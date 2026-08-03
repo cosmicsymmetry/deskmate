@@ -1,12 +1,10 @@
 #include "board.h"
 #include "board_i2c.h"
 #include "display.h"
-#include "touch.h"
 
 #include "esp_check.h"
 #include "esp_lcd_co5300.h"
 #include "esp_lcd_panel_ops.h"
-#include "esp_lcd_touch.h"
 #include "esp_log.h"
 #include "esp_lvgl_port.h"
 #include "freertos/FreeRTOS.h"
@@ -226,26 +224,24 @@ esp_err_t board_display_set_rotation_180(bool on)
     lv_display_set_rotation(s_disp, on ? LV_DISPLAY_ROTATION_180 : LV_DISPLAY_ROTATION_0);
     lvgl_port_unlock();
 
-    // Mirror touch coordinates to match. Verified in
-    // managed_components/espressif__esp_lvgl_port/src/lvgl9/esp_lvgl_port_touch.c
-    // (lvgl_port_touchpad_read()) and managed_components/lvgl__lvgl/src/indev/lv_indev.c
-    // that neither esp_lvgl_port nor LVGL core apply any rotation-aware
-    // transform to touch/indev coordinates -- raw touch-controller x/y are
-    // passed straight through regardless of lv_display_get_rotation().
-    // Mirroring both axes is a point reflection (x' = x_max - x,
-    // y' = y_max - y), the exact transform 180-degree rotation needs, and is
-    // honored in software by esp_lcd_touch_get_data() even though the
-    // CST816S driver doesn't implement the optional set_mirror_x/y HW
-    // callbacks itself (esp_lcd_touch.c, confirmed during Task 4).
-    esp_lcd_touch_handle_t tp = board_touch_handle();
-    if (tp != NULL) {
-        ESP_RETURN_ON_ERROR(esp_lcd_touch_set_mirror_x(tp, on), TAG, "touch mirror_x failed");
-        ESP_RETURN_ON_ERROR(esp_lcd_touch_set_mirror_y(tp, on), TAG, "touch mirror_y failed");
-    } else {
-        ESP_LOGW(TAG, "rotation changed before touch init -- touch mirror not updated yet");
-    }
+    // Touch coordinates do NOT need a separate transform here. LVGL core
+    // already remaps every pointer indev's coordinates for the display's
+    // current rotation, unconditionally: lv_indev.c's indev_pointer_proc()
+    // calls lv_display_rotate_point(i->disp, &data->point)
+    // (managed_components/lvgl__lvgl/src/indev/lv_indev.c) on every read,
+    // for every pointer indev, regardless of the sw_rotate flag (that flag
+    // only controls esp_lvgl_port's OWN mirror/MADCTL vs. sw-rotate flush
+    // path -- a different subsystem than LVGL core's indev processing).
+    // lv_display_rotate_point() (lv_display.c) performs exactly the
+    // x' = hor_res - x - 1, y' = ver_res - y - 1 point reflection for
+    // LV_DISPLAY_ROTATION_180. An earlier version of this function also
+    // called esp_lcd_touch_set_mirror_x/y() here, which applied a SECOND,
+    // redundant reflection at the touch-driver layer underneath LVGL's own
+    // -- the two cancelled out, leaving touch un-rotated while the image
+    // flipped. Removed after code review caught it; see board-notes.md
+    // "Task 5" section and this task's fix report for the full trace.
 
-    ESP_LOGI(TAG, "rotation set to %s (LVGL sw-rotate + touch mirror x/y=%d)",
-             on ? "180" : "0", (int)on);
+    ESP_LOGI(TAG, "rotation set to %s (LVGL sw-rotate; touch remap handled by "
+             "LVGL core's lv_display_rotate_point)", on ? "180" : "0");
     return ESP_OK;
 }

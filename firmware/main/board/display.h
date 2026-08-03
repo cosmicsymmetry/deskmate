@@ -30,9 +30,14 @@ esp_err_t board_display_set_brightness(uint8_t level);
 // opposite edge in a way that cannot be verified without eyes on the panel.
 // Software rotation never touches the panel's gap/addressing at all.
 //
-// Also updates touch-coordinate mirroring (esp_lcd_touch_set_mirror_x/y) so
-// a tap stays under the finger in both orientations -- neither LVGL nor
-// esp_lvgl_port auto-transform touch coordinates for display rotation, so
-// this must be done here, in the single rotation entry point, rather than
-// left to every future caller to remember.
+// Touch coordinates need no separate handling here: LVGL core itself remaps
+// every pointer indev's coordinates for the display's current rotation
+// unconditionally (lv_indev.c's indev_pointer_proc() ->
+// lv_display_rotate_point(), independent of the sw_rotate flag above, which
+// only governs esp_lvgl_port's own mirror/flush-buffer path). Do NOT add a
+// driver-level touch mirror (e.g. esp_lcd_touch_set_mirror_x/y) on top of
+// this -- an earlier version of this function did exactly that and it
+// silently cancelled LVGL's own remap, leaving touch un-rotated while the
+// image flipped. See board-notes.md ("Task 5: rotation path") for the full
+// trace.
 esp_err_t board_display_set_rotation_180(bool on);

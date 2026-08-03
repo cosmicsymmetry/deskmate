@@ -522,35 +522,49 @@ board's `BOARD_LCD_X_GAP` fix (see the Task 4 fix-round section above):
   existing 58,880-byte flush buffers (176,640 bytes internal SRAM total now,
   up from 117,760 before this task).
 
-**Touch consistency under rotation.** Two source reads established that
-*nothing* auto-remaps touch coordinates for display rotation in this stack:
-`managed_components/espressif__esp_lvgl_port/src/lvgl9/esp_lvgl_port_touch.c`
-(`lvgl_port_touchpad_read()`) passes `esp_lcd_touch_get_data()`'s raw x/y
-straight into `lv_indev_data_t` with only a fixed `scale.x`/`scale.y`
-multiplier (both 1.0 here) — no rotation awareness at all; and
-`managed_components/lvgl__lvgl/src/indev/lv_indev.c` has no rotation-related
-code either (grepped for `rotat`/`ROTATION`, zero hits). This holds
-regardless of which rotation mechanism (HW mirror or SW rotation) is chosen
-— the touch chip's physical coordinate frame never changes, only what LVGL
-renders where does. So `board_display_set_rotation_180()` also calls
-`esp_lcd_touch_set_mirror_x(tp, on)` / `esp_lcd_touch_set_mirror_y(tp, on)`
-(the exact mechanism the task wrinkle named) on the shared CST816S handle,
-now exposed via a new `board_touch_handle()` accessor in `touch.h`/`touch.c`
-(same singleton-accessor pattern as `board_io_expander()`/`board_i2c_bus()`
-— `touch.c` keeps owning the one real `esp_lcd_touch_handle_t`, `display.c`
-only reads it back, no second handle is ever constructed). Mirroring both
-axes together is a point reflection (`x' = x_max - x`, `y' = y_max - y`),
-the exact transform 180-degree rotation needs; confirmed in
-`managed_components/espressif__esp_lcd_touch/esp_lcd_touch.c` that this is
-applied in software (`esp_lcd_touch_get_data()`'s `sw_adj_needed` path) even
-though the CST816S driver implements neither `set_mirror_x` nor
-`set_mirror_y` as a hardware callback — exactly the "honored in software"
-behavior Task 4's notes already flagged as available for this driver.
-Wiring both the display and touch calls inside the single
-`board_display_set_rotation_180()` entry point (rather than leaving touch
-mirroring to whichever future caller remembers it) was a deliberate choice
-so `display.h`'s two-function interface stays the only thing later
-milestones' config-handling code needs to call.
+**Touch consistency under rotation — corrected after code review.** The
+first version of this task shipped a bug here: it claimed (based on a grep
+of `lv_indev.c` for the substrings `rotat`/`ROTATION`) that nothing in this
+stack auto-remaps touch coordinates for display rotation, and had
+`board_display_set_rotation_180()` call `esp_lcd_touch_set_mirror_x/y()` on
+the shared CST816S handle to compensate manually. **The grep conclusion was
+wrong** — the actual function name is `lv_display_rotate_point()` (contains
+"rotate", not "rotation"), which the `rotat`/`ROTATION` search pattern missed
+entirely. Re-reading the source properly:
+
+- `managed_components/lvgl__lvgl/src/indev/lv_indev.c`, `indev_pointer_proc()`
+  (called from `indev_proc()` for every pointer indev, unconditionally) calls
+  `lv_display_rotate_point(i->disp, &data->point)` on every read, for every
+  pointer indev, with no flag gating it.
+- `managed_components/lvgl__lvgl/src/display/lv_display.c`,
+  `lv_display_rotate_point()`: for `LV_DISPLAY_ROTATION_180`, does exactly
+  `point->x = disp->hor_res - x - 1; point->y = disp->ver_res - y - 1;` — a
+  point reflection, remapping the touch controller's raw physical coordinate
+  into the logical coordinate frame LVGL's widget tree is laid out in.
+
+This is a completely different subsystem from `esp_lvgl_port`'s
+`sw_rotate` flag (which only controls how *pixel output* reaches the panel —
+MADCTL mirror vs. software buffer rotation, see above); LVGL core's own
+indev processing remaps pointer input for the display's rotation
+**unconditionally**, regardless of that flag. So the touch-mirror calls
+added on top of this were a **second, redundant reflection**: LVGL core
+already reflected the raw touch point once (correctly), and
+`esp_lcd_touch_set_mirror_x/y()`'s software adjustment path in
+`esp_lcd_touch.c` reflected it a second time — the two cancelled out,
+leaving effective touch coordinates un-rotated while the rendered image
+flipped 180°. Net symptom this would have caused: after toggling rotation,
+the green dot (and any tap-zone hit test) would land at the *mirror-opposite*
+point from the finger instead of under it.
+
+**Fix:** removed the `esp_lcd_touch_set_mirror_x/y()` calls from
+`board_display_set_rotation_180()` entirely, and removed the
+`board_touch_handle()` accessor added to reach the touch handle (it had no
+other caller once the mirror calls were gone — `touch.c` no longer stores a
+`static esp_lcd_touch_handle_t` for this purpose either). LVGL core's own
+`lv_display_rotate_point()` is correct and sufficient on its own; no
+driver-level touch transform should be layered on top of it for this
+project's rotation handling. `board_display_set_rotation_180()` now only
+calls `lv_display_set_rotation()` — nothing touch-specific.
 
 ### Hardware verification
 

@@ -10,7 +10,27 @@ static const char *TAG = "clock";
 
 static lv_obj_t *s_time_label;
 static lv_obj_t *s_date_label;
+static lv_timer_t *s_clock_timer;
 static int s_last_minute = -1;
+
+// Fires when the active screen is deleted (M1's carousel will do this when
+// switching screens). Releases the periodic timer and NULLs the label
+// statics so they can never be dereferenced after the objects they point to
+// are freed, and so a later clock_screen_show() call knows it must rebuild
+// from scratch (see the idempotence guard in clock_screen_show() below).
+static void clock_screen_on_delete(lv_event_t *e)
+{
+    (void)e;
+
+    if (s_clock_timer) {
+        lv_timer_delete(s_clock_timer);
+        s_clock_timer = NULL;
+    }
+    s_time_label = NULL;
+    s_date_label = NULL;
+
+    ESP_LOGI(TAG, "clock_screen: screen deleted, timer + labels released");
+}
 
 // Runs in LVGL task context (esp_lvgl_port's own timer handler already holds
 // lvgl_port's lock while it services registered lv_timers) -- do NOT take
@@ -18,6 +38,13 @@ static int s_last_minute = -1;
 static void clock_timer_cb(lv_timer_t *timer)
 {
     (void)timer;
+
+    // Defensive: the screen may have been deleted (clearing these statics
+    // via clock_screen_on_delete() above) in the window between this timer
+    // firing and lv_timer_delete() actually taking effect.
+    if (s_time_label == NULL || s_date_label == NULL) {
+        return;
+    }
 
     time_t now = time(NULL);
     struct tm tm_now;
@@ -47,6 +74,23 @@ void clock_screen_show(void)
 {
     lvgl_port_lock(0);
 
+    if (s_time_label != NULL) {
+        // Idempotence guard: the clock UI is already built and live on the
+        // still-active screen (this can only be true here -- a deleted
+        // screen's LV_EVENT_DELETE handler above NULLs s_time_label before
+        // this function could be called again). Early-return instead of
+        // tearing down and rebuilding: simpler, and there is no state a
+        // second call would need to refresh since the 1s timer already
+        // keeps the labels current. If a caller (e.g. M1's carousel) wants
+        // a genuine rebuild, it should lv_obj_del() the current screen
+        // first -- that fires clock_screen_on_delete(), which clears these
+        // statics so the next clock_screen_show() call rebuilds from
+        // scratch.
+        lvgl_port_unlock();
+        ESP_LOGI(TAG, "clock_screen_show: already shown, skipping");
+        return;
+    }
+
     lv_obj_t *scr = lv_screen_active();
     // Fresh screens default to LV_OBJ_FLAG_SCROLLABLE; a finger swipe would
     // otherwise drag this screen's labels around (human-caught Task 5 bug,
@@ -70,8 +114,13 @@ void clock_screen_show(void)
     lv_label_set_text(hint, "Connect deskmate app");
     lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -16);
 
+    // Tears down the timer and NULLs the label statics if this screen is
+    // ever deleted (M1's carousel) -- without this, the timer would keep
+    // firing against freed lv_obj_t labels (use-after-free).
+    lv_obj_add_event_cb(scr, clock_screen_on_delete, LV_EVENT_DELETE, NULL);
+
     s_last_minute = -1;
-    lv_timer_create(clock_timer_cb, 1000, NULL);
+    s_clock_timer = lv_timer_create(clock_timer_cb, 1000, NULL);
     // Populate real data immediately rather than waiting up to 1s for the
     // first tick (we're already holding the lock, so this is safe to call
     // directly here -- see the "do NOT lock inside the callback" note above,

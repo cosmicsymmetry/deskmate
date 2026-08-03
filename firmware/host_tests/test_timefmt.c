@@ -19,6 +19,20 @@ int main(void)
     timefmt_date(buf, 2026, 12, 31, 3); // Thursday
     assert(strcmp(buf, "Thu, Dec 31") == 0);
 
+    // Out-of-range dow/month must never index DOW[]/MON[] out of bounds
+    // (M2 will feed this host-pushed data; bad input must never crash
+    // firmware per spec). Clamp/deflect to "???" tokens instead.
+    timefmt_date(buf, 2026, 8, 3, -1);
+    assert(strcmp(buf, "???, Aug 3") == 0);
+    timefmt_date(buf, 2026, 8, 3, 7);
+    assert(strcmp(buf, "???, Aug 3") == 0);
+    timefmt_date(buf, 2026, 0, 3, 0);
+    assert(strcmp(buf, "Mon, ??? 3") == 0);
+    timefmt_date(buf, 2026, 13, 3, 0);
+    assert(strcmp(buf, "Mon, ??? 3") == 0);
+    timefmt_date(buf, 2026, 0, 3, -1);
+    assert(strcmp(buf, "???, ??? 3") == 0);
+
     printf("test_timefmt: OK\n");
     return 0;
 }

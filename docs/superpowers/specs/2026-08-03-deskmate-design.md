@@ -36,7 +36,7 @@ plugin API, mobile companion apps.
 
 "Smart terminal" split — the device renders, the app thinks:
 
-- **Firmware** (C++, ESP-IDF 5.x + `esp_lcd` + LVGL 9, built **from
+- **Firmware** (C, ESP-IDF 5.x + `esp_lcd` + LVGL 9, built **from
   scratch** — no code reuse from prior projects): renders all UI at the
   panel's native frame rate, owns animations and instant touch feedback,
   holds the current widget configuration and the latest pushed data.

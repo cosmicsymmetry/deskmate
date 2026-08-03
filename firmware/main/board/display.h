@@ -9,7 +9,7 @@
 // LVGL APIs are usable from any task, guarded by lvgl_port_lock()/unlock().
 esp_err_t board_display_init(void);
 
-// Panel IO handle, exposed for Task 5's brightness command
+// Panel IO handle, exposed for future direct DCS access (M1+)
 // (esp_lcd_panel_io_tx_param against DCS 0x51).
 esp_lcd_panel_io_handle_t board_display_io(void);
 

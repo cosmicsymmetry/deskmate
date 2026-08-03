@@ -4,5 +4,6 @@ firmware/build/
 firmware/sdkconfig
 firmware/sdkconfig.old
 firmware/managed_components/
+firmware/host_tests/test_timefmt
 .vscode/
 .DS_Store

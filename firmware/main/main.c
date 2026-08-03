@@ -34,7 +34,6 @@ void app_main(void)
     ESP_LOGI(TAG, "board_touch_init OK");
 
     ESP_ERROR_CHECK(board_display_set_brightness(BOARD_INIT_BRIGHTNESS));
-    ESP_LOGI(TAG, "brightness set to %u/255", (unsigned)BOARD_INIT_BRIGHTNESS);
 
     clock_screen_show();
     ESP_LOGI(TAG, "clock screen shown, LVGL task running");

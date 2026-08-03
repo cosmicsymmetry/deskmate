@@ -294,6 +294,102 @@ Re-verified on hardware after the fix: same clean single-boot log as before, inc
 `LCD panel reset via TCA9554 EXIO0` and `first LVGL flush completed` — see the "Fix
 verification" entry in `task-3-report.md` for the fresh capture.
 
+## Task 4: touch bring-up — CST816S component, reset sequencing, verified on hardware
+
+**Correction inherited from task briefing:** the task's own brief still named FT3168/
+`esp_lcd_touch_ft5x06` (copied from the Waveshare wiki's v1-only prose); per the "touch
+chip identity" discrepancy already recorded above, the controller task issued a
+correction ahead of implementation directing use of **`espressif/esp_lcd_touch_cst816s`**
+(CST820 is a member of the CST816S protocol family) at I2C address `0x15`, sharing the
+bus/expander singletons from `board_i2c.h`. No new correction was needed beyond that —
+implementing exactly per the corrected brief worked first try.
+
+**Component used** (resolved via `idf.py add-dependency`, locked in
+`firmware/dependencies.lock`): `espressif/esp_lcd_touch_cst816s` **1.1.1~2**, pulling in
+`espressif/esp_lcd_touch` **1.2.1** (the base touch-controller abstraction, same
+component family as `esp_lcd_co5300`'s panel abstraction) as a transitive dependency.
+
+### TP_RESET (EXIO2) reset sequencing and I2C probe behavior
+
+Read `esp_lcd_touch_cst816s.c` (`managed_components/espressif__esp_lcd_touch_cst816s/`)
+before implementing: `esp_lcd_touch_new_i2c_cst816s()`'s internal `touch_cst816s_reset()`
+only toggles a GPIO if `config.rst_gpio_num != GPIO_NUM_NC` — since TP_RESET lives on the
+TCA9554 expander's EXIO2 (not a raw ESP32 GPIO, `BOARD_TOUCH_PIN_RST` is `GPIO_NUM_NC`,
+same situation as `BOARD_LCD_PIN_RST`/EXIO0 in Task 3), the driver's own reset path is a
+guaranteed no-op for this board. **The touch driver task must pulse EXIO2 itself before
+probing**, exactly mirroring `display.c`'s `board_lcd_expander_reset()` pattern via the
+shared `board_io_expander()` singleton (never a second
+`esp_io_expander_new_i2c_tca9554()` call — see the Task 3 "Post-review fix" section
+above; `touch.c`'s `board_touch_expander_reset()` calls `board_io_expander()`, not the
+constructor).
+
+Timing used: 10 ms assert-low (same as the EXIO0/LCD_RESET pulse, no board-specific
+timing fact exists for TP_RESET either) followed by a **200 ms** settle delay after
+release — longer than EXIO0's 150 ms, because CST816-family chips are commonly slower to
+respond on I2C after reset than the CO5300 panel is.
+
+**Observed on hardware: the probe succeeded on the very first attempt, no retry
+needed.** `esp_lcd_touch_new_i2c_cst816s()` immediately read back a valid chip-ID
+register (`CST816S: IC id: 183`), confirming real I2C ACK from the CST820 silicon at
+address `0x15` right after the single reset pulse — the "CST816-family gotcha" (chip
+silent until touched/freshly-reset) noted in the task briefing did not manifest here;
+the retry-after-second-reset-pulse code path (`board_touch_init()`'s `if (err != ESP_OK)`
+branch) exists in `touch.c` for robustness but was never exercised in this bring-up.
+
+`BOARD_TOUCH_PIN_INT` (GPIO 21) is passed through to the touch config as-is;
+`esp_lvgl_port`'s `lvgl_port_add_touch()` auto-detects a non-`GPIO_NUM_NC` `int_gpio_num`
+and switches the LVGL input device to `LV_INDEV_MODE_EVENT` (interrupt-driven) instead of
+polling, installing its own GPIO ISR via `esp_lcd_touch_register_interrupt_callback_with_data()`
+— no manual ISR wiring was needed in `touch.c`.
+
+### Hardware verification
+
+Flashed and captured serial boot log via the same pyserial DTR/RTS-toggle script used in
+Task 3 (12 s non-interactive read, `idf.py monitor` not used — same
+`/dev/cu.usbmodem1101` enumeration as Task 3). Clean single boot, no errors, touch init
+completes ~200 ms after the display's first LVGL flush (the EXIO2 settle delay):
+
+```
+I (809) board_i2c: I2C bus ready on port 0 (SDA=15, SCL=14)
+I (819) board_i2c: TCA9554 IO expander ready at 0x20
+I (979) board_display: LCD panel reset via TCA9554 EXIO0
+...
+I (1219) board_display: first LVGL flush completed
+I (1399) touch: touch controller reset via TCA9554 EXIO2
+I (1399) CST816S: IC id: 183
+I (1399) touch: CST816S touch controller initialized, handle=0x3fcec440
+I (1399) touch: touch registered as LVGL input device, indev=0x3fc9d098
+I (1399) deskmate: board_touch_init OK
+I (1409) main_task: Returned from app_main()
+```
+
+No further log lines appeared for the remaining ~10.6 s of the 12 s capture window
+(board sat untouched on a desk) — no spurious touch events, no I2C errors, no reset
+loop. This satisfies the "quiet idle" verification requirement.
+
+A throttled (`ESP_LOGI`, max ~5/sec, tag `touch`) coordinate log line is wired into
+`main.c`'s `screen_pressed_cb()` (registered on `LV_EVENT_PRESSING`) alongside a green
+20x20px dot (`lv_obj_t *s_dot`) that jumps to the LVGL press point — both were exercised
+in the sense that they compile and are wired to a live `lv_indev_t*`, but **actual
+finger-on-glass verification (dot follows finger, correct axis directions, no swap/mirror
+needed) requires a human touching the physical panel and was not and cannot be verified
+by this agent.** If axes turn out swapped/mirrored on that human pass, fix via the touch
+config's `flags.swap_xy` / `flags.mirror_x` / `flags.mirror_y` (all present in
+`esp_lcd_touch_config_t`, honored in software by `esp_lcd_touch_get_data()` in
+`esp_lcd_touch.c` even though the CST816S driver doesn't implement the optional
+`set_swap_xy`/`set_mirror_x`/`set_mirror_y` HW callbacks itself) and record the result
+here.
+
+**Known open item for the human verification pass:** the earlier "touch chip identity"
+research (above) found the Waveshare BSP applies a **16px (`0x10`) X-axis gap
+correction** specific to the CST816S path (`BSP_LCD_CST816S_X_GAP`) that this task's
+`touch.c` does **not** replicate (no `process_coordinates` callback is set in the
+`esp_lcd_touch_config_t`). If the human finger test shows the green dot consistently
+offset by ~16px on the X axis (dot appears shifted right/left of the actual finger
+position by a small, constant amount, not a full mirror/swap), that gap correction is
+the likely fix — add a `process_coordinates` callback that subtracts/adds 16 from `x`
+before passing coordinates to LVGL.
+
 ### LVGL framebuffer placement
 
 The two LVGL draw buffers configured in `lvgl_port_display_cfg_t`

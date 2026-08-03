@@ -453,3 +453,141 @@ the highest, most predictable DMA throughput for that traffic. PSRAM (8 MB, conf
 present in the boot log: `esp_psram: Found 8MB PSRAM device`) is left as headroom for
 larger allocations later (fonts, images, a full-frame buffer) rather than used for these
 partial-refresh line buffers.
+
+## Task 5: brightness control + 180-degree rotation
+
+**Brightness (`board_display_set_brightness()`):** a single, direct call to
+`esp_lcd_panel_io_tx_param(s_io, 0x51, &level, 1)` — DCS "Write Display
+Brightness", one byte, 0-255. `board_display_init()` now calls this function
+itself (with `BOARD_LCD_INIT_BRIGHTNESS = 255`) right after LVGL setup
+completes, and logs it (`board_display: brightness set to 255/255` in the
+boot capture below). This does **not** replace the co5300 driver's own
+internal `0x51 0xFF` inside its default init cmd table (see the Task 3 note
+above) — that one still fires unconditionally inside `esp_lcd_panel_init()`,
+which this project doesn't override with a custom `init_cmds` table. The
+init-time call to `board_display_set_brightness()` is a deliberate follow-up
+so that every future caller (config code in later milestones, this task's
+own tap-zone test) has exactly one function to call and one log line to grep
+for, rather than needing to know the driver sends its own copy internally
+too. Sending the same DCS command twice at boot is harmless (idempotent).
+
+**Rotation path chosen: LVGL 9 software rotation, not CO5300 MADCTL mirror.**
+The brief's suggested Step 2 (`esp_lcd_panel_mirror(s_panel, on, on)`) was
+evaluated first but **not implemented**, for a reason specific to this
+board's `BOARD_LCD_X_GAP` fix (see the Task 4 fix-round section above):
+
+- Read `esp_lcd_co5300_spi.c`: `panel_co5300_mirror()` only flips MADCTL bits
+  6/7 (`LCD_CMD_MADCTL`) and sends that one command — it does not touch
+  `co5300->x_gap`/`y_gap` at all. `panel_co5300_draw_bitmap()` *always*
+  applies `x_start += co5300->x_gap` (16, fixed via `esp_lcd_panel_set_gap()`
+  once after init) to every `CASET` window it sends, **regardless of mirror
+  state**. Whether flipping MADCTL's MX/MY bits changes which *physical*
+  glass columns that same numeric CASET range (16..383) lands on is a
+  controller-specific hardware behavior this driver's source does not
+  resolve either way, and there is no way to determine it from logs alone —
+  it can only be confirmed by looking at the panel. Getting it wrong risks
+  moving the already-fixed green uninitialized-RAM strip to the *other* edge
+  in the rotated orientation, which is exactly the failure mode the task's
+  acceptance test (no green strip in *either* orientation) is designed to
+  catch, and exactly the scenario the task instructions call out as the
+  trigger for falling back to software rotation.
+- Read `managed_components/espressif__esp_lvgl_port/src/lvgl9/esp_lvgl_port_disp.c`
+  (`lvgl_port_disp_rotation_update()`, `lvgl_port_add_disp_priv()`,
+  `lvgl_port_flush_callback()`): `esp_lvgl_port` already implements *both*
+  paths behind one config flag. With `disp_cfg.flags.sw_rotate` left `0`
+  (false), calling `lv_display_set_rotation(disp, LV_DISPLAY_ROTATION_180)`
+  makes `esp_lvgl_port` itself call
+  `esp_lcd_panel_mirror(panel, true, true)` — i.e. the brief's suggested
+  code, just invoked through the "idiomatic" LVGL rotation API instead of a
+  direct call. With `disp_cfg.flags.sw_rotate = 1` (what this task sets),
+  `lvgl_port_disp_rotation_update()` returns immediately without touching
+  the panel's MADCTL/mirror/swap_xy *at all*
+  (`if (disp_ctx->flags.sw_rotate) { return; }`), and instead
+  `lvgl_port_flush_callback()` calls `lv_draw_sw_rotate()` on the rendered
+  pixel buffer for the dirty rectangle, then `lvgl_port_rotate_area()` maps
+  the flush target rectangle back into the *same* physical coordinate space
+  as always (still `[0,368) x [0,448)` before the driver's own fixed
+  `x_gap` is added in `panel_co5300_draw_bitmap()`, completely unchanged).
+  This sidesteps the mirror/gap composition question entirely: the CO5300's
+  own addressing convention, and the human-verified (Task 4) `x_gap = 16`
+  fix, are never touched by rotation at all.
+- This project has no PPA (`LVGL_PORT_PPA`; ESP32-S3 doesn't have the PPA
+  peripheral, that's ESP32-P4-only), so `sw_rotate = 1` takes
+  `esp_lvgl_port`'s plain-malloc software path: one extra
+  `buffer_size * 2 bytes` (58,880 bytes, matching each existing flush
+  buffer) internal-DMA-SRAM scratch buffer, allocated once at
+  `lvgl_port_add_disp()` time. Confirmed on hardware this fits: the boot
+  capture below shows `lvgl_port_add_disp()` (`board_display: display init
+  complete`) succeeding with no allocation-failure log, on top of the two
+  existing 58,880-byte flush buffers (176,640 bytes internal SRAM total now,
+  up from 117,760 before this task).
+
+**Touch consistency under rotation.** Two source reads established that
+*nothing* auto-remaps touch coordinates for display rotation in this stack:
+`managed_components/espressif__esp_lvgl_port/src/lvgl9/esp_lvgl_port_touch.c`
+(`lvgl_port_touchpad_read()`) passes `esp_lcd_touch_get_data()`'s raw x/y
+straight into `lv_indev_data_t` with only a fixed `scale.x`/`scale.y`
+multiplier (both 1.0 here) — no rotation awareness at all; and
+`managed_components/lvgl__lvgl/src/indev/lv_indev.c` has no rotation-related
+code either (grepped for `rotat`/`ROTATION`, zero hits). This holds
+regardless of which rotation mechanism (HW mirror or SW rotation) is chosen
+— the touch chip's physical coordinate frame never changes, only what LVGL
+renders where does. So `board_display_set_rotation_180()` also calls
+`esp_lcd_touch_set_mirror_x(tp, on)` / `esp_lcd_touch_set_mirror_y(tp, on)`
+(the exact mechanism the task wrinkle named) on the shared CST816S handle,
+now exposed via a new `board_touch_handle()` accessor in `touch.h`/`touch.c`
+(same singleton-accessor pattern as `board_io_expander()`/`board_i2c_bus()`
+— `touch.c` keeps owning the one real `esp_lcd_touch_handle_t`, `display.c`
+only reads it back, no second handle is ever constructed). Mirroring both
+axes together is a point reflection (`x' = x_max - x`, `y' = y_max - y`),
+the exact transform 180-degree rotation needs; confirmed in
+`managed_components/espressif__esp_lcd_touch/esp_lcd_touch.c` that this is
+applied in software (`esp_lcd_touch_get_data()`'s `sw_adj_needed` path) even
+though the CST816S driver implements neither `set_mirror_x` nor
+`set_mirror_y` as a hardware callback — exactly the "honored in software"
+behavior Task 4's notes already flagged as available for this driver.
+Wiring both the display and touch calls inside the single
+`board_display_set_rotation_180()` entry point (rather than leaving touch
+mirroring to whichever future caller remembers it) was a deliberate choice
+so `display.h`'s two-function interface stays the only thing later
+milestones' config-handling code needs to call.
+
+### Hardware verification
+
+Flashed and captured serial boot log via the same pyserial DTR/RTS-toggle
+script used in Tasks 3/4 (8 s non-interactive read, same
+`/dev/cu.usbmodem1101` enumeration). Clean single boot, no errors, no reset
+loop, brightness set at init through the new function:
+
+```
+I (810) board_i2c: I2C bus ready on port 0 (SDA=15, SCL=14)
+I (820) board_i2c: TCA9554 IO expander ready at 0x20
+I (980) board_display: LCD panel reset via TCA9554 EXIO0
+...
+I (1170) board_display: display init complete (368x448)
+I (1170) board_display: brightness set to 255/255
+I (1170) deskmate: board_display_init OK, io=0x3fce9ed0
+I (1180) board_display: first LVGL flush completed
+I (1200) deskmate: test screen drawn, LVGL task running
+I (1410) touch: touch controller reset via TCA9554 EXIO2
+I (1410) CST816S: IC id: 183
+I (1410) touch: CST816S touch controller initialized, handle=0x3fcec440
+I (1410) touch: touch registered as LVGL input device, indev=0x3fc9d0d0
+I (1410) deskmate: board_touch_init OK
+I (1420) main_task: Returned from app_main()
+```
+
+No rotation-toggle log line appears in this capture, as expected — the
+board sat untouched, so `board_display_set_rotation_180()` was never called,
+and rotation stays at its default (`LV_DISPLAY_ROTATION_0`, mirror off).
+
+**What this capture can and cannot prove:** it proves brightness now routes
+through `board_display_set_brightness()` (logged), the extra SW-rotation
+scratch buffer allocated successfully, and the boot sequence is otherwise
+identical to Tasks 3/4's already human-verified state (no new errors, no
+reset loop). It **cannot** prove: that the three brightness levels are
+visibly distinct on the physical panel, that 180-degree rotation actually
+flips the visible image with no green strip on either edge, or that the
+touch dot still tracks the finger correctly post-rotation. All three require
+a human tapping the physical top/bottom halves of the panel and are flagged
+as pending human verification in `task-5-report.md`.

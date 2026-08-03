@@ -10,6 +10,12 @@
 
 static const char *TAG = "touch";
 
+// Set once board_touch_init() succeeds; exposed via board_touch_handle() so
+// display.c's rotation handling can mirror touch coordinates without a
+// second CST816S handle (mirrors the board_io_expander()/board_i2c_bus()
+// singleton-accessor pattern already used across this codebase).
+static esp_lcd_touch_handle_t s_tp;
+
 // TCA9554 IO-expander pin driving TP_RESET (see docs/hardware/board-notes.md:
 // TP_RESET is wired to EXIO2, not a direct ESP32 GPIO, so BOARD_TOUCH_PIN_RST
 // is GPIO_NUM_NC and the touch driver's own reset_gpio_num path is a no-op —
@@ -100,6 +106,7 @@ esp_err_t board_touch_init(lv_display_t *disp)
     }
 
     ESP_LOGI(TAG, "CST816S touch controller initialized, handle=%p", (void *)tp);
+    s_tp = tp;
 
     const lvgl_port_touch_cfg_t touch_cfg = {
         .disp = disp,
@@ -110,4 +117,9 @@ esp_err_t board_touch_init(lv_display_t *disp)
 
     ESP_LOGI(TAG, "touch registered as LVGL input device, indev=%p", (void *)indev);
     return ESP_OK;
+}
+
+esp_lcd_touch_handle_t board_touch_handle(void)
+{
+    return s_tp;
 }

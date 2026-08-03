@@ -14,6 +14,11 @@ static const char *TAG = "deskmate";
 // (green dot follows finger, correct axes) after this task.
 static const char *TOUCH_TAG = "touch";
 
+// Task 5 temporary test: tag "m0test" so serial shows exactly what action
+// fired, separate from the "touch"-tagged coordinate log and the
+// "deskmate"-tagged boot log. Removed in Task 6.
+static const char *M0TEST_TAG = "m0test";
+
 static lv_obj_t *s_dot;
 
 // Throttle the coordinate log to ~5/sec max: LVGL fires LV_EVENT_PRESSING on
@@ -21,6 +26,13 @@ static lv_obj_t *s_dot;
 // logging every one of those would flood the serial console.
 #define TOUCH_LOG_MIN_INTERVAL_US (200 * 1000)
 static int64_t s_last_touch_log_us;
+
+// Brightness cycle for the top-half tap zone: 25% -> 50% -> 100% -> repeat.
+// board_display_set_brightness() takes a raw 0-255 DCS level, not a percent.
+static const uint8_t BRIGHTNESS_LEVELS[] = { 64, 128, 255 };
+#define BRIGHTNESS_LEVELS_COUNT (sizeof(BRIGHTNESS_LEVELS) / sizeof(BRIGHTNESS_LEVELS[0]))
+static size_t s_brightness_idx = 0;
+static bool s_rotated_180 = false;
 
 // Proves touch coordinates AND axis orientation agree with the panel: the
 // dot jumps to wherever LVGL thinks the press is. Registered on the screen
@@ -40,6 +52,38 @@ static void screen_pressed_cb(lv_event_t *e)
     if (now_us - s_last_touch_log_us >= TOUCH_LOG_MIN_INTERVAL_US) {
         s_last_touch_log_us = now_us;
         ESP_LOGI(TOUCH_TAG, "press at x=%d y=%d", (int)p.x, (int)p.y);
+    }
+}
+
+// Task 5 temporary test (removed in Task 6): tapping the top half of the
+// screen cycles brightness 25% -> 50% -> 100%, tapping the bottom half
+// toggles 180-degree rotation. Registered on LV_EVENT_RELEASED (fires once
+// per press-and-lift, not per input-read tick like PRESSING) so a drag
+// across the boundary doesn't machine-gun the action -- only where the
+// finger lifts decides the zone. Coexists with screen_pressed_cb: the dot
+// and coordinate log above still fire on every PRESSING tick anywhere on
+// screen, this handler additionally fires once on release.
+static void screen_released_cb(lv_event_t *e)
+{
+    (void)e;
+    lv_indev_t *indev = lv_indev_active();
+    if (indev == NULL) {
+        return;
+    }
+    lv_point_t p;
+    lv_indev_get_point(indev, &p);
+
+    if (p.y < BOARD_LCD_V_RES / 2) {
+        s_brightness_idx = (s_brightness_idx + 1) % BRIGHTNESS_LEVELS_COUNT;
+        uint8_t level = BRIGHTNESS_LEVELS[s_brightness_idx];
+        esp_err_t err = board_display_set_brightness(level);
+        ESP_LOGI(M0TEST_TAG, "top-half tap at x=%d y=%d -> brightness level=%u/255 (%s)",
+                 (int)p.x, (int)p.y, (unsigned)level, esp_err_to_name(err));
+    } else {
+        s_rotated_180 = !s_rotated_180;
+        esp_err_t err = board_display_set_rotation_180(s_rotated_180);
+        ESP_LOGI(M0TEST_TAG, "bottom-half tap at x=%d y=%d -> rotation 180=%s (%s)",
+                 (int)p.x, (int)p.y, s_rotated_180 ? "on" : "off", esp_err_to_name(err));
     }
 }
 
@@ -73,6 +117,7 @@ void app_main(void)
     // hardware.
     lv_obj_remove_flag(s_dot, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(scr, screen_pressed_cb, LV_EVENT_PRESSING, NULL);
+    lv_obj_add_event_cb(scr, screen_released_cb, LV_EVENT_RELEASED, NULL);
     lvgl_port_unlock();
 
     ESP_LOGI(TAG, "test screen drawn, LVGL task running");

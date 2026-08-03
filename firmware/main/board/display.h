@@ -1,4 +1,6 @@
 #pragma once
+#include <stdint.h>
+#include <stdbool.h>
 #include "esp_err.h"
 #include "esp_lcd_panel_io.h"
 
@@ -10,3 +12,27 @@ esp_err_t board_display_init(void);
 // Panel IO handle, exposed for Task 5's brightness command
 // (esp_lcd_panel_io_tx_param against DCS 0x51).
 esp_lcd_panel_io_handle_t board_display_io(void);
+
+// Sets display brightness via DCS "Write Display Brightness" (0x51),
+// 0 (off) - 255 (max). This is the single code path for brightness: both
+// board_display_init()'s initial brightness and any later caller (config
+// handling in later milestones, main.c's tap-zone test) go through this
+// function rather than sending the DCS command directly.
+esp_err_t board_display_set_brightness(uint8_t level);
+
+// Toggles 180-degree display rotation (for the spec's cable-exit-either-side
+// enclosure requirement). Uses LVGL 9 software rotation
+// (lv_display_set_rotation) rather than the CO5300's own MADCTL mirror bits
+// -- see board-notes.md ("Task 5: rotation path") for why: the panel's fixed
+// x_gap column-address correction (BOARD_LCD_X_GAP) is applied unconditionally
+// in the co5300 driver's draw_bitmap regardless of mirror state, so a
+// hardware mirror risks moving the green uninitialized-RAM strip to the
+// opposite edge in a way that cannot be verified without eyes on the panel.
+// Software rotation never touches the panel's gap/addressing at all.
+//
+// Also updates touch-coordinate mirroring (esp_lcd_touch_set_mirror_x/y) so
+// a tap stays under the finger in both orientations -- neither LVGL nor
+// esp_lvgl_port auto-transform touch coordinates for display rotation, so
+// this must be done here, in the single rotation entry point, rather than
+// left to every future caller to remember.
+esp_err_t board_display_set_rotation_180(bool on);

@@ -1,10 +1,12 @@
 #include "board.h"
 #include "board_i2c.h"
 #include "display.h"
+#include "touch.h"
 
 #include "esp_check.h"
 #include "esp_lcd_co5300.h"
 #include "esp_lcd_panel_ops.h"
+#include "esp_lcd_touch.h"
 #include "esp_log.h"
 #include "esp_lvgl_port.h"
 #include "freertos/FreeRTOS.h"
@@ -13,12 +15,22 @@
 
 static const char *TAG = "board_display";
 
+// Initial brightness applied at the end of board_display_init(), through
+// board_display_set_brightness() -- see that function's doc comment for why
+// this is the single brightness code path (the co5300 driver's own default
+// init cmd table also sends 0x51 0xFF internally inside esp_lcd_panel_init();
+// this call is a deliberate, logged, single-source-of-truth follow-up so
+// nothing outside board_display_set_brightness() is the last word on
+// brightness).
+#define BOARD_LCD_INIT_BRIGHTNESS 255
+
 // TCA9554 IO-expander pin driving LCD_RESET (see docs/hardware/board-notes.md:
 // LCD_RESET is wired to EXIO0, not a direct ESP32 GPIO, so BOARD_LCD_PIN_RST
 // is GPIO_NUM_NC and esp_lcd_panel_reset() alone cannot toggle it).
 #define BOARD_LCD_EXIO_RST_MASK IO_EXPANDER_PIN_NUM_0
 
 static esp_lcd_panel_io_handle_t s_io;
+static lv_display_t *s_disp;
 static bool s_first_flush_logged = false;
 
 // CO5300 column-address gap correction for this v2/CST820 board. Waveshare's
@@ -154,18 +166,86 @@ esp_err_t board_display_init(void)
         .flags = {
             .buff_dma = true,
             .swap_bytes = true,
+            // Task 5: rotate in software (lv_draw_sw_rotate, an extra
+            // internal-SRAM scratch buffer the same size as one flush
+            // buffer) rather than letting esp_lvgl_port drive the CO5300's
+            // MADCTL mirror bits on rotation change. See display.h's
+            // board_display_set_rotation_180() doc comment and
+            // board-notes.md for why: this keeps BOARD_LCD_X_GAP's
+            // column-address correction untouched in both orientations.
+            .sw_rotate = true,
         },
     };
     lv_display_t *disp = lvgl_port_add_disp(&disp_cfg);
     ESP_RETURN_ON_FALSE(disp != NULL, ESP_FAIL, TAG, "lvgl_port_add_disp failed");
+    s_disp = disp;
 
     lv_display_add_event_cb(disp, board_lcd_flush_finish_cb, LV_EVENT_FLUSH_FINISH, NULL);
 
     ESP_LOGI(TAG, "display init complete (%dx%d)", BOARD_LCD_H_RES, BOARD_LCD_V_RES);
+
+    // Single brightness code path (see board_display_set_brightness()'s doc
+    // comment in display.h): even though the co5300 driver's own default
+    // init cmd table already sent DCS 0x51 0xFF internally inside
+    // esp_lcd_panel_init() above, route the init-time brightness through our
+    // own function too so there is exactly one call site any later config
+    // code needs to know about, and so the level actually applied is logged.
+    ESP_RETURN_ON_ERROR(board_display_set_brightness(BOARD_LCD_INIT_BRIGHTNESS),
+                         TAG, "initial brightness set failed");
+
     return ESP_OK;
 }
 
 esp_lcd_panel_io_handle_t board_display_io(void)
 {
     return s_io;
+}
+
+esp_err_t board_display_set_brightness(uint8_t level)
+{
+    ESP_RETURN_ON_FALSE(s_io != NULL, ESP_ERR_INVALID_STATE, TAG, "display not initialized");
+
+    // DCS "Write Display Brightness" (0x51), one data byte, 0-255. Same
+    // command the co5300 driver's own default init cmd table sends
+    // internally -- see BOARD_LCD_INIT_BRIGHTNESS's comment above.
+    ESP_RETURN_ON_ERROR(esp_lcd_panel_io_tx_param(s_io, 0x51, (uint8_t[]) { level }, 1),
+                         TAG, "brightness DCS 0x51 failed");
+    ESP_LOGI(TAG, "brightness set to %u/255", (unsigned)level);
+    return ESP_OK;
+}
+
+esp_err_t board_display_set_rotation_180(bool on)
+{
+    ESP_RETURN_ON_FALSE(s_disp != NULL, ESP_ERR_INVALID_STATE, TAG, "display not initialized");
+
+    // lvgl_port_lock()'s mutex is recursive (esp_lvgl_port.c), so this is
+    // safe to call both from app_main()-adjacent code and from inside an
+    // LVGL event callback (main.c's tap-zone handler runs on the LVGL task,
+    // already holding this lock).
+    lvgl_port_lock(0);
+    lv_display_set_rotation(s_disp, on ? LV_DISPLAY_ROTATION_180 : LV_DISPLAY_ROTATION_0);
+    lvgl_port_unlock();
+
+    // Mirror touch coordinates to match. Verified in
+    // managed_components/espressif__esp_lvgl_port/src/lvgl9/esp_lvgl_port_touch.c
+    // (lvgl_port_touchpad_read()) and managed_components/lvgl__lvgl/src/indev/lv_indev.c
+    // that neither esp_lvgl_port nor LVGL core apply any rotation-aware
+    // transform to touch/indev coordinates -- raw touch-controller x/y are
+    // passed straight through regardless of lv_display_get_rotation().
+    // Mirroring both axes is a point reflection (x' = x_max - x,
+    // y' = y_max - y), the exact transform 180-degree rotation needs, and is
+    // honored in software by esp_lcd_touch_get_data() even though the
+    // CST816S driver doesn't implement the optional set_mirror_x/y HW
+    // callbacks itself (esp_lcd_touch.c, confirmed during Task 4).
+    esp_lcd_touch_handle_t tp = board_touch_handle();
+    if (tp != NULL) {
+        ESP_RETURN_ON_ERROR(esp_lcd_touch_set_mirror_x(tp, on), TAG, "touch mirror_x failed");
+        ESP_RETURN_ON_ERROR(esp_lcd_touch_set_mirror_y(tp, on), TAG, "touch mirror_y failed");
+    } else {
+        ESP_LOGW(TAG, "rotation changed before touch init -- touch mirror not updated yet");
+    }
+
+    ESP_LOGI(TAG, "rotation set to %s (LVGL sw-rotate + touch mirror x/y=%d)",
+             on ? "180" : "0", (int)on);
+    return ESP_OK;
 }

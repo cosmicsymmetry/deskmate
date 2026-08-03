@@ -390,6 +390,58 @@ position by a small, constant amount, not a full mirror/swap), that gap correcti
 the likely fix — add a `process_coordinates` callback that subtracts/adds 16 from `x`
 before passing coordinates to LVGL.
 
+### Fix round (post-review + human hardware verification): `BSP_LCD_CST816S_X_GAP` is a PANEL gap, not (only) a touch-coordinate quirk
+
+The above paragraph undersold what `BSP_LCD_CST816S_X_GAP` (0x10 = 16) actually does.
+Re-reading the cached Waveshare BSP source in full
+(`bsp/esp32_s3_touch_amoled_1_8/esp32_s3_touch_amoled_1_8.c`, functions
+`bsp_display_set_x_gap()` and `bsp_touch_new()`):
+
+```c
+static esp_err_t bsp_display_set_x_gap(uint16_t x_gap) {
+    panel_x_gap = x_gap;
+    if (panel_handle != NULL) {
+        return esp_lcd_panel_set_gap(panel_handle, panel_x_gap, 0);
+    }
+    return ESP_OK;
+}
+// ...in bsp_touch_new(), after probing which touch chip ACKs:
+if (CST816S detected) { x_gap = BSP_LCD_CST816S_X_GAP; /* = 16 */ }
+// ...
+ESP_RETURN_ON_ERROR(bsp_display_set_x_gap(x_gap), TAG, "");
+```
+
+So the BSP calls **`esp_lcd_panel_set_gap(panel, 16, 0)`** — a real CO5300 *panel*
+column-address-window correction (`esp_lcd_co5300_spi.c:panel_co5300_set_gap()` shifts
+every `CASET`/`RASET` window by `x_gap`/`y_gap` before writes) — and it keys the decision
+of *whether* to apply that 16px panel gap off of *which touch chip probed successfully*.
+That's because the BSP's binary supports both hardware revisions at once: v1
+(SH8601+FT3168) needs no panel gap, v2 (CO5300+CST820) does, and probing the touch chip
+is the BSP's only runtime signal for which revision is attached. It is **not** primarily
+a touch-coordinate-processing quirk — the original wording above ("X-axis gap correction
+... specific to the CST816S path") was misleadingly touch-centric; the effect lands on
+the **panel's own GRAM addressing**, not on touch `x`/`y` values.
+
+**Symptom this caused:** without calling `esp_lcd_panel_set_gap()`, `display.c` was
+writing pixel data to CO5300 GRAM columns `[0, 368)`, but this panel's visible area
+apparently maps to a GRAM window offset by 16 columns — so the rightmost ~16px of the
+368px-wide visible panel showed raw, never-written GRAM content (a bright green
+vertical strip), confirmed by the user's photo of the running test screen.
+
+**Fix applied:** since this project only targets the v2/CST820 hardware (confirmed;
+no v1 support needed), `display.c` hardcodes the gap rather than probing for it —
+no dependency on touch bring-up order. Added `#define BOARD_LCD_X_GAP 16` and a call
+`esp_lcd_panel_set_gap(panel, BOARD_LCD_X_GAP, 0)` right after `esp_lcd_panel_init()`
+and before `esp_lcd_panel_disp_on_off()`, matching the BSP's own ordering (reset → init
+→ set_gap → disp_on_off). `y_gap` stays 0 — no vertical strip was observed or expected
+(the BSP's own call also always passes `y_gap = 0` for this board).
+
+Re-verified on hardware after this fix (see Task 4's fix report in `task-4-report.md`
+for the full capture): clean boot, no errors, `first LVGL flush completed` still
+present. **The strip's actual disappearance is a human-visual check pending the next
+hardware look** — not something a serial log can confirm on its own — but the mechanism
+now matches exactly what Waveshare's own shipping BSP does for this board revision.
+
 ### LVGL framebuffer placement
 
 The two LVGL draw buffers configured in `lvgl_port_display_cfg_t`

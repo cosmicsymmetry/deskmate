@@ -21,6 +21,20 @@ static const char *TAG = "board_display";
 static esp_lcd_panel_io_handle_t s_io;
 static bool s_first_flush_logged = false;
 
+// CO5300 column-address gap correction for this v2/CST820 board. Waveshare's
+// own BSP (bsp/esp32_s3_touch_amoled_1_8.c, bsp_touch_new()) applies this
+// exact 16px value via esp_lcd_panel_set_gap(panel, x_gap, 0) whenever it
+// detects the CST816S-family touch controller (BSP_LCD_CST816S_X_GAP =
+// 0x10) -- the BSP uses the touch-chip probe result as a proxy signal for
+// which panel/touch hardware revision is fitted, since v1 (SH8601+FT3168)
+// needs no gap (x_gap stays 0) while v2 (CO5300+CST820) does. Since this
+// project targets v2 exclusively (confirmed on hardware -- see
+// board-notes.md), the value is hardcoded here rather than probed. Found
+// missing during Task 4 human hardware verification: a ~16px bright green
+// vertical strip (uninitialized panel RAM) was visible along the right edge
+// of the panel without this call.
+#define BOARD_LCD_X_GAP 16
+
 // Reads: Waveshare's own esp32_s3_touch_amoled_1_8 BSP (main branch,
 // bsp/esp32_s3_touch_amoled_1_8/esp32_s3_touch_amoled_1_8.c) creates a TCA9554
 // handle via bsp_io_expander_init() but never toggles EXIO0 from
@@ -117,6 +131,12 @@ esp_err_t board_display_init(void)
     // reset on top of the EXIO0 pulse above.
     ESP_RETURN_ON_ERROR(esp_lcd_panel_reset(panel), TAG, "esp_lcd_panel_reset failed");
     ESP_RETURN_ON_ERROR(esp_lcd_panel_init(panel), TAG, "esp_lcd_panel_init failed");
+    // Correct the CO5300's column-address window so the driver writes to the
+    // GRAM columns that actually map to the visible 368px panel area --
+    // without this, the rightmost ~16px of the panel show uninitialized
+    // GRAM as a bright green strip. See BOARD_LCD_X_GAP's comment above.
+    ESP_RETURN_ON_ERROR(esp_lcd_panel_set_gap(panel, BOARD_LCD_X_GAP, 0),
+                         TAG, "esp_lcd_panel_set_gap failed");
     ESP_RETURN_ON_ERROR(esp_lcd_panel_disp_on_off(panel, true), TAG, "disp_on_off failed");
 
     ESP_LOGI(TAG, "Initialize LVGL port");

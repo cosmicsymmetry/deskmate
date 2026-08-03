@@ -66,6 +66,12 @@ void app_main(void)
     lv_obj_set_size(s_dot, 20, 20);
     lv_obj_set_style_radius(s_dot, LV_RADIUS_CIRCLE, 0);
     lv_obj_set_style_bg_color(s_dot, lv_color_hex(0x00c853), 0);
+    // Without this, the dot (clickable by default) hit-tests touches once the
+    // finger is over it, so screen_pressed_cb (registered on scr only, no
+    // event-bubble flag) stops firing until the finger moves off the dot --
+    // visible as tracking stutter/jump. Found in review + confirmed on
+    // hardware.
+    lv_obj_remove_flag(s_dot, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(scr, screen_pressed_cb, LV_EVENT_PRESSING, NULL);
     lvgl_port_unlock();
 

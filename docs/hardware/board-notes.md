@@ -605,3 +605,71 @@ flips the visible image with no green strip on either edge, or that the
 touch dot still tracks the finger correctly post-rotation. All three require
 a human tapping the physical top/bottom halves of the panel and are flagged
 as pending human verification in `task-5-report.md`.
+
+### Fix round 2 (human hardware verification): rotation+touch confirmed working; brightness invisible + drag-scrolled the screen
+
+Human verification of the touch-mirror-removal fix (commit `a25f34d`) confirmed the
+Critical fix worked: 180-degree rotation flips the image and the green dot tracks the
+finger correctly in both orientations. Two new findings came back from the same pass.
+
+**Finding 1: brightness had zero visible effect, despite `ESP_OK` and a logged level.**
+Root cause: this is a **QSPI** panel, and `esp_lcd_panel_io_tx_param()` on a QSPI LCD IO
+handle expects the "command" argument to be a full 32-bit **command envelope**, not a
+bare DCS command byte. Confirmed two ways:
+
+- `managed_components/espressif__esp_lcd_co5300/esp_lcd_co5300_spi.c`: every single
+  command the driver itself ever sends — including its own default init table's `0x53
+  0x20` (BCTRL enable) and `0x51 0xFF` (init brightness) — goes through the driver's
+  internal `tx_param()` helper, which does this whenever `use_qspi_interface` is set
+  (true for this board, `co5300_vendor_config_t.flags.use_qspi_interface = 1` in
+  `board_display_init()`):
+  ```c
+  lcd_cmd &= 0xff;
+  lcd_cmd <<= 8;
+  lcd_cmd |= LCD_OPCODE_WRITE_CMD << 24;   // LCD_OPCODE_WRITE_CMD == 0x02
+  ```
+  i.e. the real 32-bit word is `(0x02 << 24) | (cmd << 8)`, not just `cmd`.
+- Cross-checked against Waveshare's own BSP, fetched directly
+  (`raw.githubusercontent.com/waveshareteam/Waveshare-ESP32-components/main/bsp/esp32_s3_touch_amoled_1_8/esp32_s3_touch_amoled_1_8.c`):
+  `bsp_display_brightness_set()` builds the *exact same* 32-bit word by hand for this
+  exact board (`lcd_cmd = 0x51; lcd_cmd &= 0xff; lcd_cmd <<= 8; lcd_cmd |= 0x02 << 24;`)
+  before calling `esp_lcd_panel_io_tx_param(io_handle, lcd_cmd, &param, 1)` — confirming
+  this isn't a co5300-driver-specific convention but the actual protocol this panel's
+  QSPI command decoder requires.
+
+  The BSP does **not** re-send `0x53`/BCTRL inside `bsp_display_brightness_set()` either —
+  consistent with BCTRL only needing to be enabled once, which both the co5300 driver's
+  default init table and this project's (unmodified, `init_cmds = NULL`) init already do
+  before `board_display_set_brightness()` is ever reachable.
+
+  The earlier `board_display_set_brightness()` sent a **bare** `esp_lcd_panel_io_tx_param(s_io, 0x51, ...)`
+  — a different (invalid, unenveloped) 32-bit command word from the panel decoder's point
+  of view. The SPI transaction itself completes fine (hence `ESP_OK` and a clean log
+  line), but the panel has no idea a brightness write was intended, so nothing visibly
+  changed. Note the co5300 driver *also* exposes a ready-made public API for this
+  (`esp_lcd_panel_co5300_set_brightness(panel, percent_0_100)`, backed internally by the
+  same enveloped `tx_param()`), but it takes a 0-100 percentage rather than this project's
+  0-255 `level` interface, so wrapping the command by hand (matching the driver/BSP
+  convention exactly) was used instead of introducing a lossy percent round-trip.
+
+  **Fix:** `firmware/main/board/display.c` now builds
+  `BOARD_LCD_QSPI_CMD(0x51) = (0x02UL << 24) | ((0x51UL) << 8)` and sends that as the
+  `esp_lcd_panel_io_tx_param()` command argument, with `level` (0-255) as the one-byte
+  parameter — unchanged.
+
+**Finding 2: swiping a finger dragged the "deskmate M0" label across the screen.**
+Root cause: `lv_screen_active()`'s root object is `LV_OBJ_FLAG_SCROLLABLE` by default in
+LVGL 9 (like any `lv_obj_t`), and it has content (the label) that can visually appear to
+"scroll" under a drag even with no scrollbar rendered. **Fix:** `firmware/main/main.c`
+now calls `lv_obj_remove_flag(scr, LV_OBJ_FLAG_SCROLLABLE);` immediately after obtaining
+`scr`, before any styling or child objects are added. **This must be repeated for Task
+6's clock screen** (and any future screen/container that has no intended scroll content)
+— note added here so it isn't missed.
+
+**Deferred, not touched this round:** the green dot's transient trail artifacts, flagged
+by the human tester as a watch item but explicitly out of scope for this fix round.
+
+Re-verification (rebuild + reflash + boot-log capture) for this round is recorded in
+`task-5-report.md`'s fix-round-2 section. The brightness *visual* result (three distinct
+levels now actually visible) and the screen no longer dragging are, as always, human-only
+checks — the controller runs those next.

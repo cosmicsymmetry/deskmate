@@ -100,6 +100,13 @@ void app_main(void)
 
     lvgl_port_lock(0);
     lv_obj_t *scr = lv_screen_active();
+    // LVGL screens are scrollable by default (LV_OBJ_FLAG_SCROLLABLE); with
+    // no scrollbar visible, a drag was instead observed dragging the whole
+    // screen's content (the "deskmate M0" label visibly moved with the
+    // finger) -- human-hardware-verification finding from Task 5's fix
+    // round 2. This screen has nothing to scroll to, so disable it. Task 6's
+    // clock screen must do the same.
+    lv_obj_remove_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_bg_color(scr, lv_color_hex(0x101020), 0);
     lv_obj_t *label = lv_label_create(scr);
     lv_label_set_text(label, "deskmate M0");

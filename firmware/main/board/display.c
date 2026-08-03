@@ -22,6 +22,24 @@ static const char *TAG = "board_display";
 // brightness).
 #define BOARD_LCD_INIT_BRIGHTNESS 255
 
+// QSPI command envelope for DCS commands on this panel. In QSPI mode the
+// CO5300 doesn't accept a bare DCS command byte over esp_lcd_panel_io_tx_param()
+// -- confirmed by reading esp_lcd_co5300_spi.c's own tx_param() helper (used
+// for every command the driver itself sends, including its default init
+// table's 0x51 brightness command) and cross-checked against Waveshare's own
+// BSP (esp32_s3_touch_amoled_1_8.c: bsp_display_brightness_set(), fetched
+// from waveshareteam/Waveshare-ESP32-components@main), which builds the
+// exact same 32-bit word by hand for this exact board:
+//   lcd_cmd = (LCD_OPCODE_WRITE_CMD << 24) | ((cmd & 0xff) << 8)
+// with LCD_OPCODE_WRITE_CMD == 0x02. A bare esp_lcd_panel_io_tx_param(io,
+// 0x51, ...) -- what an earlier version of board_display_set_brightness()
+// sent -- is a different (invalid) 32-bit command word as far as the panel's
+// QSPI decoder is concerned: the SPI transaction still completes (ESP_OK)
+// but the panel silently ignores it, which is why brightness had no visible
+// effect on hardware despite every call logging success. See board-notes.md
+// "Task 5 fix round 2" for the full trace.
+#define BOARD_LCD_QSPI_CMD(dcs_cmd) ((0x02UL << 24) | (((uint32_t)(dcs_cmd) & 0xff) << 8))
+
 // TCA9554 IO-expander pin driving LCD_RESET (see docs/hardware/board-notes.md:
 // LCD_RESET is wired to EXIO0, not a direct ESP32 GPIO, so BOARD_LCD_PIN_RST
 // is GPIO_NUM_NC and esp_lcd_panel_reset() alone cannot toggle it).
@@ -203,11 +221,17 @@ esp_err_t board_display_set_brightness(uint8_t level)
 {
     ESP_RETURN_ON_FALSE(s_io != NULL, ESP_ERR_INVALID_STATE, TAG, "display not initialized");
 
-    // DCS "Write Display Brightness" (0x51), one data byte, 0-255. Same
-    // command the co5300 driver's own default init cmd table sends
-    // internally -- see BOARD_LCD_INIT_BRIGHTNESS's comment above.
-    ESP_RETURN_ON_ERROR(esp_lcd_panel_io_tx_param(s_io, 0x51, (uint8_t[]) { level }, 1),
-                         TAG, "brightness DCS 0x51 failed");
+    // DCS "Write Display Brightness" (0x51), one data byte, 0-255, wrapped in
+    // the QSPI command envelope this panel requires -- see
+    // BOARD_LCD_QSPI_CMD's comment above for why the wrap is mandatory (a
+    // bare 0x51 silently no-ops on this panel). BCTRL (brightness control
+    // block enable, DCS 0x53 bit 0x20) doesn't need re-sending here: the
+    // co5300 driver's default init cmd table already sends 0x53 0x20 once
+    // during board_display_init()'s esp_lcd_panel_init() call, before this
+    // function is ever reachable.
+    ESP_RETURN_ON_ERROR(
+        esp_lcd_panel_io_tx_param(s_io, BOARD_LCD_QSPI_CMD(0x51), (uint8_t[]) { level }, 1),
+        TAG, "brightness DCS 0x51 failed");
     ESP_LOGI(TAG, "brightness set to %u/255", (unsigned)level);
     return ESP_OK;
 }

@@ -1,2 +1,6 @@
 dependencies:
-  idf: ">=5.3"
+  idf: '>=5.3'
+  espressif/esp_lcd_co5300: '*'
+  lvgl/lvgl: ^9
+  espressif/esp_lvgl_port: ^2
+  espressif/esp_io_expander_tca9554: '*'

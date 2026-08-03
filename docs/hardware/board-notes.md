@@ -160,3 +160,102 @@ No GPIO pin-number differences between v1 and v2 were found in any source consul
 only the panel/touch silicon and their I2C addresses/quirks differ. This deskmate project
 targets v2 exclusively; `board.h` encodes v2 values, and the FT3168/`0x38` path exists in
 the BSP purely as a same-binary fallback for v1 units, which we do not need to support.
+
+## Task 3: display bring-up — components, reset sequencing, verified on hardware
+
+**Components used** (resolved via `idf.py add-dependency`, locked in
+`firmware/dependencies.lock`): `espressif/esp_lcd_co5300` **2.1.0** (the CO5300 driver
+exists in the registry — no SH8601 fallback needed), `lvgl/lvgl` **9.5.0** (`^9`),
+`espressif/esp_lvgl_port` **2.8.0~1** (`^2`), `espressif/esp_io_expander_tca9554`
+**2.0.3** (pulled in `espressif/esp_io_expander` 1.2.1 as its dependency).
+
+### Correction to this task's own briefing: the Waveshare BSP does NOT pulse EXIO0 for LCD reset
+
+This task's instructions asserted that "Waveshare's own BSP ... does exactly this
+[pulses EXIO0 before panel init]" and told the implementer to read the BSP for the
+pulse timing/levels. **That assertion does not hold** — verified by fetching and
+reading the actual current BSP source directly
+(`raw.githubusercontent.com/waveshareteam/Waveshare-ESP32-components/main/bsp/esp32_s3_touch_amoled_1_8/esp32_s3_touch_amoled_1_8.c`
+and its header, same files Task 2 already cited). Findings:
+
+- `bsp_display_new()` builds the panel with `.reset_gpio_num = BSP_LCD_RST`
+  (`GPIO_NUM_NC`) and simply calls `esp_lcd_panel_reset(panel_handle)` — no IO-expander
+  call anywhere in that function.
+- `bsp_io_expander_init()` exists and creates the TCA9554 handle, but it is never
+  called from `bsp_display_new()` or `bsp_touch_new()` in the file as fetched; nothing
+  in the BSP source writes to EXIO0's direction or level register.
+- This actually matches what **Task 2's own board-notes.md already said** (see the
+  "LCD panel init quirks" section above, written before this task started): *"with no
+  GPIO wired, this is a soft/command-only reset for this board ... A later
+  display-driver task should NOT expect a hardware reset pulse to do anything on this
+  board."* Task 2 had already found this; the Task 3 briefing's premise disagreed with
+  it without new evidence.
+- Confirmed in the `esp_lcd_co5300` driver source
+  (`esp_lcd_co5300_spi.c:panel_co5300_reset()`): when `reset_gpio_num < 0` the driver
+  sends `LCD_CMD_SWRESET` (0x01) over QSPI and delays 80 ms — a real, working software
+  reset path, which is what the shipping Waveshare BSP actually relies on.
+
+**What was implemented anyway, and why:** `board_i2c.c`/`display.c` still bring up the
+I2C bus and the TCA9554 expander and pulse EXIO0 (output, low 10 ms, then high, settle
+150 ms — timing borrowed from the co5300 driver's own *GPIO*-reset branch, the only
+concrete timing fact available, since no EXIO0-specific timing exists anywhere) before
+calling `esp_lcd_panel_reset()`/`esp_lcd_panel_init()`. Rationale: (a) the I2C bus +
+expander are required regardless for Task 4's touch reset (EXIO2) and for probing the
+CST816S touch controller, so bringing them up now costs nothing extra; (b) an extra,
+real electrical reset ahead of the driver's own software reset cannot hurt and is cheap
+insurance against a panel left in an unknown state by a previous firmware/power cycle.
+The driver's software SWRESET still runs afterward unconditionally (`reset_gpio_num`
+stays `GPIO_NUM_NC` in `board.h`, per the schematic). Both paths ran cleanly on hardware
+with no errors — see log below.
+
+### Brightness / display-on: no manual DCS command needed
+
+The task briefing said to send DCS `0x51` (brightness) manually via
+`esp_lcd_panel_io_tx_param` if the screen stays black. Reading
+`esp_lcd_co5300_spi.c:vendor_specific_init_default[]` shows the CO5300 driver's
+*default* init command table (used automatically whenever `co5300_vendor_config_t
+.init_cmds` is left `NULL`, which `display.c` does) already includes `0x53 0x20`
+(brightness-control-block enable) and `0x51 0xFF` (brightness = max) followed by sleep
+-out (`0x11`) and display-on (`0x29`). So `board_display_init()` does not send any
+manual brightness command — the driver's own default init already sets it. If a future
+task wants a *specific* (non-max) brightness, use the driver's exposed
+`esp_lcd_panel_co5300_set_brightness(panel, brightness_percent)` helper, or send DCS
+`0x51` directly via `board_display_io()` — both are equivalent since that function just
+wraps the same `tx_param(..., 0x51, ...)` call.
+
+### Hardware verification
+
+Flashed and captured serial boot log via a small pyserial script (DTR/RTS toggle +
+8 s non-interactive read — `idf.py monitor` is interactive and was not used). Board
+enumerated at **`/dev/cu.usbmodem1101`**, not `/dev/cu.usbmodem3101` as stated in the
+task brief (USB port re-enumerated between Task 2 and Task 3 sessions — a session/OS
+detail, not a hardware change). Boot log, no errors, single clean boot (no reset loop):
+
+```
+I (787) main_task: Calling app_main()
+I (797) deskmate: deskmate M0 boot
+I (807) deskmate: board: 368x448 LCD, QSPI CS=12 PCLK=11 D0-D3=4,5,6,7
+I (807) board_i2c: I2C bus ready on port 0 (SDA=15, SCL=14)
+I (977) board_display: LCD panel reset via TCA9554 EXIO0
+I (977) board_display: Initialize QSPI bus
+I (977) board_display: Install panel IO
+I (977) board_display: Install CO5300 panel driver
+I (977) co5300: version: 2.1.0
+I (977) co5300_spi: LCD panel create success, version: 2.1.0
+I (1167) board_display: Initialize LVGL port
+I (1167) LVGL: Starting LVGL task
+I (1187) board_display: display init complete (368x448)
+I (1187) deskmate: board_display_init OK, io=0x3fce9ed0
+I (1187) deskmate: test screen drawn, LVGL task running
+I (1187) main_task: Returned from app_main()
+I (1217) board_display: first LVGL flush completed
+```
+
+`first LVGL flush completed` is logged from an `LV_EVENT_FLUSH_FINISH` callback
+registered on the `lv_display_t*` returned by `lvgl_port_add_disp()` — it firing 30 ms
+after the label was drawn confirms a real QSPI color-data transaction completed and the
+panel IO's `on_color_trans_done` callback (registered internally by `esp_lvgl_port`)
+fired. This is the strongest evidence obtainable from logs alone that the display
+pipeline is functioning end-to-end; **actual on-screen visual confirmation (dark-blue
+background, centered white "deskmate M0" text, no tearing/garbage) still requires a
+human looking at the physical panel** and was not and cannot be verified by this agent.

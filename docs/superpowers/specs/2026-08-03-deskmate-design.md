@@ -29,7 +29,7 @@ plugin API, mobile companion apps.
   laptop lid). Parallel workstream, out of scope for this spec, but the
   software must tolerate both portrait orientations (config-selectable
   180° rotation) so the cable can exit either side.
-- **Future targets** (e.g. ESP32-P4 round displays) are enabled by a thin
+- **Future targets** (e.g. ESP32-P4 displays) are enabled by a thin
   board abstraction layer in the firmware, but only this board ships in v1.
 
 ## 3. Architecture

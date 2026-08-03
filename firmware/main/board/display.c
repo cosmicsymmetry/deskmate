@@ -3,7 +3,6 @@
 #include "display.h"
 
 #include "esp_check.h"
-#include "esp_io_expander_tca9554.h"
 #include "esp_lcd_co5300.h"
 #include "esp_lcd_panel_ops.h"
 #include "esp_log.h"
@@ -39,15 +38,17 @@ static bool s_first_flush_logged = false;
 // low / 150 ms settle) is borrowed from the co5300 driver's own hardware
 // GPIO-reset branch (same file, the `reset_gpio_num >= 0` case) since no
 // board-specific EXIO0 timing fact exists in any source consulted.
+//
+// Uses the shared board_io_expander() handle (board_i2c.h/.c), NOT a
+// locally-created one: esp_io_expander_new_i2c_tca9554() unconditionally
+// resets the physical chip's DIR/OUTPUT registers on every call, so a second
+// independent handle (e.g. Task 4's touch-reset code on EXIO2) would stomp
+// whatever this function just set on EXIO0. See board_i2c.h for the full
+// rationale.
 static esp_err_t board_lcd_expander_reset(void)
 {
-    i2c_master_bus_handle_t bus = board_i2c_bus();
-    ESP_RETURN_ON_FALSE(bus != NULL, ESP_FAIL, TAG, "I2C bus init failed");
-
-    esp_io_expander_handle_t expander = NULL;
-    ESP_RETURN_ON_ERROR(
-        esp_io_expander_new_i2c_tca9554(bus, ESP_IO_EXPANDER_I2C_TCA9554_ADDRESS_000, &expander),
-        TAG, "TCA9554 init failed");
+    esp_io_expander_handle_t expander = board_io_expander();
+    ESP_RETURN_ON_FALSE(expander != NULL, ESP_FAIL, TAG, "IO expander init failed");
 
     ESP_RETURN_ON_ERROR(
         esp_io_expander_set_dir(expander, BOARD_LCD_EXIO_RST_MASK, IO_EXPANDER_OUTPUT),

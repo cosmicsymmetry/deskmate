@@ -259,3 +259,49 @@ fired. This is the strongest evidence obtainable from logs alone that the displa
 pipeline is functioning end-to-end; **actual on-screen visual confirmation (dark-blue
 background, centered white "deskmate M0" text, no tearing/garbage) still requires a
 human looking at the physical panel** and was not and cannot be verified by this agent.
+
+### Post-review fix: the TCA9554 expander handle must be shared, not re-created
+
+Review caught a real bug in the first version of `display.c`:
+`board_lcd_expander_reset()` called `esp_io_expander_new_i2c_tca9554()` directly,
+creating its own local, throwaway `esp_io_expander_handle_t` for the duration of the
+reset pulse.
+
+**Why that's wrong, verified in `managed_components/espressif__esp_io_expander_tca9554/esp_io_expander_tca9554.c`
+(constructor at line ~54, `reset()` at line ~151):** `esp_io_expander_new_i2c_tca9554()`
+unconditionally calls `reset(&tca9554->base)` as its last construction step, which
+writes `DIR_REG_DEFAULT_VAL` (`0xFF`) and `OUT_REG_DEFAULT_VAL` (`0xFF`) to the
+**physical chip's** direction and output registers — every single time the constructor
+runs, not just the first time. Each `esp_io_expander_handle_t` only tracks its own
+in-memory shadow of those registers and never re-reads silicon on construction. So if
+Task 4 (or any future code) calls `esp_io_expander_new_i2c_tca9554()` again to drive
+EXIO2 (touch reset), it would silently reset the whole chip — including EXIO0
+(LCD_RESET) — back to all-input/all-high, and neither the display code's handle nor the
+touch code's handle would know the other's handle had done this. Two independent
+handles for one physical chip is unsafe by construction, not just by convention.
+
+**Fix:** added `esp_io_expander_handle_t board_io_expander(void)` to
+`board_i2c.h`/`board_i2c.c` (same file/pattern as `board_i2c_bus()` — both are
+lazy-init, app-lifetime singletons). `display.c`'s `board_lcd_expander_reset()` now
+calls `board_io_expander()` instead of the constructor directly. **Rule going forward:
+all TCA9554 access (EXIO0 LCD_RESET, EXIO2 TP_RESET for Task 4, EXIO7 SD-card CS for any
+future storage work) MUST go through `board_io_expander()`.** Nothing outside
+`board_i2c.c` should ever call `esp_io_expander_new_i2c_tca9554()` directly. The
+singleton handle is intentionally never freed/deleted — it needs to live exactly as
+long as the process does, so there is no corresponding `board_io_expander_deinit()`.
+
+Re-verified on hardware after the fix: same clean single-boot log as before, including
+`LCD panel reset via TCA9554 EXIO0` and `first LVGL flush completed` — see the "Fix
+verification" entry in `task-3-report.md` for the fresh capture.
+
+### LVGL framebuffer placement
+
+The two LVGL draw buffers configured in `lvgl_port_display_cfg_t`
+(`buffer_size = BOARD_LCD_H_RES * 80` pixels × `sizeof(uint16_t)` = **58,880 bytes
+each**, `double_buffer = true`) are allocated in **internal DMA-capable SRAM**, not
+PSRAM — `.flags.buff_dma = 1` with `.flags.buff_spiram` left unset (0). This is
+deliberate: partial-refresh flushes over QSPI go through GDMA, and internal SRAM gives
+the highest, most predictable DMA throughput for that traffic. PSRAM (8 MB, confirmed
+present in the boot log: `esp_psram: Found 8MB PSRAM device`) is left as headroom for
+larger allocations later (fonts, images, a full-frame buffer) rather than used for these
+partial-refresh line buffers.

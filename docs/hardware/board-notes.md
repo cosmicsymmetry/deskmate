@@ -53,14 +53,24 @@ see the "v1 vs v2" section below for every place this matters).
 | `BOARD_LCD_PIN_D3` | `GPIO_NUM_7` | `QSPI_SI3` | Schematic (GPIO7 net `NLQSPI0SI3`) = BSP `BSP_LCD_DATA3` |
 | `BOARD_LCD_PIN_RST` | `GPIO_NUM_NC` | `LCD_RESET` | Schematic shows `LCD_RESET` tied to `EXIO0` (TCA9554 IO-expander port P0), **not** a direct ESP32 GPIO. BSP agrees: `BSP_LCD_RST = GPIO_NUM_NC`. |
 | `BOARD_I2C_PORT` | `I2C_NUM_0` | — | Chosen for this project; see note below — the demo's own Kconfig defaults to I2C port **1**, but the peripheral index is a software choice, not a wiring fact (see discrepancy note). |
-| `BOARD_I2C_PIN_SDA` | `GPIO_NUM_15` | `ESP32_SDA` | Schematic (GPIO15, shared bus net `ESP32_SDA`) = BSP `BSP_I2C_SDA` |
-| `BOARD_I2C_PIN_SCL` | `GPIO_NUM_14` | `ESP32_SCL` | Schematic (GPIO14, shared bus net `ESP32_SCL`) = BSP `BSP_I2C_SCL` |
+| `BOARD_I2C_PIN_SDA` | `GPIO_NUM_15` | `ESP32_SDA` (also labeled `TP_SDA`†) | Schematic (GPIO15, shared bus net `ESP32_SDA`) = BSP `BSP_I2C_SDA` |
+| `BOARD_I2C_PIN_SCL` | `GPIO_NUM_14` | `ESP32_SCL` (also labeled `TP_SCL`†) | Schematic (GPIO14, shared bus net `ESP32_SCL`) = BSP `BSP_I2C_SCL` |
 | `BOARD_TOUCH_PIN_INT` | `GPIO_NUM_21` | `TP_INT` | Schematic (GPIO21 net `NLTP0INT`) = BSP `BSP_LCD_TOUCH_INT` |
 | `BOARD_TOUCH_PIN_RST` | `GPIO_NUM_NC` | `TP_RESET` | Schematic shows `TP_RESET` tied to `EXIO2` (TCA9554 IO-expander port P2), **not** a direct ESP32 GPIO. BSP agrees: `BSP_LCD_TOUCH_RST = GPIO_NUM_NC`. |
 
 Every LCD/touch/I2C pin above was cross-checked two ways — schematic net trace *and*
 Waveshare's own shipping BSP source — and both agreed in every case. No pin-level
 discrepancy was found between the schematic and the demo code for this board revision.
+
+† **I2C net-name clarification (Task 2 deferred minor, resolved here):** the schematic
+labels this same shared I2C bus pair differently in different sheets/blocks — the
+sheet nearest the ESP32-S3 labels the nets `ESP32_SDA`/`ESP32_SCL`, while the sheet
+block nearest the touch controller labels the identical physical nets `TP_SDA`/`TP_SCL`.
+This is not a wiring conflict: both label pairs trace to the same GPIO15/GPIO14 pins on
+the same shared bus (touch, RTC, IMU, IO-expander all hang off it), and the *values* in
+the table above were correct under either label. Recorded here so a reader cross-checking
+against a different part of the schematic doesn't mistake the second label for a second,
+different net.
 
 ## Discrepancy: I2C port index (not a wiring fact)
 
@@ -256,9 +266,11 @@ registered on the `lv_display_t*` returned by `lvgl_port_add_disp()` — it firi
 after the label was drawn confirms a real QSPI color-data transaction completed and the
 panel IO's `on_color_trans_done` callback (registered internally by `esp_lvgl_port`)
 fired. This is the strongest evidence obtainable from logs alone that the display
-pipeline is functioning end-to-end; **actual on-screen visual confirmation (dark-blue
-background, centered white "deskmate M0" text, no tearing/garbage) still requires a
-human looking at the physical panel** and was not and cannot be verified by this agent.
+pipeline is functioning end-to-end. **Human-verified since:** the user photographed the
+running board — text rendered correctly, but with a bright green ~16px strip on the
+right edge (uninitialized panel GRAM, the CO5300 x-gap quirk not yet applied at this
+point in the bring-up). That defect was root-caused and fixed in Task 4 (see the x-gap
+fix-round section below) and re-confirmed gone in that task's human verification pass.
 
 ### Post-review fix: the TCA9554 expander handle must be shared, not re-created
 
@@ -370,15 +382,14 @@ loop. This satisfies the "quiet idle" verification requirement.
 A throttled (`ESP_LOGI`, max ~5/sec, tag `touch`) coordinate log line is wired into
 `main.c`'s `screen_pressed_cb()` (registered on `LV_EVENT_PRESSING`) alongside a green
 20x20px dot (`lv_obj_t *s_dot`) that jumps to the LVGL press point — both were exercised
-in the sense that they compile and are wired to a live `lv_indev_t*`, but **actual
-finger-on-glass verification (dot follows finger, correct axis directions, no swap/mirror
-needed) requires a human touching the physical panel and was not and cannot be verified
-by this agent.** If axes turn out swapped/mirrored on that human pass, fix via the touch
-config's `flags.swap_xy` / `flags.mirror_x` / `flags.mirror_y` (all present in
-`esp_lcd_touch_config_t`, honored in software by `esp_lcd_touch_get_data()` in
-`esp_lcd_touch.c` even though the CST816S driver doesn't implement the optional
-`set_swap_xy`/`set_mirror_x`/`set_mirror_y` HW callbacks itself) and record the result
-here.
+in the sense that they compile and are wired to a live `lv_indev_t*`. **Human-verified
+since:** after the fix round below (dot no longer marked `CLICKABLE`, panel x-gap
+applied), the user confirmed on hardware that the dot tracks the finger smoothly with
+correct axis directions and no swap/mirror needed — no further axis correction was
+required. (One cosmetic item was observed and deferred, not axis-related: brief
+touch-drag trail artifacts, self-clearing after refresh, suspected double-buffer
+dirty-region sync — flagged as a watch item for M2 real widgets, see the M0 exit notes
+at the end of this file.)
 
 **Known open item for the human verification pass:** the earlier "touch chip identity"
 research (above) found the Waveshare BSP applies a **16px (`0x10`) X-axis gap
@@ -438,9 +449,10 @@ and before `esp_lcd_panel_disp_on_off()`, matching the BSP's own ordering (reset
 
 Re-verified on hardware after this fix (see Task 4's fix report in `task-4-report.md`
 for the full capture): clean boot, no errors, `first LVGL flush completed` still
-present. **The strip's actual disappearance is a human-visual check pending the next
-hardware look** — not something a serial log can confirm on its own — but the mechanism
-now matches exactly what Waveshare's own shipping BSP does for this board revision.
+present. **Human-verified since:** the user confirmed on the physical panel that the
+green strip is gone — the mechanism matches exactly what Waveshare's own shipping BSP
+does for this board revision, and the fix is confirmed effective, not just
+log-consistent.
 
 ### LVGL framebuffer placement
 
@@ -670,6 +682,75 @@ now calls `lv_obj_remove_flag(scr, LV_OBJ_FLAG_SCROLLABLE);` immediately after o
 by the human tester as a watch item but explicitly out of scope for this fix round.
 
 Re-verification (rebuild + reflash + boot-log capture) for this round is recorded in
-`task-5-report.md`'s fix-round-2 section. The brightness *visual* result (three distinct
-levels now actually visible) and the screen no longer dragging are, as always, human-only
-checks — the controller runs those next.
+`task-5-report.md`'s fix-round-2 section. **Human-verified since:** the user confirmed
+brightness now visibly steps across the three tapped levels, and the screen no longer
+drags/scrolls under a touch swipe. Combined with the earlier fix round's confirmed
+rotation+touch-tracking result, all of Task 5's human-only checks (rotation flip, dot
+tracking under rotation, brightness steps, no drag) are now confirmed on hardware.
+
+## Task 6: standalone clock screen
+
+No new hardware quirks — reuses the already-bring-up-verified display/touch/brightness/
+rotation stack as-is. `firmware/main/ui/clock_screen.c` builds a plain LVGL screen (big
+HH:MM label in Montserrat 48, a smaller date line, a dim static hint line), clears
+`LV_OBJ_FLAG_SCROLLABLE` on its own active-screen object (same fix Task 5 applied,
+required again here since this is a different `lv_obj_t`), and updates its labels only
+on minute rollover (not every 1 Hz tick) via a check against the previously-logged
+minute. A `clock`-tagged `ESP_LOGI` free-heap line is emitted on that same once-per-minute
+gate — this is the heap log the Task 7 soak below watches. `firmware/main/core/timefmt.c`
+(HH:MM/date string formatting) has zero ESP-IDF/LVGL includes and is compiled and run
+standalone by `firmware/host_tests/` on the host, independent of the target build —
+satisfying the spec's host-testable-core split for this milestone.
+
+## M0 exit — 30-minute soak test (Task 7)
+
+Soak observed the already-flashed, already-running clock firmware (commit `49c6cf0`) via
+a detached pyserial logger attached to `/dev/cu.usbmodem1101` at 115200 baud without
+touching DTR/RTS (so the attach itself does not reset the board) — see
+`task-7-report.md` for the exact log excerpts and pass/fail table.
+
+**Result: PASS.** Observation window 2026-08-03 22:59:01 -> 23:32:49 host time
+(~33.8 minutes, exceeding the 30-minute requirement), watching the clock firmware
+(commit `49c6cf0`) that was already running before this soak started (no reflash).
+
+- **No reboot:** the ESP-IDF uptime tag in every log line (`I (millis) clock: ...`)
+  increased monotonically for the entire window with no reset back to a small value
+  and no bootloader banner / repeated `app_main()` line appeared. One capture gap
+  in the host-side log exists (`23:10:49` -> `23:29:49`, ~19 minutes with no lines
+  appended) — cross-checked against the uptime counter either side of the gap
+  (`1172054` ms -> `2311334` ms = 1,139,280 ms elapsed) against the real host-clock
+  gap (~1,140,000 ms): they match to within noise, proving the board kept running
+  continuously through the gap rather than rebooting. The gap itself is attributed to
+  the host-side detached logger process/sandbox pausing (e.g. host idle/sleep
+  behavior), not the device — the device-side evidence (monotonic uptime, identical
+  heap before and after) is what actually establishes "no reboot," independent of
+  that host-side capture hiccup.
+- **No error lines:** `grep -inE "rst:0x|Guru Meditation|abort\(\)|E \(|panic|CORRUPT HEAP|assert failed"`
+  across the full captured log returned zero matches.
+- **Heap log present (`clock` tag, ~once/min) and floor flat:** 16 samples captured,
+  every single one reporting the exact same value, **8,493,783 bytes free** — no
+  decline, no leak, across the whole window (and matching the value already seen in
+  Task 6's own capture, i.e. this is the same long-lived boot session Task 6 verified,
+  now soaked for 30+ minutes past that point with zero drift).
+
+**Observed free-heap floor: 8,493,783 bytes** (flat for the entire soak window).
+
+No visual artifacts could be checked by this agent (no camera/screen access to the
+physical board) — the pass criteria above are the log-observable ones per the M0 exit
+task's scope; any residual visual concern is the touch-drag trail item captured below,
+which is a human-observed (not soak-observed) watch item.
+
+## Known open item carried into M1/M2
+
+**Transient touch-drag trail artifacts:** first observed by the human tester on the
+Task 4/5 test screen (a temporary green dot + label used only for touch/rotation
+verification, since removed) — brief visual trail/smear artifacts appeared at touched
+spots, self-clearing after the next refresh. Harmless on that throwaway test screen and
+explicitly deferred rather than root-caused during Tasks 4/5/6. Suspected cause: LVGL's
+double-buffered partial-refresh dirty-region sync (each of the two 58,880-byte flush
+buffers only has the current frame's dirty rectangle redrawn, so a stale pixel from the
+other buffer's previous frame can briefly show through at the seam between two flushes).
+**Watch item for M2:** re-observe this on real widgets (not a throwaway test screen) once
+M2 introduces more dynamic UI; if it reproduces, the fix is likely either forcing a
+full-buffer invalidate on the affected widget's redraw or switching that widget's
+containing screen to `LV_DISPLAY_RENDER_MODE_FULL` instead of partial.

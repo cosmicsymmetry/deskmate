@@ -1,0 +1,127 @@
+use protocol::{
+    Deframer, FrameError, MAX_PAYLOAD_SIZE, MessageError, decode_message, decode_wire_frame,
+};
+
+const ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../../protocol/fixtures/v1");
+
+fn fixture(name: &str) -> Vec<u8> {
+    std::fs::read(format!("{ROOT}/{name}")).unwrap()
+}
+
+#[test]
+fn valid_golden_frames_decode() {
+    for name in [
+        "status_request.bin",
+        "status_response.bin",
+        "time_sync.bin",
+        "ack_time.bin",
+        "push_data.bin",
+        "ack_push.bin",
+        "heartbeat.bin",
+        "heartbeat_ack.bin",
+        "error.bin",
+        "apply_config_min.bin",
+        "ack_config.bin",
+        "apply_config_max.bin",
+        "activate_screen.bin",
+        "ack_activate.bin",
+        "trigger_interrupt.bin",
+        "ack_interrupt.bin",
+        "device_event_tap.bin",
+        "device_event_previous.bin",
+        "device_event_next.bin",
+        "device_event_dismissed.bin",
+        "error_unknown_widget.bin",
+        "error_unknown_screen.bin",
+        "error_unsupported_template.bin",
+        "error_unsupported_size.bin",
+        "error_config_too_large.bin",
+        "push_unknown_field.bin",
+    ] {
+        let frame =
+            decode_wire_frame(&fixture(name)).unwrap_or_else(|error| panic!("{name}: {error}"));
+        decode_message(&frame).unwrap_or_else(|error| panic!("{name}: {error}"));
+    }
+}
+
+#[test]
+fn invalid_golden_inputs_have_stable_classes() {
+    assert_eq!(
+        decode_wire_frame(&fixture("bad_crc.bin")),
+        Err(FrameError::Checksum)
+    );
+    let version = decode_wire_frame(&fixture("unsupported_version.bin")).unwrap();
+    assert_eq!(decode_message(&version), Err(MessageError::Version(2)));
+    let kind = decode_wire_frame(&fixture("unsupported_type.bin")).unwrap();
+    assert_eq!(
+        decode_message(&kind),
+        Err(MessageError::UnsupportedType(99))
+    );
+    let invalid = decode_wire_frame(&fixture("invalid_cbor.bin")).unwrap();
+    assert!(matches!(
+        decode_message(&invalid),
+        Err(MessageError::Cbor(_))
+    ));
+    let duplicate = decode_wire_frame(&fixture("duplicate_keys.bin")).unwrap();
+    assert_eq!(
+        decode_message(&duplicate),
+        Err(MessageError::DuplicateOrUnsortedKey)
+    );
+    for name in ["duplicate_widget_ids.bin", "duplicate_screen_ids.bin"] {
+        let frame = decode_wire_frame(&fixture(name)).unwrap();
+        assert_eq!(
+            decode_message(&frame),
+            Err(MessageError::DuplicateOrUnsortedKey),
+            "{name}"
+        );
+    }
+    let missing = decode_wire_frame(&fixture("missing_widget_reference.bin")).unwrap();
+    assert_eq!(
+        decode_message(&missing),
+        Err(MessageError::UnknownWidgetReference)
+    );
+    let template = decode_wire_frame(&fixture("unsupported_template_config.bin")).unwrap();
+    assert_eq!(
+        decode_message(&template),
+        Err(MessageError::UnsupportedTemplate(99))
+    );
+    let size = decode_wire_frame(&fixture("unsupported_size_config.bin")).unwrap();
+    assert_eq!(
+        decode_message(&size),
+        Err(MessageError::UnsupportedSizeClass(3))
+    );
+    for name in ["config_too_many_widgets.bin", "config_too_many_screens.bin"] {
+        let excessive = decode_wire_frame(&fixture(name)).unwrap();
+        assert_eq!(
+            decode_message(&excessive),
+            Err(MessageError::ConfigTooLarge),
+            "{name}"
+        );
+    }
+    let utf8 = decode_wire_frame(&fixture("invalid_config_utf8.bin")).unwrap();
+    assert!(matches!(decode_message(&utf8), Err(MessageError::Cbor(_))));
+    let fields = decode_wire_frame(&fixture("duplicate_field_names.bin")).unwrap();
+    assert_eq!(
+        decode_message(&fields),
+        Err(MessageError::DuplicateOrUnsortedKey)
+    );
+    for name in ["zero_request_config.bin", "nonzero_request_event.bin"] {
+        let frame = decode_wire_frame(&fixture(name)).unwrap();
+        assert_eq!(
+            decode_message(&frame),
+            Err(MessageError::InvalidRequestId),
+            "{name}"
+        );
+    }
+    let results = Deframer::new().push(&fixture("overlong.bin"));
+    assert_eq!(results, vec![Err(FrameError::Overlong)]);
+    assert!(Deframer::new().push(&fixture("garbage.bin"))[0].is_err());
+}
+
+#[test]
+fn maximum_config_fixture_stays_inside_one_frame() {
+    let frame = decode_wire_frame(&fixture("apply_config_max.bin")).unwrap();
+    assert_eq!(frame.payload.len(), 931);
+    assert!(frame.payload.len() <= MAX_PAYLOAD_SIZE);
+    decode_message(&frame).unwrap();
+}

@@ -2,7 +2,10 @@
 #include "board/board.h"
 #include "board/display.h"
 #include "board/touch.h"
+#include "link/usb_link.h"
+#include "link/protocol_task.h"
 #include "ui/clock_screen.h"
+#include "ui/ui_runtime.h"
 #include "lvgl.h"
 
 static const char *TAG = "deskmate";
@@ -13,7 +16,7 @@ static const char *TAG = "deskmate";
 
 void app_main(void)
 {
-    ESP_LOGI(TAG, "deskmate M0 boot");
+    ESP_LOGI(TAG, "deskmate M2 boot");
     ESP_LOGI(TAG, "board: %dx%d LCD, QSPI CS=%d PCLK=%d D0-D3=%d,%d,%d,%d",
              BOARD_LCD_H_RES, BOARD_LCD_V_RES,
              BOARD_LCD_PIN_CS, BOARD_LCD_PIN_PCLK,
@@ -37,4 +40,13 @@ void app_main(void)
 
     clock_screen_show();
     ESP_LOGI(TAG, "clock screen shown, LVGL task running");
+    ESP_ERROR_CHECK(ui_runtime_init());
+
+    // The native USB Serial/JTAG driver allocates bounded RX/TX rings from
+    // internal RAM. Install it only after LVGL has secured its DMA and
+    // software-rotation buffers so the M0 display path remains deterministic.
+    ESP_ERROR_CHECK(usb_link_init());
+    ESP_LOGI(TAG, "native USB Serial/JTAG protocol link ready");
+    ESP_ERROR_CHECK(protocol_task_start());
+    ESP_LOGI(TAG, "protocol task running");
 }

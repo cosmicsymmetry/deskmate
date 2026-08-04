@@ -20,8 +20,9 @@ esp_lcd_panel_io_handle_t board_display_io(void);
 // function rather than sending the DCS command directly.
 esp_err_t board_display_set_brightness(uint8_t level);
 
-// Toggles 180-degree display rotation (for the spec's cable-exit-either-side
-// enclosure requirement). Uses LVGL 9 software rotation
+// Toggles a 180-degree flip relative to the device's landscape base
+// orientation: false is 90 degrees (448x368, USB cable down) and true is
+// 270 degrees. Uses LVGL 9 software rotation
 // (lv_display_set_rotation) rather than the CO5300's own MADCTL mirror bits
 // -- see board-notes.md ("Task 5: rotation path") for why: the panel's fixed
 // x_gap column-address correction (BOARD_LCD_X_GAP) is applied unconditionally
@@ -41,3 +42,8 @@ esp_err_t board_display_set_brightness(uint8_t level);
 // image flipped. See board-notes.md ("Task 5: rotation path") for the full
 // trace.
 esp_err_t board_display_set_rotation_180(bool on);
+
+// Lock-free snapshots used by the protocol status response. Rotation is the
+// actual clockwise LVGL angle: 90 or 270 degrees for this landscape device.
+uint8_t board_display_brightness(void);
+uint16_t board_display_rotation_degrees(void);

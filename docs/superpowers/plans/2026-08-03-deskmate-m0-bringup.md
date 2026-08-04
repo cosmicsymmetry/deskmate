@@ -1,5 +1,13 @@
 # Deskmate M0 — Hardware Bring-up + Walking Skeleton Implementation Plan
 
+**Status:** Complete. Hardware-verified, documented, and tagged `m0` at commit `b77a894`;
+the final review fixes landed in `54bc97b`.
+
+**Historical correction:** The initial task text below names the v1 FT3168 touch
+controller. Bring-up established that the target v2 board uses CST820 silicon through
+the CST816S driver family at `0x15`. The completed code and `docs/hardware/board-notes.md`
+are authoritative; do not reintroduce the FT3168 path for this board.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** A from-scratch ESP-IDF firmware for the Waveshare ESP32-S3 Touch AMOLED 1.8" v2 that boots to a ticking standalone clock, with touch, brightness, and 180° rotation proven working.
@@ -34,12 +42,12 @@
 - Consumes: nothing (first task).
 - Produces: a building, flashable ESP-IDF project; `app_main()` in `main.c` that later tasks extend; `idf.py build|flash|monitor` workflow documented in README.
 
-- [ ] **Step 1: Verify ESP-IDF ≥5.3 is installed and exported**
+- [x] **Step 1: Verify ESP-IDF ≥5.3 is installed and exported**
 
 Run: `idf.py --version`
 Expected: `ESP-IDF v5.3` or newer. If missing, install per https://docs.espressif.com/projects/esp-idf/en/stable/esp32s3/get-started/ (git clone + `./install.sh esp32s3` + `. ./export.sh`) and record the chosen version in README.
 
-- [ ] **Step 2: Create project files**
+- [x] **Step 2: Create project files**
 
 `firmware/CMakeLists.txt`:
 ```cmake
@@ -113,12 +121,12 @@ Monitor-clip AMOLED desk display. Spec: docs/superpowers/specs/2026-08-03-deskma
 Requires ESP-IDF >= 5.3 exported in the shell.
 ```
 
-- [ ] **Step 3: Build and flash the blank app**
+- [x] **Step 3: Build and flash the blank app**
 
 Run: `cd firmware && idf.py set-target esp32s3 && idf.py build && idf.py flash monitor`
 Expected: build succeeds; monitor shows `deskmate M0 boot`. (Board connects via its USB-C port; it enumerates as `/dev/cu.usbmodem*`.)
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add -A
@@ -138,11 +146,11 @@ git commit -m "chore: scaffold ESP-IDF firmware project for ESP32-S3"
 - Consumes: Waveshare wiki + downloadable demo/schematic for ESP32-S3-Touch-AMOLED-1.8.
 - Produces: `board.h` pin constants used by every later task: `BOARD_LCD_H_RES`, `BOARD_LCD_V_RES`, `BOARD_LCD_QSPI_HOST`, `BOARD_LCD_PIN_PCLK`, `BOARD_LCD_PIN_CS`, `BOARD_LCD_PIN_D0..D3`, `BOARD_LCD_PIN_RST`, `BOARD_I2C_PORT`, `BOARD_I2C_PIN_SDA`, `BOARD_I2C_PIN_SCL`, `BOARD_TOUCH_PIN_INT`, `BOARD_TOUCH_PIN_RST` (use `GPIO_NUM_NC` where the board ties a line to the IO expander or leaves it unconnected).
 
-- [ ] **Step 1: Extract facts from the wiki**
+- [x] **Step 1: Extract facts from the wiki**
 
 Fetch https://www.waveshare.com/wiki/ESP32-S3-Touch-AMOLED-1.8 (and its linked schematic PDF / ESP-IDF demo zip). Record in `docs/hardware/board-notes.md`: every LCD QSPI pin, reset pin, touch I²C pins + address (FT3168), any onboard IO expander or PMU chip and what hangs off it, and which panel init quirks the demo applies. Note the **v2 = CO5300** distinction explicitly.
 
-- [ ] **Step 2: Write `board.h` with the extracted values**
+- [x] **Step 2: Write `board.h` with the extracted values**
 
 ```c
 #pragma once
@@ -169,16 +177,16 @@ Fetch https://www.waveshare.com/wiki/ESP32-S3-Touch-AMOLED-1.8 (and its linked s
 ```
 Every `/* from wiki */` must be replaced with a real number in this task — the file must not merge with comments in place of values.
 
-- [ ] **Step 3: Verify it compiles**
+- [x] **Step 3: Verify it compiles**
 
 Add `"board"` to `INCLUDE_DIRS` in `firmware/main/CMakeLists.txt`, `#include "board/board.h"` from `main.c`, run `idf.py build`.
 Expected: build succeeds.
 
-- [ ] **Step 4: Cross-check**
+- [x] **Step 4: Cross-check**
 
 Diff your pin numbers against the pins used in Waveshare's own demo source (from the wiki zip). Any mismatch: schematic wins; note the discrepancy in `board-notes.md`.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add -A
@@ -200,7 +208,7 @@ git commit -m "feat: board pin map for Waveshare AMOLED 1.8 v2 from wiki/schemat
 - Consumes: `board.h` pin constants (Task 2).
 - Produces: `esp_err_t board_display_init(void)` — brings up QSPI bus, panel, and LVGL via `esp_lvgl_port`; after it returns, LVGL APIs are usable from the main task (guarded by `lvgl_port_lock()/unlock()`). Also exposes `esp_lcd_panel_io_handle_t board_display_io(void)` for Task 5's brightness command.
 
-- [ ] **Step 1: Choose and add the panel driver component**
+- [x] **Step 1: Choose and add the panel driver component**
 
 Search the registry for a maintained driver, in this preference order:
 ```bash
@@ -215,7 +223,7 @@ idf.py add-dependency "espressif/esp_lvgl_port^2"
 ```
 Record which panel component + version was chosen in `docs/hardware/board-notes.md`. Commit `dependencies.lock`.
 
-- [ ] **Step 2: Write `display.h`**
+- [x] **Step 2: Write `display.h`**
 
 ```c
 #pragma once
@@ -226,7 +234,7 @@ esp_err_t board_display_init(void);
 esp_lcd_panel_io_handle_t board_display_io(void);
 ```
 
-- [ ] **Step 3: Write `display.c`**
+- [x] **Step 3: Write `display.c`**
 
 Follow the chosen component's README example for the QSPI wiring, adapted to `board.h` names. Skeleton (macro/type names come from the chosen component — the SH8601 variants are shown):
 
@@ -288,7 +296,7 @@ esp_lcd_panel_io_handle_t board_display_io(void) { return s_io; }
 ```
 If the panel shows garbage/offset: check the component README for this panel's known `x_gap`/color-order quirks and what the Waveshare demo sets — record the fix in `board-notes.md`.
 
-- [ ] **Step 4: Show a test screen from `main.c`**
+- [x] **Step 4: Show a test screen from `main.c`**
 
 ```c
 #include "board/display.h"
@@ -309,12 +317,12 @@ void app_main(void)
 }
 ```
 
-- [ ] **Step 5: Flash and verify on hardware**
+- [x] **Step 5: Flash and verify on hardware**
 
 Run: `idf.py build flash monitor`
 Expected: dark-blue screen with centered white "deskmate M0", no tearing, no boot loop, clean log.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add -A
@@ -336,7 +344,7 @@ git commit -m "feat: CO5300 QSPI display bring-up with LVGL 9 test screen"
 - Consumes: `board.h` I²C pins; LVGL display from Task 3.
 - Produces: `esp_err_t board_touch_init(lv_display_t *disp)` — registers the touchscreen as an LVGL input device; LVGL widgets receive presses/gestures from here on.
 
-- [ ] **Step 1: Add the touch driver component**
+- [x] **Step 1: Add the touch driver component**
 
 FT3168 speaks the FocalTech FT5x06-family protocol:
 ```bash
@@ -344,7 +352,7 @@ idf.py add-dependency "espressif/esp_lcd_touch_ft5x06"
 ```
 (If the wiki demo names a different component for FT3168, prefer what the demo uses; record the choice in `board-notes.md`.)
 
-- [ ] **Step 2: Write `touch.h` / `touch.c`**
+- [x] **Step 2: Write `touch.h` / `touch.c`**
 
 ```c
 // touch.h
@@ -394,7 +402,7 @@ esp_err_t board_touch_init(lv_display_t *disp)
 }
 ```
 
-- [ ] **Step 3: Add a touch-following dot to the test screen**
+- [x] **Step 3: Add a touch-following dot to the test screen**
 
 In `main.c`, after display init, create a small circle that jumps to the touch point (proves coordinates AND orientation agree with the panel):
 
@@ -417,12 +425,12 @@ lv_obj_set_style_bg_color(s_dot, lv_color_hex(0x00c853), 0);
 lv_obj_add_event_cb(scr, screen_pressed_cb, LV_EVENT_PRESSING, NULL);
 ```
 
-- [ ] **Step 4: Flash and verify on hardware**
+- [x] **Step 4: Flash and verify on hardware**
 
 Run: `idf.py build flash monitor`
 Expected: green dot tracks the finger across the whole panel, correct axis directions (drag right → dot moves right; drag down → dot moves down). If axes are swapped/mirrored, fix with the touch config's `flags.swap_xy / mirror_x / mirror_y` and record in `board-notes.md`.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add -A
@@ -442,7 +450,7 @@ git commit -m "feat: FT3168 touch bring-up wired into LVGL input"
 - Consumes: panel IO handle from Task 3; touch from Task 4.
 - Produces: `esp_err_t board_display_set_brightness(uint8_t level)` (0–255, DCS 0x51 — AMOLED has no backlight GPIO); `esp_err_t board_display_set_rotation_180(bool on)` (for the spec's cable-exit-either-side enclosure requirement). Both used by config handling in later milestones.
 
-- [ ] **Step 1: Implement brightness**
+- [x] **Step 1: Implement brightness**
 
 ```c
 esp_err_t board_display_set_brightness(uint8_t level)
@@ -452,7 +460,7 @@ esp_err_t board_display_set_brightness(uint8_t level)
 }
 ```
 
-- [ ] **Step 2: Implement 180° rotation**
+- [x] **Step 2: Implement 180° rotation**
 
 Keep the panel handle in a static (`s_panel`) and use mirror on both axes:
 ```c
@@ -464,15 +472,15 @@ esp_err_t board_display_set_rotation_180(bool on)
 ```
 If the panel ignores mirror commands (some AMOLED controllers do), fall back to LVGL software rotation: `lv_display_set_rotation(disp, on ? LV_DISPLAY_ROTATION_180 : LV_DISPLAY_ROTATION_0);` — and note which path worked in `board-notes.md`. Touch coordinates must be remapped consistently (retest the Task 4 dot after enabling rotation).
 
-- [ ] **Step 3: Add a temporary on-screen test**
+- [x] **Step 3: Add a temporary on-screen test**
 
 In `main.c`: tapping the top half of the screen cycles brightness 25% → 50% → 100%; tapping the bottom half toggles 180° rotation. (Temporary code, removed in Task 6.)
 
-- [ ] **Step 4: Flash and verify on hardware**
+- [x] **Step 4: Flash and verify on hardware**
 
 Expected: three visibly distinct brightness levels; rotation flips the image AND the touch dot still lands under the finger in both orientations.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add -A
@@ -497,7 +505,7 @@ git commit -m "feat: brightness (DCS 0x51) and 180-degree rotation controls"
 - Consumes: display/touch/brightness from Tasks 3–5.
 - Produces: `void clock_screen_show(void)` — the standalone fallback screen (spec §3): big HH:MM, date line, "Connect deskmate app" hint. `timefmt.h`: `void timefmt_hhmm(char out[6], int hour, int minute)` and `void timefmt_date(char out[32], int year, int month, int day)` — pure C, host-testable, reused by M2's clock widget.
 
-- [ ] **Step 1: Write the failing host test**
+- [x] **Step 1: Write the failing host test**
 
 `firmware/host_tests/test_timefmt.c`:
 ```c
@@ -543,12 +551,12 @@ clean:
 .PHONY: test clean
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `make -C firmware/host_tests test`
 Expected: FAIL — `timefmt.h: No such file or directory`.
 
-- [ ] **Step 3: Implement `timefmt`**
+- [x] **Step 3: Implement `timefmt`**
 
 ```c
 // timefmt.h
@@ -579,20 +587,20 @@ void timefmt_date(char out[32], int year, int month, int day, int dow)
 }
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `make -C firmware/host_tests test`
 Expected: `test_timefmt: OK`.
 
-- [ ] **Step 5: Build the clock screen**
+- [x] **Step 5: Build the clock screen**
 
 `clock_screen.c`: LVGL screen with HH:MM in the largest built-in Montserrat font (enable `CONFIG_LV_FONT_MONTSERRAT_48=y` in `sdkconfig.defaults`), date below, dim "Connect deskmate app" hint at the bottom. A 1 Hz `lv_timer` reads `time()` / `localtime_r()` (system clock starts at epoch until M1's time sync — that's expected and fine for M0), formats via `timefmt_*`, updates labels only when the minute changes. `main.c` becomes: init display → init touch → set brightness 200 → `clock_screen_show()`.
 
-- [ ] **Step 6: Flash and verify on hardware**
+- [x] **Step 6: Flash and verify on hardware**
 
 Expected: ticking clock (starting from 00:00 epoch), date line, hint text; runs 5+ minutes with no watchdog resets and stable heap (log `esp_get_free_heap_size()` once a minute during this soak; it must plateau, not decline).
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add -A
@@ -611,15 +619,15 @@ git commit -m "feat: standalone clock screen with host-tested time formatting"
 - Consumes: everything above.
 - Produces: tagged `m0` baseline the M1 plan builds on.
 
-- [ ] **Step 1: 30-minute soak**
+- [x] **Step 1: 30-minute soak**
 
 Leave the clock running 30 minutes. Expected: no reboot, no visual artifacts, heap log flat. Record the result + observed free-heap floor in `board-notes.md`.
 
-- [ ] **Step 2: Finalize docs**
+- [x] **Step 2: Finalize docs**
 
 README gains a "Status: M0 complete" line and a photo-free summary of what works (display, touch, brightness, rotation, standalone clock). `board-notes.md` must by now contain: final pin table, chosen driver components + versions, any orientation/gap/color quirks discovered.
 
-- [ ] **Step 3: Commit and tag**
+- [x] **Step 3: Commit and tag**
 
 ```bash
 git add -A

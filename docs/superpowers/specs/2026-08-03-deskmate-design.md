@@ -26,9 +26,10 @@ plugin API, mobile companion apps.
   no drivers needed on macOS/Windows/Linux). No battery dependence — the
   device is powered whenever it is connected.
 - **Enclosure:** 3D-printed clip-on cover (webcam-style mount for monitor or
-  laptop lid). Parallel workstream, out of scope for this spec, but the
-  software must tolerate both portrait orientations (config-selectable
-  180° rotation) so the cable can exit either side.
+  laptop lid). Parallel workstream, out of scope for this spec. The product
+  UI uses the physical 368x448 panel as a 448x368 landscape canvas by
+  default (90° clockwise, cable down) and supports a 180° flip to 270° so
+  the cable can exit from the opposite landscape edge.
 - **Future targets** (e.g. ESP32-P4 displays) are enabled by a thin
   board abstraction layer in the firmware, but only this board ships in v1.
 

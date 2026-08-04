@@ -1,4 +1,14 @@
 dependencies:
+  espressif/cbor:
+    component_hash: dad9ca860963e930366510a10b422b3125a4fb27b979712ed65efcbcd742de50
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=5.0'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 0.6.1~4
   espressif/cmake_utilities:
     component_hash: 351350613ceafba240b761b4ea991e0f231ac7a9f59a9ee901f751bddc0bb18f
     dependencies:
@@ -97,12 +107,13 @@ dependencies:
       type: service
     version: 9.5.0
 direct_dependencies:
+- espressif/cbor
 - espressif/esp_io_expander_tca9554
 - espressif/esp_lcd_co5300
 - espressif/esp_lcd_touch_cst816s
 - espressif/esp_lvgl_port
 - idf
 - lvgl/lvgl
-manifest_hash: c47074c3b612ef8637d034f9605077004915934775983e7ef30c4fab3b0c9723
+manifest_hash: c17d55b9a2d20f0f0b11d1bc8e46aa30607506990d4afa021ab18b22114813e3
 target: esp32s3
 version: 2.0.0

@@ -754,3 +754,215 @@ other buffer's previous frame can briefly show through at the seam between two f
 M2 introduces more dynamic UI; if it reproduces, the fix is likely either forcing a
 full-buffer invalidate on the affected widget's redraw or switching that widget's
 containing screen to `LV_DISPLAY_RENDER_MODE_FULL` instead of partial.
+
+**M1 investigation:** landscape at 90 degrees reproduced this much more severely: the
+clock itself distorted and persistent green rectangles plus stale text appeared across
+the panel. Switching from double to single buffering did not change the photographed
+corruption, disproving the shared rotation-scratch race as its cause. A forced
+synchronous full-canvas repaint also made no visual difference.
+
+The board-specific omission was found by comparing against Waveshare's current v2 BSP.
+Waveshare commit `144d255da2ba93ddae2a976ba653a4358a1a295d` ("Update ESP32-S3
+AMOLED 1.8 display and touch drivers") changed this product from SH8601 to CO5300 and
+added an LVGL rounder in the same patch. It expands every invalid area to an even x/y
+start and odd x/y end. This is not cosmetic with landscape partial buffers: 29,440
+pixels divided by the 448-pixel logical width yields 65 rows. Without the rounder, a
+full repaint is transmitted as 65-row pieces which software rotation turns into
+odd-width CO5300 column windows. The rounder makes LVGL's buffer-fit calculation step
+down to 64 rows and keeps every panel window and payload two-pixel aligned. M1 now
+supplies that callback through `lvgl_port_display_cfg_t.rounder_cb`. The aligned build
+flashed and passed protocol boot status/time-sync. The user then confirmed the physical
+display was clean at both 90 and 270 degrees, brightness and touch remained functional,
+and the green blocks, diagonal text, and other artifacts were gone.
+
+The similar-looking Espressif software-rotation report `esp-bsp#400` was also traced to
+its exact merged fix, commit `3e6a581b31c9504801b5ea7a71291f1a09540849`. That patch
+corrected the 90/270 enum passed to `lv_draw_sw_rotate`; the local `esp_lvgl_port` 2.8.0
+already contains it, so it was ruled out rather than reapplied.
+
+## M1 Task 1: USB transport proof
+
+### USB-C data wiring
+
+The official one-page Waveshare schematic traces both orientations of the USB-C data
+pair into `USB_N`/`USB_P`, through series resistors R19/R20 (22 ohm), and then to the
+ESP32-S3R8's GPIO19/GPIO20 pins. Espressif's ESP32-S3 USB device documentation defines
+GPIO19 as the internal-PHY USB D- pin and GPIO20 as USB D+. This establishes that the
+board's only USB-C connector is electrically usable by the ESP32-S3 USB-OTG peripheral,
+not just for power. M0's earlier flashing/log capture through `/dev/cu.usbmodem1101`
+also established real data connectivity, although it used the ROM/USB-Serial-JTAG path
+rather than the new TinyUSB application descriptors.
+
+Sources:
+
+- Waveshare schematic:
+  https://files.waveshare.com/wiki/ESP32-S3-Touch-AMOLED-1.8/ESP32-S3-Touch-AMOLED-1.8.pdf
+- ESP-IDF USB Device Stack documentation:
+  https://docs.espressif.com/projects/esp-idf/en/v5.5/esp32s3/api-reference/peripherals/usb_device.html
+
+### Rejected TinyUSB dual-CDC spike and selected native transport
+
+- Component manifest constraint: `espressif/esp_tinyusb ^2.0.0`.
+- Locked versions under ESP-IDF 5.5.5: `espressif/esp_tinyusb` **2.2.1** and its
+  `espressif/tinyusb` dependency **0.21.0~1**.
+- Development descriptor IDs use Espressif's VID **0x303A** and esp_tinyusb's automatic
+  dual-CDC PID **0x4002**. These IDs are appropriate for development only and require a
+  product-owned VID/PID decision before distribution.
+- Product string: `Deskmate Desk Display`. The 12-hex-digit serial string comes from the
+  ESP32-S3 factory base MAC, so multiple development units do not share the component's
+  default placeholder serial.
+- CDC 0 string: `Deskmate diagnostics`; standard output/error and ESP-IDF logs are
+  redirected here after TinyUSB initialization.
+- CDC 1 string: `Deskmate protocol`; its callback only performs a bounded read into a
+  4096-byte static stream and queues bytes. It never prints logs or echoes traffic.
+- The protocol TX buffer is 4096 bytes so one maximum protocol v1 COBS wire frame
+  (2058-byte worst case including delimiter) fits atomically when empty.
+
+Software verification on 2026-08-04: pre-change M0 native host tests passed; the
+pre-change ESP-IDF build produced `0xb4210` bytes (30% free). After adding dual CDC, the
+firmware compiled and linked successfully at `0xbd9e0` bytes (26% free). A second,
+isolated build using a fresh temporary `sdkconfig` confirmed that the checked-in defaults
+independently enable both CDC interfaces. Rust installed for M1 is `rustc 1.97.1`,
+`cargo 1.97.1`, `rustup 1.29.0`.
+
+The board was connected later on 2026-08-04. Before flashing, it enumerated through the
+native USB Serial/JTAG peripheral as `303A:1001` at `/dev/cu.usbmodem1101`. The unrelated
+test firmware present on the board initialized the v2 peripherals and display cleanly;
+it was not the Deskmate M0 image, so this did not count as an M0 regression run.
+
+The TinyUSB image enumerated at full speed as `303A:4002`, product `Deskmate Desk
+Display`, serial `A4CB8FDB3328`, with macOS nodes ending in `...33281` (diagnostics,
+interfaces 0/1) and `...33283` (protocol, interfaces 2/3). It then rebooted repeatedly.
+A temporary five-second diagnostic window captured the deterministic failure:
+
+```
+E (...) LVGL: lvgl_port_add_disp_priv(471): Not enough memory for LVGL buffer (rotation buffer) allocation!
+```
+
+The spike also could not enter the ROM downloader through esptool's normal DTR/RTS
+sequence because custom USB-OTG CDC line state does not preserve the native peripheral's
+automatic reset behavior. Physical recovery was verified: hold BOOT, reset/power-cycle,
+release BOOT, flash `/dev/cu.usbmodem1101`, then reset once without BOOT.
+
+The selected M1 transport is therefore the ESP32-S3 native USB Serial/JTAG CDC using
+`usb_serial_jtag_driver_install()`, with fixed 4096-byte RX/TX rings. It is initialized
+after LVGL secures its DMA and rotation buffers. `CONFIG_ESP_CONSOLE_SECONDARY_NONE=y`
+keeps boot and ESP-IDF logs off the protocol CDC; diagnostics remain on UART0. This
+preserves the known-good `303A:1001` descriptor and normal `idf.py flash` workflow.
+TinyUSB and its managed dependency were removed.
+
+### M1 integrated native-USB hardware pass
+
+The complete M1 firmware now uses only the native driver, with 4096-byte bounded RX/TX
+rings and a protocol task pinned to CPU1; LVGL is explicitly pinned to CPU0. The task
+dispatches the frozen v1 fixtures, exposes live display/link/parser status, applies UTC
+time plus the host's fixed offset, retains the latest monotonic push revision, and
+returns the clock hint after ten seconds without a valid request. UI mutations are
+queued through `lv_async_call()` and therefore execute in LVGL context.
+
+Software verification on 2026-08-04 passed the default and sanitizer C suites, Rust
+format/lint/tests, and the ESP-IDF 5.5.5 build. The integrated `deskmate.bin` is
+`0xb77e0` bytes after the M1 landscape/artifact correction, leaving `0x48820` bytes (28%) of
+the smallest app partition free.
+
+The test board returned to native `303A:1001` enumeration at
+`/dev/cu.usbmodem1101`. A normal `idf.py -p /dev/cu.usbmodem1101 flash` installed the
+integrated M1 image in one pass with image-hash verification and automatic hard reset.
+The same normal flash command then succeeded a second time from the running M1 image,
+confirming that the rejected TinyUSB spike no longer affects the reset/download path.
+
+The first clean `status --json` reported protocol v1, display `368x448`, brightness
+200, rotation 0, free heap 8,462,035 bytes, latest revision 0, and all parser/transport
+counters at zero. `time-sync --json` acknowledged Unix time with the local fixed UTC
+offset of +240 minutes, and `push-data --json` accepted widget `weather`, revision 1.
+After the second flash reset the volatile state, status, time sync, and the revision-1
+push all succeeded again. A subsequent `status --json` invocation omitted `--port` and
+correctly selected `/dev/cu.usbmodem1101` by USB metadata plus the v1 status handshake.
+
+The checked `hardware_acceptance` harness passed in one serial session. It exercised
+split and coalesced requests, bad CRC, garbage, an overlong frame, invalid push data,
+invalid time, and stale revision rejection, and then received a clean final status:
+
+```
+PASS port=/dev/cu.usbmodem1101 uptime_ms=36653 heap=8462035 valid=6->14 malformed=0->3 crc=0->1 overflow=0->1 dropped=0 rx_drops=0
+```
+
+The 30-minute active heartbeat soak also passed without a device reset or heap loss:
+
+```
+PASS port=/dev/cu.usbmodem1101 elapsed=1800s heartbeats=1791 uptime_ms=2332440 heap_floor=8462035 valid=1827 malformed=0 crc=0 overflow=0 dropped=0 rx_drops=0
+```
+
+There was one host suspension between the 11- and 12-minute reports: device uptime
+advanced about 554 seconds while harness active time advanced 60 seconds. The same open
+serial session resumed and completed with flat heap and clean counters. This proves
+recovery across that host pause, but the interval is not represented as uninterrupted
+one-hertz traffic.
+
+The selected native driver fixes both rings at 4096 bytes but exposes neither ring
+occupancy nor an RX-overflow total. Accordingly, `rx_drops=0` denotes the unavailable
+native metric, not a proof that the hardware ring never dropped a byte; parser overflow,
+dropped response, heap-floor, and successful resynchronization are the observable
+pressure evidence.
+
+The final physical unplug/replug carryover passed on 2026-08-04. Cycle 1 changed the
+macOS device node from `/dev/cu.usbmodem3101` to `/dev/cu.usbmodem1101` and was followed
+by a clean v1 status handshake. Nine further cycles were observed as distinct removal
+and enumeration edges; each remained disconnected for 5-7 seconds and returned on
+`/dev/cu.usbmodem1101`. An immediate explicit-port status after the final enumeration
+raced device-node readiness and returned `ENOENT`; a time sync, retried status, and
+automatic-discovery status all succeeded without another cable action. Final status
+reported uptime 10,822,821 ms, heap 8,521,431 bytes, `valid=18 malformed=3 crc=1
+overflow=1 dropped=0 rx_drops=0`, with the display at 448x368/90 degrees. Together with
+the previously verified long-unplug standalone fallback and visual checks, this closes
+the M1 hardware exit gate.
+
+The first visual exit attempt revealed that the clock screen had no user action wired
+to the otherwise working brightness/rotation board APIs. This was inherited from M0:
+the top/bottom tap zones were explicitly a temporary Task 5 test and were removed when
+Task 6 replaced the test screen with the standalone clock. Asking for a visual M1 check
+without restoring an invocation path was therefore invalid. M1 registered a release
+handler on the clock screen: the upper half cycles raw brightness levels 64/128/255 and
+the lower half flips orientation. The corrected image compiled and flashed normally; a
+clean post-flash status reported brightness 200, rotation 0, 8,462,027 bytes free, and
+zero parser/transport errors. The user then confirmed visible brightness steps and the
+180-degree flip both worked.
+
+That confirmation photo also showed two small cyan remnants at the former location of
+the transient feedback text. Their color and position matched the M1-only cyan result
+label, reproducing the partial-refresh text artifact previously carried as an M2 watch
+item. Since the result label was diagnostic rather than product UI, it was removed; the
+brightness and rotation changes themselves are sufficient feedback and do not require a
+dynamic overlay.
+
+Per subsequent user direction, the device UI now defaults to landscape: the physical
+368x448 panel is software-rotated 90 degrees into a 448x368 logical canvas with the USB
+cable down, and the flip control selects 270 degrees. LVGL continues to rotate touch
+coordinates into logical space, and the tap zones compare against the live logical
+height. Protocol status was extended compatibly to accept all cardinal angles and now
+reports logical dimensions. The new build flashed through the normal native path; an
+automatic-discovery status returned `display_width=448`, `display_height=368`,
+`rotation=90`, brightness 200, free heap 8,462,035 bytes, and clean counters. Time sync
+then succeeded. The full hardware-acceptance harness also passed again on this landscape
+build (`valid=4->12 malformed=0->3 crc=0->1 overflow=0->1 dropped=0 rx_drops=0`).
+Artifact-free landscape rendering and the 270-degree flip were confirmed after the
+CO5300 alignment correction described below.
+
+The subsequent photos did show severe landscape corruption: a malformed clock in the
+first boot and, after the next flash, persistent green rectangles plus stale diagonal
+text and other regions. This falsified the narrower theory that only the transient
+feedback label was involved. Switching to one draw buffer recovered 59,396 bytes of
+heap but the next photo was unchanged, disproving that change as the render fix. Forcing
+full-screen invalidation and a synchronous boot refresh was also unchanged. Source
+comparison then found the missing CO5300 two-pixel invalidation rounder described in the
+earlier investigation section. The aligned image is `0xb78b0` bytes, flashed normally,
+returned 448x368 at 90 degrees with free heap 8,521,431 bytes and clean counters, and
+accepted time sync. The user confirmed both landscape orientations stayed clean,
+brightness worked, and no display artifacts remained.
+
+The native ESP32-S3 ROM may print startup text through USB Serial/JTAG before the
+application starts. Disabling that source is an irreversible eFuse operation
+(`DIS_USB_SERIAL_JTAG_ROM_PRINT`), so this project does not burn it. The M1 client clears
+the input backlog on open before its framed status handshake. Application and bootloader
+diagnostics are routed to UART0; a reset while a request is live is treated as a broken
+session rather than protocol data.

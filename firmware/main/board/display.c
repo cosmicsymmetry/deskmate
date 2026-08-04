@@ -1,6 +1,7 @@
 #include "board.h"
 #include "board_i2c.h"
 #include "display.h"
+#include <stdatomic.h>
 
 #include "esp_check.h"
 #include "esp_lcd_co5300.h"
@@ -48,6 +49,8 @@ static const char *TAG = "board_display";
 static esp_lcd_panel_io_handle_t s_io;
 static lv_display_t *s_disp;
 static bool s_first_flush_logged = false;
+static atomic_uchar s_brightness;
+static atomic_ushort s_rotation_degrees;
 
 // CO5300 column-address gap correction for this v2/CST820 board. Waveshare's
 // own BSP (bsp/esp32_s3_touch_amoled_1_8.c, bsp_touch_new()) applies this
@@ -118,6 +121,27 @@ static void board_lcd_flush_finish_cb(lv_event_t *e)
     }
 }
 
+// CO5300 v2 panels require partial update windows to start and end on
+// two-pixel boundaries. Waveshare added this exact rounding rule when it
+// changed the ESP32-S3-Touch-AMOLED-1.8 BSP from the v1 SH8601 panel to the
+// v2 CO5300 panel. It is especially important for 90/270-degree software
+// rotation: our 29,440-pixel buffer otherwise divides a 448-pixel-wide
+// landscape repaint into 65-row strips. Rotation turns each strip into an
+// odd-width CO5300 column window, which leaves the controller's subsequent
+// pixel stream/addressing visibly shifted (stale text and colored blocks).
+//
+// Both logical resolutions are even, so their final valid coordinates are
+// odd (447/367). Expanding a clipped invalid area outward this way therefore
+// remains inside the display while guaranteeing even x/y starts and even
+// widths/heights.
+static void board_lcd_rounder_cb(lv_area_t *area)
+{
+    area->x1 &= ~1;
+    area->y1 &= ~1;
+    area->x2 |= 1;
+    area->y2 |= 1;
+}
+
 esp_err_t board_display_init(void)
 {
     ESP_RETURN_ON_ERROR(board_lcd_expander_reset(), TAG, "panel expander reset failed");
@@ -168,17 +192,25 @@ esp_err_t board_display_init(void)
     ESP_RETURN_ON_ERROR(esp_lcd_panel_disp_on_off(panel, true), TAG, "disp_on_off failed");
 
     ESP_LOGI(TAG, "Initialize LVGL port");
-    const lvgl_port_cfg_t lvgl_cfg = ESP_LVGL_PORT_INIT_CONFIG();
+    lvgl_port_cfg_t lvgl_cfg = ESP_LVGL_PORT_INIT_CONFIG();
+    // Keep rendering on CPU0 so M1's parser/dispatcher can be pinned to CPU1
+    // and hostile serial input cannot monopolize LVGL's execution core.
+    lvgl_cfg.task_affinity = 0;
     ESP_RETURN_ON_ERROR(lvgl_port_init(&lvgl_cfg), TAG, "lvgl_port_init failed");
 
     const lvgl_port_display_cfg_t disp_cfg = {
         .io_handle = s_io,
         .panel_handle = panel,
         .buffer_size = BOARD_LCD_H_RES * 80,
-        .double_buffer = true,
+        // Keep one draw buffer while the newly restored CO5300 even-window
+        // rule is visually isolated on hardware. Switching from two buffers
+        // to one did not change the corruption, so it is not treated as the
+        // root cause or a durable board requirement.
+        .double_buffer = false,
         .hres = BOARD_LCD_H_RES,
         .vres = BOARD_LCD_V_RES,
         .color_format = LV_COLOR_FORMAT_RGB565,
+        .rounder_cb = board_lcd_rounder_cb,
         .flags = {
             .buff_dma = true,
             .swap_bytes = true,
@@ -195,6 +227,14 @@ esp_err_t board_display_init(void)
     lv_display_t *disp = lvgl_port_add_disp(&disp_cfg);
     ESP_RETURN_ON_FALSE(disp != NULL, ESP_FAIL, TAG, "lvgl_port_add_disp failed");
     s_disp = disp;
+
+    // The assembled desk device is used horizontally with its USB cable
+    // exiting downward. The panel is physically 368x448, so a 90-degree
+    // software rotation exposes a 448x368 logical landscape canvas. The
+    // existing "rotation 180" control flips that landscape orientation to
+    // 270 degrees rather than returning to portrait.
+    ESP_RETURN_ON_ERROR(board_display_set_rotation_180(false), TAG,
+                        "initial landscape rotation failed");
 
     lv_display_add_event_cb(disp, board_lcd_flush_finish_cb, LV_EVENT_FLUSH_FINISH, NULL);
 
@@ -232,6 +272,7 @@ esp_err_t board_display_set_brightness(uint8_t level)
     ESP_RETURN_ON_ERROR(
         esp_lcd_panel_io_tx_param(s_io, BOARD_LCD_QSPI_CMD(0x51), (uint8_t[]) { level }, 1),
         TAG, "brightness DCS 0x51 failed");
+    atomic_store(&s_brightness, level);
     ESP_LOGI(TAG, "brightness set to %u/255", (unsigned)level);
     return ESP_OK;
 }
@@ -240,13 +281,18 @@ esp_err_t board_display_set_rotation_180(bool on)
 {
     ESP_RETURN_ON_FALSE(s_disp != NULL, ESP_ERR_INVALID_STATE, TAG, "display not initialized");
 
+    lv_display_rotation_t rotation = on ? LV_DISPLAY_ROTATION_270
+                                        : LV_DISPLAY_ROTATION_90;
+    uint16_t degrees = on ? 270U : 90U;
+
     // lvgl_port_lock()'s mutex is recursive (esp_lvgl_port.c), so this is
     // safe to call both from app_main()-adjacent code and from inside an
     // LVGL event callback (main.c's tap-zone handler runs on the LVGL task,
     // already holding this lock).
     lvgl_port_lock(0);
-    lv_display_set_rotation(s_disp, on ? LV_DISPLAY_ROTATION_180 : LV_DISPLAY_ROTATION_0);
+    lv_display_set_rotation(s_disp, rotation);
     lvgl_port_unlock();
+    atomic_store(&s_rotation_degrees, degrees);
 
     // Touch coordinates do NOT need a separate transform here. LVGL core
     // already remaps every pointer indev's coordinates for the display's
@@ -256,16 +302,24 @@ esp_err_t board_display_set_rotation_180(bool on)
     // for every pointer indev, regardless of the sw_rotate flag (that flag
     // only controls esp_lvgl_port's OWN mirror/MADCTL vs. sw-rotate flush
     // path -- a different subsystem than LVGL core's indev processing).
-    // lv_display_rotate_point() (lv_display.c) performs exactly the
-    // x' = hor_res - x - 1, y' = ver_res - y - 1 point reflection for
-    // LV_DISPLAY_ROTATION_180. An earlier version of this function also
-    // called esp_lcd_touch_set_mirror_x/y() here, which applied a SECOND,
-    // redundant reflection at the touch-driver layer underneath LVGL's own
-    // -- the two cancelled out, leaving touch un-rotated while the image
-    // flipped. Removed after code review caught it; see board-notes.md
-    // "Task 5" section and this task's fix report for the full trace.
+    // lv_display_rotate_point() (lv_display.c) applies the appropriate
+    // 90/270-degree mapping into the landscape logical canvas. An earlier
+    // portrait implementation also called esp_lcd_touch_set_mirror_x/y(),
+    // adding a redundant driver transform underneath LVGL's own. Removed
+    // after review; see board-notes.md "Task 5" for the full trace.
 
-    ESP_LOGI(TAG, "rotation set to %s (LVGL sw-rotate; touch remap handled by "
-             "LVGL core's lv_display_rotate_point)", on ? "180" : "0");
+    ESP_LOGI(TAG, "rotation set to %u degrees (landscape LVGL sw-rotate; "
+             "touch remap handled by LVGL core's lv_display_rotate_point)",
+             (unsigned)degrees);
     return ESP_OK;
+}
+
+uint8_t board_display_brightness(void)
+{
+    return atomic_load(&s_brightness);
+}
+
+uint16_t board_display_rotation_degrees(void)
+{
+    return atomic_load(&s_rotation_degrees);
 }

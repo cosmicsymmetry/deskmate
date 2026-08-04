@@ -1,9 +1,9 @@
 # Deskmate M1 - Protocol, USB Link, and CLI Harness Implementation Plan
 
-**Status:** Exit gate complete. Software, adversarial-link, soak, visual, and ten-cycle
-physical unplug/replug verification pass. The `m1` tag awaits an intentional repository
-checkpoint because M2 work began in the same shared worktree before this physical
-carryover closed.
+**Status:** Complete and tagged `m1`. Software, adversarial-link, soak, visual, and
+ten-cycle physical unplug/replug verification pass. Because M2 work began in the same
+shared worktree before the final physical carryover closed, the tagged checkpoint also
+contains the completed M2 foundation present at M1 exit.
 
 **Goal:** From a terminal, discover a connected Deskmate and run
 `deskmate-cli status`, `deskmate-cli time-sync`, and `deskmate-cli push-data`; malformed
@@ -287,7 +287,7 @@ special CLI-only serial code, and failure modes are scriptable.
   responsiveness, brightness, and 90/270-degree landscape rotation.
 - [x] Update README status and usage, close every completed checkbox with evidence,
   write the M2 plan from M1 findings, and mark M1 complete in the roadmap.
-- [ ] Create an `m1` tag only after the exit checklist and review fixes are complete.
+- [x] Create an `m1` tag only after the exit checklist and review fixes are complete.
 
 **M1 exit gate:** A clean checkout can build both sides, shared fixtures prove protocol
 conformance, the CLI demo works on the physical board, corrupted input recovers, and the

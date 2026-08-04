@@ -3,9 +3,9 @@
 **Status:** Active by explicit user direction. Tasks 1-2 are complete; Task 3's
 implementation is complete with physical heap/render proof open. Task 4 firmware and
 host-test implementation is complete; its host-session end-to-end half awaits Task 5.
-M1's software and physical exit gate is complete. Its `m1` tag awaits an intentional
-repository checkpoint because M2 work began in the same shared worktree before the
-last M1 physical carryover closed.
+M1's software and physical exit gate is complete and tagged `m1`. Because M2 work began
+in the same shared worktree before the last M1 physical carryover closed, that checkpoint
+also contains the completed M2 foundation present at M1 exit.
 
 **Goal:** From a terminal, install a bounded carousel configuration and demonstrate a
 digital clock, a host-driven pomodoro with a progress ring and tap start/pause, and an

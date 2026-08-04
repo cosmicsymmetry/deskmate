@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "preferences": {
+    "timezone": "Not/A_Timezone",
+    "autostart": false,
+    "paused": false
+  },
+  "widgets": [
+    {
+      "kind": "clock",
+      "id": "duplicate",
+      "size": "standard",
+      "title": "Desk",
+      "show_seconds": true
+    },
+    {
+      "kind": "pomodoro",
+      "id": "duplicate",
+      "size": "full",
+      "label": "Focus",
+      "duration_seconds": 0
+    },
+    {
+      "kind": "calendar",
+      "id": "calendar",
+      "size": "standard",
+      "title": "Calendar",
+      "source": {
+        "kind": "url",
+        "value": "calendar.example/feed"
+      },
+      "refresh_minutes": 0
+    }
+  ],
+  "screens": [
+    {
+      "id": "same-screen",
+      "widget_id": "missing-widget"
+    },
+    {
+      "id": "same-screen",
+      "widget_id": "duplicate"
+    },
+    {
+      "id": "third-screen",
+      "widget_id": "duplicate"
+    }
+  ]
+}

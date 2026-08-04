@@ -5,8 +5,9 @@ use std::time::{Duration, Instant};
 
 use device::{DeviceClient, DeviceError, Transport, connect};
 use protocol::{
-    Deframer, ErrorCode, Frame, Message, PushData, StatusResponse, TYPE_PUSH_DATA, TYPE_TIME_SYNC,
-    decode_message, encode_frame, encode_message,
+    ApplyConfig, Deframer, ErrorCode, Frame, InterruptPolicy, Message, PushData, ScreenConfig,
+    SizeClass, StatusResponse, TYPE_APPLY_CONFIG, TYPE_PUSH_DATA, TYPE_TIME_SYNC, TapAction,
+    TemplateKind, WidgetConfig, decode_message, encode_frame, encode_message,
 };
 
 const BAD_CRC: &[u8] = include_bytes!("../../../../protocol/fixtures/v1/bad_crc.bin");
@@ -99,7 +100,7 @@ fn require_error(frame: &Frame, request_id: u32, code: ErrorCode) -> Result<(), 
 }
 
 fn verify_counter_deltas(before: &StatusResponse, after: &StatusResponse) -> Result<(), String> {
-    let expected_valid = before.valid_frames.saturating_add(8);
+    let expected_valid = before.valid_frames.saturating_add(9);
     if after.valid_frames < expected_valid {
         return Err(format!(
             "valid-frame counter did not include the split, coalesced, and recovery requests: before={}, after={}",
@@ -118,11 +119,67 @@ fn verify_counter_deltas(before: &StatusResponse, after: &StatusResponse) -> Res
     Ok(())
 }
 
+fn apply_acceptance_config(
+    client: &mut DeviceClient<impl Transport>,
+    retained_revision: u32,
+) -> Result<u32, String> {
+    let config_revision = retained_revision
+        .checked_add(1)
+        .ok_or_else(|| "cannot run config check at maximum retained revision".to_owned())?;
+    let config = ApplyConfig {
+        revision: config_revision,
+        widgets: vec![WidgetConfig {
+            widget_id: "acceptance".into(),
+            template: TemplateKind::DigitalClock,
+            size_class: SizeClass::Full,
+            tap_action: TapAction::None,
+            interrupt_policy: InterruptPolicy::Disabled,
+        }],
+        screens: vec![ScreenConfig {
+            screen_id: "acceptance-screen".into(),
+            widget_id: "acceptance".into(),
+        }],
+    };
+    match client
+        .request(&Message::ApplyConfig(config))
+        .map_err(|error| error.to_string())?
+    {
+        Message::Ack(ack)
+            if ack.acknowledged_type == TYPE_APPLY_CONFIG
+                && ack.revision == Some(config_revision) =>
+        {
+            Ok(config_revision)
+        }
+        message => Err(format!("unexpected config response: {message:?}")),
+    }
+}
+
+fn verify_retained_revisions(
+    status: &StatusResponse,
+    data_revision: u32,
+    config_revision: u32,
+) -> Result<(), String> {
+    if status.latest_revision != data_revision {
+        return Err(format!(
+            "retained revision mismatch: expected {data_revision}, received {}",
+            status.latest_revision
+        ));
+    }
+    if status.config_revision != config_revision {
+        return Err(format!(
+            "retained config revision mismatch: expected {config_revision}, received {}",
+            status.config_revision
+        ));
+    }
+    Ok(())
+}
+
 fn run() -> Result<(), String> {
     let port = parse_port()?;
-    let connected = connect(port.as_deref()).map_err(|error| error.to_string())?;
+    let mut connected = connect(port.as_deref()).map_err(|error| error.to_string())?;
     let port_name = connected.port_name;
     let before = connected.initial_status;
+    let config_revision = apply_acceptance_config(&mut connected.client, before.config_revision)?;
     let mut transport = connected.client.into_transport();
 
     let split = encode_message(100, &Message::StatusRequest).map_err(|error| error.to_string())?;
@@ -197,17 +254,13 @@ fn run() -> Result<(), String> {
     }
     let after = client.status().map_err(|error| error.to_string())?;
     verify_counter_deltas(&before, &after)?;
-    if after.latest_revision != revision {
-        return Err(format!(
-            "retained revision mismatch: expected {revision}, received {}",
-            after.latest_revision
-        ));
-    }
+    verify_retained_revisions(&after, revision, config_revision)?;
 
     println!(
-        "PASS port={port_name} uptime_ms={} heap={} valid={}->{} malformed={}->{} crc={}->{} overflow={}->{} dropped={} rx_drops={}",
+        "PASS port={port_name} uptime_ms={} heap={} config_revision={} valid={}->{} malformed={}->{} crc={}->{} overflow={}->{} dropped={} rx_drops={} events_dropped={} event_high_water={} ui_dropped={} ui_high_water={}",
         after.uptime_ms,
         after.free_heap,
+        after.config_revision,
         before.valid_frames,
         after.valid_frames,
         before.malformed_frames,
@@ -217,7 +270,11 @@ fn run() -> Result<(), String> {
         before.overflow_frames,
         after.overflow_frames,
         after.dropped_responses,
-        after.rx_dropped_bytes
+        after.rx_dropped_bytes,
+        after.dropped_events,
+        after.event_queue_high_water,
+        after.dropped_ui_commands,
+        after.ui_queue_high_water
     );
     Ok(())
 }

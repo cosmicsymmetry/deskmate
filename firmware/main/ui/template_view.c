@@ -140,6 +140,7 @@ bool template_view_show(protocol_template_kind_t template_kind,
         return false;
     }
     lv_obj_remove_flag(candidate.screen, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(candidate.screen, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_set_style_bg_color(candidate.screen, lv_color_hex(0x101020), 0);
     lv_obj_set_style_bg_opa(candidate.screen, LV_OPA_COVER, 0);
 
@@ -149,6 +150,11 @@ bool template_view_show(protocol_template_kind_t template_kind,
         return false;
     }
     lv_obj_remove_style_all(content);
+    /* Full-canvas layout containers must not win LVGL hit testing. The
+     * carousel screen owns press/release classification for both swipes and
+     * widget taps. */
+    lv_obj_remove_flag(content,
+                       LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_width(content, LV_PCT(100));
     if (size_class == PROTOCOL_SIZE_STANDARD) {
         lv_obj_set_height(content, 368 - STATUS_STRIP_HEIGHT);

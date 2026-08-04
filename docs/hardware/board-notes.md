@@ -966,3 +966,76 @@ application starts. Disabling that source is an irreversible eFuse operation
 the input backlog on open before its framed status handshake. Application and bootloader
 diagnostics are routed to UART0; a reset while a request is live is treated as a broken
 session rather than protocol data.
+
+## M2 partial hardware exit evidence (2026-08-04)
+
+The clean M2-inclusive `0xbdb80` image flashed normally twice over the native
+USB Serial/JTAG device. The second flash used `idf.py flash` without `-p` and
+automatically selected `/dev/cu.usbmodem1101`. Post-flash status reported the logical
+448x368 canvas at 90 degrees, 8,462,727 bytes free heap, and clean counters. The
+application log identifies this as an M2 boot; the protocol's firmware-version field is
+derived from `git describe` and therefore reported the nearest tagged dirty build as
+`m1-dirty` before an M2 tag exists.
+
+Automatic CLI discovery applied the checked three-screen carousel, and independent CLI
+processes successfully seeded themselves from retained data/config revisions. The M1
+adversarial hardware harness, updated to configure its test widget under the M2 model,
+passed split/coalesced input, CRC/garbage/overlong recovery, invalid payload/time, valid
+push, and stale-revision rejection. Its final counters were `valid=1->10 malformed=0->3
+crc=0->1 overflow=0->1`, with zero response/RX/event/UI drops and UI queue high-water 3.
+
+The M2 stress harness then completed 100 alternating config replacements and 1,000
+mixed clock/progress/calendar field patches, with periodic screen activation. Across 20
+status samples, initial, post-config baseline, final, and floor heap were all exactly
+8,462,727 bytes. There were no resets or protocol/UI/event drops, and UI queue high-water
+remained 3. A 65-second interval with no caller commands produced 21 session keepalives;
+the device stayed online and heap remained unchanged. The checked carousel was restored
+at data revision 1,003 and config revision 102. Human touch/visual checks, touch-event
+pressure, ten M2-session unplug/replug cycles, and the 30-minute mixed soak are still
+open and must not be inferred from this automated evidence.
+
+The first M2 full-power-cycle attempt intentionally provided a stronger test than a
+cable-only re-enumeration and exposed a host ownership defect. The device correctly
+booted into its RAM-independent `00:00 / Connect deskmate app` fallback, but the running
+pomodoro command had not issued the configuration or time sync itself; those belonged
+to earlier short-lived CLI processes. It reconnected and then received `UnknownWidget`
+while replaying its lone pomodoro push. The CLI now has a single long-lived `demo`
+command that owns time, config, clock/calendar/pomodoro data, interaction state, and
+interrupts in one replay cache. Its software checks pass and the corrected command has
+loaded successfully on this board; corrected physical power-cycle replay remains to be
+observed before the reconnect gate can close.
+
+The first physical carousel swipes produced no navigation because the full-size
+template content/root and status-strip objects inherited LVGL's default
+`CLICKABLE | SCROLLABLE` flags. Those otherwise visual-only containers won hit testing,
+so the screen-level carousel callback never received a press/release pair. The fix makes
+all layout containers passive and explicitly keeps the owning screen clickable. The
+resulting image retained the same `0xbdb80` size and flashed normally. Its live event
+stream then reported clock -> pomodoro -> calendar -> pomodoro navigation, five
+start/pause taps, exactly one pomodoro completion interrupt, and its dismissal restoring
+`pomodoro-screen`; the user confirmed the visible gestures worked.
+
+The corrected single-owner demo also passed its first full-power-cycle replay. The host
+reported `reconnected on /dev/tty.usbmodem1101`, replayed time/config/clock/calendar/
+pomodoro state after the reset, and the user confirmed the configured carousel visibly
+returned. This is corrected cycle 1 of the required 10; nine more cycles remain.
+The user explicitly deferred those repeated physical cycles so implementation could
+continue; the hardware record does not treat unperformed cycles as evidence.
+
+The subsequent mixed render/protocol soak passed for 1,800 seconds. It patched the
+clock, progress ring, and calendar at 4 Hz, activated another carousel screen every five
+seconds, and sampled status once per minute. Initial, post-config baseline, final, and
+all 32 sampled heap values were exactly 8,462,727 bytes. Final status reported uptime
+2,154,206 ms, `valid=6405 malformed=0 crc=0 overflow=0`, no reset, and zero response,
+RX, device-event, UI-command, host-event, or sequence-gap drops. UI queue high-water was
+4; device-event high-water was 1, with three physical events received during the run.
+
+The final M2 rotation/pressure check used the standalone clock control to switch the
+physical device to 270 degrees; status confirmed the same logical 448x368 canvas. The
+full demo then rendered all three widgets and the status strip in that orientation. The
+user confirmed clean rendering, responsive animation, taps, and swipes. Eight rapid
+alternating navigation events arrived in order. Final status at uptime 2,690,320 ms
+reported 8,462,727 bytes free heap, `valid=6794 malformed=0 crc=0 overflow=0`, zero
+response/RX/device-event/UI-command drops, event queue high-water 1, and UI queue
+high-water 4. Together with the earlier clean 90-degree interaction pass, this closes
+M2's physical render/gesture gate.

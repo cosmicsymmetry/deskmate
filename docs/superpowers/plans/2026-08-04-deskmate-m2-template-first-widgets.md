@@ -1,11 +1,12 @@
 # Deskmate M2 - Template Engine and First Widgets Implementation Plan
 
-**Status:** Active by explicit user direction. Tasks 1-2 are complete; Task 3's
-implementation is complete with physical heap/render proof open. Task 4 firmware and
-host-test implementation is complete; its host-session end-to-end half awaits Task 5.
-M1's software and physical exit gate is complete and tagged `m1`. Because M2 work began
-in the same shared worktree before the last M1 physical carryover closed, that checkpoint
-also contains the completed M2 foundation present at M1 exit.
+**Status:** Complete on 2026-08-04; no `m2` tag has been created. All software, physical,
+stress, render, interaction, and soak gates pass except that the user explicitly waived
+nine repetitions of the ten-cycle reconnect check after one corrected full-power-cycle
+pass. That waiver is recorded as a scope decision, not fabricated hardware evidence.
+M1 remains tagged `m1`; because M2 work began in the shared worktree before M1's final
+physical carryover closed, that checkpoint also contains the M2 foundation present at
+M1 exit.
 
 **Goal:** From a terminal, install a bounded carousel configuration and demonstrate a
 digital clock, a host-driven pomodoro with a progress ring and tap start/pause, and an
@@ -329,8 +330,8 @@ advance from the last authoritative snapshot on a 250 ms monotonic LVGL tick and
 optimistic tap feedback is overwritten by the next full snapshot. Reconnect restores
 retained content, while the offline UI command has priority over queued view work and
 returns to standalone. Nine plain-C host binaries pass default and ASan/UBSan builds;
-the integrated image links at `0xbdb80` bytes with 26% free. Task 5 still must prove
-host-side event demultiplexing and the complete physical tap-to-host path.
+the integrated image links at `0xbdb80` bytes with 26% free. Task 5 host tests now prove
+host-side event demultiplexing; the complete physical tap-to-host path remains open.
 
 ---
 
@@ -342,25 +343,41 @@ host-side event demultiplexing and the complete physical tap-to-host path.
 - Modify: `companion/crates/device/Cargo.toml`
 - Modify: `companion/crates/deskmate-cli/src/main.rs`
 
-- [ ] Introduce a connection/session loop that owns serial I/O and demultiplexes echoed
+- [x] Introduce a connection/session loop that owns serial I/O and demultiplexes echoed
   request replies from request-ID-zero events while preserving M1 timeout/error classes.
-- [ ] **Emit a keepalive heartbeat whenever no other request is in flight**, at an interval
+- [x] **Emit a keepalive heartbeat whenever no other request is in flight**, at an interval
   well inside the frozen 10,000 ms liveness deadline (3 s or less). Without it a screen
   that is not being pushed — a paused pomodoro, a calendar between refreshes — goes silent
   past the deadline and the device drops to the standalone clock in the middle of a live
   session. Test that an otherwise idle session keeps the device online indefinitely.
-- [ ] **Seed the session's data revision from the connect-time `StatusResponse`** so a
+- [x] **Seed the session's data revision from the connect-time `StatusResponse`** so a
   restarted host does not collide with the revision the device still retains. Test a
   reconnect against a device that was never power-cycled.
-- [ ] Test fragmented/coalesced reply+event reads, an event arriving before a reply,
+- [x] Test fragmented/coalesced reply+event reads, an event arriving before a reply,
   duplicate/out-of-order events, disconnect during a request, bounded event-queue
   overflow, reconnect, and state replay.
-- [ ] Expose typed `apply_config`, `activate_screen`, `trigger_interrupt`, event receive,
+- [x] Expose typed `apply_config`, `activate_screen`, `trigger_interrupt`, event receive,
   and reconnect APIs; keep raw serial logic out of the CLI.
-- [ ] Re-run the M1 CLI and hardware-acceptance suites to prevent protocol regressions.
+- [x] Re-run the M1 CLI and hardware-acceptance suites to prevent protocol regressions.
 
 **Acceptance:** One long-lived connection can issue commands and receive touch events
 without response correlation failures, then reconnect and replay state after unplug.
+
+**Implementation evidence (2026-08-04):** `DeviceSession` runs one background owner for
+serial I/O, request correlation, a 32-slot bounded host event queue, and idle keepalives
+at a three-second interval. Duplicate/out-of-order events are suppressed, sequence gaps
+and local drops are observable, and event delivery never blocks the I/O worker. Typed
+time/config/data/screen/interrupt APIs share the same request path; automatic data and
+config revision allocation starts above the connect-time status counters. Explicit
+reconnect replaces the transport and replays acknowledged time, config, latest
+per-widget data, active screen, and undismissed interrupts; a same-powered reconnect
+skips retained config/data revisions. Sixteen `device` tests cover fragmented and
+coalesced traffic, events on both sides of a reply, idle keepalive, overflow, duplicate
+and gap handling, timeout/malformed/disconnect classes, powered-reset replay, and a
+same-powered reconnect. Rust workspace tests (31 tests), formatting, Clippy with warnings
+denied, the CLI help smoke test, and all nine plain-C host binaries pass. No USB device
+node was present for the physical M1 CLI/hardware-acceptance rerun, so that final Task 5
+checkbox and the physical half of acceptance remain open.
 
 ---
 
@@ -377,26 +394,39 @@ without response correlation failures, then reconnect and replay state after unp
 - Create: `companion/crates/engine/src/interrupts.rs`
 - Modify: `companion/Cargo.toml`
 
-- [ ] Define the provider output/refresh trait needed by the M2 CLI and parse ICS file
+- [x] Define the provider output/refresh trait needed by the M2 CLI and parse ICS file
   and URL sources into the next bounded events using fixture-driven tests.
-- [ ] Cover folded lines, time zones/UTC, all-day events, cancellation, malformed feeds,
+- [x] Cover folded lines, time zones/UTC, all-day events, cancellation, malformed feeds,
   duplicate UIDs, and stable sorting. Preserve last-good output with an age/error marker
   on refresh failure.
-- [ ] **Bound recurrence support explicitly rather than aiming at full RRULE.** M2
+- [x] **Bound recurrence support explicitly rather than aiming at full RRULE.** M2
   supports `FREQ=DAILY|WEEKLY|MONTHLY` with `INTERVAL`, `COUNT`/`UNTIL`, `BYDAY` without
   ordinal prefixes, and `EXDATE`. Anything else — `BYSETPOS`, ordinal `BYDAY`, `BYMONTHDAY`
   and friends, `RECURRENCE-ID` overrides, `FREQ=YEARLY` — is skipped and counted, never
   guessed at. The counter is reported by the CLI so an unsupported rule is visible rather
   than a silently missing meeting. Every supported and skipped form gets a fixture.
   Widening this set is M4 work, not M2 scope creep.
-- [ ] Implement a monotonic-clock pomodoro state machine with start, pause, resume,
+- [x] Implement a monotonic-clock pomodoro state machine with start, pause, resume,
   reset, completed state, periodic progress fields, and exactly-once completion interrupt.
-- [ ] Implement host-side interrupt arbitration/token tracking compatible with the
+- [x] Implement host-side interrupt arbitration/token tracking compatible with the
   device's bounded interrupt state and reconnect replay.
-- [ ] Keep wall-clock jumps/time-sync separate from pomodoro elapsed timing.
+- [x] Keep wall-clock jumps/time-sync separate from pomodoro elapsed timing.
 
 **Acceptance:** Deterministic tests turn ICS fixtures and pomodoro transitions into the
 exact bounded field/config/interrupt messages expected by firmware.
+
+**Evidence (2026-08-04):** The `providers` crate exposes refresh policy and last-good
+snapshot contracts plus bounded file/HTTPS ICS loading (1 MiB feed, 4,096 VEVENTs,
+five output rows). Fixture tests cover unfolding, IANA zones and UTC, all-day and
+cancelled events, duplicate UID/sequence selection, deterministic sorting, malformed
+feeds, EXDATE, and every supported/skipped RRULE feature. Unsupported recurrences and
+bounded-scan hits are explicit counters surfaced to the CLI; refresh errors retain the
+last good rows with age/stale/error state. The `engine` crate emits complete progress-ring
+field snapshots from `Instant`-only pomodoro timing and mirrors the device's active plus
+pending interrupt slots with stable retry/replay tokens. Six provider and eight engine
+tests pass, including pause/resume/reset, exactly-once completion, Busy retry, FIFO
+promotion, and reconnect replay. Workspace format, Clippy with warnings denied, and all
+Rust tests pass.
 
 ---
 
@@ -407,18 +437,58 @@ exact bounded field/config/interrupt messages expected by firmware.
 - Create: `companion/examples/m2-carousel.json`
 - Modify: `README.md`
 
-- [ ] Add scriptable commands to apply/inspect the sample layout, select a screen, push
+- [x] Add scriptable commands to apply/inspect the sample layout, select a screen, push
   clock/calendar data, run an interactive pomodoro session, trigger an interrupt, and
   print device events as human text or JSON lines.
-- [ ] Validate the entire config locally before opening serial; return stable nonzero
+- [x] Validate the entire config locally before opening serial; return stable nonzero
   exits for config/provider/device/rejection failures.
-- [ ] Make the sample config demonstrate all three templates, both strip modes, stable
+- [x] Make the sample config demonstrate all three templates, both strip modes, stable
   template field names, ordered carousel screens, and tap actions.
-- [ ] Ensure Ctrl-C closes cleanly and never leaves the device permanently online or in
+- [x] Ensure Ctrl-C closes cleanly and never leaves the device permanently online or in
   an undismissable interrupt state.
 
 **Acceptance:** A clean terminal can reproduce every M2 feature without Tauri or hidden
 test-only serial code.
+
+**Implementation evidence (2026-08-04):** The CLI now validates/inspects and applies the
+checked JSON carousel, selects screens, pushes complete clock/calendar snapshots, runs
+the tap-driven pomodoro loop, triggers interrupts, and streams typed events as text or
+JSON lines. Config/provider/device/rejection failures retain stable exit classes 3, 4,
+10-15 and all config validation occurs before discovery opens a serial port. Long-running
+commands install a cross-platform Ctrl-C handler, stop keepalives, drop the serial worker,
+and retry discovery plus session replay across unplug/replug. The sample has digital
+clock/full, progress ring/standard with start-pause, and row list/standard in explicit
+carousel order. Two CLI tests validate the checked sample and prove an unsupported tile
+layout is rejected locally; the inspect-config JSON smoke test and help output pass.
+Physical reproduction remains part of Task 8.
+
+The first physical full-power-cycle attempt exposed an ownership hole in the original
+multi-command demo: the running pomodoro process held only its own PushData, while the
+configuration, time, clock, and calendar had been sent by already-exited processes. It
+reconnected but correctly received `UnknownWidget` when it tried to replay pomodoro data
+onto the reset device. The CLI now provides a long-lived `demo` command that loads the
+checked config, synchronizes time, pushes all three widgets, and then runs the pomodoro
+loop through one `DeviceSession`; that session therefore owns the complete replay set.
+Format, strict Clippy, all 47 tests, and the release build pass after the correction.
+The corrected full-owner replay then passed one observed full power cycle. The user
+explicitly waived the remaining nine repetitions for this milestone, so the gate is
+closed with that scope exception recorded rather than with fabricated observations.
+
+The initial physical gesture attempt then exposed another hardware-only integration
+defect: full-canvas template/status `lv_obj` containers retained LVGL's default
+clickable/scrollable flags, so they won hit testing before the carousel screen and no
+press/release pair reached the classifier. Making those layout containers passive and
+the carousel screen explicitly clickable fixed the path. After reflashing, the live
+stream observed clock -> pomodoro -> calendar -> pomodoro navigation, progress-ring tap
+events, exactly one completion interrupt, and dismissal restoring the pomodoro screen.
+The user confirmed the corrected gestures visibly worked.
+
+The physical regression rerun passed on 2026-08-04 after teaching the M1 harness to
+install a valid M2 digital-clock widget before its data push. Split/coalesced framing,
+CRC/garbage/overlong recovery, invalid payload/time errors, valid and stale data
+revisions, and retained config revision all passed. Final counters were
+`valid=1->10 malformed=0->3 crc=0->1 overflow=0->1`, with zero response/RX/event/UI
+drops, UI queue high-water 3, and 8,462,727 bytes free heap.
 
 ---
 
@@ -431,27 +501,78 @@ test-only serial code.
 - Modify: `README.md`
 - Create: M3 implementation plan
 
-- [ ] Run all C default/sanitizer tests, Rust format/Clippy/tests, fixture regeneration
+- [x] Run all C default/sanitizer tests, Rust format/Clippy/tests, fixture regeneration
   diff, clean ESP-IDF build, image-size check, and stack-frame audit.
-- [ ] Flash through the normal native path and run the sample CLI config from automatic
+- [x] Flash through the normal native path and run the sample CLI config from automatic
   discovery; repeat a second automatic flash from the running M2 image.
-- [ ] Human-verify clock, progress ring, calendar rows, status strip, full/standard
+- [x] Human-verify clock, progress ring, calendar rows, status strip, full/standard
   layouts, 90/270-degree landscape rotation, swipe/tap distinction, and responsive
   animations.
-- [ ] Complete a real accelerated pomodoro: tap start/pause/resume, observe progress,
+- [x] Complete a real accelerated pomodoro: tap start/pause/resume, observe progress,
   receive one completion interrupt, dismiss it, and return to the prior screen.
-- [ ] Exercise valid and malformed config/data/event traffic, at least 100 config swaps,
+- [x] Exercise valid and malformed config/data/event traffic, at least 100 config swaps,
   1,000 field patches, event-queue pressure, and confirm recovery plus flat heap trend.
-- [ ] Unplug/replug at least ten times while the M2 CLI session reconnects; confirm the
-  device falls back after 10 seconds and replays time/config/data without reboot.
-- [ ] Leave a session connected and idle — no config, data, or interrupt traffic — for at
+- [x] Unplug/replug at least ten times while the M2 CLI session reconnects; confirm the
+  device falls back after 10 seconds and replays time/config/data without reboot. The
+  user waived the nine repeated cycles after one corrected full-power-cycle pass; this
+  checkbox records that explicit gate revision, not ten observed cycles.
+- [x] Leave a session connected and idle — no config, data, or interrupt traffic — for at
   least 60 seconds and confirm the carousel stays online on the keepalive alone.
-- [ ] Restart the CLI process without touching the cable and confirm the new session
+- [x] Restart the CLI process without touching the cable and confirm the new session
   reads the retained revision and pushes successfully instead of taking `StaleRevision`.
-- [ ] Run a 30-minute mixed render/protocol soak and record heap floor, event/UI queue
+- [x] Run a 30-minute mixed render/protocol soak and record heap floor, event/UI queue
   pressure, parser counters, frame rate/responsiveness observations, and resets.
-- [ ] Update status/docs, write the M3 plan from measured findings, and mark M2 complete.
+- [x] Update status/docs, write the M3 plan from measured findings, and mark M2 complete.
 - [ ] Create an `m2` tag only after review fixes and only with explicit authorization.
+
+**Software exit evidence (2026-08-04):** All nine plain-C binaries pass default and
+ASan/UBSan runs. Rust formatting, workspace Clippy with warnings denied, all 47 tests,
+and an optimized CLI build pass. Fixture regeneration in a clean temporary directory has
+no diff; the checked sample inspect smoke test passes and a missing-calendar source exits
+with the stable provider code 4 before serial discovery. A fullclean ESP-IDF 5.5.5 build
+succeeds with `deskmate.bin` at `0xbdb80` bytes and `0x42480` bytes (26%) free in the
+smallest app partition. Xtensa `entry` audit measures 656 bytes for `protocol_task`, 80
+for its frame callback, 48 for transmit, 2,272 for message encode, and 2,080 for nested
+frame encode: the conservative callback/transmit path totals 5,184 of the 8,192-byte task
+stack, leaving 3,008 bytes before external callee use. No USB device node was present, so
+all remaining Task 8 items are physical gates and no M3 plan or `m2` tag has been created.
+
+**Partial physical exit evidence (2026-08-04):** The clean `0xbdb80` image flashed twice
+through native USB Serial/JTAG; the second `idf.py flash` invocation automatically found
+`/dev/cu.usbmodem1101`. Automatic CLI discovery applied the checked three-widget sample.
+Independent CLI processes then resumed at retained config/data revisions and pushed the
+clock plus five parsed calendar events without `StaleRevision`. The expanded CLI status
+now exposes all M2 counters.
+
+The checked `m2_stress` hardware harness completed 100 config swaps, 1,000 field patches,
+and 20 intermediate status samples. Initial, post-config baseline, final, and sampled
+heap floor were all exactly 8,462,727 bytes; UI queue high-water was 3, with zero UI,
+event, response, or RX drops and no reset. A subsequent 65-second caller-idle interval
+sent 21 background keepalives and stayed online. Final retained revisions were data
+1,003 and config 102 after the checked demo was restored. Human touch/visual checks,
+event pressure, unplug/replug replay, and the 30-minute mixed soak remain open; no M3
+plan or `m2` tag has been created.
+
+The corrected single-owner demo subsequently survived a full device power cycle. It
+reconnected on `/dev/tty.usbmodem1101`, replayed time/config/all widget data, and the user
+confirmed that the configured carousel visibly replaced the transient standalone boot
+screen. The user explicitly waived the nine repeated physical cycles so implementation
+could continue; they are not recorded as observed passes.
+
+The mixed M2 harness then ran for 1,800 seconds, patching clock/progress/calendar data
+four times per second and activating a different screen every five seconds. All 32 heap
+samples, including initial/baseline/final/floor, were exactly 8,462,727 bytes. Final
+status was `valid=6405 malformed=0 crc=0 overflow=0`, with zero response/RX/event/UI
+drops, UI queue high-water 4, event queue high-water 1, three physical events received,
+and zero host drops or sequence gaps. Uptime reached 2,154,206 ms without a reset.
+
+For the final rotation/pressure pass, the standalone clock's physical flip control
+changed the board to 270 degrees and status confirmed 448x368 at that rotation. The
+single-owner demo loaded all three real widgets, and the user confirmed the clock,
+progress ring, calendar, status strip, animations, taps, and swipes were clean. Eight
+rapid alternating navigation events arrived in order. Final status at uptime 2,690,320
+ms reported heap 8,462,727 bytes, `valid=6794 malformed=0 crc=0 overflow=0`, zero
+response/RX/event/UI drops, event queue high-water 1, and UI queue high-water 4.
 
 **M2 exit gate:** The physical device demonstrates the three first widgets from a clean
 CLI session, local interaction and host state remain synchronized, malformed input and

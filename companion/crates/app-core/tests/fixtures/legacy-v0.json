@@ -1,0 +1,19 @@
+{
+  "schema_version": 0,
+  "timezone": "Europe/Paris",
+  "widgets": [
+    {
+      "kind": "clock",
+      "id": "clock",
+      "size": "full",
+      "title": "Desk",
+      "show_seconds": true
+    }
+  ],
+  "screens": [
+    {
+      "id": "clock-screen",
+      "widget_id": "clock"
+    }
+  ]
+}

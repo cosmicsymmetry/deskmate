@@ -9,6 +9,8 @@ use protocol::{
     PushData, StatusResponse, TimeSync,
 };
 
+mod m2;
+
 const USAGE: &str = "\
 Usage:
   deskmate-cli status [--port PATH] [--json]
@@ -19,8 +21,10 @@ Field values infer booleans and integers; use s:, i:, or b: to force a type.
 Examples: --field summary=s:Clear --field temp=i:23 --field ok=b:true";
 
 #[derive(Debug)]
-enum AppError {
+pub(crate) enum AppError {
     Usage(String),
+    Config(String),
+    Provider(String),
     Device(DeviceError),
     Host(String),
 }
@@ -28,7 +32,10 @@ enum AppError {
 impl fmt::Display for AppError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Usage(error) | Self::Host(error) => f.write_str(error),
+            Self::Usage(error)
+            | Self::Config(error)
+            | Self::Provider(error)
+            | Self::Host(error) => f.write_str(error),
             Self::Device(error) => error.fmt(f),
         }
     }
@@ -309,7 +316,7 @@ fn json_string(value: &str) -> String {
 fn print_status(status: &StatusResponse, port_name: &str, json: bool) {
     if json {
         println!(
-            "{{\"port\":{},\"protocol_version\":{},\"firmware_version\":{},\"uptime_ms\":{},\"free_heap\":{},\"display_width\":{},\"display_height\":{},\"brightness\":{},\"rotation\":{},\"online\":{},\"latest_revision\":{},\"valid_frames\":{},\"malformed_frames\":{},\"crc_errors\":{},\"overflow_frames\":{},\"dropped_responses\":{},\"rx_dropped_bytes\":{}}}",
+            "{{\"port\":{},\"protocol_version\":{},\"firmware_version\":{},\"uptime_ms\":{},\"free_heap\":{},\"display_width\":{},\"display_height\":{},\"brightness\":{},\"rotation\":{},\"online\":{},\"latest_revision\":{},\"config_revision\":{},\"valid_frames\":{},\"malformed_frames\":{},\"crc_errors\":{},\"overflow_frames\":{},\"dropped_responses\":{},\"rx_dropped_bytes\":{},\"dropped_events\":{},\"event_queue_high_water\":{},\"dropped_ui_commands\":{},\"ui_queue_high_water\":{}}}",
             json_string(port_name),
             status.protocol_version,
             json_string(&status.firmware_version),
@@ -321,12 +328,17 @@ fn print_status(status: &StatusResponse, port_name: &str, json: bool) {
             status.rotation,
             status.online,
             status.latest_revision,
+            status.config_revision,
             status.valid_frames,
             status.malformed_frames,
             status.crc_errors,
             status.overflow_frames,
             status.dropped_responses,
-            status.rx_dropped_bytes
+            status.rx_dropped_bytes,
+            status.dropped_events,
+            status.event_queue_high_water,
+            status.dropped_ui_commands,
+            status.ui_queue_high_water
         );
     } else {
         println!("Deskmate on {port_name}");
@@ -358,10 +370,21 @@ fn print_status(status: &StatusResponse, port_name: &str, json: bool) {
             status.dropped_responses,
             status.rx_dropped_bytes
         );
+        println!(
+            "config revision={}, events dropped={} high_water={}, UI commands dropped={} high_water={}",
+            status.config_revision,
+            status.dropped_events,
+            status.event_queue_high_water,
+            status.dropped_ui_commands,
+            status.ui_queue_high_water
+        );
     }
 }
 
 fn run() -> Result<(), AppError> {
+    if m2::run_if_requested()? {
+        return Ok(());
+    }
     let options = parse_options()?;
     let mut connected = connect(options.port.as_deref())?;
     match options.command {
@@ -417,6 +440,8 @@ fn run() -> Result<(), AppError> {
 fn exit_code(error: &AppError) -> i32 {
     match error {
         AppError::Usage(_) => 2,
+        AppError::Config(_) => 3,
+        AppError::Provider(_) => 4,
         AppError::Device(DeviceError::NoDevice) => 10,
         AppError::Device(DeviceError::Timeout) => 11,
         AppError::Device(DeviceError::VersionMismatch(_)) => 12,
@@ -435,7 +460,7 @@ fn main() {
         env::args().nth(1).as_deref(),
         Some("help" | "--help" | "-h")
     ) {
-        println!("{USAGE}");
+        println!("{USAGE}\n\n{}", m2::M2_USAGE);
         return;
     }
     let json = env::args().any(|argument| argument == "--json");
@@ -446,7 +471,7 @@ fn main() {
             if !error.to_string().is_empty() {
                 eprintln!("error: {error}\n");
             }
-            eprintln!("{USAGE}");
+            eprintln!("{USAGE}\n\n{}", m2::M2_USAGE);
         } else {
             eprintln!("error: {error}");
         }

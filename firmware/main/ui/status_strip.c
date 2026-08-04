@@ -9,6 +9,8 @@ static lv_obj_t *create_dot(lv_obj_t *parent, int32_t right_offset)
 {
     lv_obj_t *dot = lv_obj_create(parent);
     lv_obj_remove_style_all(dot);
+    lv_obj_remove_flag(dot,
+                       LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_size(dot, 7, 7);
     lv_obj_set_style_radius(dot, LV_RADIUS_CIRCLE, 0);
     lv_obj_align(dot, LV_ALIGN_RIGHT_MID, right_offset, 0);
@@ -23,6 +25,8 @@ bool status_strip_create(status_strip_t *strip, lv_obj_t *parent)
     memset(strip, 0, sizeof(*strip));
     strip->root = lv_obj_create(parent);
     lv_obj_remove_style_all(strip->root);
+    lv_obj_remove_flag(strip->root,
+                       LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_size(strip->root, LV_PCT(100), STATUS_STRIP_HEIGHT);
     lv_obj_align(strip->root, LV_ALIGN_TOP_MID, 0, 0);
     lv_obj_set_style_bg_color(strip->root, lv_color_hex(0x161725), 0);

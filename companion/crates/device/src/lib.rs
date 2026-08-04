@@ -8,6 +8,13 @@ use protocol::{
     TYPE_TIME_SYNC, TimeSync, decode_message, encode_message,
 };
 
+mod session;
+
+pub use session::{
+    ConnectedSession, DEFAULT_EVENT_QUEUE_CAPACITY, DEFAULT_KEEPALIVE_INTERVAL, DeviceSession,
+    ReceivedEvent, SessionDiagnostics, SessionOptions, connect_session,
+};
+
 pub const ESPRESSIF_USB_VID: u16 = 0x303a;
 pub const ESP32_S3_SERIAL_JTAG_PID: u16 = 0x1001;
 pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
@@ -46,6 +53,7 @@ pub enum DeviceError {
     VersionMismatch(u8),
     Rejected(ErrorResponse),
     InvalidRequest,
+    RevisionExhausted,
 }
 
 impl fmt::Display for DeviceError {
@@ -71,6 +79,7 @@ impl fmt::Display for DeviceError {
                 )
             }
             Self::InvalidRequest => f.write_str("message is not a host request"),
+            Self::RevisionExhausted => f.write_str("device revision counter is exhausted"),
         }
     }
 }
@@ -127,7 +136,7 @@ impl<T: Transport> DeviceClient<T> {
         request_id
     }
 
-    fn expected_response(request: &Message) -> Option<u8> {
+    pub(crate) fn expected_response(request: &Message) -> Option<u8> {
         match request {
             Message::StatusRequest => Some(TYPE_STATUS_RESPONSE),
             Message::TimeSync(_)

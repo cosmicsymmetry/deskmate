@@ -1,9 +1,13 @@
 [workspace]
 resolver = "2"
 members = [
+    "apps/deskmate/src-tauri",
+    "crates/app-core",
     "crates/deskmate-cli",
     "crates/device",
+    "crates/engine",
     "crates/protocol",
+    "crates/providers",
 ]
 
 [workspace.package]

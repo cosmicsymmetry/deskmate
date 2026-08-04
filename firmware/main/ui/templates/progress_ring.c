@@ -63,6 +63,8 @@ bool progress_ring_create(template_widget_view_t *view,
     view->progress_displayed_seconds = -1;
     view->root = lv_obj_create(parent);
     lv_obj_remove_style_all(view->root);
+    lv_obj_remove_flag(view->root,
+                       LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_size(view->root, LV_PCT(100), LV_PCT(100));
 
     view->objects[OBJ_ARC] = lv_arc_create(view->root);

@@ -25,12 +25,27 @@ of letting code and documentation diverge.
 ## Current state
 
 - M0 is complete and tagged `m0`.
-- M2 (template engine and first widgets) is the active implementation milestone. Its
-  plan is `docs/superpowers/plans/2026-08-04-deskmate-m2-template-first-widgets.md`.
-  M1's full software and physical exit gate passes, including ten observed
+- M2 (template engine and first widgets) is complete. Its physical exit includes clean
+  90°/270° widgets and gestures, protocol/config/data stress, corrected full-power
+  replay, and a flat-heap 30-minute mixed soak. The user waived nine repetitions after
+  one observed corrected power-cycle replay; do not describe ten M2 cycles as observed.
+  No `m2` tag exists because tags require explicit authorization.
+- M3 (Tauri v2 companion app) is active. Its plan is
+  `docs/superpowers/plans/2026-08-04-deskmate-m3-companion-app.md`. One long-lived Rust
+  runtime must own time, config, all widget data, interaction state, and interrupts so
+  power-reset replay cannot reproduce M2's multi-process ownership hole. M3 Task 1 is
+  complete: `app-core` owns strict versioned config and tagged frontend-state DTOs. The
+  Task 2 atomic/last-good config store is complete, including explicit app-data path
+  resolution in the shell. Task 3 is complete: `app-core` owns the bounded background
+  runtime, scheduler, provider isolation, snapshot subscriptions, and the CLI demo now
+  launches that shared runtime. Task 4 is complete: the pinned Tauri v2 shell owns that
+  runtime before showing settings and provides the tested tray, single-instance,
+  autostart, hide-on-close, and deliberate-quit lifecycle. Task 5 (typed IPC and state
+  projection) is next.
+- M1's full software and physical exit gate passes, including ten observed
   unplug/replug cycles, and is tagged `m1`. Because M2 work began in the same shared
-  worktree before the physical carryover closed, that tag also contains the completed
-  M2 foundation present at M1 exit.
+  worktree before the physical carryover closed, that tag also contains the M2
+  foundation present at M1 exit.
 - Target hardware is the Waveshare ESP32-S3-Touch-AMOLED-1.8 **v2**: CO5300 display and
   CST820 touch using the CST816S protocol family. Do not apply v1 SH8601/FT3168 facts.
 - Treat the physical 368x448 panel as a 448x368 landscape UI: 90° is the default

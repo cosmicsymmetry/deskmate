@@ -40,8 +40,10 @@ nine repeated M2 power cycles after one observed corrected cycle. M3 now has the
 typed app/config contract, cross-platform atomic config store, single-owner background
 runtime, and pinned Tauri v2 desktop shell. The shell starts the runtime before settings,
 owns the tray/single-instance/autostart/hide-on-close lifecycle, and has passed a live
-macOS debug-app smoke test. Typed IPC and frontend state projection are next; see the
-active M3 plan.
+macOS debug-app smoke test. Task 5 adds the bounded custom-command surface, stable tagged
+IPC errors, one coalesced backend state event, focus/reopen snapshot recovery, and a
+checked Rust-to-TypeScript serialization contract. The settings experience is next; see
+the active M3 plan.
 
 ## Firmware build
 

@@ -8,8 +8,8 @@ pub mod store;
 pub use commands::{PomodoroAction, RuntimeError};
 pub use config::{
     AppConfig, AppPreferences, CURRENT_SCHEMA_VERSION, CalendarSource, CompiledAppConfig,
-    ConfigValidationError, ScreenSettings, ValidationCode, ValidationIssue, WidgetSettings,
-    WidgetSize,
+    ConfigValidationError, MAX_WIDGET_ID_LEN, ScreenSettings, ValidationCode, ValidationIssue,
+    WidgetSettings, WidgetSize,
 };
 pub use runtime::{
     CalendarRefreshRequest, CalendarRefreshResult, CalendarRefresher, DeviceConnection,

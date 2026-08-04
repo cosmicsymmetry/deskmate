@@ -1,7 +1,7 @@
 # Deskmate M3 - Daily-Use Companion App Implementation Plan
 
-**Status:** Active after M2 exit verification on 2026-08-04. Tasks 1-4 are complete;
-Task 5 (typed IPC and lifecycle projection) is next.
+**Status:** Active after M2 exit verification on 2026-08-04. Tasks 1-5 are complete;
+Task 6 (the settings experience) is next.
 
 **Goal:** Replace the M2 CLI as the normal daily-use host with a Tauri v2 tray app. One
 long-lived Rust runtime owns device discovery/reconnect, the complete replay set,
@@ -228,18 +228,31 @@ leaving no process. Both toggles were restored to autostart off and pushing resu
 - Create: `companion/apps/deskmate/src/lib/types.ts`
 - Create: `companion/apps/deskmate/src/lib/useAppState.ts`
 
-- [ ] Expose narrow commands for snapshot, validate draft, save/apply config,
+- [x] Expose narrow commands for snapshot, validate draft, save/apply config,
   pause/resume, pomodoro control, manual refresh, autostart get/set, and settings-window
   lifecycle. Return serializable tagged errors with stable categories.
-- [ ] Emit one coalesced app-state event stream and recover from missed frontend events
+- [x] Emit one coalesced app-state event stream and recover from missed frontend events
   by fetching a fresh snapshot on focus/reopen.
-- [ ] Keep secrets and raw filesystem/network/serial primitives out of IPC. Bound every
+- [x] Keep secrets and raw filesystem/network/serial primitives out of IPC. Bound every
   string/list at both serde and domain-validation layers.
-- [ ] Generate or compile-check matching TypeScript DTOs so Rust/TS drift fails CI.
-- [ ] Unit-test command authorization-independent logic and frontend subscription cleanup.
+- [x] Generate or compile-check matching TypeScript DTOs so Rust/TS drift fails CI.
+- [x] Unit-test command authorization-independent logic and frontend subscription cleanup.
 
 **Acceptance:** The frontend can be reloaded or closed/reopened without changing runtime
 ownership, leaking listeners, or losing the latest state.
+
+**Implementation evidence (2026-08-05):** The shell now registers a narrow custom-command
+surface for snapshots, bounded/strict draft validation, transactional save/apply,
+pause/resume, pomodoro control, provider refresh, autostart, and settings visibility.
+Errors cross IPC as stable tagged categories, and drafts are capped at 64 KiB before the
+existing per-field/count domain checks. One coalescing runtime subscription now projects
+the same snapshot to the tray and `app-state` event; the React hook subscribes before its
+initial fetch, refreshes on focus/visibility, and safely releases even a listener promise
+that resolves after unmount. A Rust-generated serialization fixture is checked byte-for-byte
+by a backend test and compiled with TypeScript `satisfies`, so contract drift fails either
+side. Nine focused backend tests and two frontend lifecycle tests pass; workspace fmt,
+Clippy, all 77 Rust tests, the frontend production build, and a Tauri debug no-bundle build
+also pass.
 
 ---
 

@@ -1,10 +1,10 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
+pub use protocol::MAX_WIDGET_ID_LEN;
 use protocol::{
     ApplyConfig, Field, FieldValue, InterruptPolicy, MAX_CONFIG_SCREENS, MAX_CONFIG_WIDGETS,
-    MAX_SCREEN_ID_LEN, MAX_WIDGET_ID_LEN, PushData, ScreenConfig, SizeClass, TapAction,
-    TemplateKind, WidgetConfig,
+    MAX_SCREEN_ID_LEN, PushData, ScreenConfig, SizeClass, TapAction, TemplateKind, WidgetConfig,
 };
 use serde::{Deserialize, Serialize};
 

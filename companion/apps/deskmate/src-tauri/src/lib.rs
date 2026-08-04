@@ -1,17 +1,17 @@
 use std::error::Error;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::thread::JoinHandle;
 
-use app_core::{
-    AppSnapshot, ConfigStore, ConnectionState, RuntimeError, RuntimeHandle, RuntimeState,
-};
+use app_core::{AppSnapshot, ConfigStore, ConnectionState, RuntimeHandle, RuntimeState};
 use tauri::image::Image;
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{TrayIcon, TrayIconBuilder};
 use tauri::{App, AppHandle, Manager, RunEvent, WindowEvent, Wry};
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
+
+mod commands;
+mod events;
 
 const CONFIG_FILE_NAME: &str = "config.json";
 const MAIN_WINDOW_LABEL: &str = "main";
@@ -113,56 +113,21 @@ struct DesktopState {
     store: ConfigStore,
     tray: TrayControls,
     snapshot_worker: Mutex<Option<JoinHandle<()>>>,
+    mutation_lock: Mutex<()>,
     quitting: AtomicBool,
 }
 
 impl DesktopState {
     fn toggle_paused(&self) -> Result<(), Box<dyn Error>> {
-        let before = self.runtime.snapshot()?;
-        let was_paused = before.config.preferences.paused;
-        let paused = !was_paused;
-        self.runtime.set_paused(paused)?;
-
-        let mut updated = before.config;
-        updated.preferences.paused = paused;
-        if let Err(error) = self.store.save(&updated) {
-            let _ = self.runtime.set_paused(was_paused);
-            return Err(Box::new(error));
-        }
-        Ok(())
+        let paused = !self.runtime.snapshot()?.config.preferences.paused;
+        commands::set_paused(self, paused).map_err(Into::into)
     }
 
     fn toggle_autostart(&self, app: &AppHandle) -> Result<(), Box<dyn Error>> {
-        let mut updated = self.runtime.snapshot()?.config;
-        let manager = app.autolaunch();
-        let was_enabled = manager.is_enabled()?;
-        let enabled = !was_enabled;
-        if enabled {
-            manager.enable()?;
-        } else {
-            manager.disable()?;
-        }
-
-        updated.preferences.autostart = enabled;
-        if let Err(error) = self.store.save(&updated) {
-            if was_enabled {
-                let _ = manager.enable();
-            } else {
-                let _ = manager.disable();
-            }
-            return Err(Box::new(error));
-        }
-
-        let runtime_result = self.runtime.apply_config(updated);
-        let tray_result = self.tray.autostart.set_checked(enabled);
-        if let Err(error) = runtime_result {
-            // The runtime replaces its in-memory config before attempting device I/O.
-            // Keep the valid saved preference queued for reconnect and report the
-            // transport error without rolling back the user's OS-level choice.
-            return Err(Box::new(error));
-        }
-        tray_result?;
-        Ok(())
+        let enabled = !app.autolaunch().is_enabled()?;
+        commands::set_autostart(app, self, enabled)
+            .map(|_| ())
+            .map_err(Into::into)
     }
 
     fn is_quitting(&self) -> bool {
@@ -288,46 +253,6 @@ fn show_settings(app: &AppHandle) {
     let _ = window.set_focus();
 }
 
-fn spawn_snapshot_worker(
-    app: &AppHandle,
-    runtime: &RuntimeHandle,
-) -> Result<JoinHandle<()>, RuntimeError> {
-    let subscription = runtime.subscribe()?;
-    let app = app.clone();
-    thread::Builder::new()
-        .name("deskmate-tray-state".into())
-        .spawn(move || {
-            loop {
-                match subscription.recv_timeout(Duration::from_secs(1)) {
-                    Ok(Some(snapshot)) => {
-                        let callback_app = app.clone();
-                        let dispatch_app = app.clone();
-                        if callback_app
-                            .run_on_main_thread(move || {
-                                let state = dispatch_app.state::<DesktopState>();
-                                if let Err(error) = state.tray.update(&snapshot) {
-                                    eprintln!("cannot update Deskmate tray state: {error}");
-                                }
-                            })
-                            .is_err()
-                        {
-                            break;
-                        }
-                    }
-                    Ok(None) => {}
-                    Err(RuntimeError::WorkerStopped) => break,
-                    Err(error) => {
-                        eprintln!("Deskmate state subscription failed: {error}");
-                        break;
-                    }
-                }
-            }
-        })
-        .map_err(|error| RuntimeError::Device {
-            message: format!("cannot start tray-state worker: {error}"),
-        })
-}
-
 fn setup_app(app: &mut App) -> Result<(), Box<dyn Error>> {
     let config_path = app.path().app_data_dir()?.join(CONFIG_FILE_NAME);
     let store = ConfigStore::new(config_path);
@@ -355,10 +280,11 @@ fn setup_app(app: &mut App) -> Result<(), Box<dyn Error>> {
         store,
         tray,
         snapshot_worker: Mutex::new(None),
+        mutation_lock: Mutex::new(()),
         quitting: AtomicBool::new(false),
     });
 
-    let worker = spawn_snapshot_worker(app.handle(), &runtime)?;
+    let worker = events::spawn_state_worker(app.handle(), &runtime)?;
     app.state::<DesktopState>()
         .snapshot_worker
         .lock()
@@ -380,6 +306,17 @@ pub fn run() {
             MacosLauncher::LaunchAgent,
             None,
         ))
+        .invoke_handler(tauri::generate_handler![
+            commands::get_app_snapshot,
+            commands::validate_config_draft,
+            commands::save_apply_config,
+            commands::set_pushing_paused,
+            commands::control_pomodoro,
+            commands::refresh_provider,
+            commands::get_autostart_status,
+            commands::set_autostart_enabled,
+            commands::set_settings_window_visible,
+        ])
         .setup(setup_app)
         .build(tauri::generate_context!())
         .expect("failed to build Deskmate desktop app");

@@ -40,8 +40,10 @@ of letting code and documentation diverge.
   runtime, scheduler, provider isolation, snapshot subscriptions, and the CLI demo now
   launches that shared runtime. Task 4 is complete: the pinned Tauri v2 shell owns that
   runtime before showing settings and provides the tested tray, single-instance,
-  autostart, hide-on-close, and deliberate-quit lifecycle. Task 5 (typed IPC and state
-  projection) is next.
+  autostart, hide-on-close, and deliberate-quit lifecycle. Task 5 is complete: bounded
+  typed commands, stable tagged errors, coalesced backend state events, focus/reopen
+  recovery, and a checked Rust/TypeScript serialization contract are in place. Task 6
+  (the settings experience) is next.
 - M1's full software and physical exit gate passes, including ten observed
   unplug/replug cycles, and is tagged `m1`. Because M2 work began in the same shared
   worktree before the physical carryover closed, that tag also contains the M2

@@ -722,13 +722,27 @@ fn pomodoro_events_complete_once_and_dismissed_interrupts_do_not_replay() {
 // private trigger/eligibility/hold helpers directly) that a bounded
 // `AlertHold::Seconds` deadline actually reaches a real device through the
 // full `run_runtime` loop: the interrupt fires once, then — with no touch
-// dismissal from the device — the hold auto-dismisses it on its own and, per
-// the brief's "reuse the existing dismissal path" instruction, that dismissal
-// re-sends `ActivateScreen` so the device resyncs to the saved carousel
-// screen. `full_config`'s carousel is `Manual`, so the only source of a
-// *second* activation here is the hold expiring, not rotation.
+// dismissal from the device — the hold expires on its own, the host dismisses
+// it from its own arbiter, and re-sends `ActivateScreen` for the saved
+// carousel screen. `full_config`'s carousel is `Manual`, so the only source
+// of a *second* activation here is the hold expiring, not rotation.
+//
+// This test is named for exactly that and no more: it does **not** prove the
+// physical panel actually leaves the interrupt overlay. Per
+// `docs/protocol/v1.md`'s `ActivateScreen` section and firmware's
+// `protocol_task.c` (`show_carousel_screen` is skipped whenever
+// `interrupt_state_active` is non-null), the real device keeps showing the
+// interrupt until a tap dismisses it — `ActivateScreen` only changes which
+// screen is *saved* to restore to afterward. `MockDevice` in this file has no
+// interrupt-takeover model at all: it just records that `ActivateScreen` was
+// called. So this test is wiring-only — it exercises the scheduler's
+// `alert_hold_due` → `InterruptArbiter::dismiss` → `active_screen_dirty` →
+// `send_screen` path through a real threaded runtime loop — not a claim about
+// on-device visual behavior. See `arm_alert_hold`'s doc comment in
+// `runtime.rs` for the full protocol-v1 limitation this bounded hold lives
+// under.
 #[test]
-fn a_bounded_alert_hold_auto_dismisses_and_reactivates_the_saved_screen() {
+fn a_bounded_alert_hold_re_sends_the_saved_carousel_screen_activation() {
     let control = MockDeviceControl::default();
     let mut config = full_config();
     for card in &mut config.cards {

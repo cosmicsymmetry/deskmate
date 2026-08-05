@@ -116,7 +116,24 @@ impl IcsCalendar {
         // on the event start (e.g. a "before event" alert trigger) must read this
         // field, not parse the display text. `0` means "no upcoming event";
         // events are sorted ascending, so `events.first()` is always the next
-        // occurrence, not the recurrence series start.
+        // occurrence, not the recurrence series start. Derived from `event.start`
+        // (a `DateTime<Utc>`) via `timestamp_millis()`, so — unlike `row0_time`
+        // above — the value does not depend on `display_timezone` at all.
+        //
+        // KNOWN COUNTER DRIFT: this key is not (yet) in the `RowList` field
+        // registry (`docs/protocol/v1.md`'s template field table only lists
+        // `title`, `row{N}_title`, `row{N}_time`, `stale`, `error` for
+        // `RowList`), so firmware's `widget_model_push_widget_fields`
+        // (`firmware/main/core/widget_model.c`) counts it as an unknown field
+        // on every calendar push, and `unknown_field_count` climbs
+        // (saturating, never wrapping) for the life of the device. This is
+        // harmless — the 14 fields pushed here stay well under
+        // `protocol::MAX_FIELD_COUNT` (16) — but is a deliberate, known
+        // consequence of adding a host-only field without a matching firmware
+        // registry update (out of scope here; wire protocol is unchanged).
+        // Documented so a future reader debugging a climbing
+        // `unknown_field_count` on a calendar widget doesn't chase it as a
+        // fault.
         fields.push(Field {
             key: "next_start_unix_ms".into(),
             value: FieldValue::Integer(
@@ -1300,6 +1317,19 @@ mod tests {
         assert_eq!(
             next_start.value,
             FieldValue::Integer(next_occurrence.timestamp_millis())
+        );
+
+        // Unlike `row0_time`, this field does not depend on `display_timezone`
+        // at all: a wildly different zone must report the exact same integer.
+        let fields_other_zone =
+            calendar.fields("Calendar", chrono_tz::Asia::Tokyo, now, false, None);
+        let next_start_other_zone = fields_other_zone
+            .iter()
+            .find(|field| field.key == "next_start_unix_ms")
+            .expect("next_start_unix_ms field is present");
+        assert_eq!(
+            next_start_other_zone.value, next_start.value,
+            "next_start_unix_ms must be UTC-derived and independent of display_timezone"
         );
 
         // No upcoming events: the field is `0`, never a stale or missing value.

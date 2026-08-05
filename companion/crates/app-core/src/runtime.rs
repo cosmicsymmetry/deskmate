@@ -868,17 +868,17 @@ impl WorkerState {
         self.config = config;
         self.dirty_widgets.clear();
         self.pomodoro_snapshots.clear();
-        let live_widget_ids: BTreeSet<&str> = self
+        // Owned, not borrowed: `prune_alert_state_for_live_widgets` needs
+        // `&mut self`, which cannot coexist with a set still borrowing from
+        // `self.config`.
+        let live_widget_ids: BTreeSet<String> = self
             .config
             .cards
             .iter()
             .filter(|card| !card.presence().is_off())
-            .map(CardSettings::id)
+            .map(|card| card.id().to_owned())
             .collect();
-        self.interrupts
-            .retain_widgets(|widget_id| live_widget_ids.contains(widget_id));
-        self.armed_event_alerts
-            .retain(|card_id, _| live_widget_ids.contains(card_id.as_str()));
+        self.prune_alert_state_for_live_widgets(&live_widget_ids, scheduler, now);
 
         let compiled = self
             .config
@@ -961,6 +961,40 @@ impl WorkerState {
         };
     }
 
+    /// Prunes every piece of alert-related state keyed to a widget that is no
+    /// longer live: the interrupt arbiter's tracked interrupts (existing,
+    /// pre-Task-6 behavior), the calendar dedup map, and the scheduler's
+    /// event-alert-check deadlines (Task 6). Also fixes Task 6 review
+    /// Critical-1's second half: the alert hold is keyed to a specific
+    /// interrupt token (see `sync_alert_hold_to_active_interrupt`'s doc
+    /// comment for why), so it must be resynced whenever pruning changes
+    /// *who* is active — but left untouched otherwise, so an unrelated config
+    /// edit that leaves the active interrupt's widget live does not reset its
+    /// in-flight countdown.
+    fn prune_alert_state_for_live_widgets(
+        &mut self,
+        live_widget_ids: &BTreeSet<String>,
+        scheduler: &mut Scheduler,
+        now: Instant,
+    ) {
+        let active_token_before_prune = self
+            .interrupts
+            .active()
+            .map(|tracked| tracked.message.token);
+        self.interrupts
+            .retain_widgets(|widget_id| live_widget_ids.contains(widget_id));
+        let active_token_after_prune = self
+            .interrupts
+            .active()
+            .map(|tracked| tracked.message.token);
+        if active_token_before_prune != active_token_after_prune {
+            sync_alert_hold_to_active_interrupt(self, scheduler, now);
+        }
+        self.armed_event_alerts
+            .retain(|card_id, _| live_widget_ids.contains(card_id.as_str()));
+        scheduler.retain_event_alert_checks(|card_id| live_widget_ids.contains(card_id));
+    }
+
     /// Dwell is per-card: arm the deadline from whichever card ended up
     /// active (the preserved screen if it is still in rotation, otherwise the
     /// first in-rotation card), not blindly from index 0.
@@ -1009,9 +1043,15 @@ impl WorkerState {
         );
         if update.completion_interrupt
             && card_wants_completion_interrupt(&self.config, id)
-            && self.interrupts.schedule(id, "Timer finished").is_ok()
+            && let Ok(trigger) = self.interrupts.schedule(id, "Timer finished")
         {
-            arm_alert_hold(scheduler, card_alert(&self.config, id).hold(), now);
+            arm_alert_hold_if_active(
+                &self.interrupts,
+                scheduler,
+                trigger.token,
+                card_alert(&self.config, id).hold(),
+                now,
+            );
         }
         self.pomodoros.insert(id.into(), timer);
     }
@@ -1372,14 +1412,38 @@ fn run_scheduled_work(
     // connectivity or pause. Dismissing it just changes local state; the actual
     // device push (if connected) happens through the normal sync path below via
     // `active_screen_dirty` and `flush_interrupts`.
-    if scheduler.alert_hold_due(now)
-        && let Some(token) = state
-            .interrupts
-            .active()
-            .map(|tracked| tracked.message.token)
+    //
+    // KNOWN LIMITATION (protocol v1): this only frees the host's arbiter slot
+    // and re-sends the saved screen id (see `send_screen` below); the device
+    // does not clear the interrupt overlay itself until the user taps it, so
+    // host and device interrupt state can diverge until the next tap or a
+    // full resync (see `arm_alert_hold`'s doc comment for the full picture).
+    if let Some(token) = scheduler.alert_hold_due(now)
+        && state.interrupts.dismiss(token).is_ok()
     {
-        let _ = state.interrupts.dismiss(token);
         state.active_screen_dirty = true;
+        sync_alert_hold_to_active_interrupt(state, scheduler, now);
+    }
+    // Re-evaluates every calendar card's `CardAlert::BeforeEvent` trigger on
+    // its own wake, independent of whether a provider refresh happens to land
+    // inside the lead window (Task 6 review Important-3: with the migration
+    // default 5-minute lead and any refresh interval above that, relying on
+    // `apply_provider_result` alone missed most windows — e.g. a 15-minute
+    // refresh interval landing at 8 minutes out, then again after the event
+    // started, never once lands inside a 5-minute window).
+    for card_id in scheduler.due_event_alert_cards(now) {
+        if let CardAlert::BeforeEvent { lead_minutes, hold } = card_alert(&state.config, &card_id) {
+            let now_unix_ms = Utc::now().timestamp_millis();
+            refresh_calendar_alert(
+                state,
+                scheduler,
+                &card_id,
+                lead_minutes,
+                hold,
+                now,
+                now_unix_ms,
+            );
+        }
     }
     if !state.config.preferences.paused {
         submit_due_providers(
@@ -1570,10 +1634,11 @@ fn drain_provider_results(
 }
 
 /// Applies one completed provider refresh: projects it into the provider's
-/// snapshot/fields, then (calendar cards only) evaluates the card's
-/// `CardAlert::BeforeEvent` trigger against the freshly landed
-/// `next_start_unix_ms` field, since this is the moment that field can have
-/// changed.
+/// snapshot/fields, then (calendar cards only) re-evaluates the card's
+/// `CardAlert::BeforeEvent` trigger — this is one of two places that
+/// happens, the other being the scheduler-driven tick in `run_scheduled_work`
+/// that catches the lead window opening between refreshes (see
+/// `refresh_calendar_alert`).
 fn apply_provider_result(
     state: &mut WorkerState,
     scheduler: &mut Scheduler,
@@ -1617,14 +1682,15 @@ fn apply_provider_result(
 
     if let CardAlert::BeforeEvent { lead_minutes, hold } = card_alert(&state.config, &widget_id) {
         let now_unix_ms = Utc::now().timestamp_millis();
-        if evaluate_event_alert(state, &widget_id, lead_minutes, now_unix_ms)
-            && state
-                .interrupts
-                .schedule(widget_id, "Event starting soon")
-                .is_ok()
-        {
-            arm_alert_hold(scheduler, Some(hold), now);
-        }
+        refresh_calendar_alert(
+            state,
+            scheduler,
+            &widget_id,
+            lead_minutes,
+            hold,
+            now,
+            now_unix_ms,
+        );
     }
 }
 
@@ -1651,12 +1717,17 @@ fn update_pomodoros(state: &mut WorkerState, scheduler: &mut Scheduler, now: Ins
         );
         if update.completion_interrupt
             && card_wants_completion_interrupt(&state.config, &widget_id)
-            && state
+            && let Ok(trigger) = state
                 .interrupts
                 .schedule(widget_id.clone(), "Timer finished")
-                .is_ok()
         {
-            arm_alert_hold(scheduler, card_alert(&state.config, &widget_id).hold(), now);
+            arm_alert_hold_if_active(
+                &state.interrupts,
+                scheduler,
+                trigger.token,
+                card_alert(&state.config, &widget_id).hold(),
+                now,
+            );
         }
     }
 }
@@ -1692,13 +1763,19 @@ fn control_pomodoro(
         },
     );
     if update.completion_interrupt && card_wants_completion_interrupt(&state.config, widget_id) {
-        state
+        let trigger = state
             .interrupts
             .schedule(widget_id, "Timer finished")
             .map_err(|error| RuntimeError::Device {
                 message: error.to_string(),
             })?;
-        arm_alert_hold(scheduler, card_alert(&state.config, widget_id).hold(), now);
+        arm_alert_hold_if_active(
+            &state.interrupts,
+            scheduler,
+            trigger.token,
+            card_alert(&state.config, widget_id).hold(),
+            now,
+        );
     }
     if state.connected && !state.config.preferences.paused {
         push_dirty_widgets(state, device)?;
@@ -1720,8 +1797,14 @@ fn card_alert(config: &AppConfig, widget_id: &str) -> CardAlert {
 /// A pomodoro's completion only becomes a host-triggered interrupt when its
 /// card is configured to alert specifically on timer finish. `CardAlert::None`
 /// never fires, and `CardAlert::BeforeEvent` is a calendar-only trigger (see
-/// `evaluate_event_alert`) that a pomodoro's completion can never satisfy,
-/// even if config validation somehow let it slip through.
+/// `is_event_alert_due`) that a pomodoro's completion can never satisfy, even
+/// if config validation somehow let it slip through. Config validation
+/// forbids that combination (`BeforeEvent` is calendar-only), so this
+/// narrowing from Task 2's original "any configured alert" gate is only
+/// observable on a config built directly rather than through
+/// `AppConfig::compile`/`apply_config` — see
+/// `card_wants_completion_interrupt_rejects_before_event_even_on_a_pomodoro_card`,
+/// which constructs exactly that and fails under the old, wider gate.
 fn card_wants_completion_interrupt(config: &AppConfig, widget_id: &str) -> bool {
     matches!(
         card_alert(config, widget_id),
@@ -1729,16 +1812,82 @@ fn card_wants_completion_interrupt(config: &AppConfig, widget_id: &str) -> bool 
     )
 }
 
-/// Arms (or disarms) the scheduler's bounded alert-hold deadline for the
-/// interrupt just scheduled. `AlertHold::Seconds` arms an absolute deadline;
-/// `AlertHold::UntilDismissed` (or no hold at all) disarms it, since that
-/// interrupt only ever leaves via an explicit device dismissal.
-fn arm_alert_hold(scheduler: &mut Scheduler, hold: Option<AlertHold>, now: Instant) {
+/// Arms the scheduler's bounded alert-hold deadline for `token`, but only if
+/// `token` actually is (or, via promotion, has become) the arbiter's *active*
+/// interrupt — a Pending interrupt does not run a deadline of its own; one is
+/// armed for it only once it is promoted to Active (see
+/// `sync_alert_hold_to_active_interrupt`). This guard, and keying the hold to
+/// a specific token in the first place, is what fixes Task 6 review
+/// Critical-1: a single unkeyed, unconditionally-armed hold let scheduling
+/// *any* interrupt (including one that landed Pending) clobber the deadline
+/// belonging to a *different*, already-Active interrupt — auto-dismissing an
+/// `UntilDismissed` alert early, or silently losing a bounded alert's
+/// deadline entirely.
+///
+/// `AlertHold::Seconds` arms an absolute deadline; `AlertHold::UntilDismissed`
+/// (or no hold at all) disarms it.
+///
+/// KNOWN LIMITATION (protocol v1): expiring this deadline only frees the
+/// host's arbiter slot for the next alert and re-syncs the saved carousel
+/// screen id host-side (see the `alert_hold_due` handling in
+/// `run_scheduled_work`). Per `docs/protocol/v1.md`'s `ActivateScreen`
+/// section and firmware's `protocol_task.c` (`show_carousel_screen` is
+/// skipped whenever an interrupt is active), the *device* keeps the
+/// interrupt overlay on screen regardless — it is cleared only by an
+/// on-device tap. So a bounded hold does not visually clear the panel, and
+/// dismissing host-side while the device still shows the overlay leaves host
+/// and device interrupt state diverged (the device still expects a tap; a
+/// further host-triggered alert can be rejected `Busy` by the device even
+/// though the host arbiter believes its slot is free) until the next tap or a
+/// full resync. There is no wire message to tell the device to clear an
+/// interrupt without a tap; fixing that is a protocol/spec decision, not a
+/// code fix, and is out of scope here.
+fn arm_alert_hold(scheduler: &mut Scheduler, token: u32, hold: Option<AlertHold>, now: Instant) {
     let deadline = match hold {
         Some(AlertHold::Seconds { value }) => Some(now + Duration::from_secs(u64::from(value))),
         Some(AlertHold::UntilDismissed) | None => None,
     };
-    scheduler.set_alert_hold(deadline);
+    scheduler.set_alert_hold(deadline.map(|deadline| (token, deadline)));
+}
+
+/// See `arm_alert_hold`'s doc comment for the Active-only invariant this
+/// enforces.
+fn arm_alert_hold_if_active(
+    interrupts: &InterruptArbiter,
+    scheduler: &mut Scheduler,
+    token: u32,
+    hold: Option<AlertHold>,
+    now: Instant,
+) {
+    if interrupts
+        .active()
+        .is_some_and(|active| active.message.token == token)
+    {
+        arm_alert_hold(scheduler, token, hold, now);
+    }
+}
+
+/// Recomputes the scheduler's alert-hold deadline from scratch against
+/// whichever interrupt is currently Active: re-arms it (fresh, from `now`)
+/// from that interrupt's own card's configured hold if one is active, or
+/// clears it entirely if none is. Callers only invoke this when the active
+/// interrupt has actually just changed — after a dismissal promotes (or
+/// fails to promote) a Pending interrupt, or after config replacement prunes
+/// the previously-active interrupt's widget — never on every call, since
+/// recomputing unconditionally would reset an unrelated, still-active
+/// interrupt's in-flight countdown on every unrelated event.
+fn sync_alert_hold_to_active_interrupt(
+    state: &WorkerState,
+    scheduler: &mut Scheduler,
+    now: Instant,
+) {
+    match state.interrupts.active() {
+        Some(active) => {
+            let hold = card_alert(&state.config, &active.message.widget_id).hold();
+            arm_alert_hold(scheduler, active.message.token, hold, now);
+        }
+        None => scheduler.set_alert_hold(None),
+    }
 }
 
 /// Reads a calendar card's machine-readable next-event start
@@ -1758,34 +1907,89 @@ fn next_event_start_unix_ms(state: &WorkerState, card_id: &str) -> Option<i64> {
     })
 }
 
-/// Evaluates a `CardAlert::BeforeEvent` trigger against a calendar card's
-/// latest known next-event start. Fires (returns `true`) only when that start
-/// is strictly in the future and within `lead_minutes` of `now_unix_ms`, and
-/// only once per distinct event start: `state.armed_event_alerts` remembers
-/// the start this card already fired for, so repeated provider refreshes
-/// inside the same lead window do not re-fire, while a different event start
-/// (a rescheduled or a subsequent event) re-arms it.
-fn evaluate_event_alert(
-    state: &mut WorkerState,
+/// Read-only eligibility check for a `CardAlert::BeforeEvent` trigger:
+/// `Some(start_unix_ms)` when that start is strictly in the future, within
+/// `lead_minutes` of `now_unix_ms`, and is not already the start this card
+/// last fired for; `None` otherwise (outside the window, no known event, or
+/// already armed for this exact start). Does **not** mutate
+/// `armed_event_alerts` itself — see `refresh_calendar_alert`, which only
+/// records a start as armed after `InterruptArbiter::schedule` actually
+/// succeeds. (Task 6 review Important-4: the previous version marked the
+/// start armed unconditionally before checking whether `schedule` succeeded,
+/// so a transient `Busy` — both arbiter slots already occupied — silently and
+/// *permanently* dropped the alert for that event, since the dedup check then
+/// always saw it as already armed.)
+fn is_event_alert_due(
+    state: &WorkerState,
     card_id: &str,
     lead_minutes: u16,
     now_unix_ms: i64,
-) -> bool {
-    let Some(start_unix_ms) = next_event_start_unix_ms(state, card_id) else {
-        return false;
-    };
+) -> Option<i64> {
+    let start_unix_ms = next_event_start_unix_ms(state, card_id)?;
     let lead_ms = i64::from(lead_minutes) * 60_000;
     let within_window = start_unix_ms > now_unix_ms && start_unix_ms - now_unix_ms <= lead_ms;
     if !within_window {
-        return false;
+        return None;
     }
     if state.armed_event_alerts.get(card_id) == Some(&start_unix_ms) {
-        return false;
+        return None;
     }
-    state
-        .armed_event_alerts
-        .insert(card_id.into(), start_unix_ms);
-    true
+    Some(start_unix_ms)
+}
+
+/// The delay in milliseconds (always `> 0`) until this card's lead window is
+/// expected to open, based on its currently cached `next_start_unix_ms`, or
+/// `None` if there's nothing to wait for — no known future event, or the
+/// window is already open/past, both of which the caller already handled
+/// synchronously in the same call via `is_event_alert_due`.
+fn next_event_alert_check_delay_ms(
+    state: &WorkerState,
+    card_id: &str,
+    lead_minutes: u16,
+    now_unix_ms: i64,
+) -> Option<i64> {
+    let start_unix_ms = next_event_start_unix_ms(state, card_id)?;
+    let lead_ms = i64::from(lead_minutes) * 60_000;
+    let boundary_unix_ms = start_unix_ms - lead_ms;
+    let offset_ms = boundary_unix_ms - now_unix_ms;
+    (offset_ms > 0).then_some(offset_ms)
+}
+
+/// Re-evaluates a calendar card's `CardAlert::BeforeEvent` trigger against
+/// its currently cached next-event start, firing it if eligible, then
+/// (re-)schedules the scheduler wake needed to catch the lead window opening
+/// even without a fresh provider refresh landing inside it.
+///
+/// Called from two places: `apply_provider_result`, the instant fresh field
+/// data lands, and a scheduler tick in `run_scheduled_work` driven by the
+/// deadline this function itself sets. The second call site is the fix for
+/// Task 6 review Important-3: relying on provider-result landings alone (as
+/// originally specified) meant the trigger could miss its entire lead window
+/// whenever no refresh happened to land inside it — e.g. a 15-minute refresh
+/// interval against a 5-minute lead window, refreshing 8 minutes before the
+/// event and again after it started, never once observes the window.
+fn refresh_calendar_alert(
+    state: &mut WorkerState,
+    scheduler: &mut Scheduler,
+    card_id: &str,
+    lead_minutes: u16,
+    hold: AlertHold,
+    now: Instant,
+    now_unix_ms: i64,
+) {
+    if let Some(start_unix_ms) = is_event_alert_due(state, card_id, lead_minutes, now_unix_ms)
+        && let Ok(trigger) = state.interrupts.schedule(card_id, "Event starting soon")
+    {
+        // Only mark this event start armed once the interrupt actually landed
+        // in the arbiter — see `is_event_alert_due`'s doc comment.
+        state
+            .armed_event_alerts
+            .insert(card_id.to_owned(), start_unix_ms);
+        arm_alert_hold_if_active(&state.interrupts, scheduler, trigger.token, Some(hold), now);
+    }
+    let deadline = next_event_alert_check_delay_ms(state, card_id, lead_minutes, now_unix_ms)
+        .map(|offset_ms| now + Duration::from_millis(u64::try_from(offset_ms).unwrap_or(0)));
+    scheduler.set_event_alert_deadline(card_id, deadline);
 }
 
 fn drain_device_events(
@@ -1839,8 +2043,15 @@ fn drain_device_events(
                 );
             }
             (EventKind::InterruptDismissed, EventAction::DismissInterrupt) => {
-                if let Some(token) = received.event.interrupt_token {
-                    let _ = state.interrupts.dismiss(token);
+                if let Some(token) = received.event.interrupt_token
+                    && state.interrupts.dismiss(token).is_ok()
+                {
+                    // A dismissal may promote a Pending interrupt to Active; the
+                    // hold belongs to a specific token (see `arm_alert_hold`'s
+                    // doc comment), so it must be re-armed from whichever
+                    // interrupt is active now, not left pointing at the token
+                    // that just left.
+                    sync_alert_hold_to_active_interrupt(state, scheduler, now);
                 }
             }
             _ => {}
@@ -2385,6 +2596,20 @@ mod tests {
         }
     }
 
+    fn interrupt_dismissed_event(widget_id: &str, token: u32) -> ReceivedEvent {
+        ReceivedEvent {
+            event: protocol::DeviceEvent {
+                sequence: 1,
+                kind: EventKind::InterruptDismissed,
+                widget_id: widget_id.into(),
+                screen_id: widget_id.into(),
+                action: EventAction::DismissInterrupt,
+                interrupt_token: Some(token),
+            },
+            missed_before: 0,
+        }
+    }
+
     // F1: under `CarouselAdvance::Manual`, no rotation deadline is ever armed. This
     // isolates the exact regression the reviewer flagged: if `current_dwell` stopped
     // propagating `CarouselAdvance::default_dwell_seconds()`'s `None` (e.g. a `?` was
@@ -2638,11 +2863,13 @@ mod tests {
     // -- Alert triggers and hold (Task 6) ------------------------------------
     //
     // Instant unit tests for the trigger-kind narrowing, the bounded hold
-    // deadline, and the calendar `BeforeEvent` trigger's once-per-event-start
-    // dedup. Each calls the private helpers/functions directly with synthetic
-    // `Instant`s, so none of them sleep. The one wall-clock proof that the hold
-    // deadline reaches a real device via the full `run_runtime` loop lives in
-    // `tests/runtime.rs`.
+    // deadline (including the token-keyed active/pending scoping fixed by the
+    // Task 6 code review's Critical-1), and the calendar `BeforeEvent`
+    // trigger's once-per-event-start dedup and tick-driven re-evaluation
+    // (Important-3/4). Each calls the private helpers/functions directly with
+    // synthetic `Instant`s, so none of them sleep. The one wall-clock proof
+    // that the hold deadline reaches a real device via the full `run_runtime`
+    // loop lives in `tests/runtime.rs`.
 
     fn fresh_scheduler(now: Instant) -> Scheduler {
         Scheduler::new(
@@ -2659,6 +2886,12 @@ mod tests {
     // already pinned by `pomodoro_completion_without_an_alert_does_not_schedule_an_interrupt`
     // in `tests/runtime.rs`): with two pomodoros completing at the same instant,
     // only the `OnTimerFinish` card's completion reaches the interrupt arbiter.
+    //
+    // NOTE (Task 6 review Critical-2): this test alone does *not* distinguish
+    // the narrowing from the old, wider Task 2 gate (`!alert.is_none()`) —
+    // `alert: none` vs. `OnTimerFinish` is handled identically by both. See
+    // `card_wants_completion_interrupt_rejects_before_event_even_on_a_pomodoro_card`
+    // below for the input that actually pins the narrowing.
     #[test]
     fn only_on_timer_finish_alerts_fire_when_a_pomodoro_completes() {
         let now = Instant::now();
@@ -2699,6 +2932,40 @@ mod tests {
             "only the OnTimerFinish card's completion schedules an interrupt"
         );
         assert!(state.interrupts.pending().is_none());
+    }
+
+    // Task 6 review Critical-2: config validation forbids `BeforeEvent` on a
+    // pomodoro card, so this exact config could never arrive through
+    // `AppConfig::compile`/`apply_config` — it is constructed directly here,
+    // bypassing validation, as defence-in-depth. It is the *only* input that
+    // actually distinguishes `card_wants_completion_interrupt`'s Task 6 gate
+    // (`matches!(_, CardAlert::OnTimerFinish { .. })`) from Task 2's original,
+    // wider gate (`!alert.is_none()`), which treated `BeforeEvent` as "wants a
+    // completion interrupt" exactly like `OnTimerFinish`. Verified by hand
+    // that reverting the gate to `!card_alert(config, widget_id).is_none()`
+    // makes this assertion fail (all other app-core tests still pass under
+    // that reversion, which is precisely why this dedicated test exists).
+    #[test]
+    fn card_wants_completion_interrupt_rejects_before_event_even_on_a_pomodoro_card() {
+        let config = AppConfig {
+            cards: vec![CardSettings::Pomodoro {
+                id: "p".into(),
+                label: "p".into(),
+                duration_seconds: 60,
+                template: DisplayTemplate::ProgressRing,
+                tap_action: WidgetTapAction::None,
+                refresh: RefreshPolicy::DeviceLocal,
+                presence: CardPresence::InRotation {
+                    dwell_seconds: None,
+                },
+                alert: CardAlert::BeforeEvent {
+                    lead_minutes: 5,
+                    hold: AlertHold::UntilDismissed,
+                },
+            }],
+            ..AppConfig::default()
+        };
+        assert!(!card_wants_completion_interrupt(&config, "p"));
     }
 
     // `AlertHold::Seconds` arms an absolute deadline on the scheduler when the
@@ -2825,13 +3092,206 @@ mod tests {
         );
     }
 
-    // `evaluate_event_alert`'s pure eligibility/dedup logic: outside the lead
-    // window nothing fires; inside it, it fires exactly once per distinct event
-    // start (repeated refreshes reporting the same start do not re-fire); a
-    // different start re-arms it; a past start or the provider's `0` "no event"
-    // sentinel never fire.
+    // Shared setup for the two Critical-1 tests below: a sticky
+    // (`UntilDismissed`) pomodoro alert Active, and a bounded (60s) calendar
+    // alert queued Pending behind it (the arbiter's Active slot is occupied).
+    fn sticky_active_and_bounded_pending_alert(now: Instant) -> (WorkerState, Scheduler) {
+        let config = AppConfig {
+            cards: vec![
+                rotation_pomodoro_card(
+                    "sticky",
+                    CardPresence::InRotation {
+                        dwell_seconds: None,
+                    },
+                    CardAlert::OnTimerFinish {
+                        hold: AlertHold::UntilDismissed,
+                    },
+                ),
+                alert_calendar_card(
+                    "upnext",
+                    CardAlert::BeforeEvent {
+                        lead_minutes: 5,
+                        hold: AlertHold::Seconds { value: 60 },
+                    },
+                ),
+            ],
+            ..AppConfig::default()
+        };
+        let mut scheduler = fresh_scheduler(now);
+        let mut state = WorkerState::new(config, now, &mut scheduler);
+
+        // The sticky pomodoro completes first and becomes Active with no
+        // deadline (UntilDismissed).
+        state.pomodoros.get_mut("sticky").unwrap().start(now);
+        let after_completion = now + Duration::from_mins(1);
+        update_pomodoros(&mut state, &mut scheduler, after_completion);
+        assert_eq!(
+            state
+                .interrupts
+                .active()
+                .map(|tracked| tracked.message.widget_id.as_str()),
+            Some("sticky")
+        );
+
+        // The calendar alert fires next; the Active slot is occupied, so it
+        // queues Pending.
+        let now_unix_ms = Utc::now().timestamp_millis();
+        state.latest_fields.insert(
+            "upnext".into(),
+            vec![Field {
+                key: "next_start_unix_ms".into(),
+                value: FieldValue::Integer(now_unix_ms + 4 * 60_000),
+            }],
+        );
+        refresh_calendar_alert(
+            &mut state,
+            &mut scheduler,
+            "upnext",
+            5,
+            AlertHold::Seconds { value: 60 },
+            after_completion,
+            now_unix_ms,
+        );
+        assert_eq!(
+            state
+                .interrupts
+                .pending()
+                .map(|tracked| tracked.message.widget_id.as_str()),
+            Some("upnext"),
+            "the Active slot is occupied, so the calendar alert queues Pending"
+        );
+
+        (state, scheduler)
+    }
+
+    fn stub_work_harness() -> (
+        StubDevice,
+        RuntimeDiagnosticCounters,
+        ProviderWorker,
+        RuntimeOptions,
+    ) {
+        (
+            StubDevice::default(),
+            RuntimeDiagnosticCounters::default(),
+            ProviderWorker::new(
+                Box::new(ImmediateRefresher {
+                    completed: mpsc::channel().0,
+                }),
+                1,
+            ),
+            RuntimeOptions::default(),
+        )
+    }
+
+    // Task 6 review Critical-1's reproduction: before the fix, a single
+    // unkeyed scheduler deadline was armed unconditionally by whichever
+    // interrupt was scheduled *last* — here, the Pending calendar alert's
+    // 60s — so `run_scheduled_work` auto-dismissed the sticky pomodoro's
+    // *Active* interrupt 60s later, in direct violation of "UntilDismissed
+    // never auto-dismisses". This proves the fix: an hour later, both the
+    // sticky Active interrupt and the calendar's Pending one are unharmed —
+    // the hold only ever runs against whichever interrupt is actually
+    // Active.
     #[test]
-    fn evaluate_event_alert_fires_once_per_distinct_event_start_inside_the_lead_window() {
+    fn a_pending_alerts_hold_does_not_cross_talk_with_the_active_interrupt() {
+        let now = Instant::now();
+        let (mut state, mut scheduler) = sticky_active_and_bounded_pending_alert(now);
+        let (mut device, diagnostics, provider, options) = stub_work_harness();
+
+        run_scheduled_work(
+            &mut state,
+            &mut scheduler,
+            &mut device,
+            &provider,
+            &diagnostics,
+            now + Duration::from_hours(1),
+            &options,
+        );
+        assert_eq!(
+            state
+                .interrupts
+                .active()
+                .map(|tracked| tracked.message.widget_id.as_str()),
+            Some("sticky"),
+            "UntilDismissed must not be auto-dismissed by an unrelated Pending interrupt's hold"
+        );
+        assert_eq!(
+            state
+                .interrupts
+                .pending()
+                .map(|tracked| tracked.message.widget_id.as_str()),
+            Some("upnext"),
+            "the calendar interrupt is still queued, unharmed"
+        );
+    }
+
+    // The other half of Critical-1's fix: once the sticky interrupt is
+    // dismissed (an on-device tap) and the calendar alert is promoted to
+    // Active, its own 60s hold must start fresh from that moment — before
+    // the fix, the Pending alert never got a deadline of its own at all, so
+    // this promoted interrupt would have run `UntilDismissed`-like forever.
+    #[test]
+    fn a_promoted_alert_gets_a_fresh_hold_from_its_own_card() {
+        let now = Instant::now();
+        let (mut state, mut scheduler) = sticky_active_and_bounded_pending_alert(now);
+        let (mut device, diagnostics, provider, options) = stub_work_harness();
+
+        let sticky_token = state.interrupts.active().unwrap().message.token;
+        let promotion_time = now + Duration::from_hours(1);
+        drain_device_events(
+            &mut state,
+            &mut scheduler,
+            &mut StubDevice {
+                queued_event: Some(interrupt_dismissed_event("sticky", sticky_token)),
+            },
+            promotion_time,
+        );
+        assert_eq!(
+            state
+                .interrupts
+                .active()
+                .map(|tracked| tracked.message.widget_id.as_str()),
+            Some("upnext"),
+            "dismissing the sticky interrupt promotes the queued calendar alert"
+        );
+
+        run_scheduled_work(
+            &mut state,
+            &mut scheduler,
+            &mut device,
+            &provider,
+            &diagnostics,
+            promotion_time + Duration::from_secs(59),
+            &options,
+        );
+        assert!(
+            state.interrupts.active().is_some(),
+            "the promoted alert's fresh 60s hold has not expired yet"
+        );
+
+        run_scheduled_work(
+            &mut state,
+            &mut scheduler,
+            &mut device,
+            &provider,
+            &diagnostics,
+            promotion_time + Duration::from_mins(1),
+            &options,
+        );
+        assert!(
+            state.interrupts.active().is_none(),
+            "the promoted alert's own 60s hold now auto-dismisses it"
+        );
+    }
+
+    // `is_event_alert_due`'s pure eligibility/dedup logic: outside the lead
+    // window nothing is eligible; inside it, eligible exactly once per
+    // distinct event start (simulating `refresh_calendar_alert`'s caller-side
+    // arming after a successful schedule — repeated checks against the same
+    // start are not eligible again); a different start re-arms eligibility; a
+    // past start or the provider's `0` "no event" sentinel are never eligible.
+    #[test]
+    fn is_event_alert_due_fires_once_per_distinct_event_start_inside_the_lead_window() {
         let now = Instant::now();
         let config = AppConfig {
             cards: vec![alert_calendar_card(
@@ -2859,35 +3319,45 @@ mod tests {
 
         // Event starts in 6 minutes: outside the 5-minute lead window.
         set_next_start(&mut state, 6 * 60_000);
-        assert!(!evaluate_event_alert(&mut state, "upnext", 5, now_unix_ms));
+        assert_eq!(is_event_alert_due(&state, "upnext", 5, now_unix_ms), None);
 
-        // Event starts in 4 minutes: inside the window, fires exactly once even
-        // across repeated provider refreshes that still report the same start.
+        // Event starts in 4 minutes: inside the window, eligible.
         set_next_start(&mut state, 4 * 60_000);
-        assert!(evaluate_event_alert(&mut state, "upnext", 5, now_unix_ms));
-        assert!(
-            !evaluate_event_alert(&mut state, "upnext", 5, now_unix_ms),
+        let due = is_event_alert_due(&state, "upnext", 5, now_unix_ms);
+        assert_eq!(due, Some(now_unix_ms + 4 * 60_000));
+        // Simulate the caller (`refresh_calendar_alert`) marking it armed only
+        // after `InterruptArbiter::schedule` succeeds (Important-4).
+        state
+            .armed_event_alerts
+            .insert("upnext".into(), due.unwrap());
+        assert_eq!(
+            is_event_alert_due(&state, "upnext", 5, now_unix_ms),
+            None,
             "already armed for this event start"
         );
 
-        // A different event start (same card) re-arms the trigger.
+        // A different event start (same card) re-arms eligibility.
         set_next_start(&mut state, 4 * 60_000 + 2);
-        assert!(evaluate_event_alert(&mut state, "upnext", 5, now_unix_ms));
+        assert!(is_event_alert_due(&state, "upnext", 5, now_unix_ms).is_some());
 
         // A start already in the past never fires.
         set_next_start(&mut state, -1);
-        assert!(!evaluate_event_alert(&mut state, "upnext", 5, now_unix_ms));
+        assert_eq!(is_event_alert_due(&state, "upnext", 5, now_unix_ms), None);
 
         // `0` is the provider's "no upcoming event" sentinel and never fires.
         set_next_start(&mut state, -now_unix_ms);
-        assert!(!evaluate_event_alert(&mut state, "upnext", 5, now_unix_ms));
+        assert_eq!(is_event_alert_due(&state, "upnext", 5, now_unix_ms), None);
     }
 
-    // Config replacement must not let a removed card's armed-alert entry leak
-    // forever: `replace_config` prunes `armed_event_alerts` exactly like it
-    // already prunes `interrupts` for widgets no longer live.
+    // Task 6 review Important-4: before the fix, the event start was marked
+    // armed *before* checking whether `InterruptArbiter::schedule` actually
+    // succeeded, so a transient `Busy` (both arbiter slots already occupied)
+    // silently and *permanently* dropped the alert for that event — the dedup
+    // check would see it as already armed forever after, even once a slot
+    // freed up. This proves the fix: once a slot frees, a later re-evaluation
+    // for the *same* event start still fires.
     #[test]
-    fn armed_event_alerts_are_pruned_when_their_card_leaves_the_config() {
+    fn a_calendar_alert_dropped_by_a_busy_arbiter_is_not_permanently_armed() {
         let now = Instant::now();
         let config = AppConfig {
             cards: vec![alert_calendar_card(
@@ -2901,13 +3371,229 @@ mod tests {
         };
         let mut scheduler = fresh_scheduler(now);
         let mut state = WorkerState::new(config, now, &mut scheduler);
-        state.armed_event_alerts.insert("upnext".into(), 12_345);
-        assert!(!state.armed_event_alerts.is_empty());
+        // Occupy both arbiter slots with unrelated interrupts so the calendar
+        // alert's own `schedule` call returns `Busy`.
+        state.interrupts.schedule("occupant-a", "x").unwrap();
+        state.interrupts.schedule("occupant-b", "y").unwrap();
 
-        state.replace_config(AppConfig::default(), now, &mut scheduler);
+        let now_unix_ms = Utc::now().timestamp_millis();
+        state.latest_fields.insert(
+            "upnext".into(),
+            vec![Field {
+                key: "next_start_unix_ms".into(),
+                value: FieldValue::Integer(now_unix_ms + 4 * 60_000),
+            }],
+        );
 
+        refresh_calendar_alert(
+            &mut state,
+            &mut scheduler,
+            "upnext",
+            5,
+            AlertHold::Seconds { value: 60 },
+            now,
+            now_unix_ms,
+        );
         assert!(
-            state.armed_event_alerts.is_empty(),
+            !state.armed_event_alerts.contains_key("upnext"),
+            "a Busy arbiter must not mark the event start armed"
+        );
+
+        // Both slots free up (simulating two on-device tap dismissals).
+        let first_active = state.interrupts.active().unwrap().message.token;
+        assert!(state.interrupts.dismiss(first_active).is_ok());
+        let second_active = state.interrupts.active().unwrap().message.token;
+        assert!(state.interrupts.dismiss(second_active).is_ok());
+        assert!(state.interrupts.active().is_none());
+
+        // The same event start, re-evaluated, now fires.
+        refresh_calendar_alert(
+            &mut state,
+            &mut scheduler,
+            "upnext",
+            5,
+            AlertHold::Seconds { value: 60 },
+            now,
+            now_unix_ms,
+        );
+        assert_eq!(
+            state
+                .interrupts
+                .active()
+                .map(|tracked| tracked.message.widget_id.as_str()),
+            Some("upnext"),
+            "once a slot freed, the same event start must still be able to fire"
+        );
+    }
+
+    // Task 6 review Important-3, pure-logic half: relying solely on
+    // provider-result landings to observe the lead window misses it entirely
+    // whenever no refresh happens to land inside it (the brief's original
+    // design) — a 15-minute refresh interval against a 5-minute lead window
+    // can refresh once *before* the window opens and again *after* the event
+    // starts, never once landing inside it. This pins the root cause
+    // directly: `is_event_alert_due`'s eligibility for the *same* cached
+    // event start depends only on `now_unix_ms` (standing in for the wall
+    // clock) advancing, not on `latest_fields` changing — ineligible 8
+    // minutes out, eligible 3 minutes out, with no field write in between.
+    // `now_unix_ms` is a synthetic epoch anchor (not real wall time), like
+    // `is_event_alert_due_fires_once_per_distinct_event_start_inside_the_lead_window`
+    // above, so this needs no simulated elapsed time and cannot be flaky.
+    #[test]
+    fn calendar_alert_eligibility_advances_purely_with_the_clock_not_a_fresh_refresh() {
+        let now = Instant::now();
+        let config = AppConfig {
+            cards: vec![alert_calendar_card(
+                "upnext",
+                CardAlert::BeforeEvent {
+                    lead_minutes: 5,
+                    hold: AlertHold::Seconds { value: 60 },
+                },
+            )],
+            ..AppConfig::default()
+        };
+        let mut scheduler = fresh_scheduler(now);
+        let mut state = WorkerState::new(config, now, &mut scheduler);
+        let base_unix_ms: i64 = 1_700_000_000_000;
+        let event_start_unix_ms = base_unix_ms + 8 * 60_000;
+        state.latest_fields.insert(
+            "upnext".into(),
+            vec![Field {
+                key: "next_start_unix_ms".into(),
+                value: FieldValue::Integer(event_start_unix_ms),
+            }],
+        );
+
+        // 8 minutes out: outside the 5-minute window.
+        assert_eq!(is_event_alert_due(&state, "upnext", 5, base_unix_ms), None);
+
+        // The clock alone advances 3 minutes — no new field data lands. Now 5
+        // minutes out: inside the window.
+        let three_minutes_later_unix_ms = base_unix_ms + 3 * 60_000;
+        assert_eq!(
+            is_event_alert_due(&state, "upnext", 5, three_minutes_later_unix_ms),
+            Some(event_start_unix_ms)
+        );
+    }
+
+    // Task 6 review Important-3, wiring half: `run_scheduled_work` must
+    // itself dispatch `scheduler.due_event_alert_cards` results through
+    // `card_alert` and `refresh_calendar_alert` — not rely on
+    // `apply_provider_result` alone, which only runs when a refresh lands.
+    // Arms the event-alert deadline directly, as if a prior refresh had
+    // already left it behind (rather than going through
+    // `refresh_calendar_alert` again here, which would just re-prove the pure
+    // half above); no interrupt exists yet. The event start is a real
+    // near-future wall-clock time inside the lead window, so whether it fires
+    // is decided instantly and deterministically, without needing to
+    // simulate elapsed wall-clock time — unlike `Instant`, this codebase has
+    // no injectable clock for `Utc::now()` (see e.g. `send_time_sync`, which
+    // calls it directly with no test seam either).
+    #[test]
+    fn run_scheduled_works_tick_handler_reevaluates_calendar_alerts_via_the_scheduler_deadline() {
+        let now = Instant::now();
+        let config = AppConfig {
+            cards: vec![alert_calendar_card(
+                "upnext",
+                CardAlert::BeforeEvent {
+                    lead_minutes: 5,
+                    hold: AlertHold::Seconds { value: 60 },
+                },
+            )],
+            ..AppConfig::default()
+        };
+        let mut scheduler = fresh_scheduler(now);
+        let mut state = WorkerState::new(config, now, &mut scheduler);
+        assert!(scheduler.pomodoro_due(now));
+        assert!(scheduler.status_due(now));
+        assert!(scheduler.time_sync_due(now));
+        assert_eq!(scheduler.due_providers(now), ["upnext"]);
+        scheduler.provider_started("upnext", now);
+
+        state.latest_fields.insert(
+            "upnext".into(),
+            vec![Field {
+                key: "next_start_unix_ms".into(),
+                value: FieldValue::Integer(Utc::now().timestamp_millis() + 4 * 60_000),
+            }],
+        );
+        // A deadline is armed with no interrupt scheduled yet — exactly the
+        // state left behind by a refresh that landed outside the window.
+        scheduler.set_event_alert_deadline("upnext", Some(now));
+        assert!(state.interrupts.active().is_none());
+
+        let mut device = StubDevice::default();
+        let diagnostics = RuntimeDiagnosticCounters::default();
+        let provider = ProviderWorker::new(
+            Box::new(ImmediateRefresher {
+                completed: mpsc::channel().0,
+            }),
+            1,
+        );
+        let options = RuntimeOptions::default();
+        run_scheduled_work(
+            &mut state,
+            &mut scheduler,
+            &mut device,
+            &provider,
+            &diagnostics,
+            now,
+            &options,
+        );
+
+        assert_eq!(
+            state
+                .interrupts
+                .active()
+                .map(|tracked| tracked.message.widget_id.as_str()),
+            Some("upnext"),
+            "the tick handler alone re-evaluated and fired the alert, with no provider refresh involved"
+        );
+    }
+
+    // Task 6 review Minor-5: this test must be sensitive to the *shape* of the
+    // prune, not just to "something got pruned". A surviving card's armed
+    // entry is asserted to remain untouched, so replacing the targeted
+    // `.retain(...)` with a blanket `.clear()` — which would also pass a
+    // prune test that only checks the removed card — fails this one.
+    #[test]
+    fn armed_event_alerts_are_pruned_only_for_cards_that_leave_the_config() {
+        let now = Instant::now();
+        let config = AppConfig {
+            cards: vec![
+                alert_calendar_card(
+                    "upnext",
+                    CardAlert::BeforeEvent {
+                        lead_minutes: 5,
+                        hold: AlertHold::Seconds { value: 60 },
+                    },
+                ),
+                alert_calendar_card(
+                    "keep",
+                    CardAlert::BeforeEvent {
+                        lead_minutes: 5,
+                        hold: AlertHold::Seconds { value: 60 },
+                    },
+                ),
+            ],
+            ..AppConfig::default()
+        };
+        let mut scheduler = fresh_scheduler(now);
+        let mut state = WorkerState::new(config.clone(), now, &mut scheduler);
+        state.armed_event_alerts.insert("upnext".into(), 111);
+        state.armed_event_alerts.insert("keep".into(), 222);
+
+        let mut replaced = config;
+        replaced.cards.retain(|card| card.id() != "upnext");
+        state.replace_config(replaced, now, &mut scheduler);
+
+        assert_eq!(
+            state.armed_event_alerts.get("keep"),
+            Some(&222),
+            "a surviving card's armed entry must not be dropped by an unrelated prune"
+        );
+        assert!(
+            !state.armed_event_alerts.contains_key("upnext"),
             "armed alerts for cards no longer in the config must not leak"
         );
     }
@@ -2958,9 +3644,14 @@ mod tests {
             Some("upnext"),
             "the landing result's near event start schedules the alert"
         );
-        assert!(!scheduler.alert_hold_due(now + Duration::from_secs(59)));
+        assert_eq!(
+            scheduler.alert_hold_due(now + Duration::from_secs(59)),
+            None
+        );
         assert!(
-            scheduler.alert_hold_due(now + Duration::from_mins(1)),
+            scheduler
+                .alert_hold_due(now + Duration::from_mins(1))
+                .is_some(),
             "hold armed from the card's own AlertHold::Seconds(60)"
         );
     }

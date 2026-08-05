@@ -10,6 +10,7 @@ pub(crate) struct Scheduler {
     next_time_sync: Instant,
     providers: BTreeMap<String, ProviderDeadline>,
     rotation: Option<RotationDeadline>,
+    alert_hold: Option<Instant>,
 }
 
 struct ProviderDeadline {
@@ -38,6 +39,7 @@ impl Scheduler {
             next_time_sync: now,
             providers: BTreeMap::new(),
             rotation: None,
+            alert_hold: None,
         }
     }
 
@@ -125,12 +127,32 @@ impl Scheduler {
         true
     }
 
+    /// Bounded auto-dismiss deadline for the currently active interrupt's alert
+    /// hold, armed by the caller when an interrupt with `AlertHold::Seconds` is
+    /// scheduled. `AlertHold::UntilDismissed` is represented as `None`, i.e. no
+    /// deadline, mirroring `set_rotation`'s `None`-disarms convention.
+    pub(crate) fn set_alert_hold(&mut self, deadline: Option<Instant>) {
+        self.alert_hold = deadline;
+    }
+
+    pub(crate) fn alert_hold_due(&mut self, now: Instant) -> bool {
+        let Some(deadline) = self.alert_hold else {
+            return false;
+        };
+        if now < deadline {
+            return false;
+        }
+        self.alert_hold = None;
+        true
+    }
+
     pub(crate) fn wait_duration(&self, now: Instant, maximum: Duration) -> Duration {
         let next = self
             .providers
             .values()
             .filter_map(|deadline| deadline.next)
             .chain(self.rotation.iter().map(|rotation| rotation.next))
+            .chain(self.alert_hold)
             .chain([self.next_pomodoro, self.next_status, self.next_time_sync])
             .min()
             .unwrap_or(now + maximum);
@@ -231,5 +253,49 @@ mod tests {
 
         scheduler.clear_rotation();
         assert!(!scheduler.rotation_due(now + Duration::from_hours(1)));
+    }
+
+    #[test]
+    fn alert_hold_fires_once_at_its_deadline_and_bounds_the_wait() {
+        let now = Instant::now();
+        let mut scheduler = Scheduler::new(
+            now,
+            Duration::from_hours(1),
+            Duration::from_hours(1),
+            Duration::from_hours(1),
+        );
+        // `Scheduler::new` marks the periodic deadlines due immediately (so they fire
+        // once on cold boot). Consume that initial firing so the `wait_duration`
+        // assertions below isolate the alert hold's contribution.
+        assert!(scheduler.pomodoro_due(now));
+        assert!(scheduler.status_due(now));
+        assert!(scheduler.time_sync_due(now));
+
+        // No hold armed: never due, no effect on the wait.
+        assert!(!scheduler.alert_hold_due(now + Duration::from_hours(1)));
+
+        // A bounded hold fires exactly once at its deadline, then disarms itself
+        // (unlike rotation, it does not rearm — the next interrupt arms a fresh one).
+        scheduler.set_alert_hold(Some(now + Duration::from_secs(30)));
+        assert!(!scheduler.alert_hold_due(now + Duration::from_secs(29)));
+        assert!(scheduler.alert_hold_due(now + Duration::from_secs(30)));
+        assert!(!scheduler.alert_hold_due(now + Duration::from_secs(30)));
+        assert!(!scheduler.alert_hold_due(now + Duration::from_mins(1)));
+
+        // The loop cannot sleep past a pending hold deadline.
+        scheduler.set_alert_hold(Some(now + Duration::from_secs(5)));
+        assert_eq!(
+            scheduler.wait_duration(now, Duration::from_hours(1)),
+            Duration::from_secs(5)
+        );
+
+        // `AlertHold::UntilDismissed` is represented as `None`: never due, and it
+        // does not bound the wait.
+        scheduler.set_alert_hold(None);
+        assert!(!scheduler.alert_hold_due(now + Duration::from_hours(1)));
+        assert_eq!(
+            scheduler.wait_duration(now, Duration::from_millis(5)),
+            Duration::from_millis(5)
+        );
     }
 }

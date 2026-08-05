@@ -109,8 +109,22 @@ impl IcsCalendar {
         stale: bool,
         error: Option<&str>,
     ) -> Vec<Field> {
-        let mut fields = Vec::with_capacity(13);
+        let mut fields = Vec::with_capacity(14);
         fields.push(text_field("title", truncate_utf8(title, 64)));
+        // Machine-readable next-event start, in contrast to the localised,
+        // date-dropping `row0_time` display text below. Callers that need to act
+        // on the event start (e.g. a "before event" alert trigger) must read this
+        // field, not parse the display text. `0` means "no upcoming event";
+        // events are sorted ascending, so `events.first()` is always the next
+        // occurrence, not the recurrence series start.
+        fields.push(Field {
+            key: "next_start_unix_ms".into(),
+            value: FieldValue::Integer(
+                self.events
+                    .first()
+                    .map_or(0, |event| event.start.timestamp_millis()),
+            ),
+        });
         let local_today = now.with_timezone(&display_timezone).date_naive();
         for row in 0..MAX_CALENDAR_ROWS {
             let (row_title, row_time) = self.events.get(row).map_or_else(
@@ -1266,6 +1280,39 @@ mod tests {
     }
 
     #[test]
+    fn next_start_unix_ms_is_the_next_occurrence_not_the_recurring_series_start() {
+        let now = utc(2026, 8, 2, 0, 0);
+        let calendar = parse_ics(RECURRENCE_SUPPORTED, now, &options()).unwrap();
+        // The "daily" series starts 2026-08-01 09:00 EDT (13:00 UTC), which is already
+        // in the past relative to `now`. The next actual occurrence is the following
+        // day, 2026-08-02 09:00 EDT (13:00 UTC): a different instant than the series
+        // start, so this pins that the field reports the occurrence, not DTSTART.
+        let series_start = utc(2026, 8, 1, 13, 0);
+        let next_occurrence = utc(2026, 8, 2, 13, 0);
+        assert_eq!(calendar.events[0].start, next_occurrence);
+        assert_ne!(calendar.events[0].start, series_start);
+
+        let fields = calendar.fields("Calendar", options().display_timezone, now, false, None);
+        let next_start = fields
+            .iter()
+            .find(|field| field.key == "next_start_unix_ms")
+            .expect("next_start_unix_ms field is present");
+        assert_eq!(
+            next_start.value,
+            FieldValue::Integer(next_occurrence.timestamp_millis())
+        );
+
+        // No upcoming events: the field is `0`, never a stale or missing value.
+        let empty_fields =
+            IcsCalendar::default().fields("Calendar", options().display_timezone, now, false, None);
+        let empty_next_start = empty_fields
+            .iter()
+            .find(|field| field.key == "next_start_unix_ms")
+            .expect("next_start_unix_ms field is present even with no events");
+        assert_eq!(empty_next_start.value, FieldValue::Integer(0));
+    }
+
+    #[test]
     fn skips_and_counts_every_out_of_scope_recurrence_form() {
         let calendar =
             parse_ics(RECURRENCE_UNSUPPORTED, utc(2026, 8, 1, 0, 0), &options()).unwrap();
@@ -1369,7 +1416,7 @@ mod tests {
         assert_eq!(failed.value.events, first.value.events);
         assert_eq!(failed.age, Some(Duration::from_mins(7)));
         let fields = provider.fields(&failed, first_time + ChronoDuration::minutes(7));
-        assert_eq!(fields.len(), 13);
+        assert_eq!(fields.len(), 14);
         assert!(
             fields
                 .iter()

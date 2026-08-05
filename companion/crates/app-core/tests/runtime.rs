@@ -717,6 +717,77 @@ fn pomodoro_events_complete_once_and_dismissed_interrupts_do_not_replay() {
     runtime.shutdown().unwrap();
 }
 
+// The one wall-clock proof (all other alert-trigger/hold logic is covered by
+// instant unit tests in `app-core`'s inline `mod tests`, which call the
+// private trigger/eligibility/hold helpers directly) that a bounded
+// `AlertHold::Seconds` deadline actually reaches a real device through the
+// full `run_runtime` loop: the interrupt fires once, then — with no touch
+// dismissal from the device — the hold auto-dismisses it on its own and, per
+// the brief's "reuse the existing dismissal path" instruction, that dismissal
+// re-sends `ActivateScreen` so the device resyncs to the saved carousel
+// screen. `full_config`'s carousel is `Manual`, so the only source of a
+// *second* activation here is the hold expiring, not rotation.
+#[test]
+fn a_bounded_alert_hold_auto_dismisses_and_reactivates_the_saved_screen() {
+    let control = MockDeviceControl::default();
+    let mut config = full_config();
+    for card in &mut config.cards {
+        if let CardSettings::Pomodoro {
+            duration_seconds,
+            alert,
+            ..
+        } = card
+        {
+            *duration_seconds = 1;
+            *alert = CardAlert::OnTimerFinish {
+                hold: AlertHold::Seconds { value: 5 },
+            };
+        }
+    }
+    let runtime = start_runtime(config, &control, Duration::ZERO);
+    wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
+        snapshot.device.connection == ConnectionState::Online
+    });
+    let activations_before_completion = activated_screen_ids(&control).len();
+    control.push_event(DeviceEvent {
+        sequence: 1,
+        kind: EventKind::Tap,
+        widget_id: "pomodoro".into(),
+        screen_id: "pomodoro".into(),
+        action: EventAction::StartPause,
+        interrupt_token: None,
+    });
+    wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
+        snapshot
+            .pomodoros
+            .first()
+            .is_some_and(|pomodoro| pomodoro.state == PomodoroState::Running)
+    });
+    wait_for_snapshot(&runtime, Duration::from_secs(2), |snapshot| {
+        snapshot
+            .pomodoros
+            .first()
+            .is_some_and(|pomodoro| pomodoro.state == PomodoroState::Completed)
+    });
+    wait_for(Duration::from_secs(1), || {
+        control.operations().contains(&Operation::Interrupt(1))
+    });
+    // No spontaneous activations from the manual-advance carousel between
+    // completion and the interrupt firing.
+    assert_eq!(
+        activated_screen_ids(&control).len(),
+        activations_before_completion
+    );
+
+    // No dismissal event from the device: the 5s hold must expire on its own
+    // and re-send `ActivateScreen`, which is the only other source of a new
+    // activation under `CarouselAdvance::Manual`.
+    wait_for(Duration::from_secs(7), || {
+        activated_screen_ids(&control).len() > activations_before_completion
+    });
+    runtime.shutdown().unwrap();
+}
+
 #[test]
 fn pomodoro_completion_without_an_alert_does_not_schedule_an_interrupt() {
     let control = MockDeviceControl::default();

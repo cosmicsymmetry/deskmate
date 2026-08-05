@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::File;
 use std::io::Read;
 use std::path::PathBuf;
@@ -11,14 +11,14 @@ use chrono::{
 use chrono_tz::Tz;
 use protocol::{Field, FieldValue};
 
-use crate::{Provider, ProviderError, ProviderSnapshot, RefreshPolicy};
+use crate::http::{HttpClient, SystemHttpClient};
+use crate::{LastGood, Provider, ProviderError, ProviderSnapshot, RefreshPolicy};
 
 pub const MAX_ICS_BYTES: usize = 1_048_576;
 pub const MAX_ICS_EVENTS: usize = 4_096;
 pub const MAX_UNFOLDED_LINE_BYTES: usize = 8_192;
 pub const MAX_CALENDAR_ROWS: usize = 5;
 const MAX_RECURRENCE_DAYS: i64 = 100_000;
-const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IcsSource {
@@ -44,35 +44,11 @@ impl IcsLoader for SystemIcsLoader {
                     .read_to_end(&mut bytes)
                     .map_err(|error| ProviderError::Io(error.to_string()))?;
                 if bytes.len() > MAX_ICS_BYTES {
-                    return Err(ProviderError::FeedTooLarge);
+                    return Err(ProviderError::ResponseTooLarge);
                 }
-                String::from_utf8(bytes)
-                    .map_err(|_| ProviderError::MalformedFeed("feed is not UTF-8".into()))
+                String::from_utf8(bytes).map_err(|_| ProviderError::InvalidEncoding)
             }
-            IcsSource::Url(url) => {
-                let agent: ureq::Agent = ureq::Agent::config_builder()
-                    .timeout_global(Some(HTTP_TIMEOUT))
-                    .build()
-                    .into();
-                let mut response = agent
-                    .get(url)
-                    .call()
-                    .map_err(|error| ProviderError::Http(error.to_string()))?;
-                let text = response
-                    .body_mut()
-                    .with_config()
-                    .limit((MAX_ICS_BYTES + 1) as u64)
-                    .lossy_utf8(false)
-                    .read_to_string()
-                    .map_err(|error| match error {
-                        ureq::Error::BodyExceedsLimit(_) => ProviderError::FeedTooLarge,
-                        other => ProviderError::Http(other.to_string()),
-                    })?;
-                if text.len() > MAX_ICS_BYTES {
-                    return Err(ProviderError::FeedTooLarge);
-                }
-                Ok(text)
-            }
+            IcsSource::Url(url) => SystemHttpClient::default().get_text(url),
         }
     }
 }
@@ -174,8 +150,7 @@ pub struct IcsProvider<L> {
     source: IcsSource,
     loader: L,
     options: CalendarOptions,
-    last_good: Option<IcsCalendar>,
-    last_success: Option<DateTime<Utc>>,
+    state: LastGood<IcsCalendar>,
 }
 
 impl<L: IcsLoader> IcsProvider<L> {
@@ -184,8 +159,7 @@ impl<L: IcsLoader> IcsProvider<L> {
             source,
             loader,
             options,
-            last_good: None,
-            last_success: None,
+            state: LastGood::default(),
         }
     }
 
@@ -226,31 +200,7 @@ impl<L: IcsLoader> Provider for IcsProvider<L> {
             .loader
             .load(&self.source)
             .and_then(|feed| parse_ics(&feed, now, &self.options));
-        match result {
-            Ok(calendar) => {
-                self.last_good = Some(calendar.clone());
-                self.last_success = Some(now);
-                ProviderSnapshot {
-                    value: calendar,
-                    refreshed_at: Some(now),
-                    age: Some(Duration::ZERO),
-                    stale: false,
-                    error: None,
-                }
-            }
-            Err(error) => {
-                let age = self
-                    .last_success
-                    .and_then(|success| now.signed_duration_since(success).to_std().ok());
-                ProviderSnapshot {
-                    value: self.last_good.clone().unwrap_or_default(),
-                    refreshed_at: self.last_success,
-                    age,
-                    stale: true,
-                    error: Some(truncate_utf8(&error.to_string(), 96)),
-                }
-            }
-        }
+        self.state.complete(now, result)
     }
 }
 
@@ -315,6 +265,13 @@ enum Frequency {
     Daily,
     Weekly,
     Monthly,
+    Yearly,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WeekdaySpec {
+    ordinal: Option<i8>,
+    weekday: Weekday,
 }
 
 #[derive(Debug, Clone)]
@@ -323,7 +280,11 @@ struct RecurrenceRule {
     interval: u32,
     count: Option<u32>,
     until: Option<DateTime<Utc>>,
-    weekdays: Vec<Weekday>,
+    weekdays: Vec<WeekdaySpec>,
+    month_days: Vec<i8>,
+    months: Vec<u8>,
+    set_positions: Vec<i16>,
+    week_start: Weekday,
 }
 
 #[derive(Debug, Clone)]
@@ -334,6 +295,7 @@ struct ParsedEvent {
     duration: ChronoDuration,
     recurrence: Option<RecurrenceRule>,
     exclusions: Vec<DateTime<Utc>>,
+    additional_dates: Vec<DateTime<Utc>>,
 }
 
 enum EventParseError {
@@ -353,16 +315,76 @@ pub fn parse_ics(
         + ChronoDuration::from_std(options.horizon)
             .map_err(|_| ProviderError::MalformedFeed("calendar horizon is too large".into()))?;
     let mut events = Vec::new();
+    let mut groups = BTreeMap::<String, Vec<EventComponent>>::new();
     for component in selected {
-        if component
+        let Some(uid) = component
+            .property("UID")
+            .map(|property| property.value.clone())
+        else {
+            counters.malformed_events = counters.malformed_events.saturating_add(1);
+            continue;
+        };
+        groups.entry(uid).or_default().push(component);
+    }
+    for (_, components) in groups {
+        let Some(master) = components
+            .iter()
+            .find(|component| component.property("RECURRENCE-ID").is_none())
+        else {
+            counters.malformed_events = counters.malformed_events.saturating_add(1);
+            continue;
+        };
+        if master
             .property("STATUS")
             .is_some_and(|property| property.value.eq_ignore_ascii_case("CANCELLED"))
         {
             counters.cancelled_events = counters.cancelled_events.saturating_add(1);
             continue;
         }
-        match parse_event(&component, options.default_timezone) {
-            Ok(event) => expand_event(&event, now, horizon, &mut events, &mut counters),
+        match parse_event(master, options.default_timezone) {
+            Ok(mut event) => {
+                let mut overrides = Vec::new();
+                for exception in components
+                    .iter()
+                    .filter(|component| component.property("RECURRENCE-ID").is_some())
+                {
+                    let recurrence_id = exception
+                        .property("RECURRENCE-ID")
+                        .filter(|property| property.parameter("RANGE").is_none())
+                        .and_then(|property| parse_event_time(property, event.start.timezone))
+                        .and_then(EventTime::to_utc);
+                    let Some(recurrence_id) = recurrence_id else {
+                        counters.unsupported_recurrences =
+                            counters.unsupported_recurrences.saturating_add(1);
+                        continue;
+                    };
+                    event.exclusions.push(recurrence_id);
+                    if exception
+                        .property("STATUS")
+                        .is_some_and(|property| property.value.eq_ignore_ascii_case("CANCELLED"))
+                    {
+                        counters.cancelled_events = counters.cancelled_events.saturating_add(1);
+                        continue;
+                    }
+                    match parse_event(exception, options.default_timezone) {
+                        Ok(mut override_event) if override_event.recurrence.is_none() => {
+                            override_event.additional_dates.clear();
+                            overrides.push(override_event);
+                        }
+                        Ok(_) | Err(EventParseError::UnsupportedRecurrence) => {
+                            counters.unsupported_recurrences =
+                                counters.unsupported_recurrences.saturating_add(1);
+                        }
+                        Err(EventParseError::Malformed) => {
+                            counters.malformed_events = counters.malformed_events.saturating_add(1);
+                        }
+                    }
+                }
+                expand_event(&event, now, horizon, &mut events, &mut counters);
+                for override_event in overrides {
+                    expand_event(&override_event, now, horizon, &mut events, &mut counters);
+                }
+            }
             Err(EventParseError::Malformed) => {
                 counters.malformed_events = counters.malformed_events.saturating_add(1);
             }
@@ -385,7 +407,7 @@ pub fn parse_ics(
 
 fn parse_components(feed: &str) -> Result<Vec<EventComponent>, ProviderError> {
     if feed.len() > MAX_ICS_BYTES {
-        return Err(ProviderError::FeedTooLarge);
+        return Err(ProviderError::ResponseTooLarge);
     }
     let lines = unfold_lines(feed)?;
     let mut saw_calendar_begin = false;
@@ -505,7 +527,17 @@ fn select_uid_versions(
             counters.malformed_events = counters.malformed_events.saturating_add(1);
             continue;
         }
-        if let Some(index) = uid_indexes.get(&uid).copied() {
+        let instance_key = component.property("RECURRENCE-ID").map_or_else(
+            || uid.clone(),
+            |property| {
+                format!(
+                    "{uid}\u{1f}{}\u{1f}{}",
+                    property.parameter("TZID").unwrap_or_default(),
+                    property.value
+                )
+            },
+        );
+        if let Some(index) = uid_indexes.get(&instance_key).copied() {
             counters.duplicate_uids = counters.duplicate_uids.saturating_add(1);
             let old_sequence = sequence(&selected[index]);
             let new_sequence = sequence(&component);
@@ -516,7 +548,7 @@ fn select_uid_versions(
                 selected[index] = component;
             }
         } else {
-            uid_indexes.insert(uid, selected.len());
+            uid_indexes.insert(instance_key, selected.len());
             selected.push(component);
         }
     }
@@ -534,9 +566,6 @@ fn parse_event(
     component: &EventComponent,
     default_timezone: Tz,
 ) -> Result<ParsedEvent, EventParseError> {
-    if component.property("RECURRENCE-ID").is_some() {
-        return Err(EventParseError::UnsupportedRecurrence);
-    }
     let uid = component
         .property("UID")
         .map(|property| property.value.clone())
@@ -566,7 +595,7 @@ fn parse_event(
     };
     let recurrence = component
         .property("RRULE")
-        .map(|property| parse_recurrence(&property.value, default_timezone))
+        .map(|property| parse_recurrence(&property.value, start.timezone))
         .transpose()?;
     let mut exclusions = Vec::new();
     for property in component.properties("EXDATE") {
@@ -579,6 +608,22 @@ fn parse_event(
             exclusions.push(exclusion);
         }
     }
+    let mut additional_dates = Vec::new();
+    for property in component.properties("RDATE") {
+        if property.parameter("VALUE") == Some("PERIOD") {
+            return Err(EventParseError::UnsupportedRecurrence);
+        }
+        for raw in property.value.split(',') {
+            let mut single = property.clone();
+            raw.clone_into(&mut single.value);
+            let date = parse_event_time(&single, default_timezone)
+                .and_then(EventTime::to_utc)
+                .ok_or(EventParseError::Malformed)?;
+            additional_dates.push(date);
+        }
+    }
+    additional_dates.sort_unstable();
+    additional_dates.dedup();
     Ok(ParsedEvent {
         uid,
         title,
@@ -586,6 +631,7 @@ fn parse_event(
         duration,
         recurrence,
         exclusions,
+        additional_dates,
     })
 }
 
@@ -619,22 +665,28 @@ fn parse_event_time(property: &Property, default_timezone: Tz) -> Option<EventTi
     })
 }
 
+#[allow(clippy::too_many_lines)]
 fn parse_recurrence(raw: &str, default_timezone: Tz) -> Result<RecurrenceRule, EventParseError> {
     let mut frequency = None;
     let mut interval = 1_u32;
     let mut count = None;
     let mut until = None;
     let mut weekdays = Vec::new();
+    let mut month_days = Vec::new();
+    let mut months = Vec::new();
+    let mut set_positions = Vec::new();
+    let mut week_start = Weekday::Mon;
     for part in raw.split(';') {
         let (key, value) = part
             .split_once('=')
             .ok_or(EventParseError::UnsupportedRecurrence)?;
-        match key {
+        match key.to_ascii_uppercase().as_str() {
             "FREQ" => {
-                frequency = Some(match value {
+                frequency = Some(match value.to_ascii_uppercase().as_str() {
                     "DAILY" => Frequency::Daily,
                     "WEEKLY" => Frequency::Weekly,
                     "MONTHLY" => Frequency::Monthly,
+                    "YEARLY" => Frequency::Yearly,
                     _ => return Err(EventParseError::UnsupportedRecurrence),
                 });
             }
@@ -668,36 +720,113 @@ fn parse_recurrence(raw: &str, default_timezone: Tz) -> Result<RecurrenceRule, E
             }
             "BYDAY" => {
                 for day in value.split(',') {
-                    if day.len() != 2 {
-                        return Err(EventParseError::UnsupportedRecurrence);
-                    }
-                    weekdays.push(match day {
-                        "MO" => Weekday::Mon,
-                        "TU" => Weekday::Tue,
-                        "WE" => Weekday::Wed,
-                        "TH" => Weekday::Thu,
-                        "FR" => Weekday::Fri,
-                        "SA" => Weekday::Sat,
-                        "SU" => Weekday::Sun,
-                        _ => return Err(EventParseError::UnsupportedRecurrence),
-                    });
+                    weekdays.push(parse_weekday_spec(day)?);
                 }
-                weekdays.sort_unstable_by_key(Weekday::num_days_from_monday);
+                weekdays.sort_unstable_by_key(|spec| {
+                    (
+                        spec.weekday.num_days_from_monday(),
+                        spec.ordinal.unwrap_or_default(),
+                    )
+                });
                 weekdays.dedup();
             }
+            "BYMONTHDAY" => {
+                for day in value.split(',') {
+                    month_days.push(
+                        day.parse::<i8>()
+                            .ok()
+                            .filter(|day| *day != 0 && (-31..=31).contains(day))
+                            .ok_or(EventParseError::Malformed)?,
+                    );
+                }
+                month_days.sort_unstable();
+                month_days.dedup();
+            }
+            "BYMONTH" => {
+                for month in value.split(',') {
+                    months.push(
+                        month
+                            .parse::<u8>()
+                            .ok()
+                            .filter(|month| (1..=12).contains(month))
+                            .ok_or(EventParseError::Malformed)?,
+                    );
+                }
+                months.sort_unstable();
+                months.dedup();
+            }
+            "BYSETPOS" => {
+                for position in value.split(',') {
+                    set_positions.push(
+                        position
+                            .parse::<i16>()
+                            .ok()
+                            .filter(|position| *position != 0 && (-366..=366).contains(position))
+                            .ok_or(EventParseError::Malformed)?,
+                    );
+                }
+                set_positions.sort_unstable();
+                set_positions.dedup();
+            }
+            "WKST" => week_start = parse_weekday(value)?,
             _ => return Err(EventParseError::UnsupportedRecurrence),
         }
     }
     if count.is_some() && until.is_some() {
         return Err(EventParseError::Malformed);
     }
+    let frequency = frequency.ok_or(EventParseError::Malformed)?;
+    if matches!(frequency, Frequency::Daily | Frequency::Weekly)
+        && weekdays.iter().any(|spec| spec.ordinal.is_some())
+    {
+        return Err(EventParseError::UnsupportedRecurrence);
+    }
     Ok(RecurrenceRule {
-        frequency: frequency.ok_or(EventParseError::Malformed)?,
+        frequency,
         interval,
         count,
         until,
         weekdays,
+        month_days,
+        months,
+        set_positions,
+        week_start,
     })
+}
+
+fn parse_weekday_spec(raw: &str) -> Result<WeekdaySpec, EventParseError> {
+    if raw.len() < 2 {
+        return Err(EventParseError::UnsupportedRecurrence);
+    }
+    let (ordinal, weekday) = raw.split_at(raw.len() - 2);
+    let ordinal = if ordinal.is_empty() {
+        None
+    } else {
+        Some(
+            ordinal
+                .parse::<i8>()
+                .ok()
+                .filter(|value| *value != 0 && (-53..=53).contains(value))
+                .ok_or(EventParseError::Malformed)?,
+        )
+    };
+    Ok(WeekdaySpec {
+        ordinal,
+        weekday: parse_weekday(weekday)?,
+    })
+}
+
+fn parse_weekday(raw: &str) -> Result<Weekday, EventParseError> {
+    match raw.to_ascii_uppercase().as_str() {
+        "MO" => Ok(Weekday::Mon),
+        "TU" => Ok(Weekday::Tue),
+        "WE" => Ok(Weekday::Wed),
+        "TH" => Ok(Weekday::Thu),
+        "FR" => Ok(Weekday::Fri),
+        "SA" => Ok(Weekday::Sat),
+        "SU" => Ok(Weekday::Sun),
+        _ => Err(EventParseError::UnsupportedRecurrence),
+    }
 }
 
 fn expand_event(
@@ -718,6 +847,7 @@ fn expand_event(
         .clamp(0, MAX_RECURRENCE_DAYS);
     let mut recurrence_count = 0_u32;
     let mut exhausted = false;
+    let mut starts = BTreeSet::new();
     for day_offset in 0..=maximum_days {
         let Some(date) = start_date.checked_add_signed(ChronoDuration::days(day_offset)) else {
             break;
@@ -752,6 +882,25 @@ fn expand_event(
         if event.exclusions.contains(&start) {
             continue;
         }
+        starts.insert(start);
+        if event.recurrence.is_none() {
+            break;
+        }
+        if day_offset == MAX_RECURRENCE_DAYS {
+            exhausted = true;
+        }
+    }
+    if exhausted {
+        counters.recurrence_scan_limit_hits = counters.recurrence_scan_limit_hits.saturating_add(1);
+    }
+    starts.extend(
+        event
+            .additional_dates
+            .iter()
+            .copied()
+            .filter(|start| !event.exclusions.contains(start)),
+    );
+    for start in starts {
         let end = start + event.duration;
         let is_upcoming = if event.duration.is_zero() {
             start >= now
@@ -767,15 +916,6 @@ fn expand_event(
                 all_day: event.start.all_day,
             });
         }
-        if event.recurrence.is_none() {
-            break;
-        }
-        if day_offset == MAX_RECURRENCE_DAYS {
-            exhausted = true;
-        }
-    }
-    if exhausted {
-        counters.recurrence_scan_limit_hits = counters.recurrence_scan_limit_hits.saturating_add(1);
     }
 }
 
@@ -787,37 +927,225 @@ fn recurrence_matches(rule: &RecurrenceRule, start: NaiveDate, candidate: NaiveD
     if days < 0 {
         return false;
     }
-    match rule.frequency {
-        Frequency::Daily => {
-            days % i64::from(rule.interval) == 0
-                && (rule.weekdays.is_empty() || rule.weekdays.contains(&candidate.weekday()))
-        }
+    let interval_matches = match rule.frequency {
+        Frequency::Daily => days % i64::from(rule.interval) == 0,
         Frequency::Weekly => {
-            let start_week =
-                start - ChronoDuration::days(i64::from(start.weekday().num_days_from_monday()));
-            let candidate_week = candidate
-                - ChronoDuration::days(i64::from(candidate.weekday().num_days_from_monday()));
+            let start_week = week_start(start, rule.week_start);
+            let candidate_week = week_start(candidate, rule.week_start);
             let weeks = (candidate_week - start_week).num_days() / 7;
             weeks % i64::from(rule.interval) == 0
-                && if rule.weekdays.is_empty() {
-                    candidate.weekday() == start.weekday()
-                } else {
-                    rule.weekdays.contains(&candidate.weekday())
-                }
         }
         Frequency::Monthly => {
             let months = (candidate.year() - start.year()) * 12
                 + i32::try_from(candidate.month()).unwrap_or(0)
                 - i32::try_from(start.month()).unwrap_or(0);
-            months >= 0
-                && months % i32::try_from(rule.interval).unwrap_or(i32::MAX) == 0
-                && if rule.weekdays.is_empty() {
-                    candidate.day() == start.day()
-                } else {
-                    rule.weekdays.contains(&candidate.weekday())
-                }
+            months >= 0 && months % i32::try_from(rule.interval).unwrap_or(i32::MAX) == 0
+        }
+        Frequency::Yearly => {
+            let years = candidate.year() - start.year();
+            years >= 0 && years % i32::try_from(rule.interval).unwrap_or(i32::MAX) == 0
+        }
+    };
+    if !interval_matches || !recurrence_filters_match(rule, start, candidate) {
+        return false;
+    }
+    if rule.set_positions.is_empty() {
+        return true;
+    }
+    set_position_matches(rule, start, candidate)
+}
+
+fn recurrence_filters_match(rule: &RecurrenceRule, start: NaiveDate, candidate: NaiveDate) -> bool {
+    if !rule.months.is_empty()
+        && !rule
+            .months
+            .contains(&u8::try_from(candidate.month()).unwrap_or_default())
+    {
+        return false;
+    }
+    if !rule.month_days.is_empty()
+        && !rule
+            .month_days
+            .iter()
+            .any(|day| month_day_matches(candidate, *day))
+    {
+        return false;
+    }
+    if !rule.weekdays.is_empty()
+        && !rule
+            .weekdays
+            .iter()
+            .any(|spec| weekday_matches(rule, candidate, *spec))
+    {
+        return false;
+    }
+    match rule.frequency {
+        Frequency::Daily => true,
+        Frequency::Weekly => !rule.weekdays.is_empty() || candidate.weekday() == start.weekday(),
+        Frequency::Monthly => {
+            !rule.weekdays.is_empty()
+                || !rule.month_days.is_empty()
+                || candidate.day() == start.day()
+        }
+        Frequency::Yearly => {
+            if rule.weekdays.is_empty() && rule.month_days.is_empty() {
+                let month_matches = !rule.months.is_empty() || candidate.month() == start.month();
+                month_matches && candidate.day() == start.day()
+            } else {
+                true
+            }
         }
     }
+}
+
+fn set_position_matches(rule: &RecurrenceRule, start: NaiveDate, candidate: NaiveDate) -> bool {
+    let (first, last) = period_bounds(rule, candidate);
+    let mut dates = Vec::new();
+    let mut date = first;
+    loop {
+        if date >= start
+            && recurrence_interval_matches(rule, start, date)
+            && recurrence_filters_match(rule, start, date)
+        {
+            dates.push(date);
+        }
+        if date >= last {
+            break;
+        }
+        let Some(next) = date.succ_opt() else {
+            break;
+        };
+        date = next;
+    }
+    rule.set_positions.iter().any(|position| {
+        let index = if *position > 0 {
+            usize::try_from(*position - 1).ok()
+        } else {
+            isize::try_from(dates.len())
+                .ok()
+                .and_then(|length| length.checked_add(isize::from(*position)))
+                .and_then(|index| usize::try_from(index).ok())
+        };
+        index.and_then(|index| dates.get(index)).copied() == Some(candidate)
+    })
+}
+
+fn recurrence_interval_matches(
+    rule: &RecurrenceRule,
+    start: NaiveDate,
+    candidate: NaiveDate,
+) -> bool {
+    if candidate < start {
+        return false;
+    }
+    match rule.frequency {
+        Frequency::Daily => (candidate - start).num_days() % i64::from(rule.interval) == 0,
+        Frequency::Weekly => {
+            let weeks = (week_start(candidate, rule.week_start)
+                - week_start(start, rule.week_start))
+            .num_days()
+                / 7;
+            weeks % i64::from(rule.interval) == 0
+        }
+        Frequency::Monthly => {
+            let months = (candidate.year() - start.year()) * 12
+                + i32::try_from(candidate.month()).unwrap_or_default()
+                - i32::try_from(start.month()).unwrap_or_default();
+            months % i32::try_from(rule.interval).unwrap_or(i32::MAX) == 0
+        }
+        Frequency::Yearly => {
+            (candidate.year() - start.year()) % i32::try_from(rule.interval).unwrap_or(i32::MAX)
+                == 0
+        }
+    }
+}
+
+fn period_bounds(rule: &RecurrenceRule, candidate: NaiveDate) -> (NaiveDate, NaiveDate) {
+    match rule.frequency {
+        Frequency::Daily => (candidate, candidate),
+        Frequency::Weekly => {
+            let first = week_start(candidate, rule.week_start);
+            (first, first + ChronoDuration::days(6))
+        }
+        Frequency::Monthly => {
+            let first = candidate.with_day(1).unwrap_or(candidate);
+            (
+                first,
+                first
+                    .with_day(days_in_month(candidate))
+                    .unwrap_or(candidate),
+            )
+        }
+        Frequency::Yearly => {
+            let first = NaiveDate::from_ymd_opt(candidate.year(), 1, 1).unwrap_or(candidate);
+            let last = NaiveDate::from_ymd_opt(candidate.year(), 12, 31).unwrap_or(candidate);
+            (first, last)
+        }
+    }
+}
+
+fn weekday_matches(rule: &RecurrenceRule, candidate: NaiveDate, spec: WeekdaySpec) -> bool {
+    if candidate.weekday() != spec.weekday {
+        return false;
+    }
+    let Some(ordinal) = spec.ordinal else {
+        return true;
+    };
+    if rule.frequency == Frequency::Yearly && rule.months.is_empty() {
+        ordinal_matches(
+            ordinal,
+            candidate,
+            NaiveDate::from_ymd_opt(candidate.year(), 1, 1).unwrap_or(candidate),
+            NaiveDate::from_ymd_opt(candidate.year(), 12, 31).unwrap_or(candidate),
+        )
+    } else {
+        let first = candidate.with_day(1).unwrap_or(candidate);
+        let last = first
+            .with_day(days_in_month(candidate))
+            .unwrap_or(candidate);
+        ordinal_matches(ordinal, candidate, first, last)
+    }
+}
+
+fn ordinal_matches(requested: i8, candidate: NaiveDate, first: NaiveDate, last: NaiveDate) -> bool {
+    let first_offset = (candidate.weekday().num_days_from_monday() + 7
+        - first.weekday().num_days_from_monday())
+        % 7;
+    let first_match = first + ChronoDuration::days(i64::from(first_offset));
+    let positive = ((candidate - first_match).num_days() / 7) + 1;
+    let last_offset = (last.weekday().num_days_from_monday() + 7
+        - candidate.weekday().num_days_from_monday())
+        % 7;
+    let last_match = last - ChronoDuration::days(i64::from(last_offset));
+    let negative = -(((last_match - candidate).num_days() / 7) + 1);
+    i64::from(requested) == positive || i64::from(requested) == negative
+}
+
+fn month_day_matches(candidate: NaiveDate, requested: i8) -> bool {
+    if requested > 0 {
+        candidate.day() == u32::try_from(requested).unwrap_or_default()
+    } else {
+        let from_end = i32::try_from(days_in_month(candidate)).unwrap_or_default()
+            - i32::try_from(candidate.day()).unwrap_or_default()
+            + 1;
+        from_end == -i32::from(requested)
+    }
+}
+
+fn days_in_month(date: NaiveDate) -> u32 {
+    let (year, month) = if date.month() == 12 {
+        (date.year() + 1, 1)
+    } else {
+        (date.year(), date.month() + 1)
+    };
+    NaiveDate::from_ymd_opt(year, month, 1)
+        .and_then(|first| first.pred_opt())
+        .map_or(28, |last| last.day())
+}
+
+fn week_start(date: NaiveDate, start: Weekday) -> NaiveDate {
+    let offset = (date.weekday().num_days_from_monday() + 7 - start.num_days_from_monday()) % 7;
+    date - ChronoDuration::days(i64::from(offset))
 }
 
 fn resolve_local(timezone: Tz, local: NaiveDateTime) -> Option<DateTime<Tz>> {
@@ -876,6 +1204,8 @@ mod tests {
     const RECURRENCE_SUPPORTED: &str = include_str!("../tests/fixtures/recurrence-supported.ics");
     const RECURRENCE_UNSUPPORTED: &str =
         include_str!("../tests/fixtures/recurrence-unsupported.ics");
+    const RECURRENCE_V1: &str = include_str!("../tests/fixtures/recurrence-v1.ics");
+    const RECURRENCE_EXCEPTIONS: &str = include_str!("../tests/fixtures/recurrence-exceptions.ics");
     const MALFORMED: &str = include_str!("../tests/fixtures/malformed.ics");
 
     fn utc(year: i32, month: u32, day: u32, hour: u32, minute: u32) -> DateTime<Utc> {
@@ -944,6 +1274,47 @@ mod tests {
     }
 
     #[test]
+    fn expands_v1_month_year_ordinal_set_position_and_rdate_cases() {
+        let calendar = parse_ics(RECURRENCE_V1, utc(2026, 8, 1, 0, 0), &options()).unwrap();
+        let expected = [
+            ("First Monday", utc(2026, 8, 3, 13, 0)),
+            ("Extra date", utc(2026, 8, 4, 16, 0)),
+            ("Anniversary", utc(2026, 8, 5, 15, 0)),
+            ("Last weekday", utc(2026, 8, 31, 14, 0)),
+            ("Month end", utc(2026, 8, 31, 13, 0)),
+        ];
+        for (title, start) in expected {
+            assert!(
+                calendar
+                    .events
+                    .iter()
+                    .any(|event| { event.title == title && event.start == start }),
+                "missing {title} at {start}"
+            );
+        }
+        assert_eq!(calendar.counters.unsupported_recurrences, 0);
+    }
+
+    #[test]
+    fn applies_timezone_aware_cancelled_and_moved_recurrence_exceptions() {
+        let calendar =
+            parse_ics(RECURRENCE_EXCEPTIONS, utc(2026, 10, 24, 0, 0), &options()).unwrap();
+        let starts: Vec<_> = calendar.events.iter().map(|event| event.start).collect();
+        assert_eq!(
+            starts,
+            [
+                utc(2026, 10, 25, 13, 0),
+                utc(2026, 11, 8, 16, 0),
+                utc(2026, 11, 15, 14, 0),
+            ]
+        );
+        assert_eq!(calendar.events[1].title, "Moved standup");
+        assert_eq!(calendar.counters.cancelled_events, 1);
+        assert_eq!(calendar.counters.unsupported_recurrences, 0);
+        assert_eq!(calendar.counters.duplicate_uids, 0);
+    }
+
+    #[test]
     fn malformed_calendar_boundary_is_a_refresh_failure() {
         assert!(matches!(
             parse_ics(MALFORMED, utc(2026, 8, 1, 0, 0), &options()),
@@ -984,7 +1355,7 @@ mod tests {
         loader.results.push_back(Ok(BASIC.into()));
         loader
             .results
-            .push_back(Err(ProviderError::Http("offline".into())));
+            .push_back(Err(ProviderError::Io("offline".into())));
         let mut provider = IcsProvider::new(
             IcsSource::Url("https://example.test/a.ics".into()),
             loader,

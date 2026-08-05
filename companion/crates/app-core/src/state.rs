@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::AppConfig;
 
@@ -47,11 +47,102 @@ pub struct DeviceSnapshot {
     pub port_name: Option<String>,
     pub firmware_version: Option<String>,
     pub protocol_version: Option<u8>,
+    pub max_protocol_version: Option<u8>,
+    pub capabilities: Vec<DeviceCapability>,
+    #[serde(
+        serialize_with = "serialize_capability_bits",
+        deserialize_with = "deserialize_capability_bits"
+    )]
+    pub unknown_capability_bits: u64,
     pub uptime_ms: Option<u64>,
     pub free_heap: Option<u32>,
     pub rotation: Option<u16>,
     pub active_screen_id: Option<String>,
     pub counters: DeviceCounters,
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn serialize_capability_bits<S>(bits: &u64, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    serializer.serialize_str(&format!("0x{bits:016x}"))
+}
+
+fn deserialize_capability_bits<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    let digits = value.strip_prefix("0x").ok_or_else(|| {
+        serde::de::Error::custom("capability bits must use a 0x-prefixed hexadecimal string")
+    })?;
+    if digits.len() != 16 || !digits.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(serde::de::Error::custom(
+            "capability bits must contain exactly 16 hexadecimal digits",
+        ));
+    }
+    u64::from_str_radix(digits, 16).map_err(serde::de::Error::custom)
+}
+
+impl DeviceSnapshot {
+    pub fn capability_bits(&self) -> u64 {
+        self.capabilities
+            .iter()
+            .fold(0, |bits, capability| bits | capability.bit())
+            | self.unknown_capability_bits
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DeviceCapability {
+    CoreWidgets,
+    ConfigRotation,
+    DashboardLayouts,
+    ExtendedTemplates,
+    HostTapActions,
+    AssetTransfer,
+    FirmwareUpdate,
+}
+
+impl DeviceCapability {
+    pub const fn bit(self) -> u64 {
+        match self {
+            Self::CoreWidgets => protocol::CAPABILITY_CORE_WIDGETS,
+            Self::ConfigRotation => protocol::CAPABILITY_CONFIG_ROTATION,
+            Self::DashboardLayouts => protocol::CAPABILITY_DASHBOARD_LAYOUTS,
+            Self::ExtendedTemplates => protocol::CAPABILITY_EXTENDED_TEMPLATES,
+            Self::HostTapActions => protocol::CAPABILITY_HOST_TAP_ACTIONS,
+            Self::AssetTransfer => protocol::CAPABILITY_ASSET_TRANSFER,
+            Self::FirmwareUpdate => protocol::CAPABILITY_FIRMWARE_UPDATE,
+        }
+    }
+
+    pub fn from_bits(bits: u64) -> Vec<Self> {
+        const ALL: [DeviceCapability; 7] = [
+            DeviceCapability::CoreWidgets,
+            DeviceCapability::ConfigRotation,
+            DeviceCapability::DashboardLayouts,
+            DeviceCapability::ExtendedTemplates,
+            DeviceCapability::HostTapActions,
+            DeviceCapability::AssetTransfer,
+            DeviceCapability::FirmwareUpdate,
+        ];
+        ALL.into_iter()
+            .filter(|capability| bits & capability.bit() != 0)
+            .collect()
+    }
+
+    pub const fn known_bits() -> u64 {
+        protocol::CAPABILITY_CORE_WIDGETS
+            | protocol::CAPABILITY_CONFIG_ROTATION
+            | protocol::CAPABILITY_DASHBOARD_LAYOUTS
+            | protocol::CAPABILITY_EXTENDED_TEMPLATES
+            | protocol::CAPABILITY_HOST_TAP_ACTIONS
+            | protocol::CAPABILITY_ASSET_TRANSFER
+            | protocol::CAPABILITY_FIRMWARE_UPDATE
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

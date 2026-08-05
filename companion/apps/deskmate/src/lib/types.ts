@@ -3,15 +3,50 @@ export interface AppConfig {
   preferences: AppPreferences;
   widgets: WidgetSettings[];
   screens: ScreenSettings[];
+  assets: AssetSettings[];
+  carousel: CarouselSettings;
+  updater: UpdaterSettings;
 }
 
 export interface AppPreferences {
   timezone: string;
   autostart: boolean;
   paused: boolean;
+  orientation: DisplayOrientation;
 }
 
-export type WidgetSize = "full" | "standard";
+export type DisplayOrientation = "landscape" | "landscape-flipped";
+
+export type WidgetSize = "full" | "standard" | "tile";
+
+export type DisplayTemplate =
+  | { kind: "digital-clock" }
+  | { kind: "analog-clock" }
+  | { kind: "progress-ring" }
+  | { kind: "row-list" }
+  | { kind: "big-number-label" }
+  | { kind: "icon-badge-text"; icon_asset_id: string | null };
+
+export type WidgetTapAction =
+  | { kind: "none" }
+  | { kind: "start-pause" }
+  | { kind: "reset" }
+  | { kind: "dismiss" }
+  | { kind: "open-url"; url: string }
+  | { kind: "open-application"; application_id: string };
+
+export type RefreshPolicy =
+  | { kind: "device-local" }
+  | { kind: "manual" }
+  | { kind: "interval"; minutes: number };
+
+export type WidgetInterruptPolicy = "disabled" | "enabled";
+export type WeatherUnits = "metric" | "imperial";
+
+export interface JsonFieldMapping {
+  field: string;
+  path: string;
+}
 
 export type WidgetSettings =
   | {
@@ -20,6 +55,10 @@ export type WidgetSettings =
       size: WidgetSize;
       title: string;
       show_seconds: boolean;
+      template: DisplayTemplate;
+      tap_action: WidgetTapAction;
+      refresh: RefreshPolicy;
+      interrupt_policy: WidgetInterruptPolicy;
     }
   | {
       kind: "pomodoro";
@@ -27,6 +66,10 @@ export type WidgetSettings =
       size: WidgetSize;
       label: string;
       duration_seconds: number;
+      template: DisplayTemplate;
+      tap_action: WidgetTapAction;
+      refresh: RefreshPolicy;
+      interrupt_policy: WidgetInterruptPolicy;
     }
   | {
       kind: "calendar";
@@ -34,16 +77,97 @@ export type WidgetSettings =
       size: WidgetSize;
       title: string;
       source: CalendarSource;
-      refresh_minutes: number;
+      template: DisplayTemplate;
+      tap_action: WidgetTapAction;
+      refresh: RefreshPolicy;
+      interrupt_policy: WidgetInterruptPolicy;
+    }
+  | {
+      kind: "weather";
+      id: string;
+      size: WidgetSize;
+      title: string;
+      location: string;
+      units: WeatherUnits;
+      template: DisplayTemplate;
+      tap_action: WidgetTapAction;
+      refresh: RefreshPolicy;
+      interrupt_policy: WidgetInterruptPolicy;
+    }
+  | {
+      kind: "json-feed";
+      id: string;
+      size: WidgetSize;
+      title: string;
+      url: string;
+      mappings: JsonFieldMapping[];
+      template: DisplayTemplate;
+      tap_action: WidgetTapAction;
+      refresh: RefreshPolicy;
+      interrupt_policy: WidgetInterruptPolicy;
+    }
+  | {
+      kind: "rss";
+      id: string;
+      size: WidgetSize;
+      title: string;
+      url: string;
+      max_items: number;
+      template: DisplayTemplate;
+      tap_action: WidgetTapAction;
+      refresh: RefreshPolicy;
+      interrupt_policy: WidgetInterruptPolicy;
     };
 
-export type CalendarSource =
-  | { kind: "file"; value: string }
-  | { kind: "url"; value: string };
+export type CalendarSource = { kind: "file"; value: string } | { kind: "url"; value: string };
 
 export interface ScreenSettings {
   id: string;
+  layout: ScreenLayout;
+}
+
+export type ScreenLayout =
+  | { kind: "single"; widget_id: string }
+  | { kind: "dashboard"; columns: number; rows: number; tiles: TileSettings[] };
+
+export interface TileSettings {
   widget_id: string;
+  column: number;
+  row: number;
+  column_span: number;
+  row_span: number;
+}
+
+export interface AssetSettings {
+  id: string;
+  source: { kind: "file"; value: string };
+  kind:
+    | { kind: "icon"; width: number; height: number }
+    | { kind: "font"; pixel_size: number; glyph_ranges: GlyphRange[] };
+  maximum_bytes: number;
+}
+
+export interface GlyphRange {
+  start: number;
+  end: number;
+}
+
+export interface CarouselSettings {
+  auto_advance_seconds: number | null;
+}
+
+export interface UpdaterSettings {
+  channel: "stable" | "beta" | "manual";
+  checks: "disabled" | "notify";
+}
+
+export interface FirmwareArtifactMetadata {
+  version: string;
+  model: string;
+  byte_length: number;
+  sha256_hex: string;
+  signing_key_id: string;
+  signature_base64: string;
 }
 
 export type ValidationCode =
@@ -58,7 +182,11 @@ export type ValidationCode =
   | "unsupported-size"
   | "out-of-range"
   | "invalid-timezone"
-  | "invalid-source";
+  | "invalid-source"
+  | "invalid-composition"
+  | "overlap"
+  | "too-large"
+  | "requires-capability";
 
 export interface ValidationIssue {
   path: string;
@@ -93,12 +221,24 @@ export interface DeviceSnapshot {
   port_name: string | null;
   firmware_version: string | null;
   protocol_version: number | null;
+  max_protocol_version: number | null;
+  capabilities: DeviceCapability[];
+  unknown_capability_bits: string;
   uptime_ms: number | null;
   free_heap: number | null;
   rotation: number | null;
   active_screen_id: string | null;
   counters: DeviceCounters;
 }
+
+export type DeviceCapability =
+  | "core-widgets"
+  | "config-rotation"
+  | "dashboard-layouts"
+  | "extended-templates"
+  | "host-tap-actions"
+  | "asset-transfer"
+  | "firmware-update";
 
 export interface DeviceCounters {
   reconnects: number;
@@ -207,6 +347,19 @@ export interface IpcContractFixtures {
   widget_settings: WidgetSettings[];
   widget_sizes: WidgetSize[];
   calendar_sources: CalendarSource[];
+  display_templates: DisplayTemplate[];
+  tap_actions: WidgetTapAction[];
+  refresh_policies: RefreshPolicy[];
+  interrupt_policies: WidgetInterruptPolicy[];
+  weather_units: WeatherUnits[];
+  screen_layouts: ScreenLayout[];
+  asset_sources: AssetSettings["source"][];
+  asset_kinds: AssetSettings["kind"][];
+  update_channels: UpdaterSettings["channel"][];
+  update_check_policies: UpdaterSettings["checks"][];
+  firmware_artifacts: FirmwareArtifactMetadata[];
+  display_orientations: DisplayOrientation[];
+  device_capabilities: DeviceCapability[];
   runtime_states: RuntimeState[];
   connection_states: ConnectionState[];
   provider_states: ProviderState[];

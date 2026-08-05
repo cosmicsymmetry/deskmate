@@ -59,6 +59,10 @@ impl InterruptArbiter {
         self.latest_token
     }
 
+    pub fn advance_latest_token(&mut self, observed: u32) {
+        self.latest_token = self.latest_token.max(observed);
+    }
+
     pub fn active(&self) -> Option<&TrackedInterrupt> {
         self.active.as_ref()
     }
@@ -176,6 +180,29 @@ impl InterruptArbiter {
         self.pending = None;
     }
 
+    pub fn retain_widgets(&mut self, mut retain: impl FnMut(&str) -> bool) {
+        if self
+            .active
+            .as_ref()
+            .is_some_and(|active| !retain(&active.message.widget_id))
+        {
+            self.active = None;
+        }
+        if self
+            .pending
+            .as_ref()
+            .is_some_and(|pending| !retain(&pending.message.widget_id))
+        {
+            self.pending = None;
+        }
+        if self.active.is_none() {
+            self.active = self.pending.take().map(|mut pending| {
+                pending.slot = InterruptSlot::Active;
+                pending
+            });
+        }
+    }
+
     fn find_mut(&mut self, token: u32) -> Option<&mut TrackedInterrupt> {
         if self
             .active
@@ -269,5 +296,28 @@ mod tests {
         }
         assert_eq!(arbiter.replay().len(), 1);
         assert_eq!(arbiter.active().unwrap().message.token, 1);
+    }
+
+    #[test]
+    fn config_replacement_retains_only_interrupts_for_live_widgets() {
+        let mut arbiter = InterruptArbiter::default();
+        arbiter.schedule("removed", "first").unwrap();
+        let retained = arbiter.schedule("timer", "second").unwrap();
+
+        arbiter.retain_widgets(|widget_id| widget_id == "timer");
+
+        assert_eq!(arbiter.active().unwrap().message, retained);
+        assert_eq!(arbiter.active().unwrap().slot, InterruptSlot::Active);
+        assert!(arbiter.pending().is_none());
+        assert_eq!(arbiter.latest_token(), 2);
+    }
+
+    #[test]
+    fn observed_device_token_advances_but_never_rewinds_the_counter() {
+        let mut arbiter = InterruptArbiter::with_latest_token(4);
+        arbiter.advance_latest_token(9);
+        assert_eq!(arbiter.schedule("timer", "done").unwrap().token, 10);
+        arbiter.advance_latest_token(2);
+        assert_eq!(arbiter.latest_token(), 10);
     }
 }

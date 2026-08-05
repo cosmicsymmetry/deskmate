@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TryRecvError};
 use std::sync::{Arc, Condvar, Mutex, RwLock, Weak};
 use std::thread::{self, JoinHandle};
@@ -16,14 +16,18 @@ use protocol::{
     TriggerInterrupt, WidgetConfig,
 };
 use providers::Provider;
+use providers::http::SystemHttpClient;
 use providers::ics::{CalendarOptions, IcsProvider, IcsSource};
+use providers::json_feed::{JsonFeedOptions, JsonFeedProvider, JsonMapping as ProviderJsonMapping};
+use providers::rss::{RssOptions, RssProvider};
+use providers::weather::{WeatherOptions, WeatherProvider, WeatherUnits as ProviderWeatherUnits};
 
 use crate::commands::{PomodoroAction, RuntimeCommand, RuntimeError};
 use crate::scheduler::Scheduler;
 use crate::{
     AppConfig, AppSnapshot, CalendarSource, ConnectionState, DeviceCounters, DeviceSnapshot,
-    PersistenceState, PomodoroSnapshot, PomodoroState, ProviderSnapshot, ProviderState,
-    RuntimeDiagnostics, RuntimeState, WidgetSettings,
+    JsonFieldMapping, PersistenceState, PomodoroSnapshot, PomodoroState, ProviderSnapshot,
+    ProviderState, RuntimeDiagnostics, RuntimeState, WeatherUnits, WidgetSettings,
 };
 
 pub const DEFAULT_RUNTIME_COMMAND_CAPACITY: usize = 16;
@@ -75,6 +79,7 @@ pub trait RuntimeDevice: Send + 'static {
     fn time_sync(&mut self, sync: TimeSync) -> Result<(), DeviceError>;
     fn apply_layout(
         &mut self,
+        rotation: u16,
         widgets: Vec<WidgetConfig>,
         screens: Vec<ScreenConfig>,
     ) -> Result<(), DeviceError>;
@@ -131,12 +136,13 @@ impl RuntimeDevice for SerialRuntimeDevice {
 
     fn apply_layout(
         &mut self,
+        rotation: u16,
         widgets: Vec<WidgetConfig>,
         screens: Vec<ScreenConfig>,
     ) -> Result<(), DeviceError> {
         self.connected()?
             .session
-            .apply_next_config(widgets, screens)
+            .apply_next_config(rotation, widgets, screens)
             .map(|_| ())
     }
 
@@ -177,18 +183,41 @@ impl RuntimeDevice for SerialRuntimeDevice {
 }
 
 #[derive(Debug, Clone)]
-pub struct CalendarRefreshRequest {
+pub struct ProviderRefreshRequest {
     pub generation: u64,
     pub widget_id: String,
-    pub source: CalendarSource,
-    pub timezone: Tz,
     pub title: String,
-    pub refresh_interval: Duration,
+    pub provider: ProviderRequest,
+    pub active_provider_ids: Vec<String>,
     pub now: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProviderRequest {
+    Calendar {
+        source: CalendarSource,
+        timezone: Tz,
+        refresh_interval: Duration,
+    },
+    Weather {
+        location: String,
+        units: WeatherUnits,
+        refresh_interval: Duration,
+    },
+    JsonFeed {
+        url: String,
+        mappings: Vec<JsonFieldMapping>,
+        refresh_interval: Duration,
+    },
+    Rss {
+        url: String,
+        maximum_items: u8,
+        refresh_interval: Duration,
+    },
+}
+
 #[derive(Debug, Clone)]
-pub struct CalendarRefreshResult {
+pub struct ProviderRefreshResult {
     pub generation: u64,
     pub widget_id: String,
     pub fields: Vec<Field>,
@@ -198,99 +227,205 @@ pub struct CalendarRefreshResult {
     pub error: Option<String>,
 }
 
-pub trait CalendarRefresher: Send + 'static {
-    fn refresh(&mut self, request: CalendarRefreshRequest) -> CalendarRefreshResult;
+pub trait ProviderRefresher: Send + 'static {
+    fn refresh(&mut self, request: ProviderRefreshRequest) -> ProviderRefreshResult;
 }
 
 #[derive(Default)]
-pub struct SystemCalendarRefresher {
+pub struct SystemProviderRefresher {
     providers: HashMap<String, SystemProviderEntry>,
 }
 
 struct SystemProviderEntry {
-    generation: u64,
-    provider: IcsProvider<providers::ics::SystemIcsLoader>,
+    title: String,
+    request: ProviderRequest,
+    provider: SystemProvider,
 }
 
-impl CalendarRefresher for SystemCalendarRefresher {
-    fn refresh(&mut self, request: CalendarRefreshRequest) -> CalendarRefreshResult {
+enum SystemProvider {
+    Calendar(IcsProvider<providers::ics::SystemIcsLoader>),
+    Weather(WeatherProvider<SystemHttpClient>),
+    JsonFeed(JsonFeedProvider<SystemHttpClient>),
+    Rss(RssProvider<SystemHttpClient>),
+}
+
+impl ProviderRefresher for SystemProviderRefresher {
+    fn refresh(&mut self, request: ProviderRefreshRequest) -> ProviderRefreshResult {
+        self.providers
+            .retain(|widget_id, _| request.active_provider_ids.contains(widget_id));
+        let needs_replacement = self
+            .providers
+            .get(&request.widget_id)
+            .is_none_or(|entry| entry.title != request.title || entry.request != request.provider);
+        if needs_replacement {
+            self.providers.insert(
+                request.widget_id.clone(),
+                SystemProviderEntry {
+                    title: request.title.clone(),
+                    request: request.provider.clone(),
+                    provider: system_provider(&request),
+                },
+            );
+        }
         let entry = self
             .providers
-            .entry(request.widget_id.clone())
-            .or_insert_with(|| SystemProviderEntry {
-                generation: request.generation,
-                provider: system_provider(&request),
-            });
-        if entry.generation != request.generation {
-            *entry = SystemProviderEntry {
-                generation: request.generation,
-                provider: system_provider(&request),
-            };
-        }
-        let snapshot = entry.provider.refresh(request.now);
-        CalendarRefreshResult {
+            .get_mut(&request.widget_id)
+            .expect("provider entry was inserted above");
+        let (fields, refreshed_at, age, stale, error) = match &mut entry.provider {
+            SystemProvider::Calendar(provider) => {
+                let snapshot = provider.refresh(request.now);
+                (
+                    provider.fields(&snapshot, request.now),
+                    snapshot.refreshed_at,
+                    snapshot.age,
+                    snapshot.stale,
+                    snapshot.error,
+                )
+            }
+            SystemProvider::Weather(provider) => {
+                let snapshot = provider.refresh(request.now);
+                (
+                    provider.fields(&snapshot),
+                    snapshot.refreshed_at,
+                    snapshot.age,
+                    snapshot.stale,
+                    snapshot.error,
+                )
+            }
+            SystemProvider::JsonFeed(provider) => {
+                let snapshot = provider.refresh(request.now);
+                (
+                    provider.fields(&snapshot),
+                    snapshot.refreshed_at,
+                    snapshot.age,
+                    snapshot.stale,
+                    snapshot.error,
+                )
+            }
+            SystemProvider::Rss(provider) => {
+                let snapshot = provider.refresh(request.now);
+                (
+                    provider.fields(&snapshot),
+                    snapshot.refreshed_at,
+                    snapshot.age,
+                    snapshot.stale,
+                    snapshot.error,
+                )
+            }
+        };
+        ProviderRefreshResult {
             generation: request.generation,
             widget_id: request.widget_id,
-            fields: entry.provider.fields(&snapshot, request.now),
-            refreshed_at: snapshot.refreshed_at,
-            age: snapshot.age,
-            stale: snapshot.stale,
-            error: snapshot.error,
+            fields,
+            refreshed_at,
+            age,
+            stale,
+            error,
         }
     }
 }
 
-fn system_provider(
-    request: &CalendarRefreshRequest,
-) -> IcsProvider<providers::ics::SystemIcsLoader> {
-    let source = match &request.source {
-        CalendarSource::File(path) => IcsSource::File(PathBuf::from(path)),
-        CalendarSource::Url(url) => IcsSource::Url(url.clone()),
-    };
-    IcsProvider::system(
-        source,
-        CalendarOptions {
-            default_timezone: request.timezone,
-            display_timezone: request.timezone,
-            refresh_interval: request.refresh_interval,
+fn system_provider(request: &ProviderRefreshRequest) -> SystemProvider {
+    match &request.provider {
+        ProviderRequest::Calendar {
+            source,
+            timezone,
+            refresh_interval,
+        } => {
+            let source = match source {
+                CalendarSource::File(path) => IcsSource::File(PathBuf::from(path)),
+                CalendarSource::Url(url) => IcsSource::Url(url.clone()),
+            };
+            SystemProvider::Calendar(IcsProvider::system(
+                source,
+                CalendarOptions {
+                    default_timezone: *timezone,
+                    display_timezone: *timezone,
+                    refresh_interval: *refresh_interval,
+                    title: request.title.clone(),
+                    ..CalendarOptions::default()
+                },
+            ))
+        }
+        ProviderRequest::Weather {
+            location,
+            units,
+            refresh_interval,
+        } => SystemProvider::Weather(WeatherProvider::system(WeatherOptions {
+            location: location.clone(),
+            units: match units {
+                WeatherUnits::Metric => ProviderWeatherUnits::Metric,
+                WeatherUnits::Imperial => ProviderWeatherUnits::Imperial,
+            },
+            refresh_interval: *refresh_interval,
             title: request.title.clone(),
-            ..CalendarOptions::default()
-        },
-    )
+        })),
+        ProviderRequest::JsonFeed {
+            url,
+            mappings,
+            refresh_interval,
+        } => SystemProvider::JsonFeed(JsonFeedProvider::system(JsonFeedOptions {
+            url: url.clone(),
+            mappings: mappings
+                .iter()
+                .map(|mapping| ProviderJsonMapping {
+                    field: mapping.field.clone(),
+                    path: mapping.path.clone(),
+                })
+                .collect(),
+            refresh_interval: *refresh_interval,
+            title: request.title.clone(),
+        })),
+        ProviderRequest::Rss {
+            url,
+            maximum_items,
+            refresh_interval,
+        } => SystemProvider::Rss(RssProvider::system(RssOptions {
+            url: url.clone(),
+            maximum_items: usize::from(*maximum_items),
+            refresh_interval: *refresh_interval,
+            title: request.title.clone(),
+        })),
+    }
 }
+
+pub type CalendarRefreshRequest = ProviderRefreshRequest;
+pub type CalendarRefreshResult = ProviderRefreshResult;
+pub use ProviderRefresher as CalendarRefresher;
+pub type SystemCalendarRefresher = SystemProviderRefresher;
 
 struct ProviderWorker {
     sender: Option<SyncSender<CalendarRefreshRequest>>,
     receiver: Receiver<CalendarRefreshResult>,
+    stopping: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
 }
 
+#[derive(Debug)]
 enum ProviderSubmitError {
     Full,
     Disconnected,
 }
 
 impl ProviderWorker {
-    fn new(
-        mut refresher: Box<dyn CalendarRefresher>,
-        capacity: usize,
-        diagnostics: Arc<RuntimeDiagnosticCounters>,
-    ) -> Self {
+    fn new(mut refresher: Box<dyn CalendarRefresher>, capacity: usize) -> Self {
         let (sender, request_receiver) = mpsc::sync_channel(capacity.max(1));
-        let (result_sender, receiver) = mpsc::sync_channel(capacity.max(1));
+        // At most one result can exist per in-flight provider, so this channel is
+        // already logically bounded by the configured provider count. Dropping a
+        // completed result would otherwise leave that provider marked in-flight.
+        let (result_sender, receiver) = mpsc::channel();
+        let stopping = Arc::new(AtomicBool::new(false));
+        let worker_stopping = Arc::clone(&stopping);
         let worker = thread::Builder::new()
             .name("deskmate-provider".into())
             .spawn(move || {
                 while let Ok(request) = request_receiver.recv() {
+                    if worker_stopping.load(Ordering::Acquire) {
+                        break;
+                    }
                     let result = refresher.refresh(request);
-                    match result_sender.try_send(result) {
-                        Ok(()) => {}
-                        Err(mpsc::TrySendError::Full(_)) => {
-                            diagnostics
-                                .provider_results_discarded
-                                .fetch_add(1, Ordering::Relaxed);
-                        }
-                        Err(mpsc::TrySendError::Disconnected(_)) => break,
+                    if result_sender.send(result).is_err() {
+                        break;
                     }
                 }
             })
@@ -298,6 +433,7 @@ impl ProviderWorker {
         Self {
             sender: Some(sender),
             receiver,
+            stopping,
             worker: Some(worker),
         }
     }
@@ -320,6 +456,7 @@ impl ProviderWorker {
 
 impl Drop for ProviderWorker {
     fn drop(&mut self) {
+        self.stopping.store(true, Ordering::Release);
         self.sender.take();
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
@@ -492,7 +629,7 @@ impl RuntimeHandle {
         options: RuntimeOptions,
     ) -> Result<Self, RuntimeError> {
         config
-            .validate()
+            .compile(1)
             .map_err(|error| RuntimeError::InvalidConfig {
                 issues: error.issues,
             })?;
@@ -547,7 +684,7 @@ impl RuntimeHandle {
 
     pub fn apply_config(&self, config: AppConfig) -> Result<(), RuntimeError> {
         config
-            .validate()
+            .compile(1)
             .map_err(|error| RuntimeError::InvalidConfig {
                 issues: error.issues,
             })?;
@@ -556,6 +693,14 @@ impl RuntimeHandle {
 
     pub fn set_paused(&self, paused: bool) -> Result<(), RuntimeError> {
         self.request(|reply| RuntimeCommand::SetPaused { paused, reply })
+    }
+
+    pub fn set_autostart_preference(&self, enabled: bool) -> Result<(), RuntimeError> {
+        self.request(|reply| RuntimeCommand::SetAutostartPreference { enabled, reply })
+    }
+
+    pub fn set_persistence_state(&self, persistence: PersistenceState) -> Result<(), RuntimeError> {
+        self.request(|reply| RuntimeCommand::SetPersistenceState { persistence, reply })
     }
 
     pub fn control_pomodoro(
@@ -651,7 +796,7 @@ impl Drop for RuntimeHandle {
     }
 }
 
-struct CalendarRuntimeState {
+struct ProviderRuntimeState {
     generation: u64,
     in_flight: bool,
     snapshot: ProviderSnapshot,
@@ -667,7 +812,7 @@ struct WorkerState {
     dirty_widgets: BTreeSet<String>,
     pomodoros: BTreeMap<String, Pomodoro>,
     pomodoro_snapshots: BTreeMap<String, PomodoroSnapshot>,
-    calendars: BTreeMap<String, CalendarRuntimeState>,
+    providers: BTreeMap<String, ProviderRuntimeState>,
     interrupts: InterruptArbiter,
     active_screen: Option<String>,
     active_screen_dirty: bool,
@@ -690,7 +835,7 @@ impl WorkerState {
             dirty_widgets: BTreeSet::new(),
             pomodoros: BTreeMap::new(),
             pomodoro_snapshots: BTreeMap::new(),
-            calendars: BTreeMap::new(),
+            providers: BTreeMap::new(),
             interrupts: InterruptArbiter::default(),
             active_screen: None,
             active_screen_dirty: false,
@@ -707,14 +852,19 @@ impl WorkerState {
     }
 
     fn replace_config(&mut self, config: AppConfig, now: Instant, scheduler: &mut Scheduler) {
+        let previous_config = self.config.clone();
+        let previous_active_screen = self.active_screen.clone();
+        let mut previous_fields = std::mem::take(&mut self.latest_fields);
+        let mut previous_pomodoros = std::mem::take(&mut self.pomodoros);
+        let mut previous_providers = std::mem::take(&mut self.providers);
         self.generation = self.generation.saturating_add(1);
         self.config = config;
-        self.latest_fields.clear();
         self.dirty_widgets.clear();
-        self.pomodoros.clear();
         self.pomodoro_snapshots.clear();
-        self.calendars.clear();
-        self.interrupts.clear_for_config_replacement();
+        let live_widget_ids: BTreeSet<&str> =
+            self.config.widgets.iter().map(WidgetSettings::id).collect();
+        self.interrupts
+            .retain_widgets(|widget_id| live_widget_ids.contains(widget_id));
 
         let compiled = self
             .config
@@ -724,8 +874,9 @@ impl WorkerState {
             self.latest_fields.insert(push.widget_id, push.fields);
         }
 
-        let mut calendar_deadlines = Vec::new();
-        for widget in &self.config.widgets {
+        let mut provider_deadlines = Vec::new();
+        let widgets = self.config.widgets.clone();
+        for widget in &widgets {
             match widget {
                 WidgetSettings::Pomodoro {
                     id,
@@ -733,45 +884,45 @@ impl WorkerState {
                     duration_seconds,
                     ..
                 } => {
-                    let timer = Pomodoro::new(label, *duration_seconds)
-                        .expect("validated pomodoro duration");
-                    self.pomodoro_snapshots.insert(
-                        id.clone(),
-                        PomodoroSnapshot {
-                            widget_id: id.clone(),
-                            state: PomodoroState::Idle,
-                            duration_seconds: *duration_seconds,
-                            remaining_seconds: *duration_seconds,
-                        },
+                    self.restore_pomodoro(
+                        id,
+                        label,
+                        *duration_seconds,
+                        &mut previous_pomodoros,
+                        now,
                     );
-                    self.pomodoros.insert(id.clone(), timer);
                 }
-                WidgetSettings::Calendar {
-                    id,
-                    refresh_minutes,
-                    ..
-                } => {
-                    let interval = Duration::from_secs(u64::from(*refresh_minutes) * 60);
-                    calendar_deadlines.push((id.clone(), interval));
-                    self.calendars.insert(
-                        id.clone(),
-                        CalendarRuntimeState {
-                            generation: self.generation,
-                            in_flight: false,
-                            snapshot: ProviderSnapshot {
-                                widget_id: id.clone(),
-                                state: ProviderState::Idle,
-                                last_success_unix_ms: None,
-                                age_seconds: None,
-                            },
-                        },
+                WidgetSettings::Calendar { id, refresh, .. }
+                | WidgetSettings::Weather { id, refresh, .. }
+                | WidgetSettings::JsonFeed { id, refresh, .. }
+                | WidgetSettings::Rss { id, refresh, .. } => {
+                    let interval = refresh
+                        .interval_minutes()
+                        .map(|minutes| Duration::from_secs(u64::from(minutes) * 60));
+                    provider_deadlines.push((id.clone(), interval));
+                    let unchanged = previous_config
+                        .widgets
+                        .iter()
+                        .any(|previous| previous == widget);
+                    self.restore_provider(
+                        id,
+                        unchanged,
+                        &mut previous_fields,
+                        &mut previous_providers,
                     );
                 }
                 WidgetSettings::Clock { .. } => {}
             }
         }
-        scheduler.replace_calendars(calendar_deadlines, now);
-        self.active_screen = self.config.screens.first().map(|screen| screen.id.clone());
+        scheduler.replace_providers(provider_deadlines, now);
+        self.active_screen = previous_active_screen
+            .filter(|active| {
+                self.config
+                    .screens
+                    .iter()
+                    .any(|screen| &screen.id == active)
+            })
+            .or_else(|| self.config.screens.first().map(|screen| screen.id.clone()));
         self.device.active_screen_id.clone_from(&self.active_screen);
         self.active_screen_dirty = self.active_screen.is_some();
         self.needs_full_sync = true;
@@ -782,15 +933,84 @@ impl WorkerState {
         };
     }
 
+    fn restore_pomodoro(
+        &mut self,
+        id: &str,
+        label: &str,
+        duration_seconds: u32,
+        previous: &mut BTreeMap<String, Pomodoro>,
+        now: Instant,
+    ) {
+        let mut timer = previous
+            .remove(id)
+            .filter(|timer| timer.matches_settings(label, duration_seconds))
+            .unwrap_or_else(|| {
+                Pomodoro::new(label, duration_seconds).expect("validated pomodoro duration")
+            });
+        let update = timer.update(now);
+        self.latest_fields.insert(id.into(), update.fields);
+        self.pomodoro_snapshots.insert(
+            id.into(),
+            PomodoroSnapshot {
+                widget_id: id.into(),
+                state: pomodoro_state(update.state),
+                duration_seconds: update.duration_seconds,
+                remaining_seconds: update.remaining_seconds,
+            },
+        );
+        if update.completion_interrupt {
+            let _ = self.interrupts.schedule(id, "Timer finished");
+        }
+        self.pomodoros.insert(id.into(), timer);
+    }
+
+    fn restore_provider(
+        &mut self,
+        id: &str,
+        unchanged: bool,
+        previous_fields: &mut BTreeMap<String, Vec<Field>>,
+        previous_providers: &mut BTreeMap<String, ProviderRuntimeState>,
+    ) {
+        let provider = if unchanged {
+            if let Some(fields) = previous_fields.remove(id) {
+                self.latest_fields.insert(id.into(), fields);
+            }
+            previous_providers.remove(id).map_or_else(
+                || self.empty_provider(id),
+                |mut provider| {
+                    provider.generation = self.generation;
+                    provider.in_flight = false;
+                    provider
+                },
+            )
+        } else {
+            self.empty_provider(id)
+        };
+        self.providers.insert(id.into(), provider);
+    }
+
+    fn empty_provider(&self, id: &str) -> ProviderRuntimeState {
+        ProviderRuntimeState {
+            generation: self.generation,
+            in_flight: false,
+            snapshot: ProviderSnapshot {
+                widget_id: id.into(),
+                state: ProviderState::Idle,
+                last_success_unix_ms: None,
+                age_seconds: None,
+            },
+        }
+    }
+
     fn snapshot(&self, diagnostics: &RuntimeDiagnosticCounters) -> AppSnapshot {
         AppSnapshot {
             config: self.config.clone(),
             runtime: self.runtime.clone(),
             device: self.device.clone(),
             providers: self
-                .calendars
+                .providers
                 .values()
-                .map(|calendar| calendar.snapshot.clone())
+                .map(|provider| provider.snapshot.clone())
                 .collect(),
             pomodoros: self.pomodoro_snapshots.values().cloned().collect(),
             persistence: self.persistence.clone(),
@@ -828,11 +1048,7 @@ fn run_runtime(
         options.time_sync_interval,
     );
     let mut state = WorkerState::new(config, now, &mut scheduler);
-    let provider = ProviderWorker::new(
-        refresher,
-        options.provider_job_capacity,
-        Arc::clone(&publisher.diagnostics),
-    );
+    let provider = ProviderWorker::new(refresher, options.provider_job_capacity);
     state.publish_if_changed(publisher, diagnostics);
 
     let mut shutting_down = false;
@@ -845,9 +1061,7 @@ fn run_runtime(
                     &mut state,
                     &mut scheduler,
                     device.as_mut(),
-                    &provider,
                     diagnostics,
-                    &options,
                 );
                 while !shutting_down {
                     let Ok(command) = command_receiver.try_recv() else {
@@ -858,9 +1072,7 @@ fn run_runtime(
                         &mut state,
                         &mut scheduler,
                         device.as_mut(),
-                        &provider,
                         diagnostics,
-                        &options,
                     );
                 }
             }
@@ -893,26 +1105,25 @@ fn run_runtime(
     publisher.close();
 }
 
-#[allow(clippy::too_many_arguments)]
 fn process_command(
     command: RuntimeCommand,
     state: &mut WorkerState,
     scheduler: &mut Scheduler,
     device: &mut dyn RuntimeDevice,
-    _provider: &ProviderWorker,
     diagnostics: &RuntimeDiagnosticCounters,
-    _options: &RuntimeOptions,
 ) -> bool {
     diagnostics
         .commands_processed
         .fetch_add(1, Ordering::Relaxed);
     match command {
         RuntimeCommand::ApplyConfig { config, reply } => {
-            let result = config
-                .validate()
-                .map_err(|error| RuntimeError::InvalidConfig {
-                    issues: error.issues,
-                });
+            let result =
+                config
+                    .compile(1)
+                    .map(|_| ())
+                    .map_err(|error| RuntimeError::InvalidConfig {
+                        issues: error.issues,
+                    });
             let result = result.and_then(|()| {
                 state.replace_config(config, Instant::now(), scheduler);
                 if state.connected && !state.config.preferences.paused {
@@ -937,6 +1148,14 @@ fn process_command(
             };
             let _ = reply.send(result);
         }
+        RuntimeCommand::SetAutostartPreference { enabled, reply } => {
+            state.config.preferences.autostart = enabled;
+            let _ = reply.send(Ok(()));
+        }
+        RuntimeCommand::SetPersistenceState { persistence, reply } => {
+            state.persistence = persistence;
+            let _ = reply.send(Ok(()));
+        }
         RuntimeCommand::Pomodoro {
             widget_id,
             action,
@@ -946,8 +1165,10 @@ fn process_command(
             let _ = reply.send(result);
         }
         RuntimeCommand::RefreshProvider { widget_id, reply } => {
-            let result = if state.calendars.contains_key(&widget_id) {
-                scheduler.schedule_calendar_now(&widget_id, Instant::now());
+            let result = if let Some(provider) = state.providers.get(&widget_id) {
+                if !provider.in_flight {
+                    scheduler.schedule_provider_now(&widget_id, Instant::now());
+                }
                 Ok(())
             } else {
                 Err(RuntimeError::UnknownWidget { widget_id })
@@ -1081,37 +1302,37 @@ fn submit_due_providers(
     now: Instant,
     retry: Duration,
 ) {
-    for widget_id in scheduler.due_calendars(now) {
+    for widget_id in scheduler.due_providers(now) {
         if state
-            .calendars
+            .providers
             .get(&widget_id)
-            .is_none_or(|calendar| calendar.in_flight)
+            .is_none_or(|provider| provider.in_flight)
         {
             continue;
         }
-        let Some(request) = calendar_request(state, &widget_id) else {
+        let Some(request) = provider_request(state, &widget_id) else {
             continue;
         };
         match provider.try_submit(request) {
             Ok(()) => {
-                if let Some(calendar) = state.calendars.get_mut(&widget_id) {
-                    calendar.in_flight = true;
-                    calendar.snapshot.state = ProviderState::Refreshing;
+                if let Some(provider) = state.providers.get_mut(&widget_id) {
+                    provider.in_flight = true;
+                    provider.snapshot.state = ProviderState::Refreshing;
                 }
                 diagnostics
                     .provider_jobs_started
                     .fetch_add(1, Ordering::Relaxed);
-                scheduler.calendar_started(&widget_id, now);
+                scheduler.provider_started(&widget_id, now);
             }
             Err(ProviderSubmitError::Full) => {
                 diagnostics
                     .provider_queue_full
                     .fetch_add(1, Ordering::Relaxed);
-                scheduler.calendar_retry(&widget_id, now, retry);
+                scheduler.provider_retry(&widget_id, now, retry);
             }
             Err(ProviderSubmitError::Disconnected) => {
-                if let Some(calendar) = state.calendars.get_mut(&widget_id) {
-                    calendar.snapshot.state = ProviderState::Error {
+                if let Some(provider) = state.providers.get_mut(&widget_id) {
+                    provider.snapshot.state = ProviderState::Error {
                         message: "provider worker stopped".into(),
                     };
                 }
@@ -1120,25 +1341,91 @@ fn submit_due_providers(
     }
 }
 
-fn calendar_request(state: &WorkerState, widget_id: &str) -> Option<CalendarRefreshRequest> {
+fn provider_request(state: &WorkerState, widget_id: &str) -> Option<ProviderRefreshRequest> {
+    let active_provider_ids: Vec<String> = state.providers.keys().cloned().collect();
+    let timezone = state.config.preferences.timezone.parse().ok()?;
     state.config.widgets.iter().find_map(|widget| match widget {
         WidgetSettings::Calendar {
             id,
             title,
             source,
-            refresh_minutes,
+            refresh,
             ..
-        } if id == widget_id => Some(CalendarRefreshRequest {
+        } if id == widget_id => Some(ProviderRefreshRequest {
             generation: state.generation,
             widget_id: id.clone(),
-            source: source.clone(),
-            timezone: state.config.preferences.timezone.parse().ok()?,
             title: title.clone(),
-            refresh_interval: Duration::from_secs(u64::from(*refresh_minutes) * 60),
+            provider: ProviderRequest::Calendar {
+                source: source.clone(),
+                timezone,
+                refresh_interval: refresh_interval(*refresh),
+            },
+            active_provider_ids: active_provider_ids.clone(),
+            now: Utc::now(),
+        }),
+        WidgetSettings::Weather {
+            id,
+            title,
+            location,
+            units,
+            refresh,
+            ..
+        } if id == widget_id => Some(ProviderRefreshRequest {
+            generation: state.generation,
+            widget_id: id.clone(),
+            title: title.clone(),
+            provider: ProviderRequest::Weather {
+                location: location.clone(),
+                units: *units,
+                refresh_interval: refresh_interval(*refresh),
+            },
+            active_provider_ids: active_provider_ids.clone(),
+            now: Utc::now(),
+        }),
+        WidgetSettings::JsonFeed {
+            id,
+            title,
+            url,
+            mappings,
+            refresh,
+            ..
+        } if id == widget_id => Some(ProviderRefreshRequest {
+            generation: state.generation,
+            widget_id: id.clone(),
+            title: title.clone(),
+            provider: ProviderRequest::JsonFeed {
+                url: url.clone(),
+                mappings: mappings.clone(),
+                refresh_interval: refresh_interval(*refresh),
+            },
+            active_provider_ids: active_provider_ids.clone(),
+            now: Utc::now(),
+        }),
+        WidgetSettings::Rss {
+            id,
+            title,
+            url,
+            max_items,
+            refresh,
+            ..
+        } if id == widget_id => Some(ProviderRefreshRequest {
+            generation: state.generation,
+            widget_id: id.clone(),
+            title: title.clone(),
+            provider: ProviderRequest::Rss {
+                url: url.clone(),
+                maximum_items: *max_items,
+                refresh_interval: refresh_interval(*refresh),
+            },
+            active_provider_ids: active_provider_ids.clone(),
             now: Utc::now(),
         }),
         _ => None,
     })
+}
+
+fn refresh_interval(policy: crate::RefreshPolicy) -> Duration {
+    Duration::from_secs(u64::from(policy.interval_minutes().unwrap_or(1_440)) * 60)
 }
 
 fn drain_provider_results(
@@ -1147,20 +1434,20 @@ fn drain_provider_results(
     diagnostics: &RuntimeDiagnosticCounters,
 ) {
     while let Ok(result) = provider.try_recv() {
-        let Some(calendar) = state.calendars.get_mut(&result.widget_id) else {
+        let Some(provider_state) = state.providers.get_mut(&result.widget_id) else {
             diagnostics
                 .provider_results_discarded
                 .fetch_add(1, Ordering::Relaxed);
             continue;
         };
-        if result.generation != calendar.generation || result.generation != state.generation {
+        if result.generation != provider_state.generation || result.generation != state.generation {
             diagnostics
                 .provider_results_discarded
                 .fetch_add(1, Ordering::Relaxed);
             continue;
         }
-        calendar.in_flight = false;
-        calendar.snapshot = ProviderSnapshot {
+        provider_state.in_flight = false;
+        provider_state.snapshot = ProviderSnapshot {
             widget_id: result.widget_id.clone(),
             state: match (result.stale, &result.error, result.refreshed_at) {
                 (false, None, _) => ProviderState::Fresh,
@@ -1260,6 +1547,23 @@ fn control_pomodoro(
 fn drain_device_events(state: &mut WorkerState, device: &mut dyn RuntimeDevice, now: Instant) {
     while let Some(received) = device.try_recv_event() {
         match (received.event.kind, received.event.action) {
+            (EventKind::Navigation, EventAction::NavigatePrevious | EventAction::NavigateNext) => {
+                if state
+                    .config
+                    .screens
+                    .iter()
+                    .any(|screen| screen.id == received.event.screen_id)
+                {
+                    state.active_screen = Some(received.event.screen_id.clone());
+                    state
+                        .device
+                        .active_screen_id
+                        .clone_from(&state.active_screen);
+                    // The gesture already changed the physical display. Remember it for
+                    // future replay without issuing a redundant activation now.
+                    state.active_screen_dirty = false;
+                }
+            }
             (EventKind::Tap, EventAction::StartPause) => {
                 let _ = control_pomodoro(
                     state,
@@ -1299,7 +1603,11 @@ fn synchronize_full(
         .compile(1)
         .expect("runtime config remains validated");
     device
-        .apply_layout(compiled.layout.widgets, compiled.layout.screens)
+        .apply_layout(
+            compiled.layout.rotation,
+            compiled.layout.widgets,
+            compiled.layout.screens,
+        )
         .map_err(|error| device_runtime_error(&error))?;
     state.dirty_widgets = state.latest_fields.keys().cloned().collect();
     push_dirty_widgets(state, device)?;
@@ -1469,10 +1777,23 @@ fn update_device_status(
     device: &dyn RuntimeDevice,
 ) {
     let diagnostics = device.diagnostics();
+    // The dedicated field is additive in M3. Revisions provide a safe monotonic floor
+    // when talking to an older v1 image that omits it: interrupt tokens and revisions
+    // are all nonzero u32 counters, and starting higher is always accepted.
+    state.interrupts.advance_latest_token(
+        status
+            .latest_interrupt_token
+            .max(status.latest_revision)
+            .max(status.config_revision),
+    );
     state.device.connection = ConnectionState::Online;
     state.device.port_name = Some(port_name.into());
     state.device.firmware_version = Some(status.firmware_version.clone());
     state.device.protocol_version = Some(status.protocol_version);
+    state.device.max_protocol_version = Some(status.max_protocol_version);
+    state.device.capabilities = crate::DeviceCapability::from_bits(status.capabilities);
+    state.device.unknown_capability_bits =
+        status.capabilities & !crate::DeviceCapability::known_bits();
     state.device.uptime_ms = Some(status.uptime_ms);
     state.device.free_heap = Some(status.free_heap);
     state.device.rotation = Some(status.rotation);
@@ -1507,12 +1828,6 @@ fn initial_snapshot(config: &AppConfig, diagnostics: RuntimeDiagnostics) -> AppS
     let mut pomodoros = Vec::new();
     for widget in &config.widgets {
         match widget {
-            WidgetSettings::Calendar { id, .. } => providers.push(ProviderSnapshot {
-                widget_id: id.clone(),
-                state: ProviderState::Idle,
-                last_success_unix_ms: None,
-                age_seconds: None,
-            }),
             WidgetSettings::Pomodoro {
                 id,
                 duration_seconds,
@@ -1522,6 +1837,15 @@ fn initial_snapshot(config: &AppConfig, diagnostics: RuntimeDiagnostics) -> AppS
                 state: PomodoroState::Idle,
                 duration_seconds: *duration_seconds,
                 remaining_seconds: *duration_seconds,
+            }),
+            WidgetSettings::Calendar { id, .. }
+            | WidgetSettings::Weather { id, .. }
+            | WidgetSettings::JsonFeed { id, .. }
+            | WidgetSettings::Rss { id, .. } => providers.push(ProviderSnapshot {
+                widget_id: id.clone(),
+                state: ProviderState::Idle,
+                last_success_unix_ms: None,
+                age_seconds: None,
             }),
             WidgetSettings::Clock { .. } => {}
         }
@@ -1546,10 +1870,81 @@ fn empty_device(connection: ConnectionState) -> DeviceSnapshot {
         port_name: None,
         firmware_version: None,
         protocol_version: None,
+        max_protocol_version: None,
+        capabilities: Vec::new(),
+        unknown_capability_bits: 0,
         uptime_ms: None,
         free_heap: None,
         rotation: None,
         active_screen_id: None,
         counters: DeviceCounters::default(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct ImmediateRefresher {
+        completed: mpsc::Sender<()>,
+    }
+
+    impl ProviderRefresher for ImmediateRefresher {
+        fn refresh(&mut self, request: ProviderRefreshRequest) -> ProviderRefreshResult {
+            self.completed.send(()).unwrap();
+            ProviderRefreshResult {
+                generation: request.generation,
+                widget_id: request.widget_id,
+                fields: Vec::new(),
+                refreshed_at: Some(request.now),
+                age: Some(Duration::ZERO),
+                stale: false,
+                error: None,
+            }
+        }
+    }
+
+    fn provider_request(widget_id: &str) -> ProviderRefreshRequest {
+        ProviderRefreshRequest {
+            generation: 1,
+            widget_id: widget_id.into(),
+            title: widget_id.into(),
+            provider: ProviderRequest::Calendar {
+                source: CalendarSource::File("unused.ics".into()),
+                timezone: Tz::UTC,
+                refresh_interval: Duration::from_mins(1),
+            },
+            active_provider_ids: Vec::new(),
+            now: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn completed_provider_results_are_never_dropped_under_backpressure() {
+        let (completed_sender, completed_receiver) = mpsc::channel();
+        let worker = ProviderWorker::new(
+            Box::new(ImmediateRefresher {
+                completed: completed_sender,
+            }),
+            1,
+        );
+
+        for widget_id in ["one", "two", "three"] {
+            worker.try_submit(provider_request(widget_id)).unwrap();
+            completed_receiver
+                .recv_timeout(Duration::from_secs(1))
+                .unwrap();
+        }
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let mut completed_ids = Vec::new();
+        while completed_ids.len() < 3 && Instant::now() < deadline {
+            match worker.try_recv() {
+                Ok(result) => completed_ids.push(result.widget_id),
+                Err(TryRecvError::Empty) => thread::yield_now(),
+                Err(TryRecvError::Disconnected) => break,
+            }
+        }
+        assert_eq!(completed_ids, ["one", "two", "three"]);
     }
 }

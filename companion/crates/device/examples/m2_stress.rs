@@ -242,7 +242,7 @@ fn run_config_swaps(
         let (widgets, screens) = layout(swap % 2 != 0);
         connected
             .session
-            .apply_next_config(widgets, screens)
+            .apply_next_config(90, widgets, screens)
             .map_err(|error| format!("config swap {} failed: {error}", swap + 1))?;
         if swap % 10 == 9 || swap + 1 == count {
             thread::sleep(Duration::from_millis(25));

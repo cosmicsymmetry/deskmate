@@ -59,18 +59,21 @@ plugin API, mobile companion apps.
 
 - A **carousel of user-ordered screens**; swipe to navigate; optional
   auto-rotate timer.
-- Each screen is either **one widget** (at `full` or `standard` size) or a
+- Each screen is either **one widget** (at `full` or legacy `standard` size) or a
   **dashboard grid** of 2–4 widgets at `tile` size.
-- **Size classes:** `full` (whole panel, status strip hidden), `standard`
-  (panel minus status strip), `tile` (grid cell). Each display template
+- **Size classes:** `full` (whole panel), `standard` (v1 compatibility alias that also
+  uses the whole panel), `tile` (grid cell). Each display template
   declares which size classes it supports; templates without `tile` support
   cannot be placed on a dashboard screen — no forced squeezing.
-- **Status strip:** slim always-on overlay (time · connection dot ·
-  notification dots). The active widget opts out by using `full`.
+- **Clean canvas:** single-widget screens have no status strip or other persistent
+  overlay; connection/provider state belongs in the companion settings app.
 - **Priority interrupts:** a widget may declare urgency (meeting starting,
   timer finished) and temporarily take over the screen, then yield back to
-  the previous screen. Interrupt display uses the widget's `standard` or
-  `full` layout plus a dismiss affordance (tap = acknowledge).
+  the previous screen. Interrupt display uses the full canvas plus a dismiss
+  affordance (tap = acknowledge).
+- **Mounting orientation:** the panel remains 448x368 landscape. Settings offers exactly
+  90° (USB below) and 270° (USB above); portrait and on-device rotation gestures are
+  intentionally unsupported.
 
 ## 5. Widget model (config-composable)
 
@@ -162,5 +165,6 @@ Rust workspace crates:
 | Rendering | On-device (LVGL) | S3 USB too slow for frame streaming; smooth animation + instant touch |
 | App stack | Tauri v2 | Lean Rust daemon (~15–30 MB idle), system webview only while settings open, Windows path without rewrite |
 | Extension model | B: config-composable | User power without plugin-API maintenance; templates become future plugin substrate |
-| Screen model | Carousel + size classes + opt-out status strip | Combines fullscreen, strip, and dashboard grid as one layout system |
+| Screen model | Carousel + clean widgets + future tile dashboards | Keeps the small panel readable while retaining a bounded path to multi-widget screens |
+| Mounting orientation | Settings-owned 90°/270° choice | Supports both physical attachment directions without portrait layouts or accidental touch rotation |
 | Firmware provenance | From scratch (ESP-IDF + esp_lcd + LVGL) | Clean licensing/history for a distributable product; no rsvpnano reuse |

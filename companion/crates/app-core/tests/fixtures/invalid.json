@@ -1,49 +1,79 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "preferences": {
     "timezone": "Not/A_Timezone",
     "autostart": false,
-    "paused": false
+    "paused": false,
+    "orientation": "landscape"
   },
   "widgets": [
     {
       "kind": "clock",
       "id": "duplicate",
-      "size": "standard",
+      "size": "tile",
       "title": "Desk",
-      "show_seconds": true
+      "show_seconds": true,
+      "template": { "kind": "digital-clock" },
+      "tap_action": { "kind": "none" },
+      "refresh": { "kind": "device-local" },
+      "interrupt_policy": "disabled"
     },
     {
       "kind": "pomodoro",
       "id": "duplicate",
       "size": "full",
       "label": "Focus",
-      "duration_seconds": 0
+      "duration_seconds": 0,
+      "template": { "kind": "progress-ring" },
+      "tap_action": { "kind": "start-pause" },
+      "refresh": { "kind": "device-local" },
+      "interrupt_policy": "enabled"
     },
     {
       "kind": "calendar",
       "id": "calendar",
-      "size": "standard",
+      "size": "tile",
       "title": "Calendar",
       "source": {
         "kind": "url",
         "value": "calendar.example/feed"
       },
-      "refresh_minutes": 0
+      "template": { "kind": "row-list" },
+      "tap_action": { "kind": "none" },
+      "refresh": { "kind": "interval", "minutes": 0 },
+      "interrupt_policy": "disabled"
+    },
+    {
+      "kind": "clock",
+      "id": "orphan",
+      "size": "full",
+      "title": "Orphan",
+      "show_seconds": false,
+      "template": { "kind": "digital-clock" },
+      "tap_action": { "kind": "none" },
+      "refresh": { "kind": "device-local" },
+      "interrupt_policy": "disabled"
     }
   ],
   "screens": [
     {
       "id": "same-screen",
-      "widget_id": "missing-widget"
+      "layout": { "kind": "single", "widget_id": "missing-widget" }
     },
     {
       "id": "same-screen",
-      "widget_id": "duplicate"
+      "layout": { "kind": "single", "widget_id": "duplicate" }
     },
     {
       "id": "third-screen",
-      "widget_id": "duplicate"
+      "layout": { "kind": "single", "widget_id": "calendar" }
+    },
+    {
+      "id": "fourth-screen",
+      "layout": { "kind": "single", "widget_id": "duplicate" }
     }
-  ]
+  ],
+  "assets": [],
+  "carousel": { "auto_advance_seconds": 1 },
+  "updater": { "channel": "stable", "checks": "notify" }
 }

@@ -3,12 +3,13 @@
 #![allow(clippy::needless_pass_by_value)]
 
 use app_core::{
-    AppConfig, AppSnapshot, MAX_CONFIG_FILE_BYTES, MAX_WIDGET_ID_LEN, PomodoroAction, RuntimeError,
-    SaveReceipt, StoreError, ValidationIssue,
+    AppConfig, AppSnapshot, MAX_CONFIG_FILE_BYTES, MAX_ICS_BYTES, MAX_ICS_SOURCE_LEN,
+    MAX_WIDGET_ID_LEN, PomodoroAction, RuntimeError, SaveReceipt, StoreError, ValidationIssue,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, State};
 use tauri_plugin_autostart::ManagerExt;
+use tauri_plugin_dialog::DialogExt;
 
 use crate::{DesktopState, MAIN_WINDOW_LABEL};
 
@@ -165,6 +166,49 @@ pub fn refresh_provider(
 }
 
 #[tauri::command]
+pub async fn choose_ics_file(app: AppHandle) -> Result<Option<String>, IpcError> {
+    let Some(file) = app
+        .dialog()
+        .file()
+        .set_title("Choose an iCalendar file")
+        .add_filter("iCalendar", &["ics", "ical"])
+        .blocking_pick_file()
+    else {
+        return Ok(None);
+    };
+    let path = file.into_path().map_err(|error| IpcError::InvalidPayload {
+        message: format!("the selected calendar source is not a local file: {error}"),
+    })?;
+    let metadata = std::fs::metadata(&path).map_err(|error| IpcError::Provider {
+        message: format!("cannot read the selected calendar file: {error}"),
+    })?;
+    if !metadata.is_file() {
+        return Err(IpcError::InvalidPayload {
+            message: "the selected calendar source is not a file".into(),
+        });
+    }
+    validate_ics_file_size(metadata.len())?;
+    let value = path
+        .to_str()
+        .ok_or_else(|| IpcError::InvalidPayload {
+            message: "the selected calendar path is not valid UTF-8".into(),
+        })?
+        .to_owned();
+    validate_target(&value, MAX_ICS_SOURCE_LEN, "ICS file path")?;
+    Ok(Some(value))
+}
+
+fn validate_ics_file_size(length: u64) -> Result<(), IpcError> {
+    if length > MAX_ICS_BYTES as u64 {
+        return Err(IpcError::PayloadTooLarge {
+            message: "the selected calendar file exceeds the 1 MB limit".into(),
+            maximum_bytes: MAX_ICS_BYTES,
+        });
+    }
+    Ok(())
+}
+
+#[tauri::command]
 pub fn get_autostart_status(
     app: AppHandle,
     state: State<'_, DesktopState>,
@@ -211,7 +255,7 @@ pub(crate) fn set_paused(state: &DesktopState, paused: bool) -> Result<(), IpcEr
         return Ok(());
     }
     config.preferences.paused = paused;
-    state.store.save(&config).map_err(IpcError::from)?;
+    persist_config(state, &config)?;
     // If the worker cannot accept this change, the valid saved preference remains
     // authoritative on the next app start rather than being silently discarded.
     state.runtime.set_paused(paused).map_err(IpcError::from)
@@ -238,7 +282,7 @@ pub(crate) fn set_autostart(
 
     let mut config = state.runtime.snapshot().map_err(IpcError::from)?.config;
     config.preferences.autostart = enabled;
-    if let Err(error) = state.store.save(&config) {
+    if let Err(error) = persist_config(state, &config) {
         if changed_os {
             if was_enabled {
                 let _ = manager.enable();
@@ -246,12 +290,15 @@ pub(crate) fn set_autostart(
                 let _ = manager.disable();
             }
         }
-        return Err(IpcError::from(error));
+        return Err(error);
     }
 
-    // Runtime replacement happens before any serial synchronization. A device error
-    // therefore leaves this saved, valid preference queued for reconnect.
-    state.runtime.apply_config(config).map_err(IpcError::from)?;
+    // This preference has no layout or provider effect, so update it without replacing
+    // live pomodoro/provider state.
+    state
+        .runtime
+        .set_autostart_preference(enabled)
+        .map_err(IpcError::from)?;
     state
         .tray
         .autostart
@@ -270,13 +317,65 @@ fn save_and_apply(
     let _mutation = state.mutation_lock.lock().map_err(|_| IpcError::Internal {
         message: "desktop mutation lock is unavailable".into(),
     })?;
-    let current = state.runtime.snapshot().map_err(IpcError::from)?.config;
-    merge_command_owned_preferences(&mut config, &current);
-    let save = state.store.save(&config).map_err(IpcError::from)?;
+    let snapshot = state.runtime.snapshot().map_err(IpcError::from)?;
+    merge_command_owned_preferences(&mut config, &snapshot.config);
+    let compiled = config.compile(1).map_err(|error| IpcError::Validation {
+        message: "configuration requires device features not implemented by this build".into(),
+        issues: error.issues,
+    })?;
+    ensure_device_compatibility(&snapshot.device, compiled.required_capabilities)?;
+    let save = persist_config(state, &config)?;
     // Keep a valid saved draft queued even when immediate device application reports
     // a transport failure. RuntimeHandle has already replaced its replay set then.
     state.runtime.apply_config(config).map_err(IpcError::from)?;
     Ok(ConfigApplyResult { save })
+}
+
+fn ensure_device_compatibility(
+    device: &app_core::DeviceSnapshot,
+    required_capabilities: u64,
+) -> Result<(), IpcError> {
+    if !matches!(device.connection, app_core::ConnectionState::Online)
+        || device.protocol_version.is_none()
+    {
+        return Ok(());
+    }
+    let available = device.capability_bits();
+    if available & required_capabilities == required_capabilities {
+        return Ok(());
+    }
+    let missing = required_capabilities & !available;
+    Err(IpcError::Validation {
+        message: "the connected firmware cannot apply this configuration".into(),
+        issues: vec![ValidationIssue {
+            path: "device.capabilities".into(),
+            code: app_core::ValidationCode::RequiresCapability,
+            message: format!("connected firmware is missing capability bits 0x{missing:016x}"),
+        }],
+    })
+}
+
+fn persist_config(state: &DesktopState, config: &AppConfig) -> Result<SaveReceipt, IpcError> {
+    state
+        .runtime
+        .set_persistence_state(app_core::PersistenceState::Saving)
+        .map_err(IpcError::from)?;
+    match state.store.save(config) {
+        Ok(receipt) => {
+            state
+                .runtime
+                .set_persistence_state(app_core::PersistenceState::Clean)
+                .map_err(IpcError::from)?;
+            Ok(receipt)
+        }
+        Err(error) => {
+            let message = error.to_string();
+            let _ = state
+                .runtime
+                .set_persistence_state(app_core::PersistenceState::RecoverableError { message });
+            Err(IpcError::from(error))
+        }
+    }
 }
 
 fn merge_command_owned_preferences(draft: &mut AppConfig, current: &AppConfig) {
@@ -399,10 +498,14 @@ mod tests {
     use std::path::Path;
 
     use app_core::{
-        AppConfig, AppPreferences, CURRENT_SCHEMA_VERSION, CalendarSource, ConnectionState,
-        DeviceCounters, DeviceSnapshot, PersistenceState, PomodoroSnapshot, PomodoroState,
-        ProviderSnapshot, ProviderState, RuntimeDiagnostics, RuntimeError, RuntimeState,
-        ScreenSettings, StoreWarning, ValidationCode, WidgetSettings, WidgetSize,
+        AppConfig, AppPreferences, AssetKind, AssetSource, CURRENT_SCHEMA_VERSION, CalendarSource,
+        CarouselSettings, ConnectionState, DeviceCapability, DeviceCounters, DeviceSnapshot,
+        DisplayOrientation, DisplayTemplate, FirmwareArtifactMetadata, GlyphRange,
+        PersistenceState, PomodoroSnapshot, PomodoroState, ProviderSnapshot, ProviderState,
+        RefreshPolicy, RuntimeDiagnostics, RuntimeError, RuntimeState, ScreenLayout,
+        ScreenSettings, StoreWarning, TileSettings, UpdateChannel, UpdateCheckPolicy,
+        UpdaterSettings, ValidationCode, WeatherUnits, WidgetInterruptPolicy, WidgetSettings,
+        WidgetSize, WidgetTapAction,
     };
     use serde::Serialize;
 
@@ -463,6 +566,16 @@ mod tests {
     }
 
     #[test]
+    fn calendar_file_picker_enforces_the_provider_size_limit() {
+        assert!(validate_ics_file_size(MAX_ICS_BYTES as u64).is_ok());
+        assert!(matches!(
+            validate_ics_file_size(MAX_ICS_BYTES as u64 + 1),
+            Err(IpcError::PayloadTooLarge { maximum_bytes, .. })
+                if maximum_bytes == MAX_ICS_BYTES
+        ));
+    }
+
+    #[test]
     fn runtime_errors_map_to_stable_ipc_categories() {
         assert!(matches!(
             IpcError::from(RuntimeError::QueueFull),
@@ -501,6 +614,28 @@ mod tests {
         assert!(draft.preferences.autostart);
     }
 
+    #[test]
+    fn connected_legacy_firmware_is_rejected_during_persistence_preflight() {
+        let mut device = contract_fixtures().snapshot.device;
+        device.connection = ConnectionState::Online;
+        device.protocol_version = Some(1);
+        device.capabilities = vec![DeviceCapability::CoreWidgets];
+        device.unknown_capability_bits = 0;
+        let required = DeviceCapability::CoreWidgets.bit() | DeviceCapability::ConfigRotation.bit();
+
+        let error = ensure_device_compatibility(&device, required).unwrap_err();
+        assert!(matches!(
+            error,
+            IpcError::Validation { issues, .. }
+                if issues.len() == 1
+                    && issues[0].path == "device.capabilities"
+                    && issues[0].code == ValidationCode::RequiresCapability
+        ));
+
+        device.connection = ConnectionState::Standalone;
+        assert!(ensure_device_compatibility(&device, required).is_ok());
+    }
+
     #[derive(Serialize)]
     struct ContractFixtures {
         snapshot: AppSnapshot,
@@ -508,6 +643,19 @@ mod tests {
         widget_settings: Vec<WidgetSettings>,
         widget_sizes: Vec<WidgetSize>,
         calendar_sources: Vec<CalendarSource>,
+        display_templates: Vec<DisplayTemplate>,
+        tap_actions: Vec<WidgetTapAction>,
+        refresh_policies: Vec<RefreshPolicy>,
+        interrupt_policies: Vec<WidgetInterruptPolicy>,
+        weather_units: Vec<WeatherUnits>,
+        screen_layouts: Vec<ScreenLayout>,
+        asset_sources: Vec<AssetSource>,
+        asset_kinds: Vec<AssetKind>,
+        update_channels: Vec<UpdateChannel>,
+        update_check_policies: Vec<UpdateCheckPolicy>,
+        firmware_artifacts: Vec<FirmwareArtifactMetadata>,
+        display_orientations: Vec<DisplayOrientation>,
+        device_capabilities: Vec<DeviceCapability>,
         runtime_states: Vec<RuntimeState>,
         connection_states: Vec<ConnectionState>,
         provider_states: Vec<ProviderState>,
@@ -536,43 +684,109 @@ mod tests {
                 size: WidgetSize::Full,
                 title: "Desk".into(),
                 show_seconds: true,
+                template: DisplayTemplate::DigitalClock,
+                tap_action: WidgetTapAction::None,
+                refresh: RefreshPolicy::DeviceLocal,
+                interrupt_policy: WidgetInterruptPolicy::Disabled,
             },
             WidgetSettings::Pomodoro {
                 id: "pomodoro".into(),
                 size: WidgetSize::Standard,
                 label: "Focus".into(),
                 duration_seconds: 1_500,
+                template: DisplayTemplate::ProgressRing,
+                tap_action: WidgetTapAction::StartPause,
+                refresh: RefreshPolicy::DeviceLocal,
+                interrupt_policy: WidgetInterruptPolicy::Enabled,
             },
             WidgetSettings::Calendar {
                 id: "calendar".into(),
                 size: WidgetSize::Standard,
                 title: "Next".into(),
                 source: file_source.clone(),
-                refresh_minutes: 15,
+                template: DisplayTemplate::RowList,
+                tap_action: WidgetTapAction::None,
+                refresh: RefreshPolicy::Interval { minutes: 15 },
+                interrupt_policy: WidgetInterruptPolicy::Disabled,
             },
         ];
+        let mut all_widget_settings = widgets.clone();
+        all_widget_settings.extend([
+            WidgetSettings::Weather {
+                id: "weather".into(),
+                size: WidgetSize::Tile,
+                title: "Weather".into(),
+                location: "Tbilisi".into(),
+                units: WeatherUnits::Metric,
+                template: DisplayTemplate::IconBadgeText {
+                    icon_asset_id: Some("weather-icons".into()),
+                },
+                tap_action: WidgetTapAction::OpenUrl {
+                    url: "https://example.test/weather".into(),
+                },
+                refresh: RefreshPolicy::Interval { minutes: 30 },
+                interrupt_policy: WidgetInterruptPolicy::Disabled,
+            },
+            WidgetSettings::JsonFeed {
+                id: "json".into(),
+                size: WidgetSize::Tile,
+                title: "Metric".into(),
+                url: "https://example.test/metric.json".into(),
+                mappings: vec![app_core::JsonFieldMapping {
+                    field: "value".into(),
+                    path: "$.current.value".into(),
+                }],
+                template: DisplayTemplate::BigNumberLabel,
+                tap_action: WidgetTapAction::OpenApplication {
+                    application_id: "com.example.metrics".into(),
+                },
+                refresh: RefreshPolicy::Manual,
+                interrupt_policy: WidgetInterruptPolicy::Disabled,
+            },
+            WidgetSettings::Rss {
+                id: "news".into(),
+                size: WidgetSize::Standard,
+                title: "News".into(),
+                url: "https://example.test/feed.xml".into(),
+                max_items: 3,
+                template: DisplayTemplate::RowList,
+                tap_action: WidgetTapAction::Dismiss,
+                refresh: RefreshPolicy::Interval { minutes: 15 },
+                interrupt_policy: WidgetInterruptPolicy::Enabled,
+            },
+        ]);
         let config = AppConfig {
             schema_version: CURRENT_SCHEMA_VERSION,
             preferences: AppPreferences {
                 timezone: "Asia/Tbilisi".into(),
                 autostart: true,
                 paused: false,
+                orientation: DisplayOrientation::LandscapeFlipped,
             },
             widgets: widgets.clone(),
             screens: vec![
                 ScreenSettings {
                     id: "clock-screen".into(),
-                    widget_id: "clock".into(),
+                    layout: ScreenLayout::Single {
+                        widget_id: "clock".into(),
+                    },
                 },
                 ScreenSettings {
                     id: "pomodoro-screen".into(),
-                    widget_id: "pomodoro".into(),
+                    layout: ScreenLayout::Single {
+                        widget_id: "pomodoro".into(),
+                    },
                 },
                 ScreenSettings {
                     id: "calendar-screen".into(),
-                    widget_id: "calendar".into(),
+                    layout: ScreenLayout::Single {
+                        widget_id: "calendar".into(),
+                    },
                 },
             ],
+            assets: Vec::new(),
+            carousel: CarouselSettings::default(),
+            updater: UpdaterSettings::default(),
         };
         let snapshot = AppSnapshot {
             config: config.clone(),
@@ -586,6 +800,9 @@ mod tests {
                 port_name: Some("/dev/cu.usbmodem1".into()),
                 firmware_version: Some("1.0.0".into()),
                 protocol_version: Some(1),
+                max_protocol_version: Some(1),
+                capabilities: vec![DeviceCapability::CoreWidgets],
+                unknown_capability_bits: 0,
                 uptime_ms: Some(42),
                 free_heap: Some(123_456),
                 rotation: Some(90),
@@ -683,6 +900,10 @@ mod tests {
             ValidationCode::OutOfRange,
             ValidationCode::InvalidTimezone,
             ValidationCode::InvalidSource,
+            ValidationCode::InvalidComposition,
+            ValidationCode::Overlap,
+            ValidationCode::TooLarge,
+            ValidationCode::RequiresCapability,
         ];
         let pomodoro_actions = vec![
             PomodoroAction::Start,
@@ -734,9 +955,99 @@ mod tests {
         ContractFixtures {
             snapshot,
             configs: vec![config],
-            widget_settings: widgets,
-            widget_sizes: vec![WidgetSize::Full, WidgetSize::Standard],
+            widget_settings: all_widget_settings,
+            widget_sizes: vec![WidgetSize::Full, WidgetSize::Standard, WidgetSize::Tile],
             calendar_sources: vec![file_source, url_source],
+            display_templates: vec![
+                DisplayTemplate::DigitalClock,
+                DisplayTemplate::AnalogClock,
+                DisplayTemplate::ProgressRing,
+                DisplayTemplate::RowList,
+                DisplayTemplate::BigNumberLabel,
+                DisplayTemplate::IconBadgeText {
+                    icon_asset_id: Some("weather-icons".into()),
+                },
+            ],
+            tap_actions: vec![
+                WidgetTapAction::None,
+                WidgetTapAction::StartPause,
+                WidgetTapAction::Reset,
+                WidgetTapAction::Dismiss,
+                WidgetTapAction::OpenUrl {
+                    url: "https://example.test/action".into(),
+                },
+                WidgetTapAction::OpenApplication {
+                    application_id: "com.example.app".into(),
+                },
+            ],
+            refresh_policies: vec![
+                RefreshPolicy::DeviceLocal,
+                RefreshPolicy::Manual,
+                RefreshPolicy::Interval { minutes: 15 },
+            ],
+            interrupt_policies: vec![
+                WidgetInterruptPolicy::Disabled,
+                WidgetInterruptPolicy::Enabled,
+            ],
+            weather_units: vec![WeatherUnits::Metric, WeatherUnits::Imperial],
+            screen_layouts: vec![
+                ScreenLayout::Single {
+                    widget_id: "clock".into(),
+                },
+                ScreenLayout::Dashboard {
+                    columns: 2,
+                    rows: 2,
+                    tiles: vec![TileSettings {
+                        widget_id: "weather".into(),
+                        column: 0,
+                        row: 0,
+                        column_span: 1,
+                        row_span: 1,
+                    }],
+                },
+            ],
+            asset_sources: vec![AssetSource::File("/tmp/weather-icons.bin".into())],
+            asset_kinds: vec![
+                AssetKind::Icon {
+                    width: 32,
+                    height: 32,
+                },
+                AssetKind::Font {
+                    pixel_size: 18,
+                    glyph_ranges: vec![GlyphRange {
+                        start: 0x20,
+                        end: 0x7e,
+                    }],
+                },
+            ],
+            update_channels: vec![
+                UpdateChannel::Stable,
+                UpdateChannel::Beta,
+                UpdateChannel::Manual,
+            ],
+            update_check_policies: vec![UpdateCheckPolicy::Disabled, UpdateCheckPolicy::Notify],
+            firmware_artifacts: vec![FirmwareArtifactMetadata {
+                version: "1.0.0".into(),
+                model: "waveshare-1.8".into(),
+                byte_length: 524_288,
+                sha256_hex: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                    .into(),
+                signing_key_id: "deskmate-release-1".into(),
+                signature_base64: format!("{}==", "A".repeat(86)),
+            }],
+            display_orientations: vec![
+                DisplayOrientation::Landscape,
+                DisplayOrientation::LandscapeFlipped,
+            ],
+            device_capabilities: vec![
+                DeviceCapability::CoreWidgets,
+                DeviceCapability::ConfigRotation,
+                DeviceCapability::DashboardLayouts,
+                DeviceCapability::ExtendedTemplates,
+                DeviceCapability::HostTapActions,
+                DeviceCapability::AssetTransfer,
+                DeviceCapability::FirmwareUpdate,
+            ],
             runtime_states,
             connection_states,
             provider_states,

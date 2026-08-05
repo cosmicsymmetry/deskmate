@@ -21,6 +21,17 @@
 #define PROTOCOL_MAX_UNIX_SECONDS INT64_C(4102444800)
 #define PROTOCOL_MIN_UTC_OFFSET_MINUTES (-840)
 #define PROTOCOL_MAX_UTC_OFFSET_MINUTES 840
+#define PROTOCOL_MAX_VERSION 1U
+#define PROTOCOL_CAPABILITY_CORE_WIDGETS (UINT64_C(1) << 0)
+#define PROTOCOL_CAPABILITY_CONFIG_ROTATION (UINT64_C(1) << 1)
+#define PROTOCOL_CAPABILITY_DASHBOARD_LAYOUTS (UINT64_C(1) << 2)
+#define PROTOCOL_CAPABILITY_EXTENDED_TEMPLATES (UINT64_C(1) << 3)
+#define PROTOCOL_CAPABILITY_HOST_TAP_ACTIONS (UINT64_C(1) << 4)
+#define PROTOCOL_CAPABILITY_ASSET_TRANSFER (UINT64_C(1) << 5)
+#define PROTOCOL_CAPABILITY_FIRMWARE_UPDATE (UINT64_C(1) << 6)
+#define PROTOCOL_LEGACY_CAPABILITIES PROTOCOL_CAPABILITY_CORE_WIDGETS
+#define PROTOCOL_CURRENT_CAPABILITIES \
+    (PROTOCOL_CAPABILITY_CORE_WIDGETS | PROTOCOL_CAPABILITY_CONFIG_ROTATION)
 
 typedef enum {
     PROTOCOL_TYPE_STATUS_REQUEST = 1,
@@ -107,6 +118,7 @@ typedef struct {
 
 typedef struct {
     uint32_t revision;
+    uint16_t rotation;
     size_t widget_count;
     protocol_widget_config_t widgets[PROTOCOL_MAX_CONFIG_WIDGETS];
     size_t screen_count;
@@ -169,6 +181,8 @@ typedef struct {
 
 typedef struct {
     uint8_t protocol_version;
+    uint8_t max_protocol_version;
+    uint64_t capabilities;
     char firmware_version[PROTOCOL_MAX_FIRMWARE_VERSION_LENGTH + 1U];
     uint64_t uptime_ms;
     uint32_t free_heap;
@@ -189,6 +203,7 @@ typedef struct {
     uint32_t dropped_ui_commands;
     uint32_t ui_queue_high_water;
     uint32_t config_revision;
+    uint32_t latest_interrupt_token;
 } protocol_status_response_t;
 
 typedef struct {

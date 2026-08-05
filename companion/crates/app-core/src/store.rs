@@ -8,8 +8,9 @@ use atomic_write_file::AtomicWriteFile;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AppConfig, AppPreferences, CURRENT_SCHEMA_VERSION, ScreenSettings, ValidationIssue,
-    WidgetSettings,
+    AppConfig, AppPreferences, CURRENT_SCHEMA_VERSION, CalendarSource, CarouselSettings,
+    DisplayTemplate, RefreshPolicy, ScreenLayout, ScreenSettings, UpdaterSettings, ValidationIssue,
+    WidgetInterruptPolicy, WidgetSettings, WidgetSize, WidgetTapAction,
 };
 
 pub const MAX_CONFIG_FILE_BYTES: usize = 64 * 1_024;
@@ -119,6 +120,7 @@ pub enum ConfigOrigin {
     Defaults,
     Current,
     MigratedV0,
+    MigratedV1,
     LastGood,
 }
 
@@ -188,8 +190,48 @@ struct VersionHeader {
 struct LegacyConfigV0 {
     schema_version: u32,
     timezone: String,
-    widgets: Vec<WidgetSettings>,
-    screens: Vec<ScreenSettings>,
+    widgets: Vec<LegacyWidgetSettings>,
+    screens: Vec<LegacyScreenSettings>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyConfigV1 {
+    schema_version: u32,
+    preferences: AppPreferences,
+    widgets: Vec<LegacyWidgetSettings>,
+    screens: Vec<LegacyScreenSettings>,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+enum LegacyWidgetSettings {
+    Clock {
+        id: String,
+        size: WidgetSize,
+        title: String,
+        show_seconds: bool,
+    },
+    Pomodoro {
+        id: String,
+        size: WidgetSize,
+        label: String,
+        duration_seconds: u32,
+    },
+    Calendar {
+        id: String,
+        size: WidgetSize,
+        title: String,
+        source: CalendarSource,
+        refresh_minutes: u16,
+    },
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyScreenSettings {
+    id: String,
+    widget_id: String,
 }
 
 fn decode_config(bytes: &[u8]) -> Result<(AppConfig, ConfigOrigin), StoreError> {
@@ -205,6 +247,22 @@ fn decode_config(bytes: &[u8]) -> Result<(AppConfig, ConfigOrigin), StoreError> 
             })?,
             ConfigOrigin::Current,
         ),
+        1 => {
+            let legacy: LegacyConfigV1 =
+                serde_json::from_str(text).map_err(|error| StoreError::InvalidJson {
+                    message: error.to_string(),
+                })?;
+            if legacy.schema_version != 1 {
+                return Err(StoreError::UnsupportedVersion {
+                    found: legacy.schema_version,
+                    supported: CURRENT_SCHEMA_VERSION,
+                });
+            }
+            (
+                migrate_legacy(legacy.preferences, legacy.widgets, legacy.screens),
+                ConfigOrigin::MigratedV1,
+            )
+        }
         0 => {
             let legacy: LegacyConfigV0 =
                 serde_json::from_str(text).map_err(|error| StoreError::InvalidJson {
@@ -217,15 +275,14 @@ fn decode_config(bytes: &[u8]) -> Result<(AppConfig, ConfigOrigin), StoreError> 
                 });
             }
             (
-                AppConfig {
-                    schema_version: CURRENT_SCHEMA_VERSION,
-                    preferences: AppPreferences {
+                migrate_legacy(
+                    AppPreferences {
                         timezone: legacy.timezone,
                         ..AppPreferences::default()
                     },
-                    widgets: legacy.widgets,
-                    screens: legacy.screens,
-                },
+                    legacy.widgets,
+                    legacy.screens,
+                ),
                 ConfigOrigin::MigratedV0,
             )
         }
@@ -240,6 +297,82 @@ fn decode_config(bytes: &[u8]) -> Result<(AppConfig, ConfigOrigin), StoreError> 
         issues: error.issues,
     })?;
     Ok((config, origin))
+}
+
+fn migrate_legacy(
+    preferences: AppPreferences,
+    widgets: Vec<LegacyWidgetSettings>,
+    screens: Vec<LegacyScreenSettings>,
+) -> AppConfig {
+    AppConfig {
+        schema_version: CURRENT_SCHEMA_VERSION,
+        preferences,
+        widgets: widgets
+            .into_iter()
+            .map(|widget| match widget {
+                LegacyWidgetSettings::Clock {
+                    id,
+                    size,
+                    title,
+                    show_seconds,
+                } => WidgetSettings::Clock {
+                    id,
+                    size,
+                    title,
+                    show_seconds,
+                    template: DisplayTemplate::DigitalClock,
+                    tap_action: WidgetTapAction::None,
+                    refresh: RefreshPolicy::DeviceLocal,
+                    interrupt_policy: WidgetInterruptPolicy::Disabled,
+                },
+                LegacyWidgetSettings::Pomodoro {
+                    id,
+                    size,
+                    label,
+                    duration_seconds,
+                } => WidgetSettings::Pomodoro {
+                    id,
+                    size,
+                    label,
+                    duration_seconds,
+                    template: DisplayTemplate::ProgressRing,
+                    tap_action: WidgetTapAction::StartPause,
+                    refresh: RefreshPolicy::DeviceLocal,
+                    interrupt_policy: WidgetInterruptPolicy::Enabled,
+                },
+                LegacyWidgetSettings::Calendar {
+                    id,
+                    size,
+                    title,
+                    source,
+                    refresh_minutes,
+                } => WidgetSettings::Calendar {
+                    id,
+                    size,
+                    title,
+                    source,
+                    template: DisplayTemplate::RowList,
+                    tap_action: WidgetTapAction::None,
+                    refresh: RefreshPolicy::Interval {
+                        minutes: refresh_minutes,
+                    },
+                    interrupt_policy: WidgetInterruptPolicy::Disabled,
+                },
+            })
+            .collect(),
+        screens: screens
+            .into_iter()
+            .map(|screen| ScreenSettings {
+                id: screen.id,
+                layout: ScreenLayout::Single {
+                    widget_id: screen.widget_id,
+                },
+            })
+            .collect(),
+        assets: Vec::new(),
+        carousel: CarouselSettings::default(),
+        updater: UpdaterSettings::default(),
+    }
 }
 
 fn read_bounded(path: &Path) -> Result<Option<Vec<u8>>, StoreError> {

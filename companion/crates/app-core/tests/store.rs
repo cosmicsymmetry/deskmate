@@ -4,7 +4,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Barrier};
 use std::thread;
 
-use app_core::{AppConfig, ConfigOrigin, ConfigStore, MAX_CONFIG_FILE_BYTES, StoreError};
+use app_core::{
+    AppConfig, CalendarSource, ConfigOrigin, ConfigStore, DisplayOrientation, DisplayTemplate,
+    MAX_CONFIG_FILE_BYTES, RefreshPolicy, ScreenLayout, StoreError, WidgetInterruptPolicy,
+    WidgetSettings, WidgetTapAction,
+};
 
 static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(1);
 
@@ -63,9 +67,63 @@ fn save_round_trips_and_migration_is_explicit() {
     fs::write(&path, include_bytes!("fixtures/legacy-v0.json")).unwrap();
     let migrated = store.load();
     assert_eq!(migrated.origin, ConfigOrigin::MigratedV0);
-    assert_eq!(migrated.config.schema_version, 1);
+    assert_eq!(migrated.config.schema_version, 2);
     assert_eq!(migrated.config.preferences.timezone, "Europe/Paris");
     assert!(!migrated.config.preferences.autostart);
+
+    fs::write(&path, include_bytes!("fixtures/released-m3-v1.json")).unwrap();
+    let migrated = store.load();
+    assert_eq!(migrated.origin, ConfigOrigin::MigratedV1);
+    assert_eq!(migrated.config.schema_version, 2);
+    assert_eq!(migrated.config.preferences.timezone, "Asia/Tbilisi");
+    assert_eq!(migrated.config.widgets.len(), 3);
+    assert_eq!(migrated.config.screens.len(), 3);
+    assert_eq!(
+        migrated.config.preferences.orientation,
+        DisplayOrientation::LandscapeFlipped
+    );
+    assert!(matches!(
+        &migrated.config.widgets[0],
+        WidgetSettings::Clock {
+            id,
+            title,
+            show_seconds: true,
+            template: DisplayTemplate::DigitalClock,
+            tap_action: WidgetTapAction::None,
+            refresh: RefreshPolicy::DeviceLocal,
+            interrupt_policy: WidgetInterruptPolicy::Disabled,
+            ..
+        } if id == "clock" && title == "Desk"
+    ));
+    assert!(matches!(
+        &migrated.config.widgets[1],
+        WidgetSettings::Pomodoro {
+            id,
+            label,
+            duration_seconds: 1_500,
+            template: DisplayTemplate::ProgressRing,
+            tap_action: WidgetTapAction::StartPause,
+            refresh: RefreshPolicy::DeviceLocal,
+            interrupt_policy: WidgetInterruptPolicy::Enabled,
+            ..
+        } if id == "pomodoro" && label == "Focus"
+    ));
+    assert!(matches!(
+        &migrated.config.widgets[2],
+        WidgetSettings::Calendar {
+            id,
+            source: CalendarSource::Url(source),
+            refresh: RefreshPolicy::Interval { minutes: 15 },
+            ..
+        } if id == "calendar" && source == "https://example.com/calendar.ics"
+    ));
+    assert!(matches!(
+        &migrated.config.screens[0].layout,
+        ScreenLayout::Single { widget_id } if widget_id == "pomodoro"
+    ));
+    assert!(migrated.config.assets.is_empty());
+    assert_eq!(migrated.config.carousel.auto_advance_seconds, None);
+    migrated.config.compile(7).unwrap();
 }
 
 #[test]
@@ -104,6 +162,20 @@ fn malformed_truncated_and_oversized_files_preserve_bytes_and_last_good() {
         Some(StoreError::TooLarge { .. })
     ));
     assert_eq!(fs::metadata(&path).unwrap().len(), oversized.len() as u64);
+
+    let future = include_bytes!("fixtures/future-v3.json");
+    fs::write(&path, future).unwrap();
+    let recovered = store.load();
+    assert_eq!(recovered.origin, ConfigOrigin::LastGood);
+    assert_eq!(recovered.config, last_good);
+    assert_eq!(
+        recovered.recovery,
+        Some(StoreError::UnsupportedVersion {
+            found: 3,
+            supported: 2,
+        })
+    );
+    assert_eq!(fs::read(&path).unwrap(), future);
 }
 
 #[test]
@@ -157,4 +229,27 @@ fn concurrent_saves_are_serialized_and_disk_matches_latest_generation() {
     assert_eq!(disk, latest.1);
     assert_eq!(store.last_good().unwrap(), latest.1);
     assert_eq!(fs::read_dir(&directory.0).unwrap().count(), 1);
+}
+
+#[test]
+fn calendar_persistence_contains_source_metadata_but_no_fetched_payload() {
+    let directory = TestDirectory::new("calendar-metadata");
+    let path = directory.config_path();
+    let store = ConfigStore::new(&path);
+    let mut config: AppConfig = serde_json::from_str(include_str!("fixtures/full.json")).unwrap();
+    let calendar = config
+        .widgets
+        .iter_mut()
+        .find(|widget| matches!(widget, WidgetSettings::Calendar { .. }))
+        .unwrap();
+    if let WidgetSettings::Calendar { source, .. } = calendar {
+        *source = CalendarSource::File("/tmp/work.ics".into());
+    }
+
+    store.save(&config).unwrap();
+    let json = fs::read_to_string(path).unwrap();
+    assert!(json.contains("/tmp/work.ics"));
+    assert!(!json.contains("remaining_seconds"));
+    assert!(!json.contains("last_success"));
+    assert!(!json.contains("Design review"));
 }

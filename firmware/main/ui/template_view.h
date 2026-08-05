@@ -17,9 +17,7 @@ bool template_view_patch(protocol_template_kind_t template_kind,
                          uint16_t dirty_mask);
 
 void template_view_set_data_state(bool stale, const char *error);
-void template_view_set_online(bool online);
 void template_view_set_utc_offset_minutes(int16_t offset_minutes);
-void template_view_set_interrupts(bool active, bool pending);
 void template_view_apply_local_action(protocol_event_action_t action);
 
 bool template_view_activate(void);

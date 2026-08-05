@@ -3,13 +3,11 @@
 #include <string.h>
 
 #include "lvgl.h"
-#include "status_strip.h"
 #include "templates/template_internal.h"
 
 typedef struct {
     lv_obj_t *screen;
     template_widget_view_t widget;
-    status_strip_t strip;
     protocol_template_kind_t template_kind;
     protocol_size_class_t size_class;
     bool active;
@@ -17,9 +15,6 @@ typedef struct {
 
 static template_view_state_t s_view;
 static lv_timer_t *s_tick_timer;
-static bool s_online;
-static bool s_interrupt_active;
-static bool s_interrupt_pending;
 static int16_t s_utc_offset_minutes;
 static uint32_t s_generation;
 static uint32_t s_patch_count;
@@ -34,9 +29,6 @@ static void tick_cb(lv_timer_t *timer)
         digital_clock_tick(&s_view.widget, s_utc_offset_minutes);
     } else if (s_view.template_kind == PROTOCOL_TEMPLATE_PROGRESS_RING) {
         progress_ring_tick(&s_view.widget);
-    }
-    if (s_view.size_class == PROTOCOL_SIZE_STANDARD) {
-        status_strip_tick(&s_view.strip, s_utc_offset_minutes);
     }
 }
 
@@ -57,16 +49,19 @@ static void screen_deleted_cb(lv_event_t *event)
 
 static bool create_widget(template_view_state_t *view, lv_obj_t *parent)
 {
+    /* Size classes remain accepted for protocol-v1 compatibility, but every
+     * M3 widget now receives the clean full canvas. */
+    const protocol_size_class_t rendered_size = PROTOCOL_SIZE_FULL;
     if (view->template_kind == PROTOCOL_TEMPLATE_DIGITAL_CLOCK) {
         return digital_clock_create(&view->widget, parent,
-                                    view->size_class);
+                                    rendered_size);
     }
     if (view->template_kind == PROTOCOL_TEMPLATE_PROGRESS_RING) {
         return progress_ring_create(&view->widget, parent,
-                                    view->size_class);
+                                    rendered_size);
     }
     if (view->template_kind == PROTOCOL_TEMPLATE_ROW_LIST) {
-        return row_list_create(&view->widget, parent, view->size_class);
+        return row_list_create(&view->widget, parent, rendered_size);
     }
     return false;
 }
@@ -156,29 +151,14 @@ bool template_view_show(protocol_template_kind_t template_kind,
     lv_obj_remove_flag(content,
                        LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_width(content, LV_PCT(100));
-    if (size_class == PROTOCOL_SIZE_STANDARD) {
-        lv_obj_set_height(content, 368 - STATUS_STRIP_HEIGHT);
-        lv_obj_align(content, LV_ALIGN_BOTTOM_MID, 0, 0);
-        if (!status_strip_create(&candidate.strip, candidate.screen)) {
-            lv_obj_delete(candidate.screen);
-            return false;
-        }
-    } else {
-        lv_obj_set_height(content, LV_PCT(100));
-        lv_obj_align(content, LV_ALIGN_CENTER, 0, 0);
-    }
+    lv_obj_set_height(content, LV_PCT(100));
+    lv_obj_align(content, LV_ALIGN_CENTER, 0, 0);
 
     if (!create_widget(&candidate, content)) {
         lv_obj_delete(candidate.screen);
         return false;
     }
     patch_widget(&candidate, fields, UINT16_MAX);
-    if (size_class == PROTOCOL_SIZE_STANDARD) {
-        status_strip_set_online(&candidate.strip, s_online);
-        status_strip_set_interrupts(&candidate.strip, s_interrupt_active,
-                                    s_interrupt_pending);
-        status_strip_tick(&candidate.strip, s_utc_offset_minutes);
-    }
 
     lv_obj_add_event_cb(candidate.screen, screen_deleted_cb,
                         LV_EVENT_DELETE, NULL);
@@ -214,27 +194,10 @@ void template_view_set_data_state(bool stale, const char *error)
     update_data_state(&s_view.widget, stale, error);
 }
 
-void template_view_set_online(bool online)
-{
-    s_online = online;
-    if (s_view.size_class == PROTOCOL_SIZE_STANDARD) {
-        status_strip_set_online(&s_view.strip, online);
-    }
-}
-
 void template_view_set_utc_offset_minutes(int16_t offset_minutes)
 {
     s_utc_offset_minutes = offset_minutes;
     tick_cb(NULL);
-}
-
-void template_view_set_interrupts(bool active, bool pending)
-{
-    s_interrupt_active = active;
-    s_interrupt_pending = pending;
-    if (s_view.size_class == PROTOCOL_SIZE_STANDARD) {
-        status_strip_set_interrupts(&s_view.strip, active, pending);
-    }
 }
 
 void template_view_apply_local_action(protocol_event_action_t action)

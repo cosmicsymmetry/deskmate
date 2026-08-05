@@ -128,6 +128,7 @@ fn apply_acceptance_config(
         .ok_or_else(|| "cannot run config check at maximum retained revision".to_owned())?;
     let config = ApplyConfig {
         revision: config_revision,
+        rotation: 90,
         widgets: vec![WidgetConfig {
             widget_id: "acceptance".into(),
             template: TemplateKind::DigitalClock,

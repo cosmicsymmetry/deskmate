@@ -4,10 +4,10 @@
 #include <stdint.h>
 
 // Standalone fallback clock screen (spec §3): big HH:MM, date line, and a
-// dim "Connect deskmate app" hint. During M1 acceptance, releasing in the
-// visual top half cycles brightness and releasing in the visual bottom half
-// flips the landscape orientation by 180°. Reads the system clock via time()/
-// gmtime_r() after applying M1's fixed UTC offset. Until a time sync lands,
+// dim "Connect deskmate app" hint. Releasing in the visual top half retains
+// M1's brightness diagnostic; mounting orientation is controlled only by the
+// companion configuration. Reads the system clock via time()/gmtime_r() after
+// applying M1's fixed UTC offset. Until a time sync lands,
 // this ticks up from the epoch
 // (1970-01-01 00:00 UTC), which is expected for M0. Must be called after
 // board_display_init() (needs an active LVGL display/screen).

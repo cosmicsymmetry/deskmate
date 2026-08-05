@@ -1,0 +1,31 @@
+{
+  "schema_version": 3,
+  "preferences": {
+    "timezone": "UTC",
+    "autostart": false,
+    "paused": false,
+    "orientation": "landscape"
+  },
+  "widgets": [
+    {
+      "kind": "clock",
+      "id": "clock",
+      "size": "full",
+      "title": "Desk",
+      "show_seconds": true,
+      "template": { "kind": "digital-clock" },
+      "tap_action": { "kind": "none" },
+      "refresh": { "kind": "device-local" },
+      "interrupt_policy": "disabled"
+    }
+  ],
+  "screens": [
+    {
+      "id": "clock-screen",
+      "layout": { "kind": "single", "widget_id": "clock" }
+    }
+  ],
+  "assets": [],
+  "carousel": { "auto_advance_seconds": null },
+  "updater": { "channel": "stable", "checks": "notify" }
+}

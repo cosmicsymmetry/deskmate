@@ -58,6 +58,10 @@ typedef struct {
 
 void widget_model_init(widget_model_t *model);
 
+widget_model_config_result_t widget_model_check_config(
+    const widget_model_t *model,
+    const protocol_apply_config_t *config);
+
 widget_model_config_result_t widget_model_apply_config(
     widget_model_t *model,
     const protocol_apply_config_t *config);

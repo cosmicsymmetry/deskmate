@@ -1,0 +1,121 @@
+{
+  "schema_version": 2,
+  "preferences": {
+    "timezone": "Asia/Tbilisi",
+    "autostart": true,
+    "paused": false,
+    "orientation": "landscape-flipped"
+  },
+  "widgets": [
+    {
+      "kind": "clock",
+      "id": "analog",
+      "size": "full",
+      "title": "Home",
+      "show_seconds": false,
+      "template": { "kind": "analog-clock" },
+      "tap_action": { "kind": "none" },
+      "refresh": { "kind": "device-local" },
+      "interrupt_policy": "disabled"
+    },
+    {
+      "kind": "pomodoro",
+      "id": "focus",
+      "size": "standard",
+      "label": "Focus",
+      "duration_seconds": 1500,
+      "template": { "kind": "big-number-label" },
+      "tap_action": { "kind": "reset" },
+      "refresh": { "kind": "device-local" },
+      "interrupt_policy": "enabled"
+    },
+    {
+      "kind": "calendar",
+      "id": "agenda",
+      "size": "standard",
+      "title": "Up next",
+      "source": { "kind": "url", "value": "https://example.test/calendar.ics" },
+      "template": { "kind": "icon-badge-text", "icon_asset_id": "icons" },
+      "tap_action": { "kind": "none" },
+      "refresh": { "kind": "interval", "minutes": 15 },
+      "interrupt_policy": "disabled"
+    },
+    {
+      "kind": "weather",
+      "id": "weather",
+      "size": "tile",
+      "title": "Weather",
+      "location": "Tbilisi",
+      "units": "metric",
+      "template": { "kind": "icon-badge-text", "icon_asset_id": "icons" },
+      "tap_action": { "kind": "open-url", "url": "https://example.test/weather" },
+      "refresh": { "kind": "interval", "minutes": 30 },
+      "interrupt_policy": "disabled"
+    },
+    {
+      "kind": "json-feed",
+      "id": "metric",
+      "size": "tile",
+      "title": "Metric",
+      "url": "https://example.test/metric.json",
+      "mappings": [
+        { "field": "value", "path": "$.current.value" },
+        { "field": "label", "path": "$.current.label" }
+      ],
+      "template": { "kind": "big-number-label" },
+      "tap_action": { "kind": "open-application", "application_id": "com.example.metrics" },
+      "refresh": { "kind": "manual" },
+      "interrupt_policy": "disabled"
+    },
+    {
+      "kind": "rss",
+      "id": "news",
+      "size": "standard",
+      "title": "News",
+      "url": "https://example.test/feed.xml",
+      "max_items": 5,
+      "template": { "kind": "row-list" },
+      "tap_action": { "kind": "dismiss" },
+      "refresh": { "kind": "interval", "minutes": 60 },
+      "interrupt_policy": "enabled"
+    }
+  ],
+  "screens": [
+    { "id": "analog-screen", "layout": { "kind": "single", "widget_id": "analog" } },
+    { "id": "focus-screen", "layout": { "kind": "single", "widget_id": "focus" } },
+    { "id": "agenda-screen", "layout": { "kind": "single", "widget_id": "agenda" } },
+    {
+      "id": "dashboard",
+      "layout": {
+        "kind": "dashboard",
+        "columns": 2,
+        "rows": 1,
+        "tiles": [
+          { "widget_id": "weather", "column": 0, "row": 0, "column_span": 1, "row_span": 1 },
+          { "widget_id": "metric", "column": 1, "row": 0, "column_span": 1, "row_span": 1 }
+        ]
+      }
+    },
+    { "id": "news-screen", "layout": { "kind": "single", "widget_id": "news" } }
+  ],
+  "assets": [
+    {
+      "id": "icons",
+      "source": { "kind": "file", "value": "/tmp/icons.bin" },
+      "kind": { "kind": "icon", "width": 32, "height": 32 },
+      "maximum_bytes": 262144
+    },
+    {
+      "id": "font",
+      "source": { "kind": "file", "value": "/tmp/font.bin" },
+      "kind": {
+        "kind": "font",
+        "pixel_size": 18,
+        "glyph_ranges": [{ "start": 32, "end": 126 }]
+      },
+      "maximum_bytes": 262144
+    }
+  ],
+  "carousel": { "auto_advance_seconds": 30 },
+  "updater": { "channel": "beta", "checks": "notify" }
+}

@@ -6,6 +6,16 @@ use crate::cbor::{CborError, Decoder, Encoder, deterministic_key_before};
 use crate::frame::{Frame, FrameError, MAX_PAYLOAD_SIZE, encode_frame};
 
 pub const PROTOCOL_VERSION: u8 = 1;
+pub const MAX_PROTOCOL_VERSION: u8 = 1;
+pub const CAPABILITY_CORE_WIDGETS: u64 = 1 << 0;
+pub const CAPABILITY_CONFIG_ROTATION: u64 = 1 << 1;
+pub const CAPABILITY_DASHBOARD_LAYOUTS: u64 = 1 << 2;
+pub const CAPABILITY_EXTENDED_TEMPLATES: u64 = 1 << 3;
+pub const CAPABILITY_HOST_TAP_ACTIONS: u64 = 1 << 4;
+pub const CAPABILITY_ASSET_TRANSFER: u64 = 1 << 5;
+pub const CAPABILITY_FIRMWARE_UPDATE: u64 = 1 << 6;
+pub const LEGACY_CAPABILITIES: u64 = CAPABILITY_CORE_WIDGETS;
+pub const CURRENT_CAPABILITIES: u64 = CAPABILITY_CORE_WIDGETS | CAPABILITY_CONFIG_ROTATION;
 pub const LINK_TIMEOUT_MS: u64 = 10_000;
 pub const MAX_WIDGET_ID_LEN: usize = 32;
 pub const MAX_SCREEN_ID_LEN: usize = 32;
@@ -103,6 +113,7 @@ pub struct ScreenConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApplyConfig {
     pub revision: u32,
+    pub rotation: u16,
     pub widgets: Vec<WidgetConfig>,
     pub screens: Vec<ScreenConfig>,
 }
@@ -164,6 +175,8 @@ pub struct Ack {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StatusResponse {
     pub protocol_version: u8,
+    pub max_protocol_version: u8,
+    pub capabilities: u64,
     pub firmware_version: String,
     pub uptime_ms: u64,
     pub free_heap: u32,
@@ -184,6 +197,7 @@ pub struct StatusResponse {
     pub dropped_ui_commands: u32,
     pub ui_queue_high_water: u32,
     pub config_revision: u32,
+    pub latest_interrupt_token: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -392,6 +406,9 @@ fn validate_apply_config(config: &ApplyConfig) -> Result<(), MessageError> {
     if config.widgets.len() > MAX_CONFIG_WIDGETS || config.screens.len() > MAX_CONFIG_SCREENS {
         return Err(MessageError::ConfigTooLarge);
     }
+    if !matches!(config.rotation, 90 | 270) {
+        return Err(MessageError::InvalidValue("config rotation"));
+    }
     for (index, widget) in config.widgets.iter().enumerate() {
         checked_text(&widget.widget_id, 1, MAX_WIDGET_ID_LEN, "widget_id")?;
         if config.widgets[..index]
@@ -484,6 +501,9 @@ fn validate_message(message: &Message) -> Result<(), MessageError> {
             if status.protocol_version != PROTOCOL_VERSION {
                 return Err(MessageError::InvalidValue("status protocol version"));
             }
+            if status.max_protocol_version < status.protocol_version {
+                return Err(MessageError::InvalidValue("maximum protocol version"));
+            }
             checked_text(
                 &status.firmware_version,
                 1,
@@ -568,7 +588,7 @@ fn encoded_text_key(key: &str) -> Vec<u8> {
 }
 
 fn encode_config_payload(encoder: &mut Encoder, config: &ApplyConfig) {
-    encoder.map(3);
+    encoder.map(4);
     encoder.unsigned(0);
     encoder.unsigned(u64::from(config.revision));
     encoder.unsigned(1);
@@ -595,6 +615,8 @@ fn encode_config_payload(encoder: &mut Encoder, config: &ApplyConfig) {
         encoder.unsigned(1);
         encoder.text(&screen.widget_id);
     }
+    encoder.unsigned(3);
+    encoder.unsigned(u64::from(config.rotation));
 }
 
 fn encode_device_event_payload(encoder: &mut Encoder, event: &DeviceEvent) {
@@ -620,7 +642,7 @@ fn encode_device_event_payload(encoder: &mut Encoder, event: &DeviceEvent) {
 }
 
 fn encode_status_payload(encoder: &mut Encoder, status: &StatusResponse) {
-    encoder.map(21);
+    encoder.map(24);
     encoder.unsigned(0);
     encoder.unsigned(u64::from(status.protocol_version));
     encoder.unsigned(1);
@@ -645,6 +667,9 @@ fn encode_status_payload(encoder: &mut Encoder, status: &StatusResponse) {
         u64::from(status.dropped_ui_commands),
         u64::from(status.ui_queue_high_water),
         u64::from(status.config_revision),
+        u64::from(status.latest_interrupt_token),
+        u64::from(status.max_protocol_version),
+        status.capabilities,
     ];
     for (offset, value) in unsigned_fields.into_iter().enumerate() {
         encoder.unsigned(u64::try_from(offset + 2).unwrap());
@@ -932,17 +957,20 @@ fn decode_apply_config(payload: &[u8]) -> Result<ApplyConfig, MessageError> {
     let mut revision = None;
     let mut widgets = None;
     let mut screens = None;
+    let mut rotation = None;
     for _ in 0..len {
         match next_numeric_key(&mut decoder, &mut previous)? {
             0 => revision = Some(read_u32(&mut decoder, "config revision")?),
             1 => widgets = Some(decode_widgets(&mut decoder)?),
             2 => screens = Some(decode_screens(&mut decoder)?),
+            3 => rotation = Some(read_u16(&mut decoder, "config rotation")?),
             _ => decoder.skip()?,
         }
     }
     decoder.finish()?;
     let config = ApplyConfig {
         revision: revision.ok_or(MessageError::MissingField(0))?,
+        rotation: rotation.unwrap_or(90),
         widgets: widgets.ok_or(MessageError::MissingField(1))?,
         screens: screens.ok_or(MessageError::MissingField(2))?,
     };
@@ -1114,6 +1142,9 @@ fn decode_status(payload: &[u8]) -> Result<StatusResponse, MessageError> {
     let mut dropped_ui_commands = None;
     let mut ui_queue_high_water = None;
     let mut config_revision = None;
+    let mut latest_interrupt_token = None;
+    let mut max_protocol_version = None;
+    let mut capabilities = None;
     for _ in 0..len {
         match next_numeric_key(&mut decoder, &mut previous)? {
             0 => protocol_version = Some(read_u8(&mut decoder, "protocol version")?),
@@ -1147,12 +1178,21 @@ fn decode_status(payload: &[u8]) -> Result<StatusResponse, MessageError> {
             }
             19 => ui_queue_high_water = Some(read_u32(&mut decoder, "UI queue high water")?),
             20 => config_revision = Some(read_u32(&mut decoder, "config revision")?),
+            21 => {
+                latest_interrupt_token = Some(read_u32(&mut decoder, "latest interrupt token")?);
+            }
+            22 => {
+                max_protocol_version = Some(read_u8(&mut decoder, "maximum protocol version")?);
+            }
+            23 => capabilities = Some(decoder.unsigned()?),
             _ => decoder.skip()?,
         }
     }
     decoder.finish()?;
     let value = StatusResponse {
         protocol_version: protocol_version.ok_or(MessageError::MissingField(0))?,
+        max_protocol_version: max_protocol_version.unwrap_or(PROTOCOL_VERSION),
+        capabilities: capabilities.unwrap_or(LEGACY_CAPABILITIES),
         firmware_version: firmware_version.ok_or(MessageError::MissingField(1))?,
         uptime_ms: uptime_ms.ok_or(MessageError::MissingField(2))?,
         free_heap: free_heap.ok_or(MessageError::MissingField(3))?,
@@ -1173,6 +1213,7 @@ fn decode_status(payload: &[u8]) -> Result<StatusResponse, MessageError> {
         dropped_ui_commands: dropped_ui_commands.unwrap_or(0),
         ui_queue_high_water: ui_queue_high_water.unwrap_or(0),
         config_revision: config_revision.unwrap_or(0),
+        latest_interrupt_token: latest_interrupt_token.unwrap_or(0),
     };
     validate_message(&Message::StatusResponse(value.clone()))?;
     Ok(value)
@@ -1223,6 +1264,8 @@ mod tests {
     fn status() -> StatusResponse {
         StatusResponse {
             protocol_version: 1,
+            max_protocol_version: MAX_PROTOCOL_VERSION,
+            capabilities: CURRENT_CAPABILITIES,
             firmware_version: "m1-test".into(),
             uptime_ms: 123_456,
             free_heap: 654_321,
@@ -1243,6 +1286,7 @@ mod tests {
             dropped_ui_commands: 0,
             ui_queue_high_water: 0,
             config_revision: 3,
+            latest_interrupt_token: 9,
         }
     }
 
@@ -1295,6 +1339,7 @@ mod tests {
         }));
         round_trip(&Message::ApplyConfig(ApplyConfig {
             revision: 3,
+            rotation: 270,
             widgets: vec![WidgetConfig {
                 widget_id: "timer".into(),
                 template: TemplateKind::ProgressRing,
@@ -1336,6 +1381,95 @@ mod tests {
         let mut value = status();
         value.rotation = 45;
         assert!(encode_message(1, &Message::StatusResponse(value)).is_err());
+    }
+
+    #[test]
+    fn legacy_status_without_additive_m3_or_m4_fields_remains_compatible() {
+        let mut payload = encode_payload(&Message::StatusResponse(status())).unwrap();
+        assert_eq!(
+            &payload[..2],
+            [0xb8, 0x18],
+            "status should contain 24 entries"
+        );
+        assert_eq!(
+            payload.split_off(payload.len() - 6),
+            [0x15, 0x09, 0x16, 0x01, 0x17, 0x03]
+        );
+        payload.remove(0);
+        payload[0] = 0xb5;
+
+        let decoded = decode_message(&Frame::new(TYPE_STATUS_RESPONSE, 1, payload)).unwrap();
+        let Message::StatusResponse(decoded) = decoded else {
+            panic!("decoded message should remain a status response");
+        };
+        assert_eq!(decoded.latest_interrupt_token, 0);
+        assert_eq!(decoded.max_protocol_version, PROTOCOL_VERSION);
+        assert_eq!(decoded.capabilities, LEGACY_CAPABILITIES);
+    }
+
+    #[test]
+    fn capability_handshake_is_bounded_and_forward_compatible() {
+        let mut value = status();
+        value.capabilities |= 1 << 63;
+        round_trip(&Message::StatusResponse(value));
+
+        let mut invalid = status();
+        invalid.max_protocol_version = 0;
+        assert!(encode_message(1, &Message::StatusResponse(invalid)).is_err());
+    }
+
+    #[test]
+    fn released_m3_status_reader_can_skip_the_current_handshake_extension() {
+        let payload = encode_payload(&Message::StatusResponse(status())).unwrap();
+        let mut decoder = Decoder::new(&payload);
+        let len = decoder.map_len().unwrap();
+        assert_eq!(len, 24);
+        let mut previous = None;
+        let mut released_fields = 0_u32;
+        for _ in 0..len {
+            let key = next_numeric_key(&mut decoder, &mut previous).unwrap();
+            if key <= 20 {
+                released_fields |= 1_u32 << key;
+            }
+            decoder.skip().unwrap();
+        }
+        decoder.finish().unwrap();
+        assert_eq!(released_fields, (1_u32 << 21) - 1);
+    }
+
+    #[test]
+    fn config_rotation_is_landscape_only_and_legacy_payloads_default_to_90() {
+        let config = ApplyConfig {
+            revision: 1,
+            rotation: 270,
+            widgets: vec![WidgetConfig {
+                widget_id: "clock".into(),
+                template: TemplateKind::DigitalClock,
+                size_class: SizeClass::Full,
+                tap_action: TapAction::None,
+                interrupt_policy: InterruptPolicy::Disabled,
+            }],
+            screens: vec![ScreenConfig {
+                screen_id: "home".into(),
+                widget_id: "clock".into(),
+            }],
+        };
+        let mut payload = encode_payload(&Message::ApplyConfig(config.clone())).unwrap();
+        assert_eq!(payload[0], 0xa4, "config should be a four-entry CBOR map");
+        assert_eq!(
+            payload.split_off(payload.len() - 4),
+            [0x03, 0x19, 0x01, 0x0e]
+        );
+        payload[0] = 0xa3;
+        let decoded = decode_message(&Frame::new(TYPE_APPLY_CONFIG, 1, payload)).unwrap();
+        let Message::ApplyConfig(decoded) = decoded else {
+            panic!("decoded message should remain an apply-config request");
+        };
+        assert_eq!(decoded.rotation, 90);
+
+        let mut invalid = config;
+        invalid.rotation = 180;
+        assert!(encode_message(1, &Message::ApplyConfig(invalid)).is_err());
     }
 
     #[test]

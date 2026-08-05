@@ -1039,3 +1039,70 @@ reported 8,462,727 bytes free heap, `valid=6794 malformed=0 crc=0 overflow=0`, z
 response/RX/device-event/UI-command drops, event queue high-water 1, and UI queue
 high-water 4. Together with the earlier clean 90-degree interaction pass, this closes
 M2's physical render/gesture gate.
+
+## M3 companion-app hardware exit (2026-08-05)
+
+M3's software implementation, host tests, ESP-IDF build, frontend checks, and macOS
+desktop builds pass. The user explicitly deferred new physical testing until the next
+hardware session. Nothing in this entry claims that the M3 app-to-board flow, real
+sleep/wake behavior, or soak has been observed.
+
+The remaining board session must:
+
+1. Start from the settings UI, configure the clock, pomodoro, and ICS calendar (covering
+   a local file and a URL between the functional checks), reorder the screens, and save
+   without using the CLI to establish runtime state.
+2. Observe all three clean-canvas templates at 90° and 270°. Change orientation only
+   from Settings, confirm screen-edge/bottom-half touches do not rotate it, swipe the carousel,
+   start/pause the timer by touch, let an accelerated timer complete, dismiss its
+   interrupt, and confirm the previous screen returns.
+3. Power-cycle the board while the app is the active owner. Confirm time, layout, latest
+   clock/calendar/pomodoro fields, active screen, and any live interrupt replay from that
+   one process without manual reapply.
+4. Exercise a real host sleep/wake and settings close/reopen or webview reload. Confirm
+   there is still one runtime owner, no duplicate provider refresh or interrupt, and the
+   latest snapshot appears when settings returns.
+5. Run a 30-minute mixed session with settings closed. Record host process memory/CPU,
+   device heap and protocol/UI/event counters, provider/runtime queue pressure,
+   reconnects, missed events, resets, and touch/render responsiveness.
+
+These observations passed in the resumed session. Findings were fixed and regression
+tested; the user accepted the completed morning soak and waived repeating it after the
+later orientation/clean-canvas-only change. M3 is complete. No `m3` tag was created.
+
+### M3 orientation and clean-canvas amendment (2026-08-05)
+
+The product decision changed during the resumed hardware session: mounting orientation
+belongs in the companion app, with exactly two landscape options. `90°` means USB below
+and `270°` means USB above. Portrait modes and the standalone clock's former lower-half
+rotation gesture are removed. The chosen rotation is persisted in app config, carried in
+`ApplyConfig`, applied by firmware, and used by fallback rendering until reboot or a
+later config.
+
+The status strip is also removed because its contents are not readable at this panel
+size. Digital clock, pomodoro, calendar, and interrupt views now use the complete
+448x368 canvas. The protocol retains `standard` as a legacy M2 size enum, but current
+firmware intentionally lays it out identically to `full`.
+
+The amended `0xbd8d0` image was then flashed over native USB Serial/JTAG. Its first
+status response reported 448x368 at 90°, 8,462,743 bytes free heap, revision/token zero,
+and zero malformed, CRC, overflow, response, RX, event, or UI-command drops. From the
+rebuilt release Settings app, the user selected USB-above and confirmed the display
+flipped to 270° with a clean full-canvas widget. They selected USB-below and confirmed
+it returned to 90°; repeated lower-half/edge taps did not rotate it, while carousel
+swipes continued to work. The user then checked clock, pomodoro, and calendar: all three
+used the full panel without a status strip, pomodoro start/pause and local advancement
+worked, and calendar content rendered normally.
+
+## M4 Task 1 capability-handshake deployment (2026-08-05)
+
+The schema/negotiation task adds no new rendering behavior, but its firmware advertises
+the already-proven rotation support so the new app does not conservatively treat an M3
+image as core-only. ESP-IDF built `deskmate.bin` at `0xbd940` bytes with `0x426c0` bytes
+(26%) free in the smallest app partition. The release Deskmate process was terminated
+cleanly to release `/dev/cu.usbmodem1101`, the image flashed with verified hashes, and a
+read-only CLI status query returned active protocol 1, maximum protocol 1, capabilities
+`3` (`CoreWidgets | ConfigRotation`), logical 448x368 at 90°, 8,462,743 bytes free heap,
+and zero malformed, CRC, overflow, response, RX, or event drops. The release app was
+then reopened and reacquired the device port. This verifies deployment and negotiation;
+the user-requested morning soak was not repeated.

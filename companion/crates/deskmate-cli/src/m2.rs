@@ -8,8 +8,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use app_core::{
-    AppConfig, AppPreferences, CalendarSource, ConnectionState, RuntimeHandle, RuntimeState,
-    ScreenSettings, WidgetSettings, WidgetSize,
+    AppConfig, AppPreferences, CalendarSource, CarouselSettings, ConnectionState, DisplayTemplate,
+    RefreshPolicy, RuntimeHandle, RuntimeState, ScreenLayout, ScreenSettings, UpdaterSettings,
+    WidgetInterruptPolicy, WidgetSettings, WidgetSize, WidgetTapAction,
 };
 use chrono::Utc;
 use chrono_tz::Tz;
@@ -185,9 +186,10 @@ fn apply_config(arguments: &mut Arguments) -> Result<(), AppError> {
     let path = parse_config_path(arguments)?;
     let config = load_config(&path)?;
     let connected = connect_session(arguments.common.port.as_deref())?;
-    let ack = connected
-        .session
-        .apply_next_config(config.widgets, config.screens)?;
+    let ack =
+        connected
+            .session
+            .apply_next_config(config.rotation, config.widgets, config.screens)?;
     let revision = ack.revision.ok_or(DeviceError::UnexpectedMessage)?;
     print_ok(
         arguments.common.json,
@@ -473,6 +475,7 @@ fn build_demo_config(layout: ApplyConfig, options: &DemoOptions) -> Result<AppCo
             timezone: options.timezone.to_string(),
             autostart: false,
             paused: false,
+            orientation: app_core::DisplayOrientation::Landscape,
         },
         widgets: vec![
             WidgetSettings::Clock {
@@ -480,19 +483,30 @@ fn build_demo_config(layout: ApplyConfig, options: &DemoOptions) -> Result<AppCo
                 size: WidgetSize::Full,
                 title: "Desk".into(),
                 show_seconds: true,
+                template: DisplayTemplate::DigitalClock,
+                tap_action: WidgetTapAction::None,
+                refresh: RefreshPolicy::DeviceLocal,
+                interrupt_policy: WidgetInterruptPolicy::Disabled,
             },
             WidgetSettings::Pomodoro {
                 id: options.pomodoro_widget.clone(),
                 size: WidgetSize::Standard,
                 label: "Pomodoro".into(),
                 duration_seconds: options.duration_seconds,
+                template: DisplayTemplate::ProgressRing,
+                tap_action: WidgetTapAction::StartPause,
+                refresh: RefreshPolicy::DeviceLocal,
+                interrupt_policy: WidgetInterruptPolicy::Enabled,
             },
             WidgetSettings::Calendar {
                 id: options.calendar_widget.clone(),
                 size: WidgetSize::Standard,
                 title: "Calendar".into(),
                 source,
-                refresh_minutes: 15,
+                template: DisplayTemplate::RowList,
+                tap_action: WidgetTapAction::None,
+                refresh: RefreshPolicy::Interval { minutes: 15 },
+                interrupt_policy: WidgetInterruptPolicy::Disabled,
             },
         ],
         screens: layout
@@ -500,9 +514,14 @@ fn build_demo_config(layout: ApplyConfig, options: &DemoOptions) -> Result<AppCo
             .into_iter()
             .map(|screen| ScreenSettings {
                 id: screen.screen_id,
-                widget_id: screen.widget_id,
+                layout: ScreenLayout::Single {
+                    widget_id: screen.widget_id,
+                },
             })
             .collect(),
+        assets: Vec::new(),
+        carousel: CarouselSettings::default(),
+        updater: UpdaterSettings::default(),
     };
     config
         .validate()
@@ -858,6 +877,7 @@ fn load_config(path: &PathBuf) -> Result<ApplyConfig, AppError> {
         .collect();
     let config = ApplyConfig {
         revision: 1,
+        rotation: 90,
         widgets,
         screens,
     };
@@ -1003,7 +1023,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn checked_sample_layout_exercises_all_templates_and_both_strip_modes() {
+    fn checked_sample_layout_exercises_all_templates_and_legacy_size_classes() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/m2-carousel.json");
         let config = load_config(&path).unwrap();
         assert_eq!(config.widgets.len(), 3);

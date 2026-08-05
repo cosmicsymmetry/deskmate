@@ -8,12 +8,12 @@ pub(crate) struct Scheduler {
     next_pomodoro: Instant,
     next_status: Instant,
     next_time_sync: Instant,
-    calendars: BTreeMap<String, CalendarDeadline>,
+    providers: BTreeMap<String, ProviderDeadline>,
 }
 
-struct CalendarDeadline {
-    interval: Duration,
-    next: Instant,
+struct ProviderDeadline {
+    interval: Option<Duration>,
+    next: Option<Instant>,
 }
 
 impl Scheduler {
@@ -30,54 +30,54 @@ impl Scheduler {
             next_pomodoro: now,
             next_status: now,
             next_time_sync: now,
-            calendars: BTreeMap::new(),
+            providers: BTreeMap::new(),
         }
     }
 
-    pub(crate) fn replace_calendars(
+    pub(crate) fn replace_providers(
         &mut self,
-        calendars: impl IntoIterator<Item = (String, Duration)>,
+        providers: impl IntoIterator<Item = (String, Option<Duration>)>,
         now: Instant,
     ) {
-        self.calendars = calendars
+        self.providers = providers
             .into_iter()
             .map(|(widget_id, interval)| {
                 (
                     widget_id,
-                    CalendarDeadline {
+                    ProviderDeadline {
                         interval,
-                        next: now,
+                        next: Some(now),
                     },
                 )
             })
             .collect();
     }
 
-    pub(crate) fn schedule_calendar_now(&mut self, widget_id: &str, now: Instant) -> bool {
-        let Some(deadline) = self.calendars.get_mut(widget_id) else {
+    pub(crate) fn schedule_provider_now(&mut self, widget_id: &str, now: Instant) -> bool {
+        let Some(deadline) = self.providers.get_mut(widget_id) else {
             return false;
         };
-        deadline.next = now;
+        deadline.next = Some(now);
         true
     }
 
-    pub(crate) fn due_calendars(&self, now: Instant) -> Vec<String> {
-        self.calendars
+    pub(crate) fn due_providers(&self, now: Instant) -> Vec<String> {
+        self.providers
             .iter()
-            .filter(|(_, deadline)| now >= deadline.next)
+            .filter(|(_, deadline)| deadline.next.is_some_and(|next| now >= next))
             .map(|(widget_id, _)| widget_id.clone())
             .collect()
     }
 
-    pub(crate) fn calendar_started(&mut self, widget_id: &str, now: Instant) {
-        if let Some(deadline) = self.calendars.get_mut(widget_id) {
-            deadline.next = now + deadline.interval;
+    pub(crate) fn provider_started(&mut self, widget_id: &str, now: Instant) {
+        if let Some(deadline) = self.providers.get_mut(widget_id) {
+            deadline.next = deadline.interval.map(|interval| now + interval);
         }
     }
 
-    pub(crate) fn calendar_retry(&mut self, widget_id: &str, now: Instant, delay: Duration) {
-        if let Some(deadline) = self.calendars.get_mut(widget_id) {
-            deadline.next = now + delay;
+    pub(crate) fn provider_retry(&mut self, widget_id: &str, now: Instant, delay: Duration) {
+        if let Some(deadline) = self.providers.get_mut(widget_id) {
+            deadline.next = Some(now + delay);
         }
     }
 
@@ -95,9 +95,9 @@ impl Scheduler {
 
     pub(crate) fn wait_duration(&self, now: Instant, maximum: Duration) -> Duration {
         let next = self
-            .calendars
+            .providers
             .values()
-            .map(|deadline| deadline.next)
+            .filter_map(|deadline| deadline.next)
             .chain([self.next_pomodoro, self.next_status, self.next_time_sync])
             .min()
             .unwrap_or(now + maximum);
@@ -126,18 +126,39 @@ mod tests {
             Duration::from_secs(2),
             Duration::from_secs(3),
         );
-        scheduler.replace_calendars(
+        scheduler.replace_providers(
             [
-                ("work".into(), Duration::from_mins(1)),
-                ("home".into(), Duration::from_mins(2)),
+                ("work".into(), Some(Duration::from_mins(1))),
+                ("home".into(), Some(Duration::from_mins(2))),
+                ("manual".into(), None),
             ],
             now,
         );
-        assert_eq!(scheduler.due_calendars(now), ["home", "work"]);
-        scheduler.calendar_started("work", now);
-        scheduler.calendar_started("home", now);
-        assert!(scheduler.due_calendars(now).is_empty());
-        assert!(scheduler.schedule_calendar_now("work", now));
-        assert_eq!(scheduler.due_calendars(now), ["work"]);
+        assert_eq!(scheduler.due_providers(now), ["home", "manual", "work"]);
+        scheduler.provider_started("work", now);
+        scheduler.provider_started("home", now);
+        scheduler.provider_started("manual", now);
+        assert!(scheduler.due_providers(now).is_empty());
+        assert!(scheduler.schedule_provider_now("manual", now));
+        assert_eq!(scheduler.due_providers(now), ["manual"]);
+    }
+
+    #[test]
+    fn overdue_periodic_deadlines_fire_once_then_move_past_wake_time() {
+        let now = Instant::now();
+        let mut scheduler = Scheduler::new(
+            now,
+            Duration::from_secs(1),
+            Duration::from_secs(2),
+            Duration::from_secs(3),
+        );
+        let after_sleep = now + Duration::from_hours(8);
+
+        assert!(scheduler.pomodoro_due(after_sleep));
+        assert!(!scheduler.pomodoro_due(after_sleep));
+        assert!(scheduler.status_due(after_sleep));
+        assert!(!scheduler.status_due(after_sleep));
+        assert!(scheduler.time_sync_due(after_sleep));
+        assert!(!scheduler.time_sync_due(after_sleep));
     }
 }

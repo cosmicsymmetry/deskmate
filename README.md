@@ -2,7 +2,7 @@
 
 Monitor-clip AMOLED desk display. Spec: docs/superpowers/specs/2026-08-03-deskmate-design.md
 
-**Status: M3 active; M2 exit verification complete.** M0 was
+**Status: M3 complete; M4 v1 completion active at Task 3.** M0 was
 verified on the target board (Waveshare ESP32-S3-Touch-AMOLED-1.8
 v2, CO5300 panel + CST820 touch): display bring-up over QSPI (LVGL 9 via
 `esp_lvgl_port`), capacitive touch, brightness control, 180-degree rotation, and a
@@ -38,12 +38,41 @@ carousel gestures, pomodoro completion/dismissal, full-power replay, both landsc
 orientations, event burst, and 30-minute mixed soak pass. The user explicitly waived
 nine repeated M2 power cycles after one observed corrected cycle. M3 now has the strict
 typed app/config contract, cross-platform atomic config store, single-owner background
-runtime, and pinned Tauri v2 desktop shell. The shell starts the runtime before settings,
-owns the tray/single-instance/autostart/hide-on-close lifecycle, and has passed a live
-macOS debug-app smoke test. Task 5 adds the bounded custom-command surface, stable tagged
-IPC errors, one coalesced backend state event, focus/reopen snapshot recovery, and a
-checked Rust-to-TypeScript serialization contract. The settings experience is next; see
-the active M3 plan.
+runtime, pinned Tauri v2 desktop shell, narrow typed IPC, and the complete settings UI.
+The app configures and previews the three proven widgets, arranges screens with pointer
+or keyboard, chooses between the two landscape mounting orientations, exposes
+provider/device/persistence state, and keeps the runtime alive in the tray when settings
+closes. Widgets use the complete 448x368 canvas with no status strip. Its software,
+macOS debug/release, physical UI/replay, sleep/wake, and tray-resident soak gates pass.
+M4 Task 1 freezes application config schema v2, lossless M3 migration, bounded closed
+types for the remaining v1 surface, and an additive protocol-v1 capability handshake.
+See `docs/config/v2.md`, `docs/protocol/v1.md`, `docs/providers/v1.md`, and the active
+M4 plan. Task 2 delivered the bounded weather/JSON/RSS providers and wider ICS
+recurrence; Task 3 now owns the remaining device templates.
+
+## M3 companion app
+
+Install the locked frontend dependencies and launch the desktop app:
+
+    cd companion/apps/deskmate
+    bun install --frozen-lockfile
+    PATH="$HOME/.cargo/bin:$PATH" bun run tauri dev
+
+Use Settings to add a digital clock, pomodoro, or ICS calendar from a URL or local file,
+choose USB-below or USB-above landscape mounting, then arrange its screens and choose
+Save & apply. Closing Settings hides the window; the
+tray process continues provider refreshes, timer handling, reconnect, and full replay.
+Pomodoro duration and label persist across app restarts. A live timer survives settings
+close/reopen and unrelated saves, but deliberately restarts idle after the entire app
+quits so elapsed time is never guessed from process downtime.
+
+Run the frontend checks from the same directory:
+
+    bun run format:check
+    bun run lint
+    bun run check
+    bun test
+    bun run build
 
 ## Firmware build
 
@@ -76,7 +105,8 @@ device-node suffix. Protocol details and bounds are in `docs/protocol/v1.md`.
 
 ## M2 CLI demo
 
-The checked sample uses all three M2 templates and both full/standard strip modes. Build
+The checked sample uses all three M2 templates and both legacy full/standard size
+classes. Current firmware renders either class as a clean full canvas. Build
 the CLI, then inspect and apply it before pushing widget data:
 
     cargo build --manifest-path companion/Cargo.toml -p deskmate-cli

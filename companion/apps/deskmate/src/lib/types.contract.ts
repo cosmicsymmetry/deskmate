@@ -4,11 +4,12 @@ import type { IpcContractFixtures } from "./types";
 export const ipcContractFixtures = {
   "snapshot": {
     "config": {
-      "schema_version": 1,
+      "schema_version": 2,
       "preferences": {
         "timezone": "Asia/Tbilisi",
         "autostart": true,
-        "paused": false
+        "paused": false,
+        "orientation": "landscape-flipped"
       },
       "widgets": [
         {
@@ -16,14 +17,34 @@ export const ipcContractFixtures = {
           "id": "clock",
           "size": "full",
           "title": "Desk",
-          "show_seconds": true
+          "show_seconds": true,
+          "template": {
+            "kind": "digital-clock"
+          },
+          "tap_action": {
+            "kind": "none"
+          },
+          "refresh": {
+            "kind": "device-local"
+          },
+          "interrupt_policy": "disabled"
         },
         {
           "kind": "pomodoro",
           "id": "pomodoro",
           "size": "standard",
           "label": "Focus",
-          "duration_seconds": 1500
+          "duration_seconds": 1500,
+          "template": {
+            "kind": "progress-ring"
+          },
+          "tap_action": {
+            "kind": "start-pause"
+          },
+          "refresh": {
+            "kind": "device-local"
+          },
+          "interrupt_policy": "enabled"
         },
         {
           "kind": "calendar",
@@ -34,23 +55,50 @@ export const ipcContractFixtures = {
             "kind": "file",
             "value": "/tmp/calendar.ics"
           },
-          "refresh_minutes": 15
+          "template": {
+            "kind": "row-list"
+          },
+          "tap_action": {
+            "kind": "none"
+          },
+          "refresh": {
+            "kind": "interval",
+            "minutes": 15
+          },
+          "interrupt_policy": "disabled"
         }
       ],
       "screens": [
         {
           "id": "clock-screen",
-          "widget_id": "clock"
+          "layout": {
+            "kind": "single",
+            "widget_id": "clock"
+          }
         },
         {
           "id": "pomodoro-screen",
-          "widget_id": "pomodoro"
+          "layout": {
+            "kind": "single",
+            "widget_id": "pomodoro"
+          }
         },
         {
           "id": "calendar-screen",
-          "widget_id": "calendar"
+          "layout": {
+            "kind": "single",
+            "widget_id": "calendar"
+          }
         }
-      ]
+      ],
+      "assets": [],
+      "carousel": {
+        "auto_advance_seconds": null
+      },
+      "updater": {
+        "channel": "stable",
+        "checks": "notify"
+      }
     },
     "runtime": {
       "kind": "error",
@@ -64,6 +112,11 @@ export const ipcContractFixtures = {
       "port_name": "/dev/cu.usbmodem1",
       "firmware_version": "1.0.0",
       "protocol_version": 1,
+      "max_protocol_version": 1,
+      "capabilities": [
+        "core-widgets"
+      ],
+      "unknown_capability_bits": "0x0000000000000000",
       "uptime_ms": 42,
       "free_heap": 123456,
       "rotation": 90,
@@ -118,11 +171,12 @@ export const ipcContractFixtures = {
   },
   "configs": [
     {
-      "schema_version": 1,
+      "schema_version": 2,
       "preferences": {
         "timezone": "Asia/Tbilisi",
         "autostart": true,
-        "paused": false
+        "paused": false,
+        "orientation": "landscape-flipped"
       },
       "widgets": [
         {
@@ -130,14 +184,34 @@ export const ipcContractFixtures = {
           "id": "clock",
           "size": "full",
           "title": "Desk",
-          "show_seconds": true
+          "show_seconds": true,
+          "template": {
+            "kind": "digital-clock"
+          },
+          "tap_action": {
+            "kind": "none"
+          },
+          "refresh": {
+            "kind": "device-local"
+          },
+          "interrupt_policy": "disabled"
         },
         {
           "kind": "pomodoro",
           "id": "pomodoro",
           "size": "standard",
           "label": "Focus",
-          "duration_seconds": 1500
+          "duration_seconds": 1500,
+          "template": {
+            "kind": "progress-ring"
+          },
+          "tap_action": {
+            "kind": "start-pause"
+          },
+          "refresh": {
+            "kind": "device-local"
+          },
+          "interrupt_policy": "enabled"
         },
         {
           "kind": "calendar",
@@ -148,23 +222,50 @@ export const ipcContractFixtures = {
             "kind": "file",
             "value": "/tmp/calendar.ics"
           },
-          "refresh_minutes": 15
+          "template": {
+            "kind": "row-list"
+          },
+          "tap_action": {
+            "kind": "none"
+          },
+          "refresh": {
+            "kind": "interval",
+            "minutes": 15
+          },
+          "interrupt_policy": "disabled"
         }
       ],
       "screens": [
         {
           "id": "clock-screen",
-          "widget_id": "clock"
+          "layout": {
+            "kind": "single",
+            "widget_id": "clock"
+          }
         },
         {
           "id": "pomodoro-screen",
-          "widget_id": "pomodoro"
+          "layout": {
+            "kind": "single",
+            "widget_id": "pomodoro"
+          }
         },
         {
           "id": "calendar-screen",
-          "widget_id": "calendar"
+          "layout": {
+            "kind": "single",
+            "widget_id": "calendar"
+          }
         }
-      ]
+      ],
+      "assets": [],
+      "carousel": {
+        "auto_advance_seconds": null
+      },
+      "updater": {
+        "channel": "stable",
+        "checks": "notify"
+      }
     }
   ],
   "widget_settings": [
@@ -173,14 +274,34 @@ export const ipcContractFixtures = {
       "id": "clock",
       "size": "full",
       "title": "Desk",
-      "show_seconds": true
+      "show_seconds": true,
+      "template": {
+        "kind": "digital-clock"
+      },
+      "tap_action": {
+        "kind": "none"
+      },
+      "refresh": {
+        "kind": "device-local"
+      },
+      "interrupt_policy": "disabled"
     },
     {
       "kind": "pomodoro",
       "id": "pomodoro",
       "size": "standard",
       "label": "Focus",
-      "duration_seconds": 1500
+      "duration_seconds": 1500,
+      "template": {
+        "kind": "progress-ring"
+      },
+      "tap_action": {
+        "kind": "start-pause"
+      },
+      "refresh": {
+        "kind": "device-local"
+      },
+      "interrupt_policy": "enabled"
     },
     {
       "kind": "calendar",
@@ -191,12 +312,87 @@ export const ipcContractFixtures = {
         "kind": "file",
         "value": "/tmp/calendar.ics"
       },
-      "refresh_minutes": 15
+      "template": {
+        "kind": "row-list"
+      },
+      "tap_action": {
+        "kind": "none"
+      },
+      "refresh": {
+        "kind": "interval",
+        "minutes": 15
+      },
+      "interrupt_policy": "disabled"
+    },
+    {
+      "kind": "weather",
+      "id": "weather",
+      "size": "tile",
+      "title": "Weather",
+      "location": "Tbilisi",
+      "units": "metric",
+      "template": {
+        "kind": "icon-badge-text",
+        "icon_asset_id": "weather-icons"
+      },
+      "tap_action": {
+        "kind": "open-url",
+        "url": "https://example.test/weather"
+      },
+      "refresh": {
+        "kind": "interval",
+        "minutes": 30
+      },
+      "interrupt_policy": "disabled"
+    },
+    {
+      "kind": "json-feed",
+      "id": "json",
+      "size": "tile",
+      "title": "Metric",
+      "url": "https://example.test/metric.json",
+      "mappings": [
+        {
+          "field": "value",
+          "path": "$.current.value"
+        }
+      ],
+      "template": {
+        "kind": "big-number-label"
+      },
+      "tap_action": {
+        "kind": "open-application",
+        "application_id": "com.example.metrics"
+      },
+      "refresh": {
+        "kind": "manual"
+      },
+      "interrupt_policy": "disabled"
+    },
+    {
+      "kind": "rss",
+      "id": "news",
+      "size": "standard",
+      "title": "News",
+      "url": "https://example.test/feed.xml",
+      "max_items": 3,
+      "template": {
+        "kind": "row-list"
+      },
+      "tap_action": {
+        "kind": "dismiss"
+      },
+      "refresh": {
+        "kind": "interval",
+        "minutes": 15
+      },
+      "interrupt_policy": "enabled"
     }
   ],
   "widget_sizes": [
     "full",
-    "standard"
+    "standard",
+    "tile"
   ],
   "calendar_sources": [
     {
@@ -207,6 +403,144 @@ export const ipcContractFixtures = {
       "kind": "url",
       "value": "https://example.test/calendar.ics"
     }
+  ],
+  "display_templates": [
+    {
+      "kind": "digital-clock"
+    },
+    {
+      "kind": "analog-clock"
+    },
+    {
+      "kind": "progress-ring"
+    },
+    {
+      "kind": "row-list"
+    },
+    {
+      "kind": "big-number-label"
+    },
+    {
+      "kind": "icon-badge-text",
+      "icon_asset_id": "weather-icons"
+    }
+  ],
+  "tap_actions": [
+    {
+      "kind": "none"
+    },
+    {
+      "kind": "start-pause"
+    },
+    {
+      "kind": "reset"
+    },
+    {
+      "kind": "dismiss"
+    },
+    {
+      "kind": "open-url",
+      "url": "https://example.test/action"
+    },
+    {
+      "kind": "open-application",
+      "application_id": "com.example.app"
+    }
+  ],
+  "refresh_policies": [
+    {
+      "kind": "device-local"
+    },
+    {
+      "kind": "manual"
+    },
+    {
+      "kind": "interval",
+      "minutes": 15
+    }
+  ],
+  "interrupt_policies": [
+    "disabled",
+    "enabled"
+  ],
+  "weather_units": [
+    "metric",
+    "imperial"
+  ],
+  "screen_layouts": [
+    {
+      "kind": "single",
+      "widget_id": "clock"
+    },
+    {
+      "kind": "dashboard",
+      "columns": 2,
+      "rows": 2,
+      "tiles": [
+        {
+          "widget_id": "weather",
+          "column": 0,
+          "row": 0,
+          "column_span": 1,
+          "row_span": 1
+        }
+      ]
+    }
+  ],
+  "asset_sources": [
+    {
+      "kind": "file",
+      "value": "/tmp/weather-icons.bin"
+    }
+  ],
+  "asset_kinds": [
+    {
+      "kind": "icon",
+      "width": 32,
+      "height": 32
+    },
+    {
+      "kind": "font",
+      "pixel_size": 18,
+      "glyph_ranges": [
+        {
+          "start": 32,
+          "end": 126
+        }
+      ]
+    }
+  ],
+  "update_channels": [
+    "stable",
+    "beta",
+    "manual"
+  ],
+  "update_check_policies": [
+    "disabled",
+    "notify"
+  ],
+  "firmware_artifacts": [
+    {
+      "version": "1.0.0",
+      "model": "waveshare-1.8",
+      "byte_length": 524288,
+      "sha256_hex": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "signing_key_id": "deskmate-release-1",
+      "signature_base64": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="
+    }
+  ],
+  "display_orientations": [
+    "landscape",
+    "landscape-flipped"
+  ],
+  "device_capabilities": [
+    "core-widgets",
+    "config-rotation",
+    "dashboard-layouts",
+    "extended-templates",
+    "host-tap-actions",
+    "asset-transfer",
+    "firmware-update"
   ],
   "runtime_states": [
     {
@@ -287,7 +621,11 @@ export const ipcContractFixtures = {
     "unsupported-size",
     "out-of-range",
     "invalid-timezone",
-    "invalid-source"
+    "invalid-source",
+    "invalid-composition",
+    "overlap",
+    "too-large",
+    "requires-capability"
   ],
   "pomodoro_actions": [
     "start",

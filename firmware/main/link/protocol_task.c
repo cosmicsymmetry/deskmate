@@ -210,6 +210,8 @@ static void transmit_status(protocol_context_t *context, uint32_t request_id)
     reply->type = PROTOCOL_TYPE_STATUS_RESPONSE;
     protocol_status_response_t *status = &reply->value.status;
     status->protocol_version = PROTOCOL_VERSION;
+    status->max_protocol_version = PROTOCOL_MAX_VERSION;
+    status->capabilities = PROTOCOL_CURRENT_CAPABILITIES;
     const char *version = esp_app_get_description()->version;
     size_t version_length = strlen(version);
     if (version_length > PROTOCOL_MAX_FIRMWARE_VERSION_LENGTH) {
@@ -243,6 +245,8 @@ static void transmit_status(protocol_context_t *context, uint32_t request_id)
     status->dropped_ui_commands = ui_runtime_dropped_commands();
     status->ui_queue_high_water = ui_runtime_queue_high_water();
     status->config_revision = widget_model_config_revision(&context->model);
+    status->latest_interrupt_token =
+        interrupt_state_latest_token(&context->interrupts);
     transmit(context, request_id, reply);
 }
 
@@ -369,21 +373,39 @@ static protocol_error_code_t config_error_code(
 static void dispatch_apply_config(protocol_context_t *context,
                                   uint32_t request_id)
 {
-    widget_model_config_result_t result = widget_model_apply_config(
-        &context->model, &context->message.value.apply_config);
+    const protocol_apply_config_t *incoming =
+        &context->message.value.apply_config;
+    widget_model_config_result_t result = widget_model_check_config(
+        &context->model, incoming);
     if (result != WIDGET_MODEL_CONFIG_APPLIED &&
         result != WIDGET_MODEL_CONFIG_REPLAYED) {
         transmit_error(context, request_id, config_error_code(result),
                        "configuration rejected");
         return;
     }
+    if (board_display_rotation_degrees() != incoming->rotation &&
+        board_display_set_rotation_180(incoming->rotation == 270U) != ESP_OK) {
+        transmit_error(context, request_id, PROTOCOL_ERROR_INTERNAL,
+                       "display orientation rejected");
+        return;
+    }
     if (result == WIDGET_MODEL_CONFIG_REPLAYED) {
+        if (!show_current_content(context)) {
+            transmit_error(context, request_id, PROTOCOL_ERROR_INTERNAL,
+                           "UI command rejected");
+            return;
+        }
         transmit_ack(context, request_id, PROTOCOL_TYPE_APPLY_CONFIG, true,
                      widget_model_config_revision(&context->model));
         return;
     }
+    result = widget_model_apply_config(&context->model, incoming);
+    if (result != WIDGET_MODEL_CONFIG_APPLIED) {
+        transmit_error(context, request_id, PROTOCOL_ERROR_INTERNAL,
+                       "configuration commit failed");
+        return;
+    }
     interrupt_state_clear(&context->interrupts);
-    (void)ui_runtime_set_interrupts(false, false);
     if (!show_carousel_screen(context)) {
         transmit_error(context, request_id, PROTOCOL_ERROR_INTERNAL,
                        "UI command rejected");
@@ -462,8 +484,6 @@ static void dispatch_trigger_interrupt(protocol_context_t *context,
                        "UI command rejected");
         return;
     }
-    (void)ui_runtime_set_interrupts(true,
-        interrupt_state_pending(&context->interrupts) != NULL);
     transmit_ack(context, request_id, PROTOCOL_TYPE_TRIGGER_INTERRUPT,
                  false, 0U);
 }
@@ -653,9 +673,6 @@ static bool apply_dismissal_event(protocol_context_t *context,
                                              dismissal.saved_screen_id)) {
         shown = show_carousel_screen(context);
     }
-    (void)ui_runtime_set_interrupts(
-        interrupt_state_active(&context->interrupts) != NULL,
-        interrupt_state_pending(&context->interrupts) != NULL);
     return shown;
 }
 

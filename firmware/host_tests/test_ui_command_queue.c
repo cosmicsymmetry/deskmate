@@ -57,8 +57,7 @@ static void test_view_supersedes_and_pressure_is_bounded(void)
             assert(ui_command_queue_push(&s_queue, &s_command));
         }
     }
-    memset(&s_command, 0, sizeof(s_command));
-    s_command.type = UI_COMMAND_INTERRUPTS;
+    s_command = view_command("overflow", UI_COMMAND_PATCH_VIEW, 1U);
     assert(!ui_command_queue_push(&s_queue, &s_command));
     assert(ui_command_queue_dropped(&s_queue) == 1U);
     assert(ui_command_queue_high_water(&s_queue) ==

@@ -1,9 +1,10 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "preferences": {
     "timezone": "Asia/Tbilisi",
     "autostart": true,
-    "paused": false
+    "paused": false,
+    "orientation": "landscape-flipped"
   },
   "widgets": [
     {
@@ -11,14 +12,22 @@
       "id": "clock",
       "size": "full",
       "title": "Desk",
-      "show_seconds": true
+      "show_seconds": true,
+      "template": { "kind": "digital-clock" },
+      "tap_action": { "kind": "none" },
+      "refresh": { "kind": "device-local" },
+      "interrupt_policy": "disabled"
     },
     {
       "kind": "pomodoro",
       "id": "pomodoro",
       "size": "standard",
       "label": "Focus",
-      "duration_seconds": 1500
+      "duration_seconds": 1500,
+      "template": { "kind": "progress-ring" },
+      "tap_action": { "kind": "start-pause" },
+      "refresh": { "kind": "device-local" },
+      "interrupt_policy": "enabled"
     },
     {
       "kind": "calendar",
@@ -29,21 +38,27 @@
         "kind": "url",
         "value": "https://example.com/calendar.ics"
       },
-      "refresh_minutes": 15
+      "template": { "kind": "row-list" },
+      "tap_action": { "kind": "none" },
+      "refresh": { "kind": "interval", "minutes": 15 },
+      "interrupt_policy": "disabled"
     }
   ],
   "screens": [
     {
       "id": "pomodoro-screen",
-      "widget_id": "pomodoro"
+      "layout": { "kind": "single", "widget_id": "pomodoro" }
     },
     {
       "id": "clock-screen",
-      "widget_id": "clock"
+      "layout": { "kind": "single", "widget_id": "clock" }
     },
     {
       "id": "calendar-screen",
-      "widget_id": "calendar"
+      "layout": { "kind": "single", "widget_id": "calendar" }
     }
-  ]
+  ],
+  "assets": [],
+  "carousel": { "auto_advance_seconds": null },
+  "updater": { "channel": "stable", "checks": "notify" }
 }

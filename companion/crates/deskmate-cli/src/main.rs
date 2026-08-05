@@ -316,9 +316,11 @@ fn json_string(value: &str) -> String {
 fn print_status(status: &StatusResponse, port_name: &str, json: bool) {
     if json {
         println!(
-            "{{\"port\":{},\"protocol_version\":{},\"firmware_version\":{},\"uptime_ms\":{},\"free_heap\":{},\"display_width\":{},\"display_height\":{},\"brightness\":{},\"rotation\":{},\"online\":{},\"latest_revision\":{},\"config_revision\":{},\"valid_frames\":{},\"malformed_frames\":{},\"crc_errors\":{},\"overflow_frames\":{},\"dropped_responses\":{},\"rx_dropped_bytes\":{},\"dropped_events\":{},\"event_queue_high_water\":{},\"dropped_ui_commands\":{},\"ui_queue_high_water\":{}}}",
+            "{{\"port\":{},\"protocol_version\":{},\"max_protocol_version\":{},\"capabilities\":{},\"firmware_version\":{},\"uptime_ms\":{},\"free_heap\":{},\"display_width\":{},\"display_height\":{},\"brightness\":{},\"rotation\":{},\"online\":{},\"latest_revision\":{},\"config_revision\":{},\"latest_interrupt_token\":{},\"valid_frames\":{},\"malformed_frames\":{},\"crc_errors\":{},\"overflow_frames\":{},\"dropped_responses\":{},\"rx_dropped_bytes\":{},\"dropped_events\":{},\"event_queue_high_water\":{},\"dropped_ui_commands\":{},\"ui_queue_high_water\":{}}}",
             json_string(port_name),
             status.protocol_version,
+            status.max_protocol_version,
+            status.capabilities,
             json_string(&status.firmware_version),
             status.uptime_ms,
             status.free_heap,
@@ -329,6 +331,7 @@ fn print_status(status: &StatusResponse, port_name: &str, json: bool) {
             status.online,
             status.latest_revision,
             status.config_revision,
+            status.latest_interrupt_token,
             status.valid_frames,
             status.malformed_frames,
             status.crc_errors,
@@ -343,8 +346,11 @@ fn print_status(status: &StatusResponse, port_name: &str, json: bool) {
     } else {
         println!("Deskmate on {port_name}");
         println!(
-            "firmware {} / protocol v{}",
-            status.firmware_version, status.protocol_version
+            "firmware {} / protocol v{} (max v{}, capabilities 0x{:016x})",
+            status.firmware_version,
+            status.protocol_version,
+            status.max_protocol_version,
+            status.capabilities
         );
         println!(
             "display {}x{}, brightness {}, rotation {}°",
@@ -371,8 +377,9 @@ fn print_status(status: &StatusResponse, port_name: &str, json: bool) {
             status.rx_dropped_bytes
         );
         println!(
-            "config revision={}, events dropped={} high_water={}, UI commands dropped={} high_water={}",
+            "config revision={}, latest interrupt token={}, events dropped={} high_water={}, UI commands dropped={} high_water={}",
             status.config_revision,
+            status.latest_interrupt_token,
             status.dropped_events,
             status.event_queue_high_water,
             status.dropped_ui_commands,

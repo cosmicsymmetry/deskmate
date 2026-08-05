@@ -7,7 +7,7 @@ idf_component_register(
          "core/template_fields.c" "core/timefmt.c" "core/widget_model.c"
          "link/protocol_task.c" "link/usb_link.c" "ui/carousel.c"
          "ui/clock_screen.c"
-         "ui/status_strip.c" "ui/template_view.c" "ui/ui_command_queue.c"
+         "ui/template_view.c" "ui/ui_command_queue.c"
          "ui/ui_runtime.c"
          "ui/templates/digital_clock.c" "ui/templates/progress_ring.c"
          "ui/templates/row_list.c"

@@ -6,7 +6,79 @@ use protocol::{
     ApplyConfig, Field, FieldValue, InterruptPolicy, MAX_CONFIG_SCREENS, MAX_CONFIG_WIDGETS,
     MAX_SCREEN_ID_LEN, PushData, ScreenConfig, SizeClass, TapAction, TemplateKind, WidgetConfig,
 };
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+
+// Helper module for strict deserialization of internally tagged enums
+mod strict_tagged_enum {
+    use serde::{Deserialize, Serialize};
+    use serde_json::Value;
+
+    #[derive(Debug, Serialize, Deserialize)]
+    #[serde(tag = "kind", rename_all = "kebab-case")]
+    pub enum CardPresenceInner {
+        InRotation { dwell_seconds: Option<u16> },
+        AlertOnly,
+        Off,
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    #[serde(tag = "kind", rename_all = "kebab-case")]
+    pub enum AlertHoldInner {
+        UntilDismissed,
+        Seconds { value: u16 },
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    #[serde(tag = "kind", rename_all = "kebab-case")]
+    pub enum CardAlertInner {
+        None,
+        OnTimerFinish {
+            hold: AlertHoldInner,
+        },
+        BeforeEvent {
+            lead_minutes: u16,
+            hold: AlertHoldInner,
+        },
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    #[serde(tag = "kind", rename_all = "kebab-case")]
+    pub enum CarouselAdvanceInner {
+        Manual,
+        Timed { default_dwell_seconds: u16 },
+    }
+
+    pub fn validate_and_deserialize<T: for<'de> serde::Deserialize<'de>>(
+        value: &Value,
+    ) -> Result<T, String> {
+        // Validate unknown fields
+        if let Value::Object(map) = value {
+            let allowed = match map.get("kind") {
+                Some(Value::String(s)) => match s.as_str() {
+                    "in-rotation" => vec!["kind", "dwell_seconds"],
+                    "alert-only" | "off" | "until-dismissed" | "none" | "manual" => {
+                        vec!["kind"]
+                    }
+                    "seconds" => vec!["kind", "value"],
+                    "on-timer-finish" => vec!["kind", "hold"],
+                    "before-event" => vec!["kind", "lead_minutes", "hold"],
+                    "timed" => vec!["kind", "default_dwell_seconds"],
+                    _ => return Err(format!("unknown variant: {s}")),
+                },
+                _ => return Err("missing or invalid 'kind' field".to_string()),
+            };
+
+            for key in map.keys() {
+                if !allowed.contains(&key.as_str()) {
+                    return Err(format!("unknown field: {key}"));
+                }
+            }
+        }
+
+        // Use the inner deserialize
+        serde_json::from_value(value.clone()).map_err(|e| e.to_string())
+    }
+}
 
 pub const CURRENT_SCHEMA_VERSION: u32 = 2;
 pub const MAX_WIDGET_TITLE_LEN: usize = 64;
@@ -43,6 +115,13 @@ pub const MAX_POMODORO_SECONDS: u32 = 86_400;
 pub const MIN_CALENDAR_REFRESH_MINUTES: u16 = 1;
 pub const MIN_WEATHER_REFRESH_MINUTES: u16 = 10;
 pub const MAX_CALENDAR_REFRESH_MINUTES: u16 = 1_440;
+pub const MAX_CONFIG_CARDS: usize = 8;
+pub const MIN_DWELL_SECONDS: u16 = 5;
+pub const MAX_DWELL_SECONDS: u16 = 3_600;
+pub const MIN_ALERT_LEAD_MINUTES: u16 = 1;
+pub const MAX_ALERT_LEAD_MINUTES: u16 = 60;
+pub const MIN_ALERT_HOLD_SECONDS: u16 = 5;
+pub const MAX_ALERT_HOLD_SECONDS: u16 = 600;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -545,6 +624,171 @@ impl RefreshPolicy {
 pub enum WidgetInterruptPolicy {
     Disabled,
     Enabled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum CardPresence {
+    InRotation { dwell_seconds: Option<u16> },
+    AlertOnly,
+    Off,
+}
+
+impl<'de> Deserialize<'de> for CardPresence {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let inner: strict_tagged_enum::CardPresenceInner =
+            strict_tagged_enum::validate_and_deserialize(&value)
+                .map_err(serde::de::Error::custom)?;
+        Ok(match inner {
+            strict_tagged_enum::CardPresenceInner::InRotation { dwell_seconds } => {
+                CardPresence::InRotation { dwell_seconds }
+            }
+            strict_tagged_enum::CardPresenceInner::AlertOnly => CardPresence::AlertOnly,
+            strict_tagged_enum::CardPresenceInner::Off => CardPresence::Off,
+        })
+    }
+}
+
+impl CardPresence {
+    pub const fn dwell_seconds(self, default: u16) -> Option<u16> {
+        match self {
+            Self::InRotation { dwell_seconds } => Some(match dwell_seconds {
+                Some(seconds) => seconds,
+                None => default,
+            }),
+            Self::AlertOnly | Self::Off => None,
+        }
+    }
+
+    pub const fn is_in_rotation(self) -> bool {
+        matches!(self, Self::InRotation { .. })
+    }
+
+    pub const fn is_off(self) -> bool {
+        matches!(self, Self::Off)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum AlertHold {
+    UntilDismissed,
+    Seconds { value: u16 },
+}
+
+impl<'de> Deserialize<'de> for AlertHold {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let inner: strict_tagged_enum::AlertHoldInner =
+            strict_tagged_enum::validate_and_deserialize(&value)
+                .map_err(serde::de::Error::custom)?;
+        Ok(match inner {
+            strict_tagged_enum::AlertHoldInner::UntilDismissed => AlertHold::UntilDismissed,
+            strict_tagged_enum::AlertHoldInner::Seconds { value } => AlertHold::Seconds { value },
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum CardAlert {
+    None,
+    OnTimerFinish { hold: AlertHold },
+    BeforeEvent { lead_minutes: u16, hold: AlertHold },
+}
+
+impl<'de> Deserialize<'de> for CardAlert {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let inner: strict_tagged_enum::CardAlertInner =
+            strict_tagged_enum::validate_and_deserialize(&value)
+                .map_err(serde::de::Error::custom)?;
+        Ok(match inner {
+            strict_tagged_enum::CardAlertInner::None => CardAlert::None,
+            strict_tagged_enum::CardAlertInner::OnTimerFinish { hold: inner_hold } => {
+                let hold = match inner_hold {
+                    strict_tagged_enum::AlertHoldInner::UntilDismissed => AlertHold::UntilDismissed,
+                    strict_tagged_enum::AlertHoldInner::Seconds { value } => {
+                        AlertHold::Seconds { value }
+                    }
+                };
+                CardAlert::OnTimerFinish { hold }
+            }
+            strict_tagged_enum::CardAlertInner::BeforeEvent {
+                lead_minutes,
+                hold: inner_hold,
+            } => {
+                let hold = match inner_hold {
+                    strict_tagged_enum::AlertHoldInner::UntilDismissed => AlertHold::UntilDismissed,
+                    strict_tagged_enum::AlertHoldInner::Seconds { value } => {
+                        AlertHold::Seconds { value }
+                    }
+                };
+                CardAlert::BeforeEvent { lead_minutes, hold }
+            }
+        })
+    }
+}
+
+impl CardAlert {
+    pub const fn is_none(self) -> bool {
+        matches!(self, Self::None)
+    }
+
+    pub const fn hold(self) -> Option<AlertHold> {
+        match self {
+            Self::None => None,
+            Self::OnTimerFinish { hold } | Self::BeforeEvent { hold, .. } => Some(hold),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum CarouselAdvance {
+    Manual,
+    Timed { default_dwell_seconds: u16 },
+}
+
+impl<'de> Deserialize<'de> for CarouselAdvance {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let inner: strict_tagged_enum::CarouselAdvanceInner =
+            strict_tagged_enum::validate_and_deserialize(&value)
+                .map_err(serde::de::Error::custom)?;
+        Ok(match inner {
+            strict_tagged_enum::CarouselAdvanceInner::Manual => CarouselAdvance::Manual,
+            strict_tagged_enum::CarouselAdvanceInner::Timed {
+                default_dwell_seconds,
+            } => CarouselAdvance::Timed {
+                default_dwell_seconds,
+            },
+        })
+    }
+}
+
+impl CarouselAdvance {
+    pub const fn default_dwell_seconds(self) -> Option<u16> {
+        match self {
+            Self::Manual => None,
+            Self::Timed {
+                default_dwell_seconds,
+            } => Some(default_dwell_seconds),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

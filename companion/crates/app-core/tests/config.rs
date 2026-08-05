@@ -1,8 +1,9 @@
 use app_core::{
-    AppConfig, AppSnapshot, AssetSettings, ConnectionState, DeviceCounters, DeviceSnapshot,
-    FirmwareArtifactMetadata, MAX_ASSET_BYTES, MAX_PROVIDER_URL_LEN, MAX_UPDATE_ARTIFACT_BYTES,
-    PersistenceState, PomodoroSnapshot, PomodoroState, ProviderSnapshot, ProviderState,
-    RuntimeDiagnostics, RuntimeState, ScreenLayout, ValidationCode, WidgetSettings,
+    AlertHold, AppConfig, AppSnapshot, AssetSettings, CardAlert, CardPresence, CarouselAdvance,
+    ConnectionState, DeviceCounters, DeviceSnapshot, FirmwareArtifactMetadata, MAX_ASSET_BYTES,
+    MAX_PROVIDER_URL_LEN, MAX_UPDATE_ARTIFACT_BYTES, PersistenceState, PomodoroSnapshot,
+    PomodoroState, ProviderSnapshot, ProviderState, RuntimeDiagnostics, RuntimeState, ScreenLayout,
+    ValidationCode, WidgetSettings,
 };
 use protocol::{
     CAPABILITY_ASSET_TRANSFER, CAPABILITY_CONFIG_ROTATION, CAPABILITY_CORE_WIDGETS,
@@ -320,5 +321,73 @@ fn runtime_snapshot_uses_tagged_states_for_frontend_contract() {
     assert_eq!(
         serde_json::from_value::<AppSnapshot>(json).unwrap(),
         snapshot
+    );
+}
+
+#[test]
+fn card_presence_resolves_dwell_against_the_carousel_default() {
+    assert_eq!(
+        CardPresence::InRotation {
+            dwell_seconds: Some(45)
+        }
+        .dwell_seconds(20),
+        Some(45)
+    );
+    assert_eq!(
+        CardPresence::InRotation {
+            dwell_seconds: None
+        }
+        .dwell_seconds(20),
+        Some(20)
+    );
+    assert_eq!(CardPresence::AlertOnly.dwell_seconds(20), None);
+    assert_eq!(CardPresence::Off.dwell_seconds(20), None);
+
+    assert!(
+        CardPresence::InRotation {
+            dwell_seconds: None
+        }
+        .is_in_rotation()
+    );
+    assert!(!CardPresence::AlertOnly.is_in_rotation());
+    assert!(CardPresence::Off.is_off());
+    assert!(!CardPresence::AlertOnly.is_off());
+}
+
+#[test]
+fn card_behaviour_types_round_trip_as_closed_tagged_json() {
+    let presence = CardPresence::InRotation {
+        dwell_seconds: Some(30),
+    };
+    let json = serde_json::to_value(presence).unwrap();
+    assert_eq!(json["kind"], "in-rotation");
+    assert_eq!(json["dwell_seconds"], 30);
+    assert_eq!(
+        serde_json::from_value::<CardPresence>(json).unwrap(),
+        presence
+    );
+
+    let alert = CardAlert::BeforeEvent {
+        lead_minutes: 5,
+        hold: AlertHold::Seconds { value: 60 },
+    };
+    let json = serde_json::to_value(alert).unwrap();
+    assert_eq!(json["kind"], "before-event");
+    assert_eq!(json["hold"]["kind"], "seconds");
+    assert_eq!(serde_json::from_value::<CardAlert>(json).unwrap(), alert);
+
+    assert!(CardAlert::None.is_none());
+    assert!(!alert.is_none());
+
+    let advance = CarouselAdvance::Timed {
+        default_dwell_seconds: 20,
+    };
+    assert_eq!(advance.default_dwell_seconds(), Some(20));
+    assert_eq!(CarouselAdvance::Manual.default_dwell_seconds(), None);
+
+    // Unknown fields are rejected at every level.
+    assert!(
+        serde_json::from_str::<CardPresence>(r#"{"kind":"alert-only","dwell_seconds":10}"#)
+            .is_err()
     );
 }

@@ -1,14 +1,14 @@
 import { issuesForPath, widgetKindName } from "../lib/configDraft";
-import type { PomodoroSnapshot, ValidationIssue, WidgetSettings } from "../lib/types";
+import type { CardSettings, PomodoroSnapshot, ValidationIssue } from "../lib/types";
 
 interface WidgetEditorProps {
-  widget: WidgetSettings | null;
+  widget: CardSettings | null;
   widgetIndex: number;
   issues: ValidationIssue[];
   pomodoro: PomodoroSnapshot | null;
   timerBusy: boolean;
   filePickerBusy: boolean;
-  onChange: (widget: WidgetSettings) => void;
+  onChange: (widget: CardSettings) => void;
   onRemove: () => void;
   onTimerAction: (action: "start" | "pause" | "reset") => void;
   onChooseCalendarFile: () => void;
@@ -61,7 +61,7 @@ export function WidgetEditor({
     );
   }
 
-  const path = `widgets[${widgetIndex}]`;
+  const path = `cards[${widgetIndex}]`;
   const pathIssues = (field: string) => issuesForPath(issues, `${path}.${field}`);
 
   return (

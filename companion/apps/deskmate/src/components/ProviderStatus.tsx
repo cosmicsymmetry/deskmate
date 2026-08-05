@@ -1,9 +1,9 @@
-import type { ProviderSnapshot, WidgetSettings } from "../lib/types";
+import type { CardSettings, ProviderSnapshot } from "../lib/types";
 import { widgetName } from "../lib/configDraft";
 
 interface ProviderStatusProps {
   providers: ProviderSnapshot[];
-  widgets: WidgetSettings[];
+  cards: CardSettings[];
   refreshingId: string | null;
   onRefresh: (widgetId: string) => void;
 }
@@ -21,12 +21,7 @@ export function formatProviderAge(ageSeconds: number | null): string {
   return `Updated ${Math.floor(ageSeconds / 3600)} hr ago`;
 }
 
-export function ProviderStatus({
-  providers,
-  widgets,
-  refreshingId,
-  onRefresh,
-}: ProviderStatusProps) {
+export function ProviderStatus({ providers, cards, refreshingId, onRefresh }: ProviderStatusProps) {
   if (providers.length === 0) {
     return null;
   }
@@ -40,7 +35,7 @@ export function ProviderStatus({
       </div>
       <div className="provider-list">
         {providers.map((provider) => {
-          const widget = widgets.find((candidate) => candidate.id === provider.widget_id);
+          const widget = cards.find((candidate) => candidate.id === provider.widget_id);
           const state = provider.state;
           const problematic = state.kind === "stale" || state.kind === "error";
           return (

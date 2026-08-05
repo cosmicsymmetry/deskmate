@@ -1,8 +1,7 @@
 export interface AppConfig {
   schema_version: number;
   preferences: AppPreferences;
-  widgets: WidgetSettings[];
-  screens: ScreenSettings[];
+  cards: CardSettings[];
   assets: AssetSettings[];
   carousel: CarouselSettings;
   updater: UpdaterSettings;
@@ -16,8 +15,6 @@ export interface AppPreferences {
 }
 
 export type DisplayOrientation = "landscape" | "landscape-flipped";
-
-export type WidgetSize = "full" | "standard" | "tile";
 
 export type DisplayTemplate =
   | { kind: "digital-clock" }
@@ -40,7 +37,6 @@ export type RefreshPolicy =
   | { kind: "manual" }
   | { kind: "interval"; minutes: number };
 
-export type WidgetInterruptPolicy = "disabled" | "enabled";
 export type WeatherUnits = "metric" | "imperial";
 
 export interface JsonFieldMapping {
@@ -48,95 +44,92 @@ export interface JsonFieldMapping {
   path: string;
 }
 
-export type WidgetSettings =
+export type CardPresence =
+  | { kind: "in-rotation"; dwell_seconds: number | null }
+  | { kind: "alert-only" }
+  | { kind: "off" };
+
+export type AlertHold = { kind: "until-dismissed" } | { kind: "seconds"; value: number };
+
+export type CardAlert =
+  | { kind: "none" }
+  | { kind: "on-timer-finish"; hold: AlertHold }
+  | { kind: "before-event"; lead_minutes: number; hold: AlertHold };
+
+export type CardSettings =
   | {
       kind: "clock";
       id: string;
-      size: WidgetSize;
       title: string;
       show_seconds: boolean;
       template: DisplayTemplate;
       tap_action: WidgetTapAction;
       refresh: RefreshPolicy;
-      interrupt_policy: WidgetInterruptPolicy;
+      presence: CardPresence;
+      alert: CardAlert;
     }
   | {
       kind: "pomodoro";
       id: string;
-      size: WidgetSize;
       label: string;
       duration_seconds: number;
       template: DisplayTemplate;
       tap_action: WidgetTapAction;
       refresh: RefreshPolicy;
-      interrupt_policy: WidgetInterruptPolicy;
+      presence: CardPresence;
+      alert: CardAlert;
     }
   | {
       kind: "calendar";
       id: string;
-      size: WidgetSize;
       title: string;
       source: CalendarSource;
       template: DisplayTemplate;
       tap_action: WidgetTapAction;
       refresh: RefreshPolicy;
-      interrupt_policy: WidgetInterruptPolicy;
+      presence: CardPresence;
+      alert: CardAlert;
     }
   | {
       kind: "weather";
       id: string;
-      size: WidgetSize;
       title: string;
       location: string;
       units: WeatherUnits;
       template: DisplayTemplate;
       tap_action: WidgetTapAction;
       refresh: RefreshPolicy;
-      interrupt_policy: WidgetInterruptPolicy;
+      presence: CardPresence;
+      alert: CardAlert;
     }
   | {
       kind: "json-feed";
       id: string;
-      size: WidgetSize;
       title: string;
       url: string;
       mappings: JsonFieldMapping[];
       template: DisplayTemplate;
       tap_action: WidgetTapAction;
       refresh: RefreshPolicy;
-      interrupt_policy: WidgetInterruptPolicy;
+      presence: CardPresence;
+      alert: CardAlert;
     }
   | {
       kind: "rss";
       id: string;
-      size: WidgetSize;
       title: string;
       url: string;
       max_items: number;
       template: DisplayTemplate;
       tap_action: WidgetTapAction;
       refresh: RefreshPolicy;
-      interrupt_policy: WidgetInterruptPolicy;
+      presence: CardPresence;
+      alert: CardAlert;
     };
 
+export type CardKind = CardSettings["kind"];
+
 export type CalendarSource = { kind: "file"; value: string } | { kind: "url"; value: string };
-
-export interface ScreenSettings {
-  id: string;
-  layout: ScreenLayout;
-}
-
-export type ScreenLayout =
-  | { kind: "single"; widget_id: string }
-  | { kind: "dashboard"; columns: number; rows: number; tiles: TileSettings[] };
-
-export interface TileSettings {
-  widget_id: string;
-  column: number;
-  row: number;
-  column_span: number;
-  row_span: number;
-}
 
 export interface AssetSettings {
   id: string;
@@ -152,8 +145,10 @@ export interface GlyphRange {
   end: number;
 }
 
+export type CarouselAdvance = { kind: "manual" } | { kind: "timed"; default_dwell_seconds: number };
+
 export interface CarouselSettings {
-  auto_advance_seconds: number | null;
+  advance: CarouselAdvance;
 }
 
 export interface UpdaterSettings {
@@ -344,15 +339,16 @@ export type IpcError =
 export interface IpcContractFixtures {
   snapshot: AppSnapshot;
   configs: AppConfig[];
-  widget_settings: WidgetSettings[];
-  widget_sizes: WidgetSize[];
+  card_settings: CardSettings[];
+  card_presences: CardPresence[];
+  card_alerts: CardAlert[];
+  alert_holds: AlertHold[];
+  carousel_advances: CarouselAdvance[];
   calendar_sources: CalendarSource[];
   display_templates: DisplayTemplate[];
   tap_actions: WidgetTapAction[];
   refresh_policies: RefreshPolicy[];
-  interrupt_policies: WidgetInterruptPolicy[];
   weather_units: WeatherUnits[];
-  screen_layouts: ScreenLayout[];
   asset_sources: AssetSettings["source"][];
   asset_kinds: AssetSettings["kind"][];
   update_channels: UpdaterSettings["channel"][];

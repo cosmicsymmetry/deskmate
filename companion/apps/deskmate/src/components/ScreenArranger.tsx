@@ -1,52 +1,72 @@
 import { useState, type DragEvent, type KeyboardEvent } from "react";
 
-import {
-  moveScreen,
-  primaryScreenWidgetId,
-  screenMoveFromKey,
-  widgetName,
-} from "../lib/configDraft";
-import type { ScreenSettings, WidgetSettings } from "../lib/types";
+import { widgetName } from "../lib/configDraft";
+import type { CardSettings } from "../lib/types";
 
 interface ScreenArrangerProps {
-  screens: ScreenSettings[];
-  widgets: WidgetSettings[];
+  cards: CardSettings[];
   selectedWidgetId: string | null;
   onSelect: (widgetId: string) => void;
-  onReorder: (screens: ScreenSettings[]) => void;
+  onReorder: (cards: CardSettings[]) => void;
+}
+
+function moveCard(cards: CardSettings[], cardId: string, targetIndex: number): CardSettings[] {
+  const sourceIndex = cards.findIndex((card) => card.id === cardId);
+  if (sourceIndex < 0 || cards.length < 2) {
+    return cards;
+  }
+  const boundedTarget = Math.max(0, Math.min(targetIndex, cards.length - 1));
+  if (sourceIndex === boundedTarget) {
+    return cards;
+  }
+  const reordered = [...cards];
+  const [moved] = reordered.splice(sourceIndex, 1);
+  reordered.splice(boundedTarget, 0, moved);
+  return reordered;
+}
+
+function moveFromKey(key: string, altKey: boolean): -1 | 0 | 1 {
+  if (!altKey) {
+    return 0;
+  }
+  if (key === "ArrowUp") {
+    return -1;
+  }
+  if (key === "ArrowDown") {
+    return 1;
+  }
+  return 0;
 }
 
 export function ScreenArranger({
-  screens,
-  widgets,
+  cards,
   selectedWidgetId,
   onSelect,
   onReorder,
 }: ScreenArrangerProps) {
   const [draggedId, setDraggedId] = useState<string | null>(null);
-  const widgetById = new Map(widgets.map((widget) => [widget.id, widget]));
 
-  const move = (screenId: string, targetIndex: number) => {
-    onReorder(moveScreen(screens, screenId, targetIndex));
+  const move = (cardId: string, targetIndex: number) => {
+    onReorder(moveCard(cards, cardId, targetIndex));
   };
-  const onKeyDown = (event: KeyboardEvent<HTMLButtonElement>, screenId: string, index: number) => {
-    const delta = screenMoveFromKey(event.key, event.altKey);
+  const onKeyDown = (event: KeyboardEvent<HTMLButtonElement>, cardId: string, index: number) => {
+    const delta = moveFromKey(event.key, event.altKey);
     if (delta === 0) {
       return;
     }
     event.preventDefault();
-    move(screenId, index + delta);
+    move(cardId, index + delta);
   };
-  const onDragStart = (event: DragEvent<HTMLLIElement>, screenId: string) => {
-    setDraggedId(screenId);
+  const onDragStart = (event: DragEvent<HTMLLIElement>, cardId: string) => {
+    setDraggedId(cardId);
     event.dataTransfer.effectAllowed = "move";
-    event.dataTransfer.setData("text/plain", screenId);
+    event.dataTransfer.setData("text/plain", cardId);
   };
   const onDrop = (event: DragEvent<HTMLLIElement>, targetIndex: number) => {
     event.preventDefault();
-    const screenId = draggedId ?? event.dataTransfer.getData("text/plain");
-    if (screenId) {
-      move(screenId, targetIndex);
+    const cardId = draggedId ?? event.dataTransfer.getData("text/plain");
+    if (cardId) {
+      move(cardId, targetIndex);
     }
     setDraggedId(null);
   };
@@ -61,67 +81,63 @@ export function ScreenArranger({
         <span className="keyboard-hint">⌥ ↑ ↓ to move</span>
       </div>
 
-      {screens.length === 0 ? (
+      {cards.length === 0 ? (
         <div className="empty-state">
           <strong>No screens yet</strong>
           <span>Each new widget gets one screen automatically.</span>
         </div>
       ) : (
         <ol className="screen-list" aria-label="Screen order">
-          {screens.map((screen, index) => {
-            const widgetId = primaryScreenWidgetId(screen) ?? "";
-            const widget = widgetById.get(widgetId);
-            return (
-              <li
-                key={screen.id}
-                draggable
-                className={`${selectedWidgetId === widgetId ? "is-selected" : ""}${draggedId === screen.id ? " is-dragging" : ""}`}
-                onDragStart={(event) => onDragStart(event, screen.id)}
-                onDragEnd={() => setDraggedId(null)}
-                onDragOver={(event) => event.preventDefault()}
-                onDrop={(event) => onDrop(event, index)}
-                aria-label={`Screen ${index + 1}: ${widget ? widgetName(widget) : widgetId}`}
+          {cards.map((card, index) => (
+            <li
+              key={card.id}
+              draggable
+              className={`${selectedWidgetId === card.id ? "is-selected" : ""}${draggedId === card.id ? " is-dragging" : ""}`}
+              onDragStart={(event) => onDragStart(event, card.id)}
+              onDragEnd={() => setDraggedId(null)}
+              onDragOver={(event) => event.preventDefault()}
+              onDrop={(event) => onDrop(event, index)}
+              aria-label={`Screen ${index + 1}: ${widgetName(card)}`}
+            >
+              <span className="drag-handle" aria-hidden="true">
+                ⠿
+              </span>
+              <span className="screen-number">{index + 1}</span>
+              <button
+                type="button"
+                className="screen-name"
+                onClick={() => onSelect(card.id)}
+                onKeyDown={(event) => onKeyDown(event, card.id, index)}
               >
-                <span className="drag-handle" aria-hidden="true">
-                  ⠿
-                </span>
-                <span className="screen-number">{index + 1}</span>
+                <strong>{widgetName(card)}</strong>
+                <small>{card.id}</small>
+              </button>
+              <span className="move-buttons">
                 <button
                   type="button"
-                  className="screen-name"
-                  onClick={() => onSelect(widgetId)}
-                  onKeyDown={(event) => onKeyDown(event, screen.id, index)}
+                  aria-label={`Move ${widgetName(card)} up`}
+                  disabled={index === 0}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    move(card.id, index - 1);
+                  }}
                 >
-                  <strong>{widget ? widgetName(widget) : "Missing widget"}</strong>
-                  <small>{screen.id}</small>
+                  ↑
                 </button>
-                <span className="move-buttons">
-                  <button
-                    type="button"
-                    aria-label={`Move ${widget ? widgetName(widget) : screen.id} up`}
-                    disabled={index === 0}
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      move(screen.id, index - 1);
-                    }}
-                  >
-                    ↑
-                  </button>
-                  <button
-                    type="button"
-                    aria-label={`Move ${widget ? widgetName(widget) : screen.id} down`}
-                    disabled={index === screens.length - 1}
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      move(screen.id, index + 1);
-                    }}
-                  >
-                    ↓
-                  </button>
-                </span>
-              </li>
-            );
-          })}
+                <button
+                  type="button"
+                  aria-label={`Move ${widgetName(card)} down`}
+                  disabled={index === cards.length - 1}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    move(card.id, index + 1);
+                  }}
+                >
+                  ↓
+                </button>
+              </span>
+            </li>
+          ))}
         </ol>
       )}
     </section>

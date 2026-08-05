@@ -4,99 +4,96 @@ import {
   addWidget,
   firstSelectableWidget,
   issuesForPath,
-  moveScreen,
   needsFirstRunGuidance,
   removeWidget,
-  screenMoveFromKey,
 } from "../src/lib/configDraft";
-import type { AppConfig, ScreenSettings, ValidationIssue } from "../src/lib/types";
+import type { AppConfig, ValidationIssue } from "../src/lib/types";
+import { ipcContractFixtures } from "../src/lib/types.contract";
 
 function initialConfig(): AppConfig {
   return {
-    schema_version: 2,
+    schema_version: 3,
     preferences: {
       timezone: "UTC",
       autostart: false,
       paused: false,
       orientation: "landscape",
     },
-    widgets: [
+    cards: [
       {
         kind: "clock",
         id: "clock",
-        size: "full",
         title: "Desk",
         show_seconds: true,
         template: { kind: "digital-clock" },
         tap_action: { kind: "none" },
         refresh: { kind: "device-local" },
-        interrupt_policy: "disabled",
+        presence: { kind: "in-rotation", dwell_seconds: null },
+        alert: { kind: "none" },
       },
     ],
-    screens: [{ id: "clock-screen", layout: { kind: "single", widget_id: "clock" } }],
     assets: [],
-    carousel: { auto_advance_seconds: null },
+    carousel: { advance: { kind: "manual" } },
     updater: { channel: "stable", checks: "notify" },
   };
 }
 
 describe("configuration draft helpers", () => {
-  test("adds the full M3 demo with stable unique widget and screen IDs", () => {
+  test("adds the full M3 demo with stable unique widget IDs", () => {
     const withSecondClock = addWidget(initialConfig(), "clock");
     expect(withSecondClock.widgetId).toBe("clock-2");
-    expect(withSecondClock.config.screens.at(-1)).toEqual({
-      id: "clock-2-screen",
-      layout: { kind: "single", widget_id: "clock-2" },
-    });
 
     const withPomodoro = addWidget(withSecondClock.config, "pomodoro");
     const complete = addWidget(withPomodoro.config, "calendar");
-    expect(complete.config.widgets.map((widget) => widget.kind)).toEqual([
+    expect(complete.config.cards.map((card) => card.kind)).toEqual([
       "clock",
       "clock",
       "pomodoro",
       "calendar",
     ]);
-    expect(new Set(complete.config.widgets.map((widget) => widget.id)).size).toBe(4);
-    expect(new Set(complete.config.screens.map((screen) => screen.id)).size).toBe(4);
+    expect(new Set(complete.config.cards.map((card) => card.id)).size).toBe(4);
     expect(needsFirstRunGuidance(complete.config)).toBe(false);
   });
 
-  test("removing a widget also removes only its screen reference", () => {
+  test("removing a widget removes only that card", () => {
     const withTimer = addWidget(initialConfig(), "pomodoro").config;
     const next = removeWidget(withTimer, "clock");
-    expect(next.widgets.map((widget) => widget.id)).toEqual(["pomodoro"]);
-    expect(next.screens).toEqual([
-      { id: "pomodoro-screen", layout: { kind: "single", widget_id: "pomodoro" } },
-    ]);
+    expect(next.cards.map((card) => card.id)).toEqual(["pomodoro"]);
     expect(firstSelectableWidget(next)).toBe("pomodoro");
-  });
-
-  test("reorders screens without changing IDs or mutating the input", () => {
-    const screens: ScreenSettings[] = [
-      { id: "one", layout: { kind: "single", widget_id: "clock" } },
-      { id: "two", layout: { kind: "single", widget_id: "pomodoro" } },
-      { id: "three", layout: { kind: "single", widget_id: "calendar" } },
-    ];
-    const reordered = moveScreen(screens, "one", 2);
-    expect(reordered.map((screen) => screen.id)).toEqual(["two", "three", "one"]);
-    expect(screens.map((screen) => screen.id)).toEqual(["one", "two", "three"]);
-    expect(moveScreen(screens, "missing", 1)).toBe(screens);
-  });
-
-  test("keyboard reorder requires Alt plus an arrow", () => {
-    expect(screenMoveFromKey("ArrowUp", true)).toBe(-1);
-    expect(screenMoveFromKey("ArrowDown", true)).toBe(1);
-    expect(screenMoveFromKey("ArrowDown", false)).toBe(0);
-    expect(screenMoveFromKey("Enter", true)).toBe(0);
   });
 
   test("maps backend validation paths to their inline editor section", () => {
     const issues: ValidationIssue[] = [
-      { path: "widgets[0].title", code: "empty", message: "required" },
-      { path: "widgets[1].source.value", code: "invalid-source", message: "invalid" },
+      { path: "cards[0].title", code: "empty", message: "required" },
+      { path: "cards[1].source.value", code: "invalid-source", message: "invalid" },
     ];
-    expect(issuesForPath(issues, "widgets[1].source")).toEqual([issues[1]]);
-    expect(issuesForPath(issues, "widgets[0].size")).toEqual([]);
+    expect(issuesForPath(issues, "cards[1].source")).toEqual([issues[1]]);
+    expect(issuesForPath(issues, "cards[0].size")).toEqual([]);
+  });
+
+  test("contract fixtures expose cards, not widgets or screens", () => {
+    const config = ipcContractFixtures.snapshot.config;
+    expect(config.schema_version).toBe(3);
+    expect(Array.isArray(config.cards)).toBe(true);
+    expect("widgets" in config).toBe(false);
+    expect("screens" in config).toBe(false);
+    expect(config.cards[0]).not.toHaveProperty("size");
+    expect(config.cards[0]).toHaveProperty("presence");
+    expect(config.cards[0]).toHaveProperty("alert");
+  });
+
+  test("every presence and alert variant is represented in the contract", () => {
+    // card_presences also covers both `in-rotation` dwell sub-variants (explicit
+    // seconds and the default null), so kinds are deduped before comparing.
+    const presenceKinds = [
+      ...new Set(ipcContractFixtures.card_presences.map((p) => p.kind)),
+    ].sort();
+    expect(presenceKinds).toEqual(["alert-only", "in-rotation", "off"]);
+
+    const alertKinds = ipcContractFixtures.card_alerts.map((a) => a.kind).sort();
+    expect(alertKinds).toEqual(["before-event", "none", "on-timer-finish"]);
+
+    const advanceKinds = ipcContractFixtures.carousel_advances.map((a) => a.kind).sort();
+    expect(advanceKinds).toEqual(["manual", "timed"]);
   });
 });

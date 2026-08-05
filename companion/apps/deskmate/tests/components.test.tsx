@@ -10,7 +10,7 @@ import { WidgetEditor } from "../src/components/WidgetEditor";
 import { ipcContractFixtures } from "../src/lib/types.contract";
 
 const snapshot = ipcContractFixtures.snapshot;
-const widgets = snapshot.config.widgets;
+const cards = snapshot.config.cards;
 
 describe("settings accessibility and states", () => {
   test("renders a non-blocking loading state before the first backend snapshot", () => {
@@ -20,7 +20,7 @@ describe("settings accessibility and states", () => {
   });
 
   test("labels the editor controls and explains the clean canvas", () => {
-    const clock = widgets.find((widget) => widget.kind === "clock");
+    const clock = cards.find((card) => card.kind === "clock");
     if (!clock) {
       throw new Error("contract fixture is missing its clock widget");
     }
@@ -44,7 +44,7 @@ describe("settings accessibility and states", () => {
   });
 
   test("offers a bounded native file chooser for local calendars", () => {
-    const calendar = widgets.find((widget) => widget.kind === "calendar");
+    const calendar = cards.find((card) => card.kind === "calendar");
     if (calendar?.kind !== "calendar") {
       throw new Error("contract fixture is missing its calendar widget");
     }
@@ -69,8 +69,7 @@ describe("settings accessibility and states", () => {
   test("exposes explicit move buttons and keyboard instructions", () => {
     const html = renderToStaticMarkup(
       <ScreenArranger
-        screens={snapshot.config.screens}
-        widgets={widgets}
+        cards={cards}
         selectedWidgetId="clock"
         onSelect={() => {}}
         onReorder={() => {}}
@@ -101,7 +100,7 @@ describe("settings accessibility and states", () => {
     const providers = renderToStaticMarkup(
       <ProviderStatus
         providers={snapshot.providers}
-        widgets={widgets}
+        cards={cards}
         refreshingId={null}
         onRefresh={() => {}}
       />,
@@ -113,8 +112,7 @@ describe("settings accessibility and states", () => {
   test("renders deterministic preview and a useful empty state", () => {
     const populated = renderToStaticMarkup(
       <DevicePreview
-        widgets={widgets}
-        screens={snapshot.config.screens}
+        cards={cards}
         selectedWidgetId="clock"
         pomodoros={snapshot.pomodoros}
         orientation="landscape"
@@ -127,8 +125,7 @@ describe("settings accessibility and states", () => {
 
     const empty = renderToStaticMarkup(
       <DevicePreview
-        widgets={[]}
-        screens={[]}
+        cards={[]}
         selectedWidgetId={null}
         pomodoros={[]}
         orientation="landscape-flipped"

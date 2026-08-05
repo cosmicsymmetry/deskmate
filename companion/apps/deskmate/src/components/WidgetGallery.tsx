@@ -1,8 +1,8 @@
 import { widgetKindName, widgetName, type WidgetKind } from "../lib/configDraft";
-import type { WidgetSettings } from "../lib/types";
+import type { CardSettings } from "../lib/types";
 
 interface WidgetGalleryProps {
-  widgets: WidgetSettings[];
+  cards: CardSettings[];
   selectedWidgetId: string | null;
   onSelect: (widgetId: string) => void;
   onAdd: (kind: WidgetKind) => void;
@@ -14,7 +14,7 @@ const kinds: { kind: WidgetKind; glyph: string; description: string }[] = [
   { kind: "calendar", glyph: "≡", description: "Upcoming events" },
 ];
 
-export function WidgetGallery({ widgets, selectedWidgetId, onSelect, onAdd }: WidgetGalleryProps) {
+export function WidgetGallery({ cards, selectedWidgetId, onSelect, onAdd }: WidgetGalleryProps) {
   return (
     <section className="panel gallery-panel" aria-labelledby="widgets-heading">
       <div className="panel-heading">
@@ -22,17 +22,17 @@ export function WidgetGallery({ widgets, selectedWidgetId, onSelect, onAdd }: Wi
           <p className="step-label">1 · Widgets</p>
           <h2 id="widgets-heading">What should it show?</h2>
         </div>
-        <span className="count-badge">{widgets.length}/16</span>
+        <span className="count-badge">{cards.length}/16</span>
       </div>
 
-      {widgets.length === 0 ? (
+      {cards.length === 0 ? (
         <div className="empty-state">
           <strong>Your display is empty</strong>
           <span>Add a widget to create its first screen.</span>
         </div>
       ) : (
         <ul className="widget-list" aria-label="Configured widgets">
-          {widgets.map((widget) => (
+          {cards.map((widget) => (
             <li key={widget.id}>
               <button
                 className={`widget-card${selectedWidgetId === widget.id ? " is-selected" : ""}`}
@@ -64,7 +64,7 @@ export function WidgetGallery({ widgets, selectedWidgetId, onSelect, onAdd }: Wi
             type="button"
             key={kind}
             onClick={() => onAdd(kind)}
-            disabled={widgets.length >= 16}
+            disabled={cards.length >= 16}
           >
             <span className="add-card__glyph" aria-hidden="true">
               {glyph}

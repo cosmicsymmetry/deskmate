@@ -1,16 +1,10 @@
 import type { CSSProperties } from "react";
 
-import { primaryScreenWidgetId, widgetName } from "../lib/configDraft";
-import type {
-  DisplayOrientation,
-  PomodoroSnapshot,
-  ScreenSettings,
-  WidgetSettings,
-} from "../lib/types";
+import { widgetName } from "../lib/configDraft";
+import type { CardSettings, DisplayOrientation, PomodoroSnapshot } from "../lib/types";
 
 interface DevicePreviewProps {
-  widgets: WidgetSettings[];
-  screens: ScreenSettings[];
+  cards: CardSettings[];
   selectedWidgetId: string | null;
   pomodoros: PomodoroSnapshot[];
   orientation: DisplayOrientation;
@@ -25,7 +19,7 @@ function WidgetFace({
   widget,
   pomodoro,
 }: {
-  widget: WidgetSettings;
+  widget: CardSettings;
   pomodoro: PomodoroSnapshot | undefined;
 }) {
   if (widget.kind === "clock") {
@@ -75,21 +69,13 @@ function WidgetFace({
 }
 
 export function DevicePreview({
-  widgets,
-  screens,
+  cards,
   selectedWidgetId,
   pomodoros,
   orientation,
   onSelect,
 }: DevicePreviewProps) {
-  const activeScreen =
-    screens.find((screen) => primaryScreenWidgetId(screen) === selectedWidgetId) ??
-    screens[0] ??
-    null;
-  const activeWidgetId = activeScreen ? primaryScreenWidgetId(activeScreen) : null;
-  const widget = activeScreen
-    ? widgets.find((candidate) => candidate.id === activeWidgetId)
-    : undefined;
+  const widget = cards.find((card) => card.id === selectedWidgetId) ?? cards[0] ?? undefined;
   const pomodoro = widget
     ? pomodoros.find((candidate) => candidate.widget_id === widget.id)
     : undefined;
@@ -116,23 +102,19 @@ export function DevicePreview({
         </div>
         <span className="device-port" aria-hidden="true" />
       </div>
-      {screens.length > 1 && (
+      {cards.length > 1 && (
         <fieldset className="preview-dots">
           <legend className="sr-only">Preview screen</legend>
-          {screens.map((screen, index) => {
-            const widgetId = primaryScreenWidgetId(screen) ?? "";
-            const candidate = widgets.find((item) => item.id === widgetId);
-            return (
-              <button
-                key={screen.id}
-                type="button"
-                className={screen.id === activeScreen?.id ? "is-active" : ""}
-                aria-label={`Preview screen ${index + 1}${candidate ? `: ${widgetName(candidate)}` : ""}`}
-                aria-pressed={screen.id === activeScreen?.id}
-                onClick={() => onSelect(widgetId)}
-              />
-            );
-          })}
+          {cards.map((card, index) => (
+            <button
+              key={card.id}
+              type="button"
+              className={card.id === widget?.id ? "is-active" : ""}
+              aria-label={`Preview screen ${index + 1}: ${widgetName(card)}`}
+              aria-pressed={card.id === widget?.id}
+              onClick={() => onSelect(card.id)}
+            />
+          ))}
         </fieldset>
       )}
     </section>

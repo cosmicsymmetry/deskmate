@@ -28,11 +28,11 @@ import {
 } from "./lib/tauri";
 import type {
   AppConfig,
+  CardSettings,
   DisplayOrientation,
   DraftValidation,
   IpcError,
   PomodoroAction,
-  WidgetSettings,
 } from "./lib/types";
 import { useAppState } from "./lib/useAppState";
 
@@ -75,7 +75,7 @@ export function App() {
       current && JSON.stringify(current) === JSON.stringify(next) ? current : next,
     );
     setSelectedWidgetId((current) =>
-      current && next.widgets.some((widget) => widget.id === current)
+      current && next.cards.some((card) => card.id === current)
         ? current
         : firstSelectableWidget(next),
     );
@@ -158,8 +158,8 @@ export function App() {
     );
   }
 
-  const selectedIndex = draft.widgets.findIndex((widget) => widget.id === selectedWidgetId);
-  const selectedWidget = selectedIndex >= 0 ? draft.widgets[selectedIndex] : null;
+  const selectedIndex = draft.cards.findIndex((card) => card.id === selectedWidgetId);
+  const selectedWidget = selectedIndex >= 0 ? draft.cards[selectedIndex] : null;
   const pomodoro =
     snapshot.pomodoros.find((candidate) => candidate.widget_id === selectedWidgetId) ?? null;
   const issues = validation.result.issues;
@@ -174,7 +174,7 @@ export function App() {
     replaceDraft(result.config);
     setSelectedWidgetId(result.widgetId);
   };
-  const handleWidgetChange = (widget: WidgetSettings) => {
+  const handleWidgetChange = (widget: CardSettings) => {
     if (!selectedWidgetId) {
       return;
     }
@@ -322,14 +322,10 @@ export function App() {
             <li className={draft.preferences.timezone.trim() ? "is-done" : ""}>
               <span>2</span> Check your timezone
             </li>
-            <li
-              className={
-                draft.widgets.some((widget) => widget.kind === "calendar") ? "is-done" : ""
-              }
-            >
+            <li className={draft.cards.some((card) => card.kind === "calendar") ? "is-done" : ""}>
               <span>3</span> Add an ICS calendar address or file
             </li>
-            <li className={draft.widgets.length > 1 ? "is-done" : ""}>
+            <li className={draft.cards.length > 1 ? "is-done" : ""}>
               <span>4</span> Arrange screens, then save
             </li>
           </ol>
@@ -339,7 +335,7 @@ export function App() {
       <div className="workspace">
         <div className="workspace__editors">
           <WidgetGallery
-            widgets={draft.widgets}
+            cards={draft.cards}
             selectedWidgetId={selectedWidgetId}
             onSelect={setSelectedWidgetId}
             onAdd={handleAdd}
@@ -357,18 +353,16 @@ export function App() {
             onChooseCalendarFile={handleChooseCalendarFile}
           />
           <ScreenArranger
-            screens={draft.screens}
-            widgets={draft.widgets}
+            cards={draft.cards}
             selectedWidgetId={selectedWidgetId}
             onSelect={setSelectedWidgetId}
-            onReorder={(screens) => replaceDraft({ ...draft, screens })}
+            onReorder={(cards) => replaceDraft({ ...draft, cards })}
           />
         </div>
 
         <aside className="workspace__preview">
           <DevicePreview
-            widgets={draft.widgets}
-            screens={draft.screens}
+            cards={draft.cards}
             selectedWidgetId={selectedWidgetId}
             pomodoros={snapshot.pomodoros}
             orientation={draft.preferences.orientation}
@@ -376,7 +370,7 @@ export function App() {
           />
           <ProviderStatus
             providers={snapshot.providers}
-            widgets={draft.widgets}
+            cards={draft.cards}
             refreshingId={refreshingProviderId}
             onRefresh={handleProviderRefresh}
           />

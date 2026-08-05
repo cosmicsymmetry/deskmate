@@ -15,7 +15,9 @@
 - The wire protocol does not change. `ApplyConfig` stays `{0: revision, 1: widgets, 2: screens, 3: rotation}`. No firmware source file is modified by this plan.
 - One Rust runtime remains the only owner of serial I/O, revisions, provider work, timers, interrupts, actions, and replay. The webview gains no filesystem, HTTP, shell, process, serial, or updater primitives.
 - Transaction order is fixed and unchanged: merge command-owned preferences, validate and compile, check connected-device capabilities, atomically persist, replace runtime state, then queue full replay.
-- A configuration document is at most 65,536 UTF-8 bytes. Unknown fields are rejected at every level (`#[serde(deny_unknown_fields)]` on every struct, `deny_unknown_fields` on every tagged enum).
+- A configuration document is at most 65,536 UTF-8 bytes. **Unknown fields are rejected at every level, including nested objects.** This is a security property of the config contract, not a nicety.
+
+  **Correction, proven during Task 1:** `#[serde(deny_unknown_fields)]` **does not work on internally-tagged enums** (`#[serde(tag = "kind")]`). Serde silently ignores it — `{"kind":"alert-only","dwell_seconds":10}` deserializes to `Ok(AlertOnly)` under the plain derive. Wherever this plan shows `#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]`, the **intent** binds and the **mechanism does not**. Use the validating `Deserialize` impls established in Task 1 (`strict_tagged_enum` in `config.rs`), and make sure every *nested* tagged object is typed as the public validating type rather than a raw inner type — that exact mistake shipped a Critical bug in Task 1. `deny_unknown_fields` on plain structs is fine and still required.
 - Card count is `1..8`. Card IDs are `1..32` UTF-8 bytes, unique among cards. Cards and assets remain separate ID namespaces.
 - Bounds, verbatim from the spec: `dwell_seconds` is `null` or `5..3600`; `default_dwell_seconds` is `5..3600`; `lead_minutes` is `1..60`; `hold.seconds` is `5..600`.
 - Verification commands, run from `companion/`:
@@ -259,6 +261,8 @@ The breaking change, landed atomically so every commit compiles. `WidgetSettings
 - Produces:
   - `AppConfig { schema_version: u32, preferences: AppPreferences, cards: Vec<CardSettings>, assets: Vec<AssetSettings>, carousel: CarouselSettings, updater: UpdaterSettings }`
   - `CardSettings` — tagged enum with the six kinds; every variant has `id: String`, `template: DisplayTemplate`, `tap_action: WidgetTapAction`, `refresh: RefreshPolicy`, `presence: CardPresence`, `alert: CardAlert`, plus its provider fields (unchanged from `WidgetSettings`, minus `size`, minus `interrupt_policy`).
+
+    **`CardSettings` is internally tagged, so it needs the same validating-`Deserialize` treatment as Task 1's types — the derive attribute alone will not reject unknown fields.** Its `presence`, `alert`, `template`, `tap_action`, `refresh`, and `source` fields must be typed as the public validating types so nested unknown keys are rejected too. Add a test proving `{"kind":"clock",…,"presence":{"kind":"off","bogus":1}}` is an error.
   - Accessors: `CardSettings::id(&self) -> &str`, `::template(&self) -> &DisplayTemplate`, `::tap_action(&self) -> &WidgetTapAction`, `::refresh(&self) -> RefreshPolicy`, `::presence(&self) -> CardPresence`, `::alert(&self) -> CardAlert`.
   - `CarouselSettings { advance: CarouselAdvance }`, defaulting to `CarouselAdvance::Manual`.
   - `CURRENT_SCHEMA_VERSION == 3`.

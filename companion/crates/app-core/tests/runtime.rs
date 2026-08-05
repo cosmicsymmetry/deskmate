@@ -5,10 +5,11 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use app_core::{
-    AppConfig, CalendarRefreshRequest, CalendarRefreshResult, CalendarRefresher, CardAlert,
-    CardSettings, ConnectionState, DeviceConnection, DisplayOrientation, PersistenceState,
-    PomodoroAction, PomodoroState, ProviderRequest, RuntimeDevice, RuntimeError, RuntimeHandle,
-    RuntimeOptions, RuntimeState,
+    AlertHold, AppConfig, CalendarRefreshRequest, CalendarRefreshResult, CalendarRefresher,
+    CardAlert, CardPresence, CardSettings, CarouselAdvance, CarouselSettings, ConnectionState,
+    DeviceConnection, DisplayOrientation, DisplayTemplate, PersistenceState, PomodoroAction,
+    PomodoroState, ProviderRequest, RefreshPolicy, RuntimeDevice, RuntimeError, RuntimeHandle,
+    RuntimeOptions, RuntimeState, WidgetTapAction,
 };
 use chrono::Utc;
 use device::{DeviceError, ReceivedEvent, SessionDiagnostics, TransportError};
@@ -1190,4 +1191,143 @@ fn app_restart_intentionally_resets_transient_timer_state_to_idle() {
     assert_eq!(timer.state, PomodoroState::Idle);
     assert_eq!(timer.remaining_seconds, timer.duration_seconds);
     second.shutdown().unwrap();
+}
+
+fn clock_card(id: &str, presence: CardPresence) -> CardSettings {
+    CardSettings::Clock {
+        id: id.into(),
+        title: id.into(),
+        show_seconds: true,
+        template: DisplayTemplate::DigitalClock,
+        tap_action: WidgetTapAction::None,
+        refresh: RefreshPolicy::DeviceLocal,
+        presence,
+        alert: CardAlert::None,
+    }
+}
+
+fn pomodoro_card(id: &str, presence: CardPresence, alert: CardAlert) -> CardSettings {
+    CardSettings::Pomodoro {
+        id: id.into(),
+        label: id.into(),
+        duration_seconds: 60,
+        template: DisplayTemplate::ProgressRing,
+        tap_action: WidgetTapAction::None,
+        refresh: RefreshPolicy::DeviceLocal,
+        presence,
+        alert,
+    }
+}
+
+/// The screen IDs sent to the device via `ActivateScreen`, in the order they
+/// were sent. The very first entry is always the initial full-sync
+/// activation of the boot-time active screen, issued on connect regardless of
+/// carousel mode; rotation-triggered activations (if any) follow it.
+fn activated_screen_ids(control: &MockDeviceControl) -> Vec<String> {
+    control
+        .operations()
+        .into_iter()
+        .filter_map(|operation| match operation {
+            Operation::Activate(screen_id) => Some(screen_id),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn timed_advance_walks_in_rotation_cards_and_skips_the_others() {
+    let control = MockDeviceControl::default();
+    let config = AppConfig {
+        carousel: CarouselSettings {
+            advance: CarouselAdvance::Timed {
+                default_dwell_seconds: 5,
+            },
+        },
+        cards: vec![
+            clock_card(
+                "first",
+                CardPresence::InRotation {
+                    dwell_seconds: Some(5),
+                },
+            ),
+            pomodoro_card(
+                "alerting",
+                CardPresence::AlertOnly,
+                CardAlert::OnTimerFinish {
+                    hold: AlertHold::UntilDismissed,
+                },
+            ),
+            clock_card(
+                "second",
+                CardPresence::InRotation {
+                    dwell_seconds: Some(5),
+                },
+            ),
+            clock_card("muted", CardPresence::Off),
+        ],
+        ..AppConfig::default()
+    };
+    let runtime = start_runtime(config, &control, Duration::ZERO);
+    wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
+        snapshot.device.connection == ConnectionState::Online
+    });
+    // The initial full sync activates the first in-rotation card ("first"),
+    // independent of rotation. Only entries after it are rotation-driven.
+    wait_for(Duration::from_secs(1), || {
+        activated_screen_ids(&control) == ["first"]
+    });
+
+    // Only in-rotation cards are activated, in card order, wrapping at the end.
+    // Each dwell is the validated minimum (5s), so allow generous real-time
+    // slack per step rather than a fake clock (this codebase drives the
+    // runtime loop with the real `Instant::now()`, not an injectable clock).
+    for expected in [
+        vec!["first".to_string(), "second".to_string()],
+        vec![
+            "first".to_string(),
+            "second".to_string(),
+            "first".to_string(),
+        ],
+        vec![
+            "first".to_string(),
+            "second".to_string(),
+            "first".to_string(),
+            "second".to_string(),
+        ],
+    ] {
+        wait_for(Duration::from_secs(8), || {
+            activated_screen_ids(&control) == expected
+        });
+    }
+
+    assert_eq!(
+        activated_screen_ids(&control)[1..],
+        ["second", "first", "second"]
+    );
+    runtime.shutdown().unwrap();
+}
+
+#[test]
+fn manual_advance_never_activates_a_screen_on_its_own() {
+    let control = MockDeviceControl::default();
+    let config = AppConfig {
+        carousel: CarouselSettings {
+            advance: CarouselAdvance::Manual,
+        },
+        ..AppConfig::default()
+    };
+    let runtime = start_runtime(config, &control, Duration::ZERO);
+    wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
+        snapshot.device.connection == ConnectionState::Online
+    });
+    // The single default clock card is activated once by the initial sync.
+    wait_for(Duration::from_secs(1), || {
+        activated_screen_ids(&control) == ["clock"]
+    });
+    // No rotation deadline is ever armed under manual advance, so waiting
+    // longer than the minimum dwell would allow must not add another
+    // activation.
+    thread::sleep(Duration::from_millis(500));
+    assert_eq!(activated_screen_ids(&control), ["clock"]);
+    runtime.shutdown().unwrap();
 }

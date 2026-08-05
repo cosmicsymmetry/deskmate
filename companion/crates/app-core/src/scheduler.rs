@@ -9,11 +9,17 @@ pub(crate) struct Scheduler {
     next_status: Instant,
     next_time_sync: Instant,
     providers: BTreeMap<String, ProviderDeadline>,
+    rotation: Option<RotationDeadline>,
 }
 
 struct ProviderDeadline {
     interval: Option<Duration>,
     next: Option<Instant>,
+}
+
+struct RotationDeadline {
+    dwell: Duration,
+    next: Instant,
 }
 
 impl Scheduler {
@@ -31,6 +37,7 @@ impl Scheduler {
             next_status: now,
             next_time_sync: now,
             providers: BTreeMap::new(),
+            rotation: None,
         }
     }
 
@@ -93,11 +100,37 @@ impl Scheduler {
         take_deadline(&mut self.next_time_sync, self.time_sync_interval, now)
     }
 
+    /// Dwell is per-card, so the caller re-arms with a (possibly different)
+    /// duration every time the rotation advances. `None` disarms rotation
+    /// entirely, which is how `CarouselAdvance::Manual` is represented.
+    pub(crate) fn set_rotation(&mut self, dwell: Option<Duration>, now: Instant) {
+        self.rotation = dwell.map(|dwell| RotationDeadline {
+            dwell,
+            next: now + dwell,
+        });
+    }
+
+    pub(crate) fn clear_rotation(&mut self) {
+        self.rotation = None;
+    }
+
+    pub(crate) fn rotation_due(&mut self, now: Instant) -> bool {
+        let Some(rotation) = self.rotation.as_mut() else {
+            return false;
+        };
+        if now < rotation.next {
+            return false;
+        }
+        rotation.next = now + rotation.dwell;
+        true
+    }
+
     pub(crate) fn wait_duration(&self, now: Instant, maximum: Duration) -> Duration {
         let next = self
             .providers
             .values()
             .filter_map(|deadline| deadline.next)
+            .chain(self.rotation.iter().map(|rotation| rotation.next))
             .chain([self.next_pomodoro, self.next_status, self.next_time_sync])
             .min()
             .unwrap_or(now + maximum);
@@ -160,5 +193,43 @@ mod tests {
         assert!(!scheduler.status_due(after_sleep));
         assert!(scheduler.time_sync_due(after_sleep));
         assert!(!scheduler.time_sync_due(after_sleep));
+    }
+
+    #[test]
+    fn rotation_deadline_fires_once_per_dwell_and_bounds_the_wait() {
+        let now = Instant::now();
+        let mut scheduler = Scheduler::new(
+            now,
+            Duration::from_mins(1),
+            Duration::from_mins(1),
+            Duration::from_mins(1),
+        );
+        // `Scheduler::new` marks the periodic deadlines due immediately (so they fire
+        // once on cold boot). Consume that initial firing so the assertions below
+        // isolate the rotation deadline's contribution to `wait_duration`.
+        assert!(scheduler.pomodoro_due(now));
+        assert!(scheduler.status_due(now));
+        assert!(scheduler.time_sync_due(now));
+
+        // Manual advance: no rotation deadline exists.
+        scheduler.set_rotation(None, now);
+        assert!(!scheduler.rotation_due(now + Duration::from_hours(1)));
+
+        // Timed advance: fires once at the deadline, then rearms.
+        scheduler.set_rotation(Some(Duration::from_secs(20)), now);
+        assert!(!scheduler.rotation_due(now + Duration::from_secs(19)));
+        assert!(scheduler.rotation_due(now + Duration::from_secs(20)));
+        assert!(!scheduler.rotation_due(now + Duration::from_secs(20)));
+        assert!(scheduler.rotation_due(now + Duration::from_secs(40)));
+
+        // The loop cannot sleep past a pending rotation.
+        scheduler.set_rotation(Some(Duration::from_secs(5)), now);
+        assert_eq!(
+            scheduler.wait_duration(now, Duration::from_hours(1)),
+            Duration::from_secs(5)
+        );
+
+        scheduler.clear_rotation();
+        assert!(!scheduler.rotation_due(now + Duration::from_hours(1)));
     }
 }

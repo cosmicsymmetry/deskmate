@@ -816,6 +816,7 @@ struct WorkerState {
     interrupts: InterruptArbiter,
     active_screen: Option<String>,
     active_screen_dirty: bool,
+    active_rotation_index: usize,
     connected: bool,
     ever_connected: bool,
     needs_full_sync: bool,
@@ -839,6 +840,7 @@ impl WorkerState {
             interrupts: InterruptArbiter::default(),
             active_screen: None,
             active_screen_dirty: false,
+            active_rotation_index: 0,
             connected: false,
             ever_connected: false,
             needs_full_sync: true,
@@ -942,12 +944,26 @@ impl WorkerState {
             });
         self.device.active_screen_id.clone_from(&self.active_screen);
         self.active_screen_dirty = self.active_screen.is_some();
+        self.rearm_rotation_for_active_screen(scheduler, now);
         self.needs_full_sync = true;
         self.runtime = if self.config.preferences.paused {
             RuntimeState::Paused
         } else {
             RuntimeState::Running
         };
+    }
+
+    /// Dwell is per-card: arm the deadline from whichever card ended up
+    /// active (the preserved screen if it is still in rotation, otherwise the
+    /// first in-rotation card), not blindly from index 0.
+    fn rearm_rotation_for_active_screen(&mut self, scheduler: &mut Scheduler, now: Instant) {
+        let rotation_ids = rotation_card_ids(&self.config);
+        self.active_rotation_index = self
+            .active_screen
+            .as_ref()
+            .and_then(|active| rotation_ids.iter().position(|id| id == active))
+            .unwrap_or(0);
+        scheduler.set_rotation(current_dwell(&self.config, self.active_rotation_index), now);
     }
 
     fn restore_pomodoro(
@@ -1048,6 +1064,57 @@ impl WorkerState {
     }
 }
 
+/// In-rotation card IDs, in card order. Screen IDs equal card IDs (see
+/// `AppConfig::compile`), so this doubles as the rotation's screen order.
+fn rotation_card_ids(config: &AppConfig) -> Vec<String> {
+    config
+        .cards
+        .iter()
+        .filter(|card| card.presence().is_in_rotation())
+        .map(|card| card.id().to_owned())
+        .collect()
+}
+
+/// The dwell for the in-rotation card at `index`, resolved against the
+/// carousel's default. Returns `None` under `CarouselAdvance::Manual`, which
+/// is what keeps the rotation deadline disarmed in manual mode.
+fn current_dwell(config: &AppConfig, index: usize) -> Option<Duration> {
+    let default = config.carousel.advance.default_dwell_seconds()?;
+    let card = config
+        .cards
+        .iter()
+        .filter(|card| card.presence().is_in_rotation())
+        .nth(index)?;
+    card.presence()
+        .dwell_seconds(default)
+        .map(|seconds| Duration::from_secs(u64::from(seconds)))
+}
+
+/// Advances the rotation by one step (wrapping) and queues the resulting
+/// screen through the existing `active_screen_dirty` flush path, then
+/// re-arms the deadline from the card just moved to, since dwell is per-card.
+/// With fewer than two in-rotation cards there is nothing to rotate to, so the
+/// deadline is disarmed instead of waking the loop again for a no-op; the next
+/// config replace re-evaluates it (see `WorkerState::replace_config`).
+fn advance_rotation(state: &mut WorkerState, scheduler: &mut Scheduler, now: Instant) {
+    let ids = rotation_card_ids(&state.config);
+    if ids.len() > 1 {
+        state.active_rotation_index = (state.active_rotation_index + 1) % ids.len();
+        state.active_screen = Some(ids[state.active_rotation_index].clone());
+        state
+            .device
+            .active_screen_id
+            .clone_from(&state.active_screen);
+        state.active_screen_dirty = true;
+        scheduler.set_rotation(
+            current_dwell(&state.config, state.active_rotation_index),
+            now,
+        );
+    } else {
+        scheduler.clear_rotation();
+    }
+}
+
 fn run_runtime(
     config: AppConfig,
     mut device: Box<dyn RuntimeDevice>,
@@ -1105,7 +1172,7 @@ fn run_runtime(
         if !state.connected && now >= state.next_connect {
             attempt_connect(&mut state, device.as_mut(), now, &options);
         }
-        drain_device_events(&mut state, device.as_mut(), now);
+        drain_device_events(&mut state, &mut scheduler, device.as_mut(), now);
         run_scheduled_work(
             &mut state,
             &mut scheduler,
@@ -1193,15 +1260,16 @@ fn process_command(
             let _ = reply.send(result);
         }
         RuntimeCommand::ActivateScreen { screen_id, reply } => {
-            let result = if state
-                .config
-                .cards
-                .iter()
-                .any(|card| card.presence().is_in_rotation() && card.id() == screen_id)
-            {
+            let ids = rotation_card_ids(&state.config);
+            let result = if let Some(index) = ids.iter().position(|id| *id == screen_id) {
                 state.active_screen = Some(screen_id.clone());
                 state.device.active_screen_id = Some(screen_id.clone());
                 state.active_screen_dirty = true;
+                // An explicit activation is a manual override, same as a physical
+                // swipe: restart the dwell from the card just landed on instead of
+                // advancing early from wherever rotation last left off.
+                state.active_rotation_index = index;
+                scheduler.set_rotation(current_dwell(&state.config, index), Instant::now());
                 if state.connected && !state.config.preferences.paused {
                     send_screen(state, device)
                 } else {
@@ -1268,6 +1336,9 @@ fn run_scheduled_work(
 ) {
     if scheduler.pomodoro_due(now) {
         update_pomodoros(state, now);
+    }
+    if scheduler.rotation_due(now) {
+        advance_rotation(state, scheduler, now);
     }
     if !state.config.preferences.paused {
         submit_due_providers(
@@ -1574,13 +1645,17 @@ fn card_wants_completion_interrupt(config: &AppConfig, widget_id: &str) -> bool 
         .is_some_and(|card| !card.alert().is_none())
 }
 
-fn drain_device_events(state: &mut WorkerState, device: &mut dyn RuntimeDevice, now: Instant) {
+fn drain_device_events(
+    state: &mut WorkerState,
+    scheduler: &mut Scheduler,
+    device: &mut dyn RuntimeDevice,
+    now: Instant,
+) {
     while let Some(received) = device.try_recv_event() {
         match (received.event.kind, received.event.action) {
             (EventKind::Navigation, EventAction::NavigatePrevious | EventAction::NavigateNext) => {
-                if state.config.cards.iter().any(|card| {
-                    card.presence().is_in_rotation() && card.id() == received.event.screen_id
-                }) {
+                let ids = rotation_card_ids(&state.config);
+                if let Some(index) = ids.iter().position(|id| *id == received.event.screen_id) {
                     state.active_screen = Some(received.event.screen_id.clone());
                     state
                         .device
@@ -1589,6 +1664,10 @@ fn drain_device_events(state: &mut WorkerState, device: &mut dyn RuntimeDevice, 
                     // The gesture already changed the physical display. Remember it for
                     // future replay without issuing a redundant activation now.
                     state.active_screen_dirty = false;
+                    // A manual swipe restarts the dwell from the card just landed on,
+                    // rather than letting a soon-to-expire deadline advance early.
+                    state.active_rotation_index = index;
+                    scheduler.set_rotation(current_dwell(&state.config, index), now);
                 }
             }
             (EventKind::Tap, EventAction::StartPause) => {

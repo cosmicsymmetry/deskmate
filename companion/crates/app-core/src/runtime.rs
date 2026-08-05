@@ -956,6 +956,13 @@ impl WorkerState {
     /// Dwell is per-card: arm the deadline from whichever card ended up
     /// active (the preserved screen if it is still in rotation, otherwise the
     /// first in-rotation card), not blindly from index 0.
+    ///
+    /// Called from `replace_config`, i.e. at config install time, which runs
+    /// before the device connects. The clock therefore starts on the boot
+    /// (or newly-applied) card's dwell immediately, not from first connect;
+    /// on a slow first connect the boot card can end up on screen for less
+    /// than its configured dwell. Noted, not restructured — connect is
+    /// normally fast and this only shortens one card's first showing.
     fn rearm_rotation_for_active_screen(&mut self, scheduler: &mut Scheduler, now: Instant) {
         let rotation_ids = rotation_card_ids(&self.config);
         self.active_rotation_index = self
@@ -1337,6 +1344,13 @@ fn run_scheduled_work(
     if scheduler.pomodoro_due(now) {
         update_pomodoros(state, now);
     }
+    // Deliberate: this sits above the `!paused` guard below, so rotation keeps
+    // advancing locally while paused, exactly like pomodoro ticks above. Pausing
+    // gates device synchronization (see the guards later in this function and in
+    // `synchronize_pending`), not local state. A long pause therefore lets rotation
+    // drift, and resuming jumps the panel to wherever it drifted to; this mirrors
+    // existing pomodoro behavior rather than introducing a new inconsistency.
+    // Pinned by `rotation_advances_locally_while_paused_mirroring_pomodoro_ticks`.
     if scheduler.rotation_due(now) {
         advance_rotation(state, scheduler, now);
     }
@@ -1666,6 +1680,11 @@ fn drain_device_events(
                     state.active_screen_dirty = false;
                     // A manual swipe restarts the dwell from the card just landed on,
                     // rather than letting a soon-to-expire deadline advance early.
+                    // With a single in-rotation card this still re-arms unconditionally
+                    // (current_dwell can return Some for that lone card), so the
+                    // deadline fires once more and `advance_rotation` immediately
+                    // disarms it again via `clear_rotation` — one harmless extra
+                    // wake-and-clear cycle, not a leak.
                     state.active_rotation_index = index;
                     scheduler.set_rotation(current_dwell(&state.config, index), now);
                 }
@@ -1994,6 +2013,10 @@ fn empty_device(connection: ConnectionState) -> DeviceSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        AlertHold, CardAlert, CardPresence, CarouselAdvance, CarouselSettings, DisplayTemplate,
+        RefreshPolicy, WidgetTapAction,
+    };
 
     struct ImmediateRefresher {
         completed: mpsc::Sender<()>,
@@ -2056,5 +2079,413 @@ mod tests {
             }
         }
         assert_eq!(completed_ids, ["one", "two", "three"]);
+    }
+
+    // -- Rotation (Task 5) ---------------------------------------------------
+    //
+    // These are the pure/instant counterparts of the single real-time rotation test
+    // in `tests/runtime.rs`. They call `current_dwell`, `rotation_card_ids`,
+    // `advance_rotation`, `drain_device_events`, and `process_command` directly, so
+    // they run in well under a millisecond instead of sleeping out real dwells.
+
+    fn rotation_clock_card(id: &str, presence: CardPresence) -> CardSettings {
+        CardSettings::Clock {
+            id: id.into(),
+            title: id.into(),
+            show_seconds: true,
+            template: DisplayTemplate::DigitalClock,
+            tap_action: WidgetTapAction::None,
+            refresh: RefreshPolicy::DeviceLocal,
+            presence,
+            alert: CardAlert::None,
+        }
+    }
+
+    fn rotation_pomodoro_card(id: &str, presence: CardPresence, alert: CardAlert) -> CardSettings {
+        CardSettings::Pomodoro {
+            id: id.into(),
+            label: id.into(),
+            duration_seconds: 60,
+            template: DisplayTemplate::ProgressRing,
+            tap_action: WidgetTapAction::None,
+            refresh: RefreshPolicy::DeviceLocal,
+            presence,
+            alert,
+        }
+    }
+
+    /// Two in-rotation cards, 5s dwell each, `Timed` advance with a 45s default that
+    /// neither card should ever need (both set an explicit dwell).
+    fn timed_two_card_config() -> AppConfig {
+        AppConfig {
+            carousel: CarouselSettings {
+                advance: CarouselAdvance::Timed {
+                    default_dwell_seconds: 45,
+                },
+            },
+            cards: vec![
+                rotation_clock_card(
+                    "a",
+                    CardPresence::InRotation {
+                        dwell_seconds: Some(5),
+                    },
+                ),
+                rotation_clock_card(
+                    "b",
+                    CardPresence::InRotation {
+                        dwell_seconds: Some(5),
+                    },
+                ),
+            ],
+            ..AppConfig::default()
+        }
+    }
+
+    /// Two in-rotation cards with an alert-only card sandwiched between them at the
+    /// card-list position that would sit at rotation index 2 if index resolution ever
+    /// (incorrectly) walked *all* cards instead of only in-rotation ones. `rotation_card_ids`
+    /// is `["a", "c"]`; card "c" sits at list position 2 but rotation index 1.
+    fn timed_config_with_alert_only_between_two_in_rotation_cards() -> AppConfig {
+        AppConfig {
+            carousel: CarouselSettings {
+                advance: CarouselAdvance::Timed {
+                    default_dwell_seconds: 45,
+                },
+            },
+            cards: vec![
+                rotation_clock_card(
+                    "a",
+                    CardPresence::InRotation {
+                        dwell_seconds: Some(5),
+                    },
+                ),
+                rotation_pomodoro_card(
+                    "b",
+                    CardPresence::AlertOnly,
+                    CardAlert::OnTimerFinish {
+                        hold: AlertHold::UntilDismissed,
+                    },
+                ),
+                rotation_clock_card(
+                    "c",
+                    CardPresence::InRotation {
+                        dwell_seconds: Some(5),
+                    },
+                ),
+            ],
+            ..AppConfig::default()
+        }
+    }
+
+    /// A `RuntimeDevice` stub for unit tests that never connect: every call other than
+    /// `try_recv_event` is unreachable in these tests (they keep `state.connected ==
+    /// false`, so the runtime never calls into the device), and `try_recv_event`
+    /// optionally yields one queued event before returning `None` forever after.
+    #[derive(Default)]
+    struct StubDevice {
+        queued_event: Option<ReceivedEvent>,
+    }
+
+    impl RuntimeDevice for StubDevice {
+        fn connect(&mut self) -> Result<DeviceConnection, DeviceError> {
+            unreachable!("stub device is never connected in these unit tests")
+        }
+        fn status(&mut self) -> Result<StatusResponse, DeviceError> {
+            unreachable!("stub device is never connected in these unit tests")
+        }
+        fn time_sync(&mut self, _sync: TimeSync) -> Result<(), DeviceError> {
+            unreachable!("stub device is never connected in these unit tests")
+        }
+        fn apply_layout(
+            &mut self,
+            _rotation: u16,
+            _widgets: Vec<WidgetConfig>,
+            _screens: Vec<ScreenConfig>,
+        ) -> Result<(), DeviceError> {
+            unreachable!("stub device is never connected in these unit tests")
+        }
+        fn push_fields(
+            &mut self,
+            _widget_id: String,
+            _fields: Vec<Field>,
+        ) -> Result<(), DeviceError> {
+            unreachable!("stub device is never connected in these unit tests")
+        }
+        fn activate_screen(&mut self, _screen_id: String) -> Result<(), DeviceError> {
+            unreachable!("stub device is never connected in these unit tests")
+        }
+        fn trigger_interrupt(&mut self, _interrupt: TriggerInterrupt) -> Result<(), DeviceError> {
+            unreachable!("stub device is never connected in these unit tests")
+        }
+        fn try_recv_event(&mut self) -> Option<ReceivedEvent> {
+            self.queued_event.take()
+        }
+        fn diagnostics(&self) -> SessionDiagnostics {
+            SessionDiagnostics::default()
+        }
+    }
+
+    fn navigation_event(screen_id: &str) -> ReceivedEvent {
+        ReceivedEvent {
+            event: protocol::DeviceEvent {
+                sequence: 1,
+                kind: EventKind::Navigation,
+                widget_id: screen_id.into(),
+                screen_id: screen_id.into(),
+                action: EventAction::NavigateNext,
+                interrupt_token: None,
+            },
+            missed_before: 0,
+        }
+    }
+
+    // F1: under `CarouselAdvance::Manual`, no rotation deadline is ever armed. This
+    // isolates the exact regression the reviewer flagged: if `current_dwell` stopped
+    // propagating `CarouselAdvance::default_dwell_seconds()`'s `None` (e.g. a `?` was
+    // dropped and a dwell hardcoded instead), this fails immediately.
+    #[test]
+    fn current_dwell_is_none_under_manual_advance() {
+        let config = AppConfig {
+            carousel: CarouselSettings {
+                advance: CarouselAdvance::Manual,
+            },
+            ..AppConfig::default()
+        };
+        assert!(current_dwell(&config, 0).is_none());
+        // Manual disarms regardless of which in-rotation card index is asked about.
+        let two_card = timed_two_card_config();
+        let mut manual_two_card = two_card;
+        manual_two_card.carousel.advance = CarouselAdvance::Manual;
+        assert!(current_dwell(&manual_two_card, 0).is_none());
+        assert!(current_dwell(&manual_two_card, 1).is_none());
+    }
+
+    // F2: dwell is resolved per-card against the carousel default, not the other way
+    // around. Uses the brief's own example: an explicit dwell wins over the default,
+    // and an absent one falls back to it. If `current_dwell` ever ignored the card's own
+    // `dwell_seconds` (always returning the carousel default) or ignored the carousel
+    // default (returning `None` when the card leaves it unset), this fails.
+    #[test]
+    fn current_dwell_resolves_each_cards_own_value_before_falling_back_to_the_default() {
+        let config = AppConfig {
+            carousel: CarouselSettings {
+                advance: CarouselAdvance::Timed {
+                    default_dwell_seconds: 45,
+                },
+            },
+            cards: vec![
+                rotation_clock_card(
+                    "explicit",
+                    CardPresence::InRotation {
+                        dwell_seconds: Some(10),
+                    },
+                ),
+                rotation_clock_card(
+                    "defaulted",
+                    CardPresence::InRotation {
+                        dwell_seconds: None,
+                    },
+                ),
+            ],
+            ..AppConfig::default()
+        };
+        assert_eq!(current_dwell(&config, 0), Some(Duration::from_secs(10)));
+        assert_eq!(current_dwell(&config, 1), Some(Duration::from_secs(45)));
+    }
+
+    // F2 (continued): `advance_rotation` walks `rotation_card_ids` in order, wraps at
+    // the end, and skips alert-only/off cards. Also exercises re-arming with each
+    // card's own dwell as the index moves.
+    #[test]
+    fn advance_rotation_walks_in_rotation_cards_in_order_and_wraps() {
+        let now = Instant::now();
+        let mut config = timed_two_card_config();
+        config.cards.push(rotation_pomodoro_card(
+            "alert-only",
+            CardPresence::AlertOnly,
+            CardAlert::OnTimerFinish {
+                hold: AlertHold::UntilDismissed,
+            },
+        ));
+        config
+            .cards
+            .push(rotation_clock_card("off", CardPresence::Off));
+        let mut scheduler = Scheduler::new(
+            now,
+            Duration::from_hours(1),
+            Duration::from_hours(1),
+            Duration::from_hours(1),
+        );
+        let mut state = WorkerState::new(config, now, &mut scheduler);
+        assert_eq!(state.active_rotation_index, 0);
+        assert_eq!(state.active_screen.as_deref(), Some("a"));
+
+        advance_rotation(&mut state, &mut scheduler, now);
+        assert_eq!(state.active_rotation_index, 1);
+        assert_eq!(state.active_screen.as_deref(), Some("b"));
+        assert!(state.active_screen_dirty);
+
+        state.active_screen_dirty = false;
+        advance_rotation(&mut state, &mut scheduler, now);
+        assert_eq!(
+            state.active_rotation_index, 0,
+            "wraps back to the first card"
+        );
+        assert_eq!(state.active_screen.as_deref(), Some("a"));
+        assert!(state.active_screen_dirty);
+    }
+
+    // F2 (continued): with fewer than two in-rotation cards there is nothing to
+    // rotate to, so `advance_rotation` disarms the deadline instead of activating
+    // anything.
+    #[test]
+    fn advance_rotation_disarms_with_fewer_than_two_in_rotation_cards() {
+        let now = Instant::now();
+        let config = AppConfig {
+            carousel: CarouselSettings {
+                advance: CarouselAdvance::Timed {
+                    default_dwell_seconds: 5,
+                },
+            },
+            ..AppConfig::default()
+        };
+        let mut scheduler = Scheduler::new(
+            now,
+            Duration::from_hours(1),
+            Duration::from_hours(1),
+            Duration::from_hours(1),
+        );
+        let mut state = WorkerState::new(config, now, &mut scheduler);
+        state.active_screen_dirty = false;
+        advance_rotation(&mut state, &mut scheduler, now);
+        assert!(!state.active_screen_dirty, "nothing to rotate to");
+        assert!(!scheduler.rotation_due(now + Duration::from_hours(1)));
+    }
+
+    // F3a: a local swipe resolves the reported screen's index within
+    // `rotation_card_ids` (the in-rotation-only order), not its position among all
+    // cards, and re-arms the dwell from the card it landed on. The alert-only card "b"
+    // sits between "a" and "c" in the card list, so "c" is at list position 2 but
+    // rotation index 1 — the exact case that distinguishes correct index resolution
+    // from a regression that walks `config.cards` directly.
+    #[test]
+    fn local_swipe_resolves_the_index_within_rotation_ids_and_rearms_the_dwell() {
+        let now = Instant::now();
+        let config = timed_config_with_alert_only_between_two_in_rotation_cards();
+        let mut scheduler = Scheduler::new(
+            now,
+            Duration::from_hours(1),
+            Duration::from_hours(1),
+            Duration::from_hours(1),
+        );
+        let mut state = WorkerState::new(config, now, &mut scheduler);
+        let mut device = StubDevice {
+            queued_event: Some(navigation_event("c")),
+        };
+
+        drain_device_events(&mut state, &mut scheduler, &mut device, now);
+
+        assert_eq!(
+            state.active_rotation_index, 1,
+            "\"c\" is rotation index 1 (within [\"a\", \"c\"]), not list position 2"
+        );
+        assert_eq!(state.active_screen.as_deref(), Some("c"));
+        // Re-armed from "c"'s own 5s dwell, not left over from "a".
+        assert!(!scheduler.rotation_due(now + Duration::from_secs(4)));
+        assert!(scheduler.rotation_due(now + Duration::from_secs(5)));
+    }
+
+    // F3b: the same index-resolution and re-arm behavior applies to an explicit
+    // `RuntimeCommand::ActivateScreen` (the IPC-driven manual activation), which is a
+    // manual override just like a swipe.
+    #[test]
+    fn explicit_activate_command_resolves_the_index_within_rotation_ids_and_rearms_the_dwell() {
+        let now = Instant::now();
+        let config = timed_config_with_alert_only_between_two_in_rotation_cards();
+        let mut scheduler = Scheduler::new(
+            now,
+            Duration::from_hours(1),
+            Duration::from_hours(1),
+            Duration::from_hours(1),
+        );
+        let mut state = WorkerState::new(config, now, &mut scheduler);
+        let mut device = StubDevice::default();
+        let diagnostics = RuntimeDiagnosticCounters::default();
+        let (reply_sender, reply_receiver) = mpsc::sync_channel(1);
+        let before = Instant::now();
+
+        let shutting_down = process_command(
+            RuntimeCommand::ActivateScreen {
+                screen_id: "c".into(),
+                reply: reply_sender,
+            },
+            &mut state,
+            &mut scheduler,
+            &mut device,
+            &diagnostics,
+        );
+
+        assert!(!shutting_down);
+        reply_receiver.recv().unwrap().unwrap();
+        assert_eq!(
+            state.active_rotation_index, 1,
+            "\"c\" is rotation index 1 (within [\"a\", \"c\"]), not list position 2"
+        );
+        assert_eq!(state.active_screen.as_deref(), Some("c"));
+        // `process_command`'s `ActivateScreen` arm uses `Instant::now()` internally
+        // (there is no injectable clock in this runtime), so assert with a margin
+        // around the 5s dwell rather than pinning it to `before` exactly.
+        assert!(!scheduler.rotation_due(before + Duration::from_millis(4_500)));
+        assert!(scheduler.rotation_due(before + Duration::from_millis(5_500)));
+    }
+
+    // F5: pins the deliberate decision (see the comment on the `rotation_due` check in
+    // `run_scheduled_work`) that rotation advances locally while paused, mirroring how
+    // pomodoro ticks are never gated by pause. This is not new behavior introduced by
+    // Task 5's rotation feature; it documents and locks in the existing pattern so a
+    // future refactor cannot silently move rotation's guard without a test noticing.
+    #[test]
+    fn rotation_advances_locally_while_paused_mirroring_pomodoro_ticks() {
+        let now = Instant::now();
+        let mut config = timed_two_card_config();
+        config.preferences.paused = true;
+        let mut scheduler = Scheduler::new(
+            now,
+            Duration::from_hours(1),
+            Duration::from_hours(1),
+            Duration::from_hours(1),
+        );
+        let mut state = WorkerState::new(config, now, &mut scheduler);
+        assert!(state.config.preferences.paused);
+        assert!(!state.connected);
+
+        let mut device = StubDevice::default();
+        let diagnostics = RuntimeDiagnosticCounters::default();
+        let provider = ProviderWorker::new(
+            Box::new(ImmediateRefresher {
+                completed: mpsc::channel().0,
+            }),
+            1,
+        );
+        let options = RuntimeOptions::default();
+
+        run_scheduled_work(
+            &mut state,
+            &mut scheduler,
+            &mut device,
+            &provider,
+            &diagnostics,
+            now + Duration::from_secs(5),
+            &options,
+        );
+
+        assert_eq!(
+            state.active_rotation_index, 1,
+            "rotation advances locally even while paused and disconnected"
+        );
+        assert!(
+            state.active_screen_dirty,
+            "queued for the device, not yet sent"
+        );
     }
 }

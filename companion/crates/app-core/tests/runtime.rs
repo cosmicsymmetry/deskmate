@@ -1234,8 +1234,19 @@ fn activated_screen_ids(control: &MockDeviceControl) -> Vec<String> {
         .collect()
 }
 
+// Rotation's pure logic (per-card dwell resolution, manual-mode disarming, in-rotation
+// ordering/skipping/wrap-around, and the swipe/IPC index-resolution edge cases) is
+// covered by instant unit tests in `companion/crates/app-core/src/runtime.rs`'s inline
+// `mod tests`, which call `current_dwell`, `rotation_card_ids`, `advance_rotation`,
+// `drain_device_events`, and `process_command` directly with synthetic `Instant`s — no
+// sleeping required. This file keeps exactly one real-time rotation test: an end-to-end
+// wiring proof that `scheduler.rotation_due` firing inside the real `run_runtime` loop
+// actually reaches the mock device via `ActivateScreen`, through
+// `advance_rotation` -> `active_screen_dirty` -> `send_screen`. One dwell period (the
+// validated minimum, 5s) is enough to prove the wiring; it does not re-prove ordering or
+// skipping, which the unit tests already pin.
 #[test]
-fn timed_advance_walks_in_rotation_cards_and_skips_the_others() {
+fn timed_advance_wiring_reaches_the_device_after_one_dwell() {
     let control = MockDeviceControl::default();
     let config = AppConfig {
         carousel: CarouselSettings {
@@ -1272,62 +1283,15 @@ fn timed_advance_walks_in_rotation_cards_and_skips_the_others() {
         snapshot.device.connection == ConnectionState::Online
     });
     // The initial full sync activates the first in-rotation card ("first"),
-    // independent of rotation. Only entries after it are rotation-driven.
+    // independent of rotation.
     wait_for(Duration::from_secs(1), || {
         activated_screen_ids(&control) == ["first"]
     });
 
-    // Only in-rotation cards are activated, in card order, wrapping at the end.
-    // Each dwell is the validated minimum (5s), so allow generous real-time
-    // slack per step rather than a fake clock (this codebase drives the
-    // runtime loop with the real `Instant::now()`, not an injectable clock).
-    for expected in [
-        vec!["first".to_string(), "second".to_string()],
-        vec![
-            "first".to_string(),
-            "second".to_string(),
-            "first".to_string(),
-        ],
-        vec![
-            "first".to_string(),
-            "second".to_string(),
-            "first".to_string(),
-            "second".to_string(),
-        ],
-    ] {
-        wait_for(Duration::from_secs(8), || {
-            activated_screen_ids(&control) == expected
-        });
-    }
-
-    assert_eq!(
-        activated_screen_ids(&control)[1..],
-        ["second", "first", "second"]
-    );
-    runtime.shutdown().unwrap();
-}
-
-#[test]
-fn manual_advance_never_activates_a_screen_on_its_own() {
-    let control = MockDeviceControl::default();
-    let config = AppConfig {
-        carousel: CarouselSettings {
-            advance: CarouselAdvance::Manual,
-        },
-        ..AppConfig::default()
-    };
-    let runtime = start_runtime(config, &control, Duration::ZERO);
-    wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
-        snapshot.device.connection == ConnectionState::Online
+    // One dwell later, rotation has walked to "second" (skipping the alert-only and
+    // off cards) and the activation reached the mock device.
+    wait_for(Duration::from_secs(8), || {
+        activated_screen_ids(&control) == ["first", "second"]
     });
-    // The single default clock card is activated once by the initial sync.
-    wait_for(Duration::from_secs(1), || {
-        activated_screen_ids(&control) == ["clock"]
-    });
-    // No rotation deadline is ever armed under manual advance, so waiting
-    // longer than the minimum dwell would allow must not add another
-    // activation.
-    thread::sleep(Duration::from_millis(500));
-    assert_eq!(activated_screen_ids(&control), ["clock"]);
     runtime.shutdown().unwrap();
 }

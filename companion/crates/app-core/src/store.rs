@@ -9,9 +9,10 @@ use atomic_write_file::AtomicWriteFile;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AlertHold, AppConfig, AppPreferences, CURRENT_SCHEMA_VERSION, CalendarSource, CardAlert,
-    CardPresence, CardSettings, CarouselSettings, DisplayTemplate, RefreshPolicy, UpdaterSettings,
-    ValidationIssue, WidgetTapAction,
+    AlertHold, AppConfig, AppPreferences, AssetSettings, CURRENT_SCHEMA_VERSION, CalendarSource,
+    CardAlert, CardPresence, CardSettings, CarouselAdvance, CarouselSettings, DisplayTemplate,
+    JsonFieldMapping, RefreshPolicy, UpdaterSettings, ValidationIssue, WeatherUnits,
+    WidgetTapAction,
 };
 
 pub const MAX_CONFIG_FILE_BYTES: usize = 64 * 1_024;
@@ -122,6 +123,7 @@ pub enum ConfigOrigin {
     Current,
     MigratedV0,
     MigratedV1,
+    MigratedV2,
     LastGood,
 }
 
@@ -253,6 +255,358 @@ struct LegacyScreenSettings {
     widget_id: String,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyConfigV2 {
+    schema_version: u32,
+    preferences: AppPreferences,
+    widgets: Vec<LegacyWidgetV2>,
+    screens: Vec<LegacyScreenV2>,
+    #[serde(default)]
+    assets: Vec<AssetSettings>,
+    #[serde(default)]
+    carousel: LegacyCarouselV2,
+    #[serde(default)]
+    updater: UpdaterSettings,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyCarouselV2 {
+    #[serde(default)]
+    auto_advance_seconds: Option<u16>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyScreenV2 {
+    // Mirrors `LegacyScreenSettings`: the screen's own id is dropped on
+    // migration, only its order and widget reference survive.
+    #[allow(dead_code)]
+    id: String,
+    layout: LegacyLayoutV2,
+}
+
+/// Deliberately `Single`-only. A dashboard layout could never appear in a
+/// persisted v2 file: v2's `compile()` rejected `ScreenLayout::Dashboard` with
+/// `requires-capability`, and `ConfigStore::save` validates/compiles before
+/// writing to disk, so no dashboard-bearing document was ever written. A
+/// dashboard document therefore fails to deserialize here (an unknown `kind`
+/// variant), surfacing as a recoverable `StoreError::InvalidJson` rather than
+/// silently inventing a lossy dashboard-to-card mapping that never needs to
+/// exist.
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+enum LegacyLayoutV2 {
+    Single { widget_id: String },
+}
+
+/// Legacy (schema v2) interrupt policy. The card model replaces this with the
+/// richer `CardAlert`; this is parsed only so the legacy JSON round-trips and
+/// then discarded (mapped through `legacy_alert`) during migration.
+#[derive(Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum LegacyInterruptPolicy {
+    Disabled,
+    Enabled,
+}
+
+/// Mirrors the v2 `WidgetSettings` shape exactly (six kinds, each carrying
+/// `size`, its provider fields, `template`, `tap_action`, `refresh`, and
+/// `interrupt_policy`). `size` and `interrupt_policy` are legacy-only
+/// concepts and are parsed here only to be dropped/translated on migration.
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+enum LegacyWidgetV2 {
+    Clock {
+        id: String,
+        #[allow(dead_code)]
+        size: LegacyWidgetSize,
+        title: String,
+        show_seconds: bool,
+        template: DisplayTemplate,
+        tap_action: WidgetTapAction,
+        refresh: RefreshPolicy,
+        interrupt_policy: LegacyInterruptPolicy,
+    },
+    Pomodoro {
+        id: String,
+        #[allow(dead_code)]
+        size: LegacyWidgetSize,
+        label: String,
+        duration_seconds: u32,
+        template: DisplayTemplate,
+        tap_action: WidgetTapAction,
+        refresh: RefreshPolicy,
+        interrupt_policy: LegacyInterruptPolicy,
+    },
+    Calendar {
+        id: String,
+        #[allow(dead_code)]
+        size: LegacyWidgetSize,
+        title: String,
+        source: CalendarSource,
+        template: DisplayTemplate,
+        tap_action: WidgetTapAction,
+        refresh: RefreshPolicy,
+        interrupt_policy: LegacyInterruptPolicy,
+    },
+    Weather {
+        id: String,
+        #[allow(dead_code)]
+        size: LegacyWidgetSize,
+        title: String,
+        location: String,
+        units: WeatherUnits,
+        template: DisplayTemplate,
+        tap_action: WidgetTapAction,
+        refresh: RefreshPolicy,
+        interrupt_policy: LegacyInterruptPolicy,
+    },
+    JsonFeed {
+        id: String,
+        #[allow(dead_code)]
+        size: LegacyWidgetSize,
+        title: String,
+        url: String,
+        mappings: Vec<JsonFieldMapping>,
+        template: DisplayTemplate,
+        tap_action: WidgetTapAction,
+        refresh: RefreshPolicy,
+        interrupt_policy: LegacyInterruptPolicy,
+    },
+    Rss {
+        id: String,
+        #[allow(dead_code)]
+        size: LegacyWidgetSize,
+        title: String,
+        url: String,
+        max_items: u8,
+        template: DisplayTemplate,
+        tap_action: WidgetTapAction,
+        refresh: RefreshPolicy,
+        interrupt_policy: LegacyInterruptPolicy,
+    },
+}
+
+impl LegacyWidgetV2 {
+    fn id(&self) -> &str {
+        match self {
+            Self::Clock { id, .. }
+            | Self::Pomodoro { id, .. }
+            | Self::Calendar { id, .. }
+            | Self::Weather { id, .. }
+            | Self::JsonFeed { id, .. }
+            | Self::Rss { id, .. } => id,
+        }
+    }
+
+    fn interrupts_enabled(&self) -> bool {
+        let policy = match self {
+            Self::Clock {
+                interrupt_policy, ..
+            }
+            | Self::Pomodoro {
+                interrupt_policy, ..
+            }
+            | Self::Calendar {
+                interrupt_policy, ..
+            }
+            | Self::Weather {
+                interrupt_policy, ..
+            }
+            | Self::JsonFeed {
+                interrupt_policy, ..
+            }
+            | Self::Rss {
+                interrupt_policy, ..
+            } => interrupt_policy,
+        };
+        matches!(policy, LegacyInterruptPolicy::Enabled)
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+fn card_from_legacy_v2(widget: LegacyWidgetV2, presence: CardPresence) -> CardSettings {
+    let enabled = widget.interrupts_enabled();
+    match widget {
+        LegacyWidgetV2::Clock {
+            id,
+            size: _,
+            title,
+            show_seconds,
+            template,
+            tap_action,
+            refresh,
+            interrupt_policy: _,
+        } => CardSettings::Clock {
+            id,
+            title,
+            show_seconds,
+            template,
+            tap_action,
+            refresh,
+            presence,
+            alert: legacy_alert(enabled, LegacyCardKind::Clock),
+        },
+        LegacyWidgetV2::Pomodoro {
+            id,
+            size: _,
+            label,
+            duration_seconds,
+            template,
+            tap_action,
+            refresh,
+            interrupt_policy: _,
+        } => CardSettings::Pomodoro {
+            id,
+            label,
+            duration_seconds,
+            template,
+            tap_action,
+            refresh,
+            presence,
+            alert: legacy_alert(enabled, LegacyCardKind::Pomodoro),
+        },
+        LegacyWidgetV2::Calendar {
+            id,
+            size: _,
+            title,
+            source,
+            template,
+            tap_action,
+            refresh,
+            interrupt_policy: _,
+        } => CardSettings::Calendar {
+            id,
+            title,
+            source,
+            template,
+            tap_action,
+            refresh,
+            presence,
+            alert: legacy_alert(enabled, LegacyCardKind::Calendar),
+        },
+        LegacyWidgetV2::Weather {
+            id,
+            size: _,
+            title,
+            location,
+            units,
+            template,
+            tap_action,
+            refresh,
+            interrupt_policy: _,
+        } => CardSettings::Weather {
+            id,
+            title,
+            location,
+            units,
+            template,
+            tap_action,
+            refresh,
+            presence,
+            alert: legacy_alert(enabled, LegacyCardKind::Weather),
+        },
+        LegacyWidgetV2::JsonFeed {
+            id,
+            size: _,
+            title,
+            url,
+            mappings,
+            template,
+            tap_action,
+            refresh,
+            interrupt_policy: _,
+        } => CardSettings::JsonFeed {
+            id,
+            title,
+            url,
+            mappings,
+            template,
+            tap_action,
+            refresh,
+            presence,
+            alert: legacy_alert(enabled, LegacyCardKind::JsonFeed),
+        },
+        LegacyWidgetV2::Rss {
+            id,
+            size: _,
+            title,
+            url,
+            max_items,
+            template,
+            tap_action,
+            refresh,
+            interrupt_policy: _,
+        } => CardSettings::Rss {
+            id,
+            title,
+            url,
+            max_items,
+            template,
+            tap_action,
+            refresh,
+            presence,
+            alert: legacy_alert(enabled, LegacyCardKind::Rss),
+        },
+    }
+}
+
+fn migrate_v2(legacy: LegacyConfigV2) -> AppConfig {
+    let mut by_id: HashMap<String, LegacyWidgetV2> = legacy
+        .widgets
+        .into_iter()
+        .map(|widget| (widget.id().to_owned(), widget))
+        .collect();
+
+    // Card order follows screens[]: that is the carousel order the user authored.
+    let mut cards = Vec::with_capacity(by_id.len());
+    for screen in legacy.screens {
+        let LegacyLayoutV2::Single { widget_id } = screen.layout;
+        if let Some(widget) = by_id.remove(&widget_id) {
+            cards.push(card_from_legacy_v2(
+                widget,
+                CardPresence::InRotation {
+                    dwell_seconds: None,
+                },
+            ));
+        }
+    }
+
+    // Widgets with no referencing screen: v2 validation should prevent these, but the
+    // protocol permits them. Preserve them (design spec §5) rather than silently
+    // dropping configuration: a widget whose interrupts were enabled becomes
+    // alert-only so its alert can still fire; otherwise it becomes off. Sort by ID so
+    // migration is deterministic regardless of hash-map iteration order.
+    let mut orphans: Vec<LegacyWidgetV2> = by_id.into_values().collect();
+    orphans.sort_by(|left, right| left.id().cmp(right.id()));
+    for widget in orphans {
+        let presence = if widget.interrupts_enabled() {
+            CardPresence::AlertOnly
+        } else {
+            CardPresence::Off
+        };
+        cards.push(card_from_legacy_v2(widget, presence));
+    }
+
+    AppConfig {
+        schema_version: CURRENT_SCHEMA_VERSION,
+        preferences: legacy.preferences,
+        cards,
+        assets: legacy.assets,
+        carousel: CarouselSettings {
+            advance: match legacy.carousel.auto_advance_seconds {
+                Some(seconds) => CarouselAdvance::Timed {
+                    default_dwell_seconds: seconds,
+                },
+                None => CarouselAdvance::Manual,
+            },
+        },
+        updater: legacy.updater,
+    }
+}
+
 fn decode_config(bytes: &[u8]) -> Result<(AppConfig, ConfigOrigin), StoreError> {
     let text = std::str::from_utf8(bytes).map_err(|_| StoreError::InvalidUtf8)?;
     let header: VersionHeader =
@@ -266,6 +620,19 @@ fn decode_config(bytes: &[u8]) -> Result<(AppConfig, ConfigOrigin), StoreError> 
             })?,
             ConfigOrigin::Current,
         ),
+        2 => {
+            let legacy: LegacyConfigV2 =
+                serde_json::from_str(text).map_err(|error| StoreError::InvalidJson {
+                    message: error.to_string(),
+                })?;
+            if legacy.schema_version != 2 {
+                return Err(StoreError::UnsupportedVersion {
+                    found: legacy.schema_version,
+                    supported: CURRENT_SCHEMA_VERSION,
+                });
+            }
+            (migrate_v2(legacy), ConfigOrigin::MigratedV2)
+        }
         1 => {
             let legacy: LegacyConfigV1 =
                 serde_json::from_str(text).map_err(|error| StoreError::InvalidJson {
@@ -318,6 +685,69 @@ fn decode_config(bytes: &[u8]) -> Result<(AppConfig, ConfigOrigin), StoreError> 
     Ok((config, origin))
 }
 
+/// Whether a v0/v1 widget's *historical* interrupt policy (the M3→v2 migration's
+/// hard-coded default per kind, since v0/v1 predates `interrupt_policy` entirely) was
+/// enabled. Pomodoro widgets were defaulted to `enabled`; clock and calendar widgets
+/// were defaulted to `disabled`.
+fn legacy_widget_interrupts_enabled(widget: &LegacyWidgetSettings) -> bool {
+    matches!(widget, LegacyWidgetSettings::Pomodoro { .. })
+}
+
+fn card_from_legacy_widget(widget: LegacyWidgetSettings, presence: CardPresence) -> CardSettings {
+    match widget {
+        LegacyWidgetSettings::Clock {
+            id,
+            size: _,
+            title,
+            show_seconds,
+        } => CardSettings::Clock {
+            id,
+            title,
+            show_seconds,
+            template: DisplayTemplate::DigitalClock,
+            tap_action: WidgetTapAction::None,
+            refresh: RefreshPolicy::DeviceLocal,
+            presence,
+            alert: legacy_alert(false, LegacyCardKind::Clock),
+        },
+        LegacyWidgetSettings::Pomodoro {
+            id,
+            size: _,
+            label,
+            duration_seconds,
+        } => CardSettings::Pomodoro {
+            id,
+            label,
+            duration_seconds,
+            template: DisplayTemplate::ProgressRing,
+            tap_action: WidgetTapAction::StartPause,
+            refresh: RefreshPolicy::DeviceLocal,
+            presence,
+            alert: legacy_alert(true, LegacyCardKind::Pomodoro),
+        },
+        LegacyWidgetSettings::Calendar {
+            id,
+            size: _,
+            title,
+            source,
+            refresh_minutes,
+        } => CardSettings::Calendar {
+            id,
+            title,
+            source,
+            template: DisplayTemplate::RowList,
+            tap_action: WidgetTapAction::None,
+            refresh: RefreshPolicy::Interval {
+                minutes: refresh_minutes,
+            },
+            presence,
+            // The historical v2 migration defaulted calendar widgets to `disabled`,
+            // so this must NOT become a `before-event` alert the widget never had.
+            alert: legacy_alert(false, LegacyCardKind::Calendar),
+        },
+    }
+}
+
 fn migrate_legacy(
     preferences: AppPreferences,
     widgets: Vec<LegacyWidgetSettings>,
@@ -333,71 +763,34 @@ fn migrate_legacy(
         .into_iter()
         .map(|widget| (legacy_widget_id(&widget).to_owned(), widget))
         .collect();
-    let cards = screens
-        .into_iter()
-        .filter_map(|screen| widgets_by_id.remove(&screen.widget_id))
-        .map(|widget| match widget {
-            LegacyWidgetSettings::Clock {
-                id,
-                size: _,
-                title,
-                show_seconds,
-            } => CardSettings::Clock {
-                id,
-                title,
-                show_seconds,
-                template: DisplayTemplate::DigitalClock,
-                tap_action: WidgetTapAction::None,
-                refresh: RefreshPolicy::DeviceLocal,
-                presence: CardPresence::InRotation {
+    let mut cards = Vec::with_capacity(widgets_by_id.len());
+    for screen in screens {
+        if let Some(widget) = widgets_by_id.remove(&screen.widget_id) {
+            cards.push(card_from_legacy_widget(
+                widget,
+                CardPresence::InRotation {
                     dwell_seconds: None,
                 },
-                // v0/v1 predates interrupt_policy entirely; the historical v2 migration
-                // (see git blame) defaulted clock widgets to `disabled`.
-                alert: legacy_alert(false, LegacyCardKind::Clock),
-            },
-            LegacyWidgetSettings::Pomodoro {
-                id,
-                size: _,
-                label,
-                duration_seconds,
-            } => CardSettings::Pomodoro {
-                id,
-                label,
-                duration_seconds,
-                template: DisplayTemplate::ProgressRing,
-                tap_action: WidgetTapAction::StartPause,
-                refresh: RefreshPolicy::DeviceLocal,
-                presence: CardPresence::InRotation {
-                    dwell_seconds: None,
-                },
-                // The historical v2 migration defaulted pomodoro widgets to `enabled`.
-                alert: legacy_alert(true, LegacyCardKind::Pomodoro),
-            },
-            LegacyWidgetSettings::Calendar {
-                id,
-                size: _,
-                title,
-                source,
-                refresh_minutes,
-            } => CardSettings::Calendar {
-                id,
-                title,
-                source,
-                template: DisplayTemplate::RowList,
-                tap_action: WidgetTapAction::None,
-                refresh: RefreshPolicy::Interval {
-                    minutes: refresh_minutes,
-                },
-                presence: CardPresence::InRotation {
-                    dwell_seconds: None,
-                },
-                // The historical v2 migration defaulted calendar widgets to `disabled`,
-                // so this must NOT become a `before-event` alert the widget never had.
-                alert: legacy_alert(false, LegacyCardKind::Calendar),
-            },
-        })
-        .collect();
+            ));
+        }
+    }
+
+    // Widgets with no referencing screen: legacy validation should prevent these, but
+    // the on-disk format permits them. Preserve them (design spec §5) rather than
+    // silently dropping configuration: a widget whose historical interrupt policy was
+    // enabled becomes alert-only so its alert can still fire; otherwise it becomes off.
+    // Sort by ID so migration is deterministic regardless of hash-map iteration order.
+    let mut orphans: Vec<LegacyWidgetSettings> = widgets_by_id.into_values().collect();
+    orphans.sort_by(|left, right| legacy_widget_id(left).cmp(legacy_widget_id(right)));
+    for widget in orphans {
+        let presence = if legacy_widget_interrupts_enabled(&widget) {
+            CardPresence::AlertOnly
+        } else {
+            CardPresence::Off
+        };
+        cards.push(card_from_legacy_widget(widget, presence));
+    }
+
     AppConfig {
         schema_version: CURRENT_SCHEMA_VERSION,
         preferences,
@@ -413,6 +806,9 @@ enum LegacyCardKind {
     Clock,
     Pomodoro,
     Calendar,
+    Weather,
+    JsonFeed,
+    Rss,
 }
 
 /// The v2→v3 alert-migration rule (design spec §5, "Migration"): an old
@@ -434,7 +830,10 @@ fn legacy_alert(interrupt_policy_enabled: bool, kind: LegacyCardKind) -> CardAle
             lead_minutes: 5,
             hold: AlertHold::Seconds { value: 60 },
         },
-        LegacyCardKind::Clock => CardAlert::None,
+        LegacyCardKind::Clock
+        | LegacyCardKind::Weather
+        | LegacyCardKind::JsonFeed
+        | LegacyCardKind::Rss => CardAlert::None,
     }
 }
 

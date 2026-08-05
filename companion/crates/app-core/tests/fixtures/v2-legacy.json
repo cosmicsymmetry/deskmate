@@ -1,0 +1,40 @@
+{
+  "schema_version": 2,
+  "preferences": {
+    "timezone": "Asia/Tbilisi",
+    "autostart": true,
+    "paused": false,
+    "orientation": "landscape-flipped"
+  },
+  "widgets": [
+    {
+      "kind": "pomodoro",
+      "id": "focus",
+      "size": "standard",
+      "label": "Focus",
+      "duration_seconds": 1500,
+      "template": { "kind": "progress-ring" },
+      "tap_action": { "kind": "start-pause" },
+      "refresh": { "kind": "device-local" },
+      "interrupt_policy": "enabled"
+    },
+    {
+      "kind": "clock",
+      "id": "clock",
+      "size": "full",
+      "title": "Desk",
+      "show_seconds": true,
+      "template": { "kind": "digital-clock" },
+      "tap_action": { "kind": "none" },
+      "refresh": { "kind": "device-local" },
+      "interrupt_policy": "disabled"
+    }
+  ],
+  "screens": [
+    { "id": "clock-screen", "layout": { "kind": "single", "widget_id": "clock" } },
+    { "id": "focus-screen", "layout": { "kind": "single", "widget_id": "focus" } }
+  ],
+  "assets": [],
+  "carousel": { "auto_advance_seconds": 30 },
+  "updater": { "channel": "stable", "checks": "notify" }
+}

@@ -25,9 +25,9 @@ use providers::weather::{WeatherOptions, WeatherProvider, WeatherUnits as Provid
 use crate::commands::{PomodoroAction, RuntimeCommand, RuntimeError};
 use crate::scheduler::Scheduler;
 use crate::{
-    AppConfig, AppSnapshot, CalendarSource, ConnectionState, DeviceCounters, DeviceSnapshot,
-    JsonFieldMapping, PersistenceState, PomodoroSnapshot, PomodoroState, ProviderSnapshot,
-    ProviderState, RuntimeDiagnostics, RuntimeState, WeatherUnits, WidgetSettings,
+    AppConfig, AppSnapshot, CalendarSource, CardSettings, ConnectionState, DeviceCounters,
+    DeviceSnapshot, JsonFieldMapping, PersistenceState, PomodoroSnapshot, PomodoroState,
+    ProviderSnapshot, ProviderState, RuntimeDiagnostics, RuntimeState, WeatherUnits,
 };
 
 pub const DEFAULT_RUNTIME_COMMAND_CAPACITY: usize = 16;
@@ -861,8 +861,13 @@ impl WorkerState {
         self.config = config;
         self.dirty_widgets.clear();
         self.pomodoro_snapshots.clear();
-        let live_widget_ids: BTreeSet<&str> =
-            self.config.widgets.iter().map(WidgetSettings::id).collect();
+        let live_widget_ids: BTreeSet<&str> = self
+            .config
+            .cards
+            .iter()
+            .filter(|card| !card.presence().is_off())
+            .map(CardSettings::id)
+            .collect();
         self.interrupts
             .retain_widgets(|widget_id| live_widget_ids.contains(widget_id));
 
@@ -875,10 +880,16 @@ impl WorkerState {
         }
 
         let mut provider_deadlines = Vec::new();
-        let widgets = self.config.widgets.clone();
-        for widget in &widgets {
-            match widget {
-                WidgetSettings::Pomodoro {
+        let cards: Vec<CardSettings> = self
+            .config
+            .cards
+            .iter()
+            .filter(|card| !card.presence().is_off())
+            .cloned()
+            .collect();
+        for card in &cards {
+            match card {
+                CardSettings::Pomodoro {
                     id,
                     label,
                     duration_seconds,
@@ -892,18 +903,18 @@ impl WorkerState {
                         now,
                     );
                 }
-                WidgetSettings::Calendar { id, refresh, .. }
-                | WidgetSettings::Weather { id, refresh, .. }
-                | WidgetSettings::JsonFeed { id, refresh, .. }
-                | WidgetSettings::Rss { id, refresh, .. } => {
+                CardSettings::Calendar { id, refresh, .. }
+                | CardSettings::Weather { id, refresh, .. }
+                | CardSettings::JsonFeed { id, refresh, .. }
+                | CardSettings::Rss { id, refresh, .. } => {
                     let interval = refresh
                         .interval_minutes()
                         .map(|minutes| Duration::from_secs(u64::from(minutes) * 60));
                     provider_deadlines.push((id.clone(), interval));
                     let unchanged = previous_config
-                        .widgets
+                        .cards
                         .iter()
-                        .any(|previous| previous == widget);
+                        .any(|previous| previous == card);
                     self.restore_provider(
                         id,
                         unchanged,
@@ -911,18 +922,24 @@ impl WorkerState {
                         &mut previous_providers,
                     );
                 }
-                WidgetSettings::Clock { .. } => {}
+                CardSettings::Clock { .. } => {}
             }
         }
         scheduler.replace_providers(provider_deadlines, now);
         self.active_screen = previous_active_screen
             .filter(|active| {
                 self.config
-                    .screens
+                    .cards
                     .iter()
-                    .any(|screen| &screen.id == active)
+                    .any(|card| card.presence().is_in_rotation() && card.id() == active)
             })
-            .or_else(|| self.config.screens.first().map(|screen| screen.id.clone()));
+            .or_else(|| {
+                self.config
+                    .cards
+                    .iter()
+                    .find(|card| card.presence().is_in_rotation())
+                    .map(|card| card.id().to_owned())
+            });
         self.device.active_screen_id.clone_from(&self.active_screen);
         self.active_screen_dirty = self.active_screen.is_some();
         self.needs_full_sync = true;
@@ -958,7 +975,7 @@ impl WorkerState {
                 remaining_seconds: update.remaining_seconds,
             },
         );
-        if update.completion_interrupt {
+        if update.completion_interrupt && card_wants_completion_interrupt(&self.config, id) {
             let _ = self.interrupts.schedule(id, "Timer finished");
         }
         self.pomodoros.insert(id.into(), timer);
@@ -1178,9 +1195,9 @@ fn process_command(
         RuntimeCommand::ActivateScreen { screen_id, reply } => {
             let result = if state
                 .config
-                .screens
+                .cards
                 .iter()
-                .any(|screen| screen.id == screen_id)
+                .any(|card| card.presence().is_in_rotation() && card.id() == screen_id)
             {
                 state.active_screen = Some(screen_id.clone());
                 state.device.active_screen_id = Some(screen_id.clone());
@@ -1344,8 +1361,8 @@ fn submit_due_providers(
 fn provider_request(state: &WorkerState, widget_id: &str) -> Option<ProviderRefreshRequest> {
     let active_provider_ids: Vec<String> = state.providers.keys().cloned().collect();
     let timezone = state.config.preferences.timezone.parse().ok()?;
-    state.config.widgets.iter().find_map(|widget| match widget {
-        WidgetSettings::Calendar {
+    state.config.cards.iter().find_map(|widget| match widget {
+        CardSettings::Calendar {
             id,
             title,
             source,
@@ -1363,7 +1380,7 @@ fn provider_request(state: &WorkerState, widget_id: &str) -> Option<ProviderRefr
             active_provider_ids: active_provider_ids.clone(),
             now: Utc::now(),
         }),
-        WidgetSettings::Weather {
+        CardSettings::Weather {
             id,
             title,
             location,
@@ -1382,7 +1399,7 @@ fn provider_request(state: &WorkerState, widget_id: &str) -> Option<ProviderRefr
             active_provider_ids: active_provider_ids.clone(),
             now: Utc::now(),
         }),
-        WidgetSettings::JsonFeed {
+        CardSettings::JsonFeed {
             id,
             title,
             url,
@@ -1401,7 +1418,7 @@ fn provider_request(state: &WorkerState, widget_id: &str) -> Option<ProviderRefr
             active_provider_ids: active_provider_ids.clone(),
             now: Utc::now(),
         }),
-        WidgetSettings::Rss {
+        CardSettings::Rss {
             id,
             title,
             url,
@@ -1494,7 +1511,8 @@ fn update_pomodoros(state: &mut WorkerState, now: Instant) {
                 remaining_seconds: update.remaining_seconds,
             },
         );
-        if update.completion_interrupt {
+        if update.completion_interrupt && card_wants_completion_interrupt(&state.config, &widget_id)
+        {
             let _ = state.interrupts.schedule(widget_id, "Timer finished");
         }
     }
@@ -1529,7 +1547,7 @@ fn control_pomodoro(
             remaining_seconds: update.remaining_seconds,
         },
     );
-    if update.completion_interrupt {
+    if update.completion_interrupt && card_wants_completion_interrupt(&state.config, widget_id) {
         state
             .interrupts
             .schedule(widget_id, "Timer finished")
@@ -1544,16 +1562,25 @@ fn control_pomodoro(
     Ok(())
 }
 
+/// A pomodoro's completion only becomes a host-triggered interrupt when its
+/// card is configured to alert on timer finish. Task 6 narrows this further
+/// to `CardAlert::OnTimerFinish` specifically; for now any configured alert
+/// is treated as opting in.
+fn card_wants_completion_interrupt(config: &AppConfig, widget_id: &str) -> bool {
+    config
+        .cards
+        .iter()
+        .find(|card| card.id() == widget_id)
+        .is_some_and(|card| !card.alert().is_none())
+}
+
 fn drain_device_events(state: &mut WorkerState, device: &mut dyn RuntimeDevice, now: Instant) {
     while let Some(received) = device.try_recv_event() {
         match (received.event.kind, received.event.action) {
             (EventKind::Navigation, EventAction::NavigatePrevious | EventAction::NavigateNext) => {
-                if state
-                    .config
-                    .screens
-                    .iter()
-                    .any(|screen| screen.id == received.event.screen_id)
-                {
+                if state.config.cards.iter().any(|card| {
+                    card.presence().is_in_rotation() && card.id() == received.event.screen_id
+                }) {
                     state.active_screen = Some(received.event.screen_id.clone());
                     state
                         .device
@@ -1826,9 +1853,9 @@ fn pomodoro_state(state: EnginePomodoroState) -> PomodoroState {
 fn initial_snapshot(config: &AppConfig, diagnostics: RuntimeDiagnostics) -> AppSnapshot {
     let mut providers = Vec::new();
     let mut pomodoros = Vec::new();
-    for widget in &config.widgets {
-        match widget {
-            WidgetSettings::Pomodoro {
+    for card in config.cards.iter().filter(|card| !card.presence().is_off()) {
+        match card {
+            CardSettings::Pomodoro {
                 id,
                 duration_seconds,
                 ..
@@ -1838,23 +1865,27 @@ fn initial_snapshot(config: &AppConfig, diagnostics: RuntimeDiagnostics) -> AppS
                 duration_seconds: *duration_seconds,
                 remaining_seconds: *duration_seconds,
             }),
-            WidgetSettings::Calendar { id, .. }
-            | WidgetSettings::Weather { id, .. }
-            | WidgetSettings::JsonFeed { id, .. }
-            | WidgetSettings::Rss { id, .. } => providers.push(ProviderSnapshot {
+            CardSettings::Calendar { id, .. }
+            | CardSettings::Weather { id, .. }
+            | CardSettings::JsonFeed { id, .. }
+            | CardSettings::Rss { id, .. } => providers.push(ProviderSnapshot {
                 widget_id: id.clone(),
                 state: ProviderState::Idle,
                 last_success_unix_ms: None,
                 age_seconds: None,
             }),
-            WidgetSettings::Clock { .. } => {}
+            CardSettings::Clock { .. } => {}
         }
     }
     AppSnapshot {
         config: config.clone(),
         runtime: RuntimeState::Starting,
         device: DeviceSnapshot {
-            active_screen_id: config.screens.first().map(|screen| screen.id.clone()),
+            active_screen_id: config
+                .cards
+                .iter()
+                .find(|card| card.presence().is_in_rotation())
+                .map(|card| card.id().to_owned()),
             ..empty_device(ConnectionState::Connecting)
         },
         providers,

@@ -3,8 +3,8 @@ use std::fmt;
 
 pub use protocol::MAX_WIDGET_ID_LEN;
 use protocol::{
-    ApplyConfig, Field, FieldValue, InterruptPolicy, MAX_CONFIG_SCREENS, MAX_CONFIG_WIDGETS,
-    MAX_SCREEN_ID_LEN, PushData, ScreenConfig, SizeClass, TapAction, TemplateKind, WidgetConfig,
+    ApplyConfig, Field, FieldValue, InterruptPolicy, PushData, ScreenConfig, TapAction,
+    TemplateKind, WidgetConfig,
 };
 use serde::{Deserialize, Deserializer, Serialize};
 
@@ -46,6 +46,80 @@ mod strict_tagged_enum {
     pub enum CarouselAdvanceInner {
         Manual,
         Timed { default_dwell_seconds: u16 },
+    }
+
+    /// Mirrors `super::CardSettings`. Fields that are themselves internally
+    /// tagged enums are typed as the outer, validating public type (e.g.
+    /// `super::CardPresence`, not a raw inner enum) so that deserializing a
+    /// card recursively re-validates every nested tagged object. Typing a
+    /// nested field as a raw inner type here would silently defeat the
+    /// unknown-field check for that nested object.
+    #[derive(Debug, Serialize, Deserialize)]
+    #[serde(tag = "kind", rename_all = "kebab-case")]
+    pub enum CardSettingsInner {
+        Clock {
+            id: String,
+            title: String,
+            show_seconds: bool,
+            template: super::DisplayTemplate,
+            tap_action: super::WidgetTapAction,
+            refresh: super::RefreshPolicy,
+            presence: super::CardPresence,
+            alert: super::CardAlert,
+        },
+        Pomodoro {
+            id: String,
+            label: String,
+            duration_seconds: u32,
+            template: super::DisplayTemplate,
+            tap_action: super::WidgetTapAction,
+            refresh: super::RefreshPolicy,
+            presence: super::CardPresence,
+            alert: super::CardAlert,
+        },
+        Calendar {
+            id: String,
+            title: String,
+            source: super::CalendarSource,
+            template: super::DisplayTemplate,
+            tap_action: super::WidgetTapAction,
+            refresh: super::RefreshPolicy,
+            presence: super::CardPresence,
+            alert: super::CardAlert,
+        },
+        Weather {
+            id: String,
+            title: String,
+            location: String,
+            units: super::WeatherUnits,
+            template: super::DisplayTemplate,
+            tap_action: super::WidgetTapAction,
+            refresh: super::RefreshPolicy,
+            presence: super::CardPresence,
+            alert: super::CardAlert,
+        },
+        JsonFeed {
+            id: String,
+            title: String,
+            url: String,
+            mappings: Vec<super::JsonFieldMapping>,
+            template: super::DisplayTemplate,
+            tap_action: super::WidgetTapAction,
+            refresh: super::RefreshPolicy,
+            presence: super::CardPresence,
+            alert: super::CardAlert,
+        },
+        Rss {
+            id: String,
+            title: String,
+            url: String,
+            max_items: u8,
+            template: super::DisplayTemplate,
+            tap_action: super::WidgetTapAction,
+            refresh: super::RefreshPolicy,
+            presence: super::CardPresence,
+            alert: super::CardAlert,
+        },
     }
 
     /// Type-aware validation of allowed fields for each enum type.
@@ -95,6 +169,83 @@ mod strict_tagged_enum {
         }
     }
 
+    impl ValidatingDeserialize for CardSettingsInner {
+        fn allowed_fields(kind: &str) -> Option<&'static [&'static str]> {
+            match kind {
+                "clock" => Some(&[
+                    "kind",
+                    "id",
+                    "title",
+                    "show_seconds",
+                    "template",
+                    "tap_action",
+                    "refresh",
+                    "presence",
+                    "alert",
+                ]),
+                "pomodoro" => Some(&[
+                    "kind",
+                    "id",
+                    "label",
+                    "duration_seconds",
+                    "template",
+                    "tap_action",
+                    "refresh",
+                    "presence",
+                    "alert",
+                ]),
+                "calendar" => Some(&[
+                    "kind",
+                    "id",
+                    "title",
+                    "source",
+                    "template",
+                    "tap_action",
+                    "refresh",
+                    "presence",
+                    "alert",
+                ]),
+                "weather" => Some(&[
+                    "kind",
+                    "id",
+                    "title",
+                    "location",
+                    "units",
+                    "template",
+                    "tap_action",
+                    "refresh",
+                    "presence",
+                    "alert",
+                ]),
+                "json-feed" => Some(&[
+                    "kind",
+                    "id",
+                    "title",
+                    "url",
+                    "mappings",
+                    "template",
+                    "tap_action",
+                    "refresh",
+                    "presence",
+                    "alert",
+                ]),
+                "rss" => Some(&[
+                    "kind",
+                    "id",
+                    "title",
+                    "url",
+                    "max_items",
+                    "template",
+                    "tap_action",
+                    "refresh",
+                    "presence",
+                    "alert",
+                ]),
+                _ => None,
+            }
+        }
+    }
+
     #[allow(private_bounds)]
     pub fn validate_and_deserialize<T: ValidatingDeserialize>(value: &Value) -> Result<T, String> {
         // Validate unknown fields using type-aware field list
@@ -119,7 +270,7 @@ mod strict_tagged_enum {
     }
 }
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 2;
+pub const CURRENT_SCHEMA_VERSION: u32 = 3;
 pub const MAX_WIDGET_TITLE_LEN: usize = 64;
 pub const MAX_TIMEZONE_LEN: usize = 64;
 pub const MAX_ICS_SOURCE_LEN: usize = 2_048;
@@ -130,7 +281,6 @@ pub const PROVIDER_REQUEST_TIMEOUT_SECONDS: u64 = providers::PROVIDER_REQUEST_TI
 pub const MAX_LOCATION_LEN: usize = 128;
 pub const MAX_JSON_PATH_LEN: usize = 256;
 pub const MAX_JSON_MAPPINGS: usize = 16;
-pub const MAX_TILES_PER_SCREEN: usize = 4;
 pub const MAX_ASSETS: usize = 16;
 pub const MAX_ASSET_SOURCE_LEN: usize = 2_048;
 pub const MAX_ASSET_BYTES: u32 = 262_144;
@@ -144,11 +294,7 @@ pub const MAX_UPDATE_VERSION_LEN: usize = 64;
 pub const MAX_UPDATE_MODEL_LEN: usize = 64;
 pub const MAX_SIGNING_KEY_ID_LEN: usize = 64;
 pub const ED25519_SIGNATURE_BASE64_LEN: usize = 88;
-pub const MAX_DASHBOARD_COLUMNS: u8 = 2;
-pub const MAX_DASHBOARD_ROWS: u8 = 2;
 pub const MAX_RSS_ITEMS: u8 = 5;
-pub const MIN_AUTO_ADVANCE_SECONDS: u16 = 5;
-pub const MAX_AUTO_ADVANCE_SECONDS: u16 = 3_600;
 pub const MIN_POMODORO_SECONDS: u32 = 1;
 pub const MAX_POMODORO_SECONDS: u32 = 86_400;
 pub const MIN_CALENDAR_REFRESH_MINUTES: u16 = 1;
@@ -167,8 +313,7 @@ pub const MAX_ALERT_HOLD_SECONDS: u16 = 600;
 pub struct AppConfig {
     pub schema_version: u32,
     pub preferences: AppPreferences,
-    pub widgets: Vec<WidgetSettings>,
-    pub screens: Vec<ScreenSettings>,
+    pub cards: Vec<CardSettings>,
     pub assets: Vec<AssetSettings>,
     pub carousel: CarouselSettings,
     pub updater: UpdaterSettings,
@@ -179,21 +324,17 @@ impl Default for AppConfig {
         Self {
             schema_version: CURRENT_SCHEMA_VERSION,
             preferences: AppPreferences::default(),
-            widgets: vec![WidgetSettings::Clock {
+            cards: vec![CardSettings::Clock {
                 id: "clock".into(),
-                size: WidgetSize::Full,
                 title: "Desk".into(),
                 show_seconds: true,
                 template: DisplayTemplate::DigitalClock,
                 tap_action: WidgetTapAction::None,
                 refresh: RefreshPolicy::DeviceLocal,
-                interrupt_policy: WidgetInterruptPolicy::Disabled,
-            }],
-            screens: vec![ScreenSettings {
-                id: "clock-screen".into(),
-                layout: ScreenLayout::Single {
-                    widget_id: "clock".into(),
+                presence: CardPresence::InRotation {
+                    dwell_seconds: None,
                 },
+                alert: CardAlert::None,
             }],
             assets: Vec::new(),
             carousel: CarouselSettings::default(),
@@ -224,154 +365,49 @@ impl AppConfig {
             &mut issues,
         );
         validate_timezone(&self.preferences.timezone, &mut issues);
-        validate_collection_bounds(
-            "widgets",
-            self.widgets.len(),
-            MAX_CONFIG_WIDGETS,
-            &mut issues,
-        );
-        validate_collection_bounds(
-            "screens",
-            self.screens.len(),
-            MAX_CONFIG_SCREENS,
-            &mut issues,
-        );
+        validate_collection_bounds("cards", self.cards.len(), MAX_CONFIG_CARDS, &mut issues);
 
-        let mut widget_ids = HashSet::with_capacity(self.widgets.len());
-        for (index, widget) in self.widgets.iter().enumerate() {
-            let path = format!("widgets[{index}]");
+        let mut card_ids = HashSet::with_capacity(self.cards.len());
+        let mut in_rotation = 0_usize;
+        for (index, card) in self.cards.iter().enumerate() {
+            let path = format!("cards[{index}]");
             validate_identifier(
                 &format!("{path}.id"),
-                widget.id(),
+                card.id(),
                 MAX_WIDGET_ID_LEN,
                 &mut issues,
             );
-            if !widget_ids.insert(widget.id()) {
+            if !card_ids.insert(card.id()) {
                 issues.push(ValidationIssue::new(
                     format!("{path}.id"),
                     ValidationCode::DuplicateId,
-                    format!("widget ID {:?} is duplicated", widget.id()),
+                    format!("card ID {:?} is duplicated", card.id()),
                 ));
             }
-            widget.validate(&path, &mut issues);
+            card.validate(&path, &mut issues);
+            validate_card_behaviour(&path, card, &mut issues);
+            if card.presence().is_in_rotation() {
+                in_rotation += 1;
+            }
         }
-
-        let mut screen_ids = HashSet::with_capacity(self.screens.len());
-        let mut references: HashMap<&str, usize> = HashMap::with_capacity(self.widgets.len());
-        let widget_sizes: HashMap<&str, WidgetSize> = self
-            .widgets
-            .iter()
-            .map(|widget| (widget.id(), widget.size()))
-            .collect();
-        for (index, screen) in self.screens.iter().enumerate() {
-            let path = format!("screens[{index}]");
-            validate_identifier(
-                &format!("{path}.id"),
-                &screen.id,
-                MAX_SCREEN_ID_LEN,
+        if in_rotation == 0 && !self.cards.is_empty() {
+            issues.push(ValidationIssue::new(
+                "cards",
+                ValidationCode::OutOfRange,
+                "at least one card must be in the rotation",
+            ));
+        }
+        if let CarouselAdvance::Timed {
+            default_dwell_seconds,
+        } = self.carousel.advance
+        {
+            validate_range(
+                "carousel.advance.default_dwell_seconds",
+                u32::from(default_dwell_seconds),
+                u32::from(MIN_DWELL_SECONDS),
+                u32::from(MAX_DWELL_SECONDS),
                 &mut issues,
             );
-            if !screen_ids.insert(screen.id.as_str()) {
-                issues.push(ValidationIssue::new(
-                    format!("{path}.id"),
-                    ValidationCode::DuplicateId,
-                    format!("screen ID {:?} is duplicated", screen.id),
-                ));
-            }
-            match &screen.layout {
-                ScreenLayout::Single { widget_id } => {
-                    validate_widget_reference(
-                        &format!("{path}.layout.widget_id"),
-                        widget_id,
-                        &widget_sizes,
-                        WidgetSize::Tile,
-                        false,
-                        &mut references,
-                        &mut issues,
-                    );
-                }
-                ScreenLayout::Dashboard {
-                    columns,
-                    rows,
-                    tiles,
-                } => {
-                    if !(1..=MAX_DASHBOARD_COLUMNS).contains(columns)
-                        || !(1..=MAX_DASHBOARD_ROWS).contains(rows)
-                    {
-                        issues.push(ValidationIssue::new(
-                            format!("{path}.layout"),
-                            ValidationCode::OutOfRange,
-                            format!(
-                                "dashboard grid must be within {MAX_DASHBOARD_COLUMNS} columns and {MAX_DASHBOARD_ROWS} rows"
-                            ),
-                        ));
-                    }
-                    if !(2..=MAX_TILES_PER_SCREEN).contains(&tiles.len()) {
-                        issues.push(ValidationIssue::new(
-                            format!("{path}.layout.tiles"),
-                            ValidationCode::OutOfRange,
-                            format!("dashboard must contain 2..={MAX_TILES_PER_SCREEN} tiles"),
-                        ));
-                    }
-                    let mut occupied = HashSet::new();
-                    for (tile_index, tile) in tiles.iter().enumerate() {
-                        let tile_path = format!("{path}.layout.tiles[{tile_index}]");
-                        validate_widget_reference(
-                            &format!("{tile_path}.widget_id"),
-                            &tile.widget_id,
-                            &widget_sizes,
-                            WidgetSize::Tile,
-                            true,
-                            &mut references,
-                            &mut issues,
-                        );
-                        let valid_geometry = tile.column_span > 0
-                            && tile.row_span > 0
-                            && tile.column < *columns
-                            && tile.row < *rows
-                            && tile.column.saturating_add(tile.column_span) <= *columns
-                            && tile.row.saturating_add(tile.row_span) <= *rows;
-                        if !valid_geometry {
-                            issues.push(ValidationIssue::new(
-                                tile_path.clone(),
-                                ValidationCode::OutOfRange,
-                                "tile must fit entirely inside its dashboard grid",
-                            ));
-                            continue;
-                        }
-                        for column in tile.column..tile.column + tile.column_span {
-                            for row in tile.row..tile.row + tile.row_span {
-                                if !occupied.insert((column, row)) {
-                                    issues.push(ValidationIssue::new(
-                                        tile_path.clone(),
-                                        ValidationCode::Overlap,
-                                        "dashboard tiles must not overlap",
-                                    ));
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        for (index, widget) in self.widgets.iter().enumerate() {
-            match references.get(widget.id()).copied().unwrap_or_default() {
-                0 => issues.push(ValidationIssue::new(
-                    format!("widgets[{index}].id"),
-                    ValidationCode::MissingScreen,
-                    format!("widget {:?} is not assigned to a screen", widget.id()),
-                )),
-                1 => {}
-                _ => issues.push(ValidationIssue::new(
-                    format!("widgets[{index}].id"),
-                    ValidationCode::DuplicateReference,
-                    format!(
-                        "widget {:?} is assigned to more than one screen",
-                        widget.id()
-                    ),
-                )),
-            }
         }
 
         if self.assets.len() > MAX_ASSETS {
@@ -405,20 +441,20 @@ impl AppConfig {
                 format!("asset budget must not exceed {MAX_TOTAL_ASSET_BYTES} bytes"),
             ));
         }
-        for (index, widget) in self.widgets.iter().enumerate() {
+        for (index, card) in self.cards.iter().enumerate() {
             if let DisplayTemplate::IconBadgeText {
                 icon_asset_id: Some(asset_id),
-            } = widget.template()
+            } = card.template()
             {
                 match assets_by_id.get(asset_id.as_str()) {
                     None => issues.push(ValidationIssue::new(
-                        format!("widgets[{index}].template.icon_asset_id"),
+                        format!("cards[{index}].template.icon_asset_id"),
                         ValidationCode::MissingReference,
                         format!("asset {asset_id:?} does not exist"),
                     )),
                     Some(kind) if !matches!(kind, AssetKind::Icon { .. }) => {
                         issues.push(ValidationIssue::new(
-                            format!("widgets[{index}].template.icon_asset_id"),
+                            format!("cards[{index}].template.icon_asset_id"),
                             ValidationCode::InvalidComposition,
                             "icon template must reference an icon asset",
                         ));
@@ -426,17 +462,6 @@ impl AppConfig {
                     Some(_) => {}
                 }
             }
-        }
-        if self.carousel.auto_advance_seconds.is_some_and(|seconds| {
-            !(MIN_AUTO_ADVANCE_SECONDS..=MAX_AUTO_ADVANCE_SECONDS).contains(&seconds)
-        }) {
-            issues.push(ValidationIssue::new(
-                "carousel.auto_advance_seconds",
-                ValidationCode::OutOfRange,
-                format!(
-                    "auto advance must be {MIN_AUTO_ADVANCE_SECONDS}..={MAX_AUTO_ADVANCE_SECONDS} seconds"
-                ),
-            ));
         }
 
         if issues.is_empty() {
@@ -459,52 +484,36 @@ impl AppConfig {
         }
 
         let mut compatibility_issues = Vec::new();
-        let widgets = self
-            .widgets
-            .iter()
-            .enumerate()
-            .filter_map(|(index, widget)| {
-                widget.wire_config().or_else(|| {
-                    compatibility_issues.push(ValidationIssue::new(
-                        format!("widgets[{index}]"),
-                        ValidationCode::RequiresCapability,
-                        "widget provider/template/action is not implemented by this build",
-                    ));
-                    None
-                })
-            })
-            .collect();
-        let screens = self
-            .screens
-            .iter()
-            .enumerate()
-            .filter_map(|(index, screen)| match &screen.layout {
-                ScreenLayout::Single { widget_id } => Some(ScreenConfig {
-                    screen_id: screen.id.clone(),
-                    widget_id: widget_id.clone(),
-                }),
-                ScreenLayout::Dashboard { .. } => {
-                    compatibility_issues.push(ValidationIssue::new(
-                        format!("screens[{index}].layout"),
-                        ValidationCode::RequiresCapability,
-                        "dashboard layout requires protocol v2 firmware",
-                    ));
-                    None
-                }
-            })
-            .collect();
+        let mut widgets = Vec::with_capacity(self.cards.len());
+        let mut screens = Vec::with_capacity(self.cards.len());
+        for (index, card) in self.cards.iter().enumerate() {
+            if card.presence().is_off() {
+                continue;
+            }
+            let Some(widget) = card.wire_config() else {
+                compatibility_issues.push(ValidationIssue::new(
+                    format!("cards[{index}]"),
+                    ValidationCode::RequiresCapability,
+                    "card provider/template/action is not implemented by this build",
+                ));
+                continue;
+            };
+            if card.presence().is_in_rotation() {
+                // The screen ID is the card ID. The protocol treats widget and screen
+                // IDs as distinct namespaces, so reuse is legal, and compilation still
+                // invents no identifiers.
+                screens.push(ScreenConfig {
+                    screen_id: card.id().to_owned(),
+                    widget_id: card.id().to_owned(),
+                });
+            }
+            widgets.push(widget);
+        }
         if !self.assets.is_empty() {
             compatibility_issues.push(ValidationIssue::new(
                 "assets",
                 ValidationCode::RequiresCapability,
                 "asset transfer is not implemented by this build",
-            ));
-        }
-        if self.carousel.auto_advance_seconds.is_some() {
-            compatibility_issues.push(ValidationIssue::new(
-                "carousel.auto_advance_seconds",
-                ValidationCode::RequiresCapability,
-                "timed carousel advance is not implemented by this build",
             ));
         }
         if !compatibility_issues.is_empty() {
@@ -513,12 +522,13 @@ impl AppConfig {
             });
         }
         let initial_pushes = self
-            .widgets
+            .cards
             .iter()
-            .map(|widget| PushData {
-                widget_id: widget.id().into(),
+            .filter(|card| !card.presence().is_off())
+            .map(|card| PushData {
+                widget_id: card.id().into(),
                 revision,
-                fields: widget.initial_fields(),
+                fields: card.initial_fields(),
             })
             .collect();
 
@@ -539,16 +549,9 @@ impl AppConfig {
         if self.preferences.orientation == DisplayOrientation::LandscapeFlipped {
             required |= protocol::CAPABILITY_CONFIG_ROTATION;
         }
-        if self
-            .screens
-            .iter()
-            .any(|screen| matches!(&screen.layout, ScreenLayout::Dashboard { .. }))
-        {
-            required |= protocol::CAPABILITY_DASHBOARD_LAYOUTS;
-        }
-        if self.widgets.iter().any(|widget| {
+        if self.cards.iter().any(|card| {
             !matches!(
-                widget.template(),
+                card.template(),
                 DisplayTemplate::DigitalClock
                     | DisplayTemplate::ProgressRing
                     | DisplayTemplate::RowList
@@ -556,9 +559,9 @@ impl AppConfig {
         }) {
             required |= protocol::CAPABILITY_EXTENDED_TEMPLATES;
         }
-        if self.widgets.iter().any(|widget| {
+        if self.cards.iter().any(|card| {
             matches!(
-                widget.tap_action(),
+                card.tap_action(),
                 WidgetTapAction::Dismiss
                     | WidgetTapAction::OpenUrl { .. }
                     | WidgetTapAction::OpenApplication { .. }
@@ -611,14 +614,6 @@ impl DisplayOrientation {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum WidgetSize {
-    Full,
-    Standard,
-    Tile,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum DisplayTemplate {
@@ -656,13 +651,6 @@ impl RefreshPolicy {
             Self::DeviceLocal | Self::Manual => None,
         }
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum WidgetInterruptPolicy {
-    Disabled,
-    Enabled,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -829,75 +817,210 @@ pub struct JsonFieldMapping {
     pub path: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
-pub enum WidgetSettings {
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum CardSettings {
     Clock {
         id: String,
-        size: WidgetSize,
         title: String,
         show_seconds: bool,
         template: DisplayTemplate,
         tap_action: WidgetTapAction,
         refresh: RefreshPolicy,
-        interrupt_policy: WidgetInterruptPolicy,
+        presence: CardPresence,
+        alert: CardAlert,
     },
     Pomodoro {
         id: String,
-        size: WidgetSize,
         label: String,
         duration_seconds: u32,
         template: DisplayTemplate,
         tap_action: WidgetTapAction,
         refresh: RefreshPolicy,
-        interrupt_policy: WidgetInterruptPolicy,
+        presence: CardPresence,
+        alert: CardAlert,
     },
     Calendar {
         id: String,
-        size: WidgetSize,
         title: String,
         source: CalendarSource,
         template: DisplayTemplate,
         tap_action: WidgetTapAction,
         refresh: RefreshPolicy,
-        interrupt_policy: WidgetInterruptPolicy,
+        presence: CardPresence,
+        alert: CardAlert,
     },
     Weather {
         id: String,
-        size: WidgetSize,
         title: String,
         location: String,
         units: WeatherUnits,
         template: DisplayTemplate,
         tap_action: WidgetTapAction,
         refresh: RefreshPolicy,
-        interrupt_policy: WidgetInterruptPolicy,
+        presence: CardPresence,
+        alert: CardAlert,
     },
     JsonFeed {
         id: String,
-        size: WidgetSize,
         title: String,
         url: String,
         mappings: Vec<JsonFieldMapping>,
         template: DisplayTemplate,
         tap_action: WidgetTapAction,
         refresh: RefreshPolicy,
-        interrupt_policy: WidgetInterruptPolicy,
+        presence: CardPresence,
+        alert: CardAlert,
     },
     Rss {
         id: String,
-        size: WidgetSize,
         title: String,
         url: String,
         max_items: u8,
         template: DisplayTemplate,
         tap_action: WidgetTapAction,
         refresh: RefreshPolicy,
-        interrupt_policy: WidgetInterruptPolicy,
+        presence: CardPresence,
+        alert: CardAlert,
     },
 }
 
-impl WidgetSettings {
+impl<'de> Deserialize<'de> for CardSettings {
+    #[allow(clippy::too_many_lines)]
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let inner: strict_tagged_enum::CardSettingsInner =
+            strict_tagged_enum::validate_and_deserialize(&value)
+                .map_err(serde::de::Error::custom)?;
+        Ok(match inner {
+            strict_tagged_enum::CardSettingsInner::Clock {
+                id,
+                title,
+                show_seconds,
+                template,
+                tap_action,
+                refresh,
+                presence,
+                alert,
+            } => CardSettings::Clock {
+                id,
+                title,
+                show_seconds,
+                template,
+                tap_action,
+                refresh,
+                presence,
+                alert,
+            },
+            strict_tagged_enum::CardSettingsInner::Pomodoro {
+                id,
+                label,
+                duration_seconds,
+                template,
+                tap_action,
+                refresh,
+                presence,
+                alert,
+            } => CardSettings::Pomodoro {
+                id,
+                label,
+                duration_seconds,
+                template,
+                tap_action,
+                refresh,
+                presence,
+                alert,
+            },
+            strict_tagged_enum::CardSettingsInner::Calendar {
+                id,
+                title,
+                source,
+                template,
+                tap_action,
+                refresh,
+                presence,
+                alert,
+            } => CardSettings::Calendar {
+                id,
+                title,
+                source,
+                template,
+                tap_action,
+                refresh,
+                presence,
+                alert,
+            },
+            strict_tagged_enum::CardSettingsInner::Weather {
+                id,
+                title,
+                location,
+                units,
+                template,
+                tap_action,
+                refresh,
+                presence,
+                alert,
+            } => CardSettings::Weather {
+                id,
+                title,
+                location,
+                units,
+                template,
+                tap_action,
+                refresh,
+                presence,
+                alert,
+            },
+            strict_tagged_enum::CardSettingsInner::JsonFeed {
+                id,
+                title,
+                url,
+                mappings,
+                template,
+                tap_action,
+                refresh,
+                presence,
+                alert,
+            } => CardSettings::JsonFeed {
+                id,
+                title,
+                url,
+                mappings,
+                template,
+                tap_action,
+                refresh,
+                presence,
+                alert,
+            },
+            strict_tagged_enum::CardSettingsInner::Rss {
+                id,
+                title,
+                url,
+                max_items,
+                template,
+                tap_action,
+                refresh,
+                presence,
+                alert,
+            } => CardSettings::Rss {
+                id,
+                title,
+                url,
+                max_items,
+                template,
+                tap_action,
+                refresh,
+                presence,
+                alert,
+            },
+        })
+    }
+}
+
+impl CardSettings {
     pub fn id(&self) -> &str {
         match self {
             Self::Clock { id, .. }
@@ -909,14 +1032,25 @@ impl WidgetSettings {
         }
     }
 
-    pub const fn size(&self) -> WidgetSize {
+    pub const fn presence(&self) -> CardPresence {
         match self {
-            Self::Clock { size, .. }
-            | Self::Pomodoro { size, .. }
-            | Self::Calendar { size, .. }
-            | Self::Weather { size, .. }
-            | Self::JsonFeed { size, .. }
-            | Self::Rss { size, .. } => *size,
+            Self::Clock { presence, .. }
+            | Self::Pomodoro { presence, .. }
+            | Self::Calendar { presence, .. }
+            | Self::Weather { presence, .. }
+            | Self::JsonFeed { presence, .. }
+            | Self::Rss { presence, .. } => *presence,
+        }
+    }
+
+    pub const fn alert(&self) -> CardAlert {
+        match self {
+            Self::Clock { alert, .. }
+            | Self::Pomodoro { alert, .. }
+            | Self::Calendar { alert, .. }
+            | Self::Weather { alert, .. }
+            | Self::JsonFeed { alert, .. }
+            | Self::Rss { alert, .. } => *alert,
         }
     }
 
@@ -950,29 +1084,6 @@ impl WidgetSettings {
             | Self::Weather { tap_action, .. }
             | Self::JsonFeed { tap_action, .. }
             | Self::Rss { tap_action, .. } => tap_action,
-        }
-    }
-
-    pub const fn interrupt_policy(&self) -> WidgetInterruptPolicy {
-        match self {
-            Self::Clock {
-                interrupt_policy, ..
-            }
-            | Self::Pomodoro {
-                interrupt_policy, ..
-            }
-            | Self::Calendar {
-                interrupt_policy, ..
-            }
-            | Self::Weather {
-                interrupt_policy, ..
-            }
-            | Self::JsonFeed {
-                interrupt_policy, ..
-            }
-            | Self::Rss {
-                interrupt_policy, ..
-            } => *interrupt_policy,
         }
     }
 
@@ -1234,11 +1345,12 @@ impl WidgetSettings {
         Some(WidgetConfig {
             widget_id: self.id().into(),
             template,
-            size_class: self.size().to_wire(),
+            size_class: protocol::SizeClass::Full,
             tap_action,
-            interrupt_policy: match self.interrupt_policy() {
-                WidgetInterruptPolicy::Disabled => InterruptPolicy::Disabled,
-                WidgetInterruptPolicy::Enabled => InterruptPolicy::Enabled,
+            interrupt_policy: if self.alert().is_none() {
+                InterruptPolicy::Disabled
+            } else {
+                InterruptPolicy::Enabled
             },
         })
     }
@@ -1316,16 +1428,6 @@ impl WidgetSettings {
     }
 }
 
-impl WidgetSize {
-    const fn to_wire(self) -> SizeClass {
-        match self {
-            Self::Full => SizeClass::Full,
-            Self::Standard => SizeClass::Standard,
-            Self::Tile => SizeClass::Tile,
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
     tag = "kind",
@@ -1351,55 +1453,6 @@ impl CalendarSource {
             Self::Url(url) => validate_http_url(path, url, issues),
         }
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ScreenSettings {
-    pub id: String,
-    pub layout: ScreenLayout,
-}
-
-impl ScreenSettings {
-    pub fn widget_ids(&self) -> impl Iterator<Item = &str> {
-        let mut ids = [None, None, None, None];
-        match &self.layout {
-            ScreenLayout::Single { widget_id } => ids[0] = Some(widget_id.as_str()),
-            ScreenLayout::Dashboard { tiles, .. } => {
-                for (slot, tile) in ids.iter_mut().zip(tiles) {
-                    *slot = Some(tile.widget_id.as_str());
-                }
-            }
-        }
-        ids.into_iter().flatten()
-    }
-
-    pub fn primary_widget_id(&self) -> Option<&str> {
-        self.widget_ids().next()
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
-pub enum ScreenLayout {
-    Single {
-        widget_id: String,
-    },
-    Dashboard {
-        columns: u8,
-        rows: u8,
-        tiles: Vec<TileSettings>,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct TileSettings {
-    pub widget_id: String,
-    pub column: u8,
-    pub row: u8,
-    pub column_span: u8,
-    pub row_span: u8,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1442,10 +1495,18 @@ pub struct GlyphRange {
     pub end: u32,
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CarouselSettings {
-    pub auto_advance_seconds: Option<u16>,
+    pub advance: CarouselAdvance,
+}
+
+impl Default for CarouselSettings {
+    fn default() -> Self {
+        Self {
+            advance: CarouselAdvance::Manual,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1744,35 +1805,89 @@ fn validate_http_url(path: &str, url: &str, issues: &mut Vec<ValidationIssue>) {
     }
 }
 
-fn validate_widget_reference<'a>(
+fn validate_range(
     path: &str,
-    widget_id: &'a str,
-    widget_sizes: &HashMap<&'a str, WidgetSize>,
-    compared_size: WidgetSize,
-    require_equal: bool,
-    references: &mut HashMap<&'a str, usize>,
+    value: u32,
+    minimum: u32,
+    maximum: u32,
     issues: &mut Vec<ValidationIssue>,
 ) {
-    validate_identifier(path, widget_id, MAX_WIDGET_ID_LEN, issues);
-    let Some(size) = widget_sizes.get(widget_id) else {
+    if !(minimum..=maximum).contains(&value) {
         issues.push(ValidationIssue::new(
             path,
-            ValidationCode::MissingReference,
-            format!("widget {widget_id:?} does not exist"),
+            ValidationCode::OutOfRange,
+            format!("value must be {minimum}..={maximum}"),
         ));
-        return;
-    };
-    *references.entry(widget_id).or_default() += 1;
-    if (*size == compared_size) != require_equal {
+    }
+}
+
+fn validate_card_behaviour(path: &str, card: &CardSettings, issues: &mut Vec<ValidationIssue>) {
+    let presence = card.presence();
+    let alert = card.alert();
+
+    if let CardPresence::InRotation {
+        dwell_seconds: Some(seconds),
+    } = presence
+    {
+        validate_range(
+            &format!("{path}.presence.dwell_seconds"),
+            u32::from(seconds),
+            u32::from(MIN_DWELL_SECONDS),
+            u32::from(MAX_DWELL_SECONDS),
+            issues,
+        );
+    }
+
+    // An alert-only card with no trigger could never appear on screen.
+    if matches!(presence, CardPresence::AlertOnly) && alert.is_none() {
         issues.push(ValidationIssue::new(
-            path,
-            ValidationCode::UnsupportedSize,
-            if require_equal {
-                "dashboard widgets must use tile size"
-            } else {
-                "single-widget screens cannot use tile size"
-            },
+            format!("{path}.presence"),
+            ValidationCode::OutOfRange,
+            "an alert-only card must configure an alert",
         ));
+    }
+
+    match alert {
+        CardAlert::None => {}
+        CardAlert::OnTimerFinish { hold } => {
+            if !matches!(card, CardSettings::Pomodoro { .. }) {
+                issues.push(ValidationIssue::new(
+                    format!("{path}.alert"),
+                    ValidationCode::OutOfRange,
+                    "on-timer-finish alerts are only valid on pomodoro cards",
+                ));
+            }
+            validate_alert_hold(path, hold, issues);
+        }
+        CardAlert::BeforeEvent { lead_minutes, hold } => {
+            if !matches!(card, CardSettings::Calendar { .. }) {
+                issues.push(ValidationIssue::new(
+                    format!("{path}.alert"),
+                    ValidationCode::OutOfRange,
+                    "before-event alerts are only valid on calendar cards",
+                ));
+            }
+            validate_range(
+                &format!("{path}.alert.lead_minutes"),
+                u32::from(lead_minutes),
+                u32::from(MIN_ALERT_LEAD_MINUTES),
+                u32::from(MAX_ALERT_LEAD_MINUTES),
+                issues,
+            );
+            validate_alert_hold(path, hold, issues);
+        }
+    }
+}
+
+fn validate_alert_hold(path: &str, hold: AlertHold, issues: &mut Vec<ValidationIssue>) {
+    if let AlertHold::Seconds { value } = hold {
+        validate_range(
+            &format!("{path}.alert.hold.value"),
+            u32::from(value),
+            u32::from(MIN_ALERT_HOLD_SECONDS),
+            u32::from(MAX_ALERT_HOLD_SECONDS),
+            issues,
+        );
     }
 }
 

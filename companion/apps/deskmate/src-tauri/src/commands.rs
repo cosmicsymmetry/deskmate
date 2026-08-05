@@ -498,14 +498,13 @@ mod tests {
     use std::path::Path;
 
     use app_core::{
-        AppConfig, AppPreferences, AssetKind, AssetSource, CURRENT_SCHEMA_VERSION, CalendarSource,
-        CarouselSettings, ConnectionState, DeviceCapability, DeviceCounters, DeviceSnapshot,
-        DisplayOrientation, DisplayTemplate, FirmwareArtifactMetadata, GlyphRange,
-        PersistenceState, PomodoroSnapshot, PomodoroState, ProviderSnapshot, ProviderState,
-        RefreshPolicy, RuntimeDiagnostics, RuntimeError, RuntimeState, ScreenLayout,
-        ScreenSettings, StoreWarning, TileSettings, UpdateChannel, UpdateCheckPolicy,
-        UpdaterSettings, ValidationCode, WeatherUnits, WidgetInterruptPolicy, WidgetSettings,
-        WidgetSize, WidgetTapAction,
+        AlertHold, AppConfig, AppPreferences, AssetKind, AssetSource, CURRENT_SCHEMA_VERSION,
+        CalendarSource, CardAlert, CardPresence, CardSettings, CarouselAdvance, CarouselSettings,
+        ConnectionState, DeviceCapability, DeviceCounters, DeviceSnapshot, DisplayOrientation,
+        DisplayTemplate, FirmwareArtifactMetadata, GlyphRange, PersistenceState, PomodoroSnapshot,
+        PomodoroState, ProviderSnapshot, ProviderState, RefreshPolicy, RuntimeDiagnostics,
+        RuntimeError, RuntimeState, StoreWarning, UpdateChannel, UpdateCheckPolicy,
+        UpdaterSettings, ValidationCode, WeatherUnits, WidgetTapAction,
     };
     use serde::Serialize;
 
@@ -640,15 +639,16 @@ mod tests {
     struct ContractFixtures {
         snapshot: AppSnapshot,
         configs: Vec<AppConfig>,
-        widget_settings: Vec<WidgetSettings>,
-        widget_sizes: Vec<WidgetSize>,
+        card_settings: Vec<CardSettings>,
+        card_presences: Vec<CardPresence>,
+        card_alerts: Vec<CardAlert>,
+        alert_holds: Vec<AlertHold>,
+        carousel_advances: Vec<CarouselAdvance>,
         calendar_sources: Vec<CalendarSource>,
         display_templates: Vec<DisplayTemplate>,
         tap_actions: Vec<WidgetTapAction>,
         refresh_policies: Vec<RefreshPolicy>,
-        interrupt_policies: Vec<WidgetInterruptPolicy>,
         weather_units: Vec<WeatherUnits>,
-        screen_layouts: Vec<ScreenLayout>,
         asset_sources: Vec<AssetSource>,
         asset_kinds: Vec<AssetKind>,
         update_channels: Vec<UpdateChannel>,
@@ -672,49 +672,59 @@ mod tests {
     #[allow(clippy::too_many_lines)]
     fn contract_fixtures() -> ContractFixtures {
         let issue = ValidationIssue {
-            path: "widgets[0].size".into(),
-            code: ValidationCode::UnsupportedSize,
-            message: "clock widgets require Full size in M3".into(),
+            path: "cards[0].presence".into(),
+            code: ValidationCode::OutOfRange,
+            message: "an alert-only card must configure an alert".into(),
         };
         let file_source = CalendarSource::File("/tmp/calendar.ics".into());
         let url_source = CalendarSource::Url("https://example.test/calendar.ics".into());
-        let widgets = vec![
-            WidgetSettings::Clock {
+        let cards = vec![
+            CardSettings::Clock {
                 id: "clock".into(),
-                size: WidgetSize::Full,
                 title: "Desk".into(),
                 show_seconds: true,
                 template: DisplayTemplate::DigitalClock,
                 tap_action: WidgetTapAction::None,
                 refresh: RefreshPolicy::DeviceLocal,
-                interrupt_policy: WidgetInterruptPolicy::Disabled,
+                presence: CardPresence::InRotation {
+                    dwell_seconds: None,
+                },
+                alert: CardAlert::None,
             },
-            WidgetSettings::Pomodoro {
+            CardSettings::Pomodoro {
                 id: "pomodoro".into(),
-                size: WidgetSize::Standard,
                 label: "Focus".into(),
                 duration_seconds: 1_500,
                 template: DisplayTemplate::ProgressRing,
                 tap_action: WidgetTapAction::StartPause,
                 refresh: RefreshPolicy::DeviceLocal,
-                interrupt_policy: WidgetInterruptPolicy::Enabled,
+                presence: CardPresence::InRotation {
+                    dwell_seconds: None,
+                },
+                alert: CardAlert::OnTimerFinish {
+                    hold: AlertHold::UntilDismissed,
+                },
             },
-            WidgetSettings::Calendar {
+            CardSettings::Calendar {
                 id: "calendar".into(),
-                size: WidgetSize::Standard,
                 title: "Next".into(),
                 source: file_source.clone(),
                 template: DisplayTemplate::RowList,
                 tap_action: WidgetTapAction::None,
                 refresh: RefreshPolicy::Interval { minutes: 15 },
-                interrupt_policy: WidgetInterruptPolicy::Disabled,
+                presence: CardPresence::InRotation {
+                    dwell_seconds: None,
+                },
+                alert: CardAlert::BeforeEvent {
+                    lead_minutes: 5,
+                    hold: AlertHold::Seconds { value: 60 },
+                },
             },
         ];
-        let mut all_widget_settings = widgets.clone();
-        all_widget_settings.extend([
-            WidgetSettings::Weather {
+        let mut all_card_settings = cards.clone();
+        all_card_settings.extend([
+            CardSettings::Weather {
                 id: "weather".into(),
-                size: WidgetSize::Tile,
                 title: "Weather".into(),
                 location: "Tbilisi".into(),
                 units: WeatherUnits::Metric,
@@ -725,11 +735,11 @@ mod tests {
                     url: "https://example.test/weather".into(),
                 },
                 refresh: RefreshPolicy::Interval { minutes: 30 },
-                interrupt_policy: WidgetInterruptPolicy::Disabled,
+                presence: CardPresence::AlertOnly,
+                alert: CardAlert::None,
             },
-            WidgetSettings::JsonFeed {
+            CardSettings::JsonFeed {
                 id: "json".into(),
-                size: WidgetSize::Tile,
                 title: "Metric".into(),
                 url: "https://example.test/metric.json".into(),
                 mappings: vec![app_core::JsonFieldMapping {
@@ -741,18 +751,21 @@ mod tests {
                     application_id: "com.example.metrics".into(),
                 },
                 refresh: RefreshPolicy::Manual,
-                interrupt_policy: WidgetInterruptPolicy::Disabled,
+                presence: CardPresence::Off,
+                alert: CardAlert::None,
             },
-            WidgetSettings::Rss {
+            CardSettings::Rss {
                 id: "news".into(),
-                size: WidgetSize::Standard,
                 title: "News".into(),
                 url: "https://example.test/feed.xml".into(),
                 max_items: 3,
                 template: DisplayTemplate::RowList,
                 tap_action: WidgetTapAction::Dismiss,
                 refresh: RefreshPolicy::Interval { minutes: 15 },
-                interrupt_policy: WidgetInterruptPolicy::Enabled,
+                presence: CardPresence::InRotation {
+                    dwell_seconds: Some(20),
+                },
+                alert: CardAlert::None,
             },
         ]);
         let config = AppConfig {
@@ -763,27 +776,7 @@ mod tests {
                 paused: false,
                 orientation: DisplayOrientation::LandscapeFlipped,
             },
-            widgets: widgets.clone(),
-            screens: vec![
-                ScreenSettings {
-                    id: "clock-screen".into(),
-                    layout: ScreenLayout::Single {
-                        widget_id: "clock".into(),
-                    },
-                },
-                ScreenSettings {
-                    id: "pomodoro-screen".into(),
-                    layout: ScreenLayout::Single {
-                        widget_id: "pomodoro".into(),
-                    },
-                },
-                ScreenSettings {
-                    id: "calendar-screen".into(),
-                    layout: ScreenLayout::Single {
-                        widget_id: "calendar".into(),
-                    },
-                },
-            ],
+            cards: cards.clone(),
             assets: Vec::new(),
             carousel: CarouselSettings::default(),
             updater: UpdaterSettings::default(),
@@ -806,7 +799,7 @@ mod tests {
                 uptime_ms: Some(42),
                 free_heap: Some(123_456),
                 rotation: Some(90),
-                active_screen_id: Some("clock-screen".into()),
+                active_screen_id: Some("clock".into()),
                 counters: DeviceCounters {
                     reconnects: 1,
                     valid_frames: 2,
@@ -955,8 +948,34 @@ mod tests {
         ContractFixtures {
             snapshot,
             configs: vec![config],
-            widget_settings: all_widget_settings,
-            widget_sizes: vec![WidgetSize::Full, WidgetSize::Standard, WidgetSize::Tile],
+            card_settings: all_card_settings,
+            card_presences: vec![
+                CardPresence::InRotation {
+                    dwell_seconds: None,
+                },
+                CardPresence::InRotation {
+                    dwell_seconds: Some(20),
+                },
+                CardPresence::AlertOnly,
+                CardPresence::Off,
+            ],
+            card_alerts: vec![
+                CardAlert::None,
+                CardAlert::OnTimerFinish {
+                    hold: AlertHold::UntilDismissed,
+                },
+                CardAlert::BeforeEvent {
+                    lead_minutes: 5,
+                    hold: AlertHold::Seconds { value: 60 },
+                },
+            ],
+            alert_holds: vec![AlertHold::UntilDismissed, AlertHold::Seconds { value: 60 }],
+            carousel_advances: vec![
+                CarouselAdvance::Manual,
+                CarouselAdvance::Timed {
+                    default_dwell_seconds: 20,
+                },
+            ],
             calendar_sources: vec![file_source, url_source],
             display_templates: vec![
                 DisplayTemplate::DigitalClock,
@@ -985,27 +1004,7 @@ mod tests {
                 RefreshPolicy::Manual,
                 RefreshPolicy::Interval { minutes: 15 },
             ],
-            interrupt_policies: vec![
-                WidgetInterruptPolicy::Disabled,
-                WidgetInterruptPolicy::Enabled,
-            ],
             weather_units: vec![WeatherUnits::Metric, WeatherUnits::Imperial],
-            screen_layouts: vec![
-                ScreenLayout::Single {
-                    widget_id: "clock".into(),
-                },
-                ScreenLayout::Dashboard {
-                    columns: 2,
-                    rows: 2,
-                    tiles: vec![TileSettings {
-                        widget_id: "weather".into(),
-                        column: 0,
-                        row: 0,
-                        column_span: 1,
-                        row_span: 1,
-                    }],
-                },
-            ],
             asset_sources: vec![AssetSource::File("/tmp/weather-icons.bin".into())],
             asset_kinds: vec![
                 AssetKind::Icon {

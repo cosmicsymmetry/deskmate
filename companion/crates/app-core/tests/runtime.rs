@@ -5,10 +5,10 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use app_core::{
-    AppConfig, CalendarRefreshRequest, CalendarRefreshResult, CalendarRefresher, ConnectionState,
-    DeviceConnection, DisplayOrientation, PersistenceState, PomodoroAction, PomodoroState,
-    ProviderRequest, RuntimeDevice, RuntimeError, RuntimeHandle, RuntimeOptions, RuntimeState,
-    ScreenSettings, WidgetSettings,
+    AppConfig, CalendarRefreshRequest, CalendarRefreshResult, CalendarRefresher, CardSettings,
+    ConnectionState, DeviceConnection, DisplayOrientation, PersistenceState, PomodoroAction,
+    PomodoroState, ProviderRequest, RuntimeDevice, RuntimeError, RuntimeHandle, RuntimeOptions,
+    RuntimeState,
 };
 use chrono::Utc;
 use device::{DeviceError, ReceivedEvent, SessionDiagnostics, TransportError};
@@ -455,11 +455,10 @@ fn full_config() -> AppConfig {
 
 fn multi_provider_config() -> AppConfig {
     let mut config = full_config();
-    config.widgets.push(
+    config.cards.push(
         serde_json::from_value(serde_json::json!({
             "kind": "json-feed",
             "id": "json",
-            "size": "standard",
             "title": "JSON",
             "url": "https://example.test/metrics.json",
             "mappings": [
@@ -469,34 +468,26 @@ fn multi_provider_config() -> AppConfig {
             "template": { "kind": "row-list" },
             "tap_action": { "kind": "none" },
             "refresh": { "kind": "manual" },
-            "interrupt_policy": "disabled"
+            "presence": { "kind": "in-rotation", "dwell_seconds": null },
+            "alert": { "kind": "none" }
         }))
         .unwrap(),
     );
-    config.widgets.push(
+    config.cards.push(
         serde_json::from_value(serde_json::json!({
             "kind": "rss",
             "id": "rss",
-            "size": "standard",
             "title": "News",
             "url": "https://example.test/feed.xml",
             "max_items": 5,
             "template": { "kind": "row-list" },
             "tap_action": { "kind": "none" },
             "refresh": { "kind": "manual" },
-            "interrupt_policy": "disabled"
+            "presence": { "kind": "in-rotation", "dwell_seconds": null },
+            "alert": { "kind": "none" }
         }))
         .unwrap(),
     );
-    for (id, widget_id) in [("json-screen", "json"), ("rss-screen", "rss")] {
-        config.screens.push(
-            serde_json::from_value::<ScreenSettings>(serde_json::json!({
-                "id": id,
-                "layout": { "kind": "single", "widget_id": widget_id }
-            }))
-            .unwrap(),
-        );
-    }
     config
 }
 
@@ -613,12 +604,12 @@ fn local_navigation_becomes_the_authoritative_screen_for_reset_replay() {
         sequence: 1,
         kind: EventKind::Navigation,
         widget_id: "calendar".into(),
-        screen_id: "calendar-screen".into(),
+        screen_id: "calendar".into(),
         action: EventAction::NavigateNext,
         interrupt_token: None,
     });
     wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
-        snapshot.device.active_screen_id.as_deref() == Some("calendar-screen")
+        snapshot.device.active_screen_id.as_deref() == Some("calendar")
     });
 
     control.force_disconnect(true);
@@ -628,7 +619,7 @@ fn local_navigation_becomes_the_authoritative_screen_for_reset_replay() {
             .operations()
             .iter()
             .rev()
-            .any(|operation| *operation == Operation::ReplayActivate("calendar-screen".into()))
+            .any(|operation| *operation == Operation::ReplayActivate("calendar".into()))
     });
     let last_replay_activation = control
         .operations()
@@ -638,7 +629,7 @@ fn local_navigation_becomes_the_authoritative_screen_for_reset_replay() {
         .unwrap();
     assert_eq!(
         last_replay_activation,
-        Operation::ReplayActivate("calendar-screen".into())
+        Operation::ReplayActivate("calendar".into())
     );
     runtime.shutdown().unwrap();
 }
@@ -671,8 +662,8 @@ fn provider_delay_does_not_block_commands_and_old_results_are_discarded() {
 fn pomodoro_events_complete_once_and_dismissed_interrupts_do_not_replay() {
     let control = MockDeviceControl::default();
     let mut config = full_config();
-    for widget in &mut config.widgets {
-        if let WidgetSettings::Pomodoro {
+    for widget in &mut config.cards {
+        if let CardSettings::Pomodoro {
             duration_seconds, ..
         } = widget
         {
@@ -687,7 +678,7 @@ fn pomodoro_events_complete_once_and_dismissed_interrupts_do_not_replay() {
         sequence: 1,
         kind: EventKind::Tap,
         widget_id: "pomodoro".into(),
-        screen_id: "pomodoro-screen".into(),
+        screen_id: "pomodoro".into(),
         action: EventAction::StartPause,
         interrupt_token: None,
     });
@@ -710,7 +701,7 @@ fn pomodoro_events_complete_once_and_dismissed_interrupts_do_not_replay() {
         sequence: 2,
         kind: EventKind::InterruptDismissed,
         widget_id: "pomodoro".into(),
-        screen_id: "pomodoro-screen".into(),
+        screen_id: "pomodoro".into(),
         action: EventAction::DismissInterrupt,
         interrupt_token: Some(1),
     });
@@ -730,8 +721,8 @@ fn app_restart_seeds_interrupt_tokens_from_the_still_powered_device() {
     let control = MockDeviceControl::default();
     control.set_latest_interrupt_token(40);
     let mut config = full_config();
-    for widget in &mut config.widgets {
-        if let WidgetSettings::Pomodoro {
+    for widget in &mut config.cards {
+        if let CardSettings::Pomodoro {
             duration_seconds, ..
         } = widget
         {
@@ -746,7 +737,7 @@ fn app_restart_seeds_interrupt_tokens_from_the_still_powered_device() {
         sequence: 1,
         kind: EventKind::Tap,
         widget_id: "pomodoro".into(),
-        screen_id: "pomodoro-screen".into(),
+        screen_id: "pomodoro".into(),
         action: EventAction::StartPause,
         interrupt_token: None,
     });
@@ -775,19 +766,16 @@ fn subscribers_are_bounded_and_coalesce_pressure_to_the_latest_snapshot() {
     assert!(matches!(runtime.subscribe(), Err(RuntimeError::QueueFull)));
     runtime.set_paused(true).unwrap();
     runtime.set_paused(false).unwrap();
-    runtime.activate_screen("clock-screen").unwrap();
+    runtime.activate_screen("clock").unwrap();
     wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
         snapshot.diagnostics.subscriber_snapshots_overwritten >= 1
-            && snapshot.device.active_screen_id.as_deref() == Some("clock-screen")
+            && snapshot.device.active_screen_id.as_deref() == Some("clock")
     });
     let latest = subscription
         .recv_timeout(Duration::from_secs(1))
         .unwrap()
         .unwrap();
-    assert_eq!(
-        latest.device.active_screen_id.as_deref(),
-        Some("clock-screen")
-    );
+    assert_eq!(latest.device.active_screen_id.as_deref(), Some("clock"));
     assert_eq!(latest.runtime, RuntimeState::Running);
     runtime.shutdown().unwrap();
 }
@@ -903,7 +891,7 @@ fn command_queue_rejects_pressure_without_growing() {
     let second = thread::spawn(move || second_runtime.set_paused(true));
     thread::sleep(Duration::from_millis(20));
     assert_eq!(
-        runtime.activate_screen("clock-screen"),
+        runtime.activate_screen("clock"),
         Err(RuntimeError::QueueFull)
     );
     gate.open();
@@ -937,7 +925,7 @@ fn invalid_commands_do_not_mutate_runtime_state() {
         Err(RuntimeError::UnknownWidget { .. })
     ));
     let unsupported: AppConfig =
-        serde_json::from_str(include_str!("fixtures/v2-surface.json")).unwrap();
+        serde_json::from_str(include_str!("fixtures/card-surface.json")).unwrap();
     assert!(matches!(
         runtime.apply_config(unsupported),
         Err(RuntimeError::InvalidConfig { issues })
@@ -1059,43 +1047,41 @@ fn unrelated_config_and_preference_edits_preserve_live_timer_and_screen() {
     runtime
         .control_pomodoro("pomodoro", PomodoroAction::Start)
         .unwrap();
-    runtime.activate_screen("calendar-screen").unwrap();
+    runtime.activate_screen("calendar").unwrap();
     runtime.set_autostart_preference(false).unwrap();
     let before = wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
         snapshot
             .pomodoros
             .first()
             .is_some_and(|timer| timer.state == PomodoroState::Running)
-            && snapshot.device.active_screen_id.as_deref() == Some("calendar-screen")
+            && snapshot.device.active_screen_id.as_deref() == Some("calendar")
     });
 
     let mut edited = before.config;
     let clock = edited
-        .widgets
+        .cards
         .iter_mut()
-        .find(|widget| matches!(widget, WidgetSettings::Clock { .. }))
+        .find(|widget| matches!(widget, CardSettings::Clock { .. }))
         .unwrap();
-    if let WidgetSettings::Clock { title, .. } = clock {
+    if let CardSettings::Clock { title, .. } = clock {
         *title = "Studio".into();
     }
     edited.preferences.orientation = DisplayOrientation::Landscape;
     runtime.apply_config(edited).unwrap();
 
-    let after = wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
-        snapshot.config.widgets.iter().any(
-            |widget| matches!(widget, WidgetSettings::Clock { title, .. } if title == "Studio"),
-        )
-    });
+    let after =
+        wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
+            snapshot.config.cards.iter().any(
+                |widget| matches!(widget, CardSettings::Clock { title, .. } if title == "Studio"),
+            )
+        });
     assert!(
         after
             .pomodoros
             .first()
             .is_some_and(|timer| timer.state == PomodoroState::Running)
     );
-    assert_eq!(
-        after.device.active_screen_id.as_deref(),
-        Some("calendar-screen")
-    );
+    assert_eq!(after.device.active_screen_id.as_deref(), Some("calendar"));
     assert!(control.operations().contains(&Operation::ApplyLayout(90)));
     runtime.shutdown().unwrap();
 }

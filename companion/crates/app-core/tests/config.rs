@@ -1,22 +1,23 @@
 use app_core::{
-    AlertHold, AppConfig, AppSnapshot, AssetSettings, CardAlert, CardPresence, CarouselAdvance,
-    ConnectionState, DeviceCounters, DeviceSnapshot, FirmwareArtifactMetadata, MAX_ASSET_BYTES,
-    MAX_PROVIDER_URL_LEN, MAX_UPDATE_ARTIFACT_BYTES, PersistenceState, PomodoroSnapshot,
-    PomodoroState, ProviderSnapshot, ProviderState, RuntimeDiagnostics, RuntimeState, ScreenLayout,
-    ValidationCode, WidgetSettings,
+    AlertHold, AppConfig, AppSnapshot, AssetSettings, CardAlert, CardPresence, CardSettings,
+    CarouselAdvance, CarouselSettings, ConnectionState, DeviceCounters, DeviceSnapshot,
+    DisplayTemplate, FirmwareArtifactMetadata, MAX_ASSET_BYTES, MAX_PROVIDER_URL_LEN,
+    MAX_UPDATE_ARTIFACT_BYTES, PersistenceState, PomodoroSnapshot, PomodoroState, ProviderSnapshot,
+    ProviderState, RefreshPolicy, RuntimeDiagnostics, RuntimeState, ValidationCode,
+    WidgetTapAction,
 };
 use protocol::{
     CAPABILITY_ASSET_TRANSFER, CAPABILITY_CONFIG_ROTATION, CAPABILITY_CORE_WIDGETS,
-    CAPABILITY_DASHBOARD_LAYOUTS, CAPABILITY_EXTENDED_TEMPLATES, CAPABILITY_HOST_TAP_ACTIONS,
-    InterruptPolicy, Message, SizeClass, TapAction, TemplateKind, encode_message,
+    CAPABILITY_EXTENDED_TEMPLATES, CAPABILITY_HOST_TAP_ACTIONS, InterruptPolicy, Message,
+    SizeClass, TapAction, TemplateKind, encode_message,
 };
 
 const DEFAULT_JSON: &str = include_str!("fixtures/default.json");
 const FULL_JSON: &str = include_str!("fixtures/full.json");
 const INVALID_JSON: &str = include_str!("fixtures/invalid.json");
-const FUTURE_JSON: &str = include_str!("fixtures/future-v3.json");
+const FUTURE_JSON: &str = include_str!("fixtures/future-v4.json");
 const MALFORMED_JSON: &str = include_str!("fixtures/malformed.json");
-const V2_SURFACE_JSON: &str = include_str!("fixtures/v2-surface.json");
+const CARD_SURFACE_JSON: &str = include_str!("fixtures/card-surface.json");
 
 #[test]
 fn default_fixture_is_the_canonical_default() {
@@ -39,9 +40,9 @@ fn full_fixture_compiles_deterministically_to_m2_contract() {
     assert_eq!(first.layout.revision, 42);
     assert_eq!(first.layout.rotation, 270);
     assert_eq!(first.layout.widgets.len(), 3);
-    assert_eq!(first.layout.screens[0].screen_id, "pomodoro-screen");
-    assert_eq!(first.layout.screens[1].screen_id, "clock-screen");
-    assert_eq!(first.layout.screens[2].screen_id, "calendar-screen");
+    assert_eq!(first.layout.screens[0].screen_id, "clock");
+    assert_eq!(first.layout.screens[1].screen_id, "pomodoro");
+    assert_eq!(first.layout.screens[2].screen_id, "calendar");
 
     let clock = &first.layout.widgets[0];
     assert_eq!(clock.template, TemplateKind::DigitalClock);
@@ -51,13 +52,14 @@ fn full_fixture_compiles_deterministically_to_m2_contract() {
 
     let pomodoro = &first.layout.widgets[1];
     assert_eq!(pomodoro.template, TemplateKind::ProgressRing);
-    assert_eq!(pomodoro.size_class, SizeClass::Standard);
+    assert_eq!(pomodoro.size_class, SizeClass::Full);
     assert_eq!(pomodoro.tap_action, TapAction::StartPause);
     assert_eq!(pomodoro.interrupt_policy, InterruptPolicy::Enabled);
 
     let calendar = &first.layout.widgets[2];
     assert_eq!(calendar.template, TemplateKind::RowList);
-    assert_eq!(calendar.size_class, SizeClass::Standard);
+    assert_eq!(calendar.size_class, SizeClass::Full);
+    assert_eq!(calendar.interrupt_policy, InterruptPolicy::Disabled);
 
     assert_eq!(first.initial_pushes.len(), 3);
     assert_eq!(first.initial_pushes[0].fields.len(), 4);
@@ -87,12 +89,9 @@ fn invalid_fixture_reports_all_domain_boundaries_before_compile() {
     for expected in [
         ValidationCode::InvalidTimezone,
         ValidationCode::DuplicateId,
-        ValidationCode::UnsupportedSize,
         ValidationCode::OutOfRange,
         ValidationCode::InvalidSource,
-        ValidationCode::DuplicateReference,
         ValidationCode::MissingReference,
-        ValidationCode::MissingScreen,
     ] {
         assert!(codes.contains(&expected), "missing {expected:?}: {error:?}");
     }
@@ -108,8 +107,8 @@ fn future_schema_establishes_a_clean_migration_boundary() {
 }
 
 #[test]
-fn v2_surface_is_closed_bounded_and_capability_gated() {
-    let config: AppConfig = serde_json::from_str(V2_SURFACE_JSON).unwrap();
+fn card_surface_is_closed_bounded_and_capability_gated() {
+    let config: AppConfig = serde_json::from_str(CARD_SURFACE_JSON).unwrap();
     config.validate().unwrap();
     assert_eq!(
         serde_json::from_str::<AppConfig>(&serde_json::to_string(&config).unwrap()).unwrap(),
@@ -118,7 +117,6 @@ fn v2_surface_is_closed_bounded_and_capability_gated() {
 
     let expected_capabilities = CAPABILITY_CORE_WIDGETS
         | CAPABILITY_CONFIG_ROTATION
-        | CAPABILITY_DASHBOARD_LAYOUTS
         | CAPABILITY_EXTENDED_TEMPLATES
         | CAPABILITY_HOST_TAP_ACTIONS
         | CAPABILITY_ASSET_TRANSFER;
@@ -136,13 +134,10 @@ fn v2_surface_is_closed_bounded_and_capability_gated() {
 }
 
 #[test]
-fn v2_rejects_oversized_sources_overlapping_tiles_and_asset_budgets() {
-    let mut config: AppConfig = serde_json::from_str(V2_SURFACE_JSON).unwrap();
-    if let WidgetSettings::JsonFeed { url, .. } = &mut config.widgets[4] {
+fn card_surface_rejects_oversized_sources_and_asset_budgets() {
+    let mut config: AppConfig = serde_json::from_str(CARD_SURFACE_JSON).unwrap();
+    if let CardSettings::JsonFeed { url, .. } = &mut config.cards[4] {
         *url = format!("https://example.test/{}", "x".repeat(MAX_PROVIDER_URL_LEN));
-    }
-    if let ScreenLayout::Dashboard { tiles, .. } = &mut config.screens[3].layout {
-        tiles[1].column = 0;
     }
     let asset = config.assets[0].clone();
     config.assets = (0..5)
@@ -156,7 +151,6 @@ fn v2_rejects_oversized_sources_overlapping_tiles_and_asset_budgets() {
     let error = config.validate().unwrap_err();
     for expected in [
         ValidationCode::TooLong,
-        ValidationCode::Overlap,
         ValidationCode::TooLarge,
         ValidationCode::MissingReference,
     ] {
@@ -169,18 +163,18 @@ fn v2_rejects_oversized_sources_overlapping_tiles_and_asset_budgets() {
 
 #[test]
 fn network_provider_urls_cannot_embed_credentials_and_weather_has_a_refresh_floor() {
-    let mut config: AppConfig = serde_json::from_str(V2_SURFACE_JSON).unwrap();
-    for widget in &mut config.widgets {
-        match widget {
-            WidgetSettings::Calendar { source, .. } => {
+    let mut config: AppConfig = serde_json::from_str(CARD_SURFACE_JSON).unwrap();
+    for card in &mut config.cards {
+        match card {
+            CardSettings::Calendar { source, .. } => {
                 *source = app_core::CalendarSource::Url(
                     "https://user:calendar-secret@example.test/feed.ics".into(),
                 );
             }
-            WidgetSettings::Weather { refresh, .. } => {
+            CardSettings::Weather { refresh, .. } => {
                 *refresh = app_core::RefreshPolicy::Interval { minutes: 9 };
             }
-            WidgetSettings::JsonFeed { url, mappings, .. } => {
+            CardSettings::JsonFeed { url, mappings, .. } => {
                 *url = "https://user:secret@example.test/feed.json".into();
                 mappings[0].field = "title".into();
             }
@@ -245,12 +239,12 @@ fn malformed_and_unknown_json_are_rejected_by_serde() {
     assert!(serde_json::from_str::<AppConfig>(MALFORMED_JSON).is_err());
 
     let with_unknown = DEFAULT_JSON.replace(
-        "\"schema_version\": 2,",
-        "\"schema_version\": 2, \"unexpected\": true,",
+        "\"schema_version\": 3,",
+        "\"schema_version\": 3, \"unexpected\": true,",
     );
     assert!(serde_json::from_str::<AppConfig>(&with_unknown).is_err());
 
-    let nested_unknown = V2_SURFACE_JSON.replacen(
+    let nested_unknown = CARD_SURFACE_JSON.replacen(
         r#""template": { "kind": "icon-badge-text", "icon_asset_id": "icons" }"#,
         r#""template": { "kind": "icon-badge-text", "icon_asset_id": "icons", "unexpected": true }"#,
         1,
@@ -259,6 +253,26 @@ fn malformed_and_unknown_json_are_rejected_by_serde() {
 
     let unknown_variant = DEFAULT_JSON.replace("digital-clock", "future-template");
     assert!(serde_json::from_str::<AppConfig>(&unknown_variant).is_err());
+}
+
+#[test]
+fn card_settings_rejects_an_unknown_field_nested_inside_presence() {
+    // CardSettings is itself an internally tagged enum ("kind" = clock/pomodoro/...).
+    // Serde silently ignores `deny_unknown_fields` on internally tagged enums, so this
+    // proves the validating Deserialize impl catches unknown fields nested inside a
+    // card's own `presence` object, not just at the card's top level.
+    let json = r#"{
+        "kind": "clock",
+        "id": "clock",
+        "title": "Desk",
+        "show_seconds": true,
+        "template": { "kind": "digital-clock" },
+        "tap_action": { "kind": "none" },
+        "refresh": { "kind": "device-local" },
+        "presence": { "kind": "off", "bogus": 1 },
+        "alert": { "kind": "none" }
+    }"#;
+    assert!(serde_json::from_str::<CardSettings>(json).is_err());
 }
 
 #[test]
@@ -287,7 +301,7 @@ fn runtime_snapshot_uses_tagged_states_for_frontend_contract() {
             uptime_ms: None,
             free_heap: None,
             rotation: None,
-            active_screen_id: Some("clock-screen".into()),
+            active_screen_id: Some("clock".into()),
             counters: DeviceCounters::default(),
         },
         providers: vec![ProviderSnapshot {
@@ -502,4 +516,110 @@ fn card_alert_hold_method_extracts_hold() {
     }
     .hold();
     assert_eq!(before_hold, Some(AlertHold::Seconds { value: 60 }));
+}
+
+fn clock_card(id: &str, presence: CardPresence) -> CardSettings {
+    CardSettings::Clock {
+        id: id.into(),
+        title: "Desk".into(),
+        show_seconds: true,
+        template: DisplayTemplate::DigitalClock,
+        tap_action: WidgetTapAction::None,
+        refresh: RefreshPolicy::DeviceLocal,
+        presence,
+        alert: CardAlert::None,
+    }
+}
+
+fn pomodoro_card(id: &str, presence: CardPresence, alert: CardAlert) -> CardSettings {
+    CardSettings::Pomodoro {
+        id: id.into(),
+        label: "Focus".into(),
+        duration_seconds: 1_500,
+        template: DisplayTemplate::ProgressRing,
+        tap_action: WidgetTapAction::StartPause,
+        refresh: RefreshPolicy::DeviceLocal,
+        presence,
+        alert,
+    }
+}
+
+#[test]
+fn compilation_lowers_cards_to_the_frozen_wire_shape() {
+    let config = AppConfig {
+        schema_version: 3,
+        cards: vec![
+            clock_card(
+                "clock",
+                CardPresence::InRotation {
+                    dwell_seconds: Some(10),
+                },
+            ),
+            pomodoro_card(
+                "focus",
+                CardPresence::AlertOnly,
+                CardAlert::OnTimerFinish {
+                    hold: AlertHold::UntilDismissed,
+                },
+            ),
+            clock_card("muted", CardPresence::Off),
+        ],
+        ..AppConfig::default()
+    };
+
+    let compiled = config.compile(7).unwrap();
+
+    // Off cards vanish entirely; alert-only cards are screenless widgets.
+    let widget_ids: Vec<&str> = compiled
+        .layout
+        .widgets
+        .iter()
+        .map(|widget| widget.widget_id.as_str())
+        .collect();
+    assert_eq!(widget_ids, ["clock", "focus"]);
+
+    // Screen ID is the card ID, in card order, for in-rotation cards only.
+    let screens: Vec<(&str, &str)> = compiled
+        .layout
+        .screens
+        .iter()
+        .map(|screen| (screen.screen_id.as_str(), screen.widget_id.as_str()))
+        .collect();
+    assert_eq!(screens, [("clock", "clock")]);
+
+    // Size class is pinned to Full for every emitted widget, forever.
+    assert!(
+        compiled
+            .layout
+            .widgets
+            .iter()
+            .all(|widget| widget.size_class == protocol::SizeClass::Full)
+    );
+
+    // Off cards receive no initial push.
+    let pushed: Vec<&str> = compiled
+        .initial_pushes
+        .iter()
+        .map(|push| push.widget_id.as_str())
+        .collect();
+    assert_eq!(pushed, ["clock", "focus"]);
+}
+
+#[test]
+fn compilation_is_deterministic_for_identical_input() {
+    let config = AppConfig::default();
+    assert_eq!(config.compile(4).unwrap(), config.compile(4).unwrap());
+}
+
+#[test]
+fn timed_advance_no_longer_requires_an_unimplemented_capability() {
+    let config = AppConfig {
+        carousel: CarouselSettings {
+            advance: CarouselAdvance::Timed {
+                default_dwell_seconds: 20,
+            },
+        },
+        ..AppConfig::default()
+    };
+    assert!(config.compile(1).is_ok());
 }

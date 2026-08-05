@@ -4,18 +4,17 @@ import type { IpcContractFixtures } from "./types";
 export const ipcContractFixtures = {
   "snapshot": {
     "config": {
-      "schema_version": 2,
+      "schema_version": 3,
       "preferences": {
         "timezone": "Asia/Tbilisi",
         "autostart": true,
         "paused": false,
         "orientation": "landscape-flipped"
       },
-      "widgets": [
+      "cards": [
         {
           "kind": "clock",
           "id": "clock",
-          "size": "full",
           "title": "Desk",
           "show_seconds": true,
           "template": {
@@ -27,12 +26,17 @@ export const ipcContractFixtures = {
           "refresh": {
             "kind": "device-local"
           },
-          "interrupt_policy": "disabled"
+          "presence": {
+            "kind": "in-rotation",
+            "dwell_seconds": null
+          },
+          "alert": {
+            "kind": "none"
+          }
         },
         {
           "kind": "pomodoro",
           "id": "pomodoro",
-          "size": "standard",
           "label": "Focus",
           "duration_seconds": 1500,
           "template": {
@@ -44,12 +48,20 @@ export const ipcContractFixtures = {
           "refresh": {
             "kind": "device-local"
           },
-          "interrupt_policy": "enabled"
+          "presence": {
+            "kind": "in-rotation",
+            "dwell_seconds": null
+          },
+          "alert": {
+            "kind": "on-timer-finish",
+            "hold": {
+              "kind": "until-dismissed"
+            }
+          }
         },
         {
           "kind": "calendar",
           "id": "calendar",
-          "size": "standard",
           "title": "Next",
           "source": {
             "kind": "file",
@@ -65,35 +77,25 @@ export const ipcContractFixtures = {
             "kind": "interval",
             "minutes": 15
           },
-          "interrupt_policy": "disabled"
-        }
-      ],
-      "screens": [
-        {
-          "id": "clock-screen",
-          "layout": {
-            "kind": "single",
-            "widget_id": "clock"
-          }
-        },
-        {
-          "id": "pomodoro-screen",
-          "layout": {
-            "kind": "single",
-            "widget_id": "pomodoro"
-          }
-        },
-        {
-          "id": "calendar-screen",
-          "layout": {
-            "kind": "single",
-            "widget_id": "calendar"
+          "presence": {
+            "kind": "in-rotation",
+            "dwell_seconds": null
+          },
+          "alert": {
+            "kind": "before-event",
+            "lead_minutes": 5,
+            "hold": {
+              "kind": "seconds",
+              "value": 60
+            }
           }
         }
       ],
       "assets": [],
       "carousel": {
-        "auto_advance_seconds": null
+        "advance": {
+          "kind": "manual"
+        }
       },
       "updater": {
         "channel": "stable",
@@ -120,7 +122,7 @@ export const ipcContractFixtures = {
       "uptime_ms": 42,
       "free_heap": 123456,
       "rotation": 90,
-      "active_screen_id": "clock-screen",
+      "active_screen_id": "clock",
       "counters": {
         "reconnects": 1,
         "valid_frames": 2,
@@ -171,18 +173,17 @@ export const ipcContractFixtures = {
   },
   "configs": [
     {
-      "schema_version": 2,
+      "schema_version": 3,
       "preferences": {
         "timezone": "Asia/Tbilisi",
         "autostart": true,
         "paused": false,
         "orientation": "landscape-flipped"
       },
-      "widgets": [
+      "cards": [
         {
           "kind": "clock",
           "id": "clock",
-          "size": "full",
           "title": "Desk",
           "show_seconds": true,
           "template": {
@@ -194,12 +195,17 @@ export const ipcContractFixtures = {
           "refresh": {
             "kind": "device-local"
           },
-          "interrupt_policy": "disabled"
+          "presence": {
+            "kind": "in-rotation",
+            "dwell_seconds": null
+          },
+          "alert": {
+            "kind": "none"
+          }
         },
         {
           "kind": "pomodoro",
           "id": "pomodoro",
-          "size": "standard",
           "label": "Focus",
           "duration_seconds": 1500,
           "template": {
@@ -211,12 +217,20 @@ export const ipcContractFixtures = {
           "refresh": {
             "kind": "device-local"
           },
-          "interrupt_policy": "enabled"
+          "presence": {
+            "kind": "in-rotation",
+            "dwell_seconds": null
+          },
+          "alert": {
+            "kind": "on-timer-finish",
+            "hold": {
+              "kind": "until-dismissed"
+            }
+          }
         },
         {
           "kind": "calendar",
           "id": "calendar",
-          "size": "standard",
           "title": "Next",
           "source": {
             "kind": "file",
@@ -232,35 +246,25 @@ export const ipcContractFixtures = {
             "kind": "interval",
             "minutes": 15
           },
-          "interrupt_policy": "disabled"
-        }
-      ],
-      "screens": [
-        {
-          "id": "clock-screen",
-          "layout": {
-            "kind": "single",
-            "widget_id": "clock"
-          }
-        },
-        {
-          "id": "pomodoro-screen",
-          "layout": {
-            "kind": "single",
-            "widget_id": "pomodoro"
-          }
-        },
-        {
-          "id": "calendar-screen",
-          "layout": {
-            "kind": "single",
-            "widget_id": "calendar"
+          "presence": {
+            "kind": "in-rotation",
+            "dwell_seconds": null
+          },
+          "alert": {
+            "kind": "before-event",
+            "lead_minutes": 5,
+            "hold": {
+              "kind": "seconds",
+              "value": 60
+            }
           }
         }
       ],
       "assets": [],
       "carousel": {
-        "auto_advance_seconds": null
+        "advance": {
+          "kind": "manual"
+        }
       },
       "updater": {
         "channel": "stable",
@@ -268,11 +272,10 @@ export const ipcContractFixtures = {
       }
     }
   ],
-  "widget_settings": [
+  "card_settings": [
     {
       "kind": "clock",
       "id": "clock",
-      "size": "full",
       "title": "Desk",
       "show_seconds": true,
       "template": {
@@ -284,12 +287,17 @@ export const ipcContractFixtures = {
       "refresh": {
         "kind": "device-local"
       },
-      "interrupt_policy": "disabled"
+      "presence": {
+        "kind": "in-rotation",
+        "dwell_seconds": null
+      },
+      "alert": {
+        "kind": "none"
+      }
     },
     {
       "kind": "pomodoro",
       "id": "pomodoro",
-      "size": "standard",
       "label": "Focus",
       "duration_seconds": 1500,
       "template": {
@@ -301,12 +309,20 @@ export const ipcContractFixtures = {
       "refresh": {
         "kind": "device-local"
       },
-      "interrupt_policy": "enabled"
+      "presence": {
+        "kind": "in-rotation",
+        "dwell_seconds": null
+      },
+      "alert": {
+        "kind": "on-timer-finish",
+        "hold": {
+          "kind": "until-dismissed"
+        }
+      }
     },
     {
       "kind": "calendar",
       "id": "calendar",
-      "size": "standard",
       "title": "Next",
       "source": {
         "kind": "file",
@@ -322,12 +338,22 @@ export const ipcContractFixtures = {
         "kind": "interval",
         "minutes": 15
       },
-      "interrupt_policy": "disabled"
+      "presence": {
+        "kind": "in-rotation",
+        "dwell_seconds": null
+      },
+      "alert": {
+        "kind": "before-event",
+        "lead_minutes": 5,
+        "hold": {
+          "kind": "seconds",
+          "value": 60
+        }
+      }
     },
     {
       "kind": "weather",
       "id": "weather",
-      "size": "tile",
       "title": "Weather",
       "location": "Tbilisi",
       "units": "metric",
@@ -343,12 +369,16 @@ export const ipcContractFixtures = {
         "kind": "interval",
         "minutes": 30
       },
-      "interrupt_policy": "disabled"
+      "presence": {
+        "kind": "alert-only"
+      },
+      "alert": {
+        "kind": "none"
+      }
     },
     {
       "kind": "json-feed",
       "id": "json",
-      "size": "tile",
       "title": "Metric",
       "url": "https://example.test/metric.json",
       "mappings": [
@@ -367,12 +397,16 @@ export const ipcContractFixtures = {
       "refresh": {
         "kind": "manual"
       },
-      "interrupt_policy": "disabled"
+      "presence": {
+        "kind": "off"
+      },
+      "alert": {
+        "kind": "none"
+      }
     },
     {
       "kind": "rss",
       "id": "news",
-      "size": "standard",
       "title": "News",
       "url": "https://example.test/feed.xml",
       "max_items": 3,
@@ -386,13 +420,67 @@ export const ipcContractFixtures = {
         "kind": "interval",
         "minutes": 15
       },
-      "interrupt_policy": "enabled"
+      "presence": {
+        "kind": "in-rotation",
+        "dwell_seconds": 20
+      },
+      "alert": {
+        "kind": "none"
+      }
     }
   ],
-  "widget_sizes": [
-    "full",
-    "standard",
-    "tile"
+  "card_presences": [
+    {
+      "kind": "in-rotation",
+      "dwell_seconds": null
+    },
+    {
+      "kind": "in-rotation",
+      "dwell_seconds": 20
+    },
+    {
+      "kind": "alert-only"
+    },
+    {
+      "kind": "off"
+    }
+  ],
+  "card_alerts": [
+    {
+      "kind": "none"
+    },
+    {
+      "kind": "on-timer-finish",
+      "hold": {
+        "kind": "until-dismissed"
+      }
+    },
+    {
+      "kind": "before-event",
+      "lead_minutes": 5,
+      "hold": {
+        "kind": "seconds",
+        "value": 60
+      }
+    }
+  ],
+  "alert_holds": [
+    {
+      "kind": "until-dismissed"
+    },
+    {
+      "kind": "seconds",
+      "value": 60
+    }
+  ],
+  "carousel_advances": [
+    {
+      "kind": "manual"
+    },
+    {
+      "kind": "timed",
+      "default_dwell_seconds": 20
+    }
   ],
   "calendar_sources": [
     {
@@ -459,33 +547,9 @@ export const ipcContractFixtures = {
       "minutes": 15
     }
   ],
-  "interrupt_policies": [
-    "disabled",
-    "enabled"
-  ],
   "weather_units": [
     "metric",
     "imperial"
-  ],
-  "screen_layouts": [
-    {
-      "kind": "single",
-      "widget_id": "clock"
-    },
-    {
-      "kind": "dashboard",
-      "columns": 2,
-      "rows": 2,
-      "tiles": [
-        {
-          "widget_id": "weather",
-          "column": 0,
-          "row": 0,
-          "column_span": 1,
-          "row_span": 1
-        }
-      ]
-    }
   ],
   "asset_sources": [
     {
@@ -648,9 +712,9 @@ export const ipcContractFixtures = {
       "message": "validation",
       "issues": [
         {
-          "path": "widgets[0].size",
-          "code": "unsupported-size",
-          "message": "clock widgets require Full size in M3"
+          "path": "cards[0].presence",
+          "code": "out-of-range",
+          "message": "an alert-only card must configure an alert"
         }
       ]
     },
@@ -695,9 +759,9 @@ export const ipcContractFixtures = {
     "valid": false,
     "issues": [
       {
-        "path": "widgets[0].size",
-        "code": "unsupported-size",
-        "message": "clock widgets require Full size in M3"
+        "path": "cards[0].presence",
+        "code": "out-of-range",
+        "message": "an alert-only card must configure an alert"
       }
     ]
   },

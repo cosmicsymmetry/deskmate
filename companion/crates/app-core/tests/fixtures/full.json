@@ -1,38 +1,37 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "preferences": {
     "timezone": "Asia/Tbilisi",
     "autostart": true,
     "paused": false,
     "orientation": "landscape-flipped"
   },
-  "widgets": [
+  "cards": [
     {
       "kind": "clock",
       "id": "clock",
-      "size": "full",
       "title": "Desk",
       "show_seconds": true,
       "template": { "kind": "digital-clock" },
       "tap_action": { "kind": "none" },
       "refresh": { "kind": "device-local" },
-      "interrupt_policy": "disabled"
+      "presence": { "kind": "in-rotation", "dwell_seconds": null },
+      "alert": { "kind": "none" }
     },
     {
       "kind": "pomodoro",
       "id": "pomodoro",
-      "size": "standard",
       "label": "Focus",
       "duration_seconds": 1500,
       "template": { "kind": "progress-ring" },
       "tap_action": { "kind": "start-pause" },
       "refresh": { "kind": "device-local" },
-      "interrupt_policy": "enabled"
+      "presence": { "kind": "in-rotation", "dwell_seconds": null },
+      "alert": { "kind": "on-timer-finish", "hold": { "kind": "until-dismissed" } }
     },
     {
       "kind": "calendar",
       "id": "calendar",
-      "size": "standard",
       "title": "Calendar",
       "source": {
         "kind": "url",
@@ -41,24 +40,11 @@
       "template": { "kind": "row-list" },
       "tap_action": { "kind": "none" },
       "refresh": { "kind": "interval", "minutes": 15 },
-      "interrupt_policy": "disabled"
-    }
-  ],
-  "screens": [
-    {
-      "id": "pomodoro-screen",
-      "layout": { "kind": "single", "widget_id": "pomodoro" }
-    },
-    {
-      "id": "clock-screen",
-      "layout": { "kind": "single", "widget_id": "clock" }
-    },
-    {
-      "id": "calendar-screen",
-      "layout": { "kind": "single", "widget_id": "calendar" }
+      "presence": { "kind": "in-rotation", "dwell_seconds": null },
+      "alert": { "kind": "none" }
     }
   ],
   "assets": [],
-  "carousel": { "auto_advance_seconds": null },
+  "carousel": { "advance": { "kind": "manual" } },
   "updater": { "channel": "stable", "checks": "notify" }
 }

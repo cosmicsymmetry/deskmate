@@ -8,9 +8,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use app_core::{
-    AppConfig, AppPreferences, CalendarSource, CarouselSettings, ConnectionState, DisplayTemplate,
-    RefreshPolicy, RuntimeHandle, RuntimeState, ScreenLayout, ScreenSettings, UpdaterSettings,
-    WidgetInterruptPolicy, WidgetSettings, WidgetSize, WidgetTapAction,
+    AlertHold, AppConfig, AppPreferences, CalendarSource, CardAlert, CardPresence, CardSettings,
+    CarouselSettings, ConnectionState, DisplayTemplate, RefreshPolicy, RuntimeHandle, RuntimeState,
+    UpdaterSettings, WidgetTapAction,
 };
 use chrono::Utc;
 use chrono_tz::Tz;
@@ -477,46 +477,56 @@ fn build_demo_config(layout: ApplyConfig, options: &DemoOptions) -> Result<AppCo
             paused: false,
             orientation: app_core::DisplayOrientation::Landscape,
         },
-        widgets: vec![
-            WidgetSettings::Clock {
-                id: options.clock_widget.clone(),
-                size: WidgetSize::Full,
-                title: "Desk".into(),
-                show_seconds: true,
-                template: DisplayTemplate::DigitalClock,
-                tap_action: WidgetTapAction::None,
-                refresh: RefreshPolicy::DeviceLocal,
-                interrupt_policy: WidgetInterruptPolicy::Disabled,
-            },
-            WidgetSettings::Pomodoro {
-                id: options.pomodoro_widget.clone(),
-                size: WidgetSize::Standard,
-                label: "Pomodoro".into(),
-                duration_seconds: options.duration_seconds,
-                template: DisplayTemplate::ProgressRing,
-                tap_action: WidgetTapAction::StartPause,
-                refresh: RefreshPolicy::DeviceLocal,
-                interrupt_policy: WidgetInterruptPolicy::Enabled,
-            },
-            WidgetSettings::Calendar {
-                id: options.calendar_widget.clone(),
-                size: WidgetSize::Standard,
-                title: "Calendar".into(),
-                source,
-                template: DisplayTemplate::RowList,
-                tap_action: WidgetTapAction::None,
-                refresh: RefreshPolicy::Interval { minutes: 15 },
-                interrupt_policy: WidgetInterruptPolicy::Disabled,
-            },
-        ],
-        screens: layout
+        // The card model has no separate screen identity: a card's own id is its
+        // screen id. The demo layout's screen order becomes the card order, and
+        // each screen's widget_id selects which of the three fixed M3 cards it
+        // names (validated above to be one of the three).
+        cards: layout
             .screens
             .into_iter()
-            .map(|screen| ScreenSettings {
-                id: screen.screen_id,
-                layout: ScreenLayout::Single {
-                    widget_id: screen.widget_id,
-                },
+            .map(|screen| {
+                let presence = CardPresence::InRotation {
+                    dwell_seconds: None,
+                };
+                if screen.widget_id == options.clock_widget {
+                    CardSettings::Clock {
+                        id: screen.widget_id,
+                        title: "Desk".into(),
+                        show_seconds: true,
+                        template: DisplayTemplate::DigitalClock,
+                        tap_action: WidgetTapAction::None,
+                        refresh: RefreshPolicy::DeviceLocal,
+                        presence,
+                        alert: CardAlert::None,
+                    }
+                } else if screen.widget_id == options.pomodoro_widget {
+                    CardSettings::Pomodoro {
+                        id: screen.widget_id,
+                        label: "Pomodoro".into(),
+                        duration_seconds: options.duration_seconds,
+                        template: DisplayTemplate::ProgressRing,
+                        tap_action: WidgetTapAction::StartPause,
+                        refresh: RefreshPolicy::DeviceLocal,
+                        presence,
+                        alert: CardAlert::OnTimerFinish {
+                            hold: AlertHold::UntilDismissed,
+                        },
+                    }
+                } else {
+                    CardSettings::Calendar {
+                        id: screen.widget_id,
+                        title: "Calendar".into(),
+                        source: source.clone(),
+                        template: DisplayTemplate::RowList,
+                        tap_action: WidgetTapAction::None,
+                        refresh: RefreshPolicy::Interval { minutes: 15 },
+                        presence,
+                        alert: CardAlert::BeforeEvent {
+                            lead_minutes: 5,
+                            hold: AlertHold::Seconds { value: 60 },
+                        },
+                    }
+                }
             })
             .collect(),
         assets: Vec::new(),

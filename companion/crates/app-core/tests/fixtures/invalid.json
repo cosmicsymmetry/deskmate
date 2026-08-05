@@ -1,38 +1,37 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "preferences": {
     "timezone": "Not/A_Timezone",
     "autostart": false,
     "paused": false,
     "orientation": "landscape"
   },
-  "widgets": [
+  "cards": [
     {
       "kind": "clock",
       "id": "duplicate",
-      "size": "tile",
       "title": "Desk",
       "show_seconds": true,
       "template": { "kind": "digital-clock" },
       "tap_action": { "kind": "none" },
       "refresh": { "kind": "device-local" },
-      "interrupt_policy": "disabled"
+      "presence": { "kind": "in-rotation", "dwell_seconds": null },
+      "alert": { "kind": "none" }
     },
     {
       "kind": "pomodoro",
       "id": "duplicate",
-      "size": "full",
       "label": "Focus",
       "duration_seconds": 0,
       "template": { "kind": "progress-ring" },
       "tap_action": { "kind": "start-pause" },
       "refresh": { "kind": "device-local" },
-      "interrupt_policy": "enabled"
+      "presence": { "kind": "in-rotation", "dwell_seconds": null },
+      "alert": { "kind": "none" }
     },
     {
       "kind": "calendar",
       "id": "calendar",
-      "size": "tile",
       "title": "Calendar",
       "source": {
         "kind": "url",
@@ -41,39 +40,23 @@
       "template": { "kind": "row-list" },
       "tap_action": { "kind": "none" },
       "refresh": { "kind": "interval", "minutes": 0 },
-      "interrupt_policy": "disabled"
+      "presence": { "kind": "in-rotation", "dwell_seconds": null },
+      "alert": { "kind": "none" }
     },
     {
-      "kind": "clock",
+      "kind": "weather",
       "id": "orphan",
-      "size": "full",
       "title": "Orphan",
-      "show_seconds": false,
-      "template": { "kind": "digital-clock" },
+      "location": "Nowhere",
+      "units": "metric",
+      "template": { "kind": "icon-badge-text", "icon_asset_id": "missing-icon" },
       "tap_action": { "kind": "none" },
-      "refresh": { "kind": "device-local" },
-      "interrupt_policy": "disabled"
-    }
-  ],
-  "screens": [
-    {
-      "id": "same-screen",
-      "layout": { "kind": "single", "widget_id": "missing-widget" }
-    },
-    {
-      "id": "same-screen",
-      "layout": { "kind": "single", "widget_id": "duplicate" }
-    },
-    {
-      "id": "third-screen",
-      "layout": { "kind": "single", "widget_id": "calendar" }
-    },
-    {
-      "id": "fourth-screen",
-      "layout": { "kind": "single", "widget_id": "duplicate" }
+      "refresh": { "kind": "interval", "minutes": 30 },
+      "presence": { "kind": "alert-only" },
+      "alert": { "kind": "none" }
     }
   ],
   "assets": [],
-  "carousel": { "auto_advance_seconds": 1 },
+  "carousel": { "advance": { "kind": "timed", "default_dwell_seconds": 1 } },
   "updater": { "channel": "stable", "checks": "notify" }
 }

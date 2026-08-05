@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fmt;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
@@ -8,9 +9,9 @@ use atomic_write_file::AtomicWriteFile;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AppConfig, AppPreferences, CURRENT_SCHEMA_VERSION, CalendarSource, CarouselSettings,
-    DisplayTemplate, RefreshPolicy, ScreenLayout, ScreenSettings, UpdaterSettings, ValidationIssue,
-    WidgetInterruptPolicy, WidgetSettings, WidgetSize, WidgetTapAction,
+    AlertHold, AppConfig, AppPreferences, CURRENT_SCHEMA_VERSION, CalendarSource, CardAlert,
+    CardPresence, CardSettings, CarouselSettings, DisplayTemplate, RefreshPolicy, UpdaterSettings,
+    ValidationIssue, WidgetTapAction,
 };
 
 pub const MAX_CONFIG_FILE_BYTES: usize = 64 * 1_024;
@@ -203,24 +204,38 @@ struct LegacyConfigV1 {
     screens: Vec<LegacyScreenSettings>,
 }
 
+/// Legacy (schema v0/v1) widget size class. The card model has no size
+/// concept; this is parsed only so the legacy JSON round-trips and then
+/// discarded during migration.
+#[derive(Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum LegacyWidgetSize {
+    Full,
+    Standard,
+    Tile,
+}
+
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
 enum LegacyWidgetSettings {
     Clock {
         id: String,
-        size: WidgetSize,
+        #[allow(dead_code)]
+        size: LegacyWidgetSize,
         title: String,
         show_seconds: bool,
     },
     Pomodoro {
         id: String,
-        size: WidgetSize,
+        #[allow(dead_code)]
+        size: LegacyWidgetSize,
         label: String,
         duration_seconds: u32,
     },
     Calendar {
         id: String,
-        size: WidgetSize,
+        #[allow(dead_code)]
+        size: LegacyWidgetSize,
         title: String,
         source: CalendarSource,
         refresh_minutes: u16,
@@ -230,6 +245,10 @@ enum LegacyWidgetSettings {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct LegacyScreenSettings {
+    // The card model folds screen and widget identity into a single id, so
+    // a legacy screen's own id is intentionally discarded on migration; only
+    // its order and widget reference survive.
+    #[allow(dead_code)]
     id: String,
     widget_id: String,
 }
@@ -304,74 +323,96 @@ fn migrate_legacy(
     widgets: Vec<LegacyWidgetSettings>,
     screens: Vec<LegacyScreenSettings>,
 ) -> AppConfig {
+    // Legacy schemas required every widget to be assigned to exactly one
+    // screen, so every migrated card is in rotation with the device's
+    // default dwell. The on-device rotation order was the screen order
+    // (dashboards did not exist in v0/v1, so each screen named exactly one
+    // widget), so cards are rebuilt by walking `screens` in order and
+    // looking up the widget each one names.
+    let mut widgets_by_id: HashMap<String, LegacyWidgetSettings> = widgets
+        .into_iter()
+        .map(|widget| (legacy_widget_id(&widget).to_owned(), widget))
+        .collect();
+    let cards = screens
+        .into_iter()
+        .filter_map(|screen| widgets_by_id.remove(&screen.widget_id))
+        .map(|widget| match widget {
+            LegacyWidgetSettings::Clock {
+                id,
+                size: _,
+                title,
+                show_seconds,
+            } => CardSettings::Clock {
+                id,
+                title,
+                show_seconds,
+                template: DisplayTemplate::DigitalClock,
+                tap_action: WidgetTapAction::None,
+                refresh: RefreshPolicy::DeviceLocal,
+                presence: CardPresence::InRotation {
+                    dwell_seconds: None,
+                },
+                alert: CardAlert::None,
+            },
+            LegacyWidgetSettings::Pomodoro {
+                id,
+                size: _,
+                label,
+                duration_seconds,
+            } => CardSettings::Pomodoro {
+                id,
+                label,
+                duration_seconds,
+                template: DisplayTemplate::ProgressRing,
+                tap_action: WidgetTapAction::StartPause,
+                refresh: RefreshPolicy::DeviceLocal,
+                presence: CardPresence::InRotation {
+                    dwell_seconds: None,
+                },
+                alert: CardAlert::OnTimerFinish {
+                    hold: AlertHold::UntilDismissed,
+                },
+            },
+            LegacyWidgetSettings::Calendar {
+                id,
+                size: _,
+                title,
+                source,
+                refresh_minutes,
+            } => CardSettings::Calendar {
+                id,
+                title,
+                source,
+                template: DisplayTemplate::RowList,
+                tap_action: WidgetTapAction::None,
+                refresh: RefreshPolicy::Interval {
+                    minutes: refresh_minutes,
+                },
+                presence: CardPresence::InRotation {
+                    dwell_seconds: None,
+                },
+                alert: CardAlert::BeforeEvent {
+                    lead_minutes: 5,
+                    hold: AlertHold::Seconds { value: 60 },
+                },
+            },
+        })
+        .collect();
     AppConfig {
         schema_version: CURRENT_SCHEMA_VERSION,
         preferences,
-        widgets: widgets
-            .into_iter()
-            .map(|widget| match widget {
-                LegacyWidgetSettings::Clock {
-                    id,
-                    size,
-                    title,
-                    show_seconds,
-                } => WidgetSettings::Clock {
-                    id,
-                    size,
-                    title,
-                    show_seconds,
-                    template: DisplayTemplate::DigitalClock,
-                    tap_action: WidgetTapAction::None,
-                    refresh: RefreshPolicy::DeviceLocal,
-                    interrupt_policy: WidgetInterruptPolicy::Disabled,
-                },
-                LegacyWidgetSettings::Pomodoro {
-                    id,
-                    size,
-                    label,
-                    duration_seconds,
-                } => WidgetSettings::Pomodoro {
-                    id,
-                    size,
-                    label,
-                    duration_seconds,
-                    template: DisplayTemplate::ProgressRing,
-                    tap_action: WidgetTapAction::StartPause,
-                    refresh: RefreshPolicy::DeviceLocal,
-                    interrupt_policy: WidgetInterruptPolicy::Enabled,
-                },
-                LegacyWidgetSettings::Calendar {
-                    id,
-                    size,
-                    title,
-                    source,
-                    refresh_minutes,
-                } => WidgetSettings::Calendar {
-                    id,
-                    size,
-                    title,
-                    source,
-                    template: DisplayTemplate::RowList,
-                    tap_action: WidgetTapAction::None,
-                    refresh: RefreshPolicy::Interval {
-                        minutes: refresh_minutes,
-                    },
-                    interrupt_policy: WidgetInterruptPolicy::Disabled,
-                },
-            })
-            .collect(),
-        screens: screens
-            .into_iter()
-            .map(|screen| ScreenSettings {
-                id: screen.id,
-                layout: ScreenLayout::Single {
-                    widget_id: screen.widget_id,
-                },
-            })
-            .collect(),
+        cards,
         assets: Vec::new(),
         carousel: CarouselSettings::default(),
         updater: UpdaterSettings::default(),
+    }
+}
+
+fn legacy_widget_id(widget: &LegacyWidgetSettings) -> &str {
+    match widget {
+        LegacyWidgetSettings::Clock { id, .. }
+        | LegacyWidgetSettings::Pomodoro { id, .. }
+        | LegacyWidgetSettings::Calendar { id, .. } => id,
     }
 }
 

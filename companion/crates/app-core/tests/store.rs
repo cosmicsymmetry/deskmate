@@ -5,9 +5,9 @@ use std::sync::{Arc, Barrier};
 use std::thread;
 
 use app_core::{
-    AppConfig, CalendarSource, ConfigOrigin, ConfigStore, DisplayOrientation, DisplayTemplate,
-    MAX_CONFIG_FILE_BYTES, RefreshPolicy, ScreenLayout, StoreError, WidgetInterruptPolicy,
-    WidgetSettings, WidgetTapAction,
+    AlertHold, AppConfig, CalendarSource, CardAlert, CardPresence, CardSettings, ConfigOrigin,
+    ConfigStore, DisplayOrientation, DisplayTemplate, MAX_CONFIG_FILE_BYTES, RefreshPolicy,
+    StoreError, WidgetTapAction,
 };
 
 static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(1);
@@ -67,62 +67,69 @@ fn save_round_trips_and_migration_is_explicit() {
     fs::write(&path, include_bytes!("fixtures/legacy-v0.json")).unwrap();
     let migrated = store.load();
     assert_eq!(migrated.origin, ConfigOrigin::MigratedV0);
-    assert_eq!(migrated.config.schema_version, 2);
+    assert_eq!(migrated.config.schema_version, 3);
     assert_eq!(migrated.config.preferences.timezone, "Europe/Paris");
     assert!(!migrated.config.preferences.autostart);
 
     fs::write(&path, include_bytes!("fixtures/released-m3-v1.json")).unwrap();
     let migrated = store.load();
     assert_eq!(migrated.origin, ConfigOrigin::MigratedV1);
-    assert_eq!(migrated.config.schema_version, 2);
+    assert_eq!(migrated.config.schema_version, 3);
     assert_eq!(migrated.config.preferences.timezone, "Asia/Tbilisi");
-    assert_eq!(migrated.config.widgets.len(), 3);
-    assert_eq!(migrated.config.screens.len(), 3);
+    assert_eq!(migrated.config.cards.len(), 3);
     assert_eq!(
         migrated.config.preferences.orientation,
         DisplayOrientation::LandscapeFlipped
     );
+    // The legacy fixture's `screens` list orders pomodoro, clock, calendar; the card
+    // model's rotation order is now the card order, so migration preserves that order.
     assert!(matches!(
-        &migrated.config.widgets[0],
-        WidgetSettings::Clock {
-            id,
-            title,
-            show_seconds: true,
-            template: DisplayTemplate::DigitalClock,
-            tap_action: WidgetTapAction::None,
-            refresh: RefreshPolicy::DeviceLocal,
-            interrupt_policy: WidgetInterruptPolicy::Disabled,
-            ..
-        } if id == "clock" && title == "Desk"
-    ));
-    assert!(matches!(
-        &migrated.config.widgets[1],
-        WidgetSettings::Pomodoro {
+        &migrated.config.cards[0],
+        CardSettings::Pomodoro {
             id,
             label,
             duration_seconds: 1_500,
             template: DisplayTemplate::ProgressRing,
             tap_action: WidgetTapAction::StartPause,
             refresh: RefreshPolicy::DeviceLocal,
-            interrupt_policy: WidgetInterruptPolicy::Enabled,
+            presence: CardPresence::InRotation { dwell_seconds: None },
+            alert: CardAlert::OnTimerFinish { hold: AlertHold::UntilDismissed },
             ..
         } if id == "pomodoro" && label == "Focus"
     ));
     assert!(matches!(
-        &migrated.config.widgets[2],
-        WidgetSettings::Calendar {
+        &migrated.config.cards[1],
+        CardSettings::Clock {
+            id,
+            title,
+            show_seconds: true,
+            template: DisplayTemplate::DigitalClock,
+            tap_action: WidgetTapAction::None,
+            refresh: RefreshPolicy::DeviceLocal,
+            presence: CardPresence::InRotation { dwell_seconds: None },
+            alert: CardAlert::None,
+            ..
+        } if id == "clock" && title == "Desk"
+    ));
+    assert!(matches!(
+        &migrated.config.cards[2],
+        CardSettings::Calendar {
             id,
             source: CalendarSource::Url(source),
             refresh: RefreshPolicy::Interval { minutes: 15 },
+            presence: CardPresence::InRotation { dwell_seconds: None },
+            alert: CardAlert::BeforeEvent {
+                lead_minutes: 5,
+                hold: AlertHold::Seconds { value: 60 },
+            },
             ..
         } if id == "calendar" && source == "https://example.com/calendar.ics"
     ));
-    assert!(matches!(
-        &migrated.config.screens[0].layout,
-        ScreenLayout::Single { widget_id } if widget_id == "pomodoro"
-    ));
     assert!(migrated.config.assets.is_empty());
-    assert_eq!(migrated.config.carousel.auto_advance_seconds, None);
+    assert_eq!(
+        migrated.config.carousel.advance,
+        app_core::CarouselAdvance::Manual
+    );
     migrated.config.compile(7).unwrap();
 }
 
@@ -163,7 +170,7 @@ fn malformed_truncated_and_oversized_files_preserve_bytes_and_last_good() {
     ));
     assert_eq!(fs::metadata(&path).unwrap().len(), oversized.len() as u64);
 
-    let future = include_bytes!("fixtures/future-v3.json");
+    let future = include_bytes!("fixtures/future-v4.json");
     fs::write(&path, future).unwrap();
     let recovered = store.load();
     assert_eq!(recovered.origin, ConfigOrigin::LastGood);
@@ -171,8 +178,8 @@ fn malformed_truncated_and_oversized_files_preserve_bytes_and_last_good() {
     assert_eq!(
         recovered.recovery,
         Some(StoreError::UnsupportedVersion {
-            found: 3,
-            supported: 2,
+            found: 4,
+            supported: 3,
         })
     );
     assert_eq!(fs::read(&path).unwrap(), future);
@@ -238,11 +245,11 @@ fn calendar_persistence_contains_source_metadata_but_no_fetched_payload() {
     let store = ConfigStore::new(&path);
     let mut config: AppConfig = serde_json::from_str(include_str!("fixtures/full.json")).unwrap();
     let calendar = config
-        .widgets
+        .cards
         .iter_mut()
-        .find(|widget| matches!(widget, WidgetSettings::Calendar { .. }))
+        .find(|card| matches!(card, CardSettings::Calendar { .. }))
         .unwrap();
-    if let WidgetSettings::Calendar { source, .. } = calendar {
+    if let CardSettings::Calendar { source, .. } = calendar {
         *source = CalendarSource::File("/tmp/work.ics".into());
     }
 

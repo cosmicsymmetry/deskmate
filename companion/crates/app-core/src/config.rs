@@ -33,11 +33,11 @@ mod strict_tagged_enum {
     pub enum CardAlertInner {
         None,
         OnTimerFinish {
-            hold: AlertHoldInner,
+            hold: super::AlertHold,
         },
         BeforeEvent {
             lead_minutes: u16,
-            hold: AlertHoldInner,
+            hold: super::AlertHold,
         },
     }
 
@@ -48,25 +48,64 @@ mod strict_tagged_enum {
         Timed { default_dwell_seconds: u16 },
     }
 
-    pub fn validate_and_deserialize<T: for<'de> serde::Deserialize<'de>>(
-        value: &Value,
-    ) -> Result<T, String> {
-        // Validate unknown fields
+    /// Type-aware validation of allowed fields for each enum type.
+    #[allow(private_bounds)]
+    trait ValidatingDeserialize: for<'de> serde::Deserialize<'de> {
+        fn allowed_fields(kind: &str) -> Option<&'static [&'static str]>;
+    }
+
+    impl ValidatingDeserialize for CardPresenceInner {
+        fn allowed_fields(kind: &str) -> Option<&'static [&'static str]> {
+            match kind {
+                "in-rotation" => Some(&["kind", "dwell_seconds"]),
+                "alert-only" | "off" => Some(&["kind"]),
+                _ => None,
+            }
+        }
+    }
+
+    impl ValidatingDeserialize for AlertHoldInner {
+        fn allowed_fields(kind: &str) -> Option<&'static [&'static str]> {
+            match kind {
+                "until-dismissed" => Some(&["kind"]),
+                "seconds" => Some(&["kind", "value"]),
+                _ => None,
+            }
+        }
+    }
+
+    impl ValidatingDeserialize for CardAlertInner {
+        fn allowed_fields(kind: &str) -> Option<&'static [&'static str]> {
+            match kind {
+                "none" => Some(&["kind"]),
+                "on-timer-finish" => Some(&["kind", "hold"]),
+                "before-event" => Some(&["kind", "lead_minutes", "hold"]),
+                _ => None,
+            }
+        }
+    }
+
+    impl ValidatingDeserialize for CarouselAdvanceInner {
+        fn allowed_fields(kind: &str) -> Option<&'static [&'static str]> {
+            match kind {
+                "manual" => Some(&["kind"]),
+                "timed" => Some(&["kind", "default_dwell_seconds"]),
+                _ => None,
+            }
+        }
+    }
+
+    #[allow(private_bounds)]
+    pub fn validate_and_deserialize<T: ValidatingDeserialize>(value: &Value) -> Result<T, String> {
+        // Validate unknown fields using type-aware field list
         if let Value::Object(map) = value {
-            let allowed = match map.get("kind") {
-                Some(Value::String(s)) => match s.as_str() {
-                    "in-rotation" => vec!["kind", "dwell_seconds"],
-                    "alert-only" | "off" | "until-dismissed" | "none" | "manual" => {
-                        vec!["kind"]
-                    }
-                    "seconds" => vec!["kind", "value"],
-                    "on-timer-finish" => vec!["kind", "hold"],
-                    "before-event" => vec!["kind", "lead_minutes", "hold"],
-                    "timed" => vec!["kind", "default_dwell_seconds"],
-                    _ => return Err(format!("unknown variant: {s}")),
-                },
+            let kind_str = match map.get("kind") {
+                Some(Value::String(s)) => s.as_str(),
                 _ => return Err("missing or invalid 'kind' field".to_string()),
             };
+
+            let allowed = T::allowed_fields(kind_str)
+                .ok_or_else(|| format!("unknown variant: {kind_str}"))?;
 
             for key in map.keys() {
                 if !allowed.contains(&key.as_str()) {
@@ -715,25 +754,10 @@ impl<'de> Deserialize<'de> for CardAlert {
                 .map_err(serde::de::Error::custom)?;
         Ok(match inner {
             strict_tagged_enum::CardAlertInner::None => CardAlert::None,
-            strict_tagged_enum::CardAlertInner::OnTimerFinish { hold: inner_hold } => {
-                let hold = match inner_hold {
-                    strict_tagged_enum::AlertHoldInner::UntilDismissed => AlertHold::UntilDismissed,
-                    strict_tagged_enum::AlertHoldInner::Seconds { value } => {
-                        AlertHold::Seconds { value }
-                    }
-                };
+            strict_tagged_enum::CardAlertInner::OnTimerFinish { hold } => {
                 CardAlert::OnTimerFinish { hold }
             }
-            strict_tagged_enum::CardAlertInner::BeforeEvent {
-                lead_minutes,
-                hold: inner_hold,
-            } => {
-                let hold = match inner_hold {
-                    strict_tagged_enum::AlertHoldInner::UntilDismissed => AlertHold::UntilDismissed,
-                    strict_tagged_enum::AlertHoldInner::Seconds { value } => {
-                        AlertHold::Seconds { value }
-                    }
-                };
+            strict_tagged_enum::CardAlertInner::BeforeEvent { lead_minutes, hold } => {
                 CardAlert::BeforeEvent { lead_minutes, hold }
             }
         })

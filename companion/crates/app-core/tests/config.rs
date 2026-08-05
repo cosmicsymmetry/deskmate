@@ -391,3 +391,115 @@ fn card_behaviour_types_round_trip_as_closed_tagged_json() {
             .is_err()
     );
 }
+
+#[test]
+fn card_alert_rejects_unknown_nested_fields_in_hold() {
+    // Unknown field nested in hold for OnTimerFinish
+    assert!(
+        serde_json::from_str::<CardAlert>(
+            r#"{"kind":"on-timer-finish","hold":{"kind":"seconds","value":60,"extra":1}}"#
+        )
+        .is_err(),
+        "should reject unknown field in nested hold for OnTimerFinish"
+    );
+
+    // Unknown field nested in hold for BeforeEvent
+    assert!(
+        serde_json::from_str::<CardAlert>(
+            r#"{"kind":"before-event","lead_minutes":5,"hold":{"kind":"seconds","value":60,"extra":1}}"#
+        )
+        .is_err(),
+        "should reject unknown field in nested hold for BeforeEvent"
+    );
+
+    // Valid nested hold still works for OnTimerFinish
+    let valid_timer = serde_json::from_str::<CardAlert>(
+        r#"{"kind":"on-timer-finish","hold":{"kind":"until-dismissed"}}"#,
+    )
+    .expect("valid OnTimerFinish should deserialize");
+    assert!(matches!(
+        valid_timer,
+        CardAlert::OnTimerFinish {
+            hold: AlertHold::UntilDismissed
+        }
+    ));
+
+    // Valid nested hold still works for BeforeEvent
+    let valid_before = serde_json::from_str::<CardAlert>(
+        r#"{"kind":"before-event","lead_minutes":10,"hold":{"kind":"seconds","value":30}}"#,
+    )
+    .expect("valid BeforeEvent should deserialize");
+    assert!(matches!(
+        valid_before,
+        CardAlert::BeforeEvent {
+            lead_minutes: 10,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn alert_hold_rejects_unknown_fields_when_deserialized_directly() {
+    // Unknown field on UntilDismissed variant
+    assert!(
+        serde_json::from_str::<AlertHold>(r#"{"kind":"until-dismissed","extra":1}"#).is_err(),
+        "should reject unknown field on until-dismissed"
+    );
+
+    // Unknown field on Seconds variant
+    assert!(
+        serde_json::from_str::<AlertHold>(r#"{"kind":"seconds","value":60,"extra":1}"#).is_err(),
+        "should reject unknown field on seconds"
+    );
+
+    // Valid round-trip
+    let valid = serde_json::from_str::<AlertHold>(r#"{"kind":"seconds","value":60}"#).unwrap();
+    assert_eq!(valid, AlertHold::Seconds { value: 60 });
+}
+
+#[test]
+fn carousel_advance_rejects_unknown_fields() {
+    // Unknown field on Manual variant
+    assert!(
+        serde_json::from_str::<CarouselAdvance>(r#"{"kind":"manual","extra":1}"#).is_err(),
+        "should reject unknown field on manual"
+    );
+
+    // Unknown field on Timed variant
+    assert!(
+        serde_json::from_str::<CarouselAdvance>(
+            r#"{"kind":"timed","default_dwell_seconds":20,"extra":1}"#
+        )
+        .is_err(),
+        "should reject unknown field on timed"
+    );
+
+    // Valid round-trip
+    let valid =
+        serde_json::from_str::<CarouselAdvance>(r#"{"kind":"timed","default_dwell_seconds":20}"#)
+            .unwrap();
+    assert_eq!(
+        valid,
+        CarouselAdvance::Timed {
+            default_dwell_seconds: 20
+        }
+    );
+}
+
+#[test]
+fn card_alert_hold_method_extracts_hold() {
+    assert_eq!(CardAlert::None.hold(), None);
+
+    let timer_hold = CardAlert::OnTimerFinish {
+        hold: AlertHold::UntilDismissed,
+    }
+    .hold();
+    assert_eq!(timer_hold, Some(AlertHold::UntilDismissed));
+
+    let before_hold = CardAlert::BeforeEvent {
+        lead_minutes: 5,
+        hold: AlertHold::Seconds { value: 60 },
+    }
+    .hold();
+    assert_eq!(before_hold, Some(AlertHold::Seconds { value: 60 }));
+}

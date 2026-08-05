@@ -69,7 +69,7 @@ describe("settings accessibility and states", () => {
   test("exposes explicit move buttons and keyboard instructions", () => {
     const html = renderToStaticMarkup(
       <ScreenArranger
-        cards={cards}
+        config={snapshot.config}
         selectedWidgetId="clock"
         onSelect={() => {}}
         onReorder={() => {}}

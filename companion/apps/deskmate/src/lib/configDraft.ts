@@ -157,6 +157,40 @@ export function issuesForPath(issues: ValidationIssue[], path: string): Validati
   return issues.filter((issue) => issue.path === path || issue.path.startsWith(`${path}.`));
 }
 
+/// Reorders `config.cards` by moving the card identified by `cardId` to
+/// `targetIndex`, clamped into range. No-ops (returning the same `config`
+/// reference) when the card is unknown, there are fewer than two cards, or
+/// the target index resolves to the card's current position. Pure: never
+/// mutates `config` or its `cards` array.
+export function moveCard(config: AppConfig, cardId: string, targetIndex: number): AppConfig {
+  const cards = config.cards;
+  const sourceIndex = cards.findIndex((card) => card.id === cardId);
+  if (sourceIndex < 0 || cards.length < 2) {
+    return config;
+  }
+  const boundedTarget = Math.max(0, Math.min(targetIndex, cards.length - 1));
+  if (sourceIndex === boundedTarget) {
+    return config;
+  }
+  const reordered = [...cards];
+  const [moved] = reordered.splice(sourceIndex, 1);
+  reordered.splice(boundedTarget, 0, moved);
+  return { ...config, cards: reordered };
+}
+
+export function cardMoveFromKey(key: string, altKey: boolean): -1 | 0 | 1 {
+  if (!altKey) {
+    return 0;
+  }
+  if (key === "ArrowUp") {
+    return -1;
+  }
+  if (key === "ArrowDown") {
+    return 1;
+  }
+  return 0;
+}
+
 export function firstSelectableWidget(config: AppConfig): string | null {
   return config.cards[0]?.id ?? null;
 }

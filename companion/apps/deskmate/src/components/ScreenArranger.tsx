@@ -1,56 +1,29 @@
 import { useState, type DragEvent, type KeyboardEvent } from "react";
 
-import { widgetName } from "../lib/configDraft";
-import type { CardSettings } from "../lib/types";
+import { cardMoveFromKey, moveCard, widgetName } from "../lib/configDraft";
+import type { AppConfig } from "../lib/types";
 
 interface ScreenArrangerProps {
-  cards: CardSettings[];
+  config: AppConfig;
   selectedWidgetId: string | null;
   onSelect: (widgetId: string) => void;
-  onReorder: (cards: CardSettings[]) => void;
-}
-
-function moveCard(cards: CardSettings[], cardId: string, targetIndex: number): CardSettings[] {
-  const sourceIndex = cards.findIndex((card) => card.id === cardId);
-  if (sourceIndex < 0 || cards.length < 2) {
-    return cards;
-  }
-  const boundedTarget = Math.max(0, Math.min(targetIndex, cards.length - 1));
-  if (sourceIndex === boundedTarget) {
-    return cards;
-  }
-  const reordered = [...cards];
-  const [moved] = reordered.splice(sourceIndex, 1);
-  reordered.splice(boundedTarget, 0, moved);
-  return reordered;
-}
-
-function moveFromKey(key: string, altKey: boolean): -1 | 0 | 1 {
-  if (!altKey) {
-    return 0;
-  }
-  if (key === "ArrowUp") {
-    return -1;
-  }
-  if (key === "ArrowDown") {
-    return 1;
-  }
-  return 0;
+  onReorder: (config: AppConfig) => void;
 }
 
 export function ScreenArranger({
-  cards,
+  config,
   selectedWidgetId,
   onSelect,
   onReorder,
 }: ScreenArrangerProps) {
+  const cards = config.cards;
   const [draggedId, setDraggedId] = useState<string | null>(null);
 
   const move = (cardId: string, targetIndex: number) => {
-    onReorder(moveCard(cards, cardId, targetIndex));
+    onReorder(moveCard(config, cardId, targetIndex));
   };
   const onKeyDown = (event: KeyboardEvent<HTMLButtonElement>, cardId: string, index: number) => {
-    const delta = moveFromKey(event.key, event.altKey);
+    const delta = cardMoveFromKey(event.key, event.altKey);
     if (delta === 0) {
       return;
     }

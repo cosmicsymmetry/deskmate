@@ -353,10 +353,10 @@ export function App() {
             onChooseCalendarFile={handleChooseCalendarFile}
           />
           <ScreenArranger
-            cards={draft.cards}
+            config={draft}
             selectedWidgetId={selectedWidgetId}
             onSelect={setSelectedWidgetId}
-            onReorder={(cards) => replaceDraft({ ...draft, cards })}
+            onReorder={(next) => replaceDraft(next)}
           />
         </div>
 

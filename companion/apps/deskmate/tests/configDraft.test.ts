@@ -2,8 +2,10 @@ import { describe, expect, test } from "bun:test";
 
 import {
   addWidget,
+  cardMoveFromKey,
   firstSelectableWidget,
   issuesForPath,
+  moveCard,
   needsFirstRunGuidance,
   removeWidget,
 } from "../src/lib/configDraft";
@@ -35,6 +37,14 @@ function initialConfig(): AppConfig {
     assets: [],
     carousel: { advance: { kind: "manual" } },
     updater: { channel: "stable", checks: "notify" },
+  };
+}
+
+function cardsConfig(ids: string[]): AppConfig {
+  const base = initialConfig();
+  return {
+    ...base,
+    cards: ids.map((id) => ({ ...base.cards[0], id })),
   };
 }
 
@@ -95,5 +105,55 @@ describe("configuration draft helpers", () => {
 
     const advanceKinds = ipcContractFixtures.carousel_advances.map((a) => a.kind).sort();
     expect(advanceKinds).toEqual(["manual", "timed"]);
+  });
+});
+
+describe("moveCard", () => {
+  test("moves a card down", () => {
+    const config = cardsConfig(["a", "b", "c"]);
+    const next = moveCard(config, "a", 1);
+    expect(next.cards.map((card) => card.id)).toEqual(["b", "a", "c"]);
+  });
+
+  test("moves a card up", () => {
+    const config = cardsConfig(["a", "b", "c"]);
+    const next = moveCard(config, "c", 1);
+    expect(next.cards.map((card) => card.id)).toEqual(["a", "c", "b"]);
+  });
+
+  test("moves a card to index 0", () => {
+    const config = cardsConfig(["a", "b", "c"]);
+    const next = moveCard(config, "c", 0);
+    expect(next.cards.map((card) => card.id)).toEqual(["c", "a", "b"]);
+  });
+
+  test("clamps a target index beyond the end to the last position", () => {
+    const config = cardsConfig(["a", "b", "c"]);
+    const next = moveCard(config, "a", 99);
+    expect(next.cards.map((card) => card.id)).toEqual(["b", "c", "a"]);
+  });
+
+  test("is a no-op with a single card", () => {
+    const config = cardsConfig(["only"]);
+    expect(moveCard(config, "only", 5)).toBe(config);
+  });
+
+  test("is a no-op when the target index matches the source index", () => {
+    const config = cardsConfig(["a", "b", "c"]);
+    expect(moveCard(config, "b", 1)).toBe(config);
+  });
+
+  test("is a no-op for an unknown card id", () => {
+    const config = cardsConfig(["a", "b", "c"]);
+    expect(moveCard(config, "missing", 0)).toBe(config);
+  });
+});
+
+describe("cardMoveFromKey", () => {
+  test("keyboard reorder requires Alt plus an arrow", () => {
+    expect(cardMoveFromKey("ArrowUp", true)).toBe(-1);
+    expect(cardMoveFromKey("ArrowDown", true)).toBe(1);
+    expect(cardMoveFromKey("ArrowDown", false)).toBe(0);
+    expect(cardMoveFromKey("Enter", true)).toBe(0);
   });
 });

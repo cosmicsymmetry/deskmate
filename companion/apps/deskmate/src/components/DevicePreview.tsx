@@ -75,6 +75,12 @@ export function DevicePreview({
   orientation,
   onSelect,
 }: DevicePreviewProps) {
+  // Falls back to the first card when the selection doesn't resolve, exactly as the
+  // old screen model fell back to `screens[0]`. The empty state below therefore still
+  // renders in precisely the same reachable case as before: zero cards configured.
+  // (The old model could also show it via a screen referencing a deleted widget id —
+  // a dangling reference — but a card IS its own widget now, so that case no longer
+  // exists to lose.)
   const widget = cards.find((card) => card.id === selectedWidgetId) ?? cards[0] ?? undefined;
   const pomodoro = widget
     ? pomodoros.find((candidate) => candidate.widget_id === widget.id)

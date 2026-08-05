@@ -48,6 +48,40 @@ mod strict_tagged_enum {
         Timed { default_dwell_seconds: u16 },
     }
 
+    /// Serde's `deny_unknown_fields` no-op on internally tagged enums affects unit
+    /// variants just as much as struct variants (`DigitalClock`, not just
+    /// `IconBadgeText`), so `DisplayTemplate` needs the same treatment as the
+    /// card-behaviour types above.
+    #[derive(Debug, Serialize, Deserialize)]
+    #[serde(tag = "kind", rename_all = "kebab-case")]
+    pub enum DisplayTemplateInner {
+        DigitalClock,
+        AnalogClock,
+        ProgressRing,
+        RowList,
+        BigNumberLabel,
+        IconBadgeText { icon_asset_id: Option<String> },
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    #[serde(tag = "kind", rename_all = "kebab-case")]
+    pub enum WidgetTapActionInner {
+        None,
+        StartPause,
+        Reset,
+        Dismiss,
+        OpenUrl { url: String },
+        OpenApplication { application_id: String },
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    #[serde(tag = "kind", rename_all = "kebab-case")]
+    pub enum RefreshPolicyInner {
+        DeviceLocal,
+        Manual,
+        Interval { minutes: u16 },
+    }
+
     /// Mirrors `super::CardSettings`. Fields that are themselves internally
     /// tagged enums are typed as the outer, validating public type (e.g.
     /// `super::CardPresence`, not a raw inner enum) so that deserializing a
@@ -164,6 +198,38 @@ mod strict_tagged_enum {
             match kind {
                 "manual" => Some(&["kind"]),
                 "timed" => Some(&["kind", "default_dwell_seconds"]),
+                _ => None,
+            }
+        }
+    }
+
+    impl ValidatingDeserialize for DisplayTemplateInner {
+        fn allowed_fields(kind: &str) -> Option<&'static [&'static str]> {
+            match kind {
+                "digital-clock" | "analog-clock" | "progress-ring" | "row-list"
+                | "big-number-label" => Some(&["kind"]),
+                "icon-badge-text" => Some(&["kind", "icon_asset_id"]),
+                _ => None,
+            }
+        }
+    }
+
+    impl ValidatingDeserialize for WidgetTapActionInner {
+        fn allowed_fields(kind: &str) -> Option<&'static [&'static str]> {
+            match kind {
+                "none" | "start-pause" | "reset" | "dismiss" => Some(&["kind"]),
+                "open-url" => Some(&["kind", "url"]),
+                "open-application" => Some(&["kind", "application_id"]),
+                _ => None,
+            }
+        }
+    }
+
+    impl ValidatingDeserialize for RefreshPolicyInner {
+        fn allowed_fields(kind: &str) -> Option<&'static [&'static str]> {
+            match kind {
+                "device-local" | "manual" => Some(&["kind"]),
+                "interval" => Some(&["kind", "minutes"]),
                 _ => None,
             }
         }
@@ -301,6 +367,9 @@ pub const MIN_CALENDAR_REFRESH_MINUTES: u16 = 1;
 pub const MIN_WEATHER_REFRESH_MINUTES: u16 = 10;
 pub const MAX_CALENDAR_REFRESH_MINUTES: u16 = 1_440;
 pub const MAX_CONFIG_CARDS: usize = 8;
+// Every in-rotation-or-alert-only card can lower to one wire widget, so the card cap
+// must never exceed what the protocol's `ApplyConfig` encoder accepts.
+const _: () = assert!(MAX_CONFIG_CARDS <= protocol::MAX_CONFIG_WIDGETS);
 pub const MIN_DWELL_SECONDS: u16 = 5;
 pub const MAX_DWELL_SECONDS: u16 = 3_600;
 pub const MIN_ALERT_LEAD_MINUTES: u16 = 1;
@@ -614,8 +683,8 @@ impl DisplayOrientation {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum DisplayTemplate {
     DigitalClock,
     AnalogClock,
@@ -625,8 +694,30 @@ pub enum DisplayTemplate {
     IconBadgeText { icon_asset_id: Option<String> },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+impl<'de> Deserialize<'de> for DisplayTemplate {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let inner: strict_tagged_enum::DisplayTemplateInner =
+            strict_tagged_enum::validate_and_deserialize(&value)
+                .map_err(serde::de::Error::custom)?;
+        Ok(match inner {
+            strict_tagged_enum::DisplayTemplateInner::DigitalClock => Self::DigitalClock,
+            strict_tagged_enum::DisplayTemplateInner::AnalogClock => Self::AnalogClock,
+            strict_tagged_enum::DisplayTemplateInner::ProgressRing => Self::ProgressRing,
+            strict_tagged_enum::DisplayTemplateInner::RowList => Self::RowList,
+            strict_tagged_enum::DisplayTemplateInner::BigNumberLabel => Self::BigNumberLabel,
+            strict_tagged_enum::DisplayTemplateInner::IconBadgeText { icon_asset_id } => {
+                Self::IconBadgeText { icon_asset_id }
+            }
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum WidgetTapAction {
     None,
     StartPause,
@@ -636,12 +727,53 @@ pub enum WidgetTapAction {
     OpenApplication { application_id: String },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+impl<'de> Deserialize<'de> for WidgetTapAction {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let inner: strict_tagged_enum::WidgetTapActionInner =
+            strict_tagged_enum::validate_and_deserialize(&value)
+                .map_err(serde::de::Error::custom)?;
+        Ok(match inner {
+            strict_tagged_enum::WidgetTapActionInner::None => Self::None,
+            strict_tagged_enum::WidgetTapActionInner::StartPause => Self::StartPause,
+            strict_tagged_enum::WidgetTapActionInner::Reset => Self::Reset,
+            strict_tagged_enum::WidgetTapActionInner::Dismiss => Self::Dismiss,
+            strict_tagged_enum::WidgetTapActionInner::OpenUrl { url } => Self::OpenUrl { url },
+            strict_tagged_enum::WidgetTapActionInner::OpenApplication { application_id } => {
+                Self::OpenApplication { application_id }
+            }
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum RefreshPolicy {
     DeviceLocal,
     Manual,
     Interval { minutes: u16 },
+}
+
+impl<'de> Deserialize<'de> for RefreshPolicy {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let inner: strict_tagged_enum::RefreshPolicyInner =
+            strict_tagged_enum::validate_and_deserialize(&value)
+                .map_err(serde::de::Error::custom)?;
+        Ok(match inner {
+            strict_tagged_enum::RefreshPolicyInner::DeviceLocal => Self::DeviceLocal,
+            strict_tagged_enum::RefreshPolicyInner::Manual => Self::Manual,
+            strict_tagged_enum::RefreshPolicyInner::Interval { minutes } => {
+                Self::Interval { minutes }
+            }
+        })
+    }
 }
 
 impl RefreshPolicy {

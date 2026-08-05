@@ -80,20 +80,41 @@ fn full_fixture_compiles_deterministically_to_m2_contract() {
 fn invalid_fixture_reports_all_domain_boundaries_before_compile() {
     let config: AppConfig = serde_json::from_str(INVALID_JSON).unwrap();
     let error = config.compile(1).unwrap_err();
-    let codes = error
-        .issues
-        .iter()
-        .map(|issue| issue.code)
-        .collect::<Vec<_>>();
 
-    for expected in [
-        ValidationCode::InvalidTimezone,
-        ValidationCode::DuplicateId,
-        ValidationCode::OutOfRange,
-        ValidationCode::InvalidSource,
-        ValidationCode::MissingReference,
+    // Match on (path, code) pairs, not code membership: several of these codes
+    // (OutOfRange especially) could otherwise be "proven" by an unrelated issue
+    // elsewhere in the fixture, which would silently stop covering the rule this test
+    // means to exercise.
+    for (expected_path, expected_code) in [
+        ("preferences.timezone", ValidationCode::InvalidTimezone),
+        // Two cards share id "duplicate"; the second occurrence is flagged.
+        ("cards[2].id", ValidationCode::DuplicateId),
+        // in-rotation dwell_seconds: 4 is below MIN_DWELL_SECONDS (5).
+        (
+            "cards[2].presence.dwell_seconds",
+            ValidationCode::OutOfRange,
+        ),
+        // before-event lead_minutes: 61 is above MAX_ALERT_LEAD_MINUTES (60).
+        ("cards[3].alert.lead_minutes", ValidationCode::OutOfRange),
+        // on-timer-finish hold.value: 4 is below MIN_ALERT_HOLD_SECONDS (5).
+        ("cards[4].alert.hold.value", ValidationCode::OutOfRange),
+        // on-timer-finish alerts are only valid on pomodoro cards; cards[0] is clock.
+        ("cards[0].alert", ValidationCode::OutOfRange),
+        // an alert-only card (cards[5]) with alert: none has no trigger that can fire.
+        ("cards[5].presence", ValidationCode::OutOfRange),
+        ("cards[3].source", ValidationCode::InvalidSource),
+        (
+            "cards[5].template.icon_asset_id",
+            ValidationCode::MissingReference,
+        ),
     ] {
-        assert!(codes.contains(&expected), "missing {expected:?}: {error:?}");
+        assert!(
+            error
+                .issues
+                .iter()
+                .any(|issue| issue.path == expected_path && issue.code == expected_code),
+            "missing ({expected_path:?}, {expected_code:?}) in {error:?}"
+        );
     }
 }
 
@@ -273,6 +294,114 @@ fn card_settings_rejects_an_unknown_field_nested_inside_presence() {
         "alert": { "kind": "none" }
     }"#;
     assert!(serde_json::from_str::<CardSettings>(json).is_err());
+}
+
+#[test]
+fn display_template_rejects_unknown_fields_on_every_unit_variant() {
+    // `DisplayTemplate` is internally tagged. A prior version of this test only probed
+    // `icon-badge-text` (a struct variant), which happened to reject unknown fields even
+    // under the plain `#[serde(deny_unknown_fields)]` derive and gave false confidence:
+    // the unit variants (DigitalClock, AnalogClock, ProgressRing, RowList,
+    // BigNumberLabel) slipped unknown fields through entirely under that derive. Probe
+    // every unit variant explicitly, plus the struct variant, plus valid round-trips.
+    for kind in [
+        "digital-clock",
+        "analog-clock",
+        "progress-ring",
+        "row-list",
+        "big-number-label",
+    ] {
+        let with_bogus = format!(r#"{{"kind":"{kind}","bogus":1}}"#);
+        assert!(
+            serde_json::from_str::<DisplayTemplate>(&with_bogus).is_err(),
+            "unit variant {kind:?} must reject an unknown field"
+        );
+        let valid = format!(r#"{{"kind":"{kind}"}}"#);
+        assert!(
+            serde_json::from_str::<DisplayTemplate>(&valid).is_ok(),
+            "unit variant {kind:?} must still deserialize without extra fields"
+        );
+    }
+
+    assert!(
+        serde_json::from_str::<DisplayTemplate>(
+            r#"{"kind":"icon-badge-text","icon_asset_id":"icons","bogus":1}"#
+        )
+        .is_err()
+    );
+    let valid_struct = serde_json::from_str::<DisplayTemplate>(
+        r#"{"kind":"icon-badge-text","icon_asset_id":"icons"}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        valid_struct,
+        DisplayTemplate::IconBadgeText {
+            icon_asset_id: Some("icons".into())
+        }
+    );
+}
+
+#[test]
+fn widget_tap_action_rejects_unknown_fields_on_every_unit_variant() {
+    for kind in ["none", "start-pause", "reset", "dismiss"] {
+        let with_bogus = format!(r#"{{"kind":"{kind}","bogus":1}}"#);
+        assert!(
+            serde_json::from_str::<WidgetTapAction>(&with_bogus).is_err(),
+            "unit variant {kind:?} must reject an unknown field"
+        );
+        let valid = format!(r#"{{"kind":"{kind}"}}"#);
+        assert!(
+            serde_json::from_str::<WidgetTapAction>(&valid).is_ok(),
+            "unit variant {kind:?} must still deserialize without extra fields"
+        );
+    }
+
+    assert!(
+        serde_json::from_str::<WidgetTapAction>(
+            r#"{"kind":"open-url","url":"https://example.test","bogus":1}"#
+        )
+        .is_err()
+    );
+    assert!(
+        serde_json::from_str::<WidgetTapAction>(
+            r#"{"kind":"open-application","application_id":"com.example.app","bogus":1}"#
+        )
+        .is_err()
+    );
+    let valid_url = serde_json::from_str::<WidgetTapAction>(
+        r#"{"kind":"open-url","url":"https://example.test"}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        valid_url,
+        WidgetTapAction::OpenUrl {
+            url: "https://example.test".into()
+        }
+    );
+}
+
+#[test]
+fn refresh_policy_rejects_unknown_fields_on_every_unit_variant() {
+    for kind in ["device-local", "manual"] {
+        let with_bogus = format!(r#"{{"kind":"{kind}","bogus":1}}"#);
+        assert!(
+            serde_json::from_str::<RefreshPolicy>(&with_bogus).is_err(),
+            "unit variant {kind:?} must reject an unknown field"
+        );
+        let valid = format!(r#"{{"kind":"{kind}"}}"#);
+        assert!(
+            serde_json::from_str::<RefreshPolicy>(&valid).is_ok(),
+            "unit variant {kind:?} must still deserialize without extra fields"
+        );
+    }
+
+    assert!(
+        serde_json::from_str::<RefreshPolicy>(r#"{"kind":"interval","minutes":15,"bogus":1}"#)
+            .is_err()
+    );
+    let valid_interval =
+        serde_json::from_str::<RefreshPolicy>(r#"{"kind":"interval","minutes":15}"#).unwrap();
+    assert_eq!(valid_interval, RefreshPolicy::Interval { minutes: 15 });
 }
 
 #[test]

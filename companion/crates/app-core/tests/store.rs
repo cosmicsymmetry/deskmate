@@ -111,6 +111,9 @@ fn save_round_trips_and_migration_is_explicit() {
             ..
         } if id == "clock" && title == "Desk"
     ));
+    // The legacy migration's calendar default is `interrupt_policy: disabled`, so this
+    // must migrate to `alert: none`, not `before-event` — a calendar card only gets
+    // `before-event` when it is derived from a legacy `interrupt_policy: enabled`.
     assert!(matches!(
         &migrated.config.cards[2],
         CardSettings::Calendar {
@@ -118,10 +121,7 @@ fn save_round_trips_and_migration_is_explicit() {
             source: CalendarSource::Url(source),
             refresh: RefreshPolicy::Interval { minutes: 15 },
             presence: CardPresence::InRotation { dwell_seconds: None },
-            alert: CardAlert::BeforeEvent {
-                lead_minutes: 5,
-                hold: AlertHold::Seconds { value: 60 },
-            },
+            alert: CardAlert::None,
             ..
         } if id == "calendar" && source == "https://example.com/calendar.ics"
     ));

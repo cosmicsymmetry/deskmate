@@ -9,6 +9,17 @@
   "cards": [
     {
       "kind": "clock",
+      "id": "on-timer-mismatch",
+      "title": "Desk",
+      "show_seconds": true,
+      "template": { "kind": "digital-clock" },
+      "tap_action": { "kind": "none" },
+      "refresh": { "kind": "device-local" },
+      "presence": { "kind": "in-rotation", "dwell_seconds": null },
+      "alert": { "kind": "on-timer-finish", "hold": { "kind": "until-dismissed" } }
+    },
+    {
+      "kind": "clock",
       "id": "duplicate",
       "title": "Desk",
       "show_seconds": true,
@@ -22,16 +33,16 @@
       "kind": "pomodoro",
       "id": "duplicate",
       "label": "Focus",
-      "duration_seconds": 0,
+      "duration_seconds": 1500,
       "template": { "kind": "progress-ring" },
       "tap_action": { "kind": "start-pause" },
       "refresh": { "kind": "device-local" },
-      "presence": { "kind": "in-rotation", "dwell_seconds": null },
+      "presence": { "kind": "in-rotation", "dwell_seconds": 4 },
       "alert": { "kind": "none" }
     },
     {
       "kind": "calendar",
-      "id": "calendar",
+      "id": "calendar-a",
       "title": "Calendar",
       "source": {
         "kind": "url",
@@ -39,9 +50,27 @@
       },
       "template": { "kind": "row-list" },
       "tap_action": { "kind": "none" },
-      "refresh": { "kind": "interval", "minutes": 0 },
+      "refresh": { "kind": "interval", "minutes": 15 },
       "presence": { "kind": "in-rotation", "dwell_seconds": null },
-      "alert": { "kind": "none" }
+      "alert": {
+        "kind": "before-event",
+        "lead_minutes": 61,
+        "hold": { "kind": "seconds", "value": 60 }
+      }
+    },
+    {
+      "kind": "pomodoro",
+      "id": "pomodoro-b",
+      "label": "Focus",
+      "duration_seconds": 1500,
+      "template": { "kind": "progress-ring" },
+      "tap_action": { "kind": "start-pause" },
+      "refresh": { "kind": "device-local" },
+      "presence": { "kind": "in-rotation", "dwell_seconds": null },
+      "alert": {
+        "kind": "on-timer-finish",
+        "hold": { "kind": "seconds", "value": 4 }
+      }
     },
     {
       "kind": "weather",
@@ -57,6 +86,6 @@
     }
   ],
   "assets": [],
-  "carousel": { "advance": { "kind": "timed", "default_dwell_seconds": 1 } },
+  "carousel": { "advance": { "kind": "manual" } },
   "updater": { "channel": "stable", "checks": "notify" }
 }

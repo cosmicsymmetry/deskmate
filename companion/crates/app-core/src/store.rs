@@ -352,7 +352,9 @@ fn migrate_legacy(
                 presence: CardPresence::InRotation {
                     dwell_seconds: None,
                 },
-                alert: CardAlert::None,
+                // v0/v1 predates interrupt_policy entirely; the historical v2 migration
+                // (see git blame) defaulted clock widgets to `disabled`.
+                alert: legacy_alert(false, LegacyCardKind::Clock),
             },
             LegacyWidgetSettings::Pomodoro {
                 id,
@@ -369,9 +371,8 @@ fn migrate_legacy(
                 presence: CardPresence::InRotation {
                     dwell_seconds: None,
                 },
-                alert: CardAlert::OnTimerFinish {
-                    hold: AlertHold::UntilDismissed,
-                },
+                // The historical v2 migration defaulted pomodoro widgets to `enabled`.
+                alert: legacy_alert(true, LegacyCardKind::Pomodoro),
             },
             LegacyWidgetSettings::Calendar {
                 id,
@@ -391,10 +392,9 @@ fn migrate_legacy(
                 presence: CardPresence::InRotation {
                     dwell_seconds: None,
                 },
-                alert: CardAlert::BeforeEvent {
-                    lead_minutes: 5,
-                    hold: AlertHold::Seconds { value: 60 },
-                },
+                // The historical v2 migration defaulted calendar widgets to `disabled`,
+                // so this must NOT become a `before-event` alert the widget never had.
+                alert: legacy_alert(false, LegacyCardKind::Calendar),
             },
         })
         .collect();
@@ -405,6 +405,36 @@ fn migrate_legacy(
         assets: Vec::new(),
         carousel: CarouselSettings::default(),
         updater: UpdaterSettings::default(),
+    }
+}
+
+#[derive(Clone, Copy)]
+enum LegacyCardKind {
+    Clock,
+    Pomodoro,
+    Calendar,
+}
+
+/// The v2→v3 alert-migration rule (design spec §5, "Migration"): an old
+/// `interrupt_policy: "enabled"` becomes the kind-appropriate alert with sensible
+/// defaults — pomodoro to `on-timer-finish`/`until-dismissed`, calendar to
+/// `before-event`/5-minutes/60-second-hold — because those are the only two kinds that
+/// ever had a trigger that could fire. Every other combination, INCLUDING every
+/// `"disabled"` widget regardless of kind, becomes `alert: none`. The alert is derived
+/// from the (historical) interrupt policy, never from the card kind alone.
+fn legacy_alert(interrupt_policy_enabled: bool, kind: LegacyCardKind) -> CardAlert {
+    if !interrupt_policy_enabled {
+        return CardAlert::None;
+    }
+    match kind {
+        LegacyCardKind::Pomodoro => CardAlert::OnTimerFinish {
+            hold: AlertHold::UntilDismissed,
+        },
+        LegacyCardKind::Calendar => CardAlert::BeforeEvent {
+            lead_minutes: 5,
+            hold: AlertHold::Seconds { value: 60 },
+        },
+        LegacyCardKind::Clock => CardAlert::None,
     }
 }
 

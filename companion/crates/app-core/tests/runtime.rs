@@ -5,10 +5,10 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use app_core::{
-    AppConfig, CalendarRefreshRequest, CalendarRefreshResult, CalendarRefresher, CardSettings,
-    ConnectionState, DeviceConnection, DisplayOrientation, PersistenceState, PomodoroAction,
-    PomodoroState, ProviderRequest, RuntimeDevice, RuntimeError, RuntimeHandle, RuntimeOptions,
-    RuntimeState,
+    AppConfig, CalendarRefreshRequest, CalendarRefreshResult, CalendarRefresher, CardAlert,
+    CardSettings, ConnectionState, DeviceConnection, DisplayOrientation, PersistenceState,
+    PomodoroAction, PomodoroState, ProviderRequest, RuntimeDevice, RuntimeError, RuntimeHandle,
+    RuntimeOptions, RuntimeState,
 };
 use chrono::Utc;
 use device::{DeviceError, ReceivedEvent, SessionDiagnostics, TransportError};
@@ -712,6 +712,58 @@ fn pomodoro_events_complete_once_and_dismissed_interrupts_do_not_replay() {
         !control
             .operations()
             .contains(&Operation::ReplayInterrupt(1))
+    );
+    runtime.shutdown().unwrap();
+}
+
+#[test]
+fn pomodoro_completion_without_an_alert_does_not_schedule_an_interrupt() {
+    let control = MockDeviceControl::default();
+    let mut config = full_config();
+    for card in &mut config.cards {
+        if let CardSettings::Pomodoro {
+            duration_seconds,
+            alert,
+            ..
+        } = card
+        {
+            *duration_seconds = 1;
+            *alert = CardAlert::None;
+        }
+    }
+    let runtime = start_runtime(config, &control, Duration::ZERO);
+    wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
+        snapshot.device.connection == ConnectionState::Online
+    });
+    control.push_event(DeviceEvent {
+        sequence: 1,
+        kind: EventKind::Tap,
+        widget_id: "pomodoro".into(),
+        screen_id: "pomodoro".into(),
+        action: EventAction::StartPause,
+        interrupt_token: None,
+    });
+    wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
+        snapshot
+            .pomodoros
+            .first()
+            .is_some_and(|pomodoro| pomodoro.state == PomodoroState::Running)
+    });
+    wait_for_snapshot(&runtime, Duration::from_secs(2), |snapshot| {
+        snapshot
+            .pomodoros
+            .first()
+            .is_some_and(|pomodoro| pomodoro.state == PomodoroState::Completed)
+    });
+    // Give the worker plenty of time to have scheduled an interrupt if the gate were
+    // missing or inverted, then confirm it never did.
+    thread::sleep(Duration::from_millis(200));
+    assert!(
+        !control
+            .operations()
+            .iter()
+            .any(|operation| matches!(operation, Operation::Interrupt(_))),
+        "a card with alert: none must never trigger a host interrupt on completion"
     );
     runtime.shutdown().unwrap();
 }

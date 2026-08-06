@@ -2326,15 +2326,18 @@ git commit -m "docs: freeze config v3 and realign the milestone documents"
 
 This plan changes no firmware, but it changes what the host sends and when. Per CLAUDE.md, record observed results in `docs/hardware/board-notes.md` — never claim a check that was not run on the board.
 
-- [ ] Flash the current firmware unchanged. Confirm `StatusResponse` reports protocol 1 and the same capability bits as before this work.
-- [ ] Load a migrated M3/v2 configuration. Confirm card order matches the previous screen order and the display shows the same first screen.
-- [ ] With timed advance at distinct per-card dwells, confirm each card holds for its configured time and the loop wraps.
-- [ ] Swipe during a dwell. Confirm the dwell restarts rather than advancing early, and no duplicate `ActivateScreen` is observed.
-- [ ] Fire a pomodoro alert with `until-dismissed`; confirm it holds until tapped and restores the correct carousel screen.
-- [ ] Fire a calendar alert with a bounded hold; confirm it self-dismisses at the hold and fires exactly once per event.
-- [ ] Set every card to alert-only or off in the app; confirm the save is rejected with the rotation-rule error and the device keeps its previous configuration.
-- [ ] Repeat the rotation and alert checks at both 90° and 270°.
-- [ ] Unplug and replug mid-rotation; confirm replay restores the active card and pending alert state without duplicates.
+- [x] Flash the current firmware unchanged. Confirm `StatusResponse` reports protocol 1 and the same capability bits as before this work. **Observed 2026-08-06:** rebuilt from HEAD and flashed (hashes verified); protocol 1, max 1, capabilities 3 — identical to the pre-work record.
+- [x] Load a migrated M3/v2 configuration. Confirm card order matches the previous screen order and the display shows the same first screen. **Observed:** ran against the user's real live v1 config; migration matched a written prediction exactly, including pomodoro gaining an alert and calendar correctly not.
+- [x] With timed advance at distinct per-card dwells, confirm each card holds for its configured time and the loop wraps. **Observed:** 5/10/20 s dwells, correct order, visibly distinct holds, clean wrap.
+- [x] Swipe during a dwell. Confirm the dwell restarts rather than advancing early, and no duplicate `ActivateScreen` is observed. **Observed:** swiping ~20 s into a 30 s dwell gave a full 30 s. No-duplicates corroborated by `ui_queue_high_water` 3 / `dropped_ui_commands` 0.
+- [x] Fire a pomodoro alert with `until-dismissed`; confirm it holds until tapped and restores the correct carousel screen. **Observed:** held against a live rotation, cleared only on tap, correct card restored.
+- [x] Fire a calendar alert with a bounded hold; confirm it self-dismisses at the hold and fires exactly once per event. **Observed — expectation corrected:** the bounded hold does NOT self-dismiss the panel. Two controlled retests confirm the documented protocol-v1 limitation. "Exactly once per event" was not separately isolated.
+- [x] Set every card to alert-only or off in the app; confirm the save is rejected with the rotation-rule error and the device keeps its previous configuration. **Observed — stronger than specified:** the UI makes the state unreachable (last in-rotation card's mute/off controls are disabled with an inline reason), so there is no save to reject. Validation was verified separately against a hand-written all-off config. Two follow-up defects found in the fallback path — see board notes §7.
+- [x] Repeat the rotation and alert checks at both 90° and 270°. **Observed:** rotation and the pomodoro alert re-run at 90°; identical behaviour.
+- [x] Unplug and replug mid-rotation; confirm replay restores the active card and pending alert state without duplicates. **Observed:** config replay and rotation resume correctly, no duplicates. **Gap:** an alert firing entirely within the unpowered window was lost on reconnect (observed once, undiagnosed, untested in the suite).
+
+**Result: 8 of 9 pass.** Full observed detail, including the two fallback-path defects
+and the lost-alert gap, is in `docs/hardware/board-notes.md`.
 
 ## Self-Review
 

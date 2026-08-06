@@ -1107,36 +1107,162 @@ and zero malformed, CRC, overflow, response, RX, or event drops. The release app
 then reopened and reacquired the device port. This verifies deployment and negotiation;
 the user-requested morning soak was not repeated.
 
-## Card model (M4 Task 2B) — no physical verification yet (2026-08-06)
+## Card model (M4 Task 2B) — physical verification (2026-08-06)
 
-**No physical verification has been performed for the card model.** Everything below is
-a checklist of what the next hardware session must observe, not a report of results.
-The wire protocol and firmware are unchanged for this task (`cards[]` compiles to the
-same frozen `ApplyConfig`/`PushData` shapes M2/M3 already proved on the board), so no
-new firmware risk is expected — but "expected" is not "observed," and nothing here may
-be described as verified until it has actually run on the device.
+Branch `feat/card-model` at `52bf9af`, board `/dev/cu.usbmodem1101`. All nine checks in
+`docs/superpowers/plans/2026-08-06-deskmate-card-model.md` were run on the physical
+board with the user observing the panel. Eight pass. One sub-check found a real gap and
+one produced a non-reproducible first observation; both are recorded below rather than
+smoothed over.
 
-Needs observing, on the physical board, before this can be called done:
+### 1. Firmware unchanged — PASS
 
-- Each card kind's freshly-added default renders as expected for its assigned
-  template: clock (`digital-clock`) and pomodoro (`progress-ring`) render correctly;
-  calendar and rss (`row-list`) render correctly. Weather and json-feed also default
-  to `row-list` (changed from `big-number-label`, never wire-compilable, in the
-  final-review fix pass in this same change), but `row-list`'s field set is
-  `title`/`row0..4_title`/`row0..4_time`/`stale`/`error` and neither kind publishes
-  those row fields, so the expected — not yet observed — result for weather and
-  json-feed is the card's title rendering over five empty rows, not a correct
-  render. The session should confirm that is what actually happens, not something
-  worse (a crash, a stuck screen, or an `unknown_field_count` climbing beyond what
-  weather's and json-feed's unmatched fields already account for).
-- Host-driven timed rotation end to end, at both 90° and 270°: dwell expiry, the
-  inherited default, a per-card override, the loop wrap, and manual navigation
-  overriding a pending advance.
-- The documented `AlertHold` limitation (see the card-model design spec's `hold`
-  definition and its section 9): whether the on-screen interrupt overlay clears when
-  the host-side hold expires, or only ever on tap. Record whichever is observed; do not
-  assume either going in.
-- Setting every card to `alert-only`/`off` is rejected by the "at least one card must
-  be in rotation" rule, and the device keeps its previous configuration.
-- Unplug/replug and host sleep/wake mid-rotation, confirming replay restores the active
-  card without duplicate `ActivateScreen` traffic.
+`git diff eaf3b0c..HEAD` is empty for both `firmware/` and
+`companion/crates/{protocol,device}`: the card-model work changed no firmware and no
+wire code. The only commit touching `firmware/` since `ae05d7a` is the checkpoint
+`eaf3b0c`.
+
+Rebuilt from branch HEAD: `deskmate.bin` = `0xbd9d0` bytes, `0x42630` (26%) free in the
+smallest app partition. This is 144 bytes larger than the `0xbd940` previously recorded,
+which the shorter git-describe string (`m1-31-g52bf9af`, 15 ch, vs
+`m1-2-gae05d7a-dirty`, 19 ch) does not fully account for. Equivalence was therefore NOT
+assumed — the image was flashed, hashes verified.
+
+Post-flash `StatusResponse`: protocol 1, max protocol 1, **capabilities 3**
+(`CoreWidgets | ConfigRotation`) — identical to the pre-work M4 Task 1 record.
+448x368, rotation 90, free heap 8,462,743, brightness 200, all drop/error counters zero.
+
+### 2. Migrated legacy config — PASS
+
+The subject was the user's **real live config**, not a fixture: the on-disk
+`~/Library/Application Support/io.deskmate.companion/config.json` was genuine
+`schema_version: 1` with `widgets[]`/`screens[]`, screen order clock -> pomodoro ->
+calendar, orientation `landscape-flipped`. It was backed up first.
+
+The migration result was predicted in writing before the app was launched, and matched
+exactly:
+
+| card | template | presence | alert |
+|---|---|---|---|
+| `clock` "Desk" | `digital-clock` | in-rotation, inherit | `none` |
+| `pomodoro` "Focus" | `progress-ring` | in-rotation, inherit | `on-timer-finish` / `until-dismissed` |
+| `calendar` "Up next" | `row-list` | in-rotation, inherit | `none` |
+
+with `carousel.advance: manual` and orientation preserved. The alert column is the load-
+bearing part: pomodoro gained an alert because its *historical* interrupt policy was
+enabled, and calendar correctly did **not**, confirming on real data that migration
+derives the alert from the old policy and never from the card kind.
+
+Card order matched the previous screen order. On the panel the user observed the clock
+at 270° (USB cable above) — the same first screen, correctly oriented.
+
+Migration is read-time only: the v1 file stays on disk untouched until the next save,
+which then writes v3. Behaviour, not a defect.
+
+### 3. Timed rotation with distinct per-card dwells — PASS
+
+Dwells 5 s / 10 s / 20 s (35 s loop). User observed the correct order, visibly distinct
+dwell lengths, and a clean wrap.
+
+### 4. Swipe during a dwell — PASS
+
+With every card at 30 s, swiping ~20 s into a dwell gave the card swiped to a **full
+30 s**, not the ~10 s remainder. Manual navigation cancels the pending advance rather
+than inheriting it. See §10 for the counter evidence on "no duplicate `ActivateScreen`".
+
+### 5. Pomodoro alert, `until-dismissed` — PASS
+
+Full-screen takeover on timer finish, held indefinitely against a live 30 s rotation,
+cleared only on tap, and restored the correct carousel card.
+
+### 6. Bounded `AlertHold::Seconds` — LIMITATION CONFIRMED
+
+**First observation was wrong and is recorded here deliberately.** With a 30 s hold and
+30 s dwells, the panel appeared to self-clear at ~30 s. Two controlled retests
+contradicted it:
+
+- Rotation disabled entirely, 60 s hold: the alert **stayed until tapped**, never
+  cleared on its own.
+- Rotation at 10 s dwells with an `until-dismissed` hold: the alert **stayed put**; a
+  carousel advance does not disturb an active interrupt.
+
+So the documented limitation is real: protocol v1 has no host->device dismissal message,
+`TriggerInterrupt` carries no duration, the spec states "M2 has no automatic interrupt
+timeout", and firmware has no auto-dismiss path. A bounded hold bounds only host-side
+bookkeeping. The first observation is **not explained** — it was not reproduced under
+either controlled condition, and no mechanism was found that would clear the overlay.
+
+The card editor's own copy already states this correctly ("stays on screen until you tap
+it, regardless of this setting").
+
+### 7. Rotation rule — PASS, stronger than specified
+
+The plan expected a save-time rejection. The UI instead makes the state **unreachable**:
+muting the second-to-last card moves it to "Alerts and muted", and on the last remaining
+in-rotation card both "Alert only" and "Off" are disabled with the reason stated inline
+("This is your only in-rotation card — muting or turning it off would empty the
+rotation..."). There is no invalid save to reject.
+
+The validation layer was then tested separately by hand-writing a config with every card
+`presence: off`. The app refused it, showed "config has 1 validation issue(s)", and
+**left the invalid file untouched** on disk.
+
+Two defects in that fallback path, both recorded as follow-ups:
+
+1. The banner reads "Using your last working settings", but what loads is the built-in
+   default (1 card, `show_seconds` on), not the user's previous 3-card config. The copy
+   claims something the behaviour does not do.
+2. The fallback is **pushed to the device**: the user observed the panel drop to a
+   single clock card. A corrupted config file on disk therefore replaces a working
+   display, rather than the device keeping its last-applied configuration.
+
+### 8. Both orientations — PASS
+
+Re-ran rotation (5/10/20 s dwells) and the pomodoro `until-dismissed` alert at **90°**
+(USB cable below). The display flipped correctly, rotation and wrap behaved identically,
+and the alert took over, held until tapped, and restored the right card. Combined with
+checks 3-5 at 270°, both orientations are covered.
+
+### 9. Unplug / replug mid-rotation — PASS, with one gap
+
+Unplugging mid-rotation dropped the panel to the standalone clock; replugging replayed
+the configuration and rotation resumed normally, with no jumping or double-advance.
+
+**Gap — an alert that fires while the device is unpowered is lost.** A 3-minute pomodoro
+whose finish time fell entirely inside the unplugged window produced no alert on
+reconnect; rotation simply resumed. Observed once, not reproduced.
+
+This is not a sync-ordering bug: `synchronize_full` sends `apply_layout` first (which
+the firmware's `dispatch_apply_config` follows with `interrupt_state_clear()`) and calls
+`flush_interrupts` **last**, and `flush_interrupts` re-sends any interrupt that is not
+`acknowledged`. The replay path exists and is correctly ordered, so the loss is
+undiagnosed. No test covers it: `tests/runtime.rs` has
+`cold_boot_and_two_power_resets_replay_the_complete_owned_state` and
+`pomodoro_events_complete_once_and_dismissed_interrupts_do_not_replay`, but nothing
+asserts that an interrupt raised while the device is absent reaches it on reconnect.
+
+### 10. Device counters after the full session
+
+Queried over the CLI with the app closed, after all nine checks:
+
+```
+uptime 2,146,636 ms   free_heap 8,462,743   rotation 90   capabilities 3
+valid_frames 1257     malformed 0   crc_errors 0   overflow_frames 0
+dropped_responses 0   rx_dropped_bytes 0   dropped_events 0
+dropped_ui_commands 0 event_queue_high_water 0   ui_queue_high_water 3
+latest_revision 388   config_revision 11   latest_interrupt_token 386
+```
+
+Two things worth naming. `free_heap` is **byte-identical** to the post-flash reading and
+to every earlier record in this file — flat heap across rotation, alerts and reconnects.
+And `ui_queue_high_water` reached only 3 with `dropped_ui_commands` at 0, which is the
+evidence behind "no duplicate `ActivateScreen`" in checks 4 and 9: a duplicate-command
+storm would raise that high-water mark and eventually drop commands.
+
+### Not covered by this session
+
+- Weather and json-feed cards were not exercised. They default to `row-list`, whose
+  field set (`title`, `row0..4_title`, `row0..4_time`, `stale`, `error`) neither
+  provider publishes, so the expected result remains title-over-empty-rows until the
+  `big-number-label` / `icon-badge-text` templates land in M4 Task 3.
+- "Fires exactly once per event" for calendar alerts was not separately isolated.

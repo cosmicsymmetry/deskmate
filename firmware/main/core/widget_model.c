@@ -33,9 +33,7 @@ static widget_model_config_result_t validate_config(
         if (!bounded_text(widget->widget_id, sizeof(widget->widget_id), 1U)) {
             return WIDGET_MODEL_CONFIG_INVALID_VALUE;
         }
-        size_t field_count = 0U;
-        if (template_fields_registry(widget->template_kind, &field_count) ==
-            NULL) {
+        if (!protocol_template_kind_valid(widget->template_kind)) {
             return WIDGET_MODEL_CONFIG_UNSUPPORTED_TEMPLATE;
         }
         if (widget->size_class == PROTOCOL_SIZE_TILE ||

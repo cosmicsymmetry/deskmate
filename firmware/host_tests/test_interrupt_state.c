@@ -24,12 +24,14 @@ static void test_active_pending_busy_and_restore(void)
     protocol_trigger_interrupt_t third = trigger("timer", 12U, "again");
     assert(interrupt_state_trigger(&s_state, &first, "pomodoro") ==
            INTERRUPT_TRIGGER_ACTIVATED);
+    assert(interrupt_state_latest_token(&s_state) == 10U);
     assert(strcmp(s_state.saved_screen_id, "pomodoro") == 0);
     assert(interrupt_state_trigger(&s_state, &second, "ignored") ==
            INTERRUPT_TRIGGER_QUEUED);
     assert(interrupt_state_set_saved_screen(&s_state, "calendar"));
     assert(interrupt_state_trigger(&s_state, &third, "ignored") ==
            INTERRUPT_TRIGGER_BUSY);
+    assert(interrupt_state_latest_token(&s_state) == 11U);
     assert(s_state.latest_token == 11U);
 
     interrupt_dismissal_t dismissal;

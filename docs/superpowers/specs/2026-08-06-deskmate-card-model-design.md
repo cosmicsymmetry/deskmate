@@ -103,6 +103,15 @@ real events, so only two triggers exist.
 
 `hold` is `until-dismissed` or `seconds { 5..600 }`.
 
+**Known limitation, not yet decided.** Under protocol v1 the device panel yields the
+interrupt overlay only on tap — there is no host→device dismissal message, and sending
+`ActivateScreen` for a different screen while an interrupt is active changes only the
+screen *behind* the overlay, not what is visibly on screen. `hold` is host-side
+bookkeeping: it bounds how long the arbiter treats an alert as outstanding, freeing the
+slot for the next one. Whether the on-screen overlay itself also clears once `hold`
+expires, or only ever on tap, has not been decided and has not been observed on
+hardware. This spec does not resolve it; see section 9 for how to test around it.
+
 `presence` and `alert` are deliberately independent fields rather than one collapsed
 variant, because the common case is a card that is both in the rotation and alerting: a
 calendar you read during the loop *and* that warns you before an event. Collapsing them
@@ -319,9 +328,15 @@ New or changed:
 - Byte-stability: the existing maximum-capacity `ApplyConfig` fixture re-encodes
   identically.
 - Validation: each rule in section 8, at and outside its bounds.
-- Host scheduling: dwell expiry ordering, dwell inheritance from the default, manual
-  navigation overriding a pending advance, and alert takeover and yield restoring the
-  correct carousel position.
+- Host scheduling: dwell expiry ordering, dwell inheritance from the default, and manual
+  navigation overriding a pending advance — all host-side and fully testable without
+  hardware.
+- Alert takeover and yield: on the physical panel, observe and record whether the
+  overlay itself clears when `hold` expires or only on tap (see the known limitation
+  noted with the `hold` definition in section 3.2), and confirm the carousel position
+  the device is showing once the overlay does clear matches the host's arbiter state.
+  This must be observed, not assumed — do not write a test that asserts a specific
+  yield behavior the codebase has not decided.
 - Frontend: reorder-then-validate keeps issues attached to the correct card; loading,
   empty, error, stale, offline, and no-data preview states.
 - Firmware: unchanged structurally; existing host suites must pass without modification,

@@ -3,7 +3,7 @@ use std::sync::mpsc::SyncSender;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{AppConfig, ValidationIssue};
+use crate::{AppConfig, PersistenceState, ValidationIssue};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -57,6 +57,14 @@ pub(crate) enum RuntimeCommand {
     },
     SetPaused {
         paused: bool,
+        reply: CommandReply,
+    },
+    SetAutostartPreference {
+        enabled: bool,
+        reply: CommandReply,
+    },
+    SetPersistenceState {
+        persistence: PersistenceState,
         reply: CommandReply,
     },
     Pomodoro {

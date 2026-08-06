@@ -16,7 +16,6 @@ typedef enum {
     UI_COMMAND_PATCH_VIEW,
     UI_COMMAND_LINK_STATE,
     UI_COMMAND_TIME_OFFSET,
-    UI_COMMAND_INTERRUPTS,
 } ui_command_type_t;
 
 typedef struct {
@@ -40,8 +39,6 @@ typedef struct {
     uint16_t dirty_mask;
     bool online;
     int16_t utc_offset_minutes;
-    bool interrupt_active;
-    bool interrupt_pending;
 } ui_command_t;
 
 typedef struct {

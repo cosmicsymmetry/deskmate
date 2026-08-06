@@ -25,6 +25,9 @@ static widget_model_config_result_t validate_config(
         config->screen_count > PROTOCOL_MAX_CONFIG_SCREENS) {
         return WIDGET_MODEL_CONFIG_TOO_LARGE;
     }
+    if (config->rotation != 90U && config->rotation != 270U) {
+        return WIDGET_MODEL_CONFIG_INVALID_VALUE;
+    }
     for (size_t i = 0U; i < config->widget_count; ++i) {
         const protocol_widget_config_t *widget = &config->widgets[i];
         if (!bounded_text(widget->widget_id, sizeof(widget->widget_id), 1U)) {
@@ -83,6 +86,7 @@ static bool configs_equal(const protocol_apply_config_t *left,
                           const protocol_apply_config_t *right)
 {
     if (left->revision != right->revision ||
+        left->rotation != right->rotation ||
         left->widget_count != right->widget_count ||
         left->screen_count != right->screen_count) {
         return false;
@@ -152,32 +156,46 @@ uint32_t widget_model_config_revision(const widget_model_t *model)
     return config != NULL ? config->revision : 0U;
 }
 
-widget_model_config_result_t widget_model_apply_config(
-    widget_model_t *model,
+widget_model_config_result_t widget_model_check_config(
+    const widget_model_t *model,
     const protocol_apply_config_t *config)
 {
     if (model == NULL || config == NULL) {
         return WIDGET_MODEL_CONFIG_INVALID_ARGUMENT;
     }
-    uint8_t staging_index = model->configured
-                                ? (uint8_t)(model->live_config_index ^ 1U)
-                                : 1U;
-    protocol_apply_config_t *staging = &model->configs[staging_index];
-    *staging = *config;
-    widget_model_config_result_t validation = validate_config(staging);
+    widget_model_config_result_t validation = validate_config(config);
     if (validation != WIDGET_MODEL_CONFIG_APPLIED) {
         return validation;
     }
 
     const protocol_apply_config_t *live = widget_model_config(model);
-    if (live != NULL && staging->revision <= live->revision) {
-        if (staging->revision == live->revision &&
-            configs_equal(live, staging)) {
+    if (live != NULL && config->revision <= live->revision) {
+        if (config->revision == live->revision &&
+            configs_equal(live, config)) {
             return WIDGET_MODEL_CONFIG_REPLAYED;
         }
         return WIDGET_MODEL_CONFIG_STALE_REVISION;
     }
+    return WIDGET_MODEL_CONFIG_APPLIED;
+}
 
+widget_model_config_result_t widget_model_apply_config(
+    widget_model_t *model,
+    const protocol_apply_config_t *config)
+{
+    widget_model_config_result_t result = widget_model_check_config(model,
+                                                                     config);
+    if (result != WIDGET_MODEL_CONFIG_APPLIED) {
+        return result;
+    }
+
+    uint8_t staging_index = model->configured
+                                ? (uint8_t)(model->live_config_index ^ 1U)
+                                : 1U;
+    protocol_apply_config_t *staging = &model->configs[staging_index];
+    *staging = *config;
+
+    const protocol_apply_config_t *live = widget_model_config(model);
     char active_screen_id[PROTOCOL_MAX_SCREEN_ID_LENGTH + 1U] = {0};
     if (live != NULL && model->active_screen_index < live->screen_count) {
         strcpy(active_screen_id,

@@ -330,6 +330,9 @@ static protocol_message_result_t validate_apply_config(
         config->screen_count > PROTOCOL_MAX_CONFIG_SCREENS) {
         return PROTOCOL_MESSAGE_ERR_CONFIG_TOO_LARGE;
     }
+    if (config->rotation != 90U && config->rotation != 270U) {
+        return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
+    }
     for (size_t i = 0U; i < config->widget_count; ++i) {
         const protocol_widget_config_t *widget = &config->widgets[i];
         size_t length = 0U;
@@ -584,6 +587,7 @@ static protocol_message_result_t decode_apply_config(
     const protocol_frame_t *frame,
     protocol_apply_config_t *config)
 {
+    config->rotation = 90U;
     CborParser parser;
     CborValue contents;
     size_t count = 0U;
@@ -616,6 +620,14 @@ static protocol_message_result_t decode_apply_config(
         } else if (key == 2U) {
             result = decode_screens(&contents, config);
             present |= REQUIRED_BIT(2);
+        } else if (key == 3U) {
+            uint64_t rotation = 0U;
+            result = read_unsigned(&contents, &rotation);
+            if (result == PROTOCOL_MESSAGE_OK &&
+                rotation != 90U && rotation != 270U) {
+                result = PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
+            }
+            config->rotation = (uint16_t)rotation;
         } else {
             result = skip_value(&contents);
         }
@@ -1046,6 +1058,17 @@ static protocol_message_result_t assign_status_unsigned(
         if (value > UINT32_MAX) return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
         status->config_revision = (uint32_t)value;
         break;
+    case 21:
+        if (value > UINT32_MAX) return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
+        status->latest_interrupt_token = (uint32_t)value;
+        break;
+    case 22:
+        if (value > UINT8_MAX) return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
+        status->max_protocol_version = (uint8_t)value;
+        break;
+    case 23:
+        status->capabilities = value;
+        break;
     default:
         return PROTOCOL_MESSAGE_ERR_ARGUMENT;
     }
@@ -1078,7 +1101,7 @@ static protocol_message_result_t decode_status(
                                sizeof(status->firmware_version), 1U,
                                PROTOCOL_MAX_FIRMWARE_VERSION_LENGTH);
             present |= REQUIRED_BIT(1);
-        } else if (key <= 20U) {
+        } else if (key <= 23U) {
             uint64_t value = 0U;
             result = read_unsigned(&contents, &value);
             if (result == PROTOCOL_MESSAGE_OK) {
@@ -1095,7 +1118,14 @@ static protocol_message_result_t decode_status(
     if ((present & UINT32_C(0xffff)) != UINT32_C(0xffff)) {
         return PROTOCOL_MESSAGE_ERR_MISSING_FIELD;
     }
+    if ((present & REQUIRED_BIT(22)) == 0U) {
+        status->max_protocol_version = status->protocol_version;
+    }
+    if ((present & REQUIRED_BIT(23)) == 0U) {
+        status->capabilities = PROTOCOL_LEGACY_CAPABILITIES;
+    }
     if (status->protocol_version != PROTOCOL_VERSION ||
+        status->max_protocol_version < status->protocol_version ||
         (status->rotation != 0U && status->rotation != 90U &&
          status->rotation != 180U && status->rotation != 270U)) {
         return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
@@ -1167,6 +1197,8 @@ static protocol_message_result_t validate_message(
                             &length) ||
             length == 0U ||
             message->value.status.protocol_version != PROTOCOL_VERSION ||
+            message->value.status.max_protocol_version <
+                message->value.status.protocol_version ||
             (message->value.status.rotation != 0U &&
              message->value.status.rotation != 90U &&
              message->value.status.rotation != 180U &&
@@ -1391,7 +1423,7 @@ static protocol_message_result_t encode_apply_config_payload(
 {
     CborEncoder map;
     CborEncoder widgets;
-    protocol_message_result_t result = begin_map(root, &map, 3U);
+    protocol_message_result_t result = begin_map(root, &map, 4U);
     if (result == PROTOCOL_MESSAGE_OK) {
         result = encode_pair_uint(&map, 0U, config->revision);
     }
@@ -1432,6 +1464,9 @@ static protocol_message_result_t encode_apply_config_payload(
         if (result == PROTOCOL_MESSAGE_OK) result = end_map(&screens, &item);
     }
     if (result == PROTOCOL_MESSAGE_OK) result = end_map(&map, &screens);
+    if (result == PROTOCOL_MESSAGE_OK) {
+        result = encode_pair_uint(&map, 3U, config->rotation);
+    }
     if (result == PROTOCOL_MESSAGE_OK) result = end_map(root, &map);
     return result;
 }
@@ -1441,7 +1476,7 @@ static protocol_message_result_t encode_status_payload(
     const protocol_status_response_t *status)
 {
     CborEncoder map;
-    protocol_message_result_t result = begin_map(root, &map, 21U);
+    protocol_message_result_t result = begin_map(root, &map, 24U);
     if (result != PROTOCOL_MESSAGE_OK) return result;
     result = encode_pair_uint(&map, 0U, status->protocol_version);
     if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 1U);
@@ -1465,6 +1500,9 @@ static protocol_message_result_t encode_status_payload(
     if (result == PROTOCOL_MESSAGE_OK) result = encode_pair_uint(&map, 18U, status->dropped_ui_commands);
     if (result == PROTOCOL_MESSAGE_OK) result = encode_pair_uint(&map, 19U, status->ui_queue_high_water);
     if (result == PROTOCOL_MESSAGE_OK) result = encode_pair_uint(&map, 20U, status->config_revision);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_pair_uint(&map, 21U, status->latest_interrupt_token);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_pair_uint(&map, 22U, status->max_protocol_version);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_pair_uint(&map, 23U, status->capabilities);
     if (result != PROTOCOL_MESSAGE_OK) return result;
     return end_map(root, &map);
 }

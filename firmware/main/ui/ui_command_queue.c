@@ -37,8 +37,7 @@ static bool same_coalescing_key(const ui_command_t *pending,
     }
     return incoming->type == pending->type &&
            (incoming->type == UI_COMMAND_LINK_STATE ||
-            incoming->type == UI_COMMAND_TIME_OFFSET ||
-            incoming->type == UI_COMMAND_INTERRUPTS);
+            incoming->type == UI_COMMAND_TIME_OFFSET);
 }
 
 static bool is_view_work(ui_command_type_t type)
@@ -86,7 +85,7 @@ bool ui_command_queue_push(ui_command_queue_t *queue,
         command->type == UI_COMMAND_SHOW_STANDALONE ||
         (command->type == UI_COMMAND_LINK_STATE && !command->online)) {
         /* Screen replacement makes older view work obsolete, but scalar
-         * state still has to reach the status strip/new screen in order. */
+         * time/link state still has to reach the fallback/new screen in order. */
         discard_superseded_view_work(queue);
     } else {
         for (size_t i = 0U; i < queue->count; ++i) {

@@ -30,7 +30,6 @@ bool ui_runtime_patch_view(const char *widget_id,
 bool ui_runtime_show_standalone(void);
 bool ui_runtime_set_online(bool online);
 bool ui_runtime_set_utc_offset_minutes(int16_t offset_minutes);
-bool ui_runtime_set_interrupts(bool active, bool pending);
 
 uint32_t ui_runtime_dropped_commands(void);
 uint32_t ui_runtime_coalesced_commands(void);

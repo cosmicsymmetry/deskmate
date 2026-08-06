@@ -5,10 +5,11 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use protocol::{
-    Ack, ActivateScreen, ApplyConfig, Deframer, DeviceEvent, EventKind, Field, HeartbeatAck,
-    Message, PushData, ScreenConfig, StatusResponse, TYPE_ACTIVATE_SCREEN, TYPE_APPLY_CONFIG,
-    TYPE_PUSH_DATA, TYPE_TIME_SYNC, TYPE_TRIGGER_INTERRUPT, TimeSync, TriggerInterrupt,
-    WidgetConfig, decode_message, encode_message,
+    Ack, ActivateScreen, ApplyConfig, CAPABILITY_CONFIG_ROTATION, CAPABILITY_CORE_WIDGETS,
+    Deframer, DeviceEvent, EventAction, EventKind, Field, HeartbeatAck, Message, PushData,
+    ScreenConfig, StatusResponse, TYPE_ACTIVATE_SCREEN, TYPE_APPLY_CONFIG, TYPE_PUSH_DATA,
+    TYPE_TIME_SYNC, TYPE_TRIGGER_INTERRUPT, TimeSync, TriggerInterrupt, WidgetConfig,
+    decode_message, encode_message,
 };
 
 use crate::{
@@ -109,6 +110,7 @@ pub struct DeviceSession<T: Transport + Send + 'static> {
     event_receiver: Receiver<ReceivedEvent>,
     latest_data_revision: Arc<AtomicU32>,
     latest_config_revision: Arc<AtomicU32>,
+    capabilities: Arc<AtomicU64>,
     diagnostics: Arc<DiagnosticCounters>,
     worker: Option<JoinHandle<()>>,
 }
@@ -128,6 +130,7 @@ impl<T: Transport + Send + 'static> DeviceSession<T> {
         let (event_sender, event_receiver) = mpsc::sync_channel(event_capacity);
         let latest_data_revision = Arc::new(AtomicU32::new(initial_status.latest_revision));
         let latest_config_revision = Arc::new(AtomicU32::new(initial_status.config_revision));
+        let capabilities = Arc::new(AtomicU64::new(initial_status.capabilities));
         let diagnostics = Arc::new(DiagnosticCounters::default());
         let connection = SessionConnection {
             transport,
@@ -154,6 +157,7 @@ impl<T: Transport + Send + 'static> DeviceSession<T> {
             event_receiver,
             latest_data_revision,
             latest_config_revision,
+            capabilities,
             diagnostics,
             worker: Some(worker),
         }
@@ -194,9 +198,17 @@ impl<T: Transport + Send + 'static> DeviceSession<T> {
         self.latest_config_revision.load(Ordering::Acquire)
     }
 
+    pub fn capabilities(&self) -> u64 {
+        self.capabilities.load(Ordering::Acquire)
+    }
+
     pub fn status(&self) -> Result<StatusResponse, DeviceError> {
         match self.request(Message::StatusRequest)? {
-            Message::StatusResponse(status) => Ok(status),
+            Message::StatusResponse(status) => {
+                self.capabilities
+                    .store(status.capabilities, Ordering::Release);
+                Ok(status)
+            }
             _ => Err(DeviceError::UnexpectedMessage),
         }
     }
@@ -240,6 +252,9 @@ impl<T: Transport + Send + 'static> DeviceSession<T> {
     }
 
     pub fn apply_config(&self, config: ApplyConfig) -> Result<Ack, DeviceError> {
+        let required = required_config_capabilities(&config);
+        let available = self.capabilities();
+        ensure_capabilities(required, available)?;
         let revision = config.revision;
         match self.request(Message::ApplyConfig(config))? {
             Message::Ack(ack)
@@ -255,12 +270,14 @@ impl<T: Transport + Send + 'static> DeviceSession<T> {
 
     pub fn apply_next_config(
         &self,
+        rotation: u16,
         widgets: Vec<WidgetConfig>,
         screens: Vec<ScreenConfig>,
     ) -> Result<Ack, DeviceError> {
         let revision = Self::allocate_revision(&self.latest_config_revision)?;
         self.apply_config(ApplyConfig {
             revision,
+            rotation,
             widgets,
             screens,
         })
@@ -321,6 +338,7 @@ impl<T: Transport + Send + 'static> DeviceSession<T> {
         transport: T,
         initial_status: StatusResponse,
     ) -> Result<(), DeviceError> {
+        let capabilities = initial_status.capabilities;
         let (response_sender, response_receiver) = mpsc::sync_channel(1);
         self.command_sender
             .send(WorkerCommand::Reconnect {
@@ -329,9 +347,14 @@ impl<T: Transport + Send + 'static> DeviceSession<T> {
                 response: response_sender,
             })
             .map_err(|_| DeviceError::Transport(TransportError::Disconnected))?;
-        response_receiver
+        let result = response_receiver
             .recv()
-            .map_err(|_| DeviceError::Transport(TransportError::Disconnected))?
+            .map_err(|_| DeviceError::Transport(TransportError::Disconnected))?;
+        // The worker has replaced its transport even when replay is rejected. Publish
+        // that device's capabilities so every later request is gated against the
+        // actual connection rather than the previous firmware.
+        self.capabilities.store(capabilities, Ordering::Release);
+        result
     }
 }
 
@@ -525,6 +548,22 @@ impl<T: Transport> SessionConnection<T> {
             return;
         }
         self.last_seen_event_sequence = Some(event.sequence);
+        if event.kind == EventKind::Navigation
+            && matches!(
+                event.action,
+                EventAction::NavigatePrevious | EventAction::NavigateNext
+            )
+            && self.replay.config.as_ref().is_some_and(|config| {
+                config
+                    .screens
+                    .iter()
+                    .any(|screen| screen.screen_id == event.screen_id)
+            })
+        {
+            self.replay.active_screen = Some(ActivateScreen {
+                screen_id: event.screen_id.clone(),
+            });
+        }
         if event.kind == EventKind::InterruptDismissed
             && let Some(token) = event.interrupt_token
         {
@@ -605,6 +644,9 @@ impl<T: Transport> SessionConnection<T> {
 
     fn replay_after_reconnect(&mut self, status: &StatusResponse) -> Result<(), DeviceError> {
         let mut replay = self.replay.clone();
+        if let Some(config) = &replay.config {
+            ensure_capabilities(required_config_capabilities(config), status.capabilities)?;
+        }
         let powered_session_reset = status.uptime_ms < self.last_device_uptime_ms
             || (status.latest_revision == 0
                 && status.config_revision == 0
@@ -704,6 +746,26 @@ impl<T: Transport> SessionConnection<T> {
             }
             _ => Err(DeviceError::UnexpectedMessage),
         }
+    }
+}
+
+fn required_config_capabilities(config: &ApplyConfig) -> u64 {
+    CAPABILITY_CORE_WIDGETS
+        | if config.rotation == 270 {
+            CAPABILITY_CONFIG_ROTATION
+        } else {
+            0
+        }
+}
+
+fn ensure_capabilities(required: u64, available: u64) -> Result<(), DeviceError> {
+    if available & required == required {
+        Ok(())
+    } else {
+        Err(DeviceError::MissingCapabilities {
+            required,
+            available,
+        })
     }
 }
 
@@ -915,6 +977,8 @@ mod tests {
     fn status(latest_revision: u32, config_revision: u32, uptime_ms: u64) -> StatusResponse {
         StatusResponse {
             protocol_version: PROTOCOL_VERSION,
+            max_protocol_version: protocol::MAX_PROTOCOL_VERSION,
+            capabilities: protocol::CURRENT_CAPABILITIES,
             firmware_version: "deskmate-m2".into(),
             uptime_ms,
             free_heap: 100_000,
@@ -935,6 +999,7 @@ mod tests {
             dropped_ui_commands: 0,
             ui_queue_high_water: 0,
             config_revision,
+            latest_interrupt_token: 0,
         }
     }
 
@@ -986,6 +1051,7 @@ mod tests {
     fn config(revision: u32) -> ApplyConfig {
         ApplyConfig {
             revision,
+            rotation: 90,
             widgets: vec![WidgetConfig {
                 widget_id: "timer".into(),
                 template: TemplateKind::ProgressRing,
@@ -1161,6 +1227,61 @@ mod tests {
     }
 
     #[test]
+    fn legacy_firmware_rejects_rotated_config_before_any_wire_mutation() {
+        let mut legacy = status(0, 0, 100);
+        legacy.capabilities = protocol::LEGACY_CAPABILITIES;
+        let (transport, state) = FakeTransport::new(legacy.clone());
+        let session =
+            DeviceSession::with_options(transport, &legacy, options(Duration::from_mins(1), 8));
+        let mut rotated = config(1);
+        rotated.rotation = 270;
+
+        assert_eq!(
+            session.apply_config(rotated),
+            Err(DeviceError::MissingCapabilities {
+                required: protocol::CAPABILITY_CORE_WIDGETS | protocol::CAPABILITY_CONFIG_ROTATION,
+                available: protocol::LEGACY_CAPABILITIES,
+            })
+        );
+        assert!(state.lock().unwrap().requests.is_empty());
+        assert_eq!(session.latest_config_revision(), 0);
+    }
+
+    #[test]
+    fn reconnect_preflights_replay_before_time_or_config_mutation() {
+        let (transport, _) = FakeTransport::new(status(0, 0, 100));
+        let session = DeviceSession::with_options(
+            transport,
+            &status(0, 0, 100),
+            options(Duration::from_mins(1), 8),
+        );
+        session
+            .time_sync(TimeSync {
+                unix_seconds: 1_800_000_000,
+                utc_offset_minutes: 240,
+            })
+            .unwrap();
+        let mut rotated = config(1);
+        rotated.rotation = 270;
+        session.apply_config(rotated).unwrap();
+
+        let mut legacy = status(0, 0, 10);
+        legacy.capabilities = protocol::LEGACY_CAPABILITIES;
+        let (legacy_transport, legacy_state) = FakeTransport::new(legacy.clone());
+        assert!(matches!(
+            session.reconnect(legacy_transport, legacy),
+            Err(DeviceError::MissingCapabilities {
+                required,
+                available: protocol::LEGACY_CAPABILITIES,
+            }) if required
+                == protocol::CAPABILITY_CORE_WIDGETS | protocol::CAPABILITY_CONFIG_ROTATION
+        ));
+        assert!(legacy_state.lock().unwrap().requests.is_empty());
+        assert_eq!(session.latest_config_revision(), 1);
+        assert_eq!(session.capabilities(), protocol::LEGACY_CAPABILITIES);
+    }
+
+    #[test]
     fn timeout_and_malformed_response_keep_distinct_error_classes() {
         let (timeout_transport, timeout_state) = FakeTransport::new(status(0, 0, 100));
         timeout_state
@@ -1243,6 +1364,78 @@ mod tests {
         assert_eq!(session.latest_config_revision(), 4);
         assert_eq!(session.latest_data_revision(), 8);
         assert_eq!(session.diagnostics().reconnects, 1);
+    }
+
+    #[test]
+    fn local_navigation_updates_the_screen_replayed_after_power_reset() {
+        let (first_transport, first_state) = FakeTransport::new(status(0, 0, 1_000));
+        let session = DeviceSession::with_options(
+            first_transport,
+            &status(0, 0, 1_000),
+            options(Duration::from_mins(1), 8),
+        );
+        let mut layout = config(1);
+        layout.widgets.push(WidgetConfig {
+            widget_id: "calendar".into(),
+            template: TemplateKind::RowList,
+            size_class: SizeClass::Standard,
+            tap_action: TapAction::None,
+            interrupt_policy: InterruptPolicy::Disabled,
+        });
+        layout.screens.push(ScreenConfig {
+            screen_id: "calendar-screen".into(),
+            widget_id: "calendar".into(),
+        });
+        session.apply_config(layout).unwrap();
+        session
+            .activate_screen(ActivateScreen {
+                screen_id: "timer-screen".into(),
+            })
+            .unwrap();
+
+        inject_events(
+            &first_state,
+            [DeviceEvent {
+                sequence: 1,
+                kind: EventKind::Navigation,
+                widget_id: "calendar".into(),
+                screen_id: "calendar-screen".into(),
+                action: EventAction::NavigateNext,
+                interrupt_token: None,
+            }],
+        );
+        session.status().unwrap();
+        assert_eq!(
+            session
+                .recv_event_timeout(Duration::from_millis(100))
+                .unwrap()
+                .unwrap()
+                .event
+                .screen_id,
+            "calendar-screen"
+        );
+
+        first_state
+            .lock()
+            .unwrap()
+            .reply_modes
+            .push_back(ReplyMode::Disconnect);
+        assert!(matches!(
+            session.status(),
+            Err(DeviceError::Transport(TransportError::Disconnected))
+        ));
+        let (second_transport, second_state) = FakeTransport::new(status(0, 0, 10));
+        session
+            .reconnect(second_transport, status(0, 0, 10))
+            .unwrap();
+
+        assert!(second_state.lock().unwrap().requests.iter().any(|request| {
+            matches!(
+                request,
+                Message::ActivateScreen(ActivateScreen { screen_id })
+                    if screen_id == "calendar-screen"
+            )
+        }));
     }
 
     #[test]

@@ -1,49 +1,91 @@
 {
-  "schema_version": 1,
+  "schema_version": 3,
   "preferences": {
     "timezone": "Not/A_Timezone",
     "autostart": false,
-    "paused": false
+    "paused": false,
+    "orientation": "landscape"
   },
-  "widgets": [
+  "cards": [
+    {
+      "kind": "clock",
+      "id": "on-timer-mismatch",
+      "title": "Desk",
+      "show_seconds": true,
+      "template": { "kind": "digital-clock" },
+      "tap_action": { "kind": "none" },
+      "refresh": { "kind": "device-local" },
+      "presence": { "kind": "in-rotation", "dwell_seconds": null },
+      "alert": { "kind": "on-timer-finish", "hold": { "kind": "until-dismissed" } }
+    },
     {
       "kind": "clock",
       "id": "duplicate",
-      "size": "standard",
       "title": "Desk",
-      "show_seconds": true
+      "show_seconds": true,
+      "template": { "kind": "digital-clock" },
+      "tap_action": { "kind": "none" },
+      "refresh": { "kind": "device-local" },
+      "presence": { "kind": "in-rotation", "dwell_seconds": null },
+      "alert": { "kind": "none" }
     },
     {
       "kind": "pomodoro",
       "id": "duplicate",
-      "size": "full",
       "label": "Focus",
-      "duration_seconds": 0
+      "duration_seconds": 1500,
+      "template": { "kind": "progress-ring" },
+      "tap_action": { "kind": "start-pause" },
+      "refresh": { "kind": "device-local" },
+      "presence": { "kind": "in-rotation", "dwell_seconds": 4 },
+      "alert": { "kind": "none" }
     },
     {
       "kind": "calendar",
-      "id": "calendar",
-      "size": "standard",
+      "id": "calendar-a",
       "title": "Calendar",
       "source": {
         "kind": "url",
         "value": "calendar.example/feed"
       },
-      "refresh_minutes": 0
+      "template": { "kind": "row-list" },
+      "tap_action": { "kind": "none" },
+      "refresh": { "kind": "interval", "minutes": 15 },
+      "presence": { "kind": "in-rotation", "dwell_seconds": null },
+      "alert": {
+        "kind": "before-event",
+        "lead_minutes": 61,
+        "hold": { "kind": "seconds", "value": 60 }
+      }
+    },
+    {
+      "kind": "pomodoro",
+      "id": "pomodoro-b",
+      "label": "Focus",
+      "duration_seconds": 1500,
+      "template": { "kind": "progress-ring" },
+      "tap_action": { "kind": "start-pause" },
+      "refresh": { "kind": "device-local" },
+      "presence": { "kind": "in-rotation", "dwell_seconds": null },
+      "alert": {
+        "kind": "on-timer-finish",
+        "hold": { "kind": "seconds", "value": 4 }
+      }
+    },
+    {
+      "kind": "weather",
+      "id": "orphan",
+      "title": "Orphan",
+      "location": "Nowhere",
+      "units": "metric",
+      "template": { "kind": "icon-badge-text", "icon_asset_id": "missing-icon" },
+      "tap_action": { "kind": "none" },
+      "refresh": { "kind": "interval", "minutes": 30 },
+      "presence": { "kind": "alert-only" },
+      "alert": { "kind": "none" }
     }
   ],
-  "screens": [
-    {
-      "id": "same-screen",
-      "widget_id": "missing-widget"
-    },
-    {
-      "id": "same-screen",
-      "widget_id": "duplicate"
-    },
-    {
-      "id": "third-screen",
-      "widget_id": "duplicate"
-    }
-  ]
+  "assets": [],
+  "carousel": { "advance": { "kind": "manual" } },
+  "updater": { "channel": "stable", "checks": "notify" }
 }

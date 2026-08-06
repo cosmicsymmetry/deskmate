@@ -64,15 +64,9 @@ static uint8_t next_brightness_level(uint8_t current)
     return BRIGHTNESS_LEVELS[0];
 }
 
-// M1 has no persistent settings/config command yet, but its exit gate must
-// still exercise the M0 display controls on the real device. A release in
-// the visual top half cycles 25% -> 50% -> 100% brightness; a release in the
-// visual bottom half flips the landscape UI by 180 degrees. LVGL presents
-// touch coordinates in the current logical space, so compare against its
-// current logical height instead of the panel's portrait dimensions. The
-// callback runs in LVGL context, and both board setters are safe there. M2
-// replaces these diagnostic zones with carousel gestures and config-driven
-// display settings.
+// The standalone clock retains the M1 brightness diagnostic in its visual top
+// half. Orientation is deliberately not touch-controlled: the companion's
+// replayed config is the single owner of the 90/270-degree mounting choice.
 static void clock_screen_released_cb(lv_event_t *event)
 {
     (void)event;
@@ -96,15 +90,6 @@ static void clock_screen_released_cb(lv_event_t *event)
                  esp_err_to_name(result));
         return;
     }
-
-    bool rotate = board_display_rotation_degrees() != 270U;
-    esp_err_t result = board_display_set_rotation_180(rotate);
-    if (result == ESP_OK) {
-        invalidate_entire_screen();
-    }
-    ESP_LOGI(TAG, "bottom-half release x=%d y=%d: rotation=%u (%s)",
-             (int)point.x, (int)point.y, rotate ? 180U : 0U,
-             esp_err_to_name(result));
 }
 
 // Runs in LVGL task context (esp_lvgl_port's own timer handler already holds

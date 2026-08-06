@@ -117,7 +117,6 @@ static void consume_command(const ui_command_t *command)
     case UI_COMMAND_LINK_STATE: {
         bool template_was_active = template_view_active();
         clock_screen_set_online(command->online);
-        template_view_set_online(command->online);
         if (!command->online && template_was_active) {
             template_view_deactivate();
             carousel_unbind();
@@ -129,10 +128,6 @@ static void consume_command(const ui_command_t *command)
     case UI_COMMAND_TIME_OFFSET:
         clock_screen_set_utc_offset_minutes(command->utc_offset_minutes);
         template_view_set_utc_offset_minutes(command->utc_offset_minutes);
-        break;
-    case UI_COMMAND_INTERRUPTS:
-        template_view_set_interrupts(command->interrupt_active,
-                                     command->interrupt_pending);
         break;
     default:
         break;
@@ -259,21 +254,6 @@ bool ui_runtime_set_utc_offset_minutes(int16_t offset_minutes)
     s_publish_command.type = UI_COMMAND_TIME_OFFSET;
     s_publish_command.utc_offset_minutes = offset_minutes;
     bool accepted = publish_scalar(UI_COMMAND_TIME_OFFSET);
-    unlock_publisher();
-    return accepted;
-}
-
-bool ui_runtime_set_interrupts(bool active, bool pending)
-{
-    if (!s_initialized) {
-        return false;
-    }
-    lock_publisher();
-    memset(&s_publish_command, 0, sizeof(s_publish_command));
-    s_publish_command.type = UI_COMMAND_INTERRUPTS;
-    s_publish_command.interrupt_active = active;
-    s_publish_command.interrupt_pending = pending;
-    bool accepted = publish_scalar(UI_COMMAND_INTERRUPTS);
     unlock_publisher();
     return accepted;
 }

@@ -69,6 +69,11 @@ impl Pomodoro {
         self.state
     }
 
+    pub fn matches_settings(&self, label: &str, duration_seconds: u32) -> bool {
+        self.label == truncate_utf8(label, 64)
+            && self.duration == Duration::from_secs(u64::from(duration_seconds))
+    }
+
     pub fn start(&mut self, now: Instant) -> PomodoroUpdate {
         if matches!(self.state, PomodoroState::Idle | PomodoroState::Paused) {
             self.state = PomodoroState::Running;
@@ -264,5 +269,13 @@ mod tests {
     fn duration_is_bounded_by_the_wire_template_contract() {
         assert!(Pomodoro::new("bad", 0).is_err());
         assert!(Pomodoro::new("bad", MAX_POMODORO_SECONDS + 1).is_err());
+    }
+
+    #[test]
+    fn settings_identity_distinguishes_state_preserving_reconfiguration() {
+        let timer = Pomodoro::new("Focus", 60).unwrap();
+        assert!(timer.matches_settings("Focus", 60));
+        assert!(!timer.matches_settings("Break", 60));
+        assert!(!timer.matches_settings("Focus", 61));
     }
 }

@@ -3,16 +3,17 @@ use std::fs;
 use std::path::PathBuf;
 
 use protocol::{
-    Ack, ActivateScreen, ApplyConfig, DeviceEvent, ErrorCode, ErrorResponse, EventAction,
-    EventKind, Field, FieldValue, Frame, HeartbeatAck, InterruptPolicy, MAX_CONFIG_SCREENS,
-    MAX_CONFIG_WIDGETS, MAX_PAYLOAD_SIZE, MAX_WIRE_FRAME, Message, PushData, ScreenConfig,
-    SizeClass, StatusResponse, TapAction, TemplateKind, TimeSync, TriggerInterrupt, WidgetConfig,
-    encode_message,
+    Ack, ActivateScreen, ApplyConfig, CURRENT_CAPABILITIES, DeviceEvent, ErrorCode, ErrorResponse,
+    EventAction, EventKind, Field, FieldValue, Frame, HeartbeatAck, InterruptPolicy,
+    MAX_CONFIG_SCREENS, MAX_CONFIG_WIDGETS, MAX_PAYLOAD_SIZE, MAX_PROTOCOL_VERSION, MAX_WIRE_FRAME,
+    Message, PushData, ScreenConfig, SizeClass, StatusResponse, TapAction, TemplateKind, TimeSync,
+    TriggerInterrupt, WidgetConfig, encode_message,
 };
 
 fn minimum_config() -> ApplyConfig {
     ApplyConfig {
         revision: 1,
+        rotation: 90,
         widgets: vec![WidgetConfig {
             widget_id: "clock".into(),
             template: TemplateKind::DigitalClock,
@@ -65,6 +66,7 @@ fn maximum_config() -> ApplyConfig {
         .collect();
     ApplyConfig {
         revision: u32::MAX,
+        rotation: 270,
         widgets,
         screens,
     }
@@ -167,6 +169,8 @@ fn fixture_messages() -> Vec<(&'static str, u32, Message)> {
             1,
             Message::StatusResponse(StatusResponse {
                 protocol_version: 1,
+                max_protocol_version: MAX_PROTOCOL_VERSION,
+                capabilities: CURRENT_CAPABILITIES,
                 firmware_version: "deskmate-m1".into(),
                 uptime_ms: 123_456,
                 free_heap: 654_321,
@@ -187,6 +191,7 @@ fn fixture_messages() -> Vec<(&'static str, u32, Message)> {
                 dropped_ui_commands: 2,
                 ui_queue_high_water: 6,
                 config_revision: 4,
+                latest_interrupt_token: 5,
             }),
         ),
         (

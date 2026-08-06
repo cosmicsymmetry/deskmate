@@ -133,6 +133,37 @@ static void test_valid_fixtures(void)
                          19U);
 }
 
+static void test_status_capability_handshake_and_legacy_defaults(void)
+{
+    size_t length = 0U;
+    uint8_t *fixture = read_fixture("status_response.bin", &length);
+    protocol_frame_t frame;
+    assert(protocol_frame_decode(fixture, length, &frame) ==
+           PROTOCOL_FRAME_OK);
+    free(fixture);
+
+    protocol_message_t message;
+    assert(protocol_message_decode(&frame, &message) == PROTOCOL_MESSAGE_OK);
+    assert(message.value.status.max_protocol_version == PROTOCOL_MAX_VERSION);
+    assert(message.value.status.capabilities == PROTOCOL_CURRENT_CAPABILITIES);
+
+    assert(frame.payload_length >= 6U);
+    assert(frame.payload[0] == 0xb8U && frame.payload[1] == 0x18U);
+    assert(frame.payload[frame.payload_length - 4U] == 0x16U);
+    assert(frame.payload[frame.payload_length - 3U] == PROTOCOL_MAX_VERSION);
+    assert(frame.payload[frame.payload_length - 2U] == 0x17U);
+    assert(frame.payload[frame.payload_length - 1U] ==
+           PROTOCOL_CURRENT_CAPABILITIES);
+    memmove(frame.payload + 1U, frame.payload + 2U,
+            frame.payload_length - 6U);
+    frame.payload[0] = 0xb6U;
+    frame.payload_length -= 5U;
+
+    assert(protocol_message_decode(&frame, &message) == PROTOCOL_MESSAGE_OK);
+    assert(message.value.status.max_protocol_version == PROTOCOL_VERSION);
+    assert(message.value.status.capabilities == PROTOCOL_LEGACY_CAPABILITIES);
+}
+
 static void assert_invalid_message_fixture(
     const char *name,
     protocol_message_result_t expected)
@@ -277,7 +308,7 @@ static void test_maximum_config_payload(void)
     protocol_frame_t frame;
     assert(protocol_frame_decode(fixture, length, &frame) ==
            PROTOCOL_FRAME_OK);
-    assert(frame.payload_length == 931U);
+    assert(frame.payload_length == 935U);
     assert(frame.payload_length <= PROTOCOL_MAX_PAYLOAD_SIZE);
     free(fixture);
 }
@@ -378,10 +409,36 @@ static void test_cardinal_display_rotations(void)
            PROTOCOL_MESSAGE_ERR_INVALID_VALUE);
 }
 
+static void test_config_landscape_rotations(void)
+{
+    size_t length = 0U;
+    uint8_t *fixture = read_fixture("apply_config_min.bin", &length);
+    protocol_frame_t frame;
+    assert(protocol_frame_decode(fixture, length, &frame) ==
+           PROTOCOL_FRAME_OK);
+    protocol_message_t message;
+    assert(protocol_message_decode(&frame, &message) == PROTOCOL_MESSAGE_OK);
+    free(fixture);
+    assert(message.value.apply_config.rotation == 90U);
+
+    uint8_t encoded[PROTOCOL_MAX_WIRE_FRAME];
+    size_t encoded_length = 0U;
+    message.value.apply_config.rotation = 270U;
+    assert(protocol_message_encode(1U, &message, encoded, sizeof(encoded),
+                                   &encoded_length) == PROTOCOL_MESSAGE_OK);
+    assert(encoded_length > 0U);
+
+    message.value.apply_config.rotation = 180U;
+    assert(protocol_message_encode(1U, &message, encoded, sizeof(encoded),
+                                   &encoded_length) ==
+           PROTOCOL_MESSAGE_ERR_INVALID_VALUE);
+}
+
 int main(void)
 {
     test_crc();
     test_valid_fixtures();
+    test_status_capability_handshake_and_legacy_defaults();
     test_incremental_decoder();
     test_overflow_resynchronizes();
     test_invalid_fixtures();
@@ -390,6 +447,7 @@ int main(void)
     test_excessive_cbor_nesting_is_rejected();
     test_invalid_time_has_specific_error();
     test_cardinal_display_rotations();
+    test_config_landscape_rotations();
     puts("test_protocol: OK");
     return 0;
 }

@@ -11,6 +11,7 @@ static protocol_apply_config_t config_two_screens(uint32_t revision)
 {
     protocol_apply_config_t config = {
         .revision = revision,
+        .rotation = 90U,
         .widget_count = 2U,
         .widgets = {
             {
@@ -119,6 +120,10 @@ static void test_atomic_config_and_navigation(void)
     invalid.widget_count = PROTOCOL_MAX_CONFIG_WIDGETS + 1U;
     assert(widget_model_apply_config(&s_model, &invalid) ==
            WIDGET_MODEL_CONFIG_TOO_LARGE);
+    invalid = config_two_screens(2U);
+    invalid.rotation = 180U;
+    assert(widget_model_apply_config(&s_model, &invalid) ==
+           WIDGET_MODEL_CONFIG_INVALID_VALUE);
     assert(widget_model_config(&s_model)->revision == 1U);
 
     protocol_apply_config_t replacement = config_two_screens(2U);
@@ -181,7 +186,7 @@ static void test_replay_and_global_data_revisions(void)
     assert(widget_model_unknown_field_count(&s_model) == 1U);
 
     protocol_apply_config_t changed_same_revision = config;
-    strcpy(changed_same_revision.screens[0].screen_id, "changed");
+    changed_same_revision.rotation = 270U;
     assert(widget_model_apply_config(&s_model, &changed_same_revision) ==
            WIDGET_MODEL_CONFIG_STALE_REVISION);
     assert(widget_model_widget_has_data(&s_model, "clock"));
@@ -192,6 +197,42 @@ static void test_replay_and_global_data_revisions(void)
     assert(!widget_model_widget_has_data(&s_model, "clock"));
     assert(!widget_model_widget_has_data(&s_model, "timer"));
     assert(widget_model_latest_data_revision(&s_model) == 12U);
+}
+
+static void test_config_preflight_does_not_mutate_model(void)
+{
+    widget_model_init(&s_model);
+    protocol_apply_config_t config = config_two_screens(1U);
+    assert(widget_model_check_config(&s_model, &config) ==
+           WIDGET_MODEL_CONFIG_APPLIED);
+    assert(widget_model_config(&s_model) == NULL);
+
+    assert(widget_model_apply_config(&s_model, &config) ==
+           WIDGET_MODEL_CONFIG_APPLIED);
+    assert(widget_model_activate_screen(&s_model, "focus"));
+    assert(widget_model_check_config(&s_model, &config) ==
+           WIDGET_MODEL_CONFIG_REPLAYED);
+    assert(strcmp(widget_model_active_screen(&s_model)->screen_id, "focus") ==
+           0);
+
+    protocol_apply_config_t invalid = config_two_screens(2U);
+    strcpy(invalid.widgets[1].widget_id, "clock");
+    assert(widget_model_check_config(&s_model, &invalid) ==
+           WIDGET_MODEL_CONFIG_DUPLICATE_ID);
+    assert(widget_model_config_revision(&s_model) == 1U);
+
+    protocol_apply_config_t changed_same_revision = config;
+    changed_same_revision.rotation = 270U;
+    assert(widget_model_check_config(&s_model, &changed_same_revision) ==
+           WIDGET_MODEL_CONFIG_STALE_REVISION);
+    assert(widget_model_config(&s_model)->rotation == 90U);
+
+    protocol_apply_config_t replacement = config_two_screens(2U);
+    assert(widget_model_check_config(&s_model, &replacement) ==
+           WIDGET_MODEL_CONFIG_APPLIED);
+    assert(widget_model_config_revision(&s_model) == 1U);
+    assert(strcmp(widget_model_active_screen(&s_model)->screen_id, "focus") ==
+           0);
 }
 
 static void test_timeout_retains_replay_state(void)
@@ -233,6 +274,7 @@ int main(void)
 {
     test_atomic_config_and_navigation();
     test_replay_and_global_data_revisions();
+    test_config_preflight_does_not_mutate_model();
     test_timeout_retains_replay_state();
     printf("test_widget_model: OK (%zu-byte fixed model)\n", sizeof(s_model));
     return 0;

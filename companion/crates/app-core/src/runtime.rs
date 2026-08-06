@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TryRecvError};
 use std::sync::{Arc, Condvar, Mutex, RwLock, Weak};
 use std::thread::{self, JoinHandle};
@@ -12,18 +12,23 @@ use device::{ConnectedSession, DeviceError, ReceivedEvent, SessionDiagnostics, c
 use engine::interrupts::InterruptArbiter;
 use engine::pomodoro::{Pomodoro, PomodoroState as EnginePomodoroState};
 use protocol::{
-    ActivateScreen, EventAction, EventKind, Field, ScreenConfig, StatusResponse, TimeSync,
-    TriggerInterrupt, WidgetConfig,
+    ActivateScreen, EventAction, EventKind, Field, FieldValue, ScreenConfig, StatusResponse,
+    TimeSync, TriggerInterrupt, WidgetConfig,
 };
 use providers::Provider;
+use providers::http::SystemHttpClient;
 use providers::ics::{CalendarOptions, IcsProvider, IcsSource};
+use providers::json_feed::{JsonFeedOptions, JsonFeedProvider, JsonMapping as ProviderJsonMapping};
+use providers::rss::{RssOptions, RssProvider};
+use providers::weather::{WeatherOptions, WeatherProvider, WeatherUnits as ProviderWeatherUnits};
 
 use crate::commands::{PomodoroAction, RuntimeCommand, RuntimeError};
 use crate::scheduler::Scheduler;
 use crate::{
-    AppConfig, AppSnapshot, CalendarSource, ConnectionState, DeviceCounters, DeviceSnapshot,
-    PersistenceState, PomodoroSnapshot, PomodoroState, ProviderSnapshot, ProviderState,
-    RuntimeDiagnostics, RuntimeState, WidgetSettings,
+    AlertHold, AppConfig, AppSnapshot, CalendarSource, CardAlert, CardDataSnapshot, CardSettings,
+    ConnectionState, DeviceCounters, DeviceSnapshot, JsonFieldMapping, PersistenceState,
+    PomodoroSnapshot, PomodoroState, ProviderSnapshot, ProviderState, RuntimeDiagnostics,
+    RuntimeState, WeatherUnits,
 };
 
 pub const DEFAULT_RUNTIME_COMMAND_CAPACITY: usize = 16;
@@ -75,6 +80,7 @@ pub trait RuntimeDevice: Send + 'static {
     fn time_sync(&mut self, sync: TimeSync) -> Result<(), DeviceError>;
     fn apply_layout(
         &mut self,
+        rotation: u16,
         widgets: Vec<WidgetConfig>,
         screens: Vec<ScreenConfig>,
     ) -> Result<(), DeviceError>;
@@ -131,12 +137,13 @@ impl RuntimeDevice for SerialRuntimeDevice {
 
     fn apply_layout(
         &mut self,
+        rotation: u16,
         widgets: Vec<WidgetConfig>,
         screens: Vec<ScreenConfig>,
     ) -> Result<(), DeviceError> {
         self.connected()?
             .session
-            .apply_next_config(widgets, screens)
+            .apply_next_config(rotation, widgets, screens)
             .map(|_| ())
     }
 
@@ -177,18 +184,41 @@ impl RuntimeDevice for SerialRuntimeDevice {
 }
 
 #[derive(Debug, Clone)]
-pub struct CalendarRefreshRequest {
+pub struct ProviderRefreshRequest {
     pub generation: u64,
     pub widget_id: String,
-    pub source: CalendarSource,
-    pub timezone: Tz,
     pub title: String,
-    pub refresh_interval: Duration,
+    pub provider: ProviderRequest,
+    pub active_provider_ids: Vec<String>,
     pub now: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProviderRequest {
+    Calendar {
+        source: CalendarSource,
+        timezone: Tz,
+        refresh_interval: Duration,
+    },
+    Weather {
+        location: String,
+        units: WeatherUnits,
+        refresh_interval: Duration,
+    },
+    JsonFeed {
+        url: String,
+        mappings: Vec<JsonFieldMapping>,
+        refresh_interval: Duration,
+    },
+    Rss {
+        url: String,
+        maximum_items: u8,
+        refresh_interval: Duration,
+    },
+}
+
 #[derive(Debug, Clone)]
-pub struct CalendarRefreshResult {
+pub struct ProviderRefreshResult {
     pub generation: u64,
     pub widget_id: String,
     pub fields: Vec<Field>,
@@ -198,99 +228,205 @@ pub struct CalendarRefreshResult {
     pub error: Option<String>,
 }
 
-pub trait CalendarRefresher: Send + 'static {
-    fn refresh(&mut self, request: CalendarRefreshRequest) -> CalendarRefreshResult;
+pub trait ProviderRefresher: Send + 'static {
+    fn refresh(&mut self, request: ProviderRefreshRequest) -> ProviderRefreshResult;
 }
 
 #[derive(Default)]
-pub struct SystemCalendarRefresher {
+pub struct SystemProviderRefresher {
     providers: HashMap<String, SystemProviderEntry>,
 }
 
 struct SystemProviderEntry {
-    generation: u64,
-    provider: IcsProvider<providers::ics::SystemIcsLoader>,
+    title: String,
+    request: ProviderRequest,
+    provider: SystemProvider,
 }
 
-impl CalendarRefresher for SystemCalendarRefresher {
-    fn refresh(&mut self, request: CalendarRefreshRequest) -> CalendarRefreshResult {
+enum SystemProvider {
+    Calendar(IcsProvider<providers::ics::SystemIcsLoader>),
+    Weather(WeatherProvider<SystemHttpClient>),
+    JsonFeed(JsonFeedProvider<SystemHttpClient>),
+    Rss(RssProvider<SystemHttpClient>),
+}
+
+impl ProviderRefresher for SystemProviderRefresher {
+    fn refresh(&mut self, request: ProviderRefreshRequest) -> ProviderRefreshResult {
+        self.providers
+            .retain(|widget_id, _| request.active_provider_ids.contains(widget_id));
+        let needs_replacement = self
+            .providers
+            .get(&request.widget_id)
+            .is_none_or(|entry| entry.title != request.title || entry.request != request.provider);
+        if needs_replacement {
+            self.providers.insert(
+                request.widget_id.clone(),
+                SystemProviderEntry {
+                    title: request.title.clone(),
+                    request: request.provider.clone(),
+                    provider: system_provider(&request),
+                },
+            );
+        }
         let entry = self
             .providers
-            .entry(request.widget_id.clone())
-            .or_insert_with(|| SystemProviderEntry {
-                generation: request.generation,
-                provider: system_provider(&request),
-            });
-        if entry.generation != request.generation {
-            *entry = SystemProviderEntry {
-                generation: request.generation,
-                provider: system_provider(&request),
-            };
-        }
-        let snapshot = entry.provider.refresh(request.now);
-        CalendarRefreshResult {
+            .get_mut(&request.widget_id)
+            .expect("provider entry was inserted above");
+        let (fields, refreshed_at, age, stale, error) = match &mut entry.provider {
+            SystemProvider::Calendar(provider) => {
+                let snapshot = provider.refresh(request.now);
+                (
+                    provider.fields(&snapshot, request.now),
+                    snapshot.refreshed_at,
+                    snapshot.age,
+                    snapshot.stale,
+                    snapshot.error,
+                )
+            }
+            SystemProvider::Weather(provider) => {
+                let snapshot = provider.refresh(request.now);
+                (
+                    provider.fields(&snapshot),
+                    snapshot.refreshed_at,
+                    snapshot.age,
+                    snapshot.stale,
+                    snapshot.error,
+                )
+            }
+            SystemProvider::JsonFeed(provider) => {
+                let snapshot = provider.refresh(request.now);
+                (
+                    provider.fields(&snapshot),
+                    snapshot.refreshed_at,
+                    snapshot.age,
+                    snapshot.stale,
+                    snapshot.error,
+                )
+            }
+            SystemProvider::Rss(provider) => {
+                let snapshot = provider.refresh(request.now);
+                (
+                    provider.fields(&snapshot),
+                    snapshot.refreshed_at,
+                    snapshot.age,
+                    snapshot.stale,
+                    snapshot.error,
+                )
+            }
+        };
+        ProviderRefreshResult {
             generation: request.generation,
             widget_id: request.widget_id,
-            fields: entry.provider.fields(&snapshot, request.now),
-            refreshed_at: snapshot.refreshed_at,
-            age: snapshot.age,
-            stale: snapshot.stale,
-            error: snapshot.error,
+            fields,
+            refreshed_at,
+            age,
+            stale,
+            error,
         }
     }
 }
 
-fn system_provider(
-    request: &CalendarRefreshRequest,
-) -> IcsProvider<providers::ics::SystemIcsLoader> {
-    let source = match &request.source {
-        CalendarSource::File(path) => IcsSource::File(PathBuf::from(path)),
-        CalendarSource::Url(url) => IcsSource::Url(url.clone()),
-    };
-    IcsProvider::system(
-        source,
-        CalendarOptions {
-            default_timezone: request.timezone,
-            display_timezone: request.timezone,
-            refresh_interval: request.refresh_interval,
+fn system_provider(request: &ProviderRefreshRequest) -> SystemProvider {
+    match &request.provider {
+        ProviderRequest::Calendar {
+            source,
+            timezone,
+            refresh_interval,
+        } => {
+            let source = match source {
+                CalendarSource::File(path) => IcsSource::File(PathBuf::from(path)),
+                CalendarSource::Url(url) => IcsSource::Url(url.clone()),
+            };
+            SystemProvider::Calendar(IcsProvider::system(
+                source,
+                CalendarOptions {
+                    default_timezone: *timezone,
+                    display_timezone: *timezone,
+                    refresh_interval: *refresh_interval,
+                    title: request.title.clone(),
+                    ..CalendarOptions::default()
+                },
+            ))
+        }
+        ProviderRequest::Weather {
+            location,
+            units,
+            refresh_interval,
+        } => SystemProvider::Weather(WeatherProvider::system(WeatherOptions {
+            location: location.clone(),
+            units: match units {
+                WeatherUnits::Metric => ProviderWeatherUnits::Metric,
+                WeatherUnits::Imperial => ProviderWeatherUnits::Imperial,
+            },
+            refresh_interval: *refresh_interval,
             title: request.title.clone(),
-            ..CalendarOptions::default()
-        },
-    )
+        })),
+        ProviderRequest::JsonFeed {
+            url,
+            mappings,
+            refresh_interval,
+        } => SystemProvider::JsonFeed(JsonFeedProvider::system(JsonFeedOptions {
+            url: url.clone(),
+            mappings: mappings
+                .iter()
+                .map(|mapping| ProviderJsonMapping {
+                    field: mapping.field.clone(),
+                    path: mapping.path.clone(),
+                })
+                .collect(),
+            refresh_interval: *refresh_interval,
+            title: request.title.clone(),
+        })),
+        ProviderRequest::Rss {
+            url,
+            maximum_items,
+            refresh_interval,
+        } => SystemProvider::Rss(RssProvider::system(RssOptions {
+            url: url.clone(),
+            maximum_items: usize::from(*maximum_items),
+            refresh_interval: *refresh_interval,
+            title: request.title.clone(),
+        })),
+    }
 }
+
+pub type CalendarRefreshRequest = ProviderRefreshRequest;
+pub type CalendarRefreshResult = ProviderRefreshResult;
+pub use ProviderRefresher as CalendarRefresher;
+pub type SystemCalendarRefresher = SystemProviderRefresher;
 
 struct ProviderWorker {
     sender: Option<SyncSender<CalendarRefreshRequest>>,
     receiver: Receiver<CalendarRefreshResult>,
+    stopping: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
 }
 
+#[derive(Debug)]
 enum ProviderSubmitError {
     Full,
     Disconnected,
 }
 
 impl ProviderWorker {
-    fn new(
-        mut refresher: Box<dyn CalendarRefresher>,
-        capacity: usize,
-        diagnostics: Arc<RuntimeDiagnosticCounters>,
-    ) -> Self {
+    fn new(mut refresher: Box<dyn CalendarRefresher>, capacity: usize) -> Self {
         let (sender, request_receiver) = mpsc::sync_channel(capacity.max(1));
-        let (result_sender, receiver) = mpsc::sync_channel(capacity.max(1));
+        // At most one result can exist per in-flight provider, so this channel is
+        // already logically bounded by the configured provider count. Dropping a
+        // completed result would otherwise leave that provider marked in-flight.
+        let (result_sender, receiver) = mpsc::channel();
+        let stopping = Arc::new(AtomicBool::new(false));
+        let worker_stopping = Arc::clone(&stopping);
         let worker = thread::Builder::new()
             .name("deskmate-provider".into())
             .spawn(move || {
                 while let Ok(request) = request_receiver.recv() {
+                    if worker_stopping.load(Ordering::Acquire) {
+                        break;
+                    }
                     let result = refresher.refresh(request);
-                    match result_sender.try_send(result) {
-                        Ok(()) => {}
-                        Err(mpsc::TrySendError::Full(_)) => {
-                            diagnostics
-                                .provider_results_discarded
-                                .fetch_add(1, Ordering::Relaxed);
-                        }
-                        Err(mpsc::TrySendError::Disconnected(_)) => break,
+                    if result_sender.send(result).is_err() {
+                        break;
                     }
                 }
             })
@@ -298,6 +434,7 @@ impl ProviderWorker {
         Self {
             sender: Some(sender),
             receiver,
+            stopping,
             worker: Some(worker),
         }
     }
@@ -320,6 +457,7 @@ impl ProviderWorker {
 
 impl Drop for ProviderWorker {
     fn drop(&mut self) {
+        self.stopping.store(true, Ordering::Release);
         self.sender.take();
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
@@ -492,7 +630,7 @@ impl RuntimeHandle {
         options: RuntimeOptions,
     ) -> Result<Self, RuntimeError> {
         config
-            .validate()
+            .compile(1)
             .map_err(|error| RuntimeError::InvalidConfig {
                 issues: error.issues,
             })?;
@@ -547,7 +685,7 @@ impl RuntimeHandle {
 
     pub fn apply_config(&self, config: AppConfig) -> Result<(), RuntimeError> {
         config
-            .validate()
+            .compile(1)
             .map_err(|error| RuntimeError::InvalidConfig {
                 issues: error.issues,
             })?;
@@ -556,6 +694,14 @@ impl RuntimeHandle {
 
     pub fn set_paused(&self, paused: bool) -> Result<(), RuntimeError> {
         self.request(|reply| RuntimeCommand::SetPaused { paused, reply })
+    }
+
+    pub fn set_autostart_preference(&self, enabled: bool) -> Result<(), RuntimeError> {
+        self.request(|reply| RuntimeCommand::SetAutostartPreference { enabled, reply })
+    }
+
+    pub fn set_persistence_state(&self, persistence: PersistenceState) -> Result<(), RuntimeError> {
+        self.request(|reply| RuntimeCommand::SetPersistenceState { persistence, reply })
     }
 
     pub fn control_pomodoro(
@@ -651,7 +797,7 @@ impl Drop for RuntimeHandle {
     }
 }
 
-struct CalendarRuntimeState {
+struct ProviderRuntimeState {
     generation: u64,
     in_flight: bool,
     snapshot: ProviderSnapshot,
@@ -667,10 +813,15 @@ struct WorkerState {
     dirty_widgets: BTreeSet<String>,
     pomodoros: BTreeMap<String, Pomodoro>,
     pomodoro_snapshots: BTreeMap<String, PomodoroSnapshot>,
-    calendars: BTreeMap<String, CalendarRuntimeState>,
+    providers: BTreeMap<String, ProviderRuntimeState>,
     interrupts: InterruptArbiter,
+    /// Card ID -> unix-ms start of the event a `CardAlert::BeforeEvent` trigger
+    /// last fired for, so repeated provider refreshes inside the same lead
+    /// window do not re-fire. See `evaluate_event_alert`.
+    armed_event_alerts: BTreeMap<String, i64>,
     active_screen: Option<String>,
     active_screen_dirty: bool,
+    active_rotation_index: usize,
     connected: bool,
     ever_connected: bool,
     needs_full_sync: bool,
@@ -690,10 +841,12 @@ impl WorkerState {
             dirty_widgets: BTreeSet::new(),
             pomodoros: BTreeMap::new(),
             pomodoro_snapshots: BTreeMap::new(),
-            calendars: BTreeMap::new(),
+            providers: BTreeMap::new(),
             interrupts: InterruptArbiter::default(),
+            armed_event_alerts: BTreeMap::new(),
             active_screen: None,
             active_screen_dirty: false,
+            active_rotation_index: 0,
             connected: false,
             ever_connected: false,
             needs_full_sync: true,
@@ -707,14 +860,26 @@ impl WorkerState {
     }
 
     fn replace_config(&mut self, config: AppConfig, now: Instant, scheduler: &mut Scheduler) {
+        let previous_config = self.config.clone();
+        let previous_active_screen = self.active_screen.clone();
+        let mut previous_fields = std::mem::take(&mut self.latest_fields);
+        let mut previous_pomodoros = std::mem::take(&mut self.pomodoros);
+        let mut previous_providers = std::mem::take(&mut self.providers);
         self.generation = self.generation.saturating_add(1);
         self.config = config;
-        self.latest_fields.clear();
         self.dirty_widgets.clear();
-        self.pomodoros.clear();
         self.pomodoro_snapshots.clear();
-        self.calendars.clear();
-        self.interrupts.clear_for_config_replacement();
+        // Owned, not borrowed: `prune_alert_state_for_live_widgets` needs
+        // `&mut self`, which cannot coexist with a set still borrowing from
+        // `self.config`.
+        let live_widget_ids: BTreeSet<String> = self
+            .config
+            .cards
+            .iter()
+            .filter(|card| !card.presence().is_off())
+            .map(|card| card.id().to_owned())
+            .collect();
+        self.prune_alert_state_for_live_widgets(&live_widget_ids, scheduler, now);
 
         let compiled = self
             .config
@@ -724,56 +889,71 @@ impl WorkerState {
             self.latest_fields.insert(push.widget_id, push.fields);
         }
 
-        let mut calendar_deadlines = Vec::new();
-        for widget in &self.config.widgets {
-            match widget {
-                WidgetSettings::Pomodoro {
+        let mut provider_deadlines = Vec::new();
+        let cards: Vec<CardSettings> = self
+            .config
+            .cards
+            .iter()
+            .filter(|card| !card.presence().is_off())
+            .cloned()
+            .collect();
+        for card in &cards {
+            match card {
+                CardSettings::Pomodoro {
                     id,
                     label,
                     duration_seconds,
                     ..
                 } => {
-                    let timer = Pomodoro::new(label, *duration_seconds)
-                        .expect("validated pomodoro duration");
-                    self.pomodoro_snapshots.insert(
-                        id.clone(),
-                        PomodoroSnapshot {
-                            widget_id: id.clone(),
-                            state: PomodoroState::Idle,
-                            duration_seconds: *duration_seconds,
-                            remaining_seconds: *duration_seconds,
-                        },
-                    );
-                    self.pomodoros.insert(id.clone(), timer);
-                }
-                WidgetSettings::Calendar {
-                    id,
-                    refresh_minutes,
-                    ..
-                } => {
-                    let interval = Duration::from_secs(u64::from(*refresh_minutes) * 60);
-                    calendar_deadlines.push((id.clone(), interval));
-                    self.calendars.insert(
-                        id.clone(),
-                        CalendarRuntimeState {
-                            generation: self.generation,
-                            in_flight: false,
-                            snapshot: ProviderSnapshot {
-                                widget_id: id.clone(),
-                                state: ProviderState::Idle,
-                                last_success_unix_ms: None,
-                                age_seconds: None,
-                            },
-                        },
+                    self.restore_pomodoro(
+                        id,
+                        label,
+                        *duration_seconds,
+                        &mut previous_pomodoros,
+                        now,
+                        scheduler,
                     );
                 }
-                WidgetSettings::Clock { .. } => {}
+                CardSettings::Calendar { id, refresh, .. }
+                | CardSettings::Weather { id, refresh, .. }
+                | CardSettings::JsonFeed { id, refresh, .. }
+                | CardSettings::Rss { id, refresh, .. } => {
+                    let interval = refresh
+                        .interval_minutes()
+                        .map(|minutes| Duration::from_secs(u64::from(minutes) * 60));
+                    provider_deadlines.push((id.clone(), interval));
+                    let unchanged = previous_config
+                        .cards
+                        .iter()
+                        .any(|previous| previous == card);
+                    self.restore_provider(
+                        id,
+                        unchanged,
+                        &mut previous_fields,
+                        &mut previous_providers,
+                    );
+                }
+                CardSettings::Clock { .. } => {}
             }
         }
-        scheduler.replace_calendars(calendar_deadlines, now);
-        self.active_screen = self.config.screens.first().map(|screen| screen.id.clone());
+        scheduler.replace_providers(provider_deadlines, now);
+        self.active_screen = previous_active_screen
+            .filter(|active| {
+                self.config
+                    .cards
+                    .iter()
+                    .any(|card| card.presence().is_in_rotation() && card.id() == active)
+            })
+            .or_else(|| {
+                self.config
+                    .cards
+                    .iter()
+                    .find(|card| card.presence().is_in_rotation())
+                    .map(|card| card.id().to_owned())
+            });
         self.device.active_screen_id.clone_from(&self.active_screen);
         self.active_screen_dirty = self.active_screen.is_some();
+        self.rearm_rotation_for_active_screen(scheduler, now);
         self.needs_full_sync = true;
         self.runtime = if self.config.preferences.paused {
             RuntimeState::Paused
@@ -782,17 +962,155 @@ impl WorkerState {
         };
     }
 
+    /// Prunes every piece of alert-related state keyed to a widget that is no
+    /// longer live: the interrupt arbiter's tracked interrupts (existing,
+    /// pre-Task-6 behavior), the calendar dedup map, and the scheduler's
+    /// event-alert-check deadlines (Task 6). Also fixes Task 6 review
+    /// Critical-1's second half: the alert hold is keyed to a specific
+    /// interrupt token (see `sync_alert_hold_to_active_interrupt`'s doc
+    /// comment for why), so it must be resynced whenever pruning changes
+    /// *who* is active — but left untouched otherwise, so an unrelated config
+    /// edit that leaves the active interrupt's widget live does not reset its
+    /// in-flight countdown.
+    fn prune_alert_state_for_live_widgets(
+        &mut self,
+        live_widget_ids: &BTreeSet<String>,
+        scheduler: &mut Scheduler,
+        now: Instant,
+    ) {
+        let active_token_before_prune = self
+            .interrupts
+            .active()
+            .map(|tracked| tracked.message.token);
+        self.interrupts
+            .retain_widgets(|widget_id| live_widget_ids.contains(widget_id));
+        let active_token_after_prune = self
+            .interrupts
+            .active()
+            .map(|tracked| tracked.message.token);
+        if active_token_before_prune != active_token_after_prune {
+            sync_alert_hold_to_active_interrupt(self, scheduler, now);
+        }
+        self.armed_event_alerts
+            .retain(|card_id, _| live_widget_ids.contains(card_id.as_str()));
+        scheduler.retain_event_alert_checks(|card_id| live_widget_ids.contains(card_id));
+    }
+
+    /// Dwell is per-card: arm the deadline from whichever card ended up
+    /// active (the preserved screen if it is still in rotation, otherwise the
+    /// first in-rotation card), not blindly from index 0.
+    ///
+    /// Called from `replace_config`, i.e. at config install time, which runs
+    /// before the device connects. The clock therefore starts on the boot
+    /// (or newly-applied) card's dwell immediately, not from first connect;
+    /// on a slow first connect the boot card can end up on screen for less
+    /// than its configured dwell. Noted, not restructured — connect is
+    /// normally fast and this only shortens one card's first showing.
+    fn rearm_rotation_for_active_screen(&mut self, scheduler: &mut Scheduler, now: Instant) {
+        let rotation_ids = rotation_card_ids(&self.config);
+        self.active_rotation_index = self
+            .active_screen
+            .as_ref()
+            .and_then(|active| rotation_ids.iter().position(|id| id == active))
+            .unwrap_or(0);
+        scheduler.set_rotation(current_dwell(&self.config, self.active_rotation_index), now);
+    }
+
+    fn restore_pomodoro(
+        &mut self,
+        id: &str,
+        label: &str,
+        duration_seconds: u32,
+        previous: &mut BTreeMap<String, Pomodoro>,
+        now: Instant,
+        scheduler: &mut Scheduler,
+    ) {
+        let mut timer = previous
+            .remove(id)
+            .filter(|timer| timer.matches_settings(label, duration_seconds))
+            .unwrap_or_else(|| {
+                Pomodoro::new(label, duration_seconds).expect("validated pomodoro duration")
+            });
+        let update = timer.update(now);
+        self.latest_fields.insert(id.into(), update.fields);
+        self.pomodoro_snapshots.insert(
+            id.into(),
+            PomodoroSnapshot {
+                widget_id: id.into(),
+                state: pomodoro_state(update.state),
+                duration_seconds: update.duration_seconds,
+                remaining_seconds: update.remaining_seconds,
+            },
+        );
+        if update.completion_interrupt
+            && card_wants_completion_interrupt(&self.config, id)
+            && let Ok(trigger) = self.interrupts.schedule(id, "Timer finished")
+        {
+            arm_alert_hold_if_active(
+                &self.interrupts,
+                scheduler,
+                trigger.token,
+                card_alert(&self.config, id).hold(),
+                now,
+            );
+        }
+        self.pomodoros.insert(id.into(), timer);
+    }
+
+    fn restore_provider(
+        &mut self,
+        id: &str,
+        unchanged: bool,
+        previous_fields: &mut BTreeMap<String, Vec<Field>>,
+        previous_providers: &mut BTreeMap<String, ProviderRuntimeState>,
+    ) {
+        let provider = if unchanged {
+            if let Some(fields) = previous_fields.remove(id) {
+                self.latest_fields.insert(id.into(), fields);
+            }
+            previous_providers.remove(id).map_or_else(
+                || self.empty_provider(id),
+                |mut provider| {
+                    provider.generation = self.generation;
+                    provider.in_flight = false;
+                    provider
+                },
+            )
+        } else {
+            self.empty_provider(id)
+        };
+        self.providers.insert(id.into(), provider);
+    }
+
+    fn empty_provider(&self, id: &str) -> ProviderRuntimeState {
+        ProviderRuntimeState {
+            generation: self.generation,
+            in_flight: false,
+            snapshot: ProviderSnapshot {
+                widget_id: id.into(),
+                state: ProviderState::Idle,
+                last_success_unix_ms: None,
+                age_seconds: None,
+            },
+        }
+    }
+
     fn snapshot(&self, diagnostics: &RuntimeDiagnosticCounters) -> AppSnapshot {
         AppSnapshot {
             config: self.config.clone(),
             runtime: self.runtime.clone(),
             device: self.device.clone(),
             providers: self
-                .calendars
+                .providers
                 .values()
-                .map(|calendar| calendar.snapshot.clone())
+                .map(|provider| provider.snapshot.clone())
                 .collect(),
             pomodoros: self.pomodoro_snapshots.values().cloned().collect(),
+            card_data: self
+                .latest_fields
+                .iter()
+                .map(|(card_id, fields)| CardDataSnapshot::from_protocol(card_id, fields))
+                .collect(),
             persistence: self.persistence.clone(),
             diagnostics: diagnostics.snapshot(),
         }
@@ -808,6 +1126,57 @@ impl WorkerState {
             publisher.publish(&snapshot);
             self.last_published = Some(snapshot);
         }
+    }
+}
+
+/// In-rotation card IDs, in card order. Screen IDs equal card IDs (see
+/// `AppConfig::compile`), so this doubles as the rotation's screen order.
+fn rotation_card_ids(config: &AppConfig) -> Vec<String> {
+    config
+        .cards
+        .iter()
+        .filter(|card| card.presence().is_in_rotation())
+        .map(|card| card.id().to_owned())
+        .collect()
+}
+
+/// The dwell for the in-rotation card at `index`, resolved against the
+/// carousel's default. Returns `None` under `CarouselAdvance::Manual`, which
+/// is what keeps the rotation deadline disarmed in manual mode.
+fn current_dwell(config: &AppConfig, index: usize) -> Option<Duration> {
+    let default = config.carousel.advance.default_dwell_seconds()?;
+    let card = config
+        .cards
+        .iter()
+        .filter(|card| card.presence().is_in_rotation())
+        .nth(index)?;
+    card.presence()
+        .dwell_seconds(default)
+        .map(|seconds| Duration::from_secs(u64::from(seconds)))
+}
+
+/// Advances the rotation by one step (wrapping) and queues the resulting
+/// screen through the existing `active_screen_dirty` flush path, then
+/// re-arms the deadline from the card just moved to, since dwell is per-card.
+/// With fewer than two in-rotation cards there is nothing to rotate to, so the
+/// deadline is disarmed instead of waking the loop again for a no-op; the next
+/// config replace re-evaluates it (see `WorkerState::replace_config`).
+fn advance_rotation(state: &mut WorkerState, scheduler: &mut Scheduler, now: Instant) {
+    let ids = rotation_card_ids(&state.config);
+    if ids.len() > 1 {
+        state.active_rotation_index = (state.active_rotation_index + 1) % ids.len();
+        state.active_screen = Some(ids[state.active_rotation_index].clone());
+        state
+            .device
+            .active_screen_id
+            .clone_from(&state.active_screen);
+        state.active_screen_dirty = true;
+        scheduler.set_rotation(
+            current_dwell(&state.config, state.active_rotation_index),
+            now,
+        );
+    } else {
+        scheduler.clear_rotation();
     }
 }
 
@@ -828,11 +1197,7 @@ fn run_runtime(
         options.time_sync_interval,
     );
     let mut state = WorkerState::new(config, now, &mut scheduler);
-    let provider = ProviderWorker::new(
-        refresher,
-        options.provider_job_capacity,
-        Arc::clone(&publisher.diagnostics),
-    );
+    let provider = ProviderWorker::new(refresher, options.provider_job_capacity);
     state.publish_if_changed(publisher, diagnostics);
 
     let mut shutting_down = false;
@@ -845,9 +1210,7 @@ fn run_runtime(
                     &mut state,
                     &mut scheduler,
                     device.as_mut(),
-                    &provider,
                     diagnostics,
-                    &options,
                 );
                 while !shutting_down {
                     let Ok(command) = command_receiver.try_recv() else {
@@ -858,9 +1221,7 @@ fn run_runtime(
                         &mut state,
                         &mut scheduler,
                         device.as_mut(),
-                        &provider,
                         diagnostics,
-                        &options,
                     );
                 }
             }
@@ -871,12 +1232,12 @@ fn run_runtime(
             break;
         }
 
-        drain_provider_results(&mut state, &provider, diagnostics);
         let now = Instant::now();
+        drain_provider_results(&mut state, &mut scheduler, &provider, diagnostics, now);
         if !state.connected && now >= state.next_connect {
             attempt_connect(&mut state, device.as_mut(), now, &options);
         }
-        drain_device_events(&mut state, device.as_mut(), now);
+        drain_device_events(&mut state, &mut scheduler, device.as_mut(), now);
         run_scheduled_work(
             &mut state,
             &mut scheduler,
@@ -893,26 +1254,25 @@ fn run_runtime(
     publisher.close();
 }
 
-#[allow(clippy::too_many_arguments)]
 fn process_command(
     command: RuntimeCommand,
     state: &mut WorkerState,
     scheduler: &mut Scheduler,
     device: &mut dyn RuntimeDevice,
-    _provider: &ProviderWorker,
     diagnostics: &RuntimeDiagnosticCounters,
-    _options: &RuntimeOptions,
 ) -> bool {
     diagnostics
         .commands_processed
         .fetch_add(1, Ordering::Relaxed);
     match command {
         RuntimeCommand::ApplyConfig { config, reply } => {
-            let result = config
-                .validate()
-                .map_err(|error| RuntimeError::InvalidConfig {
-                    issues: error.issues,
-                });
+            let result =
+                config
+                    .compile(1)
+                    .map(|_| ())
+                    .map_err(|error| RuntimeError::InvalidConfig {
+                        issues: error.issues,
+                    });
             let result = result.and_then(|()| {
                 state.replace_config(config, Instant::now(), scheduler);
                 if state.connected && !state.config.preferences.paused {
@@ -937,17 +1297,28 @@ fn process_command(
             };
             let _ = reply.send(result);
         }
+        RuntimeCommand::SetAutostartPreference { enabled, reply } => {
+            state.config.preferences.autostart = enabled;
+            let _ = reply.send(Ok(()));
+        }
+        RuntimeCommand::SetPersistenceState { persistence, reply } => {
+            state.persistence = persistence;
+            let _ = reply.send(Ok(()));
+        }
         RuntimeCommand::Pomodoro {
             widget_id,
             action,
             reply,
         } => {
-            let result = control_pomodoro(state, device, &widget_id, action, Instant::now());
+            let result =
+                control_pomodoro(state, scheduler, device, &widget_id, action, Instant::now());
             let _ = reply.send(result);
         }
         RuntimeCommand::RefreshProvider { widget_id, reply } => {
-            let result = if state.calendars.contains_key(&widget_id) {
-                scheduler.schedule_calendar_now(&widget_id, Instant::now());
+            let result = if let Some(provider) = state.providers.get(&widget_id) {
+                if !provider.in_flight {
+                    scheduler.schedule_provider_now(&widget_id, Instant::now());
+                }
                 Ok(())
             } else {
                 Err(RuntimeError::UnknownWidget { widget_id })
@@ -955,15 +1326,16 @@ fn process_command(
             let _ = reply.send(result);
         }
         RuntimeCommand::ActivateScreen { screen_id, reply } => {
-            let result = if state
-                .config
-                .screens
-                .iter()
-                .any(|screen| screen.id == screen_id)
-            {
+            let ids = rotation_card_ids(&state.config);
+            let result = if let Some(index) = ids.iter().position(|id| *id == screen_id) {
                 state.active_screen = Some(screen_id.clone());
                 state.device.active_screen_id = Some(screen_id.clone());
                 state.active_screen_dirty = true;
+                // An explicit activation is a manual override, same as a physical
+                // swipe: restart the dwell from the card just landed on instead of
+                // advancing early from wherever rotation last left off.
+                state.active_rotation_index = index;
+                scheduler.set_rotation(current_dwell(&state.config, index), Instant::now());
                 if state.connected && !state.config.preferences.paused {
                     send_screen(state, device)
                 } else {
@@ -1029,7 +1401,55 @@ fn run_scheduled_work(
     options: &RuntimeOptions,
 ) {
     if scheduler.pomodoro_due(now) {
-        update_pomodoros(state, now);
+        update_pomodoros(state, scheduler, now);
+    }
+    // Deliberate: this sits above the `!paused` guard below, so rotation keeps
+    // advancing locally while paused, exactly like pomodoro ticks above. Pausing
+    // gates device synchronization (see the guards later in this function and in
+    // `synchronize_pending`), not local state. A long pause therefore lets rotation
+    // drift, and resuming jumps the panel to wherever it drifted to; this mirrors
+    // existing pomodoro behavior rather than introducing a new inconsistency.
+    // Pinned by `rotation_advances_locally_while_paused_mirroring_pomodoro_ticks`.
+    if scheduler.rotation_due(now) {
+        advance_rotation(state, scheduler, now);
+    }
+    // Same locally-always-advances rationale as rotation above: the hold is a
+    // local deadline on the arbiter's active interrupt, independent of device
+    // connectivity or pause. Dismissing it just changes local state; the actual
+    // device push (if connected) happens through the normal sync path below via
+    // `active_screen_dirty` and `flush_interrupts`.
+    //
+    // KNOWN LIMITATION (protocol v1): this only frees the host's arbiter slot
+    // and re-sends the saved screen id (see `send_screen` below); the device
+    // does not clear the interrupt overlay itself until the user taps it, so
+    // host and device interrupt state can diverge until the next tap or a
+    // full resync (see `arm_alert_hold`'s doc comment for the full picture).
+    if let Some(token) = scheduler.alert_hold_due(now)
+        && state.interrupts.dismiss(token).is_ok()
+    {
+        state.active_screen_dirty = true;
+        sync_alert_hold_to_active_interrupt(state, scheduler, now);
+    }
+    // Re-evaluates every calendar card's `CardAlert::BeforeEvent` trigger on
+    // its own wake, independent of whether a provider refresh happens to land
+    // inside the lead window (Task 6 review Important-3: with the migration
+    // default 5-minute lead and any refresh interval above that, relying on
+    // `apply_provider_result` alone missed most windows — e.g. a 15-minute
+    // refresh interval landing at 8 minutes out, then again after the event
+    // started, never once lands inside a 5-minute window).
+    for card_id in scheduler.due_event_alert_cards(now) {
+        if let CardAlert::BeforeEvent { lead_minutes, hold } = card_alert(&state.config, &card_id) {
+            let now_unix_ms = Utc::now().timestamp_millis();
+            refresh_calendar_alert(
+                state,
+                scheduler,
+                &card_id,
+                lead_minutes,
+                hold,
+                now,
+                now_unix_ms,
+            );
+        }
     }
     if !state.config.preferences.paused {
         submit_due_providers(
@@ -1081,37 +1501,37 @@ fn submit_due_providers(
     now: Instant,
     retry: Duration,
 ) {
-    for widget_id in scheduler.due_calendars(now) {
+    for widget_id in scheduler.due_providers(now) {
         if state
-            .calendars
+            .providers
             .get(&widget_id)
-            .is_none_or(|calendar| calendar.in_flight)
+            .is_none_or(|provider| provider.in_flight)
         {
             continue;
         }
-        let Some(request) = calendar_request(state, &widget_id) else {
+        let Some(request) = provider_request(state, &widget_id) else {
             continue;
         };
         match provider.try_submit(request) {
             Ok(()) => {
-                if let Some(calendar) = state.calendars.get_mut(&widget_id) {
-                    calendar.in_flight = true;
-                    calendar.snapshot.state = ProviderState::Refreshing;
+                if let Some(provider) = state.providers.get_mut(&widget_id) {
+                    provider.in_flight = true;
+                    provider.snapshot.state = ProviderState::Refreshing;
                 }
                 diagnostics
                     .provider_jobs_started
                     .fetch_add(1, Ordering::Relaxed);
-                scheduler.calendar_started(&widget_id, now);
+                scheduler.provider_started(&widget_id, now);
             }
             Err(ProviderSubmitError::Full) => {
                 diagnostics
                     .provider_queue_full
                     .fetch_add(1, Ordering::Relaxed);
-                scheduler.calendar_retry(&widget_id, now, retry);
+                scheduler.provider_retry(&widget_id, now, retry);
             }
             Err(ProviderSubmitError::Disconnected) => {
-                if let Some(calendar) = state.calendars.get_mut(&widget_id) {
-                    calendar.snapshot.state = ProviderState::Error {
+                if let Some(provider) = state.providers.get_mut(&widget_id) {
+                    provider.snapshot.state = ProviderState::Error {
                         message: "provider worker stopped".into(),
                     };
                 }
@@ -1120,73 +1540,167 @@ fn submit_due_providers(
     }
 }
 
-fn calendar_request(state: &WorkerState, widget_id: &str) -> Option<CalendarRefreshRequest> {
-    state.config.widgets.iter().find_map(|widget| match widget {
-        WidgetSettings::Calendar {
+fn provider_request(state: &WorkerState, widget_id: &str) -> Option<ProviderRefreshRequest> {
+    let active_provider_ids: Vec<String> = state.providers.keys().cloned().collect();
+    let timezone = state.config.preferences.timezone.parse().ok()?;
+    state.config.cards.iter().find_map(|widget| match widget {
+        CardSettings::Calendar {
             id,
             title,
             source,
-            refresh_minutes,
+            refresh,
             ..
-        } if id == widget_id => Some(CalendarRefreshRequest {
+        } if id == widget_id => Some(ProviderRefreshRequest {
             generation: state.generation,
             widget_id: id.clone(),
-            source: source.clone(),
-            timezone: state.config.preferences.timezone.parse().ok()?,
             title: title.clone(),
-            refresh_interval: Duration::from_secs(u64::from(*refresh_minutes) * 60),
+            provider: ProviderRequest::Calendar {
+                source: source.clone(),
+                timezone,
+                refresh_interval: refresh_interval(*refresh),
+            },
+            active_provider_ids: active_provider_ids.clone(),
+            now: Utc::now(),
+        }),
+        CardSettings::Weather {
+            id,
+            title,
+            location,
+            units,
+            refresh,
+            ..
+        } if id == widget_id => Some(ProviderRefreshRequest {
+            generation: state.generation,
+            widget_id: id.clone(),
+            title: title.clone(),
+            provider: ProviderRequest::Weather {
+                location: location.clone(),
+                units: *units,
+                refresh_interval: refresh_interval(*refresh),
+            },
+            active_provider_ids: active_provider_ids.clone(),
+            now: Utc::now(),
+        }),
+        CardSettings::JsonFeed {
+            id,
+            title,
+            url,
+            mappings,
+            refresh,
+            ..
+        } if id == widget_id => Some(ProviderRefreshRequest {
+            generation: state.generation,
+            widget_id: id.clone(),
+            title: title.clone(),
+            provider: ProviderRequest::JsonFeed {
+                url: url.clone(),
+                mappings: mappings.clone(),
+                refresh_interval: refresh_interval(*refresh),
+            },
+            active_provider_ids: active_provider_ids.clone(),
+            now: Utc::now(),
+        }),
+        CardSettings::Rss {
+            id,
+            title,
+            url,
+            max_items,
+            refresh,
+            ..
+        } if id == widget_id => Some(ProviderRefreshRequest {
+            generation: state.generation,
+            widget_id: id.clone(),
+            title: title.clone(),
+            provider: ProviderRequest::Rss {
+                url: url.clone(),
+                maximum_items: *max_items,
+                refresh_interval: refresh_interval(*refresh),
+            },
+            active_provider_ids: active_provider_ids.clone(),
             now: Utc::now(),
         }),
         _ => None,
     })
 }
 
+fn refresh_interval(policy: crate::RefreshPolicy) -> Duration {
+    Duration::from_secs(u64::from(policy.interval_minutes().unwrap_or(1_440)) * 60)
+}
+
 fn drain_provider_results(
     state: &mut WorkerState,
+    scheduler: &mut Scheduler,
     provider: &ProviderWorker,
     diagnostics: &RuntimeDiagnosticCounters,
+    now: Instant,
 ) {
     while let Ok(result) = provider.try_recv() {
-        let Some(calendar) = state.calendars.get_mut(&result.widget_id) else {
-            diagnostics
-                .provider_results_discarded
-                .fetch_add(1, Ordering::Relaxed);
-            continue;
-        };
-        if result.generation != calendar.generation || result.generation != state.generation {
-            diagnostics
-                .provider_results_discarded
-                .fetch_add(1, Ordering::Relaxed);
-            continue;
-        }
-        calendar.in_flight = false;
-        calendar.snapshot = ProviderSnapshot {
-            widget_id: result.widget_id.clone(),
-            state: match (result.stale, &result.error, result.refreshed_at) {
-                (false, None, _) => ProviderState::Fresh,
-                (true, Some(message), Some(_)) => ProviderState::Stale {
-                    message: message.clone(),
-                },
-                (true, None, _) => ProviderState::Stale {
-                    message: "provider data is stale".into(),
-                },
-                (_, Some(message), None) | (false, Some(message), Some(_)) => {
-                    ProviderState::Error {
-                        message: message.clone(),
-                    }
-                }
-            },
-            last_success_unix_ms: result.refreshed_at.map(|time| time.timestamp_millis()),
-            age_seconds: result.age.map(|age| age.as_secs()),
-        };
-        state
-            .latest_fields
-            .insert(result.widget_id.clone(), result.fields);
-        state.dirty_widgets.insert(result.widget_id);
+        apply_provider_result(state, scheduler, diagnostics, now, result);
     }
 }
 
-fn update_pomodoros(state: &mut WorkerState, now: Instant) {
+/// Applies one completed provider refresh: projects it into the provider's
+/// snapshot/fields, then (calendar cards only) re-evaluates the card's
+/// `CardAlert::BeforeEvent` trigger — this is one of two places that
+/// happens, the other being the scheduler-driven tick in `run_scheduled_work`
+/// that catches the lead window opening between refreshes (see
+/// `refresh_calendar_alert`).
+fn apply_provider_result(
+    state: &mut WorkerState,
+    scheduler: &mut Scheduler,
+    diagnostics: &RuntimeDiagnosticCounters,
+    now: Instant,
+    result: ProviderRefreshResult,
+) {
+    let Some(provider_state) = state.providers.get_mut(&result.widget_id) else {
+        diagnostics
+            .provider_results_discarded
+            .fetch_add(1, Ordering::Relaxed);
+        return;
+    };
+    if result.generation != provider_state.generation || result.generation != state.generation {
+        diagnostics
+            .provider_results_discarded
+            .fetch_add(1, Ordering::Relaxed);
+        return;
+    }
+    provider_state.in_flight = false;
+    provider_state.snapshot = ProviderSnapshot {
+        widget_id: result.widget_id.clone(),
+        state: match (result.stale, &result.error, result.refreshed_at) {
+            (false, None, _) => ProviderState::Fresh,
+            (true, Some(message), Some(_)) => ProviderState::Stale {
+                message: message.clone(),
+            },
+            (true, None, _) => ProviderState::Stale {
+                message: "provider data is stale".into(),
+            },
+            (_, Some(message), None) | (false, Some(message), Some(_)) => ProviderState::Error {
+                message: message.clone(),
+            },
+        },
+        last_success_unix_ms: result.refreshed_at.map(|time| time.timestamp_millis()),
+        age_seconds: result.age.map(|age| age.as_secs()),
+    };
+    let widget_id = result.widget_id;
+    state.latest_fields.insert(widget_id.clone(), result.fields);
+    state.dirty_widgets.insert(widget_id.clone());
+
+    if let CardAlert::BeforeEvent { lead_minutes, hold } = card_alert(&state.config, &widget_id) {
+        let now_unix_ms = Utc::now().timestamp_millis();
+        refresh_calendar_alert(
+            state,
+            scheduler,
+            &widget_id,
+            lead_minutes,
+            hold,
+            now,
+            now_unix_ms,
+        );
+    }
+}
+
+fn update_pomodoros(state: &mut WorkerState, scheduler: &mut Scheduler, now: Instant) {
     let ids: Vec<String> = state.pomodoros.keys().cloned().collect();
     for widget_id in ids {
         let Some(timer) = state.pomodoros.get_mut(&widget_id) else {
@@ -1207,14 +1721,26 @@ fn update_pomodoros(state: &mut WorkerState, now: Instant) {
                 remaining_seconds: update.remaining_seconds,
             },
         );
-        if update.completion_interrupt {
-            let _ = state.interrupts.schedule(widget_id, "Timer finished");
+        if update.completion_interrupt
+            && card_wants_completion_interrupt(&state.config, &widget_id)
+            && let Ok(trigger) = state
+                .interrupts
+                .schedule(widget_id.clone(), "Timer finished")
+        {
+            arm_alert_hold_if_active(
+                &state.interrupts,
+                scheduler,
+                trigger.token,
+                card_alert(&state.config, &widget_id).hold(),
+                now,
+            );
         }
     }
 }
 
 fn control_pomodoro(
     state: &mut WorkerState,
+    scheduler: &mut Scheduler,
     device: &mut dyn RuntimeDevice,
     widget_id: &str,
     action: PomodoroAction,
@@ -1242,13 +1768,20 @@ fn control_pomodoro(
             remaining_seconds: update.remaining_seconds,
         },
     );
-    if update.completion_interrupt {
-        state
+    if update.completion_interrupt && card_wants_completion_interrupt(&state.config, widget_id) {
+        let trigger = state
             .interrupts
             .schedule(widget_id, "Timer finished")
             .map_err(|error| RuntimeError::Device {
                 message: error.to_string(),
             })?;
+        arm_alert_hold_if_active(
+            &state.interrupts,
+            scheduler,
+            trigger.token,
+            card_alert(&state.config, widget_id).hold(),
+            now,
+        );
     }
     if state.connected && !state.config.preferences.paused {
         push_dirty_widgets(state, device)?;
@@ -1257,12 +1790,248 @@ fn control_pomodoro(
     Ok(())
 }
 
-fn drain_device_events(state: &mut WorkerState, device: &mut dyn RuntimeDevice, now: Instant) {
+/// The configured alert for a card, or `CardAlert::None` if the card is
+/// unknown (e.g. it was removed from config between scheduling and firing).
+fn card_alert(config: &AppConfig, widget_id: &str) -> CardAlert {
+    config
+        .cards
+        .iter()
+        .find(|card| card.id() == widget_id)
+        .map_or(CardAlert::None, CardSettings::alert)
+}
+
+/// A pomodoro's completion only becomes a host-triggered interrupt when its
+/// card is configured to alert specifically on timer finish. `CardAlert::None`
+/// never fires, and `CardAlert::BeforeEvent` is a calendar-only trigger (see
+/// `is_event_alert_due`) that a pomodoro's completion can never satisfy, even
+/// if config validation somehow let it slip through. Config validation
+/// forbids that combination (`BeforeEvent` is calendar-only), so this
+/// narrowing from Task 2's original "any configured alert" gate is only
+/// observable on a config built directly rather than through
+/// `AppConfig::compile`/`apply_config` — see
+/// `card_wants_completion_interrupt_rejects_before_event_even_on_a_pomodoro_card`,
+/// which constructs exactly that and fails under the old, wider gate.
+fn card_wants_completion_interrupt(config: &AppConfig, widget_id: &str) -> bool {
+    matches!(
+        card_alert(config, widget_id),
+        CardAlert::OnTimerFinish { .. }
+    )
+}
+
+/// Arms the scheduler's bounded alert-hold deadline for `token`, but only if
+/// `token` actually is (or, via promotion, has become) the arbiter's *active*
+/// interrupt — a Pending interrupt does not run a deadline of its own; one is
+/// armed for it only once it is promoted to Active (see
+/// `sync_alert_hold_to_active_interrupt`). This guard, and keying the hold to
+/// a specific token in the first place, is what fixes Task 6 review
+/// Critical-1: a single unkeyed, unconditionally-armed hold let scheduling
+/// *any* interrupt (including one that landed Pending) clobber the deadline
+/// belonging to a *different*, already-Active interrupt — auto-dismissing an
+/// `UntilDismissed` alert early, or silently losing a bounded alert's
+/// deadline entirely.
+///
+/// `AlertHold::Seconds` arms an absolute deadline; `AlertHold::UntilDismissed`
+/// (or no hold at all) disarms it.
+///
+/// KNOWN LIMITATION (protocol v1): expiring this deadline only frees the
+/// host's arbiter slot for the next alert and re-syncs the saved carousel
+/// screen id host-side (see the `alert_hold_due` handling in
+/// `run_scheduled_work`). Per `docs/protocol/v1.md`'s `ActivateScreen`
+/// section and firmware's `protocol_task.c` (`show_carousel_screen` is
+/// skipped whenever an interrupt is active), the *device* keeps the
+/// interrupt overlay on screen regardless — it is cleared only by an
+/// on-device tap. So a bounded hold does not visually clear the panel, and
+/// dismissing host-side while the device still shows the overlay leaves host
+/// and device interrupt state diverged (the device still expects a tap; a
+/// further host-triggered alert can be rejected `Busy` by the device even
+/// though the host arbiter believes its slot is free) until the next tap or a
+/// full resync. There is no wire message to tell the device to clear an
+/// interrupt without a tap; fixing that is a protocol/spec decision, not a
+/// code fix, and is out of scope here.
+fn arm_alert_hold(scheduler: &mut Scheduler, token: u32, hold: Option<AlertHold>, now: Instant) {
+    let deadline = match hold {
+        Some(AlertHold::Seconds { value }) => Some(now + Duration::from_secs(u64::from(value))),
+        Some(AlertHold::UntilDismissed) | None => None,
+    };
+    scheduler.set_alert_hold(deadline.map(|deadline| (token, deadline)));
+}
+
+/// See `arm_alert_hold`'s doc comment for the Active-only invariant this
+/// enforces.
+fn arm_alert_hold_if_active(
+    interrupts: &InterruptArbiter,
+    scheduler: &mut Scheduler,
+    token: u32,
+    hold: Option<AlertHold>,
+    now: Instant,
+) {
+    if interrupts
+        .active()
+        .is_some_and(|active| active.message.token == token)
+    {
+        arm_alert_hold(scheduler, token, hold, now);
+    }
+}
+
+/// Recomputes the scheduler's alert-hold deadline from scratch against
+/// whichever interrupt is currently Active: re-arms it (fresh, from `now`)
+/// from that interrupt's own card's configured hold if one is active, or
+/// clears it entirely if none is. Callers only invoke this when the active
+/// interrupt has actually just changed — after a dismissal promotes (or
+/// fails to promote) a Pending interrupt, or after config replacement prunes
+/// the previously-active interrupt's widget — never on every call, since
+/// recomputing unconditionally would reset an unrelated, still-active
+/// interrupt's in-flight countdown on every unrelated event.
+fn sync_alert_hold_to_active_interrupt(
+    state: &WorkerState,
+    scheduler: &mut Scheduler,
+    now: Instant,
+) {
+    match state.interrupts.active() {
+        Some(active) => {
+            let hold = card_alert(&state.config, &active.message.widget_id).hold();
+            arm_alert_hold(scheduler, active.message.token, hold, now);
+        }
+        None => scheduler.set_alert_hold(None),
+    }
+}
+
+/// Reads a calendar card's machine-readable next-event start
+/// (`IcsCalendar::fields`'s `next_start_unix_ms`) out of its latest pushed
+/// fields. `0` means "no upcoming event" and is treated as absent, matching
+/// the provider's documented sentinel.
+fn next_event_start_unix_ms(state: &WorkerState, card_id: &str) -> Option<i64> {
+    let fields = state.latest_fields.get(card_id)?;
+    fields.iter().find_map(|field| {
+        if field.key != "next_start_unix_ms" {
+            return None;
+        }
+        match field.value {
+            FieldValue::Integer(unix_ms) if unix_ms != 0 => Some(unix_ms),
+            _ => None,
+        }
+    })
+}
+
+/// Read-only eligibility check for a `CardAlert::BeforeEvent` trigger:
+/// `Some(start_unix_ms)` when that start is strictly in the future, within
+/// `lead_minutes` of `now_unix_ms`, and is not already the start this card
+/// last fired for; `None` otherwise (outside the window, no known event, or
+/// already armed for this exact start). Does **not** mutate
+/// `armed_event_alerts` itself — see `refresh_calendar_alert`, which only
+/// records a start as armed after `InterruptArbiter::schedule` actually
+/// succeeds. (Task 6 review Important-4: the previous version marked the
+/// start armed unconditionally before checking whether `schedule` succeeded,
+/// so a transient `Busy` — both arbiter slots already occupied — silently and
+/// *permanently* dropped the alert for that event, since the dedup check then
+/// always saw it as already armed.)
+fn is_event_alert_due(
+    state: &WorkerState,
+    card_id: &str,
+    lead_minutes: u16,
+    now_unix_ms: i64,
+) -> Option<i64> {
+    let start_unix_ms = next_event_start_unix_ms(state, card_id)?;
+    let lead_ms = i64::from(lead_minutes) * 60_000;
+    let within_window = start_unix_ms > now_unix_ms && start_unix_ms - now_unix_ms <= lead_ms;
+    if !within_window {
+        return None;
+    }
+    if state.armed_event_alerts.get(card_id) == Some(&start_unix_ms) {
+        return None;
+    }
+    Some(start_unix_ms)
+}
+
+/// The delay in milliseconds (always `> 0`) until this card's lead window is
+/// expected to open, based on its currently cached `next_start_unix_ms`, or
+/// `None` if there's nothing to wait for — no known future event, or the
+/// window is already open/past, both of which the caller already handled
+/// synchronously in the same call via `is_event_alert_due`.
+fn next_event_alert_check_delay_ms(
+    state: &WorkerState,
+    card_id: &str,
+    lead_minutes: u16,
+    now_unix_ms: i64,
+) -> Option<i64> {
+    let start_unix_ms = next_event_start_unix_ms(state, card_id)?;
+    let lead_ms = i64::from(lead_minutes) * 60_000;
+    let boundary_unix_ms = start_unix_ms - lead_ms;
+    let offset_ms = boundary_unix_ms - now_unix_ms;
+    (offset_ms > 0).then_some(offset_ms)
+}
+
+/// Re-evaluates a calendar card's `CardAlert::BeforeEvent` trigger against
+/// its currently cached next-event start, firing it if eligible, then
+/// (re-)schedules the scheduler wake needed to catch the lead window opening
+/// even without a fresh provider refresh landing inside it.
+///
+/// Called from two places: `apply_provider_result`, the instant fresh field
+/// data lands, and a scheduler tick in `run_scheduled_work` driven by the
+/// deadline this function itself sets. The second call site is the fix for
+/// Task 6 review Important-3: relying on provider-result landings alone (as
+/// originally specified) meant the trigger could miss its entire lead window
+/// whenever no refresh happened to land inside it — e.g. a 15-minute refresh
+/// interval against a 5-minute lead window, refreshing 8 minutes before the
+/// event and again after it started, never once observes the window.
+fn refresh_calendar_alert(
+    state: &mut WorkerState,
+    scheduler: &mut Scheduler,
+    card_id: &str,
+    lead_minutes: u16,
+    hold: AlertHold,
+    now: Instant,
+    now_unix_ms: i64,
+) {
+    if let Some(start_unix_ms) = is_event_alert_due(state, card_id, lead_minutes, now_unix_ms)
+        && let Ok(trigger) = state.interrupts.schedule(card_id, "Event starting soon")
+    {
+        // Only mark this event start armed once the interrupt actually landed
+        // in the arbiter — see `is_event_alert_due`'s doc comment.
+        state
+            .armed_event_alerts
+            .insert(card_id.to_owned(), start_unix_ms);
+        arm_alert_hold_if_active(&state.interrupts, scheduler, trigger.token, Some(hold), now);
+    }
+    let deadline = next_event_alert_check_delay_ms(state, card_id, lead_minutes, now_unix_ms)
+        .map(|offset_ms| now + Duration::from_millis(u64::try_from(offset_ms).unwrap_or(0)));
+    scheduler.set_event_alert_deadline(card_id, deadline);
+}
+
+fn drain_device_events(
+    state: &mut WorkerState,
+    scheduler: &mut Scheduler,
+    device: &mut dyn RuntimeDevice,
+    now: Instant,
+) {
     while let Some(received) = device.try_recv_event() {
         match (received.event.kind, received.event.action) {
+            (EventKind::Navigation, EventAction::NavigatePrevious | EventAction::NavigateNext) => {
+                let ids = rotation_card_ids(&state.config);
+                if let Some(index) = ids.iter().position(|id| *id == received.event.screen_id) {
+                    state.active_screen = Some(received.event.screen_id.clone());
+                    state
+                        .device
+                        .active_screen_id
+                        .clone_from(&state.active_screen);
+                    // The gesture already changed the physical display. Remember it for
+                    // future replay without issuing a redundant activation now.
+                    state.active_screen_dirty = false;
+                    // A manual swipe restarts the dwell from the card just landed on,
+                    // rather than letting a soon-to-expire deadline advance early.
+                    // With a single in-rotation card this still re-arms unconditionally
+                    // (current_dwell can return Some for that lone card), so the
+                    // deadline fires once more and `advance_rotation` immediately
+                    // disarms it again via `clear_rotation` — one harmless extra
+                    // wake-and-clear cycle, not a leak.
+                    state.active_rotation_index = index;
+                    scheduler.set_rotation(current_dwell(&state.config, index), now);
+                }
+            }
             (EventKind::Tap, EventAction::StartPause) => {
                 let _ = control_pomodoro(
                     state,
+                    scheduler,
                     device,
                     &received.event.widget_id,
                     PomodoroAction::Toggle,
@@ -1272,6 +2041,7 @@ fn drain_device_events(state: &mut WorkerState, device: &mut dyn RuntimeDevice, 
             (EventKind::Tap, EventAction::Reset) => {
                 let _ = control_pomodoro(
                     state,
+                    scheduler,
                     device,
                     &received.event.widget_id,
                     PomodoroAction::Reset,
@@ -1279,8 +2049,15 @@ fn drain_device_events(state: &mut WorkerState, device: &mut dyn RuntimeDevice, 
                 );
             }
             (EventKind::InterruptDismissed, EventAction::DismissInterrupt) => {
-                if let Some(token) = received.event.interrupt_token {
-                    let _ = state.interrupts.dismiss(token);
+                if let Some(token) = received.event.interrupt_token
+                    && state.interrupts.dismiss(token).is_ok()
+                {
+                    // A dismissal may promote a Pending interrupt to Active; the
+                    // hold belongs to a specific token (see `arm_alert_hold`'s
+                    // doc comment), so it must be re-armed from whichever
+                    // interrupt is active now, not left pointing at the token
+                    // that just left.
+                    sync_alert_hold_to_active_interrupt(state, scheduler, now);
                 }
             }
             _ => {}
@@ -1299,7 +2076,11 @@ fn synchronize_full(
         .compile(1)
         .expect("runtime config remains validated");
     device
-        .apply_layout(compiled.layout.widgets, compiled.layout.screens)
+        .apply_layout(
+            compiled.layout.rotation,
+            compiled.layout.widgets,
+            compiled.layout.screens,
+        )
         .map_err(|error| device_runtime_error(&error))?;
     state.dirty_widgets = state.latest_fields.keys().cloned().collect();
     push_dirty_widgets(state, device)?;
@@ -1469,10 +2250,23 @@ fn update_device_status(
     device: &dyn RuntimeDevice,
 ) {
     let diagnostics = device.diagnostics();
+    // The dedicated field is additive in M3. Revisions provide a safe monotonic floor
+    // when talking to an older v1 image that omits it: interrupt tokens and revisions
+    // are all nonzero u32 counters, and starting higher is always accepted.
+    state.interrupts.advance_latest_token(
+        status
+            .latest_interrupt_token
+            .max(status.latest_revision)
+            .max(status.config_revision),
+    );
     state.device.connection = ConnectionState::Online;
     state.device.port_name = Some(port_name.into());
     state.device.firmware_version = Some(status.firmware_version.clone());
     state.device.protocol_version = Some(status.protocol_version);
+    state.device.max_protocol_version = Some(status.max_protocol_version);
+    state.device.capabilities = crate::DeviceCapability::from_bits(status.capabilities);
+    state.device.unknown_capability_bits =
+        status.capabilities & !crate::DeviceCapability::known_bits();
     state.device.uptime_ms = Some(status.uptime_ms);
     state.device.free_heap = Some(status.free_heap);
     state.device.rotation = Some(status.rotation);
@@ -1505,15 +2299,9 @@ fn pomodoro_state(state: EnginePomodoroState) -> PomodoroState {
 fn initial_snapshot(config: &AppConfig, diagnostics: RuntimeDiagnostics) -> AppSnapshot {
     let mut providers = Vec::new();
     let mut pomodoros = Vec::new();
-    for widget in &config.widgets {
-        match widget {
-            WidgetSettings::Calendar { id, .. } => providers.push(ProviderSnapshot {
-                widget_id: id.clone(),
-                state: ProviderState::Idle,
-                last_success_unix_ms: None,
-                age_seconds: None,
-            }),
-            WidgetSettings::Pomodoro {
+    for card in config.cards.iter().filter(|card| !card.presence().is_off()) {
+        match card {
+            CardSettings::Pomodoro {
                 id,
                 duration_seconds,
                 ..
@@ -1523,18 +2311,32 @@ fn initial_snapshot(config: &AppConfig, diagnostics: RuntimeDiagnostics) -> AppS
                 duration_seconds: *duration_seconds,
                 remaining_seconds: *duration_seconds,
             }),
-            WidgetSettings::Clock { .. } => {}
+            CardSettings::Calendar { id, .. }
+            | CardSettings::Weather { id, .. }
+            | CardSettings::JsonFeed { id, .. }
+            | CardSettings::Rss { id, .. } => providers.push(ProviderSnapshot {
+                widget_id: id.clone(),
+                state: ProviderState::Idle,
+                last_success_unix_ms: None,
+                age_seconds: None,
+            }),
+            CardSettings::Clock { .. } => {}
         }
     }
     AppSnapshot {
         config: config.clone(),
         runtime: RuntimeState::Starting,
         device: DeviceSnapshot {
-            active_screen_id: config.screens.first().map(|screen| screen.id.clone()),
+            active_screen_id: config
+                .cards
+                .iter()
+                .find(|card| card.presence().is_in_rotation())
+                .map(|card| card.id().to_owned()),
             ..empty_device(ConnectionState::Connecting)
         },
         providers,
         pomodoros,
+        card_data: Vec::new(),
         persistence: PersistenceState::Clean,
         diagnostics,
     }
@@ -1546,10 +2348,1318 @@ fn empty_device(connection: ConnectionState) -> DeviceSnapshot {
         port_name: None,
         firmware_version: None,
         protocol_version: None,
+        max_protocol_version: None,
+        capabilities: Vec::new(),
+        unknown_capability_bits: 0,
         uptime_ms: None,
         free_heap: None,
         rotation: None,
         active_screen_id: None,
         counters: DeviceCounters::default(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        AlertHold, CardAlert, CardPresence, CarouselAdvance, CarouselSettings, DisplayTemplate,
+        RefreshPolicy, WidgetTapAction,
+    };
+
+    struct ImmediateRefresher {
+        completed: mpsc::Sender<()>,
+    }
+
+    impl ProviderRefresher for ImmediateRefresher {
+        fn refresh(&mut self, request: ProviderRefreshRequest) -> ProviderRefreshResult {
+            self.completed.send(()).unwrap();
+            ProviderRefreshResult {
+                generation: request.generation,
+                widget_id: request.widget_id,
+                fields: Vec::new(),
+                refreshed_at: Some(request.now),
+                age: Some(Duration::ZERO),
+                stale: false,
+                error: None,
+            }
+        }
+    }
+
+    fn provider_request(widget_id: &str) -> ProviderRefreshRequest {
+        ProviderRefreshRequest {
+            generation: 1,
+            widget_id: widget_id.into(),
+            title: widget_id.into(),
+            provider: ProviderRequest::Calendar {
+                source: CalendarSource::File("unused.ics".into()),
+                timezone: Tz::UTC,
+                refresh_interval: Duration::from_mins(1),
+            },
+            active_provider_ids: Vec::new(),
+            now: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn completed_provider_results_are_never_dropped_under_backpressure() {
+        let (completed_sender, completed_receiver) = mpsc::channel();
+        let worker = ProviderWorker::new(
+            Box::new(ImmediateRefresher {
+                completed: completed_sender,
+            }),
+            1,
+        );
+
+        for widget_id in ["one", "two", "three"] {
+            worker.try_submit(provider_request(widget_id)).unwrap();
+            completed_receiver
+                .recv_timeout(Duration::from_secs(1))
+                .unwrap();
+        }
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let mut completed_ids = Vec::new();
+        while completed_ids.len() < 3 && Instant::now() < deadline {
+            match worker.try_recv() {
+                Ok(result) => completed_ids.push(result.widget_id),
+                Err(TryRecvError::Empty) => thread::yield_now(),
+                Err(TryRecvError::Disconnected) => break,
+            }
+        }
+        assert_eq!(completed_ids, ["one", "two", "three"]);
+    }
+
+    // -- Rotation (Task 5) ---------------------------------------------------
+    //
+    // These are the pure/instant counterparts of the single real-time rotation test
+    // in `tests/runtime.rs`. They call `current_dwell`, `rotation_card_ids`,
+    // `advance_rotation`, `drain_device_events`, and `process_command` directly, so
+    // they run in well under a millisecond instead of sleeping out real dwells.
+
+    fn rotation_clock_card(id: &str, presence: CardPresence) -> CardSettings {
+        CardSettings::Clock {
+            id: id.into(),
+            title: id.into(),
+            show_seconds: true,
+            template: DisplayTemplate::DigitalClock,
+            tap_action: WidgetTapAction::None,
+            refresh: RefreshPolicy::DeviceLocal,
+            presence,
+            alert: CardAlert::None,
+        }
+    }
+
+    fn rotation_pomodoro_card(id: &str, presence: CardPresence, alert: CardAlert) -> CardSettings {
+        CardSettings::Pomodoro {
+            id: id.into(),
+            label: id.into(),
+            duration_seconds: 60,
+            template: DisplayTemplate::ProgressRing,
+            tap_action: WidgetTapAction::None,
+            refresh: RefreshPolicy::DeviceLocal,
+            presence,
+            alert,
+        }
+    }
+
+    fn alert_calendar_card(id: &str, alert: CardAlert) -> CardSettings {
+        CardSettings::Calendar {
+            id: id.into(),
+            title: id.into(),
+            source: CalendarSource::File("unused.ics".into()),
+            template: DisplayTemplate::RowList,
+            tap_action: WidgetTapAction::None,
+            refresh: RefreshPolicy::Manual,
+            presence: CardPresence::InRotation {
+                dwell_seconds: None,
+            },
+            alert,
+        }
+    }
+
+    /// Two in-rotation cards, 5s dwell each, `Timed` advance with a 45s default that
+    /// neither card should ever need (both set an explicit dwell).
+    fn timed_two_card_config() -> AppConfig {
+        AppConfig {
+            carousel: CarouselSettings {
+                advance: CarouselAdvance::Timed {
+                    default_dwell_seconds: 45,
+                },
+            },
+            cards: vec![
+                rotation_clock_card(
+                    "a",
+                    CardPresence::InRotation {
+                        dwell_seconds: Some(5),
+                    },
+                ),
+                rotation_clock_card(
+                    "b",
+                    CardPresence::InRotation {
+                        dwell_seconds: Some(5),
+                    },
+                ),
+            ],
+            ..AppConfig::default()
+        }
+    }
+
+    /// Two in-rotation cards with an alert-only card sandwiched between them at the
+    /// card-list position that would sit at rotation index 2 if index resolution ever
+    /// (incorrectly) walked *all* cards instead of only in-rotation ones. `rotation_card_ids`
+    /// is `["a", "c"]`; card "c" sits at list position 2 but rotation index 1.
+    fn timed_config_with_alert_only_between_two_in_rotation_cards() -> AppConfig {
+        AppConfig {
+            carousel: CarouselSettings {
+                advance: CarouselAdvance::Timed {
+                    default_dwell_seconds: 45,
+                },
+            },
+            cards: vec![
+                rotation_clock_card(
+                    "a",
+                    CardPresence::InRotation {
+                        dwell_seconds: Some(5),
+                    },
+                ),
+                rotation_pomodoro_card(
+                    "b",
+                    CardPresence::AlertOnly,
+                    CardAlert::OnTimerFinish {
+                        hold: AlertHold::UntilDismissed,
+                    },
+                ),
+                rotation_clock_card(
+                    "c",
+                    CardPresence::InRotation {
+                        dwell_seconds: Some(5),
+                    },
+                ),
+            ],
+            ..AppConfig::default()
+        }
+    }
+
+    /// A `RuntimeDevice` stub for unit tests that never connect: every call other than
+    /// `try_recv_event` is unreachable in these tests (they keep `state.connected ==
+    /// false`, so the runtime never calls into the device), and `try_recv_event`
+    /// optionally yields one queued event before returning `None` forever after.
+    #[derive(Default)]
+    struct StubDevice {
+        queued_event: Option<ReceivedEvent>,
+    }
+
+    impl RuntimeDevice for StubDevice {
+        fn connect(&mut self) -> Result<DeviceConnection, DeviceError> {
+            unreachable!("stub device is never connected in these unit tests")
+        }
+        fn status(&mut self) -> Result<StatusResponse, DeviceError> {
+            unreachable!("stub device is never connected in these unit tests")
+        }
+        fn time_sync(&mut self, _sync: TimeSync) -> Result<(), DeviceError> {
+            unreachable!("stub device is never connected in these unit tests")
+        }
+        fn apply_layout(
+            &mut self,
+            _rotation: u16,
+            _widgets: Vec<WidgetConfig>,
+            _screens: Vec<ScreenConfig>,
+        ) -> Result<(), DeviceError> {
+            unreachable!("stub device is never connected in these unit tests")
+        }
+        fn push_fields(
+            &mut self,
+            _widget_id: String,
+            _fields: Vec<Field>,
+        ) -> Result<(), DeviceError> {
+            unreachable!("stub device is never connected in these unit tests")
+        }
+        fn activate_screen(&mut self, _screen_id: String) -> Result<(), DeviceError> {
+            unreachable!("stub device is never connected in these unit tests")
+        }
+        fn trigger_interrupt(&mut self, _interrupt: TriggerInterrupt) -> Result<(), DeviceError> {
+            unreachable!("stub device is never connected in these unit tests")
+        }
+        fn try_recv_event(&mut self) -> Option<ReceivedEvent> {
+            self.queued_event.take()
+        }
+        fn diagnostics(&self) -> SessionDiagnostics {
+            SessionDiagnostics::default()
+        }
+    }
+
+    fn navigation_event(screen_id: &str) -> ReceivedEvent {
+        ReceivedEvent {
+            event: protocol::DeviceEvent {
+                sequence: 1,
+                kind: EventKind::Navigation,
+                widget_id: screen_id.into(),
+                screen_id: screen_id.into(),
+                action: EventAction::NavigateNext,
+                interrupt_token: None,
+            },
+            missed_before: 0,
+        }
+    }
+
+    fn interrupt_dismissed_event(widget_id: &str, token: u32) -> ReceivedEvent {
+        ReceivedEvent {
+            event: protocol::DeviceEvent {
+                sequence: 1,
+                kind: EventKind::InterruptDismissed,
+                widget_id: widget_id.into(),
+                screen_id: widget_id.into(),
+                action: EventAction::DismissInterrupt,
+                interrupt_token: Some(token),
+            },
+            missed_before: 0,
+        }
+    }
+
+    // F1: under `CarouselAdvance::Manual`, no rotation deadline is ever armed. This
+    // isolates the exact regression the reviewer flagged: if `current_dwell` stopped
+    // propagating `CarouselAdvance::default_dwell_seconds()`'s `None` (e.g. a `?` was
+    // dropped and a dwell hardcoded instead), this fails immediately.
+    #[test]
+    fn current_dwell_is_none_under_manual_advance() {
+        let config = AppConfig {
+            carousel: CarouselSettings {
+                advance: CarouselAdvance::Manual,
+            },
+            ..AppConfig::default()
+        };
+        assert!(current_dwell(&config, 0).is_none());
+        // Manual disarms regardless of which in-rotation card index is asked about.
+        let two_card = timed_two_card_config();
+        let mut manual_two_card = two_card;
+        manual_two_card.carousel.advance = CarouselAdvance::Manual;
+        assert!(current_dwell(&manual_two_card, 0).is_none());
+        assert!(current_dwell(&manual_two_card, 1).is_none());
+    }
+
+    // F2: dwell is resolved per-card against the carousel default, not the other way
+    // around. Uses the brief's own example: an explicit dwell wins over the default,
+    // and an absent one falls back to it. If `current_dwell` ever ignored the card's own
+    // `dwell_seconds` (always returning the carousel default) or ignored the carousel
+    // default (returning `None` when the card leaves it unset), this fails.
+    #[test]
+    fn current_dwell_resolves_each_cards_own_value_before_falling_back_to_the_default() {
+        let config = AppConfig {
+            carousel: CarouselSettings {
+                advance: CarouselAdvance::Timed {
+                    default_dwell_seconds: 45,
+                },
+            },
+            cards: vec![
+                rotation_clock_card(
+                    "explicit",
+                    CardPresence::InRotation {
+                        dwell_seconds: Some(10),
+                    },
+                ),
+                rotation_clock_card(
+                    "defaulted",
+                    CardPresence::InRotation {
+                        dwell_seconds: None,
+                    },
+                ),
+            ],
+            ..AppConfig::default()
+        };
+        assert_eq!(current_dwell(&config, 0), Some(Duration::from_secs(10)));
+        assert_eq!(current_dwell(&config, 1), Some(Duration::from_secs(45)));
+    }
+
+    // F2 (continued): `advance_rotation` walks `rotation_card_ids` in order, wraps at
+    // the end, and skips alert-only/off cards. Also exercises re-arming with each
+    // card's own dwell as the index moves.
+    #[test]
+    fn advance_rotation_walks_in_rotation_cards_in_order_and_wraps() {
+        let now = Instant::now();
+        let mut config = timed_two_card_config();
+        config.cards.push(rotation_pomodoro_card(
+            "alert-only",
+            CardPresence::AlertOnly,
+            CardAlert::OnTimerFinish {
+                hold: AlertHold::UntilDismissed,
+            },
+        ));
+        config
+            .cards
+            .push(rotation_clock_card("off", CardPresence::Off));
+        let mut scheduler = Scheduler::new(
+            now,
+            Duration::from_hours(1),
+            Duration::from_hours(1),
+            Duration::from_hours(1),
+        );
+        let mut state = WorkerState::new(config, now, &mut scheduler);
+        assert_eq!(state.active_rotation_index, 0);
+        assert_eq!(state.active_screen.as_deref(), Some("a"));
+
+        advance_rotation(&mut state, &mut scheduler, now);
+        assert_eq!(state.active_rotation_index, 1);
+        assert_eq!(state.active_screen.as_deref(), Some("b"));
+        assert!(state.active_screen_dirty);
+
+        state.active_screen_dirty = false;
+        advance_rotation(&mut state, &mut scheduler, now);
+        assert_eq!(
+            state.active_rotation_index, 0,
+            "wraps back to the first card"
+        );
+        assert_eq!(state.active_screen.as_deref(), Some("a"));
+        assert!(state.active_screen_dirty);
+    }
+
+    // F2 (continued): with fewer than two in-rotation cards there is nothing to
+    // rotate to, so `advance_rotation` disarms the deadline instead of activating
+    // anything.
+    #[test]
+    fn advance_rotation_disarms_with_fewer_than_two_in_rotation_cards() {
+        let now = Instant::now();
+        let config = AppConfig {
+            carousel: CarouselSettings {
+                advance: CarouselAdvance::Timed {
+                    default_dwell_seconds: 5,
+                },
+            },
+            ..AppConfig::default()
+        };
+        let mut scheduler = Scheduler::new(
+            now,
+            Duration::from_hours(1),
+            Duration::from_hours(1),
+            Duration::from_hours(1),
+        );
+        let mut state = WorkerState::new(config, now, &mut scheduler);
+        state.active_screen_dirty = false;
+        advance_rotation(&mut state, &mut scheduler, now);
+        assert!(!state.active_screen_dirty, "nothing to rotate to");
+        assert!(!scheduler.rotation_due(now + Duration::from_hours(1)));
+    }
+
+    // F3a: a local swipe resolves the reported screen's index within
+    // `rotation_card_ids` (the in-rotation-only order), not its position among all
+    // cards, and re-arms the dwell from the card it landed on. The alert-only card "b"
+    // sits between "a" and "c" in the card list, so "c" is at list position 2 but
+    // rotation index 1 — the exact case that distinguishes correct index resolution
+    // from a regression that walks `config.cards` directly.
+    #[test]
+    fn local_swipe_resolves_the_index_within_rotation_ids_and_rearms_the_dwell() {
+        let now = Instant::now();
+        let config = timed_config_with_alert_only_between_two_in_rotation_cards();
+        let mut scheduler = Scheduler::new(
+            now,
+            Duration::from_hours(1),
+            Duration::from_hours(1),
+            Duration::from_hours(1),
+        );
+        let mut state = WorkerState::new(config, now, &mut scheduler);
+        let mut device = StubDevice {
+            queued_event: Some(navigation_event("c")),
+        };
+
+        drain_device_events(&mut state, &mut scheduler, &mut device, now);
+
+        assert_eq!(
+            state.active_rotation_index, 1,
+            "\"c\" is rotation index 1 (within [\"a\", \"c\"]), not list position 2"
+        );
+        assert_eq!(state.active_screen.as_deref(), Some("c"));
+        // Re-armed from "c"'s own 5s dwell, not left over from "a".
+        assert!(!scheduler.rotation_due(now + Duration::from_secs(4)));
+        assert!(scheduler.rotation_due(now + Duration::from_secs(5)));
+    }
+
+    // F3b: the same index-resolution and re-arm behavior applies to an explicit
+    // `RuntimeCommand::ActivateScreen` (the IPC-driven manual activation), which is a
+    // manual override just like a swipe.
+    #[test]
+    fn explicit_activate_command_resolves_the_index_within_rotation_ids_and_rearms_the_dwell() {
+        let now = Instant::now();
+        let config = timed_config_with_alert_only_between_two_in_rotation_cards();
+        let mut scheduler = Scheduler::new(
+            now,
+            Duration::from_hours(1),
+            Duration::from_hours(1),
+            Duration::from_hours(1),
+        );
+        let mut state = WorkerState::new(config, now, &mut scheduler);
+        let mut device = StubDevice::default();
+        let diagnostics = RuntimeDiagnosticCounters::default();
+        let (reply_sender, reply_receiver) = mpsc::sync_channel(1);
+        let before = Instant::now();
+
+        let shutting_down = process_command(
+            RuntimeCommand::ActivateScreen {
+                screen_id: "c".into(),
+                reply: reply_sender,
+            },
+            &mut state,
+            &mut scheduler,
+            &mut device,
+            &diagnostics,
+        );
+
+        assert!(!shutting_down);
+        reply_receiver.recv().unwrap().unwrap();
+        assert_eq!(
+            state.active_rotation_index, 1,
+            "\"c\" is rotation index 1 (within [\"a\", \"c\"]), not list position 2"
+        );
+        assert_eq!(state.active_screen.as_deref(), Some("c"));
+        // `process_command`'s `ActivateScreen` arm uses `Instant::now()` internally
+        // (there is no injectable clock in this runtime), so assert with a margin
+        // around the 5s dwell rather than pinning it to `before` exactly.
+        assert!(!scheduler.rotation_due(before + Duration::from_millis(4_500)));
+        assert!(scheduler.rotation_due(before + Duration::from_millis(5_500)));
+    }
+
+    // F5: pins the deliberate decision (see the comment on the `rotation_due` check in
+    // `run_scheduled_work`) that rotation advances locally while paused, mirroring how
+    // pomodoro ticks are never gated by pause. This is not new behavior introduced by
+    // Task 5's rotation feature; it documents and locks in the existing pattern so a
+    // future refactor cannot silently move rotation's guard without a test noticing.
+    #[test]
+    fn rotation_advances_locally_while_paused_mirroring_pomodoro_ticks() {
+        let now = Instant::now();
+        let mut config = timed_two_card_config();
+        config.preferences.paused = true;
+        let mut scheduler = Scheduler::new(
+            now,
+            Duration::from_hours(1),
+            Duration::from_hours(1),
+            Duration::from_hours(1),
+        );
+        let mut state = WorkerState::new(config, now, &mut scheduler);
+        assert!(state.config.preferences.paused);
+        assert!(!state.connected);
+
+        let mut device = StubDevice::default();
+        let diagnostics = RuntimeDiagnosticCounters::default();
+        let provider = ProviderWorker::new(
+            Box::new(ImmediateRefresher {
+                completed: mpsc::channel().0,
+            }),
+            1,
+        );
+        let options = RuntimeOptions::default();
+
+        run_scheduled_work(
+            &mut state,
+            &mut scheduler,
+            &mut device,
+            &provider,
+            &diagnostics,
+            now + Duration::from_secs(5),
+            &options,
+        );
+
+        assert_eq!(
+            state.active_rotation_index, 1,
+            "rotation advances locally even while paused and disconnected"
+        );
+        assert!(
+            state.active_screen_dirty,
+            "queued for the device, not yet sent"
+        );
+    }
+
+    // -- Alert triggers and hold (Task 6) ------------------------------------
+    //
+    // Instant unit tests for the trigger-kind narrowing, the bounded hold
+    // deadline (including the token-keyed active/pending scoping fixed by the
+    // Task 6 code review's Critical-1), and the calendar `BeforeEvent`
+    // trigger's once-per-event-start dedup and tick-driven re-evaluation
+    // (Important-3/4). Each calls the private helpers/functions directly with
+    // synthetic `Instant`s, so none of them sleep. The one wall-clock proof
+    // that the hold deadline reaches a real device via the full `run_runtime`
+    // loop lives in `tests/runtime.rs`.
+
+    fn fresh_scheduler(now: Instant) -> Scheduler {
+        Scheduler::new(
+            now,
+            Duration::from_hours(1),
+            Duration::from_hours(1),
+            Duration::from_hours(1),
+        )
+    }
+
+    // Task 2 gated a pomodoro's completion interrupt on "any configured alert".
+    // Task 6 narrows that to `CardAlert::OnTimerFinish` specifically. This is the
+    // positive half of that narrowing (the negative half, `alert: none`, is
+    // already pinned by `pomodoro_completion_without_an_alert_does_not_schedule_an_interrupt`
+    // in `tests/runtime.rs`): with two pomodoros completing at the same instant,
+    // only the `OnTimerFinish` card's completion reaches the interrupt arbiter.
+    //
+    // NOTE (Task 6 review Critical-2): this test alone does *not* distinguish
+    // the narrowing from the old, wider Task 2 gate (`!alert.is_none()`) —
+    // `alert: none` vs. `OnTimerFinish` is handled identically by both. See
+    // `card_wants_completion_interrupt_rejects_before_event_even_on_a_pomodoro_card`
+    // below for the input that actually pins the narrowing.
+    #[test]
+    fn only_on_timer_finish_alerts_fire_when_a_pomodoro_completes() {
+        let now = Instant::now();
+        let config = AppConfig {
+            cards: vec![
+                rotation_pomodoro_card(
+                    "quiet",
+                    CardPresence::InRotation {
+                        dwell_seconds: None,
+                    },
+                    CardAlert::None,
+                ),
+                rotation_pomodoro_card(
+                    "loud",
+                    CardPresence::InRotation {
+                        dwell_seconds: None,
+                    },
+                    CardAlert::OnTimerFinish {
+                        hold: AlertHold::UntilDismissed,
+                    },
+                ),
+            ],
+            ..AppConfig::default()
+        };
+        let mut scheduler = fresh_scheduler(now);
+        let mut state = WorkerState::new(config, now, &mut scheduler);
+        state.pomodoros.get_mut("quiet").unwrap().start(now);
+        state.pomodoros.get_mut("loud").unwrap().start(now);
+
+        update_pomodoros(&mut state, &mut scheduler, now + Duration::from_mins(1));
+
+        assert_eq!(
+            state
+                .interrupts
+                .active()
+                .map(|tracked| tracked.message.widget_id.as_str()),
+            Some("loud"),
+            "only the OnTimerFinish card's completion schedules an interrupt"
+        );
+        assert!(state.interrupts.pending().is_none());
+    }
+
+    // Task 6 review Critical-2: config validation forbids `BeforeEvent` on a
+    // pomodoro card, so this exact config could never arrive through
+    // `AppConfig::compile`/`apply_config` — it is constructed directly here,
+    // bypassing validation, as defence-in-depth. It is the *only* input that
+    // actually distinguishes `card_wants_completion_interrupt`'s Task 6 gate
+    // (`matches!(_, CardAlert::OnTimerFinish { .. })`) from Task 2's original,
+    // wider gate (`!alert.is_none()`), which treated `BeforeEvent` as "wants a
+    // completion interrupt" exactly like `OnTimerFinish`. Verified by hand
+    // that reverting the gate to `!card_alert(config, widget_id).is_none()`
+    // makes this assertion fail (all other app-core tests still pass under
+    // that reversion, which is precisely why this dedicated test exists).
+    #[test]
+    fn card_wants_completion_interrupt_rejects_before_event_even_on_a_pomodoro_card() {
+        let config = AppConfig {
+            cards: vec![CardSettings::Pomodoro {
+                id: "p".into(),
+                label: "p".into(),
+                duration_seconds: 60,
+                template: DisplayTemplate::ProgressRing,
+                tap_action: WidgetTapAction::None,
+                refresh: RefreshPolicy::DeviceLocal,
+                presence: CardPresence::InRotation {
+                    dwell_seconds: None,
+                },
+                alert: CardAlert::BeforeEvent {
+                    lead_minutes: 5,
+                    hold: AlertHold::UntilDismissed,
+                },
+            }],
+            ..AppConfig::default()
+        };
+        assert!(!card_wants_completion_interrupt(&config, "p"));
+    }
+
+    // `AlertHold::Seconds` arms an absolute deadline on the scheduler when the
+    // interrupt is scheduled; once `run_scheduled_work` observes that deadline
+    // has passed, it dismisses the active interrupt through the existing
+    // dismissal path (`InterruptArbiter::dismiss`) and marks the screen dirty so
+    // the device resyncs to the saved carousel screen.
+    #[test]
+    fn a_bounded_alert_hold_auto_dismisses_the_active_interrupt_when_it_expires() {
+        let now = Instant::now();
+        let config = AppConfig {
+            cards: vec![rotation_pomodoro_card(
+                "loud",
+                CardPresence::InRotation {
+                    dwell_seconds: None,
+                },
+                CardAlert::OnTimerFinish {
+                    hold: AlertHold::Seconds { value: 30 },
+                },
+            )],
+            ..AppConfig::default()
+        };
+        let mut scheduler = fresh_scheduler(now);
+        let mut state = WorkerState::new(config, now, &mut scheduler);
+        state.pomodoros.get_mut("loud").unwrap().start(now);
+        update_pomodoros(&mut state, &mut scheduler, now + Duration::from_mins(1));
+        assert!(
+            state.interrupts.active().is_some(),
+            "completion scheduled the interrupt"
+        );
+
+        let mut device = StubDevice::default();
+        let diagnostics = RuntimeDiagnosticCounters::default();
+        let provider = ProviderWorker::new(
+            Box::new(ImmediateRefresher {
+                completed: mpsc::channel().0,
+            }),
+            1,
+        );
+        let options = RuntimeOptions::default();
+        state.active_screen_dirty = false;
+
+        // Hold armed at completion time (60s) + 30s = 90s from `now`. One second
+        // before that, the interrupt survives.
+        run_scheduled_work(
+            &mut state,
+            &mut scheduler,
+            &mut device,
+            &provider,
+            &diagnostics,
+            now + Duration::from_secs(89),
+            &options,
+        );
+        assert!(
+            state.interrupts.active().is_some(),
+            "hold has not expired yet"
+        );
+
+        run_scheduled_work(
+            &mut state,
+            &mut scheduler,
+            &mut device,
+            &provider,
+            &diagnostics,
+            now + Duration::from_secs(90),
+            &options,
+        );
+        assert!(
+            state.interrupts.active().is_none(),
+            "hold expired and auto-dismissed the interrupt"
+        );
+        assert!(
+            state.active_screen_dirty,
+            "queued the saved carousel screen for resync"
+        );
+    }
+
+    // The counterpart to the bounded-hold test above: `AlertHold::UntilDismissed`
+    // arms no deadline at all, so `alert_hold_due` never fires and the interrupt
+    // only ever leaves via an explicit device dismissal.
+    #[test]
+    fn an_until_dismissed_alert_hold_never_auto_dismisses() {
+        let now = Instant::now();
+        let config = AppConfig {
+            cards: vec![rotation_pomodoro_card(
+                "loud",
+                CardPresence::InRotation {
+                    dwell_seconds: None,
+                },
+                CardAlert::OnTimerFinish {
+                    hold: AlertHold::UntilDismissed,
+                },
+            )],
+            ..AppConfig::default()
+        };
+        let mut scheduler = fresh_scheduler(now);
+        let mut state = WorkerState::new(config, now, &mut scheduler);
+        state.pomodoros.get_mut("loud").unwrap().start(now);
+        update_pomodoros(&mut state, &mut scheduler, now + Duration::from_mins(1));
+        assert!(state.interrupts.active().is_some());
+
+        let mut device = StubDevice::default();
+        let diagnostics = RuntimeDiagnosticCounters::default();
+        let provider = ProviderWorker::new(
+            Box::new(ImmediateRefresher {
+                completed: mpsc::channel().0,
+            }),
+            1,
+        );
+        let options = RuntimeOptions::default();
+
+        run_scheduled_work(
+            &mut state,
+            &mut scheduler,
+            &mut device,
+            &provider,
+            &diagnostics,
+            now + Duration::from_hours(1),
+            &options,
+        );
+        assert!(
+            state.interrupts.active().is_some(),
+            "AlertHold::UntilDismissed never auto-dismisses"
+        );
+    }
+
+    // Shared setup for the two Critical-1 tests below: a sticky
+    // (`UntilDismissed`) pomodoro alert Active, and a bounded (60s) calendar
+    // alert queued Pending behind it (the arbiter's Active slot is occupied).
+    fn sticky_active_and_bounded_pending_alert(now: Instant) -> (WorkerState, Scheduler) {
+        let config = AppConfig {
+            cards: vec![
+                rotation_pomodoro_card(
+                    "sticky",
+                    CardPresence::InRotation {
+                        dwell_seconds: None,
+                    },
+                    CardAlert::OnTimerFinish {
+                        hold: AlertHold::UntilDismissed,
+                    },
+                ),
+                alert_calendar_card(
+                    "upnext",
+                    CardAlert::BeforeEvent {
+                        lead_minutes: 5,
+                        hold: AlertHold::Seconds { value: 60 },
+                    },
+                ),
+            ],
+            ..AppConfig::default()
+        };
+        let mut scheduler = fresh_scheduler(now);
+        let mut state = WorkerState::new(config, now, &mut scheduler);
+
+        // The sticky pomodoro completes first and becomes Active with no
+        // deadline (UntilDismissed).
+        state.pomodoros.get_mut("sticky").unwrap().start(now);
+        let after_completion = now + Duration::from_mins(1);
+        update_pomodoros(&mut state, &mut scheduler, after_completion);
+        assert_eq!(
+            state
+                .interrupts
+                .active()
+                .map(|tracked| tracked.message.widget_id.as_str()),
+            Some("sticky")
+        );
+
+        // The calendar alert fires next; the Active slot is occupied, so it
+        // queues Pending.
+        let now_unix_ms = Utc::now().timestamp_millis();
+        state.latest_fields.insert(
+            "upnext".into(),
+            vec![Field {
+                key: "next_start_unix_ms".into(),
+                value: FieldValue::Integer(now_unix_ms + 4 * 60_000),
+            }],
+        );
+        refresh_calendar_alert(
+            &mut state,
+            &mut scheduler,
+            "upnext",
+            5,
+            AlertHold::Seconds { value: 60 },
+            after_completion,
+            now_unix_ms,
+        );
+        assert_eq!(
+            state
+                .interrupts
+                .pending()
+                .map(|tracked| tracked.message.widget_id.as_str()),
+            Some("upnext"),
+            "the Active slot is occupied, so the calendar alert queues Pending"
+        );
+
+        (state, scheduler)
+    }
+
+    fn stub_work_harness() -> (
+        StubDevice,
+        RuntimeDiagnosticCounters,
+        ProviderWorker,
+        RuntimeOptions,
+    ) {
+        (
+            StubDevice::default(),
+            RuntimeDiagnosticCounters::default(),
+            ProviderWorker::new(
+                Box::new(ImmediateRefresher {
+                    completed: mpsc::channel().0,
+                }),
+                1,
+            ),
+            RuntimeOptions::default(),
+        )
+    }
+
+    // Task 6 review Critical-1's reproduction: before the fix, a single
+    // unkeyed scheduler deadline was armed unconditionally by whichever
+    // interrupt was scheduled *last* — here, the Pending calendar alert's
+    // 60s — so `run_scheduled_work` auto-dismissed the sticky pomodoro's
+    // *Active* interrupt 60s later, in direct violation of "UntilDismissed
+    // never auto-dismisses". This proves the fix: an hour later, both the
+    // sticky Active interrupt and the calendar's Pending one are unharmed —
+    // the hold only ever runs against whichever interrupt is actually
+    // Active.
+    #[test]
+    fn a_pending_alerts_hold_does_not_cross_talk_with_the_active_interrupt() {
+        let now = Instant::now();
+        let (mut state, mut scheduler) = sticky_active_and_bounded_pending_alert(now);
+        let (mut device, diagnostics, provider, options) = stub_work_harness();
+
+        run_scheduled_work(
+            &mut state,
+            &mut scheduler,
+            &mut device,
+            &provider,
+            &diagnostics,
+            now + Duration::from_hours(1),
+            &options,
+        );
+        assert_eq!(
+            state
+                .interrupts
+                .active()
+                .map(|tracked| tracked.message.widget_id.as_str()),
+            Some("sticky"),
+            "UntilDismissed must not be auto-dismissed by an unrelated Pending interrupt's hold"
+        );
+        assert_eq!(
+            state
+                .interrupts
+                .pending()
+                .map(|tracked| tracked.message.widget_id.as_str()),
+            Some("upnext"),
+            "the calendar interrupt is still queued, unharmed"
+        );
+    }
+
+    // The other half of Critical-1's fix: once the sticky interrupt is
+    // dismissed (an on-device tap) and the calendar alert is promoted to
+    // Active, its own 60s hold must start fresh from that moment — before
+    // the fix, the Pending alert never got a deadline of its own at all, so
+    // this promoted interrupt would have run `UntilDismissed`-like forever.
+    #[test]
+    fn a_promoted_alert_gets_a_fresh_hold_from_its_own_card() {
+        let now = Instant::now();
+        let (mut state, mut scheduler) = sticky_active_and_bounded_pending_alert(now);
+        let (mut device, diagnostics, provider, options) = stub_work_harness();
+
+        let sticky_token = state.interrupts.active().unwrap().message.token;
+        let promotion_time = now + Duration::from_hours(1);
+        drain_device_events(
+            &mut state,
+            &mut scheduler,
+            &mut StubDevice {
+                queued_event: Some(interrupt_dismissed_event("sticky", sticky_token)),
+            },
+            promotion_time,
+        );
+        assert_eq!(
+            state
+                .interrupts
+                .active()
+                .map(|tracked| tracked.message.widget_id.as_str()),
+            Some("upnext"),
+            "dismissing the sticky interrupt promotes the queued calendar alert"
+        );
+
+        run_scheduled_work(
+            &mut state,
+            &mut scheduler,
+            &mut device,
+            &provider,
+            &diagnostics,
+            promotion_time + Duration::from_secs(59),
+            &options,
+        );
+        assert!(
+            state.interrupts.active().is_some(),
+            "the promoted alert's fresh 60s hold has not expired yet"
+        );
+
+        run_scheduled_work(
+            &mut state,
+            &mut scheduler,
+            &mut device,
+            &provider,
+            &diagnostics,
+            promotion_time + Duration::from_mins(1),
+            &options,
+        );
+        assert!(
+            state.interrupts.active().is_none(),
+            "the promoted alert's own 60s hold now auto-dismisses it"
+        );
+    }
+
+    // `is_event_alert_due`'s pure eligibility/dedup logic: outside the lead
+    // window nothing is eligible; inside it, eligible exactly once per
+    // distinct event start (simulating `refresh_calendar_alert`'s caller-side
+    // arming after a successful schedule — repeated checks against the same
+    // start are not eligible again); a different start re-arms eligibility; a
+    // past start or the provider's `0` "no event" sentinel are never eligible.
+    #[test]
+    fn is_event_alert_due_fires_once_per_distinct_event_start_inside_the_lead_window() {
+        let now = Instant::now();
+        let config = AppConfig {
+            cards: vec![alert_calendar_card(
+                "upnext",
+                CardAlert::BeforeEvent {
+                    lead_minutes: 5,
+                    hold: AlertHold::Seconds { value: 60 },
+                },
+            )],
+            ..AppConfig::default()
+        };
+        let mut scheduler = fresh_scheduler(now);
+        let mut state = WorkerState::new(config, now, &mut scheduler);
+        let now_unix_ms: i64 = 1_700_000_000_000;
+
+        let set_next_start = |state: &mut WorkerState, offset_ms: i64| {
+            state.latest_fields.insert(
+                "upnext".into(),
+                vec![Field {
+                    key: "next_start_unix_ms".into(),
+                    value: FieldValue::Integer(now_unix_ms + offset_ms),
+                }],
+            );
+        };
+
+        // Event starts in 6 minutes: outside the 5-minute lead window.
+        set_next_start(&mut state, 6 * 60_000);
+        assert_eq!(is_event_alert_due(&state, "upnext", 5, now_unix_ms), None);
+
+        // Event starts in 4 minutes: inside the window, eligible.
+        set_next_start(&mut state, 4 * 60_000);
+        let due = is_event_alert_due(&state, "upnext", 5, now_unix_ms);
+        assert_eq!(due, Some(now_unix_ms + 4 * 60_000));
+        // Simulate the caller (`refresh_calendar_alert`) marking it armed only
+        // after `InterruptArbiter::schedule` succeeds (Important-4).
+        state
+            .armed_event_alerts
+            .insert("upnext".into(), due.unwrap());
+        assert_eq!(
+            is_event_alert_due(&state, "upnext", 5, now_unix_ms),
+            None,
+            "already armed for this event start"
+        );
+
+        // A different event start (same card) re-arms eligibility.
+        set_next_start(&mut state, 4 * 60_000 + 2);
+        assert!(is_event_alert_due(&state, "upnext", 5, now_unix_ms).is_some());
+
+        // A start already in the past never fires.
+        set_next_start(&mut state, -1);
+        assert_eq!(is_event_alert_due(&state, "upnext", 5, now_unix_ms), None);
+
+        // `0` is the provider's "no upcoming event" sentinel and never fires.
+        set_next_start(&mut state, -now_unix_ms);
+        assert_eq!(is_event_alert_due(&state, "upnext", 5, now_unix_ms), None);
+    }
+
+    // Task 6 review Important-4: before the fix, the event start was marked
+    // armed *before* checking whether `InterruptArbiter::schedule` actually
+    // succeeded, so a transient `Busy` (both arbiter slots already occupied)
+    // silently and *permanently* dropped the alert for that event — the dedup
+    // check would see it as already armed forever after, even once a slot
+    // freed up. This proves the fix: once a slot frees, a later re-evaluation
+    // for the *same* event start still fires.
+    #[test]
+    fn a_calendar_alert_dropped_by_a_busy_arbiter_is_not_permanently_armed() {
+        let now = Instant::now();
+        let config = AppConfig {
+            cards: vec![alert_calendar_card(
+                "upnext",
+                CardAlert::BeforeEvent {
+                    lead_minutes: 5,
+                    hold: AlertHold::Seconds { value: 60 },
+                },
+            )],
+            ..AppConfig::default()
+        };
+        let mut scheduler = fresh_scheduler(now);
+        let mut state = WorkerState::new(config, now, &mut scheduler);
+        // Occupy both arbiter slots with unrelated interrupts so the calendar
+        // alert's own `schedule` call returns `Busy`.
+        state.interrupts.schedule("occupant-a", "x").unwrap();
+        state.interrupts.schedule("occupant-b", "y").unwrap();
+
+        let now_unix_ms = Utc::now().timestamp_millis();
+        state.latest_fields.insert(
+            "upnext".into(),
+            vec![Field {
+                key: "next_start_unix_ms".into(),
+                value: FieldValue::Integer(now_unix_ms + 4 * 60_000),
+            }],
+        );
+
+        refresh_calendar_alert(
+            &mut state,
+            &mut scheduler,
+            "upnext",
+            5,
+            AlertHold::Seconds { value: 60 },
+            now,
+            now_unix_ms,
+        );
+        assert!(
+            !state.armed_event_alerts.contains_key("upnext"),
+            "a Busy arbiter must not mark the event start armed"
+        );
+
+        // Both slots free up (simulating two on-device tap dismissals).
+        let first_active = state.interrupts.active().unwrap().message.token;
+        assert!(state.interrupts.dismiss(first_active).is_ok());
+        let second_active = state.interrupts.active().unwrap().message.token;
+        assert!(state.interrupts.dismiss(second_active).is_ok());
+        assert!(state.interrupts.active().is_none());
+
+        // The same event start, re-evaluated, now fires.
+        refresh_calendar_alert(
+            &mut state,
+            &mut scheduler,
+            "upnext",
+            5,
+            AlertHold::Seconds { value: 60 },
+            now,
+            now_unix_ms,
+        );
+        assert_eq!(
+            state
+                .interrupts
+                .active()
+                .map(|tracked| tracked.message.widget_id.as_str()),
+            Some("upnext"),
+            "once a slot freed, the same event start must still be able to fire"
+        );
+    }
+
+    // Task 6 review Important-3, pure-logic half: relying solely on
+    // provider-result landings to observe the lead window misses it entirely
+    // whenever no refresh happens to land inside it (the brief's original
+    // design) — a 15-minute refresh interval against a 5-minute lead window
+    // can refresh once *before* the window opens and again *after* the event
+    // starts, never once landing inside it. This pins the root cause
+    // directly: `is_event_alert_due`'s eligibility for the *same* cached
+    // event start depends only on `now_unix_ms` (standing in for the wall
+    // clock) advancing, not on `latest_fields` changing — ineligible 8
+    // minutes out, eligible 3 minutes out, with no field write in between.
+    // `now_unix_ms` is a synthetic epoch anchor (not real wall time), like
+    // `is_event_alert_due_fires_once_per_distinct_event_start_inside_the_lead_window`
+    // above, so this needs no simulated elapsed time and cannot be flaky.
+    #[test]
+    fn calendar_alert_eligibility_advances_purely_with_the_clock_not_a_fresh_refresh() {
+        let now = Instant::now();
+        let config = AppConfig {
+            cards: vec![alert_calendar_card(
+                "upnext",
+                CardAlert::BeforeEvent {
+                    lead_minutes: 5,
+                    hold: AlertHold::Seconds { value: 60 },
+                },
+            )],
+            ..AppConfig::default()
+        };
+        let mut scheduler = fresh_scheduler(now);
+        let mut state = WorkerState::new(config, now, &mut scheduler);
+        let base_unix_ms: i64 = 1_700_000_000_000;
+        let event_start_unix_ms = base_unix_ms + 8 * 60_000;
+        state.latest_fields.insert(
+            "upnext".into(),
+            vec![Field {
+                key: "next_start_unix_ms".into(),
+                value: FieldValue::Integer(event_start_unix_ms),
+            }],
+        );
+
+        // 8 minutes out: outside the 5-minute window.
+        assert_eq!(is_event_alert_due(&state, "upnext", 5, base_unix_ms), None);
+
+        // The clock alone advances 3 minutes — no new field data lands. Now 5
+        // minutes out: inside the window.
+        let three_minutes_later_unix_ms = base_unix_ms + 3 * 60_000;
+        assert_eq!(
+            is_event_alert_due(&state, "upnext", 5, three_minutes_later_unix_ms),
+            Some(event_start_unix_ms)
+        );
+    }
+
+    // Task 6 review Important-3, wiring half: `run_scheduled_work` must
+    // itself dispatch `scheduler.due_event_alert_cards` results through
+    // `card_alert` and `refresh_calendar_alert` — not rely on
+    // `apply_provider_result` alone, which only runs when a refresh lands.
+    // Arms the event-alert deadline directly, as if a prior refresh had
+    // already left it behind (rather than going through
+    // `refresh_calendar_alert` again here, which would just re-prove the pure
+    // half above); no interrupt exists yet. The event start is a real
+    // near-future wall-clock time inside the lead window, so whether it fires
+    // is decided instantly and deterministically, without needing to
+    // simulate elapsed wall-clock time — unlike `Instant`, this codebase has
+    // no injectable clock for `Utc::now()` (see e.g. `send_time_sync`, which
+    // calls it directly with no test seam either).
+    #[test]
+    fn run_scheduled_works_tick_handler_reevaluates_calendar_alerts_via_the_scheduler_deadline() {
+        let now = Instant::now();
+        let config = AppConfig {
+            cards: vec![alert_calendar_card(
+                "upnext",
+                CardAlert::BeforeEvent {
+                    lead_minutes: 5,
+                    hold: AlertHold::Seconds { value: 60 },
+                },
+            )],
+            ..AppConfig::default()
+        };
+        let mut scheduler = fresh_scheduler(now);
+        let mut state = WorkerState::new(config, now, &mut scheduler);
+        assert!(scheduler.pomodoro_due(now));
+        assert!(scheduler.status_due(now));
+        assert!(scheduler.time_sync_due(now));
+        assert_eq!(scheduler.due_providers(now), ["upnext"]);
+        scheduler.provider_started("upnext", now);
+
+        state.latest_fields.insert(
+            "upnext".into(),
+            vec![Field {
+                key: "next_start_unix_ms".into(),
+                value: FieldValue::Integer(Utc::now().timestamp_millis() + 4 * 60_000),
+            }],
+        );
+        // A deadline is armed with no interrupt scheduled yet — exactly the
+        // state left behind by a refresh that landed outside the window.
+        scheduler.set_event_alert_deadline("upnext", Some(now));
+        assert!(state.interrupts.active().is_none());
+
+        let mut device = StubDevice::default();
+        let diagnostics = RuntimeDiagnosticCounters::default();
+        let provider = ProviderWorker::new(
+            Box::new(ImmediateRefresher {
+                completed: mpsc::channel().0,
+            }),
+            1,
+        );
+        let options = RuntimeOptions::default();
+        run_scheduled_work(
+            &mut state,
+            &mut scheduler,
+            &mut device,
+            &provider,
+            &diagnostics,
+            now,
+            &options,
+        );
+
+        assert_eq!(
+            state
+                .interrupts
+                .active()
+                .map(|tracked| tracked.message.widget_id.as_str()),
+            Some("upnext"),
+            "the tick handler alone re-evaluated and fired the alert, with no provider refresh involved"
+        );
+    }
+
+    // Task 6 review Minor-5: this test must be sensitive to the *shape* of the
+    // prune, not just to "something got pruned". A surviving card's armed
+    // entry is asserted to remain untouched, so replacing the targeted
+    // `.retain(...)` with a blanket `.clear()` — which would also pass a
+    // prune test that only checks the removed card — fails this one.
+    #[test]
+    fn armed_event_alerts_are_pruned_only_for_cards_that_leave_the_config() {
+        let now = Instant::now();
+        let config = AppConfig {
+            cards: vec![
+                alert_calendar_card(
+                    "upnext",
+                    CardAlert::BeforeEvent {
+                        lead_minutes: 5,
+                        hold: AlertHold::Seconds { value: 60 },
+                    },
+                ),
+                alert_calendar_card(
+                    "keep",
+                    CardAlert::BeforeEvent {
+                        lead_minutes: 5,
+                        hold: AlertHold::Seconds { value: 60 },
+                    },
+                ),
+            ],
+            ..AppConfig::default()
+        };
+        let mut scheduler = fresh_scheduler(now);
+        let mut state = WorkerState::new(config.clone(), now, &mut scheduler);
+        state.armed_event_alerts.insert("upnext".into(), 111);
+        state.armed_event_alerts.insert("keep".into(), 222);
+
+        let mut replaced = config;
+        replaced.cards.retain(|card| card.id() != "upnext");
+        state.replace_config(replaced, now, &mut scheduler);
+
+        assert_eq!(
+            state.armed_event_alerts.get("keep"),
+            Some(&222),
+            "a surviving card's armed entry must not be dropped by an unrelated prune"
+        );
+        assert!(
+            !state.armed_event_alerts.contains_key("upnext"),
+            "armed alerts for cards no longer in the config must not leak"
+        );
+    }
+
+    // Wiring proof (instant, no sleeping): a provider result landing through
+    // `apply_provider_result` — the function `drain_provider_results` calls in
+    // its loop — for a calendar card with a `BeforeEvent` alert both schedules
+    // the interrupt and arms the hold from that card's configured
+    // `AlertHold::Seconds`, exactly as the pomodoro completion path does.
+    #[test]
+    fn a_landing_provider_result_schedules_a_calendar_alert_and_arms_its_hold() {
+        let now = Instant::now();
+        let config = AppConfig {
+            cards: vec![alert_calendar_card(
+                "upnext",
+                CardAlert::BeforeEvent {
+                    lead_minutes: 5,
+                    hold: AlertHold::Seconds { value: 60 },
+                },
+            )],
+            ..AppConfig::default()
+        };
+        let mut scheduler = fresh_scheduler(now);
+        let mut state = WorkerState::new(config, now, &mut scheduler);
+        let diagnostics = RuntimeDiagnosticCounters::default();
+
+        let event_start_unix_ms = Utc::now().timestamp_millis() + 4 * 60_000;
+        let result = ProviderRefreshResult {
+            generation: state.generation,
+            widget_id: "upnext".into(),
+            fields: vec![Field {
+                key: "next_start_unix_ms".into(),
+                value: FieldValue::Integer(event_start_unix_ms),
+            }],
+            refreshed_at: Some(Utc::now()),
+            age: Some(Duration::ZERO),
+            stale: false,
+            error: None,
+        };
+
+        apply_provider_result(&mut state, &mut scheduler, &diagnostics, now, result);
+
+        assert_eq!(
+            state
+                .interrupts
+                .active()
+                .map(|tracked| tracked.message.widget_id.as_str()),
+            Some("upnext"),
+            "the landing result's near event start schedules the alert"
+        );
+        assert_eq!(
+            scheduler.alert_hold_due(now + Duration::from_secs(59)),
+            None
+        );
+        assert!(
+            scheduler
+                .alert_hold_due(now + Duration::from_mins(1))
+                .is_some(),
+            "hold armed from the card's own AlertHold::Seconds(60)"
+        );
     }
 }

@@ -121,7 +121,7 @@ fn invalid_golden_inputs_have_stable_classes() {
 #[test]
 fn maximum_config_fixture_stays_inside_one_frame() {
     let frame = decode_wire_frame(&fixture("apply_config_max.bin")).unwrap();
-    assert_eq!(frame.payload.len(), 931);
+    assert_eq!(frame.payload.len(), 935);
     assert!(frame.payload.len() <= MAX_PAYLOAD_SIZE);
     decode_message(&frame).unwrap();
 }

@@ -1,7 +1,9 @@
 # Deskmate M3 - Daily-Use Companion App Implementation Plan
 
-**Status:** Active after M2 exit verification on 2026-08-04. Tasks 1-5 are complete;
-Task 6 (the settings experience) is next.
+**Status:** Complete on 2026-08-05. Software, macOS app, physical-board UI/replay,
+sleep/wake, and tray-resident soak checks pass. The user accepted the completed morning
+soak and explicitly waived repeating it after the later orientation/clean-canvas change,
+whose focused physical regression also passed.
 
 **Goal:** Replace the M2 CLI as the normal daily-use host with a Tauri v2 tray app. One
 long-lived Rust runtime owns device discovery/reconnect, the complete replay set,
@@ -32,7 +34,8 @@ last-good file if validation or migration fails.
 - Provider failures preserve last-good data and expose stale age/error state.
 - The settings window is disposable; closing it must not stop keepalives or providers.
 - Hardware renders at 448x368 in 90°/270° landscape. The preview uses the same logical
-  proportions, template/size compatibility rules, screen order, and status-strip rules.
+  proportions, template/size compatibility rules, and screen order. The later M3
+  clean-canvas amendment removed the original status-strip design.
 - M3 does not require firmware changes unless app integration reveals a protocol defect.
 
 **Current Tauri v2 baseline:** Use a Vite SPA rather than SSR, Rust-side
@@ -43,7 +46,8 @@ Tauri v2 project, tray, single-instance, autostart, and capabilities documentati
 implementing; lock resolved Rust and frontend dependencies in the repository.
 
 **Out of scope:** Weather, JSON-feed, and RSS providers; dashboard grids and `tile`
-layouts; new templates; open-URL/app tap actions; auto-rotate; asset/font push; firmware
+layouts; new templates; open-URL/app tap actions; optional timed carousel advance;
+asset/font push; firmware
 update UI; production VID/PID; signing/notarization and broad release packaging. Those
 remain M4 work. Do not add a general plugin system.
 
@@ -270,24 +274,39 @@ also pass.
 - Create: `companion/apps/deskmate/src/components/ProviderStatus.tsx`
 - Create: frontend tests
 
-- [ ] Create a focused desktop layout with persistent device status, widget gallery,
+- [x] Create a focused desktop layout with persistent device status, widget gallery,
   selected-widget editor, ordered screen list, and a 448:368 device preview.
-- [ ] Support the M3 widget set only: digital clock/full, progress ring/standard with
+- [x] Support the M3 widget set only: digital clock/full, progress ring/standard with
   start-pause, and ICS row list/standard. Explain incompatible size choices instead of
   silently coercing them.
-- [ ] Make screen ordering work with pointer drag, keyboard controls, and explicit move
+- [x] Make screen ordering work with pointer drag, keyboard controls, and explicit move
   buttons. Preserve stable IDs while reordering.
-- [ ] Validate drafts inline and show save/apply progress, last-good fallback, provider
+- [x] Validate drafts inline and show save/apply progress, last-good fallback, provider
   staleness, disconnected state, and protocol mismatch without blocking the editor.
-- [ ] Provide first-run guidance: connect USB, choose timezone, add an ICS URL/file,
+- [x] Provide first-run guidance: connect USB, choose timezone, add an ICS URL/file,
   arrange screens, save. No terminal terminology in product copy.
-- [ ] Make the preview deterministic and visually parallel the firmware templates;
+- [x] Make the preview deterministic and visually parallel the firmware templates;
   clearly label it as a preview rather than pixel-identical LVGL rendering.
-- [ ] Test keyboard navigation, labels/focus, reduced motion, empty/error/loading states,
+- [x] Offer exactly two persisted landscape mounting choices in Settings (USB below or
+  USB above), apply them through the authoritative config, and keep rotation off the
+  device's touch surface.
+- [x] Remove the status strip from firmware and preview so every M3 widget uses the clean
+  448x368 canvas. Retain the `standard` wire value only for v1 compatibility.
+- [x] Test keyboard navigation, labels/focus, reduced motion, empty/error/loading states,
   reorder semantics, draft validation, and narrow-window behavior.
 
 **Acceptance:** A user can create, edit, reorder, validate, and apply the full M2 demo
 without touching JSON or a terminal, using either pointer or keyboard.
+
+**Implementation evidence (2026-08-05):** The React settings app now provides a
+persistent device header, first-run guidance, M3-only widget gallery/editor, provider
+status, stable-ID screen arrangement, explicit and keyboard reorder controls, and a
+deterministic 448:368 preview. Draft errors are shown inline while disconnected,
+stale/error, persistence-recovery, and protocol-mismatch states remain independently
+visible. Native buttons, lists, fieldsets, focus styles, live regions, narrow-window
+layout, and reduced-motion behavior keep the editor usable without pointer input. The
+pinned Biome formatter/linter, TypeScript check, 15 Bun tests (59 expectations), and
+production Vite build all pass.
 
 ---
 
@@ -299,20 +318,33 @@ without touching JSON or a terminal, using either pointer or keyboard.
 - Modify: `companion/apps/deskmate/src/`
 - Create: integration fixtures/tests
 
-- [ ] Wire ICS URL/file settings through the existing bounded provider and persist only
+- [x] Wire ICS URL/file settings through the existing bounded provider and persist only
   source metadata/config, never transient fetched payload as authoritative config.
-- [ ] Preserve and display last-good calendar rows with stale age/error after refresh
+- [x] Preserve and display last-good calendar rows with stale age/error after refresh
   failure; manual retry must not duplicate scheduler work.
-- [ ] Persist pomodoro duration/label and intentional timer state needed across settings
+- [x] Persist pomodoro duration/label and intentional timer state needed across settings
   window closure. Define app-restart behavior explicitly and test it.
-- [ ] Apply edits transactionally: validate/compile, persist, then replace runtime config;
+- [x] Apply edits transactionally: validate/compile, persist, then replace runtime config;
   if device application fails, keep the saved valid config queued for reconnect and show
   the device error separately.
-- [ ] Confirm pause/resume, window close/reopen, app restart, sleep/wake, and USB reset do
+- [x] Confirm in software that pause/resume, window close/reopen, app restart, overdue
+  sleep/wake scheduling, and USB reset handling do
   not create multiple runtimes or duplicate interrupts.
 
 **Acceptance:** The tray app runs the clock, accelerated pomodoro, and fixture/file/URL
 calendar for a complete session with visible stale/recovery behavior and durable edits.
+
+**Implementation evidence (2026-08-05):** Calendar URL/file metadata is the only
+provider state serialized to config; store tests prove fetched rows remain transient.
+Unchanged providers retain their last-good rows and timestamps through unrelated edits,
+manual refresh coalesces with work already in flight, and stale/error state is projected
+separately. Unchanged live pomodoros and interrupts survive settings saves and window
+closure. Duration and label persist across app restart, while running/paused/completed
+state deliberately resets to idle: reconstructing elapsed monotonic time across process
+downtime would invent state. Runtime and shell tests cover this policy, overdue deadline
+coalescing after a simulated wake, persistence recovery, queued replay after replacement,
+and USB-reset replay through the one runtime owner. Real host sleep and physical-board
+reset observation remain part of Task 8's deferred hardware pass.
 
 ---
 
@@ -325,24 +357,50 @@ calendar for a complete session with visible stale/recovery behavior and durable
 - Modify: `docs/hardware/board-notes.md`
 - Create: M4 implementation plan
 
-- [ ] Run Rust format/Clippy/tests, frontend format/lint/typecheck/tests, dependency audit,
+- [x] Run Rust format/Clippy/tests, frontend format/lint/typecheck/tests, dependency audit,
   Tauri capability review, production frontend build, and Tauri debug/release builds on
   macOS. Keep Windows code compiling in CI or document the first concrete blocker.
-- [ ] Verify first run from an empty app-data directory, corrupt-config recovery, save
+- [x] Verify first run from an empty app-data directory, corrupt-config recovery, save
   atomicity, single-instance focus, settings close/reopen, tray pause/resume/quit, and
   autostart opt-in/out.
-- [ ] On the physical board, configure all three widgets from the UI, reorder screens,
+- [x] On the physical board, configure all three widgets from the UI, reorder screens,
   run tap/pomodoro/interrupt flow, and verify 90°/270° rendering without using the CLI.
-- [ ] Power-cycle during active app ownership and confirm complete replay. Exercise host
+- [x] Power-cycle during active app ownership and confirm complete replay. Exercise host
   sleep/wake and settings webview reload without stopping the Rust runtime.
-- [ ] Run a 30-minute tray-resident mixed session with the settings window closed; record
+- [x] Run a 30-minute tray-resident mixed session with the settings window closed; record
   process memory/CPU, device heap/counters, provider/runtime queue pressure, reconnects,
   missed events, resets, and responsiveness.
-- [ ] Update status/docs, write the M4 plan from measured findings, and mark M3 complete.
+- [x] Update status/docs and write the M4 plan from the software findings.
+- [x] Mark M3 complete only after the deferred physical checks pass.
 - [ ] Create an `m3` tag only after review fixes and only with explicit authorization.
+
+**Software exit evidence (updated 2026-08-05):** Rust formatting, workspace Clippy with
+warnings denied, and all 92 Rust tests pass (one hardware-fixture printer test remains
+ignored). Firmware host tests pass all nine cases and ESP-IDF 5.5.5 produces the
+`0xbd8d0` application. Frontend formatting, lint, typecheck, 15 tests, and production
+build pass. The Tauri macOS `.app` release bundle succeeds. `bun audit`
+reports no vulnerabilities. RustSec returns success with 17 allowed advisory warnings:
+the inherited GTK3/proc-macro-error/unic crates are unmaintained, and glib 0.18.5 has an
+unsoundness warning. These are recorded M4 dependency-hardening work, not silently
+reported as clean. A Windows MSVC target check reaches `ring`'s native C build and then
+fails because this macOS host has no Windows SDK/MSVC C headers (`assert.h` is missing);
+Windows CI or a Windows development host is required for the actual compile gate. The
+window capability still grants only core event listening; raw filesystem, network,
+shell, process, serial, and autostart APIs are absent from the webview.
 
 **M3 exit gate:** A nontechnical user can install/open the app, configure and arrange the
 three proven widgets, close settings, and rely on the tray daemon for provider refresh,
 touch actions, reconnect, and replay. No terminal is required for daily use, invalid
 config/provider input preserves last-good behavior, and the settings webview never owns
 the device session.
+
+**Physical exit evidence (2026-08-05):** The resumed board session covered the complete
+UI-configured clock/pomodoro/calendar flow, screen ordering and gestures, timer completion
+and dismissal, active-owner power-cycle replay, host sleep/wake, settings lifecycle, and
+a tray-resident morning soak. Findings from that session (active-screen replay, calendar
+file selection, and interrupt-token seeding) were fixed and regression-tested. The later
+orientation/clean-canvas firmware was flashed and the user confirmed both 90°/270° app
+choices, no touch rotation, full-canvas rendering for all three widgets, working
+pomodoro advancement, calendar content, and carousel swipes. Because those changes did
+not alter the already-soaked runtime/queue behavior, the user explicitly accepted the
+morning soak and waived a duplicate run. M3 is complete; no tag was created.

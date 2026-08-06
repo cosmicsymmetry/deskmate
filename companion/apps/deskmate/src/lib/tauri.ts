@@ -115,6 +115,10 @@ export function refreshProvider(widgetId: string): Promise<void> {
   return invokeTyped("refresh_provider", { target: { widget_id: widgetId } });
 }
 
+export function chooseIcsFile(): Promise<string | null> {
+  return invokeTyped("choose_ics_file");
+}
+
 export function getAutostartStatus(): Promise<AutostartStatus> {
   return invokeTyped("get_autostart_status");
 }
@@ -127,8 +131,6 @@ export function setSettingsWindowVisible(visible: boolean): Promise<AppSnapshot>
   return invokeTyped("set_settings_window_visible", { visible });
 }
 
-export function listenToAppState(
-  onSnapshot: (snapshot: AppSnapshot) => void,
-): Promise<UnlistenFn> {
+export function listenToAppState(onSnapshot: (snapshot: AppSnapshot) => void): Promise<UnlistenFn> {
   return listen<AppSnapshot>(APP_STATE_EVENT, (event) => onSnapshot(event.payload));
 }

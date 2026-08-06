@@ -54,6 +54,7 @@ pub enum DeviceError {
     Rejected(ErrorResponse),
     InvalidRequest,
     RevisionExhausted,
+    MissingCapabilities { required: u64, available: u64 },
 }
 
 impl fmt::Display for DeviceError {
@@ -80,6 +81,13 @@ impl fmt::Display for DeviceError {
             }
             Self::InvalidRequest => f.write_str("message is not a host request"),
             Self::RevisionExhausted => f.write_str("device revision counter is exhausted"),
+            Self::MissingCapabilities {
+                required,
+                available,
+            } => write!(
+                f,
+                "device capabilities 0x{available:016x} do not satisfy required 0x{required:016x}"
+            ),
         }
     }
 }
@@ -378,6 +386,8 @@ mod tests {
     fn status() -> StatusResponse {
         StatusResponse {
             protocol_version: PROTOCOL_VERSION,
+            max_protocol_version: protocol::MAX_PROTOCOL_VERSION,
+            capabilities: protocol::CURRENT_CAPABILITIES,
             firmware_version: "deskmate-m1".into(),
             uptime_ms: 123,
             free_heap: 456,
@@ -398,6 +408,7 @@ mod tests {
             dropped_ui_commands: 0,
             ui_queue_high_water: 0,
             config_revision: 0,
+            latest_interrupt_token: 0,
         }
     }
 

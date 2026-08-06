@@ -7,6 +7,9 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "check": "tsc --noEmit",
+    "format": "biome format --write .",
+    "format:check": "biome format .",
+    "lint": "biome lint .",
     "test": "bun test",
     "preview": "vite preview",
     "tauri": "tauri"
@@ -17,6 +20,7 @@
     "react-dom": "19.2.8"
   },
   "devDependencies": {
+    "@biomejs/biome": "2.5.7",
     "@tauri-apps/cli": "2.11.4",
     "@types/node": "26.1.2",
     "@types/react": "19.2.18",

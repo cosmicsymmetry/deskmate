@@ -3,7 +3,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
-use app_core::{AppSnapshot, ConfigStore, ConnectionState, RuntimeHandle, RuntimeState};
+use app_core::{
+    AppSnapshot, ConfigStore, ConnectionState, PersistenceState, ProviderState, RuntimeHandle,
+    RuntimeState,
+};
 use tauri::image::Image;
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{TrayIcon, TrayIconBuilder};
@@ -138,6 +141,9 @@ impl DesktopState {
         if self.quitting.swap(true, Ordering::AcqRel) {
             return;
         }
+        if let Ok(snapshot) = self.runtime.snapshot() {
+            report_exit_metrics(&snapshot);
+        }
         if let Err(error) = self.runtime.shutdown() {
             eprintln!("failed to stop Deskmate runtime cleanly: {error}");
         }
@@ -148,6 +154,30 @@ impl DesktopState {
             eprintln!("Deskmate tray-state worker panicked during shutdown");
         }
     }
+}
+
+fn report_exit_metrics(snapshot: &AppSnapshot) {
+    let mut provider_fresh = 0usize;
+    let mut provider_stale = 0usize;
+    let mut provider_error = 0usize;
+    for provider in &snapshot.providers {
+        match provider.state {
+            ProviderState::Fresh => provider_fresh += 1,
+            ProviderState::Stale { .. } => provider_stale += 1,
+            ProviderState::Error { .. } => provider_error += 1,
+            ProviderState::Idle | ProviderState::Refreshing => {}
+        }
+    }
+    eprintln!(
+        "Deskmate exit metrics: runtime={:?} connection={:?} uptime_ms={:?} free_heap={:?} active_screen={:?} providers=fresh:{provider_fresh},stale:{provider_stale},error:{provider_error} counters={:?} runtime_diagnostics={:?}",
+        snapshot.runtime,
+        snapshot.device.connection,
+        snapshot.device.uptime_ms,
+        snapshot.device.free_heap,
+        snapshot.device.active_screen_id,
+        snapshot.device.counters,
+        snapshot.diagnostics,
+    );
 }
 
 fn tray_image(online: bool) -> tauri::Result<Image<'static>> {
@@ -265,6 +295,11 @@ fn setup_app(app: &mut App) -> Result<(), Box<dyn Error>> {
     // settings UI appears. The explicit Tauri app-data path keeps filesystem policy
     // out of app-core.
     let runtime = Arc::new(RuntimeHandle::start_serial(loaded.config, None)?);
+    if let Some(recovery) = loaded.recovery {
+        runtime.set_persistence_state(PersistenceState::RecoverableError {
+            message: recovery.to_string(),
+        })?;
+    }
     let autostart_enabled = match app.autolaunch().is_enabled() {
         Ok(enabled) => enabled,
         Err(error) => {
@@ -306,6 +341,7 @@ pub fn run() {
             MacosLauncher::LaunchAgent,
             None,
         ))
+        .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             commands::get_app_snapshot,
             commands::validate_config_draft,
@@ -313,6 +349,7 @@ pub fn run() {
             commands::set_pushing_paused,
             commands::control_pomodoro,
             commands::refresh_provider,
+            commands::choose_ics_file,
             commands::get_autostart_status,
             commands::set_autostart_enabled,
             commands::set_settings_window_visible,

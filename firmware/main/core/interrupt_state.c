@@ -48,6 +48,11 @@ void interrupt_state_clear(interrupt_state_t *state)
     memset(state->saved_screen_id, 0, sizeof(state->saved_screen_id));
 }
 
+uint32_t interrupt_state_latest_token(const interrupt_state_t *state)
+{
+    return state == NULL ? 0U : state->latest_token;
+}
+
 bool interrupt_state_set_saved_screen(interrupt_state_t *state,
                                       const char *screen_id)
 {

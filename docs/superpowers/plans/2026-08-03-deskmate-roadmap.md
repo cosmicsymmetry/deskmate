@@ -2,8 +2,9 @@
 
 Spec: `docs/superpowers/specs/2026-08-03-deskmate-design.md`
 
-**Current:** M0, M1, and M2 are complete; M3 is active. M0/M1 are tagged `m0`/`m1`;
-M2 has not been tagged because tags require explicit authorization. Because M2
+**Current:** M0, M1, M2, and M3 are complete. M4 Tasks 1-2 froze the v1 contract and
+delivered the bounded provider runtime; Task 3 is active. M0/M1 are tagged `m0`/`m1`; M2 and M3 have
+not been tagged because tags require explicit authorization. Because M2
 implementation began in the same shared worktree before M1's final physical carryover
 closed, the `m1` checkpoint also contains the M2 foundation present at that point.
 
@@ -19,8 +20,8 @@ breadth.
 | M0 | Complete | Hardware bring-up + walking skeleton | Device shows ticking clock; touch moves a dot; brightness + 180° rotation work | `2026-08-03-deskmate-m0-bringup.md` |
 | M1 | Complete | Protocol + link + CLI harness | `deskmate-cli status` / `time-sync` / `push-data` work from a terminal; device falls back to standalone clock on unplug | `2026-08-04-deskmate-m1-protocol-link-cli.md` |
 | M2 | Complete | Template engine + first widgets | Clock, pomodoro (progress ring, tap start/pause, done-interrupt), ICS calendar — all driven via CLI; carousel + status strip | `2026-08-04-deskmate-m2-template-first-widgets.md` |
-| M3 | Active | Companion app (Tauri v2) | Tray app replaces CLI for daily use: config store, providers, settings UI with widget gallery + screen arranger | `2026-08-04-deskmate-m3-companion-app.md` |
-| M4 | Pending | v1 completion | Weather/JSON-feed/RSS providers, remaining spec templates (big number + label, icon + badge + text, analog clock face), `tile` layouts + dashboard grids, "open URL/app on host" tap action, auto-rotate, asset push, staleness, wider ICS recurrence, in-app firmware update, production VID/PID, release smoke checklist | (write at M3 exit) |
+| M3 | Complete | Companion app (Tauri v2) | Tray app replaces CLI for daily use: config store, providers, settings UI with widget gallery + screen arranger | `2026-08-04-deskmate-m3-companion-app.md` |
+| M4 | Active — Task 3 | v1 completion | Weather/JSON-feed/RSS providers, remaining spec templates (big number + label, icon + badge + text, analog clock face), the card model (`presence`/`alert`/`carousel.advance`, replacing dashboard grids, which are cancelled — see the card-model design spec), "open URL/app on host" tap action, asset push, staleness, wider ICS recurrence, in-app firmware update, production VID/PID, release smoke checklist | `2026-08-05-deskmate-m4-v1-completion.md` |
 
 First-widget order and why:
 
@@ -32,6 +33,8 @@ First-widget order and why:
 3. **Calendar (ICS)** — first external data: parsing, list-of-rows
    template, staleness indicator.
 
-Plans are written just-in-time at each milestone exit so learnings feed forward. M1
+Plans are written just-in-time at each milestone exit so learnings feed forward. The M4
+plan was drafted from M3's findings and activated after its physical exit gate closed.
+M1
 starts with a USB transport proof because M0 established serial flashing/logging but did
 not establish a dedicated, log-free application channel.

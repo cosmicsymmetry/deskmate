@@ -41,6 +41,9 @@ void interrupt_state_init(interrupt_state_t *state);
 /** Clear active/pending slots without emitting dismissal or resetting token order. */
 void interrupt_state_clear(interrupt_state_t *state);
 
+/** Highest accepted token, retained when active/pending slots are cleared. */
+uint32_t interrupt_state_latest_token(const interrupt_state_t *state);
+
 bool interrupt_state_set_saved_screen(interrupt_state_t *state,
                                       const char *screen_id);
 

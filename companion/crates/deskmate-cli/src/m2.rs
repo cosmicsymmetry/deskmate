@@ -8,8 +8,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use app_core::{
-    AppConfig, AppPreferences, CalendarSource, ConnectionState, RuntimeHandle, RuntimeState,
-    ScreenSettings, WidgetSettings, WidgetSize,
+    AlertHold, AppConfig, AppPreferences, CalendarSource, CardAlert, CardPresence, CardSettings,
+    CarouselSettings, ConnectionState, DisplayTemplate, RefreshPolicy, RuntimeHandle, RuntimeState,
+    UpdaterSettings, WidgetTapAction,
 };
 use chrono::Utc;
 use chrono_tz::Tz;
@@ -185,9 +186,10 @@ fn apply_config(arguments: &mut Arguments) -> Result<(), AppError> {
     let path = parse_config_path(arguments)?;
     let config = load_config(&path)?;
     let connected = connect_session(arguments.common.port.as_deref())?;
-    let ack = connected
-        .session
-        .apply_next_config(config.widgets, config.screens)?;
+    let ack =
+        connected
+            .session
+            .apply_next_config(config.rotation, config.widgets, config.screens)?;
     let revision = ack.revision.ok_or(DeviceError::UnexpectedMessage)?;
     print_ok(
         arguments.common.json,
@@ -473,36 +475,63 @@ fn build_demo_config(layout: ApplyConfig, options: &DemoOptions) -> Result<AppCo
             timezone: options.timezone.to_string(),
             autostart: false,
             paused: false,
+            orientation: app_core::DisplayOrientation::Landscape,
         },
-        widgets: vec![
-            WidgetSettings::Clock {
-                id: options.clock_widget.clone(),
-                size: WidgetSize::Full,
-                title: "Desk".into(),
-                show_seconds: true,
-            },
-            WidgetSettings::Pomodoro {
-                id: options.pomodoro_widget.clone(),
-                size: WidgetSize::Standard,
-                label: "Pomodoro".into(),
-                duration_seconds: options.duration_seconds,
-            },
-            WidgetSettings::Calendar {
-                id: options.calendar_widget.clone(),
-                size: WidgetSize::Standard,
-                title: "Calendar".into(),
-                source,
-                refresh_minutes: 15,
-            },
-        ],
-        screens: layout
+        // The card model has no separate screen identity: a card's own id is its
+        // screen id. The demo layout's screen order becomes the card order, and
+        // each screen's widget_id selects which of the three fixed M3 cards it
+        // names (validated above to be one of the three).
+        cards: layout
             .screens
             .into_iter()
-            .map(|screen| ScreenSettings {
-                id: screen.screen_id,
-                widget_id: screen.widget_id,
+            .map(|screen| {
+                let presence = CardPresence::InRotation {
+                    dwell_seconds: None,
+                };
+                if screen.widget_id == options.clock_widget {
+                    CardSettings::Clock {
+                        id: screen.widget_id,
+                        title: "Desk".into(),
+                        show_seconds: true,
+                        template: DisplayTemplate::DigitalClock,
+                        tap_action: WidgetTapAction::None,
+                        refresh: RefreshPolicy::DeviceLocal,
+                        presence,
+                        alert: CardAlert::None,
+                    }
+                } else if screen.widget_id == options.pomodoro_widget {
+                    CardSettings::Pomodoro {
+                        id: screen.widget_id,
+                        label: "Pomodoro".into(),
+                        duration_seconds: options.duration_seconds,
+                        template: DisplayTemplate::ProgressRing,
+                        tap_action: WidgetTapAction::StartPause,
+                        refresh: RefreshPolicy::DeviceLocal,
+                        presence,
+                        alert: CardAlert::OnTimerFinish {
+                            hold: AlertHold::UntilDismissed,
+                        },
+                    }
+                } else {
+                    CardSettings::Calendar {
+                        id: screen.widget_id,
+                        title: "Calendar".into(),
+                        source: source.clone(),
+                        template: DisplayTemplate::RowList,
+                        tap_action: WidgetTapAction::None,
+                        refresh: RefreshPolicy::Interval { minutes: 15 },
+                        presence,
+                        alert: CardAlert::BeforeEvent {
+                            lead_minutes: 5,
+                            hold: AlertHold::Seconds { value: 60 },
+                        },
+                    }
+                }
             })
             .collect(),
+        assets: Vec::new(),
+        carousel: CarouselSettings::default(),
+        updater: UpdaterSettings::default(),
     };
     config
         .validate()
@@ -858,6 +887,7 @@ fn load_config(path: &PathBuf) -> Result<ApplyConfig, AppError> {
         .collect();
     let config = ApplyConfig {
         revision: 1,
+        rotation: 90,
         widgets,
         screens,
     };
@@ -1003,7 +1033,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn checked_sample_layout_exercises_all_templates_and_both_strip_modes() {
+    fn checked_sample_layout_exercises_all_templates_and_legacy_size_classes() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/m2-carousel.json");
         let config = load_config(&path).unwrap();
         assert_eq!(config.widgets.len(), 3);

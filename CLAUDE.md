@@ -30,20 +30,34 @@ of letting code and documentation diverge.
   replay, and a flat-heap 30-minute mixed soak. The user waived nine repetitions after
   one observed corrected power-cycle replay; do not describe ten M2 cycles as observed.
   No `m2` tag exists because tags require explicit authorization.
-- M3 (Tauri v2 companion app) is active. Its plan is
+- M3 (Tauri v2 companion app) is complete. Its plan is
   `docs/superpowers/plans/2026-08-04-deskmate-m3-companion-app.md`. One long-lived Rust
   runtime must own time, config, all widget data, interaction state, and interrupts so
-  power-reset replay cannot reproduce M2's multi-process ownership hole. M3 Task 1 is
-  complete: `app-core` owns strict versioned config and tagged frontend-state DTOs. The
-  Task 2 atomic/last-good config store is complete, including explicit app-data path
-  resolution in the shell. Task 3 is complete: `app-core` owns the bounded background
-  runtime, scheduler, provider isolation, snapshot subscriptions, and the CLI demo now
-  launches that shared runtime. Task 4 is complete: the pinned Tauri v2 shell owns that
-  runtime before showing settings and provides the tested tray, single-instance,
-  autostart, hide-on-close, and deliberate-quit lifecycle. Task 5 is complete: bounded
-  typed commands, stable tagged errors, coalesced backend state events, focus/reopen
-  recovery, and a checked Rust/TypeScript serialization contract are in place. Task 6
-  (the settings experience) is next.
+  power-reset replay cannot reproduce M2's multi-process ownership hole. Tasks 1-7 are
+  complete: the strict config/store contract, bounded single-owner runtime, pinned Tauri
+  shell and lifecycle, typed IPC, accessible settings experience, and end-to-end
+  provider/timer/persistence integration are implemented and tested. Task 8's macOS
+  builds, audits, physical-board UI/replay, host sleep/wake, and morning tray-resident
+  soak pass. After the settings-owned orientation/clean-canvas amendment passed its
+  focused hardware regression, the user explicitly waived repeating the unchanged soak
+  and authorized starting M4. No `m3` tag exists because tags require explicit
+  authorization. M4 Task 1 is complete: config schema v2, lossless M3 migration,
+  deterministic capability-gated compilation, the additive protocol-v1 handshake,
+  cross-language contracts, and compatibility fixtures pass. M4 Task 2B replaced the
+  widget/screen authoring model with the card model: schema v3 (`cards[]`, `presence`,
+  `alert`, `carousel.advance`), lossless v0/v1/v2 migration, host-driven timed rotation,
+  and bounded alert triggers compiling to the unchanged wire contract. M4 Task 4 is now
+  timed rotation and alerts (delivered by Task 2B) rather than tile dashboards, which
+  were cancelled, not deferred. M4 is active at Task 3; its plan is
+  `docs/superpowers/plans/2026-08-05-deskmate-m4-v1-completion.md` and the frozen config
+  contract is `docs/config/v3.md`. The card model was physically verified on 2026-08-06:
+  eight of the nine checks pass, recorded in `docs/hardware/board-notes.md`. Three items
+  stay open and must not be described as resolved — a bounded `AlertHold::Seconds` does
+  not clear the panel (protocol v1 has no dismissal message, so the hold bounds only
+  host-side state); an alert firing while the device is unpowered was lost on reconnect
+  (observed once, undiagnosed, not covered by any test); and a config that fails
+  validation falls back to built-in defaults, pushes them to the device, and mislabels
+  them "your last working settings".
 - M1's full software and physical exit gate passes, including ten observed
   unplug/replug cycles, and is tagged `m1`. Because M2 work began in the same shared
   worktree before the physical carryover closed, that tag also contains the M2
@@ -52,7 +66,12 @@ of letting code and documentation diverge.
   CST820 touch using the CST816S protocol family. Do not apply v1 SH8601/FT3168 facts.
 - Treat the physical 368x448 panel as a 448x368 landscape UI: 90° is the default
   (USB cable down) and 270° is the flipped orientation. Layout and touch logic use
-  logical dimensions.
+  logical dimensions. The companion setting owns this choice; do not add a device-edge
+  or screen gesture that changes orientation, and do not expose portrait orientations.
+- All current cards use the clean 448x368 canvas: there is exactly one canvas and one
+  layout per template. Size classes no longer exist in the config authoring model as of
+  schema v3; `SizeClass::Full` is pinned on the wire for every compiled widget. Do not
+  reintroduce dashboards or a status strip.
 - The v2 CO5300 requires every LVGL invalidation area to be rounded outward to even
   pixel boundaries before partial flushing. Keep `board_lcd_rounder_cb` registered in
   the `esp_lvgl_port` display config, including for 90°/270° software rotation.

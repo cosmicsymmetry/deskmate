@@ -43,9 +43,15 @@ of letting code and documentation diverge.
   and authorized starting M4. No `m3` tag exists because tags require explicit
   authorization. M4 Task 1 is complete: config schema v2, lossless M3 migration,
   deterministic capability-gated compilation, the additive protocol-v1 handshake,
-  cross-language contracts, and compatibility fixtures pass. M4 is active at Task 2;
-  its plan is `docs/superpowers/plans/2026-08-05-deskmate-m4-v1-completion.md` and the
-  frozen config contract is `docs/config/v2.md`.
+  cross-language contracts, and compatibility fixtures pass. M4 Task 2B replaced the
+  widget/screen authoring model with the card model: schema v3 (`cards[]`, `presence`,
+  `alert`, `carousel.advance`), lossless v0/v1/v2 migration, host-driven timed rotation,
+  and bounded alert triggers compiling to the unchanged wire contract. M4 Task 4 is now
+  timed rotation and alerts (delivered by Task 2B) rather than tile dashboards, which
+  were cancelled, not deferred. M4 is active at Task 3; its plan is
+  `docs/superpowers/plans/2026-08-05-deskmate-m4-v1-completion.md` and the frozen config
+  contract is `docs/config/v3.md`. No physical verification has been performed for the
+  card model; it is outstanding.
 - M1's full software and physical exit gate passes, including ten observed
   unplug/replug cycles, and is tagged `m1`. Because M2 work began in the same shared
   worktree before the physical carryover closed, that tag also contains the M2
@@ -56,8 +62,10 @@ of letting code and documentation diverge.
   (USB cable down) and 270° is the flipped orientation. Layout and touch logic use
   logical dimensions. The companion setting owns this choice; do not add a device-edge
   or screen gesture that changes orientation, and do not expose portrait orientations.
-- All current widgets use the clean 448x368 canvas. The v1 `standard` size value remains
-  wire/config compatibility only and renders like `full`; do not restore a status strip.
+- All current cards use the clean 448x368 canvas: there is exactly one canvas and one
+  layout per template. Size classes no longer exist in the config authoring model as of
+  schema v3; `SizeClass::Full` is pinned on the wire for every compiled widget. Do not
+  reintroduce dashboards or a status strip.
 - The v2 CO5300 requires every LVGL invalidation area to be rounded outward to even
   pixel boundaries before partial flushing. Keep `board_lcd_rounder_cb` registered in
   the `esp_lvgl_port` display config, including for 90°/270° software rotation.

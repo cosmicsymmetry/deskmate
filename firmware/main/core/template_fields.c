@@ -87,8 +87,8 @@ static const template_field_descriptor_t s_icon_badge_text_fields[] = {
     TEXT_FIELD("value", false, 16U, "--"),
     TEXT_FIELD("label", false, 64U, ""),
     TEXT_FIELD("unit", false, 16U, ""),
-    INT_FIELD("temperature_tenths", false, -1000, 1000, 0),
-    INT_FIELD("apparent_temperature_tenths", false, -1000, 1000, 0),
+    INT_FIELD("temperature_tenths", false, -2000, 2000, 0),
+    INT_FIELD("apparent_temperature_tenths", false, -2000, 2000, 0),
     BOOL_FIELD("stale", false, false),
     TEXT_FIELD("error", false, 96U, ""),
 };

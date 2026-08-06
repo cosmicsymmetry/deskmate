@@ -216,6 +216,38 @@ static void test_big_number_label_defaults_are_safe(void)
     assert(strcmp(value->value.text, "--") == 0);
 }
 
+static void test_icon_badge_text_temperature_bounds(void)
+{
+    /* Regression for a bounds defect: temperature_tenths/
+     * apparent_temperature_tenths are tenths of a degree in the user's
+     * selected unit, not always Celsius. A hot Fahrenheit reading (e.g.
+     * 101.3 F == 1013 tenths) must not push the whole card stale. */
+    template_field_state_t state;
+    template_field_state_t staging;
+    template_field_patch_t patch;
+    assert(template_fields_init(PROTOCOL_TEMPLATE_ICON_BADGE_TEXT, &state));
+
+    protocol_push_data_t hot_fahrenheit = {
+        .widget_id = "weather",
+        .revision = 1U,
+    };
+    add_field(&hot_fahrenheit, "temperature_tenths", PROTOCOL_FIELD_INTEGER)
+        ->value.integer = 1013;
+    assert(template_fields_resolve(&state, &staging, &hot_fahrenheit,
+                                   &patch) == TEMPLATE_FIELDS_OK);
+    assert(template_fields_get(&state, "temperature_tenths")->value.integer ==
+           1013);
+
+    protocol_push_data_t out_of_range = {
+        .widget_id = "weather",
+        .revision = 2U,
+    };
+    add_field(&out_of_range, "temperature_tenths", PROTOCOL_FIELD_INTEGER)
+        ->value.integer = 25000;
+    assert(template_fields_resolve(&state, &staging, &out_of_range, &patch) ==
+           TEMPLATE_FIELDS_OUT_OF_RANGE);
+}
+
 int main(void)
 {
     test_registry_and_defaults();
@@ -224,6 +256,7 @@ int main(void)
     test_extended_template_registries();
     test_weather_push_has_no_unknown_fields();
     test_big_number_label_defaults_are_safe();
+    test_icon_badge_text_temperature_bounds();
     puts("test_template_fields: OK");
     return 0;
 }

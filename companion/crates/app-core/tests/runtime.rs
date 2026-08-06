@@ -6,10 +6,10 @@ use std::time::{Duration, Instant};
 
 use app_core::{
     AlertHold, AppConfig, CalendarRefreshRequest, CalendarRefreshResult, CalendarRefresher,
-    CardAlert, CardPresence, CardSettings, CarouselAdvance, CarouselSettings, ConnectionState,
-    DeviceConnection, DisplayOrientation, DisplayTemplate, PersistenceState, PomodoroAction,
-    PomodoroState, ProviderRequest, RefreshPolicy, RuntimeDevice, RuntimeError, RuntimeHandle,
-    RuntimeOptions, RuntimeState, WidgetTapAction,
+    CardAlert, CardField, CardFieldValue, CardPresence, CardSettings, CarouselAdvance,
+    CarouselSettings, ConnectionState, DeviceConnection, DisplayOrientation, DisplayTemplate,
+    PersistenceState, PomodoroAction, PomodoroState, ProviderRequest, RefreshPolicy, RuntimeDevice,
+    RuntimeError, RuntimeHandle, RuntimeOptions, RuntimeState, WidgetTapAction,
 };
 use chrono::Utc;
 use device::{DeviceError, ReceivedEvent, SessionDiagnostics, TransportError};
@@ -1378,5 +1378,68 @@ fn timed_advance_wiring_reaches_the_device_after_one_dwell() {
     wait_for(Duration::from_secs(8), || {
         activated_screen_ids(&control) == ["first", "second"]
     });
+    runtime.shutdown().unwrap();
+}
+
+/// Proves the `WorkerState::latest_fields` -> `AppSnapshot.card_data` wiring
+/// (runtime.rs's `snapshot` method) by driving a real `RuntimeHandle` and
+/// reading `card_data` back off `RuntimeHandle::snapshot()`, the same way
+/// `all_provider_kinds_share_bounded_scheduling_and_fail_independently`
+/// reads `providers`/`diagnostics`. A pomodoro card pushes its fields into
+/// `latest_fields` synchronously at config-install time (no device
+/// connection or provider round trip needed), which makes the live card's
+/// exact field values available on the very first snapshot. A second,
+/// otherwise-identical pomodoro card with `CardPresence::Off` is included to
+/// prove an off card contributes no entry at all — a stale entry would
+/// otherwise render in the settings preview as if it were live.
+#[test]
+fn card_data_carries_a_live_cards_exact_field_values_and_excludes_off_cards() {
+    let control = MockDeviceControl::default();
+    let config = AppConfig {
+        cards: vec![
+            pomodoro_card(
+                "on",
+                CardPresence::InRotation {
+                    dwell_seconds: None,
+                },
+                CardAlert::None,
+            ),
+            pomodoro_card("off", CardPresence::Off, CardAlert::None),
+        ],
+        ..AppConfig::default()
+    };
+    let runtime = start_runtime(config, &control, Duration::ZERO);
+
+    let snapshot = wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
+        snapshot.card_data.iter().any(|card| card.card_id == "on")
+    });
+
+    let on_card = snapshot
+        .card_data
+        .iter()
+        .find(|card| card.card_id == "on")
+        .expect("the live pomodoro card's fields must reach the snapshot");
+    assert!(
+        on_card.fields.contains(&CardField {
+            key: "label".into(),
+            value: CardFieldValue::Text { value: "on".into() },
+        }),
+        "expected the pomodoro's label field in card_data, got {:?}",
+        on_card.fields
+    );
+    assert!(
+        on_card.fields.contains(&CardField {
+            key: "duration_seconds".into(),
+            value: CardFieldValue::Integer { value: 60 },
+        }),
+        "expected the pomodoro's duration_seconds field in card_data, got {:?}",
+        on_card.fields
+    );
+
+    assert!(
+        !snapshot.card_data.iter().any(|card| card.card_id == "off"),
+        "an off-presence card must not contribute an entry to card_data"
+    );
+
     runtime.shutdown().unwrap();
 }

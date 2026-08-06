@@ -27,6 +27,8 @@ bool big_number_label_create(template_widget_view_t *view,
     view->objects[OBJ_TITLE] = lv_label_create(view->root);
     lv_obj_set_style_text_color(view->objects[OBJ_TITLE],
                                 lv_color_hex(0x8f93a8), 0);
+    lv_label_set_long_mode(view->objects[OBJ_TITLE], LV_LABEL_LONG_DOT);
+    lv_obj_set_width(view->objects[OBJ_TITLE], 392);
     lv_obj_align(view->objects[OBJ_TITLE], LV_ALIGN_TOP_LEFT, 28, 24);
     lv_label_set_text(view->objects[OBJ_TITLE], "");
 
@@ -35,6 +37,13 @@ bool big_number_label_create(template_widget_view_t *view,
                                &lv_font_montserrat_48, 0);
     lv_obj_set_style_text_color(view->objects[OBJ_VALUE],
                                 lv_color_hex(0xf2c14e), 0);
+    /* 16 schema-legal characters exceed 448px in this font. Bound the box and
+     * ellipsize, so an over-long value is visibly cut rather than silently
+     * clipped at the panel edge. */
+    lv_label_set_long_mode(view->objects[OBJ_VALUE], LV_LABEL_LONG_DOT);
+    lv_obj_set_width(view->objects[OBJ_VALUE], 400);
+    lv_obj_set_style_text_align(view->objects[OBJ_VALUE],
+                                LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_align(view->objects[OBJ_VALUE], LV_ALIGN_CENTER, 0, -18);
     lv_label_set_text(view->objects[OBJ_VALUE], "--");
 
@@ -82,8 +91,13 @@ void big_number_label_patch(template_widget_view_t *view,
     if (label != NULL) {
         lv_label_set_text(view->objects[OBJ_LABEL], label->value.text);
     }
-    /* Re-align: the value's width changes with its content. */
-    lv_obj_align(view->objects[OBJ_VALUE], LV_ALIGN_CENTER, 0, -18);
+    /* OBJ_VALUE now has a fixed 400px width and (under LV_LABEL_LONG_DOT) a
+     * fixed single-line height, so its box no longer changes with content:
+     * the create()-time lv_obj_align already positions it correctly for the
+     * object's lifetime, and re-running that align here would always
+     * recompute the same coordinates. It is intentionally not repeated.
+     * OBJ_LABEL still depends on OBJ_VALUE's box, so it is kept re-anchored
+     * beneath it in case that assumption ever changes. */
     lv_obj_align_to(view->objects[OBJ_LABEL], view->objects[OBJ_VALUE],
                     LV_ALIGN_OUT_BOTTOM_MID, 0, 16);
 }

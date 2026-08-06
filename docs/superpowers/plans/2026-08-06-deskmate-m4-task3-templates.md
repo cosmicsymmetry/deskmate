@@ -244,6 +244,13 @@ git commit -m "feat: add extended template kinds to the wire contract"
 - Consumes: `PROTOCOL_TEMPLATE_ANALOG_CLOCK`, `PROTOCOL_TEMPLATE_BIG_NUMBER_LABEL`, `PROTOCOL_TEMPLATE_ICON_BADGE_TEXT` from Task 1.
 - Produces: registry entries so `template_fields_registry()` and `template_fields_resolve()` accept the new kinds. Field names other tasks depend on: analog-clock `title`/`show_seconds`; big-number-label `title`/`value`/`label`; icon-badge-text `title`/`icon`/`badge`/`value`/`label`.
 
+**Temperature bounds, corrected during execution.** These are tenths of a degree *in the
+unit the user selected*, not always Celsius. An earlier draft of this plan used `-1000..1000`,
+which breaks at 100.1 F because `template_fields_resolve` rejects the **entire push** when a
+single field falls out of range — the card would go stale rather than mis-render one value.
+`-2000..2000` covers Celsius (-90..60) and Fahrenheit (-130..135) with headroom while staying
+bounded against a malicious host. Do not narrow it back.
+
 **Why icon-badge-text accepts fields it does not render.** The weather provider pushes ten fields: `title`, `value`, `label`, `badge`, `icon`, `temperature_tenths`, `apparent_temperature_tenths`, `unit`, `stale`, `error`. The layout renders five of them. Fields absent from a registry are counted in `widget_model`'s `unknown_field_count`, which `docs/hardware/board-notes.md` instructs hardware sessions to watch as a diagnostic signal. If three fields were unknown on every weather push, that counter would climb forever and stop meaning anything. So the schema declares all ten and the view renders five. Do not "clean this up" by removing the unrendered descriptors.
 
 - [ ] **Step 1: Write the failing schema tests**
@@ -352,8 +359,8 @@ static const template_field_descriptor_t s_icon_badge_text_fields[] = {
     TEXT_FIELD("value", false, 16U, "--"),
     TEXT_FIELD("label", false, 64U, ""),
     TEXT_FIELD("unit", false, 16U, ""),
-    INT_FIELD("temperature_tenths", false, -1000, 1000, 0),
-    INT_FIELD("apparent_temperature_tenths", false, -1000, 1000, 0),
+    INT_FIELD("temperature_tenths", false, -2000, 2000, 0),
+    INT_FIELD("apparent_temperature_tenths", false, -2000, 2000, 0),
     BOOL_FIELD("stale", false, false),
     TEXT_FIELD("error", false, 96U, ""),
 };

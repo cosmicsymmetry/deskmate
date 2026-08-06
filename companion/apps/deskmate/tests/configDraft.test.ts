@@ -4,6 +4,8 @@ import {
   addCard,
   cardMoveFromKey,
   firstSelectableCard,
+  issuesForCard,
+  issuesForField,
   issuesForPath,
   loopSeconds,
   moveCard,
@@ -12,8 +14,10 @@ import {
   nonRotationCards,
   removeCard,
   rotationCards,
+  tapActionDescription,
+  withAlert,
 } from "../src/lib/configDraft";
-import type { AppConfig, ValidationIssue } from "../src/lib/types";
+import type { AppConfig, CardSettings, ValidationIssue } from "../src/lib/types";
 import { ipcContractFixtures } from "../src/lib/types.contract";
 
 function initialConfig(): AppConfig {
@@ -141,6 +145,79 @@ describe("configuration draft helpers", () => {
     ];
     expect(issuesForPath(issues, "cards[1].source")).toEqual([issues[1]]);
     expect(issuesForPath(issues, "cards[0].size")).toEqual([]);
+  });
+
+  test("issues follow the card across a reorder", () => {
+    const base = initialConfig();
+    const config: AppConfig = {
+      ...base,
+      cards: [
+        { ...addCard(base, "clock").config.cards[0], id: "a" },
+        { ...addCard(base, "calendar").config.cards[0], id: "b" },
+      ],
+    };
+    const issues: ValidationIssue[] = [
+      { path: "cards[1].source", code: "out-of-range", message: "calendar source is required" },
+    ];
+
+    expect(issuesForCard(issues, config, "b")).toHaveLength(1);
+    expect(issuesForCard(issues, config, "a")).toHaveLength(0);
+
+    // After dragging "b" to the front, the SAME issue list must still attach to "b".
+    const reordered = moveCard(config, "b", 0);
+    const rebased: ValidationIssue[] = [
+      { path: "cards[0].source", code: "out-of-range", message: "calendar source is required" },
+    ];
+    expect(issuesForCard(rebased, reordered, "b")).toHaveLength(1);
+    expect(issuesForCard(rebased, reordered, "a")).toHaveLength(0);
+  });
+
+  test("issuesForCard returns nothing for a card that no longer exists", () => {
+    const config = initialConfig();
+    const issues: ValidationIssue[] = [
+      { path: "cards[0].title", code: "empty", message: "required" },
+    ];
+    expect(issuesForCard(issues, config, "removed-card")).toEqual([]);
+  });
+
+  test("issuesForField matches a leaf field but not its dotted children", () => {
+    const cardIssues: ValidationIssue[] = [
+      { path: "cards[0].presence", code: "out-of-range", message: "dead card" },
+      { path: "cards[0].presence.dwell_seconds", code: "out-of-range", message: "bad dwell" },
+    ];
+    expect(issuesForField(cardIssues, "presence")).toEqual([cardIssues[0]]);
+    expect(issuesForField(cardIssues, "presence.dwell_seconds")).toEqual([cardIssues[1]]);
+  });
+
+  test("unchecking a card's only alert also lifts it out of alert-only, so the dead combination never re-forms", () => {
+    const alertOnlyCard: CardSettings = {
+      ...addCard(initialConfig(), "pomodoro").config.cards[0],
+      presence: { kind: "alert-only" },
+      alert: { kind: "on-timer-finish", hold: { kind: "until-dismissed" } },
+    };
+    const next = withAlert(alertOnlyCard, { kind: "none" });
+    expect(next.alert).toEqual({ kind: "none" });
+    expect(next.presence).toEqual({ kind: "in-rotation", dwell_seconds: null });
+  });
+
+  test("withAlert leaves presence untouched when the card isn't alert-only", () => {
+    const rotationCard: CardSettings = {
+      ...addCard(initialConfig(), "pomodoro").config.cards[0],
+      presence: { kind: "in-rotation", dwell_seconds: 20 },
+    };
+    const next = withAlert(rotationCard, { kind: "none" });
+    expect(next.presence).toEqual({ kind: "in-rotation", dwell_seconds: 20 });
+  });
+
+  test("tapActionDescription states plain-language tap behaviour per action", () => {
+    const clock = initialConfig().cards[0];
+    const withPomodoro = addCard(initialConfig(), "pomodoro");
+    const pomodoro = withPomodoro.config.cards.find((card) => card.id === withPomodoro.cardId);
+    if (!pomodoro) {
+      throw new Error("addCard did not append the pomodoro card");
+    }
+    expect(tapActionDescription(clock)).toBe("Tapping this card does nothing.");
+    expect(tapActionDescription(pomodoro)).toBe("Tapping this card starts or pauses its timer.");
   });
 
   test("contract fixtures expose cards, not widgets or screens", () => {

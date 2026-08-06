@@ -2,12 +2,12 @@ import { describe, expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import { App } from "../src/App";
+import { CardEditor } from "../src/components/CardEditor";
 import { CardList } from "../src/components/CardList";
 import { DeviceHeader } from "../src/components/DeviceHeader";
 import { DevicePreview } from "../src/components/DevicePreview";
 import { ProviderStatus, formatProviderAge } from "../src/components/ProviderStatus";
-import { WidgetEditor } from "../src/components/WidgetEditor";
-import type { AppConfig, CardSettings } from "../src/lib/types";
+import type { AppConfig, CardSettings, ValidationIssue } from "../src/lib/types";
 import { ipcContractFixtures } from "../src/lib/types.contract";
 
 const snapshot = ipcContractFixtures.snapshot;
@@ -34,6 +34,31 @@ function clockCard(
   };
 }
 
+function weatherCard(id: string, alert: CardSettings["alert"] = { kind: "none" }): CardSettings {
+  return {
+    kind: "weather",
+    id,
+    title: "Weather",
+    location: "",
+    units: "metric",
+    template: { kind: "big-number-label" },
+    tap_action: { kind: "none" },
+    refresh: { kind: "interval", minutes: 30 },
+    presence: { kind: "in-rotation", dwell_seconds: null },
+    alert,
+  };
+}
+
+/// Finds the self-closing `<input ...>` tag carrying both `name` and
+/// `value`, regardless of where React's server renderer places `checked` /
+/// `disabled` relative to the other attributes — that ordering is an
+/// implementation detail (observed to differ from JSX source order), not
+/// something a test should assume.
+function radioTag(html: string, name: string, value: string): string | undefined {
+  const inputs = html.match(/<input[^>]*>/g) ?? [];
+  return inputs.find((tag) => tag.includes(`name="${name}"`) && tag.includes(`value="${value}"`));
+}
+
 function cardListConfig(cardList: CardSettings[]): AppConfig {
   return {
     schema_version: 3,
@@ -52,17 +77,13 @@ describe("settings accessibility and states", () => {
     expect(html).toContain("background service keeps running");
   });
 
-  test("labels the editor controls and explains the clean canvas", () => {
-    const clock = cards.find((card) => card.kind === "clock");
-    if (!clock) {
-      throw new Error("contract fixture is missing its clock widget");
-    }
-    const html = renderToStaticMarkup(
-      <WidgetEditor
-        widget={clock}
-        widgetIndex={0}
-        issues={[]}
+  function renderCardEditor(card: CardSettings, issues: ValidationIssue[] = []) {
+    return renderToStaticMarkup(
+      <CardEditor
+        card={card}
+        issues={issues}
         pomodoro={null}
+        defaultDwellSeconds={20}
         timerBusy={false}
         filePickerBusy={false}
         onChange={() => {}}
@@ -71,9 +92,23 @@ describe("settings accessibility and states", () => {
         onChooseCalendarFile={() => {}}
       />,
     );
-    expect(html).toContain("Widget ID");
+  }
+
+  test("explains the clean canvas and never shows the wire id", () => {
+    // A distinctive id with no overlap with any visible label (unlike the
+    // fixture's plain "clock", which is also a substring of the visible
+    // "Digital clock" kind name and would make this assertion meaningless).
+    const clock = clockCard(
+      "internal-uuid-0001",
+      { kind: "in-rotation", dwell_seconds: null },
+      "Desk",
+    );
+    const html = renderCardEditor(clock);
     expect(html).toContain("Clean 448 × 368 canvas");
     expect(html).toContain("Show seconds");
+    // IDs are wire identifiers, not something a person should see or edit.
+    expect(html).not.toContain("Widget ID");
+    expect(html).not.toContain("internal-uuid-0001");
   });
 
   test("offers a bounded native file chooser for local calendars", () => {
@@ -81,22 +116,65 @@ describe("settings accessibility and states", () => {
     if (calendar?.kind !== "calendar") {
       throw new Error("contract fixture is missing its calendar widget");
     }
-    const html = renderToStaticMarkup(
-      <WidgetEditor
-        widget={{ ...calendar, source: { kind: "file", value: "" } }}
-        widgetIndex={2}
-        issues={[]}
-        pomodoro={null}
-        timerBusy={false}
-        filePickerBusy={false}
-        onChange={() => {}}
-        onRemove={() => {}}
-        onTimerAction={() => {}}
-        onChooseCalendarFile={() => {}}
-      />,
-    );
+    const html = renderCardEditor({ ...calendar, source: { kind: "file", value: "" } });
     expect(html).toContain("Choose file…");
     expect(html).toContain("up to 1 MB");
+  });
+
+  test("alert-only is unavailable until an alert is configured", () => {
+    const pomodoro = cards.find((card) => card.kind === "pomodoro");
+    if (pomodoro?.kind !== "pomodoro") {
+      throw new Error("contract fixture is missing its pomodoro widget");
+    }
+    const card: CardSettings = { ...pomodoro, alert: { kind: "none" } };
+    const html = renderCardEditor(card);
+    const radio = radioTag(html, "presence", "alert-only");
+    expect(radio).not.toBeUndefined();
+    expect(radio).toContain('disabled=""');
+    expect(html).toContain("Turn on an alert below");
+  });
+
+  test("alert-only becomes available once an alert is configured", () => {
+    const pomodoro = cards.find((card) => card.kind === "pomodoro");
+    if (pomodoro?.kind !== "pomodoro") {
+      throw new Error("contract fixture is missing its pomodoro widget");
+    }
+    const card: CardSettings = {
+      ...pomodoro,
+      alert: { kind: "on-timer-finish", hold: { kind: "until-dismissed" } },
+    };
+    const html = renderCardEditor(card);
+    const radio = radioTag(html, "presence", "alert-only");
+    expect(radio).not.toBeUndefined();
+    expect(radio).not.toContain("disabled");
+  });
+
+  test("weather cards offer no alert controls", () => {
+    const html = renderCardEditor(weatherCard("weather-1"));
+    // The other four kinds have no trigger that could ever fire, so a
+    // disabled alert control there would be noise — nothing renders at all.
+    expect(html).not.toContain("alert-fieldset");
+    expect(html).not.toMatch(/<legend>Alert<\/legend>/);
+  });
+
+  test("pomodoro and calendar cards do offer alert controls", () => {
+    const pomodoro = cards.find((card) => card.kind === "pomodoro");
+    const calendar = cards.find((card) => card.kind === "calendar");
+    if (!pomodoro || !calendar) {
+      throw new Error("contract fixture is missing pomodoro or calendar widgets");
+    }
+    expect(renderCardEditor(pomodoro)).toContain("Take over the screen when the timer ends");
+    expect(renderCardEditor(calendar)).toContain("Take over the screen before an event");
+  });
+
+  test("states the card's tap gesture and the shared alert-dismiss behaviour", () => {
+    const clock = cards.find((card) => card.kind === "clock");
+    if (!clock) {
+      throw new Error("contract fixture is missing its clock widget");
+    }
+    const html = renderCardEditor(clock);
+    expect(html).toContain("Tapping this card does nothing.");
+    expect(html).toContain("a tap dismisses it");
   });
 
   test("exposes explicit move buttons and keyboard instructions", () => {

@@ -8,11 +8,13 @@
  *
  * --accent / --accent-dark / --accent-soft / --danger / --warning / --panel
  * below are the pre-existing palette, kept only so panels this task does not
- * touch (WidgetEditor, ProviderStatus, DeviceHeader, the preview chrome) keep
- * rendering as before. They are not part of the new system and are retired
- * as each of those components is rebuilt. The old --shadow token (panel
- * elevation) is gone outright: no shadow survives except the single amber
- * glow under the device preview, in .device-shell below.
+ * touch (ProviderStatus, DeviceHeader, the preview chrome) keep rendering as
+ * before. They are not part of the new system and are retired as each of
+ * those components is rebuilt. CardEditor (below, replacing WidgetEditor) is
+ * fully migrated: it does not read --accent/--accent-dark/--accent-soft.
+ * The old --shadow token (panel elevation) is gone outright: no shadow
+ * survives except the single amber glow under the device preview, in
+ * .device-shell below.
  */
 :root {
   color-scheme: light dark;
@@ -405,7 +407,8 @@ h2 {
   background: var(--panel);
 }
 
-.card-list-panel {
+.card-list-panel,
+.editor-panel {
   border-color: var(--line);
   border-radius: 6px;
 }
@@ -668,9 +671,9 @@ h2 {
   grid-column: 1 / -1;
   margin: 0;
   padding: 8px 10px;
-  border-radius: 8px;
-  color: var(--accent-dark);
-  background: var(--accent-soft);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--muted);
   font-size: 0.68rem;
   font-weight: 700;
 }
@@ -682,10 +685,13 @@ h2 {
 
 .field > span,
 .field > label,
-.source-picker legend {
+.source-picker legend,
+.behaviour-fieldset legend,
+.alert-fieldset legend,
+.mapping-list legend {
   display: block;
   margin-bottom: 7px;
-  color: #42524e;
+  color: var(--muted);
   font-size: 0.72rem;
   font-weight: 750;
 }
@@ -701,26 +707,22 @@ h2 {
 }
 
 .field input,
-.field select {
+.field select,
+.mapping-row input {
   width: 100%;
   min-height: 39px;
   padding: 8px 10px;
-  border: 1px solid #cdd7d2;
-  border-radius: 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
   color: var(--ink);
-  background: white;
+  background: transparent;
   font-size: 0.78rem;
-}
-
-.field input[readonly] {
-  color: #64736f;
-  background: #f4f6f4;
 }
 
 .field input[aria-invalid="true"],
 .field select[aria-invalid="true"] {
-  border-color: #d06a5c;
-  box-shadow: 0 0 0 2px rgb(208 106 92 / 12%);
+  border-color: var(--alarm);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--alarm) 16%, transparent);
 }
 
 .field > small,
@@ -734,11 +736,11 @@ h2 {
 
 .field-error,
 .field-errors {
-  color: var(--danger);
+  color: var(--alarm);
 }
 
 .field > .field-error {
-  color: var(--danger);
+  color: var(--alarm);
 }
 
 .field-errors {
@@ -753,9 +755,9 @@ h2 {
   gap: 9px;
   align-items: flex-start;
   padding: 11px 12px;
-  border: 1px solid #dde4df;
-  border-radius: 9px;
-  background: #fafbf9;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: transparent;
   cursor: pointer;
 }
 
@@ -763,7 +765,7 @@ h2 {
   width: 16px;
   height: 16px;
   margin-top: 2px;
-  accent-color: var(--accent);
+  accent-color: var(--signal);
 }
 
 .check-field strong,
@@ -787,8 +789,8 @@ h2 {
   gap: 16px;
   margin: 0;
   padding: 12px;
-  border: 1px solid #dde4df;
-  border-radius: 9px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
 }
 
 .source-picker legend {
@@ -803,7 +805,7 @@ h2 {
 }
 
 .source-picker input {
-  accent-color: var(--accent);
+  accent-color: var(--signal);
 }
 
 .timer-controls {
@@ -813,9 +815,71 @@ h2 {
   min-width: 0;
   margin: 0;
   padding: 12px;
-  border: 0;
-  border-radius: 10px;
-  background: var(--accent-soft);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: transparent;
+}
+
+/* Behaviour (presence) and Alert fieldsets — same quiet hairline grouping
+   as .source-picker/.timer-controls above, never a colour fill: presence
+   and alert are structure, not emission or interaction. */
+.behaviour-fieldset,
+.alert-fieldset,
+.mapping-list {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+.behaviour-fieldset label {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  font-size: 0.74rem;
+}
+
+.behaviour-fieldset input[type="radio"] {
+  accent-color: var(--signal);
+}
+
+.behaviour-hint {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.66rem;
+  line-height: 1.4;
+}
+
+.mapping-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.mapping-row input {
+  min-height: 34px;
+  font-size: 0.74rem;
+}
+
+.gesture-note {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--muted);
+  font-size: 0.68rem;
+  line-height: 1.5;
+}
+
+.gesture-note p {
+  margin: 0;
 }
 
 .timer-controls strong,
@@ -1256,7 +1320,11 @@ h2 {
 
   .source-picker,
   .check-field,
-  .timer-controls {
+  .timer-controls,
+  .behaviour-fieldset,
+  .alert-fieldset,
+  .mapping-list,
+  .gesture-note {
     grid-column: 1;
   }
 
@@ -1309,7 +1377,8 @@ h2 {
     flex-direction: column;
   }
 
-  .file-picker-row {
+  .file-picker-row,
+  .mapping-row {
     grid-template-columns: 1fr;
   }
 

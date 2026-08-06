@@ -1,14 +1,15 @@
 import { useEffect, useState } from "react";
 
+import { CardEditor } from "./components/CardEditor";
 import { CardList } from "./components/CardList";
 import { DeviceHeader } from "./components/DeviceHeader";
 import { DevicePreview } from "./components/DevicePreview";
 import { ProviderStatus } from "./components/ProviderStatus";
-import { WidgetEditor } from "./components/WidgetEditor";
 import {
   addCard,
   copyConfig,
   firstSelectableCard,
+  issuesForCard,
   needsFirstRunGuidance,
   removeCard,
   updateWidget,
@@ -157,11 +158,13 @@ export function App() {
     );
   }
 
-  const selectedIndex = draft.cards.findIndex((card) => card.id === selectedWidgetId);
-  const selectedWidget = selectedIndex >= 0 ? draft.cards[selectedIndex] : null;
+  const selectedWidget = draft.cards.find((card) => card.id === selectedWidgetId) ?? null;
   const pomodoro =
     snapshot.pomodoros.find((candidate) => candidate.widget_id === selectedWidgetId) ?? null;
   const issues = validation.result.issues;
+  const cardIssues = selectedWidgetId ? issuesForCard(issues, draft, selectedWidgetId) : [];
+  const defaultDwellSeconds =
+    draft.carousel.advance.kind === "timed" ? draft.carousel.advance.default_dwell_seconds : null;
 
   const replaceDraft = (next: AppConfig) => {
     setDraft(next);
@@ -344,11 +347,11 @@ export function App() {
             onRemove={handleRemoveCard}
             onReorder={(next) => replaceDraft(next)}
           />
-          <WidgetEditor
-            widget={selectedWidget}
-            widgetIndex={selectedIndex}
-            issues={issues}
+          <CardEditor
+            card={selectedWidget}
+            issues={cardIssues}
             pomodoro={pomodoro}
+            defaultDwellSeconds={defaultDwellSeconds}
             timerBusy={busyAction === "timer"}
             filePickerBusy={busyAction === "calendar-file"}
             onChange={handleWidgetChange}

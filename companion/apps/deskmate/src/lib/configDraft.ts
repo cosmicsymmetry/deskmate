@@ -1,5 +1,6 @@
 import type {
   AppConfig,
+  CardAlert,
   CardKind,
   CardPresence,
   CardSettings,
@@ -226,6 +227,84 @@ export function loopSeconds(config: AppConfig): number | null {
 
 export function issuesForPath(issues: ValidationIssue[], path: string): ValidationIssue[] {
   return issues.filter((issue) => issue.path === path || issue.path.startsWith(`${path}.`));
+}
+
+/// Resolves `cardId` to its CURRENT index in `config.cards` and returns only
+/// the issues whose backend path targets that card (`cards[i]` itself, or
+/// any `cards[i].*` field beneath it). Backend validation paths are
+/// array-index based (`cards[2].title`) and `cards[]` is user-reorderable,
+/// so an index captured at validation time is not a stable identity — this
+/// re-resolves the index from the current config on every call instead of
+/// trusting a caller-supplied index, which is what keeps an issue attached
+/// to the same card across a drag reorder rather than sliding onto whatever
+/// card now occupies its old slot. Returns an empty array for an unknown
+/// card id (e.g. one just removed) rather than throwing.
+export function issuesForCard(
+  issues: ValidationIssue[],
+  config: AppConfig,
+  cardId: string,
+): ValidationIssue[] {
+  const index = config.cards.findIndex((card) => card.id === cardId);
+  if (index < 0) {
+    return [];
+  }
+  return issuesForPath(issues, `cards[${index}]`);
+}
+
+/// Narrows a card's already-scoped issues (see `issuesForCard`) down to a
+/// single field, matched on the path SUFFIX after the `cards[i].` prefix
+/// rather than the absolute path. This is what lets `CardEditor` look up
+/// per-field errors without ever knowing the card's numeric index — the
+/// index-stripping already happened in `issuesForCard`, so the field name
+/// alone is enough to identify the right issues regardless of where the
+/// card currently sits in `config.cards`. Matching is exact (not
+/// prefix-based) because every backend field path used here is a leaf: two
+/// unrelated fields never share a dotted prefix (e.g. `presence` and
+/// `presence.dwell_seconds` are deliberately queried separately so a dwell
+/// error is not double-reported at the parent field too).
+export function issuesForField(cardIssues: ValidationIssue[], field: string): ValidationIssue[] {
+  return cardIssues.filter((issue) => {
+    const dot = issue.path.indexOf(".");
+    const suffix = dot < 0 ? "" : issue.path.slice(dot + 1);
+    return suffix === field;
+  });
+}
+
+/// Applies a new alert to a card. If this disables the card's only trigger
+/// (`{ kind: "none" }`) while its presence is `alert-only`, also resets
+/// presence to `in-rotation` — otherwise unchecking the alert checkbox
+/// would silently recreate the dead-card combination (alert-only with no
+/// alert) that the disabled "Alert only" radio exists to prevent the user
+/// from ever selecting in the first place.
+export function withAlert(card: CardSettings, alert: CardAlert): CardSettings {
+  const presence: CardPresence =
+    alert.kind === "none" && card.presence.kind === "alert-only"
+      ? { kind: "in-rotation", dwell_seconds: null }
+      : card.presence;
+  return { ...card, alert, presence };
+}
+
+/// A plain-language statement of what tapping this card does, for the
+/// editor's gesture disclosure. Three gestures share one physical screen —
+/// tap runs the card's own action, swipe navigates the rotation, and a tap
+/// while an alert is showing dismisses it instead — and nothing else in the
+/// app states this, so the editor is where a person can find out what their
+/// tap will actually do before they rely on it.
+export function tapActionDescription(card: CardSettings): string {
+  switch (card.tap_action.kind) {
+    case "none":
+      return "Tapping this card does nothing.";
+    case "start-pause":
+      return "Tapping this card starts or pauses its timer.";
+    case "reset":
+      return "Tapping this card resets it.";
+    case "dismiss":
+      return "Tapping this card dismisses it.";
+    case "open-url":
+      return "Tapping this card opens a web address.";
+    case "open-application":
+      return "Tapping this card opens an application.";
+  }
 }
 
 /// Reorders `config.cards` by moving the card identified by `cardId` to

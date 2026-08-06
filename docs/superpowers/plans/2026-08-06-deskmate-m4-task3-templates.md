@@ -1319,6 +1319,9 @@ bool icon_badge_text_create(template_widget_view_t *view,
                                 lv_color_hex(0x8f93a8), 0);
     lv_label_set_long_mode(view->objects[OBJ_BADGE], LV_LABEL_LONG_DOT);
     lv_obj_set_width(view->objects[OBJ_BADGE], 190);
+    lv_obj_set_height(view->objects[OBJ_BADGE],
+                      lv_font_get_line_height(lv_obj_get_style_text_font(
+                          view->objects[OBJ_BADGE], LV_PART_MAIN)));
     lv_obj_set_style_text_align(view->objects[OBJ_BADGE],
                                 LV_TEXT_ALIGN_RIGHT, 0);
     lv_obj_align(view->objects[OBJ_BADGE], LV_ALIGN_TOP_RIGHT, -28, 22);
@@ -1352,6 +1355,9 @@ bool icon_badge_text_create(template_widget_view_t *view,
                                 lv_color_hex(0xb3b6c7), 0);
     lv_label_set_long_mode(view->objects[OBJ_LABEL], LV_LABEL_LONG_DOT);
     lv_obj_set_width(view->objects[OBJ_LABEL], 200);
+    lv_obj_set_height(view->objects[OBJ_LABEL],
+                      lv_font_get_line_height(lv_obj_get_style_text_font(
+                          view->objects[OBJ_LABEL], LV_PART_MAIN)));
     lv_obj_align(view->objects[OBJ_LABEL], LV_ALIGN_LEFT_MID, 216, 40);
     lv_label_set_text(view->objects[OBJ_LABEL], "");
 

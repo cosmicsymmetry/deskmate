@@ -16,6 +16,11 @@
 - Treat all bytes received from the host as untrusted: bound every length and count, reject malformed or unsupported messages, and recover framing without rebooting.
 - The canvas is exactly 448x368 landscape. There is one layout per template. Size classes do not exist in the card model; `SizeClass::Full` is pinned on the wire. Do not reintroduce dashboards or a status strip.
 - Preserve the standalone clock on boot, host loss, malformed input, and protocol version mismatch.
+- An LVGL label needs **both** a width and a height pinned for `LV_LABEL_LONG_DOT` to
+  ellipsize. With a width alone the label keeps `LV_SIZE_CONTENT` height, and LVGL
+  force-breaks an over-long word onto a second line rather than showing dots — so the text
+  silently wraps and the object grows instead of truncating. Any label that must not wrap
+  gets `lv_obj_set_width` **and** `lv_obj_set_height`.
 - `TEMPLATE_OBJECT_CAPACITY` is `14`. A template's entries in `view->objects[]` must not exceed it. Composite artwork uses a single container object whose children are not tracked in `objects[]`.
 - `template_field_patch_t.dirty_mask` is `uint16_t`, so a template registry may declare at most **16** fields.
 - The weather icon vocabulary is a closed set of exactly 11 values: `sun`, `moon`, `cloud`, `cloud-sun`, `cloud-moon`, `rain`, `drizzle`, `snow`, `storm`, `fog`, `unknown`. Any unrecognised value renders `unknown`.
@@ -1117,6 +1122,9 @@ bool big_number_label_create(template_widget_view_t *view,
                                 lv_color_hex(0x8f93a8), 0);
     lv_label_set_long_mode(view->objects[OBJ_TITLE], LV_LABEL_LONG_DOT);
     lv_obj_set_width(view->objects[OBJ_TITLE], 392);
+    lv_obj_set_height(view->objects[OBJ_TITLE],
+                      lv_font_get_line_height(lv_obj_get_style_text_font(
+                          view->objects[OBJ_TITLE], LV_PART_MAIN)));
     lv_obj_align(view->objects[OBJ_TITLE], LV_ALIGN_TOP_LEFT, 28, 24);
     lv_label_set_text(view->objects[OBJ_TITLE], "");
 
@@ -1130,6 +1138,11 @@ bool big_number_label_create(template_widget_view_t *view,
      * clipped at the panel edge. */
     lv_label_set_long_mode(view->objects[OBJ_VALUE], LV_LABEL_LONG_DOT);
     lv_obj_set_width(view->objects[OBJ_VALUE], 400);
+    /* Height must be pinned too. With only a width, the label keeps
+     * LV_SIZE_CONTENT height and LVGL force-breaks an over-long word onto a
+     * second line instead of ellipsizing, so LONG_DOT never fires. */
+    lv_obj_set_height(view->objects[OBJ_VALUE],
+                      lv_font_get_line_height(&lv_font_montserrat_48));
     lv_obj_set_style_text_align(view->objects[OBJ_VALUE],
                                 LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_align(view->objects[OBJ_VALUE], LV_ALIGN_CENTER, 0, -18);
@@ -1295,6 +1308,9 @@ bool icon_badge_text_create(template_widget_view_t *view,
                                 lv_color_hex(0x8f93a8), 0);
     lv_label_set_long_mode(view->objects[OBJ_TITLE], LV_LABEL_LONG_DOT);
     lv_obj_set_width(view->objects[OBJ_TITLE], 190);
+    lv_obj_set_height(view->objects[OBJ_TITLE],
+                      lv_font_get_line_height(lv_obj_get_style_text_font(
+                          view->objects[OBJ_TITLE], LV_PART_MAIN)));
     lv_obj_align(view->objects[OBJ_TITLE], LV_ALIGN_TOP_LEFT, 28, 22);
     lv_label_set_text(view->objects[OBJ_TITLE], "");
 
@@ -1325,6 +1341,9 @@ bool icon_badge_text_create(template_widget_view_t *view,
      * ellipsize rather than letting it run off the panel edge. */
     lv_label_set_long_mode(view->objects[OBJ_VALUE], LV_LABEL_LONG_DOT);
     lv_obj_set_width(view->objects[OBJ_VALUE], 204);
+    /* Pin the height too — width alone lets LVGL wrap instead of ellipsize. */
+    lv_obj_set_height(view->objects[OBJ_VALUE],
+                      lv_font_get_line_height(&lv_font_montserrat_48));
     lv_obj_align(view->objects[OBJ_VALUE], LV_ALIGN_LEFT_MID, 216, -14);
     lv_label_set_text(view->objects[OBJ_VALUE], "--");
 

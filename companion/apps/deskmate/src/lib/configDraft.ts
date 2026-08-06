@@ -303,6 +303,50 @@ export function nextFilmstripCardId(
   return segments[nextIndex].cardId;
 }
 
+/// The absolute deadline (matching `Date.now()`'s epoch) at which a segment
+/// begun at `startedAtMs` finishes its dwell. A one-second floor keeps a
+/// zero/negative dwell from producing an immediately-due, tight-loop
+/// advance. Kept as its own function so a caller can compute a deadline
+/// once and then only ever compare it against "now" — never re-derive it
+/// from a relative duration on every check, which is what let the ribbon's
+/// old relative `setTimeout` get silently re-armed by unrelated re-renders
+/// before it ever had a chance to fire.
+export function filmstripDeadline(startedAtMs: number, dwellSeconds: number): number {
+  return startedAtMs + Math.max(1, dwellSeconds) * 1000;
+}
+
+export interface FilmstripAdvance {
+  cardId: string;
+  deadlineMs: number;
+}
+
+/// The one place "has enough real time elapsed to advance" is decided — a
+/// pure function of `deadlineMs` and `nowMs` alone, never of how many times
+/// a caller has re-rendered or re-checked it. Returns `null` before the
+/// deadline (nothing to do yet). Once `nowMs` has reached it, returns the
+/// next card in rotation together with the deadline for THAT card's own
+/// dwell, so a caller can just feed the previous result's `deadlineMs`
+/// back in on every tick without tracking anything else.
+export function filmstripAdvance(
+  segments: FilmstripSegment[],
+  activeCardId: string | null,
+  deadlineMs: number,
+  nowMs: number,
+): FilmstripAdvance | null {
+  if (nowMs < deadlineMs) {
+    return null;
+  }
+  const nextCardId = nextFilmstripCardId(segments, activeCardId);
+  if (!nextCardId) {
+    return null;
+  }
+  const nextSegment = segments.find((segment) => segment.cardId === nextCardId);
+  return {
+    cardId: nextCardId,
+    deadlineMs: filmstripDeadline(nowMs, nextSegment?.dwellSeconds ?? 0),
+  };
+}
+
 /// Renders a whole-second duration as "1 hr 2 min 3 s", dropping leading
 /// zero units (but never the trailing seconds, so `0` still reads as "0 s"
 /// rather than an empty string). Used for the ribbon's total loop length;

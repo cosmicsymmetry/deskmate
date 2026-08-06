@@ -4,6 +4,8 @@ import {
   addCard,
   cardFields,
   cardMoveFromKey,
+  filmstripAdvance,
+  filmstripDeadline,
   filmstripSegments,
   firstSelectableCard,
   formatDuration,
@@ -232,6 +234,96 @@ describe("configuration draft helpers", () => {
     expect(nextFilmstripCardId(segments, "b")).toBe("a");
     expect(nextFilmstripCardId(segments, "unknown-id")).toBe("a");
     expect(nextFilmstripCardId([], "a")).toBeNull();
+  });
+
+  test("filmstripDeadline offsets from the given start time by the dwell, flooring a non-positive dwell to one second", () => {
+    expect(filmstripDeadline(1_000, 45)).toBe(1_000 + 45_000);
+    expect(filmstripDeadline(1_000, 0)).toBe(1_000 + 1_000);
+    expect(filmstripDeadline(1_000, -5)).toBe(1_000 + 1_000);
+  });
+
+  test("filmstripAdvance's due/not-due decision is a pure function of elapsed time, not of how many times it is checked", () => {
+    const base = initialConfig();
+    const config: AppConfig = {
+      ...base,
+      carousel: { advance: { kind: "timed", default_dwell_seconds: 20 } },
+      cards: [
+        {
+          ...addCard(base, "clock").config.cards[0],
+          id: "a",
+          presence: { kind: "in-rotation", dwell_seconds: 45 },
+        },
+        {
+          ...addCard(base, "clock").config.cards[0],
+          id: "b",
+          presence: { kind: "in-rotation", dwell_seconds: 20 },
+        },
+      ],
+    };
+    const segments = filmstripSegments(config);
+    const startedAtMs = 0;
+    const deadlineMs = filmstripDeadline(startedAtMs, 45); // 45_000
+
+    // Simulates a re-render-happy caller re-checking the very same deadline
+    // hundreds of times before it is actually due — this is exactly the
+    // shape of the bug being regression-tested: a snapshot-driven re-render
+    // roughly once a second must never itself cause an advance. However
+    // many times this is checked before the deadline, the answer must stay
+    // "not yet".
+    for (let check = 0; check < 500; check += 1) {
+      expect(filmstripAdvance(segments, "a", deadlineMs, deadlineMs - 1)).toBeNull();
+    }
+    expect(filmstripAdvance(segments, "a", deadlineMs, 0)).toBeNull();
+
+    // Once real time has actually reached the deadline, it advances —
+    // regardless of the fact that it was checked 500 times first without
+    // effect, and the new deadline is a fresh dwell for the new card.
+    expect(filmstripAdvance(segments, "a", deadlineMs, deadlineMs)).toEqual({
+      cardId: "b",
+      deadlineMs: filmstripDeadline(deadlineMs, 20),
+    });
+    // Checking arbitrarily far past the deadline still advances to the
+    // same next card — "due" is a threshold, not a narrow window that can
+    // be missed by a slow or delayed check.
+    const late = filmstripAdvance(segments, "a", deadlineMs, deadlineMs + 999_999);
+    expect(late?.cardId).toBe("b");
+    expect(late?.deadlineMs).toBe(filmstripDeadline(deadlineMs + 999_999, 20));
+  });
+
+  test("filmstripAdvance wraps past the last segment and resolves against whatever segments it is given, so a mid-play reorder is honoured on the next check", () => {
+    const base = initialConfig();
+    const config: AppConfig = {
+      ...base,
+      carousel: { advance: { kind: "timed", default_dwell_seconds: 20 } },
+      cards: [
+        { ...addCard(base, "clock").config.cards[0], id: "a" },
+        { ...addCard(base, "clock").config.cards[0], id: "b" },
+        { ...addCard(base, "clock").config.cards[0], id: "c" },
+      ],
+    };
+    const segments = filmstripSegments(config);
+    // b and c swapped, leaving "a" (the active/current card) exactly where
+    // it was — isolating the reorder's effect to "what comes after a".
+    const reordered = filmstripSegments({
+      ...config,
+      cards: [config.cards[0], config.cards[2], config.cards[1]],
+    });
+
+    // In the original order (a, b, c), "a" advances to "b"...
+    expect(filmstripAdvance(segments, "a", 1_000, 1_000)?.cardId).toBe("b");
+    // ...but once the rotation is reordered mid-play (now a, c, b), the very
+    // same due check for the very same active card resolves against the
+    // NEW order instead of a stale one — because the caller passes the
+    // latest segments in on every check rather than one captured once at
+    // play-start.
+    expect(filmstripAdvance(reordered, "a", 1_000, 1_000)?.cardId).toBe("c");
+
+    // Wrapping past the last segment still returns to the first.
+    expect(filmstripAdvance(segments, "c", 1_000, 1_000)?.cardId).toBe("a");
+  });
+
+  test("filmstripAdvance returns null with no segments or nothing to advance to", () => {
+    expect(filmstripAdvance([], "a", 1_000, 1_000)).toBeNull();
   });
 
   test("formatDuration renders whole-second durations in the ribbon's units, dropping leading zero units", () => {

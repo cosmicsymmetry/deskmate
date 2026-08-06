@@ -1253,6 +1253,12 @@ h2 {
   pointer-events: none;
 }
 
+.filmstrip-play-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
 .filmstrip-play {
   justify-self: start;
   min-height: 32px;
@@ -1266,8 +1272,23 @@ h2 {
   transition: background 140ms ease;
 }
 
-.filmstrip-play:hover {
+.filmstrip-play:hover:not(:disabled) {
   background: var(--line);
+}
+
+/* A disabled Play control must not also claim (via label or aria-pressed)
+   that playback is active — see the visual-language quality floor on
+   controls never lying about their own state. Reduced motion disables the
+   control outright rather than letting it silently no-op. */
+.filmstrip-play:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.filmstrip-play-hint {
+  color: var(--muted);
+  font-size: 0.66rem;
+  line-height: 1.4;
 }
 
 .provider-row {

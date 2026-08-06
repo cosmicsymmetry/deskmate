@@ -6,8 +6,9 @@ import { CardEditor } from "../src/components/CardEditor";
 import { CardList } from "../src/components/CardList";
 import { DeviceHeader } from "../src/components/DeviceHeader";
 import { DevicePreview } from "../src/components/DevicePreview";
+import { Filmstrip } from "../src/components/Filmstrip";
 import { ProviderStatus, formatProviderAge } from "../src/components/ProviderStatus";
-import type { AppConfig, CardSettings, ValidationIssue } from "../src/lib/types";
+import type { AppConfig, CardDataSnapshot, CardSettings, ValidationIssue } from "../src/lib/types";
 import { ipcContractFixtures } from "../src/lib/types.contract";
 
 const snapshot = ipcContractFixtures.snapshot;
@@ -276,31 +277,124 @@ describe("settings accessibility and states", () => {
     expect(providers).toContain("Refresh now");
   });
 
-  test("renders deterministic preview and a useful empty state", () => {
+  function calendarCard(
+    id: string,
+    presence: CardSettings["presence"],
+    title = "Up next",
+  ): CardSettings {
+    return {
+      kind: "calendar",
+      id,
+      title,
+      source: { kind: "url", value: "https://example.com/cal.ics" },
+      template: { kind: "row-list" },
+      tap_action: { kind: "none" },
+      refresh: { kind: "interval", minutes: 15 },
+      presence,
+      alert: { kind: "none" },
+    };
+  }
+
+  function renderPreview({
+    cardId,
+    cardData,
+  }: {
+    cardId: string;
+    cardData: CardDataSnapshot[];
+  }): string {
+    return renderToStaticMarkup(
+      <DevicePreview
+        cards={[calendarCard(cardId, { kind: "in-rotation", dwell_seconds: null })]}
+        selectedWidgetId={cardId}
+        cardData={cardData}
+        pomodoros={[]}
+        orientation="landscape"
+      />,
+    );
+  }
+
+  test("renders a real pushed value on the preview face", () => {
+    const cardData: CardDataSnapshot[] = [
+      {
+        card_id: "upnext",
+        fields: [{ key: "row0_title", value: { kind: "text", value: "Q3 Planning Sync" } }],
+      },
+    ];
+    const html = renderPreview({ cardId: "upnext", cardData });
+    expect(html).toContain("Q3 Planning Sync");
+    expect(html).not.toMatch(/sample/i);
+  });
+
+  test("a card with no published data yet is clearly labelled as a sample", () => {
+    const html = renderPreview({ cardId: "upnext", cardData: [] });
+    expect(html).toMatch(/sample/i);
+  });
+
+  test("renders a useful empty state and keeps the panel's narrower claim", () => {
     const populated = renderToStaticMarkup(
       <DevicePreview
         cards={cards}
         selectedWidgetId="clock"
+        cardData={snapshot.card_data}
         pomodoros={snapshot.pomodoros}
         orientation="landscape"
-        onSelect={() => {}}
       />,
     );
-    expect(populated).toContain("09:41");
-    expect(populated).toContain("Layout preview · not pixel-identical");
-    expect(populated).not.toContain("USB · 09:41");
+    expect(populated).toContain("Same data as your display · approximate pixels");
+    // Not pixel-perfect, and no longer claims to be — just an honest label.
+    expect(populated).not.toContain("Layout preview · not pixel-identical");
 
     const empty = renderToStaticMarkup(
       <DevicePreview
         cards={[]}
         selectedWidgetId={null}
+        cardData={[]}
         pomodoros={[]}
         orientation="landscape-flipped"
-        onSelect={() => {}}
       />,
     );
     expect(empty).toContain("The standalone clock stays available.");
     expect(empty).toContain("is-flipped");
+  });
+
+  function filmstripConfig(): AppConfig {
+    return {
+      schema_version: 3,
+      preferences: { timezone: "UTC", autostart: false, paused: false, orientation: "landscape" },
+      cards: [
+        calendarCard("first", { kind: "in-rotation", dwell_seconds: 45 }, "Desk"),
+        calendarCard("second", { kind: "in-rotation", dwell_seconds: 20 }, "Up next"),
+        calendarCard("third", { kind: "alert-only" }, "Focus"),
+      ],
+      assets: [],
+      carousel: { advance: { kind: "timed", default_dwell_seconds: 20 } },
+      updater: { channel: "stable", checks: "notify" },
+    };
+  }
+
+  function renderFilmstrip(config: AppConfig): string {
+    return renderToStaticMarkup(
+      <Filmstrip config={config} selectedCardId="first" onSelect={() => {}} onReorder={() => {}} />,
+    );
+  }
+
+  test("the filmstrip shows the loop length and only in-rotation cards", () => {
+    const html = renderFilmstrip(filmstripConfig());
+    expect(html).toMatch(/1 min 5 s/);
+    expect(html).toContain("Desk");
+    expect(html).toContain("Up next");
+    expect(html).not.toContain("Focus");
+  });
+
+  test("the filmstrip hides timings and the play control under manual advance", () => {
+    const config = filmstripConfig();
+    const html = renderFilmstrip({
+      ...config,
+      carousel: { advance: { kind: "manual" } },
+    });
+    expect(html).not.toMatch(/\d+s</);
+    expect(html).not.toContain(">Play<");
+    expect(html).toContain("Desk");
   });
 
   test("formats provider staleness without exposing raw timestamps", () => {

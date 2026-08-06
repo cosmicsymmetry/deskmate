@@ -1,6 +1,8 @@
 import type {
   AppConfig,
   CardAlert,
+  CardDataSnapshot,
+  CardFieldValue,
   CardKind,
   CardPresence,
   CardSettings,
@@ -223,6 +225,102 @@ export function loopSeconds(config: AppConfig): number | null {
     const presence = card.presence;
     return total + (presence.kind === "in-rotation" ? (presence.dwell_seconds ?? fallback) : 0);
   }, 0);
+}
+
+/// The published field values for one card, keyed by field name — e.g.
+/// `row0_title`, `stale`, `next_start_unix_ms`. These are the SAME values
+/// the physical device receives, sourced from `AppSnapshot.card_data`, not
+/// from the (possibly unsaved) draft. An empty map means the runtime has no
+/// snapshot for this card yet — never pushed, because the card was just
+/// added and never saved — which is the one condition callers should treat
+/// as "show a clearly marked sample" rather than as empty real data.
+export function cardFields(
+  cardData: CardDataSnapshot[],
+  cardId: string,
+): Map<string, CardFieldValue> {
+  const snapshot = cardData.find((entry) => entry.card_id === cardId);
+  if (!snapshot) {
+    return new Map();
+  }
+  return new Map(snapshot.fields.map((field) => [field.key, field.value]));
+}
+
+/// One ribbon segment: an in-rotation card plus its resolved dwell and the
+/// proportional width/offset (both 0-100) that dwell earns in the loop
+/// ribbon. Pure and independent of any DOM/flex mechanics so the width math
+/// — the whole point of the ribbon — can be unit-tested without rendering
+/// anything.
+export interface FilmstripSegment {
+  cardId: string;
+  name: string;
+  dwellSeconds: number;
+  widthPercent: number;
+  offsetPercent: number;
+}
+
+/// Builds the ribbon's segments from `rotationCards(config)` only — cards
+/// that are `alert-only` or `off` have no position in the loop and must
+/// never appear here (see the visual language doc). Under manual advance
+/// there is no dwell to speak of, so every segment is given equal width
+/// instead of a zero-width one, which is what lets the ribbon still show
+/// order (just not timing) in that mode.
+export function filmstripSegments(config: AppConfig): FilmstripSegment[] {
+  const advance = config.carousel.advance;
+  const fallback = advance.kind === "timed" ? advance.default_dwell_seconds : 0;
+  const rotation = rotationCards(config);
+  const dwellSeconds = rotation.map((card) => {
+    const presence = card.presence;
+    return presence.kind === "in-rotation" ? (presence.dwell_seconds ?? fallback) : fallback;
+  });
+  const total = dwellSeconds.reduce((sum, seconds) => sum + seconds, 0);
+  const equalShare = rotation.length > 0 ? 100 / rotation.length : 0;
+  let offset = 0;
+  return rotation.map((card, index) => {
+    const widthPercent = total > 0 ? (dwellSeconds[index] / total) * 100 : equalShare;
+    const segment: FilmstripSegment = {
+      cardId: card.id,
+      name: cardName(card),
+      dwellSeconds: dwellSeconds[index],
+      widthPercent,
+      offsetPercent: offset,
+    };
+    offset += widthPercent;
+    return segment;
+  });
+}
+
+/// The segment the ribbon's play control should move to next, wrapping past
+/// the end. Returns `null` only when there is nothing to advance to.
+export function nextFilmstripCardId(
+  segments: FilmstripSegment[],
+  currentCardId: string | null,
+): string | null {
+  if (segments.length === 0) {
+    return null;
+  }
+  const index = segments.findIndex((segment) => segment.cardId === currentCardId);
+  const nextIndex = index < 0 ? 0 : (index + 1) % segments.length;
+  return segments[nextIndex].cardId;
+}
+
+/// Renders a whole-second duration as "1 hr 2 min 3 s", dropping leading
+/// zero units (but never the trailing seconds, so `0` still reads as "0 s"
+/// rather than an empty string). Used for the ribbon's total loop length;
+/// tabular-numeral styling is applied by the caller's CSS, not here.
+export function formatDuration(totalSeconds: number): string {
+  const whole = Math.max(0, Math.round(totalSeconds));
+  const hours = Math.floor(whole / 3600);
+  const minutes = Math.floor((whole % 3600) / 60);
+  const seconds = whole % 60;
+  const parts: string[] = [];
+  if (hours > 0) {
+    parts.push(`${hours} hr`);
+  }
+  if (hours > 0 || minutes > 0) {
+    parts.push(`${minutes} min`);
+  }
+  parts.push(`${seconds} s`);
+  return parts.join(" ");
 }
 
 export function issuesForPath(issues: ValidationIssue[], path: string): ValidationIssue[] {

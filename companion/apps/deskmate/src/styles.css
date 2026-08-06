@@ -925,27 +925,17 @@ h2 {
   min-height: 280px;
 }
 
+/* Preview chrome: this section is chrome, not the device — the hard rule
+   in the visual-language doc is that --panel-black stays quarantined to
+   .device-screen below, so this panel is an ordinary quiet card like its
+   .provider-panel/.preferences-panel peers, not a second dark surface. */
 .preview-panel {
   padding-bottom: 18px;
-  color: #dff8f1;
-  border-color: #1c3833;
-  background: linear-gradient(155deg, #1b332e, #0d1d1a);
-}
-
-.preview-heading {
-  border-color: rgb(188 230 218 / 12%);
-}
-
-.preview-heading .step-label {
-  color: #64d7bc;
-}
-
-.preview-heading h2 {
-  color: white;
+  border-color: var(--line);
 }
 
 .preview-heading > span {
-  color: #92aaa4;
+  color: var(--muted);
   font-size: 0.62rem;
 }
 
@@ -954,19 +944,30 @@ h2 {
   width: min(88%, 490px);
   margin: 22px auto 12px;
   padding: 13px;
-  border: 1px solid #38554f;
+  border: 1px solid color-mix(in srgb, var(--graphite) 55%, transparent);
   border-radius: 24px;
-  background: linear-gradient(145deg, #283f3a, #101c1a);
+  /* The device housing, not the screen: dark like real bezel plastic, built
+     from --graphite (never --panel-black, which is reserved for the lit
+     screen surface below). */
+  background: linear-gradient(
+    145deg,
+    color-mix(in srgb, var(--graphite) 90%, white 8%),
+    var(--graphite)
+  );
   /* The one light effect in the app: a soft amber glow beneath the device
      preview — the emission itself, not chrome elevation. */
-  box-shadow: 0 28px 46px -14px rgb(242 193 78 / 32%);
+  box-shadow: 0 28px 46px -14px color-mix(in srgb, var(--emit) 32%, transparent);
 }
 
 .device-screen {
   overflow: hidden;
   aspect-ratio: 448 / 368;
   border-radius: 13px;
-  color: #effffb;
+  /* The preview's own type is the emissive colour — see --emit's role in
+     the visual-language doc — so every face inside the screen is amber on
+     true black by default; faces dim it with opacity for secondary text
+     rather than reaching for a second hue. */
+  color: var(--emit);
   background: var(--panel-black);
 }
 
@@ -977,7 +978,7 @@ h2 {
   width: 34px;
   height: 7px;
   border-radius: 0 0 5px 5px;
-  background: #070e0d;
+  background: color-mix(in srgb, var(--graphite) 55%, black 45%);
   transform: translateX(-50%);
 }
 
@@ -998,11 +999,14 @@ h2 {
 
 .preview-clock {
   gap: 7px;
-  background: radial-gradient(circle at 50% 50%, rgb(34 99 83 / 30%), transparent 65%);
+  background: radial-gradient(
+    circle at 50% 50%,
+    color-mix(in srgb, var(--emit) 14%, transparent),
+    transparent 65%
+  );
 }
 
 .preview-clock > strong {
-  color: white;
   font-size: clamp(2.8rem, 7vw, 5.4rem);
   font-weight: 640;
   letter-spacing: -0.08em;
@@ -1011,22 +1015,22 @@ h2 {
 
 .preview-clock strong small {
   margin-left: 5px;
-  color: #6fe3c8;
   font-size: 0.32em;
   letter-spacing: -0.03em;
+  opacity: 0.68;
 }
 
 .preview-clock > span:first-child {
-  color: #70dfc6;
   font-size: 0.68rem;
   font-weight: 800;
   letter-spacing: 0.16em;
   text-transform: uppercase;
+  opacity: 0.72;
 }
 
 .preview-clock > span:last-child {
-  color: #91aaa4;
   font-size: 0.7rem;
+  opacity: 0.6;
 }
 
 .preview-pomodoro {
@@ -1039,7 +1043,10 @@ h2 {
   width: min(47%, 160px);
   aspect-ratio: 1;
   border-radius: 50%;
-  background: conic-gradient(#64d7bc var(--progress), #203a34 0);
+  background: conic-gradient(
+    var(--emit) var(--progress),
+    color-mix(in srgb, var(--panel-black), var(--emit) 12%) 0
+  );
 }
 
 .preview-ring::before {
@@ -1047,15 +1054,13 @@ h2 {
   width: 82%;
   height: 82%;
   border-radius: 50%;
-  background: #07110f;
+  background: var(--panel-black);
   content: "";
 }
 
 .preview-ring span {
   z-index: 1;
   grid-area: 1 / 1;
-  color: white;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: clamp(1rem, 3vw, 1.65rem);
   font-weight: 650;
 }
@@ -1066,9 +1071,9 @@ h2 {
 }
 
 .preview-pomodoro > small {
-  color: #76958d;
   font-size: 0.57rem;
   text-transform: capitalize;
+  opacity: 0.65;
 }
 
 .preview-calendar {
@@ -1079,62 +1084,190 @@ h2 {
 .preview-calendar > strong {
   display: block;
   margin-bottom: 10px;
-  color: #65d8bd;
   font-size: 0.75rem;
+  opacity: 0.85;
 }
 
 .preview-calendar > div {
   display: flex;
   justify-content: space-between;
   padding: 9px 0;
-  border-bottom: 1px solid #18332d;
+  border-bottom: 1px solid color-mix(in srgb, var(--emit) 14%, transparent);
   font-size: 0.64rem;
 }
 
 .preview-calendar time {
-  color: #7f9c95;
+  opacity: 0.62;
+}
+
+.preview-calendar__placeholder {
+  padding: 10px 0;
+  font-size: 0.66rem;
+  line-height: 1.45;
+  opacity: 0.55;
 }
 
 .preview-empty {
   gap: 7px;
-  color: #7f9c95;
   text-align: center;
 }
 
 .preview-empty strong {
-  color: white;
   font-size: 2.7rem;
   letter-spacing: -0.07em;
 }
 
 .preview-empty span {
   font-size: 0.65rem;
+  opacity: 0.6;
 }
 
-.preview-dots {
-  display: flex;
-  justify-content: center;
-  gap: 7px;
+/* A visible, non-tooltip marker that a face is showing sample rather than
+   published content — see cardFields' empty-map contract in configDraft.ts.
+   Amber like the rest of the screen's own type, not --alarm: it is a
+   neutral disclosure, not an error. */
+.preview-sample-badge {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 1px 6px;
+  border: 1px solid color-mix(in srgb, var(--emit) 55%, transparent);
+  border-radius: 999px;
+  font-size: 0.52rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  opacity: 0.85;
+}
+
+/* The loop ribbon — this task's signature element. Chrome, not the device:
+   achromatic surfaces and hairlines like .card-list-panel, --signal for the
+   selected segment (selection, never hover decoration), and --emit
+   reserved for the playhead alone since a ribbon segment is clickable and
+   --emit may never mark something clickable. */
+.filmstrip-panel {
+  display: grid;
+  gap: 10px;
   min-width: 0;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+}
+
+.filmstrip-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.filmstrip-total {
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.filmstrip-empty {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.filmstrip-scroll {
+  position: relative;
+  overflow-x: auto;
+  overflow-y: hidden;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+.filmstrip-track {
+  display: flex;
+  min-width: 100%;
   margin: 0;
   padding: 0;
-  border: 0;
+  list-style: none;
 }
 
-.preview-dots button {
-  width: 7px;
-  height: 7px;
-  padding: 0;
+.filmstrip-segment {
+  min-width: 68px;
+  border-right: 1px solid var(--line);
+  cursor: grab;
+}
+
+.filmstrip-segment:last-child {
+  border-right: 0;
+}
+
+.filmstrip-segment.is-dragging {
+  opacity: 0.45;
+}
+
+.filmstrip-segment__button {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  padding: 9px 10px;
   border: 0;
-  border-radius: 50%;
-  background: #47635c;
+  background: transparent;
+  color: inherit;
+  cursor: grab;
+  text-align: left;
+  transition: background 140ms ease;
+}
+
+/* Hover is a neutral affordance, not selection — --signal stays reserved
+   for :focus-visible and .is-selected, matching .card-row's rule. */
+.filmstrip-segment__button:hover {
+  background: var(--line);
+}
+
+.filmstrip-segment__button.is-selected {
+  background: color-mix(in srgb, var(--signal) 14%, transparent);
+  box-shadow: inset 0 -2px 0 var(--signal);
+}
+
+.filmstrip-segment__name {
+  overflow: hidden;
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.filmstrip-segment__dwell {
+  color: var(--muted);
+  font-size: 0.64rem;
+}
+
+/* The playhead: the ribbon's own emission, sweeping in real time while
+   playing. It is never clickable, so --emit stays true to its one rule. */
+.filmstrip-playhead {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--emit);
+  transition-property: left;
+  transition-timing-function: linear;
+  pointer-events: none;
+}
+
+.filmstrip-play {
+  justify-self: start;
+  min-height: 32px;
+  padding: 6px 14px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: transparent;
   cursor: pointer;
+  font-size: 0.72rem;
+  font-weight: 750;
+  transition: background 140ms ease;
 }
 
-.preview-dots button.is-active {
-  width: 19px;
-  border-radius: 999px;
-  background: #64d7bc;
+.filmstrip-play:hover {
+  background: var(--line);
 }
 
 .provider-row {
@@ -1285,7 +1418,7 @@ h2 {
   }
 
   .preview-panel {
-    grid-row: span 2;
+    grid-row: span 3;
   }
 
   .first-run {

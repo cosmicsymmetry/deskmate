@@ -4,6 +4,7 @@ import { CardEditor } from "./components/CardEditor";
 import { CardList } from "./components/CardList";
 import { DeviceHeader } from "./components/DeviceHeader";
 import { DevicePreview } from "./components/DevicePreview";
+import { Filmstrip } from "./components/Filmstrip";
 import { ProviderStatus } from "./components/ProviderStatus";
 import {
   addCard,
@@ -365,9 +366,15 @@ export function App() {
           <DevicePreview
             cards={draft.cards}
             selectedWidgetId={selectedWidgetId}
+            cardData={snapshot.card_data}
             pomodoros={snapshot.pomodoros}
             orientation={draft.preferences.orientation}
+          />
+          <Filmstrip
+            config={draft}
+            selectedCardId={selectedWidgetId}
             onSelect={setSelectedWidgetId}
+            onReorder={(next) => replaceDraft(next)}
           />
           <ProviderStatus
             providers={snapshot.providers}

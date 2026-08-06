@@ -2,8 +2,11 @@ import { describe, expect, test } from "bun:test";
 
 import {
   addCard,
+  cardFields,
   cardMoveFromKey,
+  filmstripSegments,
   firstSelectableCard,
+  formatDuration,
   issuesForCard,
   issuesForField,
   issuesForPath,
@@ -11,13 +14,14 @@ import {
   moveCard,
   moveCardWithinRotation,
   needsFirstRunGuidance,
+  nextFilmstripCardId,
   nonRotationCards,
   removeCard,
   rotationCards,
   tapActionDescription,
   withAlert,
 } from "../src/lib/configDraft";
-import type { AppConfig, CardSettings, ValidationIssue } from "../src/lib/types";
+import type { AppConfig, CardDataSnapshot, CardSettings, ValidationIssue } from "../src/lib/types";
 import { ipcContractFixtures } from "../src/lib/types.contract";
 
 function initialConfig(): AppConfig {
@@ -136,6 +140,105 @@ describe("configuration draft helpers", () => {
     };
     expect(loopSeconds(config)).toBe(65);
     expect(loopSeconds({ ...config, carousel: { advance: { kind: "manual" } } })).toBeNull();
+  });
+
+  test("cardFields reads a card's published fields, keyed by name", () => {
+    const cardData: CardDataSnapshot[] = [
+      {
+        card_id: "upnext",
+        fields: [
+          { key: "row0_title", value: { kind: "text", value: "Q3 Planning Sync" } },
+          { key: "stale", value: { kind: "boolean", value: false } },
+        ],
+      },
+    ];
+    const fields = cardFields(cardData, "upnext");
+    expect(fields.get("row0_title")).toEqual({ kind: "text", value: "Q3 Planning Sync" });
+    expect(fields.get("stale")).toEqual({ kind: "boolean", value: false });
+    expect(fields.get("row1_title")).toBeUndefined();
+  });
+
+  test("cardFields returns an empty map for a card with no published snapshot yet", () => {
+    expect(cardFields([], "upnext").size).toBe(0);
+    const cardData: CardDataSnapshot[] = [{ card_id: "some-other-card", fields: [] }];
+    expect(cardFields(cardData, "upnext").size).toBe(0);
+  });
+
+  test("filmstripSegments proportions each in-rotation card's width to its resolved dwell, inheriting the carousel default, and excludes alert-only/off cards", () => {
+    const base = initialConfig();
+    const config: AppConfig = {
+      ...base,
+      carousel: { advance: { kind: "timed", default_dwell_seconds: 20 } },
+      cards: [
+        {
+          ...addCard(base, "clock").config.cards[0],
+          id: "a",
+          title: "Desk",
+          presence: { kind: "in-rotation", dwell_seconds: 45 },
+        },
+        {
+          ...addCard(base, "clock").config.cards[0],
+          id: "b",
+          title: "Up next",
+          presence: { kind: "in-rotation", dwell_seconds: null }, // inherits the 20s default
+        },
+        {
+          ...addCard(base, "clock").config.cards[0],
+          id: "c",
+          title: "Muted",
+          presence: { kind: "off" },
+        },
+      ],
+    };
+    const segments = filmstripSegments(config);
+    expect(segments.map((segment) => segment.cardId)).toEqual(["a", "b"]);
+    expect(segments[0].dwellSeconds).toBe(45);
+    expect(segments[1].dwellSeconds).toBe(20);
+    // 45 of 65 total seconds, and 20 of 65 — proportional to dwell, not count.
+    expect(segments[0].widthPercent).toBeCloseTo((45 / 65) * 100, 5);
+    expect(segments[1].widthPercent).toBeCloseTo((20 / 65) * 100, 5);
+    expect(segments[0].offsetPercent).toBe(0);
+    expect(segments[1].offsetPercent).toBeCloseTo((45 / 65) * 100, 5);
+  });
+
+  test("filmstripSegments gives every card an equal share under manual advance, where there is no dwell to encode", () => {
+    const base = initialConfig();
+    const config: AppConfig = {
+      ...base,
+      carousel: { advance: { kind: "manual" } },
+      cards: [
+        { ...addCard(base, "clock").config.cards[0], id: "a" },
+        { ...addCard(base, "clock").config.cards[0], id: "b" },
+      ],
+    };
+    const segments = filmstripSegments(config);
+    expect(segments.map((segment) => segment.dwellSeconds)).toEqual([0, 0]);
+    expect(segments[0].widthPercent).toBe(50);
+    expect(segments[1].widthPercent).toBe(50);
+  });
+
+  test("nextFilmstripCardId wraps past the last segment", () => {
+    const base = initialConfig();
+    const config: AppConfig = {
+      ...base,
+      carousel: { advance: { kind: "timed", default_dwell_seconds: 20 } },
+      cards: [
+        { ...addCard(base, "clock").config.cards[0], id: "a" },
+        { ...addCard(base, "clock").config.cards[0], id: "b" },
+      ],
+    };
+    const segments = filmstripSegments(config);
+    expect(nextFilmstripCardId(segments, "a")).toBe("b");
+    expect(nextFilmstripCardId(segments, "b")).toBe("a");
+    expect(nextFilmstripCardId(segments, "unknown-id")).toBe("a");
+    expect(nextFilmstripCardId([], "a")).toBeNull();
+  });
+
+  test("formatDuration renders whole-second durations in the ribbon's units, dropping leading zero units", () => {
+    expect(formatDuration(65)).toBe("1 min 5 s");
+    expect(formatDuration(0)).toBe("0 s");
+    expect(formatDuration(45)).toBe("45 s");
+    expect(formatDuration(3725)).toBe("1 hr 2 min 5 s");
   });
 
   test("maps backend validation paths to their inline editor section", () => {

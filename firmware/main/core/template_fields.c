@@ -62,6 +62,37 @@ static const template_field_descriptor_t s_row_list_fields[] = {
     TEXT_FIELD("error", false, 96U, ""),
 };
 
+static const template_field_descriptor_t s_analog_clock_fields[] = {
+    TEXT_FIELD("title", false, 64U, ""),
+    BOOL_FIELD("show_seconds", false, true),
+    BOOL_FIELD("stale", false, false),
+    TEXT_FIELD("error", false, 96U, ""),
+};
+
+static const template_field_descriptor_t s_big_number_label_fields[] = {
+    TEXT_FIELD("title", false, 64U, ""),
+    TEXT_FIELD("value", false, 16U, "--"),
+    TEXT_FIELD("label", false, 64U, ""),
+    BOOL_FIELD("stale", false, false),
+    TEXT_FIELD("error", false, 96U, ""),
+};
+
+/* Declares every field the weather provider emits, including the three the
+ * layout does not draw, so unknown_field_count stays zero on a weather push.
+ * See this task's note in the plan before removing any of them. */
+static const template_field_descriptor_t s_icon_badge_text_fields[] = {
+    TEXT_FIELD("title", false, 64U, ""),
+    TEXT_FIELD("icon", false, 16U, "unknown"),
+    TEXT_FIELD("badge", false, 64U, ""),
+    TEXT_FIELD("value", false, 16U, "--"),
+    TEXT_FIELD("label", false, 64U, ""),
+    TEXT_FIELD("unit", false, 16U, ""),
+    INT_FIELD("temperature_tenths", false, -1000, 1000, 0),
+    INT_FIELD("apparent_temperature_tenths", false, -1000, 1000, 0),
+    BOOL_FIELD("stale", false, false),
+    TEXT_FIELD("error", false, 96U, ""),
+};
+
 static size_t array_length(size_t bytes, size_t element_size)
 {
     return bytes / element_size;
@@ -85,6 +116,18 @@ const template_field_descriptor_t *template_fields_registry(
         fields = s_row_list_fields;
         count = array_length(sizeof(s_row_list_fields),
                              sizeof(s_row_list_fields[0]));
+    } else if (template_kind == PROTOCOL_TEMPLATE_ANALOG_CLOCK) {
+        fields = s_analog_clock_fields;
+        count = array_length(sizeof(s_analog_clock_fields),
+                             sizeof(s_analog_clock_fields[0]));
+    } else if (template_kind == PROTOCOL_TEMPLATE_BIG_NUMBER_LABEL) {
+        fields = s_big_number_label_fields;
+        count = array_length(sizeof(s_big_number_label_fields),
+                             sizeof(s_big_number_label_fields[0]));
+    } else if (template_kind == PROTOCOL_TEMPLATE_ICON_BADGE_TEXT) {
+        fields = s_icon_badge_text_fields;
+        count = array_length(sizeof(s_icon_badge_text_fields),
+                             sizeof(s_icon_badge_text_fields[0]));
     }
     if (field_count != NULL) {
         *field_count = count;

@@ -4,7 +4,7 @@ import {
   cardKindName,
   cardMoveFromKey,
   cardName,
-  moveCard,
+  moveCardWithinRotation,
   nonRotationCards,
   rotationCards,
 } from "../lib/configDraft";
@@ -57,9 +57,12 @@ export function CardList({
   const [draggedId, setDraggedId] = useState<string | null>(null);
   const atCapacity = config.cards.length >= MAX_CARDS;
 
-  const fullIndexOf = (cardId: string) => config.cards.findIndex((card) => card.id === cardId);
-  const moveTo = (cardId: string, targetCardId: string) => {
-    onReorder(moveCard(config, cardId, fullIndexOf(targetCardId)));
+  // `targetRotationIndex` is a position among rotation rows only (what the
+  // user sees and drags), never a raw config.cards index — the mapping
+  // from one to the other, which must account for interspersed
+  // alert-only/off cards, lives in configDraft's moveCardWithinRotation.
+  const moveTo = (cardId: string, targetRotationIndex: number) => {
+    onReorder(moveCardWithinRotation(config, cardId, targetRotationIndex));
   };
 
   const onKeyDown = (event: KeyboardEvent<HTMLButtonElement>, index: number) => {
@@ -67,23 +70,22 @@ export function CardList({
     if (delta === 0) {
       return;
     }
-    const neighbor = rotation[index + delta];
-    if (!neighbor) {
+    if (!rotation[index + delta]) {
       return;
     }
     event.preventDefault();
-    moveTo(rotation[index].id, neighbor.id);
+    moveTo(rotation[index].id, index + delta);
   };
   const onDragStart = (event: DragEvent<HTMLLIElement>, cardId: string) => {
     setDraggedId(cardId);
     event.dataTransfer.effectAllowed = "move";
     event.dataTransfer.setData("text/plain", cardId);
   };
-  const onDrop = (event: DragEvent<HTMLLIElement>, targetCardId: string) => {
+  const onDrop = (event: DragEvent<HTMLLIElement>, targetIndex: number) => {
     event.preventDefault();
     const cardId = draggedId ?? event.dataTransfer.getData("text/plain");
-    if (cardId && cardId !== targetCardId) {
-      moveTo(cardId, targetCardId);
+    if (cardId) {
+      moveTo(cardId, targetIndex);
     }
     setDraggedId(null);
   };
@@ -95,7 +97,7 @@ export function CardList({
           <p className="step-label">Cards</p>
           <h2 id="card-list-heading">What should it show?</h2>
         </div>
-        <span className="count-badge numeral">
+        <span className="count-badge numeral" id="card-capacity">
           {config.cards.length}/{MAX_CARDS}
         </span>
       </div>
@@ -120,7 +122,7 @@ export function CardList({
                 onDragStart={(event) => onDragStart(event, card.id)}
                 onDragEnd={() => setDraggedId(null)}
                 onDragOver={(event) => event.preventDefault()}
-                onDrop={(event) => onDrop(event, card.id)}
+                onDrop={(event) => onDrop(event, index)}
               >
                 <span className="card-row__handle" aria-hidden="true">
                   ⠿
@@ -144,7 +146,7 @@ export function CardList({
                     disabled={index === 0}
                     onClick={(event) => {
                       event.stopPropagation();
-                      moveTo(card.id, rotation[index - 1].id);
+                      moveTo(card.id, index - 1);
                     }}
                   >
                     ↑
@@ -155,7 +157,7 @@ export function CardList({
                     disabled={index === rotation.length - 1}
                     onClick={(event) => {
                       event.stopPropagation();
-                      moveTo(card.id, rotation[index + 1].id);
+                      moveTo(card.id, index + 1);
                     }}
                   >
                     ↓
@@ -222,6 +224,7 @@ export function CardList({
             key={kind}
             onClick={() => onAdd(kind)}
             disabled={atCapacity}
+            aria-describedby={atCapacity ? "card-capacity" : undefined}
           >
             <span className="add-card__glyph numeral" aria-hidden="true">
               {glyph}

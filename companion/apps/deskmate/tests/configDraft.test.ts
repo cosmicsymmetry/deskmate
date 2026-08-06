@@ -7,6 +7,7 @@ import {
   issuesForPath,
   loopSeconds,
   moveCard,
+  moveCardWithinRotation,
   needsFirstRunGuidance,
   nonRotationCards,
   removeCard,
@@ -216,5 +217,78 @@ describe("cardMoveFromKey", () => {
     expect(cardMoveFromKey("ArrowDown", true)).toBe(1);
     expect(cardMoveFromKey("ArrowDown", false)).toBe(0);
     expect(cardMoveFromKey("Enter", true)).toBe(0);
+  });
+});
+
+describe("moveCardWithinRotation", () => {
+  // Rotation cards "a", "b", "c" with a non-rotation card sitting between
+  // each pair, so any implementation that forgets to map a rotation-local
+  // index back onto config.cards (and instead hands moveCard a raw
+  // rotation index) lands cards in the wrong slot. This is exactly the
+  // shape CardList's drag/keyboard reorder produces once alert-only/off
+  // cards exist alongside a rotation.
+  function interleavedConfig(): AppConfig {
+    const base = initialConfig();
+    return {
+      ...base,
+      cards: [
+        { ...base.cards[0], id: "a", presence: { kind: "in-rotation", dwell_seconds: null } },
+        {
+          ...base.cards[0],
+          id: "x",
+          presence: { kind: "alert-only" },
+          alert: { kind: "on-timer-finish", hold: { kind: "until-dismissed" } },
+        },
+        { ...base.cards[0], id: "b", presence: { kind: "in-rotation", dwell_seconds: null } },
+        { ...base.cards[0], id: "y", presence: { kind: "off" } },
+        { ...base.cards[0], id: "c", presence: { kind: "in-rotation", dwell_seconds: null } },
+      ],
+    };
+  }
+
+  test("moves the first rotation card to the last rotation slot, across interspersed non-rotation cards", () => {
+    const config = interleavedConfig();
+    const next = moveCardWithinRotation(config, "a", 2);
+    expect(rotationCards(next).map((card) => card.id)).toEqual(["b", "c", "a"]);
+    // Non-rotation cards are untouched and still unordered/present.
+    expect(
+      nonRotationCards(next)
+        .map((card) => card.id)
+        .sort(),
+    ).toEqual(["x", "y"]);
+  });
+
+  test("moves the last rotation card to the first rotation slot, across interspersed non-rotation cards", () => {
+    const config = interleavedConfig();
+    const next = moveCardWithinRotation(config, "c", 0);
+    expect(rotationCards(next).map((card) => card.id)).toEqual(["c", "a", "b"]);
+  });
+
+  test("moves a middle rotation card across a single interspersed non-rotation card", () => {
+    const config = interleavedConfig();
+    // "a" (rotation index 0) targets rotation index 1 (where "b" sits),
+    // crossing over "x" which sits between them in config.cards.
+    const next = moveCardWithinRotation(config, "a", 1);
+    expect(rotationCards(next).map((card) => card.id)).toEqual(["b", "a", "c"]);
+  });
+
+  test("clamps a target rotation index below the start to the first rotation slot", () => {
+    const config = interleavedConfig();
+    const next = moveCardWithinRotation(config, "c", -5);
+    expect(rotationCards(next).map((card) => card.id)).toEqual(["c", "a", "b"]);
+  });
+
+  test("clamps a target rotation index past the end to the last rotation slot", () => {
+    const config = interleavedConfig();
+    const next = moveCardWithinRotation(config, "a", 99);
+    expect(rotationCards(next).map((card) => card.id)).toEqual(["b", "c", "a"]);
+  });
+
+  test("is a no-op when there are no rotation cards", () => {
+    const config: AppConfig = {
+      ...initialConfig(),
+      cards: [{ ...initialConfig().cards[0], id: "only", presence: { kind: "off" } }],
+    };
+    expect(moveCardWithinRotation(config, "only", 0)).toBe(config);
   });
 });

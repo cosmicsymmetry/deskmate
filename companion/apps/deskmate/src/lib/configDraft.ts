@@ -262,6 +262,37 @@ export function cardMoveFromKey(key: string, altKey: boolean): -1 | 0 | 1 {
   return 0;
 }
 
+/// Moves `cardId` to `targetRotationIndex`, a position expressed relative
+/// to `rotationCards(config)` — i.e. "this card should become the Nth
+/// in-rotation card" — NOT an index into `config.cards`. This is the
+/// mapping `CardList` needs: rotation rows are drag/keyboard-reordered
+/// among themselves, but `alert-only`/`off` cards can be interspersed
+/// anywhere in the underlying `cards[]` array, so a naive rotation-index
+/// passed straight to `moveCard` would land the card in the wrong slot
+/// whenever a non-rotation card sits between source and target.
+///
+/// Resolves `targetRotationIndex` (clamped into `[0, rotationCards.length
+/// - 1]`) to the in-rotation card currently occupying that slot, then
+/// delegates the actual splice to `moveCard` using THAT card's real index
+/// in `config.cards` — so the two cards end up swapped in rotation order
+/// exactly as if the interspersed cards weren't there. No-ops (same
+/// `config` reference) when there is no rotation card at the resolved
+/// slot (empty rotation) or when `moveCard` itself would no-op.
+export function moveCardWithinRotation(
+  config: AppConfig,
+  cardId: string,
+  targetRotationIndex: number,
+): AppConfig {
+  const rotation = rotationCards(config);
+  if (rotation.length === 0) {
+    return config;
+  }
+  const bounded = Math.max(0, Math.min(targetRotationIndex, rotation.length - 1));
+  const anchor = rotation[bounded];
+  const targetIndex = config.cards.findIndex((card) => card.id === anchor.id);
+  return moveCard(config, cardId, targetIndex);
+}
+
 export function firstSelectableCard(config: AppConfig): string | null {
   return config.cards[0]?.id ?? null;
 }

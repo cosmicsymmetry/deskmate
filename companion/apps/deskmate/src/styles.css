@@ -486,6 +486,7 @@ h2 {
   cursor: grab;
   transition:
     border-color 140ms ease,
+    background 140ms ease,
     opacity 140ms ease,
     transform 140ms ease;
 }
@@ -495,7 +496,12 @@ h2 {
   cursor: default;
 }
 
-.card-row:hover,
+/* Hover is a neutral affordance, not selection — --signal is reserved for
+   :focus-visible and .is-selected so blue keeps one meaning. */
+.card-row:hover {
+  background: var(--line);
+}
+
 .card-row.is-selected {
   border-color: var(--signal);
 }
@@ -602,11 +608,13 @@ h2 {
   background: transparent;
   cursor: pointer;
   text-align: left;
-  transition: border-color 140ms ease;
+  transition: background 140ms ease;
 }
 
+/* Neutral hover — --signal stays reserved for focus/selection, and an
+   add-card button has no selection state to conflate it with. */
 .add-card:hover:not(:disabled) {
-  border-color: var(--signal);
+  background: var(--line);
 }
 
 .add-card strong,
@@ -896,7 +904,6 @@ h2 {
   border-radius: 13px;
   color: #effffb;
   background: var(--panel-black);
-  box-shadow: inset 0 0 0 1px rgb(111 231 207 / 14%);
 }
 
 .device-port {

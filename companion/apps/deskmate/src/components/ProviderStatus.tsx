@@ -45,7 +45,7 @@ export function ProviderStatus({ providers, cards, refreshingId, onRefresh }: Pr
             >
               <span className="provider-state" aria-hidden="true" />
               <span>
-                <strong>{widget ? cardName(widget) : provider.widget_id}</strong>
+                <strong>{widget ? cardName(widget) : "Unknown card"}</strong>
                 <small>
                   {state.kind === "refreshing"
                     ? "Refreshing…"

@@ -1058,7 +1058,15 @@ git commit -m "feat: add the analog-clock template view"
 - Consumes: Task 2's `s_big_number_label_fields` (`title`, `value`, `label`).
 - Produces: `big_number_label_create(view, parent, size)`, `big_number_label_patch(view, fields, dirty_mask)`. No tick.
 
-**Layout on 448x368.** Title top-left in muted small caps; `value` centred in `lv_font_montserrat_48` as the hero; `label` directly beneath it; the shared state label at the bottom. `value` is capped at 16 characters by the schema, so it cannot overflow the panel.
+**Layout on 448x368.** Title top-left in muted grey; `value` centred in `lv_font_montserrat_48` as the hero; `label` directly beneath it; the shared state label at the bottom.
+
+**Overflow, corrected during execution.** An earlier draft claimed the schema's 16-character
+cap on `value` made overflow impossible. That is false: measured against this project's
+`lv_font_montserrat_48` glyph metrics, sixteen digits run roughly 453-514px and uppercase-heavy
+strings far more, against a 448px panel. Without a width and a long mode, LVGL clips a centred
+label at the panel edge with no ellipsis — silently amputating digits from the one number the
+card exists to show. Every text object in this template therefore carries an explicit width and
+`LV_LABEL_LONG_DOT`, so an over-long value is visibly truncated rather than quietly wrong.
 
 - [ ] **Step 1: Declare the entry points**
 
@@ -1107,6 +1115,8 @@ bool big_number_label_create(template_widget_view_t *view,
     view->objects[OBJ_TITLE] = lv_label_create(view->root);
     lv_obj_set_style_text_color(view->objects[OBJ_TITLE],
                                 lv_color_hex(0x8f93a8), 0);
+    lv_label_set_long_mode(view->objects[OBJ_TITLE], LV_LABEL_LONG_DOT);
+    lv_obj_set_width(view->objects[OBJ_TITLE], 392);
     lv_obj_align(view->objects[OBJ_TITLE], LV_ALIGN_TOP_LEFT, 28, 24);
     lv_label_set_text(view->objects[OBJ_TITLE], "");
 
@@ -1115,6 +1125,13 @@ bool big_number_label_create(template_widget_view_t *view,
                                &lv_font_montserrat_48, 0);
     lv_obj_set_style_text_color(view->objects[OBJ_VALUE],
                                 lv_color_hex(0xf2c14e), 0);
+    /* 16 schema-legal characters exceed 448px in this font. Bound the box and
+     * ellipsize, so an over-long value is visibly cut rather than silently
+     * clipped at the panel edge. */
+    lv_label_set_long_mode(view->objects[OBJ_VALUE], LV_LABEL_LONG_DOT);
+    lv_obj_set_width(view->objects[OBJ_VALUE], 400);
+    lv_obj_set_style_text_align(view->objects[OBJ_VALUE],
+                                LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_align(view->objects[OBJ_VALUE], LV_ALIGN_CENTER, 0, -18);
     lv_label_set_text(view->objects[OBJ_VALUE], "--");
 
@@ -1276,6 +1293,8 @@ bool icon_badge_text_create(template_widget_view_t *view,
     view->objects[OBJ_TITLE] = lv_label_create(view->root);
     lv_obj_set_style_text_color(view->objects[OBJ_TITLE],
                                 lv_color_hex(0x8f93a8), 0);
+    lv_label_set_long_mode(view->objects[OBJ_TITLE], LV_LABEL_LONG_DOT);
+    lv_obj_set_width(view->objects[OBJ_TITLE], 190);
     lv_obj_align(view->objects[OBJ_TITLE], LV_ALIGN_TOP_LEFT, 28, 22);
     lv_label_set_text(view->objects[OBJ_TITLE], "");
 
@@ -1301,6 +1320,11 @@ bool icon_badge_text_create(template_widget_view_t *view,
                                &lv_font_montserrat_48, 0);
     lv_obj_set_style_text_color(view->objects[OBJ_VALUE],
                                 lv_color_hex(0xf2c14e), 0);
+    /* Only ~232px of canvas remains to the right of the icon, and 16
+     * schema-legal characters in this font exceed that comfortably. Bound and
+     * ellipsize rather than letting it run off the panel edge. */
+    lv_label_set_long_mode(view->objects[OBJ_VALUE], LV_LABEL_LONG_DOT);
+    lv_obj_set_width(view->objects[OBJ_VALUE], 204);
     lv_obj_align(view->objects[OBJ_VALUE], LV_ALIGN_LEFT_MID, 216, -14);
     lv_label_set_text(view->objects[OBJ_VALUE], "--");
 

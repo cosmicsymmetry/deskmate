@@ -24,7 +24,10 @@ weather_icon_t weather_icon_from_name(const char *name);
 #include "lvgl.h"
 
 /* Clears `container`'s children and draws `icon` into it using LVGL
- * primitives. Idempotent. The container must already be sized. */
+ * primitives. Idempotent. The container must already be sized. `background`
+ * must match the real card background colour, since cutout shapes (the
+ * crescent moon, the unknown ring) are drawn by punching a
+ * background-coloured disc over a lit one. */
 void weather_icon_render(lv_obj_t *container, weather_icon_t icon,
-                         lv_color_t color);
+                         lv_color_t color, lv_color_t background);
 #endif

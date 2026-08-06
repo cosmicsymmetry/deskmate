@@ -79,12 +79,15 @@ static void draw_sun(lv_obj_t *parent, lv_color_t color, int16_t dx,
     (void)disc(parent, color, diameter, dx, dy);
 }
 
-static void draw_moon(lv_obj_t *parent, lv_color_t color, int16_t dx,
-                      int16_t dy)
+static void draw_moon(lv_obj_t *parent, lv_color_t color,
+                      lv_color_t background, int16_t dx, int16_t dy)
 {
-    /* Crescent: a lit disc with a background-coloured disc offset over it. */
+    /* Crescent: a lit disc with a background-coloured disc offset over it.
+     * `background` must match the real card background colour (see
+     * clock_screen.c / template_view.c) or the cutout shows as a visible
+     * disc instead of a crescent. Do not hardcode this back to black. */
     (void)disc(parent, color, 56, dx, dy);
-    (void)disc(parent, lv_color_hex(0x000000), 48, dx + 16, dy - 8);
+    (void)disc(parent, background, 48, dx + 16, dy - 8);
 }
 
 static void draw_drops(lv_obj_t *parent, lv_color_t color, int16_t count,
@@ -97,7 +100,7 @@ static void draw_drops(lv_obj_t *parent, lv_color_t color, int16_t count,
 }
 
 void weather_icon_render(lv_obj_t *container, weather_icon_t icon,
-                         lv_color_t color)
+                         lv_color_t color, lv_color_t background)
 {
     if (container == NULL) {
         return;
@@ -110,7 +113,7 @@ void weather_icon_render(lv_obj_t *container, weather_icon_t icon,
         draw_sun(container, color, 0, 0, 72);
         break;
     case WEATHER_ICON_MOON:
-        draw_moon(container, color, 0, 0);
+        draw_moon(container, color, background, 0, 0);
         break;
     case WEATHER_ICON_CLOUD:
         draw_cloud(container, color, 0);
@@ -120,7 +123,7 @@ void weather_icon_render(lv_obj_t *container, weather_icon_t icon,
         draw_cloud(container, color, 6);
         break;
     case WEATHER_ICON_CLOUD_MOON:
-        draw_moon(container, color, -26, -30);
+        draw_moon(container, color, background, -26, -30);
         draw_cloud(container, color, 6);
         break;
     case WEATHER_ICON_RAIN:
@@ -151,7 +154,7 @@ void weather_icon_render(lv_obj_t *container, weather_icon_t icon,
         /* A hollow ring: unmistakably "no data", never a plausible-looking
          * wrong forecast. */
         (void)disc(container, color, 72, 0, 0);
-        (void)disc(container, lv_color_hex(0x000000), 52, 0, 0);
+        (void)disc(container, background, 52, 0, 0);
         break;
     }
 }

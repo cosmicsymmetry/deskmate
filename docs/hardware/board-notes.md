@@ -1118,11 +1118,17 @@ be described as verified until it has actually run on the device.
 
 Needs observing, on the physical board, before this can be called done:
 
-- Every card kind's freshly-added default (clock, pomodoro, calendar, weather,
-  json-feed, rss) renders correctly through its assigned template
-  (`digital-clock`/`progress-ring`/`row-list`) — weather and json-feed changed their
-  default template in the final-review fix pass in this same change, from
-  `big-number-label` (never wire-compilable) to `row-list`.
+- Each card kind's freshly-added default renders as expected for its assigned
+  template: clock (`digital-clock`) and pomodoro (`progress-ring`) render correctly;
+  calendar and rss (`row-list`) render correctly. Weather and json-feed also default
+  to `row-list` (changed from `big-number-label`, never wire-compilable, in the
+  final-review fix pass in this same change), but `row-list`'s field set is
+  `title`/`row0..4_title`/`row0..4_time`/`stale`/`error` and neither kind publishes
+  those row fields, so the expected — not yet observed — result for weather and
+  json-feed is the card's title rendering over five empty rows, not a correct
+  render. The session should confirm that is what actually happens, not something
+  worse (a crash, a stuck screen, or an `unknown_field_count` climbing beyond what
+  weather's and json-feed's unmatched fields already account for).
 - Host-driven timed rotation end to end, at both 90° and 270°: dwell expiry, the
   inherited default, a per-card override, the loop wrap, and manual navigation
   overriding a pending advance.

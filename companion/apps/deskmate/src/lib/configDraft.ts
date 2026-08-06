@@ -158,6 +158,10 @@ export function addCard(
         // defaulted to it validates cleanly but can never compile, making it
         // addable-but-unsaveable — the exact defect this default exists to avoid.
         // Keep this within the implemented set until a weather-specific template lands.
+        // Placeholder, not a fit: weather publishes `value`/`label`/`badge`/`icon`/
+        // `temperature_tenths`/`apparent_temperature_tenths`/`unit`, none of which
+        // `row-list` consumes, so on the device this renders as just the title over
+        // five empty rows until `big-number-label` or `icon-badge-text` lands on the wire.
         template: { kind: "row-list" },
         refresh: { kind: "interval", minutes: 30 },
       };
@@ -172,6 +176,10 @@ export function addCard(
         // See the weather case above: `row-list` is the only implemented template
         // json-feed's composition rules allow. Keep this within the implemented set
         // until a json-feed-specific template lands.
+        // Placeholder, not a fit: json-feed publishes whatever field names the user's
+        // own mappings declare, and nothing cross-checks those against `row-list`'s
+        // field set, so on the device this renders as just the title over five empty
+        // rows until `big-number-label` or `icon-badge-text` lands on the wire.
         template: { kind: "row-list" },
         refresh: { kind: "interval", minutes: 15 },
       };

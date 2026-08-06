@@ -8,7 +8,14 @@ import { DeviceHeader } from "../src/components/DeviceHeader";
 import { DevicePreview } from "../src/components/DevicePreview";
 import { Filmstrip } from "../src/components/Filmstrip";
 import { ProviderStatus, formatProviderAge } from "../src/components/ProviderStatus";
-import type { AppConfig, CardDataSnapshot, CardSettings, ValidationIssue } from "../src/lib/types";
+import type {
+  AppConfig,
+  CardDataSnapshot,
+  CardField,
+  CardSettings,
+  DisplayTemplate,
+  ValidationIssue,
+} from "../src/lib/types";
 import { ipcContractFixtures } from "../src/lib/types.contract";
 
 const snapshot = ipcContractFixtures.snapshot;
@@ -336,6 +343,87 @@ describe("settings accessibility and states", () => {
   test("a card with no published data yet is clearly labelled as a sample", () => {
     const html = renderPreview({ cardId: "upnext", cardData: [] });
     expect(html).toMatch(/sample/i);
+  });
+
+  // `renderPreview` above is pinned to a calendar/row-list card, so the extended
+  // templates (which are not calendar-shaped) get their own helper rather than
+  // overloading that one's signature. It reuses the same `weatherCard`/`clockCard`
+  // fixtures already defined in this file and drives `DevicePreview` the same way:
+  // one card, selected, with `cardData` standing in for the runtime's last-published
+  // snapshot for that card id.
+  function renderTemplatePreview({
+    template,
+    fields,
+    base,
+  }: {
+    template: DisplayTemplate;
+    fields: CardField[];
+    base?: CardSettings;
+  }): string {
+    const card: CardSettings = { ...(base ?? weatherCard("template-preview")), template };
+    return renderToStaticMarkup(
+      <DevicePreview
+        cards={[card]}
+        selectedWidgetId={card.id}
+        cardData={fields.length > 0 ? [{ card_id: card.id, fields }] : []}
+        pomodoros={[]}
+        orientation="landscape"
+      />,
+    );
+  }
+
+  test("big-number-label preview shows the value as the hero", () => {
+    const html = renderTemplatePreview({
+      template: { kind: "big-number-label" },
+      fields: [
+        { key: "title", value: { kind: "text", value: "Downloads" } },
+        { key: "value", value: { kind: "text", value: "1,204" } },
+        { key: "label", value: { kind: "text", value: "this week" } },
+      ],
+    });
+    expect(html).toContain("1,204");
+    expect(html).toContain("this week");
+    expect(html).toContain("Downloads");
+  });
+
+  test("big-number-label falls back to a placeholder when value is absent", () => {
+    const html = renderTemplatePreview({ template: { kind: "big-number-label" }, fields: [] });
+    expect(html).toContain("--");
+  });
+
+  test("icon-badge-text preview shows icon, badge, value and label", () => {
+    const html = renderTemplatePreview({
+      template: { kind: "icon-badge-text", icon_asset_id: null },
+      fields: [
+        { key: "icon", value: { kind: "text", value: "cloud-sun" } },
+        { key: "badge", value: { kind: "text", value: "Berlin" } },
+        { key: "value", value: { kind: "text", value: "21°" } },
+        { key: "label", value: { kind: "text", value: "Partly cloudy" } },
+      ],
+    });
+    expect(html).toContain("Berlin");
+    expect(html).toContain("21°");
+    expect(html).toContain("Partly cloudy");
+    expect(html).toContain("preview-icon--cloud-sun");
+  });
+
+  test("an unrecognised icon name renders the unknown icon", () => {
+    const html = renderTemplatePreview({
+      template: { kind: "icon-badge-text", icon_asset_id: null },
+      fields: [{ key: "icon", value: { kind: "text", value: "meteor" } }],
+    });
+    expect(html).toContain("preview-icon--unknown");
+  });
+
+  test("analog-clock preview renders a face with hands", () => {
+    const html = renderTemplatePreview({
+      template: { kind: "analog-clock" },
+      fields: [],
+      base: clockCard("analog-preview", { kind: "in-rotation", dwell_seconds: null }),
+    });
+    expect(html).toContain("preview-analog-face");
+    expect(html).toContain("preview-analog-hand--hour");
+    expect(html).toContain("preview-analog-hand--minute");
   });
 
   test("renders a useful empty state and keeps the panel's narrower claim", () => {

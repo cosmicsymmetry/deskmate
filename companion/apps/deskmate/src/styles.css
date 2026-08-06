@@ -1164,6 +1164,150 @@ h2 {
   opacity: 0.6;
 }
 
+/* big-number-label: title, a hero value, and a supporting label — same
+   amber-on-panel-black type as the other faces, no new colour. */
+.preview-bignumber {
+  display: grid;
+  height: 100%;
+  gap: 8px;
+  padding: 22px 26px;
+  align-content: center;
+  text-align: center;
+}
+
+.preview-bignumber__title {
+  font-size: 0.72rem;
+  font-weight: 750;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  opacity: 0.72;
+}
+
+.preview-bignumber__hero {
+  font-size: clamp(3rem, 9vw, 6rem);
+  font-weight: 680;
+  letter-spacing: -0.08em;
+  line-height: 0.95;
+}
+
+.preview-bignumber__label {
+  font-size: 0.74rem;
+  opacity: 0.6;
+}
+
+/* icon-badge-text: icon block on the left, text block on the right,
+   mirroring the firmware's layout. The icon glyph sits in a soft --emit
+   tint circle rather than a second colour; .preview-icon--unknown dims
+   further so an unrecognised name still reads as "no data", not a normal
+   icon. */
+.preview-iconbadge {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  height: 100%;
+  gap: 22px;
+  padding: 22px 28px;
+}
+
+.preview-icon {
+  display: grid;
+  place-items: center;
+  width: 96px;
+  height: 96px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--emit) 14%, transparent);
+  font-size: 2.9rem;
+  line-height: 1;
+}
+
+.preview-icon--unknown {
+  opacity: 0.5;
+}
+
+.preview-iconbadge__body {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.preview-iconbadge__body strong {
+  font-size: 0.78rem;
+  font-weight: 750;
+}
+
+.preview-iconbadge__hero {
+  font-size: clamp(2rem, 6vw, 3.4rem);
+  font-weight: 660;
+  letter-spacing: -0.05em;
+}
+
+.preview-iconbadge__label {
+  font-size: 0.7rem;
+  opacity: 0.62;
+}
+
+/* analog-clock: a circular face with hour/minute hands, positioned by the
+   same live preview clock the digital face uses. Ticks are intentionally
+   omitted — the fidelity rule is semantics/proportions, not a pixel replica
+   of the firmware's LVGL face. */
+.preview-analog {
+  display: grid;
+  height: 100%;
+  gap: 12px;
+  place-items: center;
+  align-content: center;
+}
+
+.preview-analog > span:first-child {
+  font-size: 0.68rem;
+  font-weight: 800;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  opacity: 0.72;
+}
+
+.preview-analog-face {
+  position: relative;
+  width: min(52%, 190px);
+  aspect-ratio: 1;
+  border: 2px solid color-mix(in srgb, var(--emit) 45%, transparent);
+  border-radius: 50%;
+}
+
+.preview-analog-face::after {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--emit);
+  content: "";
+  transform: translate(-50%, -50%);
+}
+
+.preview-analog-hand {
+  position: absolute;
+  bottom: 50%;
+  left: 50%;
+  background: var(--emit);
+  transform-origin: bottom center;
+}
+
+.preview-analog-hand--hour {
+  width: 5px;
+  height: 26%;
+  margin-left: -2.5px;
+  border-radius: 3px;
+}
+
+.preview-analog-hand--minute {
+  width: 3px;
+  height: 38%;
+  margin-left: -1.5px;
+  border-radius: 3px;
+}
+
 /* A visible, non-tooltip marker that a face is showing sample rather than
    published content — see cardFields' empty-map contract in configDraft.ts.
    Amber like the rest of the screen's own type, not --alarm: it is a

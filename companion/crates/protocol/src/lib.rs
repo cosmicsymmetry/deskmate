@@ -19,4 +19,5 @@ pub use message::{
     TYPE_ERROR, TYPE_HEARTBEAT, TYPE_HEARTBEAT_ACK, TYPE_PUSH_DATA, TYPE_STATUS_REQUEST,
     TYPE_STATUS_RESPONSE, TYPE_TIME_SYNC, TYPE_TRIGGER_INTERRUPT, TapAction, TemplateKind,
     TimeSync, TriggerInterrupt, WidgetConfig, decode_message, encode_message,
+    template_kind_from_wire,
 };

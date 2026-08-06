@@ -434,6 +434,19 @@ static void test_config_landscape_rotations(void)
            PROTOCOL_MESSAGE_ERR_INVALID_VALUE);
 }
 
+static void test_extended_template_kinds(void)
+{
+    assert(protocol_template_kind_valid(PROTOCOL_TEMPLATE_ANALOG_CLOCK));
+    assert(protocol_template_kind_valid(PROTOCOL_TEMPLATE_BIG_NUMBER_LABEL));
+    assert(protocol_template_kind_valid(PROTOCOL_TEMPLATE_ICON_BADGE_TEXT));
+    assert((int)PROTOCOL_TEMPLATE_ANALOG_CLOCK == 4);
+    assert((int)PROTOCOL_TEMPLATE_BIG_NUMBER_LABEL == 5);
+    assert((int)PROTOCOL_TEMPLATE_ICON_BADGE_TEXT == 6);
+    /* Unknown kinds must still be refused, not clamped. */
+    assert(!protocol_template_kind_valid((protocol_template_kind_t)7));
+    assert(!protocol_template_kind_valid((protocol_template_kind_t)0));
+}
+
 int main(void)
 {
     test_crc();
@@ -448,6 +461,7 @@ int main(void)
     test_invalid_time_has_specific_error();
     test_cardinal_display_rotations();
     test_config_landscape_rotations();
+    test_extended_template_kinds();
     puts("test_protocol: OK");
     return 0;
 }

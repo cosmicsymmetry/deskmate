@@ -30,6 +30,12 @@ static bool bounded_length(const char *text, size_t capacity, size_t *length)
     return true;
 }
 
+bool protocol_template_kind_valid(protocol_template_kind_t kind)
+{
+    return kind >= PROTOCOL_TEMPLATE_DIGITAL_CLOCK &&
+           kind <= PROTOCOL_TEMPLATE_ICON_BADGE_TEXT;
+}
+
 static protocol_message_result_t open_payload_map(
     const uint8_t *payload,
     size_t payload_length,
@@ -341,8 +347,7 @@ static protocol_message_result_t validate_apply_config(
             length == 0U) {
             return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
         }
-        if (widget->template_kind < PROTOCOL_TEMPLATE_DIGITAL_CLOCK ||
-            widget->template_kind > PROTOCOL_TEMPLATE_ROW_LIST) {
+        if (!protocol_template_kind_valid(widget->template_kind)) {
             return PROTOCOL_MESSAGE_ERR_UNSUPPORTED_TEMPLATE;
         }
         if (widget->size_class == PROTOCOL_SIZE_TILE ||
@@ -431,8 +436,7 @@ static protocol_message_result_t decode_widget(CborValue *value,
                 result = PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
             }
             if (result == PROTOCOL_MESSAGE_OK && key == 1U) {
-                if (raw < PROTOCOL_TEMPLATE_DIGITAL_CLOCK ||
-                    raw > PROTOCOL_TEMPLATE_ROW_LIST) {
+                if (!protocol_template_kind_valid((protocol_template_kind_t)raw)) {
                     result = PROTOCOL_MESSAGE_ERR_UNSUPPORTED_TEMPLATE;
                 } else {
                     widget->template_kind = (protocol_template_kind_t)raw;

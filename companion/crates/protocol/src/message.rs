@@ -15,7 +15,8 @@ pub const CAPABILITY_HOST_TAP_ACTIONS: u64 = 1 << 4;
 pub const CAPABILITY_ASSET_TRANSFER: u64 = 1 << 5;
 pub const CAPABILITY_FIRMWARE_UPDATE: u64 = 1 << 6;
 pub const LEGACY_CAPABILITIES: u64 = CAPABILITY_CORE_WIDGETS;
-pub const CURRENT_CAPABILITIES: u64 = CAPABILITY_CORE_WIDGETS | CAPABILITY_CONFIG_ROTATION;
+pub const CURRENT_CAPABILITIES: u64 =
+    CAPABILITY_CORE_WIDGETS | CAPABILITY_CONFIG_ROTATION | CAPABILITY_EXTENDED_TEMPLATES;
 pub const LINK_TIMEOUT_MS: u64 = 10_000;
 pub const MAX_WIDGET_ID_LEN: usize = 32;
 pub const MAX_SCREEN_ID_LEN: usize = 32;
@@ -51,6 +52,9 @@ pub enum TemplateKind {
     DigitalClock = 1,
     ProgressRing = 2,
     RowList = 3,
+    AnalogClock = 4,
+    BigNumberLabel = 5,
+    IconBadgeText = 6,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -340,11 +344,20 @@ fn checked_text(
     }
 }
 
-fn template_kind(value: u8) -> Result<TemplateKind, MessageError> {
+/// Decodes a wire-format template kind byte into a [`TemplateKind`].
+///
+/// # Errors
+///
+/// Returns [`MessageError::UnsupportedTemplate`] for any value outside the
+/// known template range; unknown kinds are rejected, never clamped.
+pub fn template_kind_from_wire(value: u8) -> Result<TemplateKind, MessageError> {
     match value {
         1 => Ok(TemplateKind::DigitalClock),
         2 => Ok(TemplateKind::ProgressRing),
         3 => Ok(TemplateKind::RowList),
+        4 => Ok(TemplateKind::AnalogClock),
+        5 => Ok(TemplateKind::BigNumberLabel),
+        6 => Ok(TemplateKind::IconBadgeText),
         other => Err(MessageError::UnsupportedTemplate(other)),
     }
 }
@@ -904,7 +917,7 @@ fn decode_widgets(decoder: &mut Decoder<'_>) -> Result<Vec<WidgetConfig>, Messag
         for _ in 0..len {
             match next_numeric_key(decoder, &mut previous)? {
                 0 => widget_id = Some(decoder.text()?.to_owned()),
-                1 => template = Some(template_kind(read_u8(decoder, "template")?)?),
+                1 => template = Some(template_kind_from_wire(read_u8(decoder, "template")?)?),
                 2 => size = Some(size_class(read_u8(decoder, "size class")?)?),
                 3 => action = Some(tap_action(read_u8(decoder, "tap action")?)?),
                 4 => {
@@ -1393,7 +1406,7 @@ mod tests {
         );
         assert_eq!(
             payload.split_off(payload.len() - 6),
-            [0x15, 0x09, 0x16, 0x01, 0x17, 0x03]
+            [0x15, 0x09, 0x16, 0x01, 0x17, 0x0b]
         );
         payload.remove(0);
         payload[0] = 0xb5;

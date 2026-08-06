@@ -2,15 +2,48 @@ import { describe, expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import { App } from "../src/App";
+import { CardList } from "../src/components/CardList";
 import { DeviceHeader } from "../src/components/DeviceHeader";
 import { DevicePreview } from "../src/components/DevicePreview";
 import { ProviderStatus, formatProviderAge } from "../src/components/ProviderStatus";
-import { ScreenArranger } from "../src/components/ScreenArranger";
 import { WidgetEditor } from "../src/components/WidgetEditor";
+import type { AppConfig, CardSettings } from "../src/lib/types";
 import { ipcContractFixtures } from "../src/lib/types.contract";
 
 const snapshot = ipcContractFixtures.snapshot;
 const cards = snapshot.config.cards;
+
+function clockCard(
+  id: string,
+  presence: CardSettings["presence"],
+  title = `Card ${id}`,
+): CardSettings {
+  return {
+    kind: "clock",
+    id,
+    title,
+    show_seconds: true,
+    template: { kind: "digital-clock" },
+    tap_action: { kind: "none" },
+    refresh: { kind: "device-local" },
+    presence,
+    alert:
+      presence.kind === "alert-only"
+        ? { kind: "on-timer-finish", hold: { kind: "until-dismissed" } }
+        : { kind: "none" },
+  };
+}
+
+function cardListConfig(cardList: CardSettings[]): AppConfig {
+  return {
+    schema_version: 3,
+    preferences: { timezone: "UTC", autostart: false, paused: false, orientation: "landscape" },
+    cards: cardList,
+    assets: [],
+    carousel: { advance: { kind: "timed", default_dwell_seconds: 20 } },
+    updater: { channel: "stable", checks: "notify" },
+  };
+}
 
 describe("settings accessibility and states", () => {
   test("renders a non-blocking loading state before the first backend snapshot", () => {
@@ -67,18 +100,74 @@ describe("settings accessibility and states", () => {
   });
 
   test("exposes explicit move buttons and keyboard instructions", () => {
+    const config = cardListConfig([
+      clockCard("first-clock-id", { kind: "in-rotation", dwell_seconds: 20 }),
+      clockCard("second-clock-id", { kind: "in-rotation", dwell_seconds: null }),
+    ]);
     const html = renderToStaticMarkup(
-      <ScreenArranger
-        config={snapshot.config}
-        selectedWidgetId="clock"
+      <CardList
+        config={config}
+        selectedCardId="first-clock-id"
         onSelect={() => {}}
+        onAdd={() => {}}
+        onRemove={() => {}}
         onReorder={() => {}}
       />,
     );
-    expect(html).toContain("Screen order");
     expect(html).toContain("⌥ ↑ ↓ to move");
-    expect(html).toContain("Move Focus up");
-    expect(html).toContain("Move Focus down");
+    expect(html).toContain("Move Card second-clock-id up");
+    expect(html).toContain("Move Card first-clock-id down");
+  });
+
+  test("the card list separates rotation from alerts and never shows ids", () => {
+    const config = cardListConfig([
+      clockCard("internal-uuid-0001", { kind: "in-rotation", dwell_seconds: 20 }, "Desk"),
+      clockCard("internal-uuid-0002", { kind: "alert-only" }, "Focus"),
+      clockCard("internal-uuid-0003", { kind: "off" }, "Spare"),
+    ]);
+    const html = renderToStaticMarkup(
+      <CardList
+        config={config}
+        selectedCardId={null}
+        onSelect={() => {}}
+        onAdd={() => {}}
+        onRemove={() => {}}
+        onReorder={() => {}}
+      />,
+    );
+    expect(html).toContain('aria-label="In rotation"');
+    expect(html).toContain('aria-label="Alerts and muted"');
+    expect(html).toContain("Desk");
+    expect(html).toContain("Focus");
+    expect(html).toContain("Spare");
+    // Internal identifiers never reach the user — only their titles do.
+    expect(html).not.toContain("internal-uuid-0001");
+    expect(html).not.toContain("internal-uuid-0002");
+    expect(html).not.toContain("internal-uuid-0003");
+  });
+
+  test("adding is disabled at the eight-card contract limit", () => {
+    const config = cardListConfig(
+      Array.from({ length: 8 }, (_, index) =>
+        clockCard(`card-${index}`, { kind: "in-rotation", dwell_seconds: null }),
+      ),
+    );
+    const html = renderToStaticMarkup(
+      <CardList
+        config={config}
+        selectedCardId={null}
+        onSelect={() => {}}
+        onAdd={() => {}}
+        onRemove={() => {}}
+        onReorder={() => {}}
+      />,
+    );
+    const addButtons = html.match(/<button class="add-card"[^>]*>[\s\S]*?<\/button>/g) ?? [];
+    expect(addButtons.length).toBe(6);
+    for (const button of addButtons) {
+      expect(button).toContain('disabled=""');
+      expect(button).toContain(">Add ");
+    }
   });
 
   test("renders disconnected, protocol mismatch, stale, and last-good copy", () => {

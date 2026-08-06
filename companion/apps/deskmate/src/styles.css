@@ -1,20 +1,61 @@
+/*
+ * Design tokens — the lit panel (docs/design/companion-visual-language.md).
+ *
+ * Chrome is strictly achromatic warm graphite; chroma is reserved for
+ * emission (--emit) and interaction (--signal), kept deliberately apart.
+ * --panel-black is quarantined to the device preview screen — it must never
+ * appear as a chrome surface. Both color schemes are first-class peers.
+ *
+ * --accent / --accent-dark / --accent-soft / --danger / --warning / --panel
+ * below are the pre-existing palette, kept only so panels this task does not
+ * touch (WidgetEditor, ProviderStatus, DeviceHeader, the preview chrome) keep
+ * rendering as before. They are not part of the new system and are retired
+ * as each of those components is rebuilt. The old --shadow token (panel
+ * elevation) is gone outright: no shadow survives except the single amber
+ * glow under the device preview, in .device-shell below.
+ */
 :root {
-  color: #172725;
-  background: #edf1ed;
-  font-family:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  font-synthesis: none;
-  text-rendering: optimizeLegibility;
-  --ink: #172725;
-  --muted: #61716d;
-  --line: #d6ded9;
+  color-scheme: light dark;
+
+  --vellum: #e8e6e1;
+  --graphite: #1c1b1a;
+  --panel-black: #050505;
+  --emit: #f2c14e;
+  --signal: #4e86f2;
+  --alarm: #c4553d;
+
+  --surface: var(--vellum);
+  --ink: #1c1b1a;
+  --muted: #6b6863;
+  --line: rgb(28 27 26 / 14%);
+
+  --font-body: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-numeral: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+
   --panel: rgb(255 255 253 / 94%);
   --accent: #087f6d;
   --accent-dark: #056355;
   --accent-soft: #e2f4ef;
-  --danger: #b54235;
+  --danger: var(--alarm);
   --warning: #9b6b16;
-  --shadow: 0 14px 40px rgb(41 61 55 / 8%);
+
+  color: var(--ink);
+  background: var(--surface);
+  font-family: var(--font-body);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --surface: var(--graphite);
+    --ink: #ede9e2;
+    --muted: #a8a49c;
+    --line: rgb(237 233 226 / 16%);
+
+    --panel: rgb(28 27 26 / 88%);
+    --accent-soft: rgb(8 127 109 / 22%);
+  }
 }
 
 * {
@@ -23,7 +64,7 @@
 
 html {
   min-width: 320px;
-  background: radial-gradient(circle at 8% 0%, rgb(151 209 190 / 20%), transparent 28rem), #edf1ed;
+  background: var(--surface);
 }
 
 body {
@@ -46,8 +87,13 @@ button:focus-visible,
 input:focus-visible,
 select:focus-visible,
 [tabindex="0"]:focus-visible {
-  outline: 3px solid rgb(8 127 109 / 28%);
+  outline: 2px solid var(--signal);
   outline-offset: 2px;
+}
+
+.numeral {
+  font-family: var(--font-numeral);
+  font-variant-numeric: tabular-nums;
 }
 
 h1,
@@ -80,13 +126,15 @@ h2 {
   letter-spacing: -0.015em;
 }
 
+/* Label type role: section names only, never decorative. */
 .eyebrow,
-.step-label {
+.step-label,
+.section-label {
   margin: 0 0 4px;
-  color: var(--accent);
-  font-size: 0.68rem;
-  font-weight: 800;
-  letter-spacing: 0.13em;
+  color: var(--muted);
+  font-size: 0.75rem;
+  font-weight: 750;
+  letter-spacing: 0.08em;
   text-transform: uppercase;
 }
 
@@ -107,7 +155,6 @@ h2 {
   padding: 14px clamp(20px, 4vw, 52px);
   border-bottom: 1px solid rgb(199 210 203 / 75%);
   background: rgb(247 249 246 / 88%);
-  box-shadow: 0 4px 24px rgb(32 51 45 / 5%);
   backdrop-filter: blur(18px);
 }
 
@@ -135,7 +182,6 @@ h2 {
   border-radius: 12px;
   color: white;
   background: linear-gradient(145deg, #11a189, #056355);
-  box-shadow: 0 7px 18px rgb(8 127 109 / 24%);
   font-size: 1rem;
   font-weight: 850;
 }
@@ -224,7 +270,6 @@ h2 {
 .button--primary {
   color: white;
   background: var(--accent);
-  box-shadow: 0 7px 18px rgb(8 127 109 / 18%);
 }
 
 .button--primary:hover:not(:disabled) {
@@ -287,7 +332,6 @@ h2 {
   border: 1px solid #cfe1da;
   border-radius: 16px;
   background: linear-gradient(115deg, rgb(255 255 253 / 94%), rgb(228 245 239 / 88%));
-  box-shadow: var(--shadow);
 }
 
 .first-run ol {
@@ -344,10 +388,6 @@ h2 {
   gap: 18px;
 }
 
-.arranger-panel {
-  grid-column: 1 / -1;
-}
-
 .workspace__preview {
   position: sticky;
   top: 100px;
@@ -363,7 +403,11 @@ h2 {
   border: 1px solid rgb(205 216 209 / 90%);
   border-radius: 16px;
   background: var(--panel);
-  box-shadow: var(--shadow);
+}
+
+.card-list-panel {
+  border-color: var(--line);
+  border-radius: 6px;
 }
 
 .panel-heading,
@@ -371,7 +415,7 @@ h2 {
   justify-content: space-between;
   gap: 16px;
   padding: 20px 22px 16px;
-  border-bottom: 1px solid #e6ebe7;
+  border-bottom: 1px solid var(--line);
 }
 
 .panel-heading--compact {
@@ -387,24 +431,165 @@ h2 {
 .count-badge {
   padding: 3px 8px;
   border-radius: 999px;
-  background: #eef2ef;
+  background: var(--line);
   font-weight: 750;
 }
 
-.widget-list,
-.gallery-add,
 .provider-list {
   display: grid;
 }
 
-.widget-list {
+/* Card list — replaces the old widget gallery + screen arranger panels. */
+.card-list-section {
+  padding: 4px 0 0;
+}
+
+.card-list-section + .card-list-section {
+  border-top: 1px solid var(--line);
+}
+
+.card-list-section__heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 14px 0;
+}
+
+.card-list-section > .section-label {
+  margin: 0;
+  padding: 14px 14px 0;
+}
+
+.card-list-section__heading .section-label {
+  padding: 0;
+}
+
+.card-list {
+  display: grid;
   gap: 7px;
   margin: 0;
-  padding: 14px;
+  padding: 10px 14px 14px;
   list-style: none;
 }
 
-.widget-card,
+.card-row {
+  display: grid;
+  grid-template-columns: auto auto 1fr auto auto auto;
+  gap: 8px;
+  align-items: center;
+  min-height: 50px;
+  padding: 7px 9px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: transparent;
+  cursor: grab;
+  transition:
+    border-color 140ms ease,
+    opacity 140ms ease,
+    transform 140ms ease;
+}
+
+.card-row--unordered {
+  grid-template-columns: 1fr auto;
+  cursor: default;
+}
+
+.card-row:hover,
+.card-row.is-selected {
+  border-color: var(--signal);
+}
+
+.card-row.is-dragging {
+  opacity: 0.45;
+  transform: scale(0.99);
+}
+
+.card-row__handle {
+  color: var(--muted);
+}
+
+.card-row__index {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  color: var(--graphite);
+  background: var(--emit);
+  font-size: 0.68rem;
+  font-weight: 800;
+}
+
+.card-row__body {
+  display: grid;
+  min-width: 0;
+  padding: 4px;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+}
+
+.card-row__body strong,
+.card-row__body small {
+  display: block;
+}
+
+.card-row__body strong {
+  overflow: hidden;
+  font-size: 0.75rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.card-row__body small {
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 0.62rem;
+}
+
+.card-row__dwell {
+  color: var(--muted);
+  font-size: 0.68rem;
+}
+
+.card-row__moves {
+  display: flex;
+  gap: 4px;
+}
+
+.card-row__moves button {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.card-row__moves button:disabled {
+  cursor: default;
+  opacity: 0.3;
+}
+
+.card-row__remove {
+  white-space: nowrap;
+}
+
+.card-add {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  margin: 0;
+  padding: 14px;
+  border: 0;
+  border-top: 1px solid var(--line);
+  background: transparent;
+}
+
 .add-card {
   display: grid;
   grid-template-columns: auto 1fr auto;
@@ -412,89 +597,43 @@ h2 {
   gap: 10px;
   width: 100%;
   padding: 9px;
-  border: 1px solid transparent;
-  border-radius: 11px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
   background: transparent;
   cursor: pointer;
   text-align: left;
+  transition: border-color 140ms ease;
 }
 
-.widget-card:hover,
-.widget-card.is-selected {
-  border-color: #bcdcd3;
-  background: var(--accent-soft);
+.add-card:hover:not(:disabled) {
+  border-color: var(--signal);
 }
 
-.widget-glyph,
-.add-card__glyph {
-  display: grid;
-  place-items: center;
-  width: 44px;
-  height: 36px;
-  border-radius: 8px;
-  color: #d6fff4;
-  background: #17332e;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 0.72rem;
-  font-weight: 750;
-}
-
-.widget-glyph--pomodoro {
-  border-radius: 50%;
-  box-shadow: inset 0 0 0 3px #58d3b5;
-}
-
-.widget-glyph--calendar {
-  font-size: 1.2rem;
-}
-
-.widget-card strong,
-.widget-card small,
 .add-card strong,
 .add-card small {
   display: block;
 }
 
-.widget-card strong,
 .add-card strong {
   font-size: 0.76rem;
 }
 
-.widget-card small,
 .add-card small {
   margin-top: 2px;
   color: var(--muted);
   font-size: 0.66rem;
 }
 
-.chevron {
-  color: #84928e;
-  font-size: 1.35rem;
-}
-
-.gallery-add {
-  gap: 6px;
-  min-width: 0;
-  margin: 0;
-  padding: 14px;
-  border: 0;
-  border-top: 1px solid #e6ebe7;
-  background: #fafbf9;
-}
-
-.add-card {
-  border-color: #e0e6e2;
-  background: white;
-}
-
-.add-card:hover:not(:disabled) {
-  border-color: #9dcec1;
-}
-
 .add-card__glyph {
+  display: grid;
+  place-items: center;
   width: 34px;
   height: 28px;
+  border-radius: 6px;
+  color: var(--surface);
+  background: var(--ink);
   font-size: 0.6rem;
+  font-weight: 750;
 }
 
 .text-button {
@@ -714,107 +853,11 @@ h2 {
   min-height: 280px;
 }
 
-.screen-list {
-  display: grid;
-  gap: 7px;
-  margin: 0;
-  padding: 14px;
-  list-style: none;
-}
-
-.screen-list li {
-  display: grid;
-  grid-template-columns: auto auto 1fr auto;
-  gap: 10px;
-  align-items: center;
-  min-height: 50px;
-  padding: 7px 9px;
-  border: 1px solid #e0e6e2;
-  border-radius: 10px;
-  background: white;
-  cursor: grab;
-  transition:
-    border-color 140ms ease,
-    opacity 140ms ease,
-    transform 140ms ease;
-}
-
-.screen-list li:hover,
-.screen-list li.is-selected {
-  border-color: #9dcec1;
-}
-
-.screen-list li.is-dragging {
-  opacity: 0.45;
-  transform: scale(0.99);
-}
-
-.drag-handle {
-  color: #8a9693;
-}
-
-.screen-number {
-  display: grid;
-  place-items: center;
-  width: 26px;
-  height: 26px;
-  border-radius: 7px;
-  color: var(--accent-dark);
-  background: var(--accent-soft);
-  font-size: 0.7rem;
-  font-weight: 800;
-}
-
-.screen-name strong,
-.screen-name small {
-  display: block;
-}
-
-.screen-name {
-  padding: 4px;
-  border: 0;
-  background: transparent;
-  cursor: pointer;
-  text-align: left;
-}
-
-.screen-name strong {
-  font-size: 0.75rem;
-}
-
-.screen-name small {
-  margin-top: 2px;
-  color: var(--muted);
-  font-size: 0.62rem;
-}
-
-.move-buttons {
-  display: flex;
-  gap: 4px;
-}
-
-.move-buttons button {
-  display: grid;
-  place-items: center;
-  width: 29px;
-  height: 29px;
-  border: 1px solid #d9e0dc;
-  border-radius: 7px;
-  background: #fafbf9;
-  cursor: pointer;
-}
-
-.move-buttons button:disabled {
-  cursor: default;
-  opacity: 0.3;
-}
-
 .preview-panel {
   padding-bottom: 18px;
   color: #dff8f1;
   border-color: #1c3833;
   background: linear-gradient(155deg, #1b332e, #0d1d1a);
-  box-shadow: 0 20px 55px rgb(19 44 38 / 18%);
 }
 
 .preview-heading {
@@ -842,9 +885,9 @@ h2 {
   border: 1px solid #38554f;
   border-radius: 24px;
   background: linear-gradient(145deg, #283f3a, #101c1a);
-  box-shadow:
-    0 22px 38px rgb(0 0 0 / 28%),
-    inset 0 1px 0 rgb(255 255 255 / 10%);
+  /* The one light effect in the app: a soft amber glow beneath the device
+     preview — the emission itself, not chrome elevation. */
+  box-shadow: 0 28px 46px -14px rgb(242 193 78 / 32%);
 }
 
 .device-screen {
@@ -852,7 +895,7 @@ h2 {
   aspect-ratio: 448 / 368;
   border-radius: 13px;
   color: #effffb;
-  background: #07110f;
+  background: var(--panel-black);
   box-shadow: inset 0 0 0 1px rgb(111 231 207 / 14%);
 }
 
@@ -1102,7 +1145,6 @@ h2 {
   padding: 13px clamp(20px, 4vw, 52px);
   border-top: 1px solid rgb(195 207 200 / 85%);
   background: rgb(250 251 248 / 92%);
-  box-shadow: 0 -12px 35px rgb(38 57 51 / 8%);
   backdrop-filter: blur(18px);
 }
 
@@ -1205,7 +1247,6 @@ h2 {
     grid-template-columns: 1fr;
   }
 
-  .arranger-panel,
   .source-picker,
   .check-field,
   .timer-controls {

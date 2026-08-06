@@ -1,4 +1,4 @@
-import { issuesForPath, widgetKindName } from "../lib/configDraft";
+import { cardKindName, issuesForPath } from "../lib/configDraft";
 import type { CardSettings, PomodoroSnapshot, ValidationIssue } from "../lib/types";
 
 interface WidgetEditorProps {
@@ -49,7 +49,7 @@ export function WidgetEditor({
       <section className="panel editor-panel" aria-labelledby="editor-heading">
         <div className="panel-heading">
           <div>
-            <p className="step-label">2 · Customize</p>
+            <p className="step-label">Customize</p>
             <h2 id="editor-heading">Choose a widget</h2>
           </div>
         </div>
@@ -68,8 +68,8 @@ export function WidgetEditor({
     <section className="panel editor-panel" aria-labelledby="editor-heading">
       <div className="panel-heading">
         <div>
-          <p className="step-label">2 · Customize</p>
-          <h2 id="editor-heading">{widgetKindName(widget.kind)}</h2>
+          <p className="step-label">Customize</p>
+          <h2 id="editor-heading">{cardKindName(widget.kind)}</h2>
         </div>
         <button className="text-button text-button--danger" type="button" onClick={onRemove}>
           Remove

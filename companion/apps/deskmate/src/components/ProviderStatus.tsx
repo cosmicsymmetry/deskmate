@@ -1,5 +1,5 @@
 import type { CardSettings, ProviderSnapshot } from "../lib/types";
-import { widgetName } from "../lib/configDraft";
+import { cardName } from "../lib/configDraft";
 
 interface ProviderStatusProps {
   providers: ProviderSnapshot[];
@@ -45,7 +45,7 @@ export function ProviderStatus({ providers, cards, refreshingId, onRefresh }: Pr
             >
               <span className="provider-state" aria-hidden="true" />
               <span>
-                <strong>{widget ? widgetName(widget) : provider.widget_id}</strong>
+                <strong>{widget ? cardName(widget) : provider.widget_id}</strong>
                 <small>
                   {state.kind === "refreshing"
                     ? "Refreshing…"

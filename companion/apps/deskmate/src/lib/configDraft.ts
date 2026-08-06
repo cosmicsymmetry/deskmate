@@ -1,6 +1,11 @@
-import type { AppConfig, CardSettings, ValidationIssue } from "./types";
-
-export type WidgetKind = "clock" | "pomodoro" | "calendar";
+import type {
+  AppConfig,
+  CardKind,
+  CardPresence,
+  CardSettings,
+  CarouselAdvance,
+  ValidationIssue,
+} from "./types";
 
 export function copyConfig(config: AppConfig): AppConfig {
   return {
@@ -34,7 +39,10 @@ export function copyConfig(config: AppConfig): AppConfig {
   };
 }
 
-export function widgetName(card: CardSettings): string {
+/// A card's user-facing name: its own title/label when set, otherwise a
+/// sensible fallback. Never the card id — ids are wire identifiers, not
+/// something a person chose or should see.
+export function cardName(card: CardSettings): string {
   switch (card.kind) {
     case "clock":
       return card.title || "Digital clock";
@@ -45,11 +53,11 @@ export function widgetName(card: CardSettings): string {
     case "weather":
     case "json-feed":
     case "rss":
-      return card.title || card.kind;
+      return card.title || cardKindName(card.kind);
   }
 }
 
-export function widgetKindName(kind: CardSettings["kind"]): string {
+export function cardKindName(kind: CardKind): string {
   switch (kind) {
     case "clock":
       return "Digital clock";
@@ -77,62 +85,98 @@ function nextId(prefix: string, used: Set<string>): string {
   return `${prefix}-${suffix}`;
 }
 
-export function addWidget(
+const DEFAULT_PRESENCE: CardPresence = { kind: "in-rotation", dwell_seconds: null };
+
+/// Appends a new card with sane defaults for its kind. Supports all six card
+/// kinds — weather, JSON feed and RSS are reachable here, not just
+/// clock/pomodoro/calendar. A card is a screen; this never touches any
+/// separate screen list because there isn't one.
+export function addCard(
   config: AppConfig,
-  kind: WidgetKind,
+  kind: CardKind,
 ): {
   config: AppConfig;
-  widgetId: string;
+  cardId: string;
 } {
-  const next = copyConfig(config);
-  const cardIds = new Set(next.cards.map((card) => card.id));
-  const widgetId = nextId(kind, cardIds);
+  const used = new Set(config.cards.map((card) => card.id));
+  const cardId = nextId(kind, used);
+  const common = {
+    id: cardId,
+    tap_action: { kind: "none" } as const,
+    presence: DEFAULT_PRESENCE,
+    alert: { kind: "none" } as const,
+  };
 
   let card: CardSettings;
   switch (kind) {
     case "clock":
       card = {
         kind,
-        id: widgetId,
+        ...common,
         title: "Desk",
         show_seconds: true,
         template: { kind: "digital-clock" },
-        tap_action: { kind: "none" },
         refresh: { kind: "device-local" },
-        presence: { kind: "in-rotation", dwell_seconds: null },
-        alert: { kind: "none" },
       };
       break;
     case "pomodoro":
       card = {
         kind,
-        id: widgetId,
+        ...common,
         label: "Focus",
         duration_seconds: 25 * 60,
         template: { kind: "progress-ring" },
         tap_action: { kind: "start-pause" },
         refresh: { kind: "device-local" },
-        presence: { kind: "in-rotation", dwell_seconds: null },
-        alert: { kind: "none" },
+        alert: { kind: "on-timer-finish", hold: { kind: "until-dismissed" } },
       };
       break;
     case "calendar":
       card = {
         kind,
-        id: widgetId,
+        ...common,
         title: "Up next",
         source: { kind: "url", value: "" },
         template: { kind: "row-list" },
-        tap_action: { kind: "none" },
         refresh: { kind: "interval", minutes: 15 },
-        presence: { kind: "in-rotation", dwell_seconds: null },
-        alert: { kind: "none" },
+      };
+      break;
+    case "weather":
+      card = {
+        kind,
+        ...common,
+        title: "Weather",
+        location: "",
+        units: "metric",
+        template: { kind: "big-number-label" },
+        refresh: { kind: "interval", minutes: 30 },
+      };
+      break;
+    case "json-feed":
+      card = {
+        kind,
+        ...common,
+        title: "Feed",
+        url: "",
+        mappings: [],
+        template: { kind: "big-number-label" },
+        refresh: { kind: "interval", minutes: 15 },
+      };
+      break;
+    case "rss":
+      card = {
+        kind,
+        ...common,
+        title: "Headlines",
+        url: "",
+        max_items: 3,
+        template: { kind: "row-list" },
+        refresh: { kind: "interval", minutes: 30 },
       };
       break;
   }
 
-  next.cards.push(card);
-  return { config: next, widgetId };
+  return { config: { ...copyConfig(config), cards: [...config.cards, card] }, cardId };
 }
 
 export function updateWidget(
@@ -146,11 +190,38 @@ export function updateWidget(
   };
 }
 
-export function removeWidget(config: AppConfig, widgetId: string): AppConfig {
+export function removeCard(config: AppConfig, cardId: string): AppConfig {
   return {
     ...config,
-    cards: config.cards.filter((card) => card.id !== widgetId),
+    cards: config.cards.filter((card) => card.id !== cardId),
   };
+}
+
+/// Cards with a carousel position, in loop order. Order is meaningful here —
+/// it IS the carousel order.
+export function rotationCards(config: AppConfig): CardSettings[] {
+  return config.cards.filter((card) => card.presence.kind === "in-rotation");
+}
+
+/// Cards with no carousel position (`alert-only` or `off`). Unordered:
+/// numbering them would claim a position they don't have.
+export function nonRotationCards(config: AppConfig): CardSettings[] {
+  return config.cards.filter((card) => card.presence.kind !== "in-rotation");
+}
+
+/// Total time for one pass through the rotation, in seconds, inheriting the
+/// carousel's default dwell for cards that don't override it. `null` under
+/// manual advance, where there is no loop length to speak of.
+export function loopSeconds(config: AppConfig): number | null {
+  const advance: CarouselAdvance = config.carousel.advance;
+  if (advance.kind !== "timed") {
+    return null;
+  }
+  const fallback = advance.default_dwell_seconds;
+  return rotationCards(config).reduce((total, card) => {
+    const presence = card.presence;
+    return total + (presence.kind === "in-rotation" ? (presence.dwell_seconds ?? fallback) : 0);
+  }, 0);
 }
 
 export function issuesForPath(issues: ValidationIssue[], path: string): ValidationIssue[] {
@@ -191,7 +262,7 @@ export function cardMoveFromKey(key: string, altKey: boolean): -1 | 0 | 1 {
   return 0;
 }
 
-export function firstSelectableWidget(config: AppConfig): string | null {
+export function firstSelectableCard(config: AppConfig): string | null {
   return config.cards[0]?.id ?? null;
 }
 

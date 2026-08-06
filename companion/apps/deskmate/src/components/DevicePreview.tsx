@@ -1,6 +1,6 @@
 import type { CSSProperties } from "react";
 
-import { widgetName } from "../lib/configDraft";
+import { cardName } from "../lib/configDraft";
 import type { CardSettings, DisplayOrientation, PomodoroSnapshot } from "../lib/types";
 
 interface DevicePreviewProps {
@@ -116,7 +116,7 @@ export function DevicePreview({
               key={card.id}
               type="button"
               className={card.id === widget?.id ? "is-active" : ""}
-              aria-label={`Preview screen ${index + 1}: ${widgetName(card)}`}
+              aria-label={`Preview screen ${index + 1}: ${cardName(card)}`}
               aria-pressed={card.id === widget?.id}
               onClick={() => onSelect(card.id)}
             />

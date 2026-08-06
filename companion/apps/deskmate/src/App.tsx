@@ -1,19 +1,17 @@
 import { useEffect, useState } from "react";
 
+import { CardList } from "./components/CardList";
 import { DeviceHeader } from "./components/DeviceHeader";
 import { DevicePreview } from "./components/DevicePreview";
 import { ProviderStatus } from "./components/ProviderStatus";
-import { ScreenArranger } from "./components/ScreenArranger";
 import { WidgetEditor } from "./components/WidgetEditor";
-import { WidgetGallery } from "./components/WidgetGallery";
 import {
-  addWidget,
+  addCard,
   copyConfig,
-  firstSelectableWidget,
+  firstSelectableCard,
   needsFirstRunGuidance,
-  removeWidget,
+  removeCard,
   updateWidget,
-  type WidgetKind,
 } from "./lib/configDraft";
 import {
   chooseIcsFile,
@@ -28,6 +26,7 @@ import {
 } from "./lib/tauri";
 import type {
   AppConfig,
+  CardKind,
   CardSettings,
   DisplayOrientation,
   DraftValidation,
@@ -77,7 +76,7 @@ export function App() {
     setSelectedWidgetId((current) =>
       current && next.cards.some((card) => card.id === current)
         ? current
-        : firstSelectableWidget(next),
+        : firstSelectableCard(next),
     );
   }, [dirty, snapshot]);
 
@@ -169,10 +168,10 @@ export function App() {
     setDirty(true);
     setSaveState({ kind: "idle" });
   };
-  const handleAdd = (kind: WidgetKind) => {
-    const result = addWidget(draft, kind);
+  const handleAdd = (kind: CardKind) => {
+    const result = addCard(draft, kind);
     replaceDraft(result.config);
-    setSelectedWidgetId(result.widgetId);
+    setSelectedWidgetId(result.cardId);
   };
   const handleWidgetChange = (widget: CardSettings) => {
     if (!selectedWidgetId) {
@@ -180,13 +179,16 @@ export function App() {
     }
     replaceDraft(updateWidget(draft, selectedWidgetId, widget));
   };
+  const handleRemoveCard = (cardId: string) => {
+    const next = removeCard(draft, cardId);
+    replaceDraft(next);
+    setSelectedWidgetId((current) => (current === cardId ? firstSelectableCard(next) : current));
+  };
   const handleRemove = () => {
     if (!selectedWidgetId) {
       return;
     }
-    const next = removeWidget(draft, selectedWidgetId);
-    replaceDraft(next);
-    setSelectedWidgetId(firstSelectableWidget(next));
+    handleRemoveCard(selectedWidgetId);
   };
   const handleChooseCalendarFile = () => {
     if (selectedWidget?.kind !== "calendar") {
@@ -334,11 +336,13 @@ export function App() {
 
       <div className="workspace">
         <div className="workspace__editors">
-          <WidgetGallery
-            cards={draft.cards}
-            selectedWidgetId={selectedWidgetId}
+          <CardList
+            config={draft}
+            selectedCardId={selectedWidgetId}
             onSelect={setSelectedWidgetId}
             onAdd={handleAdd}
+            onRemove={handleRemoveCard}
+            onReorder={(next) => replaceDraft(next)}
           />
           <WidgetEditor
             widget={selectedWidget}
@@ -351,12 +355,6 @@ export function App() {
             onRemove={handleRemove}
             onTimerAction={handleTimerAction}
             onChooseCalendarFile={handleChooseCalendarFile}
-          />
-          <ScreenArranger
-            config={draft}
-            selectedWidgetId={selectedWidgetId}
-            onSelect={setSelectedWidgetId}
-            onReorder={(next) => replaceDraft(next)}
           />
         </div>
 

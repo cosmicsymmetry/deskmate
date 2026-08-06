@@ -1,13 +1,16 @@
 import { describe, expect, test } from "bun:test";
 
 import {
-  addWidget,
+  addCard,
   cardMoveFromKey,
-  firstSelectableWidget,
+  firstSelectableCard,
   issuesForPath,
+  loopSeconds,
   moveCard,
   needsFirstRunGuidance,
-  removeWidget,
+  nonRotationCards,
+  removeCard,
+  rotationCards,
 } from "../src/lib/configDraft";
 import type { AppConfig, ValidationIssue } from "../src/lib/types";
 import { ipcContractFixtures } from "../src/lib/types.contract";
@@ -49,12 +52,12 @@ function cardsConfig(ids: string[]): AppConfig {
 }
 
 describe("configuration draft helpers", () => {
-  test("adds the full M3 demo with stable unique widget IDs", () => {
-    const withSecondClock = addWidget(initialConfig(), "clock");
-    expect(withSecondClock.widgetId).toBe("clock-2");
+  test("adds the full M3 demo with stable unique card IDs", () => {
+    const withSecondClock = addCard(initialConfig(), "clock");
+    expect(withSecondClock.cardId).toBe("clock-2");
 
-    const withPomodoro = addWidget(withSecondClock.config, "pomodoro");
-    const complete = addWidget(withPomodoro.config, "calendar");
+    const withPomodoro = addCard(withSecondClock.config, "pomodoro");
+    const complete = addCard(withPomodoro.config, "calendar");
     expect(complete.config.cards.map((card) => card.kind)).toEqual([
       "clock",
       "clock",
@@ -65,11 +68,69 @@ describe("configuration draft helpers", () => {
     expect(needsFirstRunGuidance(complete.config)).toBe(false);
   });
 
-  test("removing a widget removes only that card", () => {
-    const withTimer = addWidget(initialConfig(), "pomodoro").config;
-    const next = removeWidget(withTimer, "clock");
+  test("adding a card appends it without creating a screen", () => {
+    const { config, cardId } = addCard(initialConfig(), "weather");
+    expect(config.cards.map((card) => card.kind)).toContain("weather");
+    expect(cardId).toBe("weather");
+    expect("screens" in config).toBe(false);
+  });
+
+  test("adding every kind produces a reachable, addable card", () => {
+    const kinds = ["clock", "pomodoro", "calendar", "weather", "json-feed", "rss"] as const;
+    let config: AppConfig = { ...initialConfig(), cards: [] };
+    for (const kind of kinds) {
+      config = addCard(config, kind).config;
+    }
+    expect(config.cards.map((card) => card.kind)).toEqual([...kinds]);
+  });
+
+  test("removing a card removes only that card", () => {
+    const withTimer = addCard(initialConfig(), "pomodoro").config;
+    const next = removeCard(withTimer, "clock");
     expect(next.cards.map((card) => card.id)).toEqual(["pomodoro"]);
-    expect(firstSelectableWidget(next)).toBe("pomodoro");
+    expect(firstSelectableCard(next)).toBe("pomodoro");
+  });
+
+  test("cards split into rotation and non-rotation sections", () => {
+    const base = initialConfig();
+    const config: AppConfig = {
+      ...base,
+      cards: [
+        { ...addCard(base, "clock").config.cards[0], id: "a" },
+        {
+          ...addCard(base, "pomodoro").config.cards[0],
+          id: "b",
+          presence: { kind: "alert-only" },
+          alert: { kind: "on-timer-finish", hold: { kind: "until-dismissed" } },
+        },
+        { ...addCard(base, "clock").config.cards[0], id: "c", presence: { kind: "off" } },
+      ],
+    };
+    expect(rotationCards(config).map((card) => card.id)).toEqual(["a"]);
+    expect(nonRotationCards(config).map((card) => card.id)).toEqual(["b", "c"]);
+  });
+
+  test("loop length sums only in-rotation dwell, inheriting the default", () => {
+    const base = initialConfig();
+    const config: AppConfig = {
+      ...base,
+      carousel: { advance: { kind: "timed", default_dwell_seconds: 20 } },
+      cards: [
+        {
+          ...addCard(base, "clock").config.cards[0],
+          id: "a",
+          presence: { kind: "in-rotation", dwell_seconds: 45 },
+        },
+        {
+          ...addCard(base, "clock").config.cards[0],
+          id: "b",
+          presence: { kind: "in-rotation", dwell_seconds: null },
+        },
+        { ...addCard(base, "clock").config.cards[0], id: "c", presence: { kind: "off" } },
+      ],
+    };
+    expect(loopSeconds(config)).toBe(65);
+    expect(loopSeconds({ ...config, carousel: { advance: { kind: "manual" } } })).toBeNull();
   });
 
   test("maps backend validation paths to their inline editor section", () => {

@@ -1419,7 +1419,7 @@ fn run_scheduled_work(
     // device push (if connected) happens through the normal sync path below via
     // `active_screen_dirty` and `flush_interrupts`.
     //
-    // KNOWN LIMITATION (protocol v1): this only frees the host's arbiter slot
+    // BY DESIGN (decided 2026-08-06): this only frees the host's arbiter slot
     // and re-sends the saved screen id (see `send_screen` below); the device
     // does not clear the interrupt overlay itself until the user taps it, so
     // host and device interrupt state can diverge until the next tap or a
@@ -1833,21 +1833,22 @@ fn card_wants_completion_interrupt(config: &AppConfig, widget_id: &str) -> bool 
 /// `AlertHold::Seconds` arms an absolute deadline; `AlertHold::UntilDismissed`
 /// (or no hold at all) disarms it.
 ///
-/// KNOWN LIMITATION (protocol v1): expiring this deadline only frees the
-/// host's arbiter slot for the next alert and re-syncs the saved carousel
-/// screen id host-side (see the `alert_hold_due` handling in
-/// `run_scheduled_work`). Per `docs/protocol/v1.md`'s `ActivateScreen`
-/// section and firmware's `protocol_task.c` (`show_carousel_screen` is
-/// skipped whenever an interrupt is active), the *device* keeps the
-/// interrupt overlay on screen regardless — it is cleared only by an
-/// on-device tap. So a bounded hold does not visually clear the panel, and
-/// dismissing host-side while the device still shows the overlay leaves host
-/// and device interrupt state diverged (the device still expects a tap; a
-/// further host-triggered alert can be rejected `Busy` by the device even
-/// though the host arbiter believes its slot is free) until the next tap or a
-/// full resync. There is no wire message to tell the device to clear an
-/// interrupt without a tap; fixing that is a protocol/spec decision, not a
-/// code fix, and is out of scope here.
+/// BY DESIGN (decided 2026-08-06, design spec §3.2): expiring this deadline
+/// only frees the host's arbiter slot for the next alert and re-syncs the
+/// saved carousel screen id host-side (see the `alert_hold_due` handling in
+/// `run_scheduled_work`). It does not clear the panel. Per
+/// `docs/protocol/v1.md`'s `ActivateScreen` section and firmware's
+/// `protocol_task.c` (`show_carousel_screen` is skipped whenever an interrupt
+/// is active), the device yields the overlay on tap alone. Confirmed on
+/// hardware — see `docs/hardware/board-notes.md`, card-model §6.
+///
+/// The consequence to keep in mind: dismissing host-side while the device
+/// still shows the overlay leaves host and device interrupt state diverged
+/// (the device still expects a tap; a further host-triggered alert can be
+/// rejected `Busy` even though the host arbiter believes its slot is free)
+/// until the next tap or a full resync. Do not "fix" this by adding a wire
+/// dismissal message — that was considered and rejected for v1, because an
+/// alert worth interrupting the user is worth acknowledging.
 fn arm_alert_hold(scheduler: &mut Scheduler, token: u32, hold: Option<AlertHold>, now: Instant) {
     let deadline = match hold {
         Some(AlertHold::Seconds { value }) => Some(now + Duration::from_secs(u64::from(value))),

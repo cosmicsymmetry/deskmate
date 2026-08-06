@@ -103,14 +103,22 @@ real events, so only two triggers exist.
 
 `hold` is `until-dismissed` or `seconds { 5..600 }`.
 
-**Known limitation, not yet decided.** Under protocol v1 the device panel yields the
-interrupt overlay only on tap — there is no host→device dismissal message, and sending
-`ActivateScreen` for a different screen while an interrupt is active changes only the
-screen *behind* the overlay, not what is visibly on screen. `hold` is host-side
-bookkeeping: it bounds how long the arbiter treats an alert as outstanding, freeing the
-slot for the next one. Whether the on-screen overlay itself also clears once `hold`
-expires, or only ever on tap, has not been decided and has not been observed on
-hardware. This spec does not resolve it; see section 9 for how to test around it.
+**`hold` is host-side bookkeeping. Decided 2026-08-06.** It bounds how long the arbiter
+treats an alert as outstanding, freeing the slot for the next one. It does **not** clear
+the panel: under protocol v1 the device yields the interrupt overlay only on tap. There
+is no host→device dismissal message, `TriggerInterrupt` carries no duration, and sending
+`ActivateScreen` while an interrupt is active changes only the screen *behind* the
+overlay. This is the intended, documented meaning of the field, not a deficiency to be
+worked around — an alert worth interrupting you is worth acknowledging.
+
+Verified on hardware 2026-08-06 (`docs/hardware/board-notes.md`, card-model §6): with
+rotation disabled and a 60-second hold, the alert stayed until tapped; with a fast
+rotation and an `until-dismissed` hold, a carousel advance did not disturb it. The card
+editor's copy already states this to the user.
+
+Adding a wire-level dismissal message was considered and rejected for v1: it costs a
+protocol addition, firmware work, and a hardware re-verification to make alerts able to
+disappear unacknowledged, which is the opposite of what an alert is for.
 
 `presence` and `alert` are deliberately independent fields rather than one collapsed
 variant, because the common case is a card that is both in the rotation and alerting: a

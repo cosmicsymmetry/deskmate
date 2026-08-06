@@ -51,13 +51,13 @@ of letting code and documentation diverge.
   were cancelled, not deferred. M4 is active at Task 3; its plan is
   `docs/superpowers/plans/2026-08-05-deskmate-m4-v1-completion.md` and the frozen config
   contract is `docs/config/v3.md`. The card model was physically verified on 2026-08-06:
-  eight of the nine checks pass, recorded in `docs/hardware/board-notes.md`. Three items
-  stay open and must not be described as resolved — a bounded `AlertHold::Seconds` does
-  not clear the panel (protocol v1 has no dismissal message, so the hold bounds only
-  host-side state); an alert firing while the device is unpowered was lost on reconnect
-  (observed once, undiagnosed, not covered by any test); and a config that fails
-  validation falls back to built-in defaults, pushes them to the device, and mislabels
-  them "your last working settings".
+  eight of the nine checks pass, recorded in `docs/hardware/board-notes.md`. `AlertHold`
+  is decided: `hold` is host-side bookkeeping only and never clears the panel, which
+  yields the overlay on tap alone. Do not add a wire dismissal message for it. Two items
+  stay open and must not be described as resolved — an alert firing while the device is
+  unpowered was lost on reconnect (observed once, undiagnosed, not covered by any test);
+  and a config that fails validation falls back to built-in defaults, pushes them to the
+  device, and mislabels them "your last working settings".
 - M1's full software and physical exit gate passes, including ten observed
   unplug/replug cycles, and is tagged `m1`. Because M2 work began in the same shared
   worktree before the physical carryover closed, that tag also contains the M2

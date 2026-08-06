@@ -391,16 +391,22 @@ describe("settings accessibility and states", () => {
     expect(html).toContain("--");
   });
 
-  test("icon-badge-text preview shows icon, badge, value and label", () => {
+  // title and badge are two distinct always-visible fields in the firmware
+  // (OBJ_TITLE top-left, OBJ_BADGE top-right) — a fixture that only ever
+  // supplies three of the four fields can't catch a fourth silently being
+  // dropped, so this one supplies all four together.
+  test("icon-badge-text preview shows title, badge, value and label together", () => {
     const html = renderTemplatePreview({
       template: { kind: "icon-badge-text", icon_asset_id: null },
       fields: [
         { key: "icon", value: { kind: "text", value: "cloud-sun" } },
+        { key: "title", value: { kind: "text", value: "Home Weather" } },
         { key: "badge", value: { kind: "text", value: "Berlin" } },
         { key: "value", value: { kind: "text", value: "21°" } },
         { key: "label", value: { kind: "text", value: "Partly cloudy" } },
       ],
     });
+    expect(html).toContain("Home Weather");
     expect(html).toContain("Berlin");
     expect(html).toContain("21°");
     expect(html).toContain("Partly cloudy");

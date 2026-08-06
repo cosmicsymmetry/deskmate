@@ -210,7 +210,16 @@ function BigNumberFace({
 
 /// Face for `template: { kind: "icon-badge-text" }`: an icon block on the
 /// left, title/badge/value/label on the right — mirroring the firmware's
-/// icon-left, text-block-right layout. The icon is never the firmware's own
+/// `icon_badge_text.c` layout, which renders `OBJ_TITLE` (top-left) and
+/// `OBJ_BADGE` (top-right) simultaneously as two distinct always-visible
+/// fields, not one falling back to the other. `title` is the card's own
+/// user-facing title (e.g. "Home Weather"); `badge` is the provider-supplied
+/// value (e.g. a weather card's location, "Berlin"). Both are read straight
+/// from the published fields with no cross-substitution: an empty `title`
+/// renders nothing and takes up no visible space, matching the firmware,
+/// which initialises the title string to `""` and simply omits it — `badge`
+/// alone keeps its existing fallback to `cardName(widget)` so the header
+/// always shows at least one label. The icon is never the firmware's own
 /// LVGL vector art (out of scope for a DOM preview); it is a single glyph
 /// chosen from the closed `WEATHER_ICONS` vocabulary, with any unrecognised
 /// name — including one never emitted by any current provider — rendering
@@ -225,6 +234,7 @@ function IconBadgeFace({
   fields: Map<string, CardFieldValue>;
   sample: boolean;
 }) {
+  const title = sample ? "" : textField(fields, "title");
   const badge = (sample ? "" : textField(fields, "badge")) || cardName(widget);
   const value = sample ? "" : textField(fields, "value");
   const label = sample ? "" : textField(fields, "label");
@@ -235,10 +245,13 @@ function IconBadgeFace({
         {ICON_GLYPH[icon]}
       </span>
       <div className="preview-iconbadge__body">
-        <strong>
-          {badge}
-          {sample && <SampleBadge />}
-        </strong>
+        <div className="preview-iconbadge__header">
+          {title && <span className="preview-iconbadge__title">{title}</span>}
+          <strong className="preview-iconbadge__badge">
+            {badge}
+            {sample && <SampleBadge />}
+          </strong>
+        </div>
         <span className="preview-iconbadge__hero numeral">{value || "--"}</span>
         {label && <span className="preview-iconbadge__label">{label}</span>}
       </div>

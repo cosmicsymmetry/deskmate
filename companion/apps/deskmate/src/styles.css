@@ -1230,9 +1230,35 @@ h2 {
   min-width: 0;
 }
 
-.preview-iconbadge__body strong {
+/* Mirrors the firmware's OBJ_TITLE (top-left) / OBJ_BADGE (top-right) pair:
+   two distinct fields on one row, not one falling back to the other. An
+   empty title collapses via `justify-content: flex-end` on the badge rather
+   than leaving a gap. */
+.preview-iconbadge__header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.preview-iconbadge__title {
+  overflow: hidden;
+  font-size: 0.7rem;
+  font-weight: 700;
+  opacity: 0.68;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* `margin-left: auto` (not just the header's `space-between`) keeps the
+   badge pinned top-right even when `title` is empty and the header has only
+   this one flex child — `space-between` alone would collapse a lone child
+   to flex-start. */
+.preview-iconbadge__badge {
+  margin-left: auto;
   font-size: 0.78rem;
   font-weight: 750;
+  text-align: right;
 }
 
 .preview-iconbadge__hero {

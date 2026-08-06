@@ -1261,8 +1261,21 @@ storm would raise that high-water mark and eventually drop commands.
 
 ### Not covered by this session
 
-- Weather and json-feed cards were not exercised. They default to `row-list`, whose
-  field set (`title`, `row0..4_title`, `row0..4_time`, `stale`, `error`) neither
-  provider publishes, so the expected result remains title-over-empty-rows until the
-  `big-number-label` / `icon-badge-text` templates land in M4 Task 3.
 - "Fires exactly once per event" for calendar alerts was not separately isolated.
+
+## Extended templates (M4 Task 3) — needs physical verification
+
+Not yet observed on the board. The next hardware session must check:
+
+- [ ] `StatusResponse` reports capabilities 11 (core | rotation | extended templates).
+- [ ] A weather card renders icon-left/text-right with a real temperature, summary
+      and location, at both 90° and 270°.
+- [ ] Each of the 11 icon names renders its own distinct artwork, and an
+      unrecognised name renders the hollow `unknown` ring rather than blank space.
+- [ ] A json-feed card renders its mapped value as the hero number, and an absent
+      value renders `--` rather than stale pixels from the previous card.
+- [ ] An analog-clock card tracks time, and `show_seconds` toggles the second hand.
+- [ ] `unknown_field_count` stays at zero across a weather push (the schema
+      declares all ten emitted fields for exactly this reason).
+- [ ] Heap stays flat and `ui_queue_high_water` stays low across a full rotation
+      that includes all three new templates.

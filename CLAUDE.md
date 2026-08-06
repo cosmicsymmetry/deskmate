@@ -48,9 +48,14 @@ of letting code and documentation diverge.
   `alert`, `carousel.advance`), lossless v0/v1/v2 migration, host-driven timed rotation,
   and bounded alert triggers compiling to the unchanged wire contract. M4 Task 4 is now
   timed rotation and alerts (delivered by Task 2B) rather than tile dashboards, which
-  were cancelled, not deferred. M4 is active at Task 3; its plan is
+  were cancelled, not deferred. M4's plan is
   `docs/superpowers/plans/2026-08-05-deskmate-m4-v1-completion.md` and the frozen config
-  contract is `docs/config/v3.md`. The card model was physically verified on 2026-08-06:
+  contract is `docs/config/v3.md`. M4 Task 3 (the `AnalogClock`, `BigNumberLabel`, and
+  `IconBadgeText` templates; wire kinds 4-6) is complete in software —
+  `CURRENT_CAPABILITIES` is now `11` (core widgets | config rotation | extended
+  templates) — but has no physical verification; the checklist is in
+  `docs/hardware/board-notes.md` under "Extended templates (M4 Task 3)". The card model
+  was physically verified on 2026-08-06:
   eight of the nine checks pass, recorded in `docs/hardware/board-notes.md`. `AlertHold`
   is decided: `hold` is host-side bookkeeping only and never clears the panel, which
   yields the overlay on tap alone. Do not add a wire dismissal message for it. Two items

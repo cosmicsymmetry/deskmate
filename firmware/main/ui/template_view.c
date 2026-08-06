@@ -27,6 +27,8 @@ static void tick_cb(lv_timer_t *timer)
     }
     if (s_view.template_kind == PROTOCOL_TEMPLATE_DIGITAL_CLOCK) {
         digital_clock_tick(&s_view.widget, s_utc_offset_minutes);
+    } else if (s_view.template_kind == PROTOCOL_TEMPLATE_ANALOG_CLOCK) {
+        analog_clock_tick(&s_view.widget, s_utc_offset_minutes);
     } else if (s_view.template_kind == PROTOCOL_TEMPLATE_PROGRESS_RING) {
         progress_ring_tick(&s_view.widget);
     }
@@ -55,6 +57,9 @@ static bool create_widget(template_view_state_t *view, lv_obj_t *parent)
     if (view->template_kind == PROTOCOL_TEMPLATE_DIGITAL_CLOCK) {
         return digital_clock_create(&view->widget, parent,
                                     rendered_size);
+    }
+    if (view->template_kind == PROTOCOL_TEMPLATE_ANALOG_CLOCK) {
+        return analog_clock_create(&view->widget, parent, rendered_size);
     }
     if (view->template_kind == PROTOCOL_TEMPLATE_PROGRESS_RING) {
         return progress_ring_create(&view->widget, parent,
@@ -106,6 +111,9 @@ static void patch_widget(template_view_state_t *view,
     if (view->template_kind == PROTOCOL_TEMPLATE_DIGITAL_CLOCK) {
         digital_clock_patch(&view->widget, fields, dirty_mask);
         digital_clock_tick(&view->widget, s_utc_offset_minutes);
+    } else if (view->template_kind == PROTOCOL_TEMPLATE_ANALOG_CLOCK) {
+        analog_clock_patch(&view->widget, fields, dirty_mask);
+        analog_clock_tick(&view->widget, s_utc_offset_minutes);
     } else if (view->template_kind == PROTOCOL_TEMPLATE_PROGRESS_RING) {
         progress_ring_patch(&view->widget, fields, dirty_mask);
     } else if (view->template_kind == PROTOCOL_TEMPLATE_ROW_LIST) {

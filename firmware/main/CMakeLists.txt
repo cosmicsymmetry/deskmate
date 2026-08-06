@@ -9,7 +9,8 @@ idf_component_register(
          "ui/clock_screen.c"
          "ui/template_view.c" "ui/ui_command_queue.c"
          "ui/ui_runtime.c"
-         "ui/templates/digital_clock.c" "ui/templates/progress_ring.c"
+         "ui/templates/analog_clock.c" "ui/templates/digital_clock.c"
+         "ui/templates/progress_ring.c"
          "ui/templates/row_list.c" "ui/templates/weather_icon.c"
     INCLUDE_DIRS "." "board" "core" "link" "ui"
     REQUIRES cbor esp_app_format esp_timer

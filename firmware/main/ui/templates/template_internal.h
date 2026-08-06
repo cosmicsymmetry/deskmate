@@ -61,3 +61,10 @@ bool big_number_label_create(template_widget_view_t *view,
 void big_number_label_patch(template_widget_view_t *view,
                             const template_field_state_t *fields,
                             uint16_t dirty_mask);
+
+bool icon_badge_text_create(template_widget_view_t *view,
+                            lv_obj_t *parent,
+                            protocol_size_class_t size);
+void icon_badge_text_patch(template_widget_view_t *view,
+                           const template_field_state_t *fields,
+                           uint16_t dirty_mask);

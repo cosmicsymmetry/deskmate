@@ -71,6 +71,9 @@ static bool create_widget(template_view_state_t *view, lv_obj_t *parent)
     if (view->template_kind == PROTOCOL_TEMPLATE_BIG_NUMBER_LABEL) {
         return big_number_label_create(&view->widget, parent, rendered_size);
     }
+    if (view->template_kind == PROTOCOL_TEMPLATE_ICON_BADGE_TEXT) {
+        return icon_badge_text_create(&view->widget, parent, rendered_size);
+    }
     return false;
 }
 
@@ -123,6 +126,8 @@ static void patch_widget(template_view_state_t *view,
         row_list_patch(&view->widget, fields, dirty_mask);
     } else if (view->template_kind == PROTOCOL_TEMPLATE_BIG_NUMBER_LABEL) {
         big_number_label_patch(&view->widget, fields, dirty_mask);
+    } else if (view->template_kind == PROTOCOL_TEMPLATE_ICON_BADGE_TEXT) {
+        icon_badge_text_patch(&view->widget, fields, dirty_mask);
     }
     update_data_state_from_fields(&view->widget, fields);
 }

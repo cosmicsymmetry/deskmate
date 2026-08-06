@@ -11,6 +11,7 @@ idf_component_register(
          "ui/ui_runtime.c"
          "ui/templates/analog_clock.c" "ui/templates/big_number_label.c"
          "ui/templates/digital_clock.c"
+         "ui/templates/icon_badge_text.c"
          "ui/templates/progress_ring.c"
          "ui/templates/row_list.c" "ui/templates/weather_icon.c"
     INCLUDE_DIRS "." "board" "core" "link" "ui"

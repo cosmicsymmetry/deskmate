@@ -21,7 +21,7 @@ breadth.
 | M1 | Complete | Protocol + link + CLI harness | `deskmate-cli status` / `time-sync` / `push-data` work from a terminal; device falls back to standalone clock on unplug | `2026-08-04-deskmate-m1-protocol-link-cli.md` |
 | M2 | Complete | Template engine + first widgets | Clock, pomodoro (progress ring, tap start/pause, done-interrupt), ICS calendar — all driven via CLI; carousel + status strip | `2026-08-04-deskmate-m2-template-first-widgets.md` |
 | M3 | Complete | Companion app (Tauri v2) | Tray app replaces CLI for daily use: config store, providers, settings UI with widget gallery + screen arranger | `2026-08-04-deskmate-m3-companion-app.md` |
-| M4 | Active — Task 3 | v1 completion | Weather/JSON-feed/RSS providers, remaining spec templates (big number + label, icon + badge + text, analog clock face), `tile` layouts + dashboard grids, "open URL/app on host" tap action, optional timed carousel advance, asset push, staleness, wider ICS recurrence, in-app firmware update, production VID/PID, release smoke checklist | `2026-08-05-deskmate-m4-v1-completion.md` |
+| M4 | Active — Task 3 | v1 completion | Weather/JSON-feed/RSS providers, remaining spec templates (big number + label, icon + badge + text, analog clock face), the card model (`presence`/`alert`/`carousel.advance`, replacing dashboard grids, which are cancelled — see the card-model design spec), "open URL/app on host" tap action, asset push, staleness, wider ICS recurrence, in-app firmware update, production VID/PID, release smoke checklist | `2026-08-05-deskmate-m4-v1-completion.md` |
 
 First-widget order and why:
 

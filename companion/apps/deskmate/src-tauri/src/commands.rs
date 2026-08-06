@@ -116,8 +116,17 @@ pub fn get_app_snapshot(state: State<'_, DesktopState>) -> Result<AppSnapshot, I
 #[tauri::command]
 pub fn validate_config_draft(draft: DraftPayload) -> Result<DraftValidation, IpcError> {
     let config = parse_draft(&draft)?;
+    // Mirror `save_and_apply`'s `compile()` call below, not just `validate()`. A card
+    // whose template/tap-action combination validates cleanly but has no `wire_config()`
+    // mapping yet (`RequiresCapability`) must be reported here, or the settings UI can
+    // report a draft valid right up until Save rejects it with an error attached to no
+    // field — the bug this guards against. `compile()` already re-runs `validate()`
+    // first and returns exactly those issues when the draft fails basic validation, so
+    // this is a strict superset of the previous behaviour, never a narrower one. The
+    // revision value only matters for `revision == 0` rejection, so any nonzero
+    // placeholder is fine for a draft that is never actually applied.
     let issues = config
-        .validate()
+        .compile(1)
         .err()
         .map_or_else(Vec::new, |error| error.issues);
     Ok(DraftValidation {
@@ -546,6 +555,42 @@ mod tests {
         assert!(!result.valid);
         assert_eq!(result.issues.len(), 1);
         assert_eq!(result.issues[0].code, ValidationCode::InvalidTimezone);
+    }
+
+    /// A draft can pass `validate()` cleanly (every field within its bounds) yet still
+    /// be unsaveable because its template has no `wire_config()` mapping. Before this
+    /// fix, `validate_config_draft` ran only `validate()` and reported such a draft
+    /// valid, so Save's separate `compile()` call was the first place the failure ever
+    /// surfaced — with an error attached to no field, in a session where every other
+    /// edit was now blocked too. `validate_config_draft` must catch this itself, on the
+    /// card's own path, exactly like the save path does.
+    #[test]
+    fn draft_validation_catches_a_template_with_no_wire_mapping_like_save_does() {
+        let mut config = AppConfig::default();
+        config.cards[0] = CardSettings::Weather {
+            id: "weather".into(),
+            title: "Weather".into(),
+            location: "Tbilisi".into(),
+            units: WeatherUnits::Metric,
+            template: DisplayTemplate::BigNumberLabel,
+            tap_action: WidgetTapAction::None,
+            refresh: RefreshPolicy::Interval { minutes: 30 },
+            presence: CardPresence::InRotation {
+                dwell_seconds: None,
+            },
+            alert: CardAlert::None,
+        };
+        assert!(config.validate().is_ok(), "fixture must validate cleanly");
+
+        let result = validate_config_draft(DraftPayload {
+            json: serde_json::to_string(&config).unwrap(),
+        })
+        .unwrap();
+
+        assert!(!result.valid);
+        assert!(result.issues.iter().any(|issue| {
+            issue.path == "cards[0]" && issue.code == ValidationCode::RequiresCapability
+        }));
     }
 
     #[test]

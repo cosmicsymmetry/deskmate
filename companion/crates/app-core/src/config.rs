@@ -1836,9 +1836,18 @@ fn validate_composition(
             template,
             DisplayTemplate::RowList | DisplayTemplate::IconBadgeText { .. }
         ),
+        // `RowList` is included alongside the templates weather was designed for
+        // (`BigNumberLabel`/`IconBadgeText`) because neither of those is implemented on
+        // the wire yet (see `wire_config` below) — without this, no template exists that
+        // is both composition-valid and wire-compilable for a weather card, so every
+        // weather card would be permanently unsaveable regardless of what the companion
+        // app defaults its `template` to. Drop this once a weather-specific template
+        // lands on the wire.
         ProviderKind::Weather => matches!(
             template,
-            DisplayTemplate::BigNumberLabel | DisplayTemplate::IconBadgeText { .. }
+            DisplayTemplate::BigNumberLabel
+                | DisplayTemplate::IconBadgeText { .. }
+                | DisplayTemplate::RowList
         ),
         ProviderKind::JsonFeed => matches!(
             template,

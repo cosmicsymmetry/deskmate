@@ -78,13 +78,18 @@ describe("settings accessibility and states", () => {
     expect(html).toContain("background service keeps running");
   });
 
-  function renderCardEditor(card: CardSettings, issues: ValidationIssue[] = []) {
+  function renderCardEditor(
+    card: CardSettings,
+    issues: ValidationIssue[] = [],
+    isOnlyRotationCard = false,
+  ) {
     return renderToStaticMarkup(
       <CardEditor
         card={card}
         issues={issues}
         pomodoro={null}
         defaultDwellSeconds={20}
+        isOnlyRotationCard={isOnlyRotationCard}
         timerBusy={false}
         filePickerBusy={false}
         onChange={() => {}}
@@ -186,6 +191,7 @@ describe("settings accessibility and states", () => {
     const html = renderToStaticMarkup(
       <CardList
         config={config}
+        issues={[]}
         selectedCardId="first-clock-id"
         onSelect={() => {}}
         onAdd={() => {}}
@@ -207,6 +213,7 @@ describe("settings accessibility and states", () => {
     const html = renderToStaticMarkup(
       <CardList
         config={config}
+        issues={[]}
         selectedCardId={null}
         onSelect={() => {}}
         onAdd={() => {}}
@@ -234,6 +241,7 @@ describe("settings accessibility and states", () => {
     const html = renderToStaticMarkup(
       <CardList
         config={config}
+        issues={[]}
         selectedCardId={null}
         onSelect={() => {}}
         onAdd={() => {}}
@@ -374,7 +382,14 @@ describe("settings accessibility and states", () => {
 
   function renderFilmstrip(config: AppConfig): string {
     return renderToStaticMarkup(
-      <Filmstrip config={config} selectedCardId="first" onSelect={() => {}} onReorder={() => {}} />,
+      <Filmstrip
+        config={config}
+        issues={[]}
+        selectedCardId="first"
+        onSelect={() => {}}
+        onReorder={() => {}}
+        onChangeAdvance={() => {}}
+      />,
     );
   }
 

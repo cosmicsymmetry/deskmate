@@ -474,6 +474,17 @@ h2 {
 }
 
 /* Card list — replaces the old widget gallery + screen arranger panels. */
+
+/* Container-level `cards` issues (see `cardsContainerIssues`) — e.g. "at least one
+   card must be in the rotation" — which have no single row of their own to attach to,
+   so they render once here instead of nowhere. */
+.card-list-issues {
+  margin: 0;
+  padding: 12px 22px 12px 39px;
+  border-bottom: 1px solid var(--line);
+  background: color-mix(in srgb, var(--alarm) 8%, transparent);
+}
+
 .card-list-section {
   padding: 4px 0 0;
 }
@@ -1320,6 +1331,51 @@ h2 {
   color: var(--muted);
   font-size: 0.66rem;
   line-height: 1.4;
+}
+
+/* Sets the actual, saved `carousel.advance` — quiet chrome grouping, same hairline
+   treatment as .behaviour-fieldset, with --signal reserved for the selected radio
+   (never --emit: this is a clickable control, not the device's own emission). */
+.advance-fieldset {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+.advance-fieldset legend {
+  padding: 0 5px;
+}
+
+.advance-option {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  cursor: pointer;
+}
+
+.advance-option input {
+  margin-top: 3px;
+  accent-color: var(--signal);
+}
+
+.advance-option strong {
+  display: block;
+  font-size: 0.75rem;
+}
+
+.advance-option small {
+  display: block;
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 0.65rem;
+  line-height: 1.4;
+}
+
+.advance-dwell-field {
+  margin-left: 24px;
 }
 
 .provider-row {

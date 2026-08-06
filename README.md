@@ -39,14 +39,17 @@ orientations, event burst, and 30-minute mixed soak pass. The user explicitly wa
 nine repeated M2 power cycles after one observed corrected cycle. M3 now has the strict
 typed app/config contract, cross-platform atomic config store, single-owner background
 runtime, pinned Tauri v2 desktop shell, narrow typed IPC, and the complete settings UI.
-The app configures and previews the three proven widgets, arranges screens with pointer
-or keyboard, chooses between the two landscape mounting orientations, exposes
-provider/device/persistence state, and keeps the runtime alive in the tray when settings
-closes. Widgets use the complete 448x368 canvas with no status strip. Its software,
-macOS debug/release, physical UI/replay, sleep/wake, and tray-resident soak gates pass.
+The app configures and previews the three proven widgets, reorders the card rotation
+with pointer or keyboard, chooses between the two landscape mounting orientations,
+exposes provider/device/persistence state, and keeps the runtime alive in the tray when
+settings closes. Widgets use the complete 448x368 canvas with no status strip. Its
+software, macOS debug/release, physical UI/replay, sleep/wake, and tray-resident soak
+gates pass.
 M4 Task 1 freezes application config schema v2, lossless M3 migration, bounded closed
 types for the remaining v1 surface, and an additive protocol-v1 capability handshake.
-See `docs/config/v2.md`, `docs/protocol/v1.md`, `docs/providers/v1.md`, and the active
+Task 2B later replaced the widget/screen authoring model with the card model (schema
+v3): `cards[]`, `presence`, `alert`, and host-driven timed rotation. See
+`docs/config/v3.md`, `docs/protocol/v1.md`, `docs/providers/v1.md`, and the active
 M4 plan. Task 2 delivered the bounded weather/JSON/RSS providers and wider ICS
 recurrence; Task 3 now owns the remaining device templates.
 
@@ -58,9 +61,9 @@ Install the locked frontend dependencies and launch the desktop app:
     bun install --frozen-lockfile
     PATH="$HOME/.cargo/bin:$PATH" bun run tauri dev
 
-Use Settings to add a digital clock, pomodoro, or ICS calendar from a URL or local file,
-choose USB-below or USB-above landscape mounting, then arrange its screens and choose
-Save & apply. Closing Settings hides the window; the
+Use Settings to add cards (digital clock, pomodoro, ICS calendar from a URL or local
+file, weather, JSON feed, or RSS), choose USB-below or USB-above landscape mounting,
+reorder the card rotation, and choose Save & apply. Closing Settings hides the window; the
 tray process continues provider refreshes, timer handling, reconnect, and full replay.
 Pomodoro duration and label persist across app restarts. A live timer survives settings
 close/reopen and unrelated saves, but deliberately restarts idle after the entire app

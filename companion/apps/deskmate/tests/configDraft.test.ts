@@ -4,6 +4,7 @@ import {
   addCard,
   cardFields,
   cardMoveFromKey,
+  cardsContainerIssues,
   filmstripAdvance,
   filmstripDeadline,
   filmstripSegments,
@@ -18,6 +19,7 @@ import {
   moveCardWithinRotation,
   nextFilmstripCardId,
   nonRotationCards,
+  numberValue,
   removeCard,
   rotationCards,
   tapActionDescription,
@@ -112,6 +114,41 @@ describe("configuration draft helpers", () => {
       config = addCard(config, kind).config;
     }
     expect(config.cards.map((card) => card.kind)).toEqual([...kinds]);
+  });
+
+  // Regression test for the final-review finding: `addCard` defaulted weather and
+  // json-feed to `big-number-label`, a template `validate()` accepts but
+  // `wire_config()` (in `config.rs`) cannot lower, so a freshly-added card of either
+  // kind validated cleanly yet always failed to save. Every default here must stay
+  // within the templates `wire_config()` actually implements today: `digital-clock`,
+  // `progress-ring`, `row-list` — see `companion/crates/app-core/tests/config.rs`'s
+  // `every_freshly_added_card_kind_validates_and_compiles` for the Rust-side proof
+  // that these exact defaults both validate AND compile.
+  test("every freshly-added card kind defaults to a template the wire actually implements", () => {
+    const compilableTemplates = new Set(["digital-clock", "progress-ring", "row-list"]);
+    const kinds = ["clock", "pomodoro", "calendar", "weather", "json-feed", "rss"] as const;
+    let config: AppConfig = { ...initialConfig(), cards: [] };
+    for (const kind of kinds) {
+      const { config: next, cardId } = addCard(config, kind);
+      config = next;
+      const card = config.cards.find((candidate) => candidate.id === cardId);
+      if (!card) {
+        throw new Error(`addCard did not append the ${kind} card`);
+      }
+      expect(compilableTemplates.has(card.template.kind)).toBe(true);
+    }
+  });
+
+  test("addCard deep-copies the existing cards, not just the appended one", () => {
+    const config = initialConfig();
+    const original = config.cards[0];
+    const { config: next } = addCard(config, "pomodoro");
+
+    // The pre-existing clock card in the returned draft must be a distinct object from
+    // the source config's — otherwise mutating one through the draft would alias back
+    // onto the live snapshot `config` was copied from.
+    expect(next.cards[0]).not.toBe(original);
+    expect(next.cards[0]).toEqual(original);
   });
 
   test("removing a card removes only that card", () => {
@@ -384,6 +421,24 @@ describe("configuration draft helpers", () => {
     ];
     expect(issuesForCard(rebased, reordered, "b")).toHaveLength(1);
     expect(issuesForCard(rebased, reordered, "a")).toHaveLength(0);
+  });
+
+  test("cardsContainerIssues isolates issues whose path is exactly cards", () => {
+    const issues: ValidationIssue[] = [
+      { path: "cards", code: "out-of-range", message: "at least one card must be in the rotation" },
+      { path: "cards[0].title", code: "empty", message: "required" },
+      { path: "cards[1].presence", code: "out-of-range", message: "dead card" },
+    ];
+    expect(cardsContainerIssues(issues)).toEqual([issues[0]]);
+    expect(cardsContainerIssues([])).toEqual([]);
+    expect(cardsContainerIssues(issues.slice(1))).toEqual([]);
+  });
+
+  test("numberValue parses a numeric input, defaulting non-finite input to 0", () => {
+    expect(numberValue("42")).toBe(42);
+    expect(numberValue("3.5")).toBe(3.5);
+    expect(numberValue("")).toBe(0);
+    expect(numberValue("not a number")).toBe(0);
   });
 
   test("issuesForCard returns nothing for a card that no longer exists", () => {

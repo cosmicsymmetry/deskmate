@@ -14,18 +14,103 @@ import {
   filmstripDeadline,
   filmstripSegments,
   formatDuration,
+  issuesForPath,
+  loopSeconds,
   moveCardWithinRotation,
+  numberValue,
 } from "../lib/configDraft";
-import type { AppConfig } from "../lib/types";
+import type { AppConfig, CarouselAdvance, ValidationIssue } from "../lib/types";
 
 interface FilmstripProps {
   config: AppConfig;
+  issues: ValidationIssue[];
   selectedCardId: string | null;
   onSelect: (cardId: string) => void;
   onReorder: (config: AppConfig) => void;
+  /// Sets `carousel.advance` directly — the actual, saved rotation-advance mode, not
+  /// to be confused with the ribbon's own local Play/Pause preview control below,
+  /// which only simulates playback in this window and never touches the draft.
+  onChangeAdvance: (advance: CarouselAdvance) => void;
 }
 
 const TICK_MS = 1000;
+const DEFAULT_DWELL_FALLBACK = 20;
+
+/// The control that actually sets `carousel.advance` — the saved rotation-advance
+/// mode. Before this existed, nothing in the app ever wrote `carousel`/`advance`, so
+/// host-driven timed rotation, `default_dwell_seconds`, and per-card dwell overrides
+/// could never take effect no matter what was configured by hand. Lives beside the
+/// ribbon because that is where rotation timing is visualised.
+function AdvanceFieldset({
+  advance,
+  issues,
+  onChange,
+}: {
+  advance: CarouselAdvance;
+  issues: ValidationIssue[];
+  onChange: (advance: CarouselAdvance) => void;
+}) {
+  const isTimed = advance.kind === "timed";
+  const defaultDwellSeconds =
+    advance.kind === "timed" ? advance.default_dwell_seconds : DEFAULT_DWELL_FALLBACK;
+  return (
+    <fieldset className="advance-fieldset">
+      <legend className="section-label">Rotation advance</legend>
+      <label className="advance-option">
+        <input
+          type="radio"
+          name="advance-mode"
+          checked={!isTimed}
+          onChange={() => onChange({ kind: "manual" })}
+        />
+        <span>
+          <strong>Advance only when I swipe</strong>
+          <small>The display stays put until you swipe it.</small>
+        </span>
+      </label>
+      <label className="advance-option">
+        <input
+          type="radio"
+          name="advance-mode"
+          checked={isTimed}
+          onChange={() => onChange({ kind: "timed", default_dwell_seconds: defaultDwellSeconds })}
+        />
+        <span>
+          <strong>Advance automatically</strong>
+          <small>Each card gets its own time on screen, then the display moves on.</small>
+        </span>
+      </label>
+      {isTimed && (
+        <label className="field advance-dwell-field">
+          <span>Default time on screen</span>
+          <input
+            type="number"
+            className="numeral"
+            min={5}
+            max={3600}
+            step={1}
+            aria-label="Default time on screen in seconds"
+            value={defaultDwellSeconds}
+            onChange={(event) =>
+              onChange({
+                kind: "timed",
+                default_dwell_seconds: numberValue(event.currentTarget.value),
+              })
+            }
+            aria-invalid={issues.length > 0}
+          />
+          {issues.length > 0 && (
+            <ul className="field-errors" role="alert">
+              {issues.map((issue) => (
+                <li key={issue.code}>{issue.message}</li>
+              ))}
+            </ul>
+          )}
+        </label>
+      )}
+    </fieldset>
+  );
+}
 
 /// The loop ribbon: one segment per in-rotation card, its width proportional
 /// to its resolved dwell — the one place in the app that shows a card's
@@ -33,7 +118,14 @@ const TICK_MS = 1000;
 /// widths, playback advance decisions) lives in the pure helpers this
 /// component calls; it only wires them to drag/click/keyboard events and a
 /// deadline-driven timer.
-export function Filmstrip({ config, selectedCardId, onSelect, onReorder }: FilmstripProps) {
+export function Filmstrip({
+  config,
+  issues,
+  selectedCardId,
+  onSelect,
+  onReorder,
+  onChangeAdvance,
+}: FilmstripProps) {
   const isTimed = config.carousel.advance.kind === "timed";
   // Memoized on `config` alone (not recomputed on every render) so its
   // identity — and therefore every value derived from it below — stays
@@ -42,7 +134,12 @@ export function Filmstrip({ config, selectedCardId, onSelect, onReorder }: Films
   // second. Without this, a fresh array/objects every render would make
   // any effect keyed on them look "changed" on every tick.
   const segments = useMemo(() => filmstripSegments(config), [config]);
-  const total = isTimed ? segments.reduce((sum, segment) => sum + segment.dwellSeconds, 0) : null;
+  // `loopSeconds` recomputes the same sum this used to derive inline from `segments` —
+  // sharing the one helper keeps the ribbon's printed total and any other loop-length
+  // consumer (there is none today, but this is the shared entry point) from drifting
+  // apart.
+  const total = loopSeconds(config);
+  const advanceIssues = issuesForPath(issues, "carousel.advance.default_dwell_seconds");
   const [isPlaying, setIsPlaying] = useState(false);
   const [draggedId, setDraggedId] = useState<string | null>(null);
   const [reducedMotion, setReducedMotion] = useState(false);
@@ -138,6 +235,11 @@ export function Filmstrip({ config, selectedCardId, onSelect, onReorder }: Films
           Rotation loop
         </p>
         <p className="filmstrip-empty">Nothing is in rotation yet.</p>
+        <AdvanceFieldset
+          advance={config.carousel.advance}
+          issues={advanceIssues}
+          onChange={onChangeAdvance}
+        />
       </section>
     );
   }
@@ -234,6 +336,11 @@ export function Filmstrip({ config, selectedCardId, onSelect, onReorder }: Films
           )}
         </div>
       )}
+      <AdvanceFieldset
+        advance={config.carousel.advance}
+        issues={advanceIssues}
+        onChange={onChangeAdvance}
+      />
     </section>
   );
 }

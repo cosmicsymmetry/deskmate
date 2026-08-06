@@ -1,10 +1,10 @@
 use app_core::{
-    AlertHold, AppConfig, AppSnapshot, AssetSettings, CardAlert, CardDataSnapshot, CardField,
-    CardFieldValue, CardPresence, CardSettings, CarouselAdvance, CarouselSettings, ConnectionState,
-    DeviceCounters, DeviceSnapshot, DisplayTemplate, FirmwareArtifactMetadata, MAX_ASSET_BYTES,
-    MAX_PROVIDER_URL_LEN, MAX_UPDATE_ARTIFACT_BYTES, PersistenceState, PomodoroSnapshot,
-    PomodoroState, ProviderSnapshot, ProviderState, RefreshPolicy, RuntimeDiagnostics,
-    RuntimeState, ValidationCode, WidgetTapAction,
+    AlertHold, AppConfig, AppSnapshot, AssetSettings, CalendarSource, CardAlert, CardDataSnapshot,
+    CardField, CardFieldValue, CardPresence, CardSettings, CarouselAdvance, CarouselSettings,
+    ConnectionState, DeviceCounters, DeviceSnapshot, DisplayTemplate, FirmwareArtifactMetadata,
+    JsonFieldMapping, MAX_ASSET_BYTES, MAX_PROVIDER_URL_LEN, MAX_UPDATE_ARTIFACT_BYTES,
+    PersistenceState, PomodoroSnapshot, PomodoroState, ProviderSnapshot, ProviderState,
+    RefreshPolicy, RuntimeDiagnostics, RuntimeState, ValidationCode, WeatherUnits, WidgetTapAction,
 };
 use protocol::{
     CAPABILITY_ASSET_TRANSFER, CAPABILITY_CONFIG_ROTATION, CAPABILITY_CORE_WIDGETS,
@@ -761,6 +761,98 @@ fn timed_advance_no_longer_requires_an_unimplemented_capability() {
         ..AppConfig::default()
     };
     assert!(config.compile(1).is_ok());
+}
+
+/// Regression test for the final-review finding that a freshly-added weather or
+/// json-feed card could be added, edited, and still fail to save: `configDraft.ts`'s
+/// `addCard` defaulted both to `DisplayTemplate::BigNumberLabel`, which `validate()`
+/// accepts but `wire_config()` cannot lower (`RequiresCapability`), and the IPC
+/// `validate_config_draft` command ran only `validate()`, never `compile()` — so the
+/// settings UI reported the draft valid right up until Save rejected it with an error
+/// attached to no field. Each of these six cards mirrors exactly what `addCard`
+/// produces for that kind today (see `configDraft.ts`), with the field(s) addCard
+/// deliberately leaves empty (calendar source / weather location / json-feed url and
+/// its empty `mappings` list / rss url) filled in — this test is about whether the
+/// REST of a freshly-added card's defaults are wire-compilable, not about the
+/// separate, already-correctly-surfaced "required field left empty" validation error.
+#[test]
+fn every_freshly_added_card_kind_validates_and_compiles() {
+    let presence = CardPresence::InRotation {
+        dwell_seconds: None,
+    };
+    let cards = [
+        clock_card("clock", presence),
+        pomodoro_card(
+            "pomodoro",
+            presence,
+            CardAlert::OnTimerFinish {
+                hold: AlertHold::UntilDismissed,
+            },
+        ),
+        CardSettings::Calendar {
+            id: "calendar".into(),
+            title: "Up next".into(),
+            source: CalendarSource::Url("https://example.test/calendar.ics".into()),
+            template: DisplayTemplate::RowList,
+            tap_action: WidgetTapAction::None,
+            refresh: RefreshPolicy::Interval { minutes: 15 },
+            presence,
+            alert: CardAlert::None,
+        },
+        CardSettings::Weather {
+            id: "weather".into(),
+            title: "Weather".into(),
+            location: "Tbilisi".into(),
+            units: WeatherUnits::Metric,
+            template: DisplayTemplate::RowList,
+            tap_action: WidgetTapAction::None,
+            refresh: RefreshPolicy::Interval { minutes: 30 },
+            presence,
+            alert: CardAlert::None,
+        },
+        CardSettings::JsonFeed {
+            id: "json-feed".into(),
+            title: "Feed".into(),
+            url: "https://example.test/feed.json".into(),
+            // `addCard` itself defaults `mappings` to empty (the user adds one via
+            // "Add field mapping"), and `mappings` requires at least one entry, the
+            // same "field left empty" shape as calendar source / weather location /
+            // rss url. One mapping here represents the user having done their part.
+            mappings: vec![JsonFieldMapping {
+                field: "value".into(),
+                path: "$.value".into(),
+            }],
+            template: DisplayTemplate::RowList,
+            tap_action: WidgetTapAction::None,
+            refresh: RefreshPolicy::Interval { minutes: 15 },
+            presence,
+            alert: CardAlert::None,
+        },
+        CardSettings::Rss {
+            id: "rss".into(),
+            title: "Headlines".into(),
+            url: "https://example.test/feed.xml".into(),
+            max_items: 3,
+            template: DisplayTemplate::RowList,
+            tap_action: WidgetTapAction::None,
+            refresh: RefreshPolicy::Interval { minutes: 30 },
+            presence,
+            alert: CardAlert::None,
+        },
+    ];
+
+    for card in cards {
+        let config = AppConfig {
+            cards: vec![card],
+            ..AppConfig::default()
+        };
+        config.validate().unwrap_or_else(|error| {
+            panic!("{} card failed validate(): {error:?}", config.cards[0].id())
+        });
+        config.compile(1).unwrap_or_else(|error| {
+            panic!("{} card failed compile(): {error:?}", config.cards[0].id())
+        });
+    }
 }
 
 #[test]

@@ -1,4 +1,10 @@
-import { cardKindName, issuesForField, tapActionDescription, withAlert } from "../lib/configDraft";
+import {
+  cardKindName,
+  issuesForField,
+  numberValue,
+  tapActionDescription,
+  withAlert,
+} from "../lib/configDraft";
 import type {
   AlertHold,
   CardAlert,
@@ -24,6 +30,12 @@ interface CardEditorProps {
   /// The carousel's default dwell time, for the "use the default" option's
   /// label. `null` under manual advance, where there is no default to name.
   defaultDwellSeconds: number | null;
+  /// True when this card is the ONLY in-rotation card in the whole draft — i.e.
+  /// switching it to `alert-only` or `off` would trip the "at least one card must be
+  /// in the rotation" rule. Used to disable those two radios rather than let the user
+  /// reach a state the footer can only describe with a container-level error attached
+  /// to no visible control.
+  isOnlyRotationCard: boolean;
   timerBusy: boolean;
   filePickerBusy: boolean;
   onChange: (card: CardSettings) => void;
@@ -45,11 +57,6 @@ function FieldIssues({ issues }: { issues: ValidationIssue[] }) {
   );
 }
 
-function numberValue(value: string): number {
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : 0;
-}
-
 function HoldSelector({
   hold,
   onChange,
@@ -61,7 +68,7 @@ function HoldSelector({
 }) {
   return (
     <label className="field">
-      <span>Stay on screen</span>
+      <span>Hold as outstanding</span>
       <select
         value={hold.kind}
         onChange={(event) =>
@@ -72,8 +79,8 @@ function HoldSelector({
           )
         }
       >
-        <option value="until-dismissed">Until dismissed</option>
-        <option value="seconds">For a set time</option>
+        <option value="until-dismissed">Until you tap it</option>
+        <option value="seconds">For a limited time</option>
       </select>
       {hold.kind === "seconds" && (
         <input
@@ -90,6 +97,10 @@ function HoldSelector({
           aria-invalid={issues.length > 0}
         />
       )}
+      <small>
+        The alert stays on screen until you tap it, regardless of this setting — it only bounds how
+        long Deskmate treats the alert as outstanding, freeing it for the next one.
+      </small>
       <FieldIssues issues={issues} />
     </label>
   );
@@ -100,6 +111,7 @@ export function CardEditor({
   issues,
   pomodoro,
   defaultDwellSeconds,
+  isOnlyRotationCard,
   timerBusy,
   filePickerBusy,
   onChange,
@@ -126,7 +138,11 @@ export function CardEditor({
 
   const fieldIssues = (field: string) => issuesForField(issues, field);
   const canAlert = card.kind === "pomodoro" || card.kind === "calendar";
-  const alertOnlyDisabled = card.alert.kind === "none";
+  // Leaving the rotation (either radio) is blocked while this is the draft's only
+  // in-rotation card — see `isOnlyRotationCard`'s doc comment. Combined with the
+  // existing "no alert configured" guard on "Alert only" below.
+  const leavingRotationDisabled = isOnlyRotationCard && card.presence.kind === "in-rotation";
+  const alertOnlyDisabled = card.alert.kind === "none" || leavingRotationDisabled;
 
   const setPresence = (presence: CardPresence) => onChange({ ...card, presence });
   const setAlert = (alert: CardAlert) => onChange(withAlert(card, alert));
@@ -324,29 +340,6 @@ export function CardEditor({
               </small>
               <FieldIssues issues={fieldIssues("source")} />
             </div>
-            <label className="field">
-              <span>Refresh every</span>
-              <select
-                className="numeral"
-                value={card.refresh.kind === "interval" ? card.refresh.minutes : 15}
-                onChange={(event) =>
-                  onChange({
-                    ...card,
-                    refresh: { kind: "interval", minutes: numberValue(event.currentTarget.value) },
-                  })
-                }
-              >
-                {card.refresh.kind === "interval" &&
-                  ![5, 15, 30, 60].includes(card.refresh.minutes) && (
-                    <option value={card.refresh.minutes}>{card.refresh.minutes} minutes</option>
-                  )}
-                <option value="5">5 minutes</option>
-                <option value="15">15 minutes</option>
-                <option value="30">30 minutes</option>
-                <option value="60">1 hour</option>
-              </select>
-              <FieldIssues issues={fieldIssues("refresh")} />
-            </label>
           </>
         )}
 
@@ -521,6 +514,40 @@ export function CardEditor({
           </>
         )}
 
+        {/* Shared across every kind whose refresh policy is an interval — calendar,
+            weather, json-feed, and rss. Clock and pomodoro are device-local and never
+            reach here. This used to live only inside the calendar block, so weather/
+            json-feed/rss cards kept whatever `addCard` chose forever with no way to
+            change it. */}
+        {(card.kind === "calendar" ||
+          card.kind === "weather" ||
+          card.kind === "json-feed" ||
+          card.kind === "rss") && (
+          <label className="field">
+            <span>Refresh every</span>
+            <select
+              className="numeral"
+              value={card.refresh.kind === "interval" ? card.refresh.minutes : 15}
+              onChange={(event) =>
+                onChange({
+                  ...card,
+                  refresh: { kind: "interval", minutes: numberValue(event.currentTarget.value) },
+                })
+              }
+            >
+              {card.refresh.kind === "interval" &&
+                ![5, 15, 30, 60].includes(card.refresh.minutes) && (
+                  <option value={card.refresh.minutes}>{card.refresh.minutes} minutes</option>
+                )}
+              <option value="5">5 minutes</option>
+              <option value="15">15 minutes</option>
+              <option value="30">30 minutes</option>
+              <option value="60">1 hour</option>
+            </select>
+            <FieldIssues issues={fieldIssues("refresh")} />
+          </label>
+        )}
+
         <fieldset className="behaviour-fieldset">
           <legend>Presence</legend>
           <label>
@@ -550,59 +577,71 @@ export function CardEditor({
               name="presence"
               value="off"
               checked={card.presence.kind === "off"}
+              disabled={leavingRotationDisabled}
               onChange={() => setPresence({ kind: "off" })}
             />
             Off
           </label>
-          {alertOnlyDisabled && (
+          {leavingRotationDisabled ? (
             <small className="behaviour-hint">
-              {canAlert
-                ? "Turn on an alert below before making this card alert-only — otherwise it could never appear."
-                : `${cardKindName(card.kind)} cards have no alert to trigger them, so this stays off.`}
+              This is your only in-rotation card — muting or turning it off would empty the
+              rotation, so both are disabled until another card is in rotation.
             </small>
+          ) : (
+            alertOnlyDisabled && (
+              <small className="behaviour-hint">
+                {canAlert
+                  ? "Turn on an alert below before making this card alert-only — otherwise it could never appear."
+                  : `${cardKindName(card.kind)} cards have no alert to trigger them, so this stays off.`}
+              </small>
+            )
           )}
           <FieldIssues issues={fieldIssues("presence")} />
         </fieldset>
 
-        {card.presence.kind === "in-rotation" && (
-          <label className="field">
-            <span>Time on screen</span>
-            <select
-              value={card.presence.dwell_seconds === null ? "default" : "custom"}
-              onChange={(event) =>
-                setPresence({
-                  kind: "in-rotation",
-                  dwell_seconds:
-                    event.currentTarget.value === "default" ? null : (defaultDwellSeconds ?? 20),
-                })
-              }
-            >
-              <option value="default">
-                Use the default{defaultDwellSeconds !== null ? ` (${defaultDwellSeconds}s)` : ""}
-              </option>
-              <option value="custom">A specific length</option>
-            </select>
-            {card.presence.dwell_seconds !== null && (
-              <input
-                type="number"
-                className="numeral"
-                min={5}
-                max={3600}
-                step={1}
-                aria-label="Dwell time in seconds"
-                value={card.presence.dwell_seconds}
+        {card.presence.kind === "in-rotation" &&
+          (defaultDwellSeconds === null ? (
+            <p className="behaviour-hint">
+              Time on screen has no effect while rotation advance is set to swipe-only — set an
+              automatic advance in the rotation panel to use it.
+            </p>
+          ) : (
+            <label className="field">
+              <span>Time on screen</span>
+              <select
+                value={card.presence.dwell_seconds === null ? "default" : "custom"}
                 onChange={(event) =>
                   setPresence({
                     kind: "in-rotation",
-                    dwell_seconds: numberValue(event.currentTarget.value),
+                    dwell_seconds:
+                      event.currentTarget.value === "default" ? null : (defaultDwellSeconds ?? 20),
                   })
                 }
-                aria-invalid={fieldIssues("presence.dwell_seconds").length > 0}
-              />
-            )}
-            <FieldIssues issues={fieldIssues("presence.dwell_seconds")} />
-          </label>
-        )}
+              >
+                <option value="default">Use the default ({defaultDwellSeconds}s)</option>
+                <option value="custom">A specific length</option>
+              </select>
+              {card.presence.dwell_seconds !== null && (
+                <input
+                  type="number"
+                  className="numeral"
+                  min={5}
+                  max={3600}
+                  step={1}
+                  aria-label="Dwell time in seconds"
+                  value={card.presence.dwell_seconds}
+                  onChange={(event) =>
+                    setPresence({
+                      kind: "in-rotation",
+                      dwell_seconds: numberValue(event.currentTarget.value),
+                    })
+                  }
+                  aria-invalid={fieldIssues("presence.dwell_seconds").length > 0}
+                />
+              )}
+              <FieldIssues issues={fieldIssues("presence.dwell_seconds")} />
+            </label>
+          ))}
 
         {canAlert && card.kind === "pomodoro" && (
           <fieldset className="alert-fieldset">
@@ -627,7 +666,10 @@ export function CardEditor({
               />
               <span>
                 <strong>Take over the screen when the timer ends</strong>
-                <small>Shows full-screen until dismissed or the hold time passes.</small>
+                <small>
+                  Shows full-screen until you tap it. The hold setting below controls how long
+                  Deskmate treats it as outstanding, not how long it's shown.
+                </small>
               </span>
             </label>
             {card.alert.kind === "on-timer-finish" && (

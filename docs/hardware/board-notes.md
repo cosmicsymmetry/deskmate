@@ -1106,3 +1106,31 @@ read-only CLI status query returned active protocol 1, maximum protocol 1, capab
 and zero malformed, CRC, overflow, response, RX, or event drops. The release app was
 then reopened and reacquired the device port. This verifies deployment and negotiation;
 the user-requested morning soak was not repeated.
+
+## Card model (M4 Task 2B) — no physical verification yet (2026-08-06)
+
+**No physical verification has been performed for the card model.** Everything below is
+a checklist of what the next hardware session must observe, not a report of results.
+The wire protocol and firmware are unchanged for this task (`cards[]` compiles to the
+same frozen `ApplyConfig`/`PushData` shapes M2/M3 already proved on the board), so no
+new firmware risk is expected — but "expected" is not "observed," and nothing here may
+be described as verified until it has actually run on the device.
+
+Needs observing, on the physical board, before this can be called done:
+
+- Every card kind's freshly-added default (clock, pomodoro, calendar, weather,
+  json-feed, rss) renders correctly through its assigned template
+  (`digital-clock`/`progress-ring`/`row-list`) — weather and json-feed changed their
+  default template in the final-review fix pass in this same change, from
+  `big-number-label` (never wire-compilable) to `row-list`.
+- Host-driven timed rotation end to end, at both 90° and 270°: dwell expiry, the
+  inherited default, a per-card override, the loop wrap, and manual navigation
+  overriding a pending advance.
+- The documented `AlertHold` limitation (see the card-model design spec's `hold`
+  definition and its section 9): whether the on-screen interrupt overlay clears when
+  the host-side hold expires, or only ever on tap. Record whichever is observed; do not
+  assume either going in.
+- Setting every card to `alert-only`/`off` is rejected by the "at least one card must
+  be in rotation" rule, and the device keeps its previous configuration.
+- Unplug/replug and host sleep/wake mid-rotation, confirming replay restores the active
+  card without duplicate `ActivateScreen` traffic.

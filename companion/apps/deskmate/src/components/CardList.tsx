@@ -8,12 +8,16 @@ import {
   nonRotationCards,
   rotationCards,
 } from "../lib/configDraft";
-import type { AppConfig, CardKind, CardSettings } from "../lib/types";
+import type { AppConfig, CardKind, CardSettings, ValidationIssue } from "../lib/types";
 
 const MAX_CARDS = 8;
 
 interface CardListProps {
   config: AppConfig;
+  /// Container-level `cards` issues only (see `cardsContainerIssues`) — App scopes
+  /// these before passing them down, the same way it scopes per-card issues for
+  /// CardEditor via `issuesForCard`.
+  issues: ValidationIssue[];
   selectedCardId: string | null;
   onSelect: (cardId: string) => void;
   onAdd: (kind: CardKind) => void;
@@ -46,6 +50,7 @@ function presenceLabel(card: CardSettings): string {
 
 export function CardList({
   config,
+  issues,
   selectedCardId,
   onSelect,
   onAdd,
@@ -56,6 +61,12 @@ export function CardList({
   const alertsAndMuted = nonRotationCards(config);
   const [draggedId, setDraggedId] = useState<string | null>(null);
   const atCapacity = config.cards.length >= MAX_CARDS;
+  // Removing the last in-rotation card would trip "at least one card must be in the
+  // rotation" (or, if it's also the only card at all, "at least one cards entry is
+  // required") with no field for either issue to attach to — see
+  // `cardsContainerIssues`. Guarding here, alongside rendering the issue itself below,
+  // makes that state harder to reach rather than only explaining it after the fact.
+  const removingWouldEmptyRotation = rotation.length === 1;
 
   // `targetRotationIndex` is a position among rotation rows only (what the
   // user sees and drags), never a raw config.cards index — the mapping
@@ -101,6 +112,14 @@ export function CardList({
           {config.cards.length}/{MAX_CARDS}
         </span>
       </div>
+
+      {issues.length > 0 && (
+        <ul className="field-errors card-list-issues" role="alert">
+          {issues.map((issue) => (
+            <li key={`${issue.path}:${issue.code}`}>{issue.message}</li>
+          ))}
+        </ul>
+      )}
 
       <div className="card-list-section">
         <div className="card-list-section__heading">
@@ -166,7 +185,17 @@ export function CardList({
                 <button
                   type="button"
                   className="card-row__remove text-button text-button--danger"
-                  aria-label={`Remove ${cardName(card)}`}
+                  aria-label={
+                    removingWouldEmptyRotation
+                      ? `Remove ${cardName(card)} (keep at least one card in rotation)`
+                      : `Remove ${cardName(card)}`
+                  }
+                  title={
+                    removingWouldEmptyRotation
+                      ? "This is your only in-rotation card — the rotation can't be empty."
+                      : undefined
+                  }
+                  disabled={removingWouldEmptyRotation}
                   onClick={() => onRemove(card.id)}
                 >
                   Remove
@@ -204,7 +233,17 @@ export function CardList({
                 <button
                   type="button"
                   className="card-row__remove text-button text-button--danger"
-                  aria-label={`Remove ${cardName(card)}`}
+                  aria-label={
+                    config.cards.length === 1
+                      ? `Remove ${cardName(card)} (keep at least one card)`
+                      : `Remove ${cardName(card)}`
+                  }
+                  title={
+                    config.cards.length === 1
+                      ? "This is your only card — there must be at least one."
+                      : undefined
+                  }
+                  disabled={config.cards.length === 1}
                   onClick={() => onRemove(card.id)}
                 >
                   Remove

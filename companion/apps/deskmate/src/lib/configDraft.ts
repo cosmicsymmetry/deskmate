@@ -151,7 +151,14 @@ export function addCard(
         title: "Weather",
         location: "",
         units: "metric",
-        template: { kind: "big-number-label" },
+        // `row-list` — not the intuitive fit — because it is one of only three
+        // templates `wire_config()` currently lowers to the device (the others are
+        // `digital-clock` and `progress-ring`, neither of which suits weather).
+        // `big-number-label`, the natural choice, has no wire mapping yet, so a card
+        // defaulted to it validates cleanly but can never compile, making it
+        // addable-but-unsaveable — the exact defect this default exists to avoid.
+        // Keep this within the implemented set until a weather-specific template lands.
+        template: { kind: "row-list" },
         refresh: { kind: "interval", minutes: 30 },
       };
       break;
@@ -162,7 +169,10 @@ export function addCard(
         title: "Feed",
         url: "",
         mappings: [],
-        template: { kind: "big-number-label" },
+        // See the weather case above: `row-list` is the only implemented template
+        // json-feed's composition rules allow. Keep this within the implemented set
+        // until a json-feed-specific template lands.
+        template: { kind: "row-list" },
         refresh: { kind: "interval", minutes: 15 },
       };
       break;
@@ -179,7 +189,13 @@ export function addCard(
       break;
   }
 
-  return { config: { ...copyConfig(config), cards: [...config.cards, card] }, cardId };
+  // Spread the COPIED config's own `cards` array, not the original `config.cards` —
+  // otherwise the `cards` key here overwrites `copyConfig`'s deep copy with a shallow
+  // spread of the original elements, silently making that deep copy dead work on this
+  // path (every pre-existing card in the returned draft would alias the live snapshot's
+  // card objects instead of being an independent copy).
+  const copied = copyConfig(config);
+  return { config: { ...copied, cards: [...copied.cards, card] }, cardId };
 }
 
 export function updateWidget(
@@ -369,6 +385,27 @@ export function formatDuration(totalSeconds: number): string {
 
 export function issuesForPath(issues: ValidationIssue[], path: string): ValidationIssue[] {
   return issues.filter((issue) => issue.path === path || issue.path.startsWith(`${path}.`));
+}
+
+/// Issues whose path is exactly `cards` — the container-level rules ("at least one card
+/// must be in the rotation" and "at least one cards entry is required") — as opposed to
+/// any per-card `cards[i]*` issue, which `issuesForCard` already resolves to a row.
+/// Nothing rendered these before this helper existed: `issuesForCard` only ever matches
+/// `cards[i]` paths, so a bare `cards` issue (reachable by muting or removing your only
+/// in-rotation card) blocked Save with no highlighted control anywhere in the UI. The
+/// card list header is the natural place to show it, since it names the whole
+/// collection rather than any one row.
+export function cardsContainerIssues(issues: ValidationIssue[]): ValidationIssue[] {
+  return issues.filter((issue) => issue.path === "cards");
+}
+
+/// Parses a numeric `<input>` value into a finite number, defaulting to `0` for
+/// anything else (an empty string mid-edit, a stray non-numeric paste). Shared by every
+/// numeric field editor so the "empty box while typing" case is handled identically
+/// everywhere rather than reimplemented per field.
+export function numberValue(value: string): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : 0;
 }
 
 /// Resolves `cardId` to its CURRENT index in `config.cards` and returns only

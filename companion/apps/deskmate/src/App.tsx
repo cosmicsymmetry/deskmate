@@ -8,11 +8,13 @@ import { Filmstrip } from "./components/Filmstrip";
 import { ProviderStatus } from "./components/ProviderStatus";
 import {
   addCard,
+  cardsContainerIssues,
   copyConfig,
   firstRunSteps,
   firstSelectableCard,
   issuesForCard,
   removeCard,
+  rotationCards,
   updateWidget,
 } from "./lib/configDraft";
 import {
@@ -30,6 +32,7 @@ import type {
   AppConfig,
   CardKind,
   CardSettings,
+  CarouselAdvance,
   DisplayOrientation,
   DraftValidation,
   IpcError,
@@ -166,6 +169,8 @@ export function App() {
   const cardIssues = selectedCardId ? issuesForCard(issues, draft, selectedCardId) : [];
   const defaultDwellSeconds =
     draft.carousel.advance.kind === "timed" ? draft.carousel.advance.default_dwell_seconds : null;
+  const isOnlyRotationCard =
+    selectedWidget?.presence.kind === "in-rotation" && rotationCards(draft).length === 1;
 
   const replaceDraft = (next: AppConfig) => {
     setDraft(next);
@@ -193,6 +198,9 @@ export function App() {
       return;
     }
     handleRemoveCard(selectedCardId);
+  };
+  const handleAdvanceChange = (advance: CarouselAdvance) => {
+    replaceDraft({ ...draft, carousel: { ...draft.carousel, advance } });
   };
   const handleChooseCalendarFile = () => {
     if (selectedWidget?.kind !== "calendar") {
@@ -339,6 +347,7 @@ export function App() {
         <div className="workspace__editors">
           <CardList
             config={draft}
+            issues={cardsContainerIssues(issues)}
             selectedCardId={selectedCardId}
             onSelect={setSelectedCardId}
             onAdd={handleAdd}
@@ -350,6 +359,7 @@ export function App() {
             issues={cardIssues}
             pomodoro={pomodoro}
             defaultDwellSeconds={defaultDwellSeconds}
+            isOnlyRotationCard={isOnlyRotationCard}
             timerBusy={busyAction === "timer"}
             filePickerBusy={busyAction === "calendar-file"}
             onChange={handleWidgetChange}
@@ -369,9 +379,11 @@ export function App() {
           />
           <Filmstrip
             config={draft}
+            issues={issues}
             selectedCardId={selectedCardId}
             onSelect={setSelectedCardId}
             onReorder={(next) => replaceDraft(next)}
+            onChangeAdvance={handleAdvanceChange}
           />
           <ProviderStatus
             providers={snapshot.providers}

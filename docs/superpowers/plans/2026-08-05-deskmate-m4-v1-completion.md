@@ -10,16 +10,18 @@ accepted the completed morning soak and waived repeating it after the focused
 orientation/clean-canvas regression passed.
 
 **Goal:** Complete the approved v1 breadth on top of the proven single-owner companion
-runtime: weather/JSON-feed/RSS data, the remaining templates and dashboard layouts,
-safe host tap actions, landscape mounting and asset management, wider calendar recurrence, an
-in-app firmware update path, production USB identity, and release-grade macOS/Windows
-verification.
+runtime: weather/JSON-feed/RSS data, the remaining templates, the card model
+(`presence`, `alert`, host-driven timed `carousel.advance` — dashboard layouts were
+cancelled in favor of this, see Task 4 below), safe host tap actions, landscape
+mounting and asset management, wider calendar recurrence, an in-app firmware update
+path, production USB identity, and release-grade macOS/Windows verification.
 
-**Exit demo:** Install a release build, create a multi-tile dashboard using local and
-network providers, customize its visuals, choose either landscape mounting, and invoke an explicitly
-approved host action from touch. Disconnect/reconnect and power-cycle without losing
-authoritative state. Perform a verified firmware update in the app and recover safely
-from an interrupted update. Complete the release smoke checklist on macOS and Windows.
+**Exit demo:** Install a release build, configure a set of cards (local and network
+providers, in rotation and alert-only) with timed or manual advance, customize their
+visuals, choose either landscape mounting, and invoke an explicitly approved host action
+from touch. Disconnect/reconnect and power-cycle without losing authoritative state.
+Perform a verified firmware update in the app and recover safely from an interrupted
+update. Complete the release smoke checklist on macOS and Windows.
 
 **Prerequisites carried from M3:**
 
@@ -527,7 +529,7 @@ with no unexplained security advisories or broad frontend privileges.
   authorization.
 
 **M4 exit gate:** A nontechnical user can install Deskmate on supported macOS and Windows
-versions, configure every approved v1 provider/template/layout/action, use the board for
+versions, configure every approved v1 provider/template/action, use the board for
 an extended session through disconnects and sleep, update firmware safely in the app,
 and recover through documented paths. The release has bounded resource use, narrow
 privileges, an explicit security/advisory record, and no unobserved hardware claims.

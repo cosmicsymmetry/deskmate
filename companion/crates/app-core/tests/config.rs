@@ -769,12 +769,16 @@ fn timed_advance_no_longer_requires_an_unimplemented_capability() {
 /// accepts but `wire_config()` cannot lower (`RequiresCapability`), and the IPC
 /// `validate_config_draft` command ran only `validate()`, never `compile()` — so the
 /// settings UI reported the draft valid right up until Save rejected it with an error
-/// attached to no field. Each of these six cards mirrors exactly what `addCard`
-/// produces for that kind today (see `configDraft.ts`), with the field(s) addCard
-/// deliberately leaves empty (calendar source / weather location / json-feed url and
-/// its empty `mappings` list / rss url) filled in — this test is about whether the
-/// REST of a freshly-added card's defaults are wire-compilable, not about the
-/// separate, already-correctly-surfaced "required field left empty" validation error.
+/// attached to no field. `wire_config()` now lowers every `DisplayTemplate` (this is
+/// the M4 task-3/8 fix), so `addCard` defaults weather and json-feed to the templates
+/// their field composition was designed for — `icon-badge-text` and
+/// `big-number-label` — instead of the `row-list` placeholder this test used to pin.
+/// Each of these six cards mirrors exactly what `addCard` produces for that kind today
+/// (see `configDraft.ts`), with the field(s) addCard deliberately leaves empty
+/// (calendar source / weather location / json-feed url and its empty `mappings` list /
+/// rss url) filled in — this test is about whether the REST of a freshly-added card's
+/// defaults are wire-compilable, not about the separate, already-correctly-surfaced
+/// "required field left empty" validation error.
 #[test]
 fn every_freshly_added_card_kind_validates_and_compiles() {
     let presence = CardPresence::InRotation {
@@ -804,7 +808,9 @@ fn every_freshly_added_card_kind_validates_and_compiles() {
             title: "Weather".into(),
             location: "Tbilisi".into(),
             units: WeatherUnits::Metric,
-            template: DisplayTemplate::RowList,
+            template: DisplayTemplate::IconBadgeText {
+                icon_asset_id: None,
+            },
             tap_action: WidgetTapAction::None,
             refresh: RefreshPolicy::Interval { minutes: 30 },
             presence,
@@ -822,7 +828,7 @@ fn every_freshly_added_card_kind_validates_and_compiles() {
                 field: "value".into(),
                 path: "$.value".into(),
             }],
-            template: DisplayTemplate::RowList,
+            template: DisplayTemplate::BigNumberLabel,
             tap_action: WidgetTapAction::None,
             refresh: RefreshPolicy::Interval { minutes: 15 },
             presence,
@@ -853,6 +859,120 @@ fn every_freshly_added_card_kind_validates_and_compiles() {
             panic!("{} card failed compile(): {error:?}", config.cards[0].id())
         });
     }
+}
+
+/// Task 8: `wire_config()` used to return `None` for `AnalogClock`, `BigNumberLabel`,
+/// and `IconBadgeText`, so any card configured with one of them validated cleanly but
+/// could never compile (`RequiresCapability`). Exercises all six `DisplayTemplate`
+/// variants, each on a card kind `validate_composition` actually allows it on, and
+/// asserts `compile()` now succeeds for every one.
+#[test]
+fn every_display_template_lowers_to_the_wire() {
+    let presence = CardPresence::InRotation {
+        dwell_seconds: None,
+    };
+    let cards = [
+        clock_card("digital-clock", presence),
+        CardSettings::Clock {
+            id: "analog-clock".into(),
+            title: "Desk".into(),
+            show_seconds: true,
+            template: DisplayTemplate::AnalogClock,
+            tap_action: WidgetTapAction::None,
+            refresh: RefreshPolicy::DeviceLocal,
+            presence,
+            alert: CardAlert::None,
+        },
+        pomodoro_card(
+            "progress-ring",
+            presence,
+            CardAlert::OnTimerFinish {
+                hold: AlertHold::UntilDismissed,
+            },
+        ),
+        CardSettings::Calendar {
+            id: "row-list".into(),
+            title: "Up next".into(),
+            source: CalendarSource::Url("https://example.test/calendar.ics".into()),
+            template: DisplayTemplate::RowList,
+            tap_action: WidgetTapAction::None,
+            refresh: RefreshPolicy::Interval { minutes: 15 },
+            presence,
+            alert: CardAlert::None,
+        },
+        CardSettings::Clock {
+            id: "big-number-label".into(),
+            title: "Desk".into(),
+            show_seconds: true,
+            template: DisplayTemplate::BigNumberLabel,
+            tap_action: WidgetTapAction::None,
+            refresh: RefreshPolicy::DeviceLocal,
+            presence,
+            alert: CardAlert::None,
+        },
+        CardSettings::Calendar {
+            id: "icon-badge-text".into(),
+            title: "Up next".into(),
+            source: CalendarSource::Url("https://example.test/calendar.ics".into()),
+            template: DisplayTemplate::IconBadgeText {
+                icon_asset_id: None,
+            },
+            tap_action: WidgetTapAction::None,
+            refresh: RefreshPolicy::Interval { minutes: 15 },
+            presence,
+            alert: CardAlert::None,
+        },
+    ];
+
+    for card in cards {
+        let template = card.template().clone();
+        let config = AppConfig {
+            cards: vec![card],
+            ..AppConfig::default()
+        };
+        config.compile(1).unwrap_or_else(|error| {
+            panic!("{template:?} must lower to the wire, but compile() failed: {error:?}")
+        });
+    }
+}
+
+/// Task 8: `required_device_capabilities()` already flags `CAPABILITY_EXTENDED_TEMPLATES`
+/// for the three extended templates and only those (see `config.rs`); this pins that
+/// contract from the outside so a future change to the template set can't silently
+/// widen or narrow which templates demand the capability.
+#[test]
+fn extended_templates_require_the_extended_capability() {
+    let presence = CardPresence::InRotation {
+        dwell_seconds: None,
+    };
+    let extended = AppConfig {
+        cards: vec![CardSettings::Clock {
+            id: "big-number-label".into(),
+            title: "Desk".into(),
+            show_seconds: true,
+            template: DisplayTemplate::BigNumberLabel,
+            tap_action: WidgetTapAction::None,
+            refresh: RefreshPolicy::DeviceLocal,
+            presence,
+            alert: CardAlert::None,
+        }],
+        ..AppConfig::default()
+    };
+    assert_eq!(
+        extended.required_device_capabilities() & CAPABILITY_EXTENDED_TEMPLATES,
+        CAPABILITY_EXTENDED_TEMPLATES,
+        "big-number-label must require the extended-templates capability"
+    );
+
+    let core = AppConfig {
+        cards: vec![clock_card("digital-clock", presence)],
+        ..AppConfig::default()
+    };
+    assert_eq!(
+        core.required_device_capabilities() & CAPABILITY_EXTENDED_TEMPLATES,
+        0,
+        "core templates must not demand the extended-templates capability"
+    );
 }
 
 #[test]

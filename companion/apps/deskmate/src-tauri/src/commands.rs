@@ -558,22 +558,27 @@ mod tests {
     }
 
     /// A draft can pass `validate()` cleanly (every field within its bounds) yet still
-    /// be unsaveable because its template has no `wire_config()` mapping. Before this
-    /// fix, `validate_config_draft` ran only `validate()` and reported such a draft
-    /// valid, so Save's separate `compile()` call was the first place the failure ever
-    /// surfaced — with an error attached to no field, in a session where every other
-    /// edit was now blocked too. `validate_config_draft` must catch this itself, on the
-    /// card's own path, exactly like the save path does.
+    /// be unsaveable because one of its fields has no `wire_config()` mapping. Before
+    /// this fix, `validate_config_draft` ran only `validate()` and reported such a
+    /// draft valid, so Save's separate `compile()` call was the first place the
+    /// failure ever surfaced — with an error attached to no field, in a session where
+    /// every other edit was now blocked too. `validate_config_draft` must catch this
+    /// itself, on the card's own path, exactly like the save path does.
+    ///
+    /// `template` no longer fits this shape — `wire_config()` now lowers every
+    /// `DisplayTemplate` (M4 task 3/8) — so this uses `tap_action: Dismiss`, which
+    /// `wire_config()` still cannot lower (host tap actions are a later capability),
+    /// to keep exercising the same "validates but cannot compile" gap.
     #[test]
-    fn draft_validation_catches_a_template_with_no_wire_mapping_like_save_does() {
+    fn draft_validation_catches_a_field_with_no_wire_mapping_like_save_does() {
         let mut config = AppConfig::default();
         config.cards[0] = CardSettings::Weather {
             id: "weather".into(),
             title: "Weather".into(),
             location: "Tbilisi".into(),
             units: WeatherUnits::Metric,
-            template: DisplayTemplate::BigNumberLabel,
-            tap_action: WidgetTapAction::None,
+            template: DisplayTemplate::RowList,
+            tap_action: WidgetTapAction::Dismiss,
             refresh: RefreshPolicy::Interval { minutes: 30 },
             presence: CardPresence::InRotation {
                 dwell_seconds: None,

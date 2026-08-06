@@ -151,18 +151,14 @@ export function addCard(
         title: "Weather",
         location: "",
         units: "metric",
-        // `row-list` — not the intuitive fit — because it is one of only three
-        // templates `wire_config()` currently lowers to the device (the others are
-        // `digital-clock` and `progress-ring`, neither of which suits weather).
-        // `big-number-label`, the natural choice, has no wire mapping yet, so a card
-        // defaulted to it validates cleanly but can never compile, making it
-        // addable-but-unsaveable — the exact defect this default exists to avoid.
-        // Keep this within the implemented set until a weather-specific template lands.
-        // Placeholder, not a fit: weather publishes `value`/`label`/`badge`/`icon`/
-        // `temperature_tenths`/`apparent_temperature_tenths`/`unit`, none of which
-        // `row-list` consumes, so on the device this renders as just the title over
-        // five empty rows until `big-number-label` or `icon-badge-text` lands on the wire.
-        template: { kind: "row-list" },
+        // `icon-badge-text` is the template weather's field composition was designed
+        // for (`value`/`label`/`badge`/`icon`/`temperature_tenths`/
+        // `apparent_temperature_tenths`/`unit`), and `wire_config()` now lowers it to
+        // the device — see `companion/crates/app-core/src/config.rs`. `icon_asset_id`
+        // stays unset here: rendering a pushed custom icon needs
+        // `CAPABILITY_ASSET_TRANSFER`, which is a later milestone task; until then the
+        // device renders its built-in icon for the `icon` field.
+        template: { kind: "icon-badge-text", icon_asset_id: null },
         refresh: { kind: "interval", minutes: 30 },
       };
       break;
@@ -173,14 +169,10 @@ export function addCard(
         title: "Feed",
         url: "",
         mappings: [],
-        // See the weather case above: `row-list` is the only implemented template
-        // json-feed's composition rules allow. Keep this within the implemented set
-        // until a json-feed-specific template lands.
-        // Placeholder, not a fit: json-feed publishes whatever field names the user's
-        // own mappings declare, and nothing cross-checks those against `row-list`'s
-        // field set, so on the device this renders as just the title over five empty
-        // rows until `big-number-label` or `icon-badge-text` lands on the wire.
-        template: { kind: "row-list" },
+        // `big-number-label` is the template json-feed's single mapped value is
+        // designed for, and `wire_config()` now lowers it to the device — see
+        // `companion/crates/app-core/src/config.rs`.
+        template: { kind: "big-number-label" },
         refresh: { kind: "interval", minutes: 15 },
       };
       break;

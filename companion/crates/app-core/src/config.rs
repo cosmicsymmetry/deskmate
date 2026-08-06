@@ -1462,9 +1462,9 @@ impl CardSettings {
             DisplayTemplate::DigitalClock => TemplateKind::DigitalClock,
             DisplayTemplate::ProgressRing => TemplateKind::ProgressRing,
             DisplayTemplate::RowList => TemplateKind::RowList,
-            DisplayTemplate::AnalogClock
-            | DisplayTemplate::BigNumberLabel
-            | DisplayTemplate::IconBadgeText { .. } => return None,
+            DisplayTemplate::AnalogClock => TemplateKind::AnalogClock,
+            DisplayTemplate::BigNumberLabel => TemplateKind::BigNumberLabel,
+            DisplayTemplate::IconBadgeText { .. } => TemplateKind::IconBadgeText,
         };
         let tap_action = match self.tap_action() {
             WidgetTapAction::None => TapAction::None,

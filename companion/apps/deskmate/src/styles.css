@@ -233,8 +233,13 @@ h2 {
   box-shadow: 0 0 0 2px var(--ink);
 }
 
+/* Hollow ring rather than a filled dot: with reduced motion the pulse
+   below is disabled, and the base .status-dot (disconnected/neutral) is
+   also a static --muted fill — so shape, not just animation, is what keeps
+   "connecting" visually distinct from "disconnected" once the pulse is
+   gone. */
 .status-dot--busy {
-  background: var(--muted);
+  background: transparent;
   box-shadow: 0 0 0 2px var(--muted);
   animation: pulse 1.5s ease-in-out infinite;
 }
@@ -311,15 +316,20 @@ h2 {
   margin-left: auto;
 }
 
+/* Same alert-toned treatment as .header-alert above: this banner only
+   appears once something has already gone wrong (an unreadable settings
+   file, or start-at-login drifting from the saved preference), so it reads
+   as attention-worthy in both colour schemes rather than a fixed light-mode
+   cream card. */
 .recovery-banner {
   display: flex;
   gap: 12px;
   margin-top: 20px;
   padding: 14px 18px;
-  border: 1px solid #e4c37b;
-  border-radius: 12px;
-  color: #725018;
-  background: #fff8e7;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--alarm);
+  background: color-mix(in srgb, var(--alarm) 12%, transparent);
 }
 
 .recovery-banner > span {
@@ -422,7 +432,7 @@ h2 {
 .provider-panel,
 .preferences-panel {
   overflow: hidden;
-  border: 1px solid rgb(205 216 209 / 90%);
+  border: 1px solid var(--line);
   border-radius: 16px;
   background: var(--panel);
 }
@@ -1340,8 +1350,12 @@ h2 {
   background: var(--ink);
 }
 
+/* Hollow ring, matching .status-dot--busy's reduced-motion-safe shape cue
+   above: once the pulse is disabled, the ring shape alone still reads as
+   "in progress" rather than collapsing to a plain filled --muted dot. */
 .provider-row--refreshing .provider-state {
-  background: var(--muted);
+  background: transparent;
+  box-shadow: 0 0 0 2px var(--muted);
   animation: pulse 1.5s ease-in-out infinite;
 }
 

@@ -248,6 +248,34 @@ static void test_icon_badge_text_temperature_bounds(void)
            TEMPLATE_FIELDS_OUT_OF_RANGE);
 }
 
+/* Invariant: every template kind protocol_template_kind_valid() accepts
+ * must have a non-empty registry entry. widget_model's config preflight
+ * (widget_model_check_config) validates template kinds using only the
+ * numeric range check, while the later apply-time field-init path
+ * (widget_model_apply_config) depends on the registry. If a kind were ever
+ * added to the enum without a matching registry entry, preflight would
+ * report success and apply would then fail with a misleading
+ * WIDGET_MODEL_CONFIG_INVALID_VALUE deep inside field init instead of the
+ * correct WIDGET_MODEL_CONFIG_UNSUPPORTED_TEMPLATE at preflight. Do not
+ * delete this test as redundant with test_extended_template_registries: it
+ * is the one that pins the range check and the registry together so they
+ * cannot silently drift apart again.
+ */
+static void test_every_valid_kind_has_a_registry(void)
+{
+    for (int kind = PROTOCOL_TEMPLATE_DIGITAL_CLOCK;
+         kind <= PROTOCOL_TEMPLATE_ICON_BADGE_TEXT; ++kind) {
+        protocol_template_kind_t template_kind = (protocol_template_kind_t)kind;
+        assert(protocol_template_kind_valid(template_kind));
+
+        size_t count = 0U;
+        const template_field_descriptor_t *fields = template_fields_registry(
+            template_kind, &count);
+        assert(fields != NULL);
+        assert(count > 0U);
+    }
+}
+
 int main(void)
 {
     test_registry_and_defaults();
@@ -257,6 +285,7 @@ int main(void)
     test_weather_push_has_no_unknown_fields();
     test_big_number_label_defaults_are_safe();
     test_icon_badge_text_temperature_bounds();
+    test_every_valid_kind_has_a_registry();
     puts("test_template_fields: OK");
     return 0;
 }

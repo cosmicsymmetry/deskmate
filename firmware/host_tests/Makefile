@@ -31,8 +31,9 @@ test_protocol: test_protocol.c $(PROTOCOL_SRCS)
 test_link_state: test_link_state.c ../main/core/link_state.c
 	$(CC) $(CFLAGS) -o $@ $^
 
-test_template_fields: test_template_fields.c ../main/core/template_fields.c
-	$(CC) $(CFLAGS) -o $@ $^
+test_template_fields: test_template_fields.c ../main/core/template_fields.c \
+	$(PROTOCOL_SRCS)
+	$(CC) $(CFLAGS) -I$(CBOR_DIR) -o $@ $^
 
 test_widget_model: test_widget_model.c ../main/core/widget_model.c \
 	../main/core/template_fields.c ../main/core/link_state.c \

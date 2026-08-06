@@ -492,7 +492,15 @@ git commit -m "feat: accept extended template kinds in the widget model"
 - Produces:
   - `typedef enum { WEATHER_ICON_UNKNOWN = 0, WEATHER_ICON_SUN, WEATHER_ICON_MOON, WEATHER_ICON_CLOUD, WEATHER_ICON_CLOUD_SUN, WEATHER_ICON_CLOUD_MOON, WEATHER_ICON_RAIN, WEATHER_ICON_DRIZZLE, WEATHER_ICON_SNOW, WEATHER_ICON_STORM, WEATHER_ICON_FOG } weather_icon_t;`
   - `weather_icon_t weather_icon_from_name(const char *name);`
-  - `void weather_icon_render(lv_obj_t *container, weather_icon_t icon, lv_color_t color);`
+  - `void weather_icon_render(lv_obj_t *container, weather_icon_t icon, lv_color_t color, lv_color_t background);`
+
+**Background colour, corrected during execution.** `weather_icon_render` takes the screen
+background as an explicit parameter. The crescent moon and the `unknown` ring are drawn by
+punching a background-coloured disc over a lit disc, so that colour must be the real card
+background — `0x101020`, as set in `ui/clock_screen.c` and `ui/template_view.c` — not black.
+An earlier draft hardcoded `0x000000`, which would have drawn a visible black disc on the
+navy card. Passing it in rather than hardcoding it also stops a third copy of the background
+constant drifting out of sync.
 
 **Design note.** Icons are composed from LVGL primitives (`lv_obj_t` circles via full corner radius, and `lv_line`) inside a caller-owned container. They are *not* font glyphs and *not* pushed assets: asset transfer is M4 Task 6, and a bounded built-in set cannot fail to resolve. `weather_icon_render()` deletes the container's existing children before drawing, so repeated calls are idempotent. The container itself is one entry in `objects[]`; its children are untracked, which is how the icon stays within `TEMPLATE_OBJECT_CAPACITY`.
 
@@ -588,7 +596,7 @@ Then, in a separate `#ifndef WEATHER_ICON_HOST_TEST` guard at the bottom so the 
 /* Clears `container`'s children and draws `icon` into it using LVGL
  * primitives. Idempotent. The container must already be sized. */
 void weather_icon_render(lv_obj_t *container, weather_icon_t icon,
-                         lv_color_t color);
+                         lv_color_t color, lv_color_t background);
 #endif
 ```
 
@@ -694,12 +702,14 @@ static void draw_sun(lv_obj_t *parent, lv_color_t color, int16_t dx,
     (void)disc(parent, color, diameter, dx, dy);
 }
 
-static void draw_moon(lv_obj_t *parent, lv_color_t color, int16_t dx,
-                      int16_t dy)
+static void draw_moon(lv_obj_t *parent, lv_color_t color,
+                      lv_color_t background, int16_t dx, int16_t dy)
 {
-    /* Crescent: a lit disc with a background-coloured disc offset over it. */
+    /* Crescent: a lit disc with a background-coloured disc offset over it.
+     * The cutout MUST use the real screen background (0x101020), not black —
+     * a black disc on the navy card reads as a bug, not a crescent. */
     (void)disc(parent, color, 56, dx, dy);
-    (void)disc(parent, lv_color_hex(0x000000), 48, dx + 16, dy - 8);
+    (void)disc(parent, background, 48, dx + 16, dy - 8);
 }
 
 static void draw_drops(lv_obj_t *parent, lv_color_t color, int16_t count,
@@ -712,7 +722,7 @@ static void draw_drops(lv_obj_t *parent, lv_color_t color, int16_t count,
 }
 
 void weather_icon_render(lv_obj_t *container, weather_icon_t icon,
-                         lv_color_t color)
+                         lv_color_t color, lv_color_t background)
 {
     if (container == NULL) {
         return;
@@ -725,7 +735,7 @@ void weather_icon_render(lv_obj_t *container, weather_icon_t icon,
         draw_sun(container, color, 0, 0, 72);
         break;
     case WEATHER_ICON_MOON:
-        draw_moon(container, color, 0, 0);
+        draw_moon(container, color, background, 0, 0);
         break;
     case WEATHER_ICON_CLOUD:
         draw_cloud(container, color, 0);
@@ -735,7 +745,7 @@ void weather_icon_render(lv_obj_t *container, weather_icon_t icon,
         draw_cloud(container, color, 6);
         break;
     case WEATHER_ICON_CLOUD_MOON:
-        draw_moon(container, color, -26, -30);
+        draw_moon(container, color, background, -26, -30);
         draw_cloud(container, color, 6);
         break;
     case WEATHER_ICON_RAIN:
@@ -766,7 +776,7 @@ void weather_icon_render(lv_obj_t *container, weather_icon_t icon,
         /* A hollow ring: unmistakably "no data", never a plausible-looking
          * wrong forecast. */
         (void)disc(container, color, 72, 0, 0);
-        (void)disc(container, lv_color_hex(0x000000), 52, 0, 0);
+        (void)disc(container, background, 52, 0, 0);
         break;
     }
 }
@@ -1308,7 +1318,7 @@ bool icon_badge_text_create(template_widget_view_t *view,
 
     s_current_icon = WEATHER_ICON_UNKNOWN;
     weather_icon_render(view->objects[OBJ_ICON], s_current_icon,
-                        lv_color_hex(0xe6e8f0));
+                        lv_color_hex(0xe6e8f0), lv_color_hex(0x101020));
     return true;
 }
 
@@ -1352,7 +1362,7 @@ void icon_badge_text_patch(template_widget_view_t *view,
         if (next != s_current_icon) {
             s_current_icon = next;
             weather_icon_render(view->objects[OBJ_ICON], next,
-                                lv_color_hex(0xe6e8f0));
+                                lv_color_hex(0xe6e8f0), lv_color_hex(0x101020));
         }
     }
 }

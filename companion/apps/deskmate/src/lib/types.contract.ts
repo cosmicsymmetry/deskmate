@@ -158,6 +158,34 @@ export const ipcContractFixtures = {
         "remaining_seconds": 900
       }
     ],
+    "card_data": [
+      {
+        "card_id": "calendar",
+        "fields": [
+          {
+            "key": "row0_title",
+            "value": {
+              "kind": "text",
+              "value": "Design review"
+            }
+          },
+          {
+            "key": "next_start_unix_ms",
+            "value": {
+              "kind": "integer",
+              "value": 1787000000000
+            }
+          },
+          {
+            "key": "stale",
+            "value": {
+              "kind": "boolean",
+              "value": false
+            }
+          }
+        ]
+      }
+    ],
     "persistence": {
       "kind": "recoverable-error",
       "message": "disk full"
@@ -660,6 +688,34 @@ export const ipcContractFixtures = {
     "running",
     "paused",
     "completed"
+  ],
+  "card_data": [
+    {
+      "card_id": "calendar",
+      "fields": [
+        {
+          "key": "row0_title",
+          "value": {
+            "kind": "text",
+            "value": "Design review"
+          }
+        },
+        {
+          "key": "next_start_unix_ms",
+          "value": {
+            "kind": "integer",
+            "value": 1787000000000
+          }
+        },
+        {
+          "key": "stale",
+          "value": {
+            "kind": "boolean",
+            "value": false
+          }
+        }
+      ]
+    }
   ],
   "persistence_states": [
     {

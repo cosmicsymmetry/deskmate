@@ -1,10 +1,10 @@
 use app_core::{
-    AlertHold, AppConfig, AppSnapshot, AssetSettings, CardAlert, CardPresence, CardSettings,
-    CarouselAdvance, CarouselSettings, ConnectionState, DeviceCounters, DeviceSnapshot,
-    DisplayTemplate, FirmwareArtifactMetadata, MAX_ASSET_BYTES, MAX_PROVIDER_URL_LEN,
-    MAX_UPDATE_ARTIFACT_BYTES, PersistenceState, PomodoroSnapshot, PomodoroState, ProviderSnapshot,
-    ProviderState, RefreshPolicy, RuntimeDiagnostics, RuntimeState, ValidationCode,
-    WidgetTapAction,
+    AlertHold, AppConfig, AppSnapshot, AssetSettings, CardAlert, CardDataSnapshot, CardField,
+    CardFieldValue, CardPresence, CardSettings, CarouselAdvance, CarouselSettings, ConnectionState,
+    DeviceCounters, DeviceSnapshot, DisplayTemplate, FirmwareArtifactMetadata, MAX_ASSET_BYTES,
+    MAX_PROVIDER_URL_LEN, MAX_UPDATE_ARTIFACT_BYTES, PersistenceState, PomodoroSnapshot,
+    PomodoroState, ProviderSnapshot, ProviderState, RefreshPolicy, RuntimeDiagnostics,
+    RuntimeState, ValidationCode, WidgetTapAction,
 };
 use protocol::{
     CAPABILITY_ASSET_TRANSFER, CAPABILITY_CONFIG_ROTATION, CAPABILITY_CORE_WIDGETS,
@@ -447,6 +447,15 @@ fn runtime_snapshot_uses_tagged_states_for_frontend_contract() {
             duration_seconds: 1_500,
             remaining_seconds: 900,
         }],
+        card_data: vec![CardDataSnapshot {
+            card_id: "calendar".into(),
+            fields: vec![CardField {
+                key: "row0_title".into(),
+                value: CardFieldValue::Text {
+                    value: "Design review".into(),
+                },
+            }],
+        }],
         persistence: PersistenceState::Clean,
         diagnostics: RuntimeDiagnostics::default(),
     };
@@ -460,6 +469,7 @@ fn runtime_snapshot_uses_tagged_states_for_frontend_contract() {
     );
     assert_eq!(json["providers"][0]["state"]["kind"], "stale");
     assert_eq!(json["pomodoros"][0]["state"], "paused");
+    assert_eq!(json["card_data"][0]["fields"][0]["value"]["kind"], "text");
     assert_eq!(json["persistence"]["kind"], "clean");
     assert_eq!(
         serde_json::from_value::<AppSnapshot>(json).unwrap(),
@@ -751,4 +761,39 @@ fn timed_advance_no_longer_requires_an_unimplemented_capability() {
         ..AppConfig::default()
     };
     assert!(config.compile(1).is_ok());
+}
+
+#[test]
+fn card_data_serializes_as_tagged_values_for_the_preview() {
+    let data = CardDataSnapshot {
+        card_id: "upnext".into(),
+        fields: vec![
+            CardField {
+                key: "row0_title".into(),
+                value: CardFieldValue::Text {
+                    value: "Design review".into(),
+                },
+            },
+            CardField {
+                key: "next_start_unix_ms".into(),
+                value: CardFieldValue::Integer {
+                    value: 1_787_000_000_000,
+                },
+            },
+            CardField {
+                key: "stale".into(),
+                value: CardFieldValue::Boolean { value: false },
+            },
+        ],
+    };
+
+    let json = serde_json::to_value(&data).unwrap();
+    assert_eq!(json["card_id"], "upnext");
+    assert_eq!(json["fields"][0]["value"]["kind"], "text");
+    assert_eq!(json["fields"][1]["value"]["kind"], "integer");
+    assert_eq!(json["fields"][2]["value"]["kind"], "boolean");
+    assert_eq!(
+        serde_json::from_value::<CardDataSnapshot>(json).unwrap(),
+        data
+    );
 }

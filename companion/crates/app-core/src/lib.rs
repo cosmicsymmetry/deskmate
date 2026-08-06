@@ -30,9 +30,9 @@ pub use runtime::{
     SystemCalendarRefresher, SystemProviderRefresher,
 };
 pub use state::{
-    AppSnapshot, ConnectionState, DeviceCapability, DeviceCounters, DeviceSnapshot,
-    PersistenceState, PomodoroSnapshot, PomodoroState, ProviderSnapshot, ProviderState,
-    RuntimeDiagnostics, RuntimeState,
+    AppSnapshot, CardDataSnapshot, CardField, CardFieldValue, ConnectionState, DeviceCapability,
+    DeviceCounters, DeviceSnapshot, PersistenceState, PomodoroSnapshot, PomodoroState,
+    ProviderSnapshot, ProviderState, RuntimeDiagnostics, RuntimeState,
 };
 pub use store::{
     ConfigOrigin, ConfigStore, LoadOutcome, MAX_CONFIG_FILE_BYTES, SaveReceipt, StoreError,

@@ -9,6 +9,7 @@ pub struct AppSnapshot {
     pub device: DeviceSnapshot,
     pub providers: Vec<ProviderSnapshot>,
     pub pomodoros: Vec<PomodoroSnapshot>,
+    pub card_data: Vec<CardDataSnapshot>,
     pub persistence: PersistenceState,
     pub diagnostics: RuntimeDiagnostics,
 }
@@ -195,6 +196,55 @@ pub enum PomodoroState {
     Running,
     Paused,
     Completed,
+}
+
+/// Mirrors `protocol::FieldValue` for the settings webview. The wire type
+/// deliberately does not derive `Serialize` (it must stay free of
+/// presentation concerns), so this DTO carries the same last-good values
+/// across the IPC boundary instead.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum CardFieldValue {
+    Text { value: String },
+    Integer { value: i64 },
+    Boolean { value: bool },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CardField {
+    pub key: String,
+    pub value: CardFieldValue,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CardDataSnapshot {
+    pub card_id: String,
+    pub fields: Vec<CardField>,
+}
+
+impl CardDataSnapshot {
+    pub(crate) fn from_protocol(card_id: &str, fields: &[protocol::Field]) -> Self {
+        Self {
+            card_id: card_id.to_owned(),
+            fields: fields
+                .iter()
+                .map(|field| CardField {
+                    key: field.key.clone(),
+                    value: match &field.value {
+                        protocol::FieldValue::Text(value) => CardFieldValue::Text {
+                            value: value.clone(),
+                        },
+                        protocol::FieldValue::Integer(value) => {
+                            CardFieldValue::Integer { value: *value }
+                        }
+                        protocol::FieldValue::Boolean(value) => {
+                            CardFieldValue::Boolean { value: *value }
+                        }
+                    },
+                })
+                .collect(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

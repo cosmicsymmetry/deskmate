@@ -25,9 +25,10 @@ use providers::weather::{WeatherOptions, WeatherProvider, WeatherUnits as Provid
 use crate::commands::{PomodoroAction, RuntimeCommand, RuntimeError};
 use crate::scheduler::Scheduler;
 use crate::{
-    AlertHold, AppConfig, AppSnapshot, CalendarSource, CardAlert, CardSettings, ConnectionState,
-    DeviceCounters, DeviceSnapshot, JsonFieldMapping, PersistenceState, PomodoroSnapshot,
-    PomodoroState, ProviderSnapshot, ProviderState, RuntimeDiagnostics, RuntimeState, WeatherUnits,
+    AlertHold, AppConfig, AppSnapshot, CalendarSource, CardAlert, CardDataSnapshot, CardSettings,
+    ConnectionState, DeviceCounters, DeviceSnapshot, JsonFieldMapping, PersistenceState,
+    PomodoroSnapshot, PomodoroState, ProviderSnapshot, ProviderState, RuntimeDiagnostics,
+    RuntimeState, WeatherUnits,
 };
 
 pub const DEFAULT_RUNTIME_COMMAND_CAPACITY: usize = 16;
@@ -1105,6 +1106,11 @@ impl WorkerState {
                 .map(|provider| provider.snapshot.clone())
                 .collect(),
             pomodoros: self.pomodoro_snapshots.values().cloned().collect(),
+            card_data: self
+                .latest_fields
+                .iter()
+                .map(|(card_id, fields)| CardDataSnapshot::from_protocol(card_id, fields))
+                .collect(),
             persistence: self.persistence.clone(),
             diagnostics: diagnostics.snapshot(),
         }
@@ -2330,6 +2336,7 @@ fn initial_snapshot(config: &AppConfig, diagnostics: RuntimeDiagnostics) -> AppS
         },
         providers,
         pomodoros,
+        card_data: Vec::new(),
         persistence: PersistenceState::Clean,
         diagnostics,
     }

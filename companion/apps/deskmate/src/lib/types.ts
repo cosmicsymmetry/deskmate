@@ -195,6 +195,7 @@ export interface AppSnapshot {
   device: DeviceSnapshot;
   providers: ProviderSnapshot[];
   pomodoros: PomodoroSnapshot[];
+  card_data: CardDataSnapshot[];
   persistence: PersistenceState;
   diagnostics: RuntimeDiagnostics;
 }
@@ -273,6 +274,21 @@ export interface PomodoroSnapshot {
 }
 
 export type PomodoroState = "idle" | "running" | "paused" | "completed";
+
+export type CardFieldValue =
+  | { kind: "text"; value: string }
+  | { kind: "integer"; value: number }
+  | { kind: "boolean"; value: boolean };
+
+export interface CardField {
+  key: string;
+  value: CardFieldValue;
+}
+
+export interface CardDataSnapshot {
+  card_id: string;
+  fields: CardField[];
+}
 
 export type PersistenceState =
   | { kind: "clean" }
@@ -360,6 +376,7 @@ export interface IpcContractFixtures {
   connection_states: ConnectionState[];
   provider_states: ProviderState[];
   pomodoro_states: PomodoroState[];
+  card_data: CardDataSnapshot[];
   persistence_states: PersistenceState[];
   validation_codes: ValidationCode[];
   pomodoro_actions: PomodoroAction[];

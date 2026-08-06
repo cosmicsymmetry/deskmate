@@ -499,12 +499,13 @@ mod tests {
 
     use app_core::{
         AlertHold, AppConfig, AppPreferences, AssetKind, AssetSource, CURRENT_SCHEMA_VERSION,
-        CalendarSource, CardAlert, CardPresence, CardSettings, CarouselAdvance, CarouselSettings,
-        ConnectionState, DeviceCapability, DeviceCounters, DeviceSnapshot, DisplayOrientation,
-        DisplayTemplate, FirmwareArtifactMetadata, GlyphRange, PersistenceState, PomodoroSnapshot,
-        PomodoroState, ProviderSnapshot, ProviderState, RefreshPolicy, RuntimeDiagnostics,
-        RuntimeError, RuntimeState, StoreWarning, UpdateChannel, UpdateCheckPolicy,
-        UpdaterSettings, ValidationCode, WeatherUnits, WidgetTapAction,
+        CalendarSource, CardAlert, CardDataSnapshot, CardField, CardFieldValue, CardPresence,
+        CardSettings, CarouselAdvance, CarouselSettings, ConnectionState, DeviceCapability,
+        DeviceCounters, DeviceSnapshot, DisplayOrientation, DisplayTemplate,
+        FirmwareArtifactMetadata, GlyphRange, PersistenceState, PomodoroSnapshot, PomodoroState,
+        ProviderSnapshot, ProviderState, RefreshPolicy, RuntimeDiagnostics, RuntimeError,
+        RuntimeState, StoreWarning, UpdateChannel, UpdateCheckPolicy, UpdaterSettings,
+        ValidationCode, WeatherUnits, WidgetTapAction,
     };
     use serde::Serialize;
 
@@ -660,6 +661,7 @@ mod tests {
         connection_states: Vec<ConnectionState>,
         provider_states: Vec<ProviderState>,
         pomodoro_states: Vec<PomodoroState>,
+        card_data: Vec<CardDataSnapshot>,
         persistence_states: Vec<PersistenceState>,
         validation_codes: Vec<ValidationCode>,
         pomodoro_actions: Vec<PomodoroAction>,
@@ -781,6 +783,27 @@ mod tests {
             carousel: CarouselSettings::default(),
             updater: UpdaterSettings::default(),
         };
+        let card_data = vec![CardDataSnapshot {
+            card_id: "calendar".into(),
+            fields: vec![
+                CardField {
+                    key: "row0_title".into(),
+                    value: CardFieldValue::Text {
+                        value: "Design review".into(),
+                    },
+                },
+                CardField {
+                    key: "next_start_unix_ms".into(),
+                    value: CardFieldValue::Integer {
+                        value: 1_787_000_000_000,
+                    },
+                },
+                CardField {
+                    key: "stale".into(),
+                    value: CardFieldValue::Boolean { value: false },
+                },
+            ],
+        }];
         let snapshot = AppSnapshot {
             config: config.clone(),
             runtime: RuntimeState::Error {
@@ -830,6 +853,7 @@ mod tests {
                 duration_seconds: 1_500,
                 remaining_seconds: 900,
             }],
+            card_data: card_data.clone(),
             persistence: PersistenceState::RecoverableError {
                 message: "disk full".into(),
             },
@@ -1051,6 +1075,7 @@ mod tests {
             connection_states,
             provider_states,
             pomodoro_states,
+            card_data,
             persistence_states,
             validation_codes,
             pomodoro_actions,

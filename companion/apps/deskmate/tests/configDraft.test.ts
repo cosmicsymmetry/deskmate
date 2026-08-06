@@ -7,6 +7,7 @@ import {
   filmstripAdvance,
   filmstripDeadline,
   filmstripSegments,
+  firstRunSteps,
   firstSelectableCard,
   formatDuration,
   issuesForCard,
@@ -15,7 +16,6 @@ import {
   loopSeconds,
   moveCard,
   moveCardWithinRotation,
-  needsFirstRunGuidance,
   nextFilmstripCardId,
   nonRotationCards,
   removeCard,
@@ -76,7 +76,26 @@ describe("configuration draft helpers", () => {
       "calendar",
     ]);
     expect(new Set(complete.config.cards.map((card) => card.id)).size).toBe(4);
-    expect(needsFirstRunGuidance(complete.config)).toBe(false);
+    // The calendar card was added with an empty ICS source, so the checklist
+    // still flags it even though every demanded card kind is present.
+    expect(firstRunSteps(complete.config, true).some((step) => !step.done)).toBe(true);
+  });
+
+  test("first-run guidance clears without demanding specific card kinds", () => {
+    // A user who wants only a clock and a weather card is fully set up.
+    const config = addCard(addCard(initialConfig(), "clock").config, "weather").config;
+    const configured: AppConfig = {
+      ...config,
+      cards: config.cards.map((card) =>
+        card.kind === "weather" ? { ...card, location: "Tbilisi" } : card,
+      ),
+    };
+    expect(firstRunSteps(configured, true).every((step) => step.done)).toBe(true);
+  });
+
+  test("guidance still flags a card that is missing its source", () => {
+    const config = addCard(initialConfig(), "calendar").config; // empty ICS url
+    expect(firstRunSteps(config, true).some((step) => !step.done)).toBe(true);
   });
 
   test("adding a card appends it without creating a screen", () => {

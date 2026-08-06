@@ -9,9 +9,9 @@ import { ProviderStatus } from "./components/ProviderStatus";
 import {
   addCard,
   copyConfig,
+  firstRunSteps,
   firstSelectableCard,
   issuesForCard,
-  needsFirstRunGuidance,
   removeCard,
   updateWidget,
 } from "./lib/configDraft";
@@ -54,7 +54,7 @@ const validDraft: DraftValidation = { valid: true, issues: [] };
 export function App() {
   const { snapshot, loading, error: stateError, refresh } = useAppState();
   const [draft, setDraft] = useState<AppConfig | null>(null);
-  const [selectedWidgetId, setSelectedWidgetId] = useState<string | null>(null);
+  const [selectedCardId, setSelectedCardId] = useState<string | null>(null);
   const [dirty, setDirty] = useState(false);
   const [validation, setValidation] = useState<ValidationState>({
     kind: "idle",
@@ -75,7 +75,7 @@ export function App() {
     setDraft((current) =>
       current && JSON.stringify(current) === JSON.stringify(next) ? current : next,
     );
-    setSelectedWidgetId((current) =>
+    setSelectedCardId((current) =>
       current && next.cards.some((card) => card.id === current)
         ? current
         : firstSelectableCard(next),
@@ -159,11 +159,11 @@ export function App() {
     );
   }
 
-  const selectedWidget = draft.cards.find((card) => card.id === selectedWidgetId) ?? null;
+  const selectedWidget = draft.cards.find((card) => card.id === selectedCardId) ?? null;
   const pomodoro =
-    snapshot.pomodoros.find((candidate) => candidate.widget_id === selectedWidgetId) ?? null;
+    snapshot.pomodoros.find((candidate) => candidate.widget_id === selectedCardId) ?? null;
   const issues = validation.result.issues;
-  const cardIssues = selectedWidgetId ? issuesForCard(issues, draft, selectedWidgetId) : [];
+  const cardIssues = selectedCardId ? issuesForCard(issues, draft, selectedCardId) : [];
   const defaultDwellSeconds =
     draft.carousel.advance.kind === "timed" ? draft.carousel.advance.default_dwell_seconds : null;
 
@@ -175,24 +175,24 @@ export function App() {
   const handleAdd = (kind: CardKind) => {
     const result = addCard(draft, kind);
     replaceDraft(result.config);
-    setSelectedWidgetId(result.cardId);
+    setSelectedCardId(result.cardId);
   };
   const handleWidgetChange = (widget: CardSettings) => {
-    if (!selectedWidgetId) {
+    if (!selectedCardId) {
       return;
     }
-    replaceDraft(updateWidget(draft, selectedWidgetId, widget));
+    replaceDraft(updateWidget(draft, selectedCardId, widget));
   };
   const handleRemoveCard = (cardId: string) => {
     const next = removeCard(draft, cardId);
     replaceDraft(next);
-    setSelectedWidgetId((current) => (current === cardId ? firstSelectableCard(next) : current));
+    setSelectedCardId((current) => (current === cardId ? firstSelectableCard(next) : current));
   };
   const handleRemove = () => {
-    if (!selectedWidgetId) {
+    if (!selectedCardId) {
       return;
     }
-    handleRemoveCard(selectedWidgetId);
+    handleRemoveCard(selectedCardId);
   };
   const handleChooseCalendarFile = () => {
     if (selectedWidget?.kind !== "calendar") {
@@ -257,12 +257,10 @@ export function App() {
     }
   };
   const handleTimerAction = (action: "start" | "pause" | "reset") => {
-    if (!selectedWidgetId) {
+    if (!selectedCardId) {
       return;
     }
-    void runAction("timer", () =>
-      controlPomodoro(selectedWidgetId, action satisfies PomodoroAction),
-    );
+    void runAction("timer", () => controlPomodoro(selectedCardId, action satisfies PomodoroAction));
   };
   const handleProviderRefresh = (widgetId: string) => {
     setRefreshingProviderId(widgetId);
@@ -315,35 +313,34 @@ export function App() {
         </aside>
       )}
 
-      {needsFirstRunGuidance(draft) && (
-        <aside className="first-run" aria-labelledby="first-run-heading">
-          <div>
-            <p className="eyebrow">A quick first setup</p>
-            <h2 id="first-run-heading">Make the display yours in four steps</h2>
-          </div>
-          <ol>
-            <li className={snapshot.device.connection.kind === "online" ? "is-done" : ""}>
-              <span>1</span> Connect the display with USB
-            </li>
-            <li className={draft.preferences.timezone.trim() ? "is-done" : ""}>
-              <span>2</span> Check your timezone
-            </li>
-            <li className={draft.cards.some((card) => card.kind === "calendar") ? "is-done" : ""}>
-              <span>3</span> Add an ICS calendar address or file
-            </li>
-            <li className={draft.cards.length > 1 ? "is-done" : ""}>
-              <span>4</span> Arrange screens, then save
-            </li>
-          </ol>
-        </aside>
-      )}
+      {(() => {
+        const steps = firstRunSteps(draft, snapshot.device.connection.kind === "online");
+        if (steps.every((step) => step.done)) {
+          return null;
+        }
+        return (
+          <aside className="first-run" aria-labelledby="first-run-heading">
+            <div>
+              <p className="eyebrow">A quick first setup</p>
+              <h2 id="first-run-heading">Make the display yours</h2>
+            </div>
+            <ol>
+              {steps.map((step, index) => (
+                <li key={step.label} className={step.done ? "is-done" : ""}>
+                  <span className="numeral">{index + 1}</span> {step.label}
+                </li>
+              ))}
+            </ol>
+          </aside>
+        );
+      })()}
 
       <div className="workspace">
         <div className="workspace__editors">
           <CardList
             config={draft}
-            selectedCardId={selectedWidgetId}
-            onSelect={setSelectedWidgetId}
+            selectedCardId={selectedCardId}
+            onSelect={setSelectedCardId}
             onAdd={handleAdd}
             onRemove={handleRemoveCard}
             onReorder={(next) => replaceDraft(next)}
@@ -365,15 +362,15 @@ export function App() {
         <aside className="workspace__preview">
           <DevicePreview
             cards={draft.cards}
-            selectedWidgetId={selectedWidgetId}
+            selectedWidgetId={selectedCardId}
             cardData={snapshot.card_data}
             pomodoros={snapshot.pomodoros}
             orientation={draft.preferences.orientation}
           />
           <Filmstrip
             config={draft}
-            selectedCardId={selectedWidgetId}
-            onSelect={setSelectedWidgetId}
+            selectedCardId={selectedCardId}
+            onSelect={setSelectedCardId}
             onReorder={(next) => replaceDraft(next)}
           />
           <ProviderStatus

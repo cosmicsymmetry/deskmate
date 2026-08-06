@@ -6,12 +6,16 @@
  * --panel-black is quarantined to the device preview screen — it must never
  * appear as a chrome surface. Both color schemes are first-class peers.
  *
- * --accent / --accent-dark / --accent-soft / --danger / --warning / --panel
- * below are the pre-existing palette, kept only so panels this task does not
- * touch (ProviderStatus, DeviceHeader, the preview chrome) keep rendering as
- * before. They are not part of the new system and are retired as each of
- * those components is rebuilt. CardEditor (below, replacing WidgetEditor) is
- * fully migrated: it does not read --accent/--accent-dark/--accent-soft.
+ * The legacy teal/green --accent/--accent-dark/--accent-soft palette and the
+ * unused --warning are fully retired: every consumer (buttons, brand mark,
+ * first-run banner, save bar, provider/device status dots) now reads either
+ * a design-language token or an achromatic neutral (--ink/--muted/--line).
+ * Status dots use a three-tier achromatic-plus-alarm scheme rather than
+ * inventing a fourth chroma: --ink for a confirmed/healthy state, --muted
+ * for an in-progress one, --alarm for one that needs attention — see the
+ * comments on .status-dot and .provider-row's state modifiers below.
+ * --panel remains as the neutral translucent panel surface (not a brand
+ * color) and --danger remains as a semantic alias for --alarm.
  * The old --shadow token (panel elevation) is gone outright: no shadow
  * survives except the single amber glow under the device preview, in
  * .device-shell below.
@@ -35,11 +39,7 @@
   --font-numeral: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
 
   --panel: rgb(255 255 253 / 94%);
-  --accent: #087f6d;
-  --accent-dark: #056355;
-  --accent-soft: #e2f4ef;
   --danger: var(--alarm);
-  --warning: #9b6b16;
 
   color: var(--ink);
   background: var(--surface);
@@ -56,7 +56,6 @@
     --line: rgb(237 233 226 / 16%);
 
     --panel: rgb(28 27 26 / 88%);
-    --accent-soft: rgb(8 127 109 / 22%);
   }
 }
 
@@ -155,8 +154,8 @@ h2 {
   gap: 24px;
   min-height: 76px;
   padding: 14px clamp(20px, 4vw, 52px);
-  border-bottom: 1px solid rgb(199 210 203 / 75%);
-  background: rgb(247 249 246 / 88%);
+  border-bottom: 1px solid var(--line);
+  background: color-mix(in srgb, var(--surface) 88%, transparent);
   backdrop-filter: blur(18px);
 }
 
@@ -174,6 +173,9 @@ h2 {
   gap: 12px;
 }
 
+/* The brand mark is a miniature of the device itself — --graphite housing,
+   --emit type — rather than a decorative gradient chip. It is never
+   clickable, so amber-on-dark stays true to --emit's one rule. */
 .brand-mark,
 .startup-mark {
   display: grid;
@@ -181,9 +183,9 @@ h2 {
   place-items: center;
   width: 38px;
   height: 38px;
-  border-radius: 12px;
-  color: white;
-  background: linear-gradient(145deg, #11a189, #056355);
+  border-radius: 6px;
+  color: var(--emit);
+  background: var(--graphite);
   font-size: 1rem;
   font-weight: 850;
 }
@@ -211,38 +213,44 @@ h2 {
   white-space: nowrap;
 }
 
+/* Connection status is communicated by weight, not hue: --ink (full
+   presence) for a confirmed-good state, --muted for one still settling, and
+   --alarm — the one chroma this device-status family borrows, since it is
+   genuinely the "needs attention" case the token exists for — for one that
+   does. Neither --emit nor --signal fits here: this dot is not the device's
+   own emission and it is not an interactive affordance. */
 .status-dot {
   width: 9px;
   height: 9px;
-  border: 2px solid white;
+  border: 2px solid var(--surface);
   border-radius: 50%;
-  background: #98a5a1;
-  box-shadow: 0 0 0 2px #98a5a1;
+  background: var(--muted);
+  box-shadow: 0 0 0 2px var(--muted);
 }
 
 .status-dot--positive {
-  background: #1a9a65;
-  box-shadow: 0 0 0 2px #1a9a65;
+  background: var(--ink);
+  box-shadow: 0 0 0 2px var(--ink);
 }
 
 .status-dot--busy {
-  background: #3b85bb;
-  box-shadow: 0 0 0 2px #3b85bb;
+  background: var(--muted);
+  box-shadow: 0 0 0 2px var(--muted);
   animation: pulse 1.5s ease-in-out infinite;
 }
 
 .status-dot--warning {
-  background: #d69732;
-  box-shadow: 0 0 0 2px #d69732;
+  background: var(--alarm);
+  box-shadow: 0 0 0 2px var(--alarm);
 }
 
 .header-alert {
   grid-column: 1 / -1;
   margin: -4px 0 2px;
   padding: 8px 12px;
-  border-radius: 8px;
-  color: #793328;
-  background: #fce8e4;
+  border-radius: 6px;
+  color: var(--alarm);
+  background: color-mix(in srgb, var(--alarm) 12%, transparent);
   font-size: 0.78rem;
 }
 
@@ -269,25 +277,30 @@ h2 {
   opacity: 0.5;
 }
 
+/* --ink/--surface flip with the colour scheme, so a solid-ink primary button
+   is automatically dark-on-light / light-on-dark in both themes without a
+   second set of rules. Hover is opacity only (the shared .button:hover lift
+   handles motion) — never a colour swap, so neither chroma token is spent
+   on hover decoration here. */
 .button--primary {
-  color: white;
-  background: var(--accent);
+  color: var(--surface);
+  background: var(--ink);
 }
 
 .button--primary:hover:not(:disabled) {
-  background: var(--accent-dark);
+  opacity: 0.85;
 }
 
 .button--secondary {
-  color: var(--accent-dark);
-  border-color: #add9ce;
-  background: var(--accent-soft);
+  color: var(--ink);
+  border-color: var(--ink);
+  background: transparent;
 }
 
 .button--quiet {
-  color: #40514d;
+  color: var(--ink);
   border-color: var(--line);
-  background: rgb(255 255 255 / 72%);
+  background: color-mix(in srgb, var(--surface) 72%, transparent);
 }
 
 .recovery-banner,
@@ -331,14 +344,17 @@ h2 {
   align-items: center;
   margin-top: 24px;
   padding: 22px 24px;
-  border: 1px solid #cfe1da;
-  border-radius: 16px;
-  background: linear-gradient(115deg, rgb(255 255 253 / 94%), rgb(228 245 239 / 88%));
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
 }
 
+/* auto-fit rather than a fixed column count: firstRunSteps() derives its
+   step list from what the user actually configured, so the checklist is no
+   longer always exactly four items long. */
 .first-run ol {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
   gap: 10px;
   margin: 0;
   padding: 0;
@@ -360,9 +376,9 @@ h2 {
   place-items: center;
   width: 24px;
   height: 24px;
-  border: 1px solid #c7d3ce;
-  border-radius: 50%;
-  background: white;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: transparent;
   font-weight: 800;
 }
 
@@ -370,10 +386,14 @@ h2 {
   color: var(--ink);
 }
 
+/* The one place this banner spends chroma: a completed step's own number
+   badge lights up amber, echoing the device's own emission rather than
+   reaching for a generic "success green". Never on something clickable —
+   these badges are plain list markers, not buttons. */
 .first-run li.is-done > span {
-  color: white;
-  border-color: var(--accent);
-  background: var(--accent);
+  color: var(--graphite);
+  border-color: transparent;
+  background: var(--emit);
 }
 
 .workspace {
@@ -408,7 +428,8 @@ h2 {
 }
 
 .card-list-panel,
-.editor-panel {
+.editor-panel,
+.preferences-panel {
   border-color: var(--line);
   border-radius: 6px;
 }
@@ -1296,32 +1317,37 @@ h2 {
   grid-template-columns: auto 1fr auto;
   gap: 10px;
   padding: 13px 16px;
-  border-top: 1px solid #e7ece8;
+  border-top: 1px solid var(--line);
 }
 
 .provider-row:first-child {
   border-top: 0;
 }
 
+/* Same three-tier scheme as .status-dot above, for the same reason: a fresh
+   provider is --ink (confirmed good), a refreshing one is --muted and
+   pulsing (in progress), and a stale or errored one is --alarm (needs
+   attention) — never --emit or --signal, since a provider dot is neither
+   the device's own emission nor an interactive affordance. */
 .provider-state {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: #99a5a1;
+  background: var(--muted);
 }
 
 .provider-row--fresh .provider-state {
-  background: #1a9a65;
+  background: var(--ink);
 }
 
 .provider-row--refreshing .provider-state {
-  background: #3b85bb;
+  background: var(--muted);
   animation: pulse 1.5s ease-in-out infinite;
 }
 
 .provider-row--stale .provider-state,
 .provider-row--error .provider-state {
-  background: #d69732;
+  background: var(--alarm);
 }
 
 .provider-row strong,
@@ -1343,7 +1369,7 @@ h2 {
 }
 
 .provider-row em {
-  color: var(--warning);
+  color: var(--alarm);
 }
 
 .preferences-panel .field,
@@ -1368,8 +1394,8 @@ h2 {
   gap: 18px;
   min-height: 68px;
   padding: 13px clamp(20px, 4vw, 52px);
-  border-top: 1px solid rgb(195 207 200 / 85%);
-  background: rgb(250 251 248 / 92%);
+  border-top: 1px solid var(--line);
+  background: color-mix(in srgb, var(--surface) 92%, transparent);
   backdrop-filter: blur(18px);
 }
 
@@ -1382,8 +1408,12 @@ h2 {
   color: var(--danger);
 }
 
+/* Plain --ink, not --emit: this is body text on the light chrome surface,
+   where amber fails the 4.5:1 contrast floor. Weight and the checkmark
+   glyph carry the emphasis instead of a colour that would only read
+   correctly on --panel-black. */
 .save-success {
-  color: var(--accent-dark);
+  color: var(--ink);
   font-weight: 700;
 }
 
@@ -1405,7 +1435,8 @@ h2 {
 }
 
 .startup-mark--error {
-  background: linear-gradient(145deg, #d56c5d, #92352b);
+  color: var(--vellum);
+  background: var(--alarm);
 }
 
 .startup-state h1 {

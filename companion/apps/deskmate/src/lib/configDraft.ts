@@ -518,7 +518,35 @@ export function firstSelectableCard(config: AppConfig): string | null {
   return config.cards[0]?.id ?? null;
 }
 
-export function needsFirstRunGuidance(config: AppConfig): boolean {
-  const kinds = new Set(config.cards.map((card) => card.kind));
-  return !kinds.has("pomodoro") || !kinds.has("calendar");
+/// The first-run checklist, derived from what the user actually configured
+/// rather than from demanded card kinds — a person who only ever wants a
+/// clock and a weather card is fully set up once their weather card has a
+/// location, never nagged for a pomodoro or calendar they never asked for.
+/// A card only counts as "needs a source" when its kind has one to fill in
+/// (calendar's `source.value`, weather's `location`, json-feed/rss's `url`);
+/// clock and pomodoro cards never block this step. The caller (App) decides
+/// whether to render the banner at all — typically "while at least one step
+/// is undone" — this function only ever reports state, never presentation.
+export function firstRunSteps(
+  config: AppConfig,
+  connected: boolean,
+): { label: string; done: boolean }[] {
+  const needsSource = config.cards.some((card) => {
+    if (card.kind === "calendar") {
+      return card.source.value.trim() === "";
+    }
+    if (card.kind === "weather") {
+      return card.location.trim() === "";
+    }
+    if (card.kind === "json-feed" || card.kind === "rss") {
+      return card.url.trim() === "";
+    }
+    return false;
+  });
+
+  return [
+    { label: "Connect the display with USB", done: connected },
+    { label: "Check your timezone", done: config.preferences.timezone.trim() !== "" },
+    { label: "Finish setting up each card", done: !needsSource },
+  ];
 }

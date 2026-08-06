@@ -209,7 +209,7 @@ export function CardEditor({
               <legend className="sr-only">Pomodoro controls</legend>
               <span>
                 <strong>{pomodoro?.state ?? "idle"}</strong>
-                <small>
+                <small className={pomodoro ? "numeral" : undefined}>
                   {pomodoro
                     ? `${Math.ceil(pomodoro.remaining_seconds / 60)} min remaining`
                     : "Save this card to start it"}
@@ -327,6 +327,7 @@ export function CardEditor({
             <label className="field">
               <span>Refresh every</span>
               <select
+                className="numeral"
                 value={card.refresh.kind === "interval" ? card.refresh.minutes : 15}
                 onChange={(event) =>
                   onChange({

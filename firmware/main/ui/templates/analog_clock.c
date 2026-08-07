@@ -85,7 +85,13 @@ bool analog_clock_create(template_widget_view_t *view,
             tick, lv_color_hex(major ? 0xe6e8f0 : 0x6a6d80), 0);
         lv_obj_set_style_bg_opa(tick, LV_OPA_COVER, 0);
         lv_obj_set_style_transform_pivot_x(tick, (major ? 6 : 3) / 2, 0);
-        lv_obj_set_style_transform_pivot_y(tick, FACE_DIAMETER / 2 - 8, 0);
+        /* The pivot is measured from the tick's own top edge and must land on the
+         * face centre. LV_ALIGN_TOP_MID positions against the face's CONTENT box,
+         * which lv_obj_get_content_coords insets by the 3px border set above, so a
+         * tick's top sits at face-top + 8 + 3, not face-top + 8. Subtracting the
+         * border width here keeps the twelve ticks concentric with the hands and hub,
+         * which use centre alignment and are unaffected. */
+        lv_obj_set_style_transform_pivot_y(tick, FACE_DIAMETER / 2 - 8 - 3, 0);
         lv_obj_align(tick, LV_ALIGN_TOP_MID, 0, 8);
         lv_obj_set_style_transform_rotation(tick, i * 300, 0);
     }

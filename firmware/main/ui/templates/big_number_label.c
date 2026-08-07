@@ -63,6 +63,14 @@ bool big_number_label_create(template_widget_view_t *view,
                                 lv_color_hex(0xb3b6c7), 0);
     lv_label_set_long_mode(view->objects[OBJ_LABEL], LV_LABEL_LONG_DOT);
     lv_obj_set_width(view->objects[OBJ_LABEL], 380);
+    /* Height must be pinned too, for the same reason as OBJ_TITLE and OBJ_VALUE
+     * above: with only a width, the label keeps LV_SIZE_CONTENT height and LVGL
+     * force-breaks a spaceless run onto a second line instead of ellipsizing, so
+     * LV_LABEL_LONG_DOT never fires. A second line would also push OBJ_LABEL's box
+     * over the state label anchored to the bottom of the card. */
+    lv_obj_set_height(view->objects[OBJ_LABEL],
+                      lv_font_get_line_height(lv_obj_get_style_text_font(
+                          view->objects[OBJ_LABEL], LV_PART_MAIN)));
     lv_obj_set_style_text_align(view->objects[OBJ_LABEL],
                                 LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_align_to(view->objects[OBJ_LABEL], view->objects[OBJ_VALUE],

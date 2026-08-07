@@ -8,6 +8,7 @@ import { Filmstrip } from "./components/Filmstrip";
 import { ProviderStatus } from "./components/ProviderStatus";
 import {
   addCard,
+  cardName,
   cardsContainerIssues,
   copyConfig,
   firstRunSteps,
@@ -316,6 +317,34 @@ export function App() {
               {persistenceError
                 ? `${persistenceError}. The unreadable file was left untouched; saving will create a fresh valid configuration.`
                 : "The operating-system setting and saved preference differ. Choose your preference below to reconcile them."}
+            </p>
+          </div>
+        </aside>
+      )}
+
+      {/* A push the display understood and refused is card-scoped and actionable:
+          name the card and say what it refused, rather than parking the whole app in
+          an error state over one card's data. */}
+      {snapshot.card_errors.length > 0 && (
+        <aside className="recovery-banner" role="status">
+          <span aria-hidden="true">!</span>
+          <div>
+            <strong>
+              {snapshot.card_errors.length === 1
+                ? "The display refused one card's data"
+                : `The display refused ${snapshot.card_errors.length} cards' data`}
+            </strong>
+            {snapshot.card_errors.map((cardError) => {
+              const card = draft.cards.find((candidate) => candidate.id === cardError.card_id);
+              return (
+                <p key={cardError.card_id}>
+                  <strong>{card ? cardName(card) : cardError.card_id}</strong> — {cardError.message}
+                </p>
+              );
+            })}
+            <p>
+              Everything else kept updating. Adjust the card below and save to send its data
+              again.
             </p>
           </div>
         </aside>

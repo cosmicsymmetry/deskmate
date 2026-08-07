@@ -196,8 +196,17 @@ export interface AppSnapshot {
   providers: ProviderSnapshot[];
   pomodoros: PomodoroSnapshot[];
   card_data: CardDataSnapshot[];
+  card_errors: CardError[];
   persistence: PersistenceState;
   diagnostics: RuntimeDiagnostics;
+}
+
+/// A card whose last data push the display understood and refused. Retrying the
+/// identical payload can only fail again, so the runtime drops it and surfaces this
+/// instead of looping.
+export interface CardError {
+  card_id: string;
+  message: string;
 }
 
 export type RuntimeState =

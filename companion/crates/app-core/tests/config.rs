@@ -1,10 +1,11 @@
 use app_core::{
     AlertHold, AppConfig, AppSnapshot, AssetSettings, CalendarSource, CardAlert, CardDataSnapshot,
-    CardField, CardFieldValue, CardPresence, CardSettings, CarouselAdvance, CarouselSettings,
-    ConnectionState, DeviceCounters, DeviceSnapshot, DisplayTemplate, FirmwareArtifactMetadata,
-    JsonFieldMapping, MAX_ASSET_BYTES, MAX_PROVIDER_URL_LEN, MAX_UPDATE_ARTIFACT_BYTES,
-    PersistenceState, PomodoroSnapshot, PomodoroState, ProviderSnapshot, ProviderState,
-    RefreshPolicy, RuntimeDiagnostics, RuntimeState, ValidationCode, WeatherUnits, WidgetTapAction,
+    CardError, CardField, CardFieldValue, CardPresence, CardSettings, CarouselAdvance,
+    CarouselSettings, ConnectionState, DeviceCounters, DeviceSnapshot, DisplayTemplate,
+    FirmwareArtifactMetadata, JsonFieldMapping, MAX_ASSET_BYTES, MAX_PROVIDER_URL_LEN,
+    MAX_UPDATE_ARTIFACT_BYTES, PersistenceState, PomodoroSnapshot, PomodoroState, ProviderSnapshot,
+    ProviderState, RefreshPolicy, RuntimeDiagnostics, RuntimeState, ValidationCode, WeatherUnits,
+    WidgetTapAction,
 };
 use protocol::{
     CAPABILITY_ASSET_TRANSFER, CAPABILITY_CONFIG_ROTATION, CAPABILITY_CORE_WIDGETS,
@@ -456,6 +457,10 @@ fn runtime_snapshot_uses_tagged_states_for_frontend_contract() {
                 },
             }],
         }],
+        card_errors: vec![CardError {
+            card_id: "json-feed".into(),
+            message: "the display refused this card's data".into(),
+        }],
         persistence: PersistenceState::Clean,
         diagnostics: RuntimeDiagnostics::default(),
     };
@@ -470,6 +475,7 @@ fn runtime_snapshot_uses_tagged_states_for_frontend_contract() {
     assert_eq!(json["providers"][0]["state"]["kind"], "stale");
     assert_eq!(json["pomodoros"][0]["state"], "paused");
     assert_eq!(json["card_data"][0]["fields"][0]["value"]["kind"], "text");
+    assert_eq!(json["card_errors"][0]["card_id"], "json-feed");
     assert_eq!(json["persistence"]["kind"], "clean");
     assert_eq!(
         serde_json::from_value::<AppSnapshot>(json).unwrap(),
@@ -744,6 +750,152 @@ fn compilation_lowers_cards_to_the_frozen_wire_shape() {
     assert_eq!(pushed, ["clock", "focus"]);
 }
 
+/// Final-review finding: `wire_config()` lowering every template removed the only
+/// backstop that had been keeping host-valid-but-device-invalid compositions from
+/// being saved. A card kind may use a template only when the provider populates the
+/// fields that template declares — otherwise the card renders its placeholders
+/// forever and every field it does send inflates the device's `unknown_field_count`
+/// on every refresh, degrading the drift diagnostic Task 2 deliberately preserved.
+#[test]
+fn compositions_the_provider_cannot_populate_are_rejected() {
+    let presence = CardPresence::InRotation {
+        dwell_seconds: None,
+    };
+    let rejected = [
+        // Clock sends no `value`: big-number-label would show "--" forever.
+        CardSettings::Clock {
+            id: "clock".into(),
+            title: "Desk".into(),
+            show_seconds: true,
+            template: DisplayTemplate::BigNumberLabel,
+            tap_action: WidgetTapAction::None,
+            refresh: RefreshPolicy::DeviceLocal,
+            presence,
+            alert: CardAlert::None,
+        },
+        // Calendar sends `title` plus ten `rowN_*` fields icon-badge-text declares none of.
+        CardSettings::Calendar {
+            id: "agenda".into(),
+            title: "Up next".into(),
+            source: CalendarSource::Url("https://example.test/calendar.ics".into()),
+            template: DisplayTemplate::IconBadgeText {
+                icon_asset_id: None,
+            },
+            tap_action: WidgetTapAction::None,
+            refresh: RefreshPolicy::Interval { minutes: 15 },
+            presence,
+            alert: CardAlert::None,
+        },
+        CardSettings::Rss {
+            id: "news".into(),
+            title: "Headlines".into(),
+            url: "https://example.test/feed.xml".into(),
+            max_items: 3,
+            template: DisplayTemplate::IconBadgeText {
+                icon_asset_id: None,
+            },
+            tap_action: WidgetTapAction::None,
+            refresh: RefreshPolicy::Interval { minutes: 30 },
+            presence,
+            alert: CardAlert::None,
+        },
+    ];
+
+    for card in rejected {
+        let id = card.id().to_owned();
+        let config = AppConfig {
+            cards: vec![card],
+            ..AppConfig::default()
+        };
+        let error = config
+            .validate()
+            .expect_err(&format!("{id} must not validate"));
+        assert!(
+            error.issues.iter().any(|issue| {
+                issue.path == "cards[0].template"
+                    && issue.code == ValidationCode::InvalidComposition
+            }),
+            "{id} must report an incompatible template: {:?}",
+            error.issues
+        );
+    }
+}
+
+/// `validate()` runs on config LOAD and nothing migrates a saved card to a new
+/// template, so every weather card saved before the extended templates shipped is
+/// still on `row-list`. Narrowing weather's allowed set would make those saved
+/// configurations fail to load, stranding the user's whole configuration.
+#[test]
+fn already_saved_weather_cards_on_row_list_still_load() {
+    let config = AppConfig {
+        cards: vec![CardSettings::Weather {
+            id: "weather".into(),
+            title: "Weather".into(),
+            location: "Tbilisi".into(),
+            units: WeatherUnits::Metric,
+            template: DisplayTemplate::RowList,
+            tap_action: WidgetTapAction::None,
+            refresh: RefreshPolicy::Interval { minutes: 30 },
+            presence: CardPresence::InRotation {
+                dwell_seconds: None,
+            },
+            alert: CardAlert::None,
+        }],
+        ..AppConfig::default()
+    };
+    config.validate().expect("saved weather cards must load");
+    config.compile(1).expect("and must still compile");
+}
+
+/// Final-review finding: `widget_model.c` refuses any widget whose template is not
+/// `PROGRESS_RING` while carrying a non-`NONE` tap action, and `validate_config` is
+/// all-or-nothing — so one such card made the device reject the ENTIRE `ApplyConfig`
+/// and nothing on the display updated at all.
+#[test]
+fn timer_tap_actions_require_the_progress_ring_template() {
+    for tap_action in [WidgetTapAction::StartPause, WidgetTapAction::Reset] {
+        let config = AppConfig {
+            cards: vec![CardSettings::Pomodoro {
+                id: "focus".into(),
+                label: "Focus".into(),
+                duration_seconds: 1_500,
+                template: DisplayTemplate::BigNumberLabel,
+                tap_action: tap_action.clone(),
+                refresh: RefreshPolicy::DeviceLocal,
+                presence: CardPresence::InRotation {
+                    dwell_seconds: None,
+                },
+                alert: CardAlert::None,
+            }],
+            ..AppConfig::default()
+        };
+        let error = config.validate().expect_err(&format!(
+            "{tap_action:?} off progress-ring must not validate"
+        ));
+        assert!(
+            error.issues.iter().any(|issue| {
+                issue.path == "cards[0].tap_action"
+                    && issue.code == ValidationCode::InvalidComposition
+            }),
+            "{tap_action:?} must be reported on the tap_action path: {:?}",
+            error.issues
+        );
+    }
+
+    // The same action on `progress-ring` stays valid.
+    let config = AppConfig {
+        cards: vec![pomodoro_card(
+            "focus",
+            CardPresence::InRotation {
+                dwell_seconds: None,
+            },
+            CardAlert::None,
+        )],
+        ..AppConfig::default()
+    };
+    config.validate().expect("progress-ring timers stay valid");
+}
+
 #[test]
 fn compilation_is_deterministic_for_identical_input() {
     let config = AppConfig::default();
@@ -900,25 +1052,27 @@ fn every_display_template_lowers_to_the_wire() {
             presence,
             alert: CardAlert::None,
         },
-        CardSettings::Clock {
+        CardSettings::Weather {
             id: "big-number-label".into(),
-            title: "Desk".into(),
-            show_seconds: true,
+            title: "Weather".into(),
+            location: "Tbilisi".into(),
+            units: WeatherUnits::Metric,
             template: DisplayTemplate::BigNumberLabel,
             tap_action: WidgetTapAction::None,
-            refresh: RefreshPolicy::DeviceLocal,
+            refresh: RefreshPolicy::Interval { minutes: 30 },
             presence,
             alert: CardAlert::None,
         },
-        CardSettings::Calendar {
+        CardSettings::Weather {
             id: "icon-badge-text".into(),
-            title: "Up next".into(),
-            source: CalendarSource::Url("https://example.test/calendar.ics".into()),
+            title: "Weather".into(),
+            location: "Tbilisi".into(),
+            units: WeatherUnits::Metric,
             template: DisplayTemplate::IconBadgeText {
                 icon_asset_id: None,
             },
             tap_action: WidgetTapAction::None,
-            refresh: RefreshPolicy::Interval { minutes: 15 },
+            refresh: RefreshPolicy::Interval { minutes: 30 },
             presence,
             alert: CardAlert::None,
         },
@@ -946,13 +1100,14 @@ fn extended_templates_require_the_extended_capability() {
         dwell_seconds: None,
     };
     let extended = AppConfig {
-        cards: vec![CardSettings::Clock {
+        cards: vec![CardSettings::Weather {
             id: "big-number-label".into(),
-            title: "Desk".into(),
-            show_seconds: true,
+            title: "Weather".into(),
+            location: "Tbilisi".into(),
+            units: WeatherUnits::Metric,
             template: DisplayTemplate::BigNumberLabel,
             tap_action: WidgetTapAction::None,
-            refresh: RefreshPolicy::DeviceLocal,
+            refresh: RefreshPolicy::Interval { minutes: 30 },
             presence,
             alert: CardAlert::None,
         }],

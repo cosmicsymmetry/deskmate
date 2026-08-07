@@ -10,8 +10,22 @@ pub struct AppSnapshot {
     pub providers: Vec<ProviderSnapshot>,
     pub pomodoros: Vec<PomodoroSnapshot>,
     pub card_data: Vec<CardDataSnapshot>,
+    /// Cards whose last data push the device understood and refused. Retrying an
+    /// identical payload can only fail again, so the runtime drops it from the dirty
+    /// set and records it here instead of looping. See `CardError`.
+    pub card_errors: Vec<CardError>,
     pub persistence: PersistenceState,
     pub diagnostics: RuntimeDiagnostics,
+}
+
+/// A card-scoped, user-actionable failure: the device accepted the connection and
+/// the frame, understood the push, and refused its contents (an undeclared field
+/// type, an over-long text value, a value outside the template's declared range).
+/// Transport failures are never reported here — those are connection state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CardError {
+    pub card_id: String,
+    pub message: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -117,6 +131,21 @@ impl DeviceCapability {
             Self::HostTapActions => protocol::CAPABILITY_HOST_TAP_ACTIONS,
             Self::AssetTransfer => protocol::CAPABILITY_ASSET_TRANSFER,
             Self::FirmwareUpdate => protocol::CAPABILITY_FIRMWARE_UPDATE,
+        }
+    }
+
+    /// A name a person can act on. Capability mismatches are reported to the settings
+    /// UI, where a raw bitmask ("missing capability bits 0x0000000000000008") tells the
+    /// user nothing about what to change or which firmware to install.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::CoreWidgets => "core widgets",
+            Self::ConfigRotation => "display rotation",
+            Self::DashboardLayouts => "dashboard layouts",
+            Self::ExtendedTemplates => "extended display templates",
+            Self::HostTapActions => "host tap actions",
+            Self::AssetTransfer => "icon and font asset transfer",
+            Self::FirmwareUpdate => "firmware update",
         }
     }
 

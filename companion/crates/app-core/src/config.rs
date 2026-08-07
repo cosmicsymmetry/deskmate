@@ -1834,10 +1834,16 @@ fn validate_composition(
             template,
             DisplayTemplate::DigitalClock | DisplayTemplate::AnalogClock
         ),
-        ProviderKind::Pomodoro => matches!(
-            template,
-            DisplayTemplate::ProgressRing | DisplayTemplate::BigNumberLabel
-        ),
+        // Pomodoro sends `label`, `duration_seconds`, `remaining_seconds` and
+        // `running`; `big-number-label` declares only `label` out of those, so its
+        // hero `value` stayed "--" forever while the other three counted as unknown
+        // on EVERY tick — a continuous drip, worse than the calendar case above.
+        // Unlike weather's `row-list` this strands no saved configuration: v0/v1
+        // migration hard-codes pomodoro to `ProgressRing`, and while v2 migration
+        // copies `template` verbatim, no v2 file could hold `big-number-label` on a
+        // pomodoro card because `save_and_apply` compiled before persisting and
+        // `wire_config()` refused to lower that template at the time.
+        ProviderKind::Pomodoro => matches!(template, DisplayTemplate::ProgressRing),
         // Calendar and RSS send `title` plus ten `rowN_*` fields, which only
         // `row-list` declares. On `icon-badge-text` all ten counted as unknown on
         // every refresh and the card rendered the hollow `unknown` ring and "--".

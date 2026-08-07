@@ -799,6 +799,21 @@ fn compositions_the_provider_cannot_populate_are_rejected() {
             presence,
             alert: CardAlert::None,
         },
+        // Pomodoro sends label/duration_seconds/remaining_seconds/running, of which
+        // big-number-label declares only `label`: `value` stays "--" forever and the
+        // other three count as unknown on every tick, not merely on every refresh.
+        // `tap_action` is None here so the failure can only be the template — the
+        // timer-action rule is pinned separately below.
+        CardSettings::Pomodoro {
+            id: "focus".into(),
+            label: "Focus".into(),
+            duration_seconds: 1_500,
+            template: DisplayTemplate::BigNumberLabel,
+            tap_action: WidgetTapAction::None,
+            refresh: RefreshPolicy::DeviceLocal,
+            presence,
+            alert: CardAlert::None,
+        },
     ];
 
     for card in rejected {
@@ -851,6 +866,12 @@ fn already_saved_weather_cards_on_row_list_still_load() {
 /// `PROGRESS_RING` while carrying a non-`NONE` tap action, and `validate_config` is
 /// all-or-nothing — so one such card made the device reject the ENTIRE `ApplyConfig`
 /// and nothing on the display updated at all.
+///
+/// The fixture below is now rejected on its template as well, since pomodoro no longer
+/// allows `big-number-label` at all. This still pins the tap-action rule specifically:
+/// the assertion demands an issue on the `tap_action` path, which the template rule
+/// does not raise. Keeping it independent matters because the guard mirrors a firmware
+/// rule about templates in general, not about which templates pomodoro may use.
 #[test]
 fn timer_tap_actions_require_the_progress_ring_template() {
     for tap_action in [WidgetTapAction::StartPause, WidgetTapAction::Reset] {

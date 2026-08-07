@@ -8,6 +8,12 @@ import { DeviceHeader } from "../src/components/DeviceHeader";
 import { DevicePreview } from "../src/components/DevicePreview";
 import { Filmstrip } from "../src/components/Filmstrip";
 import { ProviderStatus, formatProviderAge } from "../src/components/ProviderStatus";
+import {
+  cardsContainerIssues,
+  issuesForCard,
+  issuesForPath,
+  unclaimedIssues,
+} from "../src/lib/configDraft";
 import type {
   AppConfig,
   CardDataSnapshot,
@@ -511,6 +517,60 @@ describe("settings accessibility and states", () => {
     expect(formatProviderAge(30)).toBe("Updated just now");
     expect(formatProviderAge(120)).toBe("Updated 2 min ago");
     expect(formatProviderAge(7200)).toBe("Updated 2 hr ago");
+  });
+
+  test("an issue on a path no card, preference, or carousel surface claims (e.g. a missing-capability issue) is not silently dropped", () => {
+    const config = cardListConfig([
+      clockCard("only-card", { kind: "in-rotation", dwell_seconds: null }),
+    ]);
+    const capabilityIssue: ValidationIssue = {
+      path: "device.capabilities",
+      code: "requires-capability",
+      message:
+        "the connected firmware does not support extended templates. Update the firmware, or remove the cards and settings that need it.",
+    };
+    expect(unclaimedIssues([capabilityIssue], config)).toEqual([capabilityIssue]);
+  });
+
+  test("every issue is claimed by exactly one surface — the cards container, a card, a preference field, the carousel, or the unclaimed fallback", () => {
+    const config = cardListConfig([
+      clockCard("first", { kind: "in-rotation", dwell_seconds: null }),
+      clockCard("second", { kind: "in-rotation", dwell_seconds: null }),
+    ]);
+    const issues: ValidationIssue[] = [
+      { path: "cards", code: "empty", message: "At least one card must be in the rotation." },
+      { path: "cards[0].title", code: "too-long", message: "Title is too long." },
+      { path: "cards[1]", code: "invalid-composition", message: "This card is misconfigured." },
+      { path: "preferences.timezone", code: "invalid-timezone", message: "Unknown timezone." },
+      {
+        path: "carousel.advance.default_dwell_seconds",
+        code: "out-of-range",
+        message: "Dwell time is out of range.",
+      },
+      {
+        path: "device.capabilities",
+        code: "requires-capability",
+        message: "the connected firmware does not support extended templates.",
+      },
+    ];
+
+    // Reconstructed independently from the same public helpers each real surface calls
+    // (App scopes CardList/CardEditor/the timezone field/the Filmstrip this exact way —
+    // see App.tsx), plus the fallback under test. This is the invariant that actually
+    // guards against the class of bug this fix addresses: if a surface's claim and
+    // `unclaimedIssues`'s notion of "claimed" ever drift apart, an issue either goes
+    // missing from every surface (as `device.capabilities` originally did) or gets
+    // double-rendered — either way this union stops matching `issues` one-to-one.
+    const union = [
+      ...cardsContainerIssues(issues),
+      ...config.cards.flatMap((card) => issuesForCard(issues, config, card.id)),
+      ...issuesForPath(issues, "preferences.timezone"),
+      ...issuesForPath(issues, "carousel.advance.default_dwell_seconds"),
+      ...unclaimedIssues(issues, config),
+    ];
+
+    expect(union).toHaveLength(issues.length);
+    expect(new Set(union)).toEqual(new Set(issues));
   });
 
   test("includes narrow-window and reduced-motion fallbacks", async () => {

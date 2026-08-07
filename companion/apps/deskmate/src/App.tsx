@@ -16,6 +16,7 @@ import {
   issuesForCard,
   removeCard,
   rotationCards,
+  unclaimedIssues,
   updateWidget,
 } from "./lib/configDraft";
 import {
@@ -168,6 +169,12 @@ export function App() {
     snapshot.pomodoros.find((candidate) => candidate.widget_id === selectedCardId) ?? null;
   const issues = validation.result.issues;
   const cardIssues = selectedCardId ? issuesForCard(issues, draft, selectedCardId) : [];
+  // Issues no card-, preference-, or carousel-scoped surface below claims — e.g. a
+  // `device.capabilities` issue naming a card the connected display can't render.
+  // Rendered as its own banner so an unclaimed issue is explained somewhere rather than
+  // just blocking Save with no highlighted control anywhere in the UI (see
+  // `unclaimedIssues`).
+  const leftoverIssues = unclaimedIssues(issues, draft);
   const defaultDwellSeconds =
     draft.carousel.advance.kind === "timed" ? draft.carousel.advance.default_dwell_seconds : null;
   const isOnlyRotationCard =
@@ -346,6 +353,27 @@ export function App() {
               Everything else kept updating. Adjust the card below and save to send its data
               again.
             </p>
+          </div>
+        </aside>
+      )}
+
+      {/* A validation issue whose path no card-, preference-, or carousel-scoped
+          surface below claims (see `unclaimedIssues`) — e.g. `device.capabilities`,
+          emitted when the connected display lacks a feature the draft needs. Without
+          this, such an issue still disabled Save but was never shown anywhere,
+          which is strictly worse than not validating it at all. */}
+      {leftoverIssues.length > 0 && (
+        <aside className="recovery-banner" role="status">
+          <span aria-hidden="true">!</span>
+          <div>
+            <strong>
+              {leftoverIssues.length === 1
+                ? "One more thing needs attention"
+                : `${leftoverIssues.length} more things need attention`}
+            </strong>
+            {leftoverIssues.map((issue) => (
+              <p key={`${issue.path}:${issue.code}`}>{issue.message}</p>
+            ))}
           </div>
         </aside>
       )}

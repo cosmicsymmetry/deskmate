@@ -10,6 +10,11 @@ use crate::{LastGood, Provider, ProviderError, ProviderSnapshot, RefreshPolicy, 
 pub const MIN_WEATHER_REFRESH_INTERVAL: Duration = Duration::from_mins(10);
 const GEOCODING_ENDPOINT: &str = "https://geocoding-api.open-meteo.com/v1/search";
 const FORECAST_ENDPOINT: &str = "https://api.open-meteo.com/v1/forecast";
+/// Mirrors the ±2000 tenths bound the firmware declares for the temperature integers
+/// in `firmware/main/core/template_fields.c`. The device is the narrower of the two
+/// and rejects a whole push over it, so the host must not admit a wider window.
+const MIN_TEMPERATURE_DEGREES: f64 = -200.0;
+const MAX_TEMPERATURE_DEGREES: f64 = 200.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WeatherUnits {
@@ -190,7 +195,15 @@ fn parse_forecast(
     })?;
     let temperature = finite_number(current, "temperature_2m")?;
     let apparent = finite_number(current, "apparent_temperature")?;
-    if !(-250.0..=250.0).contains(&temperature) || !(-250.0..=250.0).contains(&apparent) {
+    // The firmware's icon-badge-text schema declares `temperature_tenths` and
+    // `apparent_temperature_tenths` as -2000..=2000 and rejects the entire push when an
+    // integer falls outside its declared range, so the host window must be the same
+    // ±200.0° and not the wider ±250.0° it used to be. Rejecting the reading here
+    // surfaces one stale/error provider state on the card; letting it through would
+    // discard the card's whole update on the device instead.
+    if !(MIN_TEMPERATURE_DEGREES..=MAX_TEMPERATURE_DEGREES).contains(&temperature)
+        || !(MIN_TEMPERATURE_DEGREES..=MAX_TEMPERATURE_DEGREES).contains(&apparent)
+    {
         return Err(ProviderError::MalformedFeed(
             "weather temperature is outside supported bounds".into(),
         ));
@@ -341,6 +354,28 @@ mod tests {
                     .error
                     .unwrap()
                     .starts_with("malformed provider data:")
+            );
+        }
+    }
+
+    /// The host temperature window must match the ±2000 tenths the firmware declares.
+    /// It used to be ±250.0°, so a reading between 200.0° and 250.0° passed every host
+    /// check and then made the device reject the weather card's entire push.
+    #[test]
+    fn temperature_window_matches_the_firmware_declared_range() {
+        let forecast = |celsius: f64| {
+            format!(
+                r#"{{"current":{{"temperature_2m":{celsius},"apparent_temperature":{celsius},"weather_code":3,"is_day":1}}}}"#
+            )
+        };
+        let accepted = parse_forecast(&forecast(200.0), "Nowhere", WeatherUnits::Metric).unwrap();
+        assert_eq!(accepted.temperature_tenths, 2000);
+        assert_eq!(accepted.apparent_temperature_tenths, 2000);
+
+        for outside in [200.1, -200.1, 240.0] {
+            assert!(
+                parse_forecast(&forecast(outside), "Nowhere", WeatherUnits::Metric).is_err(),
+                "{outside} is outside the firmware's declared range and must be rejected"
             );
         }
     }

@@ -1261,8 +1261,36 @@ storm would raise that high-water mark and eventually drop commands.
 
 ### Not covered by this session
 
-- Weather and json-feed cards were not exercised. They default to `row-list`, whose
-  field set (`title`, `row0..4_title`, `row0..4_time`, `stale`, `error`) neither
-  provider publishes, so the expected result remains title-over-empty-rows until the
-  `big-number-label` / `icon-badge-text` templates land in M4 Task 3.
 - "Fires exactly once per event" for calendar alerts was not separately isolated.
+
+## Extended templates (M4 Task 3) — needs physical verification
+
+Not yet observed on the board. The next hardware session must check:
+
+- [ ] `StatusResponse` reports capabilities 11 (core | rotation | extended templates).
+- [ ] A weather card renders icon-left/text-right with a real temperature, summary
+      and location, at both 90° and 270°.
+- [ ] Each of the 11 icon names renders its own distinct artwork, and an
+      unrecognised name renders the hollow `unknown` ring rather than blank space.
+- [ ] A json-feed card renders its mapped value as the hero number, and an absent
+      value renders `--` rather than stale pixels from the previous card. Use the
+      default `big-number-label` template with a mapping named exactly `value` (that is
+      the only renderable data field the template declares) pointing at a **numeric**
+      JSON value, e.g. `field: "value"`, `path: "$.count"` against `{"count": 42}`. The
+      host now emits every mapped scalar as TEXT — integers, floats and booleans
+      included — because no template declares a user-mappable integer or boolean field
+      and a type mismatch makes the firmware reject the card's entire push. So `42`
+      must appear as `42`, `true` as `true`, and a value longer than the 16-byte
+      declared capacity of `value` must arrive already truncated (clipped digits), not
+      as a refused push. Confirm `unknown_field_count` does not rise across the push.
+- [ ] An analog-clock card tracks time, and `show_seconds` toggles the second hand.
+      Also check the twelve ticks now sweep a circle concentric with the hands and hub:
+      the pivot subtracts the face's 3px border, which `lv_obj_get_content_coords`
+      insets and the earlier `FACE_DIAMETER / 2 - 8` pivot did not account for.
+- [ ] A `big-number-label` `label` longer than its box ellipsizes on one line rather
+      than wrapping onto a second and colliding with the state label at the card's
+      bottom edge (its height is now pinned, like `title` and `value`).
+- [ ] `unknown_field_count` stays at zero across a weather push (the schema
+      declares all ten emitted fields for exactly this reason).
+- [ ] Heap stays flat and `ui_queue_high_water` stays low across a full rotation
+      that includes all three new templates.

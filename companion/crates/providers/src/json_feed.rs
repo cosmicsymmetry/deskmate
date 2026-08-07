@@ -38,7 +38,9 @@ pub struct JsonFeed {
 impl JsonFeed {
     pub fn wire_fields(&self, title: &str, stale: bool, error: Option<&str>) -> Vec<Field> {
         // Firmware v1 permits 16 fields. Reserve title/stale/error and retain mapping
-        // order deterministically; template validation narrows mappings further in Task 3.
+        // order deterministically. Which template field a mapping lands on is the
+        // user's choice; a mapping naming no declared field is counted as unknown by
+        // the device and ignored, never rejected.
         let mut fields = Vec::with_capacity(MAX_FIELD_COUNT);
         fields.push(text_field("title", truncate_utf8(title, 64)));
         fields.extend(
@@ -143,30 +145,70 @@ pub fn parse_json_feed(body: &str, mappings: &[JsonMapping]) -> Result<JsonFeed,
         })?;
         fields.push(Field {
             key: mapping.field.clone(),
-            value: scalar_field_value(value)?,
+            value: scalar_field_value(&mapping.field, value)?,
         });
     }
     Ok(JsonFeed { fields })
 }
 
-fn scalar_field_value(value: &Value) -> Result<FieldValue, ProviderError> {
-    match value {
-        Value::Null => Ok(FieldValue::Text(String::new())),
-        Value::Bool(value) => Ok(FieldValue::Boolean(*value)),
-        Value::Number(value) => value.as_i64().map_or_else(
-            || {
-                Ok(FieldValue::Text(truncate_utf8(
-                    &value.to_string(),
-                    MAX_FIELD_TEXT_LEN,
-                )))
-            },
-            |value| Ok(FieldValue::Integer(value)),
-        ),
-        Value::String(value) => Ok(FieldValue::Text(truncate_utf8(value, MAX_FIELD_TEXT_LEN))),
-        Value::Array(_) | Value::Object(_) => Err(ProviderError::MalformedFeed(
-            "JSON mapping must resolve to a scalar".into(),
-        )),
+/// Every mapped scalar is emitted as **text**, whatever its JSON type.
+///
+/// No display template exposes a user-mappable integer or boolean field: the only
+/// non-text fields the firmware declares are `stale` (reserved for the provider),
+/// progress-ring's timer integers (device-local, never JSON-fed), and weather's
+/// `*_temperature_tenths` (emitted by the weather provider, not by a mapping). The
+/// firmware rejects the WHOLE push when an incoming field's type does not match the
+/// declared one, so a `{"count": 42}` mapping arriving as an integer took every other
+/// field on that card down with it. Text always matches.
+fn scalar_field_value(key: &str, value: &Value) -> Result<FieldValue, ProviderError> {
+    let text = match value {
+        Value::Null => String::new(),
+        Value::Bool(value) => value.to_string(),
+        Value::Number(value) => value.to_string(),
+        Value::String(value) => value.clone(),
+        Value::Array(_) | Value::Object(_) => {
+            return Err(ProviderError::MalformedFeed(
+                "JSON mapping must resolve to a scalar".into(),
+            ));
+        }
+    };
+    Ok(FieldValue::Text(truncate_utf8(
+        &text,
+        declared_text_capacity(key),
+    )))
+}
+
+/// The text capacity the firmware's field registry declares for `key`
+/// (`firmware/main/core/template_fields.c`).
+///
+/// Over-long text is rejected per push, not per field, so a 40-character feed string
+/// mapped onto big-number-label's 16-byte `value` would discard the card's whole
+/// update. Truncating host-side keeps the push legal and shows the user a clipped
+/// value instead of nothing. Keys no template declares are ignored by the device as
+/// unknown fields and can never trigger a rejection, so they only need the generic
+/// wire bound. This can be a flat table because no key is declared with two different
+/// capacities across templates.
+fn declared_text_capacity(key: &str) -> usize {
+    match key {
+        // big-number-label `value`; icon-badge-text `value`/`icon`/`unit`.
+        "value" | "icon" | "unit" => 16,
+        // Every template's `title`, plus big-number-label/icon-badge-text `label`,
+        // progress-ring `label`, and icon-badge-text `badge`.
+        "title" | "label" | "badge" => 64,
+        _ => match key
+            .strip_prefix("row")
+            .and_then(|rest| rest.split_once('_'))
+        {
+            // row-list declares five rows of `rowN_title` (96) and `rowN_time` (32).
+            Some((index, "title")) if is_row_index(index) => 96,
+            Some((index, "time")) if is_row_index(index) => 32,
+            _ => MAX_FIELD_TEXT_LEN,
+        },
     }
+}
+
+fn is_row_index(index: &str) -> bool {
+    matches!(index, "0" | "1" | "2" | "3" | "4")
 }
 
 fn parse_path(raw: &str) -> Result<Vec<PathSegment>, ProviderError> {
@@ -270,9 +312,9 @@ mod tests {
             &mappings(),
         )
         .unwrap();
-        assert_eq!(feed.fields[0].value, FieldValue::Integer(42));
+        assert_eq!(feed.fields[0].value, FieldValue::Text("42".into()));
         assert_eq!(feed.fields[1].value, FieldValue::Text("Builds".into()));
-        assert_eq!(feed.fields[2].value, FieldValue::Boolean(true));
+        assert_eq!(feed.fields[2].value, FieldValue::Text("true".into()));
         assert!(
             parse_json_feed(
                 r#"{"items":[1]}"#,
@@ -327,6 +369,80 @@ mod tests {
         assert_eq!(stale.age, Some(Duration::from_mins(2)));
         let recovered = provider.refresh(Utc.with_ymd_and_hms(2026, 8, 5, 10, 3, 0).unwrap());
         assert!(!recovered.stale);
-        assert_eq!(recovered.value.fields[0].value, FieldValue::Integer(43));
+        assert_eq!(
+            recovered.value.fields[0].value,
+            FieldValue::Text("43".into())
+        );
+    }
+
+    /// Regression test for the final-review finding that the default json-feed card
+    /// (`big-number-label`, whose only renderable data field is the 16-byte text
+    /// `value`) could never render an integer or boolean mapping: the provider emitted
+    /// `FieldValue::Integer`/`Boolean`, the firmware rejected the whole push on the type
+    /// mismatch, and the runtime re-attempted it forever. Every mapped scalar is text
+    /// now, and text landing on a declared field is truncated to that field's declared
+    /// capacity so an over-long value clips instead of failing the push.
+    #[test]
+    fn every_mapped_scalar_is_emitted_as_bounded_text() {
+        let body = format!(
+            r#"{{"count":42,"ratio":3.5,"ready":false,"nothing":null,"long":"{}"}}"#,
+            "x".repeat(64)
+        );
+        let feed = parse_json_feed(
+            &body,
+            &[
+                mapping("value", "$.count"),
+                mapping("label", "$.ratio"),
+                mapping("badge", "$.ready"),
+                mapping("icon", "$.nothing"),
+                mapping("row0_time", "$.long"),
+                mapping("undeclared", "$.long"),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(feed.fields[0].value, FieldValue::Text("42".into()));
+        assert_eq!(feed.fields[1].value, FieldValue::Text("3.5".into()));
+        assert_eq!(feed.fields[2].value, FieldValue::Text("false".into()));
+        assert_eq!(feed.fields[3].value, FieldValue::Text(String::new()));
+        // `row0_time` declares 32 bytes; an undeclared key is ignored by the device
+        // and only needs the generic 128-byte wire bound.
+        assert_eq!(feed.fields[4].value, FieldValue::Text("x".repeat(32)));
+        assert_eq!(feed.fields[5].value, FieldValue::Text("x".repeat(64)));
+
+        // An over-long value on big-number-label's 16-byte `value` clips rather than
+        // making the firmware refuse the card's entire push.
+        let long_value =
+            parse_json_feed(r#"{"n":1234567890123456789}"#, &[mapping("value", "$.n")]).unwrap();
+        assert_eq!(
+            long_value.fields[0].value,
+            FieldValue::Text("1234567890123456".into())
+        );
+    }
+
+    /// Multi-byte text must clip on a character boundary, not mid-codepoint, or the
+    /// firmware's bounded-length check sees a malformed UTF-8 tail.
+    #[test]
+    fn truncation_respects_character_boundaries() {
+        let feed = parse_json_feed(
+            r#"{"t":"°°°°°°°°°°"}"#,
+            &[JsonMapping {
+                field: "value".into(),
+                path: "$.t".into(),
+            }],
+        )
+        .unwrap();
+        let FieldValue::Text(text) = &feed.fields[0].value else {
+            panic!("mapped scalars are always text");
+        };
+        assert_eq!(text, "°°°°°°°°");
+        assert_eq!(text.len(), 16);
+    }
+
+    fn mapping(field: &str, path: &str) -> JsonMapping {
+        JsonMapping {
+            field: field.into(),
+            path: path.into(),
+        }
     }
 }

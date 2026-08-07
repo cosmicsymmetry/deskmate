@@ -151,18 +151,14 @@ export function addCard(
         title: "Weather",
         location: "",
         units: "metric",
-        // `row-list` — not the intuitive fit — because it is one of only three
-        // templates `wire_config()` currently lowers to the device (the others are
-        // `digital-clock` and `progress-ring`, neither of which suits weather).
-        // `big-number-label`, the natural choice, has no wire mapping yet, so a card
-        // defaulted to it validates cleanly but can never compile, making it
-        // addable-but-unsaveable — the exact defect this default exists to avoid.
-        // Keep this within the implemented set until a weather-specific template lands.
-        // Placeholder, not a fit: weather publishes `value`/`label`/`badge`/`icon`/
-        // `temperature_tenths`/`apparent_temperature_tenths`/`unit`, none of which
-        // `row-list` consumes, so on the device this renders as just the title over
-        // five empty rows until `big-number-label` or `icon-badge-text` lands on the wire.
-        template: { kind: "row-list" },
+        // `icon-badge-text` is the template weather's field composition was designed
+        // for (`value`/`label`/`badge`/`icon`/`temperature_tenths`/
+        // `apparent_temperature_tenths`/`unit`), and `wire_config()` now lowers it to
+        // the device — see `companion/crates/app-core/src/config.rs`. `icon_asset_id`
+        // stays unset here: rendering a pushed custom icon needs
+        // `CAPABILITY_ASSET_TRANSFER`, which is a later milestone task; until then the
+        // device renders its built-in icon for the `icon` field.
+        template: { kind: "icon-badge-text", icon_asset_id: null },
         refresh: { kind: "interval", minutes: 30 },
       };
       break;
@@ -173,14 +169,10 @@ export function addCard(
         title: "Feed",
         url: "",
         mappings: [],
-        // See the weather case above: `row-list` is the only implemented template
-        // json-feed's composition rules allow. Keep this within the implemented set
-        // until a json-feed-specific template lands.
-        // Placeholder, not a fit: json-feed publishes whatever field names the user's
-        // own mappings declare, and nothing cross-checks those against `row-list`'s
-        // field set, so on the device this renders as just the title over five empty
-        // rows until `big-number-label` or `icon-badge-text` lands on the wire.
-        template: { kind: "row-list" },
+        // `big-number-label` is the template json-feed's single mapped value is
+        // designed for, and `wire_config()` now lowers it to the device — see
+        // `companion/crates/app-core/src/config.rs`.
+        template: { kind: "big-number-label" },
         refresh: { kind: "interval", minutes: 15 },
       };
       break;
@@ -405,6 +397,43 @@ export function issuesForPath(issues: ValidationIssue[], path: string): Validati
 /// collection rather than any one row.
 export function cardsContainerIssues(issues: ValidationIssue[]): ValidationIssue[] {
   return issues.filter((issue) => issue.path === "cards");
+}
+
+/// Every issue an existing surface already claims and renders: the cards container
+/// banner (`cardsContainerIssues`), each card's own row-scoped issues (`issuesForCard`,
+/// checked for every card in the draft — not just whichever one is currently selected,
+/// since selection is a UI-only concern this must not depend on), the timezone field,
+/// and the carousel's default-dwell field. Returns the actual issue objects (by
+/// reference into `issues`) rather than paths, so `unclaimedIssues` can compute an exact
+/// set difference without re-deriving path-matching rules of its own.
+function claimedIssues(issues: ValidationIssue[], config: AppConfig): ValidationIssue[] {
+  const claimed = new Set<ValidationIssue>();
+  const claim = (matched: ValidationIssue[]) => {
+    for (const issue of matched) {
+      claimed.add(issue);
+    }
+  };
+  claim(cardsContainerIssues(issues));
+  for (const card of config.cards) {
+    claim(issuesForCard(issues, config, card.id));
+  }
+  claim(issuesForPath(issues, "preferences.timezone"));
+  claim(issuesForPath(issues, "carousel.advance.default_dwell_seconds"));
+  return [...claimed];
+}
+
+/// Issues no existing surface renders anywhere — the fallback set a whole-app banner
+/// shows so a validation issue can never again silently vanish just because its path
+/// predates whatever surface would normally claim it. This is exactly how
+/// `device.capabilities` went missing: capability-aware validation started emitting
+/// issues on that path before any surface knew to look for it, Save stayed disabled,
+/// and nothing on screen said why. Defined as the complement of `claimedIssues` (a set
+/// difference), not as a list of paths this function itself excludes, so a *future* new
+/// path falls through to the fallback automatically instead of requiring another
+/// hard-coded case here.
+export function unclaimedIssues(issues: ValidationIssue[], config: AppConfig): ValidationIssue[] {
+  const claimed = new Set(claimedIssues(issues, config));
+  return issues.filter((issue) => !claimed.has(issue));
 }
 
 /// Parses a numeric `<input>` value into a finite number, defaulting to `0` for

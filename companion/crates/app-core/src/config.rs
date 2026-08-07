@@ -1462,9 +1462,9 @@ impl CardSettings {
             DisplayTemplate::DigitalClock => TemplateKind::DigitalClock,
             DisplayTemplate::ProgressRing => TemplateKind::ProgressRing,
             DisplayTemplate::RowList => TemplateKind::RowList,
-            DisplayTemplate::AnalogClock
-            | DisplayTemplate::BigNumberLabel
-            | DisplayTemplate::IconBadgeText { .. } => return None,
+            DisplayTemplate::AnalogClock => TemplateKind::AnalogClock,
+            DisplayTemplate::BigNumberLabel => TemplateKind::BigNumberLabel,
+            DisplayTemplate::IconBadgeText { .. } => TemplateKind::IconBadgeText,
         };
         let tap_action = match self.tap_action() {
             WidgetTapAction::None => TapAction::None,
@@ -1821,34 +1821,50 @@ fn validate_composition(
     refresh: RefreshPolicy,
     issues: &mut Vec<ValidationIssue>,
 ) {
+    // A pairing is allowed only when the provider actually populates the fields the
+    // template declares (`firmware/main/core/template_fields.c`). A template whose
+    // renderable fields the provider never sends draws its placeholders forever, and
+    // every field the provider sends that the template does not declare is counted in
+    // the device's `unknown_field_count` on EVERY refresh — degrading the diagnostic
+    // that exists to catch real host/firmware schema drift.
     let template_supported = match provider {
+        // Clock sends only title/show_seconds; `big-number-label`'s `value` would
+        // never be written and the card would show a permanent "--".
         ProviderKind::Clock => matches!(
             template,
-            DisplayTemplate::DigitalClock
-                | DisplayTemplate::AnalogClock
-                | DisplayTemplate::BigNumberLabel
+            DisplayTemplate::DigitalClock | DisplayTemplate::AnalogClock
         ),
-        ProviderKind::Pomodoro => matches!(
-            template,
-            DisplayTemplate::ProgressRing | DisplayTemplate::BigNumberLabel
-        ),
-        ProviderKind::Calendar | ProviderKind::Rss => matches!(
-            template,
-            DisplayTemplate::RowList | DisplayTemplate::IconBadgeText { .. }
-        ),
-        // `RowList` is included alongside the templates weather was designed for
-        // (`BigNumberLabel`/`IconBadgeText`) because neither of those is implemented on
-        // the wire yet (see `wire_config` below) — without this, no template exists that
-        // is both composition-valid and wire-compilable for a weather card, so every
-        // weather card would be permanently unsaveable regardless of what the companion
-        // app defaults its `template` to. Drop this once a weather-specific template
-        // lands on the wire.
+        // Pomodoro sends `label`, `duration_seconds`, `remaining_seconds` and
+        // `running`; `big-number-label` declares only `label` out of those, so its
+        // hero `value` stayed "--" forever while the other three counted as unknown
+        // on EVERY tick — a continuous drip, worse than the calendar case above.
+        // Unlike weather's `row-list` this strands no saved configuration: v0/v1
+        // migration hard-codes pomodoro to `ProgressRing`, and while v2 migration
+        // copies `template` verbatim, no v2 file could hold `big-number-label` on a
+        // pomodoro card because `save_and_apply` compiled before persisting and
+        // `wire_config()` refused to lower that template at the time.
+        ProviderKind::Pomodoro => matches!(template, DisplayTemplate::ProgressRing),
+        // Calendar and RSS send `title` plus ten `rowN_*` fields, which only
+        // `row-list` declares. On `icon-badge-text` all ten counted as unknown on
+        // every refresh and the card rendered the hollow `unknown` ring and "--".
+        ProviderKind::Calendar | ProviderKind::Rss => {
+            matches!(template, DisplayTemplate::RowList)
+        }
+        // `icon-badge-text` is what weather's field set was designed for and
+        // `big-number-label` renders its `title`/`value`/`label` subset. `RowList`
+        // must stay: `validate()` runs on config LOAD, cards are never migrated to a
+        // new template, and every weather card saved before the extended templates
+        // shipped is still on `row-list` (it was the only weather-legal template
+        // `wire_config()` could lower back then). Removing it would make those saved
+        // configurations fail to load.
         ProviderKind::Weather => matches!(
             template,
             DisplayTemplate::BigNumberLabel
                 | DisplayTemplate::IconBadgeText { .. }
                 | DisplayTemplate::RowList
         ),
+        // Every json-feed field is user-mapped by name, so the user can populate any
+        // template's declared text fields, including `row-list`'s `rowN_*` set.
         ProviderKind::JsonFeed => matches!(
             template,
             DisplayTemplate::BigNumberLabel
@@ -1873,6 +1889,23 @@ fn validate_composition(
             format!("{path}.tap_action"),
             ValidationCode::InvalidComposition,
             "start/pause and reset actions require a pomodoro provider",
+        ));
+    }
+
+    // `widget_model.c` refuses any widget whose template is not `PROGRESS_RING` while
+    // carrying a non-`NONE` tap action, and `validate_config` is all-or-nothing: one
+    // such widget makes the device reject the entire `ApplyConfig`, so no card updates
+    // at all. Mirror that rule host-side instead of letting a saveable configuration
+    // take the whole layout down.
+    if matches!(
+        tap_action,
+        WidgetTapAction::StartPause | WidgetTapAction::Reset
+    ) && !matches!(template, DisplayTemplate::ProgressRing)
+    {
+        issues.push(ValidationIssue::new(
+            format!("{path}.tap_action"),
+            ValidationCode::InvalidComposition,
+            "start/pause and reset actions require the progress-ring template",
         ));
     }
 

@@ -9,6 +9,45 @@ import type {
   PomodoroSnapshot,
 } from "../lib/types";
 
+/// The closed 11-value icon vocabulary the firmware renders as LVGL vector
+/// glyphs. Kept as one exported constant so the preview's set can never
+/// silently drift from the firmware's — any string outside it (including
+/// an empty one) must fall through to "unknown", never blank space, exactly
+/// as the panel does.
+export const WEATHER_ICONS = [
+  "sun",
+  "moon",
+  "cloud",
+  "cloud-sun",
+  "cloud-moon",
+  "rain",
+  "drizzle",
+  "snow",
+  "storm",
+  "fog",
+  "unknown",
+] as const;
+
+export type WeatherIcon = (typeof WEATHER_ICONS)[number];
+
+const ICON_GLYPH: Record<WeatherIcon, string> = {
+  sun: "☀",
+  moon: "☾",
+  cloud: "☁",
+  "cloud-sun": "⛅",
+  "cloud-moon": "🌙",
+  rain: "🌧",
+  drizzle: "🌦",
+  snow: "❄",
+  storm: "⛈",
+  fog: "🌫",
+  unknown: "○",
+};
+
+function iconName(raw: string): WeatherIcon {
+  return (WEATHER_ICONS as readonly string[]).includes(raw) ? (raw as WeatherIcon) : "unknown";
+}
+
 interface DevicePreviewProps {
   cards: CardSettings[];
   selectedWidgetId: string | null;
@@ -113,6 +152,113 @@ function PomodoroFace({
   );
 }
 
+/// An analog face for `template: { kind: "analog-clock" }`, matching the
+/// firmware's hour/minute hands. Uses the same live wall clock as
+/// `ClockFace`/`StandaloneClockFace`; SSR renders whatever moment the
+/// render happened to run at, same caveat as those.
+function AnalogClockFace({ widget }: { widget: Extract<CardSettings, { kind: "clock" }> }) {
+  const now = useLiveClock();
+  const hours = now.getHours() % 12;
+  const minutes = now.getMinutes();
+  const seconds = now.getSeconds();
+  const hourDeg = hours * 30 + minutes * 0.5;
+  const minuteDeg = minutes * 6 + seconds * 0.1;
+  return (
+    <div className="preview-analog">
+      <span>{widget.title || "Desk"}</span>
+      <div className="preview-analog-face" aria-hidden="true">
+        <span
+          className="preview-analog-hand preview-analog-hand--hour"
+          style={{ transform: `rotate(${hourDeg}deg)` }}
+        />
+        <span
+          className="preview-analog-hand preview-analog-hand--minute"
+          style={{ transform: `rotate(${minuteDeg}deg)` }}
+        />
+      </div>
+    </div>
+  );
+}
+
+/// Face for `template: { kind: "big-number-label" }`: title, a hero value,
+/// and a supporting label — the value falls back to "--" when the runtime
+/// hasn't published one (or published an empty string), matching the
+/// firmware's own fallback rather than rendering nothing.
+function BigNumberFace({
+  widget,
+  fields,
+  sample,
+}: {
+  widget: CardSettings;
+  fields: Map<string, CardFieldValue>;
+  sample: boolean;
+}) {
+  const title = (sample ? "" : textField(fields, "title")) || cardName(widget);
+  const value = sample ? "" : textField(fields, "value");
+  const label = sample ? "" : textField(fields, "label");
+  return (
+    <div className="preview-bignumber">
+      <strong className="preview-bignumber__title">
+        {title}
+        {sample && <SampleBadge />}
+      </strong>
+      <span className="preview-bignumber__hero numeral">{value || "--"}</span>
+      {label && <span className="preview-bignumber__label">{label}</span>}
+    </div>
+  );
+}
+
+/// Face for `template: { kind: "icon-badge-text" }`: an icon block on the
+/// left, title/badge/value/label on the right — mirroring the firmware's
+/// `icon_badge_text.c` layout, which renders `OBJ_TITLE` (top-left) and
+/// `OBJ_BADGE` (top-right) simultaneously as two distinct always-visible
+/// fields, not one falling back to the other. `title` is the card's own
+/// user-facing title (e.g. "Home Weather"); `badge` is the provider-supplied
+/// value (e.g. a weather card's location, "Berlin"). Both are read straight
+/// from the published fields with no cross-substitution: an empty `title`
+/// renders nothing and takes up no visible space, matching the firmware,
+/// which initialises the title string to `""` and simply omits it — `badge`
+/// alone keeps its existing fallback to `cardName(widget)` so the header
+/// always shows at least one label. The icon is never the firmware's own
+/// LVGL vector art (out of scope for a DOM preview); it is a single glyph
+/// chosen from the closed `WEATHER_ICONS` vocabulary, with any unrecognised
+/// name — including one never emitted by any current provider — rendering
+/// as "unknown" exactly as the panel does, so it stays visibly "no data"
+/// rather than silently blank.
+function IconBadgeFace({
+  widget,
+  fields,
+  sample,
+}: {
+  widget: CardSettings;
+  fields: Map<string, CardFieldValue>;
+  sample: boolean;
+}) {
+  const title = sample ? "" : textField(fields, "title");
+  const badge = (sample ? "" : textField(fields, "badge")) || cardName(widget);
+  const value = sample ? "" : textField(fields, "value");
+  const label = sample ? "" : textField(fields, "label");
+  const icon = iconName(sample ? "" : textField(fields, "icon"));
+  return (
+    <div className="preview-iconbadge">
+      <span className={`preview-icon preview-icon--${icon}`} aria-hidden="true">
+        {ICON_GLYPH[icon]}
+      </span>
+      <div className="preview-iconbadge__body">
+        <div className="preview-iconbadge__header">
+          {title && <span className="preview-iconbadge__title">{title}</span>}
+          <strong className="preview-iconbadge__badge">
+            {badge}
+            {sample && <SampleBadge />}
+          </strong>
+        </div>
+        <span className="preview-iconbadge__hero numeral">{value || "--"}</span>
+        {label && <span className="preview-iconbadge__label">{label}</span>}
+      </div>
+    </div>
+  );
+}
+
 /// The up-to-five `rowN_title` / `rowN_time` pairs a calendar or RSS card
 /// publishes, in order, skipping rows with no title — that is how the
 /// backend represents "fewer than five items right now", not a special
@@ -184,14 +330,24 @@ function WidgetFace({
   cardData: CardDataSnapshot[];
   pomodoro: PomodoroSnapshot | undefined;
 }) {
-  if (widget.kind === "clock") {
-    return <ClockFace widget={widget} />;
-  }
   if (widget.kind === "pomodoro") {
     return <PomodoroFace widget={widget} pomodoro={pomodoro} />;
   }
+  if (widget.kind === "clock") {
+    if (widget.template.kind === "analog-clock") {
+      return <AnalogClockFace widget={widget} />;
+    }
+    return <ClockFace widget={widget} />;
+  }
   const fields = cardFields(cardData, widget.id);
-  return <RowsFace widget={widget} fields={fields} sample={fields.size === 0} />;
+  const sample = fields.size === 0;
+  if (widget.template.kind === "big-number-label") {
+    return <BigNumberFace widget={widget} fields={fields} sample={sample} />;
+  }
+  if (widget.template.kind === "icon-badge-text") {
+    return <IconBadgeFace widget={widget} fields={fields} sample={sample} />;
+  }
+  return <RowsFace widget={widget} fields={fields} sample={sample} />;
 }
 
 export function DevicePreview({

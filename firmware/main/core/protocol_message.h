@@ -30,8 +30,10 @@
 #define PROTOCOL_CAPABILITY_ASSET_TRANSFER (UINT64_C(1) << 5)
 #define PROTOCOL_CAPABILITY_FIRMWARE_UPDATE (UINT64_C(1) << 6)
 #define PROTOCOL_LEGACY_CAPABILITIES PROTOCOL_CAPABILITY_CORE_WIDGETS
-#define PROTOCOL_CURRENT_CAPABILITIES \
-    (PROTOCOL_CAPABILITY_CORE_WIDGETS | PROTOCOL_CAPABILITY_CONFIG_ROTATION)
+#define PROTOCOL_CURRENT_CAPABILITIES                            \
+    (PROTOCOL_CAPABILITY_CORE_WIDGETS |                          \
+     PROTOCOL_CAPABILITY_CONFIG_ROTATION |                       \
+     PROTOCOL_CAPABILITY_EXTENDED_TEMPLATES)
 
 typedef enum {
     PROTOCOL_TYPE_STATUS_REQUEST = 1,
@@ -69,6 +71,9 @@ typedef enum {
     PROTOCOL_TEMPLATE_DIGITAL_CLOCK = 1,
     PROTOCOL_TEMPLATE_PROGRESS_RING = 2,
     PROTOCOL_TEMPLATE_ROW_LIST = 3,
+    PROTOCOL_TEMPLATE_ANALOG_CLOCK = 4,
+    PROTOCOL_TEMPLATE_BIG_NUMBER_LABEL = 5,
+    PROTOCOL_TEMPLATE_ICON_BADGE_TEXT = 6,
 } protocol_template_kind_t;
 
 typedef enum {
@@ -249,6 +254,8 @@ typedef enum {
     PROTOCOL_MESSAGE_ERR_CONFIG_TOO_LARGE,
     PROTOCOL_MESSAGE_ERR_UNKNOWN_WIDGET,
 } protocol_message_result_t;
+
+bool protocol_template_kind_valid(protocol_template_kind_t kind);
 
 protocol_message_result_t protocol_message_decode(
     const protocol_frame_t *frame,

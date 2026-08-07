@@ -186,6 +186,12 @@ export const ipcContractFixtures = {
         ]
       }
     ],
+    "card_errors": [
+      {
+        "card_id": "json",
+        "message": "the display refused this card's data (InvalidPayload): invalid push data"
+      }
+    ],
     "persistence": {
       "kind": "recoverable-error",
       "message": "disk full"

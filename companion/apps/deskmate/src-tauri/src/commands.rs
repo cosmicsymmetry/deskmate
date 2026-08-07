@@ -114,21 +114,35 @@ pub fn get_app_snapshot(state: State<'_, DesktopState>) -> Result<AppSnapshot, I
 }
 
 #[tauri::command]
-pub fn validate_config_draft(draft: DraftPayload) -> Result<DraftValidation, IpcError> {
-    let config = parse_draft(&draft)?;
-    // Mirror `save_and_apply`'s `compile()` call below, not just `validate()`. A card
-    // whose template/tap-action combination validates cleanly but has no `wire_config()`
-    // mapping yet (`RequiresCapability`) must be reported here, or the settings UI can
-    // report a draft valid right up until Save rejects it with an error attached to no
-    // field — the bug this guards against. `compile()` already re-runs `validate()`
-    // first and returns exactly those issues when the draft fails basic validation, so
-    // this is a strict superset of the previous behaviour, never a narrower one. The
-    // revision value only matters for `revision == 0` rejection, so any nonzero
-    // placeholder is fine for a draft that is never actually applied.
-    let issues = config
-        .compile(1)
-        .err()
-        .map_or_else(Vec::new, |error| error.issues);
+pub fn validate_config_draft(
+    state: State<'_, DesktopState>,
+    draft: DraftPayload,
+) -> Result<DraftValidation, IpcError> {
+    // The connected device's capabilities are half of what Save checks, so draft
+    // validation must see them too — see `validate_draft_for_device`.
+    let snapshot = state.runtime.snapshot().map_err(IpcError::from)?;
+    validate_draft_for_device(&draft, &snapshot.device)
+}
+
+/// Reports exactly the issues `save_and_apply` would, so the settings UI can never
+/// call a draft valid that Save then rejects.
+///
+/// That means both halves of Save's preflight: `compile()` (a strict superset of
+/// `validate()` — it also catches a card with no `wire_config()` lowering) AND the
+/// connected device's capability check. Reporting only the first was the narrower
+/// contract this exists to prevent: a draft using a template the connected firmware
+/// cannot render read as valid right up until Save refused it, with an error attached
+/// to no field. The revision value only matters for `revision == 0` rejection, so any
+/// nonzero placeholder is fine for a draft that is never actually applied.
+fn validate_draft_for_device(
+    draft: &DraftPayload,
+    device: &app_core::DeviceSnapshot,
+) -> Result<DraftValidation, IpcError> {
+    let config = parse_draft(draft)?;
+    let issues = match config.compile(1) {
+        Ok(compiled) => missing_capability_issues(device, compiled.required_capabilities),
+        Err(error) => error.issues,
+    };
     Ok(DraftValidation {
         valid: issues.is_empty(),
         issues,
@@ -344,24 +358,63 @@ fn ensure_device_compatibility(
     device: &app_core::DeviceSnapshot,
     required_capabilities: u64,
 ) -> Result<(), IpcError> {
+    let issues = missing_capability_issues(device, required_capabilities);
+    if issues.is_empty() {
+        return Ok(());
+    }
+    Err(IpcError::Validation {
+        message: "the connected firmware cannot apply this configuration".into(),
+        issues,
+    })
+}
+
+/// The capability issues a configuration would raise against `device`, or an empty
+/// list when it is compatible (or when no device is online to check against — an
+/// offline draft is saved for the next connection and gated then).
+fn missing_capability_issues(
+    device: &app_core::DeviceSnapshot,
+    required_capabilities: u64,
+) -> Vec<ValidationIssue> {
     if !matches!(device.connection, app_core::ConnectionState::Online)
         || device.protocol_version.is_none()
     {
-        return Ok(());
+        return Vec::new();
     }
     let available = device.capability_bits();
     if available & required_capabilities == required_capabilities {
-        return Ok(());
+        return Vec::new();
     }
     let missing = required_capabilities & !available;
-    Err(IpcError::Validation {
-        message: "the connected firmware cannot apply this configuration".into(),
-        issues: vec![ValidationIssue {
-            path: "device.capabilities".into(),
-            code: app_core::ValidationCode::RequiresCapability,
-            message: format!("connected firmware is missing capability bits 0x{missing:016x}"),
-        }],
-    })
+    vec![ValidationIssue {
+        path: "device.capabilities".into(),
+        code: app_core::ValidationCode::RequiresCapability,
+        message: format!(
+            "the connected firmware does not support {}. Update the firmware, or remove the cards and settings that need it.",
+            describe_capabilities(missing)
+        ),
+    }]
+}
+
+/// Names capabilities the way the person reading the settings window needs them. The
+/// raw bitmask this used to print ("missing capability bits 0x0000000000000008") named
+/// nothing the user could act on.
+fn describe_capabilities(bits: u64) -> String {
+    let mut names: Vec<&'static str> = app_core::DeviceCapability::from_bits(bits)
+        .into_iter()
+        .map(app_core::DeviceCapability::label)
+        .collect();
+    // A bit this build does not know about can only be reported as itself.
+    if bits & !app_core::DeviceCapability::known_bits() != 0 {
+        names.push("an unrecognized device feature");
+    }
+    match names.len() {
+        0 => "the features this configuration needs".to_owned(),
+        1 => names[0].to_owned(),
+        _ => {
+            let last = names.pop().unwrap_or_default();
+            format!("{} and {last}", names.join(", "))
+        }
+    }
 }
 
 fn persist_config(state: &DesktopState, config: &AppConfig) -> Result<SaveReceipt, IpcError> {
@@ -508,9 +561,9 @@ mod tests {
 
     use app_core::{
         AlertHold, AppConfig, AppPreferences, AssetKind, AssetSource, CURRENT_SCHEMA_VERSION,
-        CalendarSource, CardAlert, CardDataSnapshot, CardField, CardFieldValue, CardPresence,
-        CardSettings, CarouselAdvance, CarouselSettings, ConnectionState, DeviceCapability,
-        DeviceCounters, DeviceSnapshot, DisplayOrientation, DisplayTemplate,
+        CalendarSource, CardAlert, CardDataSnapshot, CardError, CardField, CardFieldValue,
+        CardPresence, CardSettings, CarouselAdvance, CarouselSettings, ConnectionState,
+        DeviceCapability, DeviceCounters, DeviceSnapshot, DisplayOrientation, DisplayTemplate,
         FirmwareArtifactMetadata, GlyphRange, PersistenceState, PomodoroSnapshot, PomodoroState,
         ProviderSnapshot, ProviderState, RefreshPolicy, RuntimeDiagnostics, RuntimeError,
         RuntimeState, StoreWarning, UpdateChannel, UpdateCheckPolicy, UpdaterSettings,
@@ -544,13 +597,22 @@ mod tests {
         ));
     }
 
+    /// A device snapshot with no connection, so draft validation exercises only the
+    /// configuration's own issues.
+    fn offline_device() -> AppSnapshot {
+        contract_fixtures().snapshot
+    }
+
     #[test]
     fn validation_is_non_mutating_and_returns_stable_issues() {
         let mut invalid = AppConfig::default();
         invalid.preferences.timezone = "Not/AZone".into();
-        let result = validate_config_draft(DraftPayload {
-            json: serde_json::to_string(&invalid).unwrap(),
-        })
+        let result = validate_draft_for_device(
+            &DraftPayload {
+                json: serde_json::to_string(&invalid).unwrap(),
+            },
+            &offline_device().device,
+        )
         .unwrap();
         assert!(!result.valid);
         assert_eq!(result.issues.len(), 1);
@@ -558,22 +620,27 @@ mod tests {
     }
 
     /// A draft can pass `validate()` cleanly (every field within its bounds) yet still
-    /// be unsaveable because its template has no `wire_config()` mapping. Before this
-    /// fix, `validate_config_draft` ran only `validate()` and reported such a draft
-    /// valid, so Save's separate `compile()` call was the first place the failure ever
-    /// surfaced — with an error attached to no field, in a session where every other
-    /// edit was now blocked too. `validate_config_draft` must catch this itself, on the
-    /// card's own path, exactly like the save path does.
+    /// be unsaveable because one of its fields has no `wire_config()` mapping. Before
+    /// this fix, `validate_config_draft` ran only `validate()` and reported such a
+    /// draft valid, so Save's separate `compile()` call was the first place the
+    /// failure ever surfaced — with an error attached to no field, in a session where
+    /// every other edit was now blocked too. `validate_config_draft` must catch this
+    /// itself, on the card's own path, exactly like the save path does.
+    ///
+    /// `template` no longer fits this shape — `wire_config()` now lowers every
+    /// `DisplayTemplate` (M4 task 3/8) — so this uses `tap_action: Dismiss`, which
+    /// `wire_config()` still cannot lower (host tap actions are a later capability),
+    /// to keep exercising the same "validates but cannot compile" gap.
     #[test]
-    fn draft_validation_catches_a_template_with_no_wire_mapping_like_save_does() {
+    fn draft_validation_catches_a_field_with_no_wire_mapping_like_save_does() {
         let mut config = AppConfig::default();
         config.cards[0] = CardSettings::Weather {
             id: "weather".into(),
             title: "Weather".into(),
             location: "Tbilisi".into(),
             units: WeatherUnits::Metric,
-            template: DisplayTemplate::BigNumberLabel,
-            tap_action: WidgetTapAction::None,
+            template: DisplayTemplate::RowList,
+            tap_action: WidgetTapAction::Dismiss,
             refresh: RefreshPolicy::Interval { minutes: 30 },
             presence: CardPresence::InRotation {
                 dwell_seconds: None,
@@ -582,15 +649,115 @@ mod tests {
         };
         assert!(config.validate().is_ok(), "fixture must validate cleanly");
 
-        let result = validate_config_draft(DraftPayload {
-            json: serde_json::to_string(&config).unwrap(),
-        })
+        let result = validate_draft_for_device(
+            &DraftPayload {
+                json: serde_json::to_string(&config).unwrap(),
+            },
+            &offline_device().device,
+        )
         .unwrap();
 
         assert!(!result.valid);
         assert!(result.issues.iter().any(|issue| {
             issue.path == "cards[0]" && issue.code == ValidationCode::RequiresCapability
         }));
+    }
+
+    /// Final-review finding: `validate_config_draft` compiled the draft but never saw
+    /// the connected device, so a configuration the attached firmware cannot render
+    /// read as valid until Save's `ensure_device_compatibility` refused it. Draft
+    /// validation must report the same issue Save would, on the same path.
+    #[test]
+    fn draft_validation_reports_the_capability_gap_save_would_reject() {
+        let mut config = AppConfig::default();
+        config.cards[0] = CardSettings::Clock {
+            id: "clock".into(),
+            title: "Desk".into(),
+            show_seconds: true,
+            template: DisplayTemplate::AnalogClock,
+            tap_action: WidgetTapAction::None,
+            refresh: RefreshPolicy::DeviceLocal,
+            presence: CardPresence::InRotation {
+                dwell_seconds: None,
+            },
+            alert: CardAlert::None,
+        };
+        let draft = DraftPayload {
+            json: serde_json::to_string(&config).unwrap(),
+        };
+        let required = config.compile(1).unwrap().required_capabilities;
+        assert_ne!(
+            required & DeviceCapability::ExtendedTemplates.bit(),
+            0,
+            "fixture must need the extended-templates capability"
+        );
+
+        // Offline: nothing to gate against, so the draft is reported as valid.
+        let mut device = offline_device().device;
+        assert!(validate_draft_for_device(&draft, &device).unwrap().valid);
+
+        // Online, but on firmware without the capability: the same issue Save raises.
+        device.connection = ConnectionState::Online;
+        device.protocol_version = Some(1);
+        device.capabilities = vec![DeviceCapability::CoreWidgets];
+        device.unknown_capability_bits = 0;
+
+        let result = validate_draft_for_device(&draft, &device).unwrap();
+        assert!(!result.valid);
+        assert_eq!(result.issues.len(), 1);
+        assert_eq!(result.issues[0].path, "device.capabilities");
+        assert_eq!(result.issues[0].code, ValidationCode::RequiresCapability);
+        let IpcError::Validation {
+            issues: save_issues,
+            ..
+        } = ensure_device_compatibility(&device, required).unwrap_err()
+        else {
+            panic!("save must reject an incompatible configuration as a validation error");
+        };
+        assert_eq!(
+            result.issues, save_issues,
+            "draft validation and save must report the identical issue"
+        );
+    }
+
+    /// The capability gap is reported by name, not as a bitmask: "missing capability
+    /// bits 0x0000000000000008" told the user nothing they could act on.
+    #[test]
+    fn capability_gaps_are_named_in_plain_language() {
+        assert_eq!(
+            describe_capabilities(DeviceCapability::ExtendedTemplates.bit()),
+            "extended display templates"
+        );
+        assert_eq!(
+            describe_capabilities(
+                DeviceCapability::ConfigRotation.bit() | DeviceCapability::AssetTransfer.bit()
+            ),
+            "display rotation and icon and font asset transfer"
+        );
+        assert_eq!(
+            describe_capabilities(DeviceCapability::ExtendedTemplates.bit() | 1 << 63),
+            "extended display templates and an unrecognized device feature"
+        );
+
+        let mut device = offline_device().device;
+        device.connection = ConnectionState::Online;
+        device.protocol_version = Some(1);
+        device.capabilities = vec![DeviceCapability::CoreWidgets];
+        device.unknown_capability_bits = 0;
+        let issues = missing_capability_issues(
+            &device,
+            DeviceCapability::CoreWidgets.bit() | DeviceCapability::ExtendedTemplates.bit(),
+        );
+        assert!(
+            issues[0].message.contains("extended display templates"),
+            "got {:?}",
+            issues[0].message
+        );
+        assert!(
+            !issues[0].message.contains("0x"),
+            "no bitmask may reach the user: {:?}",
+            issues[0].message
+        );
     }
 
     #[test]
@@ -899,6 +1066,11 @@ mod tests {
                 remaining_seconds: 900,
             }],
             card_data: card_data.clone(),
+            card_errors: vec![CardError {
+                card_id: "json".into(),
+                message: "the display refused this card's data (InvalidPayload): invalid push data"
+                    .into(),
+            }],
             persistence: PersistenceState::RecoverableError {
                 message: "disk full".into(),
             },

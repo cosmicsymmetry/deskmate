@@ -8,7 +8,20 @@ import { DeviceHeader } from "../src/components/DeviceHeader";
 import { DevicePreview } from "../src/components/DevicePreview";
 import { Filmstrip } from "../src/components/Filmstrip";
 import { ProviderStatus, formatProviderAge } from "../src/components/ProviderStatus";
-import type { AppConfig, CardDataSnapshot, CardSettings, ValidationIssue } from "../src/lib/types";
+import {
+  cardsContainerIssues,
+  issuesForCard,
+  issuesForPath,
+  unclaimedIssues,
+} from "../src/lib/configDraft";
+import type {
+  AppConfig,
+  CardDataSnapshot,
+  CardField,
+  CardSettings,
+  DisplayTemplate,
+  ValidationIssue,
+} from "../src/lib/types";
 import { ipcContractFixtures } from "../src/lib/types.contract";
 
 const snapshot = ipcContractFixtures.snapshot;
@@ -338,6 +351,93 @@ describe("settings accessibility and states", () => {
     expect(html).toMatch(/sample/i);
   });
 
+  // `renderPreview` above is pinned to a calendar/row-list card, so the extended
+  // templates (which are not calendar-shaped) get their own helper rather than
+  // overloading that one's signature. It reuses the same `weatherCard`/`clockCard`
+  // fixtures already defined in this file and drives `DevicePreview` the same way:
+  // one card, selected, with `cardData` standing in for the runtime's last-published
+  // snapshot for that card id.
+  function renderTemplatePreview({
+    template,
+    fields,
+    base,
+  }: {
+    template: DisplayTemplate;
+    fields: CardField[];
+    base?: CardSettings;
+  }): string {
+    const card: CardSettings = { ...(base ?? weatherCard("template-preview")), template };
+    return renderToStaticMarkup(
+      <DevicePreview
+        cards={[card]}
+        selectedWidgetId={card.id}
+        cardData={fields.length > 0 ? [{ card_id: card.id, fields }] : []}
+        pomodoros={[]}
+        orientation="landscape"
+      />,
+    );
+  }
+
+  test("big-number-label preview shows the value as the hero", () => {
+    const html = renderTemplatePreview({
+      template: { kind: "big-number-label" },
+      fields: [
+        { key: "title", value: { kind: "text", value: "Downloads" } },
+        { key: "value", value: { kind: "text", value: "1,204" } },
+        { key: "label", value: { kind: "text", value: "this week" } },
+      ],
+    });
+    expect(html).toContain("1,204");
+    expect(html).toContain("this week");
+    expect(html).toContain("Downloads");
+  });
+
+  test("big-number-label falls back to a placeholder when value is absent", () => {
+    const html = renderTemplatePreview({ template: { kind: "big-number-label" }, fields: [] });
+    expect(html).toContain("--");
+  });
+
+  // title and badge are two distinct always-visible fields in the firmware
+  // (OBJ_TITLE top-left, OBJ_BADGE top-right) — a fixture that only ever
+  // supplies three of the four fields can't catch a fourth silently being
+  // dropped, so this one supplies all four together.
+  test("icon-badge-text preview shows title, badge, value and label together", () => {
+    const html = renderTemplatePreview({
+      template: { kind: "icon-badge-text", icon_asset_id: null },
+      fields: [
+        { key: "icon", value: { kind: "text", value: "cloud-sun" } },
+        { key: "title", value: { kind: "text", value: "Home Weather" } },
+        { key: "badge", value: { kind: "text", value: "Berlin" } },
+        { key: "value", value: { kind: "text", value: "21°" } },
+        { key: "label", value: { kind: "text", value: "Partly cloudy" } },
+      ],
+    });
+    expect(html).toContain("Home Weather");
+    expect(html).toContain("Berlin");
+    expect(html).toContain("21°");
+    expect(html).toContain("Partly cloudy");
+    expect(html).toContain("preview-icon--cloud-sun");
+  });
+
+  test("an unrecognised icon name renders the unknown icon", () => {
+    const html = renderTemplatePreview({
+      template: { kind: "icon-badge-text", icon_asset_id: null },
+      fields: [{ key: "icon", value: { kind: "text", value: "meteor" } }],
+    });
+    expect(html).toContain("preview-icon--unknown");
+  });
+
+  test("analog-clock preview renders a face with hands", () => {
+    const html = renderTemplatePreview({
+      template: { kind: "analog-clock" },
+      fields: [],
+      base: clockCard("analog-preview", { kind: "in-rotation", dwell_seconds: null }),
+    });
+    expect(html).toContain("preview-analog-face");
+    expect(html).toContain("preview-analog-hand--hour");
+    expect(html).toContain("preview-analog-hand--minute");
+  });
+
   test("renders a useful empty state and keeps the panel's narrower claim", () => {
     const populated = renderToStaticMarkup(
       <DevicePreview
@@ -417,6 +517,60 @@ describe("settings accessibility and states", () => {
     expect(formatProviderAge(30)).toBe("Updated just now");
     expect(formatProviderAge(120)).toBe("Updated 2 min ago");
     expect(formatProviderAge(7200)).toBe("Updated 2 hr ago");
+  });
+
+  test("an issue on a path no card, preference, or carousel surface claims (e.g. a missing-capability issue) is not silently dropped", () => {
+    const config = cardListConfig([
+      clockCard("only-card", { kind: "in-rotation", dwell_seconds: null }),
+    ]);
+    const capabilityIssue: ValidationIssue = {
+      path: "device.capabilities",
+      code: "requires-capability",
+      message:
+        "the connected firmware does not support extended templates. Update the firmware, or remove the cards and settings that need it.",
+    };
+    expect(unclaimedIssues([capabilityIssue], config)).toEqual([capabilityIssue]);
+  });
+
+  test("every issue is claimed by exactly one surface — the cards container, a card, a preference field, the carousel, or the unclaimed fallback", () => {
+    const config = cardListConfig([
+      clockCard("first", { kind: "in-rotation", dwell_seconds: null }),
+      clockCard("second", { kind: "in-rotation", dwell_seconds: null }),
+    ]);
+    const issues: ValidationIssue[] = [
+      { path: "cards", code: "empty", message: "At least one card must be in the rotation." },
+      { path: "cards[0].title", code: "too-long", message: "Title is too long." },
+      { path: "cards[1]", code: "invalid-composition", message: "This card is misconfigured." },
+      { path: "preferences.timezone", code: "invalid-timezone", message: "Unknown timezone." },
+      {
+        path: "carousel.advance.default_dwell_seconds",
+        code: "out-of-range",
+        message: "Dwell time is out of range.",
+      },
+      {
+        path: "device.capabilities",
+        code: "requires-capability",
+        message: "the connected firmware does not support extended templates.",
+      },
+    ];
+
+    // Reconstructed independently from the same public helpers each real surface calls
+    // (App scopes CardList/CardEditor/the timezone field/the Filmstrip this exact way —
+    // see App.tsx), plus the fallback under test. This is the invariant that actually
+    // guards against the class of bug this fix addresses: if a surface's claim and
+    // `unclaimedIssues`'s notion of "claimed" ever drift apart, an issue either goes
+    // missing from every surface (as `device.capabilities` originally did) or gets
+    // double-rendered — either way this union stops matching `issues` one-to-one.
+    const union = [
+      ...cardsContainerIssues(issues),
+      ...config.cards.flatMap((card) => issuesForCard(issues, config, card.id)),
+      ...issuesForPath(issues, "preferences.timezone"),
+      ...issuesForPath(issues, "carousel.advance.default_dwell_seconds"),
+      ...unclaimedIssues(issues, config),
+    ];
+
+    expect(union).toHaveLength(issues.length);
+    expect(new Set(union)).toEqual(new Set(issues));
   });
 
   test("includes narrow-window and reduced-motion fallbacks", async () => {

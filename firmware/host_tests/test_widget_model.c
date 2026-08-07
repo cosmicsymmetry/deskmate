@@ -235,6 +235,51 @@ static void test_config_preflight_does_not_mutate_model(void)
            0);
 }
 
+static void build_single_widget_config(protocol_apply_config_t *config,
+                                       const char *id,
+                                       protocol_template_kind_t template_kind,
+                                       uint32_t revision)
+{
+    memset(config, 0, sizeof(*config));
+    config->revision = revision;
+    config->rotation = 90U;
+    config->widget_count = 1U;
+    strcpy(config->widgets[0].widget_id, id);
+    config->widgets[0].template_kind = template_kind;
+    config->widgets[0].size_class = PROTOCOL_SIZE_FULL;
+    config->widgets[0].tap_action = PROTOCOL_TAP_NONE;
+    config->widgets[0].interrupt_policy = PROTOCOL_INTERRUPT_DISABLED;
+    config->screen_count = 1U;
+    strcpy(config->screens[0].screen_id, id);
+    strcpy(config->screens[0].widget_id, id);
+}
+
+static void test_extended_templates_are_accepted(void)
+{
+    widget_model_t model;
+    widget_model_init(&model);
+
+    const protocol_template_kind_t kinds[] = {
+        PROTOCOL_TEMPLATE_ANALOG_CLOCK,
+        PROTOCOL_TEMPLATE_BIG_NUMBER_LABEL,
+        PROTOCOL_TEMPLATE_ICON_BADGE_TEXT,
+    };
+    for (size_t i = 0U; i < sizeof(kinds) / sizeof(kinds[0]); ++i) {
+        protocol_apply_config_t config;
+        build_single_widget_config(&config, "card", kinds[i],
+                                   (uint32_t)(i + 1U));
+        assert(widget_model_apply_config(&model, &config) ==
+               WIDGET_MODEL_CONFIG_APPLIED);
+    }
+
+    /* An out-of-range kind must still be refused. */
+    protocol_apply_config_t bad;
+    build_single_widget_config(&bad, "card", (protocol_template_kind_t)7,
+                               99U);
+    assert(widget_model_apply_config(&model, &bad) ==
+           WIDGET_MODEL_CONFIG_UNSUPPORTED_TEMPLATE);
+}
+
 static void test_timeout_retains_replay_state(void)
 {
     widget_model_init(&s_model);
@@ -275,6 +320,7 @@ int main(void)
     test_atomic_config_and_navigation();
     test_replay_and_global_data_revisions();
     test_config_preflight_does_not_mutate_model();
+    test_extended_templates_are_accepted();
     test_timeout_retains_replay_state();
     printf("test_widget_model: OK (%zu-byte fixed model)\n", sizeof(s_model));
     return 0;

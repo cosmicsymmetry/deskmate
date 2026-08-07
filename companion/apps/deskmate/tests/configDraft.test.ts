@@ -117,15 +117,33 @@ describe("configuration draft helpers", () => {
   });
 
   // Regression test for the final-review finding: `addCard` defaulted weather and
-  // json-feed to `big-number-label`, a template `validate()` accepts but
-  // `wire_config()` (in `config.rs`) cannot lower, so a freshly-added card of either
-  // kind validated cleanly yet always failed to save. Every default here must stay
-  // within the templates `wire_config()` actually implements today: `digital-clock`,
-  // `progress-ring`, `row-list` — see `companion/crates/app-core/tests/config.rs`'s
-  // `every_freshly_added_card_kind_validates_and_compiles` for the Rust-side proof
-  // that these exact defaults both validate AND compile.
+  // json-feed to `big-number-label`, a template `validate()` accepted but
+  // `wire_config()` (in `config.rs`) could not yet lower, so a freshly-added card of
+  // either kind validated cleanly yet always failed to save. `wire_config()` now lowers
+  // all six templates (see `companion/crates/app-core/src/config.rs`), so weather and
+  // json-feed default to the templates their field composition was actually designed
+  // for — `icon-badge-text` and `big-number-label` — instead of the `row-list`
+  // placeholder that rendered a title over empty rows. See
+  // `companion/crates/app-core/tests/config.rs`'s
+  // `every_freshly_added_card_kind_validates_and_compiles` for the Rust-side proof that
+  // every one of these defaults both validates AND compiles.
   test("every freshly-added card kind defaults to a template the wire actually implements", () => {
-    const compilableTemplates = new Set(["digital-clock", "progress-ring", "row-list"]);
+    const compilableTemplates = new Set([
+      "digital-clock",
+      "analog-clock",
+      "progress-ring",
+      "row-list",
+      "big-number-label",
+      "icon-badge-text",
+    ]);
+    const expectedTemplateKind: Record<string, string> = {
+      clock: "digital-clock",
+      pomodoro: "progress-ring",
+      calendar: "row-list",
+      weather: "icon-badge-text",
+      "json-feed": "big-number-label",
+      rss: "row-list",
+    };
     const kinds = ["clock", "pomodoro", "calendar", "weather", "json-feed", "rss"] as const;
     let config: AppConfig = { ...initialConfig(), cards: [] };
     for (const kind of kinds) {
@@ -136,6 +154,7 @@ describe("configuration draft helpers", () => {
         throw new Error(`addCard did not append the ${kind} card`);
       }
       expect(compilableTemplates.has(card.template.kind)).toBe(true);
+      expect(card.template.kind).toBe(expectedTemplateKind[kind]);
     }
   });
 

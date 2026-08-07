@@ -1,10 +1,11 @@
 use app_core::{
     AlertHold, AppConfig, AppSnapshot, AssetSettings, CalendarSource, CardAlert, CardDataSnapshot,
-    CardField, CardFieldValue, CardPresence, CardSettings, CarouselAdvance, CarouselSettings,
-    ConnectionState, DeviceCounters, DeviceSnapshot, DisplayTemplate, FirmwareArtifactMetadata,
-    JsonFieldMapping, MAX_ASSET_BYTES, MAX_PROVIDER_URL_LEN, MAX_UPDATE_ARTIFACT_BYTES,
-    PersistenceState, PomodoroSnapshot, PomodoroState, ProviderSnapshot, ProviderState,
-    RefreshPolicy, RuntimeDiagnostics, RuntimeState, ValidationCode, WeatherUnits, WidgetTapAction,
+    CardError, CardField, CardFieldValue, CardPresence, CardSettings, CarouselAdvance,
+    CarouselSettings, ConnectionState, DeviceCounters, DeviceSnapshot, DisplayTemplate,
+    FirmwareArtifactMetadata, JsonFieldMapping, MAX_ASSET_BYTES, MAX_PROVIDER_URL_LEN,
+    MAX_UPDATE_ARTIFACT_BYTES, PersistenceState, PomodoroSnapshot, PomodoroState, ProviderSnapshot,
+    ProviderState, RefreshPolicy, RuntimeDiagnostics, RuntimeState, ValidationCode, WeatherUnits,
+    WidgetTapAction,
 };
 use protocol::{
     CAPABILITY_ASSET_TRANSFER, CAPABILITY_CONFIG_ROTATION, CAPABILITY_CORE_WIDGETS,
@@ -456,6 +457,10 @@ fn runtime_snapshot_uses_tagged_states_for_frontend_contract() {
                 },
             }],
         }],
+        card_errors: vec![CardError {
+            card_id: "json-feed".into(),
+            message: "the display refused this card's data".into(),
+        }],
         persistence: PersistenceState::Clean,
         diagnostics: RuntimeDiagnostics::default(),
     };
@@ -470,6 +475,7 @@ fn runtime_snapshot_uses_tagged_states_for_frontend_contract() {
     assert_eq!(json["providers"][0]["state"]["kind"], "stale");
     assert_eq!(json["pomodoros"][0]["state"], "paused");
     assert_eq!(json["card_data"][0]["fields"][0]["value"]["kind"], "text");
+    assert_eq!(json["card_errors"][0]["card_id"], "json-feed");
     assert_eq!(json["persistence"]["kind"], "clean");
     assert_eq!(
         serde_json::from_value::<AppSnapshot>(json).unwrap(),
@@ -744,6 +750,173 @@ fn compilation_lowers_cards_to_the_frozen_wire_shape() {
     assert_eq!(pushed, ["clock", "focus"]);
 }
 
+/// Final-review finding: `wire_config()` lowering every template removed the only
+/// backstop that had been keeping host-valid-but-device-invalid compositions from
+/// being saved. A card kind may use a template only when the provider populates the
+/// fields that template declares — otherwise the card renders its placeholders
+/// forever and every field it does send inflates the device's `unknown_field_count`
+/// on every refresh, degrading the drift diagnostic Task 2 deliberately preserved.
+#[test]
+fn compositions_the_provider_cannot_populate_are_rejected() {
+    let presence = CardPresence::InRotation {
+        dwell_seconds: None,
+    };
+    let rejected = [
+        // Clock sends no `value`: big-number-label would show "--" forever.
+        CardSettings::Clock {
+            id: "clock".into(),
+            title: "Desk".into(),
+            show_seconds: true,
+            template: DisplayTemplate::BigNumberLabel,
+            tap_action: WidgetTapAction::None,
+            refresh: RefreshPolicy::DeviceLocal,
+            presence,
+            alert: CardAlert::None,
+        },
+        // Calendar sends `title` plus ten `rowN_*` fields icon-badge-text declares none of.
+        CardSettings::Calendar {
+            id: "agenda".into(),
+            title: "Up next".into(),
+            source: CalendarSource::Url("https://example.test/calendar.ics".into()),
+            template: DisplayTemplate::IconBadgeText {
+                icon_asset_id: None,
+            },
+            tap_action: WidgetTapAction::None,
+            refresh: RefreshPolicy::Interval { minutes: 15 },
+            presence,
+            alert: CardAlert::None,
+        },
+        CardSettings::Rss {
+            id: "news".into(),
+            title: "Headlines".into(),
+            url: "https://example.test/feed.xml".into(),
+            max_items: 3,
+            template: DisplayTemplate::IconBadgeText {
+                icon_asset_id: None,
+            },
+            tap_action: WidgetTapAction::None,
+            refresh: RefreshPolicy::Interval { minutes: 30 },
+            presence,
+            alert: CardAlert::None,
+        },
+        // Pomodoro sends label/duration_seconds/remaining_seconds/running, of which
+        // big-number-label declares only `label`: `value` stays "--" forever and the
+        // other three count as unknown on every tick, not merely on every refresh.
+        // `tap_action` is None here so the failure can only be the template — the
+        // timer-action rule is pinned separately below.
+        CardSettings::Pomodoro {
+            id: "focus".into(),
+            label: "Focus".into(),
+            duration_seconds: 1_500,
+            template: DisplayTemplate::BigNumberLabel,
+            tap_action: WidgetTapAction::None,
+            refresh: RefreshPolicy::DeviceLocal,
+            presence,
+            alert: CardAlert::None,
+        },
+    ];
+
+    for card in rejected {
+        let id = card.id().to_owned();
+        let config = AppConfig {
+            cards: vec![card],
+            ..AppConfig::default()
+        };
+        let error = config
+            .validate()
+            .expect_err(&format!("{id} must not validate"));
+        assert!(
+            error.issues.iter().any(|issue| {
+                issue.path == "cards[0].template"
+                    && issue.code == ValidationCode::InvalidComposition
+            }),
+            "{id} must report an incompatible template: {:?}",
+            error.issues
+        );
+    }
+}
+
+/// `validate()` runs on config LOAD and nothing migrates a saved card to a new
+/// template, so every weather card saved before the extended templates shipped is
+/// still on `row-list`. Narrowing weather's allowed set would make those saved
+/// configurations fail to load, stranding the user's whole configuration.
+#[test]
+fn already_saved_weather_cards_on_row_list_still_load() {
+    let config = AppConfig {
+        cards: vec![CardSettings::Weather {
+            id: "weather".into(),
+            title: "Weather".into(),
+            location: "Tbilisi".into(),
+            units: WeatherUnits::Metric,
+            template: DisplayTemplate::RowList,
+            tap_action: WidgetTapAction::None,
+            refresh: RefreshPolicy::Interval { minutes: 30 },
+            presence: CardPresence::InRotation {
+                dwell_seconds: None,
+            },
+            alert: CardAlert::None,
+        }],
+        ..AppConfig::default()
+    };
+    config.validate().expect("saved weather cards must load");
+    config.compile(1).expect("and must still compile");
+}
+
+/// Final-review finding: `widget_model.c` refuses any widget whose template is not
+/// `PROGRESS_RING` while carrying a non-`NONE` tap action, and `validate_config` is
+/// all-or-nothing — so one such card made the device reject the ENTIRE `ApplyConfig`
+/// and nothing on the display updated at all.
+///
+/// The fixture below is now rejected on its template as well, since pomodoro no longer
+/// allows `big-number-label` at all. This still pins the tap-action rule specifically:
+/// the assertion demands an issue on the `tap_action` path, which the template rule
+/// does not raise. Keeping it independent matters because the guard mirrors a firmware
+/// rule about templates in general, not about which templates pomodoro may use.
+#[test]
+fn timer_tap_actions_require_the_progress_ring_template() {
+    for tap_action in [WidgetTapAction::StartPause, WidgetTapAction::Reset] {
+        let config = AppConfig {
+            cards: vec![CardSettings::Pomodoro {
+                id: "focus".into(),
+                label: "Focus".into(),
+                duration_seconds: 1_500,
+                template: DisplayTemplate::BigNumberLabel,
+                tap_action: tap_action.clone(),
+                refresh: RefreshPolicy::DeviceLocal,
+                presence: CardPresence::InRotation {
+                    dwell_seconds: None,
+                },
+                alert: CardAlert::None,
+            }],
+            ..AppConfig::default()
+        };
+        let error = config.validate().expect_err(&format!(
+            "{tap_action:?} off progress-ring must not validate"
+        ));
+        assert!(
+            error.issues.iter().any(|issue| {
+                issue.path == "cards[0].tap_action"
+                    && issue.code == ValidationCode::InvalidComposition
+            }),
+            "{tap_action:?} must be reported on the tap_action path: {:?}",
+            error.issues
+        );
+    }
+
+    // The same action on `progress-ring` stays valid.
+    let config = AppConfig {
+        cards: vec![pomodoro_card(
+            "focus",
+            CardPresence::InRotation {
+                dwell_seconds: None,
+            },
+            CardAlert::None,
+        )],
+        ..AppConfig::default()
+    };
+    config.validate().expect("progress-ring timers stay valid");
+}
+
 #[test]
 fn compilation_is_deterministic_for_identical_input() {
     let config = AppConfig::default();
@@ -769,12 +942,16 @@ fn timed_advance_no_longer_requires_an_unimplemented_capability() {
 /// accepts but `wire_config()` cannot lower (`RequiresCapability`), and the IPC
 /// `validate_config_draft` command ran only `validate()`, never `compile()` — so the
 /// settings UI reported the draft valid right up until Save rejected it with an error
-/// attached to no field. Each of these six cards mirrors exactly what `addCard`
-/// produces for that kind today (see `configDraft.ts`), with the field(s) addCard
-/// deliberately leaves empty (calendar source / weather location / json-feed url and
-/// its empty `mappings` list / rss url) filled in — this test is about whether the
-/// REST of a freshly-added card's defaults are wire-compilable, not about the
-/// separate, already-correctly-surfaced "required field left empty" validation error.
+/// attached to no field. `wire_config()` now lowers every `DisplayTemplate` (this is
+/// the M4 task-3/8 fix), so `addCard` defaults weather and json-feed to the templates
+/// their field composition was designed for — `icon-badge-text` and
+/// `big-number-label` — instead of the `row-list` placeholder this test used to pin.
+/// Each of these six cards mirrors exactly what `addCard` produces for that kind today
+/// (see `configDraft.ts`), with the field(s) addCard deliberately leaves empty
+/// (calendar source / weather location / json-feed url and its empty `mappings` list /
+/// rss url) filled in — this test is about whether the REST of a freshly-added card's
+/// defaults are wire-compilable, not about the separate, already-correctly-surfaced
+/// "required field left empty" validation error.
 #[test]
 fn every_freshly_added_card_kind_validates_and_compiles() {
     let presence = CardPresence::InRotation {
@@ -804,7 +981,9 @@ fn every_freshly_added_card_kind_validates_and_compiles() {
             title: "Weather".into(),
             location: "Tbilisi".into(),
             units: WeatherUnits::Metric,
-            template: DisplayTemplate::RowList,
+            template: DisplayTemplate::IconBadgeText {
+                icon_asset_id: None,
+            },
             tap_action: WidgetTapAction::None,
             refresh: RefreshPolicy::Interval { minutes: 30 },
             presence,
@@ -822,7 +1001,7 @@ fn every_freshly_added_card_kind_validates_and_compiles() {
                 field: "value".into(),
                 path: "$.value".into(),
             }],
-            template: DisplayTemplate::RowList,
+            template: DisplayTemplate::BigNumberLabel,
             tap_action: WidgetTapAction::None,
             refresh: RefreshPolicy::Interval { minutes: 15 },
             presence,
@@ -853,6 +1032,123 @@ fn every_freshly_added_card_kind_validates_and_compiles() {
             panic!("{} card failed compile(): {error:?}", config.cards[0].id())
         });
     }
+}
+
+/// Task 8: `wire_config()` used to return `None` for `AnalogClock`, `BigNumberLabel`,
+/// and `IconBadgeText`, so any card configured with one of them validated cleanly but
+/// could never compile (`RequiresCapability`). Exercises all six `DisplayTemplate`
+/// variants, each on a card kind `validate_composition` actually allows it on, and
+/// asserts `compile()` now succeeds for every one.
+#[test]
+fn every_display_template_lowers_to_the_wire() {
+    let presence = CardPresence::InRotation {
+        dwell_seconds: None,
+    };
+    let cards = [
+        clock_card("digital-clock", presence),
+        CardSettings::Clock {
+            id: "analog-clock".into(),
+            title: "Desk".into(),
+            show_seconds: true,
+            template: DisplayTemplate::AnalogClock,
+            tap_action: WidgetTapAction::None,
+            refresh: RefreshPolicy::DeviceLocal,
+            presence,
+            alert: CardAlert::None,
+        },
+        pomodoro_card(
+            "progress-ring",
+            presence,
+            CardAlert::OnTimerFinish {
+                hold: AlertHold::UntilDismissed,
+            },
+        ),
+        CardSettings::Calendar {
+            id: "row-list".into(),
+            title: "Up next".into(),
+            source: CalendarSource::Url("https://example.test/calendar.ics".into()),
+            template: DisplayTemplate::RowList,
+            tap_action: WidgetTapAction::None,
+            refresh: RefreshPolicy::Interval { minutes: 15 },
+            presence,
+            alert: CardAlert::None,
+        },
+        CardSettings::Weather {
+            id: "big-number-label".into(),
+            title: "Weather".into(),
+            location: "Tbilisi".into(),
+            units: WeatherUnits::Metric,
+            template: DisplayTemplate::BigNumberLabel,
+            tap_action: WidgetTapAction::None,
+            refresh: RefreshPolicy::Interval { minutes: 30 },
+            presence,
+            alert: CardAlert::None,
+        },
+        CardSettings::Weather {
+            id: "icon-badge-text".into(),
+            title: "Weather".into(),
+            location: "Tbilisi".into(),
+            units: WeatherUnits::Metric,
+            template: DisplayTemplate::IconBadgeText {
+                icon_asset_id: None,
+            },
+            tap_action: WidgetTapAction::None,
+            refresh: RefreshPolicy::Interval { minutes: 30 },
+            presence,
+            alert: CardAlert::None,
+        },
+    ];
+
+    for card in cards {
+        let template = card.template().clone();
+        let config = AppConfig {
+            cards: vec![card],
+            ..AppConfig::default()
+        };
+        config.compile(1).unwrap_or_else(|error| {
+            panic!("{template:?} must lower to the wire, but compile() failed: {error:?}")
+        });
+    }
+}
+
+/// Task 8: `required_device_capabilities()` already flags `CAPABILITY_EXTENDED_TEMPLATES`
+/// for the three extended templates and only those (see `config.rs`); this pins that
+/// contract from the outside so a future change to the template set can't silently
+/// widen or narrow which templates demand the capability.
+#[test]
+fn extended_templates_require_the_extended_capability() {
+    let presence = CardPresence::InRotation {
+        dwell_seconds: None,
+    };
+    let extended = AppConfig {
+        cards: vec![CardSettings::Weather {
+            id: "big-number-label".into(),
+            title: "Weather".into(),
+            location: "Tbilisi".into(),
+            units: WeatherUnits::Metric,
+            template: DisplayTemplate::BigNumberLabel,
+            tap_action: WidgetTapAction::None,
+            refresh: RefreshPolicy::Interval { minutes: 30 },
+            presence,
+            alert: CardAlert::None,
+        }],
+        ..AppConfig::default()
+    };
+    assert_eq!(
+        extended.required_device_capabilities() & CAPABILITY_EXTENDED_TEMPLATES,
+        CAPABILITY_EXTENDED_TEMPLATES,
+        "big-number-label must require the extended-templates capability"
+    );
+
+    let core = AppConfig {
+        cards: vec![clock_card("digital-clock", presence)],
+        ..AppConfig::default()
+    };
+    assert_eq!(
+        core.required_device_capabilities() & CAPABILITY_EXTENDED_TEMPLATES,
+        0,
+        "core templates must not demand the extended-templates capability"
+    );
 }
 
 #[test]

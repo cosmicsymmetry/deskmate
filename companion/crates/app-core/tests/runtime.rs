@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
@@ -14,8 +14,8 @@ use app_core::{
 use chrono::Utc;
 use device::{DeviceError, ReceivedEvent, SessionDiagnostics, TransportError};
 use protocol::{
-    DeviceEvent, EventAction, EventKind, Field, FieldValue, PROTOCOL_VERSION, ScreenConfig,
-    StatusResponse, TimeSync, TriggerInterrupt, WidgetConfig,
+    DeviceEvent, ErrorCode, ErrorResponse, EventAction, EventKind, Field, FieldValue,
+    PROTOCOL_VERSION, ScreenConfig, StatusResponse, TimeSync, TriggerInterrupt, WidgetConfig,
 };
 
 const FULL_JSON: &str = include_str!("fixtures/full.json");
@@ -56,6 +56,9 @@ struct MockState {
     replay: ReplayCache,
     latest_interrupt_token: u32,
     next_push_gate: Option<Arc<PushGate>>,
+    /// Widgets whose pushes the device understands and refuses, exactly as real
+    /// firmware does for a field the widget's template does not declare.
+    refused_pushes: BTreeSet<String>,
 }
 
 #[derive(Default)]
@@ -125,6 +128,14 @@ impl MockDeviceControl {
 
     fn set_latest_interrupt_token(&self, token: u32) {
         self.state.lock().unwrap().latest_interrupt_token = token;
+    }
+
+    fn refuse_pushes_for(&self, widget_id: &str) {
+        self.state
+            .lock()
+            .unwrap()
+            .refused_pushes
+            .insert(widget_id.to_owned());
     }
 }
 
@@ -233,9 +244,16 @@ impl RuntimeDevice for MockDevice {
             gate.enter_and_wait();
         }
         self.with_connected(|state| {
-            state.replay.pushes.insert(widget_id.clone(), fields);
-            state.operations.push(Operation::Push(widget_id));
-        })
+            state.operations.push(Operation::Push(widget_id.clone()));
+            if state.refused_pushes.contains(&widget_id) {
+                return Err(DeviceError::Rejected(ErrorResponse {
+                    code: ErrorCode::InvalidPayload,
+                    diagnostic: "invalid push data".into(),
+                }));
+            }
+            state.replay.pushes.insert(widget_id, fields);
+            Ok(())
+        })?
     }
 
     fn activate_screen(&mut self, screen_id: String) -> Result<(), DeviceError> {
@@ -998,6 +1016,64 @@ fn provider_failure_keeps_last_success_and_projects_stale_state() {
     });
     assert_eq!(stale.providers[0].last_success_unix_ms, last_success);
     assert_eq!(stale.providers[0].age_seconds, Some(60));
+    runtime.shutdown().unwrap();
+}
+
+/// Final-review finding: a push the device refused aborted `push_dirty_widgets`
+/// WITHOUT clearing the widget from `dirty_widgets`, so the runtime re-attempted the
+/// identical payload every cycle, sat in `RuntimeState::Error` with raw protocol text
+/// forever, and starved every widget queued behind it in the same cycle. A refusal is
+/// terminal for that payload: drop it, record it against its card, keep going.
+#[test]
+fn a_refused_push_is_not_retried_and_does_not_starve_other_cards() {
+    let control = MockDeviceControl::default();
+    // `dirty_widgets` is ordered, so "clock" is attempted before "pomodoro": the
+    // pomodoro pushes below prove the cycle continued past the refusal.
+    control.refuse_pushes_for("clock");
+    let runtime = start_runtime(full_config(), &control, Duration::from_millis(5));
+
+    let snapshot = wait_for_snapshot(&runtime, Duration::from_secs(2), |snapshot| {
+        !snapshot.card_errors.is_empty()
+    });
+    assert_eq!(snapshot.card_errors.len(), 1);
+    assert_eq!(snapshot.card_errors[0].card_id, "clock");
+    assert!(
+        snapshot.card_errors[0].message.contains("refused"),
+        "message must be actionable, got {:?}",
+        snapshot.card_errors[0].message
+    );
+    assert!(
+        !matches!(snapshot.runtime, RuntimeState::Error { .. }),
+        "a card-scoped refusal must not park the whole runtime in Error"
+    );
+
+    // The widget ordered behind the refused one in the SAME cycle still reached the
+    // device, and later cycles still push it.
+    let pomodoro_pushes = |control: &MockDeviceControl| {
+        control
+            .operations()
+            .iter()
+            .filter(|operation| matches!(operation, Operation::Push(id) if id == "pomodoro"))
+            .count()
+    };
+    assert!(
+        pomodoro_pushes(&control) >= 1,
+        "a refusal must not skip the widgets queued behind it"
+    );
+    runtime
+        .control_pomodoro("pomodoro", PomodoroAction::Start)
+        .unwrap();
+    wait_for(Duration::from_secs(2), || pomodoro_pushes(&control) >= 2);
+
+    let clock_pushes = control
+        .operations()
+        .iter()
+        .filter(|operation| matches!(operation, Operation::Push(id) if id == "clock"))
+        .count();
+    assert_eq!(
+        clock_pushes, 1,
+        "the refused payload must be attempted once, not re-queued every cycle"
+    );
     runtime.shutdown().unwrap();
 }
 

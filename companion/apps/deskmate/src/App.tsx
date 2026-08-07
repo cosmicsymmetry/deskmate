@@ -8,6 +8,7 @@ import { Filmstrip } from "./components/Filmstrip";
 import { ProviderStatus } from "./components/ProviderStatus";
 import {
   addCard,
+  cardName,
   cardsContainerIssues,
   copyConfig,
   firstRunSteps,
@@ -15,6 +16,7 @@ import {
   issuesForCard,
   removeCard,
   rotationCards,
+  unclaimedIssues,
   updateWidget,
 } from "./lib/configDraft";
 import {
@@ -167,6 +169,12 @@ export function App() {
     snapshot.pomodoros.find((candidate) => candidate.widget_id === selectedCardId) ?? null;
   const issues = validation.result.issues;
   const cardIssues = selectedCardId ? issuesForCard(issues, draft, selectedCardId) : [];
+  // Issues no card-, preference-, or carousel-scoped surface below claims — e.g. a
+  // `device.capabilities` issue naming a card the connected display can't render.
+  // Rendered as its own banner so an unclaimed issue is explained somewhere rather than
+  // just blocking Save with no highlighted control anywhere in the UI (see
+  // `unclaimedIssues`).
+  const leftoverIssues = unclaimedIssues(issues, draft);
   const defaultDwellSeconds =
     draft.carousel.advance.kind === "timed" ? draft.carousel.advance.default_dwell_seconds : null;
   const isOnlyRotationCard =
@@ -317,6 +325,55 @@ export function App() {
                 ? `${persistenceError}. The unreadable file was left untouched; saving will create a fresh valid configuration.`
                 : "The operating-system setting and saved preference differ. Choose your preference below to reconcile them."}
             </p>
+          </div>
+        </aside>
+      )}
+
+      {/* A push the display understood and refused is card-scoped and actionable:
+          name the card and say what it refused, rather than parking the whole app in
+          an error state over one card's data. */}
+      {snapshot.card_errors.length > 0 && (
+        <aside className="recovery-banner" role="status">
+          <span aria-hidden="true">!</span>
+          <div>
+            <strong>
+              {snapshot.card_errors.length === 1
+                ? "The display refused one card's data"
+                : `The display refused ${snapshot.card_errors.length} cards' data`}
+            </strong>
+            {snapshot.card_errors.map((cardError) => {
+              const card = draft.cards.find((candidate) => candidate.id === cardError.card_id);
+              return (
+                <p key={cardError.card_id}>
+                  <strong>{card ? cardName(card) : cardError.card_id}</strong> — {cardError.message}
+                </p>
+              );
+            })}
+            <p>
+              Everything else kept updating. Adjust the card below and save to send its data
+              again.
+            </p>
+          </div>
+        </aside>
+      )}
+
+      {/* A validation issue whose path no card-, preference-, or carousel-scoped
+          surface below claims (see `unclaimedIssues`) — e.g. `device.capabilities`,
+          emitted when the connected display lacks a feature the draft needs. Without
+          this, such an issue still disabled Save but was never shown anywhere,
+          which is strictly worse than not validating it at all. */}
+      {leftoverIssues.length > 0 && (
+        <aside className="recovery-banner" role="status">
+          <span aria-hidden="true">!</span>
+          <div>
+            <strong>
+              {leftoverIssues.length === 1
+                ? "One more thing needs attention"
+                : `${leftoverIssues.length} more things need attention`}
+            </strong>
+            {leftoverIssues.map((issue) => (
+              <p key={`${issue.path}:${issue.code}`}>{issue.message}</p>
+            ))}
           </div>
         </aside>
       )}

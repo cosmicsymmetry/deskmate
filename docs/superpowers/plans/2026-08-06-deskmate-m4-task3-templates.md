@@ -16,6 +16,11 @@
 - Treat all bytes received from the host as untrusted: bound every length and count, reject malformed or unsupported messages, and recover framing without rebooting.
 - The canvas is exactly 448x368 landscape. There is one layout per template. Size classes do not exist in the card model; `SizeClass::Full` is pinned on the wire. Do not reintroduce dashboards or a status strip.
 - Preserve the standalone clock on boot, host loss, malformed input, and protocol version mismatch.
+- An LVGL label needs **both** a width and a height pinned for `LV_LABEL_LONG_DOT` to
+  ellipsize. With a width alone the label keeps `LV_SIZE_CONTENT` height, and LVGL
+  force-breaks an over-long word onto a second line rather than showing dots — so the text
+  silently wraps and the object grows instead of truncating. Any label that must not wrap
+  gets `lv_obj_set_width` **and** `lv_obj_set_height`.
 - `TEMPLATE_OBJECT_CAPACITY` is `14`. A template's entries in `view->objects[]` must not exceed it. Composite artwork uses a single container object whose children are not tracked in `objects[]`.
 - `template_field_patch_t.dirty_mask` is `uint16_t`, so a template registry may declare at most **16** fields.
 - The weather icon vocabulary is a closed set of exactly 11 values: `sun`, `moon`, `cloud`, `cloud-sun`, `cloud-moon`, `rain`, `drizzle`, `snow`, `storm`, `fog`, `unknown`. Any unrecognised value renders `unknown`.
@@ -244,6 +249,13 @@ git commit -m "feat: add extended template kinds to the wire contract"
 - Consumes: `PROTOCOL_TEMPLATE_ANALOG_CLOCK`, `PROTOCOL_TEMPLATE_BIG_NUMBER_LABEL`, `PROTOCOL_TEMPLATE_ICON_BADGE_TEXT` from Task 1.
 - Produces: registry entries so `template_fields_registry()` and `template_fields_resolve()` accept the new kinds. Field names other tasks depend on: analog-clock `title`/`show_seconds`; big-number-label `title`/`value`/`label`; icon-badge-text `title`/`icon`/`badge`/`value`/`label`.
 
+**Temperature bounds, corrected during execution.** These are tenths of a degree *in the
+unit the user selected*, not always Celsius. An earlier draft of this plan used `-1000..1000`,
+which breaks at 100.1 F because `template_fields_resolve` rejects the **entire push** when a
+single field falls out of range — the card would go stale rather than mis-render one value.
+`-2000..2000` covers Celsius (-90..60) and Fahrenheit (-130..135) with headroom while staying
+bounded against a malicious host. Do not narrow it back.
+
 **Why icon-badge-text accepts fields it does not render.** The weather provider pushes ten fields: `title`, `value`, `label`, `badge`, `icon`, `temperature_tenths`, `apparent_temperature_tenths`, `unit`, `stale`, `error`. The layout renders five of them. Fields absent from a registry are counted in `widget_model`'s `unknown_field_count`, which `docs/hardware/board-notes.md` instructs hardware sessions to watch as a diagnostic signal. If three fields were unknown on every weather push, that counter would climb forever and stop meaning anything. So the schema declares all ten and the view renders five. Do not "clean this up" by removing the unrendered descriptors.
 
 - [ ] **Step 1: Write the failing schema tests**
@@ -352,8 +364,8 @@ static const template_field_descriptor_t s_icon_badge_text_fields[] = {
     TEXT_FIELD("value", false, 16U, "--"),
     TEXT_FIELD("label", false, 64U, ""),
     TEXT_FIELD("unit", false, 16U, ""),
-    INT_FIELD("temperature_tenths", false, -1000, 1000, 0),
-    INT_FIELD("apparent_temperature_tenths", false, -1000, 1000, 0),
+    INT_FIELD("temperature_tenths", false, -2000, 2000, 0),
+    INT_FIELD("apparent_temperature_tenths", false, -2000, 2000, 0),
     BOOL_FIELD("stale", false, false),
     TEXT_FIELD("error", false, 96U, ""),
 };
@@ -485,7 +497,15 @@ git commit -m "feat: accept extended template kinds in the widget model"
 - Produces:
   - `typedef enum { WEATHER_ICON_UNKNOWN = 0, WEATHER_ICON_SUN, WEATHER_ICON_MOON, WEATHER_ICON_CLOUD, WEATHER_ICON_CLOUD_SUN, WEATHER_ICON_CLOUD_MOON, WEATHER_ICON_RAIN, WEATHER_ICON_DRIZZLE, WEATHER_ICON_SNOW, WEATHER_ICON_STORM, WEATHER_ICON_FOG } weather_icon_t;`
   - `weather_icon_t weather_icon_from_name(const char *name);`
-  - `void weather_icon_render(lv_obj_t *container, weather_icon_t icon, lv_color_t color);`
+  - `void weather_icon_render(lv_obj_t *container, weather_icon_t icon, lv_color_t color, lv_color_t background);`
+
+**Background colour, corrected during execution.** `weather_icon_render` takes the screen
+background as an explicit parameter. The crescent moon and the `unknown` ring are drawn by
+punching a background-coloured disc over a lit disc, so that colour must be the real card
+background — `0x101020`, as set in `ui/clock_screen.c` and `ui/template_view.c` — not black.
+An earlier draft hardcoded `0x000000`, which would have drawn a visible black disc on the
+navy card. Passing it in rather than hardcoding it also stops a third copy of the background
+constant drifting out of sync.
 
 **Design note.** Icons are composed from LVGL primitives (`lv_obj_t` circles via full corner radius, and `lv_line`) inside a caller-owned container. They are *not* font glyphs and *not* pushed assets: asset transfer is M4 Task 6, and a bounded built-in set cannot fail to resolve. `weather_icon_render()` deletes the container's existing children before drawing, so repeated calls are idempotent. The container itself is one entry in `objects[]`; its children are untracked, which is how the icon stays within `TEMPLATE_OBJECT_CAPACITY`.
 
@@ -581,7 +601,7 @@ Then, in a separate `#ifndef WEATHER_ICON_HOST_TEST` guard at the bottom so the 
 /* Clears `container`'s children and draws `icon` into it using LVGL
  * primitives. Idempotent. The container must already be sized. */
 void weather_icon_render(lv_obj_t *container, weather_icon_t icon,
-                         lv_color_t color);
+                         lv_color_t color, lv_color_t background);
 #endif
 ```
 
@@ -687,12 +707,14 @@ static void draw_sun(lv_obj_t *parent, lv_color_t color, int16_t dx,
     (void)disc(parent, color, diameter, dx, dy);
 }
 
-static void draw_moon(lv_obj_t *parent, lv_color_t color, int16_t dx,
-                      int16_t dy)
+static void draw_moon(lv_obj_t *parent, lv_color_t color,
+                      lv_color_t background, int16_t dx, int16_t dy)
 {
-    /* Crescent: a lit disc with a background-coloured disc offset over it. */
+    /* Crescent: a lit disc with a background-coloured disc offset over it.
+     * The cutout MUST use the real screen background (0x101020), not black —
+     * a black disc on the navy card reads as a bug, not a crescent. */
     (void)disc(parent, color, 56, dx, dy);
-    (void)disc(parent, lv_color_hex(0x000000), 48, dx + 16, dy - 8);
+    (void)disc(parent, background, 48, dx + 16, dy - 8);
 }
 
 static void draw_drops(lv_obj_t *parent, lv_color_t color, int16_t count,
@@ -705,7 +727,7 @@ static void draw_drops(lv_obj_t *parent, lv_color_t color, int16_t count,
 }
 
 void weather_icon_render(lv_obj_t *container, weather_icon_t icon,
-                         lv_color_t color)
+                         lv_color_t color, lv_color_t background)
 {
     if (container == NULL) {
         return;
@@ -718,7 +740,7 @@ void weather_icon_render(lv_obj_t *container, weather_icon_t icon,
         draw_sun(container, color, 0, 0, 72);
         break;
     case WEATHER_ICON_MOON:
-        draw_moon(container, color, 0, 0);
+        draw_moon(container, color, background, 0, 0);
         break;
     case WEATHER_ICON_CLOUD:
         draw_cloud(container, color, 0);
@@ -728,7 +750,7 @@ void weather_icon_render(lv_obj_t *container, weather_icon_t icon,
         draw_cloud(container, color, 6);
         break;
     case WEATHER_ICON_CLOUD_MOON:
-        draw_moon(container, color, -26, -30);
+        draw_moon(container, color, background, -26, -30);
         draw_cloud(container, color, 6);
         break;
     case WEATHER_ICON_RAIN:
@@ -759,7 +781,7 @@ void weather_icon_render(lv_obj_t *container, weather_icon_t icon,
         /* A hollow ring: unmistakably "no data", never a plausible-looking
          * wrong forecast. */
         (void)disc(container, color, 72, 0, 0);
-        (void)disc(container, lv_color_hex(0x000000), 52, 0, 0);
+        (void)disc(container, background, 52, 0, 0);
         break;
     }
 }
@@ -1041,7 +1063,15 @@ git commit -m "feat: add the analog-clock template view"
 - Consumes: Task 2's `s_big_number_label_fields` (`title`, `value`, `label`).
 - Produces: `big_number_label_create(view, parent, size)`, `big_number_label_patch(view, fields, dirty_mask)`. No tick.
 
-**Layout on 448x368.** Title top-left in muted small caps; `value` centred in `lv_font_montserrat_48` as the hero; `label` directly beneath it; the shared state label at the bottom. `value` is capped at 16 characters by the schema, so it cannot overflow the panel.
+**Layout on 448x368.** Title top-left in muted grey; `value` centred in `lv_font_montserrat_48` as the hero; `label` directly beneath it; the shared state label at the bottom.
+
+**Overflow, corrected during execution.** An earlier draft claimed the schema's 16-character
+cap on `value` made overflow impossible. That is false: measured against this project's
+`lv_font_montserrat_48` glyph metrics, sixteen digits run roughly 453-514px and uppercase-heavy
+strings far more, against a 448px panel. Without a width and a long mode, LVGL clips a centred
+label at the panel edge with no ellipsis — silently amputating digits from the one number the
+card exists to show. Every text object in this template therefore carries an explicit width and
+`LV_LABEL_LONG_DOT`, so an over-long value is visibly truncated rather than quietly wrong.
 
 - [ ] **Step 1: Declare the entry points**
 
@@ -1090,6 +1120,11 @@ bool big_number_label_create(template_widget_view_t *view,
     view->objects[OBJ_TITLE] = lv_label_create(view->root);
     lv_obj_set_style_text_color(view->objects[OBJ_TITLE],
                                 lv_color_hex(0x8f93a8), 0);
+    lv_label_set_long_mode(view->objects[OBJ_TITLE], LV_LABEL_LONG_DOT);
+    lv_obj_set_width(view->objects[OBJ_TITLE], 392);
+    lv_obj_set_height(view->objects[OBJ_TITLE],
+                      lv_font_get_line_height(lv_obj_get_style_text_font(
+                          view->objects[OBJ_TITLE], LV_PART_MAIN)));
     lv_obj_align(view->objects[OBJ_TITLE], LV_ALIGN_TOP_LEFT, 28, 24);
     lv_label_set_text(view->objects[OBJ_TITLE], "");
 
@@ -1098,6 +1133,18 @@ bool big_number_label_create(template_widget_view_t *view,
                                &lv_font_montserrat_48, 0);
     lv_obj_set_style_text_color(view->objects[OBJ_VALUE],
                                 lv_color_hex(0xf2c14e), 0);
+    /* 16 schema-legal characters exceed 448px in this font. Bound the box and
+     * ellipsize, so an over-long value is visibly cut rather than silently
+     * clipped at the panel edge. */
+    lv_label_set_long_mode(view->objects[OBJ_VALUE], LV_LABEL_LONG_DOT);
+    lv_obj_set_width(view->objects[OBJ_VALUE], 400);
+    /* Height must be pinned too. With only a width, the label keeps
+     * LV_SIZE_CONTENT height and LVGL force-breaks an over-long word onto a
+     * second line instead of ellipsizing, so LONG_DOT never fires. */
+    lv_obj_set_height(view->objects[OBJ_VALUE],
+                      lv_font_get_line_height(&lv_font_montserrat_48));
+    lv_obj_set_style_text_align(view->objects[OBJ_VALUE],
+                                LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_align(view->objects[OBJ_VALUE], LV_ALIGN_CENTER, 0, -18);
     lv_label_set_text(view->objects[OBJ_VALUE], "--");
 
@@ -1259,6 +1306,11 @@ bool icon_badge_text_create(template_widget_view_t *view,
     view->objects[OBJ_TITLE] = lv_label_create(view->root);
     lv_obj_set_style_text_color(view->objects[OBJ_TITLE],
                                 lv_color_hex(0x8f93a8), 0);
+    lv_label_set_long_mode(view->objects[OBJ_TITLE], LV_LABEL_LONG_DOT);
+    lv_obj_set_width(view->objects[OBJ_TITLE], 190);
+    lv_obj_set_height(view->objects[OBJ_TITLE],
+                      lv_font_get_line_height(lv_obj_get_style_text_font(
+                          view->objects[OBJ_TITLE], LV_PART_MAIN)));
     lv_obj_align(view->objects[OBJ_TITLE], LV_ALIGN_TOP_LEFT, 28, 22);
     lv_label_set_text(view->objects[OBJ_TITLE], "");
 
@@ -1267,6 +1319,9 @@ bool icon_badge_text_create(template_widget_view_t *view,
                                 lv_color_hex(0x8f93a8), 0);
     lv_label_set_long_mode(view->objects[OBJ_BADGE], LV_LABEL_LONG_DOT);
     lv_obj_set_width(view->objects[OBJ_BADGE], 190);
+    lv_obj_set_height(view->objects[OBJ_BADGE],
+                      lv_font_get_line_height(lv_obj_get_style_text_font(
+                          view->objects[OBJ_BADGE], LV_PART_MAIN)));
     lv_obj_set_style_text_align(view->objects[OBJ_BADGE],
                                 LV_TEXT_ALIGN_RIGHT, 0);
     lv_obj_align(view->objects[OBJ_BADGE], LV_ALIGN_TOP_RIGHT, -28, 22);
@@ -1284,6 +1339,14 @@ bool icon_badge_text_create(template_widget_view_t *view,
                                &lv_font_montserrat_48, 0);
     lv_obj_set_style_text_color(view->objects[OBJ_VALUE],
                                 lv_color_hex(0xf2c14e), 0);
+    /* Only ~232px of canvas remains to the right of the icon, and 16
+     * schema-legal characters in this font exceed that comfortably. Bound and
+     * ellipsize rather than letting it run off the panel edge. */
+    lv_label_set_long_mode(view->objects[OBJ_VALUE], LV_LABEL_LONG_DOT);
+    lv_obj_set_width(view->objects[OBJ_VALUE], 204);
+    /* Pin the height too — width alone lets LVGL wrap instead of ellipsize. */
+    lv_obj_set_height(view->objects[OBJ_VALUE],
+                      lv_font_get_line_height(&lv_font_montserrat_48));
     lv_obj_align(view->objects[OBJ_VALUE], LV_ALIGN_LEFT_MID, 216, -14);
     lv_label_set_text(view->objects[OBJ_VALUE], "--");
 
@@ -1292,6 +1355,9 @@ bool icon_badge_text_create(template_widget_view_t *view,
                                 lv_color_hex(0xb3b6c7), 0);
     lv_label_set_long_mode(view->objects[OBJ_LABEL], LV_LABEL_LONG_DOT);
     lv_obj_set_width(view->objects[OBJ_LABEL], 200);
+    lv_obj_set_height(view->objects[OBJ_LABEL],
+                      lv_font_get_line_height(lv_obj_get_style_text_font(
+                          view->objects[OBJ_LABEL], LV_PART_MAIN)));
     lv_obj_align(view->objects[OBJ_LABEL], LV_ALIGN_LEFT_MID, 216, 40);
     lv_label_set_text(view->objects[OBJ_LABEL], "");
 
@@ -1301,7 +1367,7 @@ bool icon_badge_text_create(template_widget_view_t *view,
 
     s_current_icon = WEATHER_ICON_UNKNOWN;
     weather_icon_render(view->objects[OBJ_ICON], s_current_icon,
-                        lv_color_hex(0xe6e8f0));
+                        lv_color_hex(0xe6e8f0), lv_color_hex(0x101020));
     return true;
 }
 
@@ -1345,7 +1411,7 @@ void icon_badge_text_patch(template_widget_view_t *view,
         if (next != s_current_icon) {
             s_current_icon = next;
             weather_icon_render(view->objects[OBJ_ICON], next,
-                                lv_color_hex(0xe6e8f0));
+                                lv_color_hex(0xe6e8f0), lv_color_hex(0x101020));
         }
     }
 }

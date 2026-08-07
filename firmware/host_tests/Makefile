@@ -11,7 +11,7 @@ PROTOCOL_SRCS = ../main/core/protocol_frame.c ../main/core/protocol_message.c \
 
 test: test_timefmt test_protocol test_link_state test_template_fields \
 	test_widget_model test_ui_command_queue test_navigation \
-	test_interrupt_state test_device_event_queue
+	test_interrupt_state test_device_event_queue test_weather_icon
 	./test_timefmt
 	./test_protocol
 	./test_link_state
@@ -21,6 +21,7 @@ test: test_timefmt test_protocol test_link_state test_template_fields \
 	./test_navigation
 	./test_interrupt_state
 	./test_device_event_queue
+	./test_weather_icon
 
 test_timefmt: test_timefmt.c ../main/core/timefmt.c
 	$(CC) $(CFLAGS) -o $@ $^
@@ -31,12 +32,14 @@ test_protocol: test_protocol.c $(PROTOCOL_SRCS)
 test_link_state: test_link_state.c ../main/core/link_state.c
 	$(CC) $(CFLAGS) -o $@ $^
 
-test_template_fields: test_template_fields.c ../main/core/template_fields.c
-	$(CC) $(CFLAGS) -o $@ $^
+test_template_fields: test_template_fields.c ../main/core/template_fields.c \
+	$(PROTOCOL_SRCS)
+	$(CC) $(CFLAGS) -I$(CBOR_DIR) -o $@ $^
 
 test_widget_model: test_widget_model.c ../main/core/widget_model.c \
-	../main/core/template_fields.c ../main/core/link_state.c
-	$(CC) $(CFLAGS) -o $@ $^
+	../main/core/template_fields.c ../main/core/link_state.c \
+	$(PROTOCOL_SRCS)
+	$(CC) $(CFLAGS) -I$(CBOR_DIR) -o $@ $^
 
 test_ui_command_queue: test_ui_command_queue.c \
 	../main/ui/ui_command_queue.c ../main/core/template_fields.c
@@ -53,6 +56,10 @@ test_device_event_queue: test_device_event_queue.c \
 	../main/core/device_event_queue.c
 	$(CC) $(CFLAGS) -o $@ $^
 
+test_weather_icon: test_weather_icon.c \
+	../main/ui/templates/weather_icon.c
+	$(CC) $(CFLAGS) -DWEATHER_ICON_HOST_TEST -o $@ $^
+
 sanitize: clean
 	$(MAKE) CFLAGS="$(CFLAGS) -O1 -g -fsanitize=address,undefined" test
 
@@ -62,10 +69,12 @@ clean:
 	rm -f test_navigation
 	rm -f test_interrupt_state
 	rm -f test_device_event_queue
+	rm -f test_weather_icon
 	rm -rf test_timefmt.dSYM test_protocol.dSYM test_link_state.dSYM \
 		test_template_fields.dSYM test_widget_model.dSYM
 	rm -rf test_ui_command_queue.dSYM
 	rm -rf test_navigation.dSYM
 	rm -rf test_interrupt_state.dSYM
 	rm -rf test_device_event_queue.dSYM
+	rm -rf test_weather_icon.dSYM
 .PHONY: test sanitize clean

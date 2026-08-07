@@ -125,3 +125,30 @@ fn maximum_config_fixture_stays_inside_one_frame() {
     assert!(frame.payload.len() <= MAX_PAYLOAD_SIZE);
     decode_message(&frame).unwrap();
 }
+
+#[test]
+fn extended_template_kinds_round_trip() {
+    for (value, kind) in [
+        (4u8, protocol::TemplateKind::AnalogClock),
+        (5u8, protocol::TemplateKind::BigNumberLabel),
+        (6u8, protocol::TemplateKind::IconBadgeText),
+    ] {
+        assert_eq!(
+            protocol::template_kind_from_wire(value).expect("kind decodes"),
+            kind,
+            "wire value {value} must decode to {kind:?}"
+        );
+        assert_eq!(kind as u8, value, "{kind:?} must encode as {value}");
+    }
+}
+
+#[test]
+fn current_capabilities_advertise_extended_templates() {
+    assert_eq!(
+        protocol::CURRENT_CAPABILITIES,
+        protocol::CAPABILITY_CORE_WIDGETS
+            | protocol::CAPABILITY_CONFIG_ROTATION
+            | protocol::CAPABILITY_EXTENDED_TEMPLATES,
+        "extended templates must be advertised once firmware renders them"
+    );
+}

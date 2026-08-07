@@ -25,10 +25,10 @@ use providers::weather::{WeatherOptions, WeatherProvider, WeatherUnits as Provid
 use crate::commands::{PomodoroAction, RuntimeCommand, RuntimeError};
 use crate::scheduler::Scheduler;
 use crate::{
-    AlertHold, AppConfig, AppSnapshot, CalendarSource, CardAlert, CardDataSnapshot, CardSettings,
-    ConnectionState, DeviceCounters, DeviceSnapshot, JsonFieldMapping, PersistenceState,
-    PomodoroSnapshot, PomodoroState, ProviderSnapshot, ProviderState, RuntimeDiagnostics,
-    RuntimeState, WeatherUnits,
+    AlertHold, AppConfig, AppSnapshot, CalendarSource, CardAlert, CardDataSnapshot, CardError,
+    CardSettings, ConnectionState, DeviceCounters, DeviceSnapshot, JsonFieldMapping,
+    PersistenceState, PomodoroSnapshot, PomodoroState, ProviderSnapshot, ProviderState,
+    RuntimeDiagnostics, RuntimeState, WeatherUnits,
 };
 
 pub const DEFAULT_RUNTIME_COMMAND_CAPACITY: usize = 16;
@@ -811,6 +811,11 @@ struct WorkerState {
     persistence: PersistenceState,
     latest_fields: BTreeMap<String, Vec<Field>>,
     dirty_widgets: BTreeSet<String>,
+    /// Card ID -> why the device refused that card's last push. Cleared for a card as
+    /// soon as one of its pushes is accepted, and wholesale when the config is
+    /// replaced (the refused payload came from the configuration being replaced).
+    /// See `push_dirty_widgets`.
+    push_rejections: BTreeMap<String, String>,
     pomodoros: BTreeMap<String, Pomodoro>,
     pomodoro_snapshots: BTreeMap<String, PomodoroSnapshot>,
     providers: BTreeMap<String, ProviderRuntimeState>,
@@ -839,6 +844,7 @@ impl WorkerState {
             persistence: PersistenceState::Clean,
             latest_fields: BTreeMap::new(),
             dirty_widgets: BTreeSet::new(),
+            push_rejections: BTreeMap::new(),
             pomodoros: BTreeMap::new(),
             pomodoro_snapshots: BTreeMap::new(),
             providers: BTreeMap::new(),
@@ -868,6 +874,7 @@ impl WorkerState {
         self.generation = self.generation.saturating_add(1);
         self.config = config;
         self.dirty_widgets.clear();
+        self.push_rejections.clear();
         self.pomodoro_snapshots.clear();
         // Owned, not borrowed: `prune_alert_state_for_live_widgets` needs
         // `&mut self`, which cannot coexist with a set still borrowing from
@@ -1110,6 +1117,14 @@ impl WorkerState {
                 .latest_fields
                 .iter()
                 .map(|(card_id, fields)| CardDataSnapshot::from_protocol(card_id, fields))
+                .collect(),
+            card_errors: self
+                .push_rejections
+                .iter()
+                .map(|(card_id, message)| CardError {
+                    card_id: card_id.clone(),
+                    message: message.clone(),
+                })
                 .collect(),
             persistence: self.persistence.clone(),
             diagnostics: diagnostics.snapshot(),
@@ -2104,6 +2119,19 @@ fn synchronize_pending(
     flush_interrupts(state, device)
 }
 
+/// Pushes every dirty widget, then leaves the dirty set holding only what still
+/// needs sending.
+///
+/// A push the device *refuses* is not a transport failure and must not be retried:
+/// the frame arrived, the device parsed it, and it rejected the contents (an
+/// undeclared field type, an over-long text value, a value outside the template's
+/// declared range). The identical payload can only be refused again, so retrying it
+/// pins the runtime in `RuntimeState::Error` forever and starves every widget queued
+/// behind it in the same cycle. Such a push is dropped from the dirty set and
+/// recorded as a card-scoped `CardError` the settings UI can show against the card
+/// that caused it. `Busy` is the one refusal that *is* transient (the device asked
+/// the host to come back later), so it stays dirty for the next cycle. Transport
+/// errors still propagate — those must reach the reconnect path.
 fn push_dirty_widgets(
     state: &mut WorkerState,
     device: &mut dyn RuntimeDevice,
@@ -2114,10 +2142,24 @@ fn push_dirty_widgets(
             state.dirty_widgets.remove(&widget_id);
             continue;
         };
-        device
-            .push_fields(widget_id.clone(), fields)
-            .map_err(|error| device_runtime_error(&error))?;
-        state.dirty_widgets.remove(&widget_id);
+        match device.push_fields(widget_id.clone(), fields) {
+            Ok(()) => {
+                state.dirty_widgets.remove(&widget_id);
+                state.push_rejections.remove(&widget_id);
+            }
+            Err(DeviceError::Rejected(error)) if error.code == protocol::ErrorCode::Busy => {}
+            Err(DeviceError::Rejected(error)) => {
+                state.dirty_widgets.remove(&widget_id);
+                state.push_rejections.insert(
+                    widget_id,
+                    format!(
+                        "the display refused this card's data ({:?}): {}",
+                        error.code, error.diagnostic
+                    ),
+                );
+            }
+            Err(error) => return Err(device_runtime_error(&error)),
+        }
     }
     Ok(())
 }
@@ -2338,6 +2380,7 @@ fn initial_snapshot(config: &AppConfig, diagnostics: RuntimeDiagnostics) -> AppS
         providers,
         pomodoros,
         card_data: Vec::new(),
+        card_errors: Vec::new(),
         persistence: PersistenceState::Clean,
         diagnostics,
     }

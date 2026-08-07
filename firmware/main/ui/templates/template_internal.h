@@ -45,3 +45,26 @@ bool row_list_create(template_widget_view_t *view,
 void row_list_patch(template_widget_view_t *view,
                     const template_field_state_t *fields,
                     uint16_t dirty_mask);
+
+bool analog_clock_create(template_widget_view_t *view,
+                         lv_obj_t *parent,
+                         protocol_size_class_t size);
+void analog_clock_patch(template_widget_view_t *view,
+                        const template_field_state_t *fields,
+                        uint16_t dirty_mask);
+void analog_clock_tick(template_widget_view_t *view,
+                       int16_t utc_offset_minutes);
+
+bool big_number_label_create(template_widget_view_t *view,
+                             lv_obj_t *parent,
+                             protocol_size_class_t size);
+void big_number_label_patch(template_widget_view_t *view,
+                            const template_field_state_t *fields,
+                            uint16_t dirty_mask);
+
+bool icon_badge_text_create(template_widget_view_t *view,
+                            lv_obj_t *parent,
+                            protocol_size_class_t size);
+void icon_badge_text_patch(template_widget_view_t *view,
+                           const template_field_state_t *fields,
+                           uint16_t dirty_mask);

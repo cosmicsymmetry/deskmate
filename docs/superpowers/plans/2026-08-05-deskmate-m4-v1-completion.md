@@ -261,17 +261,20 @@ plus physical verification. See `docs/config/v3.md`'s "Known limitation" subsect
 - Modify: `companion/apps/deskmate/src/components/DevicePreview.tsx`
 - Create: host rendering/model tests and visual acceptance fixtures
 
-- [ ] Add big-number + label, icon + badge + text, and analog-clock templates with
+- [x] Add big-number + label, icon + badge + text, and analog-clock templates with
   explicit field schemas. Each template gets exactly one 448x368 layout; size classes
   do not exist in the card model, so there is no per-size compatibility matrix to build.
-- [ ] Bound formatting, truncation, glyph fallback, numeric range, and icon lookup.
+- [x] Bound formatting, truncation, glyph fallback, numeric range, and icon lookup.
   Missing fields/assets must produce a stable fallback rather than stale pixels.
-- [ ] Keep LVGL mutations on the UI task, retain even-pixel CO5300 invalidation, and
+- [x] Keep LVGL mutations on the UI task, retain even-pixel CO5300 invalidation, and
   preserve clean-canvas interrupt layering.
-- [ ] Match template semantics and proportions in the deterministic app preview while
+- [x] Match template semantics and proportions in the deterministic app preview while
   continuing to label it as a preview, not pixel-identical firmware output.
 - [ ] Add plain-C model tests plus 90°/270° physical visual/touch checks for every new
-  template.
+  template. **Plain-C model tests done; the physical checks are NOT — nothing in this
+  task has run on the board. Checklist: `docs/hardware/board-notes.md`, "Extended
+  templates (M4 Task 3)". Software delivered on 2026-08-07 as merge `eaddbda`; the
+  detailed plan was `docs/superpowers/plans/2026-08-06-deskmate-m4-task3-templates.md`.**
 
 **Acceptance:** Each template survives malformed/maximal data and renders cleanly at
 both orientations without heap drift or UI queue overflow.

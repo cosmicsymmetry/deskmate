@@ -2,11 +2,19 @@
 
 Spec: `docs/superpowers/specs/2026-08-03-deskmate-design.md`
 
-**Current:** M0, M1, M2, and M3 are complete. M4 Tasks 1-2 froze the v1 contract and
-delivered the bounded provider runtime; Task 3 is active. M0/M1 are tagged `m0`/`m1`; M2 and M3 have
-not been tagged because tags require explicit authorization. Because M2
-implementation began in the same shared worktree before M1's final physical carryover
-closed, the `m1` checkpoint also contains the M2 foundation present at that point.
+**Current:** M0, M1, M2, and M3 are complete. M4 delivered Tasks 1-4 (contract
+freeze, bounded providers, the card model, extended templates, timed rotation and
+alerts), then was superseded on 2026-08-11 by an explicit user-directed reset:
+`docs/superpowers/specs/2026-08-11-deskmate-v1-reset-design.md`. That spec re-cuts
+the remaining work into four stages — **V1 Local Deskmate** (active: partition
+table, baked typeface, pixel-exact LVGL preview harness, built-in widget redesign,
+playlist authoring model), **V2 Networked device** (WiFi/provisioning/pairing/OTA),
+**V3 Server host**, and **V4 Plugin platform** (server-rendered HTML plugins as the
+paid tier). M4's undelivered tasks are redistributed, not lost — see the spec's §7
+disposition table. M0/M1 are tagged `m0`/`m1`; later milestones are untagged because
+tags require explicit authorization. Because M2 implementation began in the same
+shared worktree before M1's final physical carryover closed, the `m1` checkpoint
+also contains the M2 foundation present at that point.
 
 One plan per milestone; each milestone ends with working, demonstrable
 software. Ordering rationale: retire hardware risk first (from-scratch
@@ -21,7 +29,11 @@ breadth.
 | M1 | Complete | Protocol + link + CLI harness | `deskmate-cli status` / `time-sync` / `push-data` work from a terminal; device falls back to standalone clock on unplug | `2026-08-04-deskmate-m1-protocol-link-cli.md` |
 | M2 | Complete | Template engine + first widgets | Clock, pomodoro (progress ring, tap start/pause, done-interrupt), ICS calendar — all driven via CLI; carousel + status strip | `2026-08-04-deskmate-m2-template-first-widgets.md` |
 | M3 | Complete | Companion app (Tauri v2) | Tray app replaces CLI for daily use: config store, providers, settings UI with widget gallery + screen arranger | `2026-08-04-deskmate-m3-companion-app.md` |
-| M4 | Active — Task 3 | v1 completion | Weather/JSON-feed/RSS providers, remaining spec templates (big number + label, icon + badge + text, analog clock face), the card model (`presence`/`alert`/`carousel.advance`, replacing dashboard grids, which are cancelled — see the card-model design spec), "open URL/app on host" tap action, asset push, staleness, wider ICS recurrence, in-app firmware update, production VID/PID, release smoke checklist | `2026-08-05-deskmate-m4-v1-completion.md` |
+| M4 | Superseded (Tasks 1-4 delivered) | v1 completion | Delivered: weather/JSON-feed/RSS providers, extended templates, the card model, timed rotation and alerts. Remainder redistributed by the 2026-08-11 reset spec §7 | `2026-08-05-deskmate-m4-v1-completion.md` |
+| V1 | Active | Local Deskmate | Custom partition table (OTA slots + asset region), baked typeface, pixel-exact host-LVGL preview harness with golden frames, built-in widget redesign, playlist authoring model (schema v4, `presence` removed) | V1 plan (to be written from the reset spec) |
+| V2 | Planned | Networked device | WiFi/TLS, provisioning, pairing, host handoff, OTA update mechanism, production identity | own brainstorm at V1 exit |
+| V3 | Planned | Server host | `app-core`/`providers` server-side, device pairing, config storage, accounts | own brainstorm at V2 exit |
+| V4 | Planned | Plugin platform | HTML plugin contract, headless-Chromium rendering, image cards, asset cache, billing (paid tier) | own brainstorm at V3 exit |
 
 First-widget order and why:
 

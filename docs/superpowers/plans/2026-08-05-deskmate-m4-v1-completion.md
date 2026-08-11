@@ -270,11 +270,23 @@ plus physical verification. See `docs/config/v3.md`'s "Known limitation" subsect
   preserve clean-canvas interrupt layering.
 - [x] Match template semantics and proportions in the deterministic app preview while
   continuing to label it as a preview, not pixel-identical firmware output.
-- [ ] Add plain-C model tests plus 90°/270° physical visual/touch checks for every new
-  template. **Plain-C model tests done; the physical checks are NOT — nothing in this
-  task has run on the board. Checklist: `docs/hardware/board-notes.md`, "Extended
-  templates (M4 Task 3)". Software delivered on 2026-08-07 as merge `eaddbda`; the
-  detailed plan was `docs/superpowers/plans/2026-08-06-deskmate-m4-task3-templates.md`.**
+- [x] Add plain-C model tests plus 90°/270° physical visual/touch checks for every new
+  template. **Plain-C model tests done. Physical checks run on the board 2026-08-11
+  against firmware `m1-66-gbe54c85`; results in `docs/hardware/board-notes.md`,
+  "Extended templates (M4 Task 3) — verified 2026-08-11". Software delivered
+  2026-08-07 as merge `eaddbda`; the detailed plan was
+  `docs/superpowers/plans/2026-08-06-deskmate-m4-task3-templates.md`.**
+
+  **Two items did not close and must not be described as verified:** (1) the
+  `show_seconds`-false analog-clock reading showed a wrong time that was never
+  diagnosed — the check was abandoned at the user's request, with an untested
+  timezone hypothesis recorded; (2) `unknown_field_count` is not observable on
+  hardware at all — it is absent from `StatusResponse` and
+  `widget_model_unknown_field_count()` has no callers, so that checklist item cannot
+  be closed as written. A host test covers the weather field set instead. Everything
+  else — capabilities 11, weather layout at both orientations, all 11 icons plus the
+  unknown-ring fallback, the json-feed hero/`--`/truncation/boolean cases, the
+  ellipsize fix, and a byte-flat heap with `ui_queue_high_water` 2 — passed.
 
 **Acceptance:** Each template survives malformed/maximal data and renders cleanly at
 both orientations without heap drift or UI queue overflow.

@@ -51,10 +51,20 @@ of letting code and documentation diverge.
   were cancelled, not deferred. M4's plan is
   `docs/superpowers/plans/2026-08-05-deskmate-m4-v1-completion.md` and the frozen config
   contract is `docs/config/v3.md`. M4 Task 3 (the `AnalogClock`, `BigNumberLabel`, and
-  `IconBadgeText` templates; wire kinds 4-6) is complete in software —
+  `IconBadgeText` templates; wire kinds 4-6) is complete —
   `CURRENT_CAPABILITIES` is now `11` (core widgets | config rotation | extended
-  templates) — but has no physical verification; the checklist is in
-  `docs/hardware/board-notes.md` under "Extended templates (M4 Task 3)". The card model
+  templates) — and was physically verified on 2026-08-11, recorded in
+  `docs/hardware/board-notes.md` under "Extended templates (M4 Task 3) — verified
+  2026-08-11". Capabilities 11, the weather layout at both orientations, all 11 icons
+  plus the unknown-ring fallback, the json-feed hero/`--`/truncation/boolean cases,
+  the one-line ellipsize, and a byte-flat heap with `ui_queue_high_water` 2 all pass.
+  Two items did not close: the `show_seconds`-false analog clock showed an
+  undiagnosed wrong time (untested hypothesis: the test config pinned UTC while the
+  board sits at UTC+4; the hour/minute angles provably do not depend on the flag),
+  and `unknown_field_count` is **not observable on hardware** — it is absent from
+  `StatusResponse` and `widget_model_unknown_field_count()` has no callers, so that
+  checklist item cannot be closed as written; a host test covers the weather field
+  set instead. Do not describe either as verified. The card model
   was physically verified on 2026-08-06:
   eight of the nine checks pass, recorded in `docs/hardware/board-notes.md`. `AlertHold`
   is decided: `hold` is host-side bookkeeping only and never clears the panel, which

@@ -1263,34 +1263,107 @@ storm would raise that high-water mark and eventually drop commands.
 
 - "Fires exactly once per event" for calendar alerts was not separately isolated.
 
-## Extended templates (M4 Task 3) — needs physical verification
+## Extended templates (M4 Task 3) — verified 2026-08-11
 
-Not yet observed on the board. The next hardware session must check:
+Observed on the physical board, firmware `m1-66-gbe54c85` (merged `main`, image
+781,264 bytes / `0xbebd0`, hash verified on flash). Driven by the companion app for
+config application and by `deskmate-cli push-data` for the icon sweep. The device
+retained its config across the app→CLI host swap (`config_revision` stayed 7), which
+is what made the CLI sweep possible.
 
-- [ ] `StatusResponse` reports capabilities 11 (core | rotation | extended templates).
-- [ ] A weather card renders icon-left/text-right with a real temperature, summary
-      and location, at both 90° and 270°.
-- [ ] Each of the 11 icon names renders its own distinct artwork, and an
+- [x] `StatusResponse` reports capabilities 11 (core | rotation | extended templates).
+      Observed 11 immediately after flash.
+- [x] A weather card renders icon-left/text-right with a real temperature, summary
+      and location, at both 90° and 270°. Confirmed at both orientations; text
+      readable and unclipped in each.
+- [x] Each of the 11 icon names renders its own distinct artwork, and an
       unrecognised name renders the hollow `unknown` ring rather than blank space.
-- [ ] A json-feed card renders its mapped value as the hero number, and an absent
-      value renders `--` rather than stale pixels from the previous card. Use the
-      default `big-number-label` template with a mapping named exactly `value` (that is
-      the only renderable data field the template declares) pointing at a **numeric**
-      JSON value, e.g. `field: "value"`, `path: "$.count"` against `{"count": 42}`. The
-      host now emits every mapped scalar as TEXT — integers, floats and booleans
-      included — because no template declares a user-mappable integer or boolean field
-      and a type mismatch makes the firmware reject the card's entire push. So `42`
-      must appear as `42`, `true` as `true`, and a value longer than the 16-byte
-      declared capacity of `value` must arrive already truncated (clipped digits), not
-      as a refused push. Confirm `unknown_field_count` does not rise across the push.
-- [ ] An analog-clock card tracks time, and `show_seconds` toggles the second hand.
-      Also check the twelve ticks now sweep a circle concentric with the hands and hub:
-      the pivot subtracts the face's 3px border, which `lv_obj_get_content_coords`
-      insets and the earlier `FACE_DIAMETER / 2 - 8` pivot did not account for.
-- [ ] A `big-number-label` `label` longer than its box ellipsizes on one line rather
+      All twelve names (`sun`, `moon`, `cloud`, `cloud-sun`, `cloud-moon`, `rain`,
+      `drizzle`, `snow`, `storm`, `fog`, `unknown`, plus a bogus `not-a-real-icon`)
+      were pushed at 8s dwell with each icon's own name printed beside it. All 11
+      read as clearly distinct at normal desk distance — including the pairs most at
+      risk of collapsing, `rain`/`drizzle` and `cloud-sun`/`cloud-moon`. The bogus
+      name fell back to the same hollow ring as `unknown`.
+- [x] A json-feed card renders its mapped value as the hero number, and an absent
+      value renders `--` rather than stale pixels from the previous card. Observed
+      with `{"count": 42}` → `42`; `{"count": true}` → `true`; a 20-digit
+      `12345678901234567890` → `1234567890123456` (first 16 bytes, clipped
+      host-side, push NOT refused); and a payload with the path absent → `--`,
+      replacing a previously displayed `42`, so no stale pixels.
+
+      Note on the absent-value case: an unresolved mapping path is a whole-feed
+      error (`parse_json_feed` returns `MalformedFeed("JSON mapping did not resolve
+      to a value")`), so the card also shows an error line and goes stale. The `--`
+      itself comes from the firmware's declared default because the provider emits
+      no `value` field at all. Both behaviours are correct; the error line was not
+      anticipated by this checklist item.
+
+      Correction to the earlier wording of this item: `value` is **not** the only
+      renderable data field `big-number-label` declares. `label` is also declared
+      (64 bytes) and is user-mappable through a json-feed mapping — that is how the
+      ellipsize check below was driven.
+- [~] An analog-clock card tracks time, and `show_seconds` toggles the second hand.
+      **Partially verified.** With `show_seconds` true: second hand present and
+      sweeping, and the twelve ticks were confirmed concentric with the hands and
+      hub (the border-inset pivot fix works). With `show_seconds` false: the second
+      hand was correctly removed, but the displayed time was reported wrong and the
+      cause was NOT diagnosed before the check was abandoned at the user's request.
+      Do not describe the `show_seconds`-false path as verified.
+
+      Leading untested hypothesis: the verification config pinned
+      `"timezone": "UTC"` while the board sits at UTC+4, which would put the clock
+      exactly 4 hours behind wall time. This was never confirmed. Against it being a
+      template defect: `analog_clock_tick` computes the hour and minute angles
+      (`hour12 * 30 + tm_min / 2` and `tm_min * 6`) with no dependence on
+      `s_show_seconds`, which only hides the second-hand object — so the flag has no
+      path to the hour/minute positions. The time was also not scrutinised in the
+      `show_seconds`-true observation, where the question put to the observer
+      emphasised tick concentricity.
+- [x] A `big-number-label` `label` longer than its box ellipsizes on one line rather
       than wrapping onto a second and colliding with the state label at the card's
-      bottom edge (its height is now pinned, like `title` and `value`).
-- [ ] `unknown_field_count` stays at zero across a weather push (the schema
-      declares all ten emitted fields for exactly this reason).
-- [ ] Heap stays flat and `ui_queue_high_water` stays low across a full rotation
-      that includes all three new templates.
+      bottom edge. Observed: a 94-character caption rendered on one line ending in
+      an ellipsis. This is the check that matters most for the pinned-height fix —
+      pinning width alone was not sufficient, and two earlier attempts got it wrong.
+- [ ] `unknown_field_count` stays at zero across a weather push.
+      **NOT VERIFIABLE ON HARDWARE — this item cannot be closed as written.**
+      `unknown_field_count` never reaches the host: it is not a field in
+      `StatusResponse`, and `widget_model_unknown_field_count()`
+      (`firmware/main/core/widget_model.c:323`) has **no callers anywhere in the
+      firmware**. The counter is accumulated and never read, so no host-observable
+      behaviour distinguishes zero from nonzero. An unknown field is counted and
+      ignored; unlike a type mismatch, it does not reject the push.
+
+      What actually covers this today is the host test
+      `test_weather_push_has_no_unknown_fields`
+      (`firmware/host_tests/test_template_fields.c:184`), which asserts every field
+      the weather provider emits is declared in the `icon-badge-text` registry. Its
+      emitted list was re-checked against `crates/providers/src/weather.rs` on
+      2026-08-11 and matches exactly (10 fields). That list is hand-maintained and
+      can silently drift from the provider — it is not derived from it.
+
+      To make this observable, `unknown_field_count` would need a `StatusResponse`
+      field, which is an additive protocol change. Not attempted.
+- [x] Heap stays flat and `ui_queue_high_water` stays low across a full rotation
+      that includes all three new templates. After ~35 minutes uptime spanning
+      8 config applies, 117 data revisions, the 12-icon sweep and roughly 14 full
+      three-card rotations: `free_heap` 8,462,735 — **byte-identical to the reading
+      taken immediately after boot** — and `ui_queue_high_water` 2. Every error and
+      drop counter zero: `malformed_frames`, `crc_errors`, `overflow_frames`,
+      `dropped_responses`, `rx_dropped_bytes`, `dropped_events`,
+      `dropped_ui_commands`.
+
+### Not covered by this session
+
+- The `show_seconds`-false time reading, above.
+- `unknown_field_count` on hardware, above — not observable over protocol v1.
+- Weather data was fetched live from open-meteo for a guessed location
+  (`Tbilisi`, taken from the repo's own test fixture). The layout was verified;
+  the correctness of the forecast content itself was not.
+
+### Code observation, not a verification result
+
+`analog_clock.c:21` declares `static bool s_show_seconds = true;` at file scope, and
+`analog_clock_tick` reads it. It is shared by every analog-clock view and persists
+across teardown, so two analog-clock cards with different `show_seconds` values would
+have whichever applied last win for both. Not exercised by this session — the
+verification config never held two analog clocks — and not fixed.

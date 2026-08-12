@@ -15,12 +15,32 @@ enum {
     OBJ_STATE,
 };
 
-#define FACE_DIAMETER 300
-#define HAND_HOUR_LEN 82
-#define HAND_MINUTE_LEN 120
-#define HAND_SECOND_LEN 132
+/* The dial fills the short axis between the canvas margins. */
+#define FACE_DIAMETER (368 - 2 * DESKMATE_MARGIN)
+#define FACE_RADIUS   (FACE_DIAMETER / 2)
 
-static bool s_show_seconds = true;
+/* Hand lengths measured from the hub, all grid multiples, each ending on a
+ * feature of the dial rather than in mid-air: the minute hand reaches the
+ * major ticks' inner ends (r = 144), the second hand the minor ticks'
+ * (r = 152), and the hour hand stops at 0.72 of the minute hand so the two
+ * never read as one. */
+#define HAND_HOUR_LEN   (13 * DESKMATE_GRID)
+#define HAND_MINUTE_LEN (18 * DESKMATE_GRID)
+#define HAND_SECOND_LEN (19 * DESKMATE_GRID)
+
+#define HAND_HOUR_WIDTH   6
+#define HAND_MINUTE_WIDTH 4
+#define HAND_SECOND_WIDTH 2
+#define HUB_DIAMETER      (2 * DESKMATE_GRID)
+
+#define TICK_MAJOR_LEN   (2 * DESKMATE_GRID)
+#define TICK_MINOR_LEN   DESKMATE_GRID
+#define TICK_MAJOR_WIDTH 4
+/* The eight minor ticks sit at 30-degree steps, so unlike the cardinals they
+ * are drawn rotated and lose contrast to anti-aliasing: a 2px minor spreads
+ * over three columns at partial coverage and all but vanishes in TERTIARY.
+ * Three pixels keeps a whole lit column at the centre of the stroke. */
+#define TICK_MINOR_WIDTH 3
 
 static lv_obj_t *make_hand(lv_obj_t *parent, int16_t length, int16_t width,
                            lv_color_t color)
@@ -53,66 +73,85 @@ bool analog_clock_create(template_widget_view_t *view,
         return false;
     }
     memset(view, 0, sizeof(*view));
+    view->clock_show_seconds = true;
     view->root = lv_obj_create(parent);
     lv_obj_remove_style_all(view->root);
     lv_obj_remove_flag(view->root,
                        LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_size(view->root, LV_PCT(100), LV_PCT(100));
 
+    /* The dial is centred and 320px across, so the 12 o'clock tick sits on
+     * the canvas's own vertical axis: a centred title would collide with it.
+     * The title takes the top-left corner instead — clear of the circle,
+     * which at the title's baseline has not yet reached x = 143 — and lands
+     * on the same rail as the row-list and icon faces. */
     view->objects[OBJ_TITLE] = lv_label_create(view->root);
+    lv_obj_set_style_text_font(view->objects[OBJ_TITLE],
+                               DESKMATE_FONT_CAPTION, 0);
     lv_obj_set_style_text_color(view->objects[OBJ_TITLE],
-                                lv_color_hex(0x8f93a8), 0);
-    lv_obj_align(view->objects[OBJ_TITLE], LV_ALIGN_TOP_MID, 0, 14);
+                                DESKMATE_COLOR_SECONDARY, 0);
+    lv_label_set_long_mode(view->objects[OBJ_TITLE], LV_LABEL_LONG_DOT);
+    lv_obj_set_width(view->objects[OBJ_TITLE], 14 * DESKMATE_GRID);
+    lv_obj_set_height(view->objects[OBJ_TITLE],
+                      lv_font_get_line_height(DESKMATE_FONT_CAPTION));
+    lv_obj_align(view->objects[OBJ_TITLE], LV_ALIGN_TOP_LEFT, DESKMATE_MARGIN,
+                 DESKMATE_MARGIN);
+    lv_label_set_text(view->objects[OBJ_TITLE], "");
 
+    /* An invisible container: the coordinate frame the ticks and hands are
+     * placed in. The dial itself is drawn by the tick marks alone — a border
+     * ring would only compete with them for the eye. */
     view->objects[OBJ_FACE] = lv_obj_create(view->root);
     lv_obj_remove_style_all(view->objects[OBJ_FACE]);
     lv_obj_remove_flag(view->objects[OBJ_FACE],
                        LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_size(view->objects[OBJ_FACE], FACE_DIAMETER, FACE_DIAMETER);
-    lv_obj_set_style_radius(view->objects[OBJ_FACE], LV_RADIUS_CIRCLE, 0);
-    lv_obj_set_style_border_width(view->objects[OBJ_FACE], 3, 0);
-    lv_obj_set_style_border_color(view->objects[OBJ_FACE],
-                                  lv_color_hex(0x3a3d4d), 0);
     lv_obj_center(view->objects[OBJ_FACE]);
 
-    /* Twelve ticks, children of the face and therefore untracked. */
+    /* Twelve ticks, children of the face and therefore untracked. The four
+     * cardinals are longer, wider and brighter so the quarters can be read
+     * without counting. Each tick is a rectangle whose transform pivot is
+     * pushed down to the face centre, so setting its rotation swings it onto
+     * its hour. The face has no border or padding, so the pivot offset is
+     * exactly the radius. */
     for (int i = 0; i < 12; ++i) {
         lv_obj_t *tick = lv_obj_create(view->objects[OBJ_FACE]);
         lv_obj_remove_style_all(tick);
         lv_obj_remove_flag(tick,
                            LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
         bool major = (i % 3) == 0;
-        lv_obj_set_size(tick, major ? 6 : 3, major ? 18 : 10);
-        lv_obj_set_style_bg_color(
-            tick, lv_color_hex(major ? 0xe6e8f0 : 0x6a6d80), 0);
+        int32_t width = major ? TICK_MAJOR_WIDTH : TICK_MINOR_WIDTH;
+        lv_obj_set_size(tick, width, major ? TICK_MAJOR_LEN : TICK_MINOR_LEN);
+        /* Twelve o'clock is brightest: a dial needs a stated "up", and one
+         * marker carrying it is cheaper than numerals the hero subset could
+         * not set anyway. */
+        lv_obj_set_style_bg_color(tick,
+                                  i == 0 ? DESKMATE_COLOR_PRIMARY
+                                         : (major ? DESKMATE_COLOR_SECONDARY
+                                                  : DESKMATE_COLOR_TERTIARY),
+                                  0);
         lv_obj_set_style_bg_opa(tick, LV_OPA_COVER, 0);
-        lv_obj_set_style_transform_pivot_x(tick, (major ? 6 : 3) / 2, 0);
-        /* The pivot is measured from the tick's own top edge and must land on the
-         * face centre. LV_ALIGN_TOP_MID positions against the face's CONTENT box,
-         * which lv_obj_get_content_coords insets by the 3px border set above, so a
-         * tick's top sits at face-top + 8 + 3, not face-top + 8. Subtracting the
-         * border width here keeps the twelve ticks concentric with the hands and hub,
-         * which use centre alignment and are unaffected. */
-        lv_obj_set_style_transform_pivot_y(tick, FACE_DIAMETER / 2 - 8 - 3, 0);
-        lv_obj_align(tick, LV_ALIGN_TOP_MID, 0, 8);
+        lv_obj_set_style_transform_pivot_x(tick, width / 2, 0);
+        lv_obj_set_style_transform_pivot_y(tick, FACE_RADIUS, 0);
+        lv_obj_align(tick, LV_ALIGN_TOP_MID, 0, 0);
         lv_obj_set_style_transform_rotation(tick, i * 300, 0);
     }
 
     view->objects[OBJ_HOUR] =
-        make_hand(view->objects[OBJ_FACE], HAND_HOUR_LEN, 10,
-                  lv_color_hex(0xffffff));
+        make_hand(view->objects[OBJ_FACE], HAND_HOUR_LEN, HAND_HOUR_WIDTH,
+                  DESKMATE_COLOR_PRIMARY);
     lv_obj_align(view->objects[OBJ_HOUR], LV_ALIGN_CENTER, 0,
                  -HAND_HOUR_LEN / 2);
 
     view->objects[OBJ_MINUTE] =
-        make_hand(view->objects[OBJ_FACE], HAND_MINUTE_LEN, 7,
-                  lv_color_hex(0xffffff));
+        make_hand(view->objects[OBJ_FACE], HAND_MINUTE_LEN, HAND_MINUTE_WIDTH,
+                  DESKMATE_COLOR_PRIMARY);
     lv_obj_align(view->objects[OBJ_MINUTE], LV_ALIGN_CENTER, 0,
                  -HAND_MINUTE_LEN / 2);
 
     view->objects[OBJ_SECOND] =
-        make_hand(view->objects[OBJ_FACE], HAND_SECOND_LEN, 3,
-                  lv_color_hex(0xf2c14e));
+        make_hand(view->objects[OBJ_FACE], HAND_SECOND_LEN, HAND_SECOND_WIDTH,
+                  DESKMATE_COLOR_ACCENT);
     lv_obj_align(view->objects[OBJ_SECOND], LV_ALIGN_CENTER, 0,
                  -HAND_SECOND_LEN / 2);
 
@@ -120,15 +159,16 @@ bool analog_clock_create(template_widget_view_t *view,
     lv_obj_remove_style_all(view->objects[OBJ_HUB]);
     lv_obj_remove_flag(view->objects[OBJ_HUB],
                        LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_size(view->objects[OBJ_HUB], 16, 16);
+    lv_obj_set_size(view->objects[OBJ_HUB], HUB_DIAMETER, HUB_DIAMETER);
     lv_obj_set_style_radius(view->objects[OBJ_HUB], LV_RADIUS_CIRCLE, 0);
-    lv_obj_set_style_bg_color(view->objects[OBJ_HUB],
-                              lv_color_hex(0xf2c14e), 0);
+    lv_obj_set_style_bg_color(view->objects[OBJ_HUB], DESKMATE_COLOR_ACCENT,
+                              0);
     lv_obj_set_style_bg_opa(view->objects[OBJ_HUB], LV_OPA_COVER, 0);
     lv_obj_center(view->objects[OBJ_HUB]);
 
     view->objects[OBJ_STATE] = lv_label_create(view->root);
-    lv_obj_align(view->objects[OBJ_STATE], LV_ALIGN_BOTTOM_MID, 0, -10);
+    lv_obj_align(view->objects[OBJ_STATE], LV_ALIGN_BOTTOM_MID, 0,
+                 -DESKMATE_MARGIN / 2);
     view->state_label = view->objects[OBJ_STATE];
     return true;
 }
@@ -149,8 +189,8 @@ void analog_clock_patch(template_widget_view_t *view,
         lv_label_set_text(view->objects[OBJ_TITLE], title->value.text);
     }
     if (show != NULL) {
-        s_show_seconds = show->value.boolean;
-        if (s_show_seconds) {
+        view->clock_show_seconds = show->value.boolean;
+        if (view->clock_show_seconds) {
             lv_obj_remove_flag(view->objects[OBJ_SECOND], LV_OBJ_FLAG_HIDDEN);
         } else {
             lv_obj_add_flag(view->objects[OBJ_SECOND], LV_OBJ_FLAG_HIDDEN);
@@ -174,7 +214,7 @@ void analog_clock_tick(template_widget_view_t *view,
     set_hand_angle(view->objects[OBJ_HOUR],
                    (hour12 * 30) + (now.tm_min / 2));
     set_hand_angle(view->objects[OBJ_MINUTE], now.tm_min * 6);
-    if (s_show_seconds) {
+    if (view->clock_show_seconds) {
         set_hand_angle(view->objects[OBJ_SECOND], now.tm_sec * 6);
     }
 }

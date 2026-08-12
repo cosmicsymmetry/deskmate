@@ -14,6 +14,8 @@ idf_component_register(
          "ui/templates/icon_badge_text.c"
          "ui/templates/progress_ring.c"
          "ui/templates/row_list.c" "ui/templates/weather_icon.c"
+         "ui/fonts/deskmate_font_18.c" "ui/fonts/deskmate_font_28.c"
+         "ui/fonts/deskmate_font_56.c" "ui/fonts/deskmate_font_96.c"
     INCLUDE_DIRS "." "board" "core" "link" "ui"
     REQUIRES cbor esp_app_format esp_timer
 )

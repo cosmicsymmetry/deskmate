@@ -30,6 +30,14 @@ fn main() {
         sources.push(firmware.join("main/ui/templates").join(template));
     }
     sources.push(firmware.join("main/ui/template_view.c"));
+    for font in [
+        "deskmate_font_18.c",
+        "deskmate_font_28.c",
+        "deskmate_font_56.c",
+        "deskmate_font_96.c",
+    ] {
+        sources.push(firmware.join("main/ui/fonts").join(font));
+    }
     sources.push(manifest.join("csrc/sim_shim.c"));
 
     let cbor = firmware.join("managed_components/espressif__cbor/tinycbor/src");

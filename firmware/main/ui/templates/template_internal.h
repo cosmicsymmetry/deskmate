@@ -58,20 +58,18 @@ static inline bool deskmate_text_is_numeric(const char *text)
 }
 
 /* Picks the largest tier that both covers `text`'s glyphs and fits `max_width`
- * on one line, walking DESKMATE_FONT_HERO -> DISPLAY -> BODY. `start` selects
- * the top of the ladder so a face can cap itself at DISPLAY. BODY is the
- * floor: it is the only tier that can ellipsize, since its range includes the
- * '.' that LV_LABEL_LONG_DOT appends. */
+ * on one line, walking DESKMATE_FONT_HERO -> DISPLAY -> BODY. BODY is the
+ * floor for two reasons: it is the only tier with letters, and the only one
+ * that can ellipsize, since its range includes the '.' that
+ * LV_LABEL_LONG_DOT appends. */
 static inline const lv_font_t *deskmate_number_font(const char *text,
-                                                    int32_t max_width,
-                                                    const lv_font_t *start)
+                                                    int32_t max_width)
 {
     if (!deskmate_text_is_numeric(text)) {
         return DESKMATE_FONT_BODY;
     }
     const lv_font_t *tiers[2] = { DESKMATE_FONT_HERO, DESKMATE_FONT_DISPLAY };
-    size_t first = (start == DESKMATE_FONT_HERO) ? 0U : 1U;
-    for (size_t index = first; index < 2U; ++index) {
+    for (size_t index = 0U; index < 2U; ++index) {
         lv_point_t size;
         lv_text_get_size(&size, text, tiers[index], 0, 0, LV_COORD_MAX,
                          LV_TEXT_FLAG_NONE);

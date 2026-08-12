@@ -25,8 +25,7 @@ enum {
  * leaves ellipsis duty entirely with the tier that can draw one. */
 static void set_value_text(template_widget_view_t *view, const char *text)
 {
-    const lv_font_t *font = deskmate_number_font(text, CONTENT_WIDTH,
-                                                 DESKMATE_FONT_HERO);
+    const lv_font_t *font = deskmate_number_font(text, CONTENT_WIDTH);
     lv_obj_set_style_text_font(view->objects[OBJ_VALUE], font, 0);
     lv_obj_set_height(view->objects[OBJ_VALUE],
                       lv_font_get_line_height(font));

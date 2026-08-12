@@ -6,6 +6,7 @@ members = [
     "crates/deskmate-cli",
     "crates/device",
     "crates/engine",
+    "crates/lvgl-sim",
     "crates/protocol",
     "crates/providers",
 ]

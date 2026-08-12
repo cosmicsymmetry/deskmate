@@ -1,4 +1,6 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, mock, test } from "bun:test";
+import { act } from "react";
+import { createRoot, type Root } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import { App } from "../src/App";
@@ -14,18 +16,57 @@ import {
   issuesForPath,
   unclaimedIssues,
 } from "../src/lib/configDraft";
-import type {
-  AppConfig,
-  CardDataSnapshot,
-  CardField,
-  CardSettings,
-  DisplayTemplate,
-  ValidationIssue,
-} from "../src/lib/types";
+import * as tauriModule from "../src/lib/tauri";
+import type { AppConfig, CardSettings, PreviewFrame, ValidationIssue } from "../src/lib/types";
 import { ipcContractFixtures } from "../src/lib/types.contract";
 
 const snapshot = ipcContractFixtures.snapshot;
 const cards = snapshot.config.cards;
+
+// `DevicePreview` calls `renderCardPreview` (typed IPC over `tauri.ts`) directly, so
+// its behaviour tests mock that one export at the module boundary — the same
+// boundary every other command is mocked at when a test needs to control an IPC
+// result — while every other export of `tauri.ts` (used transitively by `App` and
+// `useAppState`) stays real.
+let previewImpl: (cardId: string) => Promise<PreviewFrame> = () =>
+  Promise.reject(new Error("renderCardPreview not configured for this test"));
+
+mock.module("../src/lib/tauri", () => ({
+  ...tauriModule,
+  renderCardPreview: (cardId: string) => previewImpl(cardId),
+}));
+
+/// Renders into a live DOM root (unlike this file's other `renderToStaticMarkup`
+/// tests) because `DevicePreview` fetches its frame in a `useEffect` — SSR never
+/// runs effects, so these are the only tests here that need one. The extra
+/// microtask turn after `render` lets the mocked `renderCardPreview` promise (and
+/// the `setState` it drives) settle inside this `act` call rather than after it.
+async function renderPreviewInto(root: Root, element: Parameters<Root["render"]>[0]) {
+  await act(async () => {
+    root.render(element);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+}
+
+/// Polls `assertion` inside `act`, so the passive-effect state updates the polling
+/// itself waits out (rather than the initial `renderPreviewInto` settle) are also
+/// attributed to an `act` scope.
+async function waitFor(assertion: () => void, timeoutMs = 500): Promise<void> {
+  const start = Date.now();
+  for (;;) {
+    try {
+      assertion();
+      return;
+    } catch (error) {
+      if (Date.now() - start > timeoutMs) {
+        throw error;
+      }
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      });
+    }
+  }
+}
 
 function clockCard(
   id: string,
@@ -316,153 +357,160 @@ describe("settings accessibility and states", () => {
     };
   }
 
-  function renderPreview({
-    cardId,
-    cardData,
-  }: {
-    cardId: string;
-    cardData: CardDataSnapshot[];
-  }): string {
-    return renderToStaticMarkup(
-      <DevicePreview
-        cards={[calendarCard(cardId, { kind: "in-rotation", dwell_seconds: null })]}
-        selectedWidgetId={cardId}
-        cardData={cardData}
-        pomodoros={[]}
-        orientation="landscape"
-      />,
-    );
-  }
-
-  test("renders a real pushed value on the preview face", () => {
-    const cardData: CardDataSnapshot[] = [
-      {
-        card_id: "upnext",
-        fields: [{ key: "row0_title", value: { kind: "text", value: "Q3 Planning Sync" } }],
-      },
-    ];
-    const html = renderPreview({ cardId: "upnext", cardData });
-    expect(html).toContain("Q3 Planning Sync");
-    expect(html).not.toMatch(/sample/i);
-  });
-
-  test("a card with no published data yet is clearly labelled as a sample", () => {
-    const html = renderPreview({ cardId: "upnext", cardData: [] });
-    expect(html).toMatch(/sample/i);
-  });
-
-  // `renderPreview` above is pinned to a calendar/row-list card, so the extended
-  // templates (which are not calendar-shaped) get their own helper rather than
-  // overloading that one's signature. It reuses the same `weatherCard`/`clockCard`
-  // fixtures already defined in this file and drives `DevicePreview` the same way:
-  // one card, selected, with `cardData` standing in for the runtime's last-published
-  // snapshot for that card id.
-  function renderTemplatePreview({
-    template,
-    fields,
-    base,
-  }: {
-    template: DisplayTemplate;
-    fields: CardField[];
-    base?: CardSettings;
-  }): string {
-    const card: CardSettings = { ...(base ?? weatherCard("template-preview")), template };
-    return renderToStaticMarkup(
+  /// A live-mounted `DevicePreview` for one selected card, wired to the shared
+  /// `previewImpl` mock above. `dataGeneration` defaults to 0 since most of these
+  /// tests aren't exercising re-fetch-on-change.
+  async function mountPreview(
+    card: CardSettings,
+    dataGeneration = 0,
+  ): Promise<{ container: HTMLDivElement; root: Root }> {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    await renderPreviewInto(
+      root,
       <DevicePreview
         cards={[card]}
         selectedWidgetId={card.id}
-        cardData={fields.length > 0 ? [{ card_id: card.id, fields }] : []}
-        pomodoros={[]}
         orientation="landscape"
+        dataGeneration={dataGeneration}
       />,
     );
+    return { container, root };
   }
 
-  test("big-number-label preview shows the value as the hero", () => {
-    const html = renderTemplatePreview({
-      template: { kind: "big-number-label" },
-      fields: [
-        { key: "title", value: { kind: "text", value: "Downloads" } },
-        { key: "value", value: { kind: "text", value: "1,204" } },
-        { key: "label", value: { kind: "text", value: "this week" } },
-      ],
+  test("renders the device's own pixels as an img with a data URL once the IPC resolves", async () => {
+    previewImpl = async (cardId) => {
+      expect(cardId).toBe("upnext");
+      return { png_base64: "Zmlyc3QtZnJhbWU=", sample: false };
+    };
+    const { container, root } = await mountPreview(
+      calendarCard("upnext", { kind: "in-rotation", dwell_seconds: null }),
+    );
+    await waitFor(() => {
+      const img = container.querySelector("img");
+      expect(img).not.toBeNull();
+      expect(img?.getAttribute("src")).toBe("data:image/png;base64,Zmlyc3QtZnJhbWU=");
     });
-    expect(html).toContain("1,204");
-    expect(html).toContain("this week");
-    expect(html).toContain("Downloads");
+    expect(container.querySelector(".preview-sample-badge")).toBeNull();
+    root.unmount();
   });
 
-  test("big-number-label falls back to a placeholder when value is absent", () => {
-    const html = renderTemplatePreview({ template: { kind: "big-number-label" }, fields: [] });
-    expect(html).toContain("--");
-  });
-
-  // title and badge are two distinct always-visible fields in the firmware
-  // (OBJ_TITLE top-left, OBJ_BADGE top-right) — a fixture that only ever
-  // supplies three of the four fields can't catch a fourth silently being
-  // dropped, so this one supplies all four together.
-  test("icon-badge-text preview shows title, badge, value and label together", () => {
-    const html = renderTemplatePreview({
-      template: { kind: "icon-badge-text", icon_asset_id: null },
-      fields: [
-        { key: "icon", value: { kind: "text", value: "cloud-sun" } },
-        { key: "title", value: { kind: "text", value: "Home Weather" } },
-        { key: "badge", value: { kind: "text", value: "Berlin" } },
-        { key: "value", value: { kind: "text", value: "21°" } },
-        { key: "label", value: { kind: "text", value: "Partly cloudy" } },
-      ],
+  test("shows the explicit unavailable state when the IPC rejects, never a stale or invented frame", async () => {
+    previewImpl = async () => {
+      throw new Error("simulator init failed");
+    };
+    const { container, root } = await mountPreview(
+      calendarCard("upnext", { kind: "in-rotation", dwell_seconds: null }),
+    );
+    await waitFor(() => {
+      expect(container.textContent).toContain("Preview unavailable");
     });
-    expect(html).toContain("Home Weather");
-    expect(html).toContain("Berlin");
-    expect(html).toContain("21°");
-    expect(html).toContain("Partly cloudy");
-    expect(html).toContain("preview-icon--cloud-sun");
+    expect(container.querySelector("img")).toBeNull();
+    root.unmount();
   });
 
-  test("an unrecognised icon name renders the unknown icon", () => {
-    const html = renderTemplatePreview({
-      template: { kind: "icon-badge-text", icon_asset_id: null },
-      fields: [{ key: "icon", value: { kind: "text", value: "meteor" } }],
+  test("badges the frame as sample when the card has never published data", async () => {
+    previewImpl = async () => ({ png_base64: "dW5jb25maWd1cmVk", sample: true });
+    const { container, root } = await mountPreview(
+      calendarCard("upnext", { kind: "in-rotation", dwell_seconds: null }),
+    );
+    await waitFor(() => {
+      expect(container.querySelector("img")).not.toBeNull();
+      expect(container.textContent).toContain("No data yet");
     });
-    expect(html).toContain("preview-icon--unknown");
+    root.unmount();
   });
 
-  test("analog-clock preview renders a face with hands", () => {
-    const html = renderTemplatePreview({
-      template: { kind: "analog-clock" },
-      fields: [],
-      base: clockCard("analog-preview", { kind: "in-rotation", dwell_seconds: null }),
-    });
-    expect(html).toContain("preview-analog-face");
-    expect(html).toContain("preview-analog-hand--hour");
-    expect(html).toContain("preview-analog-hand--minute");
-  });
+  test("re-requests the preview when dataGeneration bumps", async () => {
+    let calls = 0;
+    previewImpl = async () => {
+      calls += 1;
+      return { png_base64: `frame-${calls}`, sample: false };
+    };
+    const card = calendarCard("upnext", { kind: "in-rotation", dwell_seconds: null });
+    const { container, root } = await mountPreview(card, 0);
+    await waitFor(() => expect(calls).toBe(1));
 
-  test("renders a useful empty state and keeps the panel's narrower claim", () => {
-    const populated = renderToStaticMarkup(
+    await renderPreviewInto(
+      root,
       <DevicePreview
-        cards={cards}
-        selectedWidgetId="clock"
-        cardData={snapshot.card_data}
-        pomodoros={snapshot.pomodoros}
+        cards={[card]}
+        selectedWidgetId={card.id}
         orientation="landscape"
+        dataGeneration={1}
       />,
     );
-    expect(populated).toContain("Same data as your display · approximate pixels");
-    // Not pixel-perfect, and no longer claims to be — just an honest label.
-    expect(populated).not.toContain("Layout preview · not pixel-identical");
+    await waitFor(() => expect(calls).toBe(2));
+    await waitFor(() => {
+      expect(container.querySelector("img")?.getAttribute("src")).toBe(
+        "data:image/png;base64,frame-2",
+      );
+    });
+    root.unmount();
+  });
 
-    const empty = renderToStaticMarkup(
+  test("keeps a stale frame on screen while a superseding request is in flight, then replaces it", async () => {
+    // Two cards, so switching `selectedWidgetId` (not `dataGeneration`) is what
+    // triggers the re-request here — the effect depends on both.
+    let resolveSecond!: (frame: PreviewFrame) => void;
+    let requestCount = 0;
+    previewImpl = async (cardId) => {
+      requestCount += 1;
+      if (cardId === "first") {
+        return { png_base64: "first-frame", sample: false };
+      }
+      return new Promise((resolve) => {
+        resolveSecond = resolve;
+      });
+    };
+    const cardA = calendarCard("first", { kind: "in-rotation", dwell_seconds: null });
+    const cardB = calendarCard("second", { kind: "in-rotation", dwell_seconds: null });
+    const { container, root } = await mountPreview(cardA);
+    await waitFor(() => {
+      expect(container.querySelector("img")?.getAttribute("src")).toBe(
+        "data:image/png;base64,first-frame",
+      );
+    });
+
+    await renderPreviewInto(
+      root,
+      <DevicePreview
+        cards={[cardA, cardB]}
+        selectedWidgetId="second"
+        orientation="landscape"
+        dataGeneration={0}
+      />,
+    );
+    await waitFor(() => expect(requestCount).toBe(2));
+    // The old frame is still the last thing painted — no blank flash, no stale claim
+    // beyond what was already shown, since the component never clears `frame` itself.
+    expect(container.querySelector("img")?.getAttribute("src")).toBe(
+      "data:image/png;base64,first-frame",
+    );
+
+    resolveSecond({ png_base64: "second-frame", sample: false });
+    await waitFor(() => {
+      expect(container.querySelector("img")?.getAttribute("src")).toBe(
+        "data:image/png;base64,second-frame",
+      );
+    });
+    root.unmount();
+  });
+
+  test("shows 'No cards configured' when there are no cards, never a stale or invented frame", () => {
+    // No live effect needed here: with no cards, `DevicePreview` never calls the
+    // preview IPC at all, so a static render is enough to check the empty state.
+    const html = renderToStaticMarkup(
       <DevicePreview
         cards={[]}
         selectedWidgetId={null}
-        cardData={[]}
-        pomodoros={[]}
         orientation="landscape-flipped"
+        dataGeneration={0}
       />,
     );
-    expect(empty).toContain("The standalone clock stays available.");
-    expect(empty).toContain("is-flipped");
+    expect(html).toContain("No cards configured");
+    expect(html).not.toContain("<img");
   });
 
   function filmstripConfig(): AppConfig {

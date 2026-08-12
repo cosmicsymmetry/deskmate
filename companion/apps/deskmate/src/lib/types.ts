@@ -340,6 +340,11 @@ export interface AutostartStatus {
   preference_enabled: boolean;
 }
 
+export interface PreviewFrame {
+  png_base64: string;
+  sample: boolean;
+}
+
 type MessageError<Category extends string> = {
   category: Category;
   message: string;
@@ -393,4 +398,5 @@ export interface IpcContractFixtures {
   draft_validation: DraftValidation;
   config_apply_result: ConfigApplyResult;
   autostart_status: AutostartStatus;
+  preview_frame: PreviewFrame;
 }

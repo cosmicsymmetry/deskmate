@@ -6,7 +6,7 @@ use std::sync::{Arc, Condvar, Mutex, RwLock, Weak};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use chrono::{DateTime, Offset, Utc};
+use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
 use device::{ConnectedSession, DeviceError, ReceivedEvent, SessionDiagnostics, connect_session};
 use engine::interrupts::InterruptArbiter;
@@ -2221,21 +2221,9 @@ fn flush_interrupts(
 }
 
 fn send_time_sync(state: &WorkerState, device: &mut dyn RuntimeDevice) -> Result<(), RuntimeError> {
-    let timezone: Tz = state
-        .config
-        .preferences
-        .timezone
-        .parse()
-        .expect("runtime config timezone remains validated");
     let now = Utc::now();
-    let offset_seconds = now
-        .with_timezone(&timezone)
-        .offset()
-        .fix()
-        .local_minus_utc();
-    let offset_minutes = i16::try_from(offset_seconds / 60).map_err(|_| RuntimeError::Device {
-        message: "timezone offset exceeds protocol bounds".into(),
-    })?;
+    let offset_minutes = crate::config::utc_offset_minutes(&state.config.preferences.timezone, now)
+        .map_err(|message| RuntimeError::Device { message })?;
     device
         .time_sync(TimeSync {
             unix_seconds: now.timestamp(),

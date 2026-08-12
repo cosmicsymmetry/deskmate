@@ -21,6 +21,7 @@ pub use config::{
     MIN_ALERT_LEAD_MINUTES, MIN_DWELL_SECONDS, MIN_WEATHER_REFRESH_MINUTES,
     PROVIDER_REQUEST_TIMEOUT_SECONDS, RefreshPolicy, UpdateChannel, UpdateCheckPolicy,
     UpdaterSettings, ValidationCode, ValidationIssue, WeatherUnits, WidgetTapAction,
+    utc_offset_minutes,
 };
 pub use providers::ics::MAX_ICS_BYTES;
 pub use runtime::{

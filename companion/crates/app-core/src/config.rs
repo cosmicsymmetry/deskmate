@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
+use chrono::{DateTime, Offset, Utc};
 pub use protocol::MAX_WIDGET_ID_LEN;
 use protocol::{
     ApplyConfig, Field, FieldValue, InterruptPolicy, PushData, ScreenConfig, TapAction,
@@ -681,6 +682,27 @@ impl DisplayOrientation {
             Self::LandscapeFlipped => 270,
         }
     }
+}
+
+/// Computes the UTC offset in minutes for `timezone` at `now`. Shared by the
+/// runtime's device time-sync path (`runtime::send_time_sync`) and the desktop
+/// preview renderer so both derive the offset from the same configured timezone
+/// through the same formula, rather than each doing its own `chrono_tz` lookup that
+/// could drift from the other.
+///
+/// # Errors
+///
+/// Returns an error message when `timezone` is not a recognized IANA timezone, or
+/// when the computed offset does not fit the protocol's `i16` minutes field (not
+/// reachable by any real-world timezone, but `AppConfig::validate` already rejects
+/// unrecognized timezones before this is ever called on a saved configuration).
+pub fn utc_offset_minutes(timezone: &str, now: DateTime<Utc>) -> Result<i16, String> {
+    let parsed: chrono_tz::Tz = timezone
+        .parse()
+        .map_err(|_| format!("{timezone:?} is not a recognized IANA timezone"))?;
+    let offset_seconds = now.with_timezone(&parsed).offset().fix().local_minus_utc();
+    i16::try_from(offset_seconds / 60)
+        .map_err(|_| "timezone offset exceeds protocol bounds".to_owned())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

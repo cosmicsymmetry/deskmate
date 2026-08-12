@@ -1002,6 +1002,7 @@ h2 {
 }
 
 .device-screen {
+  position: relative;
   overflow: hidden;
   aspect-ratio: 448 / 368;
   border-radius: 13px;
@@ -1011,6 +1012,14 @@ h2 {
      rather than reaching for a second hue. */
   color: var(--emit);
   background: var(--panel-black);
+}
+
+/* The device's own rendered pixels: fills the screen exactly, never cropped or
+   letterboxed since the PNG is already 448×368 at the configured orientation. */
+.device-screen > img {
+  display: block;
+  width: 100%;
+  height: 100%;
 }
 
 .device-port {
@@ -1024,314 +1033,16 @@ h2 {
   transform: translateX(-50%);
 }
 
-.device-shell.is-flipped .device-port {
-  top: -5px;
-  bottom: auto;
-  border-radius: 5px 5px 0 0;
-}
-
-.preview-clock,
-.preview-pomodoro,
-.preview-empty {
+/* The preview is now the firmware's own rendered PNG (see DevicePreview.tsx), not a
+   DOM approximation, so there is no per-template face markup left to style here —
+   only the states around the image itself: unavailable, and the sample badge. */
+.preview-unavailable {
   display: grid;
   height: 100%;
+  margin: 0;
   place-items: center;
-  align-content: center;
-}
-
-.preview-clock {
-  gap: 7px;
-  background: radial-gradient(
-    circle at 50% 50%,
-    color-mix(in srgb, var(--emit) 14%, transparent),
-    transparent 65%
-  );
-}
-
-.preview-clock > strong {
-  font-size: clamp(2.8rem, 7vw, 5.4rem);
-  font-weight: 640;
-  letter-spacing: -0.08em;
-  line-height: 0.95;
-}
-
-.preview-clock strong small {
-  margin-left: 5px;
-  font-size: 0.32em;
-  letter-spacing: -0.03em;
-  opacity: 0.68;
-}
-
-.preview-clock > span:first-child {
-  font-size: 0.68rem;
-  font-weight: 800;
-  letter-spacing: 0.16em;
-  text-transform: uppercase;
-  opacity: 0.72;
-}
-
-.preview-clock > span:last-child {
   font-size: 0.7rem;
   opacity: 0.6;
-}
-
-.preview-pomodoro {
-  gap: 4px;
-}
-
-.preview-ring {
-  display: grid;
-  place-items: center;
-  width: min(47%, 160px);
-  aspect-ratio: 1;
-  border-radius: 50%;
-  background: conic-gradient(
-    var(--emit) var(--progress),
-    color-mix(in srgb, var(--panel-black), var(--emit) 12%) 0
-  );
-}
-
-.preview-ring::before {
-  grid-area: 1 / 1;
-  width: 82%;
-  height: 82%;
-  border-radius: 50%;
-  background: var(--panel-black);
-  content: "";
-}
-
-.preview-ring span {
-  z-index: 1;
-  grid-area: 1 / 1;
-  font-size: clamp(1rem, 3vw, 1.65rem);
-  font-weight: 650;
-}
-
-.preview-pomodoro > strong {
-  margin-top: 3px;
-  font-size: 0.78rem;
-}
-
-.preview-pomodoro > small {
-  font-size: 0.57rem;
-  text-transform: capitalize;
-  opacity: 0.65;
-}
-
-.preview-calendar {
-  height: 100%;
-  padding: 16px 17px;
-}
-
-.preview-calendar > strong {
-  display: block;
-  margin-bottom: 10px;
-  font-size: 0.75rem;
-  opacity: 0.85;
-}
-
-.preview-calendar > div {
-  display: flex;
-  justify-content: space-between;
-  padding: 9px 0;
-  border-bottom: 1px solid color-mix(in srgb, var(--emit) 14%, transparent);
-  font-size: 0.64rem;
-}
-
-.preview-calendar time {
-  opacity: 0.62;
-}
-
-.preview-calendar__placeholder {
-  padding: 10px 0;
-  font-size: 0.66rem;
-  line-height: 1.45;
-  opacity: 0.55;
-}
-
-.preview-empty {
-  gap: 7px;
-  text-align: center;
-}
-
-.preview-empty strong {
-  font-size: 2.7rem;
-  letter-spacing: -0.07em;
-}
-
-.preview-empty span {
-  font-size: 0.65rem;
-  opacity: 0.6;
-}
-
-/* big-number-label: title, a hero value, and a supporting label — same
-   amber-on-panel-black type as the other faces, no new colour. */
-.preview-bignumber {
-  display: grid;
-  height: 100%;
-  gap: 8px;
-  padding: 22px 26px;
-  align-content: center;
-  text-align: center;
-}
-
-.preview-bignumber__title {
-  font-size: 0.72rem;
-  font-weight: 750;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  opacity: 0.72;
-}
-
-.preview-bignumber__hero {
-  font-size: clamp(3rem, 9vw, 6rem);
-  font-weight: 680;
-  letter-spacing: -0.08em;
-  line-height: 0.95;
-}
-
-.preview-bignumber__label {
-  font-size: 0.74rem;
-  opacity: 0.6;
-}
-
-/* icon-badge-text: icon block on the left, text block on the right,
-   mirroring the firmware's layout. The icon glyph sits in a soft --emit
-   tint circle rather than a second colour; .preview-icon--unknown dims
-   further so an unrecognised name still reads as "no data", not a normal
-   icon. */
-.preview-iconbadge {
-  display: grid;
-  grid-template-columns: auto 1fr;
-  align-items: center;
-  height: 100%;
-  gap: 22px;
-  padding: 22px 28px;
-}
-
-.preview-icon {
-  display: grid;
-  place-items: center;
-  width: 96px;
-  height: 96px;
-  border-radius: 50%;
-  background: color-mix(in srgb, var(--emit) 14%, transparent);
-  font-size: 2.9rem;
-  line-height: 1;
-}
-
-.preview-icon--unknown {
-  opacity: 0.5;
-}
-
-.preview-iconbadge__body {
-  display: grid;
-  gap: 4px;
-  min-width: 0;
-}
-
-/* Mirrors the firmware's OBJ_TITLE (top-left) / OBJ_BADGE (top-right) pair:
-   two distinct fields on one row, not one falling back to the other. An
-   empty title collapses via `justify-content: flex-end` on the badge rather
-   than leaving a gap. */
-.preview-iconbadge__header {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 10px;
-}
-
-.preview-iconbadge__title {
-  overflow: hidden;
-  font-size: 0.7rem;
-  font-weight: 700;
-  opacity: 0.68;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* `margin-left: auto` (not just the header's `space-between`) keeps the
-   badge pinned top-right even when `title` is empty and the header has only
-   this one flex child — `space-between` alone would collapse a lone child
-   to flex-start. */
-.preview-iconbadge__badge {
-  margin-left: auto;
-  font-size: 0.78rem;
-  font-weight: 750;
-  text-align: right;
-}
-
-.preview-iconbadge__hero {
-  font-size: clamp(2rem, 6vw, 3.4rem);
-  font-weight: 660;
-  letter-spacing: -0.05em;
-}
-
-.preview-iconbadge__label {
-  font-size: 0.7rem;
-  opacity: 0.62;
-}
-
-/* analog-clock: a circular face with hour/minute hands, positioned by the
-   same live preview clock the digital face uses. Ticks are intentionally
-   omitted — the fidelity rule is semantics/proportions, not a pixel replica
-   of the firmware's LVGL face. */
-.preview-analog {
-  display: grid;
-  height: 100%;
-  gap: 12px;
-  place-items: center;
-  align-content: center;
-}
-
-.preview-analog > span:first-child {
-  font-size: 0.68rem;
-  font-weight: 800;
-  letter-spacing: 0.16em;
-  text-transform: uppercase;
-  opacity: 0.72;
-}
-
-.preview-analog-face {
-  position: relative;
-  width: min(52%, 190px);
-  aspect-ratio: 1;
-  border: 2px solid color-mix(in srgb, var(--emit) 45%, transparent);
-  border-radius: 50%;
-}
-
-.preview-analog-face::after {
-  position: absolute;
-  top: 50%;
-  left: 50%;
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--emit);
-  content: "";
-  transform: translate(-50%, -50%);
-}
-
-.preview-analog-hand {
-  position: absolute;
-  bottom: 50%;
-  left: 50%;
-  background: var(--emit);
-  transform-origin: bottom center;
-}
-
-.preview-analog-hand--hour {
-  width: 5px;
-  height: 26%;
-  margin-left: -2.5px;
-  border-radius: 3px;
-}
-
-.preview-analog-hand--minute {
-  width: 3px;
-  height: 38%;
-  margin-left: -1.5px;
-  border-radius: 3px;
 }
 
 /* A visible, non-tooltip marker that a face is showing sample rather than
@@ -1349,6 +1060,17 @@ h2 {
   letter-spacing: 0.08em;
   text-transform: uppercase;
   opacity: 0.85;
+}
+
+/* Floats over the rendered frame rather than sitting inline after it — the frame
+   already IS the device's unconfigured appearance; this badge only discloses that,
+   it doesn't compete with it for layout space. */
+.device-screen > .preview-sample-badge {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  margin-left: 0;
+  background: var(--panel-black);
 }
 
 /* The loop ribbon — this task's signature element. Chrome, not the device:

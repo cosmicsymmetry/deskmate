@@ -840,5 +840,9 @@ export const ipcContractFixtures = {
   "autostart_status": {
     "enabled": true,
     "preference_enabled": false
+  },
+  "preview_frame": {
+    "png_base64": "iVBORw0KGgo=",
+    "sample": true
   }
 } as const satisfies IpcContractFixtures;

@@ -15,6 +15,7 @@ use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 
 mod commands;
 mod events;
+mod preview;
 
 const CONFIG_FILE_NAME: &str = "config.json";
 const MAIN_WINDOW_LABEL: &str = "main";
@@ -118,6 +119,7 @@ struct DesktopState {
     snapshot_worker: Mutex<Option<JoinHandle<()>>>,
     mutation_lock: Mutex<()>,
     quitting: AtomicBool,
+    preview: preview::PreviewHandle,
 }
 
 impl DesktopState {
@@ -317,6 +319,9 @@ fn setup_app(app: &mut App) -> Result<(), Box<dyn Error>> {
         snapshot_worker: Mutex::new(None),
         mutation_lock: Mutex::new(()),
         quitting: AtomicBool::new(false),
+        // One dedicated thread owns the process-wide `Simulator` for the app's
+        // lifetime (see `preview` module docs); nothing else may construct one.
+        preview: preview::spawn(),
     });
 
     let worker = events::spawn_state_worker(app.handle(), &runtime)?;
@@ -353,6 +358,7 @@ pub fn run() {
             commands::get_autostart_status,
             commands::set_autostart_enabled,
             commands::set_settings_window_visible,
+            commands::render_card_preview,
         ])
         .setup(setup_app)
         .build(tauri::generate_context!())

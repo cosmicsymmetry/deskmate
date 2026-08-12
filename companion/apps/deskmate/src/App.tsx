@@ -57,7 +57,7 @@ type SaveState =
 const validDraft: DraftValidation = { valid: true, issues: [] };
 
 export function App() {
-  const { snapshot, loading, error: stateError, refresh } = useAppState();
+  const { snapshot, loading, error: stateError, refresh, dataGeneration } = useAppState();
   const [draft, setDraft] = useState<AppConfig | null>(null);
   const [selectedCardId, setSelectedCardId] = useState<string | null>(null);
   const [dirty, setDirty] = useState(false);
@@ -350,8 +350,7 @@ export function App() {
               );
             })}
             <p>
-              Everything else kept updating. Adjust the card below and save to send its data
-              again.
+              Everything else kept updating. Adjust the card below and save to send its data again.
             </p>
           </div>
         </aside>
@@ -430,9 +429,8 @@ export function App() {
           <DevicePreview
             cards={draft.cards}
             selectedWidgetId={selectedCardId}
-            cardData={snapshot.card_data}
-            pomodoros={snapshot.pomodoros}
             orientation={draft.preferences.orientation}
+            dataGeneration={dataGeneration}
           />
           <Filmstrip
             config={draft}

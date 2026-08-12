@@ -765,6 +765,9 @@ name = "deskmate-app"
 version = "0.1.0"
 dependencies = [
  "app-core",
+ "base64 0.22.1",
+ "chrono",
+ "lvgl-sim",
  "serde",
  "serde_json",
  "tauri",

@@ -3,9 +3,12 @@
 #![allow(clippy::needless_pass_by_value)]
 
 use app_core::{
-    AppConfig, AppSnapshot, MAX_CONFIG_FILE_BYTES, MAX_ICS_BYTES, MAX_ICS_SOURCE_LEN,
-    MAX_WIDGET_ID_LEN, PomodoroAction, RuntimeError, SaveReceipt, StoreError, ValidationIssue,
+    AppConfig, AppSnapshot, CardField, CardFieldValue, DisplayOrientation, DisplayTemplate,
+    MAX_CONFIG_FILE_BYTES, MAX_ICS_BYTES, MAX_ICS_SOURCE_LEN, MAX_WIDGET_ID_LEN, PomodoroAction,
+    RuntimeError, SaveReceipt, StoreError, ValidationIssue, utc_offset_minutes,
 };
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, State};
 use tauri_plugin_autostart::ManagerExt;
@@ -42,6 +45,19 @@ pub struct ConfigApplyResult {
 pub struct AutostartStatus {
     pub enabled: bool,
     pub preference_enabled: bool,
+}
+
+/// A rendered card preview: the exact PNG bytes the firmware's own template
+/// renderer produced, base64-encoded for the typed IPC boundary (the webview never
+/// receives anything besides these bytes — see the module docs on `preview`).
+/// `sample` is set when the card has never published data (the runtime holds no
+/// `CardDataSnapshot` for it): the request still renders, with an empty field set,
+/// so the image is the firmware's own unconfigured appearance for that template
+/// rather than an invented placeholder.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PreviewFrame {
+    pub png_base64: String,
+    pub sample: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -267,6 +283,97 @@ pub fn set_settings_window_visible(
         window.hide().map_err(window_error)?;
     }
     state.runtime.snapshot().map_err(IpcError::from)
+}
+
+/// Renders one card exactly as the firmware's own template would: the same
+/// `SimTemplate` `wire_config` would compile it to, the same last-good field values
+/// the device holds (`AppSnapshot.card_data`), the same timezone offset the device's
+/// clock is synced to, and the currently configured mounting orientation.
+///
+/// A card with no published data yet (no `CardDataSnapshot` entry, or one with an
+/// empty field set) renders with an empty field vector instead of inventing sample
+/// text: the firmware's own per-template defaults show through, which is the
+/// device's actual unconfigured appearance. `sample` tells the caller this happened
+/// so the settings UI can badge it, without the renderer itself lying about what it
+/// drew.
+#[tauri::command]
+pub fn render_card_preview(
+    state: State<'_, DesktopState>,
+    card_id: String,
+) -> Result<PreviewFrame, IpcError> {
+    validate_target(&card_id, MAX_WIDGET_ID_LEN, "card ID")?;
+    let snapshot = state.runtime.snapshot().map_err(IpcError::from)?;
+    let card = snapshot
+        .config
+        .cards
+        .iter()
+        .find(|card| card.id() == card_id)
+        .ok_or_else(|| IpcError::NotFound {
+            message: format!("no card with id {card_id:?}"),
+        })?;
+    let template = sim_template(card.template());
+
+    let data = snapshot
+        .card_data
+        .iter()
+        .find(|data| data.card_id == card_id);
+    let (fields, sample) = match data {
+        Some(data) if !data.fields.is_empty() => {
+            (data.fields.iter().map(sim_field).collect(), false)
+        }
+        _ => (Vec::new(), true),
+    };
+
+    let now = chrono::Utc::now();
+    let utc_offset_minutes = utc_offset_minutes(&snapshot.config.preferences.timezone, now)
+        .map_err(|message| IpcError::Internal { message })?;
+    let orientation = match snapshot.config.preferences.orientation {
+        DisplayOrientation::Landscape => lvgl_sim::SimOrientation::Landscape,
+        DisplayOrientation::LandscapeFlipped => lvgl_sim::SimOrientation::LandscapeFlipped,
+    };
+
+    let request = lvgl_sim::RenderRequest {
+        template,
+        fields,
+        utc_offset_minutes,
+        now_unix_seconds: now.timestamp(),
+        orientation,
+    };
+    let png = state
+        .preview
+        .render(request)
+        .map_err(|message| IpcError::Internal { message })?;
+    Ok(PreviewFrame {
+        png_base64: BASE64_STANDARD.encode(png),
+        sample,
+    })
+}
+
+/// Mirrors the wire mapping `CardSettings::wire_config` uses for `TemplateKind`
+/// (`app-core`'s `config.rs`), except targeting `lvgl_sim::SimTemplate` — the two
+/// enums are exhaustively 1:1, so this can never fail to map a `DisplayTemplate` the
+/// rest of the app accepts; there is no "unknown template" branch to fall back from.
+fn sim_template(template: &DisplayTemplate) -> lvgl_sim::SimTemplate {
+    match template {
+        DisplayTemplate::DigitalClock => lvgl_sim::SimTemplate::DigitalClock,
+        DisplayTemplate::ProgressRing => lvgl_sim::SimTemplate::ProgressRing,
+        DisplayTemplate::RowList => lvgl_sim::SimTemplate::RowList,
+        DisplayTemplate::AnalogClock => lvgl_sim::SimTemplate::AnalogClock,
+        DisplayTemplate::BigNumberLabel => lvgl_sim::SimTemplate::BigNumberLabel,
+        DisplayTemplate::IconBadgeText { .. } => lvgl_sim::SimTemplate::IconBadgeText,
+    }
+}
+
+fn sim_field(field: &CardField) -> lvgl_sim::SimField {
+    let value = match &field.value {
+        CardFieldValue::Text { value } => lvgl_sim::SimFieldValue::Text(value.clone()),
+        CardFieldValue::Integer { value } => lvgl_sim::SimFieldValue::Integer(*value),
+        CardFieldValue::Boolean { value } => lvgl_sim::SimFieldValue::Boolean(*value),
+    };
+    lvgl_sim::SimField {
+        name: field.key.clone(),
+        value,
+    }
 }
 
 pub(crate) fn set_paused(state: &DesktopState, paused: bool) -> Result<(), IpcError> {
@@ -570,6 +677,66 @@ mod tests {
         ValidationCode, WeatherUnits, WidgetTapAction,
     };
     use serde::Serialize;
+
+    /// Mirrors `CardSettings::wire_config`'s `TemplateKind` mapping (`app-core`'s
+    /// `config.rs`) 1:1, for every `DisplayTemplate` variant the app can construct.
+    /// A future template variant that forgets to extend this match is a compile
+    /// error, not a silent "unknown template" fallback — see `sim_template`'s docs.
+    #[test]
+    fn sim_template_mirrors_the_wire_mapping_for_every_display_template() {
+        assert_eq!(
+            sim_template(&DisplayTemplate::DigitalClock),
+            lvgl_sim::SimTemplate::DigitalClock
+        );
+        assert_eq!(
+            sim_template(&DisplayTemplate::ProgressRing),
+            lvgl_sim::SimTemplate::ProgressRing
+        );
+        assert_eq!(
+            sim_template(&DisplayTemplate::RowList),
+            lvgl_sim::SimTemplate::RowList
+        );
+        assert_eq!(
+            sim_template(&DisplayTemplate::AnalogClock),
+            lvgl_sim::SimTemplate::AnalogClock
+        );
+        assert_eq!(
+            sim_template(&DisplayTemplate::BigNumberLabel),
+            lvgl_sim::SimTemplate::BigNumberLabel
+        );
+        assert_eq!(
+            sim_template(&DisplayTemplate::IconBadgeText {
+                icon_asset_id: Some("weather-icons".into())
+            }),
+            lvgl_sim::SimTemplate::IconBadgeText
+        );
+    }
+
+    #[test]
+    fn sim_field_carries_the_key_and_maps_every_value_kind() {
+        let text = sim_field(&CardField {
+            key: "title".into(),
+            value: CardFieldValue::Text {
+                value: "Desk".into(),
+            },
+        });
+        assert_eq!(text.name, "title");
+        assert_eq!(text.value, lvgl_sim::SimFieldValue::Text("Desk".into()));
+
+        let integer = sim_field(&CardField {
+            key: "remaining_seconds".into(),
+            value: CardFieldValue::Integer { value: 900 },
+        });
+        assert_eq!(integer.name, "remaining_seconds");
+        assert_eq!(integer.value, lvgl_sim::SimFieldValue::Integer(900));
+
+        let boolean = sim_field(&CardField {
+            key: "stale".into(),
+            value: CardFieldValue::Boolean { value: true },
+        });
+        assert_eq!(boolean.name, "stale");
+        assert_eq!(boolean.value, lvgl_sim::SimFieldValue::Boolean(true));
+    }
 
     #[test]
     fn draft_parser_bounds_and_strictly_decodes_the_envelope() {
@@ -881,6 +1048,7 @@ mod tests {
         draft_validation: DraftValidation,
         config_apply_result: ConfigApplyResult,
         autostart_status: AutostartStatus,
+        preview_frame: PreviewFrame,
     }
 
     #[allow(clippy::too_many_lines)]
@@ -1313,6 +1481,10 @@ mod tests {
             autostart_status: AutostartStatus {
                 enabled: true,
                 preference_enabled: false,
+            },
+            preview_frame: PreviewFrame {
+                png_base64: "iVBORw0KGgo=".into(),
+                sample: true,
             },
         }
     }

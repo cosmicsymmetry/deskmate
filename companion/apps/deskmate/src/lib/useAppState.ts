@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { getAppSnapshot, listenToAppState, toIpcError } from "./tauri";
 import type { AppSnapshot, IpcError } from "./types";
@@ -83,17 +83,35 @@ export interface AppStateValue {
   loading: boolean;
   error: IpcError | null;
   refresh: () => Promise<void>;
+  /**
+   * Bumped whenever a new snapshot's `card_data` differs from the previous one (a
+   * provider refresh, a pomodoro tick that changed a published field, and so on).
+   * `DevicePreview` depends on this rather than on `card_data` itself, because the
+   * runtime pushes a freshly-deserialized `AppSnapshot` on every tick even when
+   * nothing in it actually changed — comparing object identity would re-request a
+   * preview render every tick, and comparing the whole snapshot would miss nothing
+   * changing except, say, `diagnostics`. Counting real `card_data` changes gives the
+   * preview a signal that fires exactly when the pixels it would render could differ.
+   */
+  dataGeneration: number;
 }
 
 export function useAppState(): AppStateValue {
   const [snapshot, setSnapshot] = useState<AppSnapshot | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<IpcError | null>(null);
+  const [dataGeneration, setDataGeneration] = useState(0);
+  const lastCardDataRef = useRef<string | null>(null);
 
   const acceptSnapshot = useCallback((next: AppSnapshot) => {
     setSnapshot(next);
     setLoading(false);
     setError(null);
+    const serializedCardData = JSON.stringify(next.card_data);
+    if (serializedCardData !== lastCardDataRef.current) {
+      lastCardDataRef.current = serializedCardData;
+      setDataGeneration((current) => current + 1);
+    }
   }, []);
   const acceptError = useCallback((next: IpcError) => {
     setLoading(false);
@@ -120,5 +138,5 @@ export function useAppState(): AppStateValue {
     [acceptError, acceptSnapshot],
   );
 
-  return { snapshot, loading, error, refresh };
+  return { snapshot, loading, error, refresh, dataGeneration };
 }

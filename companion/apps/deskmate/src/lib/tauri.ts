@@ -9,6 +9,7 @@ import type {
   DraftValidation,
   IpcError,
   PomodoroAction,
+  PreviewFrame,
 } from "./types";
 
 export const APP_STATE_EVENT = "app-state";
@@ -129,6 +130,10 @@ export function setAutostartEnabled(enabled: boolean): Promise<AutostartStatus> 
 
 export function setSettingsWindowVisible(visible: boolean): Promise<AppSnapshot> {
   return invokeTyped("set_settings_window_visible", { visible });
+}
+
+export function renderCardPreview(cardId: string): Promise<PreviewFrame> {
+  return invokeTyped("render_card_preview", { cardId });
 }
 
 export function listenToAppState(onSnapshot: (snapshot: AppSnapshot) => void): Promise<UnlistenFn> {

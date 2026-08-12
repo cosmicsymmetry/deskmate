@@ -1141,7 +1141,7 @@ git commit -m "feat: preview renders the firmware's own pixels over typed IPC"
 - Produces: `LV_FONT_DECLARE(deskmate_font_18); … deskmate_font_28; …_56; …_96;`
   via `firmware/main/ui/fonts/deskmate_fonts.h` — consumed by Task 8's redesign.
 
-- [ ] **Step 1: Vendor the working candidate face**
+- [x] **Step 1: Vendor the working candidate face**
 
 Download Inter (OFL) — `Inter-Regular.ttf` and `Inter-SemiBold.ttf` — into
 `tools/fonts/`, alongside `tools/fonts/OFL.txt` (the license text, required
@@ -1149,7 +1149,13 @@ in-repo per spec §5.2). Inter is the *working candidate*; Task 8's redesign loo
 may replace it by re-running this pipeline with a different `.ttf` — the
 pipeline, subset, and budget are what this task fixes.
 
-- [ ] **Step 2: Write the generator**
+Done: vendored Inter v4.1 (the latest official `rsms/inter` GitHub release)
+— `Inter-Regular.ttf`, `Inter-SemiBold.ttf`, and `OFL.txt` (the release's
+`LICENSE.txt`, which is the SIL OFL 1.1 text) — unmodified, at
+`tools/fonts/`. See `.superpowers/sdd/2026-08-11-deskmate-v1-preview-typeface-redesign/task-7-report.md`
+for hashes and byte sizes.
+
+- [x] **Step 2: Write the generator**
 
 `tools/genfonts.sh`:
 
@@ -1188,7 +1194,28 @@ Note on tabular figures: Inter's default figures are tabular in the weights
 vendored here; the budget check plus Task 8's golden `11:35` vs `00:00`
 width-comparison case verify it rather than trusting the claim.
 
-- [ ] **Step 3: Generate and wire in**
+**Finding: this claim did not hold empirically.** `lv_font_conv` extracts
+glyphs by raw cmap lookup and never applies OpenType GSUB features, so
+Inter-SemiBold's default (cmap-reachable) digit glyphs are proportional —
+`adv_w` for `0`-`9` in an unpatched `deskmate_font_96.c` ranged 650-1023, not
+identical. Fixed by adding `tools/fonts/patch_tabular_figures.py`, which
+bakes the font's own `tnum` GSUB substitution into the hero source's digit
+cmap entries (via `fontTools`) before conversion — the "swap to a tabular
+variant" option from the three listed alternatives, since Inter ships no
+separate tabular-by-default static file and `lv_font_conv` has no
+feature-selection flag. `genfonts.sh` runs this against a throwaway
+`/tmp/Inter-SemiBold-tnum.ttf`; the vendored `tools/fonts/Inter-SemiBold.ttf`
+is never modified. Verified post-fix: all ten digits in both
+`deskmate_font_56.c` and `deskmate_font_96.c` share one `adv_w`. Full
+detail in the task-7 report.
+
+Also required `--lv-include lvgl.h` on the `lv_font_conv` call (not in the
+brief's literal script) — the vendored LVGL component exposes `lvgl.h`
+directly, not under an `lvgl/` subdirectory, and neither build defines
+`LV_LVGL_H_INCLUDE_SIMPLE`, so the generated files' `#else` branch failed to
+compile without it.
+
+- [x] **Step 3: Generate and wire in**
 
 Run `bash tools/genfonts.sh`. Create `firmware/main/ui/fonts/deskmate_fonts.h`:
 
@@ -1205,19 +1232,36 @@ Add the four `.c` files to `firmware/main/CMakeLists.txt` `SRCS` and to the
 template list in `companion/crates/lvgl-sim/build.rs` (new `fonts` loop mirroring
 the `templates` loop).
 
-- [ ] **Step 4: Build both targets and check flash**
+- [x] **Step 4: Build both targets and check flash**
 
 Run: `idf.py -C firmware build` and `cd companion && cargo test -p lvgl-sim`
 Expected: both build; the firmware size report grows by roughly the font binary
 total; golden frames still pass (nothing uses the fonts yet).
 
-- [ ] **Step 5: Commit**
+Both builds pass. The size-growth expectation did **not** hold: a
+from-scratch build with the four font `.c` files in `SRCS` produced a
+byte-identical `deskmate.bin` (798,896 bytes) to a from-scratch build with
+them removed — confirmed by `nm` showing the font objects present (with
+their symbols) inside `libmain.a` but absent from the final linked `.elf`.
+This is expected, not a defect: ESP-IDF links `main` as a plain
+(non-whole-archive) static library, so unreferenced `.o` members are simply
+never pulled in. Nothing calls into these fonts yet (Task 8's job); the size
+delta will become observable once a template references one.
+`cargo test -p lvgl-sim` passes, including `golden_frames_match`.
+
+- [x] **Step 5: Commit**
 
 ```bash
 git add tools/genfonts.sh tools/fonts firmware/main/ui/fonts \
   firmware/main/CMakeLists.txt companion/crates/lvgl-sim/build.rs
 git commit -m "feat: baked typeface pipeline — four sizes, subset, 200KB budget gate"
 ```
+
+Committed as `2ae03e2` (also includes `firmware/lv_conf.h`'s deferred Task 3
+breadcrumb comment on `LV_FONT_MONTSERRAT_48`, and
+`tools/fonts/patch_tabular_figures.py`, not in the brief's literal file
+list but required by the pipeline — see the tabular-figures finding above).
+Full detail: `.superpowers/sdd/2026-08-11-deskmate-v1-preview-typeface-redesign/task-7-report.md`.
 
 ---
 

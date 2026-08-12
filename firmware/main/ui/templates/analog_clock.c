@@ -3,6 +3,8 @@
 #include <string.h>
 #include <time.h>
 
+#include "core/clock_source.h"
+
 enum {
     OBJ_TITLE,
     OBJ_FACE,
@@ -162,7 +164,8 @@ void analog_clock_tick(template_widget_view_t *view,
     if (view == NULL || view->root == NULL) {
         return;
     }
-    time_t local = time(NULL) + (time_t)utc_offset_minutes * 60;
+    time_t local = (time_t)clock_source_now() +
+                   (time_t)utc_offset_minutes * 60;
     struct tm now;
     if (gmtime_r(&local, &now) == NULL) {
         return;

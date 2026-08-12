@@ -26,7 +26,7 @@
 mod cases;
 
 use lvgl_sim::{
-    RenderRequest, SimField, SimFieldValue, SimOrientation, SimTemplate, Simulator, LOGICAL_WIDTH,
+    LOGICAL_WIDTH, RenderRequest, SimField, SimFieldValue, SimOrientation, SimTemplate, Simulator,
 };
 
 /// Rows covering the hero time label and nothing else: the title band ends at
@@ -70,7 +70,9 @@ fn ink_runs(pixels: &[u16]) -> Vec<(usize, usize)> {
     let mut runs = Vec::new();
     let mut run_start: Option<usize> = None;
     for column in 0..width {
-        let lit = TIME_BAND.clone().any(|row| pixels[row * width + column] != 0);
+        let lit = TIME_BAND
+            .clone()
+            .any(|row| pixels[row * width + column] != 0);
         match (lit, run_start) {
             (true, None) => run_start = Some(column),
             (false, Some(start)) => {

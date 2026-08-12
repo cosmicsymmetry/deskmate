@@ -373,6 +373,22 @@ fn big_number_label_cases(cases: &mut Vec<(String, RenderRequest)>) {
         NOW,
         0,
     );
+    // A json-feed boolean lands in `value` as free-form text. The HERO and
+    // DISPLAY tiers are digits-only subsets, so this case pins the step down
+    // to BODY; `typical` above pins the numeric case staying at HERO.
+    case(
+        cases,
+        "big-number-label",
+        "alphabetic-value",
+        SimTemplate::BigNumberLabel,
+        &[
+            text("title", "Deploy gate"),
+            text("value", "yes"),
+            text("label", "main branch"),
+        ],
+        NOW,
+        0,
+    );
     case(
         cases,
         "big-number-label",

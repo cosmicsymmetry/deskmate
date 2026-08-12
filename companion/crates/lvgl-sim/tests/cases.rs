@@ -107,7 +107,35 @@ fn digital_clock_cases(cases: &mut Vec<(String, RenderRequest)>) {
         NOW,
         OFFSET,
     );
+    // Tabular-figure pair (Task 9). Both instants render an HH:MM with no
+    // repeated digit shape in common, at the same font and the same box, so
+    // the two goldens' lit column span must be identical — proportional
+    // figures would shift the second frame. `tests/tabular.rs` asserts that
+    // equality in pixels; the goldens pin the frames it asserts over.
+    case(
+        cases,
+        "digital-clock",
+        "tabular-1135",
+        SimTemplate::DigitalClock,
+        &[text("title", "Desk"), boolean("show_seconds", false)],
+        TABULAR_1135,
+        0,
+    );
+    case(
+        cases,
+        "digital-clock",
+        "tabular-0000",
+        SimTemplate::DigitalClock,
+        &[text("title", "Desk"), boolean("show_seconds", false)],
+        TABULAR_0000,
+        0,
+    );
 }
+
+/// 2025-08-13 11:35:00 UTC — the "widest-looking" of the tabular pair.
+pub const TABULAR_1135: i64 = 1_755_084_900;
+/// 2025-08-13 00:00:00 UTC — the "narrowest-looking" of the tabular pair.
+pub const TABULAR_0000: i64 = 1_755_043_200;
 
 // Fields: title, show_seconds, stale, error
 // (firmware/main/core/template_fields.c: s_analog_clock_fields)

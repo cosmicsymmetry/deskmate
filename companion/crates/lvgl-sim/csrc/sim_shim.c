@@ -99,7 +99,17 @@ bool sim_render(int template_kind, const sim_field_t *fields,
         clock_source_clear_override();
         return false;
     }
-    /* Advance fake time so LVGL runs its refresh timer. */
+    /* Advance fake time so LVGL runs its refresh timer.
+     *
+     * Start every render on a 1000ms boundary. The tick counter is process
+     * global and monotonic (LVGL timers must never see it move backwards),
+     * so without this the phase a render begins at depends on how many
+     * renders preceded it — and the progress ring, whose arc value is
+     * derived from elapsed ticks since its patch, would then produce
+     * different pixels purely because a case was added earlier in the
+     * table. Pinning the phase makes every golden independent of case
+     * ordering. */
+    s_fake_tick = (s_fake_tick / 1000U + 1U) * 1000U;
     for (int cycle = 0; cycle < 4; ++cycle) {
         s_fake_tick += 40;
         lv_timer_handler();

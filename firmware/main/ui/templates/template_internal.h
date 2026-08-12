@@ -27,10 +27,68 @@
 #define DESKMATE_FONT_DISPLAY      (&deskmate_font_56)
 #define DESKMATE_FONT_HERO         (&deskmate_font_96)
 
+/* True when every byte of `text` is covered by the digits-only DISPLAY/HERO
+ * subsets (0-9, ':', '-', '%', and U+00B0 DEGREE SIGN; spec §5.2). Those two
+ * tiers are subset fonts, so any other glyph — including the '.' of
+ * LV_LABEL_LONG_DOT's ellipsis — renders as a placeholder box. Faces that
+ * accept free-form text in a numeric slot call this to decide whether the
+ * value may be typeset large, or must step down to DESKMATE_FONT_BODY, which
+ * carries the full text range. An empty string is not "numeric": callers
+ * substitute their own placeholder first. */
+static inline bool deskmate_text_is_numeric(const char *text)
+{
+    if (text == NULL || text[0] == '\0') {
+        return false;
+    }
+    for (const unsigned char *cursor = (const unsigned char *)text;
+         *cursor != '\0'; ++cursor) {
+        if ((*cursor >= (unsigned char)'0' && *cursor <= (unsigned char)'9') ||
+            *cursor == (unsigned char)':' || *cursor == (unsigned char)'-' ||
+            *cursor == (unsigned char)'%') {
+            continue;
+        }
+        /* U+00B0 is the two-byte UTF-8 sequence C2 B0. */
+        if (cursor[0] == 0xC2U && cursor[1] == 0xB0U) {
+            ++cursor;
+            continue;
+        }
+        return false;
+    }
+    return true;
+}
+
+/* Picks the largest tier that both covers `text`'s glyphs and fits `max_width`
+ * on one line, walking DESKMATE_FONT_HERO -> DISPLAY -> BODY. `start` selects
+ * the top of the ladder so a face can cap itself at DISPLAY. BODY is the
+ * floor: it is the only tier that can ellipsize, since its range includes the
+ * '.' that LV_LABEL_LONG_DOT appends. */
+static inline const lv_font_t *deskmate_number_font(const char *text,
+                                                    int32_t max_width,
+                                                    const lv_font_t *start)
+{
+    if (!deskmate_text_is_numeric(text)) {
+        return DESKMATE_FONT_BODY;
+    }
+    const lv_font_t *tiers[2] = { DESKMATE_FONT_HERO, DESKMATE_FONT_DISPLAY };
+    size_t first = (start == DESKMATE_FONT_HERO) ? 0U : 1U;
+    for (size_t index = first; index < 2U; ++index) {
+        lv_point_t size;
+        lv_text_get_size(&size, text, tiers[index], 0, 0, LV_COORD_MAX,
+                         LV_TEXT_FLAG_NONE);
+        if (size.x <= max_width) {
+            return tiers[index];
+        }
+    }
+    return DESKMATE_FONT_BODY;
+}
+
 typedef struct {
     lv_obj_t *root;
     lv_obj_t *state_label;
     lv_obj_t *objects[TEMPLATE_OBJECT_CAPACITY];
+    /* Owned by the two clock faces. Lives here rather than in a file-static
+     * so a second view cannot inherit the previous card's setting. */
+    bool clock_show_seconds;
     bool progress_running;
     int64_t progress_duration_seconds;
     int64_t progress_remaining_ms;

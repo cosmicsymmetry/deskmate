@@ -6,6 +6,7 @@
 #include "lvgl.h"
 #include "board/display.h"
 #include "core/timefmt.h"
+#include "templates/template_internal.h"
 #include "clock_screen.h"
 
 static const char *TAG = "clock";
@@ -174,24 +175,26 @@ void clock_screen_show_in_lvgl(void)
     // otherwise drag this screen's labels around (human-caught Task 5 bug,
     // see board-notes.md). This screen has nothing to scroll to.
     lv_obj_remove_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_style_bg_color(scr, lv_color_hex(0x101020), 0);
+    lv_obj_set_style_bg_color(scr, DESKMATE_COLOR_CANVAS, 0);
     lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
 
     s_time_label = lv_label_create(scr);
-    lv_obj_set_style_text_font(s_time_label, &lv_font_montserrat_48, 0);
-    lv_obj_set_style_text_color(s_time_label, lv_color_hex(0xffffff), 0);
+    lv_obj_set_style_text_font(s_time_label, DESKMATE_FONT_HERO, 0);
+    lv_obj_set_style_text_color(s_time_label, DESKMATE_COLOR_PRIMARY, 0);
     lv_label_set_text(s_time_label, "00:00");
     lv_obj_align(s_time_label, LV_ALIGN_CENTER, 0, -40);
 
     s_date_label = lv_label_create(scr);
-    lv_obj_set_style_text_color(s_date_label, lv_color_hex(0xa0a0b0), 0);
+    lv_obj_set_style_text_font(s_date_label, DESKMATE_FONT_BODY, 0);
+    lv_obj_set_style_text_color(s_date_label, DESKMATE_COLOR_SECONDARY, 0);
     lv_label_set_text(s_date_label, "");
     lv_obj_align_to(s_date_label, s_time_label, LV_ALIGN_OUT_BOTTOM_MID, 0, 12);
 
     s_hint_label = lv_label_create(scr);
-    lv_obj_set_style_text_color(s_hint_label, lv_color_hex(0x505060), 0);
+    lv_obj_set_style_text_font(s_hint_label, DESKMATE_FONT_CAPTION, 0);
+    lv_obj_set_style_text_color(s_hint_label, DESKMATE_COLOR_TERTIARY, 0);
     lv_label_set_text(s_hint_label, "Connect deskmate app");
-    lv_obj_align(s_hint_label, LV_ALIGN_BOTTOM_MID, 0, -16);
+    lv_obj_align(s_hint_label, LV_ALIGN_BOTTOM_MID, 0, -DESKMATE_MARGIN / 2);
     if (atomic_load(&s_online)) {
         lv_obj_add_flag(s_hint_label, LV_OBJ_FLAG_HIDDEN);
     }

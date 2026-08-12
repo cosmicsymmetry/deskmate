@@ -6,8 +6,26 @@
 #include "core/protocol_message.h"
 #include "core/template_fields.h"
 #include "lvgl.h"
+#include "ui/fonts/deskmate_fonts.h"
 
 #define TEMPLATE_OBJECT_CAPACITY 14U
+
+/* Design system constants (spec §6.2). Every per-face template and the
+ * standalone clock inherit these; do not hardcode raw colors/fonts
+ * elsewhere. */
+#define DESKMATE_GRID              8      /* spacing unit, spec §6.2 */
+#define DESKMATE_MARGIN            (3 * DESKMATE_GRID)  /* 24px canvas margin */
+#define DESKMATE_COLOR_CANVAS      lv_color_hex(0x000000)
+#define DESKMATE_COLOR_PRIMARY     lv_color_hex(0xf5f5f7)
+#define DESKMATE_COLOR_SECONDARY   lv_color_hex(0x9a9aa5)
+#define DESKMATE_COLOR_TERTIARY    lv_color_hex(0x5c5c66)
+#define DESKMATE_COLOR_ACCENT      lv_color_hex(0x4f9dff)  /* candidate; tuned in loop */
+#define DESKMATE_COLOR_STALE       lv_color_hex(0xf2c94c)  /* reserved, unchanged */
+#define DESKMATE_COLOR_ERROR       lv_color_hex(0xff6b6b)  /* reserved, unchanged */
+#define DESKMATE_FONT_CAPTION      (&deskmate_font_18)
+#define DESKMATE_FONT_BODY         (&deskmate_font_28)
+#define DESKMATE_FONT_DISPLAY      (&deskmate_font_56)
+#define DESKMATE_FONT_HERO         (&deskmate_font_96)
 
 typedef struct {
     lv_obj_t *root;

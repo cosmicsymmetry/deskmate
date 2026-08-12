@@ -84,14 +84,17 @@ static void update_data_state(template_widget_view_t *widget,
     if (widget == NULL || widget->state_label == NULL) {
         return;
     }
+    lv_obj_set_style_text_font(widget->state_label, DESKMATE_FONT_CAPTION, 0);
+    lv_obj_align(widget->state_label, LV_ALIGN_BOTTOM_MID, 0,
+                -DESKMATE_MARGIN / 2);
     if (error != NULL && error[0] != '\0') {
         lv_label_set_text(widget->state_label, error);
         lv_obj_set_style_text_color(widget->state_label,
-                                    lv_color_hex(0xff6b6b), 0);
+                                    DESKMATE_COLOR_ERROR, 0);
     } else if (stale) {
         lv_label_set_text(widget->state_label, "Stale");
         lv_obj_set_style_text_color(widget->state_label,
-                                    lv_color_hex(0xf2c94c), 0);
+                                    DESKMATE_COLOR_STALE, 0);
     } else {
         lv_label_set_text(widget->state_label, "");
     }
@@ -154,7 +157,7 @@ bool template_view_show(protocol_template_kind_t template_kind,
     }
     lv_obj_remove_flag(candidate.screen, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(candidate.screen, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_set_style_bg_color(candidate.screen, lv_color_hex(0x101020), 0);
+    lv_obj_set_style_bg_color(candidate.screen, DESKMATE_COLOR_CANVAS, 0);
     lv_obj_set_style_bg_opa(candidate.screen, LV_OPA_COVER, 0);
 
     lv_obj_t *content = lv_obj_create(candidate.screen);

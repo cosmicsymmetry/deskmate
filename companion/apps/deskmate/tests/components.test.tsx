@@ -498,6 +498,85 @@ describe("settings accessibility and states", () => {
     root.unmount();
   });
 
+  // Regression test: `preview.rs`'s latest-wins coalescing replies to a superseded
+  // job with `Err("superseded")` *before* the winning job even starts rendering, so
+  // an older request's rejection can land in the browser after a newer request from
+  // the *same* effect invocation has already succeeded. This only happens within one
+  // effect invocation (a prop-driven re-render already fully guards the old promise
+  // via `cancelled`, set synchronously during React's cleanup) — the live-templates
+  // 1 Hz interval is the one in-component path that issues a second request before
+  // the first has settled, so this test drives that interval deterministically
+  // instead of waiting on a real 1 s timer: it captures the handler `DevicePreview`
+  // passes to `window.setInterval` and invokes it itself.
+  test("an older superseded rejection landing after a newer success does not flip the panel to unavailable", async () => {
+    let capturedTick: (() => void) | undefined;
+    const originalSetInterval = window.setInterval;
+    const originalClearInterval = window.clearInterval;
+    window.setInterval = ((handler: () => void) => {
+      capturedTick = handler;
+      return 0;
+    }) as unknown as typeof window.setInterval;
+    window.clearInterval = (() => {}) as unknown as typeof window.clearInterval;
+
+    try {
+      let rejectFirst!: (error: unknown) => void;
+      let resolveSecond!: (frame: PreviewFrame) => void;
+      let callCount = 0;
+      previewImpl = () => {
+        callCount += 1;
+        if (callCount === 1) {
+          return new Promise((_resolve, reject) => {
+            rejectFirst = reject;
+          });
+        }
+        return new Promise((resolve) => {
+          resolveSecond = resolve;
+        });
+      };
+
+      // `clock` is a live template, so `DevicePreview` registers the 1 Hz interval
+      // this test drives by hand.
+      const clock = clockCard("clock-preview", { kind: "in-rotation", dwell_seconds: null });
+      const { container, root } = await mountPreview(clock);
+      await waitFor(() => expect(callCount).toBe(1));
+      expect(capturedTick).not.toBeUndefined();
+
+      // Fire the "interval tick" ourselves: the second, superseding request.
+      await act(async () => {
+        capturedTick?.();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      await waitFor(() => expect(callCount).toBe(2));
+
+      // The newer request succeeds first...
+      await act(async () => {
+        resolveSecond({ png_base64: "winning-frame", sample: false });
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      await waitFor(() => {
+        expect(container.querySelector("img")?.getAttribute("src")).toBe(
+          "data:image/png;base64,winning-frame",
+        );
+      });
+
+      // ...then the older, now-superseded request's rejection lands. It must not
+      // flip the panel to "Preview unavailable" over the already-correct frame.
+      await act(async () => {
+        rejectFirst(new Error("superseded"));
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      });
+      expect(container.textContent).not.toContain("Preview unavailable");
+      expect(container.querySelector("img")?.getAttribute("src")).toBe(
+        "data:image/png;base64,winning-frame",
+      );
+
+      root.unmount();
+    } finally {
+      window.setInterval = originalSetInterval;
+      window.clearInterval = originalClearInterval;
+    }
+  });
+
   test("shows 'No cards configured' when there are no cards, never a stale or invented frame", () => {
     // No live effect needed here: with no cards, `DevicePreview` never calls the
     // preview IPC at all, so a static render is enough to check the empty state.

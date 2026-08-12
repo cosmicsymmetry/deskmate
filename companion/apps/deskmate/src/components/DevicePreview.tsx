@@ -42,7 +42,14 @@ export function DevicePreview({
           setUnavailable(false);
         }
       } catch {
-        if (!cancelled) setUnavailable(true); // explicit, never stale (spec §3.3)
+        // Guarded the same way the success branch above is: `preview.rs`'s
+        // latest-wins coalescing replies to a superseded job with `Err("superseded")`
+        // *before* the winning job even starts rendering, so an older request's
+        // rejection can land after a newer request has already succeeded. Without
+        // this check that stale rejection would flash "Preview unavailable" over a
+        // correct, already-rendered frame before self-correcting — a stale UI state
+        // the spec's "never stale" rule forbids just as much as a stale frame.
+        if (!cancelled && requested === generation.current) setUnavailable(true);
       }
     };
     void tick();

@@ -12,6 +12,10 @@
 #include "template_view.h"
 #include "ui_command_queue.h"
 
+#ifndef DESKMATE_LV_CONF_CANARY
+#error "LVGL is not reading firmware/lv_conf.h — CONFIG_LV_CONF_SKIP must be n"
+#endif
+
 #define UI_COMMAND_POLL_MS 20U
 
 static const char *TAG = "ui_runtime";

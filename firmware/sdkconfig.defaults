@@ -13,3 +13,9 @@ CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y
 CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF=y
+
+# LVGL reads the single checked-in firmware/lv_conf.h instead of synthesizing
+# its config from Kconfig. firmware/main/CMakeLists.txt adds firmware/ to the
+# global build include path so every translation unit that includes lvgl.h
+# (LVGL itself, esp_lvgl_port, and our own board/ui code) can find it.
+CONFIG_LV_CONF_SKIP=n

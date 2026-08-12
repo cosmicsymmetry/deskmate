@@ -23,3 +23,19 @@ idf_component_register(
 # most two levels; eight preserves evolution room while bounding stack use.
 idf_component_get_property(cbor_lib espressif__cbor COMPONENT_LIB)
 target_compile_definitions(${cbor_lib} PRIVATE CBOR_PARSER_MAX_RECURSIONS=8)
+
+# Make the single checked-in firmware/lv_conf.h (CONFIG_LV_CONF_SKIP=n, see
+# sdkconfig.defaults) visible to every translation unit that includes
+# lvgl.h -- not just this component. lv_conf_internal.h resolves lv_conf.h
+# via a plain quote-search ("#include "lv_conf.h""); LVGL's own component
+# only puts firmware/managed_components/ (not firmware/) on its include
+# path, and a target_compile_definitions()/target_include_directories() set
+# here on this component's own library would only apply to *this*
+# component's sources, not LVGL's (PUBLIC compile options flow to a
+# target's dependents, not backwards to its dependencies). Appending to the
+# global COMPILE_OPTIONS build property instead reaches every component,
+# including the vendored lvgl and esp_lvgl_port components, because each
+# component's directory-scoped compile options resolve this property via a
+# generator expression at CMake generate time -- after every component,
+# including this one, has registered.
+idf_build_set_property(COMPILE_OPTIONS "-I${CMAKE_CURRENT_LIST_DIR}/.." APPEND)

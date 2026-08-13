@@ -4,6 +4,7 @@
 #include <stdatomic.h>
 
 #include "esp_check.h"
+#include "esp_heap_caps.h"
 #include "esp_lcd_co5300.h"
 #include "esp_lcd_panel_ops.h"
 #include "esp_log.h"
@@ -65,6 +66,41 @@ static atomic_ushort s_rotation_degrees;
 // vertical strip (uninitialized panel RAM) was visible along the right edge
 // of the panel without this call.
 #define BOARD_LCD_X_GAP 16
+
+// LVGL draw-buffer budget, in whole panel-width lines.
+//
+// esp_lvgl_port allocates the flush buffer from internal DMA-capable RAM
+// (`.buff_dma = true`), and -- because `.sw_rotate = true` -- a SECOND,
+// identically sized rotation scratch buffer from the same pool
+// (esp_lvgl_port_disp.c, `disp_ctx->draw_buffs[2]`). So the real internal-RAM
+// cost of this display is 2 x BOARD_LCD_DRAW_BUF_BYTES, not one buffer.
+//
+// This used to be 80 lines (2 x 58,880 = 117,760 bytes). Measured on the
+// physical board immediately before lvgl_port_add_disp(), the largest free
+// MALLOC_CAP_DMA block at that point is 110,592 bytes -- 7,168 bytes short --
+// so the rotation buffer's heap_caps_malloc() returned NULL. esp_lvgl_port's
+// failure path then frees `disp_ctx` but still returns a non-NULL
+// lv_display_t, so lvgl_port_add_disp() dereferenced freed memory and called
+// through a garbage function pointer: IllegalInstruction panic ~1.3 s into
+// every boot, i.e. a permanent boot crash-loop. See
+// docs/hardware/board-notes.md and the task-11 debug report for the full
+// evidence trail.
+//
+// 64 lines keeps both buffers (2 x 47,104 = 94,208 bytes) inside a 96 KiB
+// ceiling, leaving ~16 KiB of measured headroom in that block for the touch,
+// USB and protocol allocations that follow.
+#define BOARD_LCD_DRAW_BUF_LINES 64
+#define BOARD_LCD_DRAW_BUF_PX    ((size_t)BOARD_LCD_H_RES * BOARD_LCD_DRAW_BUF_LINES)
+#define BOARD_LCD_DRAW_BUF_BYTES (BOARD_LCD_DRAW_BUF_PX * sizeof(uint16_t))
+// What esp_lvgl_port actually takes out of internal DMA RAM for this display.
+#define BOARD_LCD_DRAW_BUF_TOTAL_BYTES (2u * BOARD_LCD_DRAW_BUF_BYTES)
+// Hard ceiling derived from the 110,592-byte largest-free-block measurement
+// above, rounded down to 96 KiB so a future buffer-size change cannot silently
+// walk back into the crash-loop.
+#define BOARD_LCD_DRAW_BUF_BUDGET_BYTES (96u * 1024u)
+_Static_assert(BOARD_LCD_DRAW_BUF_TOTAL_BYTES <= BOARD_LCD_DRAW_BUF_BUDGET_BYTES,
+               "LVGL draw buffers exceed the measured internal-DMA budget; "
+               "lower BOARD_LCD_DRAW_BUF_LINES (see the comment above)");
 
 // Reads: Waveshare's own esp32_s3_touch_amoled_1_8 BSP (main branch,
 // bsp/esp32_s3_touch_amoled_1_8/esp32_s3_touch_amoled_1_8.c) creates a TCA9554
@@ -150,7 +186,7 @@ esp_err_t board_display_init(void)
     const spi_bus_config_t buscfg = CO5300_PANEL_BUS_QSPI_CONFIG(
         BOARD_LCD_PIN_PCLK, BOARD_LCD_PIN_D0, BOARD_LCD_PIN_D1,
         BOARD_LCD_PIN_D2, BOARD_LCD_PIN_D3,
-        BOARD_LCD_H_RES * 80 * sizeof(uint16_t));
+        BOARD_LCD_DRAW_BUF_BYTES);
     ESP_RETURN_ON_ERROR(spi_bus_initialize(BOARD_LCD_QSPI_HOST, &buscfg, SPI_DMA_CH_AUTO),
                          TAG, "spi_bus_initialize failed");
 
@@ -201,7 +237,7 @@ esp_err_t board_display_init(void)
     const lvgl_port_display_cfg_t disp_cfg = {
         .io_handle = s_io,
         .panel_handle = panel,
-        .buffer_size = BOARD_LCD_H_RES * 80,
+        .buffer_size = BOARD_LCD_DRAW_BUF_PX,
         // Keep one draw buffer while the newly restored CO5300 even-window
         // rule is visually isolated on hardware. Switching from two buffers
         // to one did not change the corruption, so it is not treated as the
@@ -224,6 +260,26 @@ esp_err_t board_display_init(void)
             .sw_rotate = true,
         },
     };
+    // Pre-flight the internal-DMA budget ourselves. esp_lvgl_port cannot be
+    // trusted to fail safely here: when one of its two draw-buffer
+    // allocations returns NULL it frees `disp_ctx` on the error path and
+    // still returns a non-NULL lv_display_t, which its own caller
+    // (lvgl_port_add_disp()) immediately dereferences -- a use-after-free that
+    // surfaces as an IllegalInstruction panic, not as an error code. Checking
+    // here turns "out of internal RAM" into a named, logged ESP_ERR_NO_MEM
+    // instead of a boot crash-loop with a corrupted backtrace.
+    //
+    // The two buffers are allocated back to back, so the block that holds
+    // them must fit both plus their allocator headers; 1 KiB covers that.
+    const size_t largest_dma_block = heap_caps_get_largest_free_block(MALLOC_CAP_DMA);
+    ESP_RETURN_ON_FALSE(largest_dma_block >= BOARD_LCD_DRAW_BUF_TOTAL_BYTES + 1024u,
+                        ESP_ERR_NO_MEM, TAG,
+                        "internal DMA RAM exhausted before LVGL draw buffers: largest free "
+                        "block %u B, need %u B (%d lines x 2 buffers)",
+                        (unsigned)largest_dma_block,
+                        (unsigned)BOARD_LCD_DRAW_BUF_TOTAL_BYTES,
+                        BOARD_LCD_DRAW_BUF_LINES);
+
     lv_display_t *disp = lvgl_port_add_disp(&disp_cfg);
     ESP_RETURN_ON_FALSE(disp != NULL, ESP_FAIL, TAG, "lvgl_port_add_disp failed");
     s_disp = disp;

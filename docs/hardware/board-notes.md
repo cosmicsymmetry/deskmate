@@ -1480,3 +1480,61 @@ this is root-caused and fixed, then this whole physical batch is re-run from Pha
 Next step needs an interactive TTY against the board (`idf.py monitor` or a JTAG/GDB
 session) to catch the panic banner live or single-step `board_display_init()` —
 neither was available in this sandboxed session.
+
+## Boot crash-loop root-caused — LVGL draw-buffer budget (observed 2026-08-13)
+
+Supersedes the hypothesis in the previous entry. The crash-loop is **not** caused by
+the custom partition table or by the coredump configuration. Both were tested and
+excluded; see
+`.superpowers/sdd/2026-08-11-deskmate-v1-preview-typeface-redesign/task-11-debug-report.md`
+for the full evidence trail.
+
+**Observed on the physical board** (Waveshare v2 at `/dev/cu.usbmodem101`, ESP-IDF
+v5.5.5, HEAD `baf399f`, pyserial DTR/RTS-toggle captures):
+
+- HEAD reproduces the loop on every boot: 9 complete cycles in a 12 s capture, panic
+  at ~1317 ms each time, `RTC_SW_CPU_RST` between them.
+- The panic banner had never been seen because
+  `CONFIG_ESP_CONSOLE_UART_DEFAULT=y` + `CONFIG_ESP_CONSOLE_SECONDARY_NONE=y` send
+  `panic_print_char()` output (and every `ESP_LOGI` line) to **UART0 on GPIO43/44
+  only** — `components/esp_system/panic.c:129` dispatches solely to the compiled-in
+  console backends. The `esp_core_dump_flash:` lines that *were* visible over USB
+  come from `esp_rom_printf`, which follows
+  `CONFIG_ESP_ROM_CONSOLE_OUTPUT_SECONDARY=y`. Adding
+  `CONFIG_ESP_CONSOLE_SECONDARY_USB_SERIAL_JTAG=y` as a temporary, uncommitted
+  overlay made the banner visible; the committed config is unchanged.
+- With that visibility, the line immediately preceding the banner is the cause:
+  `E (1254) LVGL: lvgl_port_add_disp_priv(471): Not enough memory for LVGL buffer
+  (rotation buffer) allocation!`, then
+  `Guru Meditation Error: Core 0 panic'ed (IllegalInstruction)`, `PC 0x20440fca`,
+  `Backtrace: ... |<-CORRUPTED`.
+- Measured immediately before `lvgl_port_add_disp()`, identical on every boot:
+  largest free `MALLOC_CAP_DMA` block **110,592 B**, against **2 x 58,880 =
+  117,760 B** required. Total free DMA memory was 186,583 B — the failure is
+  contiguity, not capacity. Internal DMA RAM is three disjoint regions
+  (`0x3FCBFA78` 171,160 B / `0x3FCE9710` 22,308 B / `0x3FCF0000` 32,768 B); once the
+  flush buffer takes 58,880 B out of the 110,592 B block, no remaining block can hold
+  the rotation buffer.
+
+**Board fact to carry forward:** with `.sw_rotate = true`, `esp_lvgl_port` allocates
+**two** internal-DMA draw buffers of `buffer_size` each (flush + rotation scratch),
+not one. On this board the usable ceiling for that pair, measured at
+`board_display_init()` time, is ~110 KiB. `display.c` now pins the budget at 96 KiB
+(64 lines, 2 x 47,104 B) behind a `_Static_assert`, plus a runtime
+`heap_caps_get_largest_free_block(MALLOC_CAP_DMA)` pre-flight check — needed because
+`esp_lvgl_port`'s allocation-failure path frees `disp_ctx` and still returns a
+non-NULL `lv_display_t`, so its caller dereferences freed memory and jumps through a
+garbage function pointer instead of reporting an error.
+
+**Not yet verified on hardware.** The board stopped responding on both USB CDC and
+built-in USB-JTAG after the third diagnostic flash (still enumerated as
+`USB JTAG_serial debug unit`, VID `0x303a`, serial `A4:CB:8F:DB:33:28`, but
+`ioreg` reports `DevicePowerState = 0`; `esptool` fails with "No serial data
+received" under every reset mode and baud, and OpenOCD fails at
+`libusb_get_string_descriptor_ascii() failed with -1`). Most likely a USB endpoint
+wedged by ~1.3 s-period crash-looping with the USB-Serial/JTAG console enabled;
+recovery needs a physical unplug/replug. **The fix builds and passes all host and
+companion suites but has NOT been observed booting on the board — three consecutive
+clean boots to the standalone clock and a `deskmate-cli status` readback of
+protocol 1 / capabilities 11 still have to be run before this branch may be described
+as physically verified.**

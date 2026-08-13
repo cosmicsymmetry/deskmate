@@ -33,6 +33,10 @@ enum {
 #define HAND_SECOND_WIDTH 2
 #define HUB_DIAMETER      (2 * DESKMATE_GRID)
 
+/* Deep enough to seat the longer of the two tick lengths with a grid unit
+ * of surface showing on either side of it. */
+#define CHAPTER_RING_WIDTH (4 * DESKMATE_GRID)
+
 #define TICK_MAJOR_LEN   (2 * DESKMATE_GRID)
 #define TICK_MINOR_LEN   DESKMATE_GRID
 #define TICK_MAJOR_WIDTH 4
@@ -85,24 +89,30 @@ bool analog_clock_create(template_widget_view_t *view,
     /* The dial is centred and 320px across, so the 12 o'clock tick sits on
      * the canvas's own vertical axis: a centred title would collide with it.
      * The title takes the top-left corner instead — clear of the circle,
-     * which at the title's baseline has not yet reached x = 143 — and lands
-     * on the same rail as the row-list and icon faces. */
-    view->objects[OBJ_TITLE] = lv_label_create(view->root);
-    lv_obj_set_style_text_font(view->objects[OBJ_TITLE],
-                               DESKMATE_FONT_CAPTION, 0);
-    lv_obj_set_style_text_color(view->objects[OBJ_TITLE],
-                                DESKMATE_COLOR_SECONDARY, 0);
-    lv_label_set_long_mode(view->objects[OBJ_TITLE], LV_LABEL_LONG_DOT);
-    lv_obj_set_width(view->objects[OBJ_TITLE], 14 * DESKMATE_GRID);
-    lv_obj_set_height(view->objects[OBJ_TITLE],
-                      lv_font_get_line_height(DESKMATE_FONT_CAPTION));
-    lv_obj_align(view->objects[OBJ_TITLE], LV_ALIGN_TOP_LEFT, DESKMATE_MARGIN,
-                 DESKMATE_MARGIN);
-    lv_label_set_text(view->objects[OBJ_TITLE], "");
+     * which at the chip's own band has not yet reached x = 174 — and lands
+     * on the same rail as the other faces' identity chips. */
+    view->objects[OBJ_TITLE] = deskmate_chip(
+        view->root, DESKMATE_MARGIN, 2 * DESKMATE_GRID, palette.hue,
+        palette.ink);
+
+    /* A chapter ring: the surface the hour marks are set into. The
+     * complication language groups related marks onto a surface, but a
+     * filled disc would light 320px of AMOLED that the design otherwise
+     * keeps off, so the surface is an annulus just deep enough to hold the
+     * ticks. Untracked: nothing patches it. */
+    lv_obj_t *chapter = lv_arc_create(view->root);
+    lv_obj_set_size(chapter, FACE_DIAMETER, FACE_DIAMETER);
+    lv_obj_center(chapter);
+    lv_arc_set_bg_angles(chapter, 0, 360);
+    lv_obj_remove_style(chapter, NULL, LV_PART_KNOB);
+    lv_obj_remove_flag(chapter, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_arc_color(chapter, DESKMATE_COLOR_SURFACE,
+                               LV_PART_MAIN);
+    lv_obj_set_style_arc_width(chapter, CHAPTER_RING_WIDTH, LV_PART_MAIN);
+    lv_obj_set_style_arc_opa(chapter, LV_OPA_TRANSP, LV_PART_INDICATOR);
 
     /* An invisible container: the coordinate frame the ticks and hands are
-     * placed in. The dial itself is drawn by the tick marks alone — a border
-     * ring would only compete with them for the eye. */
+     * placed in. */
     view->objects[OBJ_FACE] = lv_obj_create(view->root);
     lv_obj_remove_style_all(view->objects[OBJ_FACE]);
     lv_obj_remove_flag(view->objects[OBJ_FACE],
@@ -124,11 +134,13 @@ bool analog_clock_create(template_widget_view_t *view,
         bool major = (i % 3) == 0;
         int32_t width = major ? TICK_MAJOR_WIDTH : TICK_MINOR_WIDTH;
         lv_obj_set_size(tick, width, major ? TICK_MAJOR_LEN : TICK_MINOR_LEN);
-        /* Twelve o'clock is brightest: a dial needs a stated "up", and one
-         * marker carrying it is cheaper than numerals the hero subset could
-         * not set anyway. */
+        /* Twelve o'clock carries the face hue: a dial needs a stated "up",
+         * and one marker carrying it is cheaper than numerals the hero
+         * subset could not set anyway. Taking the hue rather than plain
+         * white also ties the dial to the digital clock it shares an
+         * identity with. */
         lv_obj_set_style_bg_color(tick,
-                                  i == 0 ? DESKMATE_COLOR_PRIMARY
+                                  i == 0 ? palette.hue
                                          : (major ? DESKMATE_COLOR_SECONDARY
                                                   : DESKMATE_COLOR_TERTIARY),
                                   0);
@@ -187,7 +199,7 @@ void analog_clock_patch(template_widget_view_t *view,
     const template_field_value_t *show =
         template_fields_get(fields, "show_seconds");
     if (title != NULL) {
-        lv_label_set_text(view->objects[OBJ_TITLE], title->value.text);
+        deskmate_chip_set_text(view->objects[OBJ_TITLE], title->value.text);
     }
     if (show != NULL) {
         view->clock_show_seconds = show->value.boolean;

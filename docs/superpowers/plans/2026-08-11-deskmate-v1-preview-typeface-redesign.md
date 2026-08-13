@@ -1356,6 +1356,20 @@ git commit -m "feat: design system — true-black canvas, type scale, shared sta
 
 ### Task 9: Per-face redesign (six faces, one commit each)
 
+> **Status, amended 2026-08-13 by user direction after design review.** The first
+> pass implemented the austerity direction the layout sketches below describe. It
+> was technically clean and the user rejected the result as basic. A
+> three-direction spike (complication / instrument / editorial; nine renders, no
+> commits) followed, and the user chose **complication** as the design language
+> for all six faces. Spec §6.2 is amended to match, and §5.2 gains Latin-1
+> Supplement. The layout sketches below are therefore **superseded** — the fixed
+> constraints they carry are not. Still binding: no signature changes, the
+> create/patch/tick contract, the field schema, the wire, the four type tiers, the
+> digits-only HERO/DISPLAY ladder, the 8px grid, the reserved stale/error colours,
+> and `weather_icon.c`'s physically verified geometry. What changed: one accent
+> hue becomes a per-face palette, and boxes/surfaces are now permitted where they
+> group data.
+
 **Files:**
 - Modify: `firmware/main/ui/templates/{digital_clock,analog_clock,progress_ring,row_list,big_number_label,icon_badge_text}.c`
 - Modify: `companion/crates/lvgl-sim/tests/golden/` (re-blessed per face)

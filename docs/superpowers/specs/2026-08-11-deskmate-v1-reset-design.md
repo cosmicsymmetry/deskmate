@@ -330,9 +330,14 @@ coredump   64K
   compiles the same files, so preview type is exact.
 - Four sizes (≈18/28/56/96 px — caption, body, secondary display, hero; exact values
   tuned in the redesign, count capped at four).
-- Subset: ASCII + the punctuation/symbols the built-ins emit (`°`, `·`, `—`, curly
-  quotes). Out-of-subset glyphs render LVGL's fallback box; a golden test pins that
-  appearance.
+- Subset: ASCII + the **Latin-1 Supplement block (U+00A0–U+00FF)** + the punctuation
+  the built-ins emit (`—`, curly quotes); the block subsumes the previously explicit
+  `°` and `·`. Out-of-subset glyphs render LVGL's fallback box; a golden test pins
+  that appearance. *Latin-1 Supplement amended 2026-08-13 by user direction after
+  design review: real calendar feeds send accented Latin row titles ("Café",
+  "Zürich") and every one of them was rendering as a box. The widening costs the
+  28px tier one pixel of line height, because Latin-1's accented capitals reach
+  higher than any ASCII glyph.*
 - Hero sizes: digits + `:` `-` `°` `%` only, **tabular figures** (a ticking clock
   must not shimmer as digit widths change).
 - Budget: ≤ 200 KB total across all font files, asserted by a build-time size check
@@ -356,17 +361,47 @@ acceptance.
 
 ### 6.2 System direction (fixed by this spec)
 
+**Amended 2026-08-13 by user direction after design review.** The original
+direction here was austerity: one accent hue system-wide, hierarchy from type
+alone, no boxes or borders. Executed faithfully, it produced six faces the user
+rejected as basic — "the pomodoro timer is very basic, the calendar looks bad,
+it's just text basically, the clock is very basic too". A three-direction design
+spike followed (complication / instrument / editorial); the user chose the
+complication language, and it replaces the austerity clauses below. The
+true-black canvas, the grid, the four type tiers and the reserved semantic
+colours are unchanged.
+
 - **True-black canvas:** `#101020` → `#000000` (AMOLED pixels off; free contrast; the
   panel edge dissolves into the bezel).
-- **One accent hue** system-wide, used for exactly: the hero/active element, the
-  progress-ring arc, alert emphasis. Everything else is a neutral white→gray ramp.
-  Semantic colors stay reserved (amber `#f2c94c` stale, red `#ff6b6b` error); the
-  accent must be neither.
-- **Hierarchy from the four type sizes,** not from boxes, borders, or gradients.
+- **Per-face identity hue.** Each template kind owns a hue, returned by
+  `deskmate_palette()` in three roles: `hue` (gauges, filled chips, key secondary
+  figures), `tint` (the hue held back, for type on the black canvas), `ink`
+  (near-black drawn from the hue, for type set *on* a hue fill). The point is a
+  swipeable carousel: the hue says which card you are on before the reading is
+  parsed. Both clock faces share one palette — they are the same reading in two
+  notations. Semantic colors stay reserved (amber `#f2c94c` stale, red `#ff6b6b`
+  error) and appear **only** in the shared state footer; no face hue may be
+  confusable with either, which is why the clock hue sits at 28° rather than
+  nearer stale-gold's 45°.
+- **Dark surface modules.** `DESKMATE_COLOR_SURFACE` (`#1a1a1f`) cards group
+  related data — a date module, a status module, one module per list entry. Dark
+  enough that the AMOLED still reads the canvas as off; a face may not cover the
+  canvas in surface (a full 320px dial plate was built and rejected on exactly
+  this ground).
+- **Gauges carry weight.** Arcs are fat (≥ 24px) with rounded caps, and a gauge's
+  track is its own hue held back rather than a neutral grey, so a partly-run gauge
+  reads as one object with a spent part.
+- **Chips.** A face's title is a filled pill in its hue; so is any live token
+  (the weather badge). An empty chip hides rather than collapsing to a blob.
+- **Hierarchy from the four type sizes,** supported by — not replaced by — the
+  surface and hue above.
 - **8 px spacing grid** with named constants in `template_internal.h`, replacing
-  per-template magic offsets.
+  per-template magic offsets. Baseline arithmetic derived from font metrics is
+  exempt: it is measured, not chosen.
 - **One state (stale/error) footer treatment** defined at the shared
-  `template_view.c` layer and inherited by all templates.
+  `template_view.c` layer and inherited by all templates, at `-2 * DESKMATE_GRID`.
+- **Shared grammar, not six dialects.** The module/chip/eyebrow/label primitives
+  live in `templates/template_style.c`; faces compose from them.
 
 ### 6.3 Per-face intent (headline; detail belongs to the redesign loop)
 

@@ -381,9 +381,17 @@ mod tests {
 
         // A string with no interior NUL is passed through unchanged.
         let clean = "Zürich";
-        assert_eq!(truncated_cstring(clean).to_str().expect("valid utf-8"), clean);
+        assert_eq!(
+            truncated_cstring(clean).to_str().expect("valid utf-8"),
+            clean
+        );
 
         // A NUL as the very first byte truncates to empty, not a panic.
-        assert_eq!(truncated_cstring("\0trailing").to_str().expect("valid utf-8"), "");
+        assert_eq!(
+            truncated_cstring("\0trailing")
+                .to_str()
+                .expect("valid utf-8"),
+            ""
+        );
     }
 }

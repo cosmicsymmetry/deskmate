@@ -1406,3 +1406,77 @@ against both orientations, and an entry recording the observed per-case results
 (pass/differ/error) here, titled "V1 framebuffer diff — <date>" per the brief. An
 unexplained diff is a stop-the-line finding per the brief and must be diagnosed
 before Task 11, not waved through.
+
+## V1 physical acceptance — 2026-08-13 — BLOCKED: boot crash loop, Phase 1 fails
+
+Board connected at `/dev/cu.usbmodem101`, HEAD `ee927cc`. **Full report:**
+`.superpowers/sdd/2026-08-11-deskmate-v1-preview-typeface-redesign/task-11-report.md`.
+Summary here; do not re-derive from memory, read that file for the complete evidence
+trail (coredump register dumps, bisection table, ruled-out causes).
+
+**The device does not boot to the standalone clock, or to any usable state, on this
+branch.** It crashes and reboots in a continuous loop starting immediately after
+flashing, on every single boot cycle observed (~20+), on both the dev-diag and the
+plain release build. Framebuffer-diff (Phase 2) and the §6.4 acceptance gate/soak
+(Phase 3) did **not** run — both are blocked by Phase 1's failure and produced no
+results, pass or fail. The `show_seconds`-false analog-clock defect open since M4 is
+therefore still open; nothing this session closes it.
+
+- `idf.py -C firmware -DDESKMATE_DEV_DIAG=1 build` then
+  `idf.py -C firmware -p /dev/cu.usbmodem101 erase-flash flash` both succeed cleanly.
+  The new partition table's lines print correctly in the boot log (`ota_0`/`ota_1`
+  4MB each, `assets` 6MB, `coredump` 64KB).
+- Every boot cycle: clean ROM/bootloader/`app_init`/`heap_init`/PSRAM-pool-reserve
+  log lines, then ~450ms later `esp_core_dump_flash: Save core dump to flash...` (a
+  live panic write, confirmed against `espcoredump` source — not a boot-time
+  integrity check), then `RTC_SW_CPU_RST` reset, then the cycle repeats. No `Guru
+  Meditation` banner text appears in the non-interactive pyserial capture used (no
+  TTY available in this environment for `idf.py monitor`), though the panic clearly
+  did run (it wrote a coredump and rebooted).
+- `idf.py coredump-info` decodes the crash: `exccause 0x0 (IllegalInstructionCause)`,
+  fault `pc 0x20440fca` (not valid ESP32-S3 code space — bit-for-bit identical across
+  the dev-diag build, the plain release build, and an `LV_USE_SNAPSHOT=0` diagnostic
+  rebuild, despite each having different code layout). The return-address chain
+  (register `a0`, window-bits restored and cross-checked against a second frame's
+  independently-decoded address in the same coredump) traces cleanly through
+  `lvgl_port_add_disp` (`esp_lvgl_port_disp.c:131`, inside
+  `lvgl_port_disp_rotation_update(disp_ctx)`) called from `board_display_init`
+  (`display.c:227`) called from `app_main` (`main.c:25`,
+  `ESP_ERROR_CHECK(board_display_init())`). The exact instruction that jumps to the
+  invalid `pc` was not pinned down — no debugger session was available.
+- Ruled out this session: `DESKMATE_DEV_DIAG=1`/`dev_capture.c` (plain build crashes
+  identically), stale NVS/partial erase (reproduced with and without `erase-flash`
+  immediately prior), and `LV_USE_SNAPSHOT=1` (diagnostic flip to 0, rebuilt,
+  reflashed, identical crash — binary size was unchanged either way in this build,
+  0xbb560 both ways; reverted immediately after, `firmware/lv_conf.h` and `git
+  status` both confirmed clean afterward).
+- Bisected via disposable `git worktree` checkouts (both removed after use; main
+  worktree never left `ee927cc`): commit `363893e` ("feat: custom partition table —
+  OTA slots, asset region, coredump") — the **first commit ever to add a custom
+  `firmware/partitions.csv`** on any branch (confirmed via `git log --all --oneline
+  -- firmware/partitions.csv`, exactly one commit) — already crashes identically to
+  HEAD. Its parent, `1a6f8d9`, does not: no panic-save line and no reboot loop
+  appeared in a 15-second capture. The 40 commits of design/font/template work
+  between `363893e` and HEAD are **not** required to reproduce the crash. This
+  isolates the regression to the new partition table and/or the coredump-to-flash
+  subsystem it newly enables (`CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y` +
+  `CONFIG_ESP_COREDUMP_CHECK_BOOT=y`, previously dead configuration without a
+  `coredump` partition to target) as the most specific known variable — a hypothesis
+  backed by a clean single-commit bisection, **not** a proven root cause. Why a
+  partition-table/coredump change would produce a wild jump specifically inside
+  LVGL's display-rotation-update path is unexplained.
+- `cargo run -p deskmate-cli -- status --port /dev/cu.usbmodem101` → `error: device
+  request timed out`, consistent with the device never reaching
+  `protocol_task_start()` in `main.c`.
+- Separately noted, not the cause: `firmware/sdkconfig` routes application-level
+  `ESP_LOGI` console output to physical UART0 (`CONFIG_ESP_CONSOLE_UART_DEFAULT=y`),
+  not the native USB-Serial/JTAG port this session's captures were read over. No
+  `deskmate M2 boot` (or any app-tagged) log line appears in *any* capture in this
+  session, crashing builds and the non-crashing pre-partition-table build alike —
+  this is console routing, not evidence for or against the crash itself.
+
+**This branch must not be tagged, merged, or described as physically verified until
+this is root-caused and fixed, then this whole physical batch is re-run from Phase 1.**
+Next step needs an interactive TTY against the board (`idf.py monitor` or a JTAG/GDB
+session) to catch the panic banner live or single-step `board_display_init()` —
+neither was available in this sandboxed session.

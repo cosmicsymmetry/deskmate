@@ -77,6 +77,25 @@ of letting code and documentation diverge.
   unplug/replug cycles, and is tagged `m1`. Because M2 work began in the same shared
   worktree before the physical carryover closed, that tag also contains the M2
   foundation present at M1 exit.
+- V1 Plan A (`docs/superpowers/plans/2026-08-11-deskmate-v1-preview-typeface-redesign.md`,
+  branch `feat/v1-preview-typeface-redesign`) — preview harness, baked typeface
+  pipeline, COMPLICATION visual redesign, the custom OTA/asset/coredump partition
+  table, and dev-only framebuffer capture — is software-complete and reviewed clean,
+  but **physical acceptance FAILED on 2026-08-13 and the branch is NOT verified,
+  tagged, or mergeable.** The device crashes and reboots in a continuous loop on
+  every boot, on both the dev-diag and plain release builds, and never reaches the
+  standalone clock or any usable state; framebuffer-diff and the §6.4 acceptance
+  gate/soak did not run as a result. Full evidence and a clean single-commit
+  bisection (isolating the regression to `363893e`, the commit that added this
+  branch's custom `firmware/partitions.csv` — the first custom partition table this
+  project has ever shipped) are in
+  `docs/hardware/board-notes.md` under "V1 physical acceptance — 2026-08-13" and
+  `.superpowers/sdd/2026-08-11-deskmate-v1-preview-typeface-redesign/task-11-report.md`.
+  Root cause is not yet identified; it needs an interactive debugger session (TTY for
+  `idf.py monitor`, or JTAG/GDB) that was not available in the session that found
+  this. Do not describe the `show_seconds`-false analog-clock defect (open since M4)
+  as closed — it was supposed to close via this branch's framebuffer diff, which
+  never ran.
 - Target hardware is the Waveshare ESP32-S3-Touch-AMOLED-1.8 **v2**: CO5300 display and
   CST820 touch using the CST816S protocol family. Do not apply v1 SH8601/FT3168 facts.
 - Treat the physical 368x448 panel as a 448x368 landscape UI: 90° is the default

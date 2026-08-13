@@ -86,7 +86,7 @@ static void update_data_state(template_widget_view_t *widget,
     }
     lv_obj_set_style_text_font(widget->state_label, DESKMATE_FONT_CAPTION, 0);
     lv_obj_align(widget->state_label, LV_ALIGN_BOTTOM_MID, 0,
-                -DESKMATE_MARGIN / 2);
+                -2 * DESKMATE_GRID);
     if (error != NULL && error[0] != '\0') {
         lv_label_set_text(widget->state_label, error);
         lv_obj_set_style_text_color(widget->state_label,

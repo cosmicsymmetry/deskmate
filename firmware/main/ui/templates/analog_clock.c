@@ -73,6 +73,8 @@ bool analog_clock_create(template_widget_view_t *view,
         return false;
     }
     memset(view, 0, sizeof(*view));
+    const deskmate_palette_t palette =
+        deskmate_palette(PROTOCOL_TEMPLATE_ANALOG_CLOCK);
     view->clock_show_seconds = true;
     view->root = lv_obj_create(parent);
     lv_obj_remove_style_all(view->root);
@@ -151,7 +153,7 @@ bool analog_clock_create(template_widget_view_t *view,
 
     view->objects[OBJ_SECOND] =
         make_hand(view->objects[OBJ_FACE], HAND_SECOND_LEN, HAND_SECOND_WIDTH,
-                  DESKMATE_COLOR_ACCENT);
+                  palette.hue);
     lv_obj_align(view->objects[OBJ_SECOND], LV_ALIGN_CENTER, 0,
                  -HAND_SECOND_LEN / 2);
 
@@ -161,14 +163,13 @@ bool analog_clock_create(template_widget_view_t *view,
                        LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_size(view->objects[OBJ_HUB], HUB_DIAMETER, HUB_DIAMETER);
     lv_obj_set_style_radius(view->objects[OBJ_HUB], LV_RADIUS_CIRCLE, 0);
-    lv_obj_set_style_bg_color(view->objects[OBJ_HUB], DESKMATE_COLOR_ACCENT,
-                              0);
+    lv_obj_set_style_bg_color(view->objects[OBJ_HUB], palette.hue, 0);
     lv_obj_set_style_bg_opa(view->objects[OBJ_HUB], LV_OPA_COVER, 0);
     lv_obj_center(view->objects[OBJ_HUB]);
 
     view->objects[OBJ_STATE] = lv_label_create(view->root);
     lv_obj_align(view->objects[OBJ_STATE], LV_ALIGN_BOTTOM_MID, 0,
-                 -DESKMATE_MARGIN / 2);
+                 -2 * DESKMATE_GRID);
     view->state_label = view->objects[OBJ_STATE];
     return true;
 }

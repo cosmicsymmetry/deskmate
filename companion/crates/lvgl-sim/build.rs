@@ -25,6 +25,7 @@ fn main() {
         "row_list.c",
         "big_number_label.c",
         "icon_badge_text.c",
+        "template_style.c",
         "weather_icon.c",
     ] {
         sources.push(firmware.join("main/ui/templates").join(template));

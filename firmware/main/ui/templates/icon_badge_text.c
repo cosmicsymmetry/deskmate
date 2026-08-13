@@ -30,8 +30,6 @@ enum {
 /* Title and badge share the top rail from opposite margins. */
 #define RAIL_WIDTH (24 * DESKMATE_GRID)
 
-static weather_icon_t s_current_icon = WEATHER_ICON_UNKNOWN;
-
 /* Sets `text` in the largest tier that can both spell it and fit the text
  * column, and re-stacks the value/label pair around the canvas centre.
  *
@@ -98,8 +96,9 @@ bool icon_badge_text_create(template_widget_view_t *view,
     view->objects[OBJ_BADGE] = lv_label_create(view->root);
     lv_obj_set_style_text_font(view->objects[OBJ_BADGE],
                                DESKMATE_FONT_CAPTION, 0);
-    lv_obj_set_style_text_color(view->objects[OBJ_BADGE],
-                                DESKMATE_COLOR_ACCENT, 0);
+    lv_obj_set_style_text_color(
+        view->objects[OBJ_BADGE],
+        deskmate_palette(PROTOCOL_TEMPLATE_ICON_BADGE_TEXT).hue, 0);
     lv_label_set_long_mode(view->objects[OBJ_BADGE], LV_LABEL_LONG_DOT);
     lv_obj_set_width(view->objects[OBJ_BADGE], RAIL_WIDTH);
     lv_obj_set_height(view->objects[OBJ_BADGE],
@@ -134,11 +133,11 @@ bool icon_badge_text_create(template_widget_view_t *view,
 
     view->objects[OBJ_STATE] = lv_label_create(view->root);
     lv_obj_align(view->objects[OBJ_STATE], LV_ALIGN_BOTTOM_MID, 0,
-                 -DESKMATE_MARGIN / 2);
+                 -2 * DESKMATE_GRID);
     view->state_label = view->objects[OBJ_STATE];
 
-    s_current_icon = WEATHER_ICON_UNKNOWN;
-    weather_icon_render(view->objects[OBJ_ICON], s_current_icon,
+    view->icon_current = WEATHER_ICON_UNKNOWN;
+    weather_icon_render(view->objects[OBJ_ICON], view->icon_current,
                         DESKMATE_COLOR_PRIMARY, DESKMATE_COLOR_CANVAS);
     return true;
 }
@@ -180,8 +179,8 @@ void icon_badge_text_patch(template_widget_view_t *view,
         weather_icon_t next = weather_icon_from_name(icon->value.text);
         /* Only rebuild the artwork when the icon actually changes: every
          * rebuild deletes and recreates a dozen LVGL objects. */
-        if (next != s_current_icon) {
-            s_current_icon = next;
+        if (next != view->icon_current) {
+            view->icon_current = next;
             weather_icon_render(view->objects[OBJ_ICON], next,
                                 DESKMATE_COLOR_PRIMARY,
                                 DESKMATE_COLOR_CANVAS);

@@ -107,7 +107,7 @@ bool big_number_label_create(template_widget_view_t *view,
 
     view->objects[OBJ_STATE] = lv_label_create(view->root);
     lv_obj_align(view->objects[OBJ_STATE], LV_ALIGN_BOTTOM_MID, 0,
-                 -DESKMATE_MARGIN / 2);
+                 -2 * DESKMATE_GRID);
     view->state_label = view->objects[OBJ_STATE];
     return true;
 }

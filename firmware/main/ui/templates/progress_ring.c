@@ -56,10 +56,11 @@ static void set_running_color(template_widget_view_t *view, bool running)
      * TERTIARY — the same colour as the track, at full opacity against the
      * track's 40%, so a paused timer still reads its remaining fraction
      * without a full circle of SECONDARY shouting over the countdown. */
-    lv_obj_set_style_arc_color(view->objects[OBJ_ARC],
-                               running ? DESKMATE_COLOR_ACCENT
-                                       : DESKMATE_COLOR_TERTIARY,
-                               LV_PART_INDICATOR);
+    lv_obj_set_style_arc_color(
+        view->objects[OBJ_ARC],
+        running ? deskmate_palette(PROTOCOL_TEMPLATE_PROGRESS_RING).hue
+                : DESKMATE_COLOR_TERTIARY,
+        LV_PART_INDICATOR);
     refresh_phase(view, current_remaining_ms(view, lv_tick_get()));
 }
 
@@ -117,8 +118,10 @@ bool progress_ring_create(template_widget_view_t *view,
     lv_obj_set_style_arc_color(view->objects[OBJ_ARC],
                                DESKMATE_COLOR_TERTIARY, LV_PART_MAIN);
     lv_obj_set_style_arc_opa(view->objects[OBJ_ARC], LV_OPA_40, LV_PART_MAIN);
-    lv_obj_set_style_arc_color(view->objects[OBJ_ARC], DESKMATE_COLOR_ACCENT,
-                               LV_PART_INDICATOR);
+    lv_obj_set_style_arc_color(
+        view->objects[OBJ_ARC],
+        deskmate_palette(PROTOCOL_TEMPLATE_PROGRESS_RING).hue,
+        LV_PART_INDICATOR);
     lv_obj_set_style_arc_width(view->objects[OBJ_ARC], RING_WIDTH,
                                LV_PART_MAIN);
     lv_obj_set_style_arc_width(view->objects[OBJ_ARC], RING_WIDTH,
@@ -175,7 +178,7 @@ bool progress_ring_create(template_widget_view_t *view,
 
     view->objects[OBJ_STATE] = lv_label_create(view->root);
     lv_obj_align(view->objects[OBJ_STATE], LV_ALIGN_BOTTOM_MID, 0,
-                 -DESKMATE_MARGIN / 2);
+                 -2 * DESKMATE_GRID);
     view->state_label = view->objects[OBJ_STATE];
     return true;
 }

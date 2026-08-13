@@ -48,13 +48,23 @@ static int64_t current_remaining_ms(const template_widget_view_t *view,
                : view->progress_remaining_ms - elapsed;
 }
 
+/* The registry bounds duration_seconds and remaining_seconds to 86400, but
+ * this face must not depend on that: the preview harness writes field state
+ * straight in without going through template_fields_resolve, and the wire is
+ * untrusted by policy. Clamping to the registry's own ceiling keeps the
+ * result inside MMMM:SS — and lets the compiler prove the caller's buffer is
+ * big enough, which an unclamped int64 minute count does not. */
+#define CLOCK_SECONDS_MAX 86400
+
 static void format_clock(char *out, size_t size, int64_t seconds)
 {
     if (seconds < 0) {
         seconds = 0;
+    } else if (seconds > CLOCK_SECONDS_MAX) {
+        seconds = CLOCK_SECONDS_MAX;
     }
-    snprintf(out, size, "%02lld:%02lld", (long long)(seconds / 60),
-             (long long)(seconds % 60));
+    snprintf(out, size, "%02u:%02u", (unsigned)(seconds / 60),
+             (unsigned)(seconds % 60));
 }
 
 /* The one word the timer's state is worth saying, derived from the same

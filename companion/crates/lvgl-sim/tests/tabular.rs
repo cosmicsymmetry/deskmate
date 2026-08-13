@@ -31,7 +31,7 @@ use lvgl_sim::{
 
 /// Rows covering the hero time label and nothing else: the title chip ends at
 /// y = 48 and the module row starts at y = 208 (see `digital_clock.c`, where
-/// the hero sits at TIME_Y = 96 and the HERO tier's line box is 72 tall).
+/// the hero sits at `TIME_Y` = 96 and the HERO tier's line box is 72 tall).
 const TIME_BAND: std::ops::Range<usize> = 100..164;
 
 /// 2025-08-13, at times that all render `1X:Y0` and together use every digit:

@@ -186,8 +186,10 @@ void row_list_patch(template_widget_view_t *view,
         lv_obj_add_flag(view->objects[OBJ_COUNT], LV_OBJ_FLAG_HIDDEN);
     } else {
         lv_obj_add_flag(view->objects[OBJ_EMPTY], LV_OBJ_FLAG_HIDDEN);
-        char count_text[8];
-        snprintf(count_text, sizeof(count_text), "%u", (unsigned)shown);
+        /* The list is capped at five rows, so the count is always one
+         * digit; spelling it directly keeps the bound visible to the
+         * compiler as well as the reader. */
+        const char count_text[2] = { (char)('0' + (int)(shown % 10U)), '\0' };
         lv_label_set_text(view->objects[OBJ_COUNT], count_text);
         lv_obj_remove_flag(view->objects[OBJ_COUNT], LV_OBJ_FLAG_HIDDEN);
     }

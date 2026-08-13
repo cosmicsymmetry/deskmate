@@ -31,6 +31,18 @@ bool sim_init(void)
         return true;
     }
     lv_init();
+    /* Templates that capture lv_tick_get() while being built or patched
+     * (e.g. progress_ring's progress_anchor_ms) read s_fake_tick *before*
+     * sim_render's own "round up to the next 1000ms boundary" runs. After
+     * render N, s_fake_tick is left at boundary_N + 160 (four +40 ticks past
+     * the boundary), so render N+1 captures its anchor at boundary_N + 160
+     * and then rounds to boundary_N + 1000 — a fixed 840-tick offset between
+     * anchor and boundary on every render but the first. s_fake_tick starts
+     * at 0, not "boundary + 160", so the first render's anchor/boundary
+     * offset was 1000, not 840: an order-dependence exception for whichever
+     * case happened to run first. Starting one boundary in at 160 makes the
+     * first render match the steady state instead. */
+    s_fake_tick = 160U;
     lv_tick_set_cb(sim_tick_cb);
     s_display = lv_display_create(SIM_WIDTH, SIM_HEIGHT);
     if (s_display == NULL) {

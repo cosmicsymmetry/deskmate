@@ -20,6 +20,21 @@ mkdir -p "$FONT_DIR"
 # glyphs by raw cmap lookup, not through a text shaper). Bake the tabular
 # glyphs into the digit cmap entries of a throwaway copy of the hero source
 # before conversion; see tools/fonts/patch_tabular_figures.py for why.
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "FAIL: python3 not found on PATH; required by tools/fonts/patch_tabular_figures.py" >&2
+  exit 1
+fi
+if ! python3 -c "import fontTools" >/dev/null 2>&1; then
+  cat >&2 <<'EOF'
+FAIL: python3 cannot import fontTools; required by tools/fonts/patch_tabular_figures.py.
+Install it with:
+  pip3 install fonttools
+On macOS with a Homebrew/system Python you may need:
+  pip3 install --break-system-packages fonttools
+EOF
+  exit 1
+fi
+
 HERO="/tmp/Inter-SemiBold-tnum.ttf"
 python3 tools/fonts/patch_tabular_figures.py "$HERO_SRC" "$HERO"
 gen() { # size, ttf, range, name

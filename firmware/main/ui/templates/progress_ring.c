@@ -256,14 +256,38 @@ void progress_ring_patch(template_widget_view_t *view,
                                                                "label");
     const template_field_value_t *running = template_fields_get(fields,
                                                                  "running");
-    if (duration != NULL && remaining != NULL &&
-        duration->value.integer > 0) {
-        view->progress_duration_seconds = duration->value.integer;
-        view->progress_remaining_ms =
-            remaining->value.integer * INT64_C(1000);
-        view->progress_anchor_ms = lv_tick_get();
-        view->progress_displayed_seconds = -1;
-        render_remaining(view, view->progress_remaining_ms);
+    if (duration != NULL && remaining != NULL) {
+        /* On device, template_fields_resolve already clamps both integers to
+         * [0, 86400] and enforces remaining <= duration before this patch is
+         * ever built. The sim and render_card_preview write field state
+         * directly and skip that resolve step, so this face has to hold its
+         * own bounds — the same ones format_clock relies on below — or the
+         * unclamped division a few lines down (and the current_remaining_ms
+         * arithmetic it feeds) can see an out-of-range or non-positive
+         * duration. Values already in range are unchanged by this, so
+         * on-device pixels do not move. */
+        int64_t duration_seconds = duration->value.integer;
+        if (duration_seconds < 0) {
+            duration_seconds = 0;
+        } else if (duration_seconds > CLOCK_SECONDS_MAX) {
+            duration_seconds = CLOCK_SECONDS_MAX;
+        }
+        if (duration_seconds >= 1) {
+            int64_t remaining_seconds = remaining->value.integer;
+            if (remaining_seconds < 0) {
+                remaining_seconds = 0;
+            } else if (remaining_seconds > CLOCK_SECONDS_MAX) {
+                remaining_seconds = CLOCK_SECONDS_MAX;
+            }
+            if (remaining_seconds > duration_seconds) {
+                remaining_seconds = duration_seconds;
+            }
+            view->progress_duration_seconds = duration_seconds;
+            view->progress_remaining_ms = remaining_seconds * INT64_C(1000);
+            view->progress_anchor_ms = lv_tick_get();
+            view->progress_displayed_seconds = -1;
+            render_remaining(view, view->progress_remaining_ms);
+        }
     }
     if (label != NULL) {
         lv_label_set_text(view->objects[OBJ_LABEL], label->value.text);

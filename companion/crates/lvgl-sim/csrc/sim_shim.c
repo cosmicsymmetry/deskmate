@@ -53,8 +53,12 @@ static bool build_fields(int template_kind, const sim_field_t *fields,
     }
     /* Overwrite defaults directly: the registry validated shape lives in
      * template_fields_resolve, but the sim pins values without a PushData
-     * round-trip. Bounds still hold because template_field_value_t text is
-     * a fixed buffer. */
+     * round-trip. TEXT fields stay bounded because template_field_value_t
+     * text is a fixed buffer (see the strncpy below), but INTEGER fields
+     * have no such backstop here — keeping each face's displayed value
+     * inside its documented range is that face's own display-layer
+     * responsibility (see progress_ring.c's patch-entry clamp for an
+     * example), not something this shim or the registry enforces. */
     size_t registry_count = 0;
     const template_field_descriptor_t *registry = template_fields_registry(
         (protocol_template_kind_t)template_kind, &registry_count);

@@ -5,8 +5,12 @@ cd "$(dirname "$0")/.."
 FONT_DIR=firmware/main/ui/fonts
 BODY=tools/fonts/Inter-Regular.ttf
 HERO_SRC=tools/fonts/Inter-SemiBold.ttf
-# Text tiers: ASCII 0x20-0x7E plus the symbols the built-ins emit (spec §5.2).
-TEXT_RANGE='0x20-0x7E,0xB0,0xB7,0x2014,0x2018-0x2019,0x201C-0x201D'
+# Text tiers: ASCII 0x20-0x7E, the Latin-1 Supplement block 0xA0-0xFF (spec
+# §5.2, amended 2026-08-13 — accented Latin row titles like "Café" and
+# "Zürich" arrive from real calendar feeds and were rendering as fallback
+# boxes), plus the punctuation the built-ins emit. 0xA0-0xFF subsumes the
+# former explicit 0xB0 (°) and 0xB7 (·).
+TEXT_RANGE='0x20-0x7E,0xA0-0xFF,0x2014,0x2018-0x2019,0x201C-0x201D'
 # Hero tiers: digits : - ° % only, tabular (spec §5.2).
 HERO_RANGE='0x25,0x2D,0x30-0x3A,0xB0'
 mkdir -p "$FONT_DIR"

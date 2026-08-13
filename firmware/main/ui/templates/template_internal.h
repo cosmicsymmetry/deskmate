@@ -83,6 +83,11 @@ lv_obj_t *deskmate_module(lv_obj_t *parent, int32_t x, int32_t y, int32_t w,
 lv_obj_t *deskmate_chip(lv_obj_t *parent, int32_t x, int32_t y,
                         lv_color_t fill, lv_color_t ink);
 
+/* Sets a chip's text, hiding it entirely when the text is empty: a
+ * content-sized pill given an empty string would otherwise collapse to a
+ * coloured blob. */
+void deskmate_chip_set_text(lv_obj_t *chip, const char *text);
+
 /* Small letter-spaced caption type: the label above a module's value. */
 lv_obj_t *deskmate_eyebrow(lv_obj_t *parent, const char *text, int32_t x,
                            int32_t y, lv_color_t color);

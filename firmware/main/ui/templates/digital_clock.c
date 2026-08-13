@@ -9,12 +9,39 @@
 
 enum {
     OBJ_TITLE,
-    OBJ_TIME_ROW,
     OBJ_TIME,
     OBJ_SECONDS,
     OBJ_DATE,
+    OBJ_DIAL,
+    OBJ_HAND_HOUR,
+    OBJ_HAND_MINUTE,
     OBJ_STATE,
 };
+
+/* The reading is anchored to the left margin rather than centred: a hero
+ * that starts on the same rail as the title chip and the modules below it
+ * gives the face one vertical edge to hang everything from, and it leaves
+ * the top-right free for the seconds. */
+#define TIME_Y      (12 * DESKMATE_GRID)
+#define MODULE_Y    (26 * DESKMATE_GRID)
+#define MODULE_H    (17 * DESKMATE_GRID)
+#define DATE_W      (28 * DESKMATE_GRID)
+#define DIAL_X      (33 * DESKMATE_GRID)
+#define DIAL_W      (20 * DESKMATE_GRID)
+#define DIAL_BOX    (14 * DESKMATE_GRID)
+
+/* A 12-hour dial in minutes, so one scale positions both hands: the hour
+ * hand at h*60+m and the minute hand at m*12. */
+#define DIAL_RANGE      720
+#define HAND_HOUR_LEN   28
+#define HAND_MINUTE_LEN 42
+
+/* Distance from a label box's top edge to the baseline of the type in it.
+ * `base_line` is measured up from the bottom of the line box. */
+static int32_t baseline_offset(const lv_font_t *font)
+{
+    return lv_font_get_line_height(font) - font->base_line;
+}
 
 bool digital_clock_create(template_widget_view_t *view,
                           lv_obj_t *parent,
@@ -25,6 +52,8 @@ bool digital_clock_create(template_widget_view_t *view,
         return false;
     }
     memset(view, 0, sizeof(*view));
+    const deskmate_palette_t palette =
+        deskmate_palette(PROTOCOL_TEMPLATE_DIGITAL_CLOCK);
     /* Matches the schema default for `show_seconds`, so a view that ticks
      * before its first patch shows the same face the host asked for. */
     view->clock_show_seconds = true;
@@ -34,67 +63,92 @@ bool digital_clock_create(template_widget_view_t *view,
                        LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_size(view->root, LV_PCT(100), LV_PCT(100));
 
-    view->objects[OBJ_TITLE] = lv_label_create(view->root);
-    lv_obj_set_style_text_font(view->objects[OBJ_TITLE],
-                               DESKMATE_FONT_CAPTION, 0);
-    lv_obj_set_style_text_color(view->objects[OBJ_TITLE],
-                                DESKMATE_COLOR_SECONDARY, 0);
-    lv_label_set_long_mode(view->objects[OBJ_TITLE], LV_LABEL_LONG_DOT);
-    lv_obj_set_width(view->objects[OBJ_TITLE], 448 - 2 * DESKMATE_MARGIN);
-    lv_obj_set_height(view->objects[OBJ_TITLE],
-                      lv_font_get_line_height(DESKMATE_FONT_CAPTION));
-    lv_obj_set_style_text_align(view->objects[OBJ_TITLE],
-                                LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_align(view->objects[OBJ_TITLE], LV_ALIGN_TOP_MID, 0,
-                 DESKMATE_MARGIN);
-    lv_label_set_text(view->objects[OBJ_TITLE], "");
+    /* The title is the face's identity chip: a filled pill in the face hue
+     * says which card you swiped to before the reading is parsed. */
+    view->objects[OBJ_TITLE] = deskmate_chip(
+        view->root, DESKMATE_MARGIN, 2 * DESKMATE_GRID, palette.hue,
+        palette.ink);
 
-    /* HH:MM and SS are separate labels inside a content-sized flex row.
-     *
-     * A single "HH:MM:SS" run at DESKMATE_FONT_HERO measures 434px — the
-     * tabular digit advance is 62.1px and the colon 30.6px — which overruns
-     * the 400px content width between the canvas margins. Splitting the
-     * seconds onto their own DISPLAY-tier label brings the group to 368px,
-     * and buys the hierarchy a wall clock wants anyway: the hour and minute
-     * are the reading, the seconds are the proof it is live.
-     *
-     * The row is LV_SIZE_CONTENT and centre-aligned, so hiding the seconds
-     * label re-centres HH:MM by itself with no per-state coordinates. Cross
-     * alignment is END (bottom): both numeric tiers carry base_line = 1, so
-     * a shared box bottom is a shared baseline. */
-    view->objects[OBJ_TIME_ROW] = lv_obj_create(view->root);
-    lv_obj_remove_style_all(view->objects[OBJ_TIME_ROW]);
-    lv_obj_remove_flag(view->objects[OBJ_TIME_ROW],
-                       LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_size(view->objects[OBJ_TIME_ROW], LV_SIZE_CONTENT,
-                    LV_SIZE_CONTENT);
-    lv_obj_set_flex_flow(view->objects[OBJ_TIME_ROW], LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(view->objects[OBJ_TIME_ROW], LV_FLEX_ALIGN_CENTER,
-                          LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_column(view->objects[OBJ_TIME_ROW],
-                                2 * DESKMATE_GRID, 0);
-    lv_obj_align(view->objects[OBJ_TIME_ROW], LV_ALIGN_CENTER, 0,
-                 -2 * DESKMATE_GRID);
-
-    view->objects[OBJ_TIME] = lv_label_create(view->objects[OBJ_TIME_ROW]);
+    view->objects[OBJ_TIME] = lv_label_create(view->root);
     lv_obj_set_style_text_font(view->objects[OBJ_TIME], DESKMATE_FONT_HERO, 0);
     lv_obj_set_style_text_color(view->objects[OBJ_TIME],
                                 DESKMATE_COLOR_PRIMARY, 0);
     lv_label_set_text(view->objects[OBJ_TIME], "00:00");
+    lv_obj_set_pos(view->objects[OBJ_TIME], DESKMATE_MARGIN, TIME_Y);
 
-    view->objects[OBJ_SECONDS] = lv_label_create(view->objects[OBJ_TIME_ROW]);
+    /* The seconds are a superior figure in the face hue, sharing the hero's
+     * baseline: the watch idiom for "this is live", and it keeps the
+     * seconds out of the reading you actually want. Hiding it moves
+     * nothing, because the hero is left-anchored rather than centred. */
+    view->objects[OBJ_SECONDS] = lv_label_create(view->root);
     lv_obj_set_style_text_font(view->objects[OBJ_SECONDS],
                                DESKMATE_FONT_DISPLAY, 0);
-    lv_obj_set_style_text_color(view->objects[OBJ_SECONDS],
-                                DESKMATE_COLOR_SECONDARY, 0);
+    lv_obj_set_style_text_color(view->objects[OBJ_SECONDS], palette.hue, 0);
     lv_label_set_text(view->objects[OBJ_SECONDS], "00");
 
-    view->objects[OBJ_DATE] = lv_label_create(view->root);
-    lv_obj_set_style_text_font(view->objects[OBJ_DATE],
-                               DESKMATE_FONT_BODY, 0);
-    lv_obj_set_style_text_color(view->objects[OBJ_DATE],
-                                DESKMATE_COLOR_TERTIARY, 0);
-    lv_label_set_text(view->objects[OBJ_DATE], "");
+    /* Two modules under the reading. The date is the one thing a wall clock
+     * is always also asked for; the dial restates the same instant in the
+     * notation the eye reads fastest at a glance. */
+    lv_obj_t *date_module = deskmate_module(view->root, DESKMATE_MARGIN,
+                                            MODULE_Y, DATE_W, MODULE_H);
+    /* An eyebrow over a value, the pair centred in the module rather than
+     * pinned to its top, so the module reads as one block. */
+    const int32_t eyebrow_line =
+        lv_font_get_line_height(DESKMATE_FONT_CAPTION);
+    const int32_t value_line = lv_font_get_line_height(DESKMATE_FONT_BODY);
+    const int32_t stack_top =
+        (MODULE_H - eyebrow_line - DESKMATE_GRID - value_line) / 2;
+    deskmate_eyebrow(date_module, "DATE", DESKMATE_MARGIN, stack_top,
+                     palette.hue);
+    view->objects[OBJ_DATE] = deskmate_label_box(
+        date_module, DESKMATE_MARGIN,
+        stack_top + eyebrow_line + DESKMATE_GRID,
+        DATE_W - 2 * DESKMATE_MARGIN, LV_TEXT_ALIGN_LEFT,
+        DESKMATE_COLOR_PRIMARY, DESKMATE_FONT_BODY);
+
+    lv_obj_t *dial_module =
+        deskmate_module(view->root, DIAL_X, MODULE_Y, DIAL_W, MODULE_H);
+
+    view->objects[OBJ_DIAL] = lv_scale_create(dial_module);
+    lv_obj_set_size(view->objects[OBJ_DIAL], DIAL_BOX, DIAL_BOX);
+    lv_obj_set_pos(view->objects[OBJ_DIAL], (DIAL_W - DIAL_BOX) / 2,
+                   (MODULE_H - DIAL_BOX) / 2);
+    lv_scale_set_mode(view->objects[OBJ_DIAL], LV_SCALE_MODE_ROUND_INNER);
+    lv_scale_set_label_show(view->objects[OBJ_DIAL], false);
+    /* Thirteen ticks over a full turn puts one at every hour, with the
+     * thirteenth landing back on twelve. */
+    lv_scale_set_total_tick_count(view->objects[OBJ_DIAL], 13);
+    lv_scale_set_major_tick_every(view->objects[OBJ_DIAL], 3);
+    lv_scale_set_range(view->objects[OBJ_DIAL], 0, DIAL_RANGE);
+    lv_scale_set_angle_range(view->objects[OBJ_DIAL], 360);
+    lv_scale_set_rotation(view->objects[OBJ_DIAL], 270);
+    lv_obj_set_style_arc_width(view->objects[OBJ_DIAL], 0, LV_PART_MAIN);
+    lv_obj_set_style_line_color(view->objects[OBJ_DIAL],
+                                DESKMATE_COLOR_TERTIARY, LV_PART_ITEMS);
+    lv_obj_set_style_line_width(view->objects[OBJ_DIAL], 2, LV_PART_ITEMS);
+    lv_obj_set_style_length(view->objects[OBJ_DIAL], 6, LV_PART_ITEMS);
+    lv_obj_set_style_line_color(view->objects[OBJ_DIAL], palette.hue,
+                                LV_PART_INDICATOR);
+    lv_obj_set_style_line_width(view->objects[OBJ_DIAL], 3,
+                                LV_PART_INDICATOR);
+    lv_obj_set_style_length(view->objects[OBJ_DIAL], 11, LV_PART_INDICATOR);
+    lv_obj_set_style_line_opa(view->objects[OBJ_DIAL], LV_OPA_70,
+                              LV_PART_INDICATOR);
+
+    /* Needle lines must be children of the scale: lv_scale positions them
+     * from its own box centre and aligns them to its top-left. LVGL owns
+     * their point arrays and frees them with the object. */
+    view->objects[OBJ_HAND_HOUR] = lv_line_create(view->objects[OBJ_DIAL]);
+    lv_obj_set_style_line_color(view->objects[OBJ_HAND_HOUR],
+                                DESKMATE_COLOR_PRIMARY, 0);
+    lv_obj_set_style_line_width(view->objects[OBJ_HAND_HOUR], 6, 0);
+    lv_obj_set_style_line_rounded(view->objects[OBJ_HAND_HOUR], true, 0);
+
+    view->objects[OBJ_HAND_MINUTE] = lv_line_create(view->objects[OBJ_DIAL]);
+    lv_obj_set_style_line_color(view->objects[OBJ_HAND_MINUTE], palette.hue,
+                                0);
+    lv_obj_set_style_line_width(view->objects[OBJ_HAND_MINUTE], 4, 0);
+    lv_obj_set_style_line_rounded(view->objects[OBJ_HAND_MINUTE], true, 0);
 
     view->objects[OBJ_STATE] = lv_label_create(view->root);
     lv_obj_align(view->objects[OBJ_STATE], LV_ALIGN_BOTTOM_MID, 0,
@@ -116,7 +170,7 @@ void digital_clock_patch(template_widget_view_t *view,
     const template_field_value_t *show = template_fields_get(
         fields, "show_seconds");
     if (title != NULL) {
-        lv_label_set_text(view->objects[OBJ_TITLE], title->value.text);
+        deskmate_chip_set_text(view->objects[OBJ_TITLE], title->value.text);
     }
     if (show != NULL) {
         view->clock_show_seconds = show->value.boolean;
@@ -151,11 +205,21 @@ void digital_clock_tick(template_widget_view_t *view,
     timefmt_date(date, now.tm_year + 1900, now.tm_mon + 1, now.tm_mday,
                  (now.tm_wday + 6) % 7);
     lv_label_set_text(view->objects[OBJ_DATE], date);
-    /* The flex row is content-sized: its width changes when the seconds
-     * label is hidden, and its height is only final once LVGL has run the
-     * layout. Re-anchor the date after that so the gap under the time stays
-     * exactly 2 * DESKMATE_GRID in both states. */
+
+    /* The hero is content-sized, so its width is only final once LVGL has
+     * run the layout. Re-anchoring the seconds after that keeps the two on
+     * a shared baseline whatever the tier metrics are. */
     lv_obj_update_layout(view->root);
-    lv_obj_align_to(view->objects[OBJ_DATE], view->objects[OBJ_TIME_ROW],
-                    LV_ALIGN_OUT_BOTTOM_MID, 0, 3 * DESKMATE_GRID);
+    lv_obj_align_to(view->objects[OBJ_SECONDS], view->objects[OBJ_TIME],
+                    LV_ALIGN_OUT_RIGHT_TOP, 2 * DESKMATE_GRID,
+                    baseline_offset(DESKMATE_FONT_HERO) -
+                        baseline_offset(DESKMATE_FONT_DISPLAY));
+
+    lv_scale_set_line_needle_value(view->objects[OBJ_DIAL],
+                                   view->objects[OBJ_HAND_HOUR],
+                                   HAND_HOUR_LEN,
+                                   (now.tm_hour % 12) * 60 + now.tm_min);
+    lv_scale_set_line_needle_value(view->objects[OBJ_DIAL],
+                                   view->objects[OBJ_HAND_MINUTE],
+                                   HAND_MINUTE_LEN, now.tm_min * 12);
 }

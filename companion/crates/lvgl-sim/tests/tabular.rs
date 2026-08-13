@@ -29,9 +29,10 @@ use lvgl_sim::{
     LOGICAL_WIDTH, RenderRequest, SimField, SimFieldValue, SimOrientation, SimTemplate, Simulator,
 };
 
-/// Rows covering the hero time label and nothing else: the title band ends at
-/// y = 46 and the date band starts at y = 228 (see `digital_clock.c`).
-const TIME_BAND: std::ops::Range<usize> = 120..216;
+/// Rows covering the hero time label and nothing else: the title chip ends at
+/// y = 48 and the module row starts at y = 208 (see `digital_clock.c`, where
+/// the hero sits at TIME_Y = 96 and the HERO tier's line box is 72 tall).
+const TIME_BAND: std::ops::Range<usize> = 100..164;
 
 /// 2025-08-13, at times that all render `1X:Y0` and together use every digit:
 /// 16:00, 19:50, 17:30, 18:40, 12:20.

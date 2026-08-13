@@ -94,6 +94,23 @@ lv_obj_t *deskmate_chip(lv_obj_t *parent, int32_t x, int32_t y,
     return chip;
 }
 
+void deskmate_chip_set_text(lv_obj_t *chip, const char *text)
+{
+    if (chip == NULL) {
+        return;
+    }
+    /* An empty title is a real state — the empty-title golden pins it — and
+     * a content-sized pill given an empty string collapses to a coloured
+     * blob rather than disappearing. Hide it instead. */
+    if (text == NULL || text[0] == '\0') {
+        lv_obj_add_flag(chip, LV_OBJ_FLAG_HIDDEN);
+        lv_label_set_text(chip, "");
+        return;
+    }
+    lv_label_set_text(chip, text);
+    lv_obj_remove_flag(chip, LV_OBJ_FLAG_HIDDEN);
+}
+
 lv_obj_t *deskmate_eyebrow(lv_obj_t *parent, const char *text, int32_t x,
                            int32_t y, lv_color_t color)
 {

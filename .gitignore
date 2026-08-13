@@ -14,6 +14,7 @@ firmware/host_tests/test_navigation
 firmware/host_tests/test_interrupt_state
 firmware/host_tests/test_device_event_queue
 firmware/host_tests/test_weather_icon
+firmware/host_tests/test_clock_source
 firmware/host_tests/*.dSYM/
 companion/target/
 companion/apps/deskmate/node_modules/

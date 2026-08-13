@@ -666,10 +666,7 @@
 #define LV_FONT_MONTSERRAT_8  0
 #define LV_FONT_MONTSERRAT_10 0
 #define LV_FONT_MONTSERRAT_12 0
-/* Still built only because LV_BUILD_EXAMPLES compiles LVGL's bundled
- * examples, several of which name it directly. Nothing in firmware/main
- * references any Montserrat; the linker drops the data with the examples. */
-#define LV_FONT_MONTSERRAT_14 1
+#define LV_FONT_MONTSERRAT_14 0
 #define LV_FONT_MONTSERRAT_16 0
 #define LV_FONT_MONTSERRAT_18 0
 #define LV_FONT_MONTSERRAT_20 0
@@ -712,7 +709,8 @@
 /** Always set a default font */
 /* Deskmate's own BODY tier. Every label in firmware/main/ui sets its tier
  * explicitly, so this only backstops LVGL's internal defaults — but it must
- * not be a Montserrat, which is no longer built at any size. */
+ * not be a Montserrat: no Montserrat size is built (LV_BUILD_EXAMPLES is 0
+ * below, so nothing pulls LV_FONT_MONTSERRAT_14 back in either). */
 #define LV_FONT_DEFAULT &deskmate_font_28
 
 /** Enable handling large font and/or fonts with a lot of characters.
@@ -1475,8 +1473,10 @@
 * BUILD OPTIONS
 *======================*/
 
-/** Enable examples to be built with the library. */
-#define LV_BUILD_EXAMPLES 1
+/** Enable examples to be built with the library. Off: nothing in
+ *  firmware/main references LVGL's bundled examples, and leaving this on
+ *  was the only reason LV_FONT_MONTSERRAT_14 above had to stay built. */
+#define LV_BUILD_EXAMPLES 0
 
 /** Build the demos */
 #define LV_BUILD_DEMOS 1

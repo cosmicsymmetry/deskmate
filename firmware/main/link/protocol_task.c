@@ -21,6 +21,7 @@
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "link/dev_capture.h"
 #include "link/usb_link.h"
 #include "ui/ui_runtime.h"
 
@@ -491,6 +492,23 @@ static void dispatch_trigger_interrupt(protocol_context_t *context,
 static void dispatch_request(protocol_context_t *context,
                              const protocol_frame_t *frame)
 {
+#ifdef DESKMATE_DEV_DIAG
+    // Dev-only framebuffer capture (spec §3.2.3): 0x7E/0x7F sit outside
+    // protocol_message_type_t's frozen 1-12 range, so this is intercepted
+    // here rather than taught to protocol_message_decode -- the release
+    // message tables in core/protocol_message.c never learn about it.
+    if (frame->message_type == DEV_CAPTURE_REQUEST_TYPE) {
+        if (frame->version != PROTOCOL_VERSION || frame->payload_length != 0U) {
+            increment_saturating(&context->malformed_frames);
+            transmit_error(context, frame->request_id,
+                           PROTOCOL_ERROR_INVALID_PAYLOAD,
+                           "invalid dev capture request");
+            return;
+        }
+        dev_capture_handle_request(frame->request_id);
+        return;
+    }
+#endif
     protocol_message_result_t result = protocol_message_decode(
         frame, &context->message);
     if (result == PROTOCOL_MESSAGE_ERR_VERSION) {

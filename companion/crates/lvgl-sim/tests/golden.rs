@@ -1,6 +1,4 @@
-mod cases;
-
-use lvgl_sim::Simulator;
+use lvgl_sim::{Simulator, cases};
 
 #[test]
 fn golden_frames_match() {

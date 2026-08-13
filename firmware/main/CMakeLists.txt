@@ -5,7 +5,7 @@ idf_component_register(
          "core/protocol_frame.c"
          "core/protocol_message.c"
          "core/template_fields.c" "core/timefmt.c" "core/widget_model.c"
-         "link/protocol_task.c" "link/usb_link.c" "ui/carousel.c"
+         "link/dev_capture.c" "link/protocol_task.c" "link/usb_link.c" "ui/carousel.c"
          "ui/clock_screen.c"
          "ui/template_view.c" "ui/ui_command_queue.c"
          "ui/ui_runtime.c"
@@ -42,3 +42,14 @@ target_compile_definitions(${cbor_lib} PRIVATE CBOR_PARSER_MAX_RECURSIONS=8)
 # generator expression at CMake generate time -- after every component,
 # including this one, has registered.
 idf_build_set_property(COMPILE_OPTIONS "-I${CMAKE_CURRENT_LIST_DIR}/.." APPEND)
+
+# Dev-only framebuffer capture (Task 10, spec §3.2.3). link/dev_capture.c is
+# always compiled, but its entire body is `#ifdef DESKMATE_DEV_DIAG`-guarded,
+# so it is an empty translation unit without the flag. `idf.py -C firmware
+# -DDESKMATE_DEV_DIAG=1 build` sets a CMake cache variable at configure time;
+# map it to the matching C macro here so a plain build never defines it, and
+# the release binary contains neither the handler, the 0x7E/0x7F message
+# ids, nor dev_capture.c's log tag.
+if(DESKMATE_DEV_DIAG)
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE DESKMATE_DEV_DIAG=1)
+endif()

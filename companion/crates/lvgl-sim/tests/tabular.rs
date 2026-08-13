@@ -19,14 +19,12 @@
 //!    glyphs cancel the bearing difference, so any digit with an odd advance
 //!    shifts the trailing `0` and changes the span.
 
-#[path = "cases.rs"]
 // Only the two pinned instants are used here; the case table itself belongs
-// to `golden.rs`.
-#[allow(dead_code)]
-mod cases;
-
+// to `golden.rs`. `cases` now lives in `lvgl-sim`'s `src/` (Task 10) so both
+// this test and `framebuffer_diff.rs` (a different crate) can reach it.
 use lvgl_sim::{
     LOGICAL_WIDTH, RenderRequest, SimField, SimFieldValue, SimOrientation, SimTemplate, Simulator,
+    cases,
 };
 
 /// Rows covering the hero time label and nothing else: the title chip ends at

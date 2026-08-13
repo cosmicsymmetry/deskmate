@@ -1,9 +1,13 @@
 //! The golden-frame case table: every firmware template x both mount
 //! orientations x a field matrix chosen to exercise each template's
-//! visually distinct states. `golden.rs` renders every case and pins the
-//! output to a committed PNG under `tests/golden/`; a later physical
-//! framebuffer diff (Task 10) reuses [`golden_cases`] so the same matrix is
-//! compared against real hardware output.
+//! visually distinct states. `tests/golden.rs` renders every case and pins
+//! the output to a committed PNG under `tests/golden/`; the physical
+//! framebuffer diff (Task 10, `companion/crates/device/examples/framebuffer_diff.rs`)
+//! reuses [`golden_cases`] so the same matrix is compared against real
+//! hardware output. Lives under `src/` rather than `tests/` so both
+//! consumers — the in-crate integration test and the other crate's example
+//! — can reach it as `lvgl_sim::cases`; a `tests/` file is only visible to
+//! `cargo test` within this crate.
 //!
 //! Field names below are pulled from the firmware's own registry,
 //! `firmware/main/core/template_fields.c` (`template_fields_registry`) — do
@@ -11,7 +15,7 @@
 //! name silently falls back to the field's default and produces a
 //! meaningless golden.
 
-use lvgl_sim::{RenderRequest, SimField, SimFieldValue, SimOrientation, SimTemplate};
+use crate::{RenderRequest, SimField, SimFieldValue, SimOrientation, SimTemplate};
 
 /// The wire's absolute per-field text ceiling
 /// (`PROTOCOL_MAX_FIELD_TEXT_LENGTH` in

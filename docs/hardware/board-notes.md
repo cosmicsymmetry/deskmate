@@ -1367,3 +1367,42 @@ is what made the CLI sweep possible.
 across teardown, so two analog-clock cards with different `show_seconds` values would
 have whichever applied last win for both. Not exercised by this session — the
 verification config never held two analog clocks — and not fixed.
+
+## V1 Task 10: dev-only framebuffer capture — build verified, physical diff outstanding (2026-08-13)
+
+No physical board was connected for this session. **Step 3 of the Task 10 brief (run
+`framebuffer_diff.rs` against the board at both orientations and record per-case
+results) did not run and is not verified.** Do not describe the capture/diff path as
+observed on hardware. What was verified, all on host tooling:
+
+- `idf.py -C firmware build` (plain release build) and
+  `idf.py -C firmware -DDESKMATE_DEV_DIAG=1 build` (dev-diag build, separate build
+  directory) both compile clean.
+- The plain build's `.elf` contains neither the `dev_capture_handle_request` symbol
+  (`nm` found no match) nor the `"dev_capture"` log-tag string (`strings` found no
+  match), against a control check (`nm`/`strings` on the same `.elf` confirmed the
+  tools work against this Xtensa target by finding known-present symbols). The
+  dev-diag build's `.elf` contains both. `link/dev_capture.c` is always listed in
+  `firmware/main/CMakeLists.txt`'s `SRCS`; its `.o` is a near-empty translation unit
+  (1,232 bytes, debug info only) in the plain build and a full one (23,340 bytes) in
+  the dev-diag build, confirming the `#ifdef DESKMATE_DEV_DIAG` guard — not
+  conditional `SRCS` inclusion — is what keeps the handler out of release. Dev-diag
+  `.bin` is 1,344 bytes larger than the plain `.bin`.
+- `firmware/lv_conf.h`'s `LV_USE_SNAPSHOT` flip from 0 to 1 (needed by
+  `lv_snapshot_take_to_draw_buf`, shared config for both the firmware and
+  `lvgl-sim`) produced no pixel drift: `cargo test -p lvgl-sim` (golden-frame suite,
+  ~70 committed PNGs) passed unchanged after the flip.
+- `make -C firmware/host_tests clean test` — all 11 suites pass unchanged;
+  `link/dev_capture.c` is link-layer, not `core/`, so it has no host-test target
+  (consistent with `protocol_task.c`/`usb_link.c`, its siblings).
+- `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D
+  warnings`, and `cargo test --workspace` (companion) all pass with
+  `companion/crates/device/examples/framebuffer_diff.rs` and the `lvgl-sim` case
+  table move (`tests/cases.rs` -> `src/cases.rs`, `pub mod cases`) in place.
+
+What remains for the physical step, once a board running the dev-diag build is
+available: `cargo run -p device --example framebuffer_diff -- [--port <path>]`
+against both orientations, and an entry recording the observed per-case results
+(pass/differ/error) here, titled "V1 framebuffer diff — <date>" per the brief. An
+unexplained diff is a stop-the-line finding per the brief and must be diagnosed
+before Task 11, not waved through.

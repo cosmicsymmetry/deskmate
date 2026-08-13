@@ -12,6 +12,11 @@ use std::os::raw::c_char;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+/// The golden-frame case table shared by this crate's `tests/golden.rs` and
+/// `companion/crates/device/examples/framebuffer_diff.rs` (Task 10). See
+/// `cases.rs`'s module doc for why it lives here instead of under `tests/`.
+pub mod cases;
+
 pub const LOGICAL_WIDTH: u32 = 448;
 pub const LOGICAL_HEIGHT: u32 = 368;
 

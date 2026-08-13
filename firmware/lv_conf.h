@@ -1112,7 +1112,15 @@
 /* Documentation for several of the below items can be found here: https://docs.lvgl.io/master/auxiliary-modules/index.html . */
 
 /** 1: Enable API to take snapshot for object */
-#define LV_USE_SNAPSHOT 0
+// Task 10 (dev-only framebuffer capture, spec §3.2.3) needs
+// lv_snapshot_take_to_draw_buf() to reproduce the device's LVGL draw pass
+// on the host and in the device's own dev-diagnostic handler
+// (firmware/main/link/dev_capture.c). This is shared config for both
+// builds (spec §2.2), so enabling it touches the host lvgl-sim renderer
+// too; the golden-frame suite re-ran clean after this flip (render-neutral
+// -- lv_snapshot only adds an alternate draw entry point, it does not
+// change how any existing widget draws).
+#define LV_USE_SNAPSHOT 1
 
 /** 1: Enable system monitor component */
 #define LV_USE_SYSMON   0

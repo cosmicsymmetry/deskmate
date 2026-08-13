@@ -18,17 +18,15 @@ enum {
  * physical panel, so the box keeps its size — 15 * GRID, still on the grid —
  * rather than being scaled down around it. */
 #define ICON_BOX 120
-/* Icon and text are one cluster, and the cluster is centred rather than
- * pinned to the left margin. Anchored at the margin, a 120px icon and a
- * two-line reading left 200px of dead canvas to their right and the card
- * read half-finished. The block is a fixed 44 * GRID wide so the icon never
- * shifts when the reading changes length, which puts its left edge on
- * 6 * GRID and its right edge a margin clear of the panel. */
-#define BLOCK_LEFT  (12 * DESKMATE_GRID)
-#define TEXT_LEFT   (BLOCK_LEFT + ICON_BOX + 2 * DESKMATE_GRID)
-#define TEXT_WIDTH  (24 * DESKMATE_GRID)
-/* Title and badge share the top rail from opposite margins. */
-#define RAIL_WIDTH (24 * DESKMATE_GRID)
+/* The icon sits on its own surface tile, which is what gives this face its
+ * module: an icon alone on the canvas read as a picture next to a caption,
+ * and the tile makes it a reading. Two grid units of surface on every side
+ * of the artwork. */
+#define ICON_TILE   (19 * DESKMATE_GRID)
+#define ICON_INSET  ((ICON_TILE - ICON_BOX) / 2)
+
+#define TEXT_LEFT  (DESKMATE_MARGIN + ICON_TILE + 2 * DESKMATE_GRID)
+#define TEXT_WIDTH (28 * DESKMATE_GRID)
 
 /* Sets `text` in the largest tier that can both spell it and fit the text
  * column, and re-stacks the value/label pair around the canvas centre.
@@ -72,49 +70,36 @@ bool icon_badge_text_create(template_widget_view_t *view,
         return false;
     }
     memset(view, 0, sizeof(*view));
+    const deskmate_palette_t palette =
+        deskmate_palette(PROTOCOL_TEMPLATE_ICON_BADGE_TEXT);
     view->root = lv_obj_create(parent);
     lv_obj_remove_style_all(view->root);
     lv_obj_remove_flag(view->root,
                        LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_size(view->root, LV_PCT(100), LV_PCT(100));
 
-    view->objects[OBJ_TITLE] = lv_label_create(view->root);
-    lv_obj_set_style_text_font(view->objects[OBJ_TITLE],
-                               DESKMATE_FONT_CAPTION, 0);
-    lv_obj_set_style_text_color(view->objects[OBJ_TITLE],
-                                DESKMATE_COLOR_SECONDARY, 0);
-    lv_label_set_long_mode(view->objects[OBJ_TITLE], LV_LABEL_LONG_DOT);
-    lv_obj_set_width(view->objects[OBJ_TITLE], RAIL_WIDTH);
-    lv_obj_set_height(view->objects[OBJ_TITLE],
-                      lv_font_get_line_height(DESKMATE_FONT_CAPTION));
-    lv_obj_align(view->objects[OBJ_TITLE], LV_ALIGN_TOP_LEFT, DESKMATE_MARGIN,
-                 DESKMATE_MARGIN);
-    lv_label_set_text(view->objects[OBJ_TITLE], "");
+    view->objects[OBJ_TITLE] = deskmate_chip(
+        view->root, DESKMATE_MARGIN, 2 * DESKMATE_GRID, palette.hue,
+        palette.ink);
 
     /* The badge is this face's live token — the one thing that says which
-     * reading you are looking at — so it takes the card's single accent. */
-    view->objects[OBJ_BADGE] = lv_label_create(view->root);
-    lv_obj_set_style_text_font(view->objects[OBJ_BADGE],
-                               DESKMATE_FONT_CAPTION, 0);
-    lv_obj_set_style_text_color(
-        view->objects[OBJ_BADGE],
-        deskmate_palette(PROTOCOL_TEMPLATE_ICON_BADGE_TEXT).hue, 0);
-    lv_label_set_long_mode(view->objects[OBJ_BADGE], LV_LABEL_LONG_DOT);
-    lv_obj_set_width(view->objects[OBJ_BADGE], RAIL_WIDTH);
-    lv_obj_set_height(view->objects[OBJ_BADGE],
-                      lv_font_get_line_height(DESKMATE_FONT_CAPTION));
-    lv_obj_set_style_text_align(view->objects[OBJ_BADGE],
-                                LV_TEXT_ALIGN_RIGHT, 0);
+     * reading you are looking at — so it takes a filled chip rather than
+     * coloured text, and sits opposite the title on the same rail. */
+    view->objects[OBJ_BADGE] =
+        deskmate_chip(view->root, 0, 0, palette.hue, palette.ink);
     lv_obj_align(view->objects[OBJ_BADGE], LV_ALIGN_TOP_RIGHT,
-                 -DESKMATE_MARGIN, DESKMATE_MARGIN);
-    lv_label_set_text(view->objects[OBJ_BADGE], "");
+                 -DESKMATE_MARGIN, 2 * DESKMATE_GRID);
 
-    view->objects[OBJ_ICON] = lv_obj_create(view->root);
+    lv_obj_t *icon_tile = deskmate_module(view->root, DESKMATE_MARGIN, 0,
+                                          ICON_TILE, ICON_TILE);
+    lv_obj_align(icon_tile, LV_ALIGN_LEFT_MID, DESKMATE_MARGIN, 0);
+
+    view->objects[OBJ_ICON] = lv_obj_create(icon_tile);
     lv_obj_remove_style_all(view->objects[OBJ_ICON]);
     lv_obj_remove_flag(view->objects[OBJ_ICON],
                        LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_size(view->objects[OBJ_ICON], ICON_BOX, ICON_BOX);
-    lv_obj_align(view->objects[OBJ_ICON], LV_ALIGN_LEFT_MID, BLOCK_LEFT, 0);
+    lv_obj_set_pos(view->objects[OBJ_ICON], ICON_INSET, ICON_INSET);
 
     view->objects[OBJ_VALUE] = lv_label_create(view->root);
     lv_obj_set_style_text_color(view->objects[OBJ_VALUE],
@@ -123,8 +108,7 @@ bool icon_badge_text_create(template_widget_view_t *view,
     lv_obj_set_width(view->objects[OBJ_VALUE], TEXT_WIDTH);
 
     view->objects[OBJ_LABEL] = lv_label_create(view->root);
-    lv_obj_set_style_text_color(view->objects[OBJ_LABEL],
-                                DESKMATE_COLOR_TERTIARY, 0);
+    lv_obj_set_style_text_color(view->objects[OBJ_LABEL], palette.tint, 0);
     lv_label_set_long_mode(view->objects[OBJ_LABEL], LV_LABEL_LONG_DOT);
     lv_obj_set_width(view->objects[OBJ_LABEL], TEXT_WIDTH);
     lv_label_set_text(view->objects[OBJ_LABEL], "");
@@ -136,9 +120,14 @@ bool icon_badge_text_create(template_widget_view_t *view,
                  -2 * DESKMATE_GRID);
     view->state_label = view->objects[OBJ_STATE];
 
+    /* The artwork is drawn in the face hue on the tile's surface. The
+     * background argument is load-bearing, not cosmetic: the crescent moon
+     * and the unknown ring are cut out by punching a background-coloured
+     * disc over a lit one, so it must be the colour actually behind the
+     * icon — which is now the module, not the canvas. */
     view->icon_current = WEATHER_ICON_UNKNOWN;
     weather_icon_render(view->objects[OBJ_ICON], view->icon_current,
-                        DESKMATE_COLOR_PRIMARY, DESKMATE_COLOR_CANVAS);
+                        palette.hue, DESKMATE_COLOR_SURFACE);
     return true;
 }
 
@@ -162,10 +151,10 @@ void icon_badge_text_patch(template_widget_view_t *view,
         template_fields_get(fields, "icon");
 
     if (title != NULL) {
-        lv_label_set_text(view->objects[OBJ_TITLE], title->value.text);
+        deskmate_chip_set_text(view->objects[OBJ_TITLE], title->value.text);
     }
     if (badge != NULL) {
-        lv_label_set_text(view->objects[OBJ_BADGE], badge->value.text);
+        deskmate_chip_set_text(view->objects[OBJ_BADGE], badge->value.text);
     }
     if (label != NULL) {
         lv_label_set_text(view->objects[OBJ_LABEL], label->value.text);
@@ -181,9 +170,10 @@ void icon_badge_text_patch(template_widget_view_t *view,
          * rebuild deletes and recreates a dozen LVGL objects. */
         if (next != view->icon_current) {
             view->icon_current = next;
-            weather_icon_render(view->objects[OBJ_ICON], next,
-                                DESKMATE_COLOR_PRIMARY,
-                                DESKMATE_COLOR_CANVAS);
+            weather_icon_render(
+                view->objects[OBJ_ICON], next,
+                deskmate_palette(PROTOCOL_TEMPLATE_ICON_BADGE_TEXT).hue,
+                DESKMATE_COLOR_SURFACE);
         }
     }
 }

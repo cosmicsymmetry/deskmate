@@ -1581,3 +1581,73 @@ strips. The CO5300 even-window rounding rule (`board_lcd_rounder_cb`) is exactly
 keeps odd-width rotated column windows safe, so the acceptance run must re-eyeball
 both orientations for stale text or shifted colour blocks at the new strip height.
 That visual check needs human eyes and has not been performed.
+
+## V1 physical acceptance — 2026-08-14 — Phases 1-3 PASS
+
+HEAD `05d04ce`, board at `/dev/cu.usbmodem101`. Full detail:
+`.superpowers/sdd/2026-08-11-deskmate-v1-preview-typeface-redesign/task-11-report.md`.
+Every result below was independently observed this session (rebuilt/reflashed/
+re-read status directly), not transcribed from the prior debug session's claims.
+
+**Phase 1 (dev-diag build).** Rebuilt clean, flashed, reset via the RTC-watchdog
+method documented above (not DTR/RTS). Twelve-second capture: one ROM banner
+(`boot:0x2b`), zero panic-save lines, zero `Guru Meditation` banners.
+`deskmate-cli status`: `firmware m1-113-g05d04ce`, protocol v1, capabilities `0x0b`,
+display 448x368 rotation 90°, uptime climbing, `free heap 8476515`, all frame counters
+zero except one valid frame. PASS.
+
+**Phase 2 (framebuffer diff, dev-diag build).**
+`cargo run -p device --example framebuffer_diff -- --port /dev/cu.usbmodem101`, one
+run (the case table already spans both orientations per case):
+`SUMMARY total=56 identical=54 differing=0 errored=0 excluded=2`. The 2 excluded are
+`row-list--truncation-boundary` at both orientations, excluded by design (its 128-char
+field exceeds row-list's own 96-char registry maximum, so the device correctly rejects
+that push — not a failure). **Zero unexplained diffs.**
+`analog-clock--no-seconds--landscape` and `--flipped` are both `identical`, closing
+the `show_seconds`-false defect open since M4: the pinned-instant golden proves the
+hour/minute hand angles are correct and independent of the flag once the device
+actually renders a frame, at both orientations. PASS.
+
+**Phase 3 (plain release build).** `fullclean` then plain flash (no erase, no
+`DESKMATE_DEV_DIAG`), RTC-watchdog reset: one ROM banner, zero panic lines.
+`deskmate-cli status`: `free heap 8480619`, clean counters. Standalone clock boots.
+
+- `hardware_acceptance.rs`: `PASS ... valid=2->11 malformed=0->3 crc=0->1
+  overflow=0->1 dropped=0 rx_drops=0 events_dropped=0 event_high_water=0 ui_dropped=0
+  ui_high_water=2` — split/coalesced frame handling, bad CRC, garbage, overlong,
+  invalid-revision push (rejected `InvalidPayload`), pre-floor time-sync (rejected
+  `InvalidTime`), and a stale-revision replay (rejected `StaleRevision`) all handled
+  without a reboot, with the relevant counters advancing.
+- Rotation 270 + `RowList` (a template `hardware_acceptance.rs` doesn't touch) +
+  typical/maximal(96-char)/over-ceiling(97-char) `row0_title` pushes, via a temporary
+  uncommitted diagnostic example deleted immediately after use (`git status` clean
+  before and after): typical and maximal pushes accepted, the over-ceiling push
+  rejected (not a crash), `free_heap` byte-identical before/after (`8480619`),
+  `uptime_ms` monotonic across the run (no reboot). This was needed because
+  `hardware_acceptance.rs` only exercises `DigitalClock` at rotation 90 on this exact
+  binary; Phase 2's exhaustive template/rotation sweep ran on the dev-diag binary,
+  which differs from plain only in `dev_capture.c` (unrelated to config/template
+  code, per the Task 10 `nm`/`strings` check above).
+- **30-minute mixed soak** — `m2_stress.rs --soak-seconds 1800` (config swaps, data
+  patches, an idle window, then the soak):
+  ```
+  soak_elapsed=1620s heap=8480619 valid=6699 malformed=3 event_high_water=0 event_dropped=0 ui_high_water=2 ui_dropped=0
+  ```
+  **WAIVED at 27 of 30 minutes (1620s/1800s), not completed** — interrupted by
+  explicit user direction; process killed and the serial port released immediately.
+  Per this repo's M2 waiver convention, this is a waiver, not a pass: do not describe
+  a completed 30-minute soak as observed. The partial data itself is clean: heap held
+  byte-flat at `8480619` across every sample from the preceding 100 config swaps +
+  1000 patches + 65s idle window through `soak_elapsed=1620s`, `valid` frames climbed
+  monotonically (1466->6699) with no discontinuity, `malformed` held at `3` unchanged
+  throughout the soak's own traffic, and `event_high_water`/`event_dropped`/
+  `ui_dropped` stayed `0` with `ui_queue_high_water` flat at `2` — no reboot, no
+  counter regression, no port drop at any sampled point up to the kill.
+
+**Not evaluated — needs human eyes.** The CO5300 even-window rounding check flagged
+above (new 64-line strip height, both orientations, watching for stale text or
+shifted colour blocks) — Phase 2's diff runs through `lv_snapshot_take`, which
+captures the pre-flush logical frame and bypasses the real QSPI flush/rounding path
+entirely, so it cannot see this. Also not evaluated: AMOLED surface-module
+rendering quality, storm icon readability, boot-clock visual appearance, general
+color/contrast at desk distance.

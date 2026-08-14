@@ -1526,41 +1526,58 @@ not one. On this board the usable ceiling for that pair, measured at
 non-NULL `lv_display_t`, so its caller dereferences freed memory and jumps through a
 garbage function pointer instead of reporting an error.
 
-**Still not verified on hardware, for a second and different reason (2026-08-14).**
-The first blocker — a USB endpoint wedged by ~1.3 s-period crash-looping with the
-USB-Serial/JTAG console enabled, which left the board enumerated but silent on both
-CDC and built-in USB-JTAG — was cleared by a physical replug. The board now flashes
-cleanly (`Hash of data verified` on all four images at commit `b90e711`). But it now
-**boots into ROM DOWNLOAD mode on every reset**, so the application never runs:
+**Verified on hardware 2026-08-14.** The fix boots the board cleanly and the
+protocol answers. Observed on the committed `b90e711` build, rebuilt and flashed
+against unmodified `sdkconfig.defaults` (`CONFIG_ESP_CONSOLE_SECONDARY_NONE 1`,
+`CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH 1` in `build/config/sdkconfig.h`):
 
-- Every ROM banner reads `rst:0x15 (USB_UART_CHIP_RESET),boot:0x23
-  (DOWNLOAD(USB/UART0))` followed by `waiting for download`, against the working
-  baseline of `boot:0x2b (SPI_FAST_FLASH_BOOT)`.
-- `GPIO_STRAP_REG` (`0x60004038`) reads `0x00000023` on every connection.
-  `GPIO_STRAP_SPI_BOOT_MASK` is `1 << 3` and bit 3 is clear — **GPIO0 is held LOW at
-  reset**, forcing download mode regardless of flash contents.
-- Confirmed independently: after an `--after hard_reset`, a follow-up
-  `esptool --before no_reset chip_id` still connects and returns the MAC. A running
-  application cannot answer the ROM loader; only a chip parked in download mode can.
-- Not the force-download RTC bit (`RTC_CNTL_OPTION1_REG` reads `0x00000000`, and
-  explicitly clearing it changes nothing), and not host DTR/RTS polarity (all four
-  DTR combinations across the reset pulse were swept; all gave `boot:0x23`). The
-  ROM's own "run user code" bypass (`flash_begin(0,0)` + `flash_finish(False)`) is
-  not usable over the USB-Serial/JTAG loader — it fails with `Serial data stream
-  stopped`.
+- **Three consecutive resets, all clean:** each shows exactly one ROM banner with
+  `rst:0x15 (USB_UART_CHIP_RESET),boot:0x2b (SPI_FAST_FLASH_BOOT)`, zero
+  `Guru Meditation` banners and zero `esp_core_dump_flash: Save core dump to flash`
+  lines — against the pre-fix signature of nine of each in a 12 s window.
+- **Full boot chain** (captured once on a diagnostic-console overlay build of the same
+  fix, since the committed config sends `ESP_LOGI` to UART0): `deskmate M2 boot` →
+  `LCD panel reset via TCA9554 EXIO0` → `Install CO5300 panel driver` →
+  `Initialize LVGL port` → `rotation set to 90 degrees` →
+  `display init complete (368x448)` → `board_touch_init OK` →
+  `first LVGL flush completed` → `clock_screen_show: screen ready` →
+  `clock screen shown, LVGL task running` → `native USB Serial/JTAG protocol link
+  ready` → `protocol task running`. The error that used to precede the panic,
+  `lvgl_port_add_disp_priv(471): Not enough memory for LVGL buffer (rotation buffer)
+  allocation!`, is **absent**.
+- **Status readback:** `firmware m1-112-g65b5357 / protocol v1 (max v1, capabilities
+  0x000000000000000b)`, `display 448x368, brightness 200, rotation 90°`,
+  `uptime 18275 ms, free heap 8476515 bytes, link online`,
+  `frames valid=1 malformed=0 crc=0 overflow=0 dropped_responses=0 rx_drops=0`.
+  A second readback ~14 s later gave `uptime 32134 ms` with the **same**
+  `free heap 8476515 bytes` — monotonic uptime rules out a hidden reboot, and the
+  byte-identical heap rules out a leak across the interval.
 
-**Board-handling fact worth keeping:** GPIO0 held low — BOOT pressed or stuck — is
-indistinguishable from a dead board if you only look at "no serial output", because
-this project's committed console config (`CONFIG_ESP_CONSOLE_UART_DEFAULT=y` +
-`CONFIG_ESP_CONSOLE_SECONDARY_NONE=y`) makes a healthy running app silent over USB
-too. Read `GPIO_STRAP_REG` bit 3 to tell them apart: set (e.g. `0x2b`) means the chip
-will boot from flash. To recover, make sure nothing is pressing BOOT, then replug or
-press RESET alone.
+**Board-handling fact, corrected and important.** The previous revision of this entry
+claimed GPIO0 was held low by a stuck BOOT button. **That was wrong.** On this macOS +
+USB-Serial/JTAG setup, `esptool`'s post-flash "Hard resetting via RTS pin" pulses RTS
+while DTR is still asserted from its own connect sequence, so the chip re-enters ROM
+DOWNLOAD mode (`boot:0x23 (DOWNLOAD(USB/UART0))`) instead of running the app. Every
+`idf.py flash` and every DTR/RTS reset attempted from the host did this. Two
+consequences worth keeping:
 
-**The fix builds and passes all host and companion suites but has NOT been observed
-booting on the board.** Three consecutive clean boots to the standalone clock and a
-`deskmate-cli status` readback of protocol 1 / capabilities 11 still have to be run
-before this branch may be described as physically verified. The acceptance run must
-also re-eyeball both orientations for stale text or shifted colour blocks: the fix
-changes the flush-chunk geometry (80 → 64 lines), which is exactly what the CO5300
-even-window rounding rule (`board_lcd_rounder_cb`) exists to keep safe.
+- **Never infer the physical GPIO0 level from `GPIO_STRAP_REG` read over esptool.**
+  The register latches at reset, and esptool's connect deliberately drives GPIO0 low
+  to enter download mode, so it always reads back "GPIO0 low". That misreading cost a
+  full verification round.
+- **To get a real run-mode boot, reset via the RTC watchdog**, which touches no
+  DTR/RTS: unlock `RTC_CNTL_WDTWPROTECT_REG` with `RTC_CNTL_WDT_WKEY`, set
+  `RTC_CNTL_WDTCONFIG1_REG`, enable via `RTC_CNTL_WDTCONFIG0_REG`
+  `(1 << 31) | (5 << 28) | (1 << 8) | 2`, re-lock, then deassert DTR/RTS and close the
+  port before it fires. USB re-enumerates across the reset, so the reader must reopen
+  in a loop. This gives `boot:0x2b (SPI_FAST_FLASH_BOOT)` reliably. To tell a running
+  app from a chip parked in download mode, probe with
+  `esptool --before no_reset chip_id`: it connects **only** if the chip is in download
+  mode.
+
+**Still outstanding for the acceptance run.** The fix changes flush-chunk geometry
+(80 -> 64 lines), so a full 448x368 landscape repaint is split into more, shorter
+strips. The CO5300 even-window rounding rule (`board_lcd_rounder_cb`) is exactly what
+keeps odd-width rotated column windows safe, so the acceptance run must re-eyeball
+both orientations for stale text or shifted colour blocks at the new strip height.
+That visual check needs human eyes and has not been performed.

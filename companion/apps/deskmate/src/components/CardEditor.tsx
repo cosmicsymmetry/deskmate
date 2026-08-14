@@ -8,7 +8,6 @@ import {
 import type {
   AlertHold,
   CardAlert,
-  CardPresence,
   CardSettings,
   JsonFieldMapping,
   PomodoroSnapshot,
@@ -27,15 +26,6 @@ interface CardEditorProps {
   /// reorder to invalidate.
   issues: ValidationIssue[];
   pomodoro: PomodoroSnapshot | null;
-  /// The carousel's default dwell time, for the "use the default" option's
-  /// label. `null` under manual advance, where there is no default to name.
-  defaultDwellSeconds: number | null;
-  /// True when this card is the ONLY in-rotation card in the whole draft — i.e.
-  /// switching it to `alert-only` or `off` would trip the "at least one card must be
-  /// in the rotation" rule. Used to disable those two radios rather than let the user
-  /// reach a state the footer can only describe with a container-level error attached
-  /// to no visible control.
-  isOnlyRotationCard: boolean;
   timerBusy: boolean;
   filePickerBusy: boolean;
   onChange: (card: CardSettings) => void;
@@ -110,8 +100,6 @@ export function CardEditor({
   card,
   issues,
   pomodoro,
-  defaultDwellSeconds,
-  isOnlyRotationCard,
   timerBusy,
   filePickerBusy,
   onChange,
@@ -138,13 +126,6 @@ export function CardEditor({
 
   const fieldIssues = (field: string) => issuesForField(issues, field);
   const canAlert = card.kind === "pomodoro" || card.kind === "calendar";
-  // Leaving the rotation (either radio) is blocked while this is the draft's only
-  // in-rotation card — see `isOnlyRotationCard`'s doc comment. Combined with the
-  // existing "no alert configured" guard on "Alert only" below.
-  const leavingRotationDisabled = isOnlyRotationCard && card.presence.kind === "in-rotation";
-  const alertOnlyDisabled = card.alert.kind === "none" || leavingRotationDisabled;
-
-  const setPresence = (presence: CardPresence) => onChange({ ...card, presence });
   const setAlert = (alert: CardAlert) => onChange(withAlert(card, alert));
 
   return (
@@ -548,101 +529,6 @@ export function CardEditor({
           </label>
         )}
 
-        <fieldset className="behaviour-fieldset">
-          <legend>Presence</legend>
-          <label>
-            <input
-              type="radio"
-              name="presence"
-              value="in-rotation"
-              checked={card.presence.kind === "in-rotation"}
-              onChange={() => setPresence({ kind: "in-rotation", dwell_seconds: null })}
-            />
-            In rotation
-          </label>
-          <label>
-            <input
-              type="radio"
-              name="presence"
-              value="alert-only"
-              checked={card.presence.kind === "alert-only"}
-              disabled={alertOnlyDisabled}
-              onChange={() => setPresence({ kind: "alert-only" })}
-            />
-            Alert only
-          </label>
-          <label>
-            <input
-              type="radio"
-              name="presence"
-              value="off"
-              checked={card.presence.kind === "off"}
-              disabled={leavingRotationDisabled}
-              onChange={() => setPresence({ kind: "off" })}
-            />
-            Off
-          </label>
-          {leavingRotationDisabled ? (
-            <small className="behaviour-hint">
-              This is your only in-rotation card — muting or turning it off would empty the
-              rotation, so both are disabled until another card is in rotation.
-            </small>
-          ) : (
-            alertOnlyDisabled && (
-              <small className="behaviour-hint">
-                {canAlert
-                  ? "Turn on an alert below before making this card alert-only — otherwise it could never appear."
-                  : `${cardKindName(card.kind)} cards have no alert to trigger them, so this stays off.`}
-              </small>
-            )
-          )}
-          <FieldIssues issues={fieldIssues("presence")} />
-        </fieldset>
-
-        {card.presence.kind === "in-rotation" &&
-          (defaultDwellSeconds === null ? (
-            <p className="behaviour-hint">
-              Time on screen has no effect while rotation advance is set to swipe-only — set an
-              automatic advance in the rotation panel to use it.
-            </p>
-          ) : (
-            <label className="field">
-              <span>Time on screen</span>
-              <select
-                value={card.presence.dwell_seconds === null ? "default" : "custom"}
-                onChange={(event) =>
-                  setPresence({
-                    kind: "in-rotation",
-                    dwell_seconds:
-                      event.currentTarget.value === "default" ? null : (defaultDwellSeconds ?? 20),
-                  })
-                }
-              >
-                <option value="default">Use the default ({defaultDwellSeconds}s)</option>
-                <option value="custom">A specific length</option>
-              </select>
-              {card.presence.dwell_seconds !== null && (
-                <input
-                  type="number"
-                  className="numeral"
-                  min={5}
-                  max={3600}
-                  step={1}
-                  aria-label="Dwell time in seconds"
-                  value={card.presence.dwell_seconds}
-                  onChange={(event) =>
-                    setPresence({
-                      kind: "in-rotation",
-                      dwell_seconds: numberValue(event.currentTarget.value),
-                    })
-                  }
-                  aria-invalid={fieldIssues("presence.dwell_seconds").length > 0}
-                />
-              )}
-              <FieldIssues issues={fieldIssues("presence.dwell_seconds")} />
-            </label>
-          ))}
-
         {canAlert && card.kind === "pomodoro" && (
           <fieldset className="alert-fieldset">
             <legend>Alert</legend>
@@ -757,8 +643,8 @@ export function CardEditor({
         <div className="gesture-note">
           <p>{tapActionDescription(card)}</p>
           <p>
-            Swiping the screen moves to the next or previous card. While an alert is on screen, a
-            tap dismisses it instead of performing the card's usual tap action.
+            Swiping the screen moves through the active playlist. While an alert is on screen, a tap
+            dismisses it instead of performing the card's usual tap action.
           </p>
         </div>
       </div>

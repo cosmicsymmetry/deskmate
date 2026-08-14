@@ -1,5 +1,5 @@
 import { describe, expect, mock, test } from "bun:test";
-import { act } from "react";
+import { act, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 
@@ -9,6 +9,7 @@ import { CardList } from "../src/components/CardList";
 import { DeviceHeader } from "../src/components/DeviceHeader";
 import { DevicePreview } from "../src/components/DevicePreview";
 import { Filmstrip } from "../src/components/Filmstrip";
+import { PlaylistPanel } from "../src/components/PlaylistPanel";
 import { ProviderStatus, formatProviderAge } from "../src/components/ProviderStatus";
 import {
   cardsContainerIssues,
@@ -17,7 +18,15 @@ import {
   unclaimedIssues,
 } from "../src/lib/configDraft";
 import * as tauriModule from "../src/lib/tauri";
-import type { AppConfig, CardSettings, PreviewFrame, ValidationIssue } from "../src/lib/types";
+import type {
+  AppConfig,
+  AppSnapshot,
+  CardSettings,
+  ConfigApplyResult,
+  DraftValidation,
+  PreviewFrame,
+  ValidationIssue,
+} from "../src/lib/types";
 import { ipcContractFixtures } from "../src/lib/types.contract";
 
 const snapshot = ipcContractFixtures.snapshot;
@@ -30,10 +39,23 @@ const cards = snapshot.config.cards;
 // `useAppState`) stays real.
 let previewImpl: (cardId: string) => Promise<PreviewFrame> = () =>
   Promise.reject(new Error("renderCardPreview not configured for this test"));
+let snapshotImpl: () => Promise<AppSnapshot> = async () => snapshot;
+let validateImpl: (config: AppConfig) => Promise<DraftValidation> = async () => ({
+  valid: true,
+  issues: [],
+});
+let saveImpl: (config: AppConfig) => Promise<ConfigApplyResult> = async () => ({
+  save: { generation: 1, warning: null },
+});
 
 mock.module("../src/lib/tauri", () => ({
   ...tauriModule,
   renderCardPreview: (cardId: string) => previewImpl(cardId),
+  getAppSnapshot: () => snapshotImpl(),
+  listenToAppState: async () => () => {},
+  validateConfigDraft: (config: AppConfig) => validateImpl(config),
+  saveApplyConfig: (config: AppConfig) => saveImpl(config),
+  getAutostartStatus: async () => ({ enabled: false, preference_enabled: false }),
 }));
 
 /// Renders into a live DOM root (unlike this file's other `renderToStaticMarkup`
@@ -68,10 +90,16 @@ async function waitFor(assertion: () => void, timeoutMs = 500): Promise<void> {
   }
 }
 
+function buttonWithText(container: ParentNode, text: string): HTMLButtonElement | undefined {
+  return [...container.querySelectorAll("button")].find(
+    (button) => button.textContent?.trim() === text,
+  );
+}
+
 function clockCard(
   id: string,
-  presence: CardSettings["presence"],
   title = `Card ${id}`,
+  alert: CardSettings["alert"] = { kind: "none" },
 ): CardSettings {
   return {
     kind: "clock",
@@ -81,11 +109,7 @@ function clockCard(
     template: { kind: "digital-clock" },
     tap_action: { kind: "none" },
     refresh: { kind: "device-local" },
-    presence,
-    alert:
-      presence.kind === "alert-only"
-        ? { kind: "on-timer-finish", hold: { kind: "until-dismissed" } }
-        : { kind: "none" },
+    alert,
   };
 }
 
@@ -99,28 +123,28 @@ function weatherCard(id: string, alert: CardSettings["alert"] = { kind: "none" }
     template: { kind: "big-number-label" },
     tap_action: { kind: "none" },
     refresh: { kind: "interval", minutes: 30 },
-    presence: { kind: "in-rotation", dwell_seconds: null },
     alert,
   };
 }
 
-/// Finds the self-closing `<input ...>` tag carrying both `name` and
-/// `value`, regardless of where React's server renderer places `checked` /
-/// `disabled` relative to the other attributes — that ordering is an
-/// implementation detail (observed to differ from JSX source order), not
-/// something a test should assume.
-function radioTag(html: string, name: string, value: string): string | undefined {
-  const inputs = html.match(/<input[^>]*>/g) ?? [];
-  return inputs.find((tag) => tag.includes(`name="${name}"`) && tag.includes(`value="${value}"`));
-}
-
-function cardListConfig(cardList: CardSettings[]): AppConfig {
+function cardListConfig(
+  cardList: CardSettings[],
+  entries = cardList.map((card) => ({ card_id: card.id, dwell_seconds: null })),
+): AppConfig {
   return {
-    schema_version: 3,
+    schema_version: 4,
     preferences: { timezone: "UTC", autostart: false, paused: false, orientation: "landscape" },
     cards: cardList,
     assets: [],
-    carousel: { advance: { kind: "timed", default_dwell_seconds: 20 } },
+    playlists: [
+      {
+        id: "workday",
+        name: "Workday",
+        advance: { kind: "timed", default_dwell_seconds: 20 },
+        entries,
+      },
+    ],
+    active_playlist_id: "workday",
     updater: { channel: "stable", checks: "notify" },
   };
 }
@@ -132,18 +156,12 @@ describe("settings accessibility and states", () => {
     expect(html).toContain("background service keeps running");
   });
 
-  function renderCardEditor(
-    card: CardSettings,
-    issues: ValidationIssue[] = [],
-    isOnlyRotationCard = false,
-  ) {
+  function renderCardEditor(card: CardSettings, issues: ValidationIssue[] = []) {
     return renderToStaticMarkup(
       <CardEditor
         card={card}
         issues={issues}
         pomodoro={null}
-        defaultDwellSeconds={20}
-        isOnlyRotationCard={isOnlyRotationCard}
         timerBusy={false}
         filePickerBusy={false}
         onChange={() => {}}
@@ -158,11 +176,7 @@ describe("settings accessibility and states", () => {
     // A distinctive id with no overlap with any visible label (unlike the
     // fixture's plain "clock", which is also a substring of the visible
     // "Digital clock" kind name and would make this assertion meaningless).
-    const clock = clockCard(
-      "internal-uuid-0001",
-      { kind: "in-rotation", dwell_seconds: null },
-      "Desk",
-    );
+    const clock = clockCard("internal-uuid-0001", "Desk");
     const html = renderCardEditor(clock);
     expect(html).toContain("Clean 448 × 368 canvas");
     expect(html).toContain("Show seconds");
@@ -179,34 +193,6 @@ describe("settings accessibility and states", () => {
     const html = renderCardEditor({ ...calendar, source: { kind: "file", value: "" } });
     expect(html).toContain("Choose file…");
     expect(html).toContain("up to 1 MB");
-  });
-
-  test("alert-only is unavailable until an alert is configured", () => {
-    const pomodoro = cards.find((card) => card.kind === "pomodoro");
-    if (pomodoro?.kind !== "pomodoro") {
-      throw new Error("contract fixture is missing its pomodoro widget");
-    }
-    const card: CardSettings = { ...pomodoro, alert: { kind: "none" } };
-    const html = renderCardEditor(card);
-    const radio = radioTag(html, "presence", "alert-only");
-    expect(radio).not.toBeUndefined();
-    expect(radio).toContain('disabled=""');
-    expect(html).toContain("Turn on an alert below");
-  });
-
-  test("alert-only becomes available once an alert is configured", () => {
-    const pomodoro = cards.find((card) => card.kind === "pomodoro");
-    if (pomodoro?.kind !== "pomodoro") {
-      throw new Error("contract fixture is missing its pomodoro widget");
-    }
-    const card: CardSettings = {
-      ...pomodoro,
-      alert: { kind: "on-timer-finish", hold: { kind: "until-dismissed" } },
-    };
-    const html = renderCardEditor(card);
-    const radio = radioTag(html, "presence", "alert-only");
-    expect(radio).not.toBeUndefined();
-    expect(radio).not.toContain("disabled");
   });
 
   test("weather cards offer no alert controls", () => {
@@ -237,11 +223,21 @@ describe("settings accessibility and states", () => {
     expect(html).toContain("a tap dismisses it");
   });
 
-  test("exposes explicit move buttons and keyboard instructions", () => {
-    const config = cardListConfig([
-      clockCard("first-clock-id", { kind: "in-rotation", dwell_seconds: 20 }),
-      clockCard("second-clock-id", { kind: "in-rotation", dwell_seconds: null }),
-    ]);
+  test("the library renders every card with alert and unused badges, never wire ids", () => {
+    const config = cardListConfig(
+      [
+        clockCard("internal-uuid-0001", "Desk"),
+        clockCard("internal-uuid-0002", "Focus", {
+          kind: "on-timer-finish",
+          hold: { kind: "until-dismissed" },
+        }),
+        clockCard("internal-uuid-0003", "Spare"),
+      ],
+      [
+        { card_id: "internal-uuid-0001", dwell_seconds: null },
+        { card_id: "internal-uuid-0002", dwell_seconds: null },
+      ],
+    );
     const html = renderToStaticMarkup(
       <CardList
         config={config}
@@ -250,36 +246,14 @@ describe("settings accessibility and states", () => {
         onSelect={() => {}}
         onAdd={() => {}}
         onRemove={() => {}}
-        onReorder={() => {}}
       />,
     );
-    expect(html).toContain("⌥ ↑ ↓ to move");
-    expect(html).toContain("Move Card second-clock-id up");
-    expect(html).toContain("Move Card first-clock-id down");
-  });
-
-  test("the card list separates rotation from alerts and never shows ids", () => {
-    const config = cardListConfig([
-      clockCard("internal-uuid-0001", { kind: "in-rotation", dwell_seconds: 20 }, "Desk"),
-      clockCard("internal-uuid-0002", { kind: "alert-only" }, "Focus"),
-      clockCard("internal-uuid-0003", { kind: "off" }, "Spare"),
-    ]);
-    const html = renderToStaticMarkup(
-      <CardList
-        config={config}
-        issues={[]}
-        selectedCardId={null}
-        onSelect={() => {}}
-        onAdd={() => {}}
-        onRemove={() => {}}
-        onReorder={() => {}}
-      />,
-    );
-    expect(html).toContain('aria-label="In rotation"');
-    expect(html).toContain('aria-label="Alerts and muted"');
+    expect(html).toContain('aria-label="Card library"');
     expect(html).toContain("Desk");
     expect(html).toContain("Focus");
     expect(html).toContain("Spare");
+    expect(html).toContain(">alerts<");
+    expect(html).toContain(">unused<");
     // Internal identifiers never reach the user — only their titles do.
     expect(html).not.toContain("internal-uuid-0001");
     expect(html).not.toContain("internal-uuid-0002");
@@ -288,9 +262,7 @@ describe("settings accessibility and states", () => {
 
   test("adding is disabled at the eight-card contract limit", () => {
     const config = cardListConfig(
-      Array.from({ length: 8 }, (_, index) =>
-        clockCard(`card-${index}`, { kind: "in-rotation", dwell_seconds: null }),
-      ),
+      Array.from({ length: 8 }, (_, index) => clockCard(`card-${index}`)),
     );
     const html = renderToStaticMarkup(
       <CardList
@@ -300,7 +272,6 @@ describe("settings accessibility and states", () => {
         onSelect={() => {}}
         onAdd={() => {}}
         onRemove={() => {}}
-        onReorder={() => {}}
       />,
     );
     const addButtons = html.match(/<button class="add-card"[^>]*>[\s\S]*?<\/button>/g) ?? [];
@@ -308,6 +279,154 @@ describe("settings accessibility and states", () => {
     for (const button of addButtons) {
       expect(button).toContain('disabled=""');
       expect(button).toContain(">Add ");
+    }
+  });
+
+  test("playlist entry reorder updates the ordered draft", async () => {
+    const config = cardListConfig([clockCard("first", "Desk"), clockCard("second", "Up next")]);
+    let latest = config;
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    function Harness() {
+      const [value, setValue] = useState(config);
+      latest = value;
+      return (
+        <PlaylistPanel config={value} issues={[]} onChange={setValue} onSelectCard={() => {}} />
+      );
+    }
+
+    await act(async () => root.render(<Harness />));
+    const moveUp = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Move Up next up"]',
+    );
+    expect(moveUp).not.toBeNull();
+    await act(async () => moveUp?.click());
+    expect(latest.playlists[0].entries.map((entry) => entry.card_id)).toEqual(["second", "first"]);
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
+  test("cards already in a playlist are disabled in Add from library", () => {
+    const config = cardListConfig([clockCard("first", "Desk"), clockCard("second", "Up next")]);
+    const html = renderToStaticMarkup(
+      <PlaylistPanel config={config} issues={[]} onChange={() => {}} onSelectCard={() => {}} />,
+    );
+    const options = html.match(/<option[^>]*>[^<]*already added<\/option>/g) ?? [];
+    expect(options).toHaveLength(2);
+    expect(options.every((option) => option.includes('disabled=""'))).toBe(true);
+    expect(html).toContain("Every library card is already in this playlist");
+  });
+
+  test("card and playlist-entry validation paths render on their corresponding rows", () => {
+    const config = cardListConfig([clockCard("first", "Desk"), clockCard("second", "Up next")]);
+    const issues: ValidationIssue[] = [
+      { path: "cards[1].title", code: "too-long", message: "Card title is too long." },
+      {
+        path: "playlists[0].entries[1].dwell_seconds",
+        code: "out-of-range",
+        message: "Entry dwell is out of range.",
+      },
+    ];
+    const library = renderToStaticMarkup(
+      <CardList
+        config={config}
+        issues={issues}
+        selectedCardId={null}
+        onSelect={() => {}}
+        onAdd={() => {}}
+        onRemove={() => {}}
+      />,
+    );
+    const playlists = renderToStaticMarkup(
+      <PlaylistPanel config={config} issues={issues} onChange={() => {}} onSelectCard={() => {}} />,
+    );
+    expect(library).toContain("Card title is too long.");
+    expect(playlists).toContain("Entry dwell is out of range.");
+    expect(playlists).toContain('aria-invalid="true"');
+  });
+
+  test("switching the active playlist marks the draft dirty and saves it through IPC", async () => {
+    let liveSnapshot = structuredClone(snapshot) as AppSnapshot;
+    const saved: AppConfig[] = [];
+    snapshotImpl = async () => liveSnapshot;
+    validateImpl = async () => ({ valid: true, issues: [] });
+    saveImpl = async (config) => {
+      saved.push(config);
+      liveSnapshot = { ...liveSnapshot, config };
+      return { save: { generation: 2, warning: null } };
+    };
+    previewImpl = async () => ({ png_base64: "cHJldmlldw==", sample: false });
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<App />));
+      await waitFor(() => expect(container.textContent).toContain("Workday"));
+
+      const manualTab = buttonWithText(container, "○Manual");
+      expect(manualTab).not.toBeUndefined();
+      await act(async () => manualTab?.click());
+      const makeActive = buttonWithText(container, "Make active");
+      expect(makeActive).not.toBeUndefined();
+      await act(async () => makeActive?.click());
+
+      await waitFor(() => expect(container.textContent).toContain("Unsaved changes"));
+      await waitFor(() => expect(container.textContent).toContain("●Manual◀ active"));
+      await waitFor(() => {
+        const save = buttonWithText(container, "Save & apply");
+        expect(save?.disabled).toBe(false);
+      });
+      await act(async () => buttonWithText(container, "Save & apply")?.click());
+      await waitFor(() => expect(saved).toHaveLength(1));
+      expect(saved[0].active_playlist_id).toBe("manual");
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      snapshotImpl = async () => snapshot;
+      validateImpl = async () => ({ valid: true, issues: [] });
+      saveImpl = async () => ({ save: { generation: 1, warning: null } });
+    }
+  });
+
+  test("validation-failed persistence shows the saved-settings banner and issue messages", async () => {
+    const invalidSnapshot: AppSnapshot = {
+      ...(structuredClone(snapshot) as AppSnapshot),
+      persistence: {
+        kind: "validation-failed",
+        message: "Your saved settings failed validation and were not applied",
+        issues: [
+          {
+            path: "playlists[0].entries[0].card_id",
+            code: "missing-reference",
+            message: "playlist entry references a card that does not exist",
+          },
+        ],
+      },
+    };
+    snapshotImpl = async () => invalidSnapshot;
+    previewImpl = async () => ({ png_base64: "cHJldmlldw==", sample: false });
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<App />));
+      await waitFor(() =>
+        expect(container.textContent).toContain(
+          "Your saved settings failed validation and were not applied",
+        ),
+      );
+      expect(container.textContent).toContain(
+        "playlist entry references a card that does not exist",
+      );
+      expect(container.textContent).not.toContain("Using your last working settings");
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      snapshotImpl = async () => snapshot;
     }
   });
 
@@ -339,11 +458,7 @@ describe("settings accessibility and states", () => {
     expect(providers).toContain("Refresh now");
   });
 
-  function calendarCard(
-    id: string,
-    presence: CardSettings["presence"],
-    title = "Up next",
-  ): CardSettings {
+  function calendarCard(id: string, title = "Up next"): CardSettings {
     return {
       kind: "calendar",
       id,
@@ -352,7 +467,6 @@ describe("settings accessibility and states", () => {
       template: { kind: "row-list" },
       tap_action: { kind: "none" },
       refresh: { kind: "interval", minutes: 15 },
-      presence,
       alert: { kind: "none" },
     };
   }
@@ -384,42 +498,36 @@ describe("settings accessibility and states", () => {
       expect(cardId).toBe("upnext");
       return { png_base64: "Zmlyc3QtZnJhbWU=", sample: false };
     };
-    const { container, root } = await mountPreview(
-      calendarCard("upnext", { kind: "in-rotation", dwell_seconds: null }),
-    );
+    const { container, root } = await mountPreview(calendarCard("upnext"));
     await waitFor(() => {
       const img = container.querySelector("img");
       expect(img).not.toBeNull();
       expect(img?.getAttribute("src")).toBe("data:image/png;base64,Zmlyc3QtZnJhbWU=");
     });
     expect(container.querySelector(".preview-sample-badge")).toBeNull();
-    root.unmount();
+    await act(async () => root.unmount());
   });
 
   test("shows the explicit unavailable state when the IPC rejects, never a stale or invented frame", async () => {
     previewImpl = async () => {
       throw new Error("simulator init failed");
     };
-    const { container, root } = await mountPreview(
-      calendarCard("upnext", { kind: "in-rotation", dwell_seconds: null }),
-    );
+    const { container, root } = await mountPreview(calendarCard("upnext"));
     await waitFor(() => {
       expect(container.textContent).toContain("Preview unavailable");
     });
     expect(container.querySelector("img")).toBeNull();
-    root.unmount();
+    await act(async () => root.unmount());
   });
 
   test("badges the frame as sample when the card has never published data", async () => {
     previewImpl = async () => ({ png_base64: "dW5jb25maWd1cmVk", sample: true });
-    const { container, root } = await mountPreview(
-      calendarCard("upnext", { kind: "in-rotation", dwell_seconds: null }),
-    );
+    const { container, root } = await mountPreview(calendarCard("upnext"));
     await waitFor(() => {
       expect(container.querySelector("img")).not.toBeNull();
       expect(container.textContent).toContain("No data yet");
     });
-    root.unmount();
+    await act(async () => root.unmount());
   });
 
   test("re-requests the preview when dataGeneration bumps", async () => {
@@ -428,7 +536,7 @@ describe("settings accessibility and states", () => {
       calls += 1;
       return { png_base64: `frame-${calls}`, sample: false };
     };
-    const card = calendarCard("upnext", { kind: "in-rotation", dwell_seconds: null });
+    const card = calendarCard("upnext");
     const { container, root } = await mountPreview(card, 0);
     await waitFor(() => expect(calls).toBe(1));
 
@@ -447,7 +555,7 @@ describe("settings accessibility and states", () => {
         "data:image/png;base64,frame-2",
       );
     });
-    root.unmount();
+    await act(async () => root.unmount());
   });
 
   test("keeps a stale frame on screen while a superseding request is in flight, then replaces it", async () => {
@@ -464,8 +572,8 @@ describe("settings accessibility and states", () => {
         resolveSecond = resolve;
       });
     };
-    const cardA = calendarCard("first", { kind: "in-rotation", dwell_seconds: null });
-    const cardB = calendarCard("second", { kind: "in-rotation", dwell_seconds: null });
+    const cardA = calendarCard("first");
+    const cardB = calendarCard("second");
     const { container, root } = await mountPreview(cardA);
     await waitFor(() => {
       expect(container.querySelector("img")?.getAttribute("src")).toBe(
@@ -495,7 +603,7 @@ describe("settings accessibility and states", () => {
         "data:image/png;base64,second-frame",
       );
     });
-    root.unmount();
+    await act(async () => root.unmount());
   });
 
   // Regression test: `preview.rs`'s latest-wins coalescing replies to a superseded
@@ -536,7 +644,7 @@ describe("settings accessibility and states", () => {
 
       // `clock` is a live template, so `DevicePreview` registers the 1 Hz interval
       // this test drives by hand.
-      const clock = clockCard("clock-preview", { kind: "in-rotation", dwell_seconds: null });
+      const clock = clockCard("clock-preview");
       const { container, root } = await mountPreview(clock);
       await waitFor(() => expect(callCount).toBe(1));
       expect(capturedTick).not.toBeUndefined();
@@ -570,7 +678,7 @@ describe("settings accessibility and states", () => {
         "data:image/png;base64,winning-frame",
       );
 
-      root.unmount();
+      await act(async () => root.unmount());
     } finally {
       window.setInterval = originalSetInterval;
       window.clearInterval = originalClearInterval;
@@ -594,29 +702,33 @@ describe("settings accessibility and states", () => {
 
   function filmstripConfig(): AppConfig {
     return {
-      schema_version: 3,
+      schema_version: 4,
       preferences: { timezone: "UTC", autostart: false, paused: false, orientation: "landscape" },
       cards: [
-        calendarCard("first", { kind: "in-rotation", dwell_seconds: 45 }, "Desk"),
-        calendarCard("second", { kind: "in-rotation", dwell_seconds: 20 }, "Up next"),
-        calendarCard("third", { kind: "alert-only" }, "Focus"),
+        calendarCard("first", "Desk"),
+        calendarCard("second", "Up next"),
+        calendarCard("third", "Focus"),
       ],
       assets: [],
-      carousel: { advance: { kind: "timed", default_dwell_seconds: 20 } },
+      playlists: [
+        {
+          id: "workday",
+          name: "Workday",
+          advance: { kind: "timed", default_dwell_seconds: 20 },
+          entries: [
+            { card_id: "first", dwell_seconds: 45 },
+            { card_id: "second", dwell_seconds: null },
+          ],
+        },
+      ],
+      active_playlist_id: "workday",
       updater: { channel: "stable", checks: "notify" },
     };
   }
 
   function renderFilmstrip(config: AppConfig): string {
     return renderToStaticMarkup(
-      <Filmstrip
-        config={config}
-        issues={[]}
-        selectedCardId="first"
-        onSelect={() => {}}
-        onReorder={() => {}}
-        onChangeAdvance={() => {}}
-      />,
+      <Filmstrip config={config} selectedCardId="first" onSelect={() => {}} onReorder={() => {}} />,
     );
   }
 
@@ -632,7 +744,7 @@ describe("settings accessibility and states", () => {
     const config = filmstripConfig();
     const html = renderFilmstrip({
       ...config,
-      carousel: { advance: { kind: "manual" } },
+      playlists: [{ ...config.playlists[0], advance: { kind: "manual" } }],
     });
     expect(html).not.toMatch(/\d+s</);
     expect(html).not.toContain(">Play<");
@@ -646,10 +758,8 @@ describe("settings accessibility and states", () => {
     expect(formatProviderAge(7200)).toBe("Updated 2 hr ago");
   });
 
-  test("an issue on a path no card, preference, or carousel surface claims (e.g. a missing-capability issue) is not silently dropped", () => {
-    const config = cardListConfig([
-      clockCard("only-card", { kind: "in-rotation", dwell_seconds: null }),
-    ]);
+  test("an issue on a path no card, playlist, or preference surface claims (e.g. a missing-capability issue) is not silently dropped", () => {
+    const config = cardListConfig([clockCard("only-card")]);
     const capabilityIssue: ValidationIssue = {
       path: "device.capabilities",
       code: "requires-capability",
@@ -659,18 +769,15 @@ describe("settings accessibility and states", () => {
     expect(unclaimedIssues([capabilityIssue], config)).toEqual([capabilityIssue]);
   });
 
-  test("every issue is claimed by exactly one surface — the cards container, a card, a preference field, the carousel, or the unclaimed fallback", () => {
-    const config = cardListConfig([
-      clockCard("first", { kind: "in-rotation", dwell_seconds: null }),
-      clockCard("second", { kind: "in-rotation", dwell_seconds: null }),
-    ]);
+  test("every issue is claimed by exactly one surface — the cards container, a card, a playlist, a preference field, or the unclaimed fallback", () => {
+    const config = cardListConfig([clockCard("first"), clockCard("second")]);
     const issues: ValidationIssue[] = [
-      { path: "cards", code: "empty", message: "At least one card must be in the rotation." },
+      { path: "cards", code: "empty", message: "At least one card is required." },
       { path: "cards[0].title", code: "too-long", message: "Title is too long." },
       { path: "cards[1]", code: "invalid-composition", message: "This card is misconfigured." },
       { path: "preferences.timezone", code: "invalid-timezone", message: "Unknown timezone." },
       {
-        path: "carousel.advance.default_dwell_seconds",
+        path: "playlists[0].advance.default_dwell_seconds",
         code: "out-of-range",
         message: "Dwell time is out of range.",
       },
@@ -682,7 +789,7 @@ describe("settings accessibility and states", () => {
     ];
 
     // Reconstructed independently from the same public helpers each real surface calls
-    // (App scopes CardList/CardEditor/the timezone field/the Filmstrip this exact way —
+    // (App scopes CardList/CardEditor/PlaylistPanel/the timezone field this exact way —
     // see App.tsx), plus the fallback under test. This is the invariant that actually
     // guards against the class of bug this fix addresses: if a surface's claim and
     // `unclaimedIssues`'s notion of "claimed" ever drift apart, an issue either goes
@@ -691,8 +798,8 @@ describe("settings accessibility and states", () => {
     const union = [
       ...cardsContainerIssues(issues),
       ...config.cards.flatMap((card) => issuesForCard(issues, config, card.id)),
+      ...issuesForPath(issues, "playlists"),
       ...issuesForPath(issues, "preferences.timezone"),
-      ...issuesForPath(issues, "carousel.advance.default_dwell_seconds"),
       ...unclaimedIssues(issues, config),
     ];
 

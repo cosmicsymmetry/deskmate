@@ -5,6 +5,7 @@ import {
   type AppStateSubscriptionOptions,
 } from "../src/lib/useAppState";
 import type { AppSnapshot } from "../src/lib/types";
+import { ipcContractFixtures } from "../src/lib/types.contract";
 
 class FakeEventTarget {
   visibilityState = "visible";
@@ -31,7 +32,7 @@ class FakeEventTarget {
   }
 }
 
-const snapshot = { runtime: { kind: "running" } } as AppSnapshot;
+const snapshot: AppSnapshot = ipcContractFixtures.snapshot;
 
 async function flushPromises() {
   await Promise.resolve();
@@ -39,6 +40,12 @@ async function flushPromises() {
 }
 
 describe("startAppStateSubscription", () => {
+  test("the subscription fixture carries schema-v4 playlists", () => {
+    expect(snapshot.config.schema_version).toBe(4);
+    expect(snapshot.config.playlists.map((playlist) => playlist.id)).toEqual(["workday", "manual"]);
+    expect(snapshot.config.active_playlist_id).toBe("workday");
+  });
+
   test("cleans up when the Tauri listener resolves after unmount", async () => {
     const focusTarget = new FakeEventTarget();
     const visibilityTarget = new FakeEventTarget();

@@ -347,6 +347,13 @@ h2 {
   line-height: 1.45;
 }
 
+.recovery-banner ul {
+  margin: 7px 0 0;
+  padding-left: 18px;
+  font-size: 0.75rem;
+  line-height: 1.5;
+}
+
 .first-run {
   display: grid;
   grid-template-columns: minmax(220px, 0.8fr) minmax(520px, 1.8fr);
@@ -416,8 +423,14 @@ h2 {
 
 .workspace__editors {
   display: grid;
-  grid-template-columns: minmax(240px, 0.72fr) minmax(380px, 1.28fr);
   gap: 18px;
+}
+
+.library-playlists {
+  display: grid;
+  grid-template-columns: minmax(250px, 0.8fr) minmax(340px, 1.2fr);
+  gap: 18px;
+  align-items: start;
 }
 
 .workspace__preview {
@@ -438,6 +451,7 @@ h2 {
 }
 
 .card-list-panel,
+.playlist-panel,
 .editor-panel,
 .preferences-panel {
   border-color: var(--line);
@@ -473,10 +487,10 @@ h2 {
   display: grid;
 }
 
-/* Card list — replaces the old widget gallery + screen arranger panels. */
+/* Card library and playlist builder. */
 
 /* Container-level `cards` issues (see `cardsContainerIssues`) — e.g. "at least one
-   card must be in the rotation" — which have no single row of their own to attach to,
+   card is required" — which have no single row of their own to attach to,
    so they render once here instead of nowhere. */
 .card-list-issues {
   margin: 0;
@@ -539,6 +553,51 @@ h2 {
 .card-row--unordered {
   grid-template-columns: 1fr auto;
   cursor: default;
+}
+
+.library-row {
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  cursor: default;
+}
+
+.library-row__glyph {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 30px;
+  border-radius: 6px;
+  color: var(--surface);
+  background: var(--ink);
+  font-size: 0.58rem;
+  font-weight: 800;
+}
+
+.card-row__badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  justify-content: flex-end;
+}
+
+.status-badge {
+  padding: 2px 6px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--ink);
+  background: var(--line);
+  font-size: 0.58rem;
+  font-weight: 750;
+  letter-spacing: 0.02em;
+}
+
+.status-badge--quiet {
+  color: var(--muted);
+  background: transparent;
+}
+
+.card-row__issues {
+  grid-column: 1 / -1;
+  margin-top: 0;
 }
 
 /* Hover is a neutral affordance, not selection — --signal is reserved for
@@ -628,6 +687,192 @@ h2 {
 
 .card-row__remove {
   white-space: nowrap;
+}
+
+.playlist-panel-issues {
+  margin: 0;
+  padding: 12px 22px 12px 39px;
+  border-bottom: 1px solid var(--line);
+  background: color-mix(in srgb, var(--alarm) 8%, transparent);
+}
+
+.playlist-tabs {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 14px;
+  border-bottom: 1px solid var(--line);
+  list-style: none;
+}
+
+.playlist-tabs > li {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+.playlist-tabs > li.is-selected {
+  border-color: var(--signal);
+  box-shadow: inset 3px 0 0 var(--signal);
+}
+
+.playlist-tabs button {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  gap: 7px;
+  align-items: center;
+  width: 100%;
+  padding: 9px 10px;
+  border: 0;
+  color: inherit;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+}
+
+.playlist-tabs button:hover {
+  background: var(--line);
+}
+
+.playlist-tabs strong {
+  overflow: hidden;
+  font-size: 0.75rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.playlist-tabs small,
+.playlist-tab__issue-count {
+  color: var(--muted);
+  font-size: 0.62rem;
+}
+
+.playlist-tab__issue-count {
+  display: grid;
+  place-items: center;
+  min-width: 20px;
+  height: 20px;
+  border-radius: 999px;
+  color: var(--alarm);
+  background: color-mix(in srgb, var(--alarm) 12%, transparent);
+  font-weight: 800;
+}
+
+.playlist-tab-issues {
+  margin: 0;
+  padding: 0 12px 9px 27px;
+}
+
+.playlist-add-form,
+.playlist-add-entry {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: end;
+  padding: 14px;
+  border-bottom: 1px solid var(--line);
+}
+
+.playlist-add-form .button,
+.playlist-add-entry .button {
+  min-height: 39px;
+}
+
+.playlist-detail {
+  display: grid;
+}
+
+.playlist-actions {
+  display: grid;
+  gap: 10px;
+  padding: 16px 14px;
+  border-bottom: 1px solid var(--line);
+}
+
+.playlist-action-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  align-items: center;
+}
+
+.playlist-entries-heading {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 4px 14px 0;
+}
+
+.playlist-entries-heading p,
+.playlist-entries-heading small {
+  display: block;
+  margin: 0;
+}
+
+.playlist-entries-heading small {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 0.62rem;
+}
+
+.playlist-entry-container-issues {
+  margin: 8px 14px 0;
+}
+
+.playlist-entry-list {
+  display: grid;
+  gap: 7px;
+  margin: 0;
+  padding: 10px 14px 14px;
+  list-style: none;
+}
+
+.playlist-entry {
+  display: grid;
+  grid-template-columns: auto auto minmax(80px, 1fr) minmax(68px, 0.42fr) auto auto;
+  gap: 7px;
+  align-items: center;
+  padding: 7px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  cursor: grab;
+  transition:
+    border-color 140ms ease,
+    background 140ms ease,
+    opacity 140ms ease;
+}
+
+.playlist-entry:hover {
+  background: var(--line);
+}
+
+.playlist-entry.is-dragging {
+  opacity: 0.45;
+}
+
+.playlist-entry-issues {
+  grid-column: 1 / -1;
+  margin-top: 0;
+}
+
+.entry-dwell-field input {
+  width: 100%;
+  min-height: 34px;
+  padding: 6px 7px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--ink);
+  background: transparent;
+  font-size: 0.7rem;
+}
+
+.entry-dwell-field input[aria-invalid="true"] {
+  border-color: var(--alarm);
+}
+
+.playlist-add-entry {
+  border-top: 1px solid var(--line);
+  border-bottom: 0;
 }
 
 .card-add {
@@ -862,10 +1107,8 @@ h2 {
   background: transparent;
 }
 
-/* Behaviour (presence) and Alert fieldsets — same quiet hairline grouping
-   as .source-picker/.timer-controls above, never a colour fill: presence
-   and alert are structure, not emission or interaction. */
-.behaviour-fieldset,
+/* Alert and mapping fieldsets use the same quiet hairline grouping as
+   .source-picker/.timer-controls above. */
 .alert-fieldset,
 .mapping-list {
   grid-column: 1 / -1;
@@ -875,17 +1118,6 @@ h2 {
   padding: 12px;
   border: 1px solid var(--line);
   border-radius: 6px;
-}
-
-.behaviour-fieldset label {
-  display: flex;
-  gap: 6px;
-  align-items: center;
-  font-size: 0.74rem;
-}
-
-.behaviour-fieldset input[type="radio"] {
-  accent-color: var(--signal);
 }
 
 .behaviour-hint {
@@ -1225,13 +1457,13 @@ h2 {
   line-height: 1.4;
 }
 
-/* Sets the actual, saved `carousel.advance` — quiet chrome grouping, same hairline
-   treatment as .behaviour-fieldset, with --signal reserved for the selected radio
+/* Sets the selected playlist's saved advance mode — quiet chrome grouping, with
+   --signal reserved for the selected radio
    (never --emit: this is a clickable control, not the device's own emission). */
 .advance-fieldset {
   display: grid;
   gap: 8px;
-  margin: 0;
+  margin: 14px;
   padding: 12px;
   border: 1px solid var(--line);
   border-radius: 6px;
@@ -1460,6 +1692,7 @@ h2 {
 
   .first-run ol,
   .workspace__editors,
+  .library-playlists,
   .workspace__preview,
   .form-grid {
     grid-template-columns: 1fr;
@@ -1468,7 +1701,6 @@ h2 {
   .source-picker,
   .check-field,
   .timer-controls,
-  .behaviour-fieldset,
   .alert-fieldset,
   .mapping-list,
   .gesture-note {
@@ -1525,8 +1757,19 @@ h2 {
   }
 
   .file-picker-row,
-  .mapping-row {
+  .mapping-row,
+  .playlist-add-form,
+  .playlist-add-entry {
     grid-template-columns: 1fr;
+  }
+
+  .playlist-entry {
+    grid-template-columns: auto auto minmax(0, 1fr) minmax(68px, 0.45fr);
+  }
+
+  .playlist-entry .card-row__moves,
+  .playlist-entry > .text-button {
+    grid-row: 2;
   }
 
   .provider-row {

@@ -1,28 +1,21 @@
-import { useState, type DragEvent, type KeyboardEvent } from "react";
-
 import {
   cardKindName,
-  cardMoveFromKey,
   cardName,
-  moveCardWithinRotation,
-  nonRotationCards,
-  rotationCards,
+  cardsContainerIssues,
+  issuesForCard,
+  libraryCards,
 } from "../lib/configDraft";
-import type { AppConfig, CardKind, CardSettings, ValidationIssue } from "../lib/types";
+import type { AppConfig, CardKind, ValidationIssue } from "../lib/types";
 
 const MAX_CARDS = 8;
 
 interface CardListProps {
   config: AppConfig;
-  /// Container-level `cards` issues only (see `cardsContainerIssues`) — App scopes
-  /// these before passing them down, the same way it scopes per-card issues for
-  /// CardEditor via `issuesForCard`.
   issues: ValidationIssue[];
   selectedCardId: string | null;
   onSelect: (cardId: string) => void;
   onAdd: (kind: CardKind) => void;
   onRemove: (cardId: string) => void;
-  onReorder: (config: AppConfig) => void;
 }
 
 const addableKinds: { kind: CardKind; glyph: string; description: string }[] = [
@@ -34,18 +27,19 @@ const addableKinds: { kind: CardKind; glyph: string; description: string }[] = [
   { kind: "rss", glyph: "⟢", description: "Headlines feed" },
 ];
 
-/// Dwell time shown beside a rotation row, in the numeral stack since it's a
-/// duration. Falls back to an em dash for cards that inherit the carousel's
-/// default rather than overriding it, so every row keeps the same columns.
-function dwellLabel(card: CardSettings): string {
-  if (card.presence.kind !== "in-rotation") {
-    return "—";
-  }
-  return card.presence.dwell_seconds !== null ? `${card.presence.dwell_seconds}s` : "—";
-}
+const glyphForKind = new Map(addableKinds.map(({ kind, glyph }) => [kind, glyph]));
 
-function presenceLabel(card: CardSettings): string {
-  return card.presence.kind === "alert-only" ? "Alert" : "Muted";
+function FieldIssues({ issues }: { issues: ValidationIssue[] }) {
+  if (issues.length === 0) {
+    return null;
+  }
+  return (
+    <ul className="field-errors card-row__issues" role="alert">
+      {issues.map((issue) => (
+        <li key={`${issue.path}:${issue.code}`}>{issue.message}</li>
+      ))}
+    </ul>
+  );
 }
 
 export function CardList({
@@ -55,204 +49,86 @@ export function CardList({
   onSelect,
   onAdd,
   onRemove,
-  onReorder,
 }: CardListProps) {
-  const rotation = rotationCards(config);
-  const alertsAndMuted = nonRotationCards(config);
-  const [draggedId, setDraggedId] = useState<string | null>(null);
-  const atCapacity = config.cards.length >= MAX_CARDS;
-  // Removing the last in-rotation card would trip "at least one card must be in the
-  // rotation" (or, if it's also the only card at all, "at least one cards entry is
-  // required") with no field for either issue to attach to — see
-  // `cardsContainerIssues`. Guarding here, alongside rendering the issue itself below,
-  // makes that state harder to reach rather than only explaining it after the fact.
-  const removingWouldEmptyRotation = rotation.length === 1;
-
-  // `targetRotationIndex` is a position among rotation rows only (what the
-  // user sees and drags), never a raw config.cards index — the mapping
-  // from one to the other, which must account for interspersed
-  // alert-only/off cards, lives in configDraft's moveCardWithinRotation.
-  const moveTo = (cardId: string, targetRotationIndex: number) => {
-    onReorder(moveCardWithinRotation(config, cardId, targetRotationIndex));
-  };
-
-  const onKeyDown = (event: KeyboardEvent<HTMLButtonElement>, index: number) => {
-    const delta = cardMoveFromKey(event.key, event.altKey);
-    if (delta === 0) {
-      return;
-    }
-    if (!rotation[index + delta]) {
-      return;
-    }
-    event.preventDefault();
-    moveTo(rotation[index].id, index + delta);
-  };
-  const onDragStart = (event: DragEvent<HTMLLIElement>, cardId: string) => {
-    setDraggedId(cardId);
-    event.dataTransfer.effectAllowed = "move";
-    event.dataTransfer.setData("text/plain", cardId);
-  };
-  const onDrop = (event: DragEvent<HTMLLIElement>, targetIndex: number) => {
-    event.preventDefault();
-    const cardId = draggedId ?? event.dataTransfer.getData("text/plain");
-    if (cardId) {
-      moveTo(cardId, targetIndex);
-    }
-    setDraggedId(null);
-  };
+  const cards = libraryCards(config);
+  const atCapacity = cards.length >= MAX_CARDS;
+  const containerIssues = cardsContainerIssues(issues);
+  const usedCardIds = new Set(
+    config.playlists.flatMap((playlist) => playlist.entries.map((entry) => entry.card_id)),
+  );
 
   return (
     <section className="panel card-list-panel" aria-labelledby="card-list-heading">
       <div className="panel-heading">
         <div>
-          <p className="step-label">Cards</p>
-          <h2 id="card-list-heading">What should it show?</h2>
+          <p className="step-label">Library</p>
+          <h2 id="card-list-heading">Every card</h2>
         </div>
         <span className="count-badge numeral" id="card-capacity">
-          {config.cards.length}/{MAX_CARDS}
+          {cards.length}/{MAX_CARDS}
         </span>
       </div>
 
-      {issues.length > 0 && (
+      {containerIssues.length > 0 && (
         <ul className="field-errors card-list-issues" role="alert">
-          {issues.map((issue) => (
+          {containerIssues.map((issue) => (
             <li key={`${issue.path}:${issue.code}`}>{issue.message}</li>
           ))}
         </ul>
       )}
 
-      <div className="card-list-section">
-        <div className="card-list-section__heading">
-          <p className="section-label">In rotation</p>
-          <span className="keyboard-hint">⌥ ↑ ↓ to move</span>
+      {cards.length === 0 ? (
+        <div className="empty-state">
+          <strong>Your library is empty</strong>
+          <span>Add a card below, then place it in a playlist.</span>
         </div>
-        {rotation.length === 0 ? (
-          <div className="empty-state">
-            <strong>Your rotation is empty</strong>
-            <span>Add a card below to start the loop.</span>
-          </div>
-        ) : (
-          <ol className="card-list" aria-label="In rotation">
-            {rotation.map((card, index) => (
+      ) : (
+        <ul className="card-list library-list" aria-label="Card library">
+          {cards.map((card) => {
+            const cardIssues = issuesForCard(issues, config, card.id);
+            const hasAlert = card.alert.kind !== "none";
+            const isUnused = !usedCardIds.has(card.id);
+            return (
               <li
                 key={card.id}
-                draggable
-                className={`card-row${selectedCardId === card.id ? " is-selected" : ""}${draggedId === card.id ? " is-dragging" : ""}`}
-                onDragStart={(event) => onDragStart(event, card.id)}
-                onDragEnd={() => setDraggedId(null)}
-                onDragOver={(event) => event.preventDefault()}
-                onDrop={(event) => onDrop(event, index)}
+                className={`card-row library-row${selectedCardId === card.id ? " is-selected" : ""}`}
               >
-                <span className="card-row__handle" aria-hidden="true">
-                  ⠿
+                <span className="library-row__glyph numeral" aria-hidden="true">
+                  {glyphForKind.get(card.kind)}
                 </span>
-                <span className="card-row__index numeral">{index + 1}</span>
                 <button
                   type="button"
                   className="card-row__body"
                   aria-pressed={selectedCardId === card.id}
                   onClick={() => onSelect(card.id)}
-                  onKeyDown={(event) => onKeyDown(event, index)}
                 >
                   <strong>{cardName(card)}</strong>
                   <small>{cardKindName(card.kind)}</small>
                 </button>
-                <span className="card-row__dwell numeral">{dwellLabel(card)}</span>
-                <span className="card-row__moves">
-                  <button
-                    type="button"
-                    aria-label={`Move ${cardName(card)} up`}
-                    disabled={index === 0}
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      moveTo(card.id, index - 1);
-                    }}
-                  >
-                    ↑
-                  </button>
-                  <button
-                    type="button"
-                    aria-label={`Move ${cardName(card)} down`}
-                    disabled={index === rotation.length - 1}
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      moveTo(card.id, index + 1);
-                    }}
-                  >
-                    ↓
-                  </button>
+                <span className="card-row__badges">
+                  {hasAlert && <span className="status-badge">alerts</span>}
+                  {isUnused && <span className="status-badge status-badge--quiet">unused</span>}
                 </span>
                 <button
                   type="button"
                   className="card-row__remove text-button text-button--danger"
                   aria-label={
-                    removingWouldEmptyRotation
-                      ? `Remove ${cardName(card)} (keep at least one card in rotation)`
-                      : `Remove ${cardName(card)}`
-                  }
-                  title={
-                    removingWouldEmptyRotation
-                      ? "This is your only in-rotation card — the rotation can't be empty."
-                      : undefined
-                  }
-                  disabled={removingWouldEmptyRotation}
-                  onClick={() => onRemove(card.id)}
-                >
-                  Remove
-                </button>
-              </li>
-            ))}
-          </ol>
-        )}
-      </div>
-
-      <div className="card-list-section">
-        <p className="section-label">Alerts and muted</p>
-        {alertsAndMuted.length === 0 ? (
-          <div className="empty-state">
-            <span>Cards you mute or make alert-only appear here.</span>
-          </div>
-        ) : (
-          <ul className="card-list" aria-label="Alerts and muted">
-            {alertsAndMuted.map((card) => (
-              <li
-                key={card.id}
-                className={`card-row card-row--unordered${selectedCardId === card.id ? " is-selected" : ""}`}
-              >
-                <button
-                  type="button"
-                  className="card-row__body"
-                  aria-pressed={selectedCardId === card.id}
-                  onClick={() => onSelect(card.id)}
-                >
-                  <strong>{cardName(card)}</strong>
-                  <small>
-                    {cardKindName(card.kind)} · {presenceLabel(card)}
-                  </small>
-                </button>
-                <button
-                  type="button"
-                  className="card-row__remove text-button text-button--danger"
-                  aria-label={
-                    config.cards.length === 1
+                    cards.length === 1
                       ? `Remove ${cardName(card)} (keep at least one card)`
                       : `Remove ${cardName(card)}`
                   }
-                  title={
-                    config.cards.length === 1
-                      ? "This is your only card — there must be at least one."
-                      : undefined
-                  }
-                  disabled={config.cards.length === 1}
+                  title={cards.length === 1 ? "This is your only card." : undefined}
+                  disabled={cards.length === 1}
                   onClick={() => onRemove(card.id)}
                 >
                   Remove
                 </button>
+                <FieldIssues issues={cardIssues} />
               </li>
-            ))}
-          </ul>
-        )}
-      </div>
+            );
+          })}
+        </ul>
+      )}
 
       <fieldset className="card-add">
         <legend className="sr-only">Add a card</legend>

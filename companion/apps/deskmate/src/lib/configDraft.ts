@@ -4,11 +4,12 @@ import type {
   CardDataSnapshot,
   CardFieldValue,
   CardKind,
-  CardPresence,
   CardSettings,
   CarouselAdvance,
+  Playlist,
   ValidationIssue,
 } from "./types";
+import { MAX_PLAYLIST_ENTRIES, MAX_PLAYLISTS } from "./types";
 
 export function copyConfig(config: AppConfig): AppConfig {
   return {
@@ -23,7 +24,6 @@ export function copyConfig(config: AppConfig): AppConfig {
       template: { ...card.template },
       tap_action: { ...card.tap_action },
       refresh: { ...card.refresh },
-      presence: { ...card.presence },
       alert: { ...card.alert },
     })) as CardSettings[],
     assets: config.assets.map((asset) => ({
@@ -37,7 +37,11 @@ export function copyConfig(config: AppConfig): AppConfig {
               glyph_ranges: asset.kind.glyph_ranges.map((range) => ({ ...range })),
             },
     })),
-    carousel: { ...config.carousel, advance: { ...config.carousel.advance } },
+    playlists: config.playlists.map((playlist) => ({
+      ...playlist,
+      advance: { ...playlist.advance },
+      entries: playlist.entries.map((entry) => ({ ...entry })),
+    })),
     updater: { ...config.updater },
   };
 }
@@ -88,12 +92,10 @@ function nextId(prefix: string, used: Set<string>): string {
   return `${prefix}-${suffix}`;
 }
 
-const DEFAULT_PRESENCE: CardPresence = { kind: "in-rotation", dwell_seconds: null };
-
 /// Appends a new card with sane defaults for its kind. Supports all six card
 /// kinds — weather, JSON feed and RSS are reachable here, not just
-/// clock/pomodoro/calendar. A card is a screen; this never touches any
-/// separate screen list because there isn't one.
+/// clock/pomodoro/calendar. A new card starts in the library; playlist
+/// membership is an explicit, separate edit.
 export function addCard(
   config: AppConfig,
   kind: CardKind,
@@ -106,7 +108,6 @@ export function addCard(
   const common = {
     id: cardId,
     tap_action: { kind: "none" } as const,
-    presence: DEFAULT_PRESENCE,
     alert: { kind: "none" } as const,
   };
 
@@ -210,37 +211,231 @@ export function updateWidget(
 }
 
 export function removeCard(config: AppConfig, cardId: string): AppConfig {
+  if (!config.cards.some((card) => card.id === cardId)) {
+    return config;
+  }
   return {
     ...config,
     cards: config.cards.filter((card) => card.id !== cardId),
+    playlists: config.playlists.map((playlist) => ({
+      ...playlist,
+      entries: playlist.entries.filter((entry) => entry.card_id !== cardId),
+    })),
   };
 }
 
-/// Cards with a carousel position, in loop order. Order is meaningful here —
-/// it IS the carousel order.
-export function rotationCards(config: AppConfig): CardSettings[] {
-  return config.cards.filter((card) => card.presence.kind === "in-rotation");
+export function activePlaylist(config: AppConfig): Playlist | null {
+  return config.playlists.find((playlist) => playlist.id === config.active_playlist_id) ?? null;
 }
 
-/// Cards with no carousel position (`alert-only` or `off`). Unordered:
-/// numbering them would claim a position they don't have.
-export function nonRotationCards(config: AppConfig): CardSettings[] {
-  return config.cards.filter((card) => card.presence.kind !== "in-rotation");
+export function playlistEntries(config: AppConfig, playlistId: string): CardSettings[] {
+  const playlist = config.playlists.find((candidate) => candidate.id === playlistId);
+  if (!playlist) {
+    return [];
+  }
+  const cards = new Map(config.cards.map((card) => [card.id, card]));
+  return playlist.entries.flatMap((entry) => {
+    const card = cards.get(entry.card_id);
+    return card ? [card] : [];
+  });
 }
 
-/// Total time for one pass through the rotation, in seconds, inheriting the
-/// carousel's default dwell for cards that don't override it. `null` under
+export function libraryCards(config: AppConfig): CardSettings[] {
+  return config.cards;
+}
+
+export function cardsOutsidePlaylist(config: AppConfig, playlistId: string): CardSettings[] {
+  const playlist = config.playlists.find((candidate) => candidate.id === playlistId);
+  const used = new Set(playlist?.entries.map((entry) => entry.card_id) ?? []);
+  return config.cards.filter((card) => !used.has(card.id));
+}
+
+function slugifyPlaylistName(name: string): string {
+  const slug = name
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return slug || "playlist";
+}
+
+export function addPlaylist(config: AppConfig, name: string): AppConfig {
+  const trimmedName = name.trim();
+  if (!trimmedName || config.playlists.length >= MAX_PLAYLISTS) {
+    return config;
+  }
+  const id = nextId(
+    slugifyPlaylistName(trimmedName),
+    new Set(config.playlists.map((playlist) => playlist.id)),
+  );
+  return {
+    ...config,
+    playlists: [
+      ...config.playlists,
+      { id, name: trimmedName, advance: { kind: "manual" }, entries: [] },
+    ],
+  };
+}
+
+export function renamePlaylist(config: AppConfig, playlistId: string, name: string): AppConfig {
+  const trimmedName = name.trim();
+  const index = config.playlists.findIndex((playlist) => playlist.id === playlistId);
+  if (index < 0 || !trimmedName || config.playlists[index].name === trimmedName) {
+    return config;
+  }
+  return {
+    ...config,
+    playlists: config.playlists.map((playlist, playlistIndex) =>
+      playlistIndex === index ? { ...playlist, name: trimmedName } : playlist,
+    ),
+  };
+}
+
+export function removePlaylist(config: AppConfig, playlistId: string): AppConfig {
+  const index = config.playlists.findIndex((playlist) => playlist.id === playlistId);
+  if (index < 0 || config.playlists.length <= 1) {
+    return config;
+  }
+  const playlists = config.playlists.filter((playlist) => playlist.id !== playlistId);
+  return {
+    ...config,
+    playlists,
+    active_playlist_id:
+      config.active_playlist_id === playlistId ? playlists[0].id : config.active_playlist_id,
+  };
+}
+
+export function setActivePlaylist(config: AppConfig, playlistId: string): AppConfig {
+  if (
+    config.active_playlist_id === playlistId ||
+    !config.playlists.some((playlist) => playlist.id === playlistId)
+  ) {
+    return config;
+  }
+  return { ...config, active_playlist_id: playlistId };
+}
+
+function replacePlaylist(
+  config: AppConfig,
+  playlistId: string,
+  update: (playlist: Playlist) => Playlist,
+): AppConfig {
+  const index = config.playlists.findIndex((playlist) => playlist.id === playlistId);
+  if (index < 0) {
+    return config;
+  }
+  const playlist = config.playlists[index];
+  const next = update(playlist);
+  if (next === playlist) {
+    return config;
+  }
+  return {
+    ...config,
+    playlists: config.playlists.map((candidate, playlistIndex) =>
+      playlistIndex === index ? next : candidate,
+    ),
+  };
+}
+
+export function addEntry(config: AppConfig, playlistId: string, cardId: string): AppConfig {
+  if (!config.cards.some((card) => card.id === cardId)) {
+    return config;
+  }
+  return replacePlaylist(config, playlistId, (playlist) => {
+    if (
+      playlist.entries.length >= MAX_PLAYLIST_ENTRIES ||
+      playlist.entries.some((entry) => entry.card_id === cardId)
+    ) {
+      return playlist;
+    }
+    return {
+      ...playlist,
+      entries: [...playlist.entries, { card_id: cardId, dwell_seconds: null }],
+    };
+  });
+}
+
+export function removeEntry(config: AppConfig, playlistId: string, index: number): AppConfig {
+  return replacePlaylist(config, playlistId, (playlist) => {
+    if (!Number.isInteger(index) || index < 0 || index >= playlist.entries.length) {
+      return playlist;
+    }
+    return {
+      ...playlist,
+      entries: playlist.entries.filter((_, entryIndex) => entryIndex !== index),
+    };
+  });
+}
+
+export function moveEntry(
+  config: AppConfig,
+  playlistId: string,
+  from: number,
+  to: number,
+): AppConfig {
+  return replacePlaylist(config, playlistId, (playlist) => {
+    if (
+      !Number.isInteger(from) ||
+      from < 0 ||
+      from >= playlist.entries.length ||
+      !Number.isFinite(to) ||
+      playlist.entries.length < 2
+    ) {
+      return playlist;
+    }
+    const target = Math.max(0, Math.min(Math.trunc(to), playlist.entries.length - 1));
+    if (from === target) {
+      return playlist;
+    }
+    const entries = [...playlist.entries];
+    const [moved] = entries.splice(from, 1);
+    entries.splice(target, 0, moved);
+    return { ...playlist, entries };
+  });
+}
+
+export function setEntryDwell(
+  config: AppConfig,
+  playlistId: string,
+  index: number,
+  dwell: number | null,
+): AppConfig {
+  return replacePlaylist(config, playlistId, (playlist) => {
+    if (!Number.isInteger(index) || index < 0 || index >= playlist.entries.length) {
+      return playlist;
+    }
+    const current = playlist.entries[index];
+    if (current.dwell_seconds === dwell) {
+      return playlist;
+    }
+    return {
+      ...playlist,
+      entries: playlist.entries.map((entry, entryIndex) =>
+        entryIndex === index ? { ...entry, dwell_seconds: dwell } : entry,
+      ),
+    };
+  });
+}
+
+export function setPlaylistAdvance(
+  config: AppConfig,
+  playlistId: string,
+  advance: CarouselAdvance,
+): AppConfig {
+  return replacePlaylist(config, playlistId, (playlist) => ({ ...playlist, advance }));
+}
+
+/// Total time for one pass through a playlist, in seconds, inheriting that
+/// playlist's default dwell for entries that don't override it. `null` under
 /// manual advance, where there is no loop length to speak of.
-export function loopSeconds(config: AppConfig): number | null {
-  const advance: CarouselAdvance = config.carousel.advance;
-  if (advance.kind !== "timed") {
+export function loopSeconds(config: AppConfig, playlistId: string): number | null {
+  const playlist = config.playlists.find((candidate) => candidate.id === playlistId);
+  if (playlist?.advance.kind !== "timed") {
     return null;
   }
-  const fallback = advance.default_dwell_seconds;
-  return rotationCards(config).reduce((total, card) => {
-    const presence = card.presence;
-    return total + (presence.kind === "in-rotation" ? (presence.dwell_seconds ?? fallback) : 0);
-  }, 0);
+  const fallback = playlist.advance.default_dwell_seconds;
+  return playlist.entries.reduce((total, entry) => total + (entry.dwell_seconds ?? fallback), 0);
 }
 
 /// The published field values for one card, keyed by field name — e.g.
@@ -261,7 +456,7 @@ export function cardFields(
   return new Map(snapshot.fields.map((field) => [field.key, field.value]));
 }
 
-/// One ribbon segment: an in-rotation card plus its resolved dwell and the
+/// One ribbon segment: an active-playlist card plus its resolved dwell and the
 /// proportional width/offset (both 0-100) that dwell earns in the loop
 /// ribbon. Pure and independent of any DOM/flex mechanics so the width math
 /// — the whole point of the ribbon — can be unit-tested without rendering
@@ -274,24 +469,29 @@ export interface FilmstripSegment {
   offsetPercent: number;
 }
 
-/// Builds the ribbon's segments from `rotationCards(config)` only — cards
-/// that are `alert-only` or `off` have no position in the loop and must
-/// never appear here (see the visual language doc). Under manual advance
+/// Builds the ribbon's segments from the active playlist's entries only —
+/// library cards outside that playlist have no position in this loop. Under manual advance
 /// there is no dwell to speak of, so every segment is given equal width
 /// instead of a zero-width one, which is what lets the ribbon still show
 /// order (just not timing) in that mode.
 export function filmstripSegments(config: AppConfig): FilmstripSegment[] {
-  const advance = config.carousel.advance;
-  const fallback = advance.kind === "timed" ? advance.default_dwell_seconds : 0;
-  const rotation = rotationCards(config);
-  const dwellSeconds = rotation.map((card) => {
-    const presence = card.presence;
-    return presence.kind === "in-rotation" ? (presence.dwell_seconds ?? fallback) : fallback;
+  const playlist = activePlaylist(config);
+  if (!playlist) {
+    return [];
+  }
+  const fallback = playlist.advance.kind === "timed" ? playlist.advance.default_dwell_seconds : 0;
+  const cards = new Map(config.cards.map((card) => [card.id, card]));
+  const entries = playlist.entries.flatMap((entry) => {
+    const card = cards.get(entry.card_id);
+    return card ? [{ card, entry }] : [];
   });
+  const dwellSeconds = entries.map(({ entry }) =>
+    playlist.advance.kind === "timed" ? (entry.dwell_seconds ?? fallback) : 0,
+  );
   const total = dwellSeconds.reduce((sum, seconds) => sum + seconds, 0);
-  const equalShare = rotation.length > 0 ? 100 / rotation.length : 0;
+  const equalShare = entries.length > 0 ? 100 / entries.length : 0;
   let offset = 0;
-  return rotation.map((card, index) => {
+  return entries.map(({ card }, index) => {
     const widthPercent = total > 0 ? (dwellSeconds[index] / total) * 100 : equalShare;
     const segment: FilmstripSegment = {
       cardId: card.id,
@@ -340,7 +540,7 @@ export interface FilmstripAdvance {
 /// pure function of `deadlineMs` and `nowMs` alone, never of how many times
 /// a caller has re-rendered or re-checked it. Returns `null` before the
 /// deadline (nothing to do yet). Once `nowMs` has reached it, returns the
-/// next card in rotation together with the deadline for THAT card's own
+/// next card in the active playlist together with the deadline for THAT card's own
 /// dwell, so a caller can just feed the previous result's `deadlineMs`
 /// back in on every tick without tracking anything else.
 export function filmstripAdvance(
@@ -384,15 +584,18 @@ export function formatDuration(totalSeconds: number): string {
 }
 
 export function issuesForPath(issues: ValidationIssue[], path: string): ValidationIssue[] {
-  return issues.filter((issue) => issue.path === path || issue.path.startsWith(`${path}.`));
+  return issues.filter(
+    (issue) =>
+      issue.path === path || issue.path.startsWith(`${path}.`) || issue.path.startsWith(`${path}[`),
+  );
 }
 
-/// Issues whose path is exactly `cards` — the container-level rules ("at least one card
-/// must be in the rotation" and "at least one cards entry is required") — as opposed to
+/// Issues whose path is exactly `cards` — the container-level rules such as "at least
+/// one cards entry is required" — as opposed to
 /// any per-card `cards[i]*` issue, which `issuesForCard` already resolves to a row.
 /// Nothing rendered these before this helper existed: `issuesForCard` only ever matches
-/// `cards[i]` paths, so a bare `cards` issue (reachable by muting or removing your only
-/// in-rotation card) blocked Save with no highlighted control anywhere in the UI. The
+/// `cards[i]` paths, so a bare `cards` issue blocked Save with no highlighted control
+/// anywhere in the UI. The
 /// card list header is the natural place to show it, since it names the whole
 /// collection rather than any one row.
 export function cardsContainerIssues(issues: ValidationIssue[]): ValidationIssue[] {
@@ -402,8 +605,8 @@ export function cardsContainerIssues(issues: ValidationIssue[]): ValidationIssue
 /// Every issue an existing surface already claims and renders: the cards container
 /// banner (`cardsContainerIssues`), each card's own row-scoped issues (`issuesForCard`,
 /// checked for every card in the draft — not just whichever one is currently selected,
-/// since selection is a UI-only concern this must not depend on), the timezone field,
-/// and the carousel's default-dwell field. Returns the actual issue objects (by
+/// since selection is a UI-only concern this must not depend on), playlist surfaces,
+/// and the timezone field. Returns the actual issue objects (by
 /// reference into `issues`) rather than paths, so `unclaimedIssues` can compute an exact
 /// set difference without re-deriving path-matching rules of its own.
 function claimedIssues(issues: ValidationIssue[], config: AppConfig): ValidationIssue[] {
@@ -417,8 +620,9 @@ function claimedIssues(issues: ValidationIssue[], config: AppConfig): Validation
   for (const card of config.cards) {
     claim(issuesForCard(issues, config, card.id));
   }
+  claim(issuesForPath(issues, "playlists"));
+  claim(issuesForPath(issues, "active_playlist_id"));
   claim(issuesForPath(issues, "preferences.timezone"));
-  claim(issuesForPath(issues, "carousel.advance.default_dwell_seconds"));
   return [...claimed];
 }
 
@@ -475,8 +679,8 @@ export function issuesForCard(
 /// alone is enough to identify the right issues regardless of where the
 /// card currently sits in `config.cards`. Matching is exact (not
 /// prefix-based) because every backend field path used here is a leaf: two
-/// unrelated fields never share a dotted prefix (e.g. `presence` and
-/// `presence.dwell_seconds` are deliberately queried separately so a dwell
+/// unrelated fields never share a dotted prefix (e.g. `alert` and
+/// `alert.lead_minutes` are deliberately queried separately so a nested
 /// error is not double-reported at the parent field too).
 export function issuesForField(cardIssues: ValidationIssue[], field: string): ValidationIssue[] {
   return cardIssues.filter((issue) => {
@@ -486,23 +690,14 @@ export function issuesForField(cardIssues: ValidationIssue[], field: string): Va
   });
 }
 
-/// Applies a new alert to a card. If this disables the card's only trigger
-/// (`{ kind: "none" }`) while its presence is `alert-only`, also resets
-/// presence to `in-rotation` — otherwise unchecking the alert checkbox
-/// would silently recreate the dead-card combination (alert-only with no
-/// alert) that the disabled "Alert only" radio exists to prevent the user
-/// from ever selecting in the first place.
+/// Applies a new alert to a card. Playlist membership is independent of alerts.
 export function withAlert(card: CardSettings, alert: CardAlert): CardSettings {
-  const presence: CardPresence =
-    alert.kind === "none" && card.presence.kind === "alert-only"
-      ? { kind: "in-rotation", dwell_seconds: null }
-      : card.presence;
-  return { ...card, alert, presence };
+  return { ...card, alert };
 }
 
 /// A plain-language statement of what tapping this card does, for the
 /// editor's gesture disclosure. Three gestures share one physical screen —
-/// tap runs the card's own action, swipe navigates the rotation, and a tap
+/// tap runs the card's own action, swipe navigates the active playlist, and a tap
 /// while an alert is showing dismisses it instead — and nothing else in the
 /// app states this, so the editor is where a person can find out what their
 /// tap will actually do before they rely on it.
@@ -557,70 +752,23 @@ export function cardMoveFromKey(key: string, altKey: boolean): -1 | 0 | 1 {
   return 0;
 }
 
-/// Moves `cardId` to `targetRotationIndex`, a position expressed relative
-/// to `rotationCards(config)` — i.e. "this card should become the Nth
-/// in-rotation card" — NOT an index into `config.cards`. This is the
-/// mapping `CardList` needs: rotation rows are drag/keyboard-reordered
-/// among themselves, but `alert-only`/`off` cards can be interspersed
-/// anywhere in the underlying `cards[]` array, so a naive rotation-index
-/// passed straight to `moveCard` would land the card in the wrong slot
-/// whenever a non-rotation card sits between source and target.
-///
-/// Resolves `targetRotationIndex` (clamped into `[0, rotationCards.length
-/// - 1]`) to the in-rotation card currently occupying that slot, then
-/// delegates the actual splice to `moveCard` using THAT card's real index
-/// in `config.cards` — so the two cards end up swapped in rotation order
-/// exactly as if the interspersed cards weren't there. No-ops (same
-/// `config` reference) when there is no rotation card at the resolved
-/// slot (empty rotation) or when `moveCard` itself would no-op.
-export function moveCardWithinRotation(
-  config: AppConfig,
-  cardId: string,
-  targetRotationIndex: number,
-): AppConfig {
-  const rotation = rotationCards(config);
-  if (rotation.length === 0) {
-    return config;
-  }
-  const bounded = Math.max(0, Math.min(targetRotationIndex, rotation.length - 1));
-  const anchor = rotation[bounded];
-  const targetIndex = config.cards.findIndex((card) => card.id === anchor.id);
-  return moveCard(config, cardId, targetIndex);
-}
-
 export function firstSelectableCard(config: AppConfig): string | null {
   return config.cards[0]?.id ?? null;
 }
 
-/// The first-run checklist, derived from what the user actually configured
-/// rather than from demanded card kinds — a person who only ever wants a
-/// clock and a weather card is fully set up once their weather card has a
-/// location, never nagged for a pomodoro or calendar they never asked for.
-/// A card only counts as "needs a source" when its kind has one to fill in
-/// (calendar's `source.value`, weather's `location`, json-feed/rss's `url`);
-/// clock and pomodoro cards never block this step. The caller (App) decides
-/// whether to render the banner at all — typically "while at least one step
-/// is undone" — this function only ever reports state, never presentation.
+/// The first-run checklist is about the library/playlist workflow and never
+/// demands any specific card kind. The caller supplies whether the current
+/// draft has been saved.
 export function firstRunSteps(
   config: AppConfig,
-  connected: boolean,
+  saved: boolean,
 ): { label: string; done: boolean }[] {
-  const needsSource = config.cards.some((card) => {
-    if (card.kind === "calendar") {
-      return card.source.value.trim() === "";
-    }
-    if (card.kind === "weather") {
-      return card.location.trim() === "";
-    }
-    if (card.kind === "json-feed" || card.kind === "rss") {
-      return card.url.trim() === "";
-    }
-    return false;
-  });
-
   return [
-    { label: "Connect the display with USB", done: connected },
-    { label: "Check your timezone", done: config.preferences.timezone.trim() !== "" },
-    { label: "Finish setting up each card", done: !needsSource },
+    { label: "Add a card to your library", done: config.cards.length > 0 },
+    {
+      label: "Add it to a playlist",
+      done: config.playlists.some((playlist) => playlist.entries.length > 0),
+    },
+    { label: "Save your settings", done: saved },
   ];
 }

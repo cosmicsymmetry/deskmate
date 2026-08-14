@@ -5,17 +5,16 @@ import { CardList } from "./components/CardList";
 import { DeviceHeader } from "./components/DeviceHeader";
 import { DevicePreview } from "./components/DevicePreview";
 import { Filmstrip } from "./components/Filmstrip";
+import { PlaylistPanel } from "./components/PlaylistPanel";
 import { ProviderStatus } from "./components/ProviderStatus";
 import {
   addCard,
   cardName,
-  cardsContainerIssues,
   copyConfig,
   firstRunSteps,
   firstSelectableCard,
   issuesForCard,
   removeCard,
-  rotationCards,
   unclaimedIssues,
   updateWidget,
 } from "./lib/configDraft";
@@ -34,7 +33,6 @@ import type {
   AppConfig,
   CardKind,
   CardSettings,
-  CarouselAdvance,
   DisplayOrientation,
   DraftValidation,
   IpcError,
@@ -169,16 +167,12 @@ export function App() {
     snapshot.pomodoros.find((candidate) => candidate.widget_id === selectedCardId) ?? null;
   const issues = validation.result.issues;
   const cardIssues = selectedCardId ? issuesForCard(issues, draft, selectedCardId) : [];
-  // Issues no card-, preference-, or carousel-scoped surface below claims — e.g. a
+  // Issues no card-, playlist-, or preference-scoped surface below claims — e.g. a
   // `device.capabilities` issue naming a card the connected display can't render.
   // Rendered as its own banner so an unclaimed issue is explained somewhere rather than
   // just blocking Save with no highlighted control anywhere in the UI (see
   // `unclaimedIssues`).
   const leftoverIssues = unclaimedIssues(issues, draft);
-  const defaultDwellSeconds =
-    draft.carousel.advance.kind === "timed" ? draft.carousel.advance.default_dwell_seconds : null;
-  const isOnlyRotationCard =
-    selectedWidget?.presence.kind === "in-rotation" && rotationCards(draft).length === 1;
 
   const replaceDraft = (next: AppConfig) => {
     setDraft(next);
@@ -206,9 +200,6 @@ export function App() {
       return;
     }
     handleRemoveCard(selectedCardId);
-  };
-  const handleAdvanceChange = (advance: CarouselAdvance) => {
-    replaceDraft({ ...draft, carousel: { ...draft.carousel, advance } });
   };
   const handleChooseCalendarFile = () => {
     if (selectedWidget?.kind !== "calendar") {
@@ -301,6 +292,8 @@ export function App() {
 
   const persistenceError =
     snapshot.persistence.kind === "recoverable-error" ? snapshot.persistence.message : null;
+  const persistenceValidation =
+    snapshot.persistence.kind === "validation-failed" ? snapshot.persistence : null;
 
   return (
     <div className="app-shell">
@@ -313,16 +306,31 @@ export function App() {
         }
       />
 
+      {persistenceValidation && (
+        <aside className="recovery-banner" role="alert">
+          <span aria-hidden="true">!</span>
+          <div>
+            <strong>{persistenceValidation.message}</strong>
+            <ul>
+              {persistenceValidation.issues.map((issue) => (
+                <li key={`${issue.path}:${issue.code}`}>{issue.message}</li>
+              ))}
+            </ul>
+            <p>The saved file was left untouched. Review the issues before saving again.</p>
+          </div>
+        </aside>
+      )}
+
       {(persistenceError || autostartMismatch) && (
         <aside className="recovery-banner" role="status">
           <span aria-hidden="true">↺</span>
           <div>
             <strong>
-              {persistenceError ? "Using your last working settings" : "Start-at-login differs"}
+              {persistenceError ? "Settings file needs attention" : "Start-at-login differs"}
             </strong>
             <p>
               {persistenceError
-                ? `${persistenceError}. The unreadable file was left untouched; saving will create a fresh valid configuration.`
+                ? `${persistenceError}. The unreadable file was left untouched; review the settings shown here before saving a fresh valid configuration.`
                 : "The operating-system setting and saved preference differ. Choose your preference below to reconcile them."}
             </p>
           </div>
@@ -356,7 +364,7 @@ export function App() {
         </aside>
       )}
 
-      {/* A validation issue whose path no card-, preference-, or carousel-scoped
+      {/* A validation issue whose path no card-, playlist-, or preference-scoped
           surface below claims (see `unclaimedIssues`) — e.g. `device.capabilities`,
           emitted when the connected display lacks a feature the draft needs. Without
           this, such an issue still disabled Save but was never shown anywhere,
@@ -378,7 +386,7 @@ export function App() {
       )}
 
       {(() => {
-        const steps = firstRunSteps(draft, snapshot.device.connection.kind === "online");
+        const steps = firstRunSteps(draft, !dirty);
         if (steps.every((step) => step.done)) {
           return null;
         }
@@ -401,21 +409,26 @@ export function App() {
 
       <div className="workspace">
         <div className="workspace__editors">
-          <CardList
-            config={draft}
-            issues={cardsContainerIssues(issues)}
-            selectedCardId={selectedCardId}
-            onSelect={setSelectedCardId}
-            onAdd={handleAdd}
-            onRemove={handleRemoveCard}
-            onReorder={(next) => replaceDraft(next)}
-          />
+          <div className="library-playlists">
+            <CardList
+              config={draft}
+              issues={issues}
+              selectedCardId={selectedCardId}
+              onSelect={setSelectedCardId}
+              onAdd={handleAdd}
+              onRemove={handleRemoveCard}
+            />
+            <PlaylistPanel
+              config={draft}
+              issues={issues}
+              onChange={replaceDraft}
+              onSelectCard={setSelectedCardId}
+            />
+          </div>
           <CardEditor
             card={selectedWidget}
             issues={cardIssues}
             pomodoro={pomodoro}
-            defaultDwellSeconds={defaultDwellSeconds}
-            isOnlyRotationCard={isOnlyRotationCard}
             timerBusy={busyAction === "timer"}
             filePickerBusy={busyAction === "calendar-file"}
             onChange={handleWidgetChange}
@@ -434,11 +447,9 @@ export function App() {
           />
           <Filmstrip
             config={draft}
-            issues={issues}
             selectedCardId={selectedCardId}
             onSelect={setSelectedCardId}
             onReorder={(next) => replaceDraft(next)}
-            onChangeAdvance={handleAdvanceChange}
           />
           <ProviderStatus
             providers={snapshot.providers}

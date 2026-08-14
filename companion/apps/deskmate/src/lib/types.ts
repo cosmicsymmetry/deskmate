@@ -8,6 +8,10 @@ export interface AppConfig {
   updater: UpdaterSettings;
 }
 
+export const MAX_PLAYLISTS = 8;
+export const MAX_PLAYLIST_ENTRIES = 8;
+export const MAX_PLAYLIST_NAME_LEN = 48;
+
 export interface AppPreferences {
   timezone: string;
   autostart: boolean;

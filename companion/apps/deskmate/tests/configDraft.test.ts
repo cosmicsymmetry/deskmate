@@ -1,9 +1,13 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  activePlaylist,
   addCard,
+  addEntry,
+  addPlaylist,
   cardFields,
   cardMoveFromKey,
+  cardsOutsidePlaylist,
   cardsContainerIssues,
   filmstripAdvance,
   filmstripDeadline,
@@ -14,14 +18,20 @@ import {
   issuesForCard,
   issuesForField,
   issuesForPath,
+  libraryCards,
   loopSeconds,
   moveCard,
-  moveCardWithinRotation,
+  moveEntry,
   nextFilmstripCardId,
-  nonRotationCards,
   numberValue,
+  playlistEntries,
   removeCard,
-  rotationCards,
+  removeEntry,
+  removePlaylist,
+  renamePlaylist,
+  setActivePlaylist,
+  setEntryDwell,
+  setPlaylistAdvance,
   tapActionDescription,
   withAlert,
 } from "../src/lib/configDraft";
@@ -30,7 +40,7 @@ import { ipcContractFixtures } from "../src/lib/types.contract";
 
 function initialConfig(): AppConfig {
   return {
-    schema_version: 3,
+    schema_version: 4,
     preferences: {
       timezone: "UTC",
       autostart: false,
@@ -46,12 +56,19 @@ function initialConfig(): AppConfig {
         template: { kind: "digital-clock" },
         tap_action: { kind: "none" },
         refresh: { kind: "device-local" },
-        presence: { kind: "in-rotation", dwell_seconds: null },
         alert: { kind: "none" },
       },
     ],
     assets: [],
-    carousel: { advance: { kind: "manual" } },
+    playlists: [
+      {
+        id: "workday",
+        name: "Workday",
+        advance: { kind: "manual" },
+        entries: [{ card_id: "clock", dwell_seconds: null }],
+      },
+    ],
+    active_playlist_id: "workday",
     updater: { channel: "stable", checks: "notify" },
   };
 }
@@ -65,7 +82,7 @@ function cardsConfig(ids: string[]): AppConfig {
 }
 
 describe("configuration draft helpers", () => {
-  test("adds the full M3 demo with stable unique card IDs", () => {
+  test("adds cards with stable unique card IDs", () => {
     const withSecondClock = addCard(initialConfig(), "clock");
     expect(withSecondClock.cardId).toBe("clock-2");
 
@@ -78,26 +95,26 @@ describe("configuration draft helpers", () => {
       "calendar",
     ]);
     expect(new Set(complete.config.cards.map((card) => card.id)).size).toBe(4);
-    // The calendar card was added with an empty ICS source, so the checklist
-    // still flags it even though every demanded card kind is present.
-    expect(firstRunSteps(complete.config, true).some((step) => !step.done)).toBe(true);
   });
 
-  test("first-run guidance clears without demanding specific card kinds", () => {
-    // A user who wants only a clock and a weather card is fully set up.
-    const config = addCard(addCard(initialConfig(), "clock").config, "weather").config;
-    const configured: AppConfig = {
-      ...config,
-      cards: config.cards.map((card) =>
-        card.kind === "weather" ? { ...card, location: "Tbilisi" } : card,
-      ),
+  test("first-run guidance follows add a card, add it to a playlist, then save without demanding a card kind", () => {
+    const empty: AppConfig = {
+      ...initialConfig(),
+      cards: [],
+      playlists: [{ ...initialConfig().playlists[0], entries: [] }],
     };
-    expect(firstRunSteps(configured, true).every((step) => step.done)).toBe(true);
-  });
+    expect(firstRunSteps(empty, false).map((step) => step.done)).toEqual([false, false, false]);
 
-  test("guidance still flags a card that is missing its source", () => {
-    const config = addCard(initialConfig(), "calendar").config; // empty ICS url
-    expect(firstRunSteps(config, true).some((step) => !step.done)).toBe(true);
+    const withWeather = addCard(empty, "weather").config;
+    expect(firstRunSteps(withWeather, false).map((step) => step.done)).toEqual([
+      true,
+      false,
+      false,
+    ]);
+
+    const configured = addEntry(withWeather, "workday", "weather");
+    expect(firstRunSteps(configured, false).map((step) => step.done)).toEqual([true, true, false]);
+    expect(firstRunSteps(configured, true).every((step) => step.done)).toBe(true);
   });
 
   test("adding a card appends it without creating a screen", () => {
@@ -170,53 +187,174 @@ describe("configuration draft helpers", () => {
     expect(next.cards[0]).toEqual(original);
   });
 
-  test("removing a card removes only that card", () => {
+  test("resolves the active playlist and returns null when its id does not resolve", () => {
+    const config = initialConfig();
+    expect(activePlaylist(config)?.id).toBe("workday");
+    expect(activePlaylist({ ...config, active_playlist_id: "missing" })).toBeNull();
+  });
+
+  test("resolves playlist entries in entry order and omits missing card references", () => {
     const withTimer = addCard(initialConfig(), "pomodoro").config;
-    const next = removeCard(withTimer, "clock");
-    expect(next.cards.map((card) => card.id)).toEqual(["pomodoro"]);
-    expect(firstSelectableCard(next)).toBe("pomodoro");
-  });
-
-  test("cards split into rotation and non-rotation sections", () => {
-    const base = initialConfig();
     const config: AppConfig = {
-      ...base,
-      cards: [
-        { ...addCard(base, "clock").config.cards[0], id: "a" },
+      ...withTimer,
+      playlists: [
         {
-          ...addCard(base, "pomodoro").config.cards[0],
-          id: "b",
-          presence: { kind: "alert-only" },
-          alert: { kind: "on-timer-finish", hold: { kind: "until-dismissed" } },
+          ...withTimer.playlists[0],
+          entries: [
+            { card_id: "pomodoro", dwell_seconds: null },
+            { card_id: "missing", dwell_seconds: null },
+            { card_id: "clock", dwell_seconds: null },
+          ],
         },
-        { ...addCard(base, "clock").config.cards[0], id: "c", presence: { kind: "off" } },
       ],
     };
-    expect(rotationCards(config).map((card) => card.id)).toEqual(["a"]);
-    expect(nonRotationCards(config).map((card) => card.id)).toEqual(["b", "c"]);
+    expect(playlistEntries(config, "workday").map((card) => card.id)).toEqual([
+      "pomodoro",
+      "clock",
+    ]);
+    expect(playlistEntries(config, "missing")).toEqual([]);
   });
 
-  test("loop length sums only in-rotation dwell, inheriting the default", () => {
-    const base = initialConfig();
-    const config: AppConfig = {
-      ...base,
-      carousel: { advance: { kind: "timed", default_dwell_seconds: 20 } },
-      cards: [
+  test("returns every library card and cards outside one playlist", () => {
+    const config = addCard(addCard(initialConfig(), "pomodoro").config, "weather").config;
+    expect(libraryCards(config).map((card) => card.id)).toEqual(["clock", "pomodoro", "weather"]);
+    expect(cardsOutsidePlaylist(config, "workday").map((card) => card.id)).toEqual([
+      "pomodoro",
+      "weather",
+    ]);
+  });
+
+  test("adds playlists with slugified, unique ids", () => {
+    const once = addPlaylist(initialConfig(), "  Deep Focus!  ");
+    const twice = addPlaylist(once, "Deep Focus");
+    expect(once.playlists.at(-1)).toEqual({
+      id: "deep-focus",
+      name: "Deep Focus!",
+      advance: { kind: "manual" },
+      entries: [],
+    });
+    expect(twice.playlists.at(-1)?.id).toBe("deep-focus-2");
+  });
+
+  test("renames a playlist without changing its stable id", () => {
+    const next = renamePlaylist(initialConfig(), "workday", "  Work hours  ");
+    expect(next.playlists[0].id).toBe("workday");
+    expect(next.playlists[0].name).toBe("Work hours");
+  });
+
+  test("removing the active playlist activates the first remaining playlist and refuses the last", () => {
+    const withSecond = addPlaylist(initialConfig(), "Evening");
+    const next = removePlaylist(withSecond, "workday");
+    expect(next.playlists.map((playlist) => playlist.id)).toEqual(["evening"]);
+    expect(next.active_playlist_id).toBe("evening");
+    expect(removePlaylist(next, "evening")).toBe(next);
+  });
+
+  test("sets the active playlist only when it exists", () => {
+    const config = addPlaylist(initialConfig(), "Evening");
+    expect(setActivePlaylist(config, "evening").active_playlist_id).toBe("evening");
+    expect(setActivePlaylist(config, "missing")).toBe(config);
+  });
+
+  test("adds a playlist entry but refuses duplicates and a ninth entry", () => {
+    const withTimer = addCard(initialConfig(), "pomodoro").config;
+    const added = addEntry(withTimer, "workday", "pomodoro");
+    expect(added.playlists[0].entries.map((entry) => entry.card_id)).toEqual(["clock", "pomodoro"]);
+    expect(addEntry(added, "workday", "pomodoro")).toBe(added);
+
+    const full = cardsConfig(["a", "b", "c", "d", "e", "f", "g", "h", "i"]);
+    const fullPlaylist: AppConfig = {
+      ...full,
+      playlists: [
         {
-          ...addCard(base, "clock").config.cards[0],
-          id: "a",
-          presence: { kind: "in-rotation", dwell_seconds: 45 },
+          ...full.playlists[0],
+          entries: full.cards
+            .slice(0, 8)
+            .map((card) => ({ card_id: card.id, dwell_seconds: null })),
         },
-        {
-          ...addCard(base, "clock").config.cards[0],
-          id: "b",
-          presence: { kind: "in-rotation", dwell_seconds: null },
-        },
-        { ...addCard(base, "clock").config.cards[0], id: "c", presence: { kind: "off" } },
       ],
     };
-    expect(loopSeconds(config)).toBe(65);
-    expect(loopSeconds({ ...config, carousel: { advance: { kind: "manual" } } })).toBeNull();
+    expect(addEntry(fullPlaylist, "workday", "i")).toBe(fullPlaylist);
+  });
+
+  test("removes a playlist entry by index and ignores an out-of-range index", () => {
+    const config = addEntry(addCard(initialConfig(), "pomodoro").config, "workday", "pomodoro");
+    const next = removeEntry(config, "workday", 0);
+    expect(next.playlists[0].entries.map((entry) => entry.card_id)).toEqual(["pomodoro"]);
+    expect(removeEntry(next, "workday", 4)).toBe(next);
+  });
+
+  test("moves playlist entries with clamped targets and index-safe source boundaries", () => {
+    let config = addCard(initialConfig(), "pomodoro").config;
+    config = addCard(config, "weather").config;
+    config = addEntry(addEntry(config, "workday", "pomodoro"), "workday", "weather");
+
+    const toEnd = moveEntry(config, "workday", 0, 99);
+    expect(toEnd.playlists[0].entries.map((entry) => entry.card_id)).toEqual([
+      "pomodoro",
+      "weather",
+      "clock",
+    ]);
+    const toStart = moveEntry(toEnd, "workday", 2, -99);
+    expect(toStart.playlists[0].entries.map((entry) => entry.card_id)).toEqual([
+      "clock",
+      "pomodoro",
+      "weather",
+    ]);
+    expect(moveEntry(config, "workday", -1, 1)).toBe(config);
+    expect(moveEntry(config, "workday", 3, 1)).toBe(config);
+  });
+
+  test("sets an entry dwell by index without disturbing the other entries", () => {
+    const config = addEntry(addCard(initialConfig(), "pomodoro").config, "workday", "pomodoro");
+    const next = setEntryDwell(config, "workday", 1, 45);
+    expect(next.playlists[0].entries).toEqual([
+      { card_id: "clock", dwell_seconds: null },
+      { card_id: "pomodoro", dwell_seconds: 45 },
+    ]);
+    expect(setEntryDwell(next, "workday", 5, null)).toBe(next);
+  });
+
+  test("sets one playlist's advance mode", () => {
+    const config = addPlaylist(initialConfig(), "Evening");
+    const next = setPlaylistAdvance(config, "evening", {
+      kind: "timed",
+      default_dwell_seconds: 30,
+    });
+    expect(next.playlists[0].advance).toEqual({ kind: "manual" });
+    expect(next.playlists[1].advance).toEqual({
+      kind: "timed",
+      default_dwell_seconds: 30,
+    });
+  });
+
+  test("loop length sums playlist entry dwell with the timed default and is null for manual", () => {
+    let config = addCard(initialConfig(), "pomodoro").config;
+    config = addEntry(config, "workday", "pomodoro");
+    config = setEntryDwell(config, "workday", 1, 45);
+    config = setPlaylistAdvance(config, "workday", {
+      kind: "timed",
+      default_dwell_seconds: 20,
+    });
+    expect(loopSeconds(config, "workday")).toBe(65);
+    expect(
+      loopSeconds(setPlaylistAdvance(config, "workday", { kind: "manual" }), "workday"),
+    ).toBeNull();
+    expect(loopSeconds(config, "missing")).toBeNull();
+  });
+
+  test("removing a card strips its entries from every playlist", () => {
+    let config = addCard(initialConfig(), "pomodoro").config;
+    config = addEntry(config, "workday", "pomodoro");
+    config = addPlaylist(config, "Evening");
+    config = addEntry(config, "evening", "pomodoro");
+    const next = removeCard(config, "pomodoro");
+    expect(next.cards.map((card) => card.id)).toEqual(["clock"]);
+    expect(next.playlists.map((playlist) => playlist.entries)).toEqual([
+      [{ card_id: "clock", dwell_seconds: null }],
+      [],
+    ]);
+    expect(firstSelectableCard(next)).toBe("clock");
   });
 
   test("cardFields reads a card's published fields, keyed by name", () => {
@@ -241,34 +379,17 @@ describe("configuration draft helpers", () => {
     expect(cardFields(cardData, "upnext").size).toBe(0);
   });
 
-  test("filmstripSegments proportions each in-rotation card's width to its resolved dwell, inheriting the carousel default, and excludes alert-only/off cards", () => {
-    const base = initialConfig();
-    const config: AppConfig = {
-      ...base,
-      carousel: { advance: { kind: "timed", default_dwell_seconds: 20 } },
-      cards: [
-        {
-          ...addCard(base, "clock").config.cards[0],
-          id: "a",
-          title: "Desk",
-          presence: { kind: "in-rotation", dwell_seconds: 45 },
-        },
-        {
-          ...addCard(base, "clock").config.cards[0],
-          id: "b",
-          title: "Up next",
-          presence: { kind: "in-rotation", dwell_seconds: null }, // inherits the 20s default
-        },
-        {
-          ...addCard(base, "clock").config.cards[0],
-          id: "c",
-          title: "Muted",
-          presence: { kind: "off" },
-        },
-      ],
-    };
+  test("filmstripSegments proportions active-playlist entries by resolved dwell and excludes library-only cards", () => {
+    let config = addCard(initialConfig(), "pomodoro").config;
+    config = addCard(config, "weather").config;
+    config = addEntry(config, "workday", "pomodoro");
+    config = setEntryDwell(config, "workday", 0, 45);
+    config = setPlaylistAdvance(config, "workday", {
+      kind: "timed",
+      default_dwell_seconds: 20,
+    });
     const segments = filmstripSegments(config);
-    expect(segments.map((segment) => segment.cardId)).toEqual(["a", "b"]);
+    expect(segments.map((segment) => segment.cardId)).toEqual(["clock", "pomodoro"]);
     expect(segments[0].dwellSeconds).toBe(45);
     expect(segments[1].dwellSeconds).toBe(20);
     // 45 of 65 total seconds, and 20 of 65 — proportional to dwell, not count.
@@ -279,15 +400,9 @@ describe("configuration draft helpers", () => {
   });
 
   test("filmstripSegments gives every card an equal share under manual advance, where there is no dwell to encode", () => {
-    const base = initialConfig();
-    const config: AppConfig = {
-      ...base,
-      carousel: { advance: { kind: "manual" } },
-      cards: [
-        { ...addCard(base, "clock").config.cards[0], id: "a" },
-        { ...addCard(base, "clock").config.cards[0], id: "b" },
-      ],
-    };
+    let config = addCard(initialConfig(), "pomodoro").config;
+    config = addEntry(config, "workday", "pomodoro");
+    config = setEntryDwell(config, "workday", 0, 45);
     const segments = filmstripSegments(config);
     expect(segments.map((segment) => segment.dwellSeconds)).toEqual([0, 0]);
     expect(segments[0].widthPercent).toBe(50);
@@ -295,20 +410,13 @@ describe("configuration draft helpers", () => {
   });
 
   test("nextFilmstripCardId wraps past the last segment", () => {
-    const base = initialConfig();
-    const config: AppConfig = {
-      ...base,
-      carousel: { advance: { kind: "timed", default_dwell_seconds: 20 } },
-      cards: [
-        { ...addCard(base, "clock").config.cards[0], id: "a" },
-        { ...addCard(base, "clock").config.cards[0], id: "b" },
-      ],
-    };
+    let config = addCard(initialConfig(), "pomodoro").config;
+    config = addEntry(config, "workday", "pomodoro");
     const segments = filmstripSegments(config);
-    expect(nextFilmstripCardId(segments, "a")).toBe("b");
-    expect(nextFilmstripCardId(segments, "b")).toBe("a");
-    expect(nextFilmstripCardId(segments, "unknown-id")).toBe("a");
-    expect(nextFilmstripCardId([], "a")).toBeNull();
+    expect(nextFilmstripCardId(segments, "clock")).toBe("pomodoro");
+    expect(nextFilmstripCardId(segments, "pomodoro")).toBe("clock");
+    expect(nextFilmstripCardId(segments, "unknown-id")).toBe("clock");
+    expect(nextFilmstripCardId([], "clock")).toBeNull();
   });
 
   test("filmstripDeadline offsets from the given start time by the dwell, flooring a non-positive dwell to one second", () => {
@@ -318,23 +426,14 @@ describe("configuration draft helpers", () => {
   });
 
   test("filmstripAdvance's due/not-due decision is a pure function of elapsed time, not of how many times it is checked", () => {
-    const base = initialConfig();
-    const config: AppConfig = {
-      ...base,
-      carousel: { advance: { kind: "timed", default_dwell_seconds: 20 } },
-      cards: [
-        {
-          ...addCard(base, "clock").config.cards[0],
-          id: "a",
-          presence: { kind: "in-rotation", dwell_seconds: 45 },
-        },
-        {
-          ...addCard(base, "clock").config.cards[0],
-          id: "b",
-          presence: { kind: "in-rotation", dwell_seconds: 20 },
-        },
-      ],
-    };
+    let config = addCard(initialConfig(), "pomodoro").config;
+    config = addEntry(config, "workday", "pomodoro");
+    config = setEntryDwell(config, "workday", 0, 45);
+    config = setEntryDwell(config, "workday", 1, 20);
+    config = setPlaylistAdvance(config, "workday", {
+      kind: "timed",
+      default_dwell_seconds: 20,
+    });
     const segments = filmstripSegments(config);
     const startedAtMs = 0;
     const deadlineMs = filmstripDeadline(startedAtMs, 45); // 45_000
@@ -346,55 +445,45 @@ describe("configuration draft helpers", () => {
     // many times this is checked before the deadline, the answer must stay
     // "not yet".
     for (let check = 0; check < 500; check += 1) {
-      expect(filmstripAdvance(segments, "a", deadlineMs, deadlineMs - 1)).toBeNull();
+      expect(filmstripAdvance(segments, "clock", deadlineMs, deadlineMs - 1)).toBeNull();
     }
-    expect(filmstripAdvance(segments, "a", deadlineMs, 0)).toBeNull();
+    expect(filmstripAdvance(segments, "clock", deadlineMs, 0)).toBeNull();
 
     // Once real time has actually reached the deadline, it advances —
     // regardless of the fact that it was checked 500 times first without
     // effect, and the new deadline is a fresh dwell for the new card.
-    expect(filmstripAdvance(segments, "a", deadlineMs, deadlineMs)).toEqual({
-      cardId: "b",
+    expect(filmstripAdvance(segments, "clock", deadlineMs, deadlineMs)).toEqual({
+      cardId: "pomodoro",
       deadlineMs: filmstripDeadline(deadlineMs, 20),
     });
     // Checking arbitrarily far past the deadline still advances to the
     // same next card — "due" is a threshold, not a narrow window that can
     // be missed by a slow or delayed check.
-    const late = filmstripAdvance(segments, "a", deadlineMs, deadlineMs + 999_999);
-    expect(late?.cardId).toBe("b");
+    const late = filmstripAdvance(segments, "clock", deadlineMs, deadlineMs + 999_999);
+    expect(late?.cardId).toBe("pomodoro");
     expect(late?.deadlineMs).toBe(filmstripDeadline(deadlineMs + 999_999, 20));
   });
 
   test("filmstripAdvance wraps past the last segment and resolves against whatever segments it is given, so a mid-play reorder is honoured on the next check", () => {
-    const base = initialConfig();
-    const config: AppConfig = {
-      ...base,
-      carousel: { advance: { kind: "timed", default_dwell_seconds: 20 } },
-      cards: [
-        { ...addCard(base, "clock").config.cards[0], id: "a" },
-        { ...addCard(base, "clock").config.cards[0], id: "b" },
-        { ...addCard(base, "clock").config.cards[0], id: "c" },
-      ],
-    };
+    let config = addCard(initialConfig(), "pomodoro").config;
+    config = addCard(config, "weather").config;
+    config = addEntry(addEntry(config, "workday", "pomodoro"), "workday", "weather");
     const segments = filmstripSegments(config);
-    // b and c swapped, leaving "a" (the active/current card) exactly where
+    // pomodoro and weather swapped, leaving clock (the active/current card) exactly where
     // it was — isolating the reorder's effect to "what comes after a".
-    const reordered = filmstripSegments({
-      ...config,
-      cards: [config.cards[0], config.cards[2], config.cards[1]],
-    });
+    const reordered = filmstripSegments(moveEntry(config, "workday", 1, 2));
 
-    // In the original order (a, b, c), "a" advances to "b"...
-    expect(filmstripAdvance(segments, "a", 1_000, 1_000)?.cardId).toBe("b");
-    // ...but once the rotation is reordered mid-play (now a, c, b), the very
+    // In the original order, clock advances to pomodoro...
+    expect(filmstripAdvance(segments, "clock", 1_000, 1_000)?.cardId).toBe("pomodoro");
+    // ...but once the playlist is reordered mid-play, the very
     // same due check for the very same active card resolves against the
     // NEW order instead of a stale one — because the caller passes the
     // latest segments in on every check rather than one captured once at
     // play-start.
-    expect(filmstripAdvance(reordered, "a", 1_000, 1_000)?.cardId).toBe("c");
+    expect(filmstripAdvance(reordered, "clock", 1_000, 1_000)?.cardId).toBe("weather");
 
     // Wrapping past the last segment still returns to the first.
-    expect(filmstripAdvance(segments, "c", 1_000, 1_000)?.cardId).toBe("a");
+    expect(filmstripAdvance(segments, "weather", 1_000, 1_000)?.cardId).toBe("clock");
   });
 
   test("filmstripAdvance returns null with no segments or nothing to advance to", () => {
@@ -444,9 +533,9 @@ describe("configuration draft helpers", () => {
 
   test("cardsContainerIssues isolates issues whose path is exactly cards", () => {
     const issues: ValidationIssue[] = [
-      { path: "cards", code: "out-of-range", message: "at least one card must be in the rotation" },
+      { path: "cards", code: "out-of-range", message: "at least one card is required" },
       { path: "cards[0].title", code: "empty", message: "required" },
-      { path: "cards[1].presence", code: "out-of-range", message: "dead card" },
+      { path: "playlists[0].entries", code: "out-of-range", message: "add an entry" },
     ];
     expect(cardsContainerIssues(issues)).toEqual([issues[0]]);
     expect(cardsContainerIssues([])).toEqual([]);
@@ -470,31 +559,21 @@ describe("configuration draft helpers", () => {
 
   test("issuesForField matches a leaf field but not its dotted children", () => {
     const cardIssues: ValidationIssue[] = [
-      { path: "cards[0].presence", code: "out-of-range", message: "dead card" },
-      { path: "cards[0].presence.dwell_seconds", code: "out-of-range", message: "bad dwell" },
+      { path: "cards[0].alert", code: "out-of-range", message: "bad alert" },
+      { path: "cards[0].alert.lead_minutes", code: "out-of-range", message: "bad lead" },
     ];
-    expect(issuesForField(cardIssues, "presence")).toEqual([cardIssues[0]]);
-    expect(issuesForField(cardIssues, "presence.dwell_seconds")).toEqual([cardIssues[1]]);
+    expect(issuesForField(cardIssues, "alert")).toEqual([cardIssues[0]]);
+    expect(issuesForField(cardIssues, "alert.lead_minutes")).toEqual([cardIssues[1]]);
   });
 
-  test("unchecking a card's only alert also lifts it out of alert-only, so the dead combination never re-forms", () => {
-    const alertOnlyCard: CardSettings = {
+  test("withAlert updates only the card's alert", () => {
+    const card: CardSettings = {
       ...addCard(initialConfig(), "pomodoro").config.cards[0],
-      presence: { kind: "alert-only" },
       alert: { kind: "on-timer-finish", hold: { kind: "until-dismissed" } },
     };
-    const next = withAlert(alertOnlyCard, { kind: "none" });
+    const next = withAlert(card, { kind: "none" });
     expect(next.alert).toEqual({ kind: "none" });
-    expect(next.presence).toEqual({ kind: "in-rotation", dwell_seconds: null });
-  });
-
-  test("withAlert leaves presence untouched when the card isn't alert-only", () => {
-    const rotationCard: CardSettings = {
-      ...addCard(initialConfig(), "pomodoro").config.cards[0],
-      presence: { kind: "in-rotation", dwell_seconds: 20 },
-    };
-    const next = withAlert(rotationCard, { kind: "none" });
-    expect(next.presence).toEqual({ kind: "in-rotation", dwell_seconds: 20 });
+    expect(next).toEqual({ ...card, alert: { kind: "none" } });
   });
 
   test("tapActionDescription states plain-language tap behaviour per action", () => {
@@ -510,23 +589,18 @@ describe("configuration draft helpers", () => {
 
   test("contract fixtures expose cards, not widgets or screens", () => {
     const config = ipcContractFixtures.snapshot.config;
-    expect(config.schema_version).toBe(3);
+    expect(config.schema_version).toBe(4);
     expect(Array.isArray(config.cards)).toBe(true);
+    expect(Array.isArray(config.playlists)).toBe(true);
     expect("widgets" in config).toBe(false);
     expect("screens" in config).toBe(false);
+    expect("carousel" in config).toBe(false);
     expect(config.cards[0]).not.toHaveProperty("size");
-    expect(config.cards[0]).toHaveProperty("presence");
+    expect(config.cards[0]).not.toHaveProperty("presence");
     expect(config.cards[0]).toHaveProperty("alert");
   });
 
-  test("every presence and alert variant is represented in the contract", () => {
-    // card_presences also covers both `in-rotation` dwell sub-variants (explicit
-    // seconds and the default null), so kinds are deduped before comparing.
-    const presenceKinds = [
-      ...new Set(ipcContractFixtures.card_presences.map((p) => p.kind)),
-    ].sort();
-    expect(presenceKinds).toEqual(["alert-only", "in-rotation", "off"]);
-
+  test("every alert and playlist advance variant is represented in the contract", () => {
     const alertKinds = ipcContractFixtures.card_alerts.map((a) => a.kind).sort();
     expect(alertKinds).toEqual(["before-event", "none", "on-timer-finish"]);
 
@@ -582,78 +656,5 @@ describe("cardMoveFromKey", () => {
     expect(cardMoveFromKey("ArrowDown", true)).toBe(1);
     expect(cardMoveFromKey("ArrowDown", false)).toBe(0);
     expect(cardMoveFromKey("Enter", true)).toBe(0);
-  });
-});
-
-describe("moveCardWithinRotation", () => {
-  // Rotation cards "a", "b", "c" with a non-rotation card sitting between
-  // each pair, so any implementation that forgets to map a rotation-local
-  // index back onto config.cards (and instead hands moveCard a raw
-  // rotation index) lands cards in the wrong slot. This is exactly the
-  // shape CardList's drag/keyboard reorder produces once alert-only/off
-  // cards exist alongside a rotation.
-  function interleavedConfig(): AppConfig {
-    const base = initialConfig();
-    return {
-      ...base,
-      cards: [
-        { ...base.cards[0], id: "a", presence: { kind: "in-rotation", dwell_seconds: null } },
-        {
-          ...base.cards[0],
-          id: "x",
-          presence: { kind: "alert-only" },
-          alert: { kind: "on-timer-finish", hold: { kind: "until-dismissed" } },
-        },
-        { ...base.cards[0], id: "b", presence: { kind: "in-rotation", dwell_seconds: null } },
-        { ...base.cards[0], id: "y", presence: { kind: "off" } },
-        { ...base.cards[0], id: "c", presence: { kind: "in-rotation", dwell_seconds: null } },
-      ],
-    };
-  }
-
-  test("moves the first rotation card to the last rotation slot, across interspersed non-rotation cards", () => {
-    const config = interleavedConfig();
-    const next = moveCardWithinRotation(config, "a", 2);
-    expect(rotationCards(next).map((card) => card.id)).toEqual(["b", "c", "a"]);
-    // Non-rotation cards are untouched and still unordered/present.
-    expect(
-      nonRotationCards(next)
-        .map((card) => card.id)
-        .sort(),
-    ).toEqual(["x", "y"]);
-  });
-
-  test("moves the last rotation card to the first rotation slot, across interspersed non-rotation cards", () => {
-    const config = interleavedConfig();
-    const next = moveCardWithinRotation(config, "c", 0);
-    expect(rotationCards(next).map((card) => card.id)).toEqual(["c", "a", "b"]);
-  });
-
-  test("moves a middle rotation card across a single interspersed non-rotation card", () => {
-    const config = interleavedConfig();
-    // "a" (rotation index 0) targets rotation index 1 (where "b" sits),
-    // crossing over "x" which sits between them in config.cards.
-    const next = moveCardWithinRotation(config, "a", 1);
-    expect(rotationCards(next).map((card) => card.id)).toEqual(["b", "a", "c"]);
-  });
-
-  test("clamps a target rotation index below the start to the first rotation slot", () => {
-    const config = interleavedConfig();
-    const next = moveCardWithinRotation(config, "c", -5);
-    expect(rotationCards(next).map((card) => card.id)).toEqual(["c", "a", "b"]);
-  });
-
-  test("clamps a target rotation index past the end to the last rotation slot", () => {
-    const config = interleavedConfig();
-    const next = moveCardWithinRotation(config, "a", 99);
-    expect(rotationCards(next).map((card) => card.id)).toEqual(["b", "c", "a"]);
-  });
-
-  test("is a no-op when there are no rotation cards", () => {
-    const config: AppConfig = {
-      ...initialConfig(),
-      cards: [{ ...initialConfig().cards[0], id: "only", presence: { kind: "off" } }],
-    };
-    expect(moveCardWithinRotation(config, "only", 0)).toBe(config);
   });
 });

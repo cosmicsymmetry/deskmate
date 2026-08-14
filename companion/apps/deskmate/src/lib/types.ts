@@ -193,6 +193,8 @@ export interface ValidationIssue {
 
 export interface AppSnapshot {
   config: AppConfig;
+  /** True once a settings document has existed on disk, independent of draft edits. */
+  has_saved_config: boolean;
   runtime: RuntimeState;
   device: DeviceSnapshot;
   providers: ProviderSnapshot[];

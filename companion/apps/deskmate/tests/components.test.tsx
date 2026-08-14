@@ -347,8 +347,11 @@ describe("settings accessibility and states", () => {
     expect(playlists).toContain('aria-invalid="true"');
   });
 
-  test("switching the active playlist marks the draft dirty and saves it through IPC", async () => {
-    let liveSnapshot = structuredClone(snapshot) as AppSnapshot;
+  test("editing an already-saved config does not resurface first-run guidance", async () => {
+    let liveSnapshot = {
+      ...(structuredClone(snapshot) as AppSnapshot),
+      has_saved_config: true,
+    };
     const saved: AppConfig[] = [];
     snapshotImpl = async () => liveSnapshot;
     validateImpl = async () => ({ valid: true, issues: [] });
@@ -365,6 +368,7 @@ describe("settings accessibility and states", () => {
     try {
       await act(async () => root.render(<App />));
       await waitFor(() => expect(container.textContent).toContain("Workday"));
+      expect(container.textContent).not.toContain("A quick first setup");
 
       const manualTab = buttonWithText(container, "○Manual");
       expect(manualTab).not.toBeUndefined();
@@ -374,6 +378,7 @@ describe("settings accessibility and states", () => {
       await act(async () => makeActive?.click());
 
       await waitFor(() => expect(container.textContent).toContain("Unsaved changes"));
+      expect(container.textContent).not.toContain("A quick first setup");
       await waitFor(() => expect(container.textContent).toContain("●Manual◀ active"));
       await waitFor(() => {
         const save = buttonWithText(container, "Save & apply");
@@ -387,6 +392,48 @@ describe("settings accessibility and states", () => {
       container.remove();
       snapshotImpl = async () => snapshot;
       validateImpl = async () => ({ valid: true, issues: [] });
+      saveImpl = async () => ({ save: { generation: 1, warning: null } });
+    }
+  });
+
+  test("fresh default settings show first-run guidance until they have been saved", async () => {
+    let liveSnapshot = {
+      ...(structuredClone(snapshot) as AppSnapshot),
+      has_saved_config: false,
+    };
+    snapshotImpl = async () => liveSnapshot;
+    saveImpl = async (config) => {
+      liveSnapshot = { ...liveSnapshot, config, has_saved_config: true };
+      return { save: { generation: 1, warning: null } };
+    };
+    previewImpl = async () => ({ png_base64: "cHJldmlldw==", sample: false });
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<App />));
+      await waitFor(() => expect(container.textContent).toContain("A quick first setup"));
+      expect(container.textContent).toContain("Save your settings");
+
+      await act(async () => buttonWithText(container, "○Manual")?.click());
+      await act(async () => buttonWithText(container, "Make active")?.click());
+      await waitFor(() => expect(container.textContent).toContain("Unsaved changes"));
+      expect(container.textContent).toContain("A quick first setup");
+      await waitFor(() => {
+        expect(buttonWithText(container, "Save & apply")?.disabled).toBe(false);
+      });
+      await act(async () => buttonWithText(container, "Save & apply")?.click());
+      await waitFor(() => expect(container.textContent).not.toContain("A quick first setup"));
+
+      await act(async () => buttonWithText(container, "○Workday")?.click());
+      await act(async () => buttonWithText(container, "Make active")?.click());
+      await waitFor(() => expect(container.textContent).toContain("Unsaved changes"));
+      expect(container.textContent).not.toContain("A quick first setup");
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      snapshotImpl = async () => snapshot;
       saveImpl = async () => ({ save: { generation: 1, warning: null } });
     }
   });
@@ -749,6 +796,53 @@ describe("settings accessibility and states", () => {
     expect(html).not.toMatch(/\d+s</);
     expect(html).not.toContain(">Play<");
     expect(html).toContain("Desk");
+  });
+
+  test("filmstrip keyboard reorder maps visible segments back to playlist entry indexes", async () => {
+    const initial = filmstripConfig();
+    initial.playlists[0].entries = [
+      { card_id: "first", dwell_seconds: 45 },
+      { card_id: "missing-card", dwell_seconds: null },
+      { card_id: "second", dwell_seconds: null },
+    ];
+    let latest = initial;
+
+    function Harness() {
+      const [config, setConfig] = useState(initial);
+      return (
+        <Filmstrip
+          config={config}
+          selectedCardId="first"
+          onSelect={() => {}}
+          onReorder={(next) => {
+            latest = next;
+            setConfig(next);
+          }}
+        />
+      );
+    }
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<Harness />));
+      const firstSegment = container.querySelector<HTMLButtonElement>(".filmstrip-segment__button");
+      expect(firstSegment).not.toBeNull();
+      await act(async () => {
+        firstSegment?.dispatchEvent(
+          new KeyboardEvent("keydown", { key: "ArrowDown", altKey: true, bubbles: true }),
+        );
+      });
+      expect(latest.playlists[0].entries.map((entry) => entry.card_id)).toEqual([
+        "missing-card",
+        "second",
+        "first",
+      ]);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
   });
 
   test("formats provider staleness without exposing raw timestamps", () => {

@@ -4,9 +4,10 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
 use app_core::{
-    AppSnapshot, ConfigStore, ConnectionState, LoadOutcome, PersistenceState, ProviderState,
-    RuntimeHandle, RuntimeState, SAVED_SETTINGS_VALIDATION_FAILURE_MESSAGE,
+    AppSnapshot, ConfigOrigin, ConfigStore, ConnectionState, LoadOutcome, PersistenceState,
+    ProviderState, RuntimeHandle, RuntimeState, SAVED_SETTINGS_VALIDATION_FAILURE_MESSAGE,
 };
+use serde::Serialize;
 use tauri::image::Image;
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{TrayIcon, TrayIconBuilder};
@@ -115,6 +116,7 @@ impl TrayControls {
 struct DesktopState {
     runtime: Arc<RuntimeHandle>,
     store: ConfigStore,
+    has_saved_config: AtomicBool,
     tray: TrayControls,
     snapshot_worker: Mutex<Option<JoinHandle<()>>>,
     mutation_lock: Mutex<()>,
@@ -122,7 +124,28 @@ struct DesktopState {
     preview: preview::PreviewHandle,
 }
 
+/// The desktop IPC projection adds the one piece of persistence history the runtime
+/// intentionally does not own: whether settings have ever existed on disk. Flattening
+/// keeps the wire shape compatible with the frontend's single `AppSnapshot` DTO.
+#[derive(Debug, Clone, Serialize)]
+struct DesktopSnapshot {
+    #[serde(flatten)]
+    app: AppSnapshot,
+    has_saved_config: bool,
+}
+
 impl DesktopState {
+    fn project_snapshot(&self, app: AppSnapshot) -> DesktopSnapshot {
+        DesktopSnapshot {
+            app,
+            has_saved_config: self.has_saved_config.load(Ordering::Acquire),
+        }
+    }
+
+    fn mark_config_saved(&self) {
+        self.has_saved_config.store(true, Ordering::Release);
+    }
+
     fn toggle_paused(&self) -> Result<(), Box<dyn Error>> {
         let paused = !self.runtime.snapshot()?.config.preferences.paused;
         commands::set_paused(self, paused).map_err(Into::into)
@@ -289,6 +312,7 @@ fn setup_app(app: &mut App) -> Result<(), Box<dyn Error>> {
     let config_path = app.path().app_data_dir()?.join(CONFIG_FILE_NAME);
     let store = ConfigStore::new(config_path);
     let loaded = store.load();
+    let has_saved_config = load_has_saved_config(&loaded);
     let persistence = load_failure_persistence(&loaded);
     if let Some(persistence) = &persistence {
         eprintln!("saved Deskmate configuration was not applied: {persistence:?}");
@@ -314,6 +338,7 @@ fn setup_app(app: &mut App) -> Result<(), Box<dyn Error>> {
     app.manage(DesktopState {
         runtime: Arc::clone(&runtime),
         store,
+        has_saved_config: AtomicBool::new(has_saved_config),
         tray,
         snapshot_worker: Mutex::new(None),
         mutation_lock: Mutex::new(()),
@@ -331,6 +356,19 @@ fn setup_app(app: &mut App) -> Result<(), Box<dyn Error>> {
         .replace(worker);
     show_settings(app.handle());
     Ok(())
+}
+
+/// Only a clean defaults load means no document existed. Recovery and validation
+/// failures still came from a persisted document, so they must not turn an existing
+/// installation back into first-run mode.
+fn load_has_saved_config(loaded: &LoadOutcome) -> bool {
+    !matches!(
+        loaded,
+        LoadOutcome::Loaded {
+            origin: ConfigOrigin::Defaults,
+            ..
+        }
+    )
 }
 
 fn load_failure_persistence(loaded: &LoadOutcome) -> Option<PersistenceState> {
@@ -485,5 +523,28 @@ mod tests {
             }),
             None
         );
+    }
+
+    #[test]
+    fn only_a_missing_settings_document_is_first_run() {
+        let defaults = LoadOutcome::Loaded {
+            config: AppConfig::default(),
+            origin: ConfigOrigin::Defaults,
+        };
+        let current = LoadOutcome::Loaded {
+            config: AppConfig::default(),
+            origin: ConfigOrigin::Current,
+        };
+        let recovered = LoadOutcome::Recovered {
+            config: AppConfig::default(),
+            origin: ConfigOrigin::Defaults,
+            error: StoreError::InvalidJson {
+                message: "expected value".into(),
+            },
+        };
+
+        assert!(!load_has_saved_config(&defaults));
+        assert!(load_has_saved_config(&current));
+        assert!(load_has_saved_config(&recovered));
     }
 }

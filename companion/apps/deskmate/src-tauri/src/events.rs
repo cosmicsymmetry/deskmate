@@ -27,7 +27,8 @@ pub fn spawn_state_worker(
                         if callback_app
                             .run_on_main_thread(move || {
                                 let state = dispatch_app.state::<DesktopState>();
-                                if let Err(error) = state.tray.update(&snapshot) {
+                                let snapshot = state.project_snapshot(snapshot);
+                                if let Err(error) = state.tray.update(&snapshot.app) {
                                     eprintln!("cannot update Deskmate tray state: {error}");
                                 }
                                 if let Err(error) = dispatch_app.emit_to(

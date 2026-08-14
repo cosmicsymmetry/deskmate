@@ -386,7 +386,7 @@ export function App() {
       )}
 
       {(() => {
-        const steps = firstRunSteps(draft, !dirty);
+        const steps = firstRunSteps(draft, snapshot.has_saved_config);
         if (steps.every((step) => step.done)) {
           return null;
         }

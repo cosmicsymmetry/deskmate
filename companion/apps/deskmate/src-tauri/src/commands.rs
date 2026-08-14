@@ -3,7 +3,7 @@
 #![allow(clippy::needless_pass_by_value)]
 
 use app_core::{
-    AppConfig, AppSnapshot, CardField, CardFieldValue, DisplayOrientation, DisplayTemplate,
+    AppConfig, CardField, CardFieldValue, DisplayOrientation, DisplayTemplate,
     MAX_CONFIG_FILE_BYTES, MAX_ICS_BYTES, MAX_ICS_SOURCE_LEN, MAX_WIDGET_ID_LEN, PomodoroAction,
     RuntimeError, SaveReceipt, StoreError, ValidationIssue, utc_offset_minutes,
 };
@@ -14,7 +14,7 @@ use tauri::{AppHandle, Manager, State};
 use tauri_plugin_autostart::ManagerExt;
 use tauri_plugin_dialog::DialogExt;
 
-use crate::{DesktopState, MAIN_WINDOW_LABEL};
+use crate::{DesktopSnapshot, DesktopState, MAIN_WINDOW_LABEL};
 
 /// The draft travels as a bounded JSON envelope so an IPC caller cannot make serde
 /// allocate an arbitrarily deep application document before domain validation runs.
@@ -125,8 +125,9 @@ impl std::fmt::Display for IpcError {
 impl std::error::Error for IpcError {}
 
 #[tauri::command]
-pub fn get_app_snapshot(state: State<'_, DesktopState>) -> Result<AppSnapshot, IpcError> {
-    state.runtime.snapshot().map_err(IpcError::from)
+pub fn get_app_snapshot(state: State<'_, DesktopState>) -> Result<DesktopSnapshot, IpcError> {
+    let snapshot = state.runtime.snapshot().map_err(IpcError::from)?;
+    Ok(state.project_snapshot(snapshot))
 }
 
 #[tauri::command]
@@ -269,7 +270,7 @@ pub fn set_settings_window_visible(
     app: AppHandle,
     state: State<'_, DesktopState>,
     visible: bool,
-) -> Result<AppSnapshot, IpcError> {
+) -> Result<DesktopSnapshot, IpcError> {
     let window = app
         .get_webview_window(MAIN_WINDOW_LABEL)
         .ok_or_else(|| IpcError::Window {
@@ -282,7 +283,8 @@ pub fn set_settings_window_visible(
     } else {
         window.hide().map_err(window_error)?;
     }
-    state.runtime.snapshot().map_err(IpcError::from)
+    let snapshot = state.runtime.snapshot().map_err(IpcError::from)?;
+    Ok(state.project_snapshot(snapshot))
 }
 
 /// Renders one card exactly as the firmware's own template would: the same
@@ -531,6 +533,7 @@ fn persist_config(state: &DesktopState, config: &AppConfig) -> Result<SaveReceip
         .map_err(IpcError::from)?;
     match state.store.save(config) {
         Ok(receipt) => {
+            state.mark_config_saved();
             state
                 .runtime
                 .set_persistence_state(app_core::PersistenceState::Clean)
@@ -667,14 +670,15 @@ mod tests {
     use std::path::Path;
 
     use app_core::{
-        AlertHold, AppConfig, AppPreferences, AssetKind, AssetSource, CURRENT_SCHEMA_VERSION,
-        CalendarSource, CardAlert, CardDataSnapshot, CardError, CardField, CardFieldValue,
-        CardSettings, CarouselAdvance, ConnectionState, DeviceCapability, DeviceCounters,
-        DeviceSnapshot, DisplayOrientation, DisplayTemplate, FirmwareArtifactMetadata, GlyphRange,
-        PersistenceState, Playlist, PlaylistEntry, PomodoroSnapshot, PomodoroState,
-        ProviderSnapshot, ProviderState, RefreshPolicy, RuntimeDiagnostics, RuntimeError,
-        RuntimeState, SAVED_SETTINGS_VALIDATION_FAILURE_MESSAGE, StoreWarning, UpdateChannel,
-        UpdateCheckPolicy, UpdaterSettings, ValidationCode, WeatherUnits, WidgetTapAction,
+        AlertHold, AppConfig, AppPreferences, AppSnapshot, AssetKind, AssetSource,
+        CURRENT_SCHEMA_VERSION, CalendarSource, CardAlert, CardDataSnapshot, CardError, CardField,
+        CardFieldValue, CardSettings, CarouselAdvance, ConnectionState, DeviceCapability,
+        DeviceCounters, DeviceSnapshot, DisplayOrientation, DisplayTemplate,
+        FirmwareArtifactMetadata, GlyphRange, PersistenceState, Playlist, PlaylistEntry,
+        PomodoroSnapshot, PomodoroState, ProviderSnapshot, ProviderState, RefreshPolicy,
+        RuntimeDiagnostics, RuntimeError, RuntimeState, SAVED_SETTINGS_VALIDATION_FAILURE_MESSAGE,
+        StoreWarning, UpdateChannel, UpdateCheckPolicy, UpdaterSettings, ValidationCode,
+        WeatherUnits, WidgetTapAction,
     };
     use serde::Serialize;
 
@@ -767,7 +771,7 @@ mod tests {
     /// A device snapshot with no connection, so draft validation exercises only the
     /// configuration's own issues.
     fn offline_device() -> AppSnapshot {
-        contract_fixtures().snapshot
+        contract_fixtures().snapshot.app
     }
 
     #[test]
@@ -990,7 +994,7 @@ mod tests {
 
     #[test]
     fn connected_legacy_firmware_is_rejected_during_persistence_preflight() {
-        let mut device = contract_fixtures().snapshot.device;
+        let mut device = contract_fixtures().snapshot.app.device;
         device.connection = ConnectionState::Online;
         device.protocol_version = Some(1);
         device.capabilities = vec![DeviceCapability::CoreWidgets];
@@ -1012,7 +1016,7 @@ mod tests {
 
     #[derive(Serialize)]
     struct ContractFixtures {
-        snapshot: AppSnapshot,
+        snapshot: DesktopSnapshot,
         configs: Vec<AppConfig>,
         card_settings: Vec<CardSettings>,
         playlists: Vec<Playlist>,
@@ -1197,72 +1201,76 @@ mod tests {
                 },
             ],
         }];
-        let snapshot = AppSnapshot {
-            config: config.clone(),
-            runtime: RuntimeState::Error {
-                message: "example runtime error".into(),
-            },
-            device: DeviceSnapshot {
-                connection: ConnectionState::Disconnected {
-                    reason: Some("USB disconnected".into()),
+        let snapshot = DesktopSnapshot {
+            has_saved_config: true,
+            app: AppSnapshot {
+                config: config.clone(),
+                runtime: RuntimeState::Error {
+                    message: "example runtime error".into(),
                 },
-                port_name: Some("/dev/cu.usbmodem1".into()),
-                firmware_version: Some("1.0.0".into()),
-                protocol_version: Some(1),
-                max_protocol_version: Some(1),
-                capabilities: vec![DeviceCapability::CoreWidgets],
-                unknown_capability_bits: 0,
-                uptime_ms: Some(42),
-                free_heap: Some(123_456),
-                rotation: Some(90),
-                active_screen_id: Some("clock".into()),
-                counters: DeviceCounters {
-                    reconnects: 1,
-                    valid_frames: 2,
-                    malformed_frames: 3,
-                    crc_errors: 4,
-                    overflow_frames: 5,
-                    dropped_responses: 6,
-                    rx_dropped_bytes: 7,
-                    dropped_events: 8,
-                    event_queue_high_water: 9,
-                    dropped_ui_commands: 10,
-                    ui_queue_high_water: 11,
-                    host_dropped_events: 12,
-                    detected_event_gaps: 13,
+                device: DeviceSnapshot {
+                    connection: ConnectionState::Disconnected {
+                        reason: Some("USB disconnected".into()),
+                    },
+                    port_name: Some("/dev/cu.usbmodem1".into()),
+                    firmware_version: Some("1.0.0".into()),
+                    protocol_version: Some(1),
+                    max_protocol_version: Some(1),
+                    capabilities: vec![DeviceCapability::CoreWidgets],
+                    unknown_capability_bits: 0,
+                    uptime_ms: Some(42),
+                    free_heap: Some(123_456),
+                    rotation: Some(90),
+                    active_screen_id: Some("clock".into()),
+                    counters: DeviceCounters {
+                        reconnects: 1,
+                        valid_frames: 2,
+                        malformed_frames: 3,
+                        crc_errors: 4,
+                        overflow_frames: 5,
+                        dropped_responses: 6,
+                        rx_dropped_bytes: 7,
+                        dropped_events: 8,
+                        event_queue_high_water: 9,
+                        dropped_ui_commands: 10,
+                        ui_queue_high_water: 11,
+                        host_dropped_events: 12,
+                        detected_event_gaps: 13,
+                    },
                 },
-            },
-            providers: vec![ProviderSnapshot {
-                widget_id: "calendar".into(),
-                state: ProviderState::Stale {
-                    message: "offline".into(),
+                providers: vec![ProviderSnapshot {
+                    widget_id: "calendar".into(),
+                    state: ProviderState::Stale {
+                        message: "offline".into(),
+                    },
+                    last_success_unix_ms: Some(1_786_000_000_000),
+                    age_seconds: Some(120),
+                }],
+                pomodoros: vec![PomodoroSnapshot {
+                    widget_id: "pomodoro".into(),
+                    state: PomodoroState::Running,
+                    duration_seconds: 1_500,
+                    remaining_seconds: 900,
+                }],
+                card_data: card_data.clone(),
+                card_errors: vec![CardError {
+                    card_id: "json".into(),
+                    message:
+                        "the display refused this card's data (InvalidPayload): invalid push data"
+                            .into(),
+                }],
+                persistence: PersistenceState::ValidationFailed {
+                    message: SAVED_SETTINGS_VALIDATION_FAILURE_MESSAGE.into(),
+                    issues: vec![issue.clone()],
                 },
-                last_success_unix_ms: Some(1_786_000_000_000),
-                age_seconds: Some(120),
-            }],
-            pomodoros: vec![PomodoroSnapshot {
-                widget_id: "pomodoro".into(),
-                state: PomodoroState::Running,
-                duration_seconds: 1_500,
-                remaining_seconds: 900,
-            }],
-            card_data: card_data.clone(),
-            card_errors: vec![CardError {
-                card_id: "json".into(),
-                message: "the display refused this card's data (InvalidPayload): invalid push data"
-                    .into(),
-            }],
-            persistence: PersistenceState::ValidationFailed {
-                message: SAVED_SETTINGS_VALIDATION_FAILURE_MESSAGE.into(),
-                issues: vec![issue.clone()],
-            },
-            diagnostics: RuntimeDiagnostics {
-                commands_processed: 1,
-                command_queue_full: 2,
-                provider_jobs_started: 3,
-                provider_queue_full: 4,
-                provider_results_discarded: 5,
-                subscriber_snapshots_overwritten: 6,
+                diagnostics: RuntimeDiagnostics {
+                    commands_processed: 1,
+                    command_queue_full: 2,
+                    provider_jobs_started: 3,
+                    provider_queue_full: 4,
+                    provider_results_discarded: 5,
+                    subscriber_snapshots_overwritten: 6,
+                },
             },
         };
         let runtime_states = vec![

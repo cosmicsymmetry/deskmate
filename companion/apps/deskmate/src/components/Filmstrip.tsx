@@ -149,12 +149,20 @@ export function Filmstrip({ config, selectedCardId, onSelect, onReorder }: Films
     );
   }
 
-  const moveTo = (cardId: string, targetIndex: number) => {
+  const moveTo = (cardId: string, targetSegmentIndex: number) => {
     if (!playlist) {
       return;
     }
+    const targetCardId = segments[targetSegmentIndex]?.cardId;
+    if (!targetCardId) {
+      return;
+    }
     const sourceIndex = playlist.entries.findIndex((entry) => entry.card_id === cardId);
-    onReorder(moveEntry(config, playlist.id, sourceIndex, targetIndex));
+    const targetEntryIndex = playlist.entries.findIndex((entry) => entry.card_id === targetCardId);
+    if (sourceIndex < 0 || targetEntryIndex < 0) {
+      return;
+    }
+    onReorder(moveEntry(config, playlist.id, sourceIndex, targetEntryIndex));
   };
   const onDragStart = (event: DragEvent<HTMLLIElement>, cardId: string) => {
     setDraggedId(cardId);

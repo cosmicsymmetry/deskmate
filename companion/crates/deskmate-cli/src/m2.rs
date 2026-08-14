@@ -8,9 +8,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use app_core::{
-    AlertHold, AppConfig, AppPreferences, CalendarSource, CardAlert, CardPresence, CardSettings,
-    CarouselSettings, ConnectionState, DisplayTemplate, RefreshPolicy, RuntimeHandle, RuntimeState,
-    UpdaterSettings, WidgetTapAction,
+    AlertHold, AppConfig, AppPreferences, CalendarSource, CardAlert, CardSettings, CarouselAdvance,
+    ConnectionState, DisplayTemplate, Playlist, PlaylistEntry, RefreshPolicy, RuntimeHandle,
+    RuntimeState, UpdaterSettings, WidgetTapAction,
 };
 use chrono::Utc;
 use chrono_tz::Tz;
@@ -469,6 +469,14 @@ fn build_demo_config(layout: ApplyConfig, options: &DemoOptions) -> Result<AppCo
     } else {
         CalendarSource::File(options.source.clone())
     };
+    let playlist_entries = layout
+        .screens
+        .iter()
+        .map(|screen| PlaylistEntry {
+            card_id: screen.widget_id.clone(),
+            dwell_seconds: None,
+        })
+        .collect();
     let config = AppConfig {
         schema_version: app_core::CURRENT_SCHEMA_VERSION,
         preferences: AppPreferences {
@@ -485,9 +493,6 @@ fn build_demo_config(layout: ApplyConfig, options: &DemoOptions) -> Result<AppCo
             .screens
             .into_iter()
             .map(|screen| {
-                let presence = CardPresence::InRotation {
-                    dwell_seconds: None,
-                };
                 if screen.widget_id == options.clock_widget {
                     CardSettings::Clock {
                         id: screen.widget_id,
@@ -496,7 +501,6 @@ fn build_demo_config(layout: ApplyConfig, options: &DemoOptions) -> Result<AppCo
                         template: DisplayTemplate::DigitalClock,
                         tap_action: WidgetTapAction::None,
                         refresh: RefreshPolicy::DeviceLocal,
-                        presence,
                         alert: CardAlert::None,
                     }
                 } else if screen.widget_id == options.pomodoro_widget {
@@ -507,7 +511,6 @@ fn build_demo_config(layout: ApplyConfig, options: &DemoOptions) -> Result<AppCo
                         template: DisplayTemplate::ProgressRing,
                         tap_action: WidgetTapAction::StartPause,
                         refresh: RefreshPolicy::DeviceLocal,
-                        presence,
                         alert: CardAlert::OnTimerFinish {
                             hold: AlertHold::UntilDismissed,
                         },
@@ -520,7 +523,6 @@ fn build_demo_config(layout: ApplyConfig, options: &DemoOptions) -> Result<AppCo
                         template: DisplayTemplate::RowList,
                         tap_action: WidgetTapAction::None,
                         refresh: RefreshPolicy::Interval { minutes: 15 },
-                        presence,
                         alert: CardAlert::BeforeEvent {
                             lead_minutes: 5,
                             hold: AlertHold::Seconds { value: 60 },
@@ -530,7 +532,13 @@ fn build_demo_config(layout: ApplyConfig, options: &DemoOptions) -> Result<AppCo
             })
             .collect(),
         assets: Vec::new(),
-        carousel: CarouselSettings::default(),
+        playlists: vec![Playlist {
+            id: "demo".into(),
+            name: "Demo".into(),
+            advance: CarouselAdvance::Manual,
+            entries: playlist_entries,
+        }],
+        active_playlist_id: "demo".into(),
         updater: UpdaterSettings::default(),
     };
     config

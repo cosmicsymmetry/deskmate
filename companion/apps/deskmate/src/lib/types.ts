@@ -3,7 +3,8 @@ export interface AppConfig {
   preferences: AppPreferences;
   cards: CardSettings[];
   assets: AssetSettings[];
-  carousel: CarouselSettings;
+  playlists: Playlist[];
+  active_playlist_id: string;
   updater: UpdaterSettings;
 }
 
@@ -44,11 +45,6 @@ export interface JsonFieldMapping {
   path: string;
 }
 
-export type CardPresence =
-  | { kind: "in-rotation"; dwell_seconds: number | null }
-  | { kind: "alert-only" }
-  | { kind: "off" };
-
 export type AlertHold = { kind: "until-dismissed" } | { kind: "seconds"; value: number };
 
 export type CardAlert =
@@ -65,7 +61,6 @@ export type CardSettings =
       template: DisplayTemplate;
       tap_action: WidgetTapAction;
       refresh: RefreshPolicy;
-      presence: CardPresence;
       alert: CardAlert;
     }
   | {
@@ -76,7 +71,6 @@ export type CardSettings =
       template: DisplayTemplate;
       tap_action: WidgetTapAction;
       refresh: RefreshPolicy;
-      presence: CardPresence;
       alert: CardAlert;
     }
   | {
@@ -87,7 +81,6 @@ export type CardSettings =
       template: DisplayTemplate;
       tap_action: WidgetTapAction;
       refresh: RefreshPolicy;
-      presence: CardPresence;
       alert: CardAlert;
     }
   | {
@@ -99,7 +92,6 @@ export type CardSettings =
       template: DisplayTemplate;
       tap_action: WidgetTapAction;
       refresh: RefreshPolicy;
-      presence: CardPresence;
       alert: CardAlert;
     }
   | {
@@ -111,7 +103,6 @@ export type CardSettings =
       template: DisplayTemplate;
       tap_action: WidgetTapAction;
       refresh: RefreshPolicy;
-      presence: CardPresence;
       alert: CardAlert;
     }
   | {
@@ -123,7 +114,6 @@ export type CardSettings =
       template: DisplayTemplate;
       tap_action: WidgetTapAction;
       refresh: RefreshPolicy;
-      presence: CardPresence;
       alert: CardAlert;
     };
 
@@ -147,8 +137,16 @@ export interface GlyphRange {
 
 export type CarouselAdvance = { kind: "manual" } | { kind: "timed"; default_dwell_seconds: number };
 
-export interface CarouselSettings {
+export interface Playlist {
+  id: string;
+  name: string;
   advance: CarouselAdvance;
+  entries: PlaylistEntry[];
+}
+
+export interface PlaylistEntry {
+  card_id: string;
+  dwell_seconds: number | null;
 }
 
 export interface UpdaterSettings {
@@ -302,7 +300,8 @@ export interface CardDataSnapshot {
 export type PersistenceState =
   | { kind: "clean" }
   | { kind: "saving" }
-  | { kind: "recoverable-error"; message: string };
+  | { kind: "recoverable-error"; message: string }
+  | { kind: "validation-failed"; message: string; issues: ValidationIssue[] };
 
 export interface RuntimeDiagnostics {
   commands_processed: number;
@@ -370,7 +369,8 @@ export interface IpcContractFixtures {
   snapshot: AppSnapshot;
   configs: AppConfig[];
   card_settings: CardSettings[];
-  card_presences: CardPresence[];
+  playlists: Playlist[];
+  playlist_entries: PlaylistEntry[];
   card_alerts: CardAlert[];
   alert_holds: AlertHold[];
   carousel_advances: CarouselAdvance[];

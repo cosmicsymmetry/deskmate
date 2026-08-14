@@ -4,7 +4,7 @@ import type { IpcContractFixtures } from "./types";
 export const ipcContractFixtures = {
   "snapshot": {
     "config": {
-      "schema_version": 3,
+      "schema_version": 4,
       "preferences": {
         "timezone": "Asia/Tbilisi",
         "autostart": true,
@@ -26,10 +26,6 @@ export const ipcContractFixtures = {
           "refresh": {
             "kind": "device-local"
           },
-          "presence": {
-            "kind": "in-rotation",
-            "dwell_seconds": null
-          },
           "alert": {
             "kind": "none"
           }
@@ -47,10 +43,6 @@ export const ipcContractFixtures = {
           },
           "refresh": {
             "kind": "device-local"
-          },
-          "presence": {
-            "kind": "in-rotation",
-            "dwell_seconds": null
           },
           "alert": {
             "kind": "on-timer-finish",
@@ -77,10 +69,6 @@ export const ipcContractFixtures = {
             "kind": "interval",
             "minutes": 15
           },
-          "presence": {
-            "kind": "in-rotation",
-            "dwell_seconds": null
-          },
           "alert": {
             "kind": "before-event",
             "lead_minutes": 5,
@@ -92,11 +80,44 @@ export const ipcContractFixtures = {
         }
       ],
       "assets": [],
-      "carousel": {
-        "advance": {
-          "kind": "manual"
+      "playlists": [
+        {
+          "id": "workday",
+          "name": "Workday",
+          "advance": {
+            "kind": "timed",
+            "default_dwell_seconds": 30
+          },
+          "entries": [
+            {
+              "card_id": "clock",
+              "dwell_seconds": null
+            },
+            {
+              "card_id": "pomodoro",
+              "dwell_seconds": 20
+            },
+            {
+              "card_id": "calendar",
+              "dwell_seconds": null
+            }
+          ]
+        },
+        {
+          "id": "manual",
+          "name": "Manual",
+          "advance": {
+            "kind": "manual"
+          },
+          "entries": [
+            {
+              "card_id": "clock",
+              "dwell_seconds": null
+            }
+          ]
         }
-      },
+      ],
+      "active_playlist_id": "workday",
       "updater": {
         "channel": "stable",
         "checks": "notify"
@@ -193,8 +214,15 @@ export const ipcContractFixtures = {
       }
     ],
     "persistence": {
-      "kind": "recoverable-error",
-      "message": "disk full"
+      "kind": "validation-failed",
+      "message": "Your saved settings failed validation and were not applied",
+      "issues": [
+        {
+          "path": "active_playlist_id",
+          "code": "missing-reference",
+          "message": "active playlist does not exist"
+        }
+      ]
     },
     "diagnostics": {
       "commands_processed": 1,
@@ -207,7 +235,7 @@ export const ipcContractFixtures = {
   },
   "configs": [
     {
-      "schema_version": 3,
+      "schema_version": 4,
       "preferences": {
         "timezone": "Asia/Tbilisi",
         "autostart": true,
@@ -229,10 +257,6 @@ export const ipcContractFixtures = {
           "refresh": {
             "kind": "device-local"
           },
-          "presence": {
-            "kind": "in-rotation",
-            "dwell_seconds": null
-          },
           "alert": {
             "kind": "none"
           }
@@ -250,10 +274,6 @@ export const ipcContractFixtures = {
           },
           "refresh": {
             "kind": "device-local"
-          },
-          "presence": {
-            "kind": "in-rotation",
-            "dwell_seconds": null
           },
           "alert": {
             "kind": "on-timer-finish",
@@ -280,10 +300,6 @@ export const ipcContractFixtures = {
             "kind": "interval",
             "minutes": 15
           },
-          "presence": {
-            "kind": "in-rotation",
-            "dwell_seconds": null
-          },
           "alert": {
             "kind": "before-event",
             "lead_minutes": 5,
@@ -295,11 +311,44 @@ export const ipcContractFixtures = {
         }
       ],
       "assets": [],
-      "carousel": {
-        "advance": {
-          "kind": "manual"
+      "playlists": [
+        {
+          "id": "workday",
+          "name": "Workday",
+          "advance": {
+            "kind": "timed",
+            "default_dwell_seconds": 30
+          },
+          "entries": [
+            {
+              "card_id": "clock",
+              "dwell_seconds": null
+            },
+            {
+              "card_id": "pomodoro",
+              "dwell_seconds": 20
+            },
+            {
+              "card_id": "calendar",
+              "dwell_seconds": null
+            }
+          ]
+        },
+        {
+          "id": "manual",
+          "name": "Manual",
+          "advance": {
+            "kind": "manual"
+          },
+          "entries": [
+            {
+              "card_id": "clock",
+              "dwell_seconds": null
+            }
+          ]
         }
-      },
+      ],
+      "active_playlist_id": "workday",
       "updater": {
         "channel": "stable",
         "checks": "notify"
@@ -321,10 +370,6 @@ export const ipcContractFixtures = {
       "refresh": {
         "kind": "device-local"
       },
-      "presence": {
-        "kind": "in-rotation",
-        "dwell_seconds": null
-      },
       "alert": {
         "kind": "none"
       }
@@ -342,10 +387,6 @@ export const ipcContractFixtures = {
       },
       "refresh": {
         "kind": "device-local"
-      },
-      "presence": {
-        "kind": "in-rotation",
-        "dwell_seconds": null
       },
       "alert": {
         "kind": "on-timer-finish",
@@ -371,10 +412,6 @@ export const ipcContractFixtures = {
       "refresh": {
         "kind": "interval",
         "minutes": 15
-      },
-      "presence": {
-        "kind": "in-rotation",
-        "dwell_seconds": null
       },
       "alert": {
         "kind": "before-event",
@@ -403,9 +440,6 @@ export const ipcContractFixtures = {
         "kind": "interval",
         "minutes": 30
       },
-      "presence": {
-        "kind": "alert-only"
-      },
       "alert": {
         "kind": "none"
       }
@@ -431,9 +465,6 @@ export const ipcContractFixtures = {
       "refresh": {
         "kind": "manual"
       },
-      "presence": {
-        "kind": "off"
-      },
       "alert": {
         "kind": "none"
       }
@@ -454,29 +485,60 @@ export const ipcContractFixtures = {
         "kind": "interval",
         "minutes": 15
       },
-      "presence": {
-        "kind": "in-rotation",
-        "dwell_seconds": 20
-      },
       "alert": {
         "kind": "none"
       }
     }
   ],
-  "card_presences": [
+  "playlists": [
     {
-      "kind": "in-rotation",
+      "id": "workday",
+      "name": "Workday",
+      "advance": {
+        "kind": "timed",
+        "default_dwell_seconds": 30
+      },
+      "entries": [
+        {
+          "card_id": "clock",
+          "dwell_seconds": null
+        },
+        {
+          "card_id": "pomodoro",
+          "dwell_seconds": 20
+        },
+        {
+          "card_id": "calendar",
+          "dwell_seconds": null
+        }
+      ]
+    },
+    {
+      "id": "manual",
+      "name": "Manual",
+      "advance": {
+        "kind": "manual"
+      },
+      "entries": [
+        {
+          "card_id": "clock",
+          "dwell_seconds": null
+        }
+      ]
+    }
+  ],
+  "playlist_entries": [
+    {
+      "card_id": "clock",
       "dwell_seconds": null
     },
     {
-      "kind": "in-rotation",
+      "card_id": "pomodoro",
       "dwell_seconds": 20
     },
     {
-      "kind": "alert-only"
-    },
-    {
-      "kind": "off"
+      "card_id": "calendar",
+      "dwell_seconds": null
     }
   ],
   "card_alerts": [
@@ -733,6 +795,17 @@ export const ipcContractFixtures = {
     {
       "kind": "recoverable-error",
       "message": "error"
+    },
+    {
+      "kind": "validation-failed",
+      "message": "Your saved settings failed validation and were not applied",
+      "issues": [
+        {
+          "path": "active_playlist_id",
+          "code": "missing-reference",
+          "message": "active playlist does not exist"
+        }
+      ]
     }
   ],
   "validation_codes": [
@@ -774,9 +847,9 @@ export const ipcContractFixtures = {
       "message": "validation",
       "issues": [
         {
-          "path": "cards[0].presence",
-          "code": "out-of-range",
-          "message": "an alert-only card must configure an alert"
+          "path": "active_playlist_id",
+          "code": "missing-reference",
+          "message": "active playlist does not exist"
         }
       ]
     },
@@ -821,9 +894,9 @@ export const ipcContractFixtures = {
     "valid": false,
     "issues": [
       {
-        "path": "cards[0].presence",
-        "code": "out-of-range",
-        "message": "an alert-only card must configure an alert"
+        "path": "active_playlist_id",
+        "code": "missing-reference",
+        "message": "active playlist does not exist"
       }
     ]
   },

@@ -669,12 +669,12 @@ mod tests {
     use app_core::{
         AlertHold, AppConfig, AppPreferences, AssetKind, AssetSource, CURRENT_SCHEMA_VERSION,
         CalendarSource, CardAlert, CardDataSnapshot, CardError, CardField, CardFieldValue,
-        CardPresence, CardSettings, CarouselAdvance, CarouselSettings, ConnectionState,
-        DeviceCapability, DeviceCounters, DeviceSnapshot, DisplayOrientation, DisplayTemplate,
-        FirmwareArtifactMetadata, GlyphRange, PersistenceState, PomodoroSnapshot, PomodoroState,
+        CardSettings, CarouselAdvance, ConnectionState, DeviceCapability, DeviceCounters,
+        DeviceSnapshot, DisplayOrientation, DisplayTemplate, FirmwareArtifactMetadata, GlyphRange,
+        PersistenceState, Playlist, PlaylistEntry, PomodoroSnapshot, PomodoroState,
         ProviderSnapshot, ProviderState, RefreshPolicy, RuntimeDiagnostics, RuntimeError,
-        RuntimeState, StoreWarning, UpdateChannel, UpdateCheckPolicy, UpdaterSettings,
-        ValidationCode, WeatherUnits, WidgetTapAction,
+        RuntimeState, SAVED_SETTINGS_VALIDATION_FAILURE_MESSAGE, StoreWarning, UpdateChannel,
+        UpdateCheckPolicy, UpdaterSettings, ValidationCode, WeatherUnits, WidgetTapAction,
     };
     use serde::Serialize;
 
@@ -809,11 +809,9 @@ mod tests {
             template: DisplayTemplate::RowList,
             tap_action: WidgetTapAction::Dismiss,
             refresh: RefreshPolicy::Interval { minutes: 30 },
-            presence: CardPresence::InRotation {
-                dwell_seconds: None,
-            },
             alert: CardAlert::None,
         };
+        config.playlists[0].entries[0].card_id = "weather".into();
         assert!(config.validate().is_ok(), "fixture must validate cleanly");
 
         let result = validate_draft_for_device(
@@ -844,9 +842,6 @@ mod tests {
             template: DisplayTemplate::AnalogClock,
             tap_action: WidgetTapAction::None,
             refresh: RefreshPolicy::DeviceLocal,
-            presence: CardPresence::InRotation {
-                dwell_seconds: None,
-            },
             alert: CardAlert::None,
         };
         let draft = DraftPayload {
@@ -1020,7 +1015,8 @@ mod tests {
         snapshot: AppSnapshot,
         configs: Vec<AppConfig>,
         card_settings: Vec<CardSettings>,
-        card_presences: Vec<CardPresence>,
+        playlists: Vec<Playlist>,
+        playlist_entries: Vec<PlaylistEntry>,
         card_alerts: Vec<CardAlert>,
         alert_holds: Vec<AlertHold>,
         carousel_advances: Vec<CarouselAdvance>,
@@ -1054,9 +1050,9 @@ mod tests {
     #[allow(clippy::too_many_lines)]
     fn contract_fixtures() -> ContractFixtures {
         let issue = ValidationIssue {
-            path: "cards[0].presence".into(),
-            code: ValidationCode::OutOfRange,
-            message: "an alert-only card must configure an alert".into(),
+            path: "active_playlist_id".into(),
+            code: ValidationCode::MissingReference,
+            message: "active playlist does not exist".into(),
         };
         let file_source = CalendarSource::File("/tmp/calendar.ics".into());
         let url_source = CalendarSource::Url("https://example.test/calendar.ics".into());
@@ -1068,9 +1064,6 @@ mod tests {
                 template: DisplayTemplate::DigitalClock,
                 tap_action: WidgetTapAction::None,
                 refresh: RefreshPolicy::DeviceLocal,
-                presence: CardPresence::InRotation {
-                    dwell_seconds: None,
-                },
                 alert: CardAlert::None,
             },
             CardSettings::Pomodoro {
@@ -1080,9 +1073,6 @@ mod tests {
                 template: DisplayTemplate::ProgressRing,
                 tap_action: WidgetTapAction::StartPause,
                 refresh: RefreshPolicy::DeviceLocal,
-                presence: CardPresence::InRotation {
-                    dwell_seconds: None,
-                },
                 alert: CardAlert::OnTimerFinish {
                     hold: AlertHold::UntilDismissed,
                 },
@@ -1094,9 +1084,6 @@ mod tests {
                 template: DisplayTemplate::RowList,
                 tap_action: WidgetTapAction::None,
                 refresh: RefreshPolicy::Interval { minutes: 15 },
-                presence: CardPresence::InRotation {
-                    dwell_seconds: None,
-                },
                 alert: CardAlert::BeforeEvent {
                     lead_minutes: 5,
                     hold: AlertHold::Seconds { value: 60 },
@@ -1117,7 +1104,6 @@ mod tests {
                     url: "https://example.test/weather".into(),
                 },
                 refresh: RefreshPolicy::Interval { minutes: 30 },
-                presence: CardPresence::AlertOnly,
                 alert: CardAlert::None,
             },
             CardSettings::JsonFeed {
@@ -1133,7 +1119,6 @@ mod tests {
                     application_id: "com.example.metrics".into(),
                 },
                 refresh: RefreshPolicy::Manual,
-                presence: CardPresence::Off,
                 alert: CardAlert::None,
             },
             CardSettings::Rss {
@@ -1144,12 +1129,39 @@ mod tests {
                 template: DisplayTemplate::RowList,
                 tap_action: WidgetTapAction::Dismiss,
                 refresh: RefreshPolicy::Interval { minutes: 15 },
-                presence: CardPresence::InRotation {
-                    dwell_seconds: Some(20),
-                },
                 alert: CardAlert::None,
             },
         ]);
+        let playlist_entries = vec![
+            PlaylistEntry {
+                card_id: "clock".into(),
+                dwell_seconds: None,
+            },
+            PlaylistEntry {
+                card_id: "pomodoro".into(),
+                dwell_seconds: Some(20),
+            },
+            PlaylistEntry {
+                card_id: "calendar".into(),
+                dwell_seconds: None,
+            },
+        ];
+        let playlists = vec![
+            Playlist {
+                id: "workday".into(),
+                name: "Workday".into(),
+                advance: CarouselAdvance::Timed {
+                    default_dwell_seconds: 30,
+                },
+                entries: playlist_entries.clone(),
+            },
+            Playlist {
+                id: "manual".into(),
+                name: "Manual".into(),
+                advance: CarouselAdvance::Manual,
+                entries: vec![playlist_entries[0].clone()],
+            },
+        ];
         let config = AppConfig {
             schema_version: CURRENT_SCHEMA_VERSION,
             preferences: AppPreferences {
@@ -1160,7 +1172,8 @@ mod tests {
             },
             cards: cards.clone(),
             assets: Vec::new(),
-            carousel: CarouselSettings::default(),
+            playlists: playlists.clone(),
+            active_playlist_id: "workday".into(),
             updater: UpdaterSettings::default(),
         };
         let card_data = vec![CardDataSnapshot {
@@ -1239,8 +1252,9 @@ mod tests {
                 message: "the display refused this card's data (InvalidPayload): invalid push data"
                     .into(),
             }],
-            persistence: PersistenceState::RecoverableError {
-                message: "disk full".into(),
+            persistence: PersistenceState::ValidationFailed {
+                message: SAVED_SETTINGS_VALIDATION_FAILURE_MESSAGE.into(),
+                issues: vec![issue.clone()],
             },
             diagnostics: RuntimeDiagnostics {
                 commands_processed: 1,
@@ -1287,6 +1301,10 @@ mod tests {
             PersistenceState::Saving,
             PersistenceState::RecoverableError {
                 message: "error".into(),
+            },
+            PersistenceState::ValidationFailed {
+                message: SAVED_SETTINGS_VALIDATION_FAILURE_MESSAGE.into(),
+                issues: vec![issue.clone()],
             },
         ];
         let validation_codes = vec![
@@ -1358,16 +1376,8 @@ mod tests {
             snapshot,
             configs: vec![config],
             card_settings: all_card_settings,
-            card_presences: vec![
-                CardPresence::InRotation {
-                    dwell_seconds: None,
-                },
-                CardPresence::InRotation {
-                    dwell_seconds: Some(20),
-                },
-                CardPresence::AlertOnly,
-                CardPresence::Off,
-            ],
+            playlists,
+            playlist_entries,
             card_alerts: vec![
                 CardAlert::None,
                 CardAlert::OnTimerFinish {

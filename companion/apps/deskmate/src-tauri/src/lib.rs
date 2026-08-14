@@ -4,8 +4,8 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
 use app_core::{
-    AppSnapshot, ConfigStore, ConnectionState, PersistenceState, ProviderState, RuntimeHandle,
-    RuntimeState,
+    AppSnapshot, ConfigStore, ConnectionState, LoadOutcome, PersistenceState, ProviderState,
+    RuntimeHandle, RuntimeState, SAVED_SETTINGS_VALIDATION_FAILURE_MESSAGE,
 };
 use tauri::image::Image;
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
@@ -289,20 +289,17 @@ fn setup_app(app: &mut App) -> Result<(), Box<dyn Error>> {
     let config_path = app.path().app_data_dir()?.join(CONFIG_FILE_NAME);
     let store = ConfigStore::new(config_path);
     let loaded = store.load();
-    // TODO(plan task 5): carry the typed validation outcome into AppSnapshot/IPC.
-    let recovery = loaded.recovery();
-    if let Some(recovery) = &recovery {
-        eprintln!("saved Deskmate configuration was not applied: {recovery:?}");
+    let persistence = load_failure_persistence(&loaded);
+    if let Some(persistence) = &persistence {
+        eprintln!("saved Deskmate configuration was not applied: {persistence:?}");
     }
 
     // The window is configured hidden, so the single owner is running before any
     // settings UI appears. The explicit Tauri app-data path keeps filesystem policy
     // out of app-core.
     let runtime = Arc::new(RuntimeHandle::start_serial(loaded.into_config(), None)?);
-    if let Some(recovery) = recovery {
-        runtime.set_persistence_state(PersistenceState::RecoverableError {
-            message: recovery.to_string(),
-        })?;
+    if let Some(persistence) = persistence {
+        runtime.set_persistence_state(persistence)?;
     }
     let autostart_enabled = match app.autolaunch().is_enabled() {
         Ok(enabled) => enabled,
@@ -334,6 +331,19 @@ fn setup_app(app: &mut App) -> Result<(), Box<dyn Error>> {
         .replace(worker);
     show_settings(app.handle());
     Ok(())
+}
+
+fn load_failure_persistence(loaded: &LoadOutcome) -> Option<PersistenceState> {
+    match loaded {
+        LoadOutcome::Loaded { .. } => None,
+        LoadOutcome::Recovered { error, .. } => Some(PersistenceState::RecoverableError {
+            message: error.to_string(),
+        }),
+        LoadOutcome::ValidationFailed { issues, .. } => Some(PersistenceState::ValidationFailed {
+            message: SAVED_SETTINGS_VALIDATION_FAILURE_MESSAGE.into(),
+            issues: issues.clone(),
+        }),
+    }
 }
 
 pub fn run() {
@@ -393,6 +403,7 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use app_core::{AppConfig, ConfigOrigin, StoreError, ValidationCode, ValidationIssue};
 
     #[test]
     fn tray_ids_map_only_to_supported_actions() {
@@ -433,5 +444,46 @@ mod tests {
         );
         assert_eq!(pause_menu_text(false), "Pause pushing");
         assert_eq!(pause_menu_text(true), "Resume pushing");
+    }
+
+    #[test]
+    fn validation_load_failure_remains_typed_in_snapshot_persistence() {
+        let issue = ValidationIssue {
+            path: "active_playlist_id".into(),
+            code: ValidationCode::MissingReference,
+            message: "active playlist does not exist".into(),
+        };
+        let loaded = LoadOutcome::ValidationFailed {
+            config: AppConfig::default(),
+            origin: ConfigOrigin::Defaults,
+            issues: vec![issue.clone()],
+        };
+
+        assert_eq!(
+            load_failure_persistence(&loaded),
+            Some(PersistenceState::ValidationFailed {
+                message: SAVED_SETTINGS_VALIDATION_FAILURE_MESSAGE.into(),
+                issues: vec![issue],
+            })
+        );
+
+        let recovered = LoadOutcome::Recovered {
+            config: AppConfig::default(),
+            origin: ConfigOrigin::Defaults,
+            error: StoreError::InvalidJson {
+                message: "expected value".into(),
+            },
+        };
+        assert!(matches!(
+            load_failure_persistence(&recovered),
+            Some(PersistenceState::RecoverableError { .. })
+        ));
+        assert_eq!(
+            load_failure_persistence(&LoadOutcome::Loaded {
+                config: AppConfig::default(),
+                origin: ConfigOrigin::Defaults,
+            }),
+            None
+        );
     }
 }

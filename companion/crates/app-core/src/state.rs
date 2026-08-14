@@ -281,5 +281,11 @@ impl CardDataSnapshot {
 pub enum PersistenceState {
     Clean,
     Saving,
-    RecoverableError { message: String },
+    RecoverableError {
+        message: String,
+    },
+    ValidationFailed {
+        message: String,
+        issues: Vec<crate::ValidationIssue>,
+    },
 }

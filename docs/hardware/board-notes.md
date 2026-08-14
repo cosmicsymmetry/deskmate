@@ -1526,15 +1526,41 @@ not one. On this board the usable ceiling for that pair, measured at
 non-NULL `lv_display_t`, so its caller dereferences freed memory and jumps through a
 garbage function pointer instead of reporting an error.
 
-**Not yet verified on hardware.** The board stopped responding on both USB CDC and
-built-in USB-JTAG after the third diagnostic flash (still enumerated as
-`USB JTAG_serial debug unit`, VID `0x303a`, serial `A4:CB:8F:DB:33:28`, but
-`ioreg` reports `DevicePowerState = 0`; `esptool` fails with "No serial data
-received" under every reset mode and baud, and OpenOCD fails at
-`libusb_get_string_descriptor_ascii() failed with -1`). Most likely a USB endpoint
-wedged by ~1.3 s-period crash-looping with the USB-Serial/JTAG console enabled;
-recovery needs a physical unplug/replug. **The fix builds and passes all host and
-companion suites but has NOT been observed booting on the board — three consecutive
-clean boots to the standalone clock and a `deskmate-cli status` readback of
-protocol 1 / capabilities 11 still have to be run before this branch may be described
-as physically verified.**
+**Still not verified on hardware, for a second and different reason (2026-08-14).**
+The first blocker — a USB endpoint wedged by ~1.3 s-period crash-looping with the
+USB-Serial/JTAG console enabled, which left the board enumerated but silent on both
+CDC and built-in USB-JTAG — was cleared by a physical replug. The board now flashes
+cleanly (`Hash of data verified` on all four images at commit `b90e711`). But it now
+**boots into ROM DOWNLOAD mode on every reset**, so the application never runs:
+
+- Every ROM banner reads `rst:0x15 (USB_UART_CHIP_RESET),boot:0x23
+  (DOWNLOAD(USB/UART0))` followed by `waiting for download`, against the working
+  baseline of `boot:0x2b (SPI_FAST_FLASH_BOOT)`.
+- `GPIO_STRAP_REG` (`0x60004038`) reads `0x00000023` on every connection.
+  `GPIO_STRAP_SPI_BOOT_MASK` is `1 << 3` and bit 3 is clear — **GPIO0 is held LOW at
+  reset**, forcing download mode regardless of flash contents.
+- Confirmed independently: after an `--after hard_reset`, a follow-up
+  `esptool --before no_reset chip_id` still connects and returns the MAC. A running
+  application cannot answer the ROM loader; only a chip parked in download mode can.
+- Not the force-download RTC bit (`RTC_CNTL_OPTION1_REG` reads `0x00000000`, and
+  explicitly clearing it changes nothing), and not host DTR/RTS polarity (all four
+  DTR combinations across the reset pulse were swept; all gave `boot:0x23`). The
+  ROM's own "run user code" bypass (`flash_begin(0,0)` + `flash_finish(False)`) is
+  not usable over the USB-Serial/JTAG loader — it fails with `Serial data stream
+  stopped`.
+
+**Board-handling fact worth keeping:** GPIO0 held low — BOOT pressed or stuck — is
+indistinguishable from a dead board if you only look at "no serial output", because
+this project's committed console config (`CONFIG_ESP_CONSOLE_UART_DEFAULT=y` +
+`CONFIG_ESP_CONSOLE_SECONDARY_NONE=y`) makes a healthy running app silent over USB
+too. Read `GPIO_STRAP_REG` bit 3 to tell them apart: set (e.g. `0x2b`) means the chip
+will boot from flash. To recover, make sure nothing is pressing BOOT, then replug or
+press RESET alone.
+
+**The fix builds and passes all host and companion suites but has NOT been observed
+booting on the board.** Three consecutive clean boots to the standalone clock and a
+`deskmate-cli status` readback of protocol 1 / capabilities 11 still have to be run
+before this branch may be described as physically verified. The acceptance run must
+also re-eyeball both orientations for stale text or shifted colour blocks: the fix
+changes the flush-chunk geometry (80 → 64 lines), which is exactly what the CO5300
+even-window rounding rule (`board_lcd_rounder_cb`) exists to keep safe.

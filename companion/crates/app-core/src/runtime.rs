@@ -946,6 +946,7 @@ impl WorkerState {
         }
         scheduler.replace_providers(provider_deadlines, now);
         let rotation_card_ids = rotation_card_ids(&self.config);
+        // A playlist-ID change deliberately resets to its first entry, even when both playlists share the old card, per the acceptance test.
         self.active_screen = if previous_config.active_playlist_id == self.config.active_playlist_id
         {
             previous_active_screen

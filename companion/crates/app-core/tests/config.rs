@@ -1266,6 +1266,21 @@ fn duplicate_playlist_names_rejected() {
 }
 
 #[test]
+fn playlist_names_are_trimmed_for_uniqueness() {
+    let config = v4_config_with(
+        vec![
+            manual_playlist("p1", "Work", vec![entry("clock-a")]),
+            manual_playlist("p2", "Work ", vec![entry("clock-b")]),
+        ],
+        "p1",
+    );
+    let error = config.validate().unwrap_err();
+    assert!(error.issues.iter().any(|issue| {
+        issue.path == "playlists[1].name" && issue.code == ValidationCode::DuplicateId
+    }));
+}
+
+#[test]
 fn empty_active_playlist_rejected_when_cards_exist() {
     let config = v4_config_with(vec![manual_playlist("p1", "P1", vec![])], "p1");
     let error = config.validate().unwrap_err();
@@ -1298,6 +1313,12 @@ fn per_playlist_timed_advance_bounds() {
 fn unknown_field_in_playlist_rejected() {
     let json = r#"{"id":"p1","name":"Work","advance":{"kind":"manual"},"entries":[],"extra":1}"#;
     assert!(serde_json::from_str::<Playlist>(json).is_err());
+}
+
+#[test]
+fn unknown_field_in_playlist_entry_rejected() {
+    let json = r#"{"card_id":"x","extra":1}"#;
+    assert!(serde_json::from_str::<PlaylistEntry>(json).is_err());
 }
 
 #[test]

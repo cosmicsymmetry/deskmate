@@ -307,6 +307,8 @@ mod strict_tagged_enum {
 }
 
 pub const CURRENT_SCHEMA_VERSION: u32 = 4;
+pub(crate) const DEFAULT_PLAYLIST_ID: &str = "my-playlist";
+pub(crate) const DEFAULT_PLAYLIST_NAME: &str = "My playlist";
 pub const MAX_WIDGET_TITLE_LEN: usize = 64;
 pub const MAX_TIMEZONE_LEN: usize = 64;
 pub const MAX_ICS_SOURCE_LEN: usize = 2_048;
@@ -456,15 +458,15 @@ impl Default for AppConfig {
             }],
             assets: Vec::new(),
             playlists: vec![Playlist {
-                id: "my-playlist".into(),
-                name: "My playlist".into(),
+                id: DEFAULT_PLAYLIST_ID.into(),
+                name: DEFAULT_PLAYLIST_NAME.into(),
                 advance: CarouselAdvance::Manual,
                 entries: vec![PlaylistEntry {
                     card_id: "clock".into(),
                     dwell_seconds: None,
                 }],
             }],
-            active_playlist_id: "my-playlist".into(),
+            active_playlist_id: DEFAULT_PLAYLIST_ID.into(),
             updater: UpdaterSettings::default(),
         }
     }
@@ -555,7 +557,7 @@ impl AppConfig {
                     ),
                 ));
             }
-            if !playlist_names.insert(playlist.name.as_str()) {
+            if !playlist_names.insert(playlist.name.trim()) {
                 issues.push(ValidationIssue::new(
                     format!("{path}.name"),
                     ValidationCode::DuplicateId,

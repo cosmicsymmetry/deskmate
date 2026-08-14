@@ -8,6 +8,7 @@ use std::sync::Mutex;
 use atomic_write_file::AtomicWriteFile;
 use serde::{Deserialize, Serialize};
 
+use crate::config::{DEFAULT_PLAYLIST_ID, DEFAULT_PLAYLIST_NAME};
 use crate::{
     AlertHold, AppConfig, AppPreferences, AssetSettings, CURRENT_SCHEMA_VERSION, CalendarSource,
     CardAlert, CardSettings, CarouselAdvance, DisplayTemplate, JsonFieldMapping, Playlist,
@@ -734,7 +735,7 @@ fn migrate_v2(legacy: LegacyConfigV2) -> AppConfig {
         cards,
         assets: legacy.assets,
         playlists: vec![playlist],
-        active_playlist_id: "my-playlist".into(),
+        active_playlist_id: DEFAULT_PLAYLIST_ID.into(),
         updater: legacy.updater,
     }
 }
@@ -909,7 +910,7 @@ fn migrate_v3(legacy: LegacyConfigV3) -> AppConfig {
         )],
         cards,
         assets: legacy.assets,
-        active_playlist_id: "my-playlist".into(),
+        active_playlist_id: DEFAULT_PLAYLIST_ID.into(),
         updater: legacy.updater,
     }
 }
@@ -919,6 +920,7 @@ fn synthesize_playlist(
     advance: CarouselAdvance,
     mut entries: Vec<PlaylistEntry>,
 ) -> Playlist {
+    // With no InRotation cards, preserve authored array order rather than sorting by card ID.
     if entries.is_empty()
         && let Some(card) = cards.first()
     {
@@ -928,8 +930,8 @@ fn synthesize_playlist(
         });
     }
     Playlist {
-        id: "my-playlist".into(),
-        name: "My playlist".into(),
+        id: DEFAULT_PLAYLIST_ID.into(),
+        name: DEFAULT_PLAYLIST_NAME.into(),
         advance,
         entries,
     }
@@ -1124,7 +1126,7 @@ fn migrate_legacy(
         cards,
         assets: Vec::new(),
         playlists: vec![playlist],
-        active_playlist_id: "my-playlist".into(),
+        active_playlist_id: DEFAULT_PLAYLIST_ID.into(),
         updater: UpdaterSettings::default(),
     }
 }

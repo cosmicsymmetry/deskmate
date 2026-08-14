@@ -1401,6 +1401,211 @@ fn activated_screen_ids(control: &MockDeviceControl) -> Vec<String> {
         .collect()
 }
 
+#[test]
+fn rotation_follows_active_playlist_entry_order_and_dwell() {
+    let control = MockDeviceControl::default();
+    let config = AppConfig {
+        cards: vec![clock_card("a"), clock_card("b")],
+        playlists: vec![Playlist {
+            id: "p1".into(),
+            name: "P1".into(),
+            advance: CarouselAdvance::Timed {
+                default_dwell_seconds: 10,
+            },
+            entries: vec![
+                PlaylistEntry {
+                    card_id: "b".into(),
+                    dwell_seconds: Some(5),
+                },
+                PlaylistEntry {
+                    card_id: "a".into(),
+                    dwell_seconds: None,
+                },
+            ],
+        }],
+        active_playlist_id: "p1".into(),
+        ..AppConfig::default()
+    };
+    let runtime = start_runtime(config, &control, Duration::ZERO);
+
+    wait_for(Duration::from_secs(1), || {
+        activated_screen_ids(&control).first().map(String::as_str) == Some("b")
+    });
+    wait_for(Duration::from_secs(7), || {
+        activated_screen_ids(&control).get(1).map(String::as_str) == Some("a")
+    });
+    wait_for(Duration::from_secs(12), || {
+        activated_screen_ids(&control).get(2).map(String::as_str) == Some("b")
+    });
+
+    assert_eq!(&activated_screen_ids(&control)[..3], ["b", "a", "b"]);
+    runtime.shutdown().unwrap();
+}
+
+#[test]
+fn switching_active_playlist_is_a_config_apply_that_replays() {
+    let control = MockDeviceControl::default();
+    let mut config = AppConfig {
+        cards: vec![clock_card("shared"), clock_card("new-first")],
+        playlists: vec![
+            Playlist {
+                id: "p1".into(),
+                name: "P1".into(),
+                advance: CarouselAdvance::Manual,
+                entries: vec![PlaylistEntry {
+                    card_id: "shared".into(),
+                    dwell_seconds: None,
+                }],
+            },
+            Playlist {
+                id: "p2".into(),
+                name: "P2".into(),
+                advance: CarouselAdvance::Timed {
+                    default_dwell_seconds: 10,
+                },
+                entries: vec![
+                    PlaylistEntry {
+                        card_id: "new-first".into(),
+                        dwell_seconds: Some(5),
+                    },
+                    PlaylistEntry {
+                        card_id: "shared".into(),
+                        dwell_seconds: None,
+                    },
+                ],
+            },
+        ],
+        active_playlist_id: "p1".into(),
+        ..AppConfig::default()
+    };
+    let runtime = start_runtime(config.clone(), &control, Duration::ZERO);
+    wait_for(Duration::from_secs(1), || {
+        activated_screen_ids(&control) == ["shared"]
+    });
+    let apply_count_before = control
+        .operations()
+        .iter()
+        .filter(|operation| matches!(operation, Operation::ApplyLayout(_)))
+        .count();
+
+    config.active_playlist_id = "p2".into();
+    runtime.apply_config(config).unwrap();
+    wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
+        snapshot.config.active_playlist_id == "p2"
+            && snapshot.device.active_screen_id.as_deref() == Some("new-first")
+    });
+    wait_for(Duration::from_secs(1), || {
+        control
+            .operations()
+            .iter()
+            .filter(|operation| matches!(operation, Operation::ApplyLayout(_)))
+            .count()
+            == apply_count_before + 1
+            && activated_screen_ids(&control).get(1).map(String::as_str) == Some("new-first")
+    });
+
+    thread::sleep(Duration::from_secs(4));
+    assert_eq!(activated_screen_ids(&control), ["shared", "new-first"]);
+    wait_for(Duration::from_secs(3), || {
+        activated_screen_ids(&control).get(2).map(String::as_str) == Some("shared")
+    });
+    runtime.shutdown().unwrap();
+}
+
+#[test]
+fn alert_outside_active_playlist_still_fires() {
+    let control = MockDeviceControl::default();
+    let config = AppConfig {
+        cards: vec![
+            clock_card("visible"),
+            CardSettings::Pomodoro {
+                id: "alert-only".into(),
+                label: "Alert only".into(),
+                duration_seconds: 1,
+                template: DisplayTemplate::ProgressRing,
+                tap_action: WidgetTapAction::None,
+                refresh: RefreshPolicy::DeviceLocal,
+                alert: CardAlert::OnTimerFinish {
+                    hold: AlertHold::UntilDismissed,
+                },
+            },
+        ],
+        playlists: vec![Playlist {
+            id: "p1".into(),
+            name: "P1".into(),
+            advance: CarouselAdvance::Manual,
+            entries: vec![PlaylistEntry {
+                card_id: "visible".into(),
+                dwell_seconds: None,
+            }],
+        }],
+        active_playlist_id: "p1".into(),
+        ..AppConfig::default()
+    };
+    let runtime = start_runtime(config, &control, Duration::ZERO);
+    wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
+        snapshot.device.connection == ConnectionState::Online
+            && snapshot.device.active_screen_id.as_deref() == Some("visible")
+    });
+
+    runtime
+        .control_pomodoro("alert-only", PomodoroAction::Start)
+        .unwrap();
+    wait_for(Duration::from_secs(2), || {
+        control.operations().contains(&Operation::Interrupt(1))
+    });
+    control.push_event(DeviceEvent {
+        sequence: 1,
+        kind: EventKind::InterruptDismissed,
+        widget_id: "alert-only".into(),
+        screen_id: "alert-only".into(),
+        action: EventAction::DismissInterrupt,
+        interrupt_token: Some(1),
+    });
+
+    let after_dismissal = wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
+        snapshot.device.active_screen_id.as_deref() == Some("visible")
+    });
+    assert_eq!(
+        after_dismissal.device.active_screen_id.as_deref(),
+        Some("visible")
+    );
+    runtime.shutdown().unwrap();
+}
+
+#[test]
+fn manual_advance_playlist_has_no_rotation_deadline() {
+    let control = MockDeviceControl::default();
+    let config = AppConfig {
+        cards: vec![clock_card("first"), clock_card("second")],
+        playlists: vec![Playlist {
+            id: "p1".into(),
+            name: "P1".into(),
+            advance: CarouselAdvance::Manual,
+            entries: vec![
+                PlaylistEntry {
+                    card_id: "first".into(),
+                    dwell_seconds: None,
+                },
+                PlaylistEntry {
+                    card_id: "second".into(),
+                    dwell_seconds: None,
+                },
+            ],
+        }],
+        active_playlist_id: "p1".into(),
+        ..AppConfig::default()
+    };
+    let runtime = start_runtime(config, &control, Duration::ZERO);
+    wait_for(Duration::from_secs(1), || {
+        activated_screen_ids(&control) == ["first"]
+    });
+
+    thread::sleep(Duration::from_secs(6));
+    assert_eq!(activated_screen_ids(&control), ["first"]);
+    runtime.shutdown().unwrap();
+}
+
 // Rotation's pure logic (per-card dwell resolution, manual-mode disarming, in-rotation
 // ordering/skipping/wrap-around, and the swipe/IPC index-resolution edge cases) is
 // covered by instant unit tests in `companion/crates/app-core/src/runtime.rs`'s inline

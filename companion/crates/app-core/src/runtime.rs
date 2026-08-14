@@ -946,9 +946,14 @@ impl WorkerState {
         }
         scheduler.replace_providers(provider_deadlines, now);
         let rotation_card_ids = rotation_card_ids(&self.config);
-        self.active_screen = previous_active_screen
-            .filter(|active| rotation_card_ids.contains(active))
-            .or_else(|| rotation_card_ids.first().cloned());
+        self.active_screen = if previous_config.active_playlist_id == self.config.active_playlist_id
+        {
+            previous_active_screen
+                .filter(|active| rotation_card_ids.contains(active))
+                .or_else(|| rotation_card_ids.first().cloned())
+        } else {
+            rotation_card_ids.first().cloned()
+        };
         self.device.active_screen_id.clone_from(&self.active_screen);
         self.active_screen_dirty = self.active_screen.is_some();
         self.rearm_rotation_for_active_screen(scheduler, now);
@@ -1154,7 +1159,6 @@ fn rotation_card_ids(config: &AppConfig) -> Vec<String> {
 /// playlist's default. Returns `None` under `CarouselAdvance::Manual`, which
 /// is what keeps the rotation deadline disarmed in manual mode.
 fn current_dwell(config: &AppConfig, index: usize) -> Option<Duration> {
-    // TODO(plan task 4): move playlist selection and dwell handling into the playlist runtime.
     let playlist = config.active_playlist()?;
     let default = playlist.advance.default_dwell_seconds()?;
     let entry = playlist.entries.get(index)?;

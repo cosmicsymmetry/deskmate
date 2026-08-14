@@ -131,6 +131,193 @@ fn save_round_trips_and_migration_is_explicit() {
 }
 
 #[test]
+fn v3_migrates_to_one_playlist_preserving_rotation_order_and_dwell() {
+    let directory = TestDirectory::new("v3-migration");
+    let path = directory.config_path();
+    let store = ConfigStore::new(&path);
+    fs::write(&path, include_bytes!("fixtures/v3-roundtrip.json")).unwrap();
+
+    let outcome = store.load();
+    assert_eq!(outcome.origin, ConfigOrigin::MigratedV3);
+    assert!(outcome.recovery.is_none());
+
+    let config = outcome.config;
+    assert_eq!(config.schema_version, 4);
+    assert_eq!(config.active_playlist_id, "my-playlist");
+    assert_eq!(config.playlists.len(), 1);
+    let playlist = &config.playlists[0];
+    assert_eq!(playlist.id, "my-playlist");
+    assert_eq!(playlist.name, "My playlist");
+    assert_eq!(
+        playlist.advance,
+        CarouselAdvance::Timed {
+            default_dwell_seconds: 30
+        }
+    );
+    assert_eq!(playlist.entries.len(), 2);
+    assert_eq!(playlist.entries[0].card_id, "a");
+    assert_eq!(playlist.entries[0].dwell_seconds, Some(20));
+    assert_eq!(playlist.entries[1].card_id, "d");
+    assert_eq!(playlist.entries[1].dwell_seconds, None);
+
+    let ids: Vec<&str> = config.cards.iter().map(CardSettings::id).collect();
+    assert_eq!(ids, ["a", "b", "c", "d"]);
+    assert!(matches!(
+        &config.cards[0],
+        CardSettings::Clock {
+            title,
+            show_seconds: true,
+            template: DisplayTemplate::AnalogClock,
+            tap_action: WidgetTapAction::None,
+            refresh: RefreshPolicy::DeviceLocal,
+            alert: CardAlert::None,
+            ..
+        } if title == "Desk"
+    ));
+    assert!(matches!(
+        &config.cards[1],
+        CardSettings::Pomodoro {
+            label,
+            duration_seconds: 1_200,
+            template: DisplayTemplate::ProgressRing,
+            tap_action: WidgetTapAction::Reset,
+            refresh: RefreshPolicy::DeviceLocal,
+            alert: CardAlert::OnTimerFinish {
+                hold: AlertHold::UntilDismissed
+            },
+            ..
+        } if label == "Deep work"
+    ));
+    assert!(matches!(
+        &config.cards[2],
+        CardSettings::Calendar {
+            title,
+            source: CalendarSource::Url(source),
+            template: DisplayTemplate::RowList,
+            tap_action: WidgetTapAction::Dismiss,
+            refresh: RefreshPolicy::Interval { minutes: 20 },
+            alert: CardAlert::None,
+            ..
+        } if title == "Meetings" && source == "https://example.test/calendar.ics"
+    ));
+    assert!(matches!(
+        &config.cards[3],
+        CardSettings::Weather {
+            title,
+            location,
+            units: app_core::WeatherUnits::Metric,
+            template: DisplayTemplate::BigNumberLabel,
+            tap_action: WidgetTapAction::OpenUrl { url },
+            refresh: RefreshPolicy::Interval { minutes: 30 },
+            alert: CardAlert::None,
+            ..
+        } if title == "Outside" && location == "Tbilisi" && url == "https://example.test/weather"
+    ));
+    assert_eq!(config.preferences.timezone, "Asia/Tbilisi");
+    assert!(config.preferences.autostart);
+    assert!(config.assets.is_empty());
+    assert_eq!(config.updater.channel, app_core::UpdateChannel::Beta);
+    assert!(config.validate().is_ok());
+}
+
+#[test]
+fn v3_all_alert_only_migrates_to_valid_config() {
+    let directory = TestDirectory::new("v3-alert-only");
+    let path = directory.config_path();
+    let store = ConfigStore::new(&path);
+    let alert_only = br#"{
+      "schema_version": 3,
+      "preferences": {
+        "timezone": "UTC",
+        "autostart": false,
+        "paused": false,
+        "orientation": "landscape"
+      },
+      "cards": [
+        {
+          "kind": "pomodoro",
+          "id": "focus",
+          "label": "Focus",
+          "duration_seconds": 1500,
+          "template": { "kind": "progress-ring" },
+          "tap_action": { "kind": "start-pause" },
+          "refresh": { "kind": "device-local" },
+          "presence": { "kind": "alert-only" },
+          "alert": { "kind": "on-timer-finish", "hold": { "kind": "until-dismissed" } }
+        },
+        {
+          "kind": "calendar",
+          "id": "agenda",
+          "title": "Agenda",
+          "source": { "kind": "url", "value": "https://example.test/agenda.ics" },
+          "template": { "kind": "row-list" },
+          "tap_action": { "kind": "none" },
+          "refresh": { "kind": "interval", "minutes": 15 },
+          "presence": { "kind": "alert-only" },
+          "alert": { "kind": "before-event", "lead_minutes": 5, "hold": { "kind": "seconds", "value": 60 } }
+        }
+      ],
+      "assets": [],
+      "carousel": { "advance": { "kind": "manual" } },
+      "updater": { "channel": "stable", "checks": "notify" }
+    }"#;
+    fs::write(&path, alert_only).unwrap();
+
+    let outcome = store.load();
+    assert_eq!(outcome.origin, ConfigOrigin::MigratedV3);
+    assert!(outcome.recovery.is_none());
+    assert_eq!(outcome.config.cards.len(), 2);
+    assert_eq!(outcome.config.playlists[0].entries.len(), 1);
+    assert_eq!(outcome.config.playlists[0].entries[0].card_id, "focus");
+    assert_eq!(
+        outcome.config.cards[0].alert(),
+        CardAlert::OnTimerFinish {
+            hold: AlertHold::UntilDismissed
+        }
+    );
+    assert!(outcome.config.validate().is_ok());
+}
+
+#[test]
+fn v0_v1_v2_migrate_directly_to_v4() {
+    let directory = TestDirectory::new("legacy-direct-to-v4");
+    let path = directory.config_path();
+    let store = ConfigStore::new(&path);
+
+    for (fixture, origin, expected_ids) in [
+        (
+            include_bytes!("fixtures/legacy-v0.json").as_slice(),
+            ConfigOrigin::MigratedV0,
+            &["clock"][..],
+        ),
+        (
+            include_bytes!("fixtures/released-m3-v1.json").as_slice(),
+            ConfigOrigin::MigratedV1,
+            &["pomodoro", "clock", "calendar"][..],
+        ),
+        (
+            include_bytes!("fixtures/v2-legacy.json").as_slice(),
+            ConfigOrigin::MigratedV2,
+            &["clock", "focus"][..],
+        ),
+    ] {
+        fs::write(&path, fixture).unwrap();
+        let outcome = store.load();
+        assert_eq!(outcome.origin, origin);
+        assert!(outcome.recovery.is_none());
+        assert_eq!(outcome.config.schema_version, 4);
+        assert_eq!(outcome.config.playlists.len(), 1);
+        let entry_ids: Vec<&str> = outcome.config.playlists[0]
+            .entries
+            .iter()
+            .map(|entry| entry.card_id.as_str())
+            .collect();
+        assert_eq!(entry_ids, expected_ids);
+        assert!(outcome.config.validate().is_ok());
+    }
+}
+
+#[test]
 fn malformed_truncated_and_oversized_files_preserve_bytes_and_last_good() {
     let directory = TestDirectory::new("recovery");
     let path = directory.config_path();
@@ -324,16 +511,21 @@ fn migrated_v2_documents_always_satisfy_the_rotation_rule() {
 }
 
 #[test]
-fn unknown_future_versions_still_fail_safely() {
+fn future_v5_is_a_recoverable_error_preserving_bytes() {
     let directory = TestDirectory::new("future-version");
     let path = directory.config_path();
     let store = ConfigStore::new(&path);
+
+    let mut last_good = AppConfig::default();
+    last_good.preferences.autostart = true;
+    store.save(&last_good).unwrap();
 
     let future = include_bytes!("fixtures/future-v5.json");
     fs::write(&path, future).unwrap();
 
     let outcome = store.load();
     assert_eq!(outcome.origin, ConfigOrigin::LastGood);
+    assert_eq!(outcome.config, last_good);
     assert!(matches!(
         outcome.recovery,
         Some(StoreError::UnsupportedVersion {

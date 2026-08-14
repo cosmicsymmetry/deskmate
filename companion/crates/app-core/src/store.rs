@@ -123,6 +123,7 @@ pub enum ConfigOrigin {
     MigratedV0,
     MigratedV1,
     MigratedV2,
+    MigratedV3,
     LastGood,
 }
 
@@ -267,6 +268,102 @@ struct LegacyConfigV2 {
     carousel: LegacyCarouselV2,
     #[serde(default)]
     updater: UpdaterSettings,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyConfigV3 {
+    schema_version: u32,
+    preferences: AppPreferences,
+    cards: Vec<LegacyCardV3>,
+    assets: Vec<AssetSettings>,
+    carousel: LegacyCarouselV3,
+    updater: UpdaterSettings,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyCarouselV3 {
+    advance: CarouselAdvance,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+enum LegacyCardPresenceV3 {
+    InRotation { dwell_seconds: Option<u16> },
+    AlertOnly,
+    Off,
+}
+
+/// Mirrors the v3 `CardSettings` shape exactly. `presence` is legacy-only and
+/// is translated into playlist membership; all other fields carry directly
+/// into the v4 card library.
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+enum LegacyCardV3 {
+    Clock {
+        id: String,
+        title: String,
+        show_seconds: bool,
+        template: DisplayTemplate,
+        tap_action: WidgetTapAction,
+        refresh: RefreshPolicy,
+        presence: LegacyCardPresenceV3,
+        alert: CardAlert,
+    },
+    Pomodoro {
+        id: String,
+        label: String,
+        duration_seconds: u32,
+        template: DisplayTemplate,
+        tap_action: WidgetTapAction,
+        refresh: RefreshPolicy,
+        presence: LegacyCardPresenceV3,
+        alert: CardAlert,
+    },
+    Calendar {
+        id: String,
+        title: String,
+        source: CalendarSource,
+        template: DisplayTemplate,
+        tap_action: WidgetTapAction,
+        refresh: RefreshPolicy,
+        presence: LegacyCardPresenceV3,
+        alert: CardAlert,
+    },
+    Weather {
+        id: String,
+        title: String,
+        location: String,
+        units: WeatherUnits,
+        template: DisplayTemplate,
+        tap_action: WidgetTapAction,
+        refresh: RefreshPolicy,
+        presence: LegacyCardPresenceV3,
+        alert: CardAlert,
+    },
+    JsonFeed {
+        id: String,
+        title: String,
+        url: String,
+        mappings: Vec<JsonFieldMapping>,
+        template: DisplayTemplate,
+        tap_action: WidgetTapAction,
+        refresh: RefreshPolicy,
+        presence: LegacyCardPresenceV3,
+        alert: CardAlert,
+    },
+    Rss {
+        id: String,
+        title: String,
+        url: String,
+        max_items: u8,
+        template: DisplayTemplate,
+        tap_action: WidgetTapAction,
+        refresh: RefreshPolicy,
+        presence: LegacyCardPresenceV3,
+        alert: CardAlert,
+    },
 }
 
 #[derive(Default, Deserialize)]
@@ -585,19 +682,211 @@ fn migrate_v2(legacy: LegacyConfigV2) -> AppConfig {
         },
         None => CarouselAdvance::Manual,
     };
+    let playlist = synthesize_playlist(&cards, advance, entries);
     AppConfig {
         schema_version: CURRENT_SCHEMA_VERSION,
         preferences: legacy.preferences,
         cards,
         assets: legacy.assets,
-        playlists: vec![Playlist {
-            id: "my-playlist".into(),
-            name: "My playlist".into(),
-            advance,
-            entries,
-        }],
+        playlists: vec![playlist],
         active_playlist_id: "my-playlist".into(),
         updater: legacy.updater,
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+fn card_from_legacy_v3(legacy: LegacyCardV3) -> (CardSettings, LegacyCardPresenceV3) {
+    match legacy {
+        LegacyCardV3::Clock {
+            id,
+            title,
+            show_seconds,
+            template,
+            tap_action,
+            refresh,
+            presence,
+            alert,
+        } => (
+            CardSettings::Clock {
+                id,
+                title,
+                show_seconds,
+                template,
+                tap_action,
+                refresh,
+                alert: migrate_v3_alert(presence, alert),
+            },
+            presence,
+        ),
+        LegacyCardV3::Pomodoro {
+            id,
+            label,
+            duration_seconds,
+            template,
+            tap_action,
+            refresh,
+            presence,
+            alert,
+        } => (
+            CardSettings::Pomodoro {
+                id,
+                label,
+                duration_seconds,
+                template,
+                tap_action,
+                refresh,
+                alert: migrate_v3_alert(presence, alert),
+            },
+            presence,
+        ),
+        LegacyCardV3::Calendar {
+            id,
+            title,
+            source,
+            template,
+            tap_action,
+            refresh,
+            presence,
+            alert,
+        } => (
+            CardSettings::Calendar {
+                id,
+                title,
+                source,
+                template,
+                tap_action,
+                refresh,
+                alert: migrate_v3_alert(presence, alert),
+            },
+            presence,
+        ),
+        LegacyCardV3::Weather {
+            id,
+            title,
+            location,
+            units,
+            template,
+            tap_action,
+            refresh,
+            presence,
+            alert,
+        } => (
+            CardSettings::Weather {
+                id,
+                title,
+                location,
+                units,
+                template,
+                tap_action,
+                refresh,
+                alert: migrate_v3_alert(presence, alert),
+            },
+            presence,
+        ),
+        LegacyCardV3::JsonFeed {
+            id,
+            title,
+            url,
+            mappings,
+            template,
+            tap_action,
+            refresh,
+            presence,
+            alert,
+        } => (
+            CardSettings::JsonFeed {
+                id,
+                title,
+                url,
+                mappings,
+                template,
+                tap_action,
+                refresh,
+                alert: migrate_v3_alert(presence, alert),
+            },
+            presence,
+        ),
+        LegacyCardV3::Rss {
+            id,
+            title,
+            url,
+            max_items,
+            template,
+            tap_action,
+            refresh,
+            presence,
+            alert,
+        } => (
+            CardSettings::Rss {
+                id,
+                title,
+                url,
+                max_items,
+                template,
+                tap_action,
+                refresh,
+                alert: migrate_v3_alert(presence, alert),
+            },
+            presence,
+        ),
+    }
+}
+
+fn migrate_v3_alert(presence: LegacyCardPresenceV3, alert: CardAlert) -> CardAlert {
+    if matches!(presence, LegacyCardPresenceV3::Off) {
+        CardAlert::None
+    } else {
+        alert
+    }
+}
+
+fn migrate_v3(legacy: LegacyConfigV3) -> AppConfig {
+    let mut cards = Vec::with_capacity(legacy.cards.len());
+    let mut entries = Vec::with_capacity(legacy.cards.len());
+    for legacy_card in legacy.cards {
+        let (card, presence) = card_from_legacy_v3(legacy_card);
+        if let LegacyCardPresenceV3::InRotation { dwell_seconds } = presence {
+            entries.push(PlaylistEntry {
+                card_id: card.id().to_owned(),
+                dwell_seconds,
+            });
+        }
+        cards.push(card);
+    }
+
+    AppConfig {
+        schema_version: CURRENT_SCHEMA_VERSION,
+        preferences: legacy.preferences,
+        playlists: vec![synthesize_playlist(
+            &cards,
+            legacy.carousel.advance,
+            entries,
+        )],
+        cards,
+        assets: legacy.assets,
+        active_playlist_id: "my-playlist".into(),
+        updater: legacy.updater,
+    }
+}
+
+fn synthesize_playlist(
+    cards: &[CardSettings],
+    advance: CarouselAdvance,
+    mut entries: Vec<PlaylistEntry>,
+) -> Playlist {
+    if entries.is_empty()
+        && let Some(card) = cards.first()
+    {
+        entries.push(PlaylistEntry {
+            card_id: card.id().to_owned(),
+            dwell_seconds: None,
+        });
+    }
+    Playlist {
+        id: "my-playlist".into(),
+        name: "My playlist".into(),
+        advance,
+        entries,
     }
 }
 
@@ -607,7 +896,6 @@ fn decode_config(bytes: &[u8]) -> Result<(AppConfig, ConfigOrigin), StoreError> 
         serde_json::from_str(text).map_err(|error| StoreError::InvalidJson {
             message: error.to_string(),
         })?;
-    // TODO(plan task 2): decode and migrate schema v3 before treating it as unsupported.
     let (config, origin) = match header.schema_version {
         CURRENT_SCHEMA_VERSION => (
             serde_json::from_str(text).map_err(|error| StoreError::InvalidJson {
@@ -615,6 +903,19 @@ fn decode_config(bytes: &[u8]) -> Result<(AppConfig, ConfigOrigin), StoreError> 
             })?,
             ConfigOrigin::Current,
         ),
+        3 => {
+            let legacy: LegacyConfigV3 =
+                serde_json::from_str(text).map_err(|error| StoreError::InvalidJson {
+                    message: error.to_string(),
+                })?;
+            if legacy.schema_version != 3 {
+                return Err(StoreError::UnsupportedVersion {
+                    found: legacy.schema_version,
+                    supported: CURRENT_SCHEMA_VERSION,
+                });
+            }
+            (migrate_v3(legacy), ConfigOrigin::MigratedV3)
+        }
         2 => {
             let legacy: LegacyConfigV2 =
                 serde_json::from_str(text).map_err(|error| StoreError::InvalidJson {
@@ -771,17 +1072,13 @@ fn migrate_legacy(
         cards.push(card_from_legacy_widget(widget));
     }
 
+    let playlist = synthesize_playlist(&cards, CarouselAdvance::Manual, entries);
     AppConfig {
         schema_version: CURRENT_SCHEMA_VERSION,
         preferences,
         cards,
         assets: Vec::new(),
-        playlists: vec![Playlist {
-            id: "my-playlist".into(),
-            name: "My playlist".into(),
-            advance: CarouselAdvance::Manual,
-            entries,
-        }],
+        playlists: vec![playlist],
         active_playlist_id: "my-playlist".into(),
         updater: UpdaterSettings::default(),
     }

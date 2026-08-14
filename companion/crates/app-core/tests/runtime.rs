@@ -20,14 +20,6 @@ use protocol::{
 
 const FULL_JSON: &str = include_str!("fixtures/full.json");
 
-#[allow(dead_code)]
-#[derive(Clone, Copy)]
-enum CardPresence {
-    InRotation { dwell_seconds: Option<u16> },
-    AlertOnly,
-    Off,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Operation {
     Connect,
@@ -1370,8 +1362,7 @@ fn app_restart_intentionally_resets_transient_timer_state_to_idle() {
     second.shutdown().unwrap();
 }
 
-fn clock_card(id: &str, presence: CardPresence) -> CardSettings {
-    let _ = presence;
+fn clock_card(id: &str) -> CardSettings {
     CardSettings::Clock {
         id: id.into(),
         title: id.into(),
@@ -1383,8 +1374,7 @@ fn clock_card(id: &str, presence: CardPresence) -> CardSettings {
     }
 }
 
-fn pomodoro_card(id: &str, presence: CardPresence, alert: CardAlert) -> CardSettings {
-    let _ = presence;
+fn pomodoro_card(id: &str, alert: CardAlert) -> CardSettings {
     CardSettings::Pomodoro {
         id: id.into(),
         label: id.into(),
@@ -1445,26 +1435,15 @@ fn timed_advance_wiring_reaches_the_device_after_one_dwell() {
         }],
         active_playlist_id: "p1".into(),
         cards: vec![
-            clock_card(
-                "first",
-                CardPresence::InRotation {
-                    dwell_seconds: Some(5),
-                },
-            ),
+            clock_card("first"),
             pomodoro_card(
                 "alerting",
-                CardPresence::AlertOnly,
                 CardAlert::OnTimerFinish {
                     hold: AlertHold::UntilDismissed,
                 },
             ),
-            clock_card(
-                "second",
-                CardPresence::InRotation {
-                    dwell_seconds: Some(5),
-                },
-            ),
-            clock_card("muted", CardPresence::Off),
+            clock_card("second"),
+            clock_card("muted"),
         ],
         ..AppConfig::default()
     };
@@ -1494,11 +1473,11 @@ fn timed_advance_wiring_reaches_the_device_after_one_dwell() {
 /// `latest_fields` synchronously at config-install time (no device
 /// connection or provider round trip needed), which makes the live card's
 /// exact field values available on the very first snapshot. A second,
-/// otherwise-identical pomodoro card with `CardPresence::Off` is included to
-/// prove an off card contributes no entry at all — a stale entry would
-/// otherwise render in the settings preview as if it were live.
+/// otherwise-identical pomodoro card outside the playlist is included to prove
+/// a non-alerting library-only card contributes no entry at all — a stale entry
+/// would otherwise render in the settings preview as if it were live.
 #[test]
-fn card_data_carries_a_live_cards_exact_field_values_and_excludes_off_cards() {
+fn card_data_carries_live_fields_and_excludes_library_only_cards() {
     let control = MockDeviceControl::default();
     let config = AppConfig {
         playlists: vec![Playlist {
@@ -1512,14 +1491,8 @@ fn card_data_carries_a_live_cards_exact_field_values_and_excludes_off_cards() {
         }],
         active_playlist_id: "p1".into(),
         cards: vec![
-            pomodoro_card(
-                "on",
-                CardPresence::InRotation {
-                    dwell_seconds: None,
-                },
-                CardAlert::None,
-            ),
-            pomodoro_card("off", CardPresence::Off, CardAlert::None),
+            pomodoro_card("on", CardAlert::None),
+            pomodoro_card("library-only", CardAlert::None),
         ],
         ..AppConfig::default()
     };
@@ -1552,8 +1525,11 @@ fn card_data_carries_a_live_cards_exact_field_values_and_excludes_off_cards() {
     );
 
     assert!(
-        !snapshot.card_data.iter().any(|card| card.card_id == "off"),
-        "an off-presence card must not contribute an entry to card_data"
+        !snapshot
+            .card_data
+            .iter()
+            .any(|card| card.card_id == "library-only"),
+        "a non-alerting card outside the playlist must not contribute an entry to card_data"
     );
 
     runtime.shutdown().unwrap();

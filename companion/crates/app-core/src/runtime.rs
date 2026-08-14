@@ -2396,14 +2396,6 @@ mod tests {
         RefreshPolicy, WidgetTapAction,
     };
 
-    #[allow(dead_code)]
-    #[derive(Clone, Copy)]
-    enum CardPresence {
-        InRotation { dwell_seconds: Option<u16> },
-        AlertOnly,
-        Off,
-    }
-
     struct ImmediateRefresher {
         completed: mpsc::Sender<()>,
     }
@@ -2474,8 +2466,7 @@ mod tests {
     // `advance_rotation`, `drain_device_events`, and `process_command` directly, so
     // they run in well under a millisecond instead of sleeping out real dwells.
 
-    fn rotation_clock_card(id: &str, presence: CardPresence) -> CardSettings {
-        let _ = presence;
+    fn rotation_clock_card(id: &str) -> CardSettings {
         CardSettings::Clock {
             id: id.into(),
             title: id.into(),
@@ -2487,8 +2478,7 @@ mod tests {
         }
     }
 
-    fn rotation_pomodoro_card(id: &str, presence: CardPresence, alert: CardAlert) -> CardSettings {
-        let _ = presence;
+    fn rotation_pomodoro_card(id: &str, alert: CardAlert) -> CardSettings {
         CardSettings::Pomodoro {
             id: id.into(),
             label: id.into(),
@@ -2540,20 +2530,7 @@ mod tests {
     /// neither card should ever need (both set an explicit dwell).
     fn timed_two_card_config() -> AppConfig {
         rotation_config(
-            vec![
-                rotation_clock_card(
-                    "a",
-                    CardPresence::InRotation {
-                        dwell_seconds: Some(5),
-                    },
-                ),
-                rotation_clock_card(
-                    "b",
-                    CardPresence::InRotation {
-                        dwell_seconds: Some(5),
-                    },
-                ),
-            ],
+            vec![rotation_clock_card("a"), rotation_clock_card("b")],
             CarouselAdvance::Timed {
                 default_dwell_seconds: 45,
             },
@@ -2568,25 +2545,14 @@ mod tests {
     fn timed_config_with_alert_only_between_two_in_rotation_cards() -> AppConfig {
         rotation_config(
             vec![
-                rotation_clock_card(
-                    "a",
-                    CardPresence::InRotation {
-                        dwell_seconds: Some(5),
-                    },
-                ),
+                rotation_clock_card("a"),
                 rotation_pomodoro_card(
                     "b",
-                    CardPresence::AlertOnly,
                     CardAlert::OnTimerFinish {
                         hold: AlertHold::UntilDismissed,
                     },
                 ),
-                rotation_clock_card(
-                    "c",
-                    CardPresence::InRotation {
-                        dwell_seconds: Some(5),
-                    },
-                ),
+                rotation_clock_card("c"),
             ],
             CarouselAdvance::Timed {
                 default_dwell_seconds: 45,
@@ -2696,18 +2662,8 @@ mod tests {
     fn current_dwell_resolves_each_cards_own_value_before_falling_back_to_the_default() {
         let config = rotation_config(
             vec![
-                rotation_clock_card(
-                    "explicit",
-                    CardPresence::InRotation {
-                        dwell_seconds: Some(10),
-                    },
-                ),
-                rotation_clock_card(
-                    "defaulted",
-                    CardPresence::InRotation {
-                        dwell_seconds: None,
-                    },
-                ),
+                rotation_clock_card("explicit"),
+                rotation_clock_card("defaulted"),
             ],
             CarouselAdvance::Timed {
                 default_dwell_seconds: 45,
@@ -2727,14 +2683,11 @@ mod tests {
         let mut config = timed_two_card_config();
         config.cards.push(rotation_pomodoro_card(
             "alert-only",
-            CardPresence::AlertOnly,
             CardAlert::OnTimerFinish {
                 hold: AlertHold::UntilDismissed,
             },
         ));
-        config
-            .cards
-            .push(rotation_clock_card("off", CardPresence::Off));
+        config.cards.push(rotation_clock_card("off"));
         let mut scheduler = Scheduler::new(
             now,
             Duration::from_hours(1),
@@ -2947,18 +2900,9 @@ mod tests {
         let now = Instant::now();
         let config = rotation_config(
             vec![
-                rotation_pomodoro_card(
-                    "quiet",
-                    CardPresence::InRotation {
-                        dwell_seconds: None,
-                    },
-                    CardAlert::None,
-                ),
+                rotation_pomodoro_card("quiet", CardAlert::None),
                 rotation_pomodoro_card(
                     "loud",
-                    CardPresence::InRotation {
-                        dwell_seconds: None,
-                    },
                     CardAlert::OnTimerFinish {
                         hold: AlertHold::UntilDismissed,
                     },
@@ -3027,9 +2971,6 @@ mod tests {
         let config = rotation_config(
             vec![rotation_pomodoro_card(
                 "loud",
-                CardPresence::InRotation {
-                    dwell_seconds: None,
-                },
                 CardAlert::OnTimerFinish {
                     hold: AlertHold::Seconds { value: 30 },
                 },
@@ -3101,9 +3042,6 @@ mod tests {
         let config = rotation_config(
             vec![rotation_pomodoro_card(
                 "loud",
-                CardPresence::InRotation {
-                    dwell_seconds: None,
-                },
                 CardAlert::OnTimerFinish {
                     hold: AlertHold::UntilDismissed,
                 },
@@ -3150,9 +3088,6 @@ mod tests {
             vec![
                 rotation_pomodoro_card(
                     "sticky",
-                    CardPresence::InRotation {
-                        dwell_seconds: None,
-                    },
                     CardAlert::OnTimerFinish {
                         hold: AlertHold::UntilDismissed,
                     },

@@ -787,30 +787,14 @@ impl AppConfig {
             .iter()
             .map(|entry| entry.card_id.as_str())
             .collect();
-        let mut compiled_cards = Vec::with_capacity(self.cards.len());
-        for entry in &active_playlist.entries {
+        let compiled_card_ids = self.compiled_card_ids();
+        for card_id in &compiled_card_ids {
             let (index, card) = self
                 .cards
                 .iter()
                 .enumerate()
-                .find(|(_, card)| card.id() == entry.card_id)
-                .expect("validated playlist card must exist");
-            compiled_cards.push((index, card, true));
-        }
-        let mut alert_outsiders: Vec<(usize, &CardSettings)> = self
-            .cards
-            .iter()
-            .enumerate()
-            .filter(|(_, card)| !card.alert().is_none() && !active_card_ids.contains(card.id()))
-            .collect();
-        alert_outsiders.sort_by(|(_, left), (_, right)| left.id().cmp(right.id()));
-        compiled_cards.extend(
-            alert_outsiders
-                .into_iter()
-                .map(|(index, card)| (index, card, false)),
-        );
-
-        for &(index, card, has_screen) in &compiled_cards {
+                .find(|(_, card)| card.id() == *card_id)
+                .expect("validated compiled card must exist");
             let Some(widget) = card.wire_config() else {
                 compatibility_issues.push(ValidationIssue::new(
                     format!("cards[{index}]"),
@@ -819,7 +803,7 @@ impl AppConfig {
                 ));
                 continue;
             };
-            if has_screen {
+            if active_card_ids.contains(*card_id) {
                 // The screen ID is the card ID. The protocol treats widget and screen
                 // IDs as distinct namespaces, so reuse is legal, and compilation still
                 // invents no identifiers.
@@ -842,8 +826,7 @@ impl AppConfig {
                 issues: compatibility_issues,
             });
         }
-        let initial_pushes = self
-            .compiled_card_ids()
+        let initial_pushes = compiled_card_ids
             .into_iter()
             .map(|card_id| {
                 self.cards

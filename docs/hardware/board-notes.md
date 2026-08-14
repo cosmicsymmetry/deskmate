@@ -1582,7 +1582,7 @@ keeps odd-width rotated column windows safe, so the acceptance run must re-eyeba
 both orientations for stale text or shifted colour blocks at the new strip height.
 That visual check needs human eyes and has not been performed.
 
-## V1 physical acceptance — 2026-08-14 — Phases 1-3 PASS
+## V1 physical acceptance — 2026-08-14 — Phases 1-3 PASS (soak waived at 27 min)
 
 HEAD `05d04ce`, board at `/dev/cu.usbmodem101`. Full detail:
 `.superpowers/sdd/2026-08-11-deskmate-v1-preview-typeface-redesign/task-11-report.md`.

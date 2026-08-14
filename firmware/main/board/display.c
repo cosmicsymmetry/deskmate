@@ -160,11 +160,14 @@ static void board_lcd_flush_finish_cb(lv_event_t *e)
 // CO5300 v2 panels require partial update windows to start and end on
 // two-pixel boundaries. Waveshare added this exact rounding rule when it
 // changed the ESP32-S3-Touch-AMOLED-1.8 BSP from the v1 SH8601 panel to the
-// v2 CO5300 panel. It is especially important for 90/270-degree software
-// rotation: our 29,440-pixel buffer otherwise divides a 448-pixel-wide
-// landscape repaint into 65-row strips. Rotation turns each strip into an
-// odd-width CO5300 column window, which leaves the controller's subsequent
-// pixel stream/addressing visibly shifted (stale text and colored blocks).
+// v2 CO5300 panel. Historically, this was motivated by 90/270-degree software
+// rotation: the 80-line buffer produced odd 65-row strips on full repaints,
+// which became odd-width column windows through rotation, visibly shifting the
+// controller's pixel stream/addressing (stale text and colored blocks). This
+// hazard is now gone — our 23,552-pixel (368×64) buffer yields 7 even strips
+// per pass. However, the rule remains load-bearing because partial widget
+// invalidations (LVGL-driven updates of arbitrary rectangles) produce odd-sized
+// or odd-positioned windows regardless of buffer geometry.
 //
 // Both logical resolutions are even, so their final valid coordinates are
 // odd (447/367). Expanding a clipped invalid area outward this way therefore

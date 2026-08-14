@@ -49,9 +49,15 @@ of letting code and documentation diverge.
   and bounded alert triggers compiling to the unchanged wire contract. M4 Task 4 is now
   timed rotation and alerts (delivered by Task 2B) rather than tile dashboards, which
   were cancelled, not deferred. M4's plan is
-  `docs/superpowers/plans/2026-08-05-deskmate-m4-v1-completion.md` and the frozen config
-  contract is `docs/config/v3.md`. M4 Task 3 (the `AnalogClock`, `BigNumberLabel`, and
-  `IconBadgeText` templates; wire kinds 4-6) is complete —
+  `docs/superpowers/plans/2026-08-05-deskmate-m4-v1-completion.md` and its frozen schema-v3
+  config contract is `docs/config/v3.md`. The V1 playlists plan
+  (`docs/superpowers/plans/2026-08-11-deskmate-v1-playlists.md`) is delivered: schema v4
+  replaces per-card `presence` and the global carousel with the card library and named
+  playlists, one active, while preserving the wire and firmware; the current frozen
+  contract is `docs/config/v4.md`. That plan also **FIXED** the validation-mislabeling
+  defect: a validation failure preserves genuine last-good state, remains typed, and is
+  never presented as "your last working settings". M4 Task 3 (the `AnalogClock`,
+  `BigNumberLabel`, and `IconBadgeText` templates; wire kinds 4-6) is complete —
   `CURRENT_CAPABILITIES` is now `11` (core widgets | config rotation | extended
   templates) — and was physically verified on 2026-08-11, recorded in
   `docs/hardware/board-notes.md` under "Extended templates (M4 Task 3) — verified
@@ -68,11 +74,10 @@ of letting code and documentation diverge.
   was physically verified on 2026-08-06:
   eight of the nine checks pass, recorded in `docs/hardware/board-notes.md`. `AlertHold`
   is decided: `hold` is host-side bookkeeping only and never clears the panel, which
-  yields the overlay on tap alone. Do not add a wire dismissal message for it. Two items
-  stay open and must not be described as resolved — an alert firing while the device is
-  unpowered was lost on reconnect (observed once, undiagnosed, not covered by any test);
-  and a config that fails validation falls back to built-in defaults, pushes them to the
-  device, and mislabels them "your last working settings".
+  yields the overlay on tap alone. Do not add a wire dismissal message for it. Of the
+  two carried defects, the validation-mislabeling defect is fixed as described above;
+  an alert firing while the device is unpowered was lost on reconnect and is still open
+  (observed once, undiagnosed, not covered by any test).
 - M1's full software and physical exit gate passes, including ten observed
   unplug/replug cycles, and is tagged `m1`. Because M2 work began in the same shared
   worktree before the physical carryover closed, that tag also contains the M2

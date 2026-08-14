@@ -78,6 +78,28 @@ fn full_fixture_compiles_deterministically_to_m2_contract() {
 }
 
 #[test]
+fn v4_playlist_compiles_byte_identically_to_the_v3_full_fixture() {
+    // `full.json` is the schema-v4 form of the frozen schema-v3 full fixture:
+    // the active playlist contains its three former InRotation cards in the
+    // same order, and the pomodoro alert keeps the same interrupt policy.
+    let config: AppConfig = serde_json::from_str(FULL_JSON).unwrap();
+    let compiled = config.compile(42).unwrap();
+
+    let actual = encode_message(1, &Message::ApplyConfig(compiled.layout)).unwrap();
+    let v3_apply_config_wire = [
+        3, 1, 9, 1, 2, 1, 1, 1, 2, 123, 2, 164, 6, 24, 42, 1, 131, 165, 12, 101, 99, 108, 111, 99,
+        107, 1, 1, 2, 1, 3, 2, 4, 2, 165, 19, 104, 112, 111, 109, 111, 100, 111, 114, 111, 1, 2, 2,
+        1, 3, 1, 4, 1, 165, 15, 104, 99, 97, 108, 101, 110, 100, 97, 114, 1, 3, 2, 1, 3, 2, 4, 4,
+        2, 131, 162, 15, 101, 99, 108, 111, 99, 107, 1, 101, 99, 108, 111, 99, 107, 162, 21, 104,
+        112, 111, 109, 111, 100, 111, 114, 111, 1, 104, 112, 111, 109, 111, 100, 111, 114, 111,
+        162, 28, 104, 99, 97, 108, 101, 110, 100, 97, 114, 1, 104, 99, 97, 108, 101, 110, 100, 97,
+        114, 3, 25, 1, 14, 200, 59, 108, 173, 0,
+    ];
+
+    assert_eq!(actual, v3_apply_config_wire);
+}
+
+#[test]
 fn invalid_fixture_reports_all_domain_boundaries_before_compile() {
     let config: AppConfig = serde_json::from_str(INVALID_JSON).unwrap();
     let error = config.compile(1).unwrap_err();

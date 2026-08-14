@@ -15,6 +15,8 @@ use crate::{
 };
 
 pub const MAX_CONFIG_FILE_BYTES: usize = 64 * 1_024;
+pub const SAVED_SETTINGS_VALIDATION_FAILURE_MESSAGE: &str =
+    "Your saved settings failed validation and were not applied";
 
 pub struct ConfigStore {
     path: PathBuf,
@@ -22,7 +24,7 @@ pub struct ConfigStore {
 }
 
 struct StoreState {
-    last_good: AppConfig,
+    last_good: Option<AppConfig>,
     generation: u64,
 }
 
@@ -31,7 +33,7 @@ impl ConfigStore {
         Self {
             path: path.into(),
             state: Mutex::new(StoreState {
-                last_good: AppConfig::default(),
+                last_good: None,
                 generation: 0,
             }),
         }
@@ -43,10 +45,10 @@ impl ConfigStore {
 
     pub fn load(&self) -> LoadOutcome {
         let Ok(mut state) = self.state.lock() else {
-            return LoadOutcome {
+            return LoadOutcome::Recovered {
                 config: AppConfig::default(),
-                origin: ConfigOrigin::LastGood,
-                recovery: Some(StoreError::LockPoisoned),
+                origin: ConfigOrigin::Defaults,
+                error: StoreError::LockPoisoned,
             };
         };
 
@@ -54,11 +56,9 @@ impl ConfigStore {
             Ok(Some(bytes)) => bytes,
             Ok(None) => {
                 let config = AppConfig::default();
-                state.last_good = config.clone();
-                return LoadOutcome {
+                return LoadOutcome::Loaded {
                     config,
                     origin: ConfigOrigin::Defaults,
-                    recovery: None,
                 };
             }
             Err(error) => return recovered(&state, error),
@@ -66,13 +66,10 @@ impl ConfigStore {
 
         match decode_config(&bytes) {
             Ok((config, origin)) => {
-                state.last_good = config.clone();
-                LoadOutcome {
-                    config,
-                    origin,
-                    recovery: None,
-                }
+                state.last_good = Some(config.clone());
+                LoadOutcome::Loaded { config, origin }
             }
+            Err(StoreError::Validation { issues }) => validation_failed(&state, issues),
             Err(error) => recovered(&state, error),
         }
     }
@@ -96,7 +93,7 @@ impl ConfigStore {
         write_and_replace(&self.path, &bytes)?;
 
         state.generation = state.generation.saturating_add(1);
-        state.last_good = config.clone();
+        state.last_good = Some(config.clone());
         let warning = sync_parent(parent).err().map(|error| StoreWarning::Io {
             operation: "sync config directory".into(),
             message: error.to_string(),
@@ -110,7 +107,7 @@ impl ConfigStore {
     pub fn last_good(&self) -> Result<AppConfig, StoreError> {
         self.state
             .lock()
-            .map(|state| state.last_good.clone())
+            .map(|state| state.last_good.clone().unwrap_or_default())
             .map_err(|_| StoreError::LockPoisoned)
     }
 }
@@ -128,10 +125,58 @@ pub enum ConfigOrigin {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LoadOutcome {
-    pub config: AppConfig,
-    pub origin: ConfigOrigin,
-    pub recovery: Option<StoreError>,
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum LoadOutcome {
+    Loaded {
+        config: AppConfig,
+        origin: ConfigOrigin,
+    },
+    Recovered {
+        config: AppConfig,
+        origin: ConfigOrigin,
+        error: StoreError,
+    },
+    ValidationFailed {
+        config: AppConfig,
+        origin: ConfigOrigin,
+        issues: Vec<ValidationIssue>,
+    },
+}
+
+impl LoadOutcome {
+    pub fn config(&self) -> &AppConfig {
+        match self {
+            Self::Loaded { config, .. }
+            | Self::Recovered { config, .. }
+            | Self::ValidationFailed { config, .. } => config,
+        }
+    }
+
+    pub const fn origin(&self) -> ConfigOrigin {
+        match self {
+            Self::Loaded { origin, .. }
+            | Self::Recovered { origin, .. }
+            | Self::ValidationFailed { origin, .. } => *origin,
+        }
+    }
+
+    pub fn recovery(&self) -> Option<StoreError> {
+        match self {
+            Self::Loaded { .. } => None,
+            Self::Recovered { error, .. } => Some(error.clone()),
+            Self::ValidationFailed { issues, .. } => Some(StoreError::Validation {
+                issues: issues.clone(),
+            }),
+        }
+    }
+
+    pub fn into_config(self) -> AppConfig {
+        match self {
+            Self::Loaded { config, .. }
+            | Self::Recovered { config, .. }
+            | Self::ValidationFailed { config, .. } => config,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -167,8 +212,8 @@ impl fmt::Display for StoreError {
                 formatter,
                 "config schema version {found} is unsupported; expected {supported}"
             ),
-            Self::Validation { issues } => {
-                write!(formatter, "config has {} validation issue(s)", issues.len())
+            Self::Validation { .. } => {
+                formatter.write_str(SAVED_SETTINGS_VALIDATION_FAILURE_MESSAGE)
             }
             Self::LockPoisoned => formatter.write_str("config store lock is poisoned"),
         }
@@ -1148,10 +1193,27 @@ fn read_bounded(path: &Path) -> Result<Option<Vec<u8>>, StoreError> {
 }
 
 fn recovered(state: &StoreState, error: StoreError) -> LoadOutcome {
-    LoadOutcome {
-        config: state.last_good.clone(),
-        origin: ConfigOrigin::LastGood,
-        recovery: Some(error),
+    let (config, origin) = fallback(state);
+    LoadOutcome::Recovered {
+        config,
+        origin,
+        error,
+    }
+}
+
+fn validation_failed(state: &StoreState, issues: Vec<ValidationIssue>) -> LoadOutcome {
+    let (config, origin) = fallback(state);
+    LoadOutcome::ValidationFailed {
+        config,
+        origin,
+        issues,
+    }
+}
+
+fn fallback(state: &StoreState) -> (AppConfig, ConfigOrigin) {
+    match &state.last_good {
+        Some(config) => (config.clone(), ConfigOrigin::LastGood),
+        None => (AppConfig::default(), ConfigOrigin::Defaults),
     }
 }
 

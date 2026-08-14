@@ -6,8 +6,8 @@ use std::thread;
 
 use app_core::{
     AlertHold, AppConfig, CalendarSource, CardAlert, CardSettings, CarouselAdvance, ConfigOrigin,
-    ConfigStore, DisplayOrientation, DisplayTemplate, MAX_CONFIG_FILE_BYTES, RefreshPolicy,
-    StoreError, WidgetTapAction,
+    ConfigStore, DisplayOrientation, DisplayTemplate, LoadOutcome, MAX_CONFIG_FILE_BYTES,
+    RefreshPolicy, SAVED_SETTINGS_VALIDATION_FAILURE_MESSAGE, StoreError, WidgetTapAction,
 };
 
 static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(1);
@@ -43,10 +43,69 @@ fn missing_file_loads_defaults_without_writing() {
     let store = ConfigStore::new(&path);
 
     let outcome = store.load();
-    assert_eq!(outcome.origin, ConfigOrigin::Defaults);
-    assert_eq!(outcome.config, AppConfig::default());
-    assert_eq!(outcome.recovery, None);
+    assert_eq!(outcome.origin(), ConfigOrigin::Defaults);
+    assert_eq!(outcome.config(), &AppConfig::default());
+    assert_eq!(outcome.recovery(), None);
     assert!(!path.exists());
+}
+
+#[test]
+fn invalid_persisted_config_keeps_last_good_and_reports_typed_error() {
+    let directory = TestDirectory::new("validation-recovery");
+    let path = directory.config_path();
+    let store = ConfigStore::new(&path);
+    let mut last_good = AppConfig::default();
+    last_good.preferences.autostart = true;
+    store.save(&last_good).unwrap();
+
+    let mut invalid = serde_json::to_value(AppConfig::default()).unwrap();
+    invalid["active_playlist_id"] = serde_json::json!("ghost");
+    let invalid_bytes = serde_json::to_vec_pretty(&invalid).unwrap();
+    fs::write(&path, &invalid_bytes).unwrap();
+
+    let LoadOutcome::ValidationFailed {
+        config,
+        origin,
+        issues,
+    } = store.load()
+    else {
+        panic!("validation failure must remain typed");
+    };
+    assert_eq!(config, last_good);
+    assert_eq!(origin, ConfigOrigin::LastGood);
+    assert!(
+        issues
+            .iter()
+            .any(|issue| issue.path == "active_playlist_id")
+    );
+    assert_eq!(
+        StoreError::Validation { issues }.to_string(),
+        SAVED_SETTINGS_VALIDATION_FAILURE_MESSAGE
+    );
+    assert_eq!(store.last_good().unwrap(), last_good);
+    assert_eq!(fs::read(&path).unwrap(), invalid_bytes);
+}
+
+#[test]
+fn invalid_persisted_config_without_last_good_labels_fallback_as_defaults() {
+    let directory = TestDirectory::new("validation-defaults");
+    let path = directory.config_path();
+    let store = ConfigStore::new(&path);
+    let mut invalid = serde_json::to_value(AppConfig::default()).unwrap();
+    invalid["active_playlist_id"] = serde_json::json!("ghost");
+    fs::write(&path, serde_json::to_vec_pretty(&invalid).unwrap()).unwrap();
+
+    let LoadOutcome::ValidationFailed {
+        config,
+        origin,
+        issues,
+    } = store.load()
+    else {
+        panic!("validation failure must remain typed");
+    };
+    assert_eq!(config, AppConfig::default());
+    assert_eq!(origin, ConfigOrigin::Defaults);
+    assert!(!issues.is_empty());
 }
 
 #[test]
@@ -61,30 +120,30 @@ fn save_round_trips_and_migration_is_explicit() {
     assert_eq!(receipt.generation, 1);
     assert_eq!(receipt.warning, None);
     let loaded = store.load();
-    assert_eq!(loaded.origin, ConfigOrigin::Current);
-    assert_eq!(loaded.config, config);
+    assert_eq!(loaded.origin(), ConfigOrigin::Current);
+    assert_eq!(loaded.config(), &config);
 
     fs::write(&path, include_bytes!("fixtures/legacy-v0.json")).unwrap();
     let migrated = store.load();
-    assert_eq!(migrated.origin, ConfigOrigin::MigratedV0);
-    assert_eq!(migrated.config.schema_version, 4);
-    assert_eq!(migrated.config.preferences.timezone, "Europe/Paris");
-    assert!(!migrated.config.preferences.autostart);
+    assert_eq!(migrated.origin(), ConfigOrigin::MigratedV0);
+    assert_eq!(migrated.config().schema_version, 4);
+    assert_eq!(migrated.config().preferences.timezone, "Europe/Paris");
+    assert!(!migrated.config().preferences.autostart);
 
     fs::write(&path, include_bytes!("fixtures/released-m3-v1.json")).unwrap();
     let migrated = store.load();
-    assert_eq!(migrated.origin, ConfigOrigin::MigratedV1);
-    assert_eq!(migrated.config.schema_version, 4);
-    assert_eq!(migrated.config.preferences.timezone, "Asia/Tbilisi");
-    assert_eq!(migrated.config.cards.len(), 3);
+    assert_eq!(migrated.origin(), ConfigOrigin::MigratedV1);
+    assert_eq!(migrated.config().schema_version, 4);
+    assert_eq!(migrated.config().preferences.timezone, "Asia/Tbilisi");
+    assert_eq!(migrated.config().cards.len(), 3);
     assert_eq!(
-        migrated.config.preferences.orientation,
+        migrated.config().preferences.orientation,
         DisplayOrientation::LandscapeFlipped
     );
     // The legacy fixture's `screens` list orders pomodoro, clock, calendar; the card
     // model's rotation order is now the card order, so migration preserves that order.
     assert!(matches!(
-        &migrated.config.cards[0],
+        &migrated.config().cards[0],
         CardSettings::Pomodoro {
             id,
             label,
@@ -97,7 +156,7 @@ fn save_round_trips_and_migration_is_explicit() {
         } if id == "pomodoro" && label == "Focus"
     ));
     assert!(matches!(
-        &migrated.config.cards[1],
+        &migrated.config().cards[1],
         CardSettings::Clock {
             id,
             title,
@@ -113,7 +172,7 @@ fn save_round_trips_and_migration_is_explicit() {
     // must migrate to `alert: none`, not `before-event` — a calendar card only gets
     // `before-event` when it is derived from a legacy `interrupt_policy: enabled`.
     assert!(matches!(
-        &migrated.config.cards[2],
+        &migrated.config().cards[2],
         CardSettings::Calendar {
             id,
             source: CalendarSource::Url(source),
@@ -122,12 +181,12 @@ fn save_round_trips_and_migration_is_explicit() {
             ..
         } if id == "calendar" && source == "https://example.com/calendar.ics"
     ));
-    assert!(migrated.config.assets.is_empty());
+    assert!(migrated.config().assets.is_empty());
     assert_eq!(
-        migrated.config.playlists[0].advance,
+        migrated.config().playlists[0].advance,
         app_core::CarouselAdvance::Manual
     );
-    migrated.config.compile(7).unwrap();
+    migrated.config().compile(7).unwrap();
 }
 
 #[test]
@@ -138,10 +197,10 @@ fn v3_migrates_to_one_playlist_preserving_rotation_order_and_dwell() {
     fs::write(&path, include_bytes!("fixtures/v3-roundtrip.json")).unwrap();
 
     let outcome = store.load();
-    assert_eq!(outcome.origin, ConfigOrigin::MigratedV3);
-    assert!(outcome.recovery.is_none());
+    assert_eq!(outcome.origin(), ConfigOrigin::MigratedV3);
+    assert!(outcome.recovery().is_none());
 
-    let config = outcome.config;
+    let config = outcome.config();
     assert_eq!(config.schema_version, 4);
     assert_eq!(config.active_playlist_id, "my-playlist");
     assert_eq!(config.playlists.len(), 1);
@@ -264,18 +323,18 @@ fn v3_all_alert_only_migrates_to_valid_config() {
     fs::write(&path, alert_only).unwrap();
 
     let outcome = store.load();
-    assert_eq!(outcome.origin, ConfigOrigin::MigratedV3);
-    assert!(outcome.recovery.is_none());
-    assert_eq!(outcome.config.cards.len(), 2);
-    assert_eq!(outcome.config.playlists[0].entries.len(), 1);
-    assert_eq!(outcome.config.playlists[0].entries[0].card_id, "focus");
+    assert_eq!(outcome.origin(), ConfigOrigin::MigratedV3);
+    assert!(outcome.recovery().is_none());
+    assert_eq!(outcome.config().cards.len(), 2);
+    assert_eq!(outcome.config().playlists[0].entries.len(), 1);
+    assert_eq!(outcome.config().playlists[0].entries[0].card_id, "focus");
     assert_eq!(
-        outcome.config.cards[0].alert(),
+        outcome.config().cards[0].alert(),
         CardAlert::OnTimerFinish {
             hold: AlertHold::UntilDismissed
         }
     );
-    assert!(outcome.config.validate().is_ok());
+    assert!(outcome.config().validate().is_ok());
 }
 
 #[test]
@@ -303,17 +362,17 @@ fn v0_v1_v2_migrate_directly_to_v4() {
     ] {
         fs::write(&path, fixture).unwrap();
         let outcome = store.load();
-        assert_eq!(outcome.origin, origin);
-        assert!(outcome.recovery.is_none());
-        assert_eq!(outcome.config.schema_version, 4);
-        assert_eq!(outcome.config.playlists.len(), 1);
-        let entry_ids: Vec<&str> = outcome.config.playlists[0]
+        assert_eq!(outcome.origin(), origin);
+        assert!(outcome.recovery().is_none());
+        assert_eq!(outcome.config().schema_version, 4);
+        assert_eq!(outcome.config().playlists.len(), 1);
+        let entry_ids: Vec<&str> = outcome.config().playlists[0]
             .entries
             .iter()
             .map(|entry| entry.card_id.as_str())
             .collect();
         assert_eq!(entry_ids, expected_ids);
-        assert!(outcome.config.validate().is_ok());
+        assert!(outcome.config().validate().is_ok());
     }
 }
 
@@ -329,10 +388,10 @@ fn malformed_truncated_and_oversized_files_preserve_bytes_and_last_good() {
     let malformed = include_bytes!("fixtures/malformed.json");
     fs::write(&path, malformed).unwrap();
     let recovered = store.load();
-    assert_eq!(recovered.origin, ConfigOrigin::LastGood);
-    assert_eq!(recovered.config, last_good);
+    assert_eq!(recovered.origin(), ConfigOrigin::LastGood);
+    assert_eq!(recovered.config(), &last_good);
     assert!(matches!(
-        recovered.recovery,
+        recovered.recovery(),
         Some(StoreError::InvalidJson { .. })
     ));
     assert_eq!(fs::read(&path).unwrap(), malformed);
@@ -340,16 +399,16 @@ fn malformed_truncated_and_oversized_files_preserve_bytes_and_last_good() {
     let invalid_utf8 = [0xff, 0xfe, 0xfd];
     fs::write(&path, invalid_utf8).unwrap();
     let recovered = store.load();
-    assert_eq!(recovered.config, last_good);
-    assert_eq!(recovered.recovery, Some(StoreError::InvalidUtf8));
+    assert_eq!(recovered.config(), &last_good);
+    assert_eq!(recovered.recovery(), Some(StoreError::InvalidUtf8));
     assert_eq!(fs::read(&path).unwrap(), invalid_utf8);
 
     let oversized = vec![b'x'; MAX_CONFIG_FILE_BYTES + 1];
     fs::write(&path, &oversized).unwrap();
     let recovered = store.load();
-    assert_eq!(recovered.config, last_good);
+    assert_eq!(recovered.config(), &last_good);
     assert!(matches!(
-        recovered.recovery,
+        recovered.recovery(),
         Some(StoreError::TooLarge { .. })
     ));
     assert_eq!(fs::metadata(&path).unwrap().len(), oversized.len() as u64);
@@ -357,10 +416,10 @@ fn malformed_truncated_and_oversized_files_preserve_bytes_and_last_good() {
     let future = include_bytes!("fixtures/future-v5.json");
     fs::write(&path, future).unwrap();
     let recovered = store.load();
-    assert_eq!(recovered.origin, ConfigOrigin::LastGood);
-    assert_eq!(recovered.config, last_good);
+    assert_eq!(recovered.origin(), ConfigOrigin::LastGood);
+    assert_eq!(recovered.config(), &last_good);
     assert_eq!(
-        recovered.recovery,
+        recovered.recovery(),
         Some(StoreError::UnsupportedVersion {
             found: 5,
             supported: 4,
@@ -453,10 +512,10 @@ fn v2_documents_migrate_to_cards_in_screen_order() {
     fs::write(&path, include_bytes!("fixtures/v2-legacy.json")).unwrap();
 
     let outcome = store.load();
-    assert_eq!(outcome.origin, ConfigOrigin::MigratedV2);
-    assert!(outcome.recovery.is_none());
+    assert_eq!(outcome.origin(), ConfigOrigin::MigratedV2);
+    assert!(outcome.recovery().is_none());
 
-    let config = outcome.config;
+    let config = outcome.config();
     assert_eq!(config.schema_version, 4);
 
     // Order follows screens[], not widgets[] (the fixture deliberately lists the
@@ -506,7 +565,8 @@ fn migrated_v2_documents_always_satisfy_the_rotation_rule() {
     let store = ConfigStore::new(&path);
     fs::write(&path, include_bytes!("fixtures/v2-legacy.json")).unwrap();
 
-    let config = store.load().config;
+    let loaded = store.load();
+    let config = loaded.config();
     assert!(config.validate().is_ok());
 }
 
@@ -524,10 +584,10 @@ fn future_v5_is_a_recoverable_error_preserving_bytes() {
     fs::write(&path, future).unwrap();
 
     let outcome = store.load();
-    assert_eq!(outcome.origin, ConfigOrigin::LastGood);
-    assert_eq!(outcome.config, last_good);
+    assert_eq!(outcome.origin(), ConfigOrigin::LastGood);
+    assert_eq!(outcome.config(), &last_good);
     assert!(matches!(
-        outcome.recovery,
+        outcome.recovery(),
         Some(StoreError::UnsupportedVersion {
             found: 5,
             supported: 4
@@ -544,9 +604,9 @@ fn v2_dashboard_layout_document_fails_to_deserialize_as_a_recoverable_error() {
     // `ConfigStore::save` validates/compiles before writing to disk. `LegacyLayoutV2`
     // therefore has only a `Single` variant, so a document like this one — which could
     // only have been produced by bypassing the app entirely — fails to deserialize as
-    // an unknown `kind` variant, surfacing as a recoverable `StoreError::InvalidJson`
-    // with the in-memory last-good config left authoritative, rather than a panic or a
-    // lossy invented dashboard-to-card mapping.
+    // an unknown `kind` variant, surfacing as a recoverable `StoreError::InvalidJson`.
+    // This fresh store has no last-good document, so the fallback is explicitly
+    // labeled as defaults rather than inventing a dashboard-to-card mapping.
     let directory = TestDirectory::new("v2-dashboard");
     let path = directory.config_path();
     let store = ConfigStore::new(&path);
@@ -589,10 +649,10 @@ fn v2_dashboard_layout_document_fails_to_deserialize_as_a_recoverable_error() {
     fs::write(&path, dashboard_v2).unwrap();
 
     let outcome = store.load();
-    assert_eq!(outcome.origin, ConfigOrigin::LastGood);
-    assert_eq!(outcome.config, AppConfig::default());
+    assert_eq!(outcome.origin(), ConfigOrigin::Defaults);
+    assert_eq!(outcome.config(), &AppConfig::default());
     assert!(matches!(
-        outcome.recovery,
+        outcome.recovery(),
         Some(StoreError::InvalidJson { .. })
     ));
     // The unreadable source bytes are never rewritten.
@@ -661,10 +721,10 @@ fn v2_orphan_widgets_become_alert_only_or_off_instead_of_being_dropped() {
     fs::write(&path, with_orphans).unwrap();
 
     let outcome = store.load();
-    assert_eq!(outcome.origin, ConfigOrigin::MigratedV2);
-    assert!(outcome.recovery.is_none());
+    assert_eq!(outcome.origin(), ConfigOrigin::MigratedV2);
+    assert!(outcome.recovery().is_none());
 
-    let config = outcome.config;
+    let config = outcome.config();
     // Card order: screens[] first ("clock"), then orphans sorted by ID
     // ("alpha-orphan" before "zeta-orphan").
     let ids: Vec<&str> = config.cards.iter().map(CardSettings::id).collect();
@@ -713,10 +773,10 @@ fn v1_orphan_widgets_become_alert_only_or_off_instead_of_being_dropped() {
     fs::write(&path, with_orphans).unwrap();
 
     let outcome = store.load();
-    assert_eq!(outcome.origin, ConfigOrigin::MigratedV1);
-    assert!(outcome.recovery.is_none());
+    assert_eq!(outcome.origin(), ConfigOrigin::MigratedV1);
+    assert!(outcome.recovery().is_none());
 
-    let config = outcome.config;
+    let config = outcome.config();
     // Card order: screens[] first ("clock"), then orphans sorted by ID
     // ("alpha-orphan" before "zeta-orphan").
     let ids: Vec<&str> = config.cards.iter().map(CardSettings::id).collect();

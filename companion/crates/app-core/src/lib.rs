@@ -36,6 +36,6 @@ pub use state::{
     PomodoroState, ProviderSnapshot, ProviderState, RuntimeDiagnostics, RuntimeState,
 };
 pub use store::{
-    ConfigOrigin, ConfigStore, LoadOutcome, MAX_CONFIG_FILE_BYTES, SaveReceipt, StoreError,
-    StoreWarning,
+    ConfigOrigin, ConfigStore, LoadOutcome, MAX_CONFIG_FILE_BYTES,
+    SAVED_SETTINGS_VALIDATION_FAILURE_MESSAGE, SaveReceipt, StoreError, StoreWarning,
 };

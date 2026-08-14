@@ -289,15 +289,17 @@ fn setup_app(app: &mut App) -> Result<(), Box<dyn Error>> {
     let config_path = app.path().app_data_dir()?.join(CONFIG_FILE_NAME);
     let store = ConfigStore::new(config_path);
     let loaded = store.load();
-    if let Some(recovery) = &loaded.recovery {
-        eprintln!("using last-good Deskmate configuration: {recovery:?}");
+    // TODO(plan task 5): carry the typed validation outcome into AppSnapshot/IPC.
+    let recovery = loaded.recovery();
+    if let Some(recovery) = &recovery {
+        eprintln!("saved Deskmate configuration was not applied: {recovery:?}");
     }
 
     // The window is configured hidden, so the single owner is running before any
     // settings UI appears. The explicit Tauri app-data path keeps filesystem policy
     // out of app-core.
-    let runtime = Arc::new(RuntimeHandle::start_serial(loaded.config, None)?);
-    if let Some(recovery) = loaded.recovery {
+    let runtime = Arc::new(RuntimeHandle::start_serial(loaded.into_config(), None)?);
+    if let Some(recovery) = recovery {
         runtime.set_persistence_state(PersistenceState::RecoverableError {
             message: recovery.to_string(),
         })?;

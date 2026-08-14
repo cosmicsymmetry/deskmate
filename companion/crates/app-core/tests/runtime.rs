@@ -6,9 +6,9 @@ use std::time::{Duration, Instant};
 
 use app_core::{
     AlertHold, AppConfig, CalendarRefreshRequest, CalendarRefreshResult, CalendarRefresher,
-    CardAlert, CardField, CardFieldValue, CardPresence, CardSettings, CarouselAdvance,
-    CarouselSettings, ConnectionState, DeviceConnection, DisplayOrientation, DisplayTemplate,
-    PersistenceState, PomodoroAction, PomodoroState, ProviderRequest, RefreshPolicy, RuntimeDevice,
+    CardAlert, CardField, CardFieldValue, CardSettings, CarouselAdvance, ConnectionState,
+    DeviceConnection, DisplayOrientation, DisplayTemplate, PersistenceState, Playlist,
+    PlaylistEntry, PomodoroAction, PomodoroState, ProviderRequest, RefreshPolicy, RuntimeDevice,
     RuntimeError, RuntimeHandle, RuntimeOptions, RuntimeState, WidgetTapAction,
 };
 use chrono::Utc;
@@ -19,6 +19,14 @@ use protocol::{
 };
 
 const FULL_JSON: &str = include_str!("fixtures/full.json");
+
+#[allow(dead_code)]
+#[derive(Clone, Copy)]
+enum CardPresence {
+    InRotation { dwell_seconds: Option<u16> },
+    AlertOnly,
+    Off,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Operation {
@@ -487,7 +495,6 @@ fn multi_provider_config() -> AppConfig {
             "template": { "kind": "row-list" },
             "tap_action": { "kind": "none" },
             "refresh": { "kind": "manual" },
-            "presence": { "kind": "in-rotation", "dwell_seconds": null },
             "alert": { "kind": "none" }
         }))
         .unwrap(),
@@ -502,11 +509,20 @@ fn multi_provider_config() -> AppConfig {
             "template": { "kind": "row-list" },
             "tap_action": { "kind": "none" },
             "refresh": { "kind": "manual" },
-            "presence": { "kind": "in-rotation", "dwell_seconds": null },
             "alert": { "kind": "none" }
         }))
         .unwrap(),
     );
+    config.playlists[0].entries.extend([
+        PlaylistEntry {
+            card_id: "json".into(),
+            dwell_seconds: None,
+        },
+        PlaylistEntry {
+            card_id: "rss".into(),
+            dwell_seconds: None,
+        },
+    ]);
     config
 }
 
@@ -1355,6 +1371,7 @@ fn app_restart_intentionally_resets_transient_timer_state_to_idle() {
 }
 
 fn clock_card(id: &str, presence: CardPresence) -> CardSettings {
+    let _ = presence;
     CardSettings::Clock {
         id: id.into(),
         title: id.into(),
@@ -1362,12 +1379,12 @@ fn clock_card(id: &str, presence: CardPresence) -> CardSettings {
         template: DisplayTemplate::DigitalClock,
         tap_action: WidgetTapAction::None,
         refresh: RefreshPolicy::DeviceLocal,
-        presence,
         alert: CardAlert::None,
     }
 }
 
 fn pomodoro_card(id: &str, presence: CardPresence, alert: CardAlert) -> CardSettings {
+    let _ = presence;
     CardSettings::Pomodoro {
         id: id.into(),
         label: id.into(),
@@ -1375,7 +1392,6 @@ fn pomodoro_card(id: &str, presence: CardPresence, alert: CardAlert) -> CardSett
         template: DisplayTemplate::ProgressRing,
         tap_action: WidgetTapAction::None,
         refresh: RefreshPolicy::DeviceLocal,
-        presence,
         alert,
     }
 }
@@ -1410,11 +1426,24 @@ fn activated_screen_ids(control: &MockDeviceControl) -> Vec<String> {
 fn timed_advance_wiring_reaches_the_device_after_one_dwell() {
     let control = MockDeviceControl::default();
     let config = AppConfig {
-        carousel: CarouselSettings {
+        playlists: vec![Playlist {
+            id: "p1".into(),
+            name: "P1".into(),
             advance: CarouselAdvance::Timed {
                 default_dwell_seconds: 5,
             },
-        },
+            entries: vec![
+                PlaylistEntry {
+                    card_id: "first".into(),
+                    dwell_seconds: Some(5),
+                },
+                PlaylistEntry {
+                    card_id: "second".into(),
+                    dwell_seconds: Some(5),
+                },
+            ],
+        }],
+        active_playlist_id: "p1".into(),
         cards: vec![
             clock_card(
                 "first",
@@ -1472,6 +1501,16 @@ fn timed_advance_wiring_reaches_the_device_after_one_dwell() {
 fn card_data_carries_a_live_cards_exact_field_values_and_excludes_off_cards() {
     let control = MockDeviceControl::default();
     let config = AppConfig {
+        playlists: vec![Playlist {
+            id: "p1".into(),
+            name: "P1".into(),
+            advance: CarouselAdvance::Manual,
+            entries: vec![PlaylistEntry {
+                card_id: "on".into(),
+                dwell_seconds: None,
+            }],
+        }],
+        active_playlist_id: "p1".into(),
         cards: vec![
             pomodoro_card(
                 "on",

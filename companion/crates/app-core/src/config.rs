@@ -16,14 +16,6 @@ mod strict_tagged_enum {
 
     #[derive(Debug, Serialize, Deserialize)]
     #[serde(tag = "kind", rename_all = "kebab-case")]
-    pub enum CardPresenceInner {
-        InRotation { dwell_seconds: Option<u16> },
-        AlertOnly,
-        Off,
-    }
-
-    #[derive(Debug, Serialize, Deserialize)]
-    #[serde(tag = "kind", rename_all = "kebab-case")]
     pub enum AlertHoldInner {
         UntilDismissed,
         Seconds { value: u16 },
@@ -84,10 +76,9 @@ mod strict_tagged_enum {
     }
 
     /// Mirrors `super::CardSettings`. Fields that are themselves internally
-    /// tagged enums are typed as the outer, validating public type (e.g.
-    /// `super::CardPresence`, not a raw inner enum) so that deserializing a
-    /// card recursively re-validates every nested tagged object. Typing a
-    /// nested field as a raw inner type here would silently defeat the
+    /// tagged enums are typed as the outer, validating public type so that
+    /// deserializing a card recursively re-validates every nested tagged object.
+    /// Typing a nested field as a raw inner type here would silently defeat the
     /// unknown-field check for that nested object.
     #[derive(Debug, Serialize, Deserialize)]
     #[serde(tag = "kind", rename_all = "kebab-case")]
@@ -99,7 +90,6 @@ mod strict_tagged_enum {
             template: super::DisplayTemplate,
             tap_action: super::WidgetTapAction,
             refresh: super::RefreshPolicy,
-            presence: super::CardPresence,
             alert: super::CardAlert,
         },
         Pomodoro {
@@ -109,7 +99,6 @@ mod strict_tagged_enum {
             template: super::DisplayTemplate,
             tap_action: super::WidgetTapAction,
             refresh: super::RefreshPolicy,
-            presence: super::CardPresence,
             alert: super::CardAlert,
         },
         Calendar {
@@ -119,7 +108,6 @@ mod strict_tagged_enum {
             template: super::DisplayTemplate,
             tap_action: super::WidgetTapAction,
             refresh: super::RefreshPolicy,
-            presence: super::CardPresence,
             alert: super::CardAlert,
         },
         Weather {
@@ -130,7 +118,6 @@ mod strict_tagged_enum {
             template: super::DisplayTemplate,
             tap_action: super::WidgetTapAction,
             refresh: super::RefreshPolicy,
-            presence: super::CardPresence,
             alert: super::CardAlert,
         },
         JsonFeed {
@@ -141,7 +128,6 @@ mod strict_tagged_enum {
             template: super::DisplayTemplate,
             tap_action: super::WidgetTapAction,
             refresh: super::RefreshPolicy,
-            presence: super::CardPresence,
             alert: super::CardAlert,
         },
         Rss {
@@ -152,7 +138,6 @@ mod strict_tagged_enum {
             template: super::DisplayTemplate,
             tap_action: super::WidgetTapAction,
             refresh: super::RefreshPolicy,
-            presence: super::CardPresence,
             alert: super::CardAlert,
         },
     }
@@ -161,16 +146,6 @@ mod strict_tagged_enum {
     #[allow(private_bounds)]
     trait ValidatingDeserialize: for<'de> serde::Deserialize<'de> {
         fn allowed_fields(kind: &str) -> Option<&'static [&'static str]>;
-    }
-
-    impl ValidatingDeserialize for CardPresenceInner {
-        fn allowed_fields(kind: &str) -> Option<&'static [&'static str]> {
-            match kind {
-                "in-rotation" => Some(&["kind", "dwell_seconds"]),
-                "alert-only" | "off" => Some(&["kind"]),
-                _ => None,
-            }
-        }
     }
 
     impl ValidatingDeserialize for AlertHoldInner {
@@ -247,7 +222,6 @@ mod strict_tagged_enum {
                     "template",
                     "tap_action",
                     "refresh",
-                    "presence",
                     "alert",
                 ]),
                 "pomodoro" => Some(&[
@@ -258,7 +232,6 @@ mod strict_tagged_enum {
                     "template",
                     "tap_action",
                     "refresh",
-                    "presence",
                     "alert",
                 ]),
                 "calendar" => Some(&[
@@ -269,7 +242,6 @@ mod strict_tagged_enum {
                     "template",
                     "tap_action",
                     "refresh",
-                    "presence",
                     "alert",
                 ]),
                 "weather" => Some(&[
@@ -281,7 +253,6 @@ mod strict_tagged_enum {
                     "template",
                     "tap_action",
                     "refresh",
-                    "presence",
                     "alert",
                 ]),
                 "json-feed" => Some(&[
@@ -293,7 +264,6 @@ mod strict_tagged_enum {
                     "template",
                     "tap_action",
                     "refresh",
-                    "presence",
                     "alert",
                 ]),
                 "rss" => Some(&[
@@ -305,7 +275,6 @@ mod strict_tagged_enum {
                     "template",
                     "tap_action",
                     "refresh",
-                    "presence",
                     "alert",
                 ]),
                 _ => None,
@@ -337,7 +306,7 @@ mod strict_tagged_enum {
     }
 }
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 3;
+pub const CURRENT_SCHEMA_VERSION: u32 = 4;
 pub const MAX_WIDGET_TITLE_LEN: usize = 64;
 pub const MAX_TIMEZONE_LEN: usize = 64;
 pub const MAX_ICS_SOURCE_LEN: usize = 2_048;
@@ -368,8 +337,11 @@ pub const MIN_CALENDAR_REFRESH_MINUTES: u16 = 1;
 pub const MIN_WEATHER_REFRESH_MINUTES: u16 = 10;
 pub const MAX_CALENDAR_REFRESH_MINUTES: u16 = 1_440;
 pub const MAX_CONFIG_CARDS: usize = 8;
-// Every in-rotation-or-alert-only card can lower to one wire widget, so the card cap
-// must never exceed what the protocol's `ApplyConfig` encoder accepts.
+pub const MAX_PLAYLISTS: usize = 8;
+pub const MAX_PLAYLIST_ENTRIES: usize = 8;
+pub const MAX_PLAYLIST_NAME_LEN: usize = 48;
+// Every compiled card can lower to one wire widget, so the card cap must never exceed
+// what the protocol's `ApplyConfig` encoder accepts.
 const _: () = assert!(MAX_CONFIG_CARDS <= protocol::MAX_CONFIG_WIDGETS);
 pub const MIN_DWELL_SECONDS: u16 = 5;
 pub const MAX_DWELL_SECONDS: u16 = 3_600;
@@ -378,6 +350,84 @@ pub const MAX_ALERT_LEAD_MINUTES: u16 = 60;
 pub const MIN_ALERT_HOLD_SECONDS: u16 = 5;
 pub const MAX_ALERT_HOLD_SECONDS: u16 = 600;
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Playlist {
+    pub id: String,
+    pub name: String,
+    pub advance: CarouselAdvance,
+    pub entries: Vec<PlaylistEntry>,
+}
+
+impl<'de> Deserialize<'de> for Playlist {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Fields {
+            id: String,
+            name: String,
+            advance: CarouselAdvance,
+            entries: Vec<PlaylistEntry>,
+        }
+
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let object = value
+            .as_object()
+            .ok_or_else(|| serde::de::Error::custom("playlist must be an object"))?;
+        for key in object.keys() {
+            if !["id", "name", "advance", "entries"].contains(&key.as_str()) {
+                return Err(serde::de::Error::custom(format!(
+                    "unknown playlist field: {key}"
+                )));
+            }
+        }
+        let fields: Fields = serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+        Ok(Self {
+            id: fields.id,
+            name: fields.name,
+            advance: fields.advance,
+            entries: fields.entries,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PlaylistEntry {
+    pub card_id: String,
+    pub dwell_seconds: Option<u16>,
+}
+
+impl<'de> Deserialize<'de> for PlaylistEntry {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Fields {
+            card_id: String,
+            dwell_seconds: Option<u16>,
+        }
+
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let object = value
+            .as_object()
+            .ok_or_else(|| serde::de::Error::custom("playlist entry must be an object"))?;
+        for key in object.keys() {
+            if !["card_id", "dwell_seconds"].contains(&key.as_str()) {
+                return Err(serde::de::Error::custom(format!(
+                    "unknown playlist entry field: {key}"
+                )));
+            }
+        }
+        let fields: Fields = serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+        Ok(Self {
+            card_id: fields.card_id,
+            dwell_seconds: fields.dwell_seconds,
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AppConfig {
@@ -385,7 +435,8 @@ pub struct AppConfig {
     pub preferences: AppPreferences,
     pub cards: Vec<CardSettings>,
     pub assets: Vec<AssetSettings>,
-    pub carousel: CarouselSettings,
+    pub playlists: Vec<Playlist>,
+    pub active_playlist_id: String,
     pub updater: UpdaterSettings,
 }
 
@@ -401,13 +452,19 @@ impl Default for AppConfig {
                 template: DisplayTemplate::DigitalClock,
                 tap_action: WidgetTapAction::None,
                 refresh: RefreshPolicy::DeviceLocal,
-                presence: CardPresence::InRotation {
-                    dwell_seconds: None,
-                },
                 alert: CardAlert::None,
             }],
             assets: Vec::new(),
-            carousel: CarouselSettings::default(),
+            playlists: vec![Playlist {
+                id: "my-playlist".into(),
+                name: "My playlist".into(),
+                advance: CarouselAdvance::Manual,
+                entries: vec![PlaylistEntry {
+                    card_id: "clock".into(),
+                    dwell_seconds: None,
+                }],
+            }],
+            active_playlist_id: "my-playlist".into(),
             updater: UpdaterSettings::default(),
         }
     }
@@ -438,7 +495,6 @@ impl AppConfig {
         validate_collection_bounds("cards", self.cards.len(), MAX_CONFIG_CARDS, &mut issues);
 
         let mut card_ids = HashSet::with_capacity(self.cards.len());
-        let mut in_rotation = 0_usize;
         for (index, card) in self.cards.iter().enumerate() {
             let path = format!("cards[{index}]");
             validate_identifier(
@@ -456,28 +512,167 @@ impl AppConfig {
             }
             card.validate(&path, &mut issues);
             validate_card_behaviour(&path, card, &mut issues);
-            if card.presence().is_in_rotation() {
-                in_rotation += 1;
-            }
         }
-        if in_rotation == 0 && !self.cards.is_empty() {
-            issues.push(ValidationIssue::new(
-                "cards",
-                ValidationCode::OutOfRange,
-                "at least one card must be in the rotation",
-            ));
-        }
-        if let CarouselAdvance::Timed {
-            default_dwell_seconds,
-        } = self.carousel.advance
-        {
-            validate_range(
-                "carousel.advance.default_dwell_seconds",
-                u32::from(default_dwell_seconds),
-                u32::from(MIN_DWELL_SECONDS),
-                u32::from(MAX_DWELL_SECONDS),
+
+        validate_collection_bounds(
+            "playlists",
+            self.playlists.len(),
+            MAX_PLAYLISTS,
+            &mut issues,
+        );
+        let mut playlist_ids = HashSet::with_capacity(self.playlists.len());
+        let mut playlist_names = HashSet::with_capacity(self.playlists.len());
+        for (index, playlist) in self.playlists.iter().enumerate() {
+            let path = format!("playlists[{index}]");
+            validate_identifier_with_context(
+                &format!("{path}.id"),
+                &playlist.id,
+                MAX_WIDGET_ID_LEN,
+                &format!("playlist ID {:?}", playlist.id),
                 &mut issues,
             );
+            if !playlist_ids.insert(playlist.id.as_str()) {
+                issues.push(ValidationIssue::new(
+                    format!("{path}.id"),
+                    ValidationCode::DuplicateId,
+                    format!("playlist ID {:?} is duplicated", playlist.id),
+                ));
+            }
+            if playlist.name.trim().is_empty() {
+                issues.push(ValidationIssue::new(
+                    format!("{path}.name"),
+                    ValidationCode::Empty,
+                    format!("playlist {:?} name must not be empty", playlist.id),
+                ));
+            }
+            if playlist.name.chars().count() > MAX_PLAYLIST_NAME_LEN {
+                issues.push(ValidationIssue::new(
+                    format!("{path}.name"),
+                    ValidationCode::TooLong,
+                    format!(
+                        "playlist {:?} name must be at most {MAX_PLAYLIST_NAME_LEN} characters",
+                        playlist.id
+                    ),
+                ));
+            }
+            if !playlist_names.insert(playlist.name.as_str()) {
+                issues.push(ValidationIssue::new(
+                    format!("{path}.name"),
+                    ValidationCode::DuplicateId,
+                    format!(
+                        "playlist {:?} duplicates the name {:?}",
+                        playlist.id, playlist.name
+                    ),
+                ));
+            }
+
+            if playlist.entries.is_empty() {
+                let (code, message) =
+                    if playlist.id == self.active_playlist_id && !self.cards.is_empty() {
+                        (
+                            ValidationCode::OutOfRange,
+                            format!(
+                                "active playlist {:?} must contain at least one card",
+                                playlist.id
+                            ),
+                        )
+                    } else {
+                        (
+                            ValidationCode::Empty,
+                            format!("playlist {:?} must contain at least one entry", playlist.id),
+                        )
+                    };
+                issues.push(ValidationIssue::new(
+                    format!("{path}.entries"),
+                    code,
+                    message,
+                ));
+            } else if playlist.entries.len() > MAX_PLAYLIST_ENTRIES {
+                issues.push(ValidationIssue::new(
+                    format!("{path}.entries"),
+                    ValidationCode::TooMany,
+                    format!(
+                        "playlist {:?} supports at most {MAX_PLAYLIST_ENTRIES} entries",
+                        playlist.id
+                    ),
+                ));
+            }
+
+            if let CarouselAdvance::Timed {
+                default_dwell_seconds,
+            } = playlist.advance
+                && !(MIN_DWELL_SECONDS..=MAX_DWELL_SECONDS).contains(&default_dwell_seconds)
+            {
+                issues.push(ValidationIssue::new(
+                    format!("{path}.advance.default_dwell_seconds"),
+                    ValidationCode::OutOfRange,
+                    format!(
+                        "playlist {:?} default dwell must be {MIN_DWELL_SECONDS}..={MAX_DWELL_SECONDS} seconds",
+                        playlist.id
+                    ),
+                ));
+            }
+
+            let mut entry_card_ids = HashSet::with_capacity(playlist.entries.len());
+            for (entry_index, entry) in playlist.entries.iter().enumerate() {
+                let entry_path = format!("{path}.entries[{entry_index}]");
+                validate_identifier_with_context(
+                    &format!("{entry_path}.card_id"),
+                    &entry.card_id,
+                    MAX_WIDGET_ID_LEN,
+                    &format!("card ID {:?} in playlist {:?}", entry.card_id, playlist.id),
+                    &mut issues,
+                );
+                if !card_ids.contains(entry.card_id.as_str()) {
+                    issues.push(ValidationIssue::new(
+                        format!("{entry_path}.card_id"),
+                        ValidationCode::MissingReference,
+                        format!(
+                            "card {:?} referenced by playlist {:?} does not exist",
+                            entry.card_id, playlist.id
+                        ),
+                    ));
+                }
+                if !entry_card_ids.insert(entry.card_id.as_str()) {
+                    issues.push(ValidationIssue::new(
+                        format!("{entry_path}.card_id"),
+                        ValidationCode::DuplicateId,
+                        format!(
+                            "card {:?} appears more than once in playlist {:?}",
+                            entry.card_id, playlist.id
+                        ),
+                    ));
+                }
+                if let Some(dwell_seconds) = entry.dwell_seconds
+                    && !(MIN_DWELL_SECONDS..=MAX_DWELL_SECONDS).contains(&dwell_seconds)
+                {
+                    issues.push(ValidationIssue::new(
+                        format!("{entry_path}.dwell_seconds"),
+                        ValidationCode::OutOfRange,
+                        format!(
+                            "card {:?} in playlist {:?} must dwell for {MIN_DWELL_SECONDS}..={MAX_DWELL_SECONDS} seconds",
+                            entry.card_id, playlist.id
+                        ),
+                    ));
+                }
+            }
+        }
+        if self.active_playlist().is_none() {
+            issues.push(ValidationIssue::new(
+                "active_playlist_id",
+                ValidationCode::MissingReference,
+                format!(
+                    "active playlist {:?} does not exist",
+                    self.active_playlist_id
+                ),
+            ));
+        }
+        if self.compiled_card_ids().len() > MAX_CONFIG_CARDS {
+            issues.push(ValidationIssue::new(
+                "cards",
+                ValidationCode::TooMany,
+                format!("compiled widget set must contain at most {MAX_CONFIG_CARDS} cards"),
+            ));
         }
 
         if self.assets.len() > MAX_ASSETS {
@@ -541,6 +736,34 @@ impl AppConfig {
         }
     }
 
+    pub fn active_playlist(&self) -> Option<&Playlist> {
+        self.playlists
+            .iter()
+            .find(|playlist| playlist.id == self.active_playlist_id)
+    }
+
+    /// Card ids the compiled widget set will contain: active-playlist entries
+    /// (in entry order) followed by alert-capable cards outside it (by id).
+    pub fn compiled_card_ids(&self) -> Vec<&str> {
+        let mut card_ids = Vec::with_capacity(self.cards.len());
+        let mut active_card_ids = HashSet::new();
+        if let Some(playlist) = self.active_playlist() {
+            for entry in &playlist.entries {
+                card_ids.push(entry.card_id.as_str());
+                active_card_ids.insert(entry.card_id.as_str());
+            }
+        }
+
+        let mut alert_outsiders: Vec<&CardSettings> = self
+            .cards
+            .iter()
+            .filter(|card| !card.alert().is_none() && !active_card_ids.contains(card.id()))
+            .collect();
+        alert_outsiders.sort_by(|left, right| left.id().cmp(right.id()));
+        card_ids.extend(alert_outsiders.into_iter().map(CardSettings::id));
+        card_ids
+    }
+
     pub fn compile(&self, revision: u32) -> Result<CompiledAppConfig, ConfigValidationError> {
         self.validate()?;
         if revision == 0 {
@@ -556,10 +779,38 @@ impl AppConfig {
         let mut compatibility_issues = Vec::new();
         let mut widgets = Vec::with_capacity(self.cards.len());
         let mut screens = Vec::with_capacity(self.cards.len());
-        for (index, card) in self.cards.iter().enumerate() {
-            if card.presence().is_off() {
-                continue;
-            }
+        let active_playlist = self
+            .active_playlist()
+            .expect("validated active playlist must exist");
+        let active_card_ids: HashSet<&str> = active_playlist
+            .entries
+            .iter()
+            .map(|entry| entry.card_id.as_str())
+            .collect();
+        let mut compiled_cards = Vec::with_capacity(self.cards.len());
+        for entry in &active_playlist.entries {
+            let (index, card) = self
+                .cards
+                .iter()
+                .enumerate()
+                .find(|(_, card)| card.id() == entry.card_id)
+                .expect("validated playlist card must exist");
+            compiled_cards.push((index, card, true));
+        }
+        let mut alert_outsiders: Vec<(usize, &CardSettings)> = self
+            .cards
+            .iter()
+            .enumerate()
+            .filter(|(_, card)| !card.alert().is_none() && !active_card_ids.contains(card.id()))
+            .collect();
+        alert_outsiders.sort_by(|(_, left), (_, right)| left.id().cmp(right.id()));
+        compiled_cards.extend(
+            alert_outsiders
+                .into_iter()
+                .map(|(index, card)| (index, card, false)),
+        );
+
+        for &(index, card, has_screen) in &compiled_cards {
             let Some(widget) = card.wire_config() else {
                 compatibility_issues.push(ValidationIssue::new(
                     format!("cards[{index}]"),
@@ -568,7 +819,7 @@ impl AppConfig {
                 ));
                 continue;
             };
-            if card.presence().is_in_rotation() {
+            if has_screen {
                 // The screen ID is the card ID. The protocol treats widget and screen
                 // IDs as distinct namespaces, so reuse is legal, and compilation still
                 // invents no identifiers.
@@ -592,9 +843,14 @@ impl AppConfig {
             });
         }
         let initial_pushes = self
-            .cards
-            .iter()
-            .filter(|card| !card.presence().is_off())
+            .compiled_card_ids()
+            .into_iter()
+            .map(|card_id| {
+                self.cards
+                    .iter()
+                    .find(|card| card.id() == card_id)
+                    .expect("validated compiled card must exist")
+            })
             .map(|card| PushData {
                 widget_id: card.id().into(),
                 revision,
@@ -809,53 +1065,6 @@ impl RefreshPolicy {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
-pub enum CardPresence {
-    InRotation { dwell_seconds: Option<u16> },
-    AlertOnly,
-    Off,
-}
-
-impl<'de> Deserialize<'de> for CardPresence {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let value = serde_json::Value::deserialize(deserializer)?;
-        let inner: strict_tagged_enum::CardPresenceInner =
-            strict_tagged_enum::validate_and_deserialize(&value)
-                .map_err(serde::de::Error::custom)?;
-        Ok(match inner {
-            strict_tagged_enum::CardPresenceInner::InRotation { dwell_seconds } => {
-                CardPresence::InRotation { dwell_seconds }
-            }
-            strict_tagged_enum::CardPresenceInner::AlertOnly => CardPresence::AlertOnly,
-            strict_tagged_enum::CardPresenceInner::Off => CardPresence::Off,
-        })
-    }
-}
-
-impl CardPresence {
-    pub const fn dwell_seconds(self, default: u16) -> Option<u16> {
-        match self {
-            Self::InRotation { dwell_seconds } => Some(match dwell_seconds {
-                Some(seconds) => seconds,
-                None => default,
-            }),
-            Self::AlertOnly | Self::Off => None,
-        }
-    }
-
-    pub const fn is_in_rotation(self) -> bool {
-        matches!(self, Self::InRotation { .. })
-    }
-
-    pub const fn is_off(self) -> bool {
-        matches!(self, Self::Off)
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum AlertHold {
     UntilDismissed,
     Seconds { value: u16 },
@@ -981,7 +1190,6 @@ pub enum CardSettings {
         template: DisplayTemplate,
         tap_action: WidgetTapAction,
         refresh: RefreshPolicy,
-        presence: CardPresence,
         alert: CardAlert,
     },
     Pomodoro {
@@ -991,7 +1199,6 @@ pub enum CardSettings {
         template: DisplayTemplate,
         tap_action: WidgetTapAction,
         refresh: RefreshPolicy,
-        presence: CardPresence,
         alert: CardAlert,
     },
     Calendar {
@@ -1001,7 +1208,6 @@ pub enum CardSettings {
         template: DisplayTemplate,
         tap_action: WidgetTapAction,
         refresh: RefreshPolicy,
-        presence: CardPresence,
         alert: CardAlert,
     },
     Weather {
@@ -1012,7 +1218,6 @@ pub enum CardSettings {
         template: DisplayTemplate,
         tap_action: WidgetTapAction,
         refresh: RefreshPolicy,
-        presence: CardPresence,
         alert: CardAlert,
     },
     JsonFeed {
@@ -1023,7 +1228,6 @@ pub enum CardSettings {
         template: DisplayTemplate,
         tap_action: WidgetTapAction,
         refresh: RefreshPolicy,
-        presence: CardPresence,
         alert: CardAlert,
     },
     Rss {
@@ -1034,7 +1238,6 @@ pub enum CardSettings {
         template: DisplayTemplate,
         tap_action: WidgetTapAction,
         refresh: RefreshPolicy,
-        presence: CardPresence,
         alert: CardAlert,
     },
 }
@@ -1057,7 +1260,6 @@ impl<'de> Deserialize<'de> for CardSettings {
                 template,
                 tap_action,
                 refresh,
-                presence,
                 alert,
             } => CardSettings::Clock {
                 id,
@@ -1066,7 +1268,6 @@ impl<'de> Deserialize<'de> for CardSettings {
                 template,
                 tap_action,
                 refresh,
-                presence,
                 alert,
             },
             strict_tagged_enum::CardSettingsInner::Pomodoro {
@@ -1076,7 +1277,6 @@ impl<'de> Deserialize<'de> for CardSettings {
                 template,
                 tap_action,
                 refresh,
-                presence,
                 alert,
             } => CardSettings::Pomodoro {
                 id,
@@ -1085,7 +1285,6 @@ impl<'de> Deserialize<'de> for CardSettings {
                 template,
                 tap_action,
                 refresh,
-                presence,
                 alert,
             },
             strict_tagged_enum::CardSettingsInner::Calendar {
@@ -1095,7 +1294,6 @@ impl<'de> Deserialize<'de> for CardSettings {
                 template,
                 tap_action,
                 refresh,
-                presence,
                 alert,
             } => CardSettings::Calendar {
                 id,
@@ -1104,7 +1302,6 @@ impl<'de> Deserialize<'de> for CardSettings {
                 template,
                 tap_action,
                 refresh,
-                presence,
                 alert,
             },
             strict_tagged_enum::CardSettingsInner::Weather {
@@ -1115,7 +1312,6 @@ impl<'de> Deserialize<'de> for CardSettings {
                 template,
                 tap_action,
                 refresh,
-                presence,
                 alert,
             } => CardSettings::Weather {
                 id,
@@ -1125,7 +1321,6 @@ impl<'de> Deserialize<'de> for CardSettings {
                 template,
                 tap_action,
                 refresh,
-                presence,
                 alert,
             },
             strict_tagged_enum::CardSettingsInner::JsonFeed {
@@ -1136,7 +1331,6 @@ impl<'de> Deserialize<'de> for CardSettings {
                 template,
                 tap_action,
                 refresh,
-                presence,
                 alert,
             } => CardSettings::JsonFeed {
                 id,
@@ -1146,7 +1340,6 @@ impl<'de> Deserialize<'de> for CardSettings {
                 template,
                 tap_action,
                 refresh,
-                presence,
                 alert,
             },
             strict_tagged_enum::CardSettingsInner::Rss {
@@ -1157,7 +1350,6 @@ impl<'de> Deserialize<'de> for CardSettings {
                 template,
                 tap_action,
                 refresh,
-                presence,
                 alert,
             } => CardSettings::Rss {
                 id,
@@ -1167,7 +1359,6 @@ impl<'de> Deserialize<'de> for CardSettings {
                 template,
                 tap_action,
                 refresh,
-                presence,
                 alert,
             },
         })
@@ -1183,17 +1374,6 @@ impl CardSettings {
             | Self::Weather { id, .. }
             | Self::JsonFeed { id, .. }
             | Self::Rss { id, .. } => id,
-        }
-    }
-
-    pub const fn presence(&self) -> CardPresence {
-        match self {
-            Self::Clock { presence, .. }
-            | Self::Pomodoro { presence, .. }
-            | Self::Calendar { presence, .. }
-            | Self::Weather { presence, .. }
-            | Self::JsonFeed { presence, .. }
-            | Self::Rss { presence, .. } => *presence,
         }
     }
 
@@ -1651,20 +1831,6 @@ pub struct GlyphRange {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct CarouselSettings {
-    pub advance: CarouselAdvance,
-}
-
-impl Default for CarouselSettings {
-    fn default() -> Self {
-        Self {
-            advance: CarouselAdvance::Manual,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct UpdaterSettings {
     pub channel: UpdateChannel,
     pub checks: UpdateCheckPolicy,
@@ -1790,6 +1956,29 @@ fn validate_collection_bounds(
 
 fn validate_identifier(path: &str, value: &str, maximum: usize, issues: &mut Vec<ValidationIssue>) {
     validate_text(path, value, maximum, true, issues);
+}
+
+fn validate_identifier_with_context(
+    path: &str,
+    value: &str,
+    maximum: usize,
+    context: &str,
+    issues: &mut Vec<ValidationIssue>,
+) {
+    if value.trim().is_empty() {
+        issues.push(ValidationIssue::new(
+            path,
+            ValidationCode::Empty,
+            format!("{context} must not be empty"),
+        ));
+    }
+    if value.len() > maximum {
+        issues.push(ValidationIssue::new(
+            path,
+            ValidationCode::TooLong,
+            format!("{context} must be at most {maximum} UTF-8 bytes"),
+        ));
+    }
 }
 
 fn validate_text(
@@ -2018,30 +2207,7 @@ fn validate_range(
 }
 
 fn validate_card_behaviour(path: &str, card: &CardSettings, issues: &mut Vec<ValidationIssue>) {
-    let presence = card.presence();
     let alert = card.alert();
-
-    if let CardPresence::InRotation {
-        dwell_seconds: Some(seconds),
-    } = presence
-    {
-        validate_range(
-            &format!("{path}.presence.dwell_seconds"),
-            u32::from(seconds),
-            u32::from(MIN_DWELL_SECONDS),
-            u32::from(MAX_DWELL_SECONDS),
-            issues,
-        );
-    }
-
-    // An alert-only card with no trigger could never appear on screen.
-    if matches!(presence, CardPresence::AlertOnly) && alert.is_none() {
-        issues.push(ValidationIssue::new(
-            format!("{path}.presence"),
-            ValidationCode::OutOfRange,
-            "an alert-only card must configure an alert",
-        ));
-    }
 
     match alert {
         CardAlert::None => {}

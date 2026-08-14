@@ -1,5 +1,5 @@
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "preferences": {
     "timezone": "UTC",
     "autostart": false,
@@ -15,11 +15,20 @@
       "template": { "kind": "digital-clock" },
       "tap_action": { "kind": "none" },
       "refresh": { "kind": "device-local" },
-      "presence": { "kind": "in-rotation", "dwell_seconds": null },
       "alert": { "kind": "none" }
     }
   ],
   "assets": [],
-  "carousel": { "advance": { "kind": "manual" } },
+  "playlists": [
+    {
+      "id": "my-playlist",
+      "name": "My playlist",
+      "advance": { "kind": "manual" },
+      "entries": [
+        { "card_id": "clock", "dwell_seconds": null }
+      ]
+    }
+  ],
+  "active_playlist_id": "my-playlist",
   "updater": { "channel": "stable", "checks": "notify" }
 }

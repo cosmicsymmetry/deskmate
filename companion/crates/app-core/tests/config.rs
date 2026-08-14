@@ -1,11 +1,11 @@
 use app_core::{
     AlertHold, AppConfig, AppSnapshot, AssetSettings, CalendarSource, CardAlert, CardDataSnapshot,
-    CardError, CardField, CardFieldValue, CardPresence, CardSettings, CarouselAdvance,
-    CarouselSettings, ConnectionState, DeviceCounters, DeviceSnapshot, DisplayTemplate,
-    FirmwareArtifactMetadata, JsonFieldMapping, MAX_ASSET_BYTES, MAX_PROVIDER_URL_LEN,
-    MAX_UPDATE_ARTIFACT_BYTES, PersistenceState, PomodoroSnapshot, PomodoroState, ProviderSnapshot,
-    ProviderState, RefreshPolicy, RuntimeDiagnostics, RuntimeState, ValidationCode, WeatherUnits,
-    WidgetTapAction,
+    CardError, CardField, CardFieldValue, CardSettings, CarouselAdvance, ConnectionState,
+    DeviceCounters, DeviceSnapshot, DisplayTemplate, FirmwareArtifactMetadata, JsonFieldMapping,
+    MAX_ASSET_BYTES, MAX_PLAYLIST_ENTRIES, MAX_PLAYLIST_NAME_LEN, MAX_PLAYLISTS,
+    MAX_PROVIDER_URL_LEN, MAX_UPDATE_ARTIFACT_BYTES, PersistenceState, Playlist, PlaylistEntry,
+    PomodoroSnapshot, PomodoroState, ProviderSnapshot, ProviderState, RefreshPolicy,
+    RuntimeDiagnostics, RuntimeState, ValidationCode, WeatherUnits, WidgetTapAction,
 };
 use protocol::{
     CAPABILITY_ASSET_TRANSFER, CAPABILITY_CONFIG_ROTATION, CAPABILITY_CORE_WIDGETS,
@@ -16,7 +16,7 @@ use protocol::{
 const DEFAULT_JSON: &str = include_str!("fixtures/default.json");
 const FULL_JSON: &str = include_str!("fixtures/full.json");
 const INVALID_JSON: &str = include_str!("fixtures/invalid.json");
-const FUTURE_JSON: &str = include_str!("fixtures/future-v4.json");
+const FUTURE_JSON: &str = include_str!("fixtures/future-v5.json");
 const MALFORMED_JSON: &str = include_str!("fixtures/malformed.json");
 const CARD_SURFACE_JSON: &str = include_str!("fixtures/card-surface.json");
 
@@ -90,9 +90,9 @@ fn invalid_fixture_reports_all_domain_boundaries_before_compile() {
         ("preferences.timezone", ValidationCode::InvalidTimezone),
         // Two cards share id "duplicate"; the second occurrence is flagged.
         ("cards[2].id", ValidationCode::DuplicateId),
-        // in-rotation dwell_seconds: 4 is below MIN_DWELL_SECONDS (5).
+        // playlist entry dwell_seconds: 4 is below MIN_DWELL_SECONDS (5).
         (
-            "cards[2].presence.dwell_seconds",
+            "playlists[0].entries[1].dwell_seconds",
             ValidationCode::OutOfRange,
         ),
         // before-event lead_minutes: 61 is above MAX_ALERT_LEAD_MINUTES (60).
@@ -101,8 +101,18 @@ fn invalid_fixture_reports_all_domain_boundaries_before_compile() {
         ("cards[4].alert.hold.value", ValidationCode::OutOfRange),
         // on-timer-finish alerts are only valid on pomodoro cards; cards[0] is clock.
         ("cards[0].alert", ValidationCode::OutOfRange),
-        // an alert-only card (cards[5]) with alert: none has no trigger that can fire.
-        ("cards[5].presence", ValidationCode::OutOfRange),
+        // a playlist entry referencing a card id that does not exist.
+        (
+            "playlists[0].entries[4].card_id",
+            ValidationCode::MissingReference,
+        ),
+        // "on-timer-mismatch" appears twice in playlist "p1"'s entries.
+        (
+            "playlists[0].entries[5].card_id",
+            ValidationCode::DuplicateId,
+        ),
+        // Playlists "p1" and "p2" share the name "Main".
+        ("playlists[1].name", ValidationCode::DuplicateId),
         ("cards[3].source", ValidationCode::InvalidSource),
         (
             "cards[5].template.icon_asset_id",
@@ -261,8 +271,8 @@ fn malformed_and_unknown_json_are_rejected_by_serde() {
     assert!(serde_json::from_str::<AppConfig>(MALFORMED_JSON).is_err());
 
     let with_unknown = DEFAULT_JSON.replace(
-        "\"schema_version\": 3,",
-        "\"schema_version\": 3, \"unexpected\": true,",
+        "\"schema_version\": 4,",
+        "\"schema_version\": 4, \"unexpected\": true,",
     );
     assert!(serde_json::from_str::<AppConfig>(&with_unknown).is_err());
 
@@ -278,11 +288,11 @@ fn malformed_and_unknown_json_are_rejected_by_serde() {
 }
 
 #[test]
-fn card_settings_rejects_an_unknown_field_nested_inside_presence() {
+fn card_settings_rejects_an_unknown_field_nested_inside_refresh() {
     // CardSettings is itself an internally tagged enum ("kind" = clock/pomodoro/...).
     // Serde silently ignores `deny_unknown_fields` on internally tagged enums, so this
     // proves the validating Deserialize impl catches unknown fields nested inside a
-    // card's own `presence` object, not just at the card's top level.
+    // card's own `refresh` object, not just at the card's top level.
     let json = r#"{
         "kind": "clock",
         "id": "clock",
@@ -290,8 +300,7 @@ fn card_settings_rejects_an_unknown_field_nested_inside_presence() {
         "show_seconds": true,
         "template": { "kind": "digital-clock" },
         "tap_action": { "kind": "none" },
-        "refresh": { "kind": "device-local" },
-        "presence": { "kind": "off", "bogus": 1 },
+        "refresh": { "kind": "device-local", "bogus": 1 },
         "alert": { "kind": "none" }
     }"#;
     assert!(serde_json::from_str::<CardSettings>(json).is_err());
@@ -484,48 +493,7 @@ fn runtime_snapshot_uses_tagged_states_for_frontend_contract() {
 }
 
 #[test]
-fn card_presence_resolves_dwell_against_the_carousel_default() {
-    assert_eq!(
-        CardPresence::InRotation {
-            dwell_seconds: Some(45)
-        }
-        .dwell_seconds(20),
-        Some(45)
-    );
-    assert_eq!(
-        CardPresence::InRotation {
-            dwell_seconds: None
-        }
-        .dwell_seconds(20),
-        Some(20)
-    );
-    assert_eq!(CardPresence::AlertOnly.dwell_seconds(20), None);
-    assert_eq!(CardPresence::Off.dwell_seconds(20), None);
-
-    assert!(
-        CardPresence::InRotation {
-            dwell_seconds: None
-        }
-        .is_in_rotation()
-    );
-    assert!(!CardPresence::AlertOnly.is_in_rotation());
-    assert!(CardPresence::Off.is_off());
-    assert!(!CardPresence::AlertOnly.is_off());
-}
-
-#[test]
 fn card_behaviour_types_round_trip_as_closed_tagged_json() {
-    let presence = CardPresence::InRotation {
-        dwell_seconds: Some(30),
-    };
-    let json = serde_json::to_value(presence).unwrap();
-    assert_eq!(json["kind"], "in-rotation");
-    assert_eq!(json["dwell_seconds"], 30);
-    assert_eq!(
-        serde_json::from_value::<CardPresence>(json).unwrap(),
-        presence
-    );
-
     let alert = CardAlert::BeforeEvent {
         lead_minutes: 5,
         hold: AlertHold::Seconds { value: 60 },
@@ -543,12 +511,6 @@ fn card_behaviour_types_round_trip_as_closed_tagged_json() {
     };
     assert_eq!(advance.default_dwell_seconds(), Some(20));
     assert_eq!(CarouselAdvance::Manual.default_dwell_seconds(), None);
-
-    // Unknown fields are rejected at every level.
-    assert!(
-        serde_json::from_str::<CardPresence>(r#"{"kind":"alert-only","dwell_seconds":10}"#)
-            .is_err()
-    );
 }
 
 #[test]
@@ -663,7 +625,7 @@ fn card_alert_hold_method_extracts_hold() {
     assert_eq!(before_hold, Some(AlertHold::Seconds { value: 60 }));
 }
 
-fn clock_card(id: &str, presence: CardPresence) -> CardSettings {
+fn clock_card(id: &str) -> CardSettings {
     CardSettings::Clock {
         id: id.into(),
         title: "Desk".into(),
@@ -671,12 +633,11 @@ fn clock_card(id: &str, presence: CardPresence) -> CardSettings {
         template: DisplayTemplate::DigitalClock,
         tap_action: WidgetTapAction::None,
         refresh: RefreshPolicy::DeviceLocal,
-        presence,
         alert: CardAlert::None,
     }
 }
 
-fn pomodoro_card(id: &str, presence: CardPresence, alert: CardAlert) -> CardSettings {
+fn pomodoro_card(id: &str, alert: CardAlert) -> CardSettings {
     CardSettings::Pomodoro {
         id: id.into(),
         label: "Focus".into(),
@@ -684,37 +645,62 @@ fn pomodoro_card(id: &str, presence: CardPresence, alert: CardAlert) -> CardSett
         template: DisplayTemplate::ProgressRing,
         tap_action: WidgetTapAction::StartPause,
         refresh: RefreshPolicy::DeviceLocal,
-        presence,
         alert,
+    }
+}
+
+/// A single card, wrapped in a playlist that contains exactly that card (so
+/// `active_playlist_id` always resolves and the active playlist is never
+/// empty) — the v4 stand-in for the pre-Task-1 "just make this one card
+/// in-rotation" pattern most single-card tests need.
+fn single_card_config(card: CardSettings) -> AppConfig {
+    let id = card.id().to_owned();
+    AppConfig {
+        cards: vec![card],
+        playlists: vec![Playlist {
+            id: "p1".into(),
+            name: "P1".into(),
+            advance: CarouselAdvance::Manual,
+            entries: vec![PlaylistEntry {
+                card_id: id,
+                dwell_seconds: None,
+            }],
+        }],
+        active_playlist_id: "p1".into(),
+        ..AppConfig::default()
     }
 }
 
 #[test]
 fn compilation_lowers_cards_to_the_frozen_wire_shape() {
     let config = AppConfig {
-        schema_version: 3,
         cards: vec![
-            clock_card(
-                "clock",
-                CardPresence::InRotation {
-                    dwell_seconds: Some(10),
-                },
-            ),
+            clock_card("clock"),
             pomodoro_card(
                 "focus",
-                CardPresence::AlertOnly,
                 CardAlert::OnTimerFinish {
                     hold: AlertHold::UntilDismissed,
                 },
             ),
-            clock_card("muted", CardPresence::Off),
+            clock_card("muted"),
         ],
+        playlists: vec![Playlist {
+            id: "p1".into(),
+            name: "P1".into(),
+            advance: CarouselAdvance::Manual,
+            entries: vec![PlaylistEntry {
+                card_id: "clock".into(),
+                dwell_seconds: Some(10),
+            }],
+        }],
+        active_playlist_id: "p1".into(),
         ..AppConfig::default()
     };
 
     let compiled = config.compile(7).unwrap();
 
-    // Off cards vanish entirely; alert-only cards are screenless widgets.
+    // A card outside the playlist with no alert vanishes entirely; a card
+    // outside the playlist with an alert is a screenless widget.
     let widget_ids: Vec<&str> = compiled
         .layout
         .widgets
@@ -723,7 +709,7 @@ fn compilation_lowers_cards_to_the_frozen_wire_shape() {
         .collect();
     assert_eq!(widget_ids, ["clock", "focus"]);
 
-    // Screen ID is the card ID, in card order, for in-rotation cards only.
+    // Screen ID is the card ID, for playlist entries only.
     let screens: Vec<(&str, &str)> = compiled
         .layout
         .screens
@@ -741,7 +727,7 @@ fn compilation_lowers_cards_to_the_frozen_wire_shape() {
             .all(|widget| widget.size_class == protocol::SizeClass::Full)
     );
 
-    // Off cards receive no initial push.
+    // A card compiled out entirely receives no initial push.
     let pushed: Vec<&str> = compiled
         .initial_pushes
         .iter()
@@ -758,9 +744,6 @@ fn compilation_lowers_cards_to_the_frozen_wire_shape() {
 /// on every refresh, degrading the drift diagnostic Task 2 deliberately preserved.
 #[test]
 fn compositions_the_provider_cannot_populate_are_rejected() {
-    let presence = CardPresence::InRotation {
-        dwell_seconds: None,
-    };
     let rejected = [
         // Clock sends no `value`: big-number-label would show "--" forever.
         CardSettings::Clock {
@@ -770,7 +753,6 @@ fn compositions_the_provider_cannot_populate_are_rejected() {
             template: DisplayTemplate::BigNumberLabel,
             tap_action: WidgetTapAction::None,
             refresh: RefreshPolicy::DeviceLocal,
-            presence,
             alert: CardAlert::None,
         },
         // Calendar sends `title` plus ten `rowN_*` fields icon-badge-text declares none of.
@@ -783,7 +765,6 @@ fn compositions_the_provider_cannot_populate_are_rejected() {
             },
             tap_action: WidgetTapAction::None,
             refresh: RefreshPolicy::Interval { minutes: 15 },
-            presence,
             alert: CardAlert::None,
         },
         CardSettings::Rss {
@@ -796,7 +777,6 @@ fn compositions_the_provider_cannot_populate_are_rejected() {
             },
             tap_action: WidgetTapAction::None,
             refresh: RefreshPolicy::Interval { minutes: 30 },
-            presence,
             alert: CardAlert::None,
         },
         // Pomodoro sends label/duration_seconds/remaining_seconds/running, of which
@@ -811,17 +791,13 @@ fn compositions_the_provider_cannot_populate_are_rejected() {
             template: DisplayTemplate::BigNumberLabel,
             tap_action: WidgetTapAction::None,
             refresh: RefreshPolicy::DeviceLocal,
-            presence,
             alert: CardAlert::None,
         },
     ];
 
     for card in rejected {
         let id = card.id().to_owned();
-        let config = AppConfig {
-            cards: vec![card],
-            ..AppConfig::default()
-        };
+        let config = single_card_config(card);
         let error = config
             .validate()
             .expect_err(&format!("{id} must not validate"));
@@ -842,22 +818,16 @@ fn compositions_the_provider_cannot_populate_are_rejected() {
 /// configurations fail to load, stranding the user's whole configuration.
 #[test]
 fn already_saved_weather_cards_on_row_list_still_load() {
-    let config = AppConfig {
-        cards: vec![CardSettings::Weather {
-            id: "weather".into(),
-            title: "Weather".into(),
-            location: "Tbilisi".into(),
-            units: WeatherUnits::Metric,
-            template: DisplayTemplate::RowList,
-            tap_action: WidgetTapAction::None,
-            refresh: RefreshPolicy::Interval { minutes: 30 },
-            presence: CardPresence::InRotation {
-                dwell_seconds: None,
-            },
-            alert: CardAlert::None,
-        }],
-        ..AppConfig::default()
-    };
+    let config = single_card_config(CardSettings::Weather {
+        id: "weather".into(),
+        title: "Weather".into(),
+        location: "Tbilisi".into(),
+        units: WeatherUnits::Metric,
+        template: DisplayTemplate::RowList,
+        tap_action: WidgetTapAction::None,
+        refresh: RefreshPolicy::Interval { minutes: 30 },
+        alert: CardAlert::None,
+    });
     config.validate().expect("saved weather cards must load");
     config.compile(1).expect("and must still compile");
 }
@@ -875,21 +845,15 @@ fn already_saved_weather_cards_on_row_list_still_load() {
 #[test]
 fn timer_tap_actions_require_the_progress_ring_template() {
     for tap_action in [WidgetTapAction::StartPause, WidgetTapAction::Reset] {
-        let config = AppConfig {
-            cards: vec![CardSettings::Pomodoro {
-                id: "focus".into(),
-                label: "Focus".into(),
-                duration_seconds: 1_500,
-                template: DisplayTemplate::BigNumberLabel,
-                tap_action: tap_action.clone(),
-                refresh: RefreshPolicy::DeviceLocal,
-                presence: CardPresence::InRotation {
-                    dwell_seconds: None,
-                },
-                alert: CardAlert::None,
-            }],
-            ..AppConfig::default()
-        };
+        let config = single_card_config(CardSettings::Pomodoro {
+            id: "focus".into(),
+            label: "Focus".into(),
+            duration_seconds: 1_500,
+            template: DisplayTemplate::BigNumberLabel,
+            tap_action: tap_action.clone(),
+            refresh: RefreshPolicy::DeviceLocal,
+            alert: CardAlert::None,
+        });
         let error = config.validate().expect_err(&format!(
             "{tap_action:?} off progress-ring must not validate"
         ));
@@ -904,16 +868,7 @@ fn timer_tap_actions_require_the_progress_ring_template() {
     }
 
     // The same action on `progress-ring` stays valid.
-    let config = AppConfig {
-        cards: vec![pomodoro_card(
-            "focus",
-            CardPresence::InRotation {
-                dwell_seconds: None,
-            },
-            CardAlert::None,
-        )],
-        ..AppConfig::default()
-    };
+    let config = single_card_config(pomodoro_card("focus", CardAlert::None));
     config.validate().expect("progress-ring timers stay valid");
 }
 
@@ -925,13 +880,9 @@ fn compilation_is_deterministic_for_identical_input() {
 
 #[test]
 fn timed_advance_no_longer_requires_an_unimplemented_capability() {
-    let config = AppConfig {
-        carousel: CarouselSettings {
-            advance: CarouselAdvance::Timed {
-                default_dwell_seconds: 20,
-            },
-        },
-        ..AppConfig::default()
+    let mut config = AppConfig::default();
+    config.playlists[0].advance = CarouselAdvance::Timed {
+        default_dwell_seconds: 20,
     };
     assert!(config.compile(1).is_ok());
 }
@@ -954,14 +905,10 @@ fn timed_advance_no_longer_requires_an_unimplemented_capability() {
 /// "required field left empty" validation error.
 #[test]
 fn every_freshly_added_card_kind_validates_and_compiles() {
-    let presence = CardPresence::InRotation {
-        dwell_seconds: None,
-    };
     let cards = [
-        clock_card("clock", presence),
+        clock_card("clock"),
         pomodoro_card(
             "pomodoro",
-            presence,
             CardAlert::OnTimerFinish {
                 hold: AlertHold::UntilDismissed,
             },
@@ -973,7 +920,6 @@ fn every_freshly_added_card_kind_validates_and_compiles() {
             template: DisplayTemplate::RowList,
             tap_action: WidgetTapAction::None,
             refresh: RefreshPolicy::Interval { minutes: 15 },
-            presence,
             alert: CardAlert::None,
         },
         CardSettings::Weather {
@@ -986,7 +932,6 @@ fn every_freshly_added_card_kind_validates_and_compiles() {
             },
             tap_action: WidgetTapAction::None,
             refresh: RefreshPolicy::Interval { minutes: 30 },
-            presence,
             alert: CardAlert::None,
         },
         CardSettings::JsonFeed {
@@ -1004,7 +949,6 @@ fn every_freshly_added_card_kind_validates_and_compiles() {
             template: DisplayTemplate::BigNumberLabel,
             tap_action: WidgetTapAction::None,
             refresh: RefreshPolicy::Interval { minutes: 15 },
-            presence,
             alert: CardAlert::None,
         },
         CardSettings::Rss {
@@ -1015,16 +959,12 @@ fn every_freshly_added_card_kind_validates_and_compiles() {
             template: DisplayTemplate::RowList,
             tap_action: WidgetTapAction::None,
             refresh: RefreshPolicy::Interval { minutes: 30 },
-            presence,
             alert: CardAlert::None,
         },
     ];
 
     for card in cards {
-        let config = AppConfig {
-            cards: vec![card],
-            ..AppConfig::default()
-        };
+        let config = single_card_config(card);
         config.validate().unwrap_or_else(|error| {
             panic!("{} card failed validate(): {error:?}", config.cards[0].id())
         });
@@ -1041,11 +981,8 @@ fn every_freshly_added_card_kind_validates_and_compiles() {
 /// asserts `compile()` now succeeds for every one.
 #[test]
 fn every_display_template_lowers_to_the_wire() {
-    let presence = CardPresence::InRotation {
-        dwell_seconds: None,
-    };
     let cards = [
-        clock_card("digital-clock", presence),
+        clock_card("digital-clock"),
         CardSettings::Clock {
             id: "analog-clock".into(),
             title: "Desk".into(),
@@ -1053,12 +990,10 @@ fn every_display_template_lowers_to_the_wire() {
             template: DisplayTemplate::AnalogClock,
             tap_action: WidgetTapAction::None,
             refresh: RefreshPolicy::DeviceLocal,
-            presence,
             alert: CardAlert::None,
         },
         pomodoro_card(
             "progress-ring",
-            presence,
             CardAlert::OnTimerFinish {
                 hold: AlertHold::UntilDismissed,
             },
@@ -1070,7 +1005,6 @@ fn every_display_template_lowers_to_the_wire() {
             template: DisplayTemplate::RowList,
             tap_action: WidgetTapAction::None,
             refresh: RefreshPolicy::Interval { minutes: 15 },
-            presence,
             alert: CardAlert::None,
         },
         CardSettings::Weather {
@@ -1081,7 +1015,6 @@ fn every_display_template_lowers_to_the_wire() {
             template: DisplayTemplate::BigNumberLabel,
             tap_action: WidgetTapAction::None,
             refresh: RefreshPolicy::Interval { minutes: 30 },
-            presence,
             alert: CardAlert::None,
         },
         CardSettings::Weather {
@@ -1094,17 +1027,13 @@ fn every_display_template_lowers_to_the_wire() {
             },
             tap_action: WidgetTapAction::None,
             refresh: RefreshPolicy::Interval { minutes: 30 },
-            presence,
             alert: CardAlert::None,
         },
     ];
 
     for card in cards {
         let template = card.template().clone();
-        let config = AppConfig {
-            cards: vec![card],
-            ..AppConfig::default()
-        };
+        let config = single_card_config(card);
         config.compile(1).unwrap_or_else(|error| {
             panic!("{template:?} must lower to the wire, but compile() failed: {error:?}")
         });
@@ -1117,33 +1046,23 @@ fn every_display_template_lowers_to_the_wire() {
 /// widen or narrow which templates demand the capability.
 #[test]
 fn extended_templates_require_the_extended_capability() {
-    let presence = CardPresence::InRotation {
-        dwell_seconds: None,
-    };
-    let extended = AppConfig {
-        cards: vec![CardSettings::Weather {
-            id: "big-number-label".into(),
-            title: "Weather".into(),
-            location: "Tbilisi".into(),
-            units: WeatherUnits::Metric,
-            template: DisplayTemplate::BigNumberLabel,
-            tap_action: WidgetTapAction::None,
-            refresh: RefreshPolicy::Interval { minutes: 30 },
-            presence,
-            alert: CardAlert::None,
-        }],
-        ..AppConfig::default()
-    };
+    let extended = single_card_config(CardSettings::Weather {
+        id: "big-number-label".into(),
+        title: "Weather".into(),
+        location: "Tbilisi".into(),
+        units: WeatherUnits::Metric,
+        template: DisplayTemplate::BigNumberLabel,
+        tap_action: WidgetTapAction::None,
+        refresh: RefreshPolicy::Interval { minutes: 30 },
+        alert: CardAlert::None,
+    });
     assert_eq!(
         extended.required_device_capabilities() & CAPABILITY_EXTENDED_TEMPLATES,
         CAPABILITY_EXTENDED_TEMPLATES,
         "big-number-label must require the extended-templates capability"
     );
 
-    let core = AppConfig {
-        cards: vec![clock_card("digital-clock", presence)],
-        ..AppConfig::default()
-    };
+    let core = single_card_config(clock_card("digital-clock"));
     assert_eq!(
         core.required_device_capabilities() & CAPABILITY_EXTENDED_TEMPLATES,
         0,
@@ -1184,4 +1103,229 @@ fn card_data_serializes_as_tagged_values_for_the_preview() {
         serde_json::from_value::<CardDataSnapshot>(json).unwrap(),
         data
     );
+}
+
+// -- Schema v4: playlists replace presence and the global carousel ---------
+
+/// Two clock cards ("clock-a"/"clock-b"), the given playlists, and the given
+/// active playlist id — the shared shape most of the playlist tests below
+/// need.
+fn v4_config_with(playlists: Vec<Playlist>, active: &str) -> AppConfig {
+    AppConfig {
+        cards: vec![clock_card("clock-a"), clock_card("clock-b")],
+        playlists,
+        active_playlist_id: active.into(),
+        ..AppConfig::default()
+    }
+}
+
+fn manual_playlist(id: &str, name: &str, entries: Vec<PlaylistEntry>) -> Playlist {
+    Playlist {
+        id: id.into(),
+        name: name.into(),
+        advance: CarouselAdvance::Manual,
+        entries,
+    }
+}
+
+fn entry(card_id: &str) -> PlaylistEntry {
+    PlaylistEntry {
+        card_id: card_id.into(),
+        dwell_seconds: None,
+    }
+}
+
+#[test]
+fn default_config_is_v4_with_one_playlist() {
+    let config = AppConfig::default();
+    assert_eq!(config.schema_version, 4);
+    assert_eq!(config.playlists.len(), 1);
+    assert_eq!(config.active_playlist_id, config.playlists[0].id);
+    assert_eq!(config.playlists[0].entries.len(), 1);
+    assert!(config.validate().is_ok());
+}
+
+#[test]
+fn active_playlist_id_must_resolve() {
+    let config = v4_config_with(
+        vec![manual_playlist("p1", "P1", vec![entry("clock-a")])],
+        "nope",
+    );
+    let error = config.validate().unwrap_err();
+    assert!(error.issues.iter().any(|issue| {
+        issue.path == "active_playlist_id" && issue.code == ValidationCode::MissingReference
+    }));
+}
+
+#[test]
+fn playlist_entry_must_reference_existing_card() {
+    let config = v4_config_with(
+        vec![manual_playlist("p1", "P1", vec![entry("ghost")])],
+        "p1",
+    );
+    let error = config.validate().unwrap_err();
+    assert!(error.issues.iter().any(|issue| {
+        issue.path == "playlists[0].entries[0].card_id"
+            && issue.code == ValidationCode::MissingReference
+    }));
+}
+
+#[test]
+fn card_twice_in_one_playlist_rejected() {
+    let config = v4_config_with(
+        vec![manual_playlist(
+            "p1",
+            "P1",
+            vec![entry("clock-a"), entry("clock-a")],
+        )],
+        "p1",
+    );
+    let error = config.validate().unwrap_err();
+    assert!(error.issues.iter().any(|issue| {
+        issue.path == "playlists[0].entries[1].card_id" && issue.code == ValidationCode::DuplicateId
+    }));
+}
+
+#[test]
+fn same_card_in_two_playlists_is_allowed() {
+    let config = v4_config_with(
+        vec![
+            manual_playlist("p1", "P1", vec![entry("clock-a")]),
+            manual_playlist("p2", "P2", vec![entry("clock-a")]),
+        ],
+        "p1",
+    );
+    config
+        .validate()
+        .expect("the same card in two playlists must validate");
+}
+
+#[test]
+fn playlist_name_bounds_enforced() {
+    let empty_name = v4_config_with(
+        vec![manual_playlist("p1", "", vec![entry("clock-a")])],
+        "p1",
+    );
+    let error = empty_name.validate().unwrap_err();
+    assert!(
+        error
+            .issues
+            .iter()
+            .any(|issue| issue.path == "playlists[0].name" && issue.code == ValidationCode::Empty)
+    );
+
+    let too_long_name = v4_config_with(
+        vec![manual_playlist(
+            "p1",
+            &"x".repeat(MAX_PLAYLIST_NAME_LEN + 1),
+            vec![entry("clock-a")],
+        )],
+        "p1",
+    );
+    let error = too_long_name.validate().unwrap_err();
+    assert!(error.issues.iter().any(|issue| {
+        issue.path == "playlists[0].name" && issue.code == ValidationCode::TooLong
+    }));
+}
+
+#[test]
+fn duplicate_playlist_names_rejected() {
+    let config = v4_config_with(
+        vec![
+            manual_playlist("p1", "Work", vec![entry("clock-a")]),
+            manual_playlist("p2", "Work", vec![entry("clock-b")]),
+        ],
+        "p1",
+    );
+    let error = config.validate().unwrap_err();
+    assert!(error.issues.iter().any(|issue| {
+        issue.path == "playlists[1].name" && issue.code == ValidationCode::DuplicateId
+    }));
+}
+
+#[test]
+fn empty_active_playlist_rejected_when_cards_exist() {
+    let config = v4_config_with(vec![manual_playlist("p1", "P1", vec![])], "p1");
+    let error = config.validate().unwrap_err();
+    assert!(error.issues.iter().any(|issue| {
+        issue.path == "playlists[0].entries" && issue.code == ValidationCode::OutOfRange
+    }));
+}
+
+#[test]
+fn per_playlist_timed_advance_bounds() {
+    let config = v4_config_with(
+        vec![Playlist {
+            id: "p1".into(),
+            name: "P1".into(),
+            advance: CarouselAdvance::Timed {
+                default_dwell_seconds: 1,
+            },
+            entries: vec![entry("clock-a")],
+        }],
+        "p1",
+    );
+    let error = config.validate().unwrap_err();
+    assert!(error.issues.iter().any(|issue| {
+        issue.path == "playlists[0].advance.default_dwell_seconds"
+            && issue.code == ValidationCode::OutOfRange
+    }));
+}
+
+#[test]
+fn unknown_field_in_playlist_rejected() {
+    let json = r#"{"id":"p1","name":"Work","advance":{"kind":"manual"},"entries":[],"extra":1}"#;
+    assert!(serde_json::from_str::<Playlist>(json).is_err());
+}
+
+#[test]
+fn compiled_card_ids_are_entries_then_alert_outsiders() {
+    let config = AppConfig {
+        cards: vec![
+            clock_card("b"),
+            clock_card("a"),
+            pomodoro_card(
+                "c",
+                CardAlert::OnTimerFinish {
+                    hold: AlertHold::UntilDismissed,
+                },
+            ),
+            clock_card("d"),
+        ],
+        playlists: vec![manual_playlist("p1", "P1", vec![entry("b"), entry("a")])],
+        active_playlist_id: "p1".into(),
+        ..AppConfig::default()
+    };
+    assert_eq!(config.compiled_card_ids(), vec!["b", "a", "c"]);
+}
+
+#[test]
+fn too_many_playlists_rejected() {
+    let playlists = (0..=MAX_PLAYLISTS)
+        .map(|index| {
+            manual_playlist(
+                &format!("p{index}"),
+                &format!("P{index}"),
+                vec![entry("clock-a")],
+            )
+        })
+        .collect();
+    let config = v4_config_with(playlists, "p0");
+    let error = config.validate().unwrap_err();
+    assert!(
+        error
+            .issues
+            .iter()
+            .any(|issue| issue.path == "playlists" && issue.code == ValidationCode::TooMany)
+    );
+}
+
+#[test]
+fn too_many_entries_in_one_playlist_rejected() {
+    let entries = vec![entry("clock-a"); MAX_PLAYLIST_ENTRIES + 1];
+    let config = v4_config_with(vec![manual_playlist("p1", "P1", entries)], "p1");
+    let error = config.validate().unwrap_err();
+    assert!(error.issues.iter().any(|issue| {
+        issue.path == "playlists[0].entries" && issue.code == ValidationCode::TooMany
+    }));
 }

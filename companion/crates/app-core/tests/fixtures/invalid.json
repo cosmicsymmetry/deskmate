@@ -1,5 +1,5 @@
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "preferences": {
     "timezone": "Not/A_Timezone",
     "autostart": false,
@@ -15,7 +15,6 @@
       "template": { "kind": "digital-clock" },
       "tap_action": { "kind": "none" },
       "refresh": { "kind": "device-local" },
-      "presence": { "kind": "in-rotation", "dwell_seconds": null },
       "alert": { "kind": "on-timer-finish", "hold": { "kind": "until-dismissed" } }
     },
     {
@@ -26,7 +25,6 @@
       "template": { "kind": "digital-clock" },
       "tap_action": { "kind": "none" },
       "refresh": { "kind": "device-local" },
-      "presence": { "kind": "in-rotation", "dwell_seconds": null },
       "alert": { "kind": "none" }
     },
     {
@@ -37,7 +35,6 @@
       "template": { "kind": "progress-ring" },
       "tap_action": { "kind": "start-pause" },
       "refresh": { "kind": "device-local" },
-      "presence": { "kind": "in-rotation", "dwell_seconds": 4 },
       "alert": { "kind": "none" }
     },
     {
@@ -51,7 +48,6 @@
       "template": { "kind": "row-list" },
       "tap_action": { "kind": "none" },
       "refresh": { "kind": "interval", "minutes": 15 },
-      "presence": { "kind": "in-rotation", "dwell_seconds": null },
       "alert": {
         "kind": "before-event",
         "lead_minutes": 61,
@@ -66,7 +62,6 @@
       "template": { "kind": "progress-ring" },
       "tap_action": { "kind": "start-pause" },
       "refresh": { "kind": "device-local" },
-      "presence": { "kind": "in-rotation", "dwell_seconds": null },
       "alert": {
         "kind": "on-timer-finish",
         "hold": { "kind": "seconds", "value": 4 }
@@ -81,11 +76,33 @@
       "template": { "kind": "icon-badge-text", "icon_asset_id": "missing-icon" },
       "tap_action": { "kind": "none" },
       "refresh": { "kind": "interval", "minutes": 30 },
-      "presence": { "kind": "alert-only" },
       "alert": { "kind": "none" }
     }
   ],
   "assets": [],
-  "carousel": { "advance": { "kind": "manual" } },
+  "playlists": [
+    {
+      "id": "p1",
+      "name": "Main",
+      "advance": { "kind": "manual" },
+      "entries": [
+        { "card_id": "on-timer-mismatch", "dwell_seconds": null },
+        { "card_id": "duplicate", "dwell_seconds": 4 },
+        { "card_id": "calendar-a", "dwell_seconds": null },
+        { "card_id": "pomodoro-b", "dwell_seconds": null },
+        { "card_id": "ghost", "dwell_seconds": null },
+        { "card_id": "on-timer-mismatch", "dwell_seconds": null }
+      ]
+    },
+    {
+      "id": "p2",
+      "name": "Main",
+      "advance": { "kind": "manual" },
+      "entries": [
+        { "card_id": "orphan", "dwell_seconds": null }
+      ]
+    }
+  ],
+  "active_playlist_id": "p1",
   "updater": { "channel": "stable", "checks": "notify" }
 }

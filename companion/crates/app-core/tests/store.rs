@@ -5,9 +5,9 @@ use std::sync::{Arc, Barrier};
 use std::thread;
 
 use app_core::{
-    AlertHold, AppConfig, CalendarSource, CardAlert, CardPresence, CardSettings, CarouselAdvance,
-    ConfigOrigin, ConfigStore, DisplayOrientation, DisplayTemplate, MAX_CONFIG_FILE_BYTES,
-    RefreshPolicy, StoreError, WidgetTapAction,
+    AlertHold, AppConfig, CalendarSource, CardAlert, CardSettings, CarouselAdvance, ConfigOrigin,
+    ConfigStore, DisplayOrientation, DisplayTemplate, MAX_CONFIG_FILE_BYTES, RefreshPolicy,
+    StoreError, WidgetTapAction,
 };
 
 static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(1);
@@ -67,14 +67,14 @@ fn save_round_trips_and_migration_is_explicit() {
     fs::write(&path, include_bytes!("fixtures/legacy-v0.json")).unwrap();
     let migrated = store.load();
     assert_eq!(migrated.origin, ConfigOrigin::MigratedV0);
-    assert_eq!(migrated.config.schema_version, 3);
+    assert_eq!(migrated.config.schema_version, 4);
     assert_eq!(migrated.config.preferences.timezone, "Europe/Paris");
     assert!(!migrated.config.preferences.autostart);
 
     fs::write(&path, include_bytes!("fixtures/released-m3-v1.json")).unwrap();
     let migrated = store.load();
     assert_eq!(migrated.origin, ConfigOrigin::MigratedV1);
-    assert_eq!(migrated.config.schema_version, 3);
+    assert_eq!(migrated.config.schema_version, 4);
     assert_eq!(migrated.config.preferences.timezone, "Asia/Tbilisi");
     assert_eq!(migrated.config.cards.len(), 3);
     assert_eq!(
@@ -92,7 +92,6 @@ fn save_round_trips_and_migration_is_explicit() {
             template: DisplayTemplate::ProgressRing,
             tap_action: WidgetTapAction::StartPause,
             refresh: RefreshPolicy::DeviceLocal,
-            presence: CardPresence::InRotation { dwell_seconds: None },
             alert: CardAlert::OnTimerFinish { hold: AlertHold::UntilDismissed },
             ..
         } if id == "pomodoro" && label == "Focus"
@@ -106,7 +105,6 @@ fn save_round_trips_and_migration_is_explicit() {
             template: DisplayTemplate::DigitalClock,
             tap_action: WidgetTapAction::None,
             refresh: RefreshPolicy::DeviceLocal,
-            presence: CardPresence::InRotation { dwell_seconds: None },
             alert: CardAlert::None,
             ..
         } if id == "clock" && title == "Desk"
@@ -120,14 +118,13 @@ fn save_round_trips_and_migration_is_explicit() {
             id,
             source: CalendarSource::Url(source),
             refresh: RefreshPolicy::Interval { minutes: 15 },
-            presence: CardPresence::InRotation { dwell_seconds: None },
             alert: CardAlert::None,
             ..
         } if id == "calendar" && source == "https://example.com/calendar.ics"
     ));
     assert!(migrated.config.assets.is_empty());
     assert_eq!(
-        migrated.config.carousel.advance,
+        migrated.config.playlists[0].advance,
         app_core::CarouselAdvance::Manual
     );
     migrated.config.compile(7).unwrap();
@@ -170,7 +167,7 @@ fn malformed_truncated_and_oversized_files_preserve_bytes_and_last_good() {
     ));
     assert_eq!(fs::metadata(&path).unwrap().len(), oversized.len() as u64);
 
-    let future = include_bytes!("fixtures/future-v4.json");
+    let future = include_bytes!("fixtures/future-v5.json");
     fs::write(&path, future).unwrap();
     let recovered = store.load();
     assert_eq!(recovered.origin, ConfigOrigin::LastGood);
@@ -178,8 +175,8 @@ fn malformed_truncated_and_oversized_files_preserve_bytes_and_last_good() {
     assert_eq!(
         recovered.recovery,
         Some(StoreError::UnsupportedVersion {
-            found: 4,
-            supported: 3,
+            found: 5,
+            supported: 4,
         })
     );
     assert_eq!(fs::read(&path).unwrap(), future);
@@ -273,18 +270,22 @@ fn v2_documents_migrate_to_cards_in_screen_order() {
     assert!(outcome.recovery.is_none());
 
     let config = outcome.config;
-    assert_eq!(config.schema_version, 3);
+    assert_eq!(config.schema_version, 4);
 
     // Order follows screens[], not widgets[] (the fixture deliberately lists the
     // pomodoro widget before the clock widget, but the clock screen comes first).
     let ids: Vec<&str> = config.cards.iter().map(CardSettings::id).collect();
     assert_eq!(ids, ["clock", "focus"]);
 
-    // Every migrated card is in the rotation, inheriting the global dwell.
-    assert!(config.cards.iter().all(|card| card.presence()
-        == CardPresence::InRotation {
-            dwell_seconds: None
-        }));
+    // Every migrated card is in the playlist, inheriting its default dwell.
+    assert_eq!(
+        config.compiled_card_ids(),
+        config
+            .cards
+            .iter()
+            .map(CardSettings::id)
+            .collect::<Vec<_>>()
+    );
 
     // interrupt_policy: enabled becomes the kind-appropriate alert.
     assert_eq!(
@@ -297,7 +298,7 @@ fn v2_documents_migrate_to_cards_in_screen_order() {
 
     // auto_advance_seconds becomes timed advance.
     assert_eq!(
-        config.carousel.advance,
+        config.playlists[0].advance,
         CarouselAdvance::Timed {
             default_dwell_seconds: 30
         }
@@ -328,7 +329,7 @@ fn unknown_future_versions_still_fail_safely() {
     let path = directory.config_path();
     let store = ConfigStore::new(&path);
 
-    let future = include_bytes!("fixtures/future-v4.json");
+    let future = include_bytes!("fixtures/future-v5.json");
     fs::write(&path, future).unwrap();
 
     let outcome = store.load();
@@ -336,8 +337,8 @@ fn unknown_future_versions_still_fail_safely() {
     assert!(matches!(
         outcome.recovery,
         Some(StoreError::UnsupportedVersion {
-            found: 4,
-            supported: 3
+            found: 5,
+            supported: 4
         })
     ));
     // The unreadable source bytes are never rewritten.
@@ -477,20 +478,14 @@ fn v2_orphan_widgets_become_alert_only_or_off_instead_of_being_dropped() {
     let ids: Vec<&str> = config.cards.iter().map(CardSettings::id).collect();
     assert_eq!(ids, ["clock", "alpha-orphan", "zeta-orphan"]);
 
-    assert_eq!(
-        config.cards[0].presence(),
-        CardPresence::InRotation {
-            dwell_seconds: None
-        }
-    );
-    assert_eq!(config.cards[1].presence(), CardPresence::AlertOnly);
+    assert_eq!(config.playlists[0].entries[0].card_id, "clock");
+    assert_eq!(config.compiled_card_ids(), ["clock", "alpha-orphan"]);
     assert_eq!(
         config.cards[1].alert(),
         CardAlert::OnTimerFinish {
             hold: AlertHold::UntilDismissed
         }
     );
-    assert_eq!(config.cards[2].presence(), CardPresence::Off);
     assert_eq!(config.cards[2].alert(), CardAlert::None);
 
     config.validate().unwrap();
@@ -535,20 +530,14 @@ fn v1_orphan_widgets_become_alert_only_or_off_instead_of_being_dropped() {
     let ids: Vec<&str> = config.cards.iter().map(CardSettings::id).collect();
     assert_eq!(ids, ["clock", "alpha-orphan", "zeta-orphan"]);
 
-    assert_eq!(
-        config.cards[0].presence(),
-        CardPresence::InRotation {
-            dwell_seconds: None
-        }
-    );
-    assert_eq!(config.cards[1].presence(), CardPresence::AlertOnly);
+    assert_eq!(config.playlists[0].entries[0].card_id, "clock");
+    assert_eq!(config.compiled_card_ids(), ["clock", "alpha-orphan"]);
     assert_eq!(
         config.cards[1].alert(),
         CardAlert::OnTimerFinish {
             hold: AlertHold::UntilDismissed
         }
     );
-    assert_eq!(config.cards[2].presence(), CardPresence::Off);
     assert_eq!(config.cards[2].alert(), CardAlert::None);
 
     config.validate().unwrap();

@@ -10,9 +10,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     AlertHold, AppConfig, AppPreferences, AssetSettings, CURRENT_SCHEMA_VERSION, CalendarSource,
-    CardAlert, CardPresence, CardSettings, CarouselAdvance, CarouselSettings, DisplayTemplate,
-    JsonFieldMapping, RefreshPolicy, UpdaterSettings, ValidationIssue, WeatherUnits,
-    WidgetTapAction,
+    CardAlert, CardSettings, CarouselAdvance, DisplayTemplate, JsonFieldMapping, Playlist,
+    PlaylistEntry, RefreshPolicy, UpdaterSettings, ValidationIssue, WeatherUnits, WidgetTapAction,
 };
 
 pub const MAX_CONFIG_FILE_BYTES: usize = 64 * 1_024;
@@ -427,7 +426,7 @@ impl LegacyWidgetV2 {
 }
 
 #[allow(clippy::too_many_lines)]
-fn card_from_legacy_v2(widget: LegacyWidgetV2, presence: CardPresence) -> CardSettings {
+fn card_from_legacy_v2(widget: LegacyWidgetV2) -> CardSettings {
     let enabled = widget.interrupts_enabled();
     match widget {
         LegacyWidgetV2::Clock {
@@ -446,7 +445,6 @@ fn card_from_legacy_v2(widget: LegacyWidgetV2, presence: CardPresence) -> CardSe
             template,
             tap_action,
             refresh,
-            presence,
             alert: legacy_alert(enabled, LegacyCardKind::Clock),
         },
         LegacyWidgetV2::Pomodoro {
@@ -465,7 +463,6 @@ fn card_from_legacy_v2(widget: LegacyWidgetV2, presence: CardPresence) -> CardSe
             template,
             tap_action,
             refresh,
-            presence,
             alert: legacy_alert(enabled, LegacyCardKind::Pomodoro),
         },
         LegacyWidgetV2::Calendar {
@@ -484,7 +481,6 @@ fn card_from_legacy_v2(widget: LegacyWidgetV2, presence: CardPresence) -> CardSe
             template,
             tap_action,
             refresh,
-            presence,
             alert: legacy_alert(enabled, LegacyCardKind::Calendar),
         },
         LegacyWidgetV2::Weather {
@@ -505,7 +501,6 @@ fn card_from_legacy_v2(widget: LegacyWidgetV2, presence: CardPresence) -> CardSe
             template,
             tap_action,
             refresh,
-            presence,
             alert: legacy_alert(enabled, LegacyCardKind::Weather),
         },
         LegacyWidgetV2::JsonFeed {
@@ -526,7 +521,6 @@ fn card_from_legacy_v2(widget: LegacyWidgetV2, presence: CardPresence) -> CardSe
             template,
             tap_action,
             refresh,
-            presence,
             alert: legacy_alert(enabled, LegacyCardKind::JsonFeed),
         },
         LegacyWidgetV2::Rss {
@@ -547,7 +541,6 @@ fn card_from_legacy_v2(widget: LegacyWidgetV2, presence: CardPresence) -> CardSe
             template,
             tap_action,
             refresh,
-            presence,
             alert: legacy_alert(enabled, LegacyCardKind::Rss),
         },
     }
@@ -562,15 +555,16 @@ fn migrate_v2(legacy: LegacyConfigV2) -> AppConfig {
 
     // Card order follows screens[]: that is the carousel order the user authored.
     let mut cards = Vec::with_capacity(by_id.len());
+    let mut entries = Vec::with_capacity(legacy.screens.len());
     for screen in legacy.screens {
         let LegacyLayoutV2::Single { widget_id } = screen.layout;
         if let Some(widget) = by_id.remove(&widget_id) {
-            cards.push(card_from_legacy_v2(
-                widget,
-                CardPresence::InRotation {
-                    dwell_seconds: None,
-                },
-            ));
+            let card = card_from_legacy_v2(widget);
+            entries.push(PlaylistEntry {
+                card_id: card.id().to_owned(),
+                dwell_seconds: None,
+            });
+            cards.push(card);
         }
     }
 
@@ -582,27 +576,27 @@ fn migrate_v2(legacy: LegacyConfigV2) -> AppConfig {
     let mut orphans: Vec<LegacyWidgetV2> = by_id.into_values().collect();
     orphans.sort_by(|left, right| left.id().cmp(right.id()));
     for widget in orphans {
-        let presence = if widget.interrupts_enabled() {
-            CardPresence::AlertOnly
-        } else {
-            CardPresence::Off
-        };
-        cards.push(card_from_legacy_v2(widget, presence));
+        cards.push(card_from_legacy_v2(widget));
     }
 
+    let advance = match legacy.carousel.auto_advance_seconds {
+        Some(seconds) => CarouselAdvance::Timed {
+            default_dwell_seconds: seconds,
+        },
+        None => CarouselAdvance::Manual,
+    };
     AppConfig {
         schema_version: CURRENT_SCHEMA_VERSION,
         preferences: legacy.preferences,
         cards,
         assets: legacy.assets,
-        carousel: CarouselSettings {
-            advance: match legacy.carousel.auto_advance_seconds {
-                Some(seconds) => CarouselAdvance::Timed {
-                    default_dwell_seconds: seconds,
-                },
-                None => CarouselAdvance::Manual,
-            },
-        },
+        playlists: vec![Playlist {
+            id: "my-playlist".into(),
+            name: "My playlist".into(),
+            advance,
+            entries,
+        }],
+        active_playlist_id: "my-playlist".into(),
         updater: legacy.updater,
     }
 }
@@ -613,6 +607,7 @@ fn decode_config(bytes: &[u8]) -> Result<(AppConfig, ConfigOrigin), StoreError> 
         serde_json::from_str(text).map_err(|error| StoreError::InvalidJson {
             message: error.to_string(),
         })?;
+    // TODO(plan task 2): decode and migrate schema v3 before treating it as unsupported.
     let (config, origin) = match header.schema_version {
         CURRENT_SCHEMA_VERSION => (
             serde_json::from_str(text).map_err(|error| StoreError::InvalidJson {
@@ -685,15 +680,7 @@ fn decode_config(bytes: &[u8]) -> Result<(AppConfig, ConfigOrigin), StoreError> 
     Ok((config, origin))
 }
 
-/// Whether a v0/v1 widget's *historical* interrupt policy (the M3→v2 migration's
-/// hard-coded default per kind, since v0/v1 predates `interrupt_policy` entirely) was
-/// enabled. Pomodoro widgets were defaulted to `enabled`; clock and calendar widgets
-/// were defaulted to `disabled`.
-fn legacy_widget_interrupts_enabled(widget: &LegacyWidgetSettings) -> bool {
-    matches!(widget, LegacyWidgetSettings::Pomodoro { .. })
-}
-
-fn card_from_legacy_widget(widget: LegacyWidgetSettings, presence: CardPresence) -> CardSettings {
+fn card_from_legacy_widget(widget: LegacyWidgetSettings) -> CardSettings {
     match widget {
         LegacyWidgetSettings::Clock {
             id,
@@ -707,7 +694,6 @@ fn card_from_legacy_widget(widget: LegacyWidgetSettings, presence: CardPresence)
             template: DisplayTemplate::DigitalClock,
             tap_action: WidgetTapAction::None,
             refresh: RefreshPolicy::DeviceLocal,
-            presence,
             alert: legacy_alert(false, LegacyCardKind::Clock),
         },
         LegacyWidgetSettings::Pomodoro {
@@ -722,7 +708,6 @@ fn card_from_legacy_widget(widget: LegacyWidgetSettings, presence: CardPresence)
             template: DisplayTemplate::ProgressRing,
             tap_action: WidgetTapAction::StartPause,
             refresh: RefreshPolicy::DeviceLocal,
-            presence,
             alert: legacy_alert(true, LegacyCardKind::Pomodoro),
         },
         LegacyWidgetSettings::Calendar {
@@ -740,7 +725,6 @@ fn card_from_legacy_widget(widget: LegacyWidgetSettings, presence: CardPresence)
             refresh: RefreshPolicy::Interval {
                 minutes: refresh_minutes,
             },
-            presence,
             // The historical v2 migration defaulted calendar widgets to `disabled`,
             // so this must NOT become a `before-event` alert the widget never had.
             alert: legacy_alert(false, LegacyCardKind::Calendar),
@@ -764,14 +748,15 @@ fn migrate_legacy(
         .map(|widget| (legacy_widget_id(&widget).to_owned(), widget))
         .collect();
     let mut cards = Vec::with_capacity(widgets_by_id.len());
+    let mut entries = Vec::with_capacity(screens.len());
     for screen in screens {
         if let Some(widget) = widgets_by_id.remove(&screen.widget_id) {
-            cards.push(card_from_legacy_widget(
-                widget,
-                CardPresence::InRotation {
-                    dwell_seconds: None,
-                },
-            ));
+            let card = card_from_legacy_widget(widget);
+            entries.push(PlaylistEntry {
+                card_id: card.id().to_owned(),
+                dwell_seconds: None,
+            });
+            cards.push(card);
         }
     }
 
@@ -783,12 +768,7 @@ fn migrate_legacy(
     let mut orphans: Vec<LegacyWidgetSettings> = widgets_by_id.into_values().collect();
     orphans.sort_by(|left, right| legacy_widget_id(left).cmp(legacy_widget_id(right)));
     for widget in orphans {
-        let presence = if legacy_widget_interrupts_enabled(&widget) {
-            CardPresence::AlertOnly
-        } else {
-            CardPresence::Off
-        };
-        cards.push(card_from_legacy_widget(widget, presence));
+        cards.push(card_from_legacy_widget(widget));
     }
 
     AppConfig {
@@ -796,7 +776,13 @@ fn migrate_legacy(
         preferences,
         cards,
         assets: Vec::new(),
-        carousel: CarouselSettings::default(),
+        playlists: vec![Playlist {
+            id: "my-playlist".into(),
+            name: "My playlist".into(),
+            advance: CarouselAdvance::Manual,
+            entries,
+        }],
+        active_playlist_id: "my-playlist".into(),
         updater: UpdaterSettings::default(),
     }
 }

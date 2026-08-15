@@ -3,5 +3,5 @@
   "identifier": "main",
   "description": "The settings window may subscribe to backend-owned state events.",
   "windows": ["main"],
-  "permissions": ["core:event:default"]
+  "permissions": ["core:event:allow-listen", "core:event:allow-unlisten"]
 }

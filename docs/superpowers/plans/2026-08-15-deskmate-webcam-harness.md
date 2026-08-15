@@ -58,14 +58,16 @@ label=${2:-}
 
 # avfoundation device indices shift as cameras come and go; resolve by name,
 # stopping before the audio-device section (the OBSBOT microphone also matches).
-device_index=$(ffmpeg -hide_banner -f avfoundation -list_devices true -i "" 2>&1 |
+# The -list_devices invocation always exits nonzero by design (there is no real
+# input to open), so its status must be tolerated explicitly under pipefail.
+device_list=$(ffmpeg -hide_banner -f avfoundation -list_devices true -i "" 2>&1 || true)
+device_index=$(printf '%s\n' "$device_list" |
     awk '/audio devices:/ { exit }
          /OBSBOT/ { if (match($0, /\[[0-9]+\]/)) { print substr($0, RSTART + 1, RLENGTH - 2); exit } }')
 
 if [ -z "$device_index" ]; then
     echo "error: no OBSBOT camera among avfoundation video devices:" >&2
-    ffmpeg -hide_banner -f avfoundation -list_devices true -i "" 2>&1 |
-        sed -n '/video devices/,/audio devices/p' >&2
+    printf '%s\n' "$device_list" | sed -n '/video devices/,/audio devices/p' >&2
     exit 1
 fi
 

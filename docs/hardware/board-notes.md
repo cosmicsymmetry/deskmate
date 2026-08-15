@@ -1662,3 +1662,53 @@ captures the pre-flush logical frame and bypasses the real QSPI flush/rounding p
 entirely, so it cannot see this. Also not evaluated: AMOLED surface-module
 rendering quality, storm icon readability, boot-clock visual appearance, general
 color/contrast at desk distance.
+
+## Unpowered-alert fix — hardware re-verification PASSED (2026-08-15)
+
+Firmware `m1-113-g05d04ce` on `/dev/cu.usbmodem1101`, main at the alert-hold fix
+(`4206a98`), user observing the panel. Driven by the sequenced harness
+`companion/crates/app-core/examples/alert_replay_check.rs` (15 s pomodoro,
+5 s bounded hold), which starts the timer only after the link drops so the
+completion provably falls inside the disconnected window.
+
+**Result — PASS.** Link down at T+56 s; timer started host-side; pomodoro
+completed at T+71 s while disconnected; the 5 s bounded hold elapsed while still
+disconnected; replug at T+91 s produced the interrupt takeover on the panel
+within seconds (the completed pomodoro face, "no time left"), delivered by the
+runtime's reconnect flush. The instrumented run reported no `RuntimeState`
+errors and no card errors, and the device's `latest_interrupt_token` advanced,
+confirming the firmware accepted the trigger. Before the fix this exact
+sequence retired the interrupt host-side and the panel came back with nothing.
+
+Two earlier attempts that day mis-executed the timing (the timer completed
+while still connected); those runs instead demonstrated session-replay
+re-delivery of a never-dismissed interrupt after link loss — also observed
+working, but they are not evidence for this fix.
+
+**Battery discovery.** The board has a battery attached: unplugging USB is
+*link* loss, not power loss (`uptime_ms` kept counting across a 20 s unplug).
+The 2026-08-06 "unpowered" observation was therefore most likely also a
+link-loss case. The host-side mechanism and fix are identical either way, but
+a true power-loss run (battery disconnected, device reboots, session replay +
+reconnect flush after a fresh boot) has not been performed.
+
+**UX findings (open, not defects in the alert state machine):**
+
+1. The interrupt takeover face is visually indistinguishable from the completed
+   pomodoro card beneath it — both render the same template showing "Done" — so
+   a successful tap-dismiss looks like nothing happened. During re-verification
+   the user repeatedly "dismissed" an overlay that was already gone.
+2. Tapping a Completed pomodoro (tap action start-pause) is a deliberate host
+   no-op (`engine::pomodoro::toggle` on `Completed` only refreshes), but the
+   firmware applies optimistic local tap feedback that no authoritative push
+   ever reconciles — the "done" word flashes red and stays red until the next
+   tap. Confirmed by the event stream: such taps arrive as `tap start-pause`,
+   the host processes them, state does not change, nothing is pushed back.
+3. The host silently ignores an `InterruptDismissed` event whose token it no
+   longer tracks (`runtime.rs`, the dismissal arm's `.is_ok()` gate) — benign
+   today because the firmware restores its own saved screen on a validated
+   dismissal, but a debug log would make future sessions easier to read.
+
+Counters at session end: `valid=3261 malformed=0 crc=0 overflow=0`,
+`events dropped=1` (one event emitted while the link was down, dropped by
+design), `free_heap 8480619` — byte-identical to every prior record.

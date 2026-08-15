@@ -79,8 +79,14 @@ of letting code and documentation diverge.
   the only host-side mechanism capable of losing an alert that fired while unpowered
   was root-caused to a bounded hold expiring from schedule time before delivery and
   fixed by starting that countdown at delivery, with regression tests for bounded and
-  until-dismissed reconnect paths. The original observation did not record its hold
-  configuration, so hardware re-verification remains pending.
+  until-dismissed reconnect paths. Hardware re-verification passed on 2026-08-15 via
+  `companion/crates/app-core/examples/alert_replay_check.rs`: a bounded-hold pomodoro
+  completing while the link was down was delivered on reconnect. Note the board has a
+  battery, so USB unplug is link loss, not power loss — the true power-loss variant
+  was not separately run, and the 2026-08-06 observation was likely also link-loss.
+  Three UX findings from that session are recorded in board-notes (takeover face
+  indistinguishable from the completed card; sticky unreconciled optimistic red flash
+  on tapping a completed pomodoro; host silently ignores stale-token dismissals).
 - M1's full software and physical exit gate passes, including ten observed
   unplug/replug cycles, and is tagged `m1`. Because M2 work began in the same shared
   worktree before the physical carryover closed, that tag also contains the M2

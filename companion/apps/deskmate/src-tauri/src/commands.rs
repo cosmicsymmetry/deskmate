@@ -124,6 +124,25 @@ impl std::fmt::Display for IpcError {
 
 impl std::error::Error for IpcError {}
 
+impl IpcError {
+    pub(crate) const fn log_label(&self) -> &'static str {
+        match self {
+            Self::InvalidPayload { .. } => "invalid-payload",
+            Self::PayloadTooLarge { .. } => "payload-too-large",
+            Self::Validation { .. } => "validation",
+            Self::Persistence { .. } => "persistence",
+            Self::RuntimeBusy { .. } => "runtime-busy",
+            Self::RuntimeUnavailable { .. } => "runtime-unavailable",
+            Self::NotFound { .. } => "not-found",
+            Self::Device { .. } => "device",
+            Self::Provider { .. } => "provider",
+            Self::Autostart { .. } => "autostart",
+            Self::Window { .. } => "window",
+            Self::Internal { .. } => "internal",
+        }
+    }
+}
+
 #[tauri::command]
 pub fn get_app_snapshot(state: State<'_, DesktopState>) -> Result<DesktopSnapshot, IpcError> {
     let snapshot = state.runtime.snapshot().map_err(IpcError::from)?;
@@ -611,7 +630,7 @@ fn validate_target(value: &str, maximum: usize, label: &str) -> Result<(), IpcEr
     Ok(())
 }
 
-fn autostart_error(error: impl std::fmt::Display) -> IpcError {
+pub(crate) fn autostart_error(error: impl std::fmt::Display) -> IpcError {
     IpcError::Autostart {
         message: format!("cannot update start-at-login: {error}"),
     }

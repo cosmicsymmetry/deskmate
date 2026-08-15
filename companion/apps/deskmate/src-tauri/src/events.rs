@@ -28,15 +28,14 @@ pub fn spawn_state_worker(
                             .run_on_main_thread(move || {
                                 let state = dispatch_app.state::<DesktopState>();
                                 let snapshot = state.project_snapshot(snapshot);
-                                if let Err(error) = state.tray.update(&snapshot.app) {
-                                    eprintln!("cannot update Deskmate tray state: {error}");
+                                if state.tray.update(&snapshot.app).is_err() {
+                                    eprintln!("cannot update Deskmate tray state");
                                 }
-                                if let Err(error) = dispatch_app.emit_to(
-                                    MAIN_WINDOW_LABEL,
-                                    APP_STATE_EVENT,
-                                    snapshot,
-                                ) {
-                                    eprintln!("cannot project Deskmate app state: {error}");
+                                if dispatch_app
+                                    .emit_to(MAIN_WINDOW_LABEL, APP_STATE_EVENT, snapshot)
+                                    .is_err()
+                                {
+                                    eprintln!("cannot project Deskmate app state");
                                 }
                             })
                             .is_err()
@@ -46,8 +45,8 @@ pub fn spawn_state_worker(
                     }
                     Ok(None) => {}
                     Err(RuntimeError::WorkerStopped) => break,
-                    Err(error) => {
-                        eprintln!("Deskmate state subscription failed: {error}");
+                    Err(_) => {
+                        eprintln!("Deskmate state subscription failed");
                         break;
                     }
                 }

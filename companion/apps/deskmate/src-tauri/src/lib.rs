@@ -1,4 +1,5 @@
 use std::error::Error;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -146,16 +147,17 @@ impl DesktopState {
         self.has_saved_config.store(true, Ordering::Release);
     }
 
-    fn toggle_paused(&self) -> Result<(), Box<dyn Error>> {
+    fn toggle_paused(&self) -> Result<(), commands::IpcError> {
         let paused = !self.runtime.snapshot()?.config.preferences.paused;
-        commands::set_paused(self, paused).map_err(Into::into)
+        commands::set_paused(self, paused)
     }
 
-    fn toggle_autostart(&self, app: &AppHandle) -> Result<(), Box<dyn Error>> {
-        let enabled = !app.autolaunch().is_enabled()?;
-        commands::set_autostart(app, self, enabled)
-            .map(|_| ())
-            .map_err(Into::into)
+    fn toggle_autostart(&self, app: &AppHandle) -> Result<(), commands::IpcError> {
+        let enabled = !app
+            .autolaunch()
+            .is_enabled()
+            .map_err(commands::autostart_error)?;
+        commands::set_autostart(app, self, enabled).map(|_| ())
     }
 
     fn is_quitting(&self) -> bool {
@@ -170,7 +172,10 @@ impl DesktopState {
             report_exit_metrics(&snapshot);
         }
         if let Err(error) = self.runtime.shutdown() {
-            eprintln!("failed to stop Deskmate runtime cleanly: {error}");
+            eprintln!(
+                "failed to stop Deskmate runtime cleanly: {}",
+                runtime_error_log_label(&error)
+            );
         }
         if let Ok(mut worker) = self.snapshot_worker.lock()
             && let Some(worker) = worker.take()
@@ -194,15 +199,46 @@ fn report_exit_metrics(snapshot: &AppSnapshot) {
         }
     }
     eprintln!(
-        "Deskmate exit metrics: runtime={:?} connection={:?} uptime_ms={:?} free_heap={:?} active_screen={:?} providers=fresh:{provider_fresh},stale:{provider_stale},error:{provider_error} counters={:?} runtime_diagnostics={:?}",
-        snapshot.runtime,
-        snapshot.device.connection,
+        "Deskmate exit metrics: runtime={} connection={} uptime_ms={:?} free_heap={:?} active_screen_present={} providers=fresh:{provider_fresh},stale:{provider_stale},error:{provider_error} counters={:?} runtime_diagnostics={:?}",
+        runtime_log_label(&snapshot.runtime),
+        connection_log_label(&snapshot.device.connection),
         snapshot.device.uptime_ms,
         snapshot.device.free_heap,
-        snapshot.device.active_screen_id,
+        snapshot.device.active_screen_id.is_some(),
         snapshot.device.counters,
         snapshot.diagnostics,
     );
+}
+
+const fn runtime_log_label(runtime: &RuntimeState) -> &'static str {
+    match runtime {
+        RuntimeState::Starting => "starting",
+        RuntimeState::Running => "running",
+        RuntimeState::Paused => "paused",
+        RuntimeState::Error { .. } => "error",
+    }
+}
+
+const fn connection_log_label(connection: &ConnectionState) -> &'static str {
+    match connection {
+        ConnectionState::Disconnected { .. } => "disconnected",
+        ConnectionState::Connecting => "connecting",
+        ConnectionState::Online => "online",
+        ConnectionState::Standalone => "standalone",
+    }
+}
+
+const fn runtime_error_log_label(error: &app_core::RuntimeError) -> &'static str {
+    match error {
+        app_core::RuntimeError::InvalidConfig { .. } => "invalid-config",
+        app_core::RuntimeError::QueueFull => "queue-full",
+        app_core::RuntimeError::WorkerStopped => "worker-stopped",
+        app_core::RuntimeError::ResponseTimeout => "response-timeout",
+        app_core::RuntimeError::UnknownWidget { .. } => "unknown-widget",
+        app_core::RuntimeError::UnknownScreen { .. } => "unknown-screen",
+        app_core::RuntimeError::Device { .. } => "device",
+        app_core::RuntimeError::Provider { .. } => "provider",
+    }
 }
 
 fn tray_image(online: bool) -> tauri::Result<Image<'static>> {
@@ -280,13 +316,13 @@ fn handle_tray_action(app: &AppHandle, id: &str) {
         TrayAction::TogglePause => {
             let state = app.state::<DesktopState>();
             if let Err(error) = state.toggle_paused() {
-                eprintln!("cannot change pause state: {error}");
+                eprintln!("cannot change pause state: {}", error.log_label());
             }
         }
         TrayAction::ToggleAutostart => {
             let state = app.state::<DesktopState>();
             if let Err(error) = state.toggle_autostart(app) {
-                eprintln!("cannot change autostart: {error}");
+                eprintln!("cannot change autostart: {}", error.log_label());
                 if let Ok(enabled) = app.autolaunch().is_enabled() {
                     let _ = state.tray.autostart.set_checked(enabled);
                 }
@@ -309,13 +345,18 @@ fn show_settings(app: &AppHandle) {
 }
 
 fn setup_app(app: &mut App) -> Result<(), Box<dyn Error>> {
-    let config_path = app.path().app_data_dir()?.join(CONFIG_FILE_NAME);
+    let config_directory = app.path().app_data_dir()?;
+    prepare_config_directory(&config_directory)?;
+    let config_path = config_directory.join(CONFIG_FILE_NAME);
     let store = ConfigStore::new(config_path);
     let loaded = store.load();
     let has_saved_config = load_has_saved_config(&loaded);
     let persistence = load_failure_persistence(&loaded);
     if let Some(persistence) = &persistence {
-        eprintln!("saved Deskmate configuration was not applied: {persistence:?}");
+        eprintln!(
+            "saved Deskmate configuration was not applied: {}",
+            persistence_log_label(persistence)
+        );
     }
 
     // The window is configured hidden, so the single owner is running before any
@@ -325,13 +366,10 @@ fn setup_app(app: &mut App) -> Result<(), Box<dyn Error>> {
     if let Some(persistence) = persistence {
         runtime.set_persistence_state(persistence)?;
     }
-    let autostart_enabled = match app.autolaunch().is_enabled() {
-        Ok(enabled) => enabled,
-        Err(error) => {
-            eprintln!("cannot read autostart state: {error}");
-            false
-        }
-    };
+    let autostart_enabled = app.autolaunch().is_enabled().unwrap_or_else(|_| {
+        eprintln!("cannot read autostart state");
+        false
+    });
     let initial_snapshot = runtime.snapshot()?;
     let tray = create_tray(app, &initial_snapshot, autostart_enabled)?;
 
@@ -358,6 +396,17 @@ fn setup_app(app: &mut App) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+fn prepare_config_directory(path: &Path) -> Result<(), Box<dyn Error>> {
+    std::fs::create_dir_all(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
 /// Only a clean defaults load means no document existed. Recovery and validation
 /// failures still came from a persisted document, so they must not turn an existing
 /// installation back into first-run mode.
@@ -381,6 +430,15 @@ fn load_failure_persistence(loaded: &LoadOutcome) -> Option<PersistenceState> {
             message: SAVED_SETTINGS_VALIDATION_FAILURE_MESSAGE.into(),
             issues: issues.clone(),
         }),
+    }
+}
+
+const fn persistence_log_label(persistence: &PersistenceState) -> &'static str {
+    match persistence {
+        PersistenceState::Clean => "clean",
+        PersistenceState::Saving => "saving",
+        PersistenceState::RecoverableError { .. } => "recoverable-error",
+        PersistenceState::ValidationFailed { .. } => "validation-failed",
     }
 }
 
@@ -546,5 +604,61 @@ mod tests {
         assert!(!load_has_saved_config(&defaults));
         assert!(load_has_saved_config(&current));
         assert!(load_has_saved_config(&recovered));
+    }
+
+    #[test]
+    fn diagnostic_labels_do_not_include_runtime_or_config_messages() {
+        let runtime_secret = "calendar: Private appointment";
+        let runtime = RuntimeState::Error {
+            message: runtime_secret.into(),
+        };
+        assert_eq!(runtime_log_label(&runtime), "error");
+        assert!(!runtime_log_label(&runtime).contains(runtime_secret));
+        let runtime_error = app_core::RuntimeError::Device {
+            message: runtime_secret.into(),
+        };
+        assert_eq!(runtime_error_log_label(&runtime_error), "device");
+        let ipc_error = commands::IpcError::Device {
+            message: runtime_secret.into(),
+        };
+        assert_eq!(ipc_error.log_label(), "device");
+
+        let config_secret = "private-playlist";
+        let persistence = PersistenceState::ValidationFailed {
+            message: config_secret.into(),
+            issues: vec![ValidationIssue {
+                path: "playlists[0].name".into(),
+                code: ValidationCode::DuplicateId,
+                message: config_secret.into(),
+            }],
+        };
+        assert_eq!(persistence_log_label(&persistence), "validation-failed");
+        assert!(!persistence_log_label(&persistence).contains(config_secret));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn config_directory_is_user_only() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let serial = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "deskmate-config-permissions-{}-{serial}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&path).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        prepare_config_directory(&path).unwrap();
+
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        std::fs::remove_dir(path).unwrap();
     }
 }

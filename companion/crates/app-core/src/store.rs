@@ -6,7 +6,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use atomic_write_file::AtomicWriteFile;
+#[cfg(unix)]
+use atomic_write_file::unix::OpenOptionsExt as AtomicOpenOptionsExt;
 use serde::{Deserialize, Serialize};
+
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt as UnixOpenOptionsExt, PermissionsExt};
 
 use crate::config::{DEFAULT_PLAYLIST_ID, DEFAULT_PLAYLIST_NAME};
 use crate::{
@@ -1181,6 +1186,7 @@ fn read_bounded(path: &Path) -> Result<Option<Vec<u8>>, StoreError> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(io_error("open config", &error)),
     };
+    secure_open_config(&file)?;
     let mut bytes = Vec::new();
     file.take((MAX_CONFIG_FILE_BYTES + 1) as u64)
         .read_to_end(&mut bytes)
@@ -1231,7 +1237,9 @@ fn usable_parent(path: &Path) -> Result<&Path, StoreError> {
 }
 
 fn write_and_replace(target: &Path, bytes: &[u8]) -> Result<(), StoreError> {
-    let mut file = AtomicWriteFile::options()
+    let mut options = AtomicWriteFile::options();
+    secure_atomic_options(&mut options);
+    let mut file = options
         .open(target)
         .map_err(|error| io_error("create temporary config", &error))?;
     file.write_all(bytes)
@@ -1241,6 +1249,30 @@ fn write_and_replace(target: &Path, bytes: &[u8]) -> Result<(), StoreError> {
     file.commit()
         .map_err(|error| io_error("sync and replace config", &error))
 }
+
+/// Existing dogfood installs may have inherited the process umask's `0644` mode.
+/// Tighten the descriptor before reading so an upgrade repairs that state immediately.
+#[cfg(unix)]
+fn secure_open_config(file: &File) -> Result<(), StoreError> {
+    file.set_permissions(fs::Permissions::from_mode(0o600))
+        .map_err(|error| io_error("secure config permissions", &error))
+}
+
+#[cfg(not(unix))]
+fn secure_open_config(_file: &File) -> Result<(), StoreError> {
+    Ok(())
+}
+
+/// Do not preserve a permissive mode from an older destination when atomically
+/// replacing it. The temporary file is private from the moment it is created.
+#[cfg(unix)]
+fn secure_atomic_options(options: &mut atomic_write_file::OpenOptions) {
+    options.preserve_mode(false);
+    options.mode(0o600);
+}
+
+#[cfg(not(unix))]
+fn secure_atomic_options(_options: &mut atomic_write_file::OpenOptions) {}
 
 #[cfg(unix)]
 fn sync_parent(parent: &Path) -> io::Result<()> {

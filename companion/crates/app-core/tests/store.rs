@@ -4,6 +4,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Barrier};
 use std::thread;
 
+#[cfg(unix)]
+use std::io::Write;
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
 use app_core::{
     AlertHold, AppConfig, CalendarSource, CardAlert, CardSettings, CarouselAdvance, ConfigOrigin,
     ConfigStore, DisplayOrientation, DisplayTemplate, LoadOutcome, MAX_CONFIG_FILE_BYTES,
@@ -187,6 +192,48 @@ fn save_round_trips_and_migration_is_explicit() {
         app_core::CarouselAdvance::Manual
     );
     migrated.config().compile(7).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn saved_config_is_user_readable_and_writable_only() {
+    let directory = TestDirectory::new("private-save");
+    let path = directory.config_path();
+    let store = ConfigStore::new(&path);
+
+    store.save(&AppConfig::default()).unwrap();
+
+    assert_eq!(
+        fs::metadata(path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn loading_repairs_a_permissive_existing_config_mode() {
+    let directory = TestDirectory::new("private-load");
+    let path = directory.config_path();
+    let bytes = serde_json::to_vec_pretty(&AppConfig::default()).unwrap();
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o644)
+        .open(&path)
+        .unwrap()
+        .write_all(&bytes)
+        .unwrap();
+    // Apply the exact mode explicitly so this assertion is independent of the test
+    // process's umask.
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+
+    let loaded = ConfigStore::new(&path).load();
+
+    assert_eq!(loaded.origin(), ConfigOrigin::Current);
+    assert_eq!(
+        fs::metadata(path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
 }
 
 #[test]

@@ -98,7 +98,9 @@ recorded in `NOTES.md`.
 - Both scripts pass `shellcheck` with no warnings.
 - Live framing preflight passes on the actual desk setup.
 - The remaining Task 6 install-matrix rows are executed using the harness and
-  recorded in the plan and board-notes.
+  recorded in the plan and board-notes. (Re-homed: these rows execute under
+  the V1 packaging plan's Task 6, per the implementation plan's Task 4 Step 5;
+  the other acceptance bullets closed 2026-08-15 in the harness plan itself.)
 - A ~10-minute timelapse smoke run: expected frame count (±1), all sampled
   frames readable.
 

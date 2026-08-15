@@ -32,7 +32,7 @@
 **Interfaces:**
 - Produces: `capture.sh <session-dir> [label]` → writes `<session-dir>/<UTC-stamp>[-label].jpg`, prints that path on stdout, exit 0. Exit 1 on camera-not-found / failed / empty capture; exit 2 on usage error. Task 2 invokes it by path; Task 4 and all future verification sessions call it directly.
 
-- [ ] **Step 1: Write the script**
+- [x] **Step 1: Write the script**
 
 Create `tools/hwcam/capture.sh` with exactly this content:
 
@@ -88,7 +88,7 @@ fi
 echo "$frame"
 ```
 
-- [ ] **Step 2: Make it executable and lint it**
+- [x] **Step 2: Make it executable and lint it**
 
 ```sh
 chmod +x tools/hwcam/capture.sh
@@ -97,7 +97,7 @@ shellcheck tools/hwcam/capture.sh
 
 Expected: no output from shellcheck (clean).
 
-- [ ] **Step 3: Live failure-path check (camera busy or absent is NOT simulated — argument errors are)**
+- [x] **Step 3: Live failure-path check (camera busy or absent is NOT simulated — argument errors are)**
 
 ```sh
 tools/hwcam/capture.sh; echo "exit=$?"
@@ -105,7 +105,7 @@ tools/hwcam/capture.sh; echo "exit=$?"
 
 Expected: usage line on stderr, `exit=2`.
 
-- [ ] **Step 4: Live capture check**
+- [x] **Step 4: Live capture check**
 
 ```sh
 tools/hwcam/capture.sh ~/deskmate-hw-sessions/$(date -u +%Y-%m-%d)-harness-build smoke
@@ -113,7 +113,7 @@ tools/hwcam/capture.sh ~/deskmate-hw-sessions/$(date -u +%Y-%m-%d)-harness-build
 
 Expected: prints one path like `~/deskmate-hw-sessions/<date>-harness-build/<stamp>-smoke.jpg`; file is > 100 KB. The agent then **reads the frame** and confirms the Deskmate panel is visible and its text readable. (ffmpeg may print a benign "Selected pixel format (yuv420p) is not supported" advisory to stderr; that is not a failure.)
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```sh
 git add tools/hwcam/capture.sh
@@ -131,7 +131,7 @@ git commit -m "feat: webcam capture script for hardware verification"
 - Consumes: `capture.sh` from Task 1 (invoked from the same directory as this script).
 - Produces: `timelapse.sh <session-dir> <interval-seconds> [label]` → loops capture until killed; appends start/stop/failure lines and per-shot capture output to `<session-dir>/timelapse.log`. Interval is the sleep between shots, so the true period is interval + ~5 s capture latency. Exit 2 on usage error.
 
-- [ ] **Step 1: Write the script**
+- [x] **Step 1: Write the script**
 
 Create `tools/hwcam/timelapse.sh` with exactly this content:
 
@@ -178,7 +178,7 @@ while :; do
 done
 ```
 
-- [ ] **Step 2: Make it executable and lint it**
+- [x] **Step 2: Make it executable and lint it**
 
 ```sh
 chmod +x tools/hwcam/timelapse.sh
@@ -187,7 +187,7 @@ shellcheck tools/hwcam/timelapse.sh
 
 Expected: no shellcheck output. (The `${label:+"$label"}` expansion is the standard optional-argument idiom; shellcheck accepts it.)
 
-- [ ] **Step 3: Usage and interval validation checks**
+- [x] **Step 3: Usage and interval validation checks**
 
 ```sh
 tools/hwcam/timelapse.sh; echo "exit=$?"
@@ -197,7 +197,7 @@ tools/hwcam/timelapse.sh /tmp/x abc; echo "exit=$?"
 
 Expected: `exit=2` for all three, with the usage line (first, third) and the interval error (second) on stderr. Nothing is written to `/tmp/x`.
 
-- [ ] **Step 4: Three-shot smoke run**
+- [x] **Step 4: Three-shot smoke run**
 
 ```sh
 SESSION=~/deskmate-hw-sessions/$(date -u +%Y-%m-%d)-harness-build
@@ -210,7 +210,7 @@ tail -5 "$SESSION"/timelapse.log
 
 Expected: 3 or 4 `-lapse.jpg` frames (65 s at a ~20 s true period), a `start` line and a `stop` line in the log, no `FAILED` lines. The agent reads one frame to confirm readability.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```sh
 git add tools/hwcam/timelapse.sh
@@ -228,7 +228,7 @@ git commit -m "feat: webcam timelapse script for soak monitoring"
 - Consumes: script behaviors exactly as specified in Tasks 1–2.
 - Produces: the usage/convention reference future sessions and plans cite.
 
-- [ ] **Step 1: Write the doc**
+- [x] **Step 1: Write the doc**
 
 Create `docs/hardware/webcam-harness.md` with exactly this content:
 
@@ -288,11 +288,11 @@ behind each verdict.
   intervals.
 ```
 
-- [ ] **Step 2: Verify the doc's claims against the scripts**
+- [x] **Step 2: Verify the doc's claims against the scripts**
 
 Re-read both scripts and confirm every behavioral claim in the doc (exit codes, warmup, log lines, interval floor) matches the implementations. Fix whichever side is wrong — the scripts are the source of truth unless they contradict the spec.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```sh
 git add docs/hardware/webcam-harness.md
@@ -310,7 +310,7 @@ git commit -m "docs: webcam harness usage and session conventions"
 - Consumes: both scripts and the doc from Tasks 1–3; the running companion app (observation mode).
 - Produces: a board-notes entry future plans can cite as the harness's commissioning record. After this task, the paused V1 packaging plan's Task 6 rows (offline/replug, corrupt recovery) resume **using this harness** under that plan, not this one.
 
-- [ ] **Step 1: Framing preflight**
+- [x] **Step 1: Framing preflight**
 
 ```sh
 SESSION=~/deskmate-hw-sessions/$(date -u +%Y-%m-%d)-harness-acceptance
@@ -319,7 +319,7 @@ tools/hwcam/capture.sh "$SESSION" preflight
 
 The agent reads the frame: panel sharp, fully in frame, text readable. If not, ask the user to adjust the camera and repeat.
 
-- [ ] **Step 2: Ten-minute timelapse with the app running**
+- [x] **Step 2: Ten-minute timelapse with the app running**
 
 ```sh
 tools/hwcam/timelapse.sh "$SESSION" 25 soak &
@@ -331,11 +331,11 @@ grep -c FAILED "$SESSION"/timelapse.log || true
 
 Expected: ~20 frames (600 s at a ~30 s true period; accept 18–21), zero `FAILED` lines. The agent reviews every 5th frame plus the final one, confirms each is readable and shows a plausible playlist card, and writes the sampling rule and verdict to `"$SESSION"/NOTES.md`.
 
-- [ ] **Step 3: Record commissioning in board-notes**
+- [x] **Step 3: Record commissioning in board-notes**
 
 Append to `docs/hardware/board-notes.md` an entry titled "Webcam harness commissioned — <date>" recording: preflight result, timelapse frame count, FAILED count, the sampling rule used, the session directory path, and the explicit statement that judging is agent-vision (no CV code). Use only observed values — never projected ones.
 
-- [ ] **Step 4: Commit and push**
+- [x] **Step 4: Commit and push**
 
 ```sh
 git add docs/hardware/board-notes.md
@@ -343,6 +343,6 @@ git commit -m "docs: webcam harness commissioning record"
 git push origin main
 ```
 
-- [ ] **Step 5: Hand back to the packaging plan**
+- [x] **Step 5: Hand back to the packaging plan**
 
 Announce that the V1 packaging plan (`docs/superpowers/plans/2026-08-15-deskmate-v1-packaging-hardening.md`) Task 6 resumes at its Step 4/5 rows, now using this harness for panel observations. That work is tracked there, not here.

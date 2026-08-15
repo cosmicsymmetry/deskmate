@@ -1181,12 +1181,22 @@ fn legacy_widget_id(widget: &LegacyWidgetSettings) -> &str {
 }
 
 fn read_bounded(path: &Path) -> Result<Option<Vec<u8>>, StoreError> {
+    read_bounded_with_mode_repair(path, secure_open_config)
+}
+
+fn read_bounded_with_mode_repair(
+    path: &Path,
+    repair_mode: impl FnOnce(&File) -> io::Result<()>,
+) -> Result<Option<Vec<u8>>, StoreError> {
     let file = match File::open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(io_error("open config", &error)),
     };
-    secure_open_config(&file)?;
+    // Permission repair is defense in depth. A readable, valid configuration must
+    // still load when chmod is unavailable (for example on a read-only volume or
+    // after a root-owned backup restore).
+    let _ = repair_mode(&file);
     let mut bytes = Vec::new();
     file.take((MAX_CONFIG_FILE_BYTES + 1) as u64)
         .read_to_end(&mut bytes)
@@ -1253,13 +1263,12 @@ fn write_and_replace(target: &Path, bytes: &[u8]) -> Result<(), StoreError> {
 /// Existing dogfood installs may have inherited the process umask's `0644` mode.
 /// Tighten the descriptor before reading so an upgrade repairs that state immediately.
 #[cfg(unix)]
-fn secure_open_config(file: &File) -> Result<(), StoreError> {
+fn secure_open_config(file: &File) -> io::Result<()> {
     file.set_permissions(fs::Permissions::from_mode(0o600))
-        .map_err(|error| io_error("secure config permissions", &error))
 }
 
 #[cfg(not(unix))]
-fn secure_open_config(_file: &File) -> Result<(), StoreError> {
+fn secure_open_config(_file: &File) -> io::Result<()> {
     Ok(())
 }
 
@@ -1288,5 +1297,42 @@ fn io_error(operation: &str, error: &io::Error) -> StoreError {
     StoreError::Io {
         operation: operation.into(),
         message: error.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn failed_mode_repair_does_not_discard_valid_config() {
+        let serial = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "deskmate-mode-repair-failure-{}-{serial}.json",
+            std::process::id()
+        ));
+        fs::write(
+            &path,
+            serde_json::to_vec_pretty(&AppConfig::default()).unwrap(),
+        )
+        .unwrap();
+
+        let bytes = read_bounded_with_mode_repair(&path, |_| {
+            Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "injected chmod failure",
+            ))
+        })
+        .unwrap()
+        .unwrap();
+        let (config, origin) = decode_config(&bytes).unwrap();
+
+        assert_eq!(origin, ConfigOrigin::Current);
+        assert_eq!(config, AppConfig::default());
+        fs::remove_file(path).unwrap();
     }
 }

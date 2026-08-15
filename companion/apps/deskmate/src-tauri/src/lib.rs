@@ -346,7 +346,7 @@ fn show_settings(app: &AppHandle) {
 
 fn setup_app(app: &mut App) -> Result<(), Box<dyn Error>> {
     let config_directory = app.path().app_data_dir()?;
-    prepare_config_directory(&config_directory)?;
+    prepare_config_directory(&config_directory);
     let config_path = config_directory.join(CONFIG_FILE_NAME);
     let store = ConfigStore::new(config_path);
     let loaded = store.load();
@@ -396,7 +396,16 @@ fn setup_app(app: &mut App) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn prepare_config_directory(path: &Path) -> Result<(), Box<dyn Error>> {
+fn prepare_config_directory(path: &Path) {
+    if secure_config_directory(path).is_err() {
+        // Keep startup available so ConfigStore can surface a typed persistence
+        // error. Permission hardening must not turn a recoverable filesystem state
+        // into an application panic.
+        eprintln!("cannot secure Deskmate configuration directory");
+    }
+}
+
+fn secure_config_directory(path: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(path)?;
     #[cfg(unix)]
     {
@@ -653,12 +662,33 @@ mod tests {
         std::fs::create_dir(&path).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
 
-        prepare_config_directory(&path).unwrap();
+        prepare_config_directory(&path);
 
         assert_eq!(
             std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
             0o700
         );
         std::fs::remove_dir(path).unwrap();
+    }
+
+    #[test]
+    fn config_directory_preparation_failure_is_nonfatal() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let serial = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let blocking_file = std::env::temp_dir().join(format!(
+            "deskmate-config-permissions-blocker-{}-{serial}",
+            std::process::id()
+        ));
+        std::fs::write(&blocking_file, b"not a directory").unwrap();
+        let unavailable_directory = blocking_file.join("config");
+
+        prepare_config_directory(&unavailable_directory);
+
+        assert!(!unavailable_directory.exists());
+        std::fs::remove_file(blocking_file).unwrap();
     }
 }

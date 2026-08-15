@@ -351,6 +351,7 @@ fn setup_app(app: &mut App) -> Result<(), Box<dyn Error>> {
     let store = ConfigStore::new(config_path);
     let loaded = store.load();
     let has_saved_config = load_has_saved_config(&loaded);
+    let auto_open_settings = auto_open_settings_on_launch(&loaded);
     let persistence = load_failure_persistence(&loaded);
     if let Some(persistence) = &persistence {
         eprintln!(
@@ -392,7 +393,10 @@ fn setup_app(app: &mut App) -> Result<(), Box<dyn Error>> {
         .lock()
         .map_err(|_| "tray-state worker lock poisoned")?
         .replace(worker);
-    show_settings(app.handle());
+    // First-run discoverability only; all other launches remain tray-only.
+    if auto_open_settings {
+        show_settings(app.handle());
+    }
     Ok(())
 }
 
@@ -427,6 +431,10 @@ fn load_has_saved_config(loaded: &LoadOutcome) -> bool {
             ..
         }
     )
+}
+
+fn auto_open_settings_on_launch(loaded: &LoadOutcome) -> bool {
+    !load_has_saved_config(loaded)
 }
 
 fn load_failure_persistence(loaded: &LoadOutcome) -> Option<PersistenceState> {
@@ -613,6 +621,39 @@ mod tests {
         assert!(!load_has_saved_config(&defaults));
         assert!(load_has_saved_config(&current));
         assert!(load_has_saved_config(&recovered));
+    }
+
+    #[test]
+    fn settings_auto_open_only_for_a_missing_settings_document() {
+        let defaults = LoadOutcome::Loaded {
+            config: AppConfig::default(),
+            origin: ConfigOrigin::Defaults,
+        };
+        let current = LoadOutcome::Loaded {
+            config: AppConfig::default(),
+            origin: ConfigOrigin::Current,
+        };
+        let recovered = LoadOutcome::Recovered {
+            config: AppConfig::default(),
+            origin: ConfigOrigin::Defaults,
+            error: StoreError::InvalidJson {
+                message: "expected value".into(),
+            },
+        };
+        let validation_failed = LoadOutcome::ValidationFailed {
+            config: AppConfig::default(),
+            origin: ConfigOrigin::Defaults,
+            issues: vec![ValidationIssue {
+                path: "active_playlist_id".into(),
+                code: ValidationCode::MissingReference,
+                message: "active playlist does not exist".into(),
+            }],
+        };
+
+        assert!(auto_open_settings_on_launch(&defaults));
+        assert!(!auto_open_settings_on_launch(&current));
+        assert!(!auto_open_settings_on_launch(&recovered));
+        assert!(!auto_open_settings_on_launch(&validation_failed));
     }
 
     #[test]

@@ -1,0 +1,84 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  companion:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: companion
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.8
+      - name: rust fmt
+        working-directory: companion
+        run: cargo fmt --all --check
+      - name: rust clippy
+        working-directory: companion
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: rust tests
+        working-directory: companion
+        run: cargo test --workspace --locked
+      - name: frontend install
+        working-directory: companion/apps/deskmate
+        run: bun install --frozen-lockfile
+      - name: frontend typecheck
+        working-directory: companion/apps/deskmate
+        run: bun run check
+      - name: frontend format
+        working-directory: companion/apps/deskmate
+        run: bun run format:check
+      - name: frontend lint
+        working-directory: companion/apps/deskmate
+        run: bun run lint
+      - name: frontend tests
+        working-directory: companion/apps/deskmate
+        run: bun test
+      - name: frontend build
+        working-directory: companion/apps/deskmate
+        run: bun run build
+      - name: tauri release bundle
+        working-directory: companion/apps/deskmate
+        run: bunx tauri build
+      - name: install cargo-audit
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      - name: cargo audit (non-blocking)
+        working-directory: companion
+        run: cargo audit
+        continue-on-error: true
+      - name: bun audit (non-blocking)
+        working-directory: companion/apps/deskmate
+        run: bun audit
+        continue-on-error: true
+      - name: upload dmg
+        uses: actions/upload-artifact@v4
+        with:
+          name: deskmate-dmg
+          path: companion/target/release/bundle/dmg/*.dmg
+          retention-days: 14
+          if-no-files-found: error
+
+  firmware:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Host tests run inside the IDF container AFTER idf.py build because
+      # firmware/managed_components/ (tinycbor sources) is gitignored and only
+      # exists once the component manager has fetched dependencies.
+      - name: idf build + host tests
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: v5.5.5
+          target: esp32s3
+          path: firmware
+          command: idf.py build && make -C host_tests clean test

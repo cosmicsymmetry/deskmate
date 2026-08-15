@@ -8,9 +8,15 @@ on:
 
 jobs:
   companion:
+    needs: firmware
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+      - name: download firmware components
+        uses: actions/download-artifact@v4
+        with:
+          name: firmware-managed-components
+          path: firmware/managed_components
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -82,3 +88,20 @@ jobs:
           target: esp32s3
           path: firmware
           command: idf.py build && make -C host_tests clean test
+      - name: verify firmware lockfile unchanged
+        run: git diff --exit-code -- firmware/dependencies.lock
+      # lvgl-sim compiles these exact lockfile-resolved sources on macOS. Keep
+      # the transfer narrow: the full LVGL component includes 150+ MB of docs,
+      # demos, and tests that lvgl-sim does not build.
+      - name: upload firmware components
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-managed-components
+          path: |
+            firmware/managed_components/lvgl__lvgl/src
+            firmware/managed_components/lvgl__lvgl/lvgl.h
+            firmware/managed_components/lvgl__lvgl/lvgl_private.h
+            firmware/managed_components/lvgl__lvgl/lv_version.h
+            firmware/managed_components/espressif__cbor/tinycbor/src
+          retention-days: 1
+          if-no-files-found: error

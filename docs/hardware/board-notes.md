@@ -1712,3 +1712,22 @@ reconnect flush after a fresh boot) has not been performed.
 Counters at session end: `valid=3261 malformed=0 crc=0 overflow=0`,
 `events dropped=1` (one event emitted while the link was down, dropped by
 design), `free_heap 8480619` — byte-identical to every prior record.
+
+## CO5300 even-window rounding at the 64-line flush strip — PASSED (2026-08-15)
+
+Closes the "needs human eyes" flag above. Firmware `m1-113-g05d04ce`,
+`/dev/cu.usbmodem1101`, user observing at desk distance. Content: the default
+ticking clock with seconds (`show_seconds: true`), whose per-second digit
+updates exercise the partial-flush/rounding path continuously.
+
+- **90° (default, USB down):** observed during the alert re-verification
+  session's connected phases (~1 minute of ticking) — no flashing artifacts,
+  no flicker bands, no shifted columns, no corrupted stripes.
+- **270° (flipped, USB up):** held via a scratch runtime harness applying
+  `orientation: landscape-flipped` (~1 minute of ticking) — clean flip, no
+  mirroring or offset, no artifacts.
+
+User verdict verbatim: "There are no flashing artifacts" (90°), "Everything is
+fine" (270°). The other unevaluated visual-quality items from the V1 acceptance
+(surface-module rendering quality, storm icon readability, boot-clock
+appearance, color/contrast) were not part of this check and remain unevaluated.

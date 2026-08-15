@@ -115,9 +115,10 @@ of letting code and documentation diverge.
   by explicit user direction and is **waived, not completed** — the captured
   partial data (heap byte-flat at a single value for the full 27-minute window,
   no counter regression) is recorded, but do not describe a full 30-minute soak
-  as observed. Not yet checked by a human: the CO5300 even-window rounding
-  behavior at the fix's new 64-line flush-strip height, at both orientations —
-  flagged in board-notes, needs eyes on the physical panel.
+  as observed. The CO5300 even-window rounding check at the fix's 64-line
+  flush-strip height was human-observed clean at both orientations on
+  2026-08-15 (ticking-clock partial flushes, no artifacts) — recorded in
+  board-notes; that flag is closed.
 - Target hardware is the Waveshare ESP32-S3-Touch-AMOLED-1.8 **v2**: CO5300 display and
   CST820 touch using the CST816S protocol family. Do not apply v1 SH8601/FT3168 facts.
 - Treat the physical 368x448 panel as a 448x368 landscape UI: 90° is the default

@@ -146,9 +146,9 @@ impl Scheduler {
     }
 
     /// Bounded auto-dismiss deadline for the interrupt currently holding
-    /// token `token`, armed by the caller when that interrupt is scheduled
-    /// with `AlertHold::Seconds`, or re-armed when it is promoted from
-    /// Pending to Active. `None` disarms it entirely — used for
+    /// token `token`, armed by the caller when that interrupt is delivered
+    /// with `AlertHold::Seconds`, or when an already-delivered interrupt is
+    /// promoted from Pending to Active. `None` disarms it entirely — used for
     /// `AlertHold::UntilDismissed`, and whenever the token it was keyed to is
     /// no longer the active interrupt (see `runtime::sync_alert_hold_to_active_interrupt`).
     pub(crate) fn set_alert_hold(&mut self, hold: Option<(u32, Instant)>) {

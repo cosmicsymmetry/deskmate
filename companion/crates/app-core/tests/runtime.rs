@@ -45,9 +45,17 @@ struct ReplayCache {
     interrupts: BTreeMap<u32, TriggerInterrupt>,
 }
 
+#[derive(Default, PartialEq, Eq)]
+enum MockPower {
+    #[default]
+    Powered,
+    Unpowered,
+}
+
 #[derive(Default)]
 struct MockState {
     connected: bool,
+    power: MockPower,
     connection_count: u64,
     disconnect_on_status: bool,
     reset_on_connect: bool,
@@ -103,6 +111,18 @@ impl MockDeviceControl {
         let mut state = self.state.lock().unwrap();
         state.disconnect_on_status = true;
         state.reset_on_connect = power_reset;
+    }
+
+    fn power_off(&self) {
+        let mut state = self.state.lock().unwrap();
+        state.connected = false;
+        state.power = MockPower::Unpowered;
+    }
+
+    fn power_on(&self) {
+        let mut state = self.state.lock().unwrap();
+        state.power = MockPower::Powered;
+        state.reset_on_connect = true;
     }
 
     fn push_event(&self, event: DeviceEvent) {
@@ -163,6 +183,9 @@ impl MockDevice {
 impl RuntimeDevice for MockDevice {
     fn connect(&mut self) -> Result<DeviceConnection, DeviceError> {
         let mut state = self.control.state.lock().unwrap();
+        if state.power == MockPower::Unpowered {
+            return Err(DeviceError::Transport(TransportError::Disconnected));
+        }
         let reconnect = state.connection_count != 0;
         let reset = state.reset_on_connect;
         state.reset_on_connect = false;
@@ -825,6 +848,129 @@ fn a_bounded_alert_hold_re_sends_the_saved_carousel_screen_activation() {
     wait_for(Duration::from_secs(7), || {
         activated_screen_ids(&control).len() > activations_before_completion
     });
+    runtime.shutdown().unwrap();
+}
+
+#[test]
+fn bounded_hold_alert_completing_while_disconnected_survives_to_reconnect() {
+    let control = MockDeviceControl::default();
+    let mut config = full_config();
+    for card in &mut config.cards {
+        if let CardSettings::Pomodoro {
+            duration_seconds,
+            alert,
+            ..
+        } = card
+        {
+            *duration_seconds = 1;
+            *alert = CardAlert::OnTimerFinish {
+                hold: AlertHold::Seconds { value: 5 },
+            };
+        }
+    }
+    let runtime = start_runtime(config, &control, Duration::ZERO);
+    wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
+        snapshot.device.connection == ConnectionState::Online
+    });
+
+    runtime
+        .control_pomodoro("pomodoro", PomodoroAction::Start)
+        .unwrap();
+    wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
+        snapshot
+            .pomodoros
+            .first()
+            .is_some_and(|pomodoro| pomodoro.state == PomodoroState::Running)
+    });
+    control.power_off();
+    wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
+        snapshot.device.connection == ConnectionState::Standalone
+    });
+    wait_for_snapshot(&runtime, Duration::from_secs(2), |snapshot| {
+        snapshot
+            .pomodoros
+            .first()
+            .is_some_and(|pomodoro| pomodoro.state == PomodoroState::Completed)
+    });
+
+    // Stay unplugged beyond the bounded hold. The countdown must not start
+    // until the interrupt has actually reached the device.
+    thread::sleep(Duration::from_secs(6));
+    assert!(
+        !control.operations().contains(&Operation::Interrupt(1)),
+        "an unpowered device cannot have received the interrupt"
+    );
+
+    control.power_on();
+    wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
+        snapshot.device.connection == ConnectionState::Online && control.connection_count() >= 2
+    });
+    assert!(
+        control.operations().contains(&Operation::Interrupt(1)),
+        "the interrupt raised while unpowered must be delivered on reconnect"
+    );
+
+    let activations_after_delivery = activated_screen_ids(&control).len();
+    wait_for(Duration::from_secs(7), || {
+        activated_screen_ids(&control).len() > activations_after_delivery
+    });
+    runtime.shutdown().unwrap();
+}
+
+#[test]
+fn until_dismissed_alert_raised_while_disconnected_reaches_device_on_reconnect() {
+    let control = MockDeviceControl::default();
+    let mut config = full_config();
+    for card in &mut config.cards {
+        if let CardSettings::Pomodoro {
+            duration_seconds,
+            alert,
+            ..
+        } = card
+        {
+            *duration_seconds = 1;
+            *alert = CardAlert::OnTimerFinish {
+                hold: AlertHold::UntilDismissed,
+            };
+        }
+    }
+    let runtime = start_runtime(config, &control, Duration::ZERO);
+    wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
+        snapshot.device.connection == ConnectionState::Online
+    });
+
+    runtime
+        .control_pomodoro("pomodoro", PomodoroAction::Start)
+        .unwrap();
+    wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
+        snapshot
+            .pomodoros
+            .first()
+            .is_some_and(|pomodoro| pomodoro.state == PomodoroState::Running)
+    });
+    control.power_off();
+    wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
+        snapshot.device.connection == ConnectionState::Standalone
+    });
+    wait_for_snapshot(&runtime, Duration::from_secs(2), |snapshot| {
+        snapshot
+            .pomodoros
+            .first()
+            .is_some_and(|pomodoro| pomodoro.state == PomodoroState::Completed)
+    });
+    assert!(
+        !control.operations().contains(&Operation::Interrupt(1)),
+        "an unpowered device cannot have received the interrupt"
+    );
+
+    control.power_on();
+    wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
+        snapshot.device.connection == ConnectionState::Online && control.connection_count() >= 2
+    });
+    assert!(
+        control.operations().contains(&Operation::Interrupt(1)),
+        "the until-dismissed interrupt must be delivered on reconnect"
+    );
     runtime.shutdown().unwrap();
 }
 

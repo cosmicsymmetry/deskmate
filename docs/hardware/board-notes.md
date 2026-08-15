@@ -1241,6 +1241,17 @@ undiagnosed. No test covers it: `tests/runtime.rs` has
 `pomodoro_events_complete_once_and_dismissed_interrupts_do_not_replay`, but nothing
 asserts that an interrupt raised while the device is absent reaches it on reconnect.
 
+**Root cause and host fix — 2026-08-15.** The bounded-hold countdown was started when
+the host scheduled the interrupt, before any device had displayed it. If the configured
+hold expired during the unpowered window, the host retired that never-displayed
+interrupt locally, leaving `flush_interrupts` nothing to deliver on reconnect. The
+companion now starts a bounded hold only after `flush_interrupts` successfully delivers
+the active interrupt; regression tests cover reconnect delivery for both bounded and
+`until-dismissed` holds, and confirm that a bounded hold still expires from its delivery
+time. The original single hardware observation did not record the alert's hold
+configuration, so this closes the only persistent-loss mechanism present in the host
+code, but the hardware scenario has not yet been re-verified on the board.
+
 ### 10. Device counters after the full session
 
 Queried over the CLI with the app closed, after all nine checks:

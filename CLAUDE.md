@@ -76,8 +76,11 @@ of letting code and documentation diverge.
   is decided: `hold` is host-side bookkeeping only and never clears the panel, which
   yields the overlay on tap alone. Do not add a wire dismissal message for it. Of the
   two carried defects, the validation-mislabeling defect is fixed as described above;
-  an alert firing while the device is unpowered was lost on reconnect and is still open
-  (observed once, undiagnosed, not covered by any test).
+  the only host-side mechanism capable of losing an alert that fired while unpowered
+  was root-caused to a bounded hold expiring from schedule time before delivery and
+  fixed by starting that countdown at delivery, with regression tests for bounded and
+  until-dismissed reconnect paths. The original observation did not record its hold
+  configuration, so hardware re-verification remains pending.
 - M1's full software and physical exit gate passes, including ten observed
   unplug/replug cycles, and is tagged `m1`. Because M2 work began in the same shared
   worktree before the physical carryover closed, that tag also contains the M2

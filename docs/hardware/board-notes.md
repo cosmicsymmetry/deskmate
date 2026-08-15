@@ -1731,3 +1731,32 @@ User verdict verbatim: "There are no flashing artifacts" (90°), "Everything is
 fine" (270°). The other unevaluated visual-quality items from the V1 acceptance
 (surface-module rendering quality, storm icon readability, boot-clock
 appearance, color/contrast) were not part of this check and remain unevaluated.
+
+## Webcam harness commissioned — 2026-08-15
+
+The webcam verification harness (`tools/hwcam/`, design spec
+`docs/superpowers/specs/2026-08-15-deskmate-webcam-harness-design.md`) passed
+its live acceptance. Judging is agent-vision only — no CV/OCR code exists by
+design. Session evidence: `~/deskmate-hw-sessions/2026-08-15-harness-acceptance/`
+(frames named below; `NOTES.md` there holds the full session record).
+
+- **Framing preflight:** PASSED on the third frame
+  (`20260815T125708Z-preflight3.jpg` — sharp, centered, all panel labels
+  readable) after the user adjusted the camera; the first two attempts were
+  soft because the desk setup had shifted. One capture attempt failed loudly
+  with "Could not lock device for configuration" while the OBSBOT Center app
+  held the camera — a live validation of the harness's camera-exclusivity
+  error path.
+- **10-minute observation-mode timelapse:** `timelapse.sh <session> 25 soak`,
+  killed at 600 s. 20 frames captured (expected 18–21), **0 FAILED** lines in
+  `timelapse.log`, start/stop lines present. Sampling rule: every 5th frame
+  plus the final one (#1, #6, #11, #16, #20). All sampled frames sharp and
+  readable; the panel held an identical paused-pomodoro card (Focus 24:57,
+  ELAPSED 00:03, STATUS Paused) throughout — the user had tapped the pomodoro
+  during camera adjustment, and an active/paused pomodoro pins the takeover
+  face, so no rotation was expected. No artifacts, no reboot, no
+  standalone-clock fallback.
+- **Incidental:** the board was found running user-flashed foreign firmware
+  before acceptance (`20260815T124444Z-firmware-check.jpg`); Deskmate V1
+  firmware was rebuilt and reflashed (user-authorized), and the companion app
+  re-adopted the board (`20260815T124606Z-postflash.jpg`).

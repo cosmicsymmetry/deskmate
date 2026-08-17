@@ -12,13 +12,14 @@
 static const char *TAG = "clock";
 
 // Layout, spec §6.2's complication grammar (see templates/digital_clock.c,
-// this screen's sibling face): an identity chip on the top-left rail, a
-// left-anchored hero reading below it, and a single full-width module
-// carrying the secondary reading -- here the date rather than
-// digital_clock's date+dial pair, since a fallback clock has only one
-// secondary fact to show. All coordinates are grid multiples (spec §6.2).
-#define CLOCK_TIME_Y    (12 * DESKMATE_GRID)   /* matches digital_clock's rail */
-#define CLOCK_MODULE_Y  (24 * DESKMATE_GRID)
+// this screen's sibling face): a left-anchored hero reading with a single
+// full-width module under it carrying the date. Neither is labelled -- a
+// clock face names itself. This screen's stack is 192px against the card's
+// 248px, so centring each on its own canvas puts this hero lower than the
+// card's: 88 above and 88 below here, exactly centred. All coordinates are
+// grid multiples (spec §6.2).
+#define CLOCK_TIME_Y    (11 * DESKMATE_GRID)
+#define CLOCK_MODULE_Y  (23 * DESKMATE_GRID)
 #define CLOCK_MODULE_H  (12 * DESKMATE_GRID)
 #define CLOCK_MODULE_W  (50 * DESKMATE_GRID)   /* 448 - 2*DESKMATE_MARGIN */
 
@@ -189,44 +190,23 @@ void clock_screen_show_in_lvgl(void)
     lv_obj_set_style_bg_color(scr, DESKMATE_COLOR_CANVAS, 0);
     lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
 
-    // Both clock faces (digital_clock, analog_clock) and this standalone
-    // fallback share one identity: the same reading in different notations,
-    // so they carry the same hue rather than a colour of their own.
-    const deskmate_palette_t palette =
-        deskmate_palette(PROTOCOL_TEMPLATE_DIGITAL_CLOCK);
-
-    // Identity chip on the top-left rail, same position digital_clock's
-    // title chip occupies. There is no host-supplied title here -- this
-    // screen is the fallback shown before a host is ever connected -- so
-    // the chip names the face itself rather than a card.
-    lv_obj_t *title_chip = deskmate_chip(scr, DESKMATE_MARGIN,
-                                         2 * DESKMATE_GRID, palette.hue,
-                                         palette.ink);
-    deskmate_chip_set_text(title_chip, "CLOCK");
-
     s_time_label = lv_label_create(scr);
     lv_obj_set_style_text_font(s_time_label, DESKMATE_FONT_HERO, 0);
     lv_obj_set_style_text_color(s_time_label, DESKMATE_COLOR_PRIMARY, 0);
     lv_label_set_text(s_time_label, "00:00");
     // Left-anchored on the margin rail, matching digital_clock's hero: one
-    // vertical edge the chip, hero and module below all hang from.
+    // vertical edge the hero and the module below both hang from.
     lv_obj_set_pos(s_time_label, DESKMATE_MARGIN, CLOCK_TIME_Y);
 
-    // Single full-width module carrying the date, styled with the same
-    // eyebrow-over-value grammar every module in the six faces uses.
+    // Single full-width module carrying the date. Nothing labels it -- a date
+    // needs no naming -- so the value centres in the surface.
     lv_obj_t *date_module = deskmate_module(scr, DESKMATE_MARGIN,
                                             CLOCK_MODULE_Y, CLOCK_MODULE_W,
                                             CLOCK_MODULE_H);
-    const int32_t eyebrow_line =
-        lv_font_get_line_height(DESKMATE_FONT_CAPTION);
     const int32_t value_line = lv_font_get_line_height(DESKMATE_FONT_BODY);
-    const int32_t stack_top =
-        (CLOCK_MODULE_H - eyebrow_line - DESKMATE_GRID - value_line) / 2;
-    deskmate_eyebrow(date_module, "DATE", DESKMATE_MARGIN, stack_top,
-                     palette.hue);
+    const int32_t stack_top = (CLOCK_MODULE_H - value_line) / 2;
     s_date_label = deskmate_label_box(
-        date_module, DESKMATE_MARGIN,
-        stack_top + eyebrow_line + DESKMATE_GRID,
+        date_module, DESKMATE_MARGIN, stack_top,
         CLOCK_MODULE_W - 2 * DESKMATE_MARGIN, LV_TEXT_ALIGN_LEFT,
         DESKMATE_COLOR_PRIMARY, DESKMATE_FONT_BODY);
 

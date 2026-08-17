@@ -102,15 +102,6 @@ fn digital_clock_cases(cases: &mut Vec<(String, RenderRequest)>) {
         NOW,
         OFFSET,
     );
-    case(
-        cases,
-        "digital-clock",
-        "empty-title",
-        SimTemplate::DigitalClock,
-        &[text("title", ""), boolean("show_seconds", true)],
-        NOW,
-        OFFSET,
-    );
     // Tabular-figure pair (Task 9). Both instants render an HH:MM with no
     // repeated digit shape in common, at the same font and the same box, so
     // the two goldens' lit column span must be identical — proportional

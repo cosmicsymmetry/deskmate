@@ -8,7 +8,6 @@
 #include "core/timefmt.h"
 
 enum {
-    OBJ_TITLE,
     OBJ_TIME,
     OBJ_SECONDS,
     OBJ_DATE,
@@ -19,11 +18,13 @@ enum {
 };
 
 /* The reading is anchored to the left margin rather than centred: a hero
- * that starts on the same rail as the title chip and the modules below it
- * gives the face one vertical edge to hang everything from, and it leaves
- * the top-right free for the seconds. */
-#define TIME_Y      (12 * DESKMATE_GRID)
-#define MODULE_Y    (26 * DESKMATE_GRID)
+ * that starts on the same rail as the modules below it gives the face one
+ * vertical edge to hang everything from, and it leaves the top-right free
+ * for the seconds. Nothing labels the face — a clock names itself — so the
+ * 248px hero-plus-modules stack centres on the canvas, leaving 64 above and
+ * 56 below: very slightly top-heavy, which is what optical centring wants. */
+#define TIME_Y      (8 * DESKMATE_GRID)
+#define MODULE_Y    (22 * DESKMATE_GRID)
 #define MODULE_H    (17 * DESKMATE_GRID)
 #define DATE_W      (28 * DESKMATE_GRID)
 #define DIAL_X      (33 * DESKMATE_GRID)
@@ -63,12 +64,6 @@ bool digital_clock_create(template_widget_view_t *view,
                        LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_size(view->root, LV_PCT(100), LV_PCT(100));
 
-    /* The title is the face's identity chip: a filled pill in the face hue
-     * says which card you swiped to before the reading is parsed. */
-    view->objects[OBJ_TITLE] = deskmate_chip(
-        view->root, DESKMATE_MARGIN, 2 * DESKMATE_GRID, palette.hue,
-        palette.ink);
-
     view->objects[OBJ_TIME] = lv_label_create(view->root);
     lv_obj_set_style_text_font(view->objects[OBJ_TIME], DESKMATE_FONT_HERO, 0);
     lv_obj_set_style_text_color(view->objects[OBJ_TIME],
@@ -91,18 +86,12 @@ bool digital_clock_create(template_widget_view_t *view,
      * notation the eye reads fastest at a glance. */
     lv_obj_t *date_module = deskmate_module(view->root, DESKMATE_MARGIN,
                                             MODULE_Y, DATE_W, MODULE_H);
-    /* An eyebrow over a value, the pair centred in the module rather than
-     * pinned to its top, so the module reads as one block. */
-    const int32_t eyebrow_line =
-        lv_font_get_line_height(DESKMATE_FONT_CAPTION);
+    /* The date is the module's whole content — no eyebrow names it, since a
+     * date needs no naming — so the value centres in the surface. */
     const int32_t value_line = lv_font_get_line_height(DESKMATE_FONT_BODY);
-    const int32_t stack_top =
-        (MODULE_H - eyebrow_line - DESKMATE_GRID - value_line) / 2;
-    deskmate_eyebrow(date_module, "DATE", DESKMATE_MARGIN, stack_top,
-                     palette.hue);
+    const int32_t stack_top = (MODULE_H - value_line) / 2;
     view->objects[OBJ_DATE] = deskmate_label_box(
-        date_module, DESKMATE_MARGIN,
-        stack_top + eyebrow_line + DESKMATE_GRID,
+        date_module, DESKMATE_MARGIN, stack_top,
         DATE_W - 2 * DESKMATE_MARGIN, LV_TEXT_ALIGN_LEFT,
         DESKMATE_COLOR_PRIMARY, DESKMATE_FONT_BODY);
 
@@ -165,13 +154,11 @@ void digital_clock_patch(template_widget_view_t *view,
     if (view == NULL || view->root == NULL || fields == NULL) {
         return;
     }
-    const template_field_value_t *title = template_fields_get(fields,
-                                                               "title");
+    /* `title` is still a schema and wire field — it names the card in the
+     * companion's library — but no clock face draws it, so nothing here
+     * reads it. */
     const template_field_value_t *show = template_fields_get(
         fields, "show_seconds");
-    if (title != NULL) {
-        deskmate_chip_set_text(view->objects[OBJ_TITLE], title->value.text);
-    }
     if (show != NULL) {
         view->clock_show_seconds = show->value.boolean;
         if (view->clock_show_seconds) {

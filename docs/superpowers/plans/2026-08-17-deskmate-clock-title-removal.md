@@ -816,11 +816,19 @@ Run from `companion/apps/deskmate/`:
 ```sh
 bun test
 bunx tsc --noEmit
-bunx biome check src tests
+bunx biome lint .
+bunx biome format .
 ```
 
-Expected: all pass. If `biome` reports formatting on the changed lines, let it fix them
-with `bunx biome check --write src tests` and re-run.
+Expected: all pass.
+
+Use `biome lint` and `biome format` — the two gates `package.json` actually defines as
+`lint` and `format:check`. Do **not** substitute `biome check`: that additionally runs
+Biome's *assists*, including `organizeImports`, which this project has never enforced
+and which reports six pre-existing failures on an untouched tree
+(`Filmstrip.tsx`, `PlaylistPanel.tsx`, `ProviderStatus.tsx`, `components.test.tsx`,
+`configDraft.test.ts`, `useAppState.test.ts`). Those are not yours to fix here;
+reformatting six unrelated files would bury this task's one-line change.
 
 - [ ] **Step 7: Commit**
 

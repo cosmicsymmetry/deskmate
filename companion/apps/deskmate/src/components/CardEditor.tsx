@@ -146,7 +146,7 @@ export function CardEditor({
         {card.kind === "clock" && (
           <>
             <label className="field">
-              <span>Heading</span>
+              <span>Name</span>
               <input
                 value={card.title}
                 maxLength={64}

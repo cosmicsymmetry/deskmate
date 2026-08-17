@@ -172,6 +172,18 @@ describe("settings accessibility and states", () => {
     );
   }
 
+  test("names the clock card's title field rather than calling it a heading", () => {
+    // The clock faces draw no title chip, so the field only names the card in
+    // the library. Weather still renders its chip, so "Heading" stays right
+    // there — the assertion is that the two differ, not just that one changed.
+    const clockHtml = renderCardEditor(clockCard("clock-1", "Desk"));
+    expect(clockHtml).toContain("<span>Name</span>");
+    expect(clockHtml).not.toContain("<span>Heading</span>");
+
+    const weatherHtml = renderCardEditor(weatherCard("weather-1"));
+    expect(weatherHtml).toContain("<span>Heading</span>");
+  });
+
   test("explains the clean canvas and never shows the wire id", () => {
     // A distinctive id with no overlap with any visible label (unlike the
     // fixture's plain "clock", which is also a substring of the visible

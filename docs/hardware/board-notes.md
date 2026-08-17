@@ -1796,20 +1796,40 @@ Not fixed here (out of scope); options when someone does address it are to pin
 `running: false` for the compared case, or to exclude it in `exclusion_reason()` the way
 the `row-list--truncation-boundary` pair already is.
 
-**NOT VERIFIED — the standalone fallback screen, at either orientation.** This is the
-one surface the framebuffer diff cannot reach, because it has no golden case. The
-harness framing preflight FAILED and was not recoverable by the agent: the board sat at
-the right edge of the OBSBOT's field of view, partly out of frame, strongly backlit by a
-window, and 180° rotated relative to the camera
-(`20260817T091111Z-fallback-90.jpg`). Repositioning the board or the camera is a
-human-hands action per `docs/hardware/webcam-harness.md`'s stated limitation. The frame
-was legible enough to show no `CLOCK` chip, no `DATE` eyebrow above "Mon, Aug 17", and
-the "Connect deskmate app" hint still on its bottom rail — but it does not show the
-whole canvas, so centring is **unconfirmed** and this item stays open.
+**PASSED (with a stated limit) — the standalone fallback screen at 90°.** This is the one
+surface the framebuffer diff cannot reach, because it has no golden case, so the webcam
+harness is the only instrument. The first framing preflight FAILED unrecoverably (board at
+the right edge of frame, backlit, 180° rotated —
+`20260817T091111Z-fallback-90.jpg`); after the setup was corrected the panel was upright
+and readable. Confirmed on `20260817T092738Z-fallback-waited.jpg`: **no `CLOCK` chip**
+above the time (clear canvas where the pill used to sit), **no `DATE` eyebrow** above
+"Mon, Aug 17", the date alone and vertically centred in a **single full-width module**
+(the fallback's `CLOCK_MODULE_W` = 400, visibly distinct from the card's narrower date
+module plus dial), and generous canvas above the hero consistent with the intended 88px
+top margin. **Limit:** the camera's field of view crops the panel's bottom edge, so the
+"88 above / 88 below exactly centred" arithmetic is confirmed only for the top half by
+direct observation. The bottom half rests on the arithmetic over
+`CLOCK_TIME_Y`/`CLOCK_MODULE_Y`/`CLOCK_MODULE_H` plus the fact that the two card faces —
+same LVGL path, same board, same rounder callback — came back pixel-exact from the
+framebuffer diff.
 
-**NOT VERIFIED — the fallback-to-card transition.** The change puts the fallback's hero
-at y=88 and the card's at y=64 (each stack centred on its own canvas), so the time
-shifts 24px when a host first connects. Needs the same camera framing to judge.
+**PASSED — the fallback-to-card transition, both directions.** Four frames from an
+unmoved camera, one minute apart: card at 09:26 (`20260817T092647Z-fallback-90-retry.jpg`,
+dial module present), fallback at 09:27 (`20260817T092738Z-fallback-waited.jpg`, single
+module, hero visibly lower), card again at 09:28
+(`20260817T092832Z-card-reconnected.jpg`, dial module back, hero visibly higher). The
+predicted 24px hero shift is real and observable when frames are compared side by side,
+but in motion it does not read as a glitch: the whole layout changes at once (the dial
+module appears or vanishes, the date module resizes), so the hero moving is part of a
+wholesale screen swap rather than a jump. **Also observed:** the fallback does not appear
+the instant the companion app quits — the device waits for its link keepalive to time out,
+roughly 30 s here. A capture taken ~4 s after quitting still showed the card.
+
+**NOT VERIFIED — the fallback screen at 270°.** Changing orientation requires the
+companion's settings UI, which the agent cannot drive. The two *card* faces are verified
+at both orientations by the framebuffer diff (`--landscape` and `--flipped` both
+identical), and the fallback screen uses the same software-rotation path, but its 270°
+rendering was not itself observed. Do not describe it as verified.
 
 Incidental: the installed `/Applications/Deskmate.app` held `/dev/cu.usbmodem1101`
 exclusively and was quit (gracefully, via `osascript`) to free the port for flashing and

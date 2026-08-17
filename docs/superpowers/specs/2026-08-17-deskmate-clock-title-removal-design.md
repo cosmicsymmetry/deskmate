@@ -1,7 +1,14 @@
 # Clock faces drop their title chips and DATE eyebrows
 
 Date: 2026-08-17
-Status: approved
+Status: delivered — software complete and physically verified 2026-08-17, with one
+residual noted below. Evidence: `docs/hardware/board-notes.md`, "Clock title removal —
+partial verification 2026-08-17". All 14 clock frames byte-identical to the goldens on
+hardware across two framebuffer-diff runs at both orientations; the fallback screen and
+both transition directions confirmed by webcam at 90°. **Residual:** the fallback screen
+at 270° was not observed (changing orientation needs the companion's settings UI), and
+the fallback's bottom margin is cropped in the available camera framing. Do not describe
+either as verified.
 
 ## Problem
 

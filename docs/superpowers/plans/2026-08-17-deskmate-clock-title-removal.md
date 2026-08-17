@@ -904,7 +904,7 @@ flash serves the visual checks below.
 idf.py -C firmware -DDESKMATE_DEV_DIAG=1 flash monitor
 ```
 
-- [ ] **Step 3: Observe the fallback screen at 90°, before any host connects**
+- [x] **Step 3: Observe the fallback screen at 90°, before any host connects**
 
 Use the webcam harness for the capture — `tools/hwcam/`, usage in
 `docs/hardware/webcam-harness.md` — per the standing preference in `CLAUDE.md`. Judge
@@ -956,7 +956,7 @@ So: treat a differing `progress-ring--running-mid-countdown` as known, and any *
 differing case as a real firmware/simulator disagreement — stop and report rather than
 re-blessing.
 
-- [ ] **Step 6: Watch the fallback-to-card transition**
+- [x] **Step 6: Watch the fallback-to-card transition**
 
 Task 3 records that the hero shifts 24px down-to-up when a card replaces the fallback,
 because each stack centers on its own canvas. Trigger it (disconnect and reconnect the
@@ -964,7 +964,18 @@ companion) and confirm it reads as a screen change rather than a glitch. If it r
 badly, stop and report — do not silently re-tune the constants, since that would
 un-center one of the two faces the spec centered deliberately.
 
-- [ ] **Step 7: Repeat Steps 3, 4 and 6 at 270°**
+- [~] **Step 7: Repeat Steps 3, 4 and 6 at 270° — PARTIAL, left open deliberately**
+
+The two **card** faces are verified at 270°: `framebuffer_diff` runs every case at both
+`landscape` and `flipped`, and all 14 clock frames came back identical in both runs. That
+covers Step 4 at 270° more strictly than a photograph.
+
+The **fallback screen** at 270° is not verified and this box stays open. Changing
+orientation requires the companion's settings UI, which owns that choice and which an
+agent cannot drive; the harness's remaining limitation is human hands, not human eyes.
+The fallback uses the same software-rotation path the diff exercised, so the risk is low
+— but low is not observed. Whoever next has the board in hand: flip the orientation in
+settings, quit the app, wait ~30 s for the link keepalive to expire, and capture.
 
 Change the orientation in the companion's settings, which owns that choice, and repeat
 the fallback observation, the two card observations, and the transition check. Both
@@ -972,13 +983,13 @@ mount orientations are part of the acceptance criteria. Step 5's framebuffer dif
 already covers both orientations internally — every case runs at `landscape` and
 `flipped` — so it does not need repeating.
 
-- [ ] **Step 8: Record the observation in board-notes**
+- [x] **Step 8: Record the observation in board-notes**
 
 Add a dated section to `docs/hardware/board-notes.md` following the file's existing
 convention. Record what was actually observed at each orientation, including any item
 that did not pass. Do not write "verified" against anything not seen.
 
-- [ ] **Step 9: Update the spec status and CLAUDE.md**
+- [x] **Step 9: Update the spec status and CLAUDE.md**
 
 Change the spec's `Status: approved` line to `Status: delivered` with the observation
 date. In `CLAUDE.md`'s "Current state", add a sentence recording that the clock faces

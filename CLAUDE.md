@@ -99,6 +99,33 @@ of letting code and documentation diverge.
   defect — the settings window auto-opened on every launch and now auto-opens
   on first run only (`fc3750b`). All V1-exit items are closed; declaring V1
   exit (tag, V2 brainstorm) awaits explicit user authorization. No tags exist.
+- **Clock faces carry no title chip and no `DATE` eyebrow** (delivered 2026-08-17; spec
+  `docs/superpowers/specs/2026-08-17-deskmate-clock-title-removal-design.md`, plan
+  `docs/superpowers/plans/2026-08-17-deskmate-clock-title-removal.md`). All three clock
+  surfaces — the `DigitalClock` card, the `AnalogClock` card, and the standalone fallback
+  `clock_screen.c` — draw themselves unlabelled, and each stack is centred on its own
+  canvas (card hero at `8 * DESKMATE_GRID`, fallback hero at `11 * DESKMATE_GRID`; they
+  deliberately differ because the fallback's module is 96px against the card's 136px).
+  Do not reintroduce a chip or eyebrow on a clock face, and do not "unify" the two hero
+  rails — the 24px shift across a reconnect is accepted and was observed not to read as a
+  glitch. The five non-clock templates keep their chips. Schema stays **v4**: `title` is
+  still a schema and wire field that the host sends and firmware now ignores; it names the
+  card in the companion library, where its editor label is "Name" for clock cards and
+  "Heading" elsewhere. Verified on hardware 2026-08-17 — all 14 clock frames
+  byte-identical via `framebuffer_diff` at both orientations, fallback and both transition
+  directions confirmed by webcam at 90°. Two things are **not** verified: the fallback at
+  270°, and the fallback's bottom margin (cropped in the available camera framing).
+- **`progress-ring--running-mid-countdown` cannot pass the framebuffer diff
+  deterministically.** `progress_ring.c`'s `current_remaining_ms` keeps counting a
+  *running* ring down from `lv_tick_get()` after its fields are pushed, while
+  `Simulator::render` draws the case's pinned `remaining_seconds` frozen, so whether the
+  capture lands before or after the device's next one-second tick decides the comparison.
+  Expect `total=54 identical=51 differing=1 excluded=2` with that case differing (it
+  alternated orientation between two runs on 2026-08-17), and treat any *other* differing
+  case as a real firmware/simulator disagreement. This also means V1 acceptance's recorded
+  "0 differing" was luck, not proof. Unfixed; the options are to pin `running: false` for
+  the compared case or to exclude it in `exclusion_reason()` as the
+  `row-list--truncation-boundary` pair already is.
 - The webcam verification harness (`tools/hwcam/`, usage in
   `docs/hardware/webcam-harness.md`, spec
   `docs/superpowers/specs/2026-08-15-deskmate-webcam-harness-design.md`) was

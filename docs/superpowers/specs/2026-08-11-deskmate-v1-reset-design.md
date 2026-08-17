@@ -393,6 +393,8 @@ colours are unchanged.
   reads as one object with a spent part.
 - **Chips.** A face's title is a filled pill in its hue; so is any live token
   (the weather badge). An empty chip hides rather than collapsing to a blob.
+  Clock faces are unlabelled as of the 2026-08-17 change; see
+  `docs/superpowers/specs/2026-08-17-deskmate-clock-title-removal-design.md`.
 - **Hierarchy from the four type sizes,** supported by — not replaced by — the
   surface and hue above.
 - **8 px spacing grid** with named constants in `template_internal.h`, replacing

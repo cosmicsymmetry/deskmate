@@ -23,6 +23,8 @@ enum {
  * for the seconds. Nothing labels the face — a clock names itself — so the
  * 248px hero-plus-modules stack centres on the canvas, leaving 64 above and
  * 56 below: very slightly top-heavy, which is what optical centring wants. */
+/* If TIME_Y or MODULE_Y moves, update firmware/main/ui/clock_screen.c's layout
+ * comment and companion/crates/lvgl-sim/tests/tabular.rs's TIME_BAND. */
 #define TIME_Y      (8 * DESKMATE_GRID)
 #define MODULE_Y    (22 * DESKMATE_GRID)
 #define MODULE_H    (17 * DESKMATE_GRID)

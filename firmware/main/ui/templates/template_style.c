@@ -99,9 +99,9 @@ void deskmate_chip_set_text(lv_obj_t *chip, const char *text)
     if (chip == NULL) {
         return;
     }
-    /* An empty title is a real state — the empty-title golden pins it — and
-     * a content-sized pill given an empty string collapses to a coloured
-     * blob rather than disappearing. Hide it instead. */
+    /* An empty title is a real state — the icon-badge-text--empty-badge golden
+     * pins it — and a content-sized pill given an empty string collapses to a
+     * coloured blob rather than disappearing. Hide it instead. */
     if (text == NULL || text[0] == '\0') {
         lv_obj_add_flag(chip, LV_OBJ_FLAG_HIDDEN);
         lv_label_set_text(chip, "");

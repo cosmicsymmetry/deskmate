@@ -6,7 +6,6 @@
 #include "core/clock_source.h"
 
 enum {
-    OBJ_TITLE,
     OBJ_FACE,
     OBJ_HOUR,
     OBJ_MINUTE,
@@ -85,15 +84,6 @@ bool analog_clock_create(template_widget_view_t *view,
     lv_obj_remove_flag(view->root,
                        LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_size(view->root, LV_PCT(100), LV_PCT(100));
-
-    /* The dial is centred and 320px across, so the 12 o'clock tick sits on
-     * the canvas's own vertical axis: a centred title would collide with it.
-     * The title takes the top-left corner instead — clear of the circle,
-     * which at the chip's own band has not yet reached x = 174 — and lands
-     * on the same rail as the other faces' identity chips. */
-    view->objects[OBJ_TITLE] = deskmate_chip(
-        view->root, DESKMATE_MARGIN, 2 * DESKMATE_GRID, palette.hue,
-        palette.ink);
 
     /* A chapter ring: the surface the hour marks are set into. The
      * complication language groups related marks onto a surface, but a
@@ -194,13 +184,11 @@ void analog_clock_patch(template_widget_view_t *view,
     if (view == NULL || view->root == NULL || fields == NULL) {
         return;
     }
-    const template_field_value_t *title =
-        template_fields_get(fields, "title");
+    /* `title` is still a schema and wire field — it names the card in the
+     * companion's library — but no clock face draws it, so nothing here
+     * reads it. */
     const template_field_value_t *show =
         template_fields_get(fields, "show_seconds");
-    if (title != NULL) {
-        deskmate_chip_set_text(view->objects[OBJ_TITLE], title->value.text);
-    }
     if (show != NULL) {
         view->clock_show_seconds = show->value.boolean;
         if (view->clock_show_seconds) {

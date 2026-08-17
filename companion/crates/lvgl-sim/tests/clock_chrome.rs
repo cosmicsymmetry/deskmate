@@ -66,6 +66,7 @@ fn assert_title_is_not_rendered(sim: &mut Simulator, template: SimTemplate) {
 fn clock_faces_ignore_the_title_field() {
     let mut sim = Simulator::new().expect("simulator");
     assert_title_is_not_rendered(&mut sim, SimTemplate::DigitalClock);
+    assert_title_is_not_rendered(&mut sim, SimTemplate::AnalogClock);
 }
 
 /// The rows the title chip used to occupy: it sat at `y = 2 * DESKMATE_GRID`

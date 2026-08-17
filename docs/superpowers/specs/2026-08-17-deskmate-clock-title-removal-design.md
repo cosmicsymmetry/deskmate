@@ -169,9 +169,21 @@ cargo test --workspace
 byte-compares a real device capture against `Simulator::render`. It is the only check
 that proves the firmware draws what the simulator drew rather than proving the simulator
 is self-consistent, so it runs after the goldens are re-blessed. It needs a
-`DESKMATE_DEV_DIAG=1` build. Expected summary: `total=54 identical=52 differing=0
-errored=0 excluded=2` — the two exclusions being the unchanged
-`row-list--truncation-boundary` pair.
+`DESKMATE_DEV_DIAG=1` build.
+
+The gate is that **all 14 clock frames compare identical** — eight `digital-clock--*`
+and six `analog-clock--*`, at both orientations. That is what this change must prove,
+and it passed on 2026-08-17 across two consecutive runs.
+
+The summary line cannot reach `differing=0`, and this spec was wrong to expect it.
+`progress-ring--running-mid-countdown` is timing-sensitive on hardware:
+`progress_ring.c`'s `current_remaining_ms` keeps counting a *running* ring down from
+`lv_tick_get()` after its fields are pushed, while the simulator draws the pinned
+`remaining_seconds` frozen, so one of its two orientations differs depending on where the
+capture lands within a second. Expect `total=54 identical=51 differing=1 excluded=2` with
+the differing case being that one, and treat any *other* differing case as a real
+failure. See `docs/hardware/board-notes.md`, "Clock title removal — partial verification
+2026-08-17".
 
 ### Physical verification
 

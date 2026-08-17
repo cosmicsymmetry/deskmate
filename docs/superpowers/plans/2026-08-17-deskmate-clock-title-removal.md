@@ -872,7 +872,7 @@ observed on the physical board.
 - Consumes: the firmware built in Tasks 1-3 and the companion built in Task 4.
 - Produces: the durable record of the observation.
 
-- [ ] **Step 1: Run the full verification set before flashing**
+- [x] **Step 1: Run the full verification set before flashing**
 
 From the repository root:
 
@@ -892,7 +892,7 @@ cargo test --workspace
 
 Expected: everything passes. Do not flash on a red suite.
 
-- [ ] **Step 2: Flash a dev-diag build**
+- [x] **Step 2: Flash a dev-diag build**
 
 Step 6 runs the framebuffer diff, which needs the dev-only 0x7E capture message that
 only a `DESKMATE_DEV_DIAG=1` build answers — against a release build every case times
@@ -914,14 +914,14 @@ Confirm all four: no `CLOCK` chip in the top-left, no `DATE` label above the dat
 time and date module sitting balanced on the canvas with visibly equal space above and
 below, and "Connect deskmate app" still on the bottom rail.
 
-- [ ] **Step 4: Observe both card faces at 90°**
+- [x] **Step 4: Observe both card faces at 90°**
 
 Connect the companion and put a digital clock card and an analog clock card in the
 active playlist. Capture each. Confirm: no chip on either, the digital clock's date
 centered in its module with the dial module unmoved beside it, and the analog dial
 unchanged.
 
-- [ ] **Step 5: Run the framebuffer diff against the re-blessed goldens**
+- [x] **Step 5: Run the framebuffer diff against the re-blessed goldens**
 
 This is the check the goldens cannot perform on themselves. A golden proves the
 simulator is self-consistent; the diff proves the *firmware* draws what the simulator
@@ -935,11 +935,26 @@ Run from `companion/`:
 cargo run -p device --example framebuffer_diff -- --port <serial-port>
 ```
 
-Expected final line: `SUMMARY total=54 identical=52 differing=0 errored=0 excluded=2`.
-The 54 replaces the previous 56 because Task 1 deleted the `empty-title` pair; the 2
-exclusions are the unchanged `row-list--truncation-boundary` pair, which cannot be
-pushed to hardware as written. Any `differing` count above zero means firmware and
-simulator disagree — stop and report rather than re-blessing.
+**PASSED 2026-08-17 across two consecutive runs.** All 14 clock frames (eight
+`digital-clock--*`, six `analog-clock--*`) compared **identical** at both orientations —
+that is this change's actual gate, and it is met.
+
+Observed line, both runs: `SUMMARY total=54 identical=51 differing=1 errored=0
+excluded=2`. The 54 replaces the previous 56 because Task 1 deleted the `empty-title`
+pair; the 2 exclusions are the unchanged `row-list--truncation-boundary` pair.
+
+This step originally expected `identical=52 differing=0`. **That expectation was wrong
+and is corrected here.** `progress-ring--running-mid-countdown` cannot pass
+deterministically: `progress_ring.c:39-48`'s `current_remaining_ms` keeps counting a
+*running* ring down from `lv_tick_get()` after its fields are pushed, while the simulator
+draws the case's pinned `remaining_seconds: 900` frozen, so whether the capture lands
+before or after the device's next one-second tick decides the result. Proof it is a race
+and not a regression: run 1 differed on `--landscape`, run 2 on `--flipped`, with an
+identical 100-pixel / 208-max-delta signature both times. Untouched by this change.
+
+So: treat a differing `progress-ring--running-mid-countdown` as known, and any *other*
+differing case as a real firmware/simulator disagreement — stop and report rather than
+re-blessing.
 
 - [ ] **Step 6: Watch the fallback-to-card transition**
 

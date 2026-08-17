@@ -1760,3 +1760,57 @@ design. Session evidence: `~/deskmate-hw-sessions/2026-08-15-harness-acceptance/
   before acceptance (`20260815T124444Z-firmware-check.jpg`); Deskmate V1
   firmware was rebuilt and reflashed (user-authorized), and the companion app
   re-adopted the board (`20260815T124606Z-postflash.jpg`).
+
+## Clock title removal — partial verification 2026-08-17
+
+Software change: the identity chip is gone from all three clock surfaces and the
+`DATE` eyebrow from the two date-bearing ones; each remaining stack is re-centred on
+its own canvas. Plan
+`docs/superpowers/plans/2026-08-17-deskmate-clock-title-removal.md`, spec
+`docs/superpowers/specs/2026-08-17-deskmate-clock-title-removal-design.md`.
+Firmware flashed from `idf.py -C firmware -DDESKMATE_DEV_DIAG=1 flash` at commit
+`876033b`.
+
+**PASSED — physical framebuffer diff, all 14 clock frames byte-identical.**
+`companion/crates/device/examples/framebuffer_diff.rs` run twice against the board.
+All eight `digital-clock--*` and all six `analog-clock--*` cases compared **identical**
+in both runs, at both `landscape` and `flipped`. The panel therefore draws the
+re-centred faces exactly as the re-blessed goldens claim; this covers the two card
+faces at both orientations more strictly than a photograph could.
+
+**Pre-existing harness defect found: `progress-ring--running-mid-countdown` is
+timing-sensitive on hardware and cannot pass deterministically.** Both runs reported
+`total=54 identical=51 differing=1 errored=0 excluded=2`, but the differing case was
+`--landscape` on the first run and `--flipped` on the second, with an identical
+signature each time (100 pixels, max channel delta 208). A deterministic rendering
+fault would hit the same orientation every run; the same signature migrating between
+orientations is a race. Root cause is in `progress_ring.c:39-48`: `current_remaining_ms`
+subtracts elapsed `lv_tick_get()` time whenever `progress_running` is true, so a
+*running* ring keeps counting down on the device after its fields are pushed, while
+`Simulator::render` draws the case's pinned `remaining_seconds: 900` frozen. Whether the
+capture lands before or after the device's next one-second tick decides the comparison.
+Unrelated to this change — `progress_ring.c` was not touched, and the case pins
+`running: true`. It also means V1 acceptance's recorded `0 differing` was luck rather
+than proof, and that the expectation of `identical=52` in this plan was unattainable.
+Not fixed here (out of scope); options when someone does address it are to pin
+`running: false` for the compared case, or to exclude it in `exclusion_reason()` the way
+the `row-list--truncation-boundary` pair already is.
+
+**NOT VERIFIED — the standalone fallback screen, at either orientation.** This is the
+one surface the framebuffer diff cannot reach, because it has no golden case. The
+harness framing preflight FAILED and was not recoverable by the agent: the board sat at
+the right edge of the OBSBOT's field of view, partly out of frame, strongly backlit by a
+window, and 180° rotated relative to the camera
+(`20260817T091111Z-fallback-90.jpg`). Repositioning the board or the camera is a
+human-hands action per `docs/hardware/webcam-harness.md`'s stated limitation. The frame
+was legible enough to show no `CLOCK` chip, no `DATE` eyebrow above "Mon, Aug 17", and
+the "Connect deskmate app" hint still on its bottom rail — but it does not show the
+whole canvas, so centring is **unconfirmed** and this item stays open.
+
+**NOT VERIFIED — the fallback-to-card transition.** The change puts the fallback's hero
+at y=88 and the card's at y=64 (each stack centred on its own canvas), so the time
+shifts 24px when a host first connects. Needs the same camera framing to judge.
+
+Incidental: the installed `/Applications/Deskmate.app` held `/dev/cu.usbmodem1101`
+exclusively and was quit (gracefully, via `osascript`) to free the port for flashing and
+for the diff runs. It was not running when these observations were taken.

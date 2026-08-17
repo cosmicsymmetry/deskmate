@@ -87,6 +87,25 @@ of letting code and documentation diverge.
   Three UX findings from that session are recorded in board-notes (takeover face
   indistinguishable from the completed card; sticky unreconciled optimistic red flash
   on tapping a completed pomodoro; host silently ignores stale-token dismissals).
+- V1 packaging/hardening is delivered
+  (`docs/superpowers/plans/2026-08-15-deskmate-v1-packaging-hardening.md`): the
+  repo has a private GitHub remote `cosmicsymmetry/deskmate` with a green `ci`
+  workflow (macOS companion gates + release DMG artifact; ESP-IDF build + host
+  tests in the IDF container). Version is 1.0.0; bundle targets are app+dmg with
+  ad-hoc signing. Audits run non-blocking in CI with
+  `docs/security/advisories.md` as the blocking triage record; the security
+  review is `docs/security/v1-review.md`. The hands-on install matrix passed
+  (results table in the plan, recorded 2026-08-17); it surfaced and fixed one
+  defect — the settings window auto-opened on every launch and now auto-opens
+  on first run only (`fc3750b`). All V1-exit items are closed; declaring V1
+  exit (tag, V2 brainstorm) awaits explicit user authorization. No tags exist.
+- The webcam verification harness (`tools/hwcam/`, usage in
+  `docs/hardware/webcam-harness.md`, spec
+  `docs/superpowers/specs/2026-08-15-deskmate-webcam-harness-design.md`) was
+  commissioned 2026-08-15: agent-driven physical panel verification via OBSBOT
+  captures, judged by agent vision only (no CV code by design). Touch and cable
+  pulls remain human actions. Prefer it for panel observations in future
+  hardware checks; board-notes stays the durable record.
 - M1's full software and physical exit gate passes, including ten observed
   unplug/replug cycles, and is tagged `m1`. Because M2 work began in the same shared
   worktree before the physical carryover closed, that tag also contains the M2

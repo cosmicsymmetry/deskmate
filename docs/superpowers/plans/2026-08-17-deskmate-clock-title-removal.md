@@ -78,7 +78,7 @@ drawn, so it is deleted rather than re-blessed.
   `fn assert_title_is_not_rendered(sim: &mut Simulator, template: SimTemplate)`, and the
   test `clock_faces_ignore_the_title_field`, which Task 2 extends with one call.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `companion/crates/lvgl-sim/tests/clock_chrome.rs`:
 
@@ -181,7 +181,7 @@ fn digital_clock_leaves_the_old_chip_band_dark() {
 }
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run from `companion/`:
 
@@ -194,7 +194,7 @@ title changed the frame" (the chip renders its text, so the frames differ).
 `digital_clock_leaves_the_old_chip_band_dark` fails listing rows in 16..48 (the chip is
 a filled pill in the face hue).
 
-- [ ] **Step 3: Remove `OBJ_TITLE` from the object enum**
+- [x] **Step 3: Remove `OBJ_TITLE` from the object enum**
 
 In `firmware/main/ui/templates/digital_clock.c`, delete the `OBJ_TITLE,` line so the
 enum reads:
@@ -214,7 +214,7 @@ enum {
 This renumbers the entries after it. That is contained: each template declares its own
 local enum and no other translation unit indexes `view->objects[]` by a literal.
 
-- [ ] **Step 4: Re-center the stack**
+- [x] **Step 4: Re-center the stack**
 
 Replace the layout comment and the first two defines (currently lines 21-27) with:
 
@@ -235,7 +235,7 @@ existing 40px gap between the hero's bottom edge (64 + 72 = 136) and the module 
 top edge (176), and moves the module row's bottom edge from 344 to 312 — which also
 gives the bottom-aligned state label real clearance it does not have today.
 
-- [ ] **Step 5: Delete the chip**
+- [x] **Step 5: Delete the chip**
 
 Remove the chip comment and creation block (currently lines 66-71):
 
@@ -250,7 +250,7 @@ Remove the chip comment and creation block (currently lines 66-71):
 Keep the `palette` declaration above it — `palette.hue` still colours the seconds
 label, the dial indicator, and the minute hand.
 
-- [ ] **Step 6: Delete the eyebrow and centre the date**
+- [x] **Step 6: Delete the eyebrow and centre the date**
 
 Replace the date-module block (currently lines 92-107) with:
 
@@ -271,7 +271,7 @@ The `eyebrow_line` local is gone entirely — it was used only by the eyebrow ca
 by the old label-box offset. Leaving it declared would trip `-Werror` on an unused
 variable. `stack_top` moves from 35 to 50.
 
-- [ ] **Step 7: Stop reading `title` in the patch function**
+- [x] **Step 7: Stop reading `title` in the patch function**
 
 Replace the body of `digital_clock_patch` (currently lines 164-184) with:
 
@@ -296,7 +296,7 @@ Replace the body of `digital_clock_patch` (currently lines 164-184) with:
     }
 ```
 
-- [ ] **Step 8: Run the test to verify it passes**
+- [x] **Step 8: Run the test to verify it passes**
 
 Run from `companion/`:
 
@@ -306,7 +306,7 @@ cargo test -p lvgl-sim --test clock_chrome
 
 Expected: both tests PASS.
 
-- [ ] **Step 9: Move `tabular.rs`'s hero band to the new hero position**
+- [x] **Step 9: Move `tabular.rs`'s hero band to the new hero position**
 
 `TIME_BAND` is pinned to the hero's *old* y. Left alone it would measure a clipped
 hero and the five-glyph assertion could merge or lose runs. In
@@ -320,7 +320,7 @@ hero and the five-glyph assertion could merge or lose runs. In
 const TIME_BAND: std::ops::Range<usize> = 68..132;
 ```
 
-- [ ] **Step 10: Run the tabular test to verify it still passes**
+- [x] **Step 10: Run the tabular test to verify it still passes**
 
 Run from `companion/`:
 
@@ -332,7 +332,7 @@ Expected: PASS — `hero_time_label_is_tabular` finds five glyph runs per frame 
 equal colon columns. If it reports a run count other than 5, the band is wrong: check
 that the hero's line box is 64..136 and the band sits inside it.
 
-- [ ] **Step 11: Delete the degenerate `empty-title` golden case**
+- [x] **Step 11: Delete the degenerate `empty-title` golden case**
 
 With no chip, `digital-clock--empty-title` renders byte-identical to
 `digital-clock--typical`, so it would sit in the suite asserting nothing. In
@@ -354,7 +354,7 @@ With no chip, `digital-clock--empty-title` renders byte-identical to
 Its coverage is not lost — `clock_chrome.rs`'s `clock_faces_ignore_the_title_field`
 asserts the empty-title case explicitly, and more directly than a pinned frame could.
 
-- [ ] **Step 12: Re-bless the digital-clock goldens**
+- [x] **Step 12: Re-bless the digital-clock goldens**
 
 `tests/golden.rs` treats `BLESS` as "own the directory": it rewrites every frame and
 deletes orphan PNGs whose case no longer exists, which removes the two
@@ -364,7 +364,7 @@ deletes orphan PNGs whose case no longer exists, which removes the two
 BLESS=1 cargo test -p lvgl-sim --test golden
 ```
 
-- [ ] **Step 13: Verify the golden inventory changed exactly as intended**
+- [x] **Step 13: Verify the golden inventory changed exactly as intended**
 
 Run from the repository root:
 
@@ -380,7 +380,7 @@ any `analog-clock`, `row-list`, `progress-ring`, `big-number-label`, or
 `icon-badge-text` frame shows as modified, stop — something outside this task's scope
 changed and must be understood before committing.
 
-- [ ] **Step 14: Look at a blessed frame**
+- [x] **Step 14: Look at a blessed frame**
 
 Open `companion/crates/lvgl-sim/tests/golden/digital-clock--typical--landscape.png` and
 confirm by eye: no chip in the top-left, no `DATE` label above the date, the time and
@@ -388,7 +388,7 @@ module row sitting balanced on the canvas, and the date centered in its surface.
 goldens are only as good as this one look — a wrong-but-consistent layout blesses
 itself happily.
 
-- [ ] **Step 15: Run the full simulator suite green**
+- [x] **Step 15: Run the full simulator suite green**
 
 Run from `companion/`:
 
@@ -401,7 +401,7 @@ cargo test --workspace
 Expected: all pass. `clippy` runs over test targets too, so an unused import in
 `clock_chrome.rs` is an error, not a warning.
 
-- [ ] **Step 16: Commit**
+- [x] **Step 16: Commit**
 
 ```bash
 git add firmware/main/ui/templates/digital_clock.c \
@@ -442,7 +442,7 @@ Nothing moves on this face. The dial, chapter ring, hands, and hub are all
   `clock_faces_ignore_the_title_field` test, all created in Task 1.
 - Produces: nothing later tasks depend on.
 
-- [ ] **Step 1: Extend the failing test to the analog face**
+- [x] **Step 1: Extend the failing test to the analog face**
 
 In `companion/crates/lvgl-sim/tests/clock_chrome.rs`, add one call to
 `clock_faces_ignore_the_title_field` so it reads:
@@ -460,7 +460,7 @@ Do not add a chip-band test for this face. The analog clock's chapter ring is ce
 and 320px across, so it legitimately lights rows from y=24 — a "band is dark"
 assertion would be measuring the ring, not the chip.
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run from `companion/`:
 
@@ -472,7 +472,7 @@ Expected: `clock_faces_ignore_the_title_field` FAILS with "AnalogClock at Landsc
 longer title changed the frame". `digital_clock_leaves_the_old_chip_band_dark` still
 passes (Task 1 fixed that face).
 
-- [ ] **Step 3: Remove `OBJ_TITLE` from the object enum**
+- [x] **Step 3: Remove `OBJ_TITLE` from the object enum**
 
 In `firmware/main/ui/templates/analog_clock.c`, delete the `OBJ_TITLE,` line so the
 enum reads:
@@ -488,7 +488,7 @@ enum {
 };
 ```
 
-- [ ] **Step 4: Delete the chip and its rationale comment**
+- [x] **Step 4: Delete the chip and its rationale comment**
 
 Remove the block currently at lines 89-96 in full — both the comment, which exists
 only to explain why the title was banished to the corner, and the chip itself:
@@ -507,7 +507,7 @@ only to explain why the title was banished to the corner, and the chip itself:
 Keep the `palette` declaration — `palette.hue` still colours the twelve o'clock tick,
 the second hand, and the hub.
 
-- [ ] **Step 5: Stop reading `title` in the patch function**
+- [x] **Step 5: Stop reading `title` in the patch function**
 
 Replace the body of `analog_clock_patch` (currently lines 193-211) with:
 
@@ -531,7 +531,7 @@ Replace the body of `analog_clock_patch` (currently lines 193-211) with:
     }
 ```
 
-- [ ] **Step 6: Run the test to verify it passes**
+- [x] **Step 6: Run the test to verify it passes**
 
 Run from `companion/`:
 
@@ -541,7 +541,7 @@ cargo test -p lvgl-sim --test clock_chrome
 
 Expected: both tests PASS.
 
-- [ ] **Step 7: Re-bless the analog-clock goldens**
+- [x] **Step 7: Re-bless the analog-clock goldens**
 
 Run from `companion/`:
 
@@ -549,7 +549,7 @@ Run from `companion/`:
 BLESS=1 cargo test -p lvgl-sim --test golden
 ```
 
-- [ ] **Step 8: Verify the golden inventory changed exactly as intended**
+- [x] **Step 8: Verify the golden inventory changed exactly as intended**
 
 Run from the repository root:
 
@@ -563,13 +563,13 @@ template touched, and the count still 54. Task 1's digital-clock frames were alr
 committed, so they must **not** reappear as modified here — if they do, Task 1's bless
 was incomplete.
 
-- [ ] **Step 9: Look at a blessed frame**
+- [x] **Step 9: Look at a blessed frame**
 
 Open `companion/crates/lvgl-sim/tests/golden/analog-clock--typical--landscape.png` and
 confirm the top-left corner is empty and the dial is unchanged — same diameter, same
 position, twelve o'clock tick still in the face hue.
 
-- [ ] **Step 10: Run the full workspace green**
+- [x] **Step 10: Run the full workspace green**
 
 Run from `companion/`:
 
@@ -581,7 +581,7 @@ cargo test --workspace
 
 Expected: all pass.
 
-- [ ] **Step 11: Commit**
+- [x] **Step 11: Commit**
 
 ```bash
 git add firmware/main/ui/templates/analog_clock.c \
@@ -622,7 +622,7 @@ Task 5 confirms it does not read as a glitch.
 - Consumes: nothing from earlier tasks.
 - Produces: nothing later tasks depend on.
 
-- [ ] **Step 1: Re-center the stack and rewrite the layout comment**
+- [x] **Step 1: Re-center the stack and rewrite the layout comment**
 
 In `firmware/main/ui/clock_screen.c`, replace the comment and defines currently at
 lines 14-23 with:
@@ -645,7 +645,7 @@ The old comment claimed `CLOCK_TIME_Y` "matches digital_clock's rail". That was 
 when both were `12 * DESKMATE_GRID` and is now false, which is why the claim is gone
 rather than merely re-worded.
 
-- [ ] **Step 2: Delete the palette, the chip, and the eyebrow**
+- [x] **Step 2: Delete the palette, the chip, and the eyebrow**
 
 Replace the block currently at lines 192-231 with:
 
@@ -681,7 +681,7 @@ Leave everything else untouched — the `s_hint_label` block below keeps its
 `LV_ALIGN_BOTTOM_MID` footer rail position, because the connection hint is chrome
 rather than part of the centered stack, exactly as the templates' state label is.
 
-- [ ] **Step 3: Verify the firmware still compiles**
+- [x] **Step 3: Verify the firmware still compiles**
 
 This is the only automated gate on this file. Run from the repository root:
 
@@ -693,7 +693,7 @@ idf.py -C firmware build
 Expected: build succeeds with no warnings. An "unused variable 'palette'" or
 "unused variable 'eyebrow_line'" error means Step 2 left a declaration behind.
 
-- [ ] **Step 4: Confirm the host tests are unaffected**
+- [x] **Step 4: Confirm the host tests are unaffected**
 
 `clock_screen.c` is not in any host-test target, so this should be a no-op — run it to
 prove that rather than to discover it. From the repository root:
@@ -704,7 +704,7 @@ make -C firmware/host_tests clean test
 
 Expected: all pass, unchanged from before this task.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add firmware/main/ui/clock_screen.c
@@ -741,7 +741,7 @@ to card kinds whose chips still render, where "Heading" remains accurate.
 - Consumes: nothing from earlier tasks.
 - Produces: nothing later tasks depend on.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 The existing suite has no assertion on this label at all, so the relabel would
 otherwise be unpinned. `components.test.tsx` already provides `renderCardEditor(card)`,
@@ -762,7 +762,7 @@ same `describe` block that contains `renderCardEditor`:
   });
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run from `companion/apps/deskmate/`:
 
@@ -773,7 +773,7 @@ bun test tests/components.test.tsx
 Expected: FAIL — the clock editor renders `<span>Heading</span>`, so the
 `toContain("<span>Name</span>")` assertion fails first.
 
-- [ ] **Step 3: Relabel the clock card's field**
+- [x] **Step 3: Relabel the clock card's field**
 
 In `companion/apps/deskmate/src/components/CardEditor.tsx`, line 149 sits inside the
 `{card.kind === "clock" && (` branch that opens at line 147. Change only that one:
@@ -782,11 +782,12 @@ In `companion/apps/deskmate/src/components/CardEditor.tsx`, line 149 sits inside
               <span>Name</span>
 ```
 
-Leave lines 251, 330, 368, and 458 as `<span>Heading</span>` — those are the pomodoro,
-calendar, weather, json-feed, and rss branches, whose faces still render an identity
-chip.
+Leave lines 251, 330, 368, and 458 as `<span>Heading</span>` — those are the calendar,
+weather, json-feed, and rss branches, whose faces still render an identity chip. The
+pomodoro card is not among them: its field is labelled `Timer label` and is bound to
+`card.label`, not `card.title`, so it is untouched by this task either way.
 
-- [ ] **Step 4: Run the test to verify it passes**
+- [x] **Step 4: Run the test to verify it passes**
 
 Run from `companion/apps/deskmate/`:
 
@@ -796,7 +797,7 @@ bun test tests/components.test.tsx
 
 Expected: PASS, and the rest of the file's tests still pass.
 
-- [ ] **Step 5: Note the behaviour in the frozen v4 contract**
+- [x] **Step 5: Note the behaviour in the frozen v4 contract**
 
 `docs/config/v4.md` line 69 lists `title` as a clock card field. It still is one — the
 schema does not change — but the doc should not leave a reader expecting it on the
@@ -809,7 +810,7 @@ serves only to name the card in the companion's library. The field remains on th
 and is accepted by firmware, which ignores it.
 ```
 
-- [ ] **Step 6: Run the companion app's full gates**
+- [x] **Step 6: Run the companion app's full gates**
 
 Run from `companion/apps/deskmate/`:
 
@@ -830,7 +831,7 @@ and which reports six pre-existing failures on an untouched tree
 `configDraft.test.ts`, `useAppState.test.ts`). Those are not yours to fix here;
 reformatting six unrelated files would bury this task's one-line change.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add companion/apps/deskmate/src/components/CardEditor.tsx \

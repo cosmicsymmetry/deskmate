@@ -163,16 +163,30 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
+### Physical framebuffer diff
+
+`companion/crates/device/examples/framebuffer_diff.rs` reuses the same case table and
+byte-compares a real device capture against `Simulator::render`. It is the only check
+that proves the firmware draws what the simulator drew rather than proving the simulator
+is self-consistent, so it runs after the goldens are re-blessed. It needs a
+`DESKMATE_DEV_DIAG=1` build. Expected summary: `total=54 identical=52 differing=0
+errored=0 excluded=2` — the two exclusions being the unchanged
+`row-list--truncation-boundary` pair.
+
 ### Physical verification
 
-Required, because the fallback screen has no golden coverage and is the one surface
-only the board can confirm. On the physical board, at both 90 degrees and 270 degrees:
+Required for what the diff cannot reach: the fallback screen, which has no golden case,
+and the transition between faces, which is a relationship rather than a frame. On the
+physical board, at both 90 degrees and 270 degrees:
 
 1. The fallback clock at boot before any host connects — no `CLOCK` chip, no `DATE`
    eyebrow, time and date centered, connection hint still on its footer rail.
 2. A digital clock card — no chip, date centered in its module, dial module unmoved
    relative to the date module.
 3. An analog clock card — no chip, dial unchanged.
+4. The fallback-to-card transition. Because each stack centers on its own canvas and the
+   fallback's is 192px against the card's 248px, the hero shifts 24px when a host first
+   connects. This is accepted; confirm it reads as a screen change rather than a glitch.
 
 Record the observed result in `docs/hardware/board-notes.md`. Prefer the webcam harness
 (`tools/hwcam/`) for the panel captures, per the standing preference in `CLAUDE.md`.

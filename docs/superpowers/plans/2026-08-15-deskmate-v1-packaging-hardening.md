@@ -34,11 +34,11 @@
 **Interfaces:**
 - Produces: version `1.0.0` everywhere; `bundle.targets` = `["app", "dmg"]`. Task 3's CI and Task 6's install matrix build this exact configuration.
 
-- [ ] **Step 1: Bump versions**
+- [x] **Step 1: Bump versions**
 
 In `companion/apps/deskmate/src-tauri/tauri.conf.json` change `"version": "0.1.0"` to `"version": "1.0.0"`. In `companion/apps/deskmate/src-tauri/Cargo.toml` change `version = "0.1.0"` to `version = "1.0.0"`. In `companion/apps/deskmate/package.json` change `"version": "0.1.0"` to `"version": "1.0.0"`.
 
-- [ ] **Step 2: Narrow bundle targets**
+- [x] **Step 2: Narrow bundle targets**
 
 In `tauri.conf.json`, change `"targets": "all"` to:
 
@@ -46,7 +46,7 @@ In `tauri.conf.json`, change `"targets": "all"` to:
 "targets": ["app", "dmg"]
 ```
 
-- [ ] **Step 3: Verify**
+- [x] **Step 3: Verify**
 
 ```sh
 cd companion/apps/deskmate
@@ -58,7 +58,7 @@ cd ../.. && cargo check -p deskmate-app --locked
 
 Expected: `1.0.0` / `app,dmg` / `1.0.0` / `version = "1.0.0"`; cargo check succeeds without touching `Cargo.lock` (the workspace lock already contains the members; a version bump alone updates the lockfile's own version field — if `Cargo.lock` changes, commit that change too, it is the one legitimate delta).
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```sh
 git add companion/apps/deskmate/src-tauri/tauri.conf.json companion/apps/deskmate/src-tauri/Cargo.toml companion/apps/deskmate/package.json companion/Cargo.lock
@@ -74,7 +74,7 @@ git commit -m "chore: version 1.0.0; bundle targets narrowed to app+dmg"
 **Interfaces:**
 - Produces: remote `origin` → `https://github.com/cosmicsymmetry/deskmate.git`, `main` pushed and tracking. Task 3 pushes workflows here.
 
-- [ ] **Step 1: Create the private repo and push**
+- [x] **Step 1: Create the private repo and push**
 
 ```sh
 cd /Users/rodion/dev/deskmate
@@ -83,7 +83,7 @@ gh repo create cosmicsymmetry/deskmate --private --source . --remote origin --pu
 
 If the name is taken, stop and ask the user for an alternative — do not pick one silently.
 
-- [ ] **Step 2: Verify**
+- [x] **Step 2: Verify**
 
 ```sh
 gh repo view cosmicsymmetry/deskmate --json visibility,defaultBranchRef -q '.visibility + " " + .defaultBranchRef.name'
@@ -104,7 +104,7 @@ Expected: `PRIVATE main`; the two hashes match.
 - Consumes: the remote from Task 2; versions/targets from Task 1.
 - Produces: a green `ci` workflow on `main` whose `companion` job uploads a `deskmate-dmg` artifact. Tasks 4 and 6 rely on the audit steps and the artifact respectively.
 
-- [ ] **Step 1: Write the workflow**
+- [x] **Step 1: Write the workflow**
 
 Create `.github/workflows/ci.yml`:
 
@@ -195,7 +195,7 @@ jobs:
           command: idf.py build && make -C host_tests clean test
 ```
 
-- [ ] **Step 2: Commit and push**
+- [x] **Step 2: Commit and push**
 
 ```sh
 git add .github/workflows/ci.yml
@@ -203,7 +203,7 @@ git commit -m "ci: macOS companion gate with DMG artifact; ESP-IDF build + host 
 git push origin main
 ```
 
-- [ ] **Step 3: Watch the run and fix forward until green**
+- [x] **Step 3: Watch the run and fix forward until green**
 
 ```sh
 gh run watch --repo cosmicsymmetry/deskmate --exit-status
@@ -215,7 +215,7 @@ Likely first-run failures and their fixes (each fix is its own `ci:`-prefixed co
 - `bun audit` exit/flag behavior differing from expectation → the step is `continue-on-error`, so it cannot fail the job; if the command itself is unavailable, replace the step with `bunx npm audit --omit dev` and note why.
 - Tauri bundling reaching for signing identity → ensure no `signingIdentity` is configured; Tauri ad-hoc signs by default when none is set.
 
-- [ ] **Step 4: Verify the artifact exists**
+- [x] **Step 4: Verify the artifact exists**
 
 ```sh
 gh run list --repo cosmicsymmetry/deskmate --branch main --limit 1
@@ -237,7 +237,7 @@ Expected: one `Deskmate_1.0.0_aarch64.dmg` (or `x64` per runner arch) downloaded
 - Consumes: `cargo audit` / `bun audit` output (locally and from Task 3's CI logs).
 - Produces: `docs/security/advisories.md`, referenced by Task 7's closeout.
 
-- [ ] **Step 1: Run the audits locally**
+- [x] **Step 1: Run the audits locally**
 
 ```sh
 cargo install cargo-audit --locked   # skip if already installed
@@ -245,7 +245,7 @@ cd /Users/rodion/dev/deskmate/companion && cargo audit
 cd apps/deskmate && bun audit
 ```
 
-- [ ] **Step 2: Check the GTK3/unmaintained question for macOS**
+- [x] **Step 2: Check the GTK3/unmaintained question for macOS**
 
 ```sh
 cd /Users/rodion/dev/deskmate/companion
@@ -255,7 +255,7 @@ cargo tree --target aarch64-apple-darwin -i glib 2>&1 | head -5
 
 Expected: "nothing depends on" style output proving GTK/GLib are not in the macOS dependency graph (they are Linux-target deps of Tauri). Record the actual result either way.
 
-- [ ] **Step 3: Triage every finding**
+- [x] **Step 3: Triage every finding**
 
 For each advisory: if a patch-level dependency bump inside the existing `=x.y.z` pin style clears it and `cargo test --workspace --locked` (after `cargo update -p <crate> --precise <ver>`) plus `bun test` still pass, apply the bump. Otherwise record an exception.
 
@@ -279,7 +279,7 @@ CI runs both audits non-blocking; this document is the blocking triage.
 <actual cargo tree result and conclusion for the macOS build>
 ```
 
-- [ ] **Step 4: Verify and commit**
+- [x] **Step 4: Verify and commit**
 
 ```sh
 cd companion && cargo test --workspace --locked && cd apps/deskmate && bun test
@@ -302,7 +302,7 @@ Expected: tests pass; CI goes green on the push.
 - Consumes: the built DMG from Task 3 (or a local `bunx tauri build`).
 - Produces: `docs/security/v1-review.md`, referenced by Task 7's closeout.
 
-- [ ] **Step 1: Enumerate the review surfaces**
+- [x] **Step 1: Enumerate the review surfaces**
 
 ```sh
 grep -rn "#\[tauri::command\]" companion/apps/deskmate/src-tauri/src -A 2
@@ -313,7 +313,7 @@ grep -rn "eprintln!\|println!\|log::" companion/apps/deskmate/src-tauri/src comp
 ls -l ~/Library/Application\ Support/io.deskmate.companion/
 ```
 
-- [ ] **Step 2: Inspect the DMG contents**
+- [x] **Step 2: Inspect the DMG contents**
 
 ```sh
 hdiutil attach /tmp/ci-dmg-check/*.dmg -nobrowse -mountpoint /tmp/deskmate-dmg
@@ -324,7 +324,7 @@ hdiutil detach /tmp/deskmate-dmg
 
 Expected: only the app bundle + Applications symlink; `codesign` shows an ad-hoc signature (`Signature=adhoc`); no stray dev files inside `Contents/Resources`.
 
-- [ ] **Step 3: Write the review**
+- [x] **Step 3: Write the review**
 
 Write `docs/security/v1-review.md` covering, with the actual evidence from steps 1–2:
 
@@ -363,7 +363,7 @@ The observed bundle contents and signature state.
 
 Every finding must end fixed or reasoned — none left open.
 
-- [ ] **Step 4: Fix what the review forces, verify, commit**
+- [x] **Step 4: Fix what the review forces, verify, commit**
 
 Apply any forced fixes with their own focused commits first (e.g. `fix: redact calendar summaries from persistence warnings`), each verified by `cargo test --workspace --locked`. Then:
 
@@ -386,13 +386,13 @@ git push origin main
 
 This task requires the user at the machine for the tray/GUI observations. Automatable steps (install, config swaps, process checks) run via shell; observation steps are questions to the user. Back up the real config first; restore it at the end.
 
-- [ ] **Step 1: Back up the live config**
+- [x] **Step 1: Back up the live config**
 
 ```sh
 cp ~/Library/Application\ Support/io.deskmate.companion/config.json /tmp/deskmate-config-backup.json
 ```
 
-- [ ] **Step 2: Clean install + first run**
+- [x] **Step 2: Clean install + first run**
 
 Quit any running Deskmate instance (tray → Quit; the user does this). Then:
 
@@ -407,7 +407,7 @@ open -a Deskmate
 
 User observes: tray icon appears; no settings window auto-opens (window is configured hidden); first-run guidance appears when settings are opened; with the board attached over USB, the device leaves standalone clock and shows the active playlist.
 
-- [ ] **Step 3: Upgrade over an M3-era config**
+- [x] **Step 3: Upgrade over an M3-era config**
 
 ```sh
 osascript -e 'quit app "Deskmate"'
@@ -423,7 +423,7 @@ jq '.version' ~/Library/Application\ Support/io.deskmate.companion/config.json
 
 (If the app only persists on change, make any settings change first, then re-check.)
 
-- [ ] **Step 4: Single instance, autostart, tray behaviors**
+- [x] **Step 4: Single instance, autostart, tray behaviors**
 
 ```sh
 open -a Deskmate; open -a Deskmate; pgrep -fl Deskmate | grep -c "Deskmate.app" 
@@ -431,7 +431,7 @@ open -a Deskmate; open -a Deskmate; pgrep -fl Deskmate | grep -c "Deskmate.app"
 
 Expected: one app process. User then exercises: tray → Autostart on, log out/in (or `osascript -e 'tell application "System Events" to get the name of every login item'` to confirm registration), autostart off again; settings window close leaves tray resident; tray → Quit exits fully (`pgrep` empty).
 
-- [ ] **Step 5: Offline use + corrupt-config recovery**
+- [x] **Step 5: Offline use + corrupt-config recovery**
 
 Unplug the device: user observes tray shows offline state, app stays healthy, board falls back to standalone clock. Replug: playlist resumes and any held alert replays. Then corrupt the config:
 
@@ -443,7 +443,7 @@ open -a Deskmate
 
 User observes: app starts on defaults, the failure is surfaced as the typed validation failure (never "your last working settings"), and saving from settings recovers a valid file.
 
-- [ ] **Step 6: Uninstall + restore**
+- [x] **Step 6: Uninstall + restore**
 
 ```sh
 osascript -e 'quit app "Deskmate"'
@@ -454,7 +454,7 @@ cp /tmp/deskmate-config-backup.json ~/Library/Application\ Support/io.deskmate.c
 
 Confirm no login item remains after uninstall if autostart was left on (`osascript` login-items check again). Reinstall the app afterwards if the user wants to keep daily-driving it (they do — repeat step 2's install lines, config already restored).
 
-- [ ] **Step 7: Record results and commit**
+- [x] **Step 7: Record results and commit**
 
 Append to this task a results table — one row per matrix item (clean install, first run, M3 upgrade, single instance, autostart on/off, close-to-tray, quit, offline, corrupt recovery, uninstall) with observed result and date. Then:
 
@@ -463,6 +463,26 @@ git add docs/superpowers/plans/2026-08-15-deskmate-v1-packaging-hardening.md
 git commit -m "docs: V1 install matrix results"
 git push origin main
 ```
+
+#### Results (recorded 2026-08-17)
+
+Install/GUI observations by the user at the machine; panel observations via the
+webcam harness (`tools/hwcam/`, commissioned 2026-08-15 — see board-notes).
+Build under test: CI DMG `Deskmate_1.0.0_aarch64.dmg` from commit `fc3750b`.
+
+| Matrix item | Result | Date | Notes |
+|---|---|---|---|
+| Clean install (DMG → /Applications) | PASS | 2026-08-15 | Fresh config dir created `0700`, file `0600` (live verification of `ef7df62`) |
+| First run | PASS | 2026-08-15 | **Defect found & fixed:** settings window auto-opened on *every* launch (unconditional `show_settings` since the M3 checkpoint). User-approved behavior change: auto-open on first run only (`fc3750b`, TDD). Re-verified on the fixed CI build: window auto-opens once on first run, first-run panel ("Make the display yours") visible, tray icon present, board shows active playlist |
+| Upgrade over M3-era config (v1→v4) | PASS | 2026-08-15 | Tray-only launch (fix's negative case), migrated card library/playlist shown, no mislabel; file rewritten as `schema_version` 4 on save (plan's `jq '.version'` check corrected — the field is `schema_version`) |
+| Single instance | PASS | 2026-08-15 | 1 process after double `open` (plan's `pgrep \| grep -c` self-match artifact noted; verified with `pgrep -x`) |
+| Autostart on/off | PASS | 2026-08-15 | ON: `~/Library/LaunchAgents/Deskmate.plist` created, pref persisted; OFF: plist removed, pref false. One unreproduced anomaly: the first ON toggle silently failed (no plist, checkbox reverted; error path is stderr-only). Did not reproduce across three later toggles |
+| Close-to-tray | PASS | 2026-08-15 | Window close leaves tray resident |
+| Quit | PASS | 2026-08-15 | Tray → Quit exits fully (`pgrep` empty) |
+| Offline (USB unplugged) | PASS | 2026-08-15 | Webcam: board fell back to standalone clock with correct local time and "Connect deskmate app" hint; tray showed offline, app healthy (user) |
+| Replug / resume | PASS | 2026-08-17 | Resume observed via app relaunch after a two-day gap with the cable back (autostart was deliberately off, so no auto-start). Live replug-while-running re-adoption was separately verified 2026-08-15 (alert-replay session, board-notes). No alert was pending during this matrix run |
+| Corrupt-config recovery | PASS | 2026-08-17 | Typed banner: "invalid config JSON: expected ident at line 1 column 2… unreadable file was left untouched" — **no** "last working settings" mislabel. App ran on defaults (UTC, landscape). Save & apply rewrote a valid v4 file (`0600`); panel recovered to correct orientation |
+| Uninstall + restore | PASS | 2026-08-17 | No login item or LaunchAgent residue; real (schema v3) config restored and migrates on load; app reinstalled from the same DMG for daily driving |
 
 ---
 
@@ -475,15 +495,15 @@ git push origin main
 **Interfaces:**
 - Consumes: completed Tasks 1–6.
 
-- [ ] **Step 1: Update the roadmap V1 row**
+- [x] **Step 1: Update the roadmap V1 row**
 
 In the V1 row, replace the "Remaining before V1 exit" clause: the CO5300 even-window check closed 2026-08-15 (already true), and the packaging/hardening item is now delivered per this plan — name the CI workflow, the two security docs, and the install-matrix result. State that V1-exit *items* are all closed and that declaring V1 exit (tag, V2 brainstorm) awaits explicit user authorization. Add this plan's filename to the V1 row's Plan column.
 
-- [ ] **Step 2: Update CLAUDE.md Current state**
+- [x] **Step 2: Update CLAUDE.md Current state**
 
 Add a short paragraph: packaging/hardening delivered (private `cosmicsymmetry/deskmate` remote, `ci` workflow green with DMG artifact, advisories triaged in `docs/security/advisories.md`, security review in `docs/security/v1-review.md`, install matrix passed <date>); version is 1.0.0; audits are CI-non-blocking with the triage doc as the blocking record; no tags exist.
 
-- [ ] **Step 3: Verify and commit**
+- [x] **Step 3: Verify and commit**
 
 Re-read both edited sections for contradictions with this plan's actual outcomes (especially: do not claim anything Task 6 recorded as failed/waived as passed). Then:
 

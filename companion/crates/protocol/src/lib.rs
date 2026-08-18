@@ -1,6 +1,7 @@
 mod cbor;
 mod frame;
 mod message;
+#[cfg(feature = "test-support")]
 pub mod test_support;
 
 pub use frame::{

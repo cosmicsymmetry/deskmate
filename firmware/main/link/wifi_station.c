@@ -268,14 +268,13 @@ esp_err_t wifi_station_bringup(void)
     protocol_network_config_t config;
     net_store_load(&config);
     s_utc_offset_minutes = config.utc_offset_minutes;
+    reconnect_backoff_init(&s_reconnect_backoff, reconnect_random, NULL);
 
     if (config.ssid[0] == '\0') {
         memset(&config, 0, sizeof(config));
         ESP_LOGI(TAG, "no stored WiFi credentials; staying local");
         return ESP_OK;
     }
-
-    reconnect_backoff_init(&s_reconnect_backoff, reconnect_random, NULL);
 
     ESP_LOGI(TAG, "starting WiFi station, ssid=%s", config.ssid);
 

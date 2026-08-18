@@ -43,6 +43,25 @@ static uint32_t reconnect_random(void *context)
     return esp_random();
 }
 
+static const char *websocket_error_type_name(
+    esp_websocket_error_type_t error_type)
+{
+    switch (error_type) {
+    case WEBSOCKET_ERROR_TYPE_NONE:
+        return "none";
+    case WEBSOCKET_ERROR_TYPE_TCP_TRANSPORT:
+        return "tcp_transport";
+    case WEBSOCKET_ERROR_TYPE_PONG_TIMEOUT:
+        return "pong_timeout";
+    case WEBSOCKET_ERROR_TYPE_HANDSHAKE:
+        return "handshake";
+    case WEBSOCKET_ERROR_TYPE_SERVER_CLOSE:
+        return "server_close";
+    default:
+        return "unknown";
+    }
+}
+
 static void ring_append(const uint8_t *data, size_t length)
 {
     if (data == NULL || length == 0U || s_rx_storage == NULL) {
@@ -91,6 +110,22 @@ static void websocket_event_handler(void *handler_arg,
         s_connected = true;
         s_connected_at_us = esp_timer_get_time();
         ESP_LOGI(TAG, "WebSocket connected");
+    } else if (event_id == WEBSOCKET_EVENT_ERROR) {
+        int status = event == NULL
+            ? 0
+            : event->error_handle.esp_ws_handshake_status_code;
+        esp_websocket_error_type_t error_type = event == NULL
+            ? WEBSOCKET_ERROR_TYPE_NONE
+            : event->error_handle.error_type;
+        if (status > 0 && status != 101) {
+            ESP_LOGW(TAG, "WebSocket handshake rejected, status=%d, "
+                     "error_type=%s", status,
+                     websocket_error_type_name(error_type));
+        } else {
+            ESP_LOGW(TAG, "WebSocket TLS/transport failure, status=%d, "
+                     "error_type=%s", status,
+                     websocket_error_type_name(error_type));
+        }
     } else if (event_id == WEBSOCKET_EVENT_DISCONNECTED ||
                event_id == WEBSOCKET_EVENT_CLOSED) {
         if (s_connected) {
@@ -104,7 +139,11 @@ static void websocket_event_handler(void *handler_arg,
         if (event != NULL && event->client != NULL) {
             configure_next_reconnect(event->client);
         }
-        ESP_LOGW(TAG, "WebSocket disconnected");
+        if (event_id == WEBSOCKET_EVENT_CLOSED) {
+            ESP_LOGI(TAG, "WebSocket closed cleanly");
+        } else {
+            ESP_LOGW(TAG, "WebSocket disconnected after an error");
+        }
     } else if (event_id == WEBSOCKET_EVENT_DATA && event != NULL &&
                event->op_code == 2U && event->data_len > 0) {
         ring_append((const uint8_t *)event->data_ptr,

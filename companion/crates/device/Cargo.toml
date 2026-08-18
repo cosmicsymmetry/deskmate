@@ -12,6 +12,7 @@ serialport = { version = "4.9.0", default-features = false }
 # framebuffer_diff.rs (Task 10) renders the shared golden case table on the
 # host to compare against a physical device's dev-only framebuffer capture.
 [dev-dependencies]
+protocol = { path = "../protocol", features = ["test-support"] }
 lvgl-sim = { path = "../lvgl-sim" }
 axum = { version = "0.8", features = ["ws"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }

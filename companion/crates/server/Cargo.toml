@@ -24,6 +24,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tempfile = "3"
 
 [dev-dependencies]
+protocol = { path = "../protocol", features = ["test-support"] }
 tokio-tungstenite = "0.24"
 reqwest = { version = "0.13", default-features = false }
 http = "1"

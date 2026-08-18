@@ -1914,3 +1914,23 @@ function. Flashed at commit `660d226` (`firmware_version` `m1-172-g660d226`).
 The two distinct rejections are the substance of this check. A refactor that had
 disturbed the gate's position would most likely have produced the same answer in both
 tiers.
+
+## V2 Task 5 — per-transport link deadline, sanity-checked 2026-08-18
+
+`link_state`'s host-loss deadline is now a per-transport value rather than the
+compile-time `PROTOCOL_LINK_TIMEOUT_MS`. USB keeps exactly 10000 ms; the 45000 ms value
+for the network transport is defined but has no consumer until Task 8. Flashed at commit
+`e257f33` (`firmware_version` `m1-174-ge257f33`).
+
+The plan defines no physical step for this task — its gate is the host tests, which pin
+the boundaries at 9999/10000 and 44999/45000. This was run anyway as cheap insurance,
+because the task rewired how the USB deadline is initialised.
+
+**PASSED — USB link healthy and unchanged.** `tier: local`, `online: true`,
+`malformed_frames: 0`, `free_heap` 8474107 (flat against Task 3's 8474155/8474123 to
+within normal variation). A second status three seconds later still reported
+`online: true` with `valid_frames: 2`, so the 10-second USB deadline is intact and the
+link is not flapping.
+
+Not covered: the 45000 ms network deadline cannot be exercised until a network transport
+exists (Task 8).

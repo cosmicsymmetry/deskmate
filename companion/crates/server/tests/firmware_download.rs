@@ -45,12 +45,30 @@ async fn get_raw(host: &str, raw_path: &str) -> reqwest::Response {
 }
 
 /// A name derived from the catalog's own (randomly generated, per-test)
-/// temp directory name, so files planted outside it by different tests
-/// running concurrently can never collide.
+/// *outer* temp directory name, so files planted outside the catalog
+/// directory by different tests running concurrently can never collide.
+///
+/// This deliberately reads `directory().parent()`, not `directory()`
+/// itself: `FirmwareCatalog::in_memory()` serves from a fixed `firmware`
+/// subdirectory of its owned temp dir (so a `..` traversal stays contained
+/// inside that private tree rather than escaping to the shared system temp
+/// base), which means `directory()`'s own file name is the same literal
+/// `"firmware"` in every test. The randomness -- and the uniqueness this
+/// function exists to provide -- lives one level up.
+///
+/// Callers building a traversal payload from this (`"../" + unique_name`)
+/// must keep `suffix` short: `image_path`'s 32-character length cap is
+/// checked *before* the `..`/allowlist checks, and `tempfile`'s default
+/// prefix alone (`.tmpXXXXXX`) is already 10 characters. A long suffix
+/// pushes the decoded version over 32 and the test ends up pinning the
+/// length cap instead of the traversal guard it's named for -- silently,
+/// since both return the same 404.
 fn unique_name(state: &ServerState, suffix: &str) -> String {
     let dir_name = state
         .firmware()
         .directory()
+        .parent()
+        .expect("the in-memory catalog directory has a parent")
         .file_name()
         .expect("a tempdir has a file name")
         .to_string_lossy();
@@ -107,7 +125,7 @@ async fn download_serves_the_current_image() {
 async fn download_rejects_partially_encoded_dot_dot() {
     let (host, state) = spawn().await;
     let planted = b"PLANTED-VIA-PARTIALLY-ENCODED-DOT-DOT";
-    let stem = unique_name(&state, "partial-traversal-target");
+    let stem = unique_name(&state, "pt");
     // One level above the catalog directory -- exactly where
     // `directory.join("../<stem>.bin")` would land if `image_path`'s
     // checks were absent.
@@ -131,7 +149,7 @@ async fn download_rejects_partially_encoded_dot_dot() {
 async fn download_rejects_fully_encoded_dot_dot() {
     let (host, state) = spawn().await;
     let planted = b"PLANTED-VIA-FULLY-ENCODED-DOT-DOT";
-    let stem = unique_name(&state, "full-traversal-target");
+    let stem = unique_name(&state, "ft");
     let target = state
         .firmware()
         .directory()

@@ -42,6 +42,13 @@ use registry::Registry;
 /// this constant's name says. This is coarse, blanket protection on top of
 /// the download route's own streaming (which is what actually bounds its
 /// memory use) and the device link's own connection cap.
+///
+/// Provisional: sized by judgment for a single-device V2 deployment, not
+/// derived from real numbers. Revisit against actual traffic in V3.
+/// `device_link::MAX_CONCURRENT_LINKS` (32) is `<=` this value by
+/// construction, and an upgrade request releases its permit here at the
+/// 101 response -- before the long-lived socket loop begins -- so the two
+/// caps cannot deadlock each other.
 const MAX_CONCURRENT_REQUESTS: usize = 64;
 
 /// How long any single request may take to produce a response. Generous for

@@ -32,6 +32,12 @@ use crate::registry::DeviceId;
 /// onward, so an anonymous caller with a stolen or brute-forced token (or
 /// simply many slow, half-open connect attempts) must not be able to pin an
 /// unbounded number of sockets open.
+///
+/// Provisional: sized by judgment for a single-device V2 deployment, not
+/// derived from a real one. Revisit against actual numbers in V3. It is
+/// `<= MAX_CONCURRENT_REQUESTS` (`lib.rs`) by construction of the values
+/// below, and an upgrade request releases its request-level permit at the
+/// 101 response, so the two pools cannot deadlock each other.
 pub(crate) const MAX_CONCURRENT_LINKS: usize = 32;
 
 /// How long the link may go without receiving anything -- including a pong
@@ -49,6 +55,10 @@ const IDLE_TIMEOUT: Duration = Duration::from_millis(protocol::LINK_TIMEOUT_MS);
 /// This must stay strictly less than `IDLE_TIMEOUT` for the liveness check
 /// below to ever fire before a much coarser fallback (bare TCP
 /// retransmission timeout, on the order of minutes) does instead.
+///
+/// Provisional: sized by judgment (`PING_SEND_TIMEOUT` < `PING_INTERVAL` <
+/// `IDLE_TIMEOUT` holds), not tuned against a real deployment. Revisit in
+/// V3.
 const PING_INTERVAL: Duration = Duration::from_secs(3);
 
 /// How long a single keepalive ping's `send` may take. A peer that has
@@ -57,6 +67,9 @@ const PING_INTERVAL: Duration = Duration::from_secs(3);
 /// `send` parks the *other* arm (reading, where `last_activity` gets
 /// updated) too, defeating the idle-timeout check below. Bounding the send
 /// itself is what keeps the loop able to make progress either way.
+///
+/// Provisional, like `PING_INTERVAL` above: a judgment call for V2, not a
+/// tuned value. Revisit in V3.
 const PING_SEND_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// The largest single WebSocket message this link will accept: one

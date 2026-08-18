@@ -55,11 +55,20 @@ impl FirmwareCatalog {
     /// This is deliberately *not* the shared `std::env::temp_dir()` --
     /// that's world-writable on a multi-user host, which would let another
     /// local user plant a `1.0.0.bin` for a test to unwittingly serve.
+    ///
+    /// `directory` is a *subdirectory* of the owned temp dir, not the temp
+    /// dir's own root: that's what keeps a traversal test's planted
+    /// "outside the catalog" file (`directory().parent()`) contained
+    /// inside our own private, uniquely-named, auto-cleaned tree, rather
+    /// than landing it in the shared system temp base one level up --
+    /// exactly the exposure this doc comment just finished warning about.
     #[must_use]
     pub fn in_memory() -> Self {
         let temp_dir =
             tempfile::tempdir().expect("failed to create a temp dir for an in-memory catalog");
-        let directory = temp_dir.path().to_path_buf();
+        let directory = temp_dir.path().join("firmware");
+        std::fs::create_dir_all(&directory)
+            .expect("failed to create the in-memory catalog's firmware subdirectory");
         Self {
             directory,
             current_version: "1.0.0".to_string(),

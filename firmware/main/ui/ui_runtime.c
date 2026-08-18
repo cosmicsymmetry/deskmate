@@ -9,6 +9,7 @@
 #include "esp_log.h"
 #include "esp_lvgl_port.h"
 #include "lvgl.h"
+#include "ota_screen.h"
 #include "template_view.h"
 #include "ui_command_queue.h"
 
@@ -70,6 +71,13 @@ static bool publish_scalar(ui_command_type_t type)
 
 static void consume_command(const ui_command_t *command)
 {
+    if (ota_screen_active_in_lvgl() &&
+        (command->type == UI_COMMAND_SHOW_STANDALONE ||
+         command->type == UI_COMMAND_SHOW_VIEW ||
+         command->type == UI_COMMAND_PATCH_VIEW)) {
+        /* The OTA task owns the panel until it reboots or restores the clock. */
+        return;
+    }
     switch (command->type) {
     case UI_COMMAND_SHOW_STANDALONE:
         template_view_deactivate();
@@ -172,6 +180,11 @@ esp_err_t ui_runtime_init(void)
              (unsigned)UI_COMMAND_QUEUE_CAPACITY,
              (unsigned)sizeof(s_queue));
     return ESP_OK;
+}
+
+bool ui_runtime_is_initialized(void)
+{
+    return s_initialized;
 }
 
 bool ui_runtime_show_view(const char *widget_id,

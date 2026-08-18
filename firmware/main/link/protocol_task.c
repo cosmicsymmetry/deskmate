@@ -3,6 +3,7 @@
 #include <limits.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdatomic.h>
 #include <string.h>
 #include <sys/time.h>
 
@@ -12,6 +13,7 @@
 #include "core/interrupt_state.h"
 #include "core/link_state.h"
 #include "core/net_config.h"
+#include "core/ota_policy.h"
 #include "core/protocol_frame.h"
 #include "core/protocol_message.h"
 #include "core/widget_model.h"
@@ -27,6 +29,7 @@
 #include "link/link_transport.h"
 #include "link/net_link.h"
 #include "link/net_store.h"
+#include "link/ota.h"
 #include "link/usb_link.h"
 #include "link/wifi_station.h"
 #include "ui/ui_runtime.h"
@@ -75,6 +78,17 @@ static protocol_context_t *s_context;
 static TaskHandle_t s_task;
 static const link_transport_t *s_transport;
 static bool s_owner_usb_restricted;
+static atomic_bool s_ota_blocked;
+
+static void refresh_ota_blocked(const protocol_context_t *context)
+{
+    bool interrupt_live = interrupt_state_active(&context->interrupts) != NULL;
+    bool progress_running = widget_model_has_running_progress(&context->model);
+    atomic_store_explicit(
+        &s_ota_blocked,
+        ota_policy_update_deferred(interrupt_live, progress_running),
+        memory_order_release);
+}
 
 static uint64_t uptime_ms(void)
 {
@@ -269,8 +283,7 @@ static void transmit_status(protocol_context_t *context, uint32_t request_id)
     status->config_revision = widget_model_config_revision(&context->model);
     status->latest_interrupt_token =
         interrupt_state_latest_token(&context->interrupts);
-    // ota_state stays at its zeroed default (PROTOCOL_OTA_IDLE) from the
-    // memset above -- Task 11 populates it once OTA exists.
+    status->ota_state = ota_state();
     status->wifi_state = wifi_station_state();
     status->wifi_rssi = wifi_station_rssi();
     wifi_station_copy_ip(status->ip, sizeof(status->ip));
@@ -883,6 +896,7 @@ static void protocol_task(void *argument)
             ui_runtime_set_online(false);
             ESP_LOGI(TAG, "link standalone after timeout");
         }
+        refresh_ota_blocked(context);
     }
 }
 
@@ -924,6 +938,7 @@ esp_err_t protocol_task_start(void)
     link_state_init_with_timeout(&s_context->link, s_transport->link_timeout_ms);
     widget_model_init(&s_context->model);
     interrupt_state_init(&s_context->interrupts);
+    refresh_ota_blocked(s_context);
     device_event_queue_init(&s_context->events);
     ui_runtime_set_event_queue(&s_context->events);
     BaseType_t created = xTaskCreatePinnedToCore(
@@ -936,4 +951,14 @@ esp_err_t protocol_task_start(void)
         return ESP_ERR_NO_MEM;
     }
     return ESP_OK;
+}
+
+bool protocol_task_is_running(void)
+{
+    return s_task != NULL;
+}
+
+bool protocol_task_ota_blocked(void)
+{
+    return atomic_load_explicit(&s_ota_blocked, memory_order_acquire);
 }

@@ -146,12 +146,14 @@ fn extended_template_kinds_round_trip() {
 }
 
 #[test]
-fn current_capabilities_advertise_extended_templates() {
+fn current_capabilities_advertise_firmware_update() {
     assert_eq!(
         protocol::CURRENT_CAPABILITIES,
         protocol::CAPABILITY_CORE_WIDGETS
             | protocol::CAPABILITY_CONFIG_ROTATION
-            | protocol::CAPABILITY_EXTENDED_TEMPLATES,
-        "extended templates must be advertised once firmware renders them"
+            | protocol::CAPABILITY_EXTENDED_TEMPLATES
+            | protocol::CAPABILITY_FIRMWARE_UPDATE,
+        "firmware update must be advertised only once the device can install it"
     );
+    assert_eq!(protocol::CURRENT_CAPABILITIES, 75);
 }

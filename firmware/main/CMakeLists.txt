@@ -4,14 +4,16 @@ idf_component_register(
          "core/link_state.c" "core/navigation.c"
          "core/net_config.c"
          "core/net_ring.c"
+         "core/ota_policy.c"
          "core/protocol_frame.c"
          "core/protocol_message.c"
          "core/reconnect_backoff.c"
          "core/template_fields.c" "core/timefmt.c" "core/widget_model.c"
          "link/dev_capture.c" "link/net_link.c" "link/net_store.c"
-         "link/protocol_task.c" "link/usb_link.c"
+         "link/ota.c" "link/protocol_task.c" "link/usb_link.c"
          "link/wifi_station.c" "ui/carousel.c"
          "ui/clock_screen.c"
+         "ui/ota_screen.c"
          "ui/template_view.c" "ui/ui_command_queue.c"
          "ui/ui_runtime.c"
          "ui/templates/analog_clock.c" "ui/templates/big_number_label.c"
@@ -23,7 +25,8 @@ idf_component_register(
          "ui/fonts/deskmate_font_18.c" "ui/fonts/deskmate_font_28.c"
          "ui/fonts/deskmate_font_56.c" "ui/fonts/deskmate_font_96.c"
     INCLUDE_DIRS "." "board" "core" "link" "ui"
-    REQUIRES cbor esp_app_format esp_timer mbedtls nvs_flash
+    REQUIRES app_update cbor esp_app_format esp_http_client esp_https_ota
+             esp_timer mbedtls nvs_flash
              esp_wifi esp_netif esp_event lwip esp_hw_support
 )
 

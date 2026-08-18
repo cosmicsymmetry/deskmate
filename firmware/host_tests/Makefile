@@ -12,7 +12,8 @@ PROTOCOL_SRCS = ../main/core/protocol_frame.c ../main/core/protocol_message.c \
 test: test_timefmt test_protocol test_link_state test_template_fields \
 	test_widget_model test_ui_command_queue test_navigation \
 	test_interrupt_state test_device_event_queue test_weather_icon \
-	test_clock_source test_net_config test_net_ring test_reconnect_backoff
+	test_clock_source test_net_config test_net_ring test_reconnect_backoff \
+	test_ota_policy
 	./test_timefmt
 	./test_protocol
 	./test_link_state
@@ -27,6 +28,7 @@ test: test_timefmt test_protocol test_link_state test_template_fields \
 	./test_net_config
 	./test_net_ring
 	./test_reconnect_backoff
+	./test_ota_policy
 
 test_timefmt: test_timefmt.c ../main/core/timefmt.c
 	$(CC) $(CFLAGS) -o $@ $^
@@ -78,6 +80,9 @@ test_reconnect_backoff: test_reconnect_backoff.c \
 	../main/core/reconnect_backoff.c
 	$(CC) $(CFLAGS) -o $@ $^
 
+test_ota_policy: test_ota_policy.c ../main/core/ota_policy.c
+	$(CC) $(CFLAGS) -o $@ $^
+
 sanitize: clean
 	$(MAKE) CFLAGS="$(CFLAGS) -O1 -g -fsanitize=address,undefined" test
 
@@ -92,6 +97,7 @@ clean:
 	rm -f test_net_config
 	rm -f test_net_ring
 	rm -f test_reconnect_backoff
+	rm -f test_ota_policy
 	rm -rf test_timefmt.dSYM test_protocol.dSYM test_link_state.dSYM \
 		test_template_fields.dSYM test_widget_model.dSYM
 	rm -rf test_ui_command_queue.dSYM
@@ -103,4 +109,5 @@ clean:
 	rm -rf test_net_config.dSYM
 	rm -rf test_net_ring.dSYM
 	rm -rf test_reconnect_backoff.dSYM
+	rm -rf test_ota_policy.dSYM
 .PHONY: test sanitize clean

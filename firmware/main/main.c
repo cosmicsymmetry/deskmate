@@ -4,6 +4,7 @@
 #include "board/display.h"
 #include "board/touch.h"
 #include "link/usb_link.h"
+#include "link/ota.h"
 #include "link/protocol_task.h"
 #include "link/wifi_station.h"
 #include "ui/clock_screen.h"
@@ -69,10 +70,26 @@ void app_main(void)
     // pipeline must keep running for later milestones (soak-tested in
     // Task 7).
     lv_display_t *disp = lv_display_get_default();
-    ESP_ERROR_CHECK(board_touch_init(disp));
-    ESP_LOGI(TAG, "board_touch_init OK");
+    esp_err_t touch_status = board_touch_init(disp);
+    if (touch_status == ESP_OK) {
+        ESP_LOGI(TAG, "board_touch_init OK");
+    } else {
+        /* Touch is not one of the rollback validity conditions. A display,
+         * LVGL, protocol and NVS-capable image must not be rejected solely
+         * because the optional input path failed to attach. */
+        ESP_LOGE(TAG, "board_touch_init failed (%s); continuing without touch",
+                 esp_err_to_name(touch_status));
+    }
 
-    ESP_ERROR_CHECK(board_display_set_brightness(BOARD_INIT_BRIGHTNESS));
+    esp_err_t brightness_status = board_display_set_brightness(
+        BOARD_INIT_BRIGHTNESS);
+    if (brightness_status != ESP_OK) {
+        /* board_display_init() already applied its initial brightness through
+         * the same API. A failed redundant fallback write is diagnostic, not
+         * a reason to keep a pending image in rollback limbo. */
+        ESP_LOGE(TAG, "fallback brightness failed (%s); continuing",
+                 esp_err_to_name(brightness_status));
+    }
 
     clock_screen_show();
     ESP_LOGI(TAG, "clock screen shown, LVGL task running");
@@ -105,5 +122,23 @@ void app_main(void)
                 esp_err_to_name(protocol_status));
     } else {
         ESP_LOGI(TAG, "protocol task running");
+
+        /* This is the rollback gate. It is deliberately adjacent to the last
+         * required local subsystem coming up: no network connection, server
+         * response, or stored provisioning value stands between task creation
+         * above and confirming a pending image here. */
+        esp_err_t validation_status = ota_mark_running_image_valid();
+        if (validation_status != ESP_OK) {
+            ESP_LOGE(TAG, "OTA image validity check failed (%s)",
+                     esp_err_to_name(validation_status));
+        } else {
+            /* Starts the immediate boot check and owns the jittered 24-hour
+             * schedule thereafter. Missing provisioning is an idle no-op. */
+            esp_err_t ota_status = ota_check_now();
+            if (ota_status != ESP_OK) {
+                ESP_LOGW(TAG, "initial firmware check not scheduled (%s)",
+                         esp_err_to_name(ota_status));
+            }
+        }
     }
 }

@@ -16,8 +16,10 @@ pub const CAPABILITY_ASSET_TRANSFER: u64 = 1 << 5;
 pub const CAPABILITY_FIRMWARE_UPDATE: u64 = 1 << 6;
 pub const CAPABILITY_NETWORKING: u64 = 1 << 7;
 pub const LEGACY_CAPABILITIES: u64 = CAPABILITY_CORE_WIDGETS;
-pub const CURRENT_CAPABILITIES: u64 =
-    CAPABILITY_CORE_WIDGETS | CAPABILITY_CONFIG_ROTATION | CAPABILITY_EXTENDED_TEMPLATES;
+pub const CURRENT_CAPABILITIES: u64 = CAPABILITY_CORE_WIDGETS
+    | CAPABILITY_CONFIG_ROTATION
+    | CAPABILITY_EXTENDED_TEMPLATES
+    | CAPABILITY_FIRMWARE_UPDATE;
 pub const LINK_TIMEOUT_MS: u64 = 10_000;
 pub const MAX_WIDGET_ID_LEN: usize = 32;
 pub const MAX_SCREEN_ID_LEN: usize = 32;
@@ -1678,7 +1680,7 @@ mod tests {
         // (capabilities) are still encoded contiguously and in this order
         // because keys are canonical; locate and drop them regardless of
         // what now follows them on the wire.
-        let pattern = [0x15, 0x09, 0x16, 0x01, 0x17, 0x0b];
+        let pattern = [0x15, 0x09, 0x16, 0x01, 0x17, 0x18, 0x4b];
         let offset = payload
             .windows(pattern.len())
             .position(|window| window == pattern)

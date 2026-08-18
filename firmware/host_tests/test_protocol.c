@@ -152,6 +152,7 @@ static void test_status_capability_handshake_and_legacy_defaults(void)
     assert(protocol_message_decode(&frame, &message) == PROTOCOL_MESSAGE_OK);
     assert(message.value.status.max_protocol_version == PROTOCOL_MAX_VERSION);
     assert(message.value.status.capabilities == PROTOCOL_CURRENT_CAPABILITIES);
+    assert(PROTOCOL_CURRENT_CAPABILITIES == UINT64_C(75));
 
     /* The additive networking fields (Task 1) keep the entry count at or
      * above 24, so the map header stays in its two-byte extended form
@@ -162,8 +163,9 @@ static void test_status_capability_handshake_and_legacy_defaults(void)
     assert(frame.payload_length >= 6U);
     assert(frame.payload[0] == 0xb8U);
     uint8_t original_count = frame.payload[1];
-    static const uint8_t pattern[] = {0x16U, PROTOCOL_MAX_VERSION, 0x17U,
-                                      PROTOCOL_CURRENT_CAPABILITIES};
+    static const uint8_t pattern[] = {
+        0x16U, PROTOCOL_MAX_VERSION, 0x17U, 0x18U,
+        (uint8_t)PROTOCOL_CURRENT_CAPABILITIES};
     size_t pattern_offset = 0U;
     bool found = false;
     for (size_t i = 2U; i + sizeof(pattern) <= frame.payload_length; ++i) {

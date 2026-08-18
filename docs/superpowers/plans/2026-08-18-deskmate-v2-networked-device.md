@@ -1942,7 +1942,7 @@ password KDF would buy nothing.
   directory.
 - Produces: a `Registry` that loads at boot and persists on mint, holding digests only.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Cover, at minimum: a minted identity authenticates after the registry is dropped and
 reloaded from the same path; the persisted bytes contain the digest and **not** the token
@@ -1950,7 +1950,7 @@ reloaded from the same path; the persisted bytes contain the digest and **not** 
 degrades to an empty registry rather than panicking or refusing to start; and `mint`
 remains monotonic across a reload rather than reissuing an existing `dev-NNNN` id.
 
-- [ ] **Step 2: Persist digests, not tokens**
+- [x] **Step 2: Persist digests, not tokens**
 
 `authenticate` hashes the presented token and compares digests in constant time, keeping
 the existing whole-table scan on a miss so a rejection's cost still cannot vary with how
@@ -1959,19 +1959,19 @@ many leading bytes matched. The store is a file under the same state directory
 write-temp-then-rename discipline `app_core::ConfigStore` uses so a crash mid-write cannot
 leave a half-file.
 
-- [ ] **Step 3: Fail toward a working device, never a locked-out one**
+- [x] **Step 3: Fail toward a working device, never a locked-out one**
 
 An unreadable store must not prevent the server starting; a device that cannot be
 authenticated must log enough to distinguish "unknown token" from "store failed to load",
 without printing the token or any prefix of it.
 
-- [ ] **Step 4: Update the runbook and the env example**
+- [x] **Step 4: Update the runbook and the env example**
 
 Replace the limitation text Task 9's fix round added with the resulting behaviour, and say
 where the file lives, what it contains, and that losing it means re-minting rather than
 recovering.
 
-- [ ] **Step 5: Run the gates and commit**
+- [x] **Step 5: Run the gates and commit**
 
 ---
 

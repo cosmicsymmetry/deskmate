@@ -8,19 +8,26 @@ net_config_error_t net_config_validate(const protocol_network_config_t *config)
         return NET_CONFIG_ERR_MISSING_SSID;
     }
 
-    if (config->tier == PROTOCOL_TIER_NETWORKED) {
-        if (config->ssid[0] == '\0') {
-            return NET_CONFIG_ERR_MISSING_SSID;
-        }
-        if (config->server_url[0] == '\0') {
-            return NET_CONFIG_ERR_MISSING_SERVER_URL;
-        }
-        if (strncmp(config->server_url, "wss://", 6) != 0) {
-            return NET_CONFIG_ERR_INSECURE_URL;
-        }
-        if (config->token[0] == '\0') {
-            return NET_CONFIG_ERR_MISSING_TOKEN;
-        }
+    switch (config->tier) {
+        case PROTOCOL_TIER_LOCAL:
+            return NET_CONFIG_OK;
+        case PROTOCOL_TIER_NETWORKED:
+            break;
+        default:
+            return NET_CONFIG_ERR_INVALID_TIER;
+    }
+
+    if (config->ssid[0] == '\0') {
+        return NET_CONFIG_ERR_MISSING_SSID;
+    }
+    if (config->server_url[0] == '\0') {
+        return NET_CONFIG_ERR_MISSING_SERVER_URL;
+    }
+    if (strncmp(config->server_url, "wss://", 6) != 0) {
+        return NET_CONFIG_ERR_INSECURE_URL;
+    }
+    if (config->token[0] == '\0') {
+        return NET_CONFIG_ERR_MISSING_TOKEN;
     }
 
     return NET_CONFIG_OK;

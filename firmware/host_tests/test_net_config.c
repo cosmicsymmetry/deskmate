@@ -82,6 +82,35 @@ static void test_local_tier_without_ssid_is_not_an_error(void)
     assert(net_config_validate(&config) == NET_CONFIG_OK);
 }
 
+// A corrupted or half-written NVS record could produce a tier byte that is
+// neither LOCAL nor NETWORKED. That must not validate OK, and it must not be
+// handed back verbatim as the effective tier -- it degrades to local like any
+// other failure.
+static void test_out_of_range_tier_on_otherwise_valid_config_degrades_to_local(void)
+{
+    protocol_network_config_t config = valid_networked();
+    config.tier = (protocol_tier_t)7;
+    assert(net_config_validate(&config) == NET_CONFIG_ERR_INVALID_TIER);
+    assert(net_config_effective_tier(&config) == PROTOCOL_TIER_LOCAL);
+}
+
+static void test_out_of_range_tier_on_empty_config_degrades_to_local(void)
+{
+    protocol_network_config_t config;
+    memset(&config, 0, sizeof(config));
+    config.tier = (protocol_tier_t)7;
+    assert(net_config_validate(&config) == NET_CONFIG_ERR_INVALID_TIER);
+    assert(net_config_effective_tier(&config) == PROTOCOL_TIER_LOCAL);
+}
+
+// NULL is documented as degrading to local without crashing; exercise it
+// directly rather than only by inspection.
+static void test_null_config_is_handled_without_crashing(void)
+{
+    assert(net_config_validate(NULL) == NET_CONFIG_ERR_MISSING_SSID);
+    assert(net_config_effective_tier(NULL) == PROTOCOL_TIER_LOCAL);
+}
+
 // The restricted USB message set in networked tier. Status, provisioning and
 // reset are always allowed; anything that would make the cable an owner is not.
 static void test_usb_message_gate_in_networked_tier(void)
@@ -127,6 +156,9 @@ int main(void)
     test_non_tls_server_url_is_rejected();
     test_empty_config_is_a_valid_local_device();
     test_local_tier_without_ssid_is_not_an_error();
+    test_out_of_range_tier_on_otherwise_valid_config_degrades_to_local();
+    test_out_of_range_tier_on_empty_config_degrades_to_local();
+    test_null_config_is_handled_without_crashing();
     test_usb_message_gate_in_networked_tier();
     test_usb_message_gate_in_local_tier_allows_everything();
     return 0;

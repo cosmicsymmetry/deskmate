@@ -3,6 +3,7 @@
 #include <stdbool.h>
 #include <stdatomic.h>
 
+#include "core/protocol_message.h"
 #include "driver/usb_serial_jtag.h"
 #include "esp_check.h"
 #include "freertos/task.h"
@@ -79,4 +80,17 @@ uint32_t usb_link_rx_dropped_bytes(void)
     // an overflow counter. Protocol-level overlong and malformed input is
     // counted by the incremental decoder instead.
     return 0;
+}
+
+static const link_transport_t s_usb_transport = {
+    .name = "usb",
+    .read = usb_link_read,
+    .write_frame = usb_link_write_frame,
+    .dropped_bytes = usb_link_rx_dropped_bytes,
+    .link_timeout_ms = PROTOCOL_LINK_TIMEOUT_MS,
+};
+
+const link_transport_t *usb_link_transport(void)
+{
+    return &s_usb_transport;
 }

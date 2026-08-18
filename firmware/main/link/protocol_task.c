@@ -23,6 +23,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "link/dev_capture.h"
+#include "link/link_transport.h"
 #include "link/net_store.h"
 #include "link/usb_link.h"
 #include "ui/ui_runtime.h"
@@ -57,6 +58,7 @@ typedef struct {
 static const char *TAG = "protocol";
 static protocol_context_t s_context;
 static TaskHandle_t s_task;
+static const link_transport_t *s_transport;
 
 static uint64_t uptime_ms(void)
 {
@@ -183,8 +185,8 @@ static void transmit(protocol_context_t *context,
         request_id, message, context->wire, sizeof(context->wire),
         &wire_length);
     if (result != PROTOCOL_MESSAGE_OK ||
-        usb_link_write_frame(context->wire, wire_length,
-                             pdMS_TO_TICKS(PROTOCOL_WRITE_TIMEOUT_MS)) !=
+        s_transport->write_frame(context->wire, wire_length,
+                                 pdMS_TO_TICKS(PROTOCOL_WRITE_TIMEOUT_MS)) !=
             ESP_OK) {
         increment_saturating(&context->dropped_responses);
     }
@@ -239,7 +241,7 @@ static void transmit_status(protocol_context_t *context, uint32_t request_id)
     status->crc_errors = context->crc_errors;
     status->overflow_frames = context->overflow_frames;
     status->dropped_responses = context->dropped_responses;
-    status->rx_dropped_bytes = usb_link_rx_dropped_bytes();
+    status->rx_dropped_bytes = s_transport->dropped_bytes();
     status->dropped_events = saturating_add(
         context->dropped_events,
         device_event_queue_dropped(&context->events));
@@ -710,8 +712,8 @@ static void transmit_device_event(protocol_context_t *context,
     protocol_message_result_t result = protocol_message_encode(
         0U, message, context->wire, sizeof(context->wire), &wire_length);
     if (result != PROTOCOL_MESSAGE_OK ||
-        usb_link_write_frame(context->wire, wire_length,
-                             pdMS_TO_TICKS(PROTOCOL_EVENT_WRITE_TIMEOUT_MS)) !=
+        s_transport->write_frame(context->wire, wire_length,
+                                 pdMS_TO_TICKS(PROTOCOL_EVENT_WRITE_TIMEOUT_MS)) !=
             ESP_OK) {
         increment_saturating(&context->dropped_events);
     }
@@ -815,7 +817,7 @@ static void protocol_task(void *argument)
     protocol_context_t *context = argument;
     uint8_t chunk[PROTOCOL_READ_CHUNK_SIZE];
     for (;;) {
-        size_t received = usb_link_read(
+        size_t received = s_transport->read(
             chunk, sizeof(chunk), pdMS_TO_TICKS(PROTOCOL_READ_TIMEOUT_MS));
         if (received != 0U) {
             protocol_decoder_feed(&context->decoder, chunk, received,
@@ -833,6 +835,7 @@ esp_err_t protocol_task_start(void)
 {
     ESP_RETURN_ON_FALSE(s_task == NULL, ESP_ERR_INVALID_STATE, TAG,
                         "protocol task already running");
+    s_transport = usb_link_transport();
     memset(&s_context, 0, sizeof(s_context));
     // Populate net_store_current_tier()'s cache once, synchronously, before
     // any USB message can reach the gate below. The loaded config itself

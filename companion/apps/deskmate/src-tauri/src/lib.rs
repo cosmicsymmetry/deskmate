@@ -117,16 +117,44 @@ impl TrayControls {
     }
 }
 
+#[derive(Default)]
+struct NetworkedConfigProjection(Mutex<Option<AppConfig>>);
+
+impl NetworkedConfigProjection {
+    fn project(&self, tier: Option<DeviceTier>, config: &mut AppConfig) {
+        if !matches!(tier, Some(DeviceTier::Networked)) {
+            return;
+        }
+        if let Ok(networked) = self.0.lock()
+            && let Some(networked) = networked.as_ref()
+        {
+            *config = networked.clone();
+        }
+    }
+
+    fn replace(&self, config: Option<AppConfig>) -> Result<(), commands::IpcError> {
+        *self.0.lock().map_err(|_| commands::IpcError::Internal {
+            message: "networked configuration state is unavailable".into(),
+        })? = config;
+        Ok(())
+    }
+
+    fn clear_for_local_save(&self) -> Result<(), commands::IpcError> {
+        self.replace(None)
+    }
+}
+
 struct DesktopState {
     runtime: Arc<RuntimeHandle>,
-    store: ConfigStore,
-    network_store: NetworkSettingsStore,
-    networked_config: Mutex<Option<AppConfig>>,
+    store: Arc<ConfigStore>,
+    network_store: Arc<NetworkSettingsStore>,
+    networked_config: Arc<NetworkedConfigProjection>,
+    last_known_tier: Mutex<Option<DeviceTier>>,
     server_client: ureq::Agent,
-    has_saved_config: AtomicBool,
+    has_saved_config: Arc<AtomicBool>,
     tray: TrayControls,
     snapshot_worker: Mutex<Option<JoinHandle<()>>>,
-    mutation_lock: Mutex<()>,
+    mutation_lock: Arc<Mutex<()>>,
     quitting: AtomicBool,
     preview: preview::PreviewHandle,
 }
@@ -143,30 +171,44 @@ struct DesktopSnapshot {
 
 impl DesktopState {
     fn project_snapshot(&self, mut app: AppSnapshot) -> DesktopSnapshot {
-        if !matches!(app.device.tier, Some(DeviceTier::Local))
-            && let Ok(config) = self.networked_config.lock()
-            && let Some(config) = config.as_ref()
-        {
-            app.config = config.clone();
+        if let Some(tier) = app.device.tier {
+            self.remember_device_tier(tier);
         }
+        self.networked_config
+            .project(app.device.tier, &mut app.config);
         DesktopSnapshot {
             app,
             has_saved_config: self.has_saved_config.load(Ordering::Acquire),
         }
     }
 
-    fn mark_config_saved(&self) {
-        self.has_saved_config.store(true, Ordering::Release);
+    fn set_networked_config(&self, config: Option<AppConfig>) -> Result<(), commands::IpcError> {
+        self.networked_config.replace(config)
     }
 
-    fn set_networked_config(&self, config: Option<AppConfig>) -> Result<(), commands::IpcError> {
-        *self
-            .networked_config
-            .lock()
-            .map_err(|_| commands::IpcError::Internal {
-                message: "networked configuration state is unavailable".into(),
-            })? = config;
-        Ok(())
+    fn remember_device_tier(&self, tier: DeviceTier) {
+        let Ok(mut last_known) = self.last_known_tier.lock() else {
+            eprintln!("cannot remember display ownership tier");
+            return;
+        };
+        if *last_known == Some(tier) {
+            return;
+        }
+        let current = self.network_store.load().settings().clone();
+        if self
+            .network_store
+            .save(app_core::NetworkSettingsUpdate::new(
+                current.server_url,
+                current.device_id,
+                Some(tier),
+                None,
+            ))
+            .is_err()
+        {
+            eprintln!("cannot persist display ownership tier");
+            return;
+        }
+        *last_known = Some(tier);
     }
 
     fn toggle_paused(&self) -> Result<(), commands::IpcError> {
@@ -372,12 +414,18 @@ fn setup_app(app: &mut App) -> Result<(), Box<dyn Error>> {
     let config_directory = app.path().app_data_dir()?;
     prepare_config_directory(&config_directory);
     let config_path = config_directory.join(CONFIG_FILE_NAME);
-    let store = ConfigStore::new(config_path);
-    let network_store =
-        NetworkSettingsStore::new(config_directory.join(NETWORK_SETTINGS_FILE_NAME));
-    if network_store.load().recovery().is_some() {
+    let store = Arc::new(ConfigStore::new(config_path));
+    let network_store = Arc::new(NetworkSettingsStore::new(
+        config_directory.join(NETWORK_SETTINGS_FILE_NAME),
+    ));
+    let network_settings = network_store.load();
+    if network_settings.recovery().is_some() {
         eprintln!("saved Deskmate network settings could not be read");
     }
+    if network_store.discard_device_token().is_err() {
+        eprintln!("saved Deskmate device credential could not be discarded");
+    }
+    let last_known_tier = network_settings.settings().tier;
     let loaded = store.load();
     let has_saved_config = load_has_saved_config(&loaded);
     let auto_open_settings = auto_open_settings_on_launch(&loaded);
@@ -407,12 +455,13 @@ fn setup_app(app: &mut App) -> Result<(), Box<dyn Error>> {
         runtime: Arc::clone(&runtime),
         store,
         network_store,
-        networked_config: Mutex::new(None),
+        networked_config: Arc::new(NetworkedConfigProjection::default()),
+        last_known_tier: Mutex::new(last_known_tier),
         server_client: server_http_agent(),
-        has_saved_config: AtomicBool::new(has_saved_config),
+        has_saved_config: Arc::new(AtomicBool::new(has_saved_config)),
         tray,
         snapshot_worker: Mutex::new(None),
-        mutation_lock: Mutex::new(()),
+        mutation_lock: Arc::new(Mutex::new(())),
         quitting: AtomicBool::new(false),
         // One dedicated thread owns the process-wide `Simulator` for the app's
         // lifetime (see `preview` module docs); nothing else may construct one.
@@ -645,6 +694,23 @@ mod tests {
             }),
             None
         );
+    }
+
+    #[test]
+    fn a_local_save_clears_the_server_projection_and_unknown_tier_never_projects_it() {
+        let projection = NetworkedConfigProjection::default();
+        let mut server_config = AppConfig::default();
+        server_config.preferences.timezone = "Asia/Tbilisi".into();
+        projection.replace(Some(server_config.clone())).unwrap();
+
+        let mut unplugged_config = AppConfig::default();
+        projection.project(None, &mut unplugged_config);
+        assert_eq!(unplugged_config, AppConfig::default());
+
+        projection.clear_for_local_save().unwrap();
+        let mut later_networked_config = AppConfig::default();
+        projection.project(Some(DeviceTier::Networked), &mut later_networked_config);
+        assert_eq!(later_networked_config, AppConfig::default());
     }
 
     #[test]

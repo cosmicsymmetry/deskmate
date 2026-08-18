@@ -25,11 +25,12 @@ import type {
   CardSettings,
   ConfigApplyResult,
   DraftValidation,
+  NetworkSettings,
   PreviewFrame,
   ValidationIssue,
 } from "../src/lib/types";
 import { ipcContractFixtures } from "../src/lib/types.contract";
-import { saveConfigForTier } from "../src/lib/useAppState";
+import { resolveDeviceTier, saveConfigForTier } from "../src/lib/useAppState";
 
 const snapshot = ipcContractFixtures.snapshot;
 const cards = snapshot.config.cards;
@@ -49,6 +50,14 @@ let validateImpl: (config: AppConfig) => Promise<DraftValidation> = async () => 
 let saveImpl: (config: AppConfig) => Promise<ConfigApplyResult> = async () => ({
   save: { generation: 1, warning: null },
 });
+let serverSaveImpl: (config: AppConfig) => Promise<ConfigApplyResult> = async () => ({
+  save: { generation: 1, warning: null },
+});
+let networkSettingsImpl: () => Promise<NetworkSettings> = async () => ({
+  server_url: "https://desk.example",
+  device_id: "desk-1",
+  tier: "local",
+});
 
 mock.module("../src/lib/tauri", () => ({
   ...tauriModule,
@@ -57,10 +66,8 @@ mock.module("../src/lib/tauri", () => ({
   listenToAppState: async () => () => {},
   validateConfigDraft: (config: AppConfig) => validateImpl(config),
   saveApplyConfig: (config: AppConfig) => saveImpl(config),
-  getNetworkSettings: async () => ({
-    server_url: "https://desk.example",
-    device_id: "desk-1",
-  }),
+  saveServerConfig: (config: AppConfig) => serverSaveImpl(config),
+  getNetworkSettings: () => networkSettingsImpl(),
   getAutostartStatus: async () => ({ enabled: false, preference_enabled: false }),
 }));
 
@@ -347,6 +354,38 @@ describe("settings accessibility and states", () => {
     expect({ localWrites, serverWrites }).toEqual({ localWrites: 1, serverWrites: 1 });
   });
 
+  test("an unplugged networked display never falls back to the cable", async () => {
+    let localWrites = 0;
+    let serverWrites = 0;
+    const tier = resolveDeviceTier(null, {
+      server_url: "https://desk.example",
+      device_id: "desk-1",
+      tier: "networked",
+    });
+
+    await saveConfigForTier(tier, {
+      local: async () => {
+        localWrites += 1;
+        return { save: { generation: 1, warning: null } };
+      },
+      server: async () => {
+        serverWrites += 1;
+        return { save: { generation: 2, warning: null } };
+      },
+    });
+
+    expect({ localWrites, serverWrites }).toEqual({ localWrites: 0, serverWrites: 1 });
+  });
+
+  test("legacy server settings without a persisted tier still refuse the cable", async () => {
+    const tier = resolveDeviceTier(null, {
+      server_url: "https://desk.example",
+      device_id: "desk-1",
+      tier: null,
+    });
+    expect(tier).toBe("networked");
+  });
+
   test("names the clock card's title field rather than calling it a heading", () => {
     // The clock faces draw no title chip, so the field only names the card in
     // the library. Weather still renders its chip, so "Heading" stays right
@@ -622,6 +661,71 @@ describe("settings accessibility and states", () => {
       container.remove();
       snapshotImpl = async () => snapshot;
       saveImpl = async () => ({ save: { generation: 1, warning: null } });
+    }
+  });
+
+  test("server validation rejections show every issue beside the save action", async () => {
+    const networkedSnapshot: AppSnapshot = {
+      ...(structuredClone(snapshot) as AppSnapshot),
+      has_saved_config: true,
+      device: {
+        ...(structuredClone(snapshot.device) as AppSnapshot["device"]),
+        tier: "networked",
+      },
+    };
+    snapshotImpl = async () => networkedSnapshot;
+    networkSettingsImpl = async () => ({
+      server_url: "https://desk.example",
+      device_id: "desk-1",
+      tier: "networked",
+    });
+    serverSaveImpl = async () => {
+      throw new tauriModule.DeskmateCommandError({
+        category: "validation",
+        message: "the server rejected this configuration with 2 validation issue(s)",
+        issues: [
+          { path: "cards[0].title", code: "empty", message: "Choose a card title." },
+          {
+            path: "active_playlist_id",
+            code: "missing-reference",
+            message: "Choose an active playlist.",
+          },
+        ],
+      });
+    };
+    previewImpl = async () => ({ png_base64: "cHJldmlldw==", sample: false });
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<App />));
+      await waitFor(() => expect(container.textContent).toContain("Workday"));
+      await act(async () => buttonWithText(container, "○Manual")?.click());
+      await act(async () => buttonWithText(container, "Make active")?.click());
+      await waitFor(() =>
+        expect(buttonWithText(container, "Save to server")?.disabled).toBe(false),
+      );
+      await act(async () => buttonWithText(container, "Save to server")?.click());
+
+      await waitFor(() =>
+        expect(container.textContent).toContain(
+          "the server rejected this configuration with 2 validation issue(s)",
+        ),
+      );
+      expect(container.textContent).toContain("Choose a card title.");
+      expect(container.textContent).toContain("Choose an active playlist.");
+      expect(container.textContent).not.toContain("last working");
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      snapshotImpl = async () => snapshot;
+      networkSettingsImpl = async () => ({
+        server_url: "https://desk.example",
+        device_id: "desk-1",
+        tier: "local",
+      });
+      serverSaveImpl = async () => ({ save: { generation: 1, warning: null } });
     }
   });
 

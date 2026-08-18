@@ -103,17 +103,10 @@ export function saveApplyConfig(config: AppConfig): Promise<ConfigApplyResult> {
   return invokeTyped("save_apply_config", { draft: draftPayload(config) });
 }
 
-export function saveServerConfig(
-  config: AppConfig,
-  settings: NetworkSettings,
-  adminToken: string,
-): Promise<ConfigApplyResult> {
+export function saveServerConfig(config: AppConfig): Promise<ConfigApplyResult> {
   return invokeTyped("save_server_config", {
     request: {
       draft: draftPayload(config),
-      server_url: settings.server_url,
-      device_id: settings.device_id,
-      admin_token: adminToken,
     },
   });
 }

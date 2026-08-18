@@ -1714,6 +1714,11 @@ h2 {
   color: var(--danger);
 }
 
+.save-error__issues {
+  margin: 4px 0 0;
+  padding-left: 18px;
+}
+
 /* Plain --ink, not --emit: this is body text on the light chrome surface,
    where amber fails the 4.5:1 contrast floor. Weight and the checkmark
    glyph carry the emphasis instead of a colour that would only read

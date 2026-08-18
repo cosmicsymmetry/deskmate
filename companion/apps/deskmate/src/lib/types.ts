@@ -256,6 +256,7 @@ export type DeviceOtaState = "idle" | "checking" | "downloading" | "pending-veri
 export interface NetworkSettings {
   server_url: string;
   device_id: string;
+  tier: DeviceTier | null;
 }
 
 /**

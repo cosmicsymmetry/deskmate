@@ -5,6 +5,7 @@ use std::sync::Mutex;
 use serde::{Deserialize, Serialize};
 
 use crate::secure_file::{self, BoundedReadError, FileIoError};
+use crate::state::DeviceTier;
 
 pub const NETWORK_SETTINGS_FORMAT_VERSION: u32 = 1;
 pub const MAX_NETWORK_SETTINGS_FILE_BYTES: usize = 16 * 1_024;
@@ -16,6 +17,8 @@ pub const MAX_NETWORK_SETTINGS_FILE_BYTES: usize = 16 * 1_024;
 pub struct NetworkSettings {
     pub server_url: String,
     pub device_id: String,
+    #[serde(default)]
+    pub tier: Option<DeviceTier>,
 }
 
 /// A write request. Secret fields are deliberately private and this type implements
@@ -24,23 +27,24 @@ pub struct NetworkSettings {
 pub struct NetworkSettingsUpdate {
     server_url: String,
     device_id: String,
+    tier: Option<DeviceTier>,
     admin_token: Option<String>,
-    device_token: Option<String>,
 }
 
 impl NetworkSettingsUpdate {
-    /// `None` retains an already-stored token; `Some("")` explicitly clears it.
+    /// `None` retains the last known tier and admin token. `Some("")` explicitly
+    /// clears the admin token.
     pub fn new(
         server_url: impl Into<String>,
         device_id: impl Into<String>,
+        tier: Option<DeviceTier>,
         admin_token: Option<String>,
-        device_token: Option<String>,
     ) -> Self {
         Self {
             server_url: server_url.into(),
             device_id: device_id.into(),
+            tier,
             admin_token,
-            device_token,
         }
     }
 }
@@ -105,14 +109,14 @@ impl NetworkSettingsStore {
         let NetworkSettingsUpdate {
             server_url,
             device_id,
+            tier,
             admin_token,
-            device_token,
         } = update;
 
         // A blank write-only control is represented by `None`. Load the private
         // persisted shape only inside the store so the old token can survive without
         // ever crossing the public read boundary.
-        let previous = if admin_token.is_none() || device_token.is_none() {
+        let previous = if admin_token.is_none() || tier.is_none() {
             match &state.last_good {
                 Some(settings) => settings.clone(),
                 None => read_persisted(&self.path)?.unwrap_or_else(PersistedNetworkSettings::empty),
@@ -124,8 +128,12 @@ impl NetworkSettingsStore {
             format_version: NETWORK_SETTINGS_FORMAT_VERSION,
             server_url,
             device_id,
+            tier: tier.or(previous.tier),
             admin_token: admin_token.unwrap_or(previous.admin_token),
-            device_token: device_token.unwrap_or(previous.device_token),
+            // Version-1 files may contain a device token written by an older app.
+            // There is no desktop consumer for it, so every subsequent save removes
+            // it instead of retaining a plaintext secret with no purpose.
+            device_token: String::new(),
         };
         let bytes = serde_json::to_vec_pretty(&persisted).map_err(|error| {
             NetworkSettingsStoreError::InvalidJson {
@@ -158,6 +166,57 @@ impl NetworkSettingsStore {
             generation: state.generation,
             warning,
         })
+    }
+
+    /// Lends the stored admin token only for the duration of one operation. The
+    /// store never exposes the token through a getter, snapshot, or serializable DTO.
+    pub fn with_admin_token<R>(
+        &self,
+        operation: impl FnOnce(&str) -> R,
+    ) -> Result<Option<R>, NetworkSettingsStoreError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| NetworkSettingsStoreError::LockPoisoned)?;
+        if state.last_good.is_none() {
+            state.last_good = read_persisted(&self.path)?;
+        }
+        let token = state
+            .last_good
+            .as_ref()
+            .map(|settings| settings.admin_token.clone())
+            .filter(|token| !token.is_empty());
+        drop(state);
+        Ok(token.map(|token| operation(&token)))
+    }
+
+    /// Removes the legacy device token without ever returning it to the caller.
+    /// New writes never include this field; this operation scrubs an older v1 file
+    /// even when no other settings happen to change after upgrading the app.
+    pub fn discard_device_token(&self) -> Result<bool, NetworkSettingsStoreError> {
+        let settings = {
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| NetworkSettingsStoreError::LockPoisoned)?;
+            if state.last_good.is_none() {
+                state.last_good = read_persisted(&self.path)?;
+            }
+            let Some(persisted) = state.last_good.as_ref() else {
+                return Ok(false);
+            };
+            if persisted.device_token.is_empty() {
+                return Ok(false);
+            }
+            persisted.public_settings()
+        };
+        self.save(NetworkSettingsUpdate::new(
+            settings.server_url,
+            settings.device_id,
+            settings.tier,
+            None,
+        ))?;
+        Ok(true)
     }
 }
 
@@ -260,7 +319,10 @@ struct PersistedNetworkSettings {
     format_version: u32,
     server_url: String,
     device_id: String,
+    #[serde(default)]
+    tier: Option<DeviceTier>,
     admin_token: String,
+    #[serde(default, skip_serializing, rename = "device_token")]
     device_token: String,
 }
 
@@ -270,6 +332,7 @@ impl PersistedNetworkSettings {
             format_version: NETWORK_SETTINGS_FORMAT_VERSION,
             server_url: String::new(),
             device_id: String::new(),
+            tier: None,
             admin_token: String::new(),
             device_token: String::new(),
         }
@@ -279,6 +342,7 @@ impl PersistedNetworkSettings {
         NetworkSettings {
             server_url: self.server_url.clone(),
             device_id: self.device_id.clone(),
+            tier: self.tier,
         }
     }
 }

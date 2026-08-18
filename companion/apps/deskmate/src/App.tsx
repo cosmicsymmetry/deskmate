@@ -62,6 +62,7 @@ export function App() {
     refresh,
     dataGeneration,
     networkSettings,
+    ownershipTier,
     saveConfig,
     saveServerAccess,
     pairDevice,
@@ -185,7 +186,8 @@ export function App() {
   // just blocking Save with no highlighted control anywhere in the UI (see
   // `unclaimedIssues`).
   const leftoverIssues = unclaimedIssues(issues, draft);
-  const networkedTier = snapshot.device.tier === "networked";
+  const networkedTier = ownershipTier === "networked";
+  const localTier = ownershipTier === "local";
 
   const replaceDraft = (next: AppConfig) => {
     setDraft(next);
@@ -266,7 +268,7 @@ export function App() {
       await refresh();
     } catch (nextError) {
       const ipcError = toIpcError(nextError);
-      if (!networkedTier && ipcError.category === "device") {
+      if (localTier && ipcError.category === "device") {
         setDirty(false);
         setSaveState({
           kind: "saved",
@@ -424,7 +426,7 @@ export function App() {
 
       <NetworkPanel
         device={{
-          tier: snapshot.device.tier,
+          tier: ownershipTier,
           wifiState: snapshot.device.wifi_state,
           wifiRssi: snapshot.device.wifi_rssi,
           ip: snapshot.device.ip ?? "",
@@ -589,19 +591,33 @@ export function App() {
             <span className="save-success">✓ {saveState.message}</span>
           )}
           {saveState.kind === "error" && (
-            <span className="save-error" role="alert">
-              {saveState.error.message}
-            </span>
+            <div className="save-error" role="alert">
+              <span>{saveState.error.message}</span>
+              {saveState.error.category === "validation" && saveState.error.issues.length > 0 && (
+                <ul className="save-error__issues">
+                  {saveState.error.issues.map((issue) => (
+                    <li key={`${issue.path}:${issue.code}:${issue.message}`}>{issue.message}</li>
+                  ))}
+                </ul>
+              )}
+            </div>
           )}
-          {validation.kind === "ready" && validation.result.valid && saveState.kind === "idle" && (
-            <span>{dirty ? "Unsaved changes" : "Everything is up to date"}</span>
+          {ownershipTier === null && saveState.kind === "idle" && (
+            <span className="save-error">Connect over USB to confirm ownership before saving.</span>
           )}
+          {validation.kind === "ready" &&
+            validation.result.valid &&
+            saveState.kind === "idle" &&
+            ownershipTier !== null && (
+              <span>{dirty ? "Unsaved changes" : "Everything is up to date"}</span>
+            )}
         </div>
         <button
           className="button button--primary"
           type="button"
           disabled={
             !dirty ||
+            ownershipTier === null ||
             validation.kind !== "ready" ||
             !validation.result.valid ||
             saveState.kind === "saving"
@@ -612,9 +628,11 @@ export function App() {
             ? networkedTier
               ? "Saving to server…"
               : "Saving & applying…"
-            : networkedTier
-              ? "Save to server"
-              : "Save & apply"}
+            : ownershipTier === null
+              ? "Ownership unavailable"
+              : networkedTier
+                ? "Save to server"
+                : "Save & apply"}
         </button>
       </footer>
     </div>

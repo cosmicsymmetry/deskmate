@@ -114,6 +114,7 @@ export interface AppStateValue {
    */
   dataGeneration: number;
   networkSettings: NetworkSettings;
+  ownershipTier: DeviceTier | null;
   saveConfig: (config: AppConfig) => Promise<ConfigApplyResult>;
   saveServerAccess: (serverUrl: string, adminToken: string) => Promise<void>;
   pairDevice: (input: PairDeviceInput) => Promise<void>;
@@ -135,7 +136,31 @@ export function saveConfigForTier(
   tier: DeviceTier | null,
   destinations: ConfigSaveDestinations,
 ): Promise<ConfigApplyResult> {
-  return tier === "networked" ? destinations.server() : destinations.local();
+  if (tier === "networked") {
+    return destinations.server();
+  }
+  if (tier === "local") {
+    return destinations.local();
+  }
+  throw new DeskmateCommandError({
+    category: "invalid-payload",
+    message: "Display ownership is unavailable. Connect over USB before saving.",
+  });
+}
+
+/** Live ownership wins; otherwise use persisted ownership and conservatively treat
+ * any legacy server identity as networked so an unplugged save never hits USB. */
+export function resolveDeviceTier(
+  liveTier: DeviceTier | null,
+  settings: NetworkSettings,
+): DeviceTier | null {
+  if (liveTier) {
+    return liveTier;
+  }
+  if (settings.tier) {
+    return settings.tier;
+  }
+  return settings.server_url || settings.device_id ? "networked" : "local";
 }
 
 export function useAppState(): AppStateValue {
@@ -146,27 +171,48 @@ export function useAppState(): AppStateValue {
   const [networkSettings, setNetworkSettings] = useState<NetworkSettings>({
     server_url: "",
     device_id: "",
+    tier: null,
   });
+  const [networkSettingsLoaded, setNetworkSettingsLoaded] = useState(false);
   const lastCardDataRef = useRef<string | null>(null);
   const snapshotRef = useRef<AppSnapshot | null>(null);
   const networkSettingsRef = useRef(networkSettings);
-  const adminTokenRef = useRef<string | null>(null);
+  const networkSettingsLoadedRef = useRef(false);
 
-  const acceptSnapshot = useCallback((next: AppSnapshot) => {
-    snapshotRef.current = next;
-    setSnapshot(next);
-    setLoading(false);
-    setError(null);
-    const serializedCardData = JSON.stringify(next.card_data);
-    if (serializedCardData !== lastCardDataRef.current) {
-      lastCardDataRef.current = serializedCardData;
-      setDataGeneration((current) => current + 1);
-    }
+  const acceptNetworkSettings = useCallback((next: NetworkSettings) => {
+    networkSettingsRef.current = next;
+    networkSettingsLoadedRef.current = true;
+    setNetworkSettings(next);
+    setNetworkSettingsLoaded(true);
   }, []);
   const acceptError = useCallback((next: IpcError) => {
     setLoading(false);
     setError(next);
   }, []);
+
+  const acceptSnapshot = useCallback(
+    (next: AppSnapshot) => {
+      snapshotRef.current = next;
+      setSnapshot(next);
+      if (next.device.tier && networkSettingsRef.current.tier !== next.device.tier) {
+        // `project_snapshot` persists a newly observed tier before emitting it. Read
+        // that store back instead of copying the live value: immediately after a
+        // provision/reset the cable can still report its pre-reboot tier briefly,
+        // while the persisted requested ownership is already the routing truth.
+        void getNetworkSettings()
+          .then(acceptNetworkSettings)
+          .catch((error) => acceptError(toIpcError(error)));
+      }
+      setLoading(false);
+      setError(null);
+      const serializedCardData = JSON.stringify(next.card_data);
+      if (serializedCardData !== lastCardDataRef.current) {
+        lastCardDataRef.current = serializedCardData;
+        setDataGeneration((current) => current + 1);
+      }
+    },
+    [acceptError, acceptNetworkSettings],
+  );
   const refresh = useCallback(async () => {
     try {
       acceptSnapshot(await getAppSnapshot());
@@ -175,15 +221,9 @@ export function useAppState(): AppStateValue {
     }
   }, [acceptError, acceptSnapshot]);
 
-  const acceptNetworkSettings = useCallback((next: NetworkSettings) => {
-    networkSettingsRef.current = next;
-    setNetworkSettings(next);
-  }, []);
-
   const saveServerAccess = useCallback(
     async (serverUrl: string, adminToken: string) => {
       const settings = await setServerEndpoint(serverUrl, adminToken);
-      adminTokenRef.current = adminToken;
       acceptNetworkSettings(settings);
     },
     [acceptNetworkSettings],
@@ -219,23 +259,28 @@ export function useAppState(): AppStateValue {
 
   const factoryReset = useCallback(async () => {
     await factoryResetDevice();
-  }, []);
+    acceptNetworkSettings(await getNetworkSettings());
+  }, [acceptNetworkSettings]);
 
   const saveConfig = useCallback(async (config: AppConfig) => {
-    const tier = snapshotRef.current?.device.tier ?? null;
+    const liveTier = snapshotRef.current?.device.tier ?? null;
+    const tier =
+      liveTier ??
+      networkSettingsRef.current.tier ??
+      (networkSettingsLoadedRef.current
+        ? resolveDeviceTier(null, networkSettingsRef.current)
+        : null);
     return saveConfigForTier(tier, {
       local: () => saveApplyConfig(config),
       server: () => {
         const settings = networkSettingsRef.current;
-        const adminToken = adminTokenRef.current;
-        if (!settings.server_url || !settings.device_id || !adminToken) {
+        if (!settings.server_url || !settings.device_id) {
           throw new DeskmateCommandError({
             category: "invalid-payload",
-            message:
-              "Enter the server URL, device ID, and admin token in Network setup before saving.",
+            message: "Enter the server URL and device ID in Network setup before saving.",
           });
         }
-        return saveServerConfig(config, settings, adminToken);
+        return saveServerConfig(config);
       },
     });
   }, []);
@@ -258,7 +303,8 @@ export function useAppState(): AppStateValue {
     void getNetworkSettings()
       .then((settings) => {
         if (active) {
-          acceptNetworkSettings(settings);
+          const liveTier = snapshotRef.current?.device.tier ?? null;
+          acceptNetworkSettings(liveTier ? { ...settings, tier: liveTier } : settings);
         }
       })
       .catch((next) => {
@@ -271,6 +317,12 @@ export function useAppState(): AppStateValue {
     };
   }, [acceptError, acceptNetworkSettings]);
 
+  const liveTier = snapshot?.device.tier ?? null;
+  const ownershipTier =
+    liveTier ??
+    networkSettings.tier ??
+    (networkSettingsLoaded ? resolveDeviceTier(null, networkSettings) : null);
+
   return {
     snapshot,
     loading,
@@ -278,6 +330,7 @@ export function useAppState(): AppStateValue {
     refresh,
     dataGeneration,
     networkSettings,
+    ownershipTier,
     saveConfig,
     saveServerAccess,
     pairDevice,

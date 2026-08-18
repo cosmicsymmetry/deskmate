@@ -2,11 +2,15 @@
 // its command macro contract even when the handler only borrows them internally.
 #![allow(clippy::needless_pass_by_value)]
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+
 use app_core::{
-    AppConfig, CardField, CardFieldValue, DisplayOrientation, DisplayTemplate,
+    AppConfig, CardField, CardFieldValue, ConfigStore, DisplayOrientation, DisplayTemplate,
     MAX_CONFIG_FILE_BYTES, MAX_ICS_BYTES, MAX_ICS_SOURCE_LEN, MAX_WIDGET_ID_LEN, NetworkConfig,
-    NetworkSettings, NetworkSettingsStoreError, NetworkSettingsUpdate, PomodoroAction,
-    ProvisioningTier, RuntimeError, SaveReceipt, StoreError, ValidationIssue, utc_offset_minutes,
+    NetworkSettings, NetworkSettingsStore, NetworkSettingsStoreError, NetworkSettingsUpdate,
+    PomodoroAction, ProvisioningTier, RuntimeError, RuntimeHandle, SaveReceipt, StoreError,
+    ValidationIssue, utc_offset_minutes,
 };
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
@@ -15,7 +19,7 @@ use tauri::{AppHandle, Manager, State};
 use tauri_plugin_autostart::ManagerExt;
 use tauri_plugin_dialog::DialogExt;
 
-use crate::{DesktopSnapshot, DesktopState, MAIN_WINDOW_LABEL};
+use crate::{DesktopSnapshot, DesktopState, MAIN_WINDOW_LABEL, NetworkedConfigProjection};
 
 // These are the protocol-v1 NetworkConfig bounds. app-core deliberately exposes the
 // command type, not protocol implementation constants, so the shell repeats them at
@@ -52,6 +56,16 @@ pub struct ConfigApplyResult {
     pub save: SaveReceipt,
 }
 
+struct ServerSaveContext {
+    runtime: Arc<RuntimeHandle>,
+    store: Arc<ConfigStore>,
+    network_store: Arc<NetworkSettingsStore>,
+    networked_config: Arc<NetworkedConfigProjection>,
+    server_client: ureq::Agent,
+    has_saved_config: Arc<AtomicBool>,
+    mutation_lock: Arc<Mutex<()>>,
+}
+
 /// Secret-bearing IPC inputs intentionally implement neither `Debug` nor `Serialize`.
 /// Their only outbound projection is `NetworkSettings`, which contains public fields.
 #[derive(Deserialize)]
@@ -76,9 +90,6 @@ pub struct ProvisionDeviceRequest {
 #[serde(deny_unknown_fields)]
 pub struct ServerConfigRequest {
     draft: DraftPayload,
-    server_url: String,
-    device_id: String,
-    admin_token: String,
 }
 
 #[derive(Deserialize)]
@@ -256,14 +267,15 @@ pub fn set_server_endpoint(
     let settings = NetworkSettings {
         server_url: request.server_url,
         device_id: current.device_id,
+        tier: current.tier,
     };
     state
         .network_store
         .save(NetworkSettingsUpdate::new(
             settings.server_url.clone(),
             settings.device_id.clone(),
-            Some(request.admin_token),
             None,
+            Some(request.admin_token),
         ))
         .map_err(IpcError::from)?;
     Ok(settings)
@@ -294,6 +306,7 @@ pub fn provision_device(
     let public_settings = NetworkSettings {
         server_url: request.server_url.clone(),
         device_id: request.device_id.clone(),
+        tier: Some(request.tier),
     };
     let config = NetworkConfig {
         ssid: request.ssid,
@@ -305,15 +318,16 @@ pub fn provision_device(
         tier,
     };
 
-    // Persist first: if the cable disappears, the write-only credential is still
-    // available to a retry without ever being returned to the renderer.
+    // Persist the public identity and ownership before dispatch. The device token
+    // has no desktop consumer after this command, so it is used only by the runtime
+    // provisioning request and is never retained on disk.
     state
         .network_store
         .save(NetworkSettingsUpdate::new(
             public_settings.server_url.clone(),
             public_settings.device_id.clone(),
+            public_settings.tier,
             None,
-            Some(request.device_token),
         ))
         .map_err(IpcError::from)?;
     state.runtime.provision(config).map_err(IpcError::from)?;
@@ -332,8 +346,8 @@ pub fn factory_reset_device(state: State<'_, DesktopState>) -> Result<(), IpcErr
         .save(NetworkSettingsUpdate::new(
             current.server_url,
             current.device_id,
+            Some(app_core::DeviceTier::Local),
             None,
-            Some(String::new()),
         ))
         .map_err(IpcError::from)?;
     state.set_networked_config(None)
@@ -345,36 +359,111 @@ pub async fn save_server_config(
     request: ServerConfigRequest,
 ) -> Result<ConfigApplyResult, IpcError> {
     let config = parse_valid_draft(&request.draft)?;
-    let snapshot = state.runtime.snapshot().map_err(IpcError::from)?;
-    if !matches!(snapshot.device.tier, Some(app_core::DeviceTier::Networked)) {
+    let context = ServerSaveContext {
+        runtime: Arc::clone(&state.runtime),
+        store: Arc::clone(&state.store),
+        network_store: Arc::clone(&state.network_store),
+        networked_config: Arc::clone(&state.networked_config),
+        server_client: state.server_client.clone(),
+        has_saved_config: Arc::clone(&state.has_saved_config),
+        mutation_lock: Arc::clone(&state.mutation_lock),
+    };
+    tauri::async_runtime::spawn_blocking(move || save_server_config_blocking(context, config))
+        .await
+        .map_err(|_| IpcError::RuntimeUnavailable {
+            message: "the server request worker stopped unexpectedly".into(),
+        })?
+}
+
+fn save_server_config_blocking(
+    context: ServerSaveContext,
+    mut config: AppConfig,
+) -> Result<ConfigApplyResult, IpcError> {
+    let _mutation = context
+        .mutation_lock
+        .lock()
+        .map_err(|_| IpcError::Internal {
+            message: "desktop mutation lock is unavailable".into(),
+        })?;
+    let snapshot = context.runtime.snapshot().map_err(IpcError::from)?;
+    merge_command_owned_preferences(&mut config, &snapshot.config);
+    let compiled = config.compile(1).map_err(|error| IpcError::Validation {
+        message: "configuration requires device features not implemented by this build".into(),
+        issues: error.issues,
+    })?;
+    ensure_device_compatibility(&snapshot.device, compiled.required_capabilities)?;
+
+    let settings = context.network_store.load().settings().clone();
+    if !server_owns_device(snapshot.device.tier, &settings) {
         return Err(IpcError::InvalidPayload {
-            message: "the connected display is not owned by the server".into(),
+            message: "display ownership is not known to be networked; connect it over USB to confirm ownership before saving".into(),
         });
     }
-    validate_secret(&request.admin_token, 4_096, "admin token")?;
-    let url = server_config_url(&request.server_url, &request.device_id)?.to_string();
+    let url = server_config_url(&settings.server_url, &settings.device_id)?.to_string();
     let body = serde_json::to_vec(&config).map_err(|_| IpcError::Internal {
         message: "configuration could not be serialized for the server".into(),
     })?;
-    let agent = state.server_client.clone();
-    let admin_token = request.admin_token;
-    let (status, response_body) = tauri::async_runtime::spawn_blocking(move || {
-        put_server_config(&agent, &url, &admin_token, &body)
-    })
-    .await
-    .map_err(|_| IpcError::RuntimeUnavailable {
-        message: "the server request worker stopped unexpectedly".into(),
-    })??;
+    let response = context
+        .network_store
+        .with_admin_token(|admin_token| {
+            validate_secret(admin_token, 4_096, "admin token")?;
+            put_server_config(&context.server_client, &url, admin_token, &body)
+        })
+        .map_err(IpcError::from)?
+        .ok_or_else(|| IpcError::InvalidPayload {
+            message: "Enter the admin token in Network setup before saving to the server.".into(),
+        })?;
+    let (status, response_body) = response?;
     if !(200..300).contains(&status) {
         return Err(server_failure(status, &response_body));
     }
 
+    context
+        .network_store
+        .save(NetworkSettingsUpdate::new(
+            settings.server_url,
+            settings.device_id,
+            Some(app_core::DeviceTier::Networked),
+            None,
+        ))
+        .map_err(IpcError::from)?;
+
     // The server is authoritative in networked tier. Keep a local authoring mirror,
     // but deliberately do not call RuntimeHandle::apply_config: that would put a
     // config write onto the restricted USB link and challenge the server's ownership.
-    let save = persist_config(&state, &config)?;
-    state.set_networked_config(Some(config))?;
+    let save = persist_config_parts(
+        &context.runtime,
+        &context.store,
+        &context.has_saved_config,
+        &config,
+    )?;
+    context.networked_config.replace(Some(config))?;
     Ok(ConfigApplyResult { save })
+}
+
+fn server_owns_device(tier: Option<app_core::DeviceTier>, settings: &NetworkSettings) -> bool {
+    match tier {
+        Some(app_core::DeviceTier::Networked) => true,
+        Some(app_core::DeviceTier::Local) => false,
+        None => {
+            matches!(settings.tier, Some(app_core::DeviceTier::Networked))
+                || (settings.tier.is_none()
+                    && (!settings.server_url.is_empty() || !settings.device_id.is_empty()))
+        }
+    }
+}
+
+fn local_owns_device(tier: Option<app_core::DeviceTier>, settings: &NetworkSettings) -> bool {
+    match tier {
+        Some(app_core::DeviceTier::Local) => true,
+        Some(app_core::DeviceTier::Networked) => false,
+        None => {
+            matches!(settings.tier, Some(app_core::DeviceTier::Local))
+                || (settings.tier.is_none()
+                    && settings.server_url.is_empty()
+                    && settings.device_id.is_empty())
+        }
+    }
 }
 
 #[tauri::command]
@@ -652,6 +741,14 @@ fn save_and_apply(
         message: "desktop mutation lock is unavailable".into(),
     })?;
     let snapshot = state.runtime.snapshot().map_err(IpcError::from)?;
+    let settings = state.network_store.load().settings().clone();
+    if !local_owns_device(snapshot.device.tier, &settings) {
+        return Err(IpcError::InvalidPayload {
+            message:
+                "the display is owned by the server; save this configuration to the server instead"
+                    .into(),
+        });
+    }
     merge_command_owned_preferences(&mut config, &snapshot.config);
     let compiled = config.compile(1).map_err(|error| IpcError::Validation {
         message: "configuration requires device features not implemented by this build".into(),
@@ -659,6 +756,7 @@ fn save_and_apply(
     })?;
     ensure_device_compatibility(&snapshot.device, compiled.required_capabilities)?;
     let save = persist_config(state, &config)?;
+    state.networked_config.clear_for_local_save()?;
     // Keep a valid saved draft queued even when immediate device application reports
     // a transport failure. RuntimeHandle has already replaced its replay set then.
     state.runtime.apply_config(config).map_err(IpcError::from)?;
@@ -729,23 +827,34 @@ fn describe_capabilities(bits: u64) -> String {
 }
 
 fn persist_config(state: &DesktopState, config: &AppConfig) -> Result<SaveReceipt, IpcError> {
-    state
-        .runtime
+    persist_config_parts(
+        &state.runtime,
+        &state.store,
+        &state.has_saved_config,
+        config,
+    )
+}
+
+fn persist_config_parts(
+    runtime: &RuntimeHandle,
+    store: &ConfigStore,
+    has_saved_config: &AtomicBool,
+    config: &AppConfig,
+) -> Result<SaveReceipt, IpcError> {
+    runtime
         .set_persistence_state(app_core::PersistenceState::Saving)
         .map_err(IpcError::from)?;
-    match state.store.save(config) {
+    match store.save(config) {
         Ok(receipt) => {
-            state.mark_config_saved();
-            state
-                .runtime
+            has_saved_config.store(true, Ordering::Release);
+            runtime
                 .set_persistence_state(app_core::PersistenceState::Clean)
                 .map_err(IpcError::from)?;
             Ok(receipt)
         }
         Err(error) => {
             let message = error.to_string();
-            let _ = state
-                .runtime
+            let _ = runtime
                 .set_persistence_state(app_core::PersistenceState::RecoverableError { message });
             Err(IpcError::from(error))
         }
@@ -1361,6 +1470,32 @@ mod tests {
             url.as_str(),
             "https://desk.example/base/v1/devices/desk%20one/config"
         );
+    }
+
+    #[test]
+    fn unplugged_server_identity_routes_networked_but_live_local_ownership_wins() {
+        let mut settings = NetworkSettings {
+            server_url: "https://desk.example".into(),
+            device_id: "desk-1".into(),
+            tier: Some(app_core::DeviceTier::Networked),
+        };
+        assert!(server_owns_device(None, &settings));
+        assert!(!local_owns_device(None, &settings));
+        assert!(!server_owns_device(
+            Some(app_core::DeviceTier::Local),
+            &settings
+        ));
+        assert!(local_owns_device(
+            Some(app_core::DeviceTier::Local),
+            &settings
+        ));
+
+        settings.tier = None;
+        assert!(server_owns_device(None, &settings));
+        settings.server_url.clear();
+        settings.device_id.clear();
+        assert!(!server_owns_device(None, &settings));
+        assert!(local_owns_device(None, &settings));
     }
 
     #[test]

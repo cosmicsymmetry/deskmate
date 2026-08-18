@@ -1655,6 +1655,7 @@ mod tests {
         status.wifi_rssi = -58;
         status.ip = "192.168.1.42".into();
         status.ota_state = OtaState::Idle;
+        status.last_network_error = Some("dns resolution timed out".into());
         let wire = encode_message(3, &Message::StatusResponse(status.clone())).expect("encode");
         let frame = decode_wire_frame(&wire).expect("decode frame");
         let Message::StatusResponse(decoded) = decode_message(&frame).expect("decode") else {

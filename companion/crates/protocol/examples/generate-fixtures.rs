@@ -251,7 +251,7 @@ fn fixture_messages() -> Vec<(&'static str, u32, Message)> {
                 wifi_rssi: -58,
                 ip: "192.168.1.42".into(),
                 ota_state: OtaState::Idle,
-                last_network_error: None,
+                last_network_error: Some("dns resolution timed out".into()),
             }),
         ),
         (

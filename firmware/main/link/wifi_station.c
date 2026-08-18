@@ -44,7 +44,7 @@ static atomic_flag s_ip_lock = ATOMIC_FLAG_INIT;
 static char s_ip[PROTOCOL_MAX_IP_LENGTH + 1U];
 static char s_ip_snapshot[PROTOCOL_MAX_IP_LENGTH + 1U];
 
-// Loaded once at wifi_station_start() and never a secret; only the SSID/PSK
+// Loaded once at wifi_station_bringup() and never a secret; only the SSID/PSK
 // are sensitive and neither is retained beyond building the driver's config.
 static int16_t s_utc_offset_minutes;
 
@@ -101,6 +101,14 @@ static void schedule_reconnect(void)
 static void reconnect_timer_cb(void *arg)
 {
     (void)arg;
+    // FAILED is a report, not a terminal state: each new attempt clears it
+    // back to CONNECTING (the ruling this task implements), even if the
+    // previous disconnect was classified as a credential failure -- the
+    // password may since have been fixed, or the AP may be back in range.
+    // If this attempt fails for the same reason, the next
+    // WIFI_EVENT_STA_DISCONNECTED will re-classify and set FAILED again.
+    atomic_store_explicit(&s_wifi_state, PROTOCOL_WIFI_CONNECTING,
+                          memory_order_relaxed);
     esp_err_t result = esp_wifi_connect();
     if (result != ESP_OK) {
         ESP_LOGW(TAG, "reconnect attempt failed to start: %s",
@@ -136,12 +144,32 @@ static void start_sntp_if_needed(void)
     esp_sntp_init();
 }
 
+// Disconnect reasons that mean "this credential/target is wrong," not "the
+// link briefly dropped." Reported as PROTOCOL_WIFI_FAILED so a human
+// consulting wifi_state can tell a bad SSID/passphrase apart from an
+// out-of-range router at a glance, instead of seeing "connecting" forever
+// either way. This is a report, not a terminal state: retries continue on
+// the same backoff regardless of reason, and the next WIFI_EVENT_STA_START
+// or IP_EVENT_STA_GOT_IP clears it back to CONNECTING/CONNECTED as normal.
+static bool disconnect_reason_is_credential_failure(uint8_t reason)
+{
+    switch (reason) {
+    case WIFI_REASON_AUTH_EXPIRE:
+    case WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT:
+    case WIFI_REASON_NO_AP_FOUND:
+    case WIFI_REASON_AUTH_FAIL:
+    case WIFI_REASON_HANDSHAKE_TIMEOUT:
+        return true;
+    default:
+        return false;
+    }
+}
+
 static void wifi_event_handler(void *handler_arg, esp_event_base_t base,
                                int32_t event_id, void *event_data)
 {
     (void)handler_arg;
     (void)base;
-    (void)event_data;
     if (event_id == WIFI_EVENT_STA_START) {
         esp_err_t result = esp_wifi_connect();
         if (result != ESP_OK) {
@@ -149,7 +177,16 @@ static void wifi_event_handler(void *handler_arg, esp_event_base_t base,
                     esp_err_to_name(result));
         }
     } else if (event_id == WIFI_EVENT_STA_DISCONNECTED) {
-        atomic_store_explicit(&s_wifi_state, PROTOCOL_WIFI_CONNECTING,
+        const wifi_event_sta_disconnected_t *disconnected =
+            (const wifi_event_sta_disconnected_t *)event_data;
+        uint8_t reason = (disconnected != NULL) ? disconnected->reason : 0U;
+        // Reason code and SSID only -- never the passphrase.
+        ESP_LOGW(TAG, "WiFi disconnected, reason=%u", (unsigned)reason);
+        protocol_wifi_state_t next_state =
+            disconnect_reason_is_credential_failure(reason)
+                ? PROTOCOL_WIFI_FAILED
+                : PROTOCOL_WIFI_CONNECTING;
+        atomic_store_explicit(&s_wifi_state, next_state,
                               memory_order_relaxed);
         set_ip(NULL);
         schedule_reconnect();

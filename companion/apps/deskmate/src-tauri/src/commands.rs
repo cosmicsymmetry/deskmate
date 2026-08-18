@@ -1505,6 +1505,7 @@ mod tests {
                 DeviceCapability::HostTapActions,
                 DeviceCapability::AssetTransfer,
                 DeviceCapability::FirmwareUpdate,
+                DeviceCapability::Networking,
             ],
             runtime_states,
             connection_states,

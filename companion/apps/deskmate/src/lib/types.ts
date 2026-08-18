@@ -236,9 +236,21 @@ export interface DeviceSnapshot {
   uptime_ms: number | null;
   free_heap: number | null;
   rotation: number | null;
+  tier: DeviceTier | null;
+  wifi_state: DeviceWifiState | null;
+  wifi_rssi: number | null;
+  ip: string | null;
+  last_network_error: string | null;
+  ota_state: DeviceOtaState | null;
   active_screen_id: string | null;
   counters: DeviceCounters;
 }
+
+export type DeviceTier = "local" | "networked";
+
+export type DeviceWifiState = "down" | "connecting" | "connected" | "failed";
+
+export type DeviceOtaState = "idle" | "checking" | "downloading" | "pending-verify" | "failed";
 
 export type DeviceCapability =
   | "core-widgets"
@@ -247,7 +259,8 @@ export type DeviceCapability =
   | "extended-templates"
   | "host-tap-actions"
   | "asset-transfer"
-  | "firmware-update";
+  | "firmware-update"
+  | "networking";
 
 export interface DeviceCounters {
   reconnects: number;

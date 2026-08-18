@@ -143,6 +143,12 @@ export const ipcContractFixtures = {
       "uptime_ms": 42,
       "free_heap": 123456,
       "rotation": 90,
+      "tier": null,
+      "wifi_state": null,
+      "wifi_rssi": null,
+      "ip": null,
+      "last_network_error": null,
+      "ota_state": null,
       "active_screen_id": "clock",
       "counters": {
         "reconnects": 1,
@@ -701,7 +707,8 @@ export const ipcContractFixtures = {
     "extended-templates",
     "host-tap-actions",
     "asset-transfer",
-    "firmware-update"
+    "firmware-update",
+    "networking"
   ],
   "runtime_states": [
     {

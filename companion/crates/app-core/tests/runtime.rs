@@ -754,6 +754,10 @@ fn transport_failure_during_provisioning_marks_disconnected_and_reconnects() {
     let control = MockDeviceControl::default();
     let mut reconnecting_options = options();
     reconnecting_options.reconnect_interval = Duration::from_millis(100);
+    // Exclude the ordinary status-poll disconnect path from this regression. Without
+    // runtime_command_device_error marking the transport disconnected, no poll can
+    // rescue the test before its one-second assertion deadline.
+    reconnecting_options.status_interval = Duration::from_secs(5);
     let runtime = RuntimeHandle::start(
         full_config(),
         Box::new(MockDevice::new(control.clone())),
@@ -784,9 +788,9 @@ fn transport_failure_during_provisioning_marks_disconnected_and_reconnects() {
     assert_eq!(error, RuntimeError::DeviceDisconnected);
     let disconnected = wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
         snapshot.device.connection == ConnectionState::Standalone
+            && control.connection_count() == connections_before
     });
     assert_eq!(disconnected.device.connection, ConnectionState::Standalone);
-    assert_eq!(control.connection_count(), connections_before);
 
     let reconnected = wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
         snapshot.device.connection == ConnectionState::Online

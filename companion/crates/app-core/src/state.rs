@@ -72,17 +72,17 @@ pub struct DeviceSnapshot {
     pub uptime_ms: Option<u64>,
     pub free_heap: Option<u32>,
     pub rotation: Option<u16>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub tier: Option<DeviceTier>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub wifi_state: Option<DeviceWifiState>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub wifi_rssi: Option<i8>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub ip: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub last_network_error: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub ota_state: Option<DeviceOtaState>,
     pub active_screen_id: Option<String>,
     pub counters: DeviceCounters,

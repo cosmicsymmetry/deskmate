@@ -2,7 +2,7 @@
 
 Spec: `docs/superpowers/specs/2026-08-03-deskmate-design.md`
 
-**Current:** M0, M1, M2, and M3 are complete. M4 delivered Tasks 1-4 (contract
+**Current:** V2's design is approved (`docs/superpowers/specs/2026-08-18-deskmate-v2-networked-device-design.md`); its implementation plan is not yet written. M0, M1, M2, and M3 are complete. M4 delivered Tasks 1-4 (contract
 freeze, bounded providers, the card model, extended templates, timed rotation and
 alerts), then was superseded on 2026-08-11 by an explicit user-directed reset:
 `docs/superpowers/specs/2026-08-11-deskmate-v1-reset-design.md`. That spec re-cuts
@@ -31,8 +31,8 @@ breadth.
 | M3 | Complete | Companion app (Tauri v2) | Tray app replaces CLI for daily use: config store, providers, settings UI with widget gallery + screen arranger | `2026-08-04-deskmate-m3-companion-app.md` |
 | M4 | Superseded (Tasks 1-4 delivered) | v1 completion | Delivered: weather/JSON-feed/RSS providers, extended templates, the card model, timed rotation and alerts. Remainder redistributed by the 2026-08-11 reset spec §7 | `2026-08-05-deskmate-m4-v1-completion.md` |
 | V1 | All exit items closed (declaring V1 exit awaits explicit user authorization) | Local Deskmate | Custom partition table (OTA slots + asset region), baked typeface, pixel-exact host-LVGL preview harness with golden frames, built-in widget redesign — all delivered and physically accepted 2026-08-14; playlist authoring model (schema v4, `presence` removed) delivered and merged 2026-08-15 (wire unchanged, no on-device delta). The CO5300 even-window check at the 64-line flush strip closed 2026-08-15 (human-observed clean at both orientations). Packaging/hardening delivered: private `cosmicsymmetry/deskmate` remote with the green `ci` workflow (macOS companion gate + DMG artifact; ESP-IDF build + host tests), advisories triaged in `docs/security/advisories.md`, security review in `docs/security/v1-review.md`, and the hands-on install matrix passed (recorded 2026-08-17 in the packaging plan; one defect found and fixed — settings window now auto-opens on first run only, `fc3750b`). V1 tag and V2 brainstorm await explicit user authorization | `2026-08-11-deskmate-v1-preview-typeface-redesign.md`, `2026-08-11-deskmate-v1-playlists.md`, `2026-08-15-deskmate-v1-packaging-hardening.md` |
-| V2 | Planned | Networked device | WiFi/TLS, provisioning, pairing, host handoff, OTA update mechanism, production identity | own brainstorm at V1 exit |
-| V3 | Planned | Server host | `app-core`/`providers` server-side, device pairing, config storage, accounts | own brainstorm at V2 exit |
+| V2 | Design approved 2026-08-18 (plan pending) | Networked device | Device owned over the network instead of a cable: WiFi station, TLS, USB-based provisioning (no SoftAP), bearer-token device identity, tier pairing, WebSocket transport carrying today's frames unchanged, and OTA with rollback. Proven against a single-tenant no-accounts stub server. Headline demo: provision over USB, unplug, quit the Mac app, cards keep updating. Additive within protocol v1 | `docs/superpowers/specs/2026-08-18-deskmate-v2-networked-device-design.md` |
+| V3 | Planned (narrowed by V2's design §10) | Server host | Accounts, OAuth-held integration credentials (Google Calendar and similar), config storage, and multi-tenancy — behind the device-facing contract V2 freezes. Should require no firmware change, because V2 delivers the contract, identity, provisioning, transport and update mechanism | own brainstorm at V2 exit |
 | V4 | Planned | Plugin platform | HTML plugin contract, headless-Chromium rendering, image cards, asset cache, billing (paid tier) | own brainstorm at V3 exit |
 
 First-widget order and why:

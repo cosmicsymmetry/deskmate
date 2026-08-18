@@ -84,6 +84,55 @@ fn minted_identity_authenticates_after_registry_reload() {
 }
 
 #[test]
+fn two_mints_both_authenticate_after_registry_reload() {
+    // Catches serializing only the newest record: deleting the composition of
+    // prior records with the new record would silently deprovision the first.
+    let temp = tempfile::tempdir().expect("registry test temp dir");
+    let config_root = temp.path().join("configs");
+    let (first, second) = {
+        let state = ServerState::new(
+            "multi-reload-admin-token".to_string(),
+            server::firmware::FirmwareCatalog::in_memory(),
+            config_root.clone(),
+        );
+        (
+            state.registry().mint().expect("first mint"),
+            state.registry().mint().expect("second mint"),
+        )
+    };
+
+    let reloaded = ServerState::new(
+        "multi-reload-admin-token".to_string(),
+        server::firmware::FirmwareCatalog::in_memory(),
+        config_root,
+    );
+    assert_eq!(
+        reloaded.registry().authenticate(&first.token),
+        Some(first.device_id)
+    );
+    assert_eq!(
+        reloaded.registry().authenticate(&second.token),
+        Some(second.device_id)
+    );
+}
+
+#[test]
+fn absent_registry_is_not_a_load_failure_and_creates_no_archive() {
+    // Catches classifying a fresh install as a failed load, which would emit
+    // the wrong auth warning and could activate the corrupt-store archive path.
+    let temp = tempfile::tempdir().expect("registry test temp dir");
+    let config_root = temp.path().join("configs");
+    let state = ServerState::new(
+        "absent-admin-token".to_string(),
+        server::firmware::FirmwareCatalog::in_memory(),
+        config_root.clone(),
+    );
+    assert!(!state.registry().store_load_failed());
+    state.registry().mint().expect("mint from absent store");
+    assert!(archived_registry_files(&config_root).is_empty());
+}
+
+#[test]
 fn persisted_registry_contains_digest_and_never_plaintext_token() {
     // Catches the security-critical regression where persistence writes the
     // bearer token itself, and also catches hashing a different value.
@@ -147,6 +196,79 @@ fn corrupt_or_truncated_registry_degrades_to_empty() {
         assert!(!state.registry().contains_device("dev-0007"));
         assert!(state.registry().store_load_failed());
     }
+}
+
+#[test]
+fn failed_store_is_archived_before_a_replacement_is_minted() {
+    // Catches overwriting the only copy of a transiently unreadable or
+    // operator-repairable store when the first replacement identity is minted.
+    let temp = tempfile::tempdir().expect("registry test temp dir");
+    let config_root = temp.path().join("configs");
+    std::fs::create_dir_all(&config_root).expect("create config root");
+    let store_path = config_root.join("device-identities.json");
+    let original = b"operator may still recover these exact bytes";
+    std::fs::write(&store_path, original).expect("write broken registry");
+
+    let state = ServerState::new(
+        "archive-admin-token".to_string(),
+        server::firmware::FirmwareCatalog::in_memory(),
+        config_root.clone(),
+    );
+    let identity = state.registry().mint().expect("replacement mint");
+    assert_eq!(identity.device_id, "dev-0001");
+    assert_eq!(
+        state.registry().authenticate(&identity.token),
+        Some(identity.device_id)
+    );
+    assert_eq!(
+        state
+            .registry()
+            .mint()
+            .expect("second replacement mint")
+            .device_id,
+        "dev-0002"
+    );
+
+    let archives = archived_registry_files(&config_root);
+    assert_eq!(
+        archives.len(),
+        1,
+        "failed store was not archived exactly once"
+    );
+    assert_eq!(
+        std::fs::read(&archives[0]).expect("read archived registry"),
+        original
+    );
+    assert_ne!(
+        std::fs::read(&store_path).expect("read replacement registry"),
+        original
+    );
+}
+
+#[test]
+fn failed_store_sequence_recovers_from_existing_config_high_water() {
+    // Catches resetting to dev-0001 after a discarded store and making the
+    // replacement device inherit an earlier device's id-keyed config.
+    let temp = tempfile::tempdir().expect("registry test temp dir");
+    let config_root = temp.path().join("configs");
+    std::fs::create_dir_all(&config_root).expect("create config root");
+    std::fs::write(config_root.join("device-identities.json"), b"broken")
+        .expect("write broken registry");
+    std::fs::write(config_root.join("dev-0001.json"), b"{}").expect("write first device config");
+    std::fs::write(config_root.join("dev-0042.json"), b"{}")
+        .expect("write high-water device config");
+    std::fs::write(config_root.join("dev-9999.txt"), b"not a config")
+        .expect("write irrelevant file");
+
+    let state = ServerState::new(
+        "high-water-admin-token".to_string(),
+        server::firmware::FirmwareCatalog::in_memory(),
+        config_root,
+    );
+    assert_eq!(
+        state.registry().mint().expect("replacement mint").device_id,
+        "dev-0043"
+    );
 }
 
 #[test]
@@ -220,6 +342,136 @@ fn mint_sequence_remains_monotonic_after_reload() {
             .device_id,
         "dev-0003"
     );
+}
+
+#[test]
+fn unsupported_registry_schema_degrades_to_empty() {
+    // Catches deleting the schema-version guard and silently accepting a
+    // future format whose meaning this server does not know.
+    let temp = tempfile::tempdir().expect("registry test temp dir");
+    let config_root = temp.path().join("configs");
+    write_registry_json(
+        &config_root,
+        &serde_json::json!({"schema_version": 2, "next_sequence": 0, "devices": []}),
+    );
+    let state = persistent_test_state(config_root);
+    assert!(state.registry().store_load_failed());
+    assert!(!state.registry().contains_device("dev-0001"));
+}
+
+#[test]
+fn duplicate_registry_records_degrade_to_empty() {
+    // Catches deleting duplicate-id/digest validation and loading ambiguous
+    // authentication records from otherwise valid JSON.
+    let temp = tempfile::tempdir().expect("registry test temp dir");
+    let config_root = temp.path().join("configs");
+    let digest = "11".repeat(32);
+    write_registry_json(
+        &config_root,
+        &serde_json::json!({
+            "schema_version": 1,
+            "next_sequence": 2,
+            "devices": [
+                {"device_id": "dev-0001", "token_sha256": digest},
+                {"device_id": "dev-0002", "token_sha256": digest}
+            ]
+        }),
+    );
+    let state = persistent_test_state(config_root);
+    assert!(state.registry().store_load_failed());
+    assert!(!state.registry().contains_device("dev-0001"));
+}
+
+#[test]
+fn registry_sequence_below_an_existing_id_degrades_to_empty() {
+    // Catches deleting the sequence consistency guard and loading state that
+    // would reissue an already-present device id on the next mint.
+    let temp = tempfile::tempdir().expect("registry test temp dir");
+    let config_root = temp.path().join("configs");
+    write_registry_json(
+        &config_root,
+        &serde_json::json!({
+            "schema_version": 1,
+            "next_sequence": 6,
+            "devices": [
+                {"device_id": "dev-0007", "token_sha256": "22".repeat(32)}
+            ]
+        }),
+    );
+    let state = persistent_test_state(config_root);
+    assert!(state.registry().store_load_failed());
+    assert!(!state.registry().contains_device("dev-0007"));
+}
+
+#[test]
+fn oversized_registry_degrades_to_empty() {
+    // Catches deleting the 64 KiB read bound and accepting an unbounded
+    // operator-controlled file merely because its trailing bytes are whitespace.
+    let temp = tempfile::tempdir().expect("registry test temp dir");
+    let config_root = temp.path().join("configs");
+    std::fs::create_dir_all(&config_root).expect("create config root");
+    let mut bytes = serde_json::to_vec(
+        &serde_json::json!({"schema_version": 1, "next_sequence": 0, "devices": []}),
+    )
+    .expect("encode valid registry");
+    bytes.resize(64 * 1_024 + 1, b' ');
+    std::fs::write(config_root.join("device-identities.json"), bytes)
+        .expect("write oversized registry");
+
+    let state = persistent_test_state(config_root);
+    assert!(state.registry().store_load_failed());
+}
+
+#[test]
+fn invalid_digest_encodings_degrade_to_empty() {
+    // Catches deleting the exact-length or lowercase-hex digest guards, which
+    // would accept truncated or noncanonical authentication material.
+    for digest in ["33".repeat(31), "AA".repeat(32)] {
+        let temp = tempfile::tempdir().expect("registry test temp dir");
+        let config_root = temp.path().join("configs");
+        write_registry_json(
+            &config_root,
+            &serde_json::json!({
+                "schema_version": 1,
+                "next_sequence": 1,
+                "devices": [{"device_id": "dev-0001", "token_sha256": digest}]
+            }),
+        );
+        let state = persistent_test_state(config_root);
+        assert!(state.registry().store_load_failed());
+        assert!(!state.registry().contains_device("dev-0001"));
+    }
+}
+
+fn persistent_test_state(config_root: std::path::PathBuf) -> ServerState {
+    ServerState::new(
+        "persisted-fixture-admin-token".to_string(),
+        server::firmware::FirmwareCatalog::in_memory(),
+        config_root,
+    )
+}
+
+fn write_registry_json(config_root: &std::path::Path, value: &serde_json::Value) {
+    std::fs::create_dir_all(config_root).expect("create config root");
+    std::fs::write(
+        config_root.join("device-identities.json"),
+        serde_json::to_vec(value).expect("encode registry fixture"),
+    )
+    .expect("write registry fixture");
+}
+
+fn archived_registry_files(config_root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut archives: Vec<_> = std::fs::read_dir(config_root)
+        .expect("read config root")
+        .map(|entry| entry.expect("read config entry").path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(std::ffi::OsStr::to_str)
+                .is_some_and(|name| name.starts_with("device-identities.json.corrupt-"))
+        })
+        .collect();
+    archives.sort();
+    archives
 }
 
 #[tokio::test]

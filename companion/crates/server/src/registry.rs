@@ -6,6 +6,7 @@ use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use atomic_write_file::AtomicWriteFile;
 #[cfg(unix)]
@@ -60,8 +61,8 @@ pub enum RegistryError {
     SequenceExhausted,
 }
 
-/// Digest-to-device records plus the next monotonic id. Authentication scans
-/// the vector; it is deliberately not keyed by digest.
+/// Digest-to-device records plus the last issued monotonic id. Authentication
+/// scans the vector; it is deliberately not keyed by digest.
 pub struct Registry {
     path: Option<PathBuf>,
     state: Mutex<RegistryState>,
@@ -71,6 +72,8 @@ pub struct Registry {
 struct RegistryState {
     next_sequence: u64,
     tokens: Vec<TokenRecord>,
+    failed_store_needs_archive: bool,
+    failed_store_needs_config_scan: bool,
 }
 
 struct TokenRecord {
@@ -82,6 +85,8 @@ struct TokenRecord {
 #[serde(deny_unknown_fields)]
 struct PersistedRegistry {
     schema_version: u32,
+    /// Historical schema-v1 name: this is the last issued sequence. Minting
+    /// adds one. Keep the field name for on-disk compatibility.
     next_sequence: u64,
     devices: Vec<PersistedDevice>,
 }
@@ -125,7 +130,19 @@ impl Registry {
                     "device identity store failed to load; starting with an empty registry; \
                      existing devices must be re-minted"
                 );
-                (RegistryState::empty(), true)
+                let recovered_sequence = match scan_config_high_water(&path) {
+                    Ok(sequence) => sequence,
+                    Err(scan_error) => {
+                        tracing::warn!(
+                            store_path = %path.display(),
+                            error = %scan_error,
+                            "device config high-water scan failed after identity-store load failure; \
+                             minting will retry before assigning an id"
+                        );
+                        0
+                    }
+                };
+                (RegistryState::after_failed_load(recovered_sequence), true)
             }
         };
         Self {
@@ -143,6 +160,15 @@ impl Registry {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(path) = &self.path {
+            if state.failed_store_needs_config_scan {
+                state.next_sequence = state.next_sequence.max(scan_config_high_water(path)?);
+            }
+            if state.failed_store_needs_archive {
+                archive_failed_store(path)?;
+            }
+        }
+
         let sequence = state
             .next_sequence
             .checked_add(1)
@@ -156,6 +182,8 @@ impl Registry {
 
         if let Some(path) = &self.path {
             save_store(path, &state, sequence, &record)?;
+            state.failed_store_needs_archive = false;
+            state.failed_store_needs_config_scan = false;
         }
 
         state.next_sequence = sequence;
@@ -218,6 +246,17 @@ impl RegistryState {
         Self {
             next_sequence: 0,
             tokens: Vec::new(),
+            failed_store_needs_archive: false,
+            failed_store_needs_config_scan: false,
+        }
+    }
+
+    const fn after_failed_load(next_sequence: u64) -> Self {
+        Self {
+            next_sequence,
+            tokens: Vec::new(),
+            failed_store_needs_archive: true,
+            failed_store_needs_config_scan: true,
         }
     }
 }
@@ -280,7 +319,102 @@ fn decode_store(bytes: &[u8]) -> Result<RegistryState, RegistryError> {
     Ok(RegistryState {
         next_sequence: persisted.next_sequence,
         tokens,
+        failed_store_needs_archive: false,
+        failed_store_needs_config_scan: false,
     })
+}
+
+/// Finds the highest canonical `dev-NNNN.json` config filename. After a
+/// failed identity-store load, these files are the surviving authority for ids
+/// that must not be reused, even though their old bearer tokens are discarded.
+fn scan_config_high_water(store_path: &Path) -> Result<u64, RegistryError> {
+    let parent = usable_parent(store_path)?;
+    let entries = match fs::read_dir(parent) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(io_error("scan device config ids", &error)),
+    };
+    let mut high_water = 0;
+    for entry in entries {
+        let entry = entry.map_err(|error| io_error("read device config id", &error))?;
+        let Some(file_name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        let Some(device_id) = file_name.strip_suffix(".json") else {
+            continue;
+        };
+        if let Ok(sequence) = parse_device_sequence(device_id) {
+            high_water = high_water.max(sequence);
+        }
+    }
+    Ok(high_water)
+}
+
+/// Moves failed input out of the canonical path before the first replacement
+/// commit. An absent source is harmless (an operator may remove it after the
+/// failed load); every other metadata or rename failure blocks minting so the
+/// original cannot be overwritten.
+fn archive_failed_store(path: &Path) -> Result<(), RegistryError> {
+    let archived = archive_failed_store_with(path, |from, to| fs::rename(from, to))?;
+    if let Some(archived) = archived {
+        tracing::warn!(
+            store_path = %path.display(),
+            archived_path = %archived.display(),
+            "failed device identity store archived before replacement"
+        );
+        if let Err(error) = sync_parent(usable_parent(path)?) {
+            tracing::warn!(
+                store_path = %path.display(),
+                %error,
+                "failed identity-store archive was renamed but its directory could not be synced"
+            );
+        }
+    }
+    Ok(())
+}
+
+fn archive_failed_store_with(
+    path: &Path,
+    rename: impl FnOnce(&Path, &Path) -> io::Result<()>,
+) -> Result<Option<PathBuf>, RegistryError> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(io_error("inspect failed device identity store", &error)),
+    }
+
+    let parent = usable_parent(path)?;
+    let file_name = path
+        .file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .ok_or_else(|| invalid_store("device identity store has no UTF-8 filename"))?;
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let mut archive = None;
+    for suffix in 0..1_000 {
+        let suffix = if suffix == 0 {
+            String::new()
+        } else {
+            format!("-{suffix}")
+        };
+        let candidate = parent.join(format!("{file_name}.corrupt-{timestamp}{suffix}"));
+        match fs::symlink_metadata(&candidate) {
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                archive = Some(candidate);
+                break;
+            }
+            Err(error) => {
+                return Err(io_error("inspect device identity store archive", &error));
+            }
+        }
+    }
+    let archive = archive.ok_or_else(|| invalid_store("no unused archive filename available"))?;
+    rename(path, &archive)
+        .map_err(|error| io_error("archive failed device identity store", &error))?;
+    Ok(Some(archive))
 }
 
 fn save_store(
@@ -511,5 +645,34 @@ mod tests {
         let rendered = format!("{identity:?}");
         assert!(!rendered.contains("super-secret-value"));
         assert!(rendered.contains("dev-0001"));
+    }
+
+    #[test]
+    fn failed_archive_rename_is_reported_without_touching_the_original() {
+        // Catches swallowing a rename error in the discard path: mint must be
+        // able to stop before replacement while the original bytes remain.
+        let temp = tempfile::tempdir().expect("archive test temp dir");
+        let store_path = temp.path().join(DEVICE_IDENTITY_STORE_FILE);
+        let original = b"still potentially recoverable";
+        fs::write(&store_path, original).expect("write failed store");
+
+        let error = archive_failed_store_with(&store_path, |_, _| {
+            Err(io::Error::new(io::ErrorKind::PermissionDenied, "denied"))
+        })
+        .expect_err("archive rename failure was ignored");
+
+        assert!(matches!(
+            error,
+            RegistryError::Io {
+                operation: "archive failed device identity store",
+                ..
+            }
+        ));
+        assert_eq!(fs::read(&store_path).expect("read failed store"), original);
+        assert!(
+            fs::read_dir(temp.path())
+                .expect("read archive test dir")
+                .all(|entry| entry.expect("read archive entry").path() == store_path)
+        );
     }
 }

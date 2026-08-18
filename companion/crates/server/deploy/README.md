@@ -45,19 +45,34 @@ mode above is load-bearing.
 
 Provisioned identities survive normal process and host restarts. The registry
 lives at `$DESKMATE_CONFIG_DIR/device-identities.json`, alongside the per-device
-schema-v4 config files. It is a versioned JSON document containing the last
-issued device sequence, each `dev-NNNN` id, and the lowercase SHA-256 digest of
-that device's bearer token. The plaintext bearer token is never written there
-and cannot be recovered from the file; the server only returns it from
-`POST /v1/devices` at mint time.
+schema-v4 config files. It is a versioned JSON document containing each
+`dev-NNNN` id and the lowercase SHA-256 digest of that device's bearer token.
+Its historical schema-v1 field `next_sequence` stores the **last issued**
+sequence; minting adds one. That counterintuitive field name is retained so an
+already-written schema-v1 store remains compatible. The plaintext bearer token
+is never written there and cannot be recovered from the file; the server only
+returns it from `POST /v1/devices` at mint time.
 
 The server creates the registry with mode `0600` and replaces it atomically via
 a private temporary file, so a crash during a mint cannot leave a half-written
-registry. If the file is unreadable, corrupt, or truncated at startup, the
-server deliberately starts with an empty registry so the admin surface remains
-available for re-minting. Its warning says that the identity store failed to
-load, distinctly from the rate-limited ordinary "token is not recognized"
-warning, and neither message includes any token bytes.
+registry. The file is capped at 64 KiB (roughly 580 devices); an oversized file
+is treated as invalid rather than read without a bound.
+
+If the file is unreadable, corrupt, or truncated at startup, the server starts
+with no authenticated identities so it can still serve the admin surface. It
+does **not** silently overwrite the failed input: before the first replacement
+mint, it renames the existing file to
+`device-identities.json.corrupt-<unix-timestamp>` (adding a collision suffix if
+needed). If that rename fails, minting fails and leaves the original untouched.
+Only after the archive succeeds does the server atomically commit a replacement
+store. Inspect or copy the archived bytes before deciding they are irreparable.
+
+Because the failed store's sequence cannot be trusted, the server scans
+canonical `dev-NNNN.json` config filenames and assigns the replacement above
+their high-water mark. A replacement therefore cannot inherit an earlier
+device's id-keyed playlist. Both unknown-token warning variants -- ordinary
+unknown token and identity-store load failure -- share the same process-wide
+one-warning-per-minute limiter, and neither includes any token bytes.
 
 Back up `device-identities.json` with the rest of the state directory. Losing
 it does not expose the bearer tokens, but it does invalidate every existing

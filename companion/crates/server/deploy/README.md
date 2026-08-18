@@ -55,14 +55,16 @@ returns it from `POST /v1/devices` at mint time.
 
 The server creates the registry with mode `0600` and replaces it atomically via
 a private temporary file, so a crash during a mint cannot leave a half-written
-registry. The file is capped at 64 KiB (roughly 580 devices); an oversized file
-is treated as invalid rather than read without a bound.
+registry. The file is capped at 64 KiB, which is 492 devices -- 492 encode to 65,505 bytes
+and 493 to 65,638, so mint 493 fails on the encoded-size check rather than at
+any rounder number. An oversized file is treated as invalid rather than read
+without a bound.
 
 If the file is unreadable, corrupt, or truncated at startup, the server starts
 with no authenticated identities so it can still serve the admin surface. It
 does **not** silently overwrite the failed input: before the first replacement
 mint, it renames the existing file to
-`device-identities.json.corrupt-<unix-timestamp>` (adding a collision suffix if
+`device-identities.json.corrupt-<unix-time-in-nanoseconds>` (adding a collision suffix if
 needed). If that rename fails, minting fails and leaves the original untouched.
 Only after the archive succeeds does the server atomically commit a replacement
 store. Inspect or copy the archived bytes before deciding they are irreparable.

@@ -239,17 +239,21 @@ impl WebSocketRuntimeDevice {
 }
 
 /// Unlike the serial implementation, this object deliberately does not retain
-/// replay state across `connect()` calls. Today that is safe because app-core
-/// only marks it disconnected for `NoDevice`/`Transport`, and either result
-/// here means the socket actor is already gone and its owning link task is
-/// ending. Every real network reconnect therefore receives a fresh device, a
-/// fresh runtime, and `needs_full_sync = true`.
+/// replay state across `connect()` calls. Before the first successful full
+/// sync, app-core retries `connect()` after any `connect()` failure -- including
+/// `Timeout` while this socket actor is still alive. That path is safe because
+/// `needs_full_sync` starts `true` and `mark_disconnected` does not clear it,
+/// so a successful retry still runs the full synchronization.
 ///
-/// This reasoning is invalidated by any change that makes `connect()`
-/// retriable while the same WebSocket actor remains alive. In that design,
-/// `synchronize_pending` could observe `needs_full_sync = false`, skip the
-/// layout, and silently reopen the M2 multi-owner/power-reset hole unless this
-/// implementation first gains the trait's full replay contract.
+/// After a successful full sync sets `needs_full_sync = false`, app-core only
+/// disconnects for `NoDevice`/`Transport`; either result here means the socket
+/// actor is already gone and its owning link task is ending. Every real network
+/// reconnect therefore receives a fresh device and runtime with full sync
+/// required. This reasoning is invalidated by any change that permits retrying
+/// `connect()` on the same live actor after `needs_full_sync` became `false`.
+/// In that design, `synchronize_pending` could skip the layout and silently
+/// reopen the M2 multi-owner/power-reset hole unless this implementation first
+/// gains the trait's full replay contract.
 impl RuntimeDevice for WebSocketRuntimeDevice {
     fn connect(&mut self) -> Result<DeviceConnection, DeviceError> {
         let was_connected = self.connected;

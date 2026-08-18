@@ -2,6 +2,10 @@
 //! route. A missing header, a malformed header, and an unknown token are all
 //! indistinguishable to the caller: every one of them is a 401.
 
+use std::sync::LazyLock;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
+
 use axum::extract::FromRequestParts;
 use axum::http::StatusCode;
 use axum::http::request::Parts;
@@ -9,6 +13,46 @@ use axum::response::{IntoResponse, Response};
 
 use crate::ServerState;
 use crate::registry::DeviceId;
+
+/// Globally caps the restart-diagnostic warning at one line per minute. A
+/// single atomic timestamp has constant memory and avoids a per-source map
+/// whose attacker-controlled cardinality would create a second resource
+/// problem while trying to solve the first one.
+const UNKNOWN_AUTH_WARNING_INTERVAL_SECS: u64 = 60;
+static UNKNOWN_AUTH_WARNING_LIMITER: UnknownAuthWarningLimiter = UnknownAuthWarningLimiter::new();
+static UNKNOWN_AUTH_WARNING_CLOCK: LazyLock<Instant> = LazyLock::new(Instant::now);
+
+struct UnknownAuthWarningLimiter {
+    last_logged_elapsed_seconds: AtomicU64,
+}
+
+impl UnknownAuthWarningLimiter {
+    const fn new() -> Self {
+        Self {
+            last_logged_elapsed_seconds: AtomicU64::new(u64::MAX),
+        }
+    }
+
+    fn should_log(&self, now_elapsed_seconds: u64) -> bool {
+        let mut previous = self.last_logged_elapsed_seconds.load(Ordering::Relaxed);
+        loop {
+            if previous != u64::MAX
+                && now_elapsed_seconds.saturating_sub(previous) < UNKNOWN_AUTH_WARNING_INTERVAL_SECS
+            {
+                return false;
+            }
+            match self.last_logged_elapsed_seconds.compare_exchange(
+                previous,
+                now_elapsed_seconds,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return true,
+                Err(current) => previous = current,
+            }
+        }
+    }
+}
 
 /// Rejection returned for any bearer-auth failure. Deliberately featureless:
 /// the caller learns nothing about *why* authentication failed beyond "try a
@@ -42,14 +86,20 @@ impl FromRequestParts<ServerState> for AuthenticatedDevice {
             // Never include the presented token. This wording makes the V2
             // registry's restart behavior diagnosable without weakening the
             // deliberately featureless 401 returned to an internet caller.
-            tracing::warn!(
-                "device authentication failed: bearer token is not recognized; \
-                 the in-memory device registry may have been cleared by a server restart"
-            );
+            if UNKNOWN_AUTH_WARNING_LIMITER.should_log(monotonic_time_seconds()) {
+                tracing::warn!(
+                    "device authentication failed: bearer token is not recognized; \
+                     the in-memory device registry may have been cleared by a server restart"
+                );
+            }
             return Err(AuthError);
         };
         Ok(Self { device_id })
     }
+}
+
+fn monotonic_time_seconds() -> u64 {
+    UNKNOWN_AUTH_WARNING_CLOCK.elapsed().as_secs()
 }
 
 /// Extracts the token from a well-formed `Authorization: Bearer <token>`
@@ -73,7 +123,7 @@ mod tests {
     use axum::http::HeaderValue;
     use axum::http::header::AUTHORIZATION;
 
-    use super::bearer_token;
+    use super::{UNKNOWN_AUTH_WARNING_INTERVAL_SECS, UnknownAuthWarningLimiter, bearer_token};
 
     fn parts_with_authorization(value: Option<&str>) -> axum::http::request::Parts {
         let mut request = axum::http::Request::new(());
@@ -115,5 +165,17 @@ mod tests {
     fn rejects_a_value_shorter_than_the_scheme() {
         let parts = parts_with_authorization(Some("Bear"));
         assert_eq!(bearer_token(&parts), None);
+    }
+
+    #[test]
+    fn unknown_auth_warnings_are_limited_process_wide() {
+        // Catches logging every rejected public request: only the first call in
+        // a window may emit, while the boundary opens the diagnostic again.
+        // Zero is the real first value the process-monotonic clock can return.
+        let limiter = UnknownAuthWarningLimiter::new();
+        assert!(limiter.should_log(0));
+        assert!(!limiter.should_log(0));
+        assert!(!limiter.should_log(UNKNOWN_AUTH_WARNING_INTERVAL_SECS - 1));
+        assert!(limiter.should_log(UNKNOWN_AUTH_WARNING_INTERVAL_SECS));
     }
 }

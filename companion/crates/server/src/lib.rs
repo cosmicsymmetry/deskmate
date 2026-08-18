@@ -78,6 +78,9 @@ struct StateInner {
     admin_token: String,
     firmware: FirmwareCatalog,
     configs: store::DeviceConfigStores,
+    /// Keeps the dedicated config root alive for [`ServerState::in_memory`].
+    /// Production paths are operator-owned and leave this as `None`.
+    _config_temp_dir: Option<tempfile::TempDir>,
     live_links: Mutex<HashMap<registry::DeviceId, Arc<LiveLink>>>,
     /// Bounds concurrent `/v1/device/link` connections. `Arc`-wrapped
     /// separately from `StateInner` because `Semaphore::try_acquire_owned`
@@ -89,12 +92,22 @@ struct StateInner {
 impl ServerState {
     #[must_use]
     pub fn new(admin_token: String, firmware: FirmwareCatalog, config_directory: PathBuf) -> Self {
+        Self::with_config_temp_dir(admin_token, firmware, config_directory, None)
+    }
+
+    fn with_config_temp_dir(
+        admin_token: String,
+        firmware: FirmwareCatalog,
+        config_directory: PathBuf,
+        config_temp_dir: Option<tempfile::TempDir>,
+    ) -> Self {
         Self {
             inner: Arc::new(StateInner {
                 registry: Registry::new(),
                 admin_token,
                 firmware,
                 configs: store::DeviceConfigStores::new(config_directory),
+                _config_temp_dir: config_temp_dir,
                 live_links: Mutex::new(HashMap::new()),
                 link_slots: Arc::new(tokio::sync::Semaphore::new(
                     device_link::MAX_CONCURRENT_LINKS,
@@ -104,19 +117,19 @@ impl ServerState {
     }
 
     /// A state suitable for tests: an empty registry, a fixed admin token,
-    /// and a firmware catalog pinned at version `1.0.0`.
+    /// a firmware catalog pinned at version `1.0.0`, and independent owned
+    /// temp roots for firmware and device configuration.
     #[must_use]
     pub fn in_memory() -> Self {
         let firmware = FirmwareCatalog::in_memory();
-        let config_directory = firmware
-            .directory()
-            .parent()
-            .expect("in-memory firmware directory has an owned parent")
-            .join("configs");
-        Self::new(
+        let config_temp_dir = tempfile::tempdir()
+            .expect("failed to create a dedicated temp config directory for server state");
+        let config_directory = config_temp_dir.path().to_path_buf();
+        Self::with_config_temp_dir(
             "in-memory-admin-token".to_string(),
             firmware,
             config_directory,
+            Some(config_temp_dir),
         )
     }
 
@@ -311,18 +324,35 @@ mod tests {
 
     #[test]
     fn verify_admin_token_accepts_the_real_token() {
-        let firmware = FirmwareCatalog::in_memory();
-        let config_directory = firmware.directory().parent().unwrap().join("configs");
-        let state = ServerState::new("the-real-token".to_string(), firmware, config_directory);
-        assert!(state.verify_admin_token("the-real-token"));
+        let state = ServerState::in_memory();
+        assert!(state.verify_admin_token("in-memory-admin-token"));
     }
 
     #[test]
     fn verify_admin_token_rejects_a_wrong_token() {
-        let firmware = FirmwareCatalog::in_memory();
-        let config_directory = firmware.directory().parent().unwrap().join("configs");
-        let state = ServerState::new("the-real-token".to_string(), firmware, config_directory);
+        let state = ServerState::in_memory();
         assert!(!state.verify_admin_token("not-the-token"));
         assert!(!state.verify_admin_token(""));
+    }
+
+    #[test]
+    fn in_memory_config_root_is_independent_from_firmware_storage() {
+        // Catches reintroducing the production defect's path derivation in the
+        // test constructor, where it would teach callers the wrong pattern.
+        let state = ServerState::in_memory();
+        let identity = state.registry().mint();
+        let config_path = state
+            .configs()
+            .for_device(&identity.device_id)
+            .store
+            .path()
+            .to_path_buf();
+        let firmware_storage = state
+            .firmware()
+            .directory()
+            .parent()
+            .expect("in-memory firmware has an owned temp root");
+
+        assert!(!config_path.starts_with(firmware_storage));
     }
 }

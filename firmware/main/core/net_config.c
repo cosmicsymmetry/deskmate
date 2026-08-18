@@ -8,6 +8,15 @@ net_config_error_t net_config_validate(const protocol_network_config_t *config)
         return NET_CONFIG_ERR_MISSING_SSID;
     }
 
+    // Applies to every tier, not just networked: local tier still joins
+    // WiFi for SNTP and consumes this same field (wifi_station_bringup()),
+    // so an out-of-range offset is a real defect there too, not only in a
+    // networked config.
+    if (config->utc_offset_minutes < PROTOCOL_MIN_UTC_OFFSET_MINUTES ||
+        config->utc_offset_minutes > PROTOCOL_MAX_UTC_OFFSET_MINUTES) {
+        return NET_CONFIG_ERR_INVALID_UTC_OFFSET;
+    }
+
     switch (config->tier) {
         case PROTOCOL_TIER_LOCAL:
             return NET_CONFIG_OK;

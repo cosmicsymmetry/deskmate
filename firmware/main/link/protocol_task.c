@@ -257,10 +257,7 @@ static void transmit_status(protocol_context_t *context, uint32_t request_id)
     // memset above -- Task 11 populates it once OTA exists.
     status->wifi_state = wifi_station_state();
     status->wifi_rssi = wifi_station_rssi();
-    const char *ip = wifi_station_ip();
-    size_t ip_length = strnlen(ip, PROTOCOL_MAX_IP_LENGTH);
-    memcpy(status->ip, ip, ip_length);
-    status->ip[ip_length] = '\0';
+    wifi_station_copy_ip(status->ip, sizeof(status->ip));
     status->tier = net_store_current_tier();
     transmit(context, request_id, reply);
 }
@@ -519,6 +516,8 @@ static const char *network_config_error_diagnostic(net_config_error_t error)
             return "server URL must use wss://";
         case NET_CONFIG_ERR_INVALID_TIER:
             return "invalid tier";
+        case NET_CONFIG_ERR_INVALID_UTC_OFFSET:
+            return "utc offset out of range";
         case NET_CONFIG_OK:
         default:
             return "invalid network config";
@@ -830,6 +829,11 @@ static void protocol_task(void *argument)
                                   frame_callback, context);
         }
         process_device_events(context);
+        // Pumps the UI-facing half of an SNTP time sync. Must run on this
+        // task (see wifi_station_poll()'s doc comment) -- the SNTP
+        // notification callback runs on the unpinned lwIP tcpip task, which
+        // is not safe to let touch ui_runtime's spinlocks directly.
+        wifi_station_poll();
         if (link_state_poll(&context->link, uptime_ms())) {
             ui_runtime_set_online(false);
             ESP_LOGI(TAG, "link standalone after timeout");

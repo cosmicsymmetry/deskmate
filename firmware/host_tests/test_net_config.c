@@ -82,6 +82,40 @@ static void test_local_tier_without_ssid_is_not_an_error(void)
     assert(net_config_validate(&config) == NET_CONFIG_OK);
 }
 
+// A corrupt or malicious utc_offset_minutes must not reach the standalone
+// clock unfiltered. Checked regardless of tier: local tier still joins WiFi
+// for SNTP and applies this same field via wifi_station_bringup().
+static void test_out_of_range_utc_offset_on_networked_config_falls_back_to_local(void)
+{
+    protocol_network_config_t config = valid_networked();
+    config.utc_offset_minutes = 841;
+    assert(net_config_validate(&config) == NET_CONFIG_ERR_INVALID_UTC_OFFSET);
+    assert(net_config_effective_tier(&config) == PROTOCOL_TIER_LOCAL);
+}
+
+static void test_out_of_range_utc_offset_on_local_config_is_rejected(void)
+{
+    protocol_network_config_t config;
+    memset(&config, 0, sizeof(config));
+    config.tier = PROTOCOL_TIER_LOCAL;
+    config.utc_offset_minutes = -841;
+    assert(net_config_validate(&config) == NET_CONFIG_ERR_INVALID_UTC_OFFSET);
+    assert(net_config_effective_tier(&config) == PROTOCOL_TIER_LOCAL);
+}
+
+// The +/-840 boundary values themselves (the same range the USB TimeSync
+// path enforces) must still validate.
+static void test_boundary_utc_offsets_are_valid(void)
+{
+    protocol_network_config_t config;
+    memset(&config, 0, sizeof(config));
+    config.tier = PROTOCOL_TIER_LOCAL;
+    config.utc_offset_minutes = 840;
+    assert(net_config_validate(&config) == NET_CONFIG_OK);
+    config.utc_offset_minutes = -840;
+    assert(net_config_validate(&config) == NET_CONFIG_OK);
+}
+
 // A corrupted or half-written NVS record could produce a tier byte that is
 // neither LOCAL nor NETWORKED. That must not validate OK, and it must not be
 // handed back verbatim as the effective tier -- it degrades to local like any
@@ -158,6 +192,9 @@ int main(void)
     test_local_tier_without_ssid_is_not_an_error();
     test_out_of_range_tier_on_otherwise_valid_config_degrades_to_local();
     test_out_of_range_tier_on_empty_config_degrades_to_local();
+    test_out_of_range_utc_offset_on_networked_config_falls_back_to_local();
+    test_out_of_range_utc_offset_on_local_config_is_rejected();
+    test_boundary_utc_offsets_are_valid();
     test_null_config_is_handled_without_crashing();
     test_usb_message_gate_in_networked_tier();
     test_usb_message_gate_in_local_tier_allows_everything();

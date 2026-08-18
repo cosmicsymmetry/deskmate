@@ -27,12 +27,17 @@ static const char *TAG = "wifi_station";
 // read, matching this codebase's existing convention for a small enum/scalar
 // shared between the LVGL/protocol tasks and another context (see
 // clock_screen.c's s_utc_offset_minutes).
-// Zero-initialized statics already match PROTOCOL_WIFI_DOWN / 0 / false, so
-// no explicit initializer is needed (and none is used elsewhere in this
+// Zero-initialized statics already match PROTOCOL_WIFI_DOWN / false, so no
+// explicit initializer is needed (and none is used elsewhere in this
 // codebase for the same atomic pattern -- see clock_screen.c).
 static atomic_int s_wifi_state;
-static atomic_int s_wifi_rssi;
 static atomic_bool s_time_synced;
+
+// Set by time_sync_notification_cb() (the lwIP tcpip task) and cleared by
+// wifi_station_poll() (the protocol task). This is the entire hand-off: the
+// tcpip task never calls ui_runtime_set_utc_offset_minutes() itself. See the
+// header comment on wifi_station_poll() for why.
+static atomic_bool s_offset_apply_pending;
 
 // s_ip is mutated by the event-loop task (on IP_EVENT_STA_GOT_IP /
 // WIFI_EVENT_STA_DISCONNECTED) and read by the protocol task when it builds
@@ -42,7 +47,6 @@ static atomic_bool s_time_synced;
 // ui_runtime.c's lock_publisher()/unlock_publisher() for the same pattern).
 static atomic_flag s_ip_lock = ATOMIC_FLAG_INIT;
 static char s_ip[PROTOCOL_MAX_IP_LENGTH + 1U];
-static char s_ip_snapshot[PROTOCOL_MAX_IP_LENGTH + 1U];
 
 // Loaded once at wifi_station_bringup() and never a secret; only the SSID/PSK
 // are sensitive and neither is retained beyond building the driver's config.
@@ -111,18 +115,38 @@ static void reconnect_timer_cb(void *arg)
                           memory_order_relaxed);
     esp_err_t result = esp_wifi_connect();
     if (result != ESP_OK) {
+        // A synchronous failure here means no association was even
+        // attempted, so no WIFI_EVENT_STA_DISCONNECTED will follow to
+        // schedule the next retry -- without re-arming here, the state
+        // machine would silently stall in CONNECTING until reboot.
         ESP_LOGW(TAG, "reconnect attempt failed to start: %s",
                 esp_err_to_name(result));
+        schedule_reconnect();
     }
 }
 
 static void time_sync_notification_cb(struct timeval *tv)
 {
     (void)tv;
+    // This callback runs on the lwIP tcpip task (unpinned, priority 18) --
+    // see wifi_station_poll()'s doc comment for why it must not touch
+    // ui_runtime directly. Only atomics are touched here; the actual UI call
+    // happens later, on the protocol task, via wifi_station_poll().
     atomic_store_explicit(&s_time_synced, true, memory_order_relaxed);
+    atomic_store_explicit(&s_offset_apply_pending, true, memory_order_relaxed);
+    ESP_LOGI(TAG, "SNTP time sync complete");
+}
+
+void wifi_station_poll(void)
+{
+    bool pending = atomic_exchange_explicit(&s_offset_apply_pending, false,
+                                            memory_order_relaxed);
+    if (!pending) {
+        return;
+    }
     // The system clock now holds UTC: SNTP calls settimeofday() with the raw
-    // server time here, exactly as protocol_task.c's dispatch_time_sync()
-    // does for a USB host's TimeSync message. Applying the provisioned
+    // server time, exactly as protocol_task.c's dispatch_time_sync() does
+    // for a USB host's TimeSync message. Applying the provisioned
     // utc_offset_minutes happens only at this UI-facing call -- it is never
     // folded into the system clock itself -- so this call and a later (or
     // earlier) USB TimeSync's own ui_runtime_set_utc_offset_minutes() call
@@ -130,7 +154,6 @@ static void time_sync_notification_cb(struct timeval *tv)
     // whichever source synced most recently wins, and neither can double-
     // apply an offset because clock_source_now() is always pure UTC.
     ui_runtime_set_utc_offset_minutes(s_utc_offset_minutes);
-    ESP_LOGI(TAG, "SNTP time sync complete");
 }
 
 static void start_sntp_if_needed(void)
@@ -151,6 +174,16 @@ static void start_sntp_if_needed(void)
 // either way. This is a report, not a terminal state: retries continue on
 // the same backoff regardless of reason, and the next WIFI_EVENT_STA_START
 // or IP_EVENT_STA_GOT_IP clears it back to CONNECTING/CONNECTED as normal.
+//
+// The last three cases are written as raw integer literals rather than the
+// symbolic WIFI_REASON_NO_AP_FOUND_{W_COMPATIBLE_SECURITY,
+// IN_AUTHMODE_THRESHOLD,IN_RSSI_THRESHOLD} names: those are enum constants,
+// not preprocessor macros, so #ifdef cannot detect whether an older
+// esp_wifi_types_generic.h defines them -- an #ifdef guard on an enumerator
+// is always false regardless of whether the symbol exists. Using the
+// literal values (stable across IDF releases per Espressif's reason-code
+// table) keeps this switch buildable against any esp_wifi header, old or
+// new, without any preprocessor conditional.
 static bool disconnect_reason_is_credential_failure(uint8_t reason)
 {
     switch (reason) {
@@ -159,6 +192,9 @@ static bool disconnect_reason_is_credential_failure(uint8_t reason)
     case WIFI_REASON_NO_AP_FOUND:
     case WIFI_REASON_AUTH_FAIL:
     case WIFI_REASON_HANDSHAKE_TIMEOUT:
+    case 210: // WIFI_REASON_NO_AP_FOUND_W_COMPATIBLE_SECURITY
+    case 211: // WIFI_REASON_NO_AP_FOUND_IN_AUTHMODE_THRESHOLD
+    case 212: // WIFI_REASON_NO_AP_FOUND_IN_RSSI_THRESHOLD
         return true;
     default:
         return false;
@@ -173,8 +209,12 @@ static void wifi_event_handler(void *handler_arg, esp_event_base_t base,
     if (event_id == WIFI_EVENT_STA_START) {
         esp_err_t result = esp_wifi_connect();
         if (result != ESP_OK) {
+            // Same give-up risk as reconnect_timer_cb(): a synchronous
+            // failure here means no WIFI_EVENT_STA_DISCONNECTED is coming to
+            // schedule a retry, so this must arm the backoff itself.
             ESP_LOGW(TAG, "initial connect failed to start: %s",
                     esp_err_to_name(result));
+            schedule_reconnect();
         }
     } else if (event_id == WIFI_EVENT_STA_DISCONNECTED) {
         const wifi_event_sta_disconnected_t *disconnected =
@@ -207,21 +247,13 @@ static void ip_event_handler(void *handler_arg, esp_event_base_t base,
     // from 1s again rather than continuing to climb.
     s_reconnect_delay_ms = WIFI_RECONNECT_MIN_DELAY_MS;
 
-    wifi_ap_record_t ap_info;
-    memset(&ap_info, 0, sizeof(ap_info));
-    int8_t rssi = 0;
-    if (esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK) {
-        rssi = ap_info.rssi;
-    }
-    atomic_store_explicit(&s_wifi_rssi, rssi, memory_order_relaxed);
-
     char ip_text[PROTOCOL_MAX_IP_LENGTH + 1U];
     esp_ip4addr_ntoa(&event->ip_info.ip, ip_text, sizeof(ip_text));
     set_ip(ip_text);
 
     atomic_store_explicit(&s_wifi_state, PROTOCOL_WIFI_CONNECTED,
                           memory_order_relaxed);
-    ESP_LOGI(TAG, "WiFi connected, ip=%s rssi=%d", ip_text, (int)rssi);
+    ESP_LOGI(TAG, "WiFi connected, ip=%s", ip_text);
 
     start_sntp_if_needed();
 }
@@ -262,6 +294,18 @@ esp_err_t wifi_station_bringup(void)
         return result;
     }
 
+    // Factory reset (net_store_erase()) only clears our own NVS namespace.
+    // esp_wifi's default WIFI_STORAGE_FLASH would otherwise persist the PSK
+    // into the driver's own nvs.net80211 namespace, which survives that
+    // reset -- "factory reset" must actually mean no credentials remain on
+    // flash. We already own persistence ourselves (net_store), so RAM-only
+    // driver storage is strictly correct here, not just cheaper.
+    result = esp_wifi_set_storage(WIFI_STORAGE_RAM);
+    if (result != ESP_OK) {
+        memset(&config, 0, sizeof(config));
+        return result;
+    }
+
     result = esp_event_handler_instance_register(
         WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL, NULL);
     if (result != ESP_OK) {
@@ -293,14 +337,21 @@ esp_err_t wifi_station_bringup(void)
 
     wifi_config_t wifi_config;
     memset(&wifi_config, 0, sizeof(wifi_config));
+    // Capped at sizeof(field) - 1, not sizeof(field): wifi_sta_config_t has
+    // no ssid_len companion field, so a legal 32-character SSID filling the
+    // 32-byte ssid[] entirely would leave no NUL before the password[] bytes
+    // that follow it in the struct. Whether the closed-source net80211 blob
+    // bounds its own read of ssid[] is unverifiable from source, so leaving
+    // at least one zero byte (already present from the memset above) is
+    // cheap insurance. Same reasoning for the 64-byte password[].
     size_t ssid_len = strnlen(config.ssid, sizeof(config.ssid) - 1U);
-    if (ssid_len > sizeof(wifi_config.sta.ssid)) {
-        ssid_len = sizeof(wifi_config.sta.ssid);
+    if (ssid_len > sizeof(wifi_config.sta.ssid) - 1U) {
+        ssid_len = sizeof(wifi_config.sta.ssid) - 1U;
     }
     memcpy(wifi_config.sta.ssid, config.ssid, ssid_len);
     size_t psk_len = strnlen(config.psk, sizeof(config.psk) - 1U);
-    if (psk_len > sizeof(wifi_config.sta.password)) {
-        psk_len = sizeof(wifi_config.sta.password);
+    if (psk_len > sizeof(wifi_config.sta.password) - 1U) {
+        psk_len = sizeof(wifi_config.sta.password) - 1U;
     }
     memcpy(wifi_config.sta.password, config.psk, psk_len);
 
@@ -334,15 +385,33 @@ protocol_wifi_state_t wifi_station_state(void)
 
 int8_t wifi_station_rssi(void)
 {
-    return (int8_t)atomic_load_explicit(&s_wifi_rssi, memory_order_relaxed);
+    // Sampled live rather than cached from the join-time event: a cached
+    // value would keep reporting the last-seen RSSI while CONNECTING or
+    // FAILED with no live link at all, which defeats the "wrong password
+    // versus out of range" judgement PROTOCOL_WIFI_FAILED exists to enable.
+    // esp_wifi_sta_get_ap_info() is a thread-safe public esp_wifi API and
+    // itself returns ESP_ERR_WIFI_NOT_CONNECT (among other errors) whenever
+    // there is no current association, so the "not connected" case falls
+    // out of the same call rather than needing separate bookkeeping.
+    wifi_ap_record_t ap_info;
+    memset(&ap_info, 0, sizeof(ap_info));
+    if (esp_wifi_sta_get_ap_info(&ap_info) != ESP_OK) {
+        return 0;
+    }
+    return ap_info.rssi;
 }
 
-const char *wifi_station_ip(void)
+void wifi_station_copy_ip(char *out, size_t len)
 {
+    if (out == NULL || len == 0U) {
+        return;
+    }
     lock_ip();
-    memcpy(s_ip_snapshot, s_ip, sizeof(s_ip_snapshot));
+    size_t source_length = strnlen(s_ip, sizeof(s_ip));
+    size_t copy_length = (source_length > len - 1U) ? len - 1U : source_length;
+    memcpy(out, s_ip, copy_length);
+    out[copy_length] = '\0';
     unlock_ip();
-    return s_ip_snapshot;
 }
 
 bool wifi_station_time_synced(void)

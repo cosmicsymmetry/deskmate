@@ -22,10 +22,16 @@ typedef enum {
  * utc_offset_minutes is bounds-checked (PROTOCOL_MIN/MAX_UTC_OFFSET_MINUTES,
  * the same +/-840-minute range the USB TimeSync path already enforces)
  * regardless of tier, since local tier still joins WiFi for SNTP and applies
- * this same field -- an unchecked corrupt stored value could otherwise shift
- * the standalone clock by up to a full int16_t range. This is the sole gate:
- * rejected here means dispatch_network_config() never persists it, so a bad
- * value cannot reach NVS through the one production write path.
+ * this same field. This check gates the write path -- a NETWORK_CONFIG
+ * message with a bad offset is rejected before dispatch_network_config()
+ * ever calls net_store_save() -- but it is not the only thing standing
+ * between a corrupt value and the clock: protocol_message.c's CBOR decoder
+ * already rejects an out-of-range offset before this function even runs,
+ * and net_store_load() independently sanitises whatever a corrupt/bit-
+ * flipped NVS record returns (the read path this function cannot see,
+ * since a value can reach flash before this check existed or via storage
+ * corruption after). Belt-and-braces on the write side; net_store_load()
+ * is the gate that actually matters for already-stored state.
  */
 net_config_error_t net_config_validate(const protocol_network_config_t *config);
 

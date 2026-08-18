@@ -84,7 +84,22 @@ void net_store_load(protocol_network_config_t *out)
     int16_t utc_offset = 0;
     esp_err_t offset_result = nvs_get_i16(handle, KEY_UTC_OFFSET, &utc_offset);
     if (offset_result == ESP_OK) {
-        out->utc_offset_minutes = utc_offset;
+        // net_config_validate() only gates the write path (dispatch_
+        // network_config() calls it before net_store_save()); it cannot see
+        // a value that reached flash before that check existed, or one a
+        // corrupt/bit-flipped NVS record now returns. This is the read
+        // path, so it is where an out-of-range stored value must be
+        // sanitised rather than handed to wifi_station_bringup() verbatim --
+        // otherwise a corrupt int16_t could shift the standalone clock by
+        // up to +/-546 hours. UTC (0) is the honest fallback: the zone is
+        // unreadable, not the time itself.
+        if (utc_offset < PROTOCOL_MIN_UTC_OFFSET_MINUTES ||
+            utc_offset > PROTOCOL_MAX_UTC_OFFSET_MINUTES) {
+            ESP_LOGW(TAG, "utc_offset_minutes out of range; using UTC");
+            out->utc_offset_minutes = 0;
+        } else {
+            out->utc_offset_minutes = utc_offset;
+        }
     } else {
         if (offset_result != ESP_ERR_NVS_NOT_FOUND) {
             ESP_LOGW(TAG, "failed to read utc_offset_minutes: %s",

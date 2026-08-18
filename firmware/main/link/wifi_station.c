@@ -5,6 +5,7 @@
 #include <sys/time.h>
 
 #include "esp_event.h"
+#include "esp_idf_version.h"
 #include "esp_log.h"
 #include "esp_netif.h"
 #include "esp_random.h"
@@ -153,7 +154,15 @@ void wifi_station_poll(void)
     // simply overwrite the same display-only offset rather than compounding:
     // whichever source synced most recently wins, and neither can double-
     // apply an offset because clock_source_now() is always pure UTC.
-    ui_runtime_set_utc_offset_minutes(s_utc_offset_minutes);
+    if (!ui_runtime_set_utc_offset_minutes(s_utc_offset_minutes)) {
+        // The publish was dropped (e.g. a momentarily full UI command
+        // queue). The atomic_exchange above already consumed the pending
+        // flag, so without this the offset would silently wait for the
+        // *next* SNTP sync -- roughly an hour -- to be applied at all.
+        // Re-arm it so the next protocol-task tick retries.
+        atomic_store_explicit(&s_offset_apply_pending, true,
+                              memory_order_relaxed);
+    }
 }
 
 static void start_sntp_if_needed(void)
@@ -175,15 +184,18 @@ static void start_sntp_if_needed(void)
 // the same backoff regardless of reason, and the next WIFI_EVENT_STA_START
 // or IP_EVENT_STA_GOT_IP clears it back to CONNECTING/CONNECTED as normal.
 //
-// The last three cases are written as raw integer literals rather than the
-// symbolic WIFI_REASON_NO_AP_FOUND_{W_COMPATIBLE_SECURITY,
-// IN_AUTHMODE_THRESHOLD,IN_RSSI_THRESHOLD} names: those are enum constants,
-// not preprocessor macros, so #ifdef cannot detect whether an older
-// esp_wifi_types_generic.h defines them -- an #ifdef guard on an enumerator
-// is always false regardless of whether the symbol exists. Using the
-// literal values (stable across IDF releases per Espressif's reason-code
-// table) keeps this switch buildable against any esp_wifi header, old or
-// new, without any preprocessor conditional.
+// The three IDF-5.5 codes below (WIFI_REASON_NO_AP_FOUND_{W_COMPATIBLE_
+// SECURITY,IN_AUTHMODE_THRESHOLD,IN_RSSI_THRESHOLD}) are wifi_err_reason_t
+// enum constants, not preprocessor macros, so #ifdef cannot detect whether
+// an older esp_wifi_types_generic.h defines them -- an #ifdef guard on an
+// enumerator is always false regardless of whether the symbol exists, which
+// would silently compile away the intended check rather than fail loud.
+// ESP_IDF_VERSION_VAL, by contrast, is a real macro (esp_idf_version.h), so
+// gating on it gets a genuine compile-time cross-check of the symbolic
+// names on IDF >=5.5 (this project targets 5.5.5) while still compiling
+// against the project's idf: '>=5.3' floor: below 5.5 the block simply
+// compiles out and no classification is needed for codes that release
+// doesn't emit.
 static bool disconnect_reason_is_credential_failure(uint8_t reason)
 {
     switch (reason) {
@@ -192,10 +204,13 @@ static bool disconnect_reason_is_credential_failure(uint8_t reason)
     case WIFI_REASON_NO_AP_FOUND:
     case WIFI_REASON_AUTH_FAIL:
     case WIFI_REASON_HANDSHAKE_TIMEOUT:
-    case 210: // WIFI_REASON_NO_AP_FOUND_W_COMPATIBLE_SECURITY
-    case 211: // WIFI_REASON_NO_AP_FOUND_IN_AUTHMODE_THRESHOLD
-    case 212: // WIFI_REASON_NO_AP_FOUND_IN_RSSI_THRESHOLD
         return true;
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 5, 0)
+    case WIFI_REASON_NO_AP_FOUND_W_COMPATIBLE_SECURITY:
+    case WIFI_REASON_NO_AP_FOUND_IN_AUTHMODE_THRESHOLD:
+    case WIFI_REASON_NO_AP_FOUND_IN_RSSI_THRESHOLD:
+        return true;
+#endif
     default:
         return false;
     }

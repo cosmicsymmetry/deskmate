@@ -409,6 +409,12 @@ mod tests {
             ui_queue_high_water: 0,
             config_revision: 0,
             latest_interrupt_token: 0,
+            tier: protocol::Tier::Local,
+            wifi_state: protocol::WifiState::Down,
+            wifi_rssi: 0,
+            ip: String::new(),
+            ota_state: protocol::OtaState::Idle,
+            last_network_error: None,
         }
     }
 

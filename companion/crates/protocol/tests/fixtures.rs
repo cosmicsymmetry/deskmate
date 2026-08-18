@@ -37,6 +37,9 @@ fn valid_golden_frames_decode() {
         "error_unsupported_size.bin",
         "error_config_too_large.bin",
         "push_unknown_field.bin",
+        "network_config.bin",
+        "factory_reset.bin",
+        "status_response_networked.bin",
     ] {
         let frame =
             decode_wire_frame(&fixture(name)).unwrap_or_else(|error| panic!("{name}: {error}"));

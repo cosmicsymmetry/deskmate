@@ -14,6 +14,7 @@ pub const CAPABILITY_EXTENDED_TEMPLATES: u64 = 1 << 3;
 pub const CAPABILITY_HOST_TAP_ACTIONS: u64 = 1 << 4;
 pub const CAPABILITY_ASSET_TRANSFER: u64 = 1 << 5;
 pub const CAPABILITY_FIRMWARE_UPDATE: u64 = 1 << 6;
+pub const CAPABILITY_NETWORKING: u64 = 1 << 7;
 pub const LEGACY_CAPABILITIES: u64 = CAPABILITY_CORE_WIDGETS;
 pub const CURRENT_CAPABILITIES: u64 =
     CAPABILITY_CORE_WIDGETS | CAPABILITY_CONFIG_ROTATION | CAPABILITY_EXTENDED_TEMPLATES;
@@ -32,6 +33,12 @@ pub const MIN_UNIX_SECONDS: i64 = 1_577_836_800;
 pub const MAX_UNIX_SECONDS: i64 = 4_102_444_800;
 pub const MIN_UTC_OFFSET_MINUTES: i16 = -840;
 pub const MAX_UTC_OFFSET_MINUTES: i16 = 840;
+pub const MAX_SSID_LEN: usize = 32;
+pub const MAX_PSK_LEN: usize = 64;
+pub const MAX_SERVER_URL_LEN: usize = 128;
+pub const MAX_DEVICE_TOKEN_LEN: usize = 128;
+pub const MAX_DEVICE_ID_LEN: usize = 32;
+pub const MAX_IP_LEN: usize = 15;
 
 pub const TYPE_STATUS_REQUEST: u8 = 1;
 pub const TYPE_STATUS_RESPONSE: u8 = 2;
@@ -45,6 +52,8 @@ pub const TYPE_APPLY_CONFIG: u8 = 9;
 pub const TYPE_ACTIVATE_SCREEN: u8 = 10;
 pub const TYPE_TRIGGER_INTERRUPT: u8 = 11;
 pub const TYPE_DEVICE_EVENT: u8 = 12;
+pub const TYPE_NETWORK_CONFIG: u8 = 13;
+pub const TYPE_FACTORY_RESET: u8 = 14;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -97,6 +106,43 @@ pub enum EventAction {
     NavigatePrevious = 3,
     NavigateNext = 4,
     DismissInterrupt = 5,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum Tier {
+    Local = 0,
+    Networked = 1,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum WifiState {
+    Down = 0,
+    Connecting = 1,
+    Connected = 2,
+    Failed = 3,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum OtaState {
+    Idle = 0,
+    Checking = 1,
+    Downloading = 2,
+    PendingVerify = 3,
+    Failed = 4,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NetworkConfig {
+    pub ssid: String,
+    pub psk: String,
+    pub server_url: String,
+    pub device_id: String,
+    pub token: String,
+    pub utc_offset_minutes: i16,
+    pub tier: Tier,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -202,6 +248,12 @@ pub struct StatusResponse {
     pub ui_queue_high_water: u32,
     pub config_revision: u32,
     pub latest_interrupt_token: u32,
+    pub tier: Tier,
+    pub wifi_state: WifiState,
+    pub wifi_rssi: i8,
+    pub ip: String,
+    pub ota_state: OtaState,
+    pub last_network_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -226,6 +278,7 @@ pub enum ErrorCode {
     UnsupportedTemplate = 12,
     UnsupportedSizeClass = 13,
     ConfigTooLarge = 14,
+    WrongTier = 15,
 }
 
 impl TryFrom<u16> for ErrorCode {
@@ -247,6 +300,7 @@ impl TryFrom<u16> for ErrorCode {
             12 => Ok(Self::UnsupportedTemplate),
             13 => Ok(Self::UnsupportedSizeClass),
             14 => Ok(Self::ConfigTooLarge),
+            15 => Ok(Self::WrongTier),
             _ => Err(MessageError::InvalidValue("error code")),
         }
     }
@@ -272,6 +326,8 @@ pub enum Message {
     ActivateScreen(ActivateScreen),
     TriggerInterrupt(TriggerInterrupt),
     DeviceEvent(DeviceEvent),
+    NetworkConfig(NetworkConfig),
+    FactoryReset,
 }
 
 impl Message {
@@ -290,6 +346,8 @@ impl Message {
             Self::ActivateScreen(_) => TYPE_ACTIVATE_SCREEN,
             Self::TriggerInterrupt(_) => TYPE_TRIGGER_INTERRUPT,
             Self::DeviceEvent(_) => TYPE_DEVICE_EVENT,
+            Self::NetworkConfig(_) => TYPE_NETWORK_CONFIG,
+            Self::FactoryReset => TYPE_FACTORY_RESET,
         }
     }
 }
@@ -388,6 +446,35 @@ fn interrupt_policy(value: u8) -> Result<InterruptPolicy, MessageError> {
     }
 }
 
+fn tier_from_wire(value: u8) -> Result<Tier, MessageError> {
+    match value {
+        0 => Ok(Tier::Local),
+        1 => Ok(Tier::Networked),
+        _ => Err(MessageError::InvalidValue("tier")),
+    }
+}
+
+fn wifi_state_from_wire(value: u8) -> Result<WifiState, MessageError> {
+    match value {
+        0 => Ok(WifiState::Down),
+        1 => Ok(WifiState::Connecting),
+        2 => Ok(WifiState::Connected),
+        3 => Ok(WifiState::Failed),
+        _ => Err(MessageError::InvalidValue("wifi state")),
+    }
+}
+
+fn ota_state_from_wire(value: u8) -> Result<OtaState, MessageError> {
+    match value {
+        0 => Ok(OtaState::Idle),
+        1 => Ok(OtaState::Checking),
+        2 => Ok(OtaState::Downloading),
+        3 => Ok(OtaState::PendingVerify),
+        4 => Ok(OtaState::Failed),
+        _ => Err(MessageError::InvalidValue("ota state")),
+    }
+}
+
 fn event_kind(value: u8) -> Result<EventKind, MessageError> {
     match value {
         1 => Ok(EventKind::Tap),
@@ -407,6 +494,18 @@ fn event_action(value: u8) -> Result<EventAction, MessageError> {
         5 => Ok(EventAction::DismissInterrupt),
         _ => Err(MessageError::InvalidValue("event action")),
     }
+}
+
+fn validate_network_config(config: &NetworkConfig) -> Result<(), MessageError> {
+    checked_text(&config.ssid, 0, MAX_SSID_LEN, "ssid")?;
+    checked_text(&config.psk, 0, MAX_PSK_LEN, "psk")?;
+    checked_text(&config.server_url, 0, MAX_SERVER_URL_LEN, "server_url")?;
+    checked_text(&config.device_id, 0, MAX_DEVICE_ID_LEN, "device_id")?;
+    checked_text(&config.token, 0, MAX_DEVICE_TOKEN_LEN, "token")?;
+    if !(MIN_UTC_OFFSET_MINUTES..=MAX_UTC_OFFSET_MINUTES).contains(&config.utc_offset_minutes) {
+        return Err(MessageError::InvalidValue("UTC offset"));
+    }
+    Ok(())
 }
 
 fn validate_apply_config(config: &ApplyConfig) -> Result<(), MessageError> {
@@ -526,6 +625,10 @@ fn validate_message(message: &Message) -> Result<(), MessageError> {
             if !matches!(status.rotation, 0 | 90 | 180 | 270) {
                 return Err(MessageError::InvalidValue("rotation"));
             }
+            checked_text(&status.ip, 0, MAX_IP_LEN, "ip")?;
+            if let Some(diagnostic) = &status.last_network_error {
+                checked_text(diagnostic, 0, MAX_DIAGNOSTIC_LEN, "last network error")?;
+            }
             Ok(())
         }
         Message::TimeSync(sync) => {
@@ -582,6 +685,7 @@ fn validate_message(message: &Message) -> Result<(), MessageError> {
             }
         }
         Message::DeviceEvent(event) => validate_device_event(event),
+        Message::NetworkConfig(config) => validate_network_config(config),
         _ => Ok(()),
     }
 }
@@ -655,7 +759,8 @@ fn encode_device_event_payload(encoder: &mut Encoder, event: &DeviceEvent) {
 }
 
 fn encode_status_payload(encoder: &mut Encoder, status: &StatusResponse) {
-    encoder.map(24);
+    let entry_count = 24 + 5 + usize::from(status.last_network_error.is_some());
+    encoder.map(entry_count);
     encoder.unsigned(0);
     encoder.unsigned(u64::from(status.protocol_version));
     encoder.unsigned(1);
@@ -688,13 +793,45 @@ fn encode_status_payload(encoder: &mut Encoder, status: &StatusResponse) {
         encoder.unsigned(u64::try_from(offset + 2).unwrap());
         encoder.unsigned(value);
     }
+    encoder.unsigned(24);
+    encoder.unsigned(u64::from(status.tier as u8));
+    encoder.unsigned(25);
+    encoder.unsigned(u64::from(status.wifi_state as u8));
+    encoder.unsigned(26);
+    encoder.signed(i64::from(status.wifi_rssi));
+    encoder.unsigned(27);
+    encoder.text(&status.ip);
+    encoder.unsigned(28);
+    encoder.unsigned(u64::from(status.ota_state as u8));
+    if let Some(diagnostic) = &status.last_network_error {
+        encoder.unsigned(29);
+        encoder.text(diagnostic);
+    }
+}
+
+fn encode_network_config_payload(encoder: &mut Encoder, config: &NetworkConfig) {
+    encoder.map(7);
+    encoder.unsigned(1);
+    encoder.text(&config.ssid);
+    encoder.unsigned(2);
+    encoder.text(&config.psk);
+    encoder.unsigned(3);
+    encoder.text(&config.server_url);
+    encoder.unsigned(4);
+    encoder.text(&config.device_id);
+    encoder.unsigned(5);
+    encoder.text(&config.token);
+    encoder.unsigned(6);
+    encoder.signed(i64::from(config.utc_offset_minutes));
+    encoder.unsigned(7);
+    encoder.unsigned(u64::from(config.tier as u8));
 }
 
 fn encode_payload(message: &Message) -> Result<Vec<u8>, MessageError> {
     validate_message(message)?;
     let mut encoder = Encoder::new();
     match message {
-        Message::StatusRequest | Message::Heartbeat => encoder.map(0),
+        Message::StatusRequest | Message::Heartbeat | Message::FactoryReset => encoder.map(0),
         Message::TimeSync(sync) => {
             encoder.map(2);
             encoder.unsigned(0);
@@ -759,6 +896,7 @@ fn encode_payload(message: &Message) -> Result<Vec<u8>, MessageError> {
             encoder.text(&error.diagnostic);
         }
         Message::StatusResponse(status) => encode_status_payload(&mut encoder, status),
+        Message::NetworkConfig(config) => encode_network_config_payload(&mut encoder, config),
     }
     let payload = encoder.into_bytes();
     if payload.len() > MAX_PAYLOAD_SIZE {
@@ -991,6 +1129,51 @@ fn decode_apply_config(payload: &[u8]) -> Result<ApplyConfig, MessageError> {
     Ok(config)
 }
 
+fn decode_network_config(payload: &[u8]) -> Result<NetworkConfig, MessageError> {
+    let mut decoder = Decoder::new(payload);
+    let len = decoder.map_len()?;
+    let mut previous = None;
+    let mut ssid = None;
+    let mut psk = None;
+    let mut server_url = None;
+    let mut device_id = None;
+    let mut token = None;
+    let mut utc_offset_minutes = None;
+    let mut tier = None;
+    for _ in 0..len {
+        match next_numeric_key(&mut decoder, &mut previous)? {
+            1 => ssid = Some(decoder.text()?.to_owned()),
+            2 => psk = Some(decoder.text()?.to_owned()),
+            3 => server_url = Some(decoder.text()?.to_owned()),
+            4 => device_id = Some(decoder.text()?.to_owned()),
+            5 => token = Some(decoder.text()?.to_owned()),
+            6 => {
+                utc_offset_minutes = Some(
+                    i16::try_from(decoder.signed()?)
+                        .map_err(|_| MessageError::InvalidValue("UTC offset"))?,
+                );
+            }
+            7 => tier = Some(tier_from_wire(read_u8(&mut decoder, "tier")?)?),
+            // Unlike the other additive message types, network config is a
+            // closed, security-sensitive schema: an unrecognized key is
+            // rejected rather than skipped.
+            _ => return Err(MessageError::InvalidValue("network config key")),
+        }
+    }
+    decoder.finish()?;
+    let config = NetworkConfig {
+        ssid: ssid.ok_or(MessageError::MissingField(1))?,
+        psk: psk.ok_or(MessageError::MissingField(2))?,
+        server_url: server_url.ok_or(MessageError::MissingField(3))?,
+        device_id: device_id.ok_or(MessageError::MissingField(4))?,
+        token: token.ok_or(MessageError::MissingField(5))?,
+        utc_offset_minutes: utc_offset_minutes.ok_or(MessageError::MissingField(6))?,
+        tier: tier.ok_or(MessageError::MissingField(7))?,
+    };
+    validate_network_config(&config)?;
+    Ok(config)
+}
+
 fn decode_activate_screen(payload: &[u8]) -> Result<ActivateScreen, MessageError> {
     let mut decoder = Decoder::new(payload);
     let len = decoder.map_len()?;
@@ -1130,6 +1313,7 @@ fn decode_error(payload: &[u8]) -> Result<ErrorResponse, MessageError> {
     Ok(value)
 }
 
+#[allow(clippy::too_many_lines)]
 fn decode_status(payload: &[u8]) -> Result<StatusResponse, MessageError> {
     let mut decoder = Decoder::new(payload);
     let len = decoder.map_len()?;
@@ -1158,6 +1342,12 @@ fn decode_status(payload: &[u8]) -> Result<StatusResponse, MessageError> {
     let mut latest_interrupt_token = None;
     let mut max_protocol_version = None;
     let mut capabilities = None;
+    let mut tier = None;
+    let mut wifi_state = None;
+    let mut wifi_rssi = None;
+    let mut ip = None;
+    let mut ota_state = None;
+    let mut last_network_error = None;
     for _ in 0..len {
         match next_numeric_key(&mut decoder, &mut previous)? {
             0 => protocol_version = Some(read_u8(&mut decoder, "protocol version")?),
@@ -1198,6 +1388,17 @@ fn decode_status(payload: &[u8]) -> Result<StatusResponse, MessageError> {
                 max_protocol_version = Some(read_u8(&mut decoder, "maximum protocol version")?);
             }
             23 => capabilities = Some(decoder.unsigned()?),
+            24 => tier = Some(tier_from_wire(read_u8(&mut decoder, "tier")?)?),
+            25 => wifi_state = Some(wifi_state_from_wire(read_u8(&mut decoder, "wifi state")?)?),
+            26 => {
+                wifi_rssi = Some(
+                    i8::try_from(decoder.signed()?)
+                        .map_err(|_| MessageError::InvalidValue("wifi rssi"))?,
+                );
+            }
+            27 => ip = Some(decoder.text()?.to_owned()),
+            28 => ota_state = Some(ota_state_from_wire(read_u8(&mut decoder, "ota state")?)?),
+            29 => last_network_error = Some(decoder.text()?.to_owned()),
             _ => decoder.skip()?,
         }
     }
@@ -1227,6 +1428,12 @@ fn decode_status(payload: &[u8]) -> Result<StatusResponse, MessageError> {
         ui_queue_high_water: ui_queue_high_water.unwrap_or(0),
         config_revision: config_revision.unwrap_or(0),
         latest_interrupt_token: latest_interrupt_token.unwrap_or(0),
+        tier: tier.unwrap_or(Tier::Local),
+        wifi_state: wifi_state.unwrap_or(WifiState::Down),
+        wifi_rssi: wifi_rssi.unwrap_or(0),
+        ip: ip.unwrap_or_default(),
+        ota_state: ota_state.unwrap_or(OtaState::Idle),
+        last_network_error,
     };
     validate_message(&Message::StatusResponse(value.clone()))?;
     Ok(value)
@@ -1263,6 +1470,11 @@ pub fn decode_message(frame: &Frame) -> Result<Message, MessageError> {
             Message::TriggerInterrupt(decode_trigger_interrupt(&frame.payload)?)
         }
         TYPE_DEVICE_EVENT => Message::DeviceEvent(decode_device_event(&frame.payload)?),
+        TYPE_NETWORK_CONFIG => Message::NetworkConfig(decode_network_config(&frame.payload)?),
+        TYPE_FACTORY_RESET => {
+            require_empty_map(&frame.payload)?;
+            Message::FactoryReset
+        }
         other => return Err(MessageError::UnsupportedType(other)),
     };
     Ok(message)
@@ -1300,6 +1512,12 @@ mod tests {
             ui_queue_high_water: 0,
             config_revision: 3,
             latest_interrupt_token: 9,
+            tier: Tier::Local,
+            wifi_state: WifiState::Down,
+            wifi_rssi: 0,
+            ip: String::new(),
+            ota_state: OtaState::Idle,
+            last_network_error: None,
         }
     }
 
@@ -1384,6 +1602,39 @@ mod tests {
     }
 
     #[test]
+    fn network_config_round_trips() {
+        let message = Message::NetworkConfig(NetworkConfig {
+            ssid: "home-network".into(),
+            psk: "correct horse battery staple".into(),
+            server_url: "wss://deskmate.example.com/v1/device/link".into(),
+            device_id: "dev-0001".into(),
+            token: "t".repeat(MAX_DEVICE_TOKEN_LEN),
+            utc_offset_minutes: 240,
+            tier: Tier::Networked,
+        });
+        round_trip(&message);
+    }
+
+    #[test]
+    fn network_config_rejects_oversized_ssid() {
+        let message = Message::NetworkConfig(NetworkConfig {
+            ssid: "s".repeat(MAX_SSID_LEN + 1),
+            psk: String::new(),
+            server_url: "wss://example.com/l".into(),
+            device_id: "dev-0001".into(),
+            token: "token".into(),
+            utc_offset_minutes: 0,
+            tier: Tier::Networked,
+        });
+        assert!(encode_message(8, &message).is_err());
+    }
+
+    #[test]
+    fn factory_reset_round_trips() {
+        round_trip(&Message::FactoryReset);
+    }
+
+    #[test]
     fn cardinal_display_rotations_are_valid() {
         for rotation in [0, 90, 180, 270] {
             let mut value = status();
@@ -1397,21 +1648,43 @@ mod tests {
     }
 
     #[test]
-    fn legacy_status_without_additive_m3_or_m4_fields_remains_compatible() {
-        let mut payload = encode_payload(&Message::StatusResponse(status())).unwrap();
-        assert_eq!(
-            &payload[..2],
-            [0xb8, 0x18],
-            "status should contain 24 entries"
-        );
-        assert_eq!(
-            payload.split_off(payload.len() - 6),
-            [0x15, 0x09, 0x16, 0x01, 0x17, 0x0b]
-        );
-        payload.remove(0);
-        payload[0] = 0xb5;
+    fn status_response_network_fields_round_trip() {
+        let mut status = status();
+        status.tier = Tier::Networked;
+        status.wifi_state = WifiState::Connected;
+        status.wifi_rssi = -58;
+        status.ip = "192.168.1.42".into();
+        status.ota_state = OtaState::Idle;
+        let wire = encode_message(3, &Message::StatusResponse(status.clone())).expect("encode");
+        let frame = decode_wire_frame(&wire).expect("decode frame");
+        let Message::StatusResponse(decoded) = decode_message(&frame).expect("decode") else {
+            panic!("wrong variant");
+        };
+        assert_eq!(decoded, status);
+    }
 
-        let decoded = decode_message(&Frame::new(TYPE_STATUS_RESPONSE, 1, payload)).unwrap();
+    #[test]
+    fn legacy_status_without_additive_m3_or_m4_fields_remains_compatible() {
+        let payload = encode_payload(&Message::StatusResponse(status())).unwrap();
+        // The additive networking fields (M4-and-later Task 1) keep the entry
+        // count at or above 24, so the map header stays in its two-byte
+        // extended form regardless of the exact count.
+        assert_eq!(payload[0], 0xb8, "status should use the extended map form");
+        let original_count = payload[1];
+        // Keys 21 (latest_interrupt_token), 22 (max_protocol_version), and 23
+        // (capabilities) are still encoded contiguously and in this order
+        // because keys are canonical; locate and drop them regardless of
+        // what now follows them on the wire.
+        let pattern = [0x15, 0x09, 0x16, 0x01, 0x17, 0x0b];
+        let offset = payload
+            .windows(pattern.len())
+            .position(|window| window == pattern)
+            .expect("legacy-optional status fields must be contiguous");
+        let mut truncated = payload;
+        truncated.drain(offset..offset + pattern.len());
+        truncated[1] = original_count - 3;
+
+        let decoded = decode_message(&Frame::new(TYPE_STATUS_RESPONSE, 1, truncated)).unwrap();
         let Message::StatusResponse(decoded) = decoded else {
             panic!("decoded message should remain a status response");
         };
@@ -1436,7 +1709,7 @@ mod tests {
         let payload = encode_payload(&Message::StatusResponse(status())).unwrap();
         let mut decoder = Decoder::new(&payload);
         let len = decoder.map_len().unwrap();
-        assert_eq!(len, 24);
+        assert_eq!(len, 29);
         let mut previous = None;
         let mut released_fields = 0_u32;
         for _ in 0..len {

@@ -29,11 +29,18 @@
 #define PROTOCOL_CAPABILITY_HOST_TAP_ACTIONS (UINT64_C(1) << 4)
 #define PROTOCOL_CAPABILITY_ASSET_TRANSFER (UINT64_C(1) << 5)
 #define PROTOCOL_CAPABILITY_FIRMWARE_UPDATE (UINT64_C(1) << 6)
+#define PROTOCOL_CAPABILITY_NETWORKING (UINT64_C(1) << 7)
 #define PROTOCOL_LEGACY_CAPABILITIES PROTOCOL_CAPABILITY_CORE_WIDGETS
 #define PROTOCOL_CURRENT_CAPABILITIES                            \
     (PROTOCOL_CAPABILITY_CORE_WIDGETS |                          \
      PROTOCOL_CAPABILITY_CONFIG_ROTATION |                       \
      PROTOCOL_CAPABILITY_EXTENDED_TEMPLATES)
+#define PROTOCOL_MAX_SSID_LENGTH 32U
+#define PROTOCOL_MAX_PSK_LENGTH 64U
+#define PROTOCOL_MAX_SERVER_URL_LENGTH 128U
+#define PROTOCOL_MAX_DEVICE_TOKEN_LENGTH 128U
+#define PROTOCOL_MAX_DEVICE_ID_LENGTH 32U
+#define PROTOCOL_MAX_IP_LENGTH 15U
 
 typedef enum {
     PROTOCOL_TYPE_STATUS_REQUEST = 1,
@@ -48,6 +55,8 @@ typedef enum {
     PROTOCOL_TYPE_ACTIVATE_SCREEN = 10,
     PROTOCOL_TYPE_TRIGGER_INTERRUPT = 11,
     PROTOCOL_TYPE_DEVICE_EVENT = 12,
+    PROTOCOL_TYPE_NETWORK_CONFIG = 13,
+    PROTOCOL_TYPE_FACTORY_RESET = 14,
 } protocol_message_type_t;
 
 typedef enum {
@@ -65,6 +74,9 @@ typedef enum {
     PROTOCOL_ERROR_UNSUPPORTED_TEMPLATE = 12,
     PROTOCOL_ERROR_UNSUPPORTED_SIZE_CLASS = 13,
     PROTOCOL_ERROR_CONFIG_TOO_LARGE = 14,
+    /* Returned when a message is valid but not permitted on this transport
+     * in the device's current tier. */
+    PROTOCOL_ERROR_WRONG_TIER = 15,
 } protocol_error_code_t;
 
 typedef enum {
@@ -107,6 +119,36 @@ typedef enum {
     PROTOCOL_EVENT_ACTION_NAVIGATE_NEXT = 4,
     PROTOCOL_EVENT_ACTION_DISMISS_INTERRUPT = 5,
 } protocol_event_action_t;
+
+typedef enum {
+    PROTOCOL_TIER_LOCAL = 0,
+    PROTOCOL_TIER_NETWORKED = 1,
+} protocol_tier_t;
+
+typedef enum {
+    PROTOCOL_WIFI_DOWN = 0,
+    PROTOCOL_WIFI_CONNECTING = 1,
+    PROTOCOL_WIFI_CONNECTED = 2,
+    PROTOCOL_WIFI_FAILED = 3,
+} protocol_wifi_state_t;
+
+typedef enum {
+    PROTOCOL_OTA_IDLE = 0,
+    PROTOCOL_OTA_CHECKING = 1,
+    PROTOCOL_OTA_DOWNLOADING = 2,
+    PROTOCOL_OTA_PENDING_VERIFY = 3,
+    PROTOCOL_OTA_FAILED = 4,
+} protocol_ota_state_t;
+
+typedef struct {
+    char ssid[PROTOCOL_MAX_SSID_LENGTH + 1U];
+    char psk[PROTOCOL_MAX_PSK_LENGTH + 1U];
+    char server_url[PROTOCOL_MAX_SERVER_URL_LENGTH + 1U];
+    char device_id[PROTOCOL_MAX_DEVICE_ID_LENGTH + 1U];
+    char token[PROTOCOL_MAX_DEVICE_TOKEN_LENGTH + 1U];
+    int16_t utc_offset_minutes;
+    protocol_tier_t tier;
+} protocol_network_config_t;
 
 typedef struct {
     char widget_id[PROTOCOL_MAX_WIDGET_ID_LENGTH + 1U];
@@ -209,6 +251,13 @@ typedef struct {
     uint32_t ui_queue_high_water;
     uint32_t config_revision;
     uint32_t latest_interrupt_token;
+    protocol_tier_t tier;
+    protocol_wifi_state_t wifi_state;
+    int8_t wifi_rssi;
+    char ip[PROTOCOL_MAX_IP_LENGTH + 1U];
+    protocol_ota_state_t ota_state;
+    bool has_last_network_error;
+    char last_network_error[PROTOCOL_MAX_DIAGNOSTIC_LENGTH + 1U];
 } protocol_status_response_t;
 
 typedef struct {
@@ -233,6 +282,7 @@ typedef struct {
         protocol_activate_screen_t activate_screen;
         protocol_trigger_interrupt_t trigger_interrupt;
         protocol_device_event_t device_event;
+        protocol_network_config_t network_config;
     } value;
 } protocol_message_t;
 

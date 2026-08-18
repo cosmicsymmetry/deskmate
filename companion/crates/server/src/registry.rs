@@ -61,7 +61,7 @@ impl Registry {
         let token = random_token();
         self.tokens
             .lock()
-            .expect("registry mutex poisoned")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(token.clone(), device_id.clone());
         DeviceIdentity { device_id, token }
     }
@@ -78,7 +78,16 @@ impl Registry {
     /// holds, scanning the whole table on a miss is cheap.
     pub fn authenticate(&self, token: &str) -> Option<DeviceId> {
         let token = token.as_bytes();
-        let tokens = self.tokens.lock().expect("registry mutex poisoned");
+        // A panic while some other request held the lock must not turn every
+        // *subsequent* authentication into a panic too -- that would be a
+        // latent, self-inflicted denial of service on an internet-facing
+        // endpoint. The registry holds no invariant a panic mid-mutation
+        // could leave inconsistent (it's an insert or a scan, nothing more),
+        // so recovering the poisoned guard and carrying on is safe.
+        let tokens = self
+            .tokens
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         tokens
             .iter()
             .find(|(candidate, _)| constant_time_eq(candidate.as_bytes(), token))

@@ -8,9 +8,10 @@
 //! (accounts, storage, multi-tenancy) without touching that surface.
 //!
 //! Task 8 puts this behind a public Cloudflare tunnel, so `app()` treats
-//! every caller as internet-facing and anonymous by default: a global
-//! concurrency limit and request timeout guard every route, on top of the
-//! per-route defenses in `device_link` and `firmware`.
+//! every caller as internet-facing and anonymous by default: a single
+//! process-wide concurrency limit, load shedding, and a request timeout
+//! guard every route, on top of the per-route defenses in `device_link` and
+//! `firmware`.
 
 mod auth;
 mod device_link;
@@ -25,14 +26,22 @@ use axum::error_handling::HandleErrorLayer;
 use axum::http::StatusCode;
 use axum::routing::get;
 use tower::ServiceBuilder;
+use tower::limit::GlobalConcurrencyLimitLayer;
+use tower::load_shed::error::Overloaded;
 
 use firmware::FirmwareCatalog;
 use registry::Registry;
 
-/// Caps how many requests this process handles at once, across every route.
-/// This is coarse, blanket protection on top of the download route's own
-/// streaming (which is what actually bounds its memory use) and the device
-/// link's own connection cap.
+/// Caps how many requests this process handles at once, across *every*
+/// route -- genuinely process-wide, via [`GlobalConcurrencyLimitLayer`]
+/// sharing one semaphore. Plain `ServiceBuilder::concurrency_limit` would
+/// look identical but mint a fresh semaphore each time `Layer::layer()` is
+/// called, and axum calls it once per route *and* per method slot
+/// (including the automatic 405 fallback) -- roughly six independent
+/// limiters for this router's three routes, none of which would mean what
+/// this constant's name says. This is coarse, blanket protection on top of
+/// the download route's own streaming (which is what actually bounds its
+/// memory use) and the device link's own connection cap.
 const MAX_CONCURRENT_REQUESTS: usize = 64;
 
 /// How long any single request may take to produce a response. Generous for
@@ -123,11 +132,25 @@ impl ServerState {
 /// Builds the full device-facing router over `state`. Task 9 adds a
 /// Mac-facing router behind the admin token; this task only wires the
 /// surface firmware will ever call.
+///
+/// Middleware order matters and is easy to get backwards: `poll_ready`
+/// cascades down through the *whole* nested stack before `call` ever runs
+/// on the outermost layer, so a plain concurrency limiter blocks
+/// `poll_ready` itself while waiting for a permit -- invisibly to any
+/// `Timeout` layered "outside" it, since `Timeout::call` (which is what
+/// starts its clock) never even begins until `poll_ready` has already
+/// resolved. `load_shed()` is what actually bounds that wait: it makes
+/// `poll_ready` succeed unconditionally and turns "the inner service isn't
+/// ready" into an immediate rejection at `call` time instead of a block.
+/// `load_shed()` must therefore sit directly outside the concurrency
+/// limiter (not just anywhere above it), which is why it is threaded
+/// between `HandleErrorLayer` and `GlobalConcurrencyLimitLayer` below.
 pub fn app(state: ServerState) -> Router {
     let middleware = ServiceBuilder::new()
         .layer(HandleErrorLayer::new(handle_middleware_error))
-        .timeout(REQUEST_TIMEOUT)
-        .concurrency_limit(MAX_CONCURRENT_REQUESTS);
+        .load_shed()
+        .layer(GlobalConcurrencyLimitLayer::new(MAX_CONCURRENT_REQUESTS))
+        .timeout(REQUEST_TIMEOUT);
 
     Router::new()
         .route("/v1/device/link", get(device_link::handler))
@@ -139,14 +162,15 @@ pub fn app(state: ServerState) -> Router {
 
 /// Converts whatever error the middleware stack above can produce into a
 /// response, so the router as a whole stays an infallible `Service` as
-/// `axum::serve` requires. `tower::timeout::Timeout` boxes its error (it
-/// forwards the inner service's error or its own `Elapsed`, both converted
-/// via `Into<BoxError>`), so the only error this stack can actually produce
-/// today is an elapsed timeout -- checked explicitly rather than assumed,
-/// so a future layer's genuine error still gets a distinct response.
+/// `axum::serve` requires: an elapsed request timeout, or a request shed
+/// because [`MAX_CONCURRENT_REQUESTS`] was already in flight. Both of
+/// tower's error types are boxed by the layers that produce them, so this
+/// downcasts rather than assuming which one occurred.
 async fn handle_middleware_error(error: axum::BoxError) -> StatusCode {
     if error.is::<tower::timeout::error::Elapsed>() {
         StatusCode::REQUEST_TIMEOUT
+    } else if error.is::<Overloaded>() {
+        StatusCode::SERVICE_UNAVAILABLE
     } else {
         StatusCode::INTERNAL_SERVER_ERROR
     }

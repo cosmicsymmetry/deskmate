@@ -10,7 +10,7 @@ protocol = { path = "../protocol" }
 axum = { version = "0.8", features = ["ws"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "net", "fs"] }
 tokio-util = { version = "0.7", features = ["io"] }
-tower = { version = "0.5", features = ["limit", "timeout", "util"] }
+tower = { version = "0.5", features = ["limit", "load-shed", "timeout", "util"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 rand = "0.9"
 serde = { version = "1", features = ["derive"] }

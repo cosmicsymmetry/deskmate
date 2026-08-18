@@ -15,10 +15,13 @@
   at login) or /Library/LaunchDaemons/com.deskmate.server.plist (system-wide,
   runs at boot, needs `sudo launchctl load` and a root-writable log path).
 
-  WorkingDirectory is set explicitly below, belt-and-braces alongside the
-  binary's own refusal to start with a relative DESKMATE_FIRMWARE_DIR: with
-  no WorkingDirectory, launchd would otherwise run this job with cwd `/`,
-  which is not a directory this job should ever read or write relative to.
+  No WorkingDirectory is set deliberately: launchd refuses to spawn a job
+  whose WorkingDirectory does not exist, and /var/lib/deskmate is absent on
+  a stock box until an operator runs README.md Sec.2's `install -d` -- a
+  missing WorkingDirectory would turn a first-time install into a silent
+  launch failure. The binary's own refusal to start with a relative
+  DESKMATE_FIRMWARE_DIR (see main.rs) already covers the real risk this
+  would have guarded against, without that start-time dependency.
 -->
 <plist version="1.0">
 <dict>
@@ -31,9 +34,6 @@
         <string>-c</string>
         <string>set -a; . /etc/deskmate/server.env; exec /usr/local/bin/deskmate-server</string>
     </array>
-
-    <key>WorkingDirectory</key>
-    <string>/var/lib/deskmate</string>
 
     <key>RunAtLoad</key>
     <true/>

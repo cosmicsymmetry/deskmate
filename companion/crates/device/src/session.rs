@@ -6,10 +6,11 @@ use std::time::{Duration, Instant};
 
 use protocol::{
     Ack, ActivateScreen, ApplyConfig, CAPABILITY_CONFIG_ROTATION, CAPABILITY_CORE_WIDGETS,
-    Deframer, DeviceEvent, EventAction, EventKind, Field, HeartbeatAck, Message, PushData,
-    ScreenConfig, StatusResponse, TYPE_ACTIVATE_SCREEN, TYPE_APPLY_CONFIG, TYPE_PUSH_DATA,
-    TYPE_TIME_SYNC, TYPE_TRIGGER_INTERRUPT, TimeSync, TriggerInterrupt, WidgetConfig,
-    decode_message, encode_message,
+    Deframer, DeviceEvent, EventAction, EventKind, Field, HeartbeatAck, Message, NetworkConfig,
+    PushData, ScreenConfig, StatusResponse, TYPE_ACTIVATE_SCREEN, TYPE_APPLY_CONFIG,
+    TYPE_FACTORY_RESET, TYPE_NETWORK_CONFIG, TYPE_PUSH_DATA, TYPE_TIME_SYNC,
+    TYPE_TRIGGER_INTERRUPT, TimeSync, TriggerInterrupt, WidgetConfig, decode_message,
+    encode_message,
 };
 
 use crate::{
@@ -298,6 +299,34 @@ impl<T: Transport + Send + 'static> DeviceSession<T> {
         match self.request(Message::TriggerInterrupt(interrupt))? {
             Message::Ack(ack)
                 if ack.acknowledged_type == TYPE_TRIGGER_INTERRUPT && ack.revision.is_none() =>
+            {
+                Ok(ack)
+            }
+            _ => Err(DeviceError::UnexpectedMessage),
+        }
+    }
+
+    /// Provision the device's network config over USB. The device persists
+    /// this and applies the resulting tier on its *next* boot -- it never
+    /// hot-swaps ownership mid-session, so this ACK does not mean the device
+    /// is networked yet.
+    pub fn provision(&self, config: &NetworkConfig) -> Result<Ack, DeviceError> {
+        match self.request(Message::NetworkConfig(config.clone()))? {
+            Message::Ack(ack)
+                if ack.acknowledged_type == TYPE_NETWORK_CONFIG && ack.revision.is_none() =>
+            {
+                Ok(ack)
+            }
+            _ => Err(DeviceError::UnexpectedMessage),
+        }
+    }
+
+    /// Erase the device's persisted network config, returning it to
+    /// factory-fresh local tier on its next boot.
+    pub fn factory_reset(&self) -> Result<Ack, DeviceError> {
+        match self.request(Message::FactoryReset)? {
+            Message::Ack(ack)
+                if ack.acknowledged_type == TYPE_FACTORY_RESET && ack.revision.is_none() =>
             {
                 Ok(ack)
             }

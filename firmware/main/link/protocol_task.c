@@ -11,6 +11,7 @@
 #include "core/device_event_queue.h"
 #include "core/interrupt_state.h"
 #include "core/link_state.h"
+#include "core/net_config.h"
 #include "core/protocol_frame.h"
 #include "core/protocol_message.h"
 #include "core/widget_model.h"
@@ -22,6 +23,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "link/dev_capture.h"
+#include "link/net_store.h"
 #include "link/usb_link.h"
 #include "ui/ui_runtime.h"
 
@@ -248,6 +250,10 @@ static void transmit_status(protocol_context_t *context, uint32_t request_id)
     status->config_revision = widget_model_config_revision(&context->model);
     status->latest_interrupt_token =
         interrupt_state_latest_token(&context->interrupts);
+    // wifi_state, wifi_rssi, ip and ota_state stay at their zeroed defaults
+    // (PROTOCOL_WIFI_DOWN / 0 / empty / PROTOCOL_OTA_IDLE) from the memset
+    // above -- Tasks 6 and 11 populate them once the radio exists.
+    status->tier = net_store_current_tier();
     transmit(context, request_id, reply);
 }
 
@@ -489,6 +495,44 @@ static void dispatch_trigger_interrupt(protocol_context_t *context,
                  false, 0U);
 }
 
+static void dispatch_network_config(protocol_context_t *context,
+                                    uint32_t request_id)
+{
+    const protocol_network_config_t *config =
+        &context->message.value.network_config;
+    // Only an insecure server URL is flatly rejected. Every other invalid
+    // combination (e.g. a networked tier missing its token) is still
+    // persisted: net_store_load() always re-derives the effective tier via
+    // net_config_effective_tier(), so an invalid stored config degrades to
+    // local tier on its own rather than needing to be caught here.
+    if (net_config_validate(config) == NET_CONFIG_ERR_INSECURE_URL) {
+        transmit_error(context, request_id, PROTOCOL_ERROR_INVALID_PAYLOAD,
+                       "server URL must use wss://");
+        return;
+    }
+    if (net_store_save(config) != ESP_OK) {
+        transmit_error(context, request_id, PROTOCOL_ERROR_INTERNAL,
+                       "failed to persist network config");
+        return;
+    }
+    // The new tier takes effect on the next boot, not live: net_store_save()
+    // never updates net_store_current_tier()'s cache, so this ACK does not
+    // change what net_config_usb_message_allowed() enforces for the rest of
+    // this session.
+    transmit_ack(context, request_id, PROTOCOL_TYPE_NETWORK_CONFIG, false, 0U);
+}
+
+static void dispatch_factory_reset(protocol_context_t *context,
+                                   uint32_t request_id)
+{
+    if (net_store_erase() != ESP_OK) {
+        transmit_error(context, request_id, PROTOCOL_ERROR_INTERNAL,
+                       "failed to erase network config");
+        return;
+    }
+    transmit_ack(context, request_id, PROTOCOL_TYPE_FACTORY_RESET, false, 0U);
+}
+
 static void dispatch_request(protocol_context_t *context,
                              const protocol_frame_t *frame)
 {
@@ -543,10 +587,22 @@ static void dispatch_request(protocol_context_t *context,
         context->message.type != PROTOCOL_TYPE_HEARTBEAT &&
         context->message.type != PROTOCOL_TYPE_APPLY_CONFIG &&
         context->message.type != PROTOCOL_TYPE_ACTIVATE_SCREEN &&
-        context->message.type != PROTOCOL_TYPE_TRIGGER_INTERRUPT) {
+        context->message.type != PROTOCOL_TYPE_TRIGGER_INTERRUPT &&
+        context->message.type != PROTOCOL_TYPE_NETWORK_CONFIG &&
+        context->message.type != PROTOCOL_TYPE_FACTORY_RESET) {
         transmit_error(context, frame->request_id,
                        PROTOCOL_ERROR_UNSUPPORTED_MESSAGE,
                        "response type sent as request");
+        return;
+    }
+
+    // USB is currently the only transport, so every inbound message is
+    // gated here. A later task that adds the network transport will scope
+    // this gate to the USB reader specifically rather than every request.
+    if (!net_config_usb_message_allowed(net_store_current_tier(),
+                                        context->message.type)) {
+        transmit_error(context, frame->request_id, PROTOCOL_ERROR_WRONG_TIER,
+                       "device is owned over the network");
         return;
     }
 
@@ -575,6 +631,12 @@ static void dispatch_request(protocol_context_t *context,
         break;
     case PROTOCOL_TYPE_TRIGGER_INTERRUPT:
         dispatch_trigger_interrupt(context, frame->request_id);
+        break;
+    case PROTOCOL_TYPE_NETWORK_CONFIG:
+        dispatch_network_config(context, frame->request_id);
+        break;
+    case PROTOCOL_TYPE_FACTORY_RESET:
+        dispatch_factory_reset(context, frame->request_id);
         break;
     case PROTOCOL_TYPE_HEARTBEAT: {
         protocol_message_t *reply = &context->message;
@@ -745,6 +807,11 @@ esp_err_t protocol_task_start(void)
     ESP_RETURN_ON_FALSE(s_task == NULL, ESP_ERR_INVALID_STATE, TAG,
                         "protocol task already running");
     memset(&s_context, 0, sizeof(s_context));
+    // Populate net_store_current_tier()'s cache once, synchronously, before
+    // any USB message can reach the gate below. The loaded config itself
+    // isn't needed here -- only its side effect on the tier cache.
+    protocol_network_config_t boot_network_config;
+    net_store_load(&boot_network_config);
     protocol_decoder_init(&s_context.decoder);
     link_state_init(&s_context.link);
     widget_model_init(&s_context.model);

@@ -1,4 +1,5 @@
 #include "esp_log.h"
+#include "nvs_flash.h"
 #include "board/board.h"
 #include "board/display.h"
 #include "board/touch.h"
@@ -21,6 +22,17 @@ void app_main(void)
              BOARD_LCD_H_RES, BOARD_LCD_V_RES,
              BOARD_LCD_PIN_CS, BOARD_LCD_PIN_PCLK,
              BOARD_LCD_PIN_D0, BOARD_LCD_PIN_D1, BOARD_LCD_PIN_D2, BOARD_LCD_PIN_D3);
+
+    esp_err_t nvs_status = nvs_flash_init();
+    if (nvs_status == ESP_ERR_NVS_NO_FREE_PAGES ||
+        nvs_status == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        // A truncated or version-shifted namespace is recoverable by erasing
+        // it: the device returns to factory-fresh local tier, which is the
+        // failure direction the spec requires.
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        nvs_status = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(nvs_status);
 
     ESP_ERROR_CHECK(board_display_init());
     ESP_LOGI(TAG, "board_display_init OK, io=%p", (void *)board_display_io());

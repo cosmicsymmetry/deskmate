@@ -3,10 +3,11 @@ use std::fmt;
 use std::process::{self, Command as ProcessCommand};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use device::{DeviceError, connect};
+use device::{DeviceError, connect, connect_session};
 use protocol::{
-    Field, FieldValue, MAX_FIELD_COUNT, MAX_FIELD_KEY_LEN, MAX_FIELD_TEXT_LEN, MAX_WIDGET_ID_LEN,
-    PushData, StatusResponse, TimeSync,
+    Field, FieldValue, MAX_DEVICE_ID_LEN, MAX_DEVICE_TOKEN_LEN, MAX_FIELD_COUNT, MAX_FIELD_KEY_LEN,
+    MAX_FIELD_TEXT_LEN, MAX_PSK_LEN, MAX_SERVER_URL_LEN, MAX_SSID_LEN, MAX_WIDGET_ID_LEN,
+    NetworkConfig, PushData, StatusResponse, Tier, TimeSync,
 };
 
 mod m2;
@@ -16,9 +17,16 @@ Usage:
   deskmate-cli status [--port PATH] [--json]
   deskmate-cli time-sync [--offset-minutes N] [--port PATH] [--json]
   deskmate-cli push-data --widget ID --revision N [--field KEY=VALUE]... [--port PATH] [--json]
+  deskmate-cli provision [--ssid SSID] [--psk PSK] [--server-url URL] \\
+      [--device-id ID] [--token TOKEN] [--offset-minutes N] [--tier local|networked] \\
+      [--port PATH] [--json]
+  deskmate-cli factory-reset [--port PATH] [--json]
 
 Field values infer booleans and integers; use s:, i:, or b: to force a type.
-Examples: --field summary=s:Clear --field temp=i:23 --field ok=b:true";
+Examples: --field summary=s:Clear --field temp=i:23 --field ok=b:true
+
+provision persists over the cable and takes effect on the device's next boot,
+not live.";
 
 #[derive(Debug)]
 pub(crate) enum AppError {
@@ -58,6 +66,10 @@ enum CliCommand {
         revision: u32,
         fields: Vec<Field>,
     },
+    Provision {
+        config: NetworkConfig,
+    },
+    FactoryReset,
 }
 
 #[derive(Debug)]
@@ -73,6 +85,23 @@ struct CommandOptions {
     widget_id: Option<String>,
     revision: Option<u32>,
     fields: Vec<Field>,
+    ssid: Option<String>,
+    psk: Option<String>,
+    server_url: Option<String>,
+    device_id: Option<String>,
+    token: Option<String>,
+    tier: Option<Tier>,
+}
+
+impl CommandOptions {
+    fn has_provisioning_options(&self) -> bool {
+        self.ssid.is_some()
+            || self.psk.is_some()
+            || self.server_url.is_some()
+            || self.device_id.is_some()
+            || self.token.is_some()
+            || self.tier.is_some()
+    }
 }
 
 fn next_value(
@@ -137,9 +166,10 @@ fn build_command(command_name: &str, options: CommandOptions) -> Result<CliComma
                 || options.widget_id.is_some()
                 || options.revision.is_some()
                 || !options.fields.is_empty()
+                || options.has_provisioning_options()
             {
                 return Err(AppError::Usage(
-                    "status does not accept time-sync or push-data options".into(),
+                    "status does not accept time-sync, push-data or provision options".into(),
                 ));
             }
             CliCommand::Status
@@ -148,9 +178,10 @@ fn build_command(command_name: &str, options: CommandOptions) -> Result<CliComma
             if options.widget_id.is_some()
                 || options.revision.is_some()
                 || !options.fields.is_empty()
+                || options.has_provisioning_options()
             {
                 return Err(AppError::Usage(
-                    "time-sync does not accept push-data options".into(),
+                    "time-sync does not accept push-data or provision options".into(),
                 ));
             }
             if options
@@ -165,47 +196,115 @@ fn build_command(command_name: &str, options: CommandOptions) -> Result<CliComma
                 offset_minutes: options.offset_minutes,
             }
         }
-        "push-data" => {
-            if options.offset_minutes.is_some() {
+        "push-data" => build_push_data(options)?,
+        "provision" => build_provision(options)?,
+        "factory-reset" => {
+            if options.offset_minutes.is_some()
+                || options.widget_id.is_some()
+                || options.revision.is_some()
+                || !options.fields.is_empty()
+                || options.has_provisioning_options()
+            {
                 return Err(AppError::Usage(
-                    "push-data does not accept --offset-minutes".into(),
+                    "factory-reset does not accept any command options".into(),
                 ));
             }
-            let widget_id = options
-                .widget_id
-                .ok_or_else(|| AppError::Usage("push-data requires --widget".into()))?;
-            if widget_id.is_empty() || widget_id.len() > MAX_WIDGET_ID_LEN {
-                return Err(AppError::Usage(format!(
-                    "widget ID must be 1..={MAX_WIDGET_ID_LEN} UTF-8 bytes"
-                )));
-            }
-            let revision = options
-                .revision
-                .filter(|value| *value != 0)
-                .ok_or_else(|| AppError::Usage("push-data requires nonzero --revision".into()))?;
-            if options.fields.len() > MAX_FIELD_COUNT {
-                return Err(AppError::Usage(format!(
-                    "push-data accepts at most {MAX_FIELD_COUNT} fields"
-                )));
-            }
-            for (index, field) in options.fields.iter().enumerate() {
-                if options.fields[..index]
-                    .iter()
-                    .any(|previous| previous.key == field.key)
-                {
-                    return Err(AppError::Usage(format!(
-                        "duplicate field key: {}",
-                        field.key
-                    )));
-                }
-            }
-            CliCommand::PushData {
-                widget_id,
-                revision,
-                fields: options.fields,
-            }
+            CliCommand::FactoryReset
         }
         _ => return Err(AppError::Usage(format!("unknown command: {command_name}"))),
+    })
+}
+
+fn build_push_data(options: CommandOptions) -> Result<CliCommand, AppError> {
+    if options.offset_minutes.is_some() || options.has_provisioning_options() {
+        return Err(AppError::Usage(
+            "push-data does not accept --offset-minutes or provision options".into(),
+        ));
+    }
+    let widget_id = options
+        .widget_id
+        .ok_or_else(|| AppError::Usage("push-data requires --widget".into()))?;
+    if widget_id.is_empty() || widget_id.len() > MAX_WIDGET_ID_LEN {
+        return Err(AppError::Usage(format!(
+            "widget ID must be 1..={MAX_WIDGET_ID_LEN} UTF-8 bytes"
+        )));
+    }
+    let revision = options
+        .revision
+        .filter(|value| *value != 0)
+        .ok_or_else(|| AppError::Usage("push-data requires nonzero --revision".into()))?;
+    if options.fields.len() > MAX_FIELD_COUNT {
+        return Err(AppError::Usage(format!(
+            "push-data accepts at most {MAX_FIELD_COUNT} fields"
+        )));
+    }
+    for (index, field) in options.fields.iter().enumerate() {
+        if options.fields[..index]
+            .iter()
+            .any(|previous| previous.key == field.key)
+        {
+            return Err(AppError::Usage(format!(
+                "duplicate field key: {}",
+                field.key
+            )));
+        }
+    }
+    Ok(CliCommand::PushData {
+        widget_id,
+        revision,
+        fields: options.fields,
+    })
+}
+
+fn checked_provision_text(
+    value: Option<String>,
+    max_len: usize,
+    option: &str,
+) -> Result<String, AppError> {
+    let value = value.unwrap_or_default();
+    if value.len() > max_len {
+        return Err(AppError::Usage(format!(
+            "{option} must be at most {max_len} UTF-8 bytes"
+        )));
+    }
+    Ok(value)
+}
+
+fn build_provision(options: CommandOptions) -> Result<CliCommand, AppError> {
+    if options.widget_id.is_some() || options.revision.is_some() || !options.fields.is_empty() {
+        return Err(AppError::Usage(
+            "provision does not accept push-data options".into(),
+        ));
+    }
+    if options
+        .offset_minutes
+        .is_some_and(|offset| !(-840..=840).contains(&offset))
+    {
+        return Err(AppError::Usage(
+            "--offset-minutes must be in -840..=840".into(),
+        ));
+    }
+    let ssid = checked_provision_text(options.ssid, MAX_SSID_LEN, "--ssid")?;
+    let psk = checked_provision_text(options.psk, MAX_PSK_LEN, "--psk")?;
+    let server_url =
+        checked_provision_text(options.server_url, MAX_SERVER_URL_LEN, "--server-url")?;
+    let device_id = checked_provision_text(options.device_id, MAX_DEVICE_ID_LEN, "--device-id")?;
+    let token = checked_provision_text(options.token, MAX_DEVICE_TOKEN_LEN, "--token")?;
+    let tier = options.tier.unwrap_or(Tier::Local);
+    let utc_offset_minutes = match options.offset_minutes {
+        Some(offset) => offset,
+        None => system_utc_offset_minutes()?,
+    };
+    Ok(CliCommand::Provision {
+        config: NetworkConfig {
+            ssid,
+            psk,
+            server_url,
+            device_id,
+            token,
+            utc_offset_minutes,
+            tier,
+        },
     })
 }
 
@@ -241,6 +340,27 @@ fn parse_options() -> Result<Options, AppError> {
             "--field" => {
                 let value = next_value(&mut arguments, "--field")?;
                 command_options.fields.push(parse_field(&value)?);
+            }
+            "--ssid" => command_options.ssid = Some(next_value(&mut arguments, "--ssid")?),
+            "--psk" => command_options.psk = Some(next_value(&mut arguments, "--psk")?),
+            "--server-url" => {
+                command_options.server_url = Some(next_value(&mut arguments, "--server-url")?);
+            }
+            "--device-id" => {
+                command_options.device_id = Some(next_value(&mut arguments, "--device-id")?);
+            }
+            "--token" => command_options.token = Some(next_value(&mut arguments, "--token")?),
+            "--tier" => {
+                let value = next_value(&mut arguments, "--tier")?;
+                command_options.tier = Some(match value.as_str() {
+                    "local" => Tier::Local,
+                    "networked" => Tier::Networked,
+                    other => {
+                        return Err(AppError::Usage(format!(
+                            "--tier must be local or networked, got: {other}"
+                        )));
+                    }
+                });
             }
             _ => return Err(AppError::Usage(format!("unknown option: {argument}"))),
         }
@@ -393,16 +513,15 @@ fn run() -> Result<(), AppError> {
         return Ok(());
     }
     let options = parse_options()?;
-    let mut connected = connect(options.port.as_deref())?;
+    let port = options.port.as_deref();
+    let json = options.json;
     match options.command {
         CliCommand::Status => {
-            print_status(
-                &connected.initial_status,
-                &connected.port_name,
-                options.json,
-            );
+            let connected = connect(port)?;
+            print_status(&connected.initial_status, &connected.port_name, json);
         }
         CliCommand::TimeSync { offset_minutes } => {
+            let mut connected = connect(port)?;
             let offset_minutes = match offset_minutes {
                 Some(offset) => offset,
                 None => system_utc_offset_minutes()?,
@@ -412,7 +531,7 @@ fn run() -> Result<(), AppError> {
                 unix_seconds: seconds,
                 utc_offset_minutes: offset_minutes,
             })?;
-            if options.json {
+            if json {
                 println!(
                     "{{\"ok\":true,\"unix_seconds\":{seconds},\"utc_offset_minutes\":{offset_minutes}}}"
                 );
@@ -425,13 +544,14 @@ fn run() -> Result<(), AppError> {
             revision,
             fields,
         } => {
+            let mut connected = connect(port)?;
             let ack = connected.client.push_data(PushData {
                 widget_id: widget_id.clone(),
                 revision,
                 fields,
             })?;
             let accepted_revision = ack.revision.ok_or(DeviceError::UnexpectedMessage)?;
-            if options.json {
+            if json {
                 println!(
                     "{{\"ok\":true,\"widget_id\":{},\"revision\":{accepted_revision}}}",
                     json_string(&widget_id)
@@ -440,8 +560,49 @@ fn run() -> Result<(), AppError> {
                 println!("pushed {widget_id} revision {accepted_revision}");
             }
         }
+        CliCommand::Provision { config } => {
+            // A dedicated session (not the lighter DeviceClient used above)
+            // because DeviceSession::provision is where this request lives;
+            // a one-shot session for a single command mirrors the M2
+            // commands in m2.rs (e.g. apply-config).
+            let connected = connect_session(port)?;
+            connected.session.provision(&config)?;
+            if json {
+                println!(
+                    "{{\"ok\":true,\"ssid\":{},\"server_url\":{},\"device_id\":{},\"tier\":{}}}",
+                    json_string(&config.ssid),
+                    json_string(&config.server_url),
+                    json_string(&config.device_id),
+                    json_string(tier_name(config.tier))
+                );
+            } else {
+                println!(
+                    "provisioned: ssid={} server_url={} device_id={} tier={} (takes effect on next boot)",
+                    config.ssid,
+                    config.server_url,
+                    config.device_id,
+                    tier_name(config.tier)
+                );
+            }
+        }
+        CliCommand::FactoryReset => {
+            let connected = connect_session(port)?;
+            connected.session.factory_reset()?;
+            if json {
+                println!("{{\"ok\":true}}");
+            } else {
+                println!("factory reset: network config erased (takes effect on next boot)");
+            }
+        }
     }
     Ok(())
+}
+
+fn tier_name(tier: Tier) -> &'static str {
+    match tier {
+        Tier::Local => "local",
+        Tier::Networked => "networked",
+    }
 }
 
 fn exit_code(error: &AppError) -> i32 {

@@ -151,7 +151,9 @@ impl<T: Transport> DeviceClient<T> {
             | Message::PushData(_)
             | Message::ApplyConfig(_)
             | Message::ActivateScreen(_)
-            | Message::TriggerInterrupt(_) => Some(TYPE_ACK),
+            | Message::TriggerInterrupt(_)
+            | Message::NetworkConfig(_)
+            | Message::FactoryReset => Some(TYPE_ACK),
             Message::Heartbeat => Some(TYPE_HEARTBEAT_ACK),
             _ => None,
         }

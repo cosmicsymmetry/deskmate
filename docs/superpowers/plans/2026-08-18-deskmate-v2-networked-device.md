@@ -94,7 +94,7 @@ Used verbatim by every task that touches these fields.
 
 ---
 
-### Task 1: Wire contract — new types, capability, bounds
+### Task 1:1 Wire contract — new types, capability, bounds
 
 Everything downstream depends on these names, so this task defines them in both
 languages and pins them with cross-language golden frames. No radio, no NVS, no server.
@@ -114,7 +114,7 @@ languages and pins them with cross-language golden frames. No radio, no NVS, no 
   `PROTOCOL_CAPABILITY_NETWORKING`, and the Rust mirrors `NetworkConfig`, `Tier`,
   `WifiState`, `OtaState`. Every later task uses these names exactly as spelled here.
 
-- [ ] **Step 1: Write the failing Rust round-trip test**
+- [x] **Step 1: Write the failing Rust round-trip test**
 
 Append to `companion/crates/protocol/src/message.rs`'s test module:
 
@@ -156,7 +156,7 @@ Append to `companion/crates/protocol/src/message.rs`'s test module:
     }
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 From `companion/`:
 
@@ -167,7 +167,7 @@ cargo test -p protocol network_config factory_reset
 Expected: compile failure — `NetworkConfig`, `Tier`, `MAX_SSID_LEN` and
 `Message::FactoryReset` do not exist.
 
-- [ ] **Step 3: Add the Rust constants and types**
+- [x] **Step 3: Add the Rust constants and types**
 
 In `companion/crates/protocol/src/message.rs`, beside the existing capability constants:
 
@@ -230,7 +230,7 @@ matching `Heartbeat`. Enforce every bound from the table in the Global Constrain
 section during encode **and** decode; `utc_offset_minutes` reuses the existing
 `MIN_UTC_OFFSET_MINUTES`/`MAX_UTC_OFFSET_MINUTES` range.
 
-- [ ] **Step 4: Run the Rust tests to verify they pass**
+- [x] **Step 4: Run the Rust tests to verify they pass**
 
 ```sh
 cargo test -p protocol network_config factory_reset
@@ -238,7 +238,7 @@ cargo test -p protocol network_config factory_reset
 
 Expected: PASS.
 
-- [ ] **Step 5: Add the additive StatusResponse fields**
+- [x] **Step 5: Add the additive StatusResponse fields**
 
 Extend `StatusResponse` with `tier: Tier`, `wifi_state: WifiState`, `wifi_rssi: i8`,
 `ip: String`, `ota_state: OtaState`, and `last_network_error: Option<String>` (bounded by
@@ -266,7 +266,7 @@ existing key. Add:
 If `StatusResponse::current()` does not exist, use whichever constructor
 `generate-fixtures.rs` already uses for `status_response.bin`.
 
-- [ ] **Step 6: Generate the new golden fixtures**
+- [x] **Step 6: Generate the new golden fixtures**
 
 Add three frames to `companion/crates/protocol/examples/generate-fixtures.rs`:
 `network_config.bin` (all fields at maximum length), `factory_reset.bin`, and
@@ -279,7 +279,7 @@ cargo run -p protocol --example generate-fixtures
 Add the three names to the `valid_golden_frames_decode` list in
 `companion/crates/protocol/tests/fixtures.rs`.
 
-- [ ] **Step 7: Write the failing C fixture assertions**
+- [x] **Step 7: Write the failing C fixture assertions**
 
 In `firmware/host_tests/test_protocol.c`, inside `test_valid_fixtures()`, add:
 
@@ -293,7 +293,7 @@ In `firmware/host_tests/test_protocol.c`, inside `test_valid_fixtures()`, add:
 The third argument is the frame's sequence number; use the values passed to
 `encode_message` in Step 6.
 
-- [ ] **Step 8: Run the C tests to verify they fail**
+- [x] **Step 8: Run the C tests to verify they fail**
 
 ```sh
 make -C firmware/host_tests clean test
@@ -301,7 +301,7 @@ make -C firmware/host_tests clean test
 
 Expected: `test_protocol` FAILS — the C decoder rejects type 13 as unsupported.
 
-- [ ] **Step 9: Mirror the contract in C**
+- [x] **Step 9: Mirror the contract in C**
 
 In `firmware/main/core/protocol_message.h` add the two enum members to
 `protocol_message_type_t`, add `PROTOCOL_ERROR_WRONG_TIER = 15` to
@@ -347,7 +347,7 @@ unknown or duplicate keys, reject any string exceeding its bound, and reject an
 out-of-range `utc_offset_minutes`. Encode the additive status keys in the same
 deterministic key order used by the Rust side.
 
-- [ ] **Step 10: Run the C tests to verify they pass**
+- [x] **Step 10: Run the C tests to verify they pass**
 
 ```sh
 make -C firmware/host_tests clean test
@@ -355,14 +355,14 @@ make -C firmware/host_tests clean test
 
 Expected: all pass, including the three new fixture assertions.
 
-- [ ] **Step 11: Add rejection tests for malformed network config**
+- [x] **Step 11: Add rejection tests for malformed network config**
 
 In `firmware/host_tests/test_protocol.c`, add a test that a `network_config` frame whose
 `ssid` is 33 bytes decodes to `PROTOCOL_MESSAGE_ERR_*` rather than succeeding, and that a
 frame with an unknown map key inside the network-config map is rejected. Build the
 malformed bytes by hand in the test, as the existing malformed-frame tests do.
 
-- [ ] **Step 12: Run the full gates**
+- [x] **Step 12: Run the full gates**
 
 From the repository root:
 
@@ -380,7 +380,7 @@ cargo test --workspace
 
 Expected: all pass.
 
-- [ ] **Step 13: Commit**
+- [x] **Step 13: Commit**
 
 ```bash
 git add firmware/main/core/protocol_message.h firmware/main/core/protocol_message.c \
@@ -405,7 +405,7 @@ Claude-Session: https://claude.ai/code/session_01SwAMBn6h8WMLU4ADiA8LwG"
 
 ---
 
-### Task 2: Tier state machine and config validation (pure C)
+### Task 2:2 Tier state machine and config validation (pure C)
 
 The rules that decide whether a stored config is usable, and what tier the device runs
 in, belong in `core/` where they are host-testable without a board. This task writes no
@@ -422,7 +422,7 @@ ESP-IDF code.
   `net_config_usb_message_allowed()`, and `net_config_error_t`. Tasks 3, 8 and 11 call
   these by exactly these names.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `firmware/host_tests/test_net_config.c`:
 
@@ -562,7 +562,7 @@ int main(void)
 }
 ```
 
-- [ ] **Step 2: Register the test target**
+- [x] **Step 2: Register the test target**
 
 In `firmware/host_tests/Makefile`, add `test_net_config` to the `test:` prerequisite
 list and to the run list, then add the rule:
@@ -572,7 +572,7 @@ test_net_config: test_net_config.c ../main/core/net_config.c $(PROTOCOL_SRCS)
 	$(CC) $(CFLAGS) -I$(CBOR_DIR) -o $@ $^
 ```
 
-- [ ] **Step 3: Run the test to verify it fails**
+- [x] **Step 3: Run the test to verify it fails**
 
 ```sh
 make -C firmware/host_tests clean test
@@ -580,7 +580,7 @@ make -C firmware/host_tests clean test
 
 Expected: compile failure — `net_config.h` does not exist.
 
-- [ ] **Step 4: Write the header**
+- [x] **Step 4: Write the header**
 
 Create `firmware/main/core/net_config.h`:
 
@@ -625,14 +625,14 @@ bool net_config_usb_message_allowed(protocol_tier_t tier,
                                     protocol_message_type_t type);
 ```
 
-- [ ] **Step 5: Write the minimal implementation**
+- [x] **Step 5: Write the minimal implementation**
 
 Create `firmware/main/core/net_config.c` implementing exactly the three functions. Use
 `strncmp(config->server_url, "wss://", 6) == 0` for the TLS check and treat a
 `NULL` config as `NET_CONFIG_ERR_MISSING_SSID` with an effective tier of local. Include
 only `<string.h>` and the two project headers — no ESP-IDF.
 
-- [ ] **Step 6: Run the test to verify it passes**
+- [x] **Step 6: Run the test to verify it passes**
 
 ```sh
 make -C firmware/host_tests clean test
@@ -640,7 +640,7 @@ make -C firmware/host_tests clean test
 
 Expected: all pass, including `test_net_config`.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add firmware/main/core/net_config.c firmware/main/core/net_config.h \
@@ -659,7 +659,7 @@ Claude-Session: https://claude.ai/code/session_01SwAMBn6h8WMLU4ADiA8LwG"
 
 ---
 
-### Task 3: NVS persistence and provisioning over USB
+### Task 3:3 NVS persistence and provisioning over USB
 
 The device's first use of NVS. This task ends with a real, board-testable deliverable
 that needs no radio at all: `deskmate-cli` can provision the device over the cable, the
@@ -682,7 +682,7 @@ messages on USB.
   `net_store_current_tier()`. Tasks 6, 8 and 11 read the stored config through
   `net_store_load()`.
 
-- [ ] **Step 1: Write the header**
+- [x] **Step 1: Write the header**
 
 Create `firmware/main/link/net_store.h`:
 
@@ -713,7 +713,7 @@ esp_err_t net_store_erase(void);
 protocol_tier_t net_store_current_tier(void);
 ```
 
-- [ ] **Step 2: Implement the store**
+- [x] **Step 2: Implement the store**
 
 Create `firmware/main/link/net_store.c`. Use one namespace `"deskmate"` with
 `nvs_get_str`/`nvs_set_str` per field and `nvs_get_i8` for `tier`, `nvs_get_i16` for
@@ -727,7 +727,7 @@ Create `firmware/main/link/net_store.c`. Use one namespace `"deskmate"` with
   failure returns the error and leaves the previous config intact.
 - Log at `ESP_LOGW` on any degradation, and never log a PSK or token value.
 
-- [ ] **Step 3: Initialise NVS at boot**
+- [x] **Step 3: Initialise NVS at boot**
 
 In `firmware/main/main.c`, before `board_display_init()`:
 
@@ -744,7 +744,7 @@ In `firmware/main/main.c`, before `board_display_init()`:
     ESP_ERROR_CHECK(nvs_status);
 ```
 
-- [ ] **Step 4: Handle the two new messages in `protocol_task.c`**
+- [x] **Step 4: Handle the two new messages in `protocol_task.c`**
 
 Add cases to the message dispatch:
 
@@ -755,7 +755,7 @@ Add cases to the message dispatch:
   well-defined event rather than a hot swap.
 - `PROTOCOL_TYPE_FACTORY_RESET`: `net_store_erase()`, then ACK.
 
-- [ ] **Step 5: Apply the tier gate to USB messages**
+- [x] **Step 5: Apply the tier gate to USB messages**
 
 At the top of the dispatch, before acting on any message that arrived on the USB
 transport:
@@ -768,13 +768,13 @@ transport:
     }
 ```
 
-- [ ] **Step 6: Populate the additive status fields**
+- [x] **Step 6: Populate the additive status fields**
 
 In the status builder (around `protocol_task.c:213`), set `status->tier` from
 `net_store_current_tier()`. Leave `wifi_state` at `PROTOCOL_WIFI_DOWN`, `wifi_rssi` at 0,
 `ip` empty and `ota_state` at `PROTOCOL_OTA_IDLE` — Tasks 6 and 11 fill those in.
 
-- [ ] **Step 7: Build the firmware**
+- [x] **Step 7: Build the firmware**
 
 ```sh
 . "$HOME/esp/esp-idf/export.sh"
@@ -784,7 +784,7 @@ idf.py -C firmware build
 Expected: builds with no warnings. Remember to add `nvs_flash` to the component
 requirements in `firmware/main/CMakeLists.txt` if the build cannot find it.
 
-- [ ] **Step 8: Add host-side provisioning to the device crate and CLI**
+- [x] **Step 8: Add host-side provisioning to the device crate and CLI**
 
 In `companion/crates/device/src/session.rs` add `provision(&mut self, config:
 &NetworkConfig) -> Result<...>` and `factory_reset(&mut self) -> Result<...>`, both
@@ -799,7 +799,7 @@ In `companion/crates/deskmate-cli/src/main.rs` add two commands to the dispatch 
 
 Update the usage text so `unknown command` errors stay accurate.
 
-- [ ] **Step 9: Run the workspace gates**
+- [x] **Step 9: Run the workspace gates**
 
 From `companion/`:
 
@@ -811,7 +811,7 @@ cargo test --workspace
 
 Expected: all pass.
 
-- [ ] **Step 10: Verify on the physical board**
+- [x] **Step 10: Verify on the physical board**
 
 Flash and exercise the round trip. This is the first hardware gate in V2 and it needs no
 radio.
@@ -836,12 +836,12 @@ ACKs; **after a power cycle** status reports `tier: networked`; a `push-data` co
 fails with the wrong-tier error; and `factory-reset` followed by a power cycle returns
 status to `tier: local`.
 
-- [ ] **Step 11: Record the observation**
+- [x] **Step 11: Record the observation**
 
 Add a dated entry to `docs/hardware/board-notes.md` recording exactly what was observed,
 including anything that did not pass. Do not write "verified" against anything not seen.
 
-- [ ] **Step 12: Commit**
+- [x] **Step 12: Commit**
 
 ```bash
 git add firmware/main/link/net_store.c firmware/main/link/net_store.h \
@@ -867,7 +867,7 @@ Claude-Session: https://claude.ai/code/session_01SwAMBn6h8WMLU4ADiA8LwG"
 
 ---
 
-### Task 4: Transport vtable
+### Task 4:4 Transport vtable
 
 A pure refactor with no behaviour change, so that Task 8 can add a second transport
 without touching the protocol task's logic. `protocol_task.c` calls `usb_link_*` at four
@@ -883,7 +883,7 @@ sites today: lines 184, 240, 624 and 729.
 - Produces: `link_transport_t` and `usb_link_transport()`. Task 8 adds
   `net_link_transport()` with the identical shape.
 
-- [ ] **Step 1: Define the vtable**
+- [x] **Step 1: Define the vtable**
 
 Create `firmware/main/link/link_transport.h`:
 
@@ -914,7 +914,7 @@ typedef struct {
 } link_transport_t;
 ```
 
-- [ ] **Step 2: Expose the USB implementation**
+- [x] **Step 2: Expose the USB implementation**
 
 Add to `firmware/main/link/usb_link.h`:
 
@@ -928,14 +928,14 @@ const link_transport_t *usb_link_transport(void);
 Implement it in `usb_link.c` as a `static const link_transport_t` whose members point at
 the existing `usb_link_read`, `usb_link_write_frame` and `usb_link_rx_dropped_bytes`.
 
-- [ ] **Step 3: Route the protocol task through the vtable**
+- [x] **Step 3: Route the protocol task through the vtable**
 
 In `protocol_task.c`, hold `static const link_transport_t *s_transport;`, initialise it to
 `usb_link_transport()`, and replace the four direct calls with
 `s_transport->write_frame(...)`, `s_transport->dropped_bytes()` and
 `s_transport->read(...)`.
 
-- [ ] **Step 4: Build and confirm nothing changed**
+- [x] **Step 4: Build and confirm nothing changed**
 
 ```sh
 make -C firmware/host_tests clean test
@@ -946,13 +946,13 @@ idf.py -C firmware build
 Expected: both pass. Host tests do not compile `protocol_task.c`, so they should be
 untouched — run them to prove that rather than to discover it.
 
-- [ ] **Step 5: Verify behaviour is unchanged on the board**
+- [x] **Step 5: Verify behaviour is unchanged on the board**
 
 Flash and run `cargo run -p deskmate-cli -- status --port <serial-port>` plus one
 `push-data`. Expected: identical behaviour to Task 3. A refactor that changes observable
 behaviour is a failed refactor — stop and diagnose rather than continuing.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add firmware/main/link/link_transport.h firmware/main/link/usb_link.c \
@@ -969,7 +969,7 @@ Claude-Session: https://claude.ai/code/session_01SwAMBn6h8WMLU4ADiA8LwG"
 
 ---
 
-### Task 5: Per-transport link timeout
+### Task 5:5 Per-transport link timeout
 
 `link_state.c:29` compares against the compile-time `PROTOCOL_LINK_TIMEOUT_MS`. Over the
 internet, 10 s will flap and drop the device to the standalone clock on ordinary jitter.
@@ -985,7 +985,7 @@ USB must keep 10000 ms; the network transport uses 45000 ms.
 - Produces: `link_state_init_with_timeout(link_state_t *, uint32_t timeout_ms)`.
   `link_state_init()` keeps its existing signature and behaviour.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Add to `firmware/host_tests/test_link_state.c`:
 
@@ -1013,7 +1013,7 @@ static void test_network_timeout_is_longer(void)
 }
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 ```sh
 make -C firmware/host_tests clean test
@@ -1021,7 +1021,7 @@ make -C firmware/host_tests clean test
 
 Expected: compile failure — `link_state_init_with_timeout` is undefined.
 
-- [ ] **Step 3: Add the timeout to the state**
+- [x] **Step 3: Add the timeout to the state**
 
 Add `uint32_t timeout_ms;` to `link_state_t` in `link_state.h` and declare:
 
@@ -1036,7 +1036,7 @@ void link_state_init_with_timeout(link_state_t *state, uint32_t timeout_ms);
 In `link_state.c`, make `link_state_init()` call the new function with
 `PROTOCOL_LINK_TIMEOUT_MS`, and change line 29's comparison to use `state->timeout_ms`.
 
-- [ ] **Step 4: Run the test to verify it passes**
+- [x] **Step 4: Run the test to verify it passes**
 
 ```sh
 make -C firmware/host_tests clean test
@@ -1044,12 +1044,12 @@ make -C firmware/host_tests clean test
 
 Expected: all pass, including the two new cases.
 
-- [ ] **Step 5: Initialise from the active transport**
+- [x] **Step 5: Initialise from the active transport**
 
 In `protocol_task.c`, replace the `link_state_init(...)` call with
 `link_state_init_with_timeout(&state, s_transport->link_timeout_ms)`.
 
-- [ ] **Step 6: Build and commit**
+- [x] **Step 6: Build and commit**
 
 ```sh
 . "$HOME/esp/esp-idf/export.sh"
@@ -1073,7 +1073,7 @@ Claude-Session: https://claude.ai/code/session_01SwAMBn6h8WMLU4ADiA8LwG"
 
 ---
 
-### Task 6: WiFi station and SNTP
+### Task 6:6 WiFi station and SNTP
 
 The radio comes up on both tiers. This task ends with a board-testable deliverable that
 still involves no server: the device joins WiFi and the standalone clock shows correct
@@ -1090,7 +1090,7 @@ local time with no host attached at all.
   `wifi_station_ip()`, and `wifi_station_time_synced()`. Tasks 8 and 11 gate their work
   on `wifi_station_state() == PROTOCOL_WIFI_CONNECTED`.
 
-- [ ] **Step 1: Write the header**
+- [x] **Step 1: Write the header**
 
 Create `firmware/main/link/wifi_station.h`:
 
@@ -1124,7 +1124,7 @@ const char *wifi_station_ip(void);
 bool wifi_station_time_synced(void);
 ```
 
-- [ ] **Step 2: Implement the station**
+- [x] **Step 2: Implement the station**
 
 Create `firmware/main/link/wifi_station.c` using `esp_netif_init()`,
 `esp_event_loop_create_default()`, `esp_netif_create_default_wifi_sta()`,
@@ -1141,18 +1141,18 @@ Create `firmware/main/link/wifi_station.c` using `esp_netif_init()`,
   where the existing host time-sync path applies it — follow `link_state_local_seconds()`
   rather than adding a second convention.
 
-- [ ] **Step 3: Start the station at boot**
+- [x] **Step 3: Start the station at boot**
 
 In `firmware/main/main.c`, after NVS init and the display bring-up, call
 `wifi_station_start()` and log the result. Do not block boot on it: the clock screen must
 appear whether or not WiFi ever joins.
 
-- [ ] **Step 4: Report WiFi in status**
+- [x] **Step 4: Report WiFi in status**
 
 In `protocol_task.c`'s status builder, fill `wifi_state`, `wifi_rssi` and `ip` from the
 three accessors. The SSID and PSK are never reported.
 
-- [ ] **Step 5: Build**
+- [x] **Step 5: Build**
 
 ```sh
 . "$HOME/esp/esp-idf/export.sh"
@@ -1162,7 +1162,7 @@ idf.py -C firmware build
 Expected: builds clean. Note the image size from the build summary and record it — this
 is the start of the re-baselining the spec §3.4 requires.
 
-- [ ] **Step 6: Verify on the physical board**
+- [x] **Step 6: Verify on the physical board**
 
 Flash, then provision credentials for a real network with `--tier local`:
 
@@ -1178,7 +1178,7 @@ with no host attached (unplug the cable and use the webcam harness per
 `docs/hardware/webcam-harness.md`); the time survives a reboot with no host; and pulling
 the network makes `wifi_state` go to `connecting` without rebooting the device.
 
-- [ ] **Step 7: Record the observation and commit**
+- [x] **Step 7: Record the observation and commit**
 
 Add the dated entry to `docs/hardware/board-notes.md`, including the new image size and
 free-heap figure. Then:
@@ -1204,7 +1204,7 @@ Claude-Session: https://claude.ai/code/session_01SwAMBn6h8WMLU4ADiA8LwG"
 
 ---
 
-### Task 7: Server skeleton — device link, auth, firmware endpoints
+### Task 7:7 Server skeleton — device link, auth, firmware endpoints
 
 A new workspace crate. This task has no device involvement at all and is testable
 entirely with `cargo test`: a WebSocket client with a good token gets a session, a bad
@@ -1224,7 +1224,7 @@ token is refused, and the firmware endpoints answer correctly.
   `authenticate(&self, token: &str) -> Option<DeviceId>`, and
   `server::ServerState`. Task 9 adds the ownership runtime behind this same router.
 
-- [ ] **Step 1: Create the crate and register it**
+- [x] **Step 1: Create the crate and register it**
 
 Add `"crates/server"` to `members` in `companion/Cargo.toml`. Create
 `companion/crates/server/Cargo.toml` depending on `protocol` (path), `axum` with the `ws`
@@ -1233,7 +1233,7 @@ feature, `tokio` with `rt-multi-thread`, `macros` and `signal`, `serde` with `de
 `edition`, `rust-version`, `license` and `[lints]` from the workspace as the other crates
 do.
 
-- [ ] **Step 2: Write the failing test**
+- [x] **Step 2: Write the failing test**
 
 Create `companion/crates/server/tests/device_link.rs`:
 
@@ -1329,7 +1329,7 @@ async fn firmware_check_refuses_an_unknown_token() {
 
 Add `tokio-tungstenite`, `reqwest` and `http` as `[dev-dependencies]`.
 
-- [ ] **Step 3: Run the test to verify it fails**
+- [x] **Step 3: Run the test to verify it fails**
 
 From `companion/`:
 
@@ -1339,7 +1339,7 @@ cargo test -p server
 
 Expected: compile failure — the crate has no `app`, `ServerState` or `registry`.
 
-- [ ] **Step 4: Implement the registry**
+- [x] **Step 4: Implement the registry**
 
 `src/registry.rs`: a `Registry` holding `Mutex<HashMap<String, DeviceId>>` mapping token
 to device. `mint()` generates a `device_id` (`dev-0001` style, monotonic) and a random
@@ -1348,7 +1348,7 @@ token of at least 32 bytes rendered as hex, inserts it, and returns
 device id. Compare tokens in constant time — a plain `==` on a secret invites timing
 analysis, and the fix costs one dependency-free helper.
 
-- [ ] **Step 5: Implement auth extraction and the router**
+- [x] **Step 5: Implement auth extraction and the router**
 
 `src/auth.rs`: parse `Authorization: Bearer <token>`, returning `401` on a missing,
 malformed or unknown token. `src/lib.rs`: `ServerState` holding the registry and, later, the runtime, with
@@ -1363,7 +1363,7 @@ nothing yet. Task 9 replaces the body of this handler with the ownership runtime
 the requested version matches the newest available, otherwise `200` with
 `{"version": ..., "url": ...}`. Serve images from a configured directory.
 
-- [ ] **Step 6: Run the tests to verify they pass**
+- [x] **Step 6: Run the tests to verify they pass**
 
 ```sh
 cargo test -p server
@@ -1371,13 +1371,13 @@ cargo test -p server
 
 Expected: all five pass.
 
-- [ ] **Step 7: Add the binary entry point**
+- [x] **Step 7: Add the binary entry point**
 
 `src/main.rs`: read a bind address, a firmware directory and an admin token from
 environment variables, build `ServerState`, and serve with graceful shutdown on
 `SIGINT`/`SIGTERM`. Print the bind address at startup.
 
-- [ ] **Step 8: Write the deployment unit and its runbook**
+- [x] **Step 8: Write the deployment unit and its runbook**
 
 The spec's §5.4 commits to "a single binary plus `cloudflared`, run under systemd or
 launchd". Create `companion/crates/server/deploy/` holding a `launchd` plist and a
@@ -1387,7 +1387,7 @@ where the admin token is expected to live. A server that only ever runs from a d
 shell is not deployed, and the runbook is what makes the tunnel hostname reproducible
 across restarts.
 
-- [ ] **Step 9: Run the workspace gates and commit**
+- [x] **Step 9: Run the workspace gates and commit**
 
 ```sh
 cargo fmt --all --check
@@ -1413,7 +1413,7 @@ Claude-Session: https://claude.ai/code/session_01SwAMBn6h8WMLU4ADiA8LwG"
 
 ---
 
-### Task 8: WebSocket transport on the device
+### Task 8:8 WebSocket transport on the device
 
 The device dials out and the existing frames flow over the socket. Deliverable: a
 networked device answers `status` from the server rather than from the cable.
@@ -1588,7 +1588,7 @@ Claude-Session: https://claude.ai/code/session_01SwAMBn6h8WMLU4ADiA8LwG"
 
 ---
 
-### Task 9: Server owns the device
+### Task 9:9 Server owns the device
 
 The milestone's centre. `app-core`'s `RuntimeDevice` trait is the seam: the server
 implements it over the WebSocket and calls the same `RuntimeHandle` the Mac app uses, so
@@ -1872,7 +1872,7 @@ Claude-Session: https://claude.ai/code/session_01SwAMBn6h8WMLU4ADiA8LwG"
 
 ---
 
-### Task 10: Companion app — provisioning and tier UI
+### Task 10:10 Companion app — provisioning and tier UI
 
 The Mac app becomes the setup surface. In local tier it writes settings to the device as
 it does today; in networked tier it writes them to the server and shows that it is doing
@@ -1998,7 +1998,7 @@ Claude-Session: https://claude.ai/code/session_01SwAMBn6h8WMLU4ADiA8LwG"
 
 ---
 
-### Task 11: Firmware update and rollback
+### Task 11:11 Firmware update and rollback
 
 The last feature task. V1 already poured the foundation: `ota_0`/`ota_1` at 4 MB each,
 `otadata`, and an OTA-aware bootloader.
@@ -2167,7 +2167,7 @@ Claude-Session: https://claude.ai/code/session_01SwAMBn6h8WMLU4ADiA8LwG"
 
 ---
 
-### Task 12: Physical exit gate and documentation
+### Task 12:12 Physical exit gate and documentation
 
 The spec's §7.2 gate, run as one session on the physical board, plus the durable record.
 This task cannot be completed by an agent alone: flashing, cable pulls, touching and

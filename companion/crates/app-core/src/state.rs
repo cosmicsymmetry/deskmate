@@ -72,6 +72,12 @@ pub struct DeviceSnapshot {
     pub uptime_ms: Option<u64>,
     pub free_heap: Option<u32>,
     pub rotation: Option<u16>,
+    pub tier: Option<DeviceTier>,
+    pub wifi_state: Option<DeviceWifiState>,
+    pub wifi_rssi: Option<i8>,
+    pub ip: Option<String>,
+    pub last_network_error: Option<String>,
+    pub ota_state: Option<DeviceOtaState>,
     pub active_screen_id: Option<String>,
     pub counters: DeviceCounters,
 }
@@ -119,6 +125,7 @@ pub enum DeviceCapability {
     HostTapActions,
     AssetTransfer,
     FirmwareUpdate,
+    Networking,
 }
 
 impl DeviceCapability {
@@ -131,6 +138,7 @@ impl DeviceCapability {
             Self::HostTapActions => protocol::CAPABILITY_HOST_TAP_ACTIONS,
             Self::AssetTransfer => protocol::CAPABILITY_ASSET_TRANSFER,
             Self::FirmwareUpdate => protocol::CAPABILITY_FIRMWARE_UPDATE,
+            Self::Networking => protocol::CAPABILITY_NETWORKING,
         }
     }
 
@@ -146,11 +154,12 @@ impl DeviceCapability {
             Self::HostTapActions => "host tap actions",
             Self::AssetTransfer => "icon and font asset transfer",
             Self::FirmwareUpdate => "firmware update",
+            Self::Networking => "networking",
         }
     }
 
     pub fn from_bits(bits: u64) -> Vec<Self> {
-        const ALL: [DeviceCapability; 7] = [
+        const ALL: [DeviceCapability; 8] = [
             DeviceCapability::CoreWidgets,
             DeviceCapability::ConfigRotation,
             DeviceCapability::DashboardLayouts,
@@ -158,6 +167,7 @@ impl DeviceCapability {
             DeviceCapability::HostTapActions,
             DeviceCapability::AssetTransfer,
             DeviceCapability::FirmwareUpdate,
+            DeviceCapability::Networking,
         ];
         ALL.into_iter()
             .filter(|capability| bits & capability.bit() != 0)
@@ -172,6 +182,65 @@ impl DeviceCapability {
             | protocol::CAPABILITY_HOST_TAP_ACTIONS
             | protocol::CAPABILITY_ASSET_TRANSFER
             | protocol::CAPABILITY_FIRMWARE_UPDATE
+            | protocol::CAPABILITY_NETWORKING
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DeviceTier {
+    Local,
+    Networked,
+}
+
+impl From<protocol::Tier> for DeviceTier {
+    fn from(tier: protocol::Tier) -> Self {
+        match tier {
+            protocol::Tier::Local => Self::Local,
+            protocol::Tier::Networked => Self::Networked,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DeviceWifiState {
+    Down,
+    Connecting,
+    Connected,
+    Failed,
+}
+
+impl From<protocol::WifiState> for DeviceWifiState {
+    fn from(state: protocol::WifiState) -> Self {
+        match state {
+            protocol::WifiState::Down => Self::Down,
+            protocol::WifiState::Connecting => Self::Connecting,
+            protocol::WifiState::Connected => Self::Connected,
+            protocol::WifiState::Failed => Self::Failed,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DeviceOtaState {
+    Idle,
+    Checking,
+    Downloading,
+    PendingVerify,
+    Failed,
+}
+
+impl From<protocol::OtaState> for DeviceOtaState {
+    fn from(state: protocol::OtaState) -> Self {
+        match state {
+            protocol::OtaState::Idle => Self::Idle,
+            protocol::OtaState::Checking => Self::Checking,
+            protocol::OtaState::Downloading => Self::Downloading,
+            protocol::OtaState::PendingVerify => Self::PendingVerify,
+            protocol::OtaState::Failed => Self::Failed,
+        }
     }
 }
 

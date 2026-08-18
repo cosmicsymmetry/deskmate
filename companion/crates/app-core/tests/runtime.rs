@@ -7,8 +7,9 @@ use std::time::{Duration, Instant};
 use app_core::{
     AlertHold, AppConfig, CalendarRefreshRequest, CalendarRefreshResult, CalendarRefresher,
     CardAlert, CardField, CardFieldValue, CardSettings, CarouselAdvance, ConnectionState,
-    DeviceConnection, DisplayOrientation, DisplayTemplate, PersistenceState, Playlist,
-    PlaylistEntry, PomodoroAction, PomodoroState, ProviderRequest, RefreshPolicy, RuntimeDevice,
+    DeviceCapability, DeviceConnection, DeviceOtaState, DeviceTier, DeviceWifiState,
+    DisplayOrientation, DisplayTemplate, NetworkConfig, PersistenceState, Playlist, PlaylistEntry,
+    PomodoroAction, PomodoroState, ProviderRequest, ProvisioningTier, RefreshPolicy, RuntimeDevice,
     RuntimeError, RuntimeHandle, RuntimeOptions, RuntimeState, WidgetTapAction,
 };
 use chrono::Utc;
@@ -23,6 +24,8 @@ const FULL_JSON: &str = include_str!("fixtures/full.json");
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Operation {
     Connect,
+    Provision,
+    FactoryReset,
     Status,
     TimeSync,
     ApplyLayout(u16),
@@ -57,12 +60,14 @@ struct MockState {
     connected: bool,
     power: MockPower,
     connection_count: u64,
+    provision_attempts: u64,
     disconnect_on_status: bool,
     reset_on_connect: bool,
     operations: Vec<Operation>,
     events: VecDeque<ReceivedEvent>,
     replay: ReplayCache,
     latest_interrupt_token: u32,
+    status_override: Option<StatusResponse>,
     next_push_gate: Option<Arc<PushGate>>,
     /// Widgets whose pushes the device understands and refuses, exactly as real
     /// firmware does for a field the widget's template does not declare.
@@ -140,6 +145,10 @@ impl MockDeviceControl {
         self.state.lock().unwrap().connection_count
     }
 
+    fn provision_attempts(&self) -> u64 {
+        self.state.lock().unwrap().provision_attempts
+    }
+
     fn block_next_push(&self) -> Arc<PushGate> {
         let gate = Arc::new(PushGate::default());
         self.state.lock().unwrap().next_push_gate = Some(Arc::clone(&gate));
@@ -148,6 +157,10 @@ impl MockDeviceControl {
 
     fn set_latest_interrupt_token(&self, token: u32) {
         self.state.lock().unwrap().latest_interrupt_token = token;
+    }
+
+    fn set_status(&self, status: StatusResponse) {
+        self.state.lock().unwrap().status_override = Some(status);
     }
 
     fn refuse_pushes_for(&self, widget_id: &str) {
@@ -216,7 +229,11 @@ impl RuntimeDevice for MockDevice {
         } else {
             state.connection_count * 1_000
         };
-        let mut device_status = status(uptime_ms);
+        let mut device_status = state
+            .status_override
+            .clone()
+            .unwrap_or_else(|| status(uptime_ms));
+        device_status.uptime_ms = uptime_ms;
         device_status.latest_interrupt_token = state.latest_interrupt_token;
         Ok(DeviceConnection {
             port_name: "mock-usb".into(),
@@ -235,9 +252,28 @@ impl RuntimeDevice for MockDevice {
             return Err(DeviceError::Transport(TransportError::Disconnected));
         }
         state.operations.push(Operation::Status);
-        let mut device_status = status(state.connection_count * 1_000 + 100);
+        let uptime_ms = state.connection_count * 1_000 + 100;
+        let mut device_status = state
+            .status_override
+            .clone()
+            .unwrap_or_else(|| status(uptime_ms));
+        device_status.uptime_ms = uptime_ms;
         device_status.latest_interrupt_token = state.latest_interrupt_token;
         Ok(device_status)
+    }
+
+    fn provision(&mut self, _config: &NetworkConfig) -> Result<(), DeviceError> {
+        let mut state = self.control.state.lock().unwrap();
+        state.provision_attempts += 1;
+        if !state.connected {
+            return Err(DeviceError::Transport(TransportError::Disconnected));
+        }
+        state.operations.push(Operation::Provision);
+        Ok(())
+    }
+
+    fn factory_reset(&mut self) -> Result<(), DeviceError> {
+        self.with_connected(|state| state.operations.push(Operation::FactoryReset))
     }
 
     fn time_sync(&mut self, _sync: TimeSync) -> Result<(), DeviceError> {
@@ -579,6 +615,116 @@ fn wait_for(timeout: Duration, predicate: impl Fn() -> bool) {
         assert!(Instant::now() < deadline, "timed out waiting for condition");
         thread::sleep(Duration::from_millis(5));
     }
+}
+
+#[test]
+fn v2_status_and_networking_capability_survive_into_the_device_snapshot() {
+    let control = MockDeviceControl::default();
+    let unknown_bit = 1_u64 << 63;
+    let mut device_status = status(42);
+    device_status.capabilities =
+        protocol::CAPABILITY_CORE_WIDGETS | protocol::CAPABILITY_NETWORKING | unknown_bit;
+    device_status.tier = protocol::Tier::Networked;
+    device_status.wifi_state = protocol::WifiState::Failed;
+    device_status.wifi_rssi = -58;
+    device_status.ip = "192.168.1.42".into();
+    device_status.last_network_error = Some("dns resolution timed out".into());
+    device_status.ota_state = protocol::OtaState::Downloading;
+    control.set_status(device_status);
+
+    let runtime = start_runtime(full_config(), &control, Duration::ZERO);
+    let snapshot = wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
+        snapshot.device.connection == ConnectionState::Online
+    });
+
+    assert_eq!(snapshot.device.tier, Some(DeviceTier::Networked));
+    assert_eq!(snapshot.device.wifi_state, Some(DeviceWifiState::Failed));
+    assert_eq!(snapshot.device.wifi_rssi, Some(-58));
+    assert_eq!(snapshot.device.ip.as_deref(), Some("192.168.1.42"));
+    assert_eq!(
+        snapshot.device.last_network_error.as_deref(),
+        Some("dns resolution timed out")
+    );
+    assert_eq!(snapshot.device.ota_state, Some(DeviceOtaState::Downloading));
+    assert!(
+        snapshot
+            .device
+            .capabilities
+            .contains(&DeviceCapability::Networking)
+    );
+    assert_eq!(snapshot.device.unknown_capability_bits, unknown_bit);
+    runtime.shutdown().unwrap();
+}
+
+#[test]
+fn provision_and_factory_reset_use_the_runtime_owned_device_without_reconnecting() {
+    let control = MockDeviceControl::default();
+    let runtime = start_runtime(full_config(), &control, Duration::ZERO);
+    wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
+        snapshot.device.connection == ConnectionState::Online
+    });
+    let connections_before = control.connection_count();
+
+    runtime
+        .provision(NetworkConfig {
+            ssid: "home-network".into(),
+            psk: "wifi-passphrase".into(),
+            server_url: "wss://deskmate.example/v1/device/link".into(),
+            device_id: "dev-0042".into(),
+            token: "device-token".into(),
+            utc_offset_minutes: 240,
+            tier: ProvisioningTier::Networked,
+        })
+        .unwrap();
+    runtime.factory_reset().unwrap();
+
+    assert_eq!(control.connection_count(), connections_before);
+    let operations = control.operations();
+    assert_eq!(
+        operations
+            .iter()
+            .filter(|operation| **operation == Operation::Provision)
+            .count(),
+        1
+    );
+    assert_eq!(
+        operations
+            .iter()
+            .filter(|operation| **operation == Operation::FactoryReset)
+            .count(),
+        1
+    );
+    runtime.shutdown().unwrap();
+}
+
+#[test]
+fn provisioning_while_disconnected_is_a_typed_error_and_never_reaches_the_device() {
+    let control = MockDeviceControl::default();
+    control.power_off();
+    let runtime = start_runtime(full_config(), &control, Duration::ZERO);
+    wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
+        matches!(
+            snapshot.device.connection,
+            ConnectionState::Disconnected { .. }
+        )
+    });
+
+    let error = runtime
+        .provision(NetworkConfig {
+            ssid: "home-network".into(),
+            psk: "wifi-passphrase".into(),
+            server_url: "wss://deskmate.example/v1/device/link".into(),
+            device_id: "dev-0042".into(),
+            token: "device-token".into(),
+            utc_offset_minutes: 240,
+            tier: ProvisioningTier::Networked,
+        })
+        .unwrap_err();
+
+    assert_eq!(error, RuntimeError::DeviceDisconnected);
+    assert_eq!(control.provision_attempts(), 0);
+    assert!(!control.operations().contains(&Operation::Provision));
+    runtime.shutdown().unwrap();
 }
 
 #[test]

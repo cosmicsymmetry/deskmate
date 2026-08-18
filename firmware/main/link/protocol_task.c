@@ -846,7 +846,7 @@ esp_err_t protocol_task_start(void)
     net_store_load(&boot_network_config);
     memset(&boot_network_config, 0, sizeof(boot_network_config));
     protocol_decoder_init(&s_context.decoder);
-    link_state_init(&s_context.link);
+    link_state_init_with_timeout(&s_context.link, s_transport->link_timeout_ms);
     widget_model_init(&s_context.model);
     interrupt_state_init(&s_context.interrupts);
     device_event_queue_init(&s_context.events);

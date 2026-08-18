@@ -5,8 +5,14 @@
 
 void link_state_init(link_state_t *state)
 {
+    link_state_init_with_timeout(state, PROTOCOL_LINK_TIMEOUT_MS);
+}
+
+void link_state_init_with_timeout(link_state_t *state, uint32_t timeout_ms)
+{
     if (state != NULL) {
         memset(state, 0, sizeof(*state));
+        state->timeout_ms = timeout_ms;
     }
 }
 
@@ -26,7 +32,7 @@ bool link_state_poll(link_state_t *state, uint64_t now_ms)
     if (state == NULL || !state->online) {
         return false;
     }
-    if (now_ms - state->last_valid_request_ms < PROTOCOL_LINK_TIMEOUT_MS) {
+    if (now_ms - state->last_valid_request_ms < state->timeout_ms) {
         return false;
     }
     state->online = false;

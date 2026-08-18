@@ -18,8 +18,8 @@ use device::{DeviceError, ReceivedEvent, SessionDiagnostics, TransportError};
 use futures_util::stream::SplitSink;
 use futures_util::{SinkExt, StreamExt};
 use protocol::{
-    Ack, ActivateScreen, ApplyConfig, Field, Message, PushData, ScreenConfig, StatusResponse,
-    TimeSync, TriggerInterrupt, WidgetConfig,
+    Ack, ActivateScreen, ApplyConfig, ErrorCode, ErrorResponse, Field, Message, NetworkConfig,
+    PushData, ScreenConfig, StatusResponse, TimeSync, TriggerInterrupt, WidgetConfig,
 };
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::time::{Instant, MissedTickBehavior, interval, timeout};
@@ -288,6 +288,20 @@ impl RuntimeDevice for WebSocketRuntimeDevice {
             }
             _ => Err(DeviceError::UnexpectedMessage),
         }
+    }
+
+    fn provision(&mut self, _config: &NetworkConfig) -> Result<(), DeviceError> {
+        Err(DeviceError::Rejected(ErrorResponse {
+            code: ErrorCode::UnsupportedMessage,
+            diagnostic: "provisioning is unsupported on the WebSocket transport".into(),
+        }))
+    }
+
+    fn factory_reset(&mut self) -> Result<(), DeviceError> {
+        Err(DeviceError::Rejected(ErrorResponse {
+            code: ErrorCode::UnsupportedMessage,
+            diagnostic: "factory reset is unsupported on the WebSocket transport".into(),
+        }))
     }
 
     fn time_sync(&mut self, sync: TimeSync) -> Result<(), DeviceError> {
@@ -604,7 +618,40 @@ fn mark_seen(last_seen_unix_ms: &AtomicU64) {
 
 #[cfg(test)]
 mod tests {
+    use app_core::RuntimeDevice;
+    use device::DeviceError;
+    use protocol::{ErrorCode, NetworkConfig, Tier};
+
     use super::SocketPeer;
+
+    fn network_config() -> NetworkConfig {
+        NetworkConfig {
+            ssid: "network".into(),
+            psk: "passphrase".into(),
+            server_url: "wss://deskmate.example/v1/device/link".into(),
+            device_id: "dev-0001".into(),
+            token: "device-token".into(),
+            utc_offset_minutes: 240,
+            tier: Tier::Networked,
+        }
+    }
+
+    #[test]
+    fn cable_only_operations_are_typed_as_unsupported_on_websocket() {
+        let (mut device, _peer) = super::WebSocketRuntimeDevice::channel("dev-1".into());
+
+        for error in [
+            device.provision(&network_config()).unwrap_err(),
+            device.factory_reset().unwrap_err(),
+        ] {
+            assert!(matches!(
+                error,
+                DeviceError::Rejected(ref rejection)
+                    if rejection.code == ErrorCode::UnsupportedMessage
+                        && rejection.diagnostic.contains("WebSocket transport")
+            ));
+        }
+    }
 
     #[test]
     fn request_ids_are_nonzero_and_wrap_to_one() {

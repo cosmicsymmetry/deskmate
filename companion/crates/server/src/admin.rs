@@ -195,7 +195,9 @@ impl From<RuntimeError> for AdminError {
                 status: StatusCode::GATEWAY_TIMEOUT,
                 message: error.to_string(),
             },
-            RuntimeError::Device { .. } | RuntimeError::Provider { .. } => Self::Runtime {
+            RuntimeError::DeviceDisconnected
+            | RuntimeError::Device { .. }
+            | RuntimeError::Provider { .. } => Self::Runtime {
                 status: StatusCode::BAD_GATEWAY,
                 message: error.to_string(),
             },

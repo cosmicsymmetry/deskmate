@@ -662,6 +662,9 @@ impl From<RuntimeError> for IpcError {
                     message: error.to_string(),
                 }
             }
+            RuntimeError::DeviceDisconnected => Self::Device {
+                message: "device is disconnected".into(),
+            },
             RuntimeError::Device { message } => Self::Device { message },
             RuntimeError::Provider { message } => Self::Provider { message },
         }
@@ -994,6 +997,10 @@ mod tests {
             }),
             IpcError::Provider { .. }
         ));
+        assert!(matches!(
+            IpcError::from(RuntimeError::DeviceDisconnected),
+            IpcError::Device { .. }
+        ));
     }
 
     #[test]
@@ -1240,6 +1247,12 @@ mod tests {
                     uptime_ms: Some(42),
                     free_heap: Some(123_456),
                     rotation: Some(90),
+                    tier: None,
+                    wifi_state: None,
+                    wifi_rssi: None,
+                    ip: None,
+                    last_network_error: None,
+                    ota_state: None,
                     active_screen_id: Some("clock".into()),
                     counters: DeviceCounters {
                         reconnects: 1,

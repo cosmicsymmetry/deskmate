@@ -55,13 +55,19 @@ enum MockPower {
     Unpowered,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum InjectedDisconnect {
+    Status,
+    Provision,
+}
+
 #[derive(Default)]
 struct MockState {
     connected: bool,
     power: MockPower,
     connection_count: u64,
     provision_attempts: u64,
-    disconnect_on_status: bool,
+    injected_disconnect: Option<InjectedDisconnect>,
     reset_on_connect: bool,
     operations: Vec<Operation>,
     events: VecDeque<ReceivedEvent>,
@@ -114,7 +120,7 @@ struct MockDeviceControl {
 impl MockDeviceControl {
     fn force_disconnect(&self, power_reset: bool) {
         let mut state = self.state.lock().unwrap();
-        state.disconnect_on_status = true;
+        state.injected_disconnect = Some(InjectedDisconnect::Status);
         state.reset_on_connect = power_reset;
     }
 
@@ -147,6 +153,10 @@ impl MockDeviceControl {
 
     fn provision_attempts(&self) -> u64 {
         self.state.lock().unwrap().provision_attempts
+    }
+
+    fn disconnect_during_next_provision(&self) {
+        self.state.lock().unwrap().injected_disconnect = Some(InjectedDisconnect::Provision);
     }
 
     fn block_next_push(&self) -> Arc<PushGate> {
@@ -243,8 +253,8 @@ impl RuntimeDevice for MockDevice {
 
     fn status(&mut self) -> Result<StatusResponse, DeviceError> {
         let mut state = self.control.state.lock().unwrap();
-        if state.disconnect_on_status {
-            state.disconnect_on_status = false;
+        if state.injected_disconnect == Some(InjectedDisconnect::Status) {
+            state.injected_disconnect = None;
             state.connected = false;
             return Err(DeviceError::Transport(TransportError::Disconnected));
         }
@@ -265,6 +275,11 @@ impl RuntimeDevice for MockDevice {
     fn provision(&mut self, _config: &NetworkConfig) -> Result<(), DeviceError> {
         let mut state = self.control.state.lock().unwrap();
         state.provision_attempts += 1;
+        if state.injected_disconnect == Some(InjectedDisconnect::Provision) {
+            state.injected_disconnect = None;
+            state.connected = false;
+            return Err(DeviceError::Transport(TransportError::Disconnected));
+        }
         if !state.connected {
             return Err(DeviceError::Transport(TransportError::Disconnected));
         }
@@ -653,6 +668,13 @@ fn v2_status_and_networking_capability_survive_into_the_device_snapshot() {
             .contains(&DeviceCapability::Networking)
     );
     assert_eq!(snapshot.device.unknown_capability_bits, unknown_bit);
+    let json = serde_json::to_value(&snapshot.device).unwrap();
+    assert_eq!(json["tier"], "networked");
+    assert_eq!(json["wifi_state"], "failed");
+    assert_eq!(json["wifi_rssi"], -58);
+    assert_eq!(json["ip"], "192.168.1.42");
+    assert_eq!(json["last_network_error"], "dns resolution timed out");
+    assert_eq!(json["ota_state"], "downloading");
     runtime.shutdown().unwrap();
 }
 
@@ -724,6 +746,53 @@ fn provisioning_while_disconnected_is_a_typed_error_and_never_reaches_the_device
     assert_eq!(error, RuntimeError::DeviceDisconnected);
     assert_eq!(control.provision_attempts(), 0);
     assert!(!control.operations().contains(&Operation::Provision));
+    runtime.shutdown().unwrap();
+}
+
+#[test]
+fn transport_failure_during_provisioning_marks_disconnected_and_reconnects() {
+    let control = MockDeviceControl::default();
+    let mut reconnecting_options = options();
+    reconnecting_options.reconnect_interval = Duration::from_millis(100);
+    let runtime = RuntimeHandle::start(
+        full_config(),
+        Box::new(MockDevice::new(control.clone())),
+        Box::new(FixedRefresher {
+            delay: Duration::ZERO,
+        }),
+        reconnecting_options,
+    )
+    .unwrap();
+    wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
+        snapshot.device.connection == ConnectionState::Online
+    });
+    let connections_before = control.connection_count();
+    control.disconnect_during_next_provision();
+
+    let error = runtime
+        .provision(NetworkConfig {
+            ssid: "home-network".into(),
+            psk: "wifi-passphrase".into(),
+            server_url: "wss://deskmate.example/v1/device/link".into(),
+            device_id: "dev-0042".into(),
+            token: "device-token".into(),
+            utc_offset_minutes: 240,
+            tier: ProvisioningTier::Networked,
+        })
+        .unwrap_err();
+
+    assert_eq!(error, RuntimeError::DeviceDisconnected);
+    let disconnected = wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
+        snapshot.device.connection == ConnectionState::Standalone
+    });
+    assert_eq!(disconnected.device.connection, ConnectionState::Standalone);
+    assert_eq!(control.connection_count(), connections_before);
+
+    let reconnected = wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
+        snapshot.device.connection == ConnectionState::Online
+            && control.connection_count() > connections_before
+    });
+    assert_eq!(reconnected.device.connection, ConnectionState::Online);
     runtime.shutdown().unwrap();
 }
 

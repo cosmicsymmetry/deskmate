@@ -3,6 +3,7 @@ pub mod config;
 pub mod network_settings;
 pub mod runtime;
 mod scheduler;
+mod secure_file;
 pub mod state;
 pub mod store;
 

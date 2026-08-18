@@ -1,16 +1,10 @@
 use std::fmt;
-use std::fs::{self, File};
-use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use atomic_write_file::AtomicWriteFile;
-#[cfg(unix)]
-use atomic_write_file::unix::OpenOptionsExt as AtomicOpenOptionsExt;
 use serde::{Deserialize, Serialize};
 
-#[cfg(unix)]
-use std::os::unix::fs::{OpenOptionsExt as UnixOpenOptionsExt, PermissionsExt};
+use crate::secure_file::{self, BoundedReadError, FileIoError};
 
 pub const NETWORK_SETTINGS_FORMAT_VERSION: u32 = 1;
 pub const MAX_NETWORK_SETTINGS_FILE_BYTES: usize = 16 * 1_024;
@@ -144,19 +138,22 @@ impl NetworkSettingsStore {
             });
         }
 
-        let parent = usable_parent(&self.path)?;
-        fs::create_dir_all(parent)
-            .map_err(|error| io_error("create network settings directory", &error))?;
-        write_and_replace(&self.path, &bytes)?;
+        let parent = secure_file::usable_parent(&self.path).ok_or_else(|| {
+            NetworkSettingsStoreError::InvalidPath {
+                message: format!("{} has no parent directory", self.path.display()),
+            }
+        })?;
+        secure_file::create_directory(parent)
+            .map_err(|error| secure_io_error("network settings directory", error))?;
+        secure_file::write_and_replace(&self.path, &bytes)
+            .map_err(|error| secure_io_error("network settings", error))?;
 
         state.generation = state.generation.saturating_add(1);
         state.last_good = Some(persisted);
-        let warning = sync_parent(parent)
-            .err()
-            .map(|error| NetworkSettingsStoreWarning::Io {
-                operation: "sync network settings directory".into(),
-                message: error.to_string(),
-            });
+        let warning = secure_file::sync_parent(parent).err().map(|error| {
+            let (operation, message) = error.into_strings("network settings directory");
+            NetworkSettingsStoreWarning::Io { operation, message }
+        });
         Ok(NetworkSettingsSaveReceipt {
             generation: state.generation,
             warning,
@@ -316,23 +313,10 @@ fn read_persisted(
 }
 
 fn read_bounded(path: &Path) -> Result<Option<Vec<u8>>, NetworkSettingsStoreError> {
-    let file = match File::open(path) {
-        Ok(file) => file,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(io_error("open network settings", &error)),
-    };
-    let _ = secure_open_settings(&file);
-    let mut bytes = Vec::new();
-    file.take((MAX_NETWORK_SETTINGS_FILE_BYTES + 1) as u64)
-        .read_to_end(&mut bytes)
-        .map_err(|error| io_error("read network settings", &error))?;
-    if bytes.len() > MAX_NETWORK_SETTINGS_FILE_BYTES {
-        Err(NetworkSettingsStoreError::TooLarge {
-            maximum: MAX_NETWORK_SETTINGS_FILE_BYTES,
-        })
-    } else {
-        Ok(Some(bytes))
-    }
+    secure_file::read_bounded(path, MAX_NETWORK_SETTINGS_FILE_BYTES).map_err(|error| match error {
+        BoundedReadError::Io(error) => secure_io_error("network settings", error),
+        BoundedReadError::TooLarge { maximum } => NetworkSettingsStoreError::TooLarge { maximum },
+    })
 }
 
 fn recovered(
@@ -350,65 +334,7 @@ fn recovered(
     }
 }
 
-fn usable_parent(path: &Path) -> Result<&Path, NetworkSettingsStoreError> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| NetworkSettingsStoreError::InvalidPath {
-            message: format!("{} has no parent directory", path.display()),
-        })?;
-    if parent.as_os_str().is_empty() {
-        Ok(Path::new("."))
-    } else {
-        Ok(parent)
-    }
-}
-
-fn write_and_replace(target: &Path, bytes: &[u8]) -> Result<(), NetworkSettingsStoreError> {
-    let mut options = AtomicWriteFile::options();
-    secure_atomic_options(&mut options);
-    let mut file = options
-        .open(target)
-        .map_err(|error| io_error("create temporary network settings", &error))?;
-    file.write_all(bytes)
-        .map_err(|error| io_error("write temporary network settings", &error))?;
-    file.write_all(b"\n")
-        .map_err(|error| io_error("finish temporary network settings", &error))?;
-    file.commit()
-        .map_err(|error| io_error("sync and replace network settings", &error))
-}
-
-#[cfg(unix)]
-fn secure_open_settings(file: &File) -> io::Result<()> {
-    file.set_permissions(fs::Permissions::from_mode(0o600))
-}
-
-#[cfg(not(unix))]
-fn secure_open_settings(_file: &File) -> io::Result<()> {
-    Ok(())
-}
-
-#[cfg(unix)]
-fn secure_atomic_options(options: &mut atomic_write_file::OpenOptions) {
-    options.preserve_mode(false);
-    options.mode(0o600);
-}
-
-#[cfg(not(unix))]
-fn secure_atomic_options(_options: &mut atomic_write_file::OpenOptions) {}
-
-#[cfg(unix)]
-fn sync_parent(parent: &Path) -> io::Result<()> {
-    File::open(parent)?.sync_all()
-}
-
-#[cfg(not(unix))]
-fn sync_parent(_parent: &Path) -> io::Result<()> {
-    Ok(())
-}
-
-fn io_error(operation: &str, error: &io::Error) -> NetworkSettingsStoreError {
-    NetworkSettingsStoreError::Io {
-        operation: operation.into(),
-        message: error.to_string(),
-    }
+fn secure_io_error(subject: &str, error: FileIoError) -> NetworkSettingsStoreError {
+    let (operation, message) = error.into_strings(subject);
+    NetworkSettingsStoreError::Io { operation, message }
 }

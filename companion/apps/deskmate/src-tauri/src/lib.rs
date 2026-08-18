@@ -236,7 +236,9 @@ const fn runtime_error_log_label(error: &app_core::RuntimeError) -> &'static str
         app_core::RuntimeError::ResponseTimeout => "response-timeout",
         app_core::RuntimeError::UnknownWidget { .. } => "unknown-widget",
         app_core::RuntimeError::UnknownScreen { .. } => "unknown-screen",
-        app_core::RuntimeError::Device { .. } => "device",
+        app_core::RuntimeError::DeviceDisconnected | app_core::RuntimeError::Device { .. } => {
+            "device"
+        }
         app_core::RuntimeError::Provider { .. } => "provider",
     }
 }
@@ -668,6 +670,10 @@ mod tests {
             message: runtime_secret.into(),
         };
         assert_eq!(runtime_error_log_label(&runtime_error), "device");
+        assert_eq!(
+            runtime_error_log_label(&app_core::RuntimeError::DeviceDisconnected),
+            "device"
+        );
         let ipc_error = commands::IpcError::Device {
             message: runtime_secret.into(),
         };

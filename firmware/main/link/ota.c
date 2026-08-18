@@ -229,9 +229,13 @@ static esp_err_t reject_reinstall_of_failed_image(
     result = esp_ota_get_partition_description(update_partition,
                                                &failed_description);
     if (result != ESP_OK) {
-        ESP_LOGE(TAG, "refusing to overwrite failed OTA slot whose version "
-                      "cannot be read");
-        return ESP_ERR_OTA_ROLLBACK_FAILED;
+        /* An interrupted attempt to replace a rolled-back image erases this
+         * descriptor while leaving the old ABORTED/INVALID otadata state.
+         * With no readable image, there is no failed version to protect from
+         * reinstall; allow a future candidate to repopulate the slot. */
+        ESP_LOGW(TAG, "failed OTA slot has no readable image; allowing "
+                      "replacement");
+        return ESP_OK;
     }
     if (image_version_matches(&failed_description, candidate_version)) {
         ESP_LOGW(TAG, "server still advertises the image that rolled back; "

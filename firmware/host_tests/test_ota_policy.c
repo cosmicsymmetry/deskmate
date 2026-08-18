@@ -35,7 +35,8 @@ static void test_urls_reject_unsafe_or_truncated_inputs(void)
     assert(!ota_policy_build_download_url("wss://host/link", "//evil.test/x",
                                           url, sizeof(url)));
     assert(!ota_policy_build_download_url(
-        "wss://host/link", "/v1/firmware/1.1.0.bin", url, 8U));
+        "wss://host/link", "/v1/firmware/1.1.0.bin", url,
+        sizeof("https://host")));
 }
 
 static void test_metadata_is_bounded_and_tied_to_its_version(void)

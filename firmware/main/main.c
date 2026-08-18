@@ -135,7 +135,10 @@ void app_main(void)
             /* Starts the immediate boot check and owns the jittered 24-hour
              * schedule thereafter. Missing provisioning is an idle no-op. */
             esp_err_t ota_status = ota_check_now();
-            if (ota_status != ESP_OK) {
+            if (ota_status == ESP_ERR_INVALID_STATE) {
+                ESP_LOGI(TAG, "initial firmware check already active or "
+                              "queued/deferred");
+            } else if (ota_status != ESP_OK) {
                 ESP_LOGW(TAG, "initial firmware check not scheduled (%s)",
                          esp_err_to_name(ota_status));
             }

@@ -17,6 +17,7 @@ firmware/host_tests/test_weather_icon
 firmware/host_tests/test_clock_source
 firmware/host_tests/test_net_config
 firmware/host_tests/test_net_ring
+firmware/host_tests/test_ota_policy
 firmware/host_tests/test_reconnect_backoff
 firmware/host_tests/*.dSYM/
 companion/target/

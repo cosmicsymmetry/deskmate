@@ -1633,7 +1633,7 @@ ownership has one implementation rather than two that must agree.
   `POST /v1/devices`, `PUT /v1/devices/{id}/config`, `GET /v1/devices/{id}`. Task 10's
   Mac UI calls exactly these.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `companion/crates/server/tests/ownership.rs`:
 
@@ -1789,7 +1789,7 @@ Create `companion/crates/server/tests/fixtures/one-clock-card.json` holding a mi
 valid schema-v4 config with a single clock card whose id is `clock-1` in the active
 playlist. Add `futures-util` to `[dev-dependencies]`.
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 ```sh
 cargo test -p server ownership
@@ -1797,7 +1797,7 @@ cargo test -p server ownership
 
 Expected: compile failure — the admin routes do not exist.
 
-- [ ] **Step 3: Implement `WebSocketRuntimeDevice`**
+- [x] **Step 3: Implement `WebSocketRuntimeDevice`**
 
 `src/runtime_device.rs` implements every `RuntimeDevice` method by encoding the matching
 `protocol::Message` and awaiting its ACK over the socket:
@@ -1824,14 +1824,14 @@ impl RuntimeDevice for WebSocketRuntimeDevice {
 The trait is synchronous and `Send + 'static`, so bridge to the async socket with a
 channel pair rather than blocking on a runtime inside these methods.
 
-- [ ] **Step 4: Start the runtime when a device connects**
+- [x] **Step 4: Start the runtime when a device connects**
 
 In `src/device_link.rs`, on an authenticated upgrade: refuse if that device already has a
 live link, then construct `WebSocketRuntimeDevice`, call `RuntimeHandle::start(...)` with
 the stored config, and hold both until the socket closes. On close, shut the runtime down
 so a reconnect starts cleanly.
 
-- [ ] **Step 5: Implement config storage and the admin API**
+- [x] **Step 5: Implement config storage and the admin API**
 
 `src/store.rs`: load and save a schema-v4 `AppConfig` as JSON on disk using
 `app_core::ConfigStore`, so the server and the Mac app validate configuration
@@ -1840,13 +1840,13 @@ identically. `src/admin.rs`: `POST /v1/devices` mints an identity;
 live `RuntimeHandle`; `GET /v1/devices/{id}` returns connection state, last-seen time and
 the current `AppSnapshot` summary. All three require the admin token.
 
-- [ ] **Step 6: Enable providers server-side**
+- [x] **Step 6: Enable providers server-side**
 
 Construct `RuntimeOptions` with `SystemProviderRefresher` and
 `SystemCalendarRefresher`, so weather, ICS calendar, RSS and JSON feeds are fetched by
 the server. This is what makes the device work with the Mac off.
 
-- [ ] **Step 7: Run the tests to verify they pass**
+- [x] **Step 7: Run the tests to verify they pass**
 
 ```sh
 cargo test -p server
@@ -1858,6 +1858,16 @@ cargo test --workspace
 Expected: all pass.
 
 - [ ] **Step 8: The headline demo, on the physical board**
+
+> **DEFERRED to the morning board session**, together with Task 8's four carried
+> observations. Everything this step needs on the software side is in place and the server
+> is deployed at `wss://deskmate.rodi.one/v1/device/link`; what is missing is the board and
+> a human to watch the panel, tap a card, quit the Mac app and pull the cable. The five
+> claims to confirm are unchanged: the panel leaves the standalone clock and renders the
+> configured cards; the weather card shows real fetched data; quitting the Mac app changes
+> nothing; unplugging USB changes nothing; and tapping a pomodoro card starts it, with the
+> observed latency recorded.
+
 
 With the server running behind the tunnel and the device provisioned as networked from
 Task 8:

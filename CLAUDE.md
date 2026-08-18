@@ -87,6 +87,48 @@ of letting code and documentation diverge.
   Three UX findings from that session are recorded in board-notes (takeover face
   indistinguishable from the completed card; sticky unreconciled optimistic red flash
   on tapping a completed pomodoro; host silently ignores stale-token dismissals).
+- **V2 (networked device) is software-complete and awaiting its physical exit gate.**
+  Plan `docs/superpowers/plans/2026-08-18-deskmate-v2-networked-device.md`, branch
+  `feat/v2-networked-device`. The device joins WiFi, dials out over WSS to a single-tenant
+  server, and that server owns it through the same `RuntimeDevice` seam the Mac app uses —
+  so ownership has one implementation, not two that must agree. Providers run server-side,
+  which is what makes the display work with the Mac quit. The wire stays **protocol v1**
+  and the config schema stays **v4**; V2 is additive only. New message types are 13
+  (`NETWORK_CONFIG`) and 14 (`FACTORY_RESET`); `CURRENT_CAPABILITIES` is now **75**
+  (core widgets | config rotation | extended templates | firmware update | networking).
+- **Two plan amendments were added during execution and are marked as such in the plan.**
+  Task 9b (persistent device identities) was added by explicit owner direction; Task 10a
+  (the app-core boundary) was added because Task 10's implementer correctly refused to
+  open a second `device::Session` from a Tauri command, which would have compiled, passed
+  its tests, and put two processes on one cable.
+- **The server is deployed and live at `deskmate.rodi.one`**, on the owner's homelab
+  (docker-vm), behind Cloudflare → cloudflared → Caddy, under the systemd unit in
+  `companion/crates/server/deploy/`. It is built for linux/x86_64 in a throwaway
+  `rust:1.97-bookworm` container over an rsync'd copy of `companion/` — no Rust toolchain
+  on the VM. Device URL is `wss://deskmate.rodi.one/v1/device/link`. Redeploy from a
+  `git archive HEAD` export, never the working tree.
+- **Device identities persist as SHA-256 digests, never as tokens.** Minting is the only
+  path that needs the plaintext; authentication only compares. Verified on the live
+  deployment: the plaintext does not appear in the store file, and a pre-restart token
+  still authenticates afterwards.
+- **Provisioning is a cable operation by design.** `WebSocketRuntimeDevice::provision` and
+  `factory_reset` return a typed unsupported-on-this-transport error. In networked tier
+  the cable is the *configurator* and the server is the *owner*; the firmware's tier gate
+  encodes exactly that. Do not add provisioning over the tunnel without specifying it
+  first.
+- **`CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y` changes boot behaviour, not just update
+  behaviour.** An image that does not call `esp_ota_mark_app_valid_cancel_rollback()`
+  within its validity window is rolled back on the next boot. The validity gate lives in
+  `ota_mark_running_image_valid()` and is deliberately free of every dependency that can
+  fail — no network, server, config, or NVS content stands between boot and marking valid.
+  Do not add one. Two consequences worth knowing: OTA does not update the bootloader, so
+  a rollback test must start from a full `idf.py flash`; and a corrected rebuild published
+  under the **same version string** as a failed one is refused forever, because the
+  refusal keys on the version string rather than image content.
+- **Nothing in V2 has been verified on the physical board.** Task 8's four link
+  observations, Task 9's headline demo, and Task 11's OTA/rollback/deferral steps are all
+  open, along with the whole of Task 12's exit gate. Do not describe any of them as
+  observed.
 - V1 packaging/hardening is delivered
   (`docs/superpowers/plans/2026-08-15-deskmate-v1-packaging-hardening.md`): the
   repo has a private GitHub remote `cosmicsymmetry/deskmate` with a green `ci`

@@ -4,7 +4,7 @@
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
-use protocol::{Frame, MAX_PAYLOAD_SIZE, Message, decode_message, decode_wire_frame};
+use protocol::{Frame, Message, decode_message, decode_wire_frame};
 use server::{ServerState, app};
 use tokio::net::TcpStream;
 use tokio::time::timeout;
@@ -61,50 +61,6 @@ async fn assert_rejected(host: &str, identity: &server::registry::DeviceIdentity
     assert_eq!(closed, Ok(true), "hostile frame did not close the link");
 }
 
-fn cobs_encode(decoded: &[u8]) -> Vec<u8> {
-    let mut encoded = Vec::with_capacity(decoded.len() + decoded.len() / 254 + 2);
-    encoded.push(0);
-    let mut code_index = 0;
-    let mut code = 1_u8;
-    for &byte in decoded {
-        if byte == 0 {
-            encoded[code_index] = code;
-            code_index = encoded.len();
-            encoded.push(0);
-            code = 1;
-        } else {
-            encoded.push(byte);
-            code = code.wrapping_add(1);
-            if code == 0xff {
-                encoded[code_index] = code;
-                code_index = encoded.len();
-                encoded.push(0);
-                code = 1;
-            }
-        }
-    }
-    encoded[code_index] = code;
-    encoded.push(0);
-    encoded
-}
-
-fn oversized_declared_payload() -> Vec<u8> {
-    let declared = u16::try_from(MAX_PAYLOAD_SIZE + 1).unwrap();
-    let mut decoded = vec![
-        protocol::PROTOCOL_VERSION,
-        protocol::TYPE_STATUS_REQUEST,
-        0,
-        0,
-        2,
-        0,
-        0,
-        0,
-    ];
-    decoded.extend_from_slice(&declared.to_le_bytes());
-    decoded.extend_from_slice(&protocol::crc32c(&decoded).to_le_bytes());
-    cobs_encode(&decoded)
-}
-
 async fn receive_two_status_responses(socket: &mut DeviceSocket) -> Vec<u32> {
     timeout(Duration::from_secs(1), async {
         let mut request_ids = Vec::new();
@@ -140,7 +96,12 @@ async fn hostile_device_frames_are_bounded_and_concatenated_frames_decode() {
     corrupt_delimiter.insert(corrupt_delimiter.len() / 2, 0);
     assert_rejected(&host, &identity, corrupt_delimiter).await;
 
-    assert_rejected(&host, &identity, oversized_declared_payload()).await;
+    assert_rejected(
+        &host,
+        &identity,
+        protocol::test_support::oversized_declared_payload(2),
+    )
+    .await;
 
     let unknown_type = protocol::encode_frame(&Frame::new(u8::MAX, 3, vec![0xa0])).unwrap();
     assert_rejected(&host, &identity, unknown_type).await;

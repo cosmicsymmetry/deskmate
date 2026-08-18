@@ -13,14 +13,9 @@
 #include "esp_timer.h"
 #include "esp_wifi.h"
 
+#include "core/reconnect_backoff.h"
 #include "link/net_store.h"
 #include "ui/ui_runtime.h"
-
-// Plan-wide reconnect backoff: 1s initial, doubling, capped at 60s. Jitter is
-// applied on top (see jittered_delay_ms) so a fleet does not resynchronise
-// onto the network in lockstep the instant an outage ends.
-#define WIFI_RECONNECT_MIN_DELAY_MS 1000U
-#define WIFI_RECONNECT_MAX_DELAY_MS 60000U
 
 static const char *TAG = "wifi_station";
 
@@ -54,7 +49,7 @@ static char s_ip[PROTOCOL_MAX_IP_LENGTH + 1U];
 static int16_t s_utc_offset_minutes;
 
 static esp_timer_handle_t s_reconnect_timer;
-static uint32_t s_reconnect_delay_ms = WIFI_RECONNECT_MIN_DELAY_MS;
+static reconnect_backoff_t s_reconnect_backoff;
 
 static void lock_ip(void)
 {
@@ -80,27 +75,22 @@ static void set_ip(const char *ip)
     unlock_ip();
 }
 
-static uint32_t jittered_delay_ms(uint32_t base_ms)
+static uint32_t reconnect_random(void *context)
 {
-    // Scale factor in [80, 120] percent, i.e. +/-20%.
-    uint32_t percent = 80U + (esp_random() % 41U);
-    return (uint32_t)(((uint64_t)base_ms * percent) / 100U);
+    (void)context;
+    return esp_random();
 }
 
 static void schedule_reconnect(void)
 {
-    uint32_t delay_ms = jittered_delay_ms(s_reconnect_delay_ms);
+    uint32_t delay_ms = reconnect_backoff_next_delay_ms(
+        &s_reconnect_backoff);
     esp_err_t result = esp_timer_start_once(s_reconnect_timer,
                                             (uint64_t)delay_ms * 1000ULL);
     if (result != ESP_OK) {
         ESP_LOGW(TAG, "failed to arm reconnect timer: %s",
                 esp_err_to_name(result));
     }
-    uint32_t doubled = s_reconnect_delay_ms * 2U;
-    s_reconnect_delay_ms = (doubled > WIFI_RECONNECT_MAX_DELAY_MS ||
-                            doubled < s_reconnect_delay_ms)
-        ? WIFI_RECONNECT_MAX_DELAY_MS
-        : doubled;
 }
 
 static void reconnect_timer_cb(void *arg)
@@ -260,7 +250,7 @@ static void ip_event_handler(void *handler_arg, esp_event_base_t base,
 
     // A successful join resets the backoff so the *next* disconnect starts
     // from 1s again rather than continuing to climb.
-    s_reconnect_delay_ms = WIFI_RECONNECT_MIN_DELAY_MS;
+    reconnect_backoff_reset(&s_reconnect_backoff);
 
     char ip_text[PROTOCOL_MAX_IP_LENGTH + 1U];
     esp_ip4addr_ntoa(&event->ip_info.ip, ip_text, sizeof(ip_text));
@@ -284,6 +274,8 @@ esp_err_t wifi_station_bringup(void)
         ESP_LOGI(TAG, "no stored WiFi credentials; staying local");
         return ESP_OK;
     }
+
+    reconnect_backoff_init(&s_reconnect_backoff, reconnect_random, NULL);
 
     ESP_LOGI(TAG, "starting WiFi station, ssid=%s", config.ssid);
 

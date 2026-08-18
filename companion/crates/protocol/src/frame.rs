@@ -58,7 +58,7 @@ pub fn crc32c(bytes: &[u8]) -> u32 {
     !crc
 }
 
-fn cobs_encode(decoded: &[u8]) -> Vec<u8> {
+pub(crate) fn cobs_encode(decoded: &[u8]) -> Vec<u8> {
     let mut encoded = Vec::with_capacity(decoded.len() + decoded.len() / 254 + 1);
     encoded.push(0);
     let mut code_index = 0;

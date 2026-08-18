@@ -18,7 +18,7 @@ use axum::extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use protocol::{Frame, MAX_PAYLOAD_SIZE, Message, StatusResponse};
+use protocol::{ErrorCode, Frame, Message, StatusResponse};
 use tokio::sync::mpsc;
 use tokio::time::timeout;
 
@@ -110,50 +110,6 @@ async fn device_link(
         })
 }
 
-fn cobs_encode(decoded: &[u8]) -> Vec<u8> {
-    let mut encoded = Vec::with_capacity(decoded.len() + decoded.len() / 254 + 2);
-    encoded.push(0);
-    let mut code_index = 0;
-    let mut code = 1_u8;
-    for &byte in decoded {
-        if byte == 0 {
-            encoded[code_index] = code;
-            code_index = encoded.len();
-            encoded.push(0);
-            code = 1;
-        } else {
-            encoded.push(byte);
-            code = code.wrapping_add(1);
-            if code == 0xff {
-                encoded[code_index] = code;
-                code_index = encoded.len();
-                encoded.push(0);
-                code = 1;
-            }
-        }
-    }
-    encoded[code_index] = code;
-    encoded.push(0);
-    encoded
-}
-
-fn oversized_declared_payload() -> Vec<u8> {
-    let declared = u16::try_from(MAX_PAYLOAD_SIZE + 1).unwrap();
-    let mut decoded = vec![
-        protocol::PROTOCOL_VERSION,
-        protocol::TYPE_STATUS_REQUEST,
-        0,
-        0,
-        3,
-        0,
-        0,
-        0,
-    ];
-    decoded.extend_from_slice(&declared.to_le_bytes());
-    decoded.extend_from_slice(&protocol::crc32c(&decoded).to_le_bytes());
-    cobs_encode(&decoded)
-}
-
 async fn send(socket: &mut WebSocket, bytes: Vec<u8>) -> Result<(), String> {
     socket
         .send(WsMessage::Binary(bytes.into()))
@@ -219,7 +175,11 @@ async fn check_device(mut socket: WebSocket) -> Result<(), String> {
     corrupt_delimiter.insert(corrupt_delimiter.len() / 2, 0);
     send(&mut socket, corrupt_delimiter).await?;
 
-    send(&mut socket, oversized_declared_payload()).await?;
+    send(
+        &mut socket,
+        protocol::test_support::oversized_declared_payload(3),
+    )
+    .await?;
 
     let unknown_type = protocol::encode_frame(&Frame::new(u8::MAX, 4, vec![0xa0]))
         .map_err(|error| error.to_string())?;
@@ -227,14 +187,14 @@ async fn check_device(mut socket: WebSocket) -> Result<(), String> {
 
     let mut truncated =
         protocol::encode_message(5, &Message::StatusRequest).map_err(|error| error.to_string())?;
-    if truncated.pop() != Some(0) {
-        return Err("status fixture was missing its delimiter".to_owned());
+    if truncated.len() < 3 || truncated.last() != Some(&0) {
+        return Err("status fixture was too short or missing its delimiter".to_owned());
     }
+    truncated.truncate(truncated.len() - 3);
+    // Keep a delimiter so the destructively shortened frame reaches the
+    // decoder and the byte stream resynchronises for the next case.
+    truncated.push(0);
     send(&mut socket, truncated).await?;
-    // WebSocket boundaries do not reset the COBS stream. Supply the missing
-    // delimiter so the decoder can discard the truncated frame before the
-    // independent concatenated-frame case begins.
-    send(&mut socket, vec![0]).await?;
 
     let mut concatenated =
         protocol::encode_message(10, &Message::StatusRequest).map_err(|error| error.to_string())?;
@@ -252,22 +212,37 @@ async fn check_device(mut socket: WebSocket) -> Result<(), String> {
 
     let mut saw_first_concatenated = false;
     let mut saw_second_concatenated = false;
+    let mut saw_unknown_type_rejection = false;
     let after = loop {
         let (frame, message) = next_protocol_message(&mut socket).await?;
-        if matches!(message, Message::StatusResponse(_)) {
-            if frame.request_id == 10 {
+        match message {
+            Message::StatusResponse(_) if matches!(frame.request_id, 2 | 3 | 5) => {
+                return Err(format!(
+                    "board accepted malformed status request {}",
+                    frame.request_id
+                ));
+            }
+            Message::Error(error)
+                if frame.request_id == 4 && error.code == ErrorCode::UnsupportedMessage =>
+            {
+                saw_unknown_type_rejection = true;
+            }
+            Message::StatusResponse(_) if frame.request_id == 10 => {
                 saw_first_concatenated = true;
-            } else if frame.request_id == 11 {
+            }
+            Message::StatusResponse(_) if frame.request_id == 11 => {
                 saw_second_concatenated = true;
-            } else if frame.request_id == 20 {
-                let Message::StatusResponse(status) = message else {
-                    unreachable!();
-                };
+            }
+            Message::StatusResponse(status) if frame.request_id == 20 => {
                 break status;
             }
+            _ => {}
         }
     };
 
+    if !saw_unknown_type_rejection {
+        return Err("board did not reject the unknown message type".to_owned());
+    }
     if !saw_first_concatenated || !saw_second_concatenated {
         return Err("board did not decode both concatenated frames".to_owned());
     }

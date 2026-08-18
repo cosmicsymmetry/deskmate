@@ -63,6 +63,11 @@ const IDLE_TIMEOUT: Duration = Duration::from_millis(protocol::LINK_TIMEOUT_MS);
 /// V3.
 const PING_INTERVAL: Duration = Duration::from_secs(3);
 
+/// Status is deliberately independent of the WebSocket keepalive: it proves
+/// that protocol frames make a server-to-device-to-server round trip before
+/// Task 9 introduces the runtime that will own real requests.
+const STATUS_INTERVAL: Duration = Duration::from_secs(5);
+
 /// How long a single keepalive ping's `send` may take. A peer that has
 /// stopped reading (TCP zero-window) would otherwise let `send` block
 /// indefinitely -- and because the ping is one arm of a `select!`, a stuck
@@ -83,6 +88,18 @@ const PING_SEND_TIMEOUT: Duration = Duration::from_secs(2);
 /// capped identically: tungstenite checks a single frame against it before
 /// the message-size check ever applies.
 const MAX_WS_MESSAGE_SIZE: usize = protocol::MAX_WIRE_FRAME;
+
+fn allocate_request_id(next_request_id: &mut u32) -> u32 {
+    if *next_request_id == 0 {
+        *next_request_id = 1;
+    }
+    let request_id = *next_request_id;
+    *next_request_id = next_request_id.wrapping_add(1);
+    if *next_request_id == 0 {
+        *next_request_id = 1;
+    }
+    request_id
+}
 
 pub async fn handler(
     State(state): State<ServerState>,
@@ -168,6 +185,22 @@ async fn handle_binary(
             "device protocol message received"
         );
 
+        if let ProtocolMessage::StatusResponse(status) = &message {
+            tracing::info!(
+                device_id = %device_id,
+                request_id = frame.request_id,
+                firmware_version = %status.firmware_version,
+                uptime_ms = status.uptime_ms,
+                free_heap = status.free_heap,
+                tier = ?status.tier,
+                wifi_state = ?status.wifi_state,
+                wifi_rssi = status.wifi_rssi,
+                ip = %status.ip,
+                ota_state = ?status.ota_state,
+                "device status response"
+            );
+        }
+
         if matches!(message, ProtocolMessage::StatusRequest) {
             let response = ProtocolMessage::StatusResponse(echo_status());
             let response_wire = match protocol::encode_message(frame.request_id, &response) {
@@ -214,6 +247,11 @@ async fn run(socket: WebSocket, device_id: DeviceId, _permit: OwnedSemaphorePerm
     ping_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
     ping_tick.tick().await; // the first tick fires immediately; skip it
 
+    let mut status_tick = interval(STATUS_INTERVAL);
+    status_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    status_tick.tick().await; // the first tick fires immediately; skip it
+    let mut next_request_id = 1_u32;
+
     loop {
         tokio::select! {
             next_message = receiver.next() => {
@@ -258,8 +296,67 @@ async fn run(socket: WebSocket, device_id: DeviceId, _permit: OwnedSemaphorePerm
                     break;
                 }
             }
+            _ = status_tick.tick() => {
+                let request_id = allocate_request_id(&mut next_request_id);
+                let wire = match protocol::encode_message(
+                    request_id,
+                    &ProtocolMessage::StatusRequest,
+                ) {
+                    Ok(wire) => wire,
+                    Err(error) => {
+                        tracing::error!(
+                            device_id = %device_id,
+                            %error,
+                            "periodic status request encode failed"
+                        );
+                        break;
+                    }
+                };
+                let send = sender.send(Message::Binary(wire.into()));
+                match timeout(PING_SEND_TIMEOUT, send).await {
+                    Ok(Ok(())) => {
+                        tracing::debug!(
+                            device_id = %device_id,
+                            request_id,
+                            "periodic status request sent"
+                        );
+                    }
+                    Ok(Err(error)) => {
+                        tracing::warn!(
+                            device_id = %device_id,
+                            %error,
+                            "periodic status request send failed"
+                        );
+                        break;
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            device_id = %device_id,
+                            "periodic status request send stalled"
+                        );
+                        break;
+                    }
+                }
+            }
         }
     }
 
     tracing::info!(device_id = %device_id, "device link closed");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::allocate_request_id;
+
+    #[test]
+    fn request_ids_are_nonzero_and_wrap_to_one() {
+        let mut next = 0_u32;
+        assert_eq!(allocate_request_id(&mut next), 1);
+        assert_eq!(next, 2);
+
+        next = u32::MAX;
+        assert_eq!(allocate_request_id(&mut next), u32::MAX);
+        assert_eq!(next, 1);
+        assert_eq!(allocate_request_id(&mut next), 1);
+    }
 }

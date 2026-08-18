@@ -1555,10 +1555,10 @@ cargo run -p deskmate-cli -- provision --port <serial-port> \
     --offset-minutes 240 --tier networked
 ```
 
-Confirm all four: the server logs an accepted connection; it logs incoming heartbeats;
-the device's panel stays on the standalone clock (no config has been sent yet, which is
-correct); and killing the server leaves the device retrying with visibly widening gaps
-rather than rebooting or spinning.
+Confirm all four: the server logs an accepted connection; it periodically requests status
+and logs the device's status response; the device's panel stays on the standalone clock
+(no config has been sent yet, which is correct); and killing the server leaves the device
+retrying with visibly widening gaps rather than rebooting or spinning.
 
 - [ ] **Step 9: Record and commit**
 

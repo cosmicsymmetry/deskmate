@@ -1,6 +1,7 @@
 mod cbor;
 mod frame;
 mod message;
+pub mod test_support;
 
 pub use frame::{
     Deframer, Frame, FrameError, MAX_DECODED_FRAME, MAX_PAYLOAD_SIZE, MAX_WIRE_FRAME, crc32c,

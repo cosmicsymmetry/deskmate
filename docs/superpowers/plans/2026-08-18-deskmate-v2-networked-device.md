@@ -1899,6 +1899,72 @@ Claude-Session: https://claude.ai/code/session_01SwAMBn6h8WMLU4ADiA8LwG"
 
 ---
 
+### Task 9b:9b Device identities survive a restart (amendment)
+
+**Added 2026-08-19 by explicit direction of the repository owner**, after Task 9's review
+classified in-memory identities as a limitation whose documentation did not exist. This
+was not in the approved plan; it is recorded here rather than left to diverge.
+
+The problem is operational, not theoretical. `deploy/deskmate-server.service` sets
+`Restart=on-failure` with `RestartSec=2`, so an unattended crash silently deprovisions
+every device. The board then presents a token the server has never heard of, 401s
+forever, and can only be recovered with a USB cable — which is precisely the failure mode
+V2 exists to remove.
+
+**The owner's decision, and the one refinement made to it.** The owner accepted storing
+device credentials on disk, reasoning that a desk accessory sits next to the computer it
+serves. Note the file does not live next to the board: it lives on the shared homelab VM
+that also fronts unrelated services through the same tunnel. That does not change the
+decision, but it makes the cheaper form of it clearly correct — **store a SHA-256 of each
+token, never the token**. `POST /v1/devices` is the only code path that ever needs the
+plaintext, and it has it in hand at mint time; `Registry::authenticate` only ever needs to
+*verify*. A copy of the state file therefore grants nothing. Because the token is 32 bytes
+of CSPRNG output rather than a human-chosen secret, a plain digest is sufficient and a
+password KDF would buy nothing.
+
+**Files:**
+- Modify: `companion/crates/server/src/registry.rs`, `src/lib.rs`, `src/main.rs`
+- Modify: `companion/crates/server/deploy/README.md`, `deploy/deskmate-server.env.example`
+- Modify: `companion/crates/server/tests/ownership.rs`
+
+**Interfaces:**
+- Consumes: Task 7's `Registry`/`DeviceIdentity` and Task 9's `ConfigStore`-backed state
+  directory.
+- Produces: a `Registry` that loads at boot and persists on mint, holding digests only.
+
+- [ ] **Step 1: Write the failing tests**
+
+Cover, at minimum: a minted identity authenticates after the registry is dropped and
+reloaded from the same path; the persisted bytes contain the digest and **not** the token
+(assert the literal token string is absent from the file); a corrupt or truncated store
+degrades to an empty registry rather than panicking or refusing to start; and `mint`
+remains monotonic across a reload rather than reissuing an existing `dev-NNNN` id.
+
+- [ ] **Step 2: Persist digests, not tokens**
+
+`authenticate` hashes the presented token and compares digests in constant time, keeping
+the existing whole-table scan on a miss so a rejection's cost still cannot vary with how
+many leading bytes matched. The store is a file under the same state directory
+`DESKMATE_CONFIG_DIR` already lives in, created `0600`, written by the same
+write-temp-then-rename discipline `app_core::ConfigStore` uses so a crash mid-write cannot
+leave a half-file.
+
+- [ ] **Step 3: Fail toward a working device, never a locked-out one**
+
+An unreadable store must not prevent the server starting; a device that cannot be
+authenticated must log enough to distinguish "unknown token" from "store failed to load",
+without printing the token or any prefix of it.
+
+- [ ] **Step 4: Update the runbook and the env example**
+
+Replace the limitation text Task 9's fix round added with the resulting behaviour, and say
+where the file lives, what it contains, and that losing it means re-minting rather than
+recovering.
+
+- [ ] **Step 5: Run the gates and commit**
+
+---
+
 ### Task 10:10 Companion app — provisioning and tier UI
 
 The Mac app becomes the setup surface. In local tier it writes settings to the device as

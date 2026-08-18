@@ -13,14 +13,22 @@
 //! guard every route, on top of the per-route defenses in `device_link` and
 //! `firmware`.
 
+mod admin;
 mod auth;
 mod device_link;
 pub mod firmware;
 pub mod registry;
+pub mod runtime_device;
+mod store;
 
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use app_core::RuntimeHandle;
 use axum::Router;
 use axum::error_handling::HandleErrorLayer;
 use axum::http::StatusCode;
@@ -58,8 +66,8 @@ const MAX_CONCURRENT_REQUESTS: usize = 64;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Shared server state, cheap to clone: every field is behind an `Arc`
-/// (directly or via the outer `Arc<StateInner>`). Task 9 adds the
-/// single-owner `app-core` runtime alongside the registry.
+/// (directly or via the outer `Arc<StateInner>`). Live links carry the
+/// single-owner `app-core` runtime alongside the registry and config stores.
 #[derive(Clone)]
 pub struct ServerState {
     inner: Arc<StateInner>,
@@ -69,6 +77,8 @@ struct StateInner {
     registry: Registry,
     admin_token: String,
     firmware: FirmwareCatalog,
+    configs: store::DeviceConfigStores,
+    live_links: Mutex<HashMap<registry::DeviceId, Arc<LiveLink>>>,
     /// Bounds concurrent `/v1/device/link` connections. `Arc`-wrapped
     /// separately from `StateInner` because `Semaphore::try_acquire_owned`
     /// needs an owned `Arc<Semaphore>` to hand a `'static` permit to the
@@ -79,11 +89,14 @@ struct StateInner {
 impl ServerState {
     #[must_use]
     pub fn new(admin_token: String, firmware: FirmwareCatalog) -> Self {
+        let config_root = config_root_for_firmware(firmware.directory());
         Self {
             inner: Arc::new(StateInner {
                 registry: Registry::new(),
                 admin_token,
                 firmware,
+                configs: store::DeviceConfigStores::new(config_root),
+                live_links: Mutex::new(HashMap::new()),
                 link_slots: Arc::new(tokio::sync::Semaphore::new(
                     device_link::MAX_CONCURRENT_LINKS,
                 )),
@@ -134,11 +147,121 @@ impl ServerState {
     pub(crate) fn link_slots(&self) -> Arc<tokio::sync::Semaphore> {
         Arc::clone(&self.inner.link_slots)
     }
+
+    pub(crate) fn configs(&self) -> &store::DeviceConfigStores {
+        &self.inner.configs
+    }
+
+    /// Atomically reserves the one live ownership slot for `device_id`.
+    /// The reservation happens before the 101 response, so two simultaneous
+    /// upgrades cannot both believe they won.
+    pub(crate) fn claim_link(&self, device_id: registry::DeviceId) -> Option<LinkLease> {
+        let mut links = self
+            .inner
+            .live_links
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if links.contains_key(&device_id) {
+            return None;
+        }
+        let link = Arc::new(LiveLink::default());
+        links.insert(device_id.clone(), Arc::clone(&link));
+        Some(LinkLease {
+            state: self.clone(),
+            device_id,
+            link,
+        })
+    }
+
+    pub(crate) fn live_link(&self, device_id: &str) -> Option<Arc<LiveLink>> {
+        self.inner
+            .live_links
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(device_id)
+            .cloned()
+    }
 }
 
-/// Builds the full device-facing router over `state`. Task 9 adds a
-/// Mac-facing router behind the admin token; this task only wires the
-/// surface firmware will ever call.
+fn config_root_for_firmware(firmware_directory: &std::path::Path) -> PathBuf {
+    firmware_directory
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(firmware_directory)
+        .join("configs")
+}
+
+#[derive(Default)]
+pub(crate) struct LiveLink {
+    runtime: Mutex<Option<Arc<RuntimeHandle>>>,
+    last_seen_unix_ms: Arc<AtomicU64>,
+}
+
+impl LiveLink {
+    pub(crate) fn set_runtime(&self, runtime: Arc<RuntimeHandle>) {
+        *self
+            .runtime
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(runtime);
+    }
+
+    pub(crate) fn runtime(&self) -> Option<Arc<RuntimeHandle>> {
+        self.runtime
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    pub(crate) fn take_runtime(&self) -> Option<Arc<RuntimeHandle>> {
+        self.runtime
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+    }
+
+    pub(crate) fn last_seen_counter(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.last_seen_unix_ms)
+    }
+
+    pub(crate) fn last_seen_unix_ms(&self) -> Option<u64> {
+        match self.last_seen_unix_ms.load(Ordering::Relaxed) {
+            0 => None,
+            seen => Some(seen),
+        }
+    }
+}
+
+pub(crate) struct LinkLease {
+    state: ServerState,
+    device_id: registry::DeviceId,
+    link: Arc<LiveLink>,
+}
+
+impl LinkLease {
+    pub(crate) fn link(&self) -> &Arc<LiveLink> {
+        &self.link
+    }
+}
+
+impl Drop for LinkLease {
+    fn drop(&mut self) {
+        let mut links = self
+            .state
+            .inner
+            .live_links
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if links
+            .get(&self.device_id)
+            .is_some_and(|current| Arc::ptr_eq(current, &self.link))
+        {
+            links.remove(&self.device_id);
+        }
+    }
+}
+
+/// Builds both the device-facing surface and the admin-token-protected
+/// Mac-facing routes over `state`.
 ///
 /// Middleware order matters and is easy to get backwards: `poll_ready`
 /// cascades down through the *whole* nested stack before `call` ever runs
@@ -163,6 +286,7 @@ pub fn app(state: ServerState) -> Router {
         .route("/v1/device/link", get(device_link::handler))
         .route("/v1/device/firmware", get(firmware::check))
         .route("/v1/firmware/{filename}", get(firmware::download))
+        .merge(admin::routes())
         .layer(middleware)
         .with_state(state)
 }

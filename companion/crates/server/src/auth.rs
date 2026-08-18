@@ -48,7 +48,7 @@ impl FromRequestParts<ServerState> for AuthenticatedDevice {
 /// wrong scheme). The scheme name is matched case-insensitively per RFC
 /// 7235 §2.1 ("auth-scheme ... is case-insensitive") -- firmware or a proxy
 /// sending `bearer`/`BEARER` is a protocol-legal client, not a malformed one.
-fn bearer_token(parts: &Parts) -> Option<&str> {
+pub(crate) fn bearer_token(parts: &Parts) -> Option<&str> {
     const SCHEME: &str = "Bearer ";
     let header = parts.headers.get(axum::http::header::AUTHORIZATION)?;
     let value = header.to_str().ok()?;

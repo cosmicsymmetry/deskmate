@@ -8,6 +8,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use rand::RngCore;
+use serde::Serialize;
 
 /// A device's opaque identifier, e.g. `dev-0001`.
 pub type DeviceId = String;
@@ -17,7 +18,7 @@ pub type DeviceId = String;
 /// returned exactly once, at mint time; the server never logs it again, and
 /// `Debug` never prints it either (see the hand-written impl below), so a
 /// stray `tracing::info!(?identity)` can't leak a live bearer secret.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Serialize)]
 pub struct DeviceIdentity {
     pub device_id: DeviceId,
     pub token: String,
@@ -92,6 +93,17 @@ impl Registry {
             .iter()
             .find(|(candidate, _)| constant_time_eq(candidate.as_bytes(), token))
             .map(|(_, device_id)| device_id.clone())
+    }
+
+    /// Whether `device_id` belongs to an identity minted by this process.
+    /// Admin paths use this check before deriving a per-device config path,
+    /// so an arbitrary URL segment never reaches the filesystem.
+    pub fn contains_device(&self, device_id: &str) -> bool {
+        self.tokens
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+            .any(|candidate| candidate == device_id)
     }
 }
 

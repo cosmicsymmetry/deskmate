@@ -3519,7 +3519,9 @@ dependencies = [
 name = "server"
 version = "0.1.0"
 dependencies = [
+ "app-core",
  "axum",
+ "device",
  "futures-util",
  "http",
  "protocol",

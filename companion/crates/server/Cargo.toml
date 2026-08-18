@@ -6,9 +6,11 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+app-core = { path = "../app-core" }
+device = { path = "../device" }
 protocol = { path = "../protocol" }
 axum = { version = "0.8", features = ["ws"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "net", "fs"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "net", "fs", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["io"] }
 tower = { version = "0.5", features = ["limit", "load-shed", "timeout", "util"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }

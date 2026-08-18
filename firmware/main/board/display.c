@@ -9,7 +9,6 @@
 #include "esp_lcd_panel_ops.h"
 #include "esp_log.h"
 #include "esp_lvgl_port.h"
-#include "esp_rom_sys.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "lvgl.h"
@@ -184,12 +183,6 @@ static void board_lcd_rounder_cb(lv_area_t *area)
 
 esp_err_t board_display_init(void)
 {
-    // TEMPORARY (task 6 PSRAM fix, pending removal): reports the largest
-    // contiguous MALLOC_CAP_DMA block on entry so the s_context PSRAM move's
-    // headroom can be confirmed on hardware before this probe is removed.
-    esp_rom_printf("PROBE dma_largest=%u\n",
-                   (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_DMA));
-
     ESP_RETURN_ON_ERROR(board_lcd_expander_reset(), TAG, "panel expander reset failed");
 
     ESP_LOGI(TAG, "Initialize QSPI bus");

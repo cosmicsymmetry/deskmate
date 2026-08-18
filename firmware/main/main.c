@@ -90,6 +90,20 @@ void app_main(void)
     // software-rotation buffers so the M0 display path remains deterministic.
     ESP_ERROR_CHECK(usb_link_init());
     ESP_LOGI(TAG, "native USB Serial/JTAG protocol link ready");
-    ESP_ERROR_CHECK(protocol_task_start());
-    ESP_LOGI(TAG, "protocol task running");
+
+    // protocol_task_start() now allocates its context from PSRAM, and that
+    // allocation can fail (e.g. under PSRAM pressure from a future feature).
+    // Aborting here with ESP_ERROR_CHECK() would panic-reboot-loop the
+    // device without ever reaching the standalone clock, which is already
+    // showing above -- the same failure-direction rule already applied to
+    // nvs_flash_init() and nvs_flash_erase() earlier in this function. A
+    // device with no protocol link is a working standalone clock, not a
+    // brick, so log and continue instead of aborting.
+    esp_err_t protocol_status = protocol_task_start();
+    if (protocol_status != ESP_OK) {
+        ESP_LOGE(TAG, "protocol_task_start failed (%s); continuing standalone",
+                esp_err_to_name(protocol_status));
+    } else {
+        ESP_LOGI(TAG, "protocol task running");
+    }
 }

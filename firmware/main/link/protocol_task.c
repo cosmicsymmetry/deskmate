@@ -17,6 +17,7 @@
 #include "core/widget_model.h"
 #include "esp_app_desc.h"
 #include "esp_check.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_system.h"
 #include "esp_timer.h"
@@ -57,7 +58,17 @@ typedef struct {
 } protocol_context_t;
 
 static const char *TAG = "protocol";
-static protocol_context_t s_context;
+// Allocated from PSRAM in protocol_task_start(), not a static internal-RAM
+// object: protocol_context_t is 54,616 B, which crowded out the internal
+// MALLOC_CAP_DMA headroom board_display_init() needs for its LVGL flush and
+// software-rotation buffers once WiFi's static internal .bss landed (see
+// docs/hardware/board-notes.md). Nothing in this struct is DMA'd -- see
+// transmit()/transmit_device_event(), which hand context->wire to
+// usb_link_write_frame() (copies into the USB driver's own ring buffer) and,
+// from Task 8 on, esp_websocket_client_send_bin() (also copies) -- and the
+// struct is only ever touched from this task, never an ISR, so PSRAM cache
+// access is safe here.
+static protocol_context_t *s_context;
 static TaskHandle_t s_task;
 static const link_transport_t *s_transport;
 
@@ -845,8 +856,18 @@ esp_err_t protocol_task_start(void)
 {
     ESP_RETURN_ON_FALSE(s_task == NULL, ESP_ERR_INVALID_STATE, TAG,
                         "protocol task already running");
+    // Allocate before anything else touches the context (including
+    // net_store_load() below): a failure here must be reported through this
+    // function's return value rather than left to be discovered by some
+    // later NULL dereference. heap_caps_calloc() already zero-fills, so no
+    // separate memset() is needed. On any later failure in this function the
+    // allocation is released so a caller that retries protocol_task_start()
+    // (main.c does not today, but nothing here should assume that) doesn't
+    // leak it.
+    s_context = heap_caps_calloc(1, sizeof(*s_context), MALLOC_CAP_SPIRAM);
+    ESP_RETURN_ON_FALSE(s_context != NULL, ESP_ERR_NO_MEM, TAG,
+                        "allocate protocol context from PSRAM");
     s_transport = usb_link_transport();
-    memset(&s_context, 0, sizeof(s_context));
     // Populate net_store_current_tier()'s cache once, synchronously, before
     // any USB message can reach the gate below. The loaded config itself
     // isn't needed here -- only its side effect on the tier cache -- so
@@ -855,16 +876,20 @@ esp_err_t protocol_task_start(void)
     protocol_network_config_t boot_network_config;
     net_store_load(&boot_network_config);
     memset(&boot_network_config, 0, sizeof(boot_network_config));
-    protocol_decoder_init(&s_context.decoder);
-    link_state_init_with_timeout(&s_context.link, s_transport->link_timeout_ms);
-    widget_model_init(&s_context.model);
-    interrupt_state_init(&s_context.interrupts);
-    device_event_queue_init(&s_context.events);
-    ui_runtime_set_event_queue(&s_context.events);
+    protocol_decoder_init(&s_context->decoder);
+    link_state_init_with_timeout(&s_context->link, s_transport->link_timeout_ms);
+    widget_model_init(&s_context->model);
+    interrupt_state_init(&s_context->interrupts);
+    device_event_queue_init(&s_context->events);
+    ui_runtime_set_event_queue(&s_context->events);
     BaseType_t created = xTaskCreatePinnedToCore(
-        protocol_task, "protocol", PROTOCOL_TASK_STACK_SIZE, &s_context,
+        protocol_task, "protocol", PROTOCOL_TASK_STACK_SIZE, s_context,
         PROTOCOL_TASK_PRIORITY, &s_task, PROTOCOL_TASK_CORE);
-    ESP_RETURN_ON_FALSE(created == pdPASS, ESP_ERR_NO_MEM, TAG,
-                        "create protocol task");
+    if (created != pdPASS) {
+        heap_caps_free(s_context);
+        s_context = NULL;
+        ESP_LOGE(TAG, "create protocol task failed");
+        return ESP_ERR_NO_MEM;
+    }
     return ESP_OK;
 }

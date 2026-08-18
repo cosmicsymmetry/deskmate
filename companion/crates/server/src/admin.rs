@@ -47,8 +47,21 @@ impl FromRequestParts<ServerState> for AdminAuthenticated {
 async fn create_device(
     State(state): State<ServerState>,
     _admin: AdminAuthenticated,
-) -> Json<crate::registry::DeviceIdentity> {
-    Json(state.registry().mint())
+) -> Json<MintDeviceResponse> {
+    let identity = state.registry().mint();
+    Json(MintDeviceResponse {
+        device_id: identity.device_id,
+        token: identity.token,
+    })
+}
+
+/// The sole serialization boundary for a newly minted device token. Keeping
+/// it separate from the registry identity prevents that secret-bearing type
+/// from becoming casually serializable on status or diagnostic paths.
+#[derive(Serialize)]
+struct MintDeviceResponse {
+    device_id: String,
+    token: String,
 }
 
 async fn put_config(
@@ -88,6 +101,7 @@ async fn put_config(
             .map_err(|_| AdminError::WorkerFailed)?
             .map_err(AdminError::from)?;
     }
+    device_config.record_current();
 
     Ok(Json(receipt))
 }
@@ -104,6 +118,7 @@ async fn get_device(
     let connected = live.is_some();
     let last_seen_unix_ms = live.as_ref().and_then(|link| link.last_seen_unix_ms());
     let runtime = live.and_then(|link| link.runtime());
+    let config = state.configs().for_device(&device_id).status();
     let snapshot = if let Some(runtime) = runtime {
         Some(
             tokio::task::spawn_blocking(move || runtime.snapshot())
@@ -119,6 +134,7 @@ async fn get_device(
         device_id,
         connected,
         last_seen_unix_ms,
+        config,
         snapshot,
     }))
 }
@@ -128,6 +144,7 @@ struct DeviceStatus {
     device_id: String,
     connected: bool,
     last_seen_unix_ms: Option<u64>,
+    config: crate::store::DeviceConfigStatus,
     snapshot: Option<AppSnapshot>,
 }
 

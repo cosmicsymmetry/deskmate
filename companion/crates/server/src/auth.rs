@@ -38,7 +38,16 @@ impl FromRequestParts<ServerState> for AuthenticatedDevice {
         state: &ServerState,
     ) -> Result<Self, Self::Rejection> {
         let token = bearer_token(parts).ok_or(AuthError)?;
-        let device_id = state.registry().authenticate(token).ok_or(AuthError)?;
+        let Some(device_id) = state.registry().authenticate(token) else {
+            // Never include the presented token. This wording makes the V2
+            // registry's restart behavior diagnosable without weakening the
+            // deliberately featureless 401 returned to an internet caller.
+            tracing::warn!(
+                "device authentication failed: bearer token is not recognized; \
+                 the in-memory device registry may have been cleared by a server restart"
+            );
+            return Err(AuthError);
+        };
         Ok(Self { device_id })
     }
 }

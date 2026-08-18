@@ -18,17 +18,47 @@ use device::{DeviceError, ReceivedEvent, SessionDiagnostics, TransportError};
 use futures_util::stream::SplitSink;
 use futures_util::{SinkExt, StreamExt};
 use protocol::{
-    Ack, ActivateScreen, ApplyConfig, Field, Message, OtaState, PushData, ScreenConfig,
-    StatusResponse, Tier, TimeSync, TriggerInterrupt, WidgetConfig, WifiState,
+    Ack, ActivateScreen, ApplyConfig, Field, Message, PushData, ScreenConfig, StatusResponse,
+    TimeSync, TriggerInterrupt, WidgetConfig,
 };
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::time::{Instant, MissedTickBehavior, interval, timeout};
 
+/// How long the socket actor waits for a matching protocol response. Keeping
+/// this equal to the serial transport's established request deadline gives
+/// both implementations the same device-facing failure threshold.
 const REQUEST_TIMEOUT: Duration = device::DEFAULT_REQUEST_TIMEOUT;
+
+/// How long the blocking [`RuntimeDevice`] caller waits for the socket actor.
+/// This must stay strictly greater than [`REQUEST_TIMEOUT`]: the actor must
+/// expire and remove its pending request before the caller can submit another,
+/// or a late response could be attributed to the next command.
 const RESPONSE_WAIT_TIMEOUT: Duration = Duration::from_secs(4);
+
+/// Bounds every WebSocket send, including requests, keepalives, and close
+/// frames. A peer that stops reading would otherwise park the socket actor and
+/// prevent both response deadlines and idle checks from making progress.
+///
+/// Provisional: like [`PING_INTERVAL`], this is a V2 judgment call to revisit
+/// with real traffic in V3. `SEND_TIMEOUT < PING_INTERVAL < IDLE_TIMEOUT` must
+/// continue to hold.
 const SEND_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// How often an otherwise-live link gets a WebSocket ping. It is intentionally
+/// below [`IDLE_TIMEOUT`] so dead NAT/WiFi peers are detected before bare TCP's
+/// much coarser retransmission timeout.
+///
+/// Provisional: sized by judgment for V2, not measurements. Revisit in V3.
 const PING_INTERVAL: Duration = Duration::from_secs(3);
+
+/// Maximum silence from the peer, including absence of a pong. This mirrors
+/// the protocol's declared link timeout so both ends agree when the link has
+/// died.
 const IDLE_TIMEOUT: Duration = Duration::from_millis(protocol::LINK_TIMEOUT_MS);
+
+/// Bounded handoff from the async socket actor to app-core's synchronous event
+/// drain. A full queue drops locally and increments diagnostics rather than
+/// allowing an untrusted device to grow memory without limit.
 const EVENT_QUEUE_CAPACITY: usize = device::DEFAULT_EVENT_QUEUE_CAPACITY;
 
 struct DeviceRequest {
@@ -208,6 +238,18 @@ impl WebSocketRuntimeDevice {
     }
 }
 
+/// Unlike the serial implementation, this object deliberately does not retain
+/// replay state across `connect()` calls. Today that is safe because app-core
+/// only marks it disconnected for `NoDevice`/`Transport`, and either result
+/// here means the socket actor is already gone and its owning link task is
+/// ending. Every real network reconnect therefore receives a fresh device, a
+/// fresh runtime, and `needs_full_sync = true`.
+///
+/// This reasoning is invalidated by any change that makes `connect()`
+/// retriable while the same WebSocket actor remains alive. In that design,
+/// `synchronize_pending` could observe `needs_full_sync = false`, skip the
+/// layout, and silently reopen the M2 multi-owner/power-reset hole unless this
+/// implementation first gains the trait's full replay contract.
 impl RuntimeDevice for WebSocketRuntimeDevice {
     fn connect(&mut self) -> Result<DeviceConnection, DeviceError> {
         let was_connected = self.connected;
@@ -345,12 +387,7 @@ impl SocketPeer {
                         Some(Ok(WsMessage::Binary(bytes))) => {
                             last_activity = std::time::Instant::now();
                             mark_seen(&last_seen_unix_ms);
-                            if !self.handle_binary(
-                                &mut sender,
-                                &bytes,
-                                device_id,
-                                &mut pending,
-                            ).await {
+                            if !self.handle_binary(&bytes, device_id, &mut pending) {
                                 close_socket(&mut sender).await;
                                 break;
                             }
@@ -424,9 +461,8 @@ impl SocketPeer {
         }
     }
 
-    async fn handle_binary(
+    fn handle_binary(
         &mut self,
-        sender: &mut SplitSink<WebSocket, WsMessage>,
         bytes: &[u8],
         device_id: &str,
         pending: &mut Option<PendingRequest>,
@@ -451,25 +487,6 @@ impl SocketPeer {
                     return false;
                 }
             };
-
-            // Retain Task 8's framing probe: a device-originated StatusRequest
-            // is not part of normal ownership traffic, but answering it keeps
-            // the hostile-frame concatenation test able to observe that both
-            // complete frames were decoded. There is no periodic status poller
-            // here; app-core owns the real 2-second status cadence.
-            if matches!(message, Message::StatusRequest) {
-                let response = Message::StatusResponse(server_status());
-                let Ok(wire) = protocol::encode_message(frame.request_id, &response) else {
-                    return false;
-                };
-                if send_ws(sender, WsMessage::Binary(wire.into()))
-                    .await
-                    .is_err()
-                {
-                    return false;
-                }
-                continue;
-            }
 
             if frame.request_id == 0 {
                 if let Message::DeviceEvent(event) = message {
@@ -581,41 +598,6 @@ fn mark_seen(last_seen_unix_ms: &AtomicU64) {
     last_seen_unix_ms.store(millis.max(1), Ordering::Relaxed);
 }
 
-fn server_status() -> StatusResponse {
-    StatusResponse {
-        protocol_version: protocol::PROTOCOL_VERSION,
-        max_protocol_version: protocol::MAX_PROTOCOL_VERSION,
-        capabilities: 0,
-        firmware_version: env!("CARGO_PKG_VERSION").to_owned(),
-        uptime_ms: 0,
-        free_heap: 0,
-        display_width: 0,
-        display_height: 0,
-        brightness: 0,
-        rotation: 0,
-        online: true,
-        latest_revision: 0,
-        valid_frames: 0,
-        malformed_frames: 0,
-        crc_errors: 0,
-        overflow_frames: 0,
-        dropped_responses: 0,
-        rx_dropped_bytes: 0,
-        dropped_events: 0,
-        event_queue_high_water: 0,
-        dropped_ui_commands: 0,
-        ui_queue_high_water: 0,
-        config_revision: 0,
-        latest_interrupt_token: 0,
-        tier: Tier::Local,
-        wifi_state: WifiState::Down,
-        wifi_rssi: 0,
-        ip: String::new(),
-        ota_state: OtaState::Idle,
-        last_network_error: None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::SocketPeer;
@@ -637,5 +619,19 @@ mod tests {
     fn socket_peer_is_send() {
         fn assert_send<T: Send>() {}
         assert_send::<SocketPeer>();
+    }
+
+    #[test]
+    fn actor_deadline_expires_before_the_blocking_caller_deadline() {
+        assert!(
+            super::RESPONSE_WAIT_TIMEOUT > super::REQUEST_TIMEOUT,
+            "the actor must clear a pending request before its caller can time out"
+        );
+    }
+
+    #[test]
+    fn keepalive_deadlines_preserve_progress_and_idle_detection() {
+        assert!(super::SEND_TIMEOUT < super::PING_INTERVAL);
+        assert!(super::PING_INTERVAL < super::IDLE_TIMEOUT);
     }
 }

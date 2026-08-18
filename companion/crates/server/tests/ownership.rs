@@ -8,7 +8,10 @@ mod support;
 /// Mirrors `tests/device_link.rs`'s helper; kept separate so the two files
 /// can diverge without one silently changing the other's fixture.
 async fn spawn() -> (String, server::registry::DeviceIdentity, String) {
-    let state = ServerState::in_memory();
+    spawn_state(ServerState::in_memory()).await
+}
+
+async fn spawn_state(state: ServerState) -> (String, server::registry::DeviceIdentity, String) {
     let identity = state.registry().mint();
     let admin_token = state.admin_token().to_string();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -90,10 +93,51 @@ async fn a_second_socket_for_the_same_device_is_refused() {
     let _first = connect_device(&host, &identity.token)
         .await
         .expect("first connects");
-    assert!(
-        connect_device(&host, &identity.token).await.is_err(),
-        "a second link for a device that already has one was accepted"
+    let error = connect_device(&host, &identity.token)
+        .await
+        .expect_err("a second link for a device that already has one was accepted");
+    let tokio_tungstenite::tungstenite::Error::Http(response) = error else {
+        panic!("second link failed without the intended HTTP refusal: {error}");
+    };
+    assert_eq!(response.status(), http::StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn config_is_written_under_the_explicit_config_directory() {
+    // Catches deriving config storage from the firmware path: production's
+    // systemd sandbox only makes /var/lib/deskmate writable, so a firmware
+    // override must not redirect config writes outside the configured root.
+    let temp = tempfile::tempdir().expect("config test temp dir");
+    let config_root = temp.path().join("explicit-configs");
+    let firmware = server::firmware::FirmwareCatalog::in_memory();
+    let former_derived_root = firmware.directory().parent().unwrap().join("configs");
+    let state = ServerState::new(
+        "explicit-config-admin-token".to_string(),
+        firmware,
+        config_root.clone(),
     );
+    let (host, identity, admin_token) = spawn_state(state).await;
+    let config = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/one-clock-card.json"
+    ))
+    .expect("fixture");
+
+    let response = reqwest::Client::new()
+        .put(format!(
+            "http://{host}/v1/devices/{}/config",
+            identity.device_id
+        ))
+        .bearer_auth(admin_token)
+        .header("Content-Type", "application/json")
+        .body(config)
+        .send()
+        .await
+        .expect("config write");
+
+    assert_eq!(response.status(), 200);
+    assert!(config_root.join("dev-0001.json").is_file());
+    assert!(!former_derived_root.join("dev-0001.json").exists());
 }
 
 #[tokio::test]
@@ -267,6 +311,61 @@ async fn admin_status_reports_live_state_without_device_secrets() {
         status["snapshot"]["device"]["connection"]["kind"], "online",
         "status omitted the runtime's live app-core connection state"
     );
+}
+
+#[tokio::test]
+async fn admin_status_reports_defaults_used_after_stored_config_validation_failure() {
+    // Catches calling a fresh process's factory defaults "last-good" and
+    // catches omitting fallback state from the only admin status endpoint.
+    let temp = tempfile::tempdir().expect("config test temp dir");
+    let config_root = temp.path().join("configs");
+    std::fs::create_dir_all(&config_root).expect("create config root");
+    let state = ServerState::new(
+        "fallback-admin-token".to_string(),
+        server::firmware::FirmwareCatalog::in_memory(),
+        config_root.clone(),
+    );
+    let identity = state.registry().mint();
+    let admin_token = state.admin_token().to_string();
+    let mut invalid: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/one-clock-card.json"
+        ))
+        .expect("fixture"),
+    )
+    .expect("fixture JSON");
+    invalid["active_playlist_id"] = "missing-playlist".into();
+    std::fs::write(
+        config_root.join(format!("{}.json", identity.device_id)),
+        serde_json::to_vec(&invalid).expect("invalid config JSON"),
+    )
+    .expect("write invalid stored config");
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app(state)).await.unwrap();
+    });
+    let host = format!("127.0.0.1:{}", address.port());
+    let mut socket = connect_device(&host, &identity.token)
+        .await
+        .expect("connect with invalid stored config");
+    support::bootstrap_runtime(&mut socket).await;
+
+    let response = reqwest::Client::new()
+        .get(format!("http://{host}/v1/devices/{}", identity.device_id))
+        .bearer_auth(admin_token)
+        .send()
+        .await
+        .expect("status request");
+    assert_eq!(response.status(), 200);
+    let status: serde_json::Value =
+        serde_json::from_str(&response.text().await.expect("status response body"))
+            .expect("status JSON");
+    assert_eq!(status["config"]["origin"], "defaults");
+    assert_eq!(status["config"]["using_fallback"], true);
+    assert_eq!(status["config"]["fallback_reason"], "validation-failed");
 }
 
 #[tokio::test]

@@ -7,14 +7,25 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use tokio::sync::OwnedSemaphorePermit;
 
-use app_core::{LoadOutcome, RuntimeHandle, RuntimeOptions, SystemCalendarRefresher};
+use app_core::{ConfigOrigin, LoadOutcome, RuntimeHandle, RuntimeOptions, SystemCalendarRefresher};
 
 use crate::auth::AuthenticatedDevice;
 use crate::registry::DeviceId;
 use crate::runtime_device::WebSocketRuntimeDevice;
 use crate::{LinkLease, ServerState};
 
-/// Coarse process protection for authenticated but long-lived sockets.
+/// Caps concurrent device links. V2 is single-tenant and realistically has
+/// one device, but this endpoint sits on a public tunnel, so a caller with a
+/// compromised token must not be able to pin unbounded socket tasks and
+/// runtimes.
+///
+/// Provisional: sized by judgment for a single-device V2 deployment, not
+/// derived from measurements. Revisit against actual traffic in V3. It is
+/// `<= MAX_CONCURRENT_REQUESTS` (`lib.rs`) by construction. The link permit
+/// is acquired with `try_acquire_owned` while the request permit is held, so
+/// that step never waits; the 101 then releases the request permit before the
+/// long-lived socket loop begins. With no circular wait, the two pools cannot
+/// deadlock each other.
 pub(crate) const MAX_CONCURRENT_LINKS: usize = 32;
 
 /// One maximum COBS-framed protocol frame, delimiter included. A WebSocket
@@ -55,26 +66,8 @@ async fn run(
 
     let device_config = state.configs().for_device(&device_id);
     let update = device_config.update.lock().await;
-    let store = std::sync::Arc::clone(&device_config);
-    let load = tokio::task::spawn_blocking(move || store.store.load()).await;
-    let config = match load {
-        Ok(LoadOutcome::Loaded { config, .. }) => config,
-        Ok(LoadOutcome::Recovered { config, error, .. }) => {
-            tracing::warn!(device_id = %device_id, %error, "device config recovered");
-            config
-        }
-        Ok(LoadOutcome::ValidationFailed { config, issues, .. }) => {
-            tracing::warn!(
-                device_id = %device_id,
-                issue_count = issues.len(),
-                "device config validation failed; using genuine last-good config"
-            );
-            config
-        }
-        Err(_) => {
-            tracing::error!(device_id = %device_id, "device config loader panicked");
-            return;
-        }
+    let Some(config) = load_config(&device_config, &device_id).await else {
+        return;
     };
 
     let (device, peer) = WebSocketRuntimeDevice::channel(device_id.clone());
@@ -125,4 +118,62 @@ async fn run(
         }
     }
     tracing::info!(device_id = %device_id, "device link closed");
+}
+
+async fn load_config(
+    device_config: &std::sync::Arc<crate::store::DeviceConfig>,
+    device_id: &str,
+) -> Option<app_core::AppConfig> {
+    let store = std::sync::Arc::clone(device_config);
+    let load = tokio::task::spawn_blocking(move || store.store.load()).await;
+    match load {
+        Ok(LoadOutcome::Loaded { config, origin }) => {
+            device_config.record_load(origin, None);
+            Some(config)
+        }
+        Ok(LoadOutcome::Recovered {
+            config,
+            origin,
+            error,
+        }) => {
+            device_config.record_load(origin, Some(crate::store::ConfigFallbackReason::Recovery));
+            tracing::warn!(
+                device_id = %device_id,
+                ?origin,
+                %error,
+                "device config recovery selected a fallback"
+            );
+            Some(config)
+        }
+        Ok(LoadOutcome::ValidationFailed {
+            config,
+            origin,
+            issues,
+        }) => {
+            device_config.record_load(
+                origin,
+                Some(crate::store::ConfigFallbackReason::ValidationFailed),
+            );
+            if origin == ConfigOrigin::LastGood {
+                tracing::warn!(
+                    device_id = %device_id,
+                    ?origin,
+                    issue_count = issues.len(),
+                    "device config validation failed; using genuine last-good config"
+                );
+            } else {
+                tracing::warn!(
+                    device_id = %device_id,
+                    ?origin,
+                    issue_count = issues.len(),
+                    "device config validation failed; using fallback config"
+                );
+            }
+            Some(config)
+        }
+        Err(_) => {
+            tracing::error!(device_id = %device_id, "device config loader panicked");
+            None
+        }
+    }
 }

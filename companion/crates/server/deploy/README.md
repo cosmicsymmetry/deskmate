@@ -22,11 +22,11 @@ sudo install -m 0755 target/release/server /usr/local/bin/deskmate-server
 
 ## 2. Configuration: the environment file
 
-Bind address, firmware directory and admin token are read from environment
-variables (`src/main.rs`), never from a config file the binary parses itself.
-Both unit files source them from **one env file at `/etc/deskmate/server.env`**
--- see `deskmate-server.env.example` in this directory for the exact keys and
-comments.
+Bind address, firmware directory, device-config directory, and admin token are
+read from environment variables (`src/main.rs`), never from a config file the
+binary parses itself. Both unit files source them from **one env file at
+`/etc/deskmate/server.env`** -- see `deskmate-server.env.example` in this
+directory for the exact keys and comments.
 
 ```sh
 sudo install -d -m 0755 /etc/deskmate
@@ -41,11 +41,36 @@ on a command line where it lands in shell history, and never commit
 `/etc/deskmate/server.env` (it is deliberately outside this repo). The 0600
 mode above is load-bearing.
 
-Create the firmware directory the env file points at:
+### Important V2 identity limitation
+
+The device identity registry is **memory-only**. Every server process restart
+forgets every provisioned device and bearer token; neither the token nor the
+identity is restored from the config directory. Under the supplied systemd
+unit, `Restart=on-failure` and `RestartSec=2` mean an unattended crash can look
+like a quick recovery while the board is permanently receiving 401 responses.
+It cannot re-provision itself: recovery currently requires connecting the board
+over USB and provisioning a newly minted identity.
+
+For an unrecognized device token, the server log explicitly says that the
+in-memory registry may have been cleared by a restart. Check it with
+`journalctl -u deskmate-server` before treating a stream of 401s as a mistyped
+token. Persisting identities is intentionally deferred pending a repository
+owner design decision.
+
+Create the read-only firmware directory the env file points at:
 
 ```sh
 sudo install -d -m 0755 /var/lib/deskmate/firmware
 ```
+
+`DESKMATE_CONFIG_DIR` defaults to `/var/lib/deskmate/configs`; both it and
+`DESKMATE_FIRMWARE_DIR` must be absolute paths. Keep both under
+`/var/lib/deskmate` when using the supplied systemd unit. Do not pre-create
+`configs` as a root-owned directory for the `DynamicUser`: systemd gives the
+service ownership of the `StateDirectory` parent, and the server creates its
+config subdirectory on the first successful write. For launchd, point
+`DESKMATE_CONFIG_DIR` at an absolute directory writable by the account running
+the agent/daemon.
 
 ## 3a. Run under systemd (Linux)
 
@@ -59,7 +84,8 @@ journalctl -u deskmate-server -f
 
 The unit runs as a `DynamicUser` with `ProtectSystem=strict`; its only
 writable path is `/var/lib/deskmate` (via `StateDirectory=deskmate`), which is
-where `/etc/deskmate/server.env`'s `DESKMATE_FIRMWARE_DIR` should live.
+where `/etc/deskmate/server.env`'s `DESKMATE_FIRMWARE_DIR` and
+`DESKMATE_CONFIG_DIR` should live.
 
 ## 3b. Run under launchd (macOS)
 

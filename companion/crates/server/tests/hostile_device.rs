@@ -4,7 +4,7 @@
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
-use protocol::{Frame, Message, decode_message, decode_wire_frame};
+use protocol::{DeviceEvent, EventAction, EventKind, Frame, Message};
 use server::{ServerState, app};
 use tokio::net::TcpStream;
 use tokio::time::timeout;
@@ -15,15 +15,20 @@ mod support;
 
 type DeviceSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
-async fn spawn() -> (String, server::registry::DeviceIdentity) {
+async fn spawn() -> (String, server::registry::DeviceIdentity, String) {
     let state = ServerState::in_memory();
     let identity = state.registry().mint();
+    let admin_token = state.admin_token().to_string();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     tokio::spawn(async move {
         axum::serve(listener, app(state)).await.unwrap();
     });
-    (format!("127.0.0.1:{}", address.port()), identity)
+    (
+        format!("127.0.0.1:{}", address.port()),
+        identity,
+        admin_token,
+    )
 }
 
 async fn connect(host: &str, identity: &server::registry::DeviceIdentity) -> DeviceSocket {
@@ -73,36 +78,9 @@ async fn assert_rejected(host: &str, identity: &server::registry::DeviceIdentity
     assert_eq!(closed, Ok(true), "hostile frame did not close the link");
 }
 
-async fn receive_two_status_responses(socket: &mut DeviceSocket) -> Vec<u32> {
-    timeout(Duration::from_secs(1), async {
-        let mut request_ids = Vec::new();
-        while request_ids.len() < 2 {
-            match socket.next().await {
-                Some(Ok(WsMessage::Binary(wire))) => {
-                    let frame = decode_wire_frame(&wire).unwrap();
-                    assert!(matches!(
-                        decode_message(&frame).unwrap(),
-                        Message::StatusResponse(_)
-                    ));
-                    request_ids.push(frame.request_id);
-                }
-                Some(Ok(WsMessage::Ping(payload))) => {
-                    socket.send(WsMessage::Pong(payload)).await.unwrap();
-                }
-                Some(Ok(other)) => panic!("unexpected WebSocket message: {other:?}"),
-                Some(Err(error)) => panic!("WebSocket read failed: {error}"),
-                None => panic!("WebSocket closed before both responses arrived"),
-            }
-        }
-        request_ids
-    })
-    .await
-    .expect("timed out waiting for two status responses")
-}
-
 #[tokio::test]
 async fn hostile_device_frames_are_bounded_and_concatenated_frames_decode() {
-    let (host, identity) = spawn().await;
+    let (host, identity, admin_token) = spawn().await;
 
     let mut corrupt_delimiter = protocol::encode_message(1, &Message::StatusRequest).unwrap();
     corrupt_delimiter.insert(corrupt_delimiter.len() / 2, 0);
@@ -122,9 +100,42 @@ async fn hostile_device_frames_are_bounded_and_concatenated_frames_decode() {
     assert_eq!(truncated.pop(), Some(0));
     assert_rejected(&host, &identity, truncated).await;
 
-    let mut concatenated = protocol::encode_message(10, &Message::StatusRequest).unwrap();
-    concatenated.extend(protocol::encode_message(11, &Message::StatusRequest).unwrap());
+    let event = |sequence| {
+        Message::DeviceEvent(DeviceEvent {
+            sequence,
+            kind: EventKind::Tap,
+            widget_id: "clock".to_string(),
+            screen_id: "clock".to_string(),
+            action: EventAction::StartPause,
+            interrupt_token: None,
+        })
+    };
+    let mut concatenated = protocol::encode_message(0, &event(10)).unwrap();
+    concatenated.extend(protocol::encode_message(0, &event(12)).unwrap());
     let mut socket = connect(&host, &identity).await;
     socket.send(WsMessage::Binary(concatenated)).await.unwrap();
-    assert_eq!(receive_two_status_responses(&mut socket).await, [10, 11]);
+    support::answer_next_runtime_status(&mut socket).await;
+    support::flush_socket(&mut socket).await;
+
+    let client = reqwest::Client::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+    loop {
+        let response = client
+            .get(format!("http://{host}/v1/devices/{}", identity.device_id))
+            .bearer_auth(&admin_token)
+            .send()
+            .await
+            .expect("device status request");
+        let status: serde_json::Value =
+            serde_json::from_str(&response.text().await.expect("device status response body"))
+                .expect("device status JSON");
+        if status["snapshot"]["device"]["counters"]["detected_event_gaps"] == 1 {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "both concatenated DeviceEvents were not routed in sequence"
+        );
+        tokio::task::yield_now().await;
+    }
 }

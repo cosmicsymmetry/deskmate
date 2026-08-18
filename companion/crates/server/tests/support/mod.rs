@@ -66,7 +66,7 @@ pub async fn bootstrap_runtime(socket: &mut DeviceSocket) {
                     reply(socket, frame.request_id, &message).await;
                     if complete {
                         finish_initial_schedule(socket).await;
-                        round_trip_probe(socket).await;
+                        flush_socket(socket).await;
                         return;
                     }
                 }
@@ -131,24 +131,15 @@ pub async fn answer_next_runtime_status(socket: &mut DeviceSocket) {
     .expect("timed out waiting for app-core's status request");
 }
 
-async fn round_trip_probe(socket: &mut DeviceSocket) {
-    const PROBE_REQUEST_ID: u32 = u32::MAX;
-    socket
-        .send(WsMessage::Binary(
-            protocol::encode_message(PROBE_REQUEST_ID, &Message::StatusRequest).unwrap(),
-        ))
-        .await
-        .unwrap();
+pub async fn flush_socket(socket: &mut DeviceSocket) {
+    const PROBE: &[u8] = b"deskmate-test-flush";
+    socket.send(WsMessage::Ping(PROBE.to_vec())).await.unwrap();
     loop {
         match socket.next().await {
+            Some(Ok(WsMessage::Pong(payload))) if payload.as_slice() == PROBE => return,
             Some(Ok(WsMessage::Binary(bytes))) => {
                 let frame = protocol::decode_wire_frame(&bytes).expect("probe frame");
                 let message = protocol::decode_message(&frame).expect("probe message");
-                if frame.request_id == PROBE_REQUEST_ID
-                    && matches!(message, Message::StatusResponse(_))
-                {
-                    return;
-                }
                 reply(socket, frame.request_id, &message).await;
             }
             Some(Ok(WsMessage::Ping(payload))) => {
@@ -156,7 +147,7 @@ async fn round_trip_probe(socket: &mut DeviceSocket) {
             }
             Some(Ok(other)) => panic!("unexpected probe WebSocket message: {other:?}"),
             Some(Err(error)) => panic!("probe WebSocket read failed: {error}"),
-            None => panic!("socket closed before probe completed"),
+            None => panic!("socket closed before flush completed"),
         }
     }
 }

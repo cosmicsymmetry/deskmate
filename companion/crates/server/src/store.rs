@@ -9,7 +9,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use app_core::ConfigStore;
+use app_core::{ConfigOrigin, ConfigStore};
+use serde::Serialize;
 
 use crate::registry::DeviceId;
 
@@ -20,6 +21,45 @@ pub(crate) struct DeviceConfig {
     /// before its runtime became visible, leaving the new config persisted
     /// yet unapplied until the next reconnect.
     pub update: tokio::sync::Mutex<()>,
+    status: Mutex<DeviceConfigStatus>,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub(crate) struct DeviceConfigStatus {
+    origin: Option<ConfigOrigin>,
+    using_fallback: bool,
+    fallback_reason: Option<ConfigFallbackReason>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum ConfigFallbackReason {
+    Recovery,
+    ValidationFailed,
+}
+
+impl DeviceConfig {
+    pub fn record_load(&self, origin: ConfigOrigin, fallback_reason: Option<ConfigFallbackReason>) {
+        *self
+            .status
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = DeviceConfigStatus {
+            origin: Some(origin),
+            using_fallback: fallback_reason.is_some(),
+            fallback_reason,
+        };
+    }
+
+    pub fn record_current(&self) {
+        self.record_load(ConfigOrigin::Current, None);
+    }
+
+    pub fn status(&self) -> DeviceConfigStatus {
+        self.status
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
 }
 
 pub(crate) struct DeviceConfigStores {
@@ -44,6 +84,7 @@ impl DeviceConfigStores {
             Arc::new(DeviceConfig {
                 store: ConfigStore::new(self.root.join(format!("{device_id}.json"))),
                 update: tokio::sync::Mutex::new(()),
+                status: Mutex::new(DeviceConfigStatus::default()),
             })
         }))
     }

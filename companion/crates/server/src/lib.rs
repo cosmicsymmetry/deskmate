@@ -88,14 +88,13 @@ struct StateInner {
 
 impl ServerState {
     #[must_use]
-    pub fn new(admin_token: String, firmware: FirmwareCatalog) -> Self {
-        let config_root = config_root_for_firmware(firmware.directory());
+    pub fn new(admin_token: String, firmware: FirmwareCatalog, config_directory: PathBuf) -> Self {
         Self {
             inner: Arc::new(StateInner {
                 registry: Registry::new(),
                 admin_token,
                 firmware,
-                configs: store::DeviceConfigStores::new(config_root),
+                configs: store::DeviceConfigStores::new(config_directory),
                 live_links: Mutex::new(HashMap::new()),
                 link_slots: Arc::new(tokio::sync::Semaphore::new(
                     device_link::MAX_CONCURRENT_LINKS,
@@ -108,9 +107,16 @@ impl ServerState {
     /// and a firmware catalog pinned at version `1.0.0`.
     #[must_use]
     pub fn in_memory() -> Self {
+        let firmware = FirmwareCatalog::in_memory();
+        let config_directory = firmware
+            .directory()
+            .parent()
+            .expect("in-memory firmware directory has an owned parent")
+            .join("configs");
         Self::new(
             "in-memory-admin-token".to_string(),
-            FirmwareCatalog::in_memory(),
+            firmware,
+            config_directory,
         )
     }
 
@@ -181,14 +187,6 @@ impl ServerState {
             .get(device_id)
             .cloned()
     }
-}
-
-fn config_root_for_firmware(firmware_directory: &std::path::Path) -> PathBuf {
-    firmware_directory
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or(firmware_directory)
-        .join("configs")
 }
 
 #[derive(Default)]
@@ -313,13 +311,17 @@ mod tests {
 
     #[test]
     fn verify_admin_token_accepts_the_real_token() {
-        let state = ServerState::new("the-real-token".to_string(), FirmwareCatalog::in_memory());
+        let firmware = FirmwareCatalog::in_memory();
+        let config_directory = firmware.directory().parent().unwrap().join("configs");
+        let state = ServerState::new("the-real-token".to_string(), firmware, config_directory);
         assert!(state.verify_admin_token("the-real-token"));
     }
 
     #[test]
     fn verify_admin_token_rejects_a_wrong_token() {
-        let state = ServerState::new("the-real-token".to_string(), FirmwareCatalog::in_memory());
+        let firmware = FirmwareCatalog::in_memory();
+        let config_directory = firmware.directory().parent().unwrap().join("configs");
+        let state = ServerState::new("the-real-token".to_string(), firmware, config_directory);
         assert!(!state.verify_admin_token("not-the-token"));
         assert!(!state.verify_admin_token(""));
     }

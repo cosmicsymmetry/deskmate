@@ -5,7 +5,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-# Bind address, firmware directory and admin token all come from here --
+# Bind address, firmware/config directories and admin token all come from here --
 # systemd exports every KEY=value line as a process environment variable
 # before exec, which is exactly what std::env::var reads in src/main.rs.
 EnvironmentFile=/etc/deskmate/server.env
@@ -13,11 +13,12 @@ ExecStart=/usr/local/bin/deskmate-server
 Restart=on-failure
 RestartSec=2
 
-# Least privilege: the binary only needs to bind a port and read/write the
-# firmware directory it's told about.
+# Least privilege: the binary only needs to bind a port, read firmware, and
+# write the config directory it's told about.
 # StateDirectory=deskmate creates and grants write access to
 # /var/lib/deskmate under ProtectSystem=strict -- no separate ReadWritePaths
-# needed. Point DESKMATE_FIRMWARE_DIR in server.env at a subdirectory of it.
+# needed. Point DESKMATE_FIRMWARE_DIR and DESKMATE_CONFIG_DIR in server.env at
+# subdirectories of it.
 DynamicUser=yes
 StateDirectory=deskmate
 NoNewPrivileges=yes

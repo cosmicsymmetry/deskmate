@@ -8,8 +8,6 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use rand::RngCore;
-use serde::Serialize;
-
 /// A device's opaque identifier, e.g. `dev-0001`.
 pub type DeviceId = String;
 
@@ -18,7 +16,7 @@ pub type DeviceId = String;
 /// returned exactly once, at mint time; the server never logs it again, and
 /// `Debug` never prints it either (see the hand-written impl below), so a
 /// stray `tracing::info!(?identity)` can't leak a live bearer secret.
-#[derive(Clone, PartialEq, Eq, Serialize)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct DeviceIdentity {
     pub device_id: DeviceId,
     pub token: String,

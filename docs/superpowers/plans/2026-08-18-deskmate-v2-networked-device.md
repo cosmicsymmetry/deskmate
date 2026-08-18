@@ -1975,6 +1975,72 @@ recovering.
 
 ---
 
+### Task 10a:10a The app-core boundary Task 10 needs (amendment)
+
+**Added 2026-08-19.** Task 10's implementer stopped and reported BLOCKED rather than
+writing code, and it was right to. Task 10 assumes the Tauri shell can call
+`device::Session::provision` and `factory_reset` and can see the device's tier. Neither
+reaches the app: the Mac talks to the board through `app_core::RuntimeHandle`, which owns
+the serial port exclusively and exposes no provisioning or factory-reset command, and
+`SerialRuntimeDevice` keeps its `ConnectedSession` private.
+
+**Opening a second `device::Session` from a Tauri command is the wrong answer** even
+though it would compile and pass tests. It would compete with the live app-core session
+for the same port, make provisioning timing-dependent, and reintroduce exactly the
+multi-process ownership hole M2 suffered and M3 was built to close. The implementer
+declined to do it; this task exists so nobody does it later under time pressure.
+
+Three gaps, all in `companion/crates/app-core/`:
+
+1. `DeviceSnapshot` carries none of V2's additive status fields — no `tier`, `wifi_state`,
+   `wifi_rssi`, `ip`, `last_network_error` or `ota_state`. `runtime::update_device_status`
+   receives them from the wire and drops them on the floor. `DeviceCapability` also stops
+   at `FirmwareUpdate`, so `CAPABILITY_NETWORKING` reads as unknown.
+2. There is no provisioning or factory-reset path through the single owner.
+3. There is nowhere to keep the server base URL, device id, and the write-only admin and
+   device tokens. **They must not go into `AppConfig`** — the plan's Global Constraints
+   freeze the config schema at v4 with no migration, and `ConfigStore` is strict, so an
+   added field is a contract break, not a convenience.
+
+**Files:**
+- Modify: `companion/crates/app-core/src/runtime.rs`, `src/state.rs`
+- Create: a small separate settings store in `companion/crates/app-core/` for the network
+  credentials, alongside `ConfigStore` rather than inside it
+
+**Interfaces:**
+- Consumes: Task 3's `provision`/`factory_reset` on `device::Session`.
+- Produces: the projected status fields, two runtime commands, and the credential store
+  that Task 10's UI and typed IPC consume.
+
+- [ ] **Step 1: Write the failing tests**
+
+Cover: every additive V2 status field surviving the wire-to-snapshot projection;
+`CAPABILITY_NETWORKING` decoding rather than reading as unknown; a provisioning command
+executing on the **existing** session with no second port open; and the credential store
+round-tripping without touching `AppConfig`.
+
+- [ ] **Step 2: Project the V2 status fields into `DeviceSnapshot`**
+
+Additive only. This is the third time in this project that firmware has filled a status
+field nothing consumes — it cost a wasted board session at Task 3 and was caught again at
+Task 6. Project every field, not only the ones Task 10 happens to render.
+
+- [ ] **Step 3: Add provisioning and factory-reset runtime commands**
+
+They execute on the existing `SerialRuntimeDevice`/`ConnectedSession`. No second session,
+ever. A provisioning attempt while the runtime is disconnected must return a typed error,
+not open a port of its own.
+
+- [ ] **Step 4: Add the credential store**
+
+Server base URL, device id, admin token, device token. Tokens are write-only: accepted,
+never returned to a caller, never present in any snapshot or event. `AppConfig` is
+untouched and `docs/config/v4.md` stays the frozen contract.
+
+- [ ] **Step 5: Run the gates and commit**
+
+---
+
 ### Task 10:10 Companion app — provisioning and tier UI
 
 The Mac app becomes the setup surface. In local tier it writes settings to the device as

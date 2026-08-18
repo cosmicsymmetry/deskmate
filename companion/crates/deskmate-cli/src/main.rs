@@ -7,7 +7,7 @@ use device::{DeviceError, connect, connect_session};
 use protocol::{
     Field, FieldValue, MAX_DEVICE_ID_LEN, MAX_DEVICE_TOKEN_LEN, MAX_FIELD_COUNT, MAX_FIELD_KEY_LEN,
     MAX_FIELD_TEXT_LEN, MAX_PSK_LEN, MAX_SERVER_URL_LEN, MAX_SSID_LEN, MAX_WIDGET_ID_LEN,
-    NetworkConfig, PushData, StatusResponse, Tier, TimeSync,
+    NetworkConfig, OtaState, PushData, StatusResponse, Tier, TimeSync, WifiState,
 };
 
 mod m2;
@@ -438,7 +438,7 @@ fn json_string(value: &str) -> String {
 fn print_status(status: &StatusResponse, port_name: &str, json: bool) {
     if json {
         println!(
-            "{{\"port\":{},\"protocol_version\":{},\"max_protocol_version\":{},\"capabilities\":{},\"firmware_version\":{},\"uptime_ms\":{},\"free_heap\":{},\"display_width\":{},\"display_height\":{},\"brightness\":{},\"rotation\":{},\"online\":{},\"latest_revision\":{},\"config_revision\":{},\"latest_interrupt_token\":{},\"valid_frames\":{},\"malformed_frames\":{},\"crc_errors\":{},\"overflow_frames\":{},\"dropped_responses\":{},\"rx_dropped_bytes\":{},\"dropped_events\":{},\"event_queue_high_water\":{},\"dropped_ui_commands\":{},\"ui_queue_high_water\":{},\"tier\":{}}}",
+            "{{\"port\":{},\"protocol_version\":{},\"max_protocol_version\":{},\"capabilities\":{},\"firmware_version\":{},\"uptime_ms\":{},\"free_heap\":{},\"display_width\":{},\"display_height\":{},\"brightness\":{},\"rotation\":{},\"online\":{},\"latest_revision\":{},\"config_revision\":{},\"latest_interrupt_token\":{},\"valid_frames\":{},\"malformed_frames\":{},\"crc_errors\":{},\"overflow_frames\":{},\"dropped_responses\":{},\"rx_dropped_bytes\":{},\"dropped_events\":{},\"event_queue_high_water\":{},\"dropped_ui_commands\":{},\"ui_queue_high_water\":{},\"tier\":{},\"wifi_state\":{},\"wifi_rssi\":{},\"ip\":{},\"ota_state\":{}}}",
             json_string(port_name),
             status.protocol_version,
             status.max_protocol_version,
@@ -464,7 +464,11 @@ fn print_status(status: &StatusResponse, port_name: &str, json: bool) {
             status.event_queue_high_water,
             status.dropped_ui_commands,
             status.ui_queue_high_water,
-            json_string(tier_name(status.tier))
+            json_string(tier_name(status.tier)),
+            json_string(wifi_state_name(status.wifi_state)),
+            status.wifi_rssi,
+            json_string(&status.ip),
+            json_string(ota_state_name(status.ota_state))
         );
     } else {
         println!("Deskmate on {port_name}");
@@ -482,6 +486,13 @@ fn print_status(status: &StatusResponse, port_name: &str, json: bool) {
             status.brightness,
             status.rotation,
             tier_name(status.tier)
+        );
+        println!(
+            "wifi {} (rssi {} dBm, ip {}), ota {}",
+            wifi_state_name(status.wifi_state),
+            status.wifi_rssi,
+            status.ip,
+            ota_state_name(status.ota_state)
         );
         println!(
             "uptime {} ms, free heap {} bytes, link {}, latest revision {}",
@@ -612,6 +623,25 @@ fn tier_name(tier: Tier) -> &'static str {
     }
 }
 
+fn wifi_state_name(state: WifiState) -> &'static str {
+    match state {
+        WifiState::Down => "down",
+        WifiState::Connecting => "connecting",
+        WifiState::Connected => "connected",
+        WifiState::Failed => "failed",
+    }
+}
+
+fn ota_state_name(state: OtaState) -> &'static str {
+    match state {
+        OtaState::Idle => "idle",
+        OtaState::Checking => "checking",
+        OtaState::Downloading => "downloading",
+        OtaState::PendingVerify => "pending_verify",
+        OtaState::Failed => "failed",
+    }
+}
+
 fn exit_code(error: &AppError) -> i32 {
     match error {
         AppError::Usage(_) => 2,
@@ -667,6 +697,23 @@ mod tests {
     #[test]
     fn tier_option_rejects_an_invalid_value() {
         assert!(matches!(parse_tier("bogus"), Err(AppError::Usage(_))));
+    }
+
+    #[test]
+    fn wifi_state_name_maps_every_variant() {
+        assert_eq!(wifi_state_name(WifiState::Down), "down");
+        assert_eq!(wifi_state_name(WifiState::Connecting), "connecting");
+        assert_eq!(wifi_state_name(WifiState::Connected), "connected");
+        assert_eq!(wifi_state_name(WifiState::Failed), "failed");
+    }
+
+    #[test]
+    fn ota_state_name_maps_every_variant() {
+        assert_eq!(ota_state_name(OtaState::Idle), "idle");
+        assert_eq!(ota_state_name(OtaState::Checking), "checking");
+        assert_eq!(ota_state_name(OtaState::Downloading), "downloading");
+        assert_eq!(ota_state_name(OtaState::PendingVerify), "pending_verify");
+        assert_eq!(ota_state_name(OtaState::Failed), "failed");
     }
 
     #[test]

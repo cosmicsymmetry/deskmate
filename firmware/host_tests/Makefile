@@ -12,7 +12,7 @@ PROTOCOL_SRCS = ../main/core/protocol_frame.c ../main/core/protocol_message.c \
 test: test_timefmt test_protocol test_link_state test_template_fields \
 	test_widget_model test_ui_command_queue test_navigation \
 	test_interrupt_state test_device_event_queue test_weather_icon \
-	test_clock_source
+	test_clock_source test_net_config
 	./test_timefmt
 	./test_protocol
 	./test_link_state
@@ -24,6 +24,7 @@ test: test_timefmt test_protocol test_link_state test_template_fields \
 	./test_device_event_queue
 	./test_weather_icon
 	./test_clock_source
+	./test_net_config
 
 test_timefmt: test_timefmt.c ../main/core/timefmt.c
 	$(CC) $(CFLAGS) -o $@ $^
@@ -65,6 +66,9 @@ test_weather_icon: test_weather_icon.c \
 test_clock_source: test_clock_source.c ../main/core/clock_source.c
 	$(CC) $(CFLAGS) -o $@ $^
 
+test_net_config: test_net_config.c ../main/core/net_config.c $(PROTOCOL_SRCS)
+	$(CC) $(CFLAGS) -I$(CBOR_DIR) -o $@ $^
+
 sanitize: clean
 	$(MAKE) CFLAGS="$(CFLAGS) -O1 -g -fsanitize=address,undefined" test
 
@@ -76,6 +80,7 @@ clean:
 	rm -f test_device_event_queue
 	rm -f test_weather_icon
 	rm -f test_clock_source
+	rm -f test_net_config
 	rm -rf test_timefmt.dSYM test_protocol.dSYM test_link_state.dSYM \
 		test_template_fields.dSYM test_widget_model.dSYM
 	rm -rf test_ui_command_queue.dSYM
@@ -84,4 +89,5 @@ clean:
 	rm -rf test_device_event_queue.dSYM
 	rm -rf test_weather_icon.dSYM
 	rm -rf test_clock_source.dSYM
+	rm -rf test_net_config.dSYM
 .PHONY: test sanitize clean

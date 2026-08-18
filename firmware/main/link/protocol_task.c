@@ -26,6 +26,7 @@
 #include "link/link_transport.h"
 #include "link/net_store.h"
 #include "link/usb_link.h"
+#include "link/wifi_station.h"
 #include "ui/ui_runtime.h"
 
 #define PROTOCOL_TASK_STACK_SIZE 8192U
@@ -252,9 +253,14 @@ static void transmit_status(protocol_context_t *context, uint32_t request_id)
     status->config_revision = widget_model_config_revision(&context->model);
     status->latest_interrupt_token =
         interrupt_state_latest_token(&context->interrupts);
-    // wifi_state, wifi_rssi, ip and ota_state stay at their zeroed defaults
-    // (PROTOCOL_WIFI_DOWN / 0 / empty / PROTOCOL_OTA_IDLE) from the memset
-    // above -- Tasks 6 and 11 populate them once the radio exists.
+    // ota_state stays at its zeroed default (PROTOCOL_OTA_IDLE) from the
+    // memset above -- Task 11 populates it once OTA exists.
+    status->wifi_state = wifi_station_state();
+    status->wifi_rssi = wifi_station_rssi();
+    const char *ip = wifi_station_ip();
+    size_t ip_length = strnlen(ip, PROTOCOL_MAX_IP_LENGTH);
+    memcpy(status->ip, ip, ip_length);
+    status->ip[ip_length] = '\0';
     status->tier = net_store_current_tier();
     transmit(context, request_id, reply);
 }

@@ -5,6 +5,7 @@
 #include "board/touch.h"
 #include "link/usb_link.h"
 #include "link/protocol_task.h"
+#include "link/wifi_station.h"
 #include "ui/clock_screen.h"
 #include "ui/ui_runtime.h"
 #include "lvgl.h"
@@ -28,9 +29,21 @@ void app_main(void)
         nvs_status == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         // A truncated or version-shifted namespace is recoverable by erasing
         // it: the device returns to factory-fresh local tier, which is the
-        // failure direction the spec requires.
-        ESP_ERROR_CHECK(nvs_flash_erase());
-        nvs_status = nvs_flash_init();
+        // failure direction the spec requires. But the erase itself can also
+        // fail (e.g. a flash read error) -- ESP_ERROR_CHECK()'ing that would
+        // abort before board_display_init() and panic-reboot-loop the device
+        // without ever reaching the standalone clock, the same class of bug
+        // already fixed below for nvs_flash_init() itself. Degrade the same
+        // way: only retry nvs_flash_init() if the erase succeeded, otherwise
+        // log and fall through to the same "continue without NVS" handling.
+        esp_err_t erase_status = nvs_flash_erase();
+        if (erase_status == ESP_OK) {
+            nvs_status = nvs_flash_init();
+        } else {
+            ESP_LOGE(TAG, "nvs_flash_erase failed (%s); continuing without NVS",
+                    esp_err_to_name(erase_status));
+            nvs_status = erase_status;
+        }
     }
     if (nvs_status != ESP_OK) {
         // Any other NVS failure (corruption, a flash read error, no memory)
@@ -64,6 +77,13 @@ void app_main(void)
     clock_screen_show();
     ESP_LOGI(TAG, "clock screen shown, LVGL task running");
     ESP_ERROR_CHECK(ui_runtime_init());
+
+    // wifi_station_bringup() only starts the join attempt (or no-ops when no
+    // SSID is stored); it never blocks on the network, so the clock screen
+    // above is already showing whether or not WiFi ever comes up. Any
+    // failure here is diagnostic only -- boot must not abort on it.
+    esp_err_t wifi_status = wifi_station_bringup();
+    ESP_LOGI(TAG, "wifi_station_bringup: %s", esp_err_to_name(wifi_status));
 
     // The native USB Serial/JTAG driver allocates bounded RX/TX rings from
     // internal RAM. Install it only after LVGL has secured its DMA and

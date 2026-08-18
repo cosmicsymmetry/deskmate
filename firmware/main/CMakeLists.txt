@@ -6,7 +6,8 @@ idf_component_register(
          "core/protocol_frame.c"
          "core/protocol_message.c"
          "core/template_fields.c" "core/timefmt.c" "core/widget_model.c"
-         "link/dev_capture.c" "link/net_store.c" "link/protocol_task.c" "link/usb_link.c" "ui/carousel.c"
+         "link/dev_capture.c" "link/net_store.c" "link/protocol_task.c" "link/usb_link.c"
+         "link/wifi_station.c" "ui/carousel.c"
          "ui/clock_screen.c"
          "ui/template_view.c" "ui/ui_command_queue.c"
          "ui/ui_runtime.c"
@@ -20,6 +21,7 @@ idf_component_register(
          "ui/fonts/deskmate_font_56.c" "ui/fonts/deskmate_font_96.c"
     INCLUDE_DIRS "." "board" "core" "link" "ui"
     REQUIRES cbor esp_app_format esp_timer nvs_flash
+             esp_wifi esp_netif esp_event lwip esp_hw_support
 )
 
 # TinyCBOR defaults to 1024 recursive containers, which is inappropriate for

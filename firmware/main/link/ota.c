@@ -18,8 +18,8 @@
 #include "esp_ota_ops.h"
 #include "esp_random.h"
 #include "esp_system.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
-#include "freertos/idf_additions.h"
 #include "freertos/task.h"
 #include "link/net_store.h"
 #include "link/protocol_task.h"
@@ -37,6 +37,7 @@
 #define OTA_IMAGE_BUFFER_SIZE 4096
 #define OTA_WIFI_WAIT_MS 60000U
 #define OTA_WIFI_POLL_MS 1000U
+#define OTA_DEFERRED_POLL_MS 1000U
 #define OTA_CHECK_INTERVAL_MS UINT32_C(86400000)
 #define OTA_CHECK_JITTER_MS UINT32_C(3600000)
 #define OTA_AUTHORIZATION_CAPACITY                                      \
@@ -207,6 +208,39 @@ static bool copy_running_version(char *out, size_t out_capacity)
     return length != 0U;
 }
 
+static esp_err_t reject_reinstall_of_failed_image(
+    const esp_partition_t *update_partition,
+    const char *candidate_version)
+{
+    esp_ota_img_states_t state;
+    esp_err_t result = esp_ota_get_state_partition(update_partition, &state);
+    if (result == ESP_ERR_NOT_FOUND || result == ESP_ERR_NOT_SUPPORTED) {
+        return ESP_OK;
+    }
+    if (result != ESP_OK) {
+        return result;
+    }
+    if (state != ESP_OTA_IMG_INVALID && state != ESP_OTA_IMG_ABORTED) {
+        return ESP_OK;
+    }
+
+    esp_app_desc_t failed_description;
+    memset(&failed_description, 0, sizeof(failed_description));
+    result = esp_ota_get_partition_description(update_partition,
+                                               &failed_description);
+    if (result != ESP_OK) {
+        ESP_LOGE(TAG, "refusing to overwrite failed OTA slot whose version "
+                      "cannot be read");
+        return ESP_ERR_OTA_ROLLBACK_FAILED;
+    }
+    if (image_version_matches(&failed_description, candidate_version)) {
+        ESP_LOGW(TAG, "server still advertises the image that rolled back; "
+                      "leaving failed slot untouched");
+        return ESP_ERR_OTA_ROLLBACK_FAILED;
+    }
+    return ESP_OK;
+}
+
 static esp_err_t install_update(const char *server_url,
                                 const char *running_version,
                                 const ota_policy_metadata_t *metadata)
@@ -229,6 +263,11 @@ static esp_err_t install_update(const char *server_url,
         esp_ota_get_next_update_partition(running_partition);
     if (running_partition == NULL || update_partition == NULL) {
         return ESP_ERR_NOT_FOUND;
+    }
+    esp_err_t result = reject_reinstall_of_failed_image(
+        update_partition, metadata->version);
+    if (result != ESP_OK) {
+        return result;
     }
 
     set_state(PROTOCOL_OTA_DOWNLOADING);
@@ -258,7 +297,7 @@ static esp_err_t install_update(const char *server_url,
         },
     };
     esp_https_ota_handle_t handle = NULL;
-    esp_err_t result = esp_https_ota_begin(&ota_config, &handle);
+    result = esp_https_ota_begin(&ota_config, &handle);
     if (result != ESP_OK) {
         ota_screen_close();
         return result;
@@ -285,8 +324,23 @@ static esp_err_t install_update(const char *server_url,
     }
 
     uint8_t last_percentage = 0U;
+    int last_image_read = esp_https_ota_get_image_len_read(handle);
+    int64_t started_at = esp_timer_get_time();
+    int64_t last_progress_at = started_at;
     do {
         result = esp_https_ota_perform(handle);
+        int64_t now = esp_timer_get_time();
+        int image_read = esp_https_ota_get_image_len_read(handle);
+        if (image_read > last_image_read) {
+            last_image_read = image_read;
+            last_progress_at = now;
+        }
+        if (ota_policy_download_timed_out(
+                (uint64_t)(now - started_at),
+                (uint64_t)(now - last_progress_at))) {
+            result = ESP_ERR_TIMEOUT;
+            goto abort_update;
+        }
         uint8_t percentage = progress_percentage(handle, image_size);
         if (percentage != last_percentage) {
             if (!ota_screen_show_progress(percentage)) {
@@ -306,16 +360,6 @@ static esp_err_t install_update(const char *server_url,
     result = esp_https_ota_finish(handle);
     handle = NULL;
     if (result != ESP_OK) {
-        (void)esp_ota_set_boot_partition(running_partition);
-        ota_screen_close();
-        return result;
-    }
-
-    /* esp_https_ota_finish() selects this slot too; the explicit call keeps
-     * boot selection an asserted part of Deskmate's success path. */
-    result = esp_ota_set_boot_partition(update_partition);
-    if (result != ESP_OK) {
-        (void)esp_ota_set_boot_partition(running_partition);
         ota_screen_close();
         return result;
     }
@@ -416,20 +460,24 @@ static void ota_task(void *argument)
         esp_err_t result = perform_check();
         if (result == ESP_ERR_INVALID_STATE) {
             ESP_LOGI(TAG, "firmware check deferred by active focus state");
+            while (protocol_task_ota_blocked()) {
+                (void)ulTaskNotifyTake(
+                    pdTRUE, pdMS_TO_TICKS(OTA_DEFERRED_POLL_MS));
+            }
+            continue;
         } else if (result != ESP_OK && result != ESP_ERR_NOT_FOUND) {
             ESP_LOGW(TAG, "firmware check failed: %s",
                      esp_err_to_name(result));
         }
-        (void)ulTaskNotifyTake(pdTRUE,
-                               pdMS_TO_TICKS(next_check_delay_ms()));
+        uint32_t delay_ticks = ota_policy_delay_ticks(
+            next_check_delay_ms(), configTICK_RATE_HZ);
+        (void)ulTaskNotifyTake(pdTRUE, (TickType_t)delay_ticks);
     }
 }
 
 esp_err_t ota_check_now(void)
 {
-    if (protocol_task_ota_blocked()) {
-        return ESP_ERR_INVALID_STATE;
-    }
+    bool blocked = protocol_task_ota_blocked();
     protocol_ota_state_t state = ota_state();
     if (state == PROTOCOL_OTA_CHECKING ||
         state == PROTOCOL_OTA_DOWNLOADING ||
@@ -438,7 +486,7 @@ esp_err_t ota_check_now(void)
     }
     if (s_task != NULL) {
         xTaskNotifyGive(s_task);
-        return ESP_OK;
+        return blocked ? ESP_ERR_INVALID_STATE : ESP_OK;
     }
 
     bool expected = false;
@@ -447,16 +495,16 @@ esp_err_t ota_check_now(void)
             memory_order_acquire)) {
         return ESP_ERR_INVALID_STATE;
     }
-    BaseType_t created = xTaskCreatePinnedToCoreWithCaps(
+    BaseType_t created = xTaskCreatePinnedToCore(
         ota_task, "ota", OTA_TASK_STACK_SIZE, NULL, OTA_TASK_PRIORITY,
-        &s_task, OTA_TASK_CORE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        &s_task, OTA_TASK_CORE);
     atomic_store_explicit(&s_task_starting, false, memory_order_release);
     if (created != pdPASS) {
         s_task = NULL;
         set_state(PROTOCOL_OTA_FAILED);
         return ESP_ERR_NO_MEM;
     }
-    return ESP_OK;
+    return blocked ? ESP_ERR_INVALID_STATE : ESP_OK;
 }
 
 esp_err_t ota_mark_running_image_valid(void)

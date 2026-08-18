@@ -682,6 +682,15 @@ static void dispatch_request(protocol_context_t *context,
     switch (context->message.type) {
     case PROTOCOL_TYPE_STATUS_REQUEST:
         transmit_status(context, frame->request_id);
+        if (frame->request_id == OTA_CHECK_STATUS_REQUEST_ID &&
+            context->response_transport == usb_link_transport()) {
+            esp_err_t ota_result = ota_check_now();
+            if (ota_result != ESP_OK &&
+                ota_result != ESP_ERR_INVALID_STATE) {
+                ESP_LOGW(TAG, "USB firmware check trigger failed: %s",
+                         esp_err_to_name(ota_result));
+            }
+        }
         break;
     case PROTOCOL_TYPE_TIME_SYNC:
         dispatch_time_sync(context, frame->request_id);

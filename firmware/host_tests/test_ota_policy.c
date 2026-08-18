@@ -30,8 +30,12 @@ static void test_urls_reject_unsafe_or_truncated_inputs(void)
                                        url, sizeof(url)));
     assert(!ota_policy_build_check_url("wss:///missing-host", "1.0.0", url,
                                        sizeof(url)));
+    assert(!ota_policy_build_download_url("wss://host/link", "not/absolute",
+                                          url, sizeof(url)));
     assert(!ota_policy_build_download_url("wss://host/link", "//evil.test/x",
-                                          url, 8U));
+                                          url, sizeof(url)));
+    assert(!ota_policy_build_download_url(
+        "wss://host/link", "/v1/firmware/1.1.0.bin", url, 8U));
 }
 
 static void test_metadata_is_bounded_and_tied_to_its_version(void)
@@ -67,7 +71,9 @@ static void test_metadata_is_bounded_and_tied_to_its_version(void)
     assert(!ota_policy_parse_metadata(traversal, sizeof(traversal) - 1U,
                                       &metadata));
     char oversized[OTA_POLICY_MAX_METADATA_LENGTH + 1U];
-    memset(oversized, 'x', sizeof(oversized));
+    memcpy(oversized, valid, sizeof(valid) - 1U);
+    memset(oversized + sizeof(valid) - 1U, ' ',
+           sizeof(oversized) - (sizeof(valid) - 1U));
     assert(!ota_policy_parse_metadata(oversized, sizeof(oversized),
                                       &metadata));
 }
@@ -80,12 +86,34 @@ static void test_either_live_focus_state_defers_update(void)
     assert(ota_policy_update_deferred(true, true));
 }
 
+static void test_day_scale_delays_convert_without_32_bit_overflow(void)
+{
+    assert(ota_policy_delay_ticks(82800000U, 100U) == 8280000U);
+    assert(ota_policy_delay_ticks(90000000U, 100U) == 9000000U);
+    assert(ota_policy_delay_ticks(UINT32_MAX, UINT32_MAX) == UINT32_MAX);
+}
+
+static void test_download_deadlines_bound_stalls_and_slow_trickles(void)
+{
+    assert(!ota_policy_download_timed_out(
+        OTA_POLICY_TOTAL_TIMEOUT_US - 1U,
+        OTA_POLICY_NO_PROGRESS_TIMEOUT_US - 1U));
+    assert(ota_policy_download_timed_out(
+        OTA_POLICY_TOTAL_TIMEOUT_US,
+        OTA_POLICY_NO_PROGRESS_TIMEOUT_US - 1U));
+    assert(ota_policy_download_timed_out(
+        OTA_POLICY_TOTAL_TIMEOUT_US - 1U,
+        OTA_POLICY_NO_PROGRESS_TIMEOUT_US));
+}
+
 int main(void)
 {
     test_urls_use_the_server_origin_and_https();
     test_urls_reject_unsafe_or_truncated_inputs();
     test_metadata_is_bounded_and_tied_to_its_version();
     test_either_live_focus_state_defers_update();
+    test_day_scale_delays_convert_without_32_bit_overflow();
+    test_download_deadlines_bound_stalls_and_slow_trickles();
     puts("test_ota_policy: OK");
     return 0;
 }

@@ -2,11 +2,14 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 #include "protocol_message.h"
 
 #define OTA_POLICY_MAX_URL_LENGTH 256U
 #define OTA_POLICY_MAX_METADATA_LENGTH 256U
+#define OTA_POLICY_NO_PROGRESS_TIMEOUT_US UINT64_C(120000000)
+#define OTA_POLICY_TOTAL_TIMEOUT_US UINT64_C(1800000000)
 
 typedef struct {
     char version[PROTOCOL_MAX_FIRMWARE_VERSION_LENGTH + 1U];
@@ -42,3 +45,11 @@ bool ota_policy_parse_metadata(
 /** A live interrupt and a running focus timer independently defer OTA. */
 bool ota_policy_update_deferred(bool interrupt_live,
                                 bool progress_timer_running);
+
+/** Convert a millisecond interval without overflowing a 32-bit multiply. */
+uint32_t ota_policy_delay_ticks(uint32_t milliseconds,
+                                uint32_t ticks_per_second);
+
+/** Bound both a stalled transfer and a pathologically slow trickle. */
+bool ota_policy_download_timed_out(uint64_t total_elapsed_us,
+                                   uint64_t no_progress_elapsed_us);

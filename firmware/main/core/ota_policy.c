@@ -171,6 +171,7 @@ bool ota_policy_build_download_url(const char *server_url,
     size_t used = 0U;
     if (!bounded_length(path, OTA_POLICY_MAX_URL_LENGTH, &path_length) ||
         path_length == 0U || path[0] != '/' ||
+        (path_length > 1U && path[1] == '/') ||
         !write_origin(server_url, out, out_capacity, &used) ||
         path_length > out_capacity - used - 1U) {
         return false;
@@ -295,4 +296,20 @@ bool ota_policy_update_deferred(bool interrupt_live,
                                 bool progress_timer_running)
 {
     return interrupt_live || progress_timer_running;
+}
+
+uint32_t ota_policy_delay_ticks(uint32_t milliseconds,
+                                uint32_t ticks_per_second)
+{
+    uint64_t ticks = ((uint64_t)milliseconds * ticks_per_second +
+                      UINT64_C(999)) /
+                     UINT64_C(1000);
+    return ticks > UINT32_MAX ? UINT32_MAX : (uint32_t)ticks;
+}
+
+bool ota_policy_download_timed_out(uint64_t total_elapsed_us,
+                                   uint64_t no_progress_elapsed_us)
+{
+    return total_elapsed_us >= OTA_POLICY_TOTAL_TIMEOUT_US ||
+           no_progress_elapsed_us >= OTA_POLICY_NO_PROGRESS_TIMEOUT_US;
 }

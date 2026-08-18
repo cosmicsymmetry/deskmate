@@ -6,6 +6,11 @@
 
 #include "core/protocol_message.h"
 
+/* Firmware-only diagnostic trigger: a StatusRequest carrying this reserved
+ * request ID over native USB schedules an OTA check without changing the v1
+ * wire schema. The ordinary StatusResponse is still returned. */
+#define OTA_CHECK_STATUS_REQUEST_ID UINT32_MAX
+
 /**
  * Confirm the running image so the bootloader stops holding a rollback.
  *
@@ -20,8 +25,8 @@ esp_err_t ota_mark_running_image_valid(void);
  * Ask the server whether a newer image exists and install it if so.
  *
  * Returns ESP_ERR_INVALID_STATE while an interrupt is live or a pomodoro is
- * running: an update that eats a focus session to install itself is a defect
- * regardless of correctness.
+ * running, but keeps the request pending and retries shortly after that focus
+ * state ends.
  */
 esp_err_t ota_check_now(void);
 

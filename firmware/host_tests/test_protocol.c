@@ -62,6 +62,24 @@ static void test_crc(void)
     assert(protocol_crc32c(NULL, 0U) == 0U);
 }
 
+static void test_status_request_accepts_reserved_ota_trigger_id(void)
+{
+    protocol_message_t request = {.type = PROTOCOL_TYPE_STATUS_REQUEST};
+    uint8_t encoded[PROTOCOL_MAX_WIRE_FRAME];
+    size_t encoded_length = 0U;
+    assert(protocol_message_encode(UINT32_MAX, &request, encoded,
+                                   sizeof(encoded), &encoded_length) ==
+           PROTOCOL_MESSAGE_OK);
+
+    protocol_frame_t frame;
+    assert(protocol_frame_decode(encoded, encoded_length, &frame) ==
+           PROTOCOL_FRAME_OK);
+    assert(frame.request_id == UINT32_MAX);
+    protocol_message_t decoded;
+    assert(protocol_message_decode(&frame, &decoded) == PROTOCOL_MESSAGE_OK);
+    assert(decoded.type == PROTOCOL_TYPE_STATUS_REQUEST);
+}
+
 static void assert_valid_fixture(const char *name,
                                  uint8_t expected_type,
                                  uint32_t expected_request_id)
@@ -535,6 +553,7 @@ static void test_extended_template_kinds(void)
 int main(void)
 {
     test_crc();
+    test_status_request_accepts_reserved_ota_trigger_id();
     test_valid_fixtures();
     test_status_capability_handshake_and_legacy_defaults();
     test_incremental_decoder();

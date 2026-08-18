@@ -1,7 +1,26 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { getAppSnapshot, listenToAppState, toIpcError } from "./tauri";
-import type { AppSnapshot, IpcError } from "./types";
+import {
+  DeskmateCommandError,
+  factoryResetDevice,
+  getAppSnapshot,
+  getNetworkSettings,
+  listenToAppState,
+  provisionDevice,
+  saveApplyConfig,
+  saveServerConfig,
+  setServerEndpoint,
+  toIpcError,
+} from "./tauri";
+import type {
+  AppConfig,
+  AppSnapshot,
+  ConfigApplyResult,
+  DeviceTier,
+  IpcError,
+  NetworkSettings,
+  ProvisionDeviceInput,
+} from "./types";
 
 interface EventTargetLike {
   addEventListener(type: string, listener: EventListener): void;
@@ -94,6 +113,29 @@ export interface AppStateValue {
    * preview a signal that fires exactly when the pixels it would render could differ.
    */
   dataGeneration: number;
+  networkSettings: NetworkSettings;
+  saveConfig: (config: AppConfig) => Promise<ConfigApplyResult>;
+  saveServerAccess: (serverUrl: string, adminToken: string) => Promise<void>;
+  pairDevice: (input: PairDeviceInput) => Promise<void>;
+  unpairDevice: () => Promise<void>;
+  factoryReset: () => Promise<void>;
+}
+
+export interface PairDeviceInput extends ProvisionDeviceInput {
+  admin_token: string;
+}
+
+interface ConfigSaveDestinations {
+  local: () => Promise<ConfigApplyResult>;
+  server: () => Promise<ConfigApplyResult>;
+}
+
+/** The ownership guard: one draft, but exactly one write destination. */
+export function saveConfigForTier(
+  tier: DeviceTier | null,
+  destinations: ConfigSaveDestinations,
+): Promise<ConfigApplyResult> {
+  return tier === "networked" ? destinations.server() : destinations.local();
 }
 
 export function useAppState(): AppStateValue {
@@ -101,9 +143,17 @@ export function useAppState(): AppStateValue {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<IpcError | null>(null);
   const [dataGeneration, setDataGeneration] = useState(0);
+  const [networkSettings, setNetworkSettings] = useState<NetworkSettings>({
+    server_url: "",
+    device_id: "",
+  });
   const lastCardDataRef = useRef<string | null>(null);
+  const snapshotRef = useRef<AppSnapshot | null>(null);
+  const networkSettingsRef = useRef(networkSettings);
+  const adminTokenRef = useRef<string | null>(null);
 
   const acceptSnapshot = useCallback((next: AppSnapshot) => {
+    snapshotRef.current = next;
     setSnapshot(next);
     setLoading(false);
     setError(null);
@@ -125,6 +175,71 @@ export function useAppState(): AppStateValue {
     }
   }, [acceptError, acceptSnapshot]);
 
+  const acceptNetworkSettings = useCallback((next: NetworkSettings) => {
+    networkSettingsRef.current = next;
+    setNetworkSettings(next);
+  }, []);
+
+  const saveServerAccess = useCallback(
+    async (serverUrl: string, adminToken: string) => {
+      const settings = await setServerEndpoint(serverUrl, adminToken);
+      adminTokenRef.current = adminToken;
+      acceptNetworkSettings(settings);
+    },
+    [acceptNetworkSettings],
+  );
+
+  const pairDevice = useCallback(
+    async (input: PairDeviceInput) => {
+      await saveServerAccess(input.server_url, input.admin_token);
+      const settings = await provisionDevice({
+        ssid: input.ssid,
+        passphrase: input.passphrase,
+        server_url: input.server_url,
+        device_id: input.device_id,
+        device_token: input.device_token,
+        tier: input.tier,
+      });
+      acceptNetworkSettings(settings);
+    },
+    [acceptNetworkSettings, saveServerAccess],
+  );
+
+  const unpairDevice = useCallback(async () => {
+    const settings = await provisionDevice({
+      ssid: "",
+      passphrase: "",
+      server_url: networkSettingsRef.current.server_url,
+      device_id: networkSettingsRef.current.device_id,
+      device_token: "",
+      tier: "local",
+    });
+    acceptNetworkSettings(settings);
+  }, [acceptNetworkSettings]);
+
+  const factoryReset = useCallback(async () => {
+    await factoryResetDevice();
+  }, []);
+
+  const saveConfig = useCallback(async (config: AppConfig) => {
+    const tier = snapshotRef.current?.device.tier ?? null;
+    return saveConfigForTier(tier, {
+      local: () => saveApplyConfig(config),
+      server: () => {
+        const settings = networkSettingsRef.current;
+        const adminToken = adminTokenRef.current;
+        if (!settings.server_url || !settings.device_id || !adminToken) {
+          throw new DeskmateCommandError({
+            category: "invalid-payload",
+            message:
+              "Enter the server URL, device ID, and admin token in Network setup before saving.",
+          });
+        }
+        return saveServerConfig(config, settings, adminToken);
+      },
+    });
+  }, []);
+
   useEffect(
     () =>
       startAppStateSubscription({
@@ -138,5 +253,35 @@ export function useAppState(): AppStateValue {
     [acceptError, acceptSnapshot],
   );
 
-  return { snapshot, loading, error, refresh, dataGeneration };
+  useEffect(() => {
+    let active = true;
+    void getNetworkSettings()
+      .then((settings) => {
+        if (active) {
+          acceptNetworkSettings(settings);
+        }
+      })
+      .catch((next) => {
+        if (active) {
+          acceptError(toIpcError(next));
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [acceptError, acceptNetworkSettings]);
+
+  return {
+    snapshot,
+    loading,
+    error,
+    refresh,
+    dataGeneration,
+    networkSettings,
+    saveConfig,
+    saveServerAccess,
+    pairDevice,
+    unpairDevice,
+    factoryReset,
+  };
 }

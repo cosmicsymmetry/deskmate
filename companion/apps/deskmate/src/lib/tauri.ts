@@ -8,8 +8,10 @@ import type {
   ConfigApplyResult,
   DraftValidation,
   IpcError,
+  NetworkSettings,
   PomodoroAction,
   PreviewFrame,
+  ProvisionDeviceInput,
 } from "./types";
 
 export const APP_STATE_EVENT = "app-state";
@@ -99,6 +101,39 @@ export function validateConfigDraft(config: AppConfig): Promise<DraftValidation>
 
 export function saveApplyConfig(config: AppConfig): Promise<ConfigApplyResult> {
   return invokeTyped("save_apply_config", { draft: draftPayload(config) });
+}
+
+export function saveServerConfig(
+  config: AppConfig,
+  settings: NetworkSettings,
+  adminToken: string,
+): Promise<ConfigApplyResult> {
+  return invokeTyped("save_server_config", {
+    request: {
+      draft: draftPayload(config),
+      server_url: settings.server_url,
+      device_id: settings.device_id,
+      admin_token: adminToken,
+    },
+  });
+}
+
+export function getNetworkSettings(): Promise<NetworkSettings> {
+  return invokeTyped("get_network_settings");
+}
+
+export function setServerEndpoint(serverUrl: string, adminToken: string): Promise<NetworkSettings> {
+  return invokeTyped("set_server_endpoint", {
+    request: { server_url: serverUrl, admin_token: adminToken },
+  });
+}
+
+export function provisionDevice(input: ProvisionDeviceInput): Promise<NetworkSettings> {
+  return invokeTyped("provision_device", { request: input });
+}
+
+export function factoryResetDevice(): Promise<void> {
+  return invokeTyped("factory_reset_device");
 }
 
 export function setPushingPaused(paused: boolean): Promise<void> {

@@ -252,6 +252,25 @@ export type DeviceWifiState = "down" | "connecting" | "connected" | "failed";
 
 export type DeviceOtaState = "idle" | "checking" | "downloading" | "pending-verify" | "failed";
 
+/** The persisted, non-secret portion of the Mac app's server settings. */
+export interface NetworkSettings {
+  server_url: string;
+  device_id: string;
+}
+
+/**
+ * A write-only provisioning request. Secret fields are accepted by IPC but are
+ * deliberately absent from every response, snapshot, and event type.
+ */
+export interface ProvisionDeviceInput {
+  ssid: string;
+  passphrase: string;
+  server_url: string;
+  device_id: string;
+  device_token: string;
+  tier: DeviceTier;
+}
+
 export type DeviceCapability =
   | "core-widgets"
   | "config-rotation"

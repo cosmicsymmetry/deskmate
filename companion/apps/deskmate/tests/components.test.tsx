@@ -1,5 +1,5 @@
 import { describe, expect, mock, test } from "bun:test";
-import { act, useState } from "react";
+import { act, type ComponentProps, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 
@@ -9,6 +9,7 @@ import { CardList } from "../src/components/CardList";
 import { DeviceHeader } from "../src/components/DeviceHeader";
 import { DevicePreview } from "../src/components/DevicePreview";
 import { Filmstrip } from "../src/components/Filmstrip";
+import { NetworkPanel } from "../src/components/NetworkPanel";
 import { PlaylistPanel } from "../src/components/PlaylistPanel";
 import { ProviderStatus, formatProviderAge } from "../src/components/ProviderStatus";
 import {
@@ -28,6 +29,7 @@ import type {
   ValidationIssue,
 } from "../src/lib/types";
 import { ipcContractFixtures } from "../src/lib/types.contract";
+import { saveConfigForTier } from "../src/lib/useAppState";
 
 const snapshot = ipcContractFixtures.snapshot;
 const cards = snapshot.config.cards;
@@ -55,6 +57,10 @@ mock.module("../src/lib/tauri", () => ({
   listenToAppState: async () => () => {},
   validateConfigDraft: (config: AppConfig) => validateImpl(config),
   saveApplyConfig: (config: AppConfig) => saveImpl(config),
+  getNetworkSettings: async () => ({
+    server_url: "https://desk.example",
+    device_id: "desk-1",
+  }),
   getAutostartStatus: async () => ({ enabled: false, preference_enabled: false }),
 }));
 
@@ -171,6 +177,175 @@ describe("settings accessibility and states", () => {
       />,
     );
   }
+
+  function renderNetworkPanel({
+    tier,
+    wifiState,
+    ip,
+    ssid = "",
+  }: {
+    tier: "local" | "networked";
+    wifiState: "down" | "connected";
+    ip: string;
+    ssid?: string;
+  }) {
+    // Deliberately include hostile extra properties at the runtime boundary. The
+    // public prop type does not admit them, and the component must continue to ignore
+    // them if a stale/malicious caller supplies a wider object anyway.
+    const publicSettingsWithStoredSecrets = {
+      serverUrl: "https://desk.example",
+      deviceId: "desk-1",
+      ssid,
+      passphrase: "stored-wifi-secret",
+      deviceToken: "stored-device-secret",
+      adminToken: "stored-admin-secret",
+    };
+    return renderToStaticMarkup(
+      <NetworkPanel
+        device={{
+          tier,
+          wifiState,
+          wifiRssi: wifiState === "connected" ? -54 : null,
+          ip,
+          lastNetworkError: null,
+          otaState: "idle",
+        }}
+        settings={publicSettingsWithStoredSecrets}
+        onPair={async () => {}}
+        onUnpair={async () => {}}
+        onFactoryReset={async () => {}}
+      />,
+    );
+  }
+
+  test("network panel shows the device as locally owned before provisioning", () => {
+    const html = renderNetworkPanel({ tier: "local", wifiState: "down", ip: "" });
+    expect(html).toContain("Owned by this Mac");
+    expect(html).not.toContain("Owned by the server");
+  });
+
+  test("network panel says where settings are written once networked", () => {
+    // The destination changing invisibly is the failure mode worth pinning:
+    // the same edit goes to a different place depending on tier.
+    const html = renderNetworkPanel({
+      tier: "networked",
+      wifiState: "connected",
+      ip: "192.168.1.42",
+    });
+    expect(html).toContain("Owned by the server");
+    expect(html).toContain("192.168.1.42");
+    expect(html).toContain("Settings are saved to the server");
+  });
+
+  test("network panel renders public settings but never a stored secret", () => {
+    const html = renderNetworkPanel({
+      tier: "networked",
+      wifiState: "connected",
+      ip: "192.168.1.42",
+      ssid: "home-network",
+    });
+    expect(html).toContain("home-network");
+    expect(html).toContain("https://desk.example");
+    expect(html).toContain("desk-1");
+    expect(html).not.toContain("stored-wifi-secret");
+    expect(html).not.toContain("stored-device-secret");
+    expect(html).not.toContain("stored-admin-secret");
+  });
+
+  test("network panel accepts secrets once and clears them after pairing", async () => {
+    let submitted: Parameters<ComponentProps<typeof NetworkPanel>["onPair"]>[0] | null = null;
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const setInput = (labelText: string, value: string) => {
+      const label = [...container.querySelectorAll("label")].find((candidate) =>
+        candidate.querySelector("span")?.textContent?.includes(labelText),
+      );
+      const input = label?.querySelector("input");
+      expect(input).not.toBeNull();
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set?.call(input, value);
+      input?.dispatchEvent(new Event("input", { bubbles: true }));
+    };
+    const inputValue = (labelText: string) =>
+      [...container.querySelectorAll("label")]
+        .find((candidate) => candidate.querySelector("span")?.textContent?.includes(labelText))
+        ?.querySelector("input")?.value;
+
+    try {
+      await act(async () =>
+        root.render(
+          <NetworkPanel
+            device={{
+              tier: "local",
+              wifiState: "down",
+              wifiRssi: null,
+              ip: "",
+              lastNetworkError: null,
+              otaState: "idle",
+            }}
+            settings={{
+              serverUrl: "https://desk.example",
+              deviceId: "desk-1",
+              ssid: "home-network",
+            }}
+            onPair={async (input) => {
+              submitted = input;
+            }}
+            onUnpair={async () => {}}
+            onFactoryReset={async () => {}}
+            onSaveServerAccess={async () => {}}
+          />,
+        ),
+      );
+      await act(async () => {
+        setInput("WiFi passphrase", "wifi-secret-92");
+        setInput("Device token", "device-secret-17");
+        setInput("Admin token", "admin-secret-46");
+      });
+      const pair = buttonWithText(container, "Pair with server");
+      expect(pair?.disabled).toBe(false);
+      await act(async () => pair?.click());
+
+      expect(submitted).toMatchObject({
+        ssid: "home-network",
+        passphrase: "wifi-secret-92",
+        server_url: "https://desk.example",
+        device_id: "desk-1",
+        device_token: "device-secret-17",
+        admin_token: "admin-secret-46",
+        tier: "networked",
+      });
+      expect(inputValue("WiFi passphrase")).toBe("");
+      expect(inputValue("Device token")).toBe("");
+      expect(inputValue("Admin token")).toBe("");
+      expect(inputValue("WiFi network")).toBe("home-network");
+      expect(inputValue("Server URL")).toBe("https://desk.example");
+      expect(inputValue("Device ID")).toBe("desk-1");
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("the tier guard selects exactly one configuration destination", async () => {
+    let localWrites = 0;
+    let serverWrites = 0;
+    const destinations = {
+      local: async () => {
+        localWrites += 1;
+        return { save: { generation: 1, warning: null } };
+      },
+      server: async () => {
+        serverWrites += 1;
+        return { save: { generation: 2, warning: null } };
+      },
+    };
+
+    await saveConfigForTier("local", destinations);
+    expect({ localWrites, serverWrites }).toEqual({ localWrites: 1, serverWrites: 0 });
+    await saveConfigForTier("networked", destinations);
+    expect({ localWrites, serverWrites }).toEqual({ localWrites: 1, serverWrites: 1 });
+  });
 
   test("names the clock card's title field rather than calling it a heading", () => {
     // The clock faces draw no title chip, so the field only names the card in

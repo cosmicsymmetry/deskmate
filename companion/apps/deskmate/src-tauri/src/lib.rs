@@ -3,10 +3,12 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
+use std::time::Duration;
 
 use app_core::{
-    AppSnapshot, ConfigOrigin, ConfigStore, ConnectionState, LoadOutcome, PersistenceState,
-    ProviderState, RuntimeHandle, RuntimeState, SAVED_SETTINGS_VALIDATION_FAILURE_MESSAGE,
+    AppConfig, AppSnapshot, ConfigOrigin, ConfigStore, ConnectionState, DeviceTier, LoadOutcome,
+    NetworkSettingsStore, PersistenceState, ProviderState, RuntimeHandle, RuntimeState,
+    SAVED_SETTINGS_VALIDATION_FAILURE_MESSAGE,
 };
 use serde::Serialize;
 use tauri::image::Image;
@@ -20,6 +22,7 @@ mod events;
 mod preview;
 
 const CONFIG_FILE_NAME: &str = "config.json";
+const NETWORK_SETTINGS_FILE_NAME: &str = "network-settings.json";
 const MAIN_WINDOW_LABEL: &str = "main";
 const TRAY_ID: &str = "deskmate";
 const STATUS_ITEM_ID: &str = "device-status";
@@ -117,6 +120,9 @@ impl TrayControls {
 struct DesktopState {
     runtime: Arc<RuntimeHandle>,
     store: ConfigStore,
+    network_store: NetworkSettingsStore,
+    networked_config: Mutex<Option<AppConfig>>,
+    server_client: ureq::Agent,
     has_saved_config: AtomicBool,
     tray: TrayControls,
     snapshot_worker: Mutex<Option<JoinHandle<()>>>,
@@ -136,7 +142,13 @@ struct DesktopSnapshot {
 }
 
 impl DesktopState {
-    fn project_snapshot(&self, app: AppSnapshot) -> DesktopSnapshot {
+    fn project_snapshot(&self, mut app: AppSnapshot) -> DesktopSnapshot {
+        if !matches!(app.device.tier, Some(DeviceTier::Local))
+            && let Ok(config) = self.networked_config.lock()
+            && let Some(config) = config.as_ref()
+        {
+            app.config = config.clone();
+        }
         DesktopSnapshot {
             app,
             has_saved_config: self.has_saved_config.load(Ordering::Acquire),
@@ -145,6 +157,16 @@ impl DesktopState {
 
     fn mark_config_saved(&self) {
         self.has_saved_config.store(true, Ordering::Release);
+    }
+
+    fn set_networked_config(&self, config: Option<AppConfig>) -> Result<(), commands::IpcError> {
+        *self
+            .networked_config
+            .lock()
+            .map_err(|_| commands::IpcError::Internal {
+                message: "networked configuration state is unavailable".into(),
+            })? = config;
+        Ok(())
     }
 
     fn toggle_paused(&self) -> Result<(), commands::IpcError> {
@@ -351,6 +373,11 @@ fn setup_app(app: &mut App) -> Result<(), Box<dyn Error>> {
     prepare_config_directory(&config_directory);
     let config_path = config_directory.join(CONFIG_FILE_NAME);
     let store = ConfigStore::new(config_path);
+    let network_store =
+        NetworkSettingsStore::new(config_directory.join(NETWORK_SETTINGS_FILE_NAME));
+    if network_store.load().recovery().is_some() {
+        eprintln!("saved Deskmate network settings could not be read");
+    }
     let loaded = store.load();
     let has_saved_config = load_has_saved_config(&loaded);
     let auto_open_settings = auto_open_settings_on_launch(&loaded);
@@ -379,6 +406,9 @@ fn setup_app(app: &mut App) -> Result<(), Box<dyn Error>> {
     app.manage(DesktopState {
         runtime: Arc::clone(&runtime),
         store,
+        network_store,
+        networked_config: Mutex::new(None),
+        server_client: server_http_agent(),
         has_saved_config: AtomicBool::new(has_saved_config),
         tray,
         snapshot_worker: Mutex::new(None),
@@ -409,6 +439,16 @@ fn prepare_config_directory(path: &Path) {
         // into an application panic.
         eprintln!("cannot secure Deskmate configuration directory");
     }
+}
+
+fn server_http_agent() -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .timeout_global(Some(Duration::from_secs(15)))
+        // Validation details live in the 422 response body, so status handling
+        // belongs in the typed IPC mapper after the bounded body is read.
+        .http_status_as_error(false)
+        .build()
+        .into()
 }
 
 fn secure_config_directory(path: &Path) -> std::io::Result<()> {
@@ -478,6 +518,11 @@ pub fn run() {
             commands::get_app_snapshot,
             commands::validate_config_draft,
             commands::save_apply_config,
+            commands::save_server_config,
+            commands::get_network_settings,
+            commands::set_server_endpoint,
+            commands::provision_device,
+            commands::factory_reset_device,
             commands::set_pushing_paused,
             commands::control_pomodoro,
             commands::refresh_provider,

@@ -5,6 +5,7 @@ import { CardList } from "./components/CardList";
 import { DeviceHeader } from "./components/DeviceHeader";
 import { DevicePreview } from "./components/DevicePreview";
 import { Filmstrip } from "./components/Filmstrip";
+import { NetworkPanel } from "./components/NetworkPanel";
 import { PlaylistPanel } from "./components/PlaylistPanel";
 import { ProviderStatus } from "./components/ProviderStatus";
 import {
@@ -23,7 +24,6 @@ import {
   controlPomodoro,
   getAutostartStatus,
   refreshProvider,
-  saveApplyConfig,
   setAutostartEnabled,
   setPushingPaused,
   toIpcError,
@@ -55,7 +55,19 @@ type SaveState =
 const validDraft: DraftValidation = { valid: true, issues: [] };
 
 export function App() {
-  const { snapshot, loading, error: stateError, refresh, dataGeneration } = useAppState();
+  const {
+    snapshot,
+    loading,
+    error: stateError,
+    refresh,
+    dataGeneration,
+    networkSettings,
+    saveConfig,
+    saveServerAccess,
+    pairDevice,
+    unpairDevice,
+    factoryReset,
+  } = useAppState();
   const [draft, setDraft] = useState<AppConfig | null>(null);
   const [selectedCardId, setSelectedCardId] = useState<string | null>(null);
   const [dirty, setDirty] = useState(false);
@@ -173,6 +185,7 @@ export function App() {
   // just blocking Save with no highlighted control anywhere in the UI (see
   // `unclaimedIssues`).
   const leftoverIssues = unclaimedIssues(issues, draft);
+  const networkedTier = snapshot.device.tier === "networked";
 
   const replaceDraft = (next: AppConfig) => {
     setDraft(next);
@@ -238,20 +251,22 @@ export function App() {
     setSaveState({ kind: "saving" });
     setCommandError(null);
     try {
-      const result = await saveApplyConfig(draft);
+      const result = await saveConfig(draft);
       setDirty(false);
       setSaveState({
         kind: "saved",
         message: result.save.warning
           ? `Saved. ${result.save.warning.message}`
-          : snapshot.device.connection.kind === "online"
-            ? "Saved and applied to your display."
-            : "Saved. It will sync when your display reconnects.",
+          : networkedTier
+            ? "Saved to the server. The server will update your display."
+            : snapshot.device.connection.kind === "online"
+              ? "Saved and applied to your display."
+              : "Saved. It will sync when your display reconnects.",
       });
       await refresh();
     } catch (nextError) {
       const ipcError = toIpcError(nextError);
-      if (ipcError.category === "device") {
+      if (!networkedTier && ipcError.category === "device") {
         setDirty(false);
         setSaveState({
           kind: "saved",
@@ -406,6 +421,35 @@ export function App() {
           </aside>
         );
       })()}
+
+      <NetworkPanel
+        device={{
+          tier: snapshot.device.tier,
+          wifiState: snapshot.device.wifi_state,
+          wifiRssi: snapshot.device.wifi_rssi,
+          ip: snapshot.device.ip ?? "",
+          lastNetworkError: snapshot.device.last_network_error,
+          otaState: snapshot.device.ota_state,
+        }}
+        settings={{
+          serverUrl: networkSettings.server_url,
+          deviceId: networkSettings.device_id,
+          ssid: "",
+        }}
+        onPair={async (input) => {
+          await pairDevice(input);
+          await refresh();
+        }}
+        onUnpair={async () => {
+          await unpairDevice();
+          await refresh();
+        }}
+        onFactoryReset={async () => {
+          await factoryReset();
+          await refresh();
+        }}
+        onSaveServerAccess={saveServerAccess}
+      />
 
       <div className="workspace">
         <div className="workspace__editors">
@@ -564,7 +608,13 @@ export function App() {
           }
           onClick={() => void handleSave()}
         >
-          {saveState.kind === "saving" ? "Saving & applying…" : "Save & apply"}
+          {saveState.kind === "saving"
+            ? networkedTier
+              ? "Saving to server…"
+              : "Saving & applying…"
+            : networkedTier
+              ? "Save to server"
+              : "Save & apply"}
         </button>
       </footer>
     </div>

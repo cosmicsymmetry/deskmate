@@ -495,19 +495,46 @@ static void dispatch_trigger_interrupt(protocol_context_t *context,
                  false, 0U);
 }
 
+// Distinguishes why an incoming NETWORK_CONFIG command was rejected, for a
+// host-side diagnostic. Never includes a field value -- ssid/psk/server_url/
+// token are never safe to echo back onto the wire.
+static const char *network_config_error_diagnostic(net_config_error_t error)
+{
+    switch (error) {
+        case NET_CONFIG_ERR_MISSING_SSID:
+            return "networked tier requires ssid";
+        case NET_CONFIG_ERR_MISSING_SERVER_URL:
+            return "networked tier requires server_url";
+        case NET_CONFIG_ERR_MISSING_TOKEN:
+            return "networked tier requires token";
+        case NET_CONFIG_ERR_INSECURE_URL:
+            return "server URL must use wss://";
+        case NET_CONFIG_ERR_INVALID_TIER:
+            return "invalid tier";
+        case NET_CONFIG_OK:
+        default:
+            return "invalid network config";
+    }
+}
+
 static void dispatch_network_config(protocol_context_t *context,
                                     uint32_t request_id)
 {
     const protocol_network_config_t *config =
         &context->message.value.network_config;
-    // Only an insecure server URL is flatly rejected. Every other invalid
-    // combination (e.g. a networked tier missing its token) is still
-    // persisted: net_store_load() always re-derives the effective tier via
-    // net_config_effective_tier(), so an invalid stored config degrades to
-    // local tier on its own rather than needing to be caught here.
-    if (net_config_validate(config) == NET_CONFIG_ERR_INSECURE_URL) {
+    // Reject-on-write, distinct from the store's degrade-on-read rule: a
+    // NETWORK_CONFIG message is the host asking to pair, and if the config
+    // cannot produce the tier it asks for, the host must be told the
+    // request failed rather than receiving an ACK for a config that will
+    // silently boot local. Only NET_CONFIG_OK (which a factory-fresh local
+    // config with every field empty satisfies) is persisted. Returning here
+    // means net_store_save() is never reached on any rejection path, so a
+    // rejected write cannot land a partial update over a previously-stored
+    // valid config.
+    net_config_error_t validation = net_config_validate(config);
+    if (validation != NET_CONFIG_OK) {
         transmit_error(context, request_id, PROTOCOL_ERROR_INVALID_PAYLOAD,
-                       "server URL must use wss://");
+                       network_config_error_diagnostic(validation));
         return;
     }
     if (net_store_save(config) != ESP_OK) {

@@ -9,12 +9,19 @@ rust-version.workspace = true
 protocol = { path = "../protocol" }
 axum = { version = "0.8", features = ["ws"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "net", "fs"] }
+tokio-util = { version = "0.7", features = ["io"] }
+tower = { version = "0.5", features = ["limit", "timeout", "util"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 rand = "0.9"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Backs `FirmwareCatalog::in_memory()`, which is normal library API (used by
+# every integration test binary, not just this crate's own #[cfg(test)]
+# code) -- it must be a real dependency, not a dev-dependency.
+tempfile = "3"
 
 [dev-dependencies]
 tokio-tungstenite = "0.24"

@@ -3518,15 +3518,19 @@ name = "server"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "futures-util",
  "http",
  "protocol",
  "rand 0.9.5",
  "reqwest",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.19",
  "tokio",
  "tokio-tungstenite 0.24.0",
+ "tokio-util",
+ "tower",
  "tracing",
  "tracing-subscriber",
 ]
@@ -4467,6 +4471,7 @@ dependencies = [
  "pin-project-lite",
  "sync_wrapper",
  "tokio",
+ "tokio-util",
  "tower-layer",
  "tower-service",
  "tracing",

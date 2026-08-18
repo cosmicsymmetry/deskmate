@@ -45,10 +45,18 @@ impl FromRequestParts<ServerState> for AuthenticatedDevice {
 
 /// Extracts the token from a well-formed `Authorization: Bearer <token>`
 /// header, or `None` for anything else (missing header, non-UTF-8 value,
-/// wrong scheme).
+/// wrong scheme). The scheme name is matched case-insensitively per RFC
+/// 7235 §2.1 ("auth-scheme ... is case-insensitive") -- firmware or a proxy
+/// sending `bearer`/`BEARER` is a protocol-legal client, not a malformed one.
 fn bearer_token(parts: &Parts) -> Option<&str> {
+    const SCHEME: &str = "Bearer ";
     let header = parts.headers.get(axum::http::header::AUTHORIZATION)?;
-    header.to_str().ok()?.strip_prefix("Bearer ")
+    let value = header.to_str().ok()?;
+    if value.len() < SCHEME.len() || !value.is_char_boundary(SCHEME.len()) {
+        return None;
+    }
+    let (scheme, token) = value.split_at(SCHEME.len());
+    scheme.eq_ignore_ascii_case(SCHEME).then_some(token)
 }
 
 #[cfg(test)]
@@ -75,6 +83,14 @@ mod tests {
     }
 
     #[test]
+    fn extracts_a_token_with_a_differently_cased_scheme() {
+        let parts = parts_with_authorization(Some("bearer abc123"));
+        assert_eq!(bearer_token(&parts), Some("abc123"));
+        let parts = parts_with_authorization(Some("BEARER abc123"));
+        assert_eq!(bearer_token(&parts), Some("abc123"));
+    }
+
+    #[test]
     fn rejects_a_missing_header() {
         let parts = parts_with_authorization(None);
         assert_eq!(bearer_token(&parts), None);
@@ -83,6 +99,12 @@ mod tests {
     #[test]
     fn rejects_the_wrong_scheme() {
         let parts = parts_with_authorization(Some("Basic abc123"));
+        assert_eq!(bearer_token(&parts), None);
+    }
+
+    #[test]
+    fn rejects_a_value_shorter_than_the_scheme() {
+        let parts = parts_with_authorization(Some("Bear"));
         assert_eq!(bearer_token(&parts), None);
     }
 }

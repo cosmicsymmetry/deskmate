@@ -1,8 +1,9 @@
 //! In-memory device registry: mints per-device bearer tokens and authenticates
 //! them in constant time. V2 is single-tenant and has no accounts, so this is
-//! deliberately not a database — nothing here survives a server restart.
+//! deliberately not a database -- nothing here survives a server restart.
 
 use std::collections::HashMap;
+use std::fmt;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -13,11 +14,22 @@ pub type DeviceId = String;
 
 /// A freshly minted device identity: the id the server assigns internally and
 /// the bearer token the device presents on every request. The token is
-/// returned exactly once, at mint time; the server never logs it again.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// returned exactly once, at mint time; the server never logs it again, and
+/// `Debug` never prints it either (see the hand-written impl below), so a
+/// stray `tracing::info!(?identity)` can't leak a live bearer secret.
+#[derive(Clone, PartialEq, Eq)]
 pub struct DeviceIdentity {
     pub device_id: DeviceId,
     pub token: String,
+}
+
+impl fmt::Debug for DeviceIdentity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DeviceIdentity")
+            .field("device_id", &self.device_id)
+            .field("token", &"<redacted>")
+            .finish()
+    }
 }
 
 /// Token-to-device lookup, held in memory for the life of the process.
@@ -56,11 +68,14 @@ impl Registry {
 
     /// Authenticates a presented bearer token against every minted token.
     ///
-    /// Every candidate is compared with [`constant_time_eq`] rather than
-    /// `==`, so a wrong token's rejection time does not vary with how many of
-    /// its leading bytes happen to match a real one. This scans the whole
-    /// table on every call, which is fine at the device counts V2's
-    /// single-tenant registry ever holds.
+    /// A *match* short-circuits via `Iterator::find`, same as any lookup --
+    /// that's fine, since which token matched is exactly the information
+    /// being asked for. The property this guards is about *rejection*: a
+    /// wrong token is compared against the entire table with
+    /// [`constant_time_eq`] rather than `==`, so how many of its leading
+    /// bytes happen to match some real token never shows up as a timing
+    /// difference. At the device counts V2's single-tenant registry ever
+    /// holds, scanning the whole table on a miss is cheap.
     pub fn authenticate(&self, token: &str) -> Option<DeviceId> {
         let token = token.as_bytes();
         let tokens = self.tokens.lock().expect("registry mutex poisoned");
@@ -89,8 +104,11 @@ fn random_token() -> String {
 ///
 /// Lengths are checked up front: our tokens are always the same fixed
 /// length, so a length mismatch only tells an attacker their guess had the
-/// wrong shape, never anything about the secret's content.
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+/// wrong shape, never anything about the secret's content. Shared by device
+/// token authentication ([`Registry::authenticate`]) and, via
+/// `ServerState::verify_admin_token`, the single admin token -- the crate
+/// has exactly one way to compare a presented secret against a real one.
+pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }
@@ -137,5 +155,16 @@ mod tests {
         assert!(constant_time_eq(b"abc", b"abc"));
         assert!(!constant_time_eq(b"abc", b"abd"));
         assert!(!constant_time_eq(b"abc", b"ab"));
+    }
+
+    #[test]
+    fn debug_redacts_the_token() {
+        let identity = DeviceIdentity {
+            device_id: "dev-0001".to_string(),
+            token: "super-secret-value".to_string(),
+        };
+        let rendered = format!("{identity:?}");
+        assert!(!rendered.contains("super-secret-value"));
+        assert!(rendered.contains("dev-0001"));
     }
 }

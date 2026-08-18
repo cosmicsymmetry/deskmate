@@ -18,11 +18,16 @@ static const char *KEY_TOKEN = "token";
 static const char *KEY_UTC_OFFSET = "utc_offset";
 static const char *KEY_TIER = "tier";
 
-// The tier cache only ever moves at boot, inside net_store_load(). Neither
-// net_store_save() nor net_store_erase() touches it: a newly provisioned or
-// erased config always takes effect on the next boot rather than hot-swapping
-// the device's owner mid-session (see protocol_task.c's dispatch handlers).
+// The tier cache latches to the FIRST net_store_load() call and never moves
+// again. Neither net_store_save() nor net_store_erase() touches it, and a
+// later net_store_load() call (a future networking/status task reading the
+// stored config, say) must not re-latch it either: a newly provisioned or
+// erased config always takes effect on the next boot rather than
+// hot-swapping the device's owner mid-session (see protocol_task.c's
+// dispatch handlers). s_loaded is what makes that true regardless of how
+// many times net_store_load() is called or by whom.
 static protocol_tier_t s_current_tier = PROTOCOL_TIER_LOCAL;
+static bool s_loaded = false;
 
 // Reads one string field, logging (never the value -- it may be a secret)
 // and leaving the field empty on any error other than "key not present",
@@ -61,7 +66,10 @@ void net_store_load(protocol_network_config_t *out)
         // Factory-fresh or unreadable: out is already zeroed, which
         // net_config_effective_tier() below resolves to local tier.
         out->tier = net_config_effective_tier(out);
-        s_current_tier = out->tier;
+        if (!s_loaded) {
+            s_current_tier = out->tier;
+            s_loaded = true;
+        }
         return;
     }
 
@@ -102,7 +110,10 @@ void net_store_load(protocol_network_config_t *out)
     // itself as networked: recompute the effective tier from validation
     // instead of trusting the raw stored value.
     out->tier = net_config_effective_tier(out);
-    s_current_tier = out->tier;
+    if (!s_loaded) {
+        s_current_tier = out->tier;
+        s_loaded = true;
+    }
 }
 
 esp_err_t net_store_save(const protocol_network_config_t *config)

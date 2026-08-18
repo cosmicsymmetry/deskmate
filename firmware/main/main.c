@@ -32,7 +32,18 @@ void app_main(void)
         ESP_ERROR_CHECK(nvs_flash_erase());
         nvs_status = nvs_flash_init();
     }
-    ESP_ERROR_CHECK(nvs_status);
+    if (nvs_status != ESP_OK) {
+        // Any other NVS failure (corruption, a flash read error, no memory)
+        // must not abort boot here: aborting before board_display_init()
+        // would panic-reboot-loop the device without ever reaching the
+        // standalone clock, which is the one thing that must always survive
+        // NVS trouble. net_store_load()'s own nvs_open() will fail the same
+        // way and already degrades to local tier on its own, so continuing
+        // is safe -- provisioning/persistence are simply unavailable this
+        // boot.
+        ESP_LOGE(TAG, "nvs_flash_init failed (%s); continuing without NVS",
+                esp_err_to_name(nvs_status));
+    }
 
     ESP_ERROR_CHECK(board_display_init());
     ESP_LOGI(TAG, "board_display_init OK, io=%p", (void *)board_display_io());

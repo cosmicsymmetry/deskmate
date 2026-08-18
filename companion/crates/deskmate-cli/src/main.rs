@@ -159,6 +159,16 @@ fn parse_field(raw: &str) -> Result<Field, AppError> {
     })
 }
 
+fn parse_tier(value: &str) -> Result<Tier, AppError> {
+    match value {
+        "local" => Ok(Tier::Local),
+        "networked" => Ok(Tier::Networked),
+        other => Err(AppError::Usage(format!(
+            "--tier must be local or networked, got: {other}"
+        ))),
+    }
+}
+
 fn build_command(command_name: &str, options: CommandOptions) -> Result<CliCommand, AppError> {
     Ok(match command_name {
         "status" => {
@@ -352,15 +362,7 @@ fn parse_options() -> Result<Options, AppError> {
             "--token" => command_options.token = Some(next_value(&mut arguments, "--token")?),
             "--tier" => {
                 let value = next_value(&mut arguments, "--tier")?;
-                command_options.tier = Some(match value.as_str() {
-                    "local" => Tier::Local,
-                    "networked" => Tier::Networked,
-                    other => {
-                        return Err(AppError::Usage(format!(
-                            "--tier must be local or networked, got: {other}"
-                        )));
-                    }
-                });
+                command_options.tier = Some(parse_tier(&value)?);
             }
             _ => return Err(AppError::Usage(format!("unknown option: {argument}"))),
         }
@@ -436,7 +438,7 @@ fn json_string(value: &str) -> String {
 fn print_status(status: &StatusResponse, port_name: &str, json: bool) {
     if json {
         println!(
-            "{{\"port\":{},\"protocol_version\":{},\"max_protocol_version\":{},\"capabilities\":{},\"firmware_version\":{},\"uptime_ms\":{},\"free_heap\":{},\"display_width\":{},\"display_height\":{},\"brightness\":{},\"rotation\":{},\"online\":{},\"latest_revision\":{},\"config_revision\":{},\"latest_interrupt_token\":{},\"valid_frames\":{},\"malformed_frames\":{},\"crc_errors\":{},\"overflow_frames\":{},\"dropped_responses\":{},\"rx_dropped_bytes\":{},\"dropped_events\":{},\"event_queue_high_water\":{},\"dropped_ui_commands\":{},\"ui_queue_high_water\":{}}}",
+            "{{\"port\":{},\"protocol_version\":{},\"max_protocol_version\":{},\"capabilities\":{},\"firmware_version\":{},\"uptime_ms\":{},\"free_heap\":{},\"display_width\":{},\"display_height\":{},\"brightness\":{},\"rotation\":{},\"online\":{},\"latest_revision\":{},\"config_revision\":{},\"latest_interrupt_token\":{},\"valid_frames\":{},\"malformed_frames\":{},\"crc_errors\":{},\"overflow_frames\":{},\"dropped_responses\":{},\"rx_dropped_bytes\":{},\"dropped_events\":{},\"event_queue_high_water\":{},\"dropped_ui_commands\":{},\"ui_queue_high_water\":{},\"tier\":{}}}",
             json_string(port_name),
             status.protocol_version,
             status.max_protocol_version,
@@ -461,7 +463,8 @@ fn print_status(status: &StatusResponse, port_name: &str, json: bool) {
             status.dropped_events,
             status.event_queue_high_water,
             status.dropped_ui_commands,
-            status.ui_queue_high_water
+            status.ui_queue_high_water,
+            json_string(tier_name(status.tier))
         );
     } else {
         println!("Deskmate on {port_name}");
@@ -473,8 +476,12 @@ fn print_status(status: &StatusResponse, port_name: &str, json: bool) {
             status.capabilities
         );
         println!(
-            "display {}x{}, brightness {}, rotation {}°",
-            status.display_width, status.display_height, status.brightness, status.rotation
+            "display {}x{}, brightness {}, rotation {}°, tier {}",
+            status.display_width,
+            status.display_height,
+            status.brightness,
+            status.rotation,
+            tier_name(status.tier)
         );
         println!(
             "uptime {} ms, free heap {} bytes, link {}, latest revision {}",
@@ -644,5 +651,56 @@ fn main() {
             eprintln!("error: {error}");
         }
         process::exit(exit_code(&error));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tier_option_parses_local_and_networked() {
+        assert_eq!(parse_tier("local").unwrap(), Tier::Local);
+        assert_eq!(parse_tier("networked").unwrap(), Tier::Networked);
+    }
+
+    #[test]
+    fn tier_option_rejects_an_invalid_value() {
+        assert!(matches!(parse_tier("bogus"), Err(AppError::Usage(_))));
+    }
+
+    #[test]
+    fn provision_rejects_an_over_length_token() {
+        let options = CommandOptions {
+            token: Some("t".repeat(MAX_DEVICE_TOKEN_LEN + 1)),
+            offset_minutes: Some(0),
+            ..CommandOptions::default()
+        };
+        assert!(matches!(build_provision(options), Err(AppError::Usage(_))));
+    }
+
+    #[test]
+    fn provision_accepts_a_minimal_local_config() {
+        let options = CommandOptions {
+            offset_minutes: Some(0),
+            ..CommandOptions::default()
+        };
+        let command = build_provision(options).unwrap();
+        let CliCommand::Provision { config } = command else {
+            panic!("expected CliCommand::Provision");
+        };
+        assert_eq!(config.tier, Tier::Local);
+        assert_eq!(config.ssid, "");
+        assert_eq!(config.utc_offset_minutes, 0);
+    }
+
+    #[test]
+    fn provision_rejects_push_data_options() {
+        let options = CommandOptions {
+            widget_id: Some("clock".into()),
+            offset_minutes: Some(0),
+            ..CommandOptions::default()
+        };
+        assert!(matches!(build_provision(options), Err(AppError::Usage(_))));
     }
 }

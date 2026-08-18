@@ -1064,6 +1064,14 @@ mod tests {
                 acknowledged_type: TYPE_TRIGGER_INTERRUPT,
                 revision: None,
             }),
+            Message::NetworkConfig(_) => Message::Ack(Ack {
+                acknowledged_type: TYPE_NETWORK_CONFIG,
+                revision: None,
+            }),
+            Message::FactoryReset => Message::Ack(Ack {
+                acknowledged_type: TYPE_FACTORY_RESET,
+                revision: None,
+            }),
             _ => panic!("unexpected fake request: {request:?}"),
         }
     }
@@ -1491,5 +1499,48 @@ mod tests {
         assert!(second_state.lock().unwrap().requests.is_empty());
         assert_eq!(session.latest_data_revision(), 8);
         assert_eq!(session.latest_config_revision(), 4);
+    }
+
+    #[test]
+    fn provision_sends_the_config_and_returns_the_ack() {
+        let (transport, state) = FakeTransport::new(status(0, 0, 100));
+        let session = DeviceSession::with_options(
+            transport,
+            &status(0, 0, 100),
+            options(Duration::from_mins(1), 8),
+        );
+        let network_config = NetworkConfig {
+            ssid: "desk-wifi".into(),
+            psk: "hunter2".into(),
+            server_url: "wss://example.invalid/v1/device/link".into(),
+            device_id: "dev-0001".into(),
+            token: "placeholder".into(),
+            utc_offset_minutes: 240,
+            tier: protocol::Tier::Networked,
+        };
+        let ack = session.provision(&network_config).unwrap();
+        assert_eq!(ack.acknowledged_type, TYPE_NETWORK_CONFIG);
+        assert_eq!(ack.revision, None);
+        assert_eq!(
+            state.lock().unwrap().requests.last(),
+            Some(&Message::NetworkConfig(network_config))
+        );
+    }
+
+    #[test]
+    fn factory_reset_sends_the_request_and_returns_the_ack() {
+        let (transport, state) = FakeTransport::new(status(0, 0, 100));
+        let session = DeviceSession::with_options(
+            transport,
+            &status(0, 0, 100),
+            options(Duration::from_mins(1), 8),
+        );
+        let ack = session.factory_reset().unwrap();
+        assert_eq!(ack.acknowledged_type, TYPE_FACTORY_RESET);
+        assert_eq!(ack.revision, None);
+        assert_eq!(
+            state.lock().unwrap().requests.last(),
+            Some(&Message::FactoryReset)
+        );
     }
 }

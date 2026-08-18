@@ -989,7 +989,9 @@ static protocol_message_result_t decode_ack(const protocol_frame_t *frame,
         ack->acknowledged_type != PROTOCOL_TYPE_PUSH_DATA &&
         ack->acknowledged_type != PROTOCOL_TYPE_APPLY_CONFIG &&
         ack->acknowledged_type != PROTOCOL_TYPE_ACTIVATE_SCREEN &&
-        ack->acknowledged_type != PROTOCOL_TYPE_TRIGGER_INTERRUPT) {
+        ack->acknowledged_type != PROTOCOL_TYPE_TRIGGER_INTERRUPT &&
+        ack->acknowledged_type != PROTOCOL_TYPE_NETWORK_CONFIG &&
+        ack->acknowledged_type != PROTOCOL_TYPE_FACTORY_RESET) {
         return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
     }
     if (revision_required != ack->has_revision) {
@@ -1412,7 +1414,11 @@ static protocol_message_result_t validate_message(
              message->value.ack.acknowledged_type !=
                  PROTOCOL_TYPE_ACTIVATE_SCREEN &&
              message->value.ack.acknowledged_type !=
-                 PROTOCOL_TYPE_TRIGGER_INTERRUPT) ||
+                 PROTOCOL_TYPE_TRIGGER_INTERRUPT &&
+             message->value.ack.acknowledged_type !=
+                 PROTOCOL_TYPE_NETWORK_CONFIG &&
+             message->value.ack.acknowledged_type !=
+                 PROTOCOL_TYPE_FACTORY_RESET) ||
             (((message->value.ack.acknowledged_type ==
                    PROTOCOL_TYPE_PUSH_DATA ||
                message->value.ack.acknowledged_type ==

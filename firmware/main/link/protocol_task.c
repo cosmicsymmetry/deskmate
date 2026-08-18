@@ -836,9 +836,12 @@ esp_err_t protocol_task_start(void)
     memset(&s_context, 0, sizeof(s_context));
     // Populate net_store_current_tier()'s cache once, synchronously, before
     // any USB message can reach the gate below. The loaded config itself
-    // isn't needed here -- only its side effect on the tier cache.
+    // isn't needed here -- only its side effect on the tier cache -- so
+    // zero it immediately after: it briefly held a PSK and a token, and
+    // this stack region must not keep carrying them once its job is done.
     protocol_network_config_t boot_network_config;
     net_store_load(&boot_network_config);
+    memset(&boot_network_config, 0, sizeof(boot_network_config));
     protocol_decoder_init(&s_context.decoder);
     link_state_init(&s_context.link);
     widget_model_init(&s_context.model);

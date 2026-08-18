@@ -651,6 +651,8 @@ fn validate_message(message: &Message) -> Result<(), MessageError> {
                     | TYPE_APPLY_CONFIG
                     | TYPE_ACTIVATE_SCREEN
                     | TYPE_TRIGGER_INTERRUPT
+                    | TYPE_NETWORK_CONFIG
+                    | TYPE_FACTORY_RESET
             ) {
                 return Err(MessageError::InvalidValue("acknowledged type"));
             }

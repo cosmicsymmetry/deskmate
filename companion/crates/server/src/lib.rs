@@ -38,7 +38,7 @@ use tower::limit::GlobalConcurrencyLimitLayer;
 use tower::load_shed::error::Overloaded;
 
 use firmware::FirmwareCatalog;
-use registry::Registry;
+use registry::{DEVICE_IDENTITY_STORE_FILE, Registry};
 
 /// Caps how many requests this process handles at once, across *every*
 /// route -- genuinely process-wide, via [`GlobalConcurrencyLimitLayer`]
@@ -67,7 +67,8 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Shared server state, cheap to clone: every field is behind an `Arc`
 /// (directly or via the outer `Arc<StateInner>`). Live links carry the
-/// single-owner `app-core` runtime alongside the registry and config stores.
+/// single-owner `app-core` runtime alongside the persistent registry and
+/// config stores.
 #[derive(Clone)]
 pub struct ServerState {
     inner: Arc<StateInner>,
@@ -92,18 +93,20 @@ struct StateInner {
 impl ServerState {
     #[must_use]
     pub fn new(admin_token: String, firmware: FirmwareCatalog, config_directory: PathBuf) -> Self {
-        Self::with_config_temp_dir(admin_token, firmware, config_directory, None)
+        let registry = Registry::load(config_directory.join(DEVICE_IDENTITY_STORE_FILE));
+        Self::with_config_temp_dir(admin_token, firmware, config_directory, registry, None)
     }
 
     fn with_config_temp_dir(
         admin_token: String,
         firmware: FirmwareCatalog,
         config_directory: PathBuf,
+        registry: Registry,
         config_temp_dir: Option<tempfile::TempDir>,
     ) -> Self {
         Self {
             inner: Arc::new(StateInner {
-                registry: Registry::new(),
+                registry,
                 admin_token,
                 firmware,
                 configs: store::DeviceConfigStores::new(config_directory),
@@ -129,6 +132,7 @@ impl ServerState {
             "in-memory-admin-token".to_string(),
             firmware,
             config_directory,
+            Registry::new(),
             Some(config_temp_dir),
         )
     }
@@ -340,7 +344,7 @@ mod tests {
         // Catches reintroducing the production defect's path derivation in the
         // test constructor, where it would teach callers the wrong pattern.
         let state = ServerState::in_memory();
-        let identity = state.registry().mint();
+        let identity = state.registry().mint().expect("mint identity");
         let config_path = state
             .configs()
             .for_device(&identity.device_id)

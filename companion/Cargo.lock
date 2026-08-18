@@ -3520,6 +3520,7 @@ name = "server"
 version = "0.1.0"
 dependencies = [
  "app-core",
+ "atomic-write-file",
  "axum",
  "device",
  "futures-util",
@@ -3529,6 +3530,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror 2.0.19",
  "tokio",

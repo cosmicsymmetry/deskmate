@@ -41,21 +41,28 @@ on a command line where it lands in shell history, and never commit
 `/etc/deskmate/server.env` (it is deliberately outside this repo). The 0600
 mode above is load-bearing.
 
-### Important V2 identity limitation
+### Device identity persistence
 
-The device identity registry is **memory-only**. Every server process restart
-forgets every provisioned device and bearer token; neither the token nor the
-identity is restored from the config directory. Under the supplied systemd
-unit, `Restart=on-failure` and `RestartSec=2` mean an unattended crash can look
-like a quick recovery while the board is permanently receiving 401 responses.
-It cannot re-provision itself: recovery currently requires connecting the board
-over USB and provisioning a newly minted identity.
+Provisioned identities survive normal process and host restarts. The registry
+lives at `$DESKMATE_CONFIG_DIR/device-identities.json`, alongside the per-device
+schema-v4 config files. It is a versioned JSON document containing the last
+issued device sequence, each `dev-NNNN` id, and the lowercase SHA-256 digest of
+that device's bearer token. The plaintext bearer token is never written there
+and cannot be recovered from the file; the server only returns it from
+`POST /v1/devices` at mint time.
 
-For an unrecognized device token, the server log explicitly says that the
-in-memory registry may have been cleared by a restart. Check it with
-`journalctl -u deskmate-server` before treating a stream of 401s as a mistyped
-token. Persisting identities is intentionally deferred pending a repository
-owner design decision.
+The server creates the registry with mode `0600` and replaces it atomically via
+a private temporary file, so a crash during a mint cannot leave a half-written
+registry. If the file is unreadable, corrupt, or truncated at startup, the
+server deliberately starts with an empty registry so the admin surface remains
+available for re-minting. Its warning says that the identity store failed to
+load, distinctly from the rate-limited ordinary "token is not recognized"
+warning, and neither message includes any token bytes.
+
+Back up `device-identities.json` with the rest of the state directory. Losing
+it does not expose the bearer tokens, but it does invalidate every existing
+device identity: mint a replacement identity and provision it over USB. There
+is no token-recovery procedure because only digests are stored.
 
 Create the read-only firmware directory the env file points at:
 
@@ -68,9 +75,9 @@ sudo install -d -m 0755 /var/lib/deskmate/firmware
 `/var/lib/deskmate` when using the supplied systemd unit. Do not pre-create
 `configs` as a root-owned directory for the `DynamicUser`: systemd gives the
 service ownership of the `StateDirectory` parent, and the server creates its
-config subdirectory on the first successful write. For launchd, point
-`DESKMATE_CONFIG_DIR` at an absolute directory writable by the account running
-the agent/daemon.
+state subdirectory on the first successful identity or config write. For
+launchd, point `DESKMATE_CONFIG_DIR` at an absolute directory writable by the
+account running the agent/daemon.
 
 ## 3a. Run under systemd (Linux)
 

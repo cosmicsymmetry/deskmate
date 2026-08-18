@@ -1,6 +1,7 @@
 //! Ownership, exercised with a fake device socket rather than a board.
 
 use server::{ServerState, app};
+use sha2::{Digest, Sha256};
 
 mod support;
 
@@ -12,7 +13,7 @@ async fn spawn() -> (String, server::registry::DeviceIdentity, String) {
 }
 
 async fn spawn_state(state: ServerState) -> (String, server::registry::DeviceIdentity, String) {
-    let identity = state.registry().mint();
+    let identity = state.registry().mint().expect("mint identity");
     let admin_token = state.admin_token().to_string();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -49,6 +50,176 @@ async fn connect_device(
     tokio_tungstenite::connect_async(request)
         .await
         .map(|(s, _)| s)
+}
+
+#[test]
+fn minted_identity_authenticates_after_registry_reload() {
+    // Catches a registry that still keeps identities only in process memory:
+    // the second ServerState has no shared state except this directory.
+    let temp = tempfile::tempdir().expect("registry test temp dir");
+    let config_root = temp.path().join("configs");
+    let identity = {
+        let state = ServerState::new(
+            "reload-admin-token".to_string(),
+            server::firmware::FirmwareCatalog::in_memory(),
+            config_root.clone(),
+        );
+        let identity = state.registry().mint().expect("mint identity");
+        assert_eq!(
+            state.registry().authenticate(&identity.token),
+            Some(identity.device_id.clone())
+        );
+        identity
+    };
+
+    let reloaded = ServerState::new(
+        "reload-admin-token".to_string(),
+        server::firmware::FirmwareCatalog::in_memory(),
+        config_root,
+    );
+    assert_eq!(
+        reloaded.registry().authenticate(&identity.token),
+        Some(identity.device_id)
+    );
+}
+
+#[test]
+fn persisted_registry_contains_digest_and_never_plaintext_token() {
+    // Catches the security-critical regression where persistence writes the
+    // bearer token itself, and also catches hashing a different value.
+    let temp = tempfile::tempdir().expect("registry test temp dir");
+    let config_root = temp.path().join("configs");
+    let state = ServerState::new(
+        "digest-admin-token".to_string(),
+        server::firmware::FirmwareCatalog::in_memory(),
+        config_root.clone(),
+    );
+    let identity = state.registry().mint().expect("mint identity");
+    let persisted = std::fs::read_to_string(config_root.join("device-identities.json"))
+        .expect("persisted identity registry");
+    let expected_digest = Sha256::digest(identity.token.as_bytes()).iter().fold(
+        String::with_capacity(64),
+        |mut hex, byte| {
+            use std::fmt::Write;
+            write!(hex, "{byte:02x}").expect("writing to a String cannot fail");
+            hex
+        },
+    );
+
+    assert!(persisted.contains(&expected_digest));
+    assert!(
+        !persisted.contains(&identity.token),
+        "persisted registry exposed the literal bearer token"
+    );
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(config_root.join("device-identities.json"))
+            .expect("registry metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "identity registry was not created private");
+    }
+}
+
+#[test]
+fn corrupt_or_truncated_registry_degrades_to_empty() {
+    // Catches propagating parse failures into a startup panic/error, accepting
+    // partial state, or losing the diagnostic that explains ensuing 401s.
+    for bytes in [
+        b"this is not JSON".as_slice(),
+        br#"{"schema_version":1,"next_sequence":7,"devices":["#.as_slice(),
+    ] {
+        let temp = tempfile::tempdir().expect("registry test temp dir");
+        let config_root = temp.path().join("configs");
+        std::fs::create_dir_all(&config_root).expect("create config root");
+        std::fs::write(config_root.join("device-identities.json"), bytes)
+            .expect("write broken registry");
+
+        let state = ServerState::new(
+            "corrupt-admin-token".to_string(),
+            server::firmware::FirmwareCatalog::in_memory(),
+            config_root,
+        );
+        assert_eq!(state.registry().authenticate("any-token"), None);
+        assert!(!state.registry().contains_device("dev-0007"));
+        assert!(state.registry().store_load_failed());
+    }
+}
+
+#[test]
+fn unreadable_registry_degrades_to_empty() {
+    // Catches treating an I/O failure as a fatal startup error. A directory at
+    // the file path is deterministically unreadable as a registry on every OS.
+    let temp = tempfile::tempdir().expect("registry test temp dir");
+    let config_root = temp.path().join("configs");
+    std::fs::create_dir_all(config_root.join("device-identities.json"))
+        .expect("create unreadable registry stand-in");
+
+    let state = ServerState::new(
+        "unreadable-admin-token".to_string(),
+        server::firmware::FirmwareCatalog::in_memory(),
+        config_root,
+    );
+    assert_eq!(state.registry().authenticate("any-token"), None);
+    assert!(state.registry().store_load_failed());
+}
+
+#[test]
+fn mint_does_not_release_a_token_when_persistence_fails() {
+    // Catches returning a credential that works only in memory: the config
+    // root is a regular file, so its registry child cannot be atomically saved.
+    let temp = tempfile::tempdir().expect("registry test temp dir");
+    let config_root = temp.path().join("not-a-directory");
+    std::fs::write(&config_root, b"blocks registry directory creation")
+        .expect("create unwritable registry parent");
+    let state = ServerState::new(
+        "failed-mint-admin-token".to_string(),
+        server::firmware::FirmwareCatalog::in_memory(),
+        config_root,
+    );
+
+    assert!(state.registry().mint().is_err());
+    assert!(!state.registry().contains_device("dev-0001"));
+}
+
+#[test]
+fn mint_sequence_remains_monotonic_after_reload() {
+    // Catches reconstructing an empty/default sequence on every process start,
+    // which would reissue a device id and alias its per-device config file.
+    let temp = tempfile::tempdir().expect("registry test temp dir");
+    let config_root = temp.path().join("configs");
+    {
+        let state = ServerState::new(
+            "sequence-admin-token".to_string(),
+            server::firmware::FirmwareCatalog::in_memory(),
+            config_root.clone(),
+        );
+        assert_eq!(
+            state.registry().mint().expect("first mint").device_id,
+            "dev-0001"
+        );
+        assert_eq!(
+            state.registry().mint().expect("second mint").device_id,
+            "dev-0002"
+        );
+    }
+
+    let reloaded = ServerState::new(
+        "sequence-admin-token".to_string(),
+        server::firmware::FirmwareCatalog::in_memory(),
+        config_root,
+    );
+    assert_eq!(
+        reloaded
+            .registry()
+            .mint()
+            .expect("mint after reload")
+            .device_id,
+        "dev-0003"
+    );
 }
 
 #[tokio::test]
@@ -325,7 +496,7 @@ async fn admin_status_reports_defaults_used_after_stored_config_validation_failu
         server::firmware::FirmwareCatalog::in_memory(),
         config_root.clone(),
     );
-    let identity = state.registry().mint();
+    let identity = state.registry().mint().expect("mint identity");
     let admin_token = state.admin_token().to_string();
     let mut invalid: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(concat!(

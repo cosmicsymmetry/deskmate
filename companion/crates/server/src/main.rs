@@ -15,8 +15,10 @@ const DEFAULT_BIND_ADDRESS: &str = "127.0.0.1:8443";
 // Absolute, matching `deskmate-server.env.example`: launchd's plist sets no
 // `WorkingDirectory`, and systemd's is unit-manager-defined, so a relative
 // default would resolve against whatever directory happens to be current --
-// unspecified in practice. Both directory variables are checked below and the
-// process refuses to start with a relative override for the same reason.
+// unspecified in practice. The config directory owns both per-device configs
+// and the digest-only identity registry. Both directory variables are checked
+// below and the process refuses to start with a relative override for the same
+// reason.
 const DEFAULT_FIRMWARE_DIR: &str = "/var/lib/deskmate/firmware";
 const DEFAULT_CONFIG_DIR: &str = "/var/lib/deskmate/configs";
 const DEFAULT_FIRMWARE_VERSION: &str = "1.0.0";

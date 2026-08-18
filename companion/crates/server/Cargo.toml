@@ -9,12 +9,14 @@ rust-version.workspace = true
 app-core = { path = "../app-core" }
 device = { path = "../device" }
 protocol = { path = "../protocol" }
+atomic-write-file = "0.3.0"
 axum = { version = "0.8", features = ["ws"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "net", "fs", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["io"] }
 tower = { version = "0.5", features = ["limit", "load-shed", "timeout", "util"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 rand = "0.9"
+sha2 = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"

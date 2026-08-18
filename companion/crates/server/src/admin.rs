@@ -47,12 +47,17 @@ impl FromRequestParts<ServerState> for AdminAuthenticated {
 async fn create_device(
     State(state): State<ServerState>,
     _admin: AdminAuthenticated,
-) -> Json<MintDeviceResponse> {
-    let identity = state.registry().mint();
-    Json(MintDeviceResponse {
+) -> Result<Json<MintDeviceResponse>, AdminError> {
+    let identity = tokio::task::spawn_blocking(move || state.registry().mint())
+        .await
+        .map_err(|_| AdminError::WorkerFailed)?
+        .map_err(|error| AdminError::Store {
+            message: error.to_string(),
+        })?;
+    Ok(Json(MintDeviceResponse {
         device_id: identity.device_id,
         token: identity.token,
-    })
+    }))
 }
 
 /// The sole serialization boundary for a newly minted device token. Keeping

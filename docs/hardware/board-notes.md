@@ -1834,3 +1834,58 @@ rendering was not itself observed. Do not describe it as verified.
 Incidental: the installed `/Applications/Deskmate.app` held `/dev/cu.usbmodem1101`
 exclusively and was quit (gracefully, via `osascript`) to free the port for flashing and
 for the diff runs. It was not running when these observations were taken.
+
+## V2 Task 3 — NVS persistence and the tier gate, verified 2026-08-18
+
+First firmware to persist anything across a reboot. Software change: an NVS-backed
+network config store (`firmware/main/link/net_store.c`), handlers for the two new
+provisioning message types, and the USB tier gate. Plan
+`docs/superpowers/plans/2026-08-18-deskmate-v2-networked-device.md`, spec
+`docs/superpowers/specs/2026-08-18-deskmate-v2-networked-device-design.md`.
+Flashed from `idf.py -C firmware -p /dev/cu.usbmodem3101 flash` at commit `77dc868`
+(`firmware_version` reported as `m1-170-g77dc868`, confirming the running image).
+No radio involved in any of this — the device never joined a network.
+
+Reboots were performed with `esptool --after hard_reset` rather than by unplugging USB.
+That is the correct instrument here: the board has a battery, so a USB unplug is link
+loss rather than power loss (recorded under the 2026-08-15 alert-replay entry), and NVS
+lives in flash, which survives a reset and a power cut identically. Each reboot was
+confirmed by a low `uptime_ms` in the following status.
+
+**PASSED — all six checks.**
+
+1. **Factory-fresh state reports local.** Before any provisioning, `status --json`
+   reported `tier: local`, `capabilities: 11`, `rotation: 90`, `valid_frames: 1`,
+   `malformed_frames: 0`.
+2. **Provisioning is accepted and acknowledged.** `provision ... --tier networked` ACKed,
+   exit 0, printing `(takes effect on next boot)`. The output named the ssid, server_url
+   and device_id and **did not print the passphrase or the token** — the never-expose-
+   secrets rule observed in practice, not only in review.
+3. **The tier survived a reboot.** After a hard reset, `status` reported
+   `tier: networked` at `uptime_ms: 12610`. This is the change's central claim and it
+   holds.
+4. **The cable is refused as an owner.** With the device in networked tier,
+   `push-data` over USB was rejected: `device rejected request (WrongTier): device is
+   owned over the network`, CLI exit code **13** (non-zero, so the failure is
+   scriptable). This is the first physically observable proof of the single-owner
+   invariant on the network tier.
+5. **Factory reset returns the device to local.** `factory-reset` ACKed; after a hard
+   reset `status` reported `tier: local` at `uptime_ms: 5807`.
+6. **An all-empty local config round-trips.** Provisioning with every string field empty
+   and `--tier local` ACKed, and after a reboot reported `tier: local` at
+   `uptime_ms: 5811`. This settles a question that could not be answered off-hardware:
+   `nvs_set_str` does accept the empty strings a factory-fresh local config writes.
+
+Counters stayed clean throughout: `malformed_frames: 0`, `free_heap` ~8.474 MB at every
+sample (8474155 / 8474123), `ui_queue_high_water: 1`. The panel showed no change at any
+point, which is correct — this task adds no UI.
+
+**Not covered by this session, and not claimed:** the radio, SNTP, the WebSocket
+transport, and OTA are all later tasks. A genuinely torn NVS write (power cut mid-save)
+was not induced; the code's mitigation is field ordering, with `tier` written last, so a
+fresh device cannot half-become networked.
+
+Incidental: `/Applications/Deskmate.app` held the serial port exclusively and was quit
+gracefully via `osascript` before flashing, as in the 2026-08-15 session. It was not
+running during any of these observations, and was left quit afterwards. The board
+enumerated as `/dev/cu.usbmodem3101` this session rather than `1101`.

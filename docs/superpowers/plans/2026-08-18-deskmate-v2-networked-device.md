@@ -1430,13 +1430,13 @@ networked device answers `status` from the server rather than from the cable.
 - Produces: `net_link_start()` and `net_link_transport()`, matching
   `usb_link_transport()`'s shape with `link_timeout_ms = 45000`.
 
-- [ ] **Step 1: Add the dependencies**
+- [x] **Step 1: Add the dependencies**
 
 Add `espressif/esp_websocket_client` to `firmware/main/idf_component.yml`. In
 `firmware/sdkconfig.defaults` enable `CONFIG_ESP_TLS_USING_MBEDTLS=y` and
 `CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y` so `esp_crt_bundle_attach` is available.
 
-- [ ] **Step 2: Write the header**
+- [x] **Step 2: Write the header**
 
 Create `firmware/main/link/net_link.h`:
 
@@ -1460,7 +1460,7 @@ esp_err_t net_link_start(void);
 const link_transport_t *net_link_transport(void);
 ```
 
-- [ ] **Step 3: Implement the client**
+- [x] **Step 3: Implement the client**
 
 Create `firmware/main/link/net_link.c`:
 
@@ -1479,7 +1479,7 @@ Create `firmware/main/link/net_link.c`:
 - Treat every received byte as untrusted: the frame decoder already bounds lengths, and
   the ring must never be indexed past its capacity.
 
-- [ ] **Step 4: Select the transport by tier**
+- [x] **Step 4: Select the transport by tier**
 
 In `protocol_task.c`, choose the transport once at task start:
 
@@ -1498,7 +1498,7 @@ reader** that runs `net_config_usb_message_allowed()` and never becomes the owne
 transport. Keep that reader small: it handles status, network-config, factory-reset and
 heartbeat only.
 
-- [ ] **Step 5: Echo frames on the server so the link is observable**
+- [x] **Step 5: Echo frames on the server so the link is observable**
 
 In `companion/crates/server/src/device_link.rs`, decode each binary message with
 `protocol::decode_wire_frame` + `decode_message`, log the message type at `info`, and
@@ -1506,7 +1506,7 @@ answer `StatusRequest` with a `StatusResponse` so the round trip is provable bef
 runtime exists. Reject a message that fails to decode by closing the socket — malformed
 input from a device is as suspect as malformed input from a host.
 
-- [ ] **Step 6: Re-run malformed-input coverage over the WSS path**
+- [x] **Step 6: Re-run malformed-input coverage over the WSS path**
 
 The spec's §7.1 requires this explicitly, and it is the step most easily skipped on the
 grounds that "it is the same decoder". It is the same decoder reached through a different
@@ -1526,7 +1526,7 @@ five shapes *to* the board over the network transport and asserts, via a followi
 `uptime_ms` before and after. Framing recovery without a reboot is the rule from
 `CLAUDE.md`, and the network path has never been tested against it.
 
-- [ ] **Step 7: Build and run the server locally**
+- [x] **Step 7: Build and run the server locally**
 
 ```sh
 . "$HOME/esp/esp-idf/export.sh"
@@ -1543,7 +1543,34 @@ Expose it with `cloudflared tunnel --url http://localhost:<port>` and note the p
 `https://` hostname it prints. The device's `server_url` is that hostname with the
 `wss://` scheme and the `/v1/device/link` path.
 
+
+> **Delivered differently, and permanently.** No `cloudflared --url` quick tunnel was
+> used. The repository owner elected to give the server a real home on the existing
+> homelab instead: it is built for linux/x86_64 in a throwaway `rust:1.97-bookworm`
+> container over an rsync'd copy of `companion/` (no Rust toolchain on the VM), installed
+> to `/usr/local/bin/deskmate-server` on docker-vm, and run under this plan's own systemd
+> unit with `/etc/deskmate/server.env`. Public path: Cloudflare HTTPS -> `cloudflared`
+> (orion) -> Caddy (docker-vm:80) -> `192.168.8.20:8443`. The device URL is
+> **`wss://deskmate.rodi.one/v1/device/link`**. Proven end to end from the Mac on
+> 2026-08-18: `GET /` returns 404 from axum's own router, and `/v1/device/link` and
+> `/v1/device/firmware` both return 401. Caddy carries no edge auth by design -- the
+> device and the companion each send their own bearer in `Authorization`, which
+> `basic_auth` would consume.
+
 - [ ] **Step 8: Verify on the physical board**
+
+> **DEFERRED to Task 9's board session -- this is a plan defect, not a choice.** Step 8
+> requires provisioning with "a token minted by the server", but `Registry::mint()` has no
+> HTTP route until **Task 9 Step 5** creates `POST /v1/devices`, and the registry is
+> in-memory with no persistence. There is currently no way to obtain a device token at
+> all, so this step is not executable as written at Task 8. Writing a throwaway bootstrap
+> route or seed variable would mean unreviewed code whose only purpose is to be deleted
+> one task later. Task 9 needs the same board and the same server, so Task 8's four
+> observations (accepted connection; periodic status round-trips; panel stays on the
+> standalone clock; killing the server yields visibly widening reconnect gaps, not a
+> reboot or a spin) are carried into that session as separately-recorded items.
+> Task 8 is **software complete / hardware open**, the same split Task 3 used.
+
 
 Provision with the tunnel hostname and a token minted by the server, then power cycle:
 

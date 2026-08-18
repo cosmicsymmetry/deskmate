@@ -1889,3 +1889,28 @@ Incidental: `/Applications/Deskmate.app` held the serial port exclusively and wa
 gracefully via `osascript` before flashing, as in the 2026-08-15 session. It was not
 running during any of these observations, and was left quit afterwards. The board
 enumerated as `/dev/cu.usbmodem3101` this session rather than `1101`.
+
+## V2 Task 4 — transport vtable refactor, verified 2026-08-18
+
+Pure refactor: `protocol_task.c`'s four `usb_link_*` call sites now route through a
+`link_transport_t` vtable, so Task 8's WebSocket transport can be a sibling rather than a
+special case. No behaviour was intended to change, so the gate is equivalence, not new
+function. Flashed at commit `660d226` (`firmware_version` `m1-172-g660d226`).
+
+**PASSED — behaviour identical to Task 3's verified state.**
+
+- Status in local tier reported `tier: local`, `malformed_frames: 0`, `valid_frames: 1`.
+- `push-data` in **local** tier was rejected with `UnknownWidget` — the informative
+  result, not merely a success: the tier gate passed the message through and the
+  *handler* rejected it because no widget is configured. The message reached its
+  destination.
+- Re-provisioned to networked, hard reset: `tier: networked` at `uptime_ms: 6125`, so
+  persistence still works across the refactor.
+- `push-data` in **networked** tier was rejected with `WrongTier` at CLI exit 13 — a
+  different rejection from the local-tier case, which is what proves the gate still
+  discriminates by tier rather than simply blocking or simply passing.
+- Restored to local tier with `factory-reset`.
+
+The two distinct rejections are the substance of this check. A refactor that had
+disturbed the gate's position would most likely have produced the same answer in both
+tiers.

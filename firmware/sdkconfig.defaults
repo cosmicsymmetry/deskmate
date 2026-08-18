@@ -12,6 +12,8 @@ CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y
 CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF=y
+CONFIG_ESP_TLS_USING_MBEDTLS=y
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
 
 # LVGL reads the single checked-in firmware/lv_conf.h instead of synthesizing
 # its config from Kconfig. firmware/main/CMakeLists.txt adds firmware/ to the

@@ -25,6 +25,7 @@
 #include "freertos/task.h"
 #include "link/dev_capture.h"
 #include "link/link_transport.h"
+#include "link/net_link.h"
 #include "link/net_store.h"
 #include "link/usb_link.h"
 #include "link/wifi_station.h"
@@ -41,6 +42,7 @@
 
 typedef struct {
     protocol_decoder_t decoder;
+    protocol_decoder_t restricted_usb_decoder;
     link_state_t link;
     widget_model_t model;
     interrupt_state_t interrupts;
@@ -55,11 +57,12 @@ typedef struct {
     uint32_t overflow_frames;
     uint32_t dropped_responses;
     uint32_t dropped_events;
+    const link_transport_t *response_transport;
 } protocol_context_t;
 
 static const char *TAG = "protocol";
 // Allocated from PSRAM in protocol_task_start(), not a static internal-RAM
-// object: protocol_context_t is 54,616 B, which crowded out the internal
+// object: protocol_context_t is 58,736 B, which would crowd out the internal
 // MALLOC_CAP_DMA headroom board_display_init() needs for its LVGL flush and
 // software-rotation buffers once WiFi's static internal .bss landed (see
 // docs/hardware/board-notes.md). Nothing in this struct is DMA'd -- see
@@ -71,6 +74,7 @@ static const char *TAG = "protocol";
 static protocol_context_t *s_context;
 static TaskHandle_t s_task;
 static const link_transport_t *s_transport;
+static bool s_owner_usb_restricted;
 
 static uint64_t uptime_ms(void)
 {
@@ -197,8 +201,9 @@ static void transmit(protocol_context_t *context,
         request_id, message, context->wire, sizeof(context->wire),
         &wire_length);
     if (result != PROTOCOL_MESSAGE_OK ||
-        s_transport->write_frame(context->wire, wire_length,
-                                 pdMS_TO_TICKS(PROTOCOL_WRITE_TIMEOUT_MS)) !=
+        context->response_transport->write_frame(
+            context->wire, wire_length,
+            pdMS_TO_TICKS(PROTOCOL_WRITE_TIMEOUT_MS)) !=
             ESP_OK) {
         increment_saturating(&context->dropped_responses);
     }
@@ -579,7 +584,8 @@ static void dispatch_factory_reset(protocol_context_t *context,
 }
 
 static void dispatch_request(protocol_context_t *context,
-                             const protocol_frame_t *frame)
+                             const protocol_frame_t *frame,
+                             bool restricted_usb)
 {
 #ifdef DESKMATE_DEV_DIAG
     // Dev-only framebuffer capture (spec §3.2.3): 0x7E/0x7F sit outside
@@ -641,17 +647,19 @@ static void dispatch_request(protocol_context_t *context,
         return;
     }
 
-    // USB is currently the only transport, so every inbound message is
-    // gated here. A later task that adds the network transport will scope
-    // this gate to the USB reader specifically rather than every request.
-    if (!net_config_usb_message_allowed(net_store_current_tier(),
+    if (restricted_usb &&
+        !net_config_usb_message_allowed(net_store_current_tier(),
                                         context->message.type)) {
         transmit_error(context, frame->request_id, PROTOCOL_ERROR_WRONG_TIER,
                        "device is owned over the network");
         return;
     }
 
-    if (link_state_note_valid_request(&context->link, uptime_ms())) {
+    // Configurator traffic over USB must not establish or keep alive the
+    // network owner's link. In local tier the owner itself is USB, so the
+    // same messages still drive the ordinary link state there.
+    if (!restricted_usb &&
+        link_state_note_valid_request(&context->link, uptime_ms())) {
         ui_runtime_set_online(true);
         if (widget_model_config(&context->model) != NULL) {
             (void)show_current_content(context);
@@ -696,11 +704,12 @@ static void dispatch_request(protocol_context_t *context,
     }
 }
 
-static void frame_callback(protocol_frame_result_t result,
-                           const protocol_frame_t *frame,
-                           void *opaque)
+static void handle_frame(protocol_frame_result_t result,
+                         const protocol_frame_t *frame,
+                         protocol_context_t *context,
+                         const link_transport_t *response_transport,
+                         bool restricted_usb)
 {
-    protocol_context_t *context = opaque;
     if (result == PROTOCOL_FRAME_ERR_CHECKSUM) {
         increment_saturating(&context->crc_errors);
         return;
@@ -714,7 +723,24 @@ static void frame_callback(protocol_frame_result_t result,
         return;
     }
     increment_saturating(&context->valid_frames);
-    dispatch_request(context, frame);
+    context->response_transport = response_transport;
+    dispatch_request(context, frame, restricted_usb);
+    context->response_transport = s_transport;
+}
+
+static void frame_callback(protocol_frame_result_t result,
+                           const protocol_frame_t *frame,
+                           void *opaque)
+{
+    handle_frame(result, frame, opaque, s_transport,
+                 s_owner_usb_restricted);
+}
+
+static void restricted_usb_frame_callback(protocol_frame_result_t result,
+                                          const protocol_frame_t *frame,
+                                          void *opaque)
+{
+    handle_frame(result, frame, opaque, usb_link_transport(), true);
 }
 
 static void transmit_device_event(protocol_context_t *context,
@@ -839,6 +865,14 @@ static void protocol_task(void *argument)
             protocol_decoder_feed(&context->decoder, chunk, received,
                                   frame_callback, context);
         }
+        if (s_transport != usb_link_transport()) {
+            size_t usb_received = usb_link_read(chunk, sizeof(chunk), 0U);
+            if (usb_received != 0U) {
+                protocol_decoder_feed(&context->restricted_usb_decoder,
+                                      chunk, usb_received,
+                                      restricted_usb_frame_callback, context);
+            }
+        }
         process_device_events(context);
         // Pumps the UI-facing half of an SNTP time sync. Must run on this
         // task (see wifi_station_poll()'s doc comment) -- the SNTP
@@ -867,16 +901,26 @@ esp_err_t protocol_task_start(void)
     s_context = heap_caps_calloc(1, sizeof(*s_context), MALLOC_CAP_SPIRAM);
     ESP_RETURN_ON_FALSE(s_context != NULL, ESP_ERR_NO_MEM, TAG,
                         "allocate protocol context from PSRAM");
-    s_transport = usb_link_transport();
     // Populate net_store_current_tier()'s cache once, synchronously, before
-    // any USB message can reach the gate below. The loaded config itself
+    // any USB message can reach its reader gate. The loaded config itself
     // isn't needed here -- only its side effect on the tier cache -- so
     // zero it immediately after: it briefly held a PSK and a token, and
     // this stack region must not keep carrying them once its job is done.
     protocol_network_config_t boot_network_config;
     net_store_load(&boot_network_config);
     memset(&boot_network_config, 0, sizeof(boot_network_config));
+    if (net_store_current_tier() == PROTOCOL_TIER_NETWORKED &&
+        net_link_start() == ESP_OK) {
+        s_transport = net_link_transport();
+    } else {
+        s_transport = usb_link_transport();
+    }
+    s_owner_usb_restricted =
+        net_store_current_tier() == PROTOCOL_TIER_NETWORKED &&
+        s_transport == usb_link_transport();
+    s_context->response_transport = s_transport;
     protocol_decoder_init(&s_context->decoder);
+    protocol_decoder_init(&s_context->restricted_usb_decoder);
     link_state_init_with_timeout(&s_context->link, s_transport->link_timeout_ms);
     widget_model_init(&s_context->model);
     interrupt_state_init(&s_context->interrupts);

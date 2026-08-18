@@ -858,9 +858,11 @@ dependencies = [
 name = "device"
 version = "0.1.0"
 dependencies = [
+ "axum",
  "lvgl-sim",
  "protocol",
  "serialport",
+ "tokio",
 ]
 
 [[package]]

@@ -13,6 +13,8 @@ serialport = { version = "4.9.0", default-features = false }
 # host to compare against a physical device's dev-only framebuffer capture.
 [dev-dependencies]
 lvgl-sim = { path = "../lvgl-sim" }
+axum = { version = "0.8", features = ["ws"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
 
 [lints]
 workspace = true

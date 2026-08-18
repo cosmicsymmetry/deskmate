@@ -1,9 +1,9 @@
 //! `GET /v1/device/link` -- the networked-tier device's persistent link.
 //!
 //! This task's handler does the bare minimum to make the contract real: it
-//! authenticates the upgrade, logs which device connected, and then holds
-//! the socket open, discarding whatever the device sends. Task 9 replaces
-//! the body of [`run`] with the `app-core` ownership runtime; nothing here
+//! authenticates the upgrade, decodes and logs incoming protocol message
+//! types, and provides a deliberately small status-request echo. Task 9
+//! replaces that echo with the `app-core` ownership runtime; nothing here
 //! should grow logic that runtime will need to own instead.
 //!
 //! What *does* belong here, because Task 9 would otherwise inherit the gap
@@ -26,6 +26,8 @@ use tokio::time::{MissedTickBehavior, interval, timeout};
 use crate::ServerState;
 use crate::auth::AuthenticatedDevice;
 use crate::registry::DeviceId;
+
+use protocol::{Message as ProtocolMessage, OtaState, StatusResponse, Tier, WifiState};
 
 /// Caps concurrent device links. V2 is single-tenant and realistically has
 /// one device, but this endpoint sits on a public tunnel from Task 8
@@ -72,18 +74,14 @@ const PING_INTERVAL: Duration = Duration::from_secs(3);
 /// tuned value. Revisit in V3.
 const PING_SEND_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// The largest single WebSocket message this link will accept: one
-/// COBS-framed protocol frame, delimiter included -- exactly
-/// `protocol::MAX_WIRE_FRAME`, since that is what one binary WS message
-/// carries end to end (see the module doc on framing in `lib.rs`/the design
-/// spec). Without this bound axum defaults to a 64 MiB message limit, so
-/// every authenticated link could otherwise make the server buffer 64 MiB
+/// The largest single WebSocket message this link will accept: one maximum
+/// COBS-framed protocol frame, delimiter included. A message may also contain
+/// multiple smaller complete frames; their combined size is still bounded by
+/// this same limit. Without the bound axum defaults to a 64 MiB message limit,
+/// so every authenticated link could otherwise make the server buffer 64 MiB
 /// for a message this protocol can never legally send. `max_frame_size` is
-/// capped identically: tungstenite checks a single frame against it
-/// *before* the message-size check ever applies, and this protocol never
-/// fragments one frame across multiple WS frames, so the two bounds should
-/// coincide -- leaving `max_frame_size` at its 16 MiB default would let one
-/// link buffer 16 MiB before rejection regardless of the message-size cap.
+/// capped identically: tungstenite checks a single frame against it before
+/// the message-size check ever applies.
 const MAX_WS_MESSAGE_SIZE: usize = protocol::MAX_WIRE_FRAME;
 
 pub async fn handler(
@@ -104,8 +102,100 @@ pub async fn handler(
         .on_upgrade(move |socket| run(socket, device_id, permit))
 }
 
-/// Holds the link open with a keepalive/idle-timeout loop. Does nothing
-/// else with the frames it receives -- see the module doc.
+fn echo_status() -> StatusResponse {
+    StatusResponse {
+        protocol_version: protocol::PROTOCOL_VERSION,
+        max_protocol_version: protocol::MAX_PROTOCOL_VERSION,
+        capabilities: 0,
+        firmware_version: env!("CARGO_PKG_VERSION").to_owned(),
+        uptime_ms: 0,
+        free_heap: 0,
+        display_width: 0,
+        display_height: 0,
+        brightness: 0,
+        rotation: 0,
+        online: true,
+        latest_revision: 0,
+        valid_frames: 0,
+        malformed_frames: 0,
+        crc_errors: 0,
+        overflow_frames: 0,
+        dropped_responses: 0,
+        rx_dropped_bytes: 0,
+        dropped_events: 0,
+        event_queue_high_water: 0,
+        dropped_ui_commands: 0,
+        ui_queue_high_water: 0,
+        config_revision: 0,
+        latest_interrupt_token: 0,
+        tier: Tier::Local,
+        wifi_state: WifiState::Down,
+        wifi_rssi: 0,
+        ip: String::new(),
+        ota_state: OtaState::Idle,
+        last_network_error: None,
+    }
+}
+
+async fn handle_binary(
+    sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    bytes: &[u8],
+    device_id: &DeviceId,
+) -> bool {
+    if bytes.is_empty() {
+        tracing::warn!(device_id = %device_id, "device link received an empty binary message");
+        return false;
+    }
+
+    for wire in bytes.split_inclusive(|byte| *byte == 0) {
+        let frame = match protocol::decode_wire_frame(wire) {
+            Ok(frame) => frame,
+            Err(error) => {
+                tracing::warn!(device_id = %device_id, %error, "device link frame decode failed");
+                return false;
+            }
+        };
+        let message = match protocol::decode_message(&frame) {
+            Ok(message) => message,
+            Err(error) => {
+                tracing::warn!(device_id = %device_id, %error, "device link message decode failed");
+                return false;
+            }
+        };
+        tracing::info!(
+            device_id = %device_id,
+            message_type = frame.message_type,
+            "device protocol message received"
+        );
+
+        if matches!(message, ProtocolMessage::StatusRequest) {
+            let response = ProtocolMessage::StatusResponse(echo_status());
+            let response_wire = match protocol::encode_message(frame.request_id, &response) {
+                Ok(wire) => wire,
+                Err(error) => {
+                    tracing::error!(device_id = %device_id, %error, "status echo encode failed");
+                    return false;
+                }
+            };
+            let send = sender.send(Message::Binary(response_wire.into()));
+            match timeout(PING_SEND_TIMEOUT, send).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    tracing::warn!(device_id = %device_id, %error, "status echo send failed");
+                    return false;
+                }
+                Err(_) => {
+                    tracing::warn!(device_id = %device_id, "status echo send stalled");
+                    return false;
+                }
+            }
+        }
+    }
+    true
+}
+
+/// Holds the link open with a keepalive/idle-timeout loop and the minimal
+/// protocol echo described in the module docs.
 ///
 /// Liveness is tracked with a plain `last_activity: Instant` rather than a
 /// `tokio::time::timeout` wrapped around each read: a per-iteration timeout
@@ -138,14 +228,19 @@ async fn run(socket: WebSocket, device_id: DeviceId, _permit: OwnedSemaphorePerm
                         );
                         break;
                     }
-                    Some(Ok(_binary_ping_or_pong)) => {
+                    Some(Ok(Message::Binary(bytes))) => {
+                        last_activity = Instant::now();
+                        if !handle_binary(&mut sender, &bytes, &device_id).await {
+                            let close = sender.send(Message::Close(None));
+                            let _ = timeout(PING_SEND_TIMEOUT, close).await;
+                            break;
+                        }
+                    }
+                    Some(Ok(Message::Ping(_) | Message::Pong(_))) => {
                         // A `Pong` answering our own keepalive counts as
                         // activity too, which is the point: it's how a
                         // healthy link's deadline gets pushed out.
                         last_activity = Instant::now();
-                        // Task 9 hands inbound binary frames to the
-                        // ownership runtime. Until then the link is held
-                        // open and nothing is echoed.
                     }
                 }
             }

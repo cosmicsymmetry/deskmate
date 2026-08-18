@@ -2012,32 +2012,32 @@ Three gaps, all in `companion/crates/app-core/`:
 - Produces: the projected status fields, two runtime commands, and the credential store
   that Task 10's UI and typed IPC consume.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Cover: every additive V2 status field surviving the wire-to-snapshot projection;
 `CAPABILITY_NETWORKING` decoding rather than reading as unknown; a provisioning command
 executing on the **existing** session with no second port open; and the credential store
 round-tripping without touching `AppConfig`.
 
-- [ ] **Step 2: Project the V2 status fields into `DeviceSnapshot`**
+- [x] **Step 2: Project the V2 status fields into `DeviceSnapshot`**
 
 Additive only. This is the third time in this project that firmware has filled a status
 field nothing consumes — it cost a wasted board session at Task 3 and was caught again at
 Task 6. Project every field, not only the ones Task 10 happens to render.
 
-- [ ] **Step 3: Add provisioning and factory-reset runtime commands**
+- [x] **Step 3: Add provisioning and factory-reset runtime commands**
 
 They execute on the existing `SerialRuntimeDevice`/`ConnectedSession`. No second session,
 ever. A provisioning attempt while the runtime is disconnected must return a typed error,
 not open a port of its own.
 
-- [ ] **Step 4: Add the credential store**
+- [x] **Step 4: Add the credential store**
 
 Server base URL, device id, admin token, device token. Tokens are write-only: accepted,
 never returned to a caller, never present in any snapshot or event. `AppConfig` is
 untouched and `docs/config/v4.md` stays the frozen contract.
 
-- [ ] **Step 5: Run the gates and commit**
+- [x] **Step 5: Run the gates and commit**
 
 ---
 
@@ -2184,7 +2184,7 @@ The last feature task. V1 already poured the foundation: `ota_0`/`ota_1` at 4 MB
   firmware endpoints.
 - Produces: `ota_mark_running_image_valid()`, `ota_check_now()`, `ota_state()`.
 
-- [ ] **Step 1: Enable rollback**
+- [x] **Step 1: Enable rollback**
 
 In `firmware/sdkconfig.defaults`:
 
@@ -2192,7 +2192,7 @@ In `firmware/sdkconfig.defaults`:
 CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 ```
 
-- [ ] **Step 2: Write the header**
+- [x] **Step 2: Write the header**
 
 Create `firmware/main/link/ota.h`:
 
@@ -2227,7 +2227,7 @@ esp_err_t ota_check_now(void);
 protocol_ota_state_t ota_state(void);
 ```
 
-- [ ] **Step 3: Implement the update path**
+- [x] **Step 3: Implement the update path**
 
 Create `firmware/main/link/ota.c`:
 
@@ -2242,21 +2242,21 @@ Create `firmware/main/link/ota.c`:
   cleanly, set state to `PROTOCOL_OTA_FAILED`, and leave the running image untouched.
 - Schedule: at boot and every 24 h thereafter with jitter, in **both** tiers.
 
-- [ ] **Step 4: Implement the validity gate**
+- [x] **Step 4: Implement the validity gate**
 
 `ota_mark_running_image_valid()` checks `esp_ota_get_state_partition()` for
 `ESP_OTA_IMG_PENDING_VERIFY`; if so, verify the four local conditions and call
 `esp_ota_mark_app_valid_cancel_rollback()`. Call it from `main.c` **after** the display,
 LVGL, NVS and protocol task are all up — not before, or the check proves nothing.
 
-- [ ] **Step 5: Build the progress takeover**
+- [x] **Step 5: Build the progress takeover**
 
 Create `firmware/main/ui/ota_screen.c` showing "Updating" with a percentage, following
 the existing template style helpers. Guard every LVGL call with
 `lvgl_port_lock()`/`lvgl_port_unlock()` — this runs from the OTA task, not an LVGL
 callback.
 
-- [ ] **Step 6: Switch the capability bit on**
+- [x] **Step 6: Switch the capability bit on**
 
 In `firmware/main/core/protocol_message.h` add `PROTOCOL_CAPABILITY_FIRMWARE_UPDATE` to
 `PROTOCOL_CURRENT_CAPABILITIES`, and mirror it in `CURRENT_CAPABILITIES` in
@@ -2264,11 +2264,11 @@ In `firmware/main/core/protocol_message.h` add `PROTOCOL_CAPABILITY_FIRMWARE_UPD
 capability value — with networking (bit 7) and firmware update (bit 6) the value becomes
 `0b1100_1011` = **203**.
 
-- [ ] **Step 7: Report OTA state in status**
+- [x] **Step 7: Report OTA state in status**
 
 Fill `status->ota_state` from `ota_state()` in the status builder.
 
-- [ ] **Step 8: Run the gates**
+- [x] **Step 8: Run the gates**
 
 ```sh
 make -C firmware/host_tests clean test
@@ -2285,6 +2285,17 @@ cargo test --workspace
 ```
 
 - [ ] **Step 9: Verify the happy path on the physical board**
+
+> **DEFERRED to the morning board session.** Steps 9-11 need the device. Two things the
+> owner must know before starting, both established by review rather than guesswork:
+> **(1) start from a full `idf.py flash`** of bootloader + partition table + otadata + app.
+> Rollback is a *bootloader* feature and OTA does not update the bootloader, so a board
+> still carrying the pre-Task-11 bootloader will accept the new app and never roll it
+> back — Step 10 would appear to fail for reasons unrelated to this code.
+> **(2) a corrected rebuild published under the same version string as a failed one is
+> refused forever**, because the refusal keys on the version string rather than image
+> content. Bump the version or reflash over USB.
+
 
 Build version A, flash it over USB, then build version B with a visible difference and
 place it in the server's firmware directory. Confirm all five: the device reports the new

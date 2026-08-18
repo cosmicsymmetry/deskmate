@@ -1934,3 +1934,103 @@ link is not flapping.
 
 Not covered: the 45000 ms network deadline cannot be exercised until a network transport
 exists (Task 8).
+
+## V2 Task 6 — WiFi station and SNTP, verified 2026-08-18
+
+The radio comes up for the first time. Flashed at commit `373b0ca` lineage
+(`baac85f` firmware + CLI status fields), board on `/dev/cu.usbmodem3101`.
+
+**A blocking defect was found and fixed first — see the entry below this one.** The
+first WiFi build crash-looped before reaching the clock screen; `s_context` was moved to
+PSRAM to make room. Everything here was observed on the fixed build.
+
+**PASSED — network half, read from `status --json`.**
+
+- `wifi_state: connected`, `ip: 192.168.8.168`, `wifi_rssi: -63`. The RSSI is a live
+  sample via `esp_wifi_sta_get_ap_info()`, not the join-instant value — a review finding
+  fixed before this run, because a frozen RSSI defeats the "wrong password versus out of
+  range" judgement the FAILED classification exists to support.
+- `tier: local`, correct for the free tier: the radio is up for SNTP and firmware only,
+  and no control connection to any server exists.
+- `uptime_ms: 282274` at the sample, ~4.7 minutes with no reboot. `malformed_frames: 0`.
+  `free_heap` 8,376,795.
+
+**PASSED — the standalone clock shows correct local time, observed by the repository
+owner directly.** The panel showed the correct local time when checked against UTC+4 at
+17:49 local / 13:49 UTC. The webcam harness was unavailable this session (see below), so
+this is a direct human observation rather than a captured frame.
+
+Worth stating precisely, because it is stronger than "no host attached": USB *was*
+connected throughout as a status-polling link, but **no configuration and no time-sync
+was ever pushed** — neither `status` nor `provision` sends one, and no config was ever
+applied, so the device sat on the standalone clock screen for the whole session. The
+displayed time can therefore only have come from SNTP supplying UTC plus the provisioned
+`utc_offset_minutes` of 240 supplying the zone. That is exactly the property Task 6
+exists to deliver.
+
+**NOT VERIFIED — the network-loss transition.** That pulling the network moves
+`wifi_state` to `connecting` without rebooting the device was not exercised; it needs the
+AP taken away or the board moved out of range, neither of which was available. The
+reconnect path is covered by review only.
+
+**NOT VERIFIED — anything requiring the webcam.** The harness failed this session and
+this exposed a latent defect in it: the physical **OBSBOT Meet 2 StreamCamera was absent
+from the `avfoundation` device list entirely** (only MacBook Pro Camera `[0]`, **OBSBOT
+Virtual Camera** `[1]` and Desk View `[2]` enumerated), while the OBSBOT Center system
+extension was running. `tools/hwcam/capture.sh` resolves the camera by matching the first
+video device whose name contains `OBSBOT`, which now matches the *Virtual* camera, and
+opening it fails with `Error opening input file 1`. The script's own comment explains it
+resolves by name because indices shift — but the match is too loose to tell the real
+camera from the virtual one. **Fix when next touching the harness: exclude `Virtual` from
+the match, and fail with a clear message when only the virtual device is present.**
+
+## V2 — WiFi crash-loop root-caused and fixed, 2026-08-18
+
+The first Task 6 build **crash-looped on every boot** and never reached the standalone
+clock: `ESP_ERROR_CHECK failed: esp_err_t 0x101 (ESP_ERR_NO_MEM)` at `main.c:61`,
+`expression: board_display_init()`.
+
+**Root cause: the WiFi stack's static DIRAM squeezed the LVGL draw buffers out of
+internal RAM.** `display.c` needs two internal-DMA buffers (flush plus rotation scratch,
+because `sw_rotate = true`): 2 x 47,104 = 94,208 B, and its guard requires a free block of
+95,232 B.
+
+Measured on the board with temporary `esp_rom_printf` probes:
+
+| | bytes |
+|---|---|
+| Largest contiguous `MALLOC_CAP_DMA` block at `board_display_init()` entry | **61,440** |
+| Required | 95,232 |
+| Shortfall | 33,792 |
+| Same figure measured during V1 | 110,592 |
+
+The block was identical at every probe point through expander reset, SPI bus init and
+`lvgl_port_init`, so nothing inside display init consumed it — the loss predated
+`app_main`. `idf.py size-components` attributed it: libpp 19,189 + libnet80211 12,422 +
+libphy 8,498 + liblwip 3,790 + libwpa_supplicant 1,371 = **45,270 B** of WiFi-stack
+DIRAM, against a measured drop of 49,152 B from V1.
+
+**Fix: `s_context` (54,616 B) moved from internal `.bss` to PSRAM.** The map file ranks
+internal `.bss` as `work_mem_int$0` 65,536 (LVGL's pool), `s_context` 54,616,
+`s_queue` 10,232 — roughly 130 KB, none of it DMA-requiring, on a board with 8 MB of idle
+PSRAM. Nothing in `protocol_context_t` is DMA'd: `usb_serial_jtag_write_bytes()` and
+`esp_websocket_client_send_bin()` both copy, and the context is touched only from the
+protocol task, never an ISR.
+
+**Result, measured: largest contiguous DMA block 61,440 -> 118,784 B**, a margin of
+23,552 B over the 95,232 requirement, with headroom for Task 8's TLS. One boot, zero
+crashes.
+
+Two notes for whoever hits this next:
+
+- **LVGL's 64 KiB pool is the bigger block but the wrong target.** `firmware/lv_conf.h`
+  is compiled by the `lvgl-sim` host harness, so changing LVGL's allocator would put V1's
+  pixel-exact golden-frame pipeline and all 54 goldens at risk. `s_context` is confined to
+  one file in `link/` and cannot affect the simulator.
+- **The error was legible only because of V1's defensive guard.** The explicit
+  `heap_caps_get_largest_free_block(MALLOC_CAP_DMA)` check added after the 2026-08-13
+  crash-loop turned what would have been an `IllegalInstruction` panic with a corrupted
+  backtrace into a named `ESP_ERR_NO_MEM` at one line. Note also that the `ESP_LOGE`
+  carrying the actual figures was **invisible**: the post-scheduler console goes to UART0
+  only, and even switching the primary console to USB Serial JTAG did not surface it, so
+  `esp_rom_printf` probes were required. Same blindfold as 2026-08-13.

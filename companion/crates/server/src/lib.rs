@@ -25,7 +25,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use app_core::RuntimeHandle;
@@ -39,6 +39,7 @@ use tower::load_shed::error::Overloaded;
 
 use firmware::FirmwareCatalog;
 use registry::{DEVICE_IDENTITY_STORE_FILE, Registry};
+use runtime_device::SocketConnector;
 
 /// Caps how many requests this process handles at once, across *every*
 /// route -- genuinely process-wide, via [`GlobalConcurrencyLimitLayer`]
@@ -66,9 +67,10 @@ const MAX_CONCURRENT_REQUESTS: usize = 64;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Shared server state, cheap to clone: every field is behind an `Arc`
-/// (directly or via the outer `Arc<StateInner>`). Live links carry the
+/// (directly or via the outer `Arc<StateInner>`). Per-device entries carry the
 /// single-owner `app-core` runtime alongside the persistent registry and
-/// config stores.
+/// config stores. They outlive individual WebSocket links so live app-core
+/// state is not a property of a transport connection.
 #[derive(Clone)]
 pub struct ServerState {
     inner: Arc<StateInner>,
@@ -82,7 +84,7 @@ struct StateInner {
     /// Keeps the dedicated config root alive for [`ServerState::in_memory`].
     /// Production paths are operator-owned and leave this as `None`.
     _config_temp_dir: Option<tempfile::TempDir>,
-    live_links: Mutex<HashMap<registry::DeviceId, Arc<LiveLink>>>,
+    device_links: Mutex<HashMap<registry::DeviceId, Arc<LiveLink>>>,
     /// Bounds concurrent `/v1/device/link` connections. `Arc`-wrapped
     /// separately from `StateInner` because `Semaphore::try_acquire_owned`
     /// needs an owned `Arc<Semaphore>` to hand a `'static` permit to the
@@ -111,7 +113,7 @@ impl ServerState {
                 firmware,
                 configs: store::DeviceConfigStores::new(config_directory),
                 _config_temp_dir: config_temp_dir,
-                live_links: Mutex::new(HashMap::new()),
+                device_links: Mutex::new(HashMap::new()),
                 link_slots: Arc::new(tokio::sync::Semaphore::new(
                     device_link::MAX_CONCURRENT_LINKS,
                 )),
@@ -179,55 +181,106 @@ impl ServerState {
     /// The reservation happens before the 101 response, so two simultaneous
     /// upgrades cannot both believe they won.
     pub(crate) fn claim_link(&self, device_id: registry::DeviceId) -> Option<LinkLease> {
-        let mut links = self
-            .inner
-            .live_links
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if links.contains_key(&device_id) {
+        let link = {
+            let mut links = self
+                .inner
+                .device_links
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            Arc::clone(links.entry(device_id).or_default())
+        };
+        if !link.claim() {
             return None;
         }
-        let link = Arc::new(LiveLink::default());
-        links.insert(device_id.clone(), Arc::clone(&link));
-        Some(LinkLease {
-            state: self.clone(),
-            device_id,
-            link,
-        })
+        Some(LinkLease { link })
     }
 
-    pub(crate) fn live_link(&self, device_id: &str) -> Option<Arc<LiveLink>> {
+    pub(crate) fn device_link(&self, device_id: &str) -> Option<Arc<LiveLink>> {
         self.inner
-            .live_links
+            .device_links
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(device_id)
             .cloned()
     }
+
+    /// Stops every per-device runtime retained by this server. The operation
+    /// is idempotent and is called after Axum drains on process shutdown.
+    pub fn shutdown(&self) {
+        let links: Vec<_> = self
+            .inner
+            .device_links
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+            .cloned()
+            .collect();
+        for link in links {
+            let Some(runtime) = link.take_runtime() else {
+                continue;
+            };
+            runtime.connector.detach();
+            if let Err(error) = runtime.handle.shutdown() {
+                tracing::warn!(%error, "device runtime shutdown failed");
+            }
+        }
+    }
 }
 
 #[derive(Default)]
 pub(crate) struct LiveLink {
-    runtime: Mutex<Option<Arc<RuntimeHandle>>>,
+    live: AtomicBool,
+    runtime: Mutex<Option<ManagedRuntime>>,
     last_seen_unix_ms: Arc<AtomicU64>,
 }
 
+struct ManagedRuntime {
+    handle: Arc<RuntimeHandle>,
+    connector: SocketConnector,
+}
+
 impl LiveLink {
-    pub(crate) fn set_runtime(&self, runtime: Arc<RuntimeHandle>) {
+    fn claim(&self) -> bool {
+        self.live
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+
+    fn release(&self) {
+        self.live.store(false, Ordering::Release);
+    }
+
+    pub(crate) fn is_live(&self) -> bool {
+        self.live.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn set_runtime(&self, runtime: Arc<RuntimeHandle>, connector: SocketConnector) {
         *self
             .runtime
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(runtime);
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(ManagedRuntime {
+            handle: runtime,
+            connector,
+        });
     }
 
     pub(crate) fn runtime(&self) -> Option<Arc<RuntimeHandle>> {
         self.runtime
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
+            .as_ref()
+            .map(|runtime| Arc::clone(&runtime.handle))
     }
 
-    pub(crate) fn take_runtime(&self) -> Option<Arc<RuntimeHandle>> {
+    pub(crate) fn attach_runtime(&self) -> Option<runtime_device::SocketPeer> {
+        self.runtime
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .map(|runtime| runtime.connector.attach())
+    }
+
+    fn take_runtime(&self) -> Option<ManagedRuntime> {
         self.runtime
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -247,8 +300,6 @@ impl LiveLink {
 }
 
 pub(crate) struct LinkLease {
-    state: ServerState,
-    device_id: registry::DeviceId,
     link: Arc<LiveLink>,
 }
 
@@ -260,18 +311,7 @@ impl LinkLease {
 
 impl Drop for LinkLease {
     fn drop(&mut self) {
-        let mut links = self
-            .state
-            .inner
-            .live_links
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if links
-            .get(&self.device_id)
-            .is_some_and(|current| Arc::ptr_eq(current, &self.link))
-        {
-            links.remove(&self.device_id);
-        }
+        self.link.release();
     }
 }
 
@@ -358,5 +398,22 @@ mod tests {
             .expect("in-memory firmware has an owned temp root");
 
         assert!(!config_path.starts_with(firmware_storage));
+    }
+
+    #[test]
+    fn link_claim_refuses_a_second_live_owner_and_releases_on_drop() {
+        let state = ServerState::in_memory();
+        let first = state
+            .claim_link("dev-0001".into())
+            .expect("first owner claims the link");
+        assert!(
+            state.claim_link("dev-0001".into()).is_none(),
+            "a second concurrent owner was accepted"
+        );
+        drop(first);
+        assert!(
+            state.claim_link("dev-0001".into()).is_some(),
+            "the ownership slot was not released with its lease"
+        );
     }
 }

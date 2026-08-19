@@ -53,6 +53,43 @@ pub async fn drive_until_config(socket: &mut DeviceSocket, widget_id: &str) -> A
     .expect("timed out waiting for the expected config")
 }
 
+pub async fn drive_until_push(socket: &mut DeviceSocket, widget_id: &str) -> protocol::PushData {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            match socket.next().await {
+                Some(Ok(WsMessage::Binary(bytes))) => {
+                    let frame = protocol::decode_wire_frame(&bytes)
+                        .expect("device received a malformed frame");
+                    let message = protocol::decode_message(&frame)
+                        .expect("device received an undecodable message");
+                    let target = matches!(
+                        &message,
+                        Message::PushData(push) if push.widget_id == widget_id
+                    );
+                    reply(socket, frame.request_id, &message).await;
+                    if target {
+                        let Message::PushData(push) = message else {
+                            unreachable!("target is true only for PushData");
+                        };
+                        return push;
+                    }
+                }
+                Some(Ok(WsMessage::Ping(payload))) => {
+                    socket.send(WsMessage::Pong(payload)).await.unwrap();
+                }
+                Some(Ok(other)) => panic!("unexpected WebSocket message: {other:?}"),
+                Some(Err(error)) => panic!("WebSocket read failed: {error}"),
+                None => panic!("socket closed before the expected data push arrived"),
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for the expected data push")
+}
+
+/// Drives a runtime's first connection through full synchronization and the
+/// initial scheduled status/time-sync work. Do not use this for reattachment:
+/// a retained scheduler does not restart those periodic deadlines.
 pub async fn bootstrap_runtime(socket: &mut DeviceSocket) {
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
@@ -81,6 +118,38 @@ pub async fn bootstrap_runtime(socket: &mut DeviceSocket) {
     })
     .await
     .expect("timed out bootstrapping the runtime");
+}
+
+/// Drives a retained runtime's reconnect replay. Replay restores the cached
+/// device model through `ActivateScreen`, but deliberately does not restart
+/// app-core's initial periodic schedule.
+pub async fn reattach_runtime(socket: &mut DeviceSocket) {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            match socket.next().await {
+                Some(Ok(WsMessage::Binary(bytes))) => {
+                    let frame = protocol::decode_wire_frame(&bytes)
+                        .expect("device received a malformed frame during reattach");
+                    let message = protocol::decode_message(&frame)
+                        .expect("device received an undecodable message during reattach");
+                    let complete = matches!(message, Message::ActivateScreen(_));
+                    reply(socket, frame.request_id, &message).await;
+                    if complete {
+                        flush_socket(socket).await;
+                        return;
+                    }
+                }
+                Some(Ok(WsMessage::Ping(payload))) => {
+                    socket.send(WsMessage::Pong(payload)).await.unwrap();
+                }
+                Some(Ok(other)) => panic!("unexpected reattach WebSocket message: {other:?}"),
+                Some(Err(error)) => panic!("reattach WebSocket read failed: {error}"),
+                None => panic!("socket closed before runtime reattach completed"),
+            }
+        }
+    })
+    .await
+    .expect("timed out reattaching the runtime");
 }
 
 async fn finish_initial_schedule(socket: &mut DeviceSocket) {

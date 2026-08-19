@@ -15,6 +15,11 @@ mod support;
 
 type DeviceSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
+#[derive(Default)]
+struct ConnectionSequence {
+    connected_once: bool,
+}
+
 async fn spawn() -> (String, server::registry::DeviceIdentity, String) {
     let state = ServerState::in_memory();
     let identity = state.registry().mint().expect("mint identity");
@@ -31,37 +36,53 @@ async fn spawn() -> (String, server::registry::DeviceIdentity, String) {
     )
 }
 
-async fn connect(host: &str, identity: &server::registry::DeviceIdentity) -> DeviceSocket {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
-    loop {
-        let request = http::Request::builder()
-            .uri(format!("ws://{host}/v1/device/link"))
-            .header("Authorization", format!("Bearer {}", identity.token))
-            .header("Host", host)
-            .header("Connection", "Upgrade")
-            .header("Upgrade", "websocket")
-            .header("Sec-WebSocket-Version", "13")
-            .header(
-                "Sec-WebSocket-Key",
-                tokio_tungstenite::tungstenite::handshake::client::generate_key(),
-            )
-            .body(())
-            .unwrap();
-        if let Ok((mut socket, response)) = tokio_tungstenite::connect_async(request).await {
-            assert_eq!(response.status(), 101);
-            support::bootstrap_runtime(&mut socket).await;
-            return socket;
+impl ConnectionSequence {
+    async fn connect(
+        &mut self,
+        host: &str,
+        identity: &server::registry::DeviceIdentity,
+    ) -> DeviceSocket {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+        loop {
+            let request = http::Request::builder()
+                .uri(format!("ws://{host}/v1/device/link"))
+                .header("Authorization", format!("Bearer {}", identity.token))
+                .header("Host", host)
+                .header("Connection", "Upgrade")
+                .header("Upgrade", "websocket")
+                .header("Sec-WebSocket-Version", "13")
+                .header(
+                    "Sec-WebSocket-Key",
+                    tokio_tungstenite::tungstenite::handshake::client::generate_key(),
+                )
+                .body(())
+                .unwrap();
+            if let Ok((mut socket, response)) = tokio_tungstenite::connect_async(request).await {
+                assert_eq!(response.status(), 101);
+                if self.connected_once {
+                    support::reattach_runtime(&mut socket).await;
+                } else {
+                    support::bootstrap_runtime(&mut socket).await;
+                    self.connected_once = true;
+                }
+                return socket;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "device ownership slot was not released after hostile disconnect"
+            );
+            tokio::task::yield_now().await;
         }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "device ownership slot was not released after hostile disconnect"
-        );
-        tokio::task::yield_now().await;
     }
 }
 
-async fn assert_rejected(host: &str, identity: &server::registry::DeviceIdentity, bytes: Vec<u8>) {
-    let mut socket = connect(host, identity).await;
+async fn assert_rejected(
+    connections: &mut ConnectionSequence,
+    host: &str,
+    identity: &server::registry::DeviceIdentity,
+    bytes: Vec<u8>,
+) {
+    let mut socket = connections.connect(host, identity).await;
     socket.send(WsMessage::Binary(bytes)).await.unwrap();
     let closed = timeout(Duration::from_secs(1), async {
         loop {
@@ -81,12 +102,14 @@ async fn assert_rejected(host: &str, identity: &server::registry::DeviceIdentity
 #[tokio::test]
 async fn hostile_device_frames_are_bounded_and_concatenated_frames_decode() {
     let (host, identity, admin_token) = spawn().await;
+    let mut connections = ConnectionSequence::default();
 
     let mut corrupt_delimiter = protocol::encode_message(1, &Message::StatusRequest).unwrap();
     corrupt_delimiter.insert(corrupt_delimiter.len() / 2, 0);
-    assert_rejected(&host, &identity, corrupt_delimiter).await;
+    assert_rejected(&mut connections, &host, &identity, corrupt_delimiter).await;
 
     assert_rejected(
+        &mut connections,
         &host,
         &identity,
         protocol::test_support::oversized_declared_payload(2),
@@ -94,11 +117,11 @@ async fn hostile_device_frames_are_bounded_and_concatenated_frames_decode() {
     .await;
 
     let unknown_type = protocol::encode_frame(&Frame::new(u8::MAX, 3, vec![0xa0])).unwrap();
-    assert_rejected(&host, &identity, unknown_type).await;
+    assert_rejected(&mut connections, &host, &identity, unknown_type).await;
 
     let mut truncated = protocol::encode_message(4, &Message::StatusRequest).unwrap();
     assert_eq!(truncated.pop(), Some(0));
-    assert_rejected(&host, &identity, truncated).await;
+    assert_rejected(&mut connections, &host, &identity, truncated).await;
 
     let event = |sequence| {
         Message::DeviceEvent(DeviceEvent {
@@ -112,7 +135,7 @@ async fn hostile_device_frames_are_bounded_and_concatenated_frames_decode() {
     };
     let mut concatenated = protocol::encode_message(0, &event(10)).unwrap();
     concatenated.extend(protocol::encode_message(0, &event(12)).unwrap());
-    let mut socket = connect(&host, &identity).await;
+    let mut socket = connections.connect(&host, &identity).await;
     socket.send(WsMessage::Binary(concatenated)).await.unwrap();
     support::answer_next_runtime_status(&mut socket).await;
     support::flush_socket(&mut socket).await;

@@ -1,0 +1,34 @@
+{
+  "schema_version": 4,
+  "preferences": {
+    "timezone": "UTC",
+    "autostart": false,
+    "paused": false,
+    "orientation": "landscape"
+  },
+  "cards": [
+    {
+      "kind": "pomodoro",
+      "id": "pomodoro",
+      "label": "Focus",
+      "duration_seconds": 30,
+      "template": { "kind": "progress-ring" },
+      "tap_action": { "kind": "start-pause" },
+      "refresh": { "kind": "device-local" },
+      "alert": { "kind": "none" }
+    }
+  ],
+  "assets": [],
+  "playlists": [
+    {
+      "id": "main",
+      "name": "Main",
+      "advance": { "kind": "manual" },
+      "entries": [
+        { "card_id": "pomodoro", "dwell_seconds": null }
+      ]
+    }
+  ],
+  "active_playlist_id": "main",
+  "updater": { "channel": "stable", "checks": "notify" }
+}

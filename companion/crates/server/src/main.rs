@@ -68,10 +68,14 @@ async fn main() {
     println!("deskmate server listening on {local_addr}");
     tracing::info!(address = %local_addr, "deskmate server listening");
 
+    let shutdown_state = state.clone();
     axum::serve(listener, app(state))
         .with_graceful_shutdown(shutdown_signal())
         .await
         .expect("server exited with an error");
+    tokio::task::spawn_blocking(move || shutdown_state.shutdown())
+        .await
+        .expect("device runtime shutdown worker panicked");
 }
 
 /// Resolves once `SIGINT` (Ctrl-C) or, on Unix, `SIGTERM` is received, so

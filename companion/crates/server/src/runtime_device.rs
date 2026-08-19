@@ -7,9 +7,9 @@
 //! channel boundary avoids trying to enter a Tokio runtime from synchronous
 //! trait methods and keeps request IDs single-owned.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use app_core::{DeviceConnection, RuntimeDevice};
@@ -74,6 +74,62 @@ struct PendingRequest {
 }
 
 #[derive(Default)]
+struct TransportState {
+    generation: u64,
+    commands: Option<UnboundedSender<DeviceRequest>>,
+}
+
+#[derive(Default)]
+struct TransportSlot {
+    state: Mutex<TransportState>,
+}
+
+impl TransportSlot {
+    fn attach(&self, commands: UnboundedSender<DeviceRequest>) -> u64 {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.generation = state.generation.wrapping_add(1).max(1);
+        state.commands = Some(commands);
+        state.generation
+    }
+
+    fn current(&self) -> Option<(u64, UnboundedSender<DeviceRequest>)> {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state
+            .commands
+            .as_ref()
+            .filter(|commands| !commands.is_closed())
+            .map(|commands| (state.generation, commands.clone()))
+    }
+
+    fn current_generation(&self) -> Option<u64> {
+        self.current().map(|(generation, _)| generation)
+    }
+
+    fn detach(&self, generation: u64) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.generation == generation {
+            state.commands = None;
+        }
+    }
+
+    fn detach_current(&self) {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .commands = None;
+    }
+}
+
+#[derive(Default)]
 struct DiagnosticCounters {
     keepalives_sent: AtomicU64,
     reconnects: AtomicU64,
@@ -105,6 +161,7 @@ struct EventRouter {
     last_seen_sequence: Option<u64>,
     last_queued_sequence: Option<u64>,
     diagnostics: Arc<DiagnosticCounters>,
+    replay: Arc<Mutex<ReplayState>>,
 }
 
 impl EventRouter {
@@ -119,6 +176,35 @@ impl EventRouter {
             return;
         }
         self.last_seen_sequence = Some(event.sequence);
+        {
+            let mut replay = self
+                .replay
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if event.kind == protocol::EventKind::Navigation
+                && matches!(
+                    event.action,
+                    protocol::EventAction::NavigatePrevious | protocol::EventAction::NavigateNext
+                )
+                && replay.config.as_ref().is_some_and(|config| {
+                    config
+                        .screens
+                        .iter()
+                        .any(|screen| screen.screen_id == event.screen_id)
+                })
+            {
+                replay.active_screen = Some(ActivateScreen {
+                    screen_id: event.screen_id.clone(),
+                });
+            }
+            if event.kind == protocol::EventKind::InterruptDismissed
+                && let Some(token) = event.interrupt_token
+            {
+                replay
+                    .interrupts
+                    .retain(|interrupt| interrupt.token != token);
+            }
+        }
         let missed_before = self.last_queued_sequence.map_or(0, |sequence| {
             event.sequence.saturating_sub(sequence).saturating_sub(1)
         });
@@ -143,13 +229,59 @@ impl EventRouter {
     }
 }
 
+#[derive(Clone, Default)]
+struct ReplayState {
+    time_sync: Option<(TimeSync, std::time::Instant)>,
+    config: Option<ApplyConfig>,
+    pushes: Vec<PushData>,
+    active_screen: Option<ActivateScreen>,
+    interrupts: Vec<TriggerInterrupt>,
+}
+
+/// Stable attachment point retained beside a device's long-lived runtime.
+/// Each accepted WebSocket installs a fresh actor endpoint into this slot.
+#[derive(Clone)]
+pub(crate) struct SocketConnector {
+    transport: Arc<TransportSlot>,
+    event_sender: SyncSender<ReceivedEvent>,
+    diagnostics: Arc<DiagnosticCounters>,
+    replay: Arc<Mutex<ReplayState>>,
+}
+
+impl SocketConnector {
+    pub(crate) fn attach(&self) -> SocketPeer {
+        let (command_sender, command_receiver) = tokio::sync::mpsc::unbounded_channel();
+        let generation = self.transport.attach(command_sender);
+        SocketPeer {
+            commands: command_receiver,
+            event_router: EventRouter {
+                sender: self.event_sender.clone(),
+                last_seen_sequence: None,
+                last_queued_sequence: None,
+                diagnostics: Arc::clone(&self.diagnostics),
+                replay: Arc::clone(&self.replay),
+            },
+            diagnostics: Arc::clone(&self.diagnostics),
+            transport: Arc::clone(&self.transport),
+            generation,
+            next_request_id: 1,
+        }
+    }
+
+    pub(crate) fn detach(&self) {
+        self.transport.detach_current();
+    }
+}
+
 /// The synchronous half handed to [`app_core::RuntimeHandle`].
 pub struct WebSocketRuntimeDevice {
     device_id: String,
-    commands: UnboundedSender<DeviceRequest>,
+    transport: Arc<TransportSlot>,
     events: Receiver<ReceivedEvent>,
     diagnostics: Arc<DiagnosticCounters>,
-    connected: bool,
+    replay: Arc<Mutex<ReplayState>>,
+    connected_generation: Option<u64>,
+    ever_connected: bool,
     latest_data_revision: u32,
     latest_config_revision: u32,
     capabilities: u64,
@@ -160,50 +292,61 @@ pub(crate) struct SocketPeer {
     commands: UnboundedReceiver<DeviceRequest>,
     event_router: EventRouter,
     diagnostics: Arc<DiagnosticCounters>,
+    transport: Arc<TransportSlot>,
+    generation: u64,
     next_request_id: u32,
 }
 
 impl WebSocketRuntimeDevice {
-    pub(crate) fn channel(device_id: String) -> (Self, SocketPeer) {
-        let (command_sender, command_receiver) = tokio::sync::mpsc::unbounded_channel();
+    pub(crate) fn channel(device_id: String) -> (Self, SocketConnector) {
         let (event_sender, event_receiver) = mpsc::sync_channel(EVENT_QUEUE_CAPACITY);
         let diagnostics = Arc::new(DiagnosticCounters::default());
-        let peer = SocketPeer {
-            commands: command_receiver,
-            event_router: EventRouter {
-                sender: event_sender,
-                last_seen_sequence: None,
-                last_queued_sequence: None,
-                diagnostics: Arc::clone(&diagnostics),
-            },
+        let transport = Arc::new(TransportSlot::default());
+        let replay = Arc::new(Mutex::new(ReplayState::default()));
+        let connector = SocketConnector {
+            transport: Arc::clone(&transport),
+            event_sender,
             diagnostics: Arc::clone(&diagnostics),
-            next_request_id: 1,
+            replay: Arc::clone(&replay),
         };
         (
             Self {
                 device_id,
-                commands: command_sender,
+                transport,
                 events: event_receiver,
                 diagnostics,
-                connected: false,
+                replay,
+                connected_generation: None,
+                ever_connected: false,
                 latest_data_revision: 0,
                 latest_config_revision: 0,
                 capabilities: 0,
             },
-            peer,
+            connector,
         )
     }
 
-    fn request(&self, message: Message) -> Result<Message, DeviceError> {
+    fn request_on_generation(
+        &self,
+        expected_generation: Option<u64>,
+        message: Message,
+    ) -> Result<(u64, Message), DeviceError> {
+        let (generation, commands) = self
+            .transport
+            .current()
+            .ok_or(DeviceError::Transport(TransportError::Disconnected))?;
+        if expected_generation.is_some_and(|expected| expected != generation) {
+            return Err(DeviceError::NoDevice);
+        }
         let (response_sender, response_receiver) = mpsc::sync_channel(1);
-        self.commands
+        commands
             .send(DeviceRequest {
                 message,
                 response: response_sender,
             })
             .map_err(|_| DeviceError::Transport(TransportError::Disconnected))?;
         match response_receiver.recv_timeout(RESPONSE_WAIT_TIMEOUT) {
-            Ok(response) => response,
+            Ok(response) => response.map(|message| (generation, message)),
             Err(RecvTimeoutError::Timeout) => Err(DeviceError::Timeout),
             Err(RecvTimeoutError::Disconnected) => {
                 Err(DeviceError::Transport(TransportError::Disconnected))
@@ -211,12 +354,14 @@ impl WebSocketRuntimeDevice {
         }
     }
 
-    fn require_connected(&self) -> Result<(), DeviceError> {
-        if self.connected {
-            Ok(())
-        } else {
-            Err(DeviceError::NoDevice)
-        }
+    fn request(&self, message: Message) -> Result<(u64, Message), DeviceError> {
+        self.request_on_generation(None, message)
+    }
+
+    fn connected_request(&self, message: Message) -> Result<Message, DeviceError> {
+        let generation = self.connected_generation.ok_or(DeviceError::NoDevice)?;
+        self.request_on_generation(Some(generation), message)
+            .map(|(_, response)| response)
     }
 
     fn require_ack(
@@ -236,43 +381,188 @@ impl WebSocketRuntimeDevice {
     fn next_revision(current: u32) -> Result<u32, DeviceError> {
         current.checked_add(1).ok_or(DeviceError::RevisionExhausted)
     }
+
+    fn remember_success(&self, request: &Message) {
+        let mut replay = self
+            .replay
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match request {
+            Message::TimeSync(sync) => replay.time_sync = Some((*sync, std::time::Instant::now())),
+            Message::ApplyConfig(config) => {
+                let changes_live_model = replay.config.as_ref() != Some(config);
+                replay.config = Some(config.clone());
+                if changes_live_model {
+                    replay.pushes.clear();
+                    replay.interrupts.clear();
+                    if replay.active_screen.as_ref().is_some_and(|active| {
+                        !config
+                            .screens
+                            .iter()
+                            .any(|screen| screen.screen_id == active.screen_id)
+                    }) {
+                        replay.active_screen = None;
+                    }
+                }
+            }
+            Message::PushData(push) => {
+                replay
+                    .pushes
+                    .retain(|cached| cached.widget_id != push.widget_id);
+                replay.pushes.push(push.clone());
+                replay.pushes.sort_unstable_by_key(|cached| cached.revision);
+            }
+            Message::ActivateScreen(activation) => {
+                replay.active_screen = Some(activation.clone());
+            }
+            Message::TriggerInterrupt(interrupt) => {
+                replay
+                    .interrupts
+                    .retain(|cached| cached.token != interrupt.token);
+                replay.interrupts.push(interrupt.clone());
+                replay
+                    .interrupts
+                    .sort_unstable_by_key(|cached| cached.token);
+            }
+            _ => {}
+        }
+    }
+
+    fn replay_after_reconnect(
+        &mut self,
+        status: &StatusResponse,
+        generation: u64,
+    ) -> Result<(), DeviceError> {
+        let mut replay = self
+            .replay
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(config) = &replay.config {
+            let required = protocol::CAPABILITY_CORE_WIDGETS
+                | if config.rotation == 270 {
+                    protocol::CAPABILITY_CONFIG_ROTATION
+                } else {
+                    0
+                };
+            if status.capabilities & required != required {
+                return Err(DeviceError::MissingCapabilities {
+                    required,
+                    available: status.capabilities,
+                });
+            }
+        }
+
+        self.latest_data_revision = status.latest_revision;
+        self.latest_config_revision = status.config_revision;
+
+        if let Some((mut sync, synchronized_at)) = replay.time_sync {
+            if let Ok(elapsed) = i64::try_from(synchronized_at.elapsed().as_secs())
+                && let Some(adjusted) = sync.unix_seconds.checked_add(elapsed)
+            {
+                sync.unix_seconds = adjusted;
+            }
+            let (_, response) =
+                self.request_on_generation(Some(generation), Message::TimeSync(sync))?;
+            Self::require_ack(&response, protocol::TYPE_TIME_SYNC, None)?;
+        }
+
+        let mut config_applied = false;
+        if let Some(config) = replay.config.as_mut() {
+            if config.revision != status.config_revision {
+                if config.revision < status.config_revision {
+                    config.revision = status
+                        .config_revision
+                        .checked_add(1)
+                        .ok_or(DeviceError::RevisionExhausted)?;
+                }
+                let (_, response) = self.request_on_generation(
+                    Some(generation),
+                    Message::ApplyConfig(config.clone()),
+                )?;
+                Self::require_ack(
+                    &response,
+                    protocol::TYPE_APPLY_CONFIG,
+                    Some(config.revision),
+                )?;
+                config_applied = true;
+            }
+            self.latest_config_revision = config.revision;
+        }
+
+        let mut data_revision = status.latest_revision;
+        for push in &mut replay.pushes {
+            if !config_applied && push.revision <= data_revision {
+                continue;
+            }
+            if push.revision <= data_revision {
+                push.revision = data_revision
+                    .checked_add(1)
+                    .ok_or(DeviceError::RevisionExhausted)?;
+            }
+            let (_, response) =
+                self.request_on_generation(Some(generation), Message::PushData(push.clone()))?;
+            Self::require_ack(&response, protocol::TYPE_PUSH_DATA, Some(push.revision))?;
+            data_revision = push.revision;
+        }
+        self.latest_data_revision = data_revision;
+
+        if let Some(activation) = &replay.active_screen {
+            let (_, response) = self.request_on_generation(
+                Some(generation),
+                Message::ActivateScreen(activation.clone()),
+            )?;
+            Self::require_ack(&response, protocol::TYPE_ACTIVATE_SCREEN, None)?;
+        }
+        for interrupt in &replay.interrupts {
+            let (_, response) = self.request_on_generation(
+                Some(generation),
+                Message::TriggerInterrupt(interrupt.clone()),
+            )?;
+            Self::require_ack(&response, protocol::TYPE_TRIGGER_INTERRUPT, None)?;
+        }
+
+        *self
+            .replay
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = replay;
+        Ok(())
+    }
 }
 
-/// Unlike the serial implementation, this object deliberately does not retain
-/// replay state across `connect()` calls. Before the first successful full
-/// sync, app-core retries `connect()` after any `connect()` failure -- including
-/// `Timeout` while this socket actor is still alive. That path is safe because
-/// `needs_full_sync` starts `true` and `mark_disconnected` does not clear it,
-/// so a successful retry still runs the full synchronization.
-///
-/// After a successful full sync sets `needs_full_sync = false`, app-core only
-/// disconnects for `NoDevice`/`Transport`; either result here means the socket
-/// actor is already gone and its owning link task is ending. Every real network
-/// reconnect therefore receives a fresh device and runtime with full sync
-/// required. This reasoning is invalidated by any change that permits retrying
-/// `connect()` on the same live actor after `needs_full_sync` became `false`.
-/// In that design, `synchronize_pending` could skip the layout and silently
-/// reopen the M2 multi-owner/power-reset hole unless this implementation first
-/// gains the trait's full replay contract.
+/// Like the serial implementation, this object retains successfully-issued
+/// replay state across `connect()` calls. A new socket has a new attachment
+/// generation, so ordinary status/data work refuses it until app-core runs
+/// `connect()` and this implementation has replayed the device model.
 impl RuntimeDevice for WebSocketRuntimeDevice {
     fn connect(&mut self) -> Result<DeviceConnection, DeviceError> {
-        let was_connected = self.connected;
         let response = self.request(Message::StatusRequest);
-        let status = match response {
-            Ok(Message::StatusResponse(status)) => status,
-            Ok(_) => return Err(DeviceError::UnexpectedMessage),
+        let (generation, response) = match response {
+            Ok(response) => response,
             Err(error) => {
-                self.connected = false;
+                self.connected_generation = None;
                 return Err(error);
             }
         };
-        self.connected = true;
+        let Message::StatusResponse(status) = response else {
+            return Err(DeviceError::UnexpectedMessage);
+        };
         self.latest_data_revision = status.latest_revision;
         self.latest_config_revision = status.config_revision;
         self.capabilities = status.capabilities;
-        if was_connected {
+        if self.ever_connected {
+            if let Err(error) = self.replay_after_reconnect(&status, generation) {
+                self.connected_generation = None;
+                return Err(error);
+            }
             self.diagnostics.reconnects.fetch_add(1, Ordering::Relaxed);
         }
+        if self.transport.current_generation() != Some(generation) {
+            self.connected_generation = None;
+            return Err(DeviceError::Transport(TransportError::Disconnected));
+        }
+        self.connected_generation = Some(generation);
+        self.ever_connected = true;
         Ok(DeviceConnection {
             port_name: format!("network:{}", self.device_id),
             status,
@@ -280,8 +570,7 @@ impl RuntimeDevice for WebSocketRuntimeDevice {
     }
 
     fn status(&mut self) -> Result<StatusResponse, DeviceError> {
-        self.require_connected()?;
-        match self.request(Message::StatusRequest)? {
+        match self.connected_request(Message::StatusRequest)? {
             Message::StatusResponse(status) => {
                 self.capabilities = status.capabilities;
                 Ok(status)
@@ -305,9 +594,11 @@ impl RuntimeDevice for WebSocketRuntimeDevice {
     }
 
     fn time_sync(&mut self, sync: TimeSync) -> Result<(), DeviceError> {
-        self.require_connected()?;
-        let response = self.request(Message::TimeSync(sync))?;
-        Self::require_ack(&response, protocol::TYPE_TIME_SYNC, None)
+        let request = Message::TimeSync(sync);
+        let response = self.connected_request(request.clone())?;
+        Self::require_ack(&response, protocol::TYPE_TIME_SYNC, None)?;
+        self.remember_success(&request);
+        Ok(())
     }
 
     fn apply_layout(
@@ -316,7 +607,9 @@ impl RuntimeDevice for WebSocketRuntimeDevice {
         widgets: Vec<WidgetConfig>,
         screens: Vec<ScreenConfig>,
     ) -> Result<(), DeviceError> {
-        self.require_connected()?;
+        if self.connected_generation.is_none() {
+            return Err(DeviceError::NoDevice);
+        }
         let required = protocol::CAPABILITY_CORE_WIDGETS
             | if rotation == 270 {
                 protocol::CAPABILITY_CONFIG_ROTATION
@@ -330,40 +623,47 @@ impl RuntimeDevice for WebSocketRuntimeDevice {
             });
         }
         let revision = Self::next_revision(self.latest_config_revision)?;
-        let response = self.request(Message::ApplyConfig(ApplyConfig {
+        let request = Message::ApplyConfig(ApplyConfig {
             revision,
             rotation,
             widgets,
             screens,
-        }))?;
+        });
+        let response = self.connected_request(request.clone())?;
         Self::require_ack(&response, protocol::TYPE_APPLY_CONFIG, Some(revision))?;
         self.latest_config_revision = revision;
+        self.remember_success(&request);
         Ok(())
     }
 
     fn push_fields(&mut self, widget_id: String, fields: Vec<Field>) -> Result<(), DeviceError> {
-        self.require_connected()?;
         let revision = Self::next_revision(self.latest_data_revision)?;
-        let response = self.request(Message::PushData(PushData {
+        let request = Message::PushData(PushData {
             widget_id,
             revision,
             fields,
-        }))?;
+        });
+        let response = self.connected_request(request.clone())?;
         Self::require_ack(&response, protocol::TYPE_PUSH_DATA, Some(revision))?;
         self.latest_data_revision = revision;
+        self.remember_success(&request);
         Ok(())
     }
 
     fn activate_screen(&mut self, screen_id: String) -> Result<(), DeviceError> {
-        self.require_connected()?;
-        let response = self.request(Message::ActivateScreen(ActivateScreen { screen_id }))?;
-        Self::require_ack(&response, protocol::TYPE_ACTIVATE_SCREEN, None)
+        let request = Message::ActivateScreen(ActivateScreen { screen_id });
+        let response = self.connected_request(request.clone())?;
+        Self::require_ack(&response, protocol::TYPE_ACTIVATE_SCREEN, None)?;
+        self.remember_success(&request);
+        Ok(())
     }
 
     fn trigger_interrupt(&mut self, interrupt: TriggerInterrupt) -> Result<(), DeviceError> {
-        self.require_connected()?;
-        let response = self.request(Message::TriggerInterrupt(interrupt))?;
-        Self::require_ack(&response, protocol::TYPE_TRIGGER_INTERRUPT, None)
+        let request = Message::TriggerInterrupt(interrupt);
+        let response = self.connected_request(request.clone())?;
+        Self::require_ack(&response, protocol::TYPE_TRIGGER_INTERRUPT, None)?;
+        self.remember_success(&request);
+        Ok(())
     }
 
     fn try_recv_event(&mut self) -> Option<ReceivedEvent> {
@@ -477,6 +777,7 @@ impl SocketPeer {
                 .response
                 .send(Err(DeviceError::Transport(TransportError::Disconnected)));
         }
+        self.transport.detach(self.generation);
     }
 
     fn handle_binary(
@@ -620,7 +921,10 @@ fn mark_seen(last_seen_unix_ms: &AtomicU64) {
 mod tests {
     use app_core::RuntimeDevice;
     use device::DeviceError;
-    use protocol::{ErrorCode, NetworkConfig, Tier};
+    use protocol::{
+        Ack, ErrorCode, Field, FieldValue, Message, NetworkConfig, OtaState, StatusResponse, Tier,
+        TimeSync, WifiState,
+    };
 
     use super::SocketPeer;
 
@@ -638,7 +942,7 @@ mod tests {
 
     #[test]
     fn cable_only_operations_are_typed_as_unsupported_on_websocket() {
-        let (mut device, _peer) = super::WebSocketRuntimeDevice::channel("dev-1".into());
+        let (mut device, _connector) = super::WebSocketRuntimeDevice::channel("dev-1".into());
 
         for error in [
             device.provision(&network_config()).unwrap_err(),
@@ -655,7 +959,8 @@ mod tests {
 
     #[test]
     fn request_ids_are_nonzero_and_wrap_to_one() {
-        let (_device, mut peer) = super::WebSocketRuntimeDevice::channel("dev-1".into());
+        let (_device, connector) = super::WebSocketRuntimeDevice::channel("dev-1".into());
+        let mut peer = connector.attach();
         peer.next_request_id = 0;
         assert_eq!(peer.allocate_request_id(), 1);
         assert_eq!(peer.next_request_id, 2);
@@ -684,5 +989,136 @@ mod tests {
     fn keepalive_deadlines_preserve_progress_and_idle_detection() {
         assert!(super::SEND_TIMEOUT < super::PING_INTERVAL);
         assert!(super::PING_INTERVAL < super::IDLE_TIMEOUT);
+    }
+
+    #[test]
+    fn detached_transport_fails_immediately_without_queueing_work() {
+        let (mut device, connector) = super::WebSocketRuntimeDevice::channel("dev-1".into());
+        let peer = connector.attach();
+        drop(peer);
+
+        let started = std::time::Instant::now();
+        assert!(matches!(
+            device.connect(),
+            Err(DeviceError::Transport(device::TransportError::Disconnected))
+        ));
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(100),
+            "a detached runtime parked on a request instead of failing cleanly"
+        );
+    }
+
+    #[test]
+    fn a_new_attachment_requires_connect_and_replays_the_device_model() {
+        let (mut device, connector) = super::WebSocketRuntimeDevice::channel("dev-1".into());
+        let first_actor = spawn_test_actor(connector.attach());
+        device.connect().expect("first connect");
+        device
+            .time_sync(TimeSync {
+                unix_seconds: 1_700_000_000,
+                utc_offset_minutes: 0,
+            })
+            .expect("initial time sync");
+        device
+            .apply_layout(90, Vec::new(), Vec::new())
+            .expect("initial layout");
+        device
+            .push_fields(
+                "pomodoro".into(),
+                vec![Field {
+                    key: "remaining_seconds".into(),
+                    value: FieldValue::Integer(30),
+                }],
+            )
+            .expect("initial fields");
+        device
+            .activate_screen("pomodoro".into())
+            .expect("initial activation");
+
+        let second_actor = spawn_test_actor(connector.attach());
+        assert!(matches!(device.status(), Err(DeviceError::NoDevice)));
+        device.connect().expect("reattach connect and replay");
+        connector.detach();
+
+        first_actor.join().expect("first actor joins");
+        let replayed = second_actor.join().expect("second actor joins");
+        assert!(matches!(replayed.first(), Some(Message::StatusRequest)));
+        assert!(matches!(replayed.get(1), Some(Message::TimeSync(_))));
+        assert!(matches!(replayed.get(2), Some(Message::ApplyConfig(_))));
+        assert!(matches!(replayed.get(3), Some(Message::PushData(_))));
+        assert!(matches!(replayed.get(4), Some(Message::ActivateScreen(_))));
+        assert_eq!(replayed.len(), 5);
+    }
+
+    fn spawn_test_actor(mut peer: super::SocketPeer) -> std::thread::JoinHandle<Vec<Message>> {
+        std::thread::spawn(move || {
+            let mut requests = Vec::new();
+            while let Some(command) = peer.commands.blocking_recv() {
+                let response = match &command.message {
+                    Message::StatusRequest => Message::StatusResponse(sample_status()),
+                    Message::TimeSync(_) => Message::Ack(Ack {
+                        acknowledged_type: protocol::TYPE_TIME_SYNC,
+                        revision: None,
+                    }),
+                    Message::ApplyConfig(config) => Message::Ack(Ack {
+                        acknowledged_type: protocol::TYPE_APPLY_CONFIG,
+                        revision: Some(config.revision),
+                    }),
+                    Message::PushData(push) => Message::Ack(Ack {
+                        acknowledged_type: protocol::TYPE_PUSH_DATA,
+                        revision: Some(push.revision),
+                    }),
+                    Message::ActivateScreen(_) => Message::Ack(Ack {
+                        acknowledged_type: protocol::TYPE_ACTIVATE_SCREEN,
+                        revision: None,
+                    }),
+                    unexpected => panic!("unexpected test actor request: {unexpected:?}"),
+                };
+                requests.push(command.message);
+                command
+                    .response
+                    .send(Ok(response))
+                    .expect("runtime receives test response");
+            }
+            peer.transport.detach(peer.generation);
+            requests
+        })
+    }
+
+    fn sample_status() -> StatusResponse {
+        StatusResponse {
+            protocol_version: protocol::PROTOCOL_VERSION,
+            max_protocol_version: protocol::MAX_PROTOCOL_VERSION,
+            capabilities: protocol::CAPABILITY_CORE_WIDGETS
+                | protocol::CAPABILITY_CONFIG_ROTATION
+                | protocol::CAPABILITY_EXTENDED_TEMPLATES,
+            firmware_version: "test-device".into(),
+            uptime_ms: 1_234,
+            free_heap: 5_678,
+            display_width: 448,
+            display_height: 368,
+            brightness: 128,
+            rotation: 90,
+            online: true,
+            latest_revision: 0,
+            valid_frames: 1,
+            malformed_frames: 0,
+            crc_errors: 0,
+            overflow_frames: 0,
+            dropped_responses: 0,
+            rx_dropped_bytes: 0,
+            dropped_events: 0,
+            event_queue_high_water: 0,
+            dropped_ui_commands: 0,
+            ui_queue_high_water: 0,
+            config_revision: 0,
+            latest_interrupt_token: 0,
+            tier: Tier::Networked,
+            wifi_state: WifiState::Connected,
+            wifi_rssi: -42,
+            ip: "192.0.2.10".into(),
+            ota_state: OtaState::Idle,
+            last_network_error: None,
+        }
     }
 }

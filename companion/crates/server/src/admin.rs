@@ -100,7 +100,10 @@ async fn put_config(
     .map_err(|_| AdminError::WorkerFailed)?
     .map_err(AdminError::from)?;
 
-    if let Some(runtime) = state.live_link(&device_id).and_then(|link| link.runtime()) {
+    if let Some(runtime) = state
+        .device_link(&device_id)
+        .and_then(|link| link.runtime())
+    {
         tokio::task::spawn_blocking(move || runtime.apply_config(config))
             .await
             .map_err(|_| AdminError::WorkerFailed)?
@@ -119,10 +122,10 @@ async fn get_device(
     if !state.registry().contains_device(&device_id) {
         return Err(AdminError::NotFound);
     }
-    let live = state.live_link(&device_id);
-    let connected = live.is_some();
-    let last_seen_unix_ms = live.as_ref().and_then(|link| link.last_seen_unix_ms());
-    let runtime = live.and_then(|link| link.runtime());
+    let link = state.device_link(&device_id);
+    let connected = link.as_ref().is_some_and(|link| link.is_live());
+    let last_seen_unix_ms = link.as_ref().and_then(|link| link.last_seen_unix_ms());
+    let runtime = link.and_then(|link| link.runtime());
     let config = state.configs().for_device(&device_id).status();
     let snapshot = if let Some(runtime) = runtime {
         Some(

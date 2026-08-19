@@ -64,59 +64,55 @@ async fn run(
 ) {
     tracing::info!(device_id = %device_id, "device link established");
 
-    let device_config = state.configs().for_device(&device_id);
-    let update = device_config.update.lock().await;
-    let Some(config) = load_config(&device_config, &device_id).await else {
-        return;
-    };
+    let peer = if let Some(peer) = lease.link().attach_runtime() {
+        peer
+    } else {
+        let device_config = state.configs().for_device(&device_id);
+        let update = device_config.update.lock().await;
+        let Some(config) = load_config(&device_config, &device_id).await else {
+            return;
+        };
 
-    let (device, peer) = WebSocketRuntimeDevice::channel(device_id.clone());
-    let runtime = tokio::task::spawn_blocking(move || {
-        RuntimeHandle::start(
-            config,
-            Box::new(device),
-            Box::<SystemCalendarRefresher>::default(),
-            RuntimeOptions::default(),
-        )
-    })
-    .await;
-    let runtime = match runtime {
-        Ok(Ok(runtime)) => std::sync::Arc::new(runtime),
-        Ok(Err(app_core::RuntimeError::InvalidConfig { issues })) => {
-            tracing::error!(
-                device_id = %device_id,
-                issue_count = issues.len(),
-                "stored device config cannot start the runtime"
-            );
-            return;
-        }
-        Ok(Err(error)) => {
-            tracing::error!(device_id = %device_id, %error, "device runtime failed to start");
-            return;
-        }
-        Err(_) => {
-            tracing::error!(device_id = %device_id, "device runtime starter panicked");
-            return;
-        }
+        let (device, connector) = WebSocketRuntimeDevice::channel(device_id.clone());
+        let peer = connector.attach();
+        let runtime = tokio::task::spawn_blocking(move || {
+            RuntimeHandle::start(
+                config,
+                Box::new(device),
+                Box::<SystemCalendarRefresher>::default(),
+                RuntimeOptions::default(),
+            )
+        })
+        .await;
+        let runtime = match runtime {
+            Ok(Ok(runtime)) => std::sync::Arc::new(runtime),
+            Ok(Err(app_core::RuntimeError::InvalidConfig { issues })) => {
+                tracing::error!(
+                    device_id = %device_id,
+                    issue_count = issues.len(),
+                    "stored device config cannot start the runtime"
+                );
+                return;
+            }
+            Ok(Err(error)) => {
+                tracing::error!(device_id = %device_id, %error, "device runtime failed to start");
+                return;
+            }
+            Err(_) => {
+                tracing::error!(device_id = %device_id, "device runtime starter panicked");
+                return;
+            }
+        };
+        lease
+            .link()
+            .set_runtime(std::sync::Arc::clone(&runtime), connector);
+        drop(update);
+        peer
     };
-    lease.link().set_runtime(std::sync::Arc::clone(&runtime));
-    drop(update);
 
     peer.run(socket, &device_id, lease.link().last_seen_counter())
         .await;
 
-    let runtime = lease.link().take_runtime();
-    if let Some(runtime) = runtime {
-        match tokio::task::spawn_blocking(move || runtime.shutdown()).await {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => {
-                tracing::warn!(device_id = %device_id, %error, "device runtime shutdown failed");
-            }
-            Err(_) => {
-                tracing::warn!(device_id = %device_id, "device runtime shutdown panicked");
-            }
-        }
-    }
     tracing::info!(device_id = %device_id, "device link closed");
 }
 

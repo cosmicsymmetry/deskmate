@@ -1,7 +1,10 @@
 //! Ownership, exercised with a fake device socket rather than a board.
 
+use futures_util::SinkExt;
+use protocol::{DeviceEvent, EventAction, EventKind, FieldValue, Message};
 use server::{ServerState, app};
 use sha2::{Digest, Sha256};
+use tokio_tungstenite::tungstenite::Message as WsMessage;
 
 mod support;
 
@@ -523,6 +526,207 @@ async fn a_second_socket_for_the_same_device_is_refused() {
         panic!("second link failed without the intended HTTP refusal: {error}");
     };
     assert_eq!(response.status(), http::StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn running_pomodoro_survives_link_close_and_reattach() {
+    let (host, identity, admin_token) = spawn().await;
+    let client = reqwest::Client::new();
+    install_pomodoro_config(&client, &host, &identity.device_id, &admin_token).await;
+
+    let mut first = connect_device(&host, &identity.token)
+        .await
+        .expect("first link connects");
+    support::drive_until_config(&mut first, "pomodoro").await;
+    start_pomodoro(&mut first).await;
+
+    let before = wait_for_pomodoro(&client, &host, &identity.device_id, &admin_token, |timer| {
+        timer["state"] == "running"
+    })
+    .await;
+    let before_remaining = before["remaining_seconds"]
+        .as_u64()
+        .expect("remaining seconds before disconnect");
+    drop(first);
+
+    tokio::time::sleep(std::time::Duration::from_millis(1_500)).await;
+    let detached = wait_for_pomodoro(&client, &host, &identity.device_id, &admin_token, |timer| {
+        timer["state"] == "running"
+            && timer["remaining_seconds"]
+                .as_u64()
+                .is_some_and(|remaining| {
+                    remaining < before_remaining && before_remaining.saturating_sub(remaining) <= 5
+                })
+    })
+    .await;
+    let detached_remaining = detached["remaining_seconds"]
+        .as_u64()
+        .expect("remaining seconds while detached");
+
+    let after_config_remaining = reapply_config_while_running(
+        &client,
+        &host,
+        &identity.device_id,
+        &admin_token,
+        detached_remaining,
+    )
+    .await;
+
+    let mut second = connect_after_release(&host, &identity.token).await;
+    let replayed = support::drive_until_config(&mut second, "pomodoro").await;
+    assert!(
+        replayed
+            .widgets
+            .iter()
+            .any(|widget| widget.widget_id == "pomodoro"),
+        "reattach did not replay the layout"
+    );
+    let current_push = support::drive_until_push(&mut second, "pomodoro").await;
+    assert!(
+        current_push
+            .fields
+            .iter()
+            .any(|field| { field.key == "running" && field.value == FieldValue::Boolean(true) })
+    );
+    let replayed_remaining = current_push
+        .fields
+        .iter()
+        .find_map(|field| match (&*field.key, &field.value) {
+            ("remaining_seconds", FieldValue::Integer(remaining)) => u64::try_from(*remaining).ok(),
+            _ => None,
+        })
+        .expect("reattach push omitted remaining_seconds");
+
+    let after = wait_for_pomodoro(&client, &host, &identity.device_id, &admin_token, |timer| {
+        timer["state"] == "running"
+    })
+    .await;
+    let after_remaining = after["remaining_seconds"]
+        .as_u64()
+        .expect("remaining seconds after reattach");
+    assert!(
+        replayed_remaining <= after_config_remaining,
+        "reattach replayed stale timer fields: before={after_config_remaining}, pushed={replayed_remaining}"
+    );
+    assert!(
+        after_remaining <= after_config_remaining,
+        "reattach moved the running pomodoro backwards: before={after_config_remaining}, after={after_remaining}"
+    );
+    assert!(
+        before_remaining.saturating_sub(after_remaining) <= 8,
+        "test reconnect took implausibly long: before={before_remaining}, after={after_remaining}"
+    );
+}
+
+async fn install_pomodoro_config(
+    client: &reqwest::Client,
+    host: &str,
+    device_id: &str,
+    admin_token: &str,
+) {
+    let config = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/one-pomodoro-card.json"
+    ))
+    .expect("fixture");
+    let saved = client
+        .put(format!("http://{host}/v1/devices/{device_id}/config"))
+        .bearer_auth(admin_token)
+        .header("Content-Type", "application/json")
+        .body(config)
+        .send()
+        .await
+        .expect("config write");
+    assert_eq!(saved.status(), 200);
+}
+
+async fn reapply_config_while_running(
+    client: &reqwest::Client,
+    host: &str,
+    device_id: &str,
+    admin_token: &str,
+    maximum_remaining: u64,
+) -> u64 {
+    install_pomodoro_config(client, host, device_id, admin_token).await;
+    let timer = wait_for_pomodoro(client, host, device_id, admin_token, |timer| {
+        timer["state"] == "running"
+            && timer["remaining_seconds"]
+                .as_u64()
+                .is_some_and(|remaining| remaining <= maximum_remaining)
+    })
+    .await;
+    timer["remaining_seconds"]
+        .as_u64()
+        .expect("remaining seconds after config apply")
+}
+
+async fn start_pomodoro(socket: &mut support::DeviceSocket) {
+    socket
+        .send(WsMessage::Binary(
+            protocol::encode_message(
+                0,
+                &Message::DeviceEvent(DeviceEvent {
+                    sequence: 1,
+                    kind: EventKind::Tap,
+                    widget_id: "pomodoro".into(),
+                    screen_id: "pomodoro".into(),
+                    action: EventAction::StartPause,
+                    interrupt_token: None,
+                }),
+            )
+            .expect("encode tap event"),
+        ))
+        .await
+        .expect("send tap event");
+    support::drive_until_push(socket, "pomodoro").await;
+}
+
+async fn connect_after_release(host: &str, token: &str) -> support::DeviceSocket {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        if let Ok(socket) = connect_device(host, token).await {
+            return socket;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "ownership slot remained reserved after the first link closed"
+        );
+        tokio::task::yield_now().await;
+    }
+}
+
+async fn wait_for_pomodoro(
+    client: &reqwest::Client,
+    host: &str,
+    device_id: &str,
+    admin_token: &str,
+    predicate: impl Fn(&serde_json::Value) -> bool,
+) -> serde_json::Value {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+    loop {
+        let response = client
+            .get(format!("http://{host}/v1/devices/{device_id}"))
+            .bearer_auth(admin_token)
+            .send()
+            .await
+            .expect("status request");
+        assert_eq!(response.status(), 200);
+        let status: serde_json::Value =
+            serde_json::from_str(&response.text().await.expect("status response body"))
+                .expect("status JSON");
+        if let Some(timer) = status["snapshot"]["pomodoros"]
+            .as_array()
+            .and_then(|timers| timers.iter().find(|timer| timer["widget_id"] == "pomodoro"))
+            && predicate(timer)
+        {
+            return timer.clone();
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "pomodoro snapshot did not reach the expected state: {status}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
 }
 
 #[tokio::test]

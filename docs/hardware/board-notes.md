@@ -2719,6 +2719,44 @@ plausible and unproven; no second fix was invented for it.
 The isolation to `3f2aa03` is empirical and stands on the table above. What does not
 stand is any explanation of *why*.
 
+### The handler hypothesis is now refuted by experiment too
+
+A build with the custom handler and all its status-capture machinery removed
+(`v2.0.0-gate5`) was flashed and tested at 22:09. **It still fails:**
+
+```
+gate5 (handler removed) -> failed   last_ota_error = "download: ESP_FAIL"
+```
+
+So removing the handler does not fix the download, matching what the IDF sources already
+said. Two hypotheses are now dead: the handler is not the mechanism, and neither is
+anything else that removal touched.
+
+Note the reason string got *worse* — `download: ESP_FAIL` instead of
+`download: ESP_ERR_MBEDTLS_SSL_READ_FAILED` — because the removed `prefer_transport_error`
+machinery was what surfaced the specific mbedTLS error. That machinery is worth keeping
+for its diagnostic value; it is not implicated in the regression.
+
+### Where a morning session should start
+
+The regression is somewhere inside `3f2aa03` and has not been bisected. It is a ~159-line
+diff to one file, so bisecting it is a bounded job:
+
+1. Build a variant with only the wire/protocol half of `3f2aa03` (the `StatusResponse`
+   key 30 plumbing) and none of the `ota.c` instrumentation. If downloads work, the
+   cause is in `ota.c`.
+2. Then add back the `ota.c` pieces in two halves — the static state
+   (`s_last_error` + its `portMUX_TYPE`, ~105 bytes of **internal DRAM**) versus the
+   failure-path string formatting.
+3. The DRAM half is the standing suspect, because `0ad1a51` established that this board
+   starves the AES accelerator's DMA allocations out of internal RAM, and `free_heap`
+   reports PSRAM so it cannot show this. `heap_caps_get_free_size(MALLOC_CAP_INTERNAL)`
+   around the download would settle it — and if it is the cause, the field's storage
+   simply needs to move out of DRAM.
+
+Do not attempt this by reasoning alone; every step needs a flash and a download attempt,
+because no host test reaches this path.
+
 ### Why this matters beyond the bug
 
 1. **Every gate was green.** Host tests, `idf.py build`, clippy and the full cargo

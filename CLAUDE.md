@@ -87,10 +87,28 @@ of letting code and documentation diverge.
   Three UX findings from that session are recorded in board-notes (takeover face
   indistinguishable from the completed card; sticky unreconciled optimistic red flash
   on tapping a completed pomodoro; host silently ignores stale-token dismissals).
-- **V2's exit gate is OPEN: Task 11 Step 11 fails on hardware and cannot be closed by
-  re-running it.** The first physical session (2026-08-19) found and fixed three
-  firmware defects on paths that had been marked complete on software grounds, and left
-  one gate item failing. Do not describe V2 as software-complete.
+- **The companion app's visual language is now `DESIGN.md` (The Modular Face), at the
+  repository root.** Delivered 2026-08-19 on explicit owner direction to replace the
+  previous world rather than refine it; the owner pinned the reference ("somewhat
+  resemble Apple Watch", a tool that conveys being organised and productive).
+  `docs/design/companion-visual-language.md` ("the lit panel") is **superseded** and
+  marked so in-file — its `--panel-black` quarantine rule is retired, because the
+  successor deliberately uses a true-black ground in both colour schemes. The card
+  library is complication tiles, the filmstrip is replaced by `LoopRing.tsx` (arc =
+  dwell, same `configDraft` helpers), and `Filmstrip.tsx` is deleted. Product truth
+  lives in `PRODUCT.md` at the root. Schema v4 and protocol v1 are untouched: this was
+  a presentation change only. Two rules worth not relearning: a label above a heading
+  and a card inside a card are both out, and `ui-rounded` (SF Pro Rounded) is the
+  numeral face because it is free under the Tauri CSP that blocks every font host.
+  A **dev-only browser harness** now exists: `VITE_DESKMATE_MOCK=1 bun run dev` aliases
+  the Tauri IPC bridge at `src/dev/`, so every device, provider, ownership and
+  validation state renders without hardware (`?scenario=…`, `?theme=…`). It is absent
+  from production builds.
+- **V2's exit gate is OPEN, but no longer blocked.** Task 11 Step 11 failed on hardware
+  on 2026-08-19 and **passed on a re-run the same day** after two real defects were
+  fixed; what remains open is the gate's own unobserved items, not a blocker. The first
+  physical session found and fixed three firmware defects on paths that had been marked
+  complete on software grounds. Do not describe V2 as software-complete.
   - `62e5aea` — `CONFIG_MBEDTLS_INTERNAL_MEM_ALLOC` confined TLS to internal DRAM, which
     LVGL and WiFi had already spent, so `mbedtls_ssl_setup()` failed before any socket
     work. **The networked link had never once worked on hardware.** Fixed by
@@ -103,22 +121,43 @@ of letting code and documentation diverge.
     so **two concurrent TLS sessions cannot coexist**: a download alongside the live WSS
     link dies on `esp-aes: Failed to allocate memory`. `install_update()` now suspends
     the link for the duration and resumes it on every failure path.
-  - **Open: the OTA deferral never defers.** Checks fire only at boot; at boot the
-    device reconnects faster than the server notices the old socket is dead, so the
-    server refuses its own device ("owner already live"), the device backs off, and the
-    check runs link-less with no replayed host state. Entangled with two systemic
-    findings — a quick reboot costs ~28 s offline, and a link drop discards a running
-    pomodoro (the runtime is torn down on close by design). Fixing the deferral alone
-    would not make it defer. Directions are recorded in board-notes; none was chosen.
+  - **Closed: the OTA deferral, which needed two fixes, not one.** `3f83911` — the boot
+    check waited on `wait_for_wifi()`, i.e. the radio, while the deferral gate reads
+    host-pushed state; it now also waits on `protocol_task_owner_state_ready()` (link
+    online **and** widget config present) for at most 60 s. **That wait is bounded and
+    fails open on purpose** — a device whose owner can never become ready must stay
+    updatable, or a bad config strands it. `12e5f4d` — the server built a
+    `RuntimeHandle` per WebSocket and shut it down on close, so a link drop discarded a
+    running pomodoro; the runtime is now per-device and long-lived, with sockets
+    attaching as replaceable transports pinned by a generation, and a reconnect replays
+    time, layout, fields, active screen and interrupts. Neither fix works alone: the
+    first gives the guard a link to wait for, the second a running timer to see.
+    Verified on the board 2026-08-19 — `ota` stayed `idle` for a full five-minute timer
+    with an update genuinely available, and installed within a second of the blocking
+    state clearing. **`connected` in `GET /v1/devices/{id}` now means "a socket is
+    live", not "a runtime exists"** — a retained runtime returns a `snapshot` while
+    disconnected, which is intended.
   - Verified and passing: the server owns the device, providers run server-side, real
     weather renders with the Mac quit, a tap travels up and state comes back down,
     pulling USB changes nothing, the Mac app holds the cable without taking the display
     (`reconnects: 0`), OTA installs and reboots, and **rollback works unattended** —
     otadata marks the broken image `ABORTED` and the previous slot `VALID`.
-  - Still owed: Task 8's widening-backoff observation on a shipping build, Task 9's tap
-    latency, the rotation stall on the pomodoro entry (anomaly, unchased), and an OTA
-    failure *reason* anywhere on the wire — `ota_state: failed` carries no cause, which
-    is why diagnosis needed a console reflash of a board on the desk.
+  - Still owed: Task 8's widening-backoff observation on a shipping build, and Task 9's
+    tap latency. (The rotation-stall anomaly was retracted; there is no defect.) The OTA
+    observability gap is **partly** closed: additive protocol-v1 `StatusResponse` key 30
+    carries bounded `last_ota_error`, `GET /v1/devices/{id}` exposes it under
+    `snapshot.device`, and it was verified on the board — but a missing image renders
+    `begin: ESP_FAIL`, because `esp_https_ota_begin()` fails before the download stage
+    and IDF collapses the HTTP error, so the commonest remote failure still names no
+    cause. A green suite could not have shown that; only the board did.
+  - Traps learned on the board, all still true: **a flashed build is reverted within a
+    minute** unless `DESKMATE_FIRMWARE_VERSION` is moved to match, because the catalog
+    pins the fleet and offers its version in either direction — a downgrade path exists
+    by design. **A tier round-trip costs a device identity**, since returning to
+    networked needs a plaintext token and only digests are stored. **An
+    until-dismissed alert postpones firmware updates indefinitely**, because it keeps
+    `interrupt_live` true. `firmware/version.txt` now pins the version explicitly; do
+    not rely on `git describe`, which serves a stale cached string from a dirty tree.
   Plan `docs/superpowers/plans/2026-08-18-deskmate-v2-networked-device.md`, branch
   `feat/v2-networked-device`. The device joins WiFi, dials out over WSS to a single-tenant
   server, and that server owns it through the same `RuntimeDevice` seam the Mac app uses —

@@ -79,15 +79,20 @@ static TaskHandle_t s_task;
 static const link_transport_t *s_transport;
 static bool s_owner_usb_restricted;
 static atomic_bool s_ota_blocked;
+static atomic_bool s_owner_state_ready;
 static atomic_bool s_network_decoder_reset_requested;
 
-static void refresh_ota_blocked(const protocol_context_t *context)
+static void refresh_ota_snapshots(const protocol_context_t *context)
 {
     bool interrupt_live = interrupt_state_active(&context->interrupts) != NULL;
     bool progress_running = widget_model_has_running_progress(&context->model);
     atomic_store_explicit(
         &s_ota_blocked,
         ota_policy_update_deferred(interrupt_live, progress_running),
+        memory_order_release);
+    atomic_store_explicit(
+        &s_owner_state_ready,
+        context->link.online && widget_model_config(&context->model) != NULL,
         memory_order_release);
 }
 
@@ -910,7 +915,7 @@ static void protocol_task(void *argument)
             ui_runtime_set_online(false);
             ESP_LOGI(TAG, "link standalone after timeout");
         }
-        refresh_ota_blocked(context);
+        refresh_ota_snapshots(context);
     }
 }
 
@@ -954,7 +959,7 @@ esp_err_t protocol_task_start(void)
     link_state_init_with_timeout(&s_context->link, s_transport->link_timeout_ms);
     widget_model_init(&s_context->model);
     interrupt_state_init(&s_context->interrupts);
-    refresh_ota_blocked(s_context);
+    refresh_ota_snapshots(s_context);
     device_event_queue_init(&s_context->events);
     ui_runtime_set_event_queue(&s_context->events);
     BaseType_t created = xTaskCreatePinnedToCore(
@@ -983,4 +988,10 @@ void protocol_task_reset_network_decoder(void)
 bool protocol_task_ota_blocked(void)
 {
     return atomic_load_explicit(&s_ota_blocked, memory_order_acquire);
+}
+
+bool protocol_task_owner_state_ready(void)
+{
+    return atomic_load_explicit(&s_owner_state_ready,
+                                memory_order_acquire);
 }

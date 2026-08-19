@@ -15,3 +15,6 @@ void protocol_task_reset_network_decoder(void);
 
 /** Thread-safe OTA deferral snapshot maintained by the protocol owner task. */
 bool protocol_task_ota_blocked(void);
+
+/** True while the owner link is online and has supplied widget config. */
+bool protocol_task_owner_state_ready(void);

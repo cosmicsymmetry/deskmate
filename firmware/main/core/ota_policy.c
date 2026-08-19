@@ -298,6 +298,13 @@ bool ota_policy_update_deferred(bool interrupt_live,
     return interrupt_live || progress_timer_running;
 }
 
+bool ota_policy_should_wait_for_owner(bool owner_state_ready,
+                                      uint32_t waited_ms,
+                                      uint32_t limit_ms)
+{
+    return !owner_state_ready && waited_ms < limit_ms;
+}
+
 uint32_t ota_policy_delay_ticks(uint32_t milliseconds,
                                 uint32_t ticks_per_second)
 {

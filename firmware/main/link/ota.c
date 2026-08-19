@@ -38,6 +38,7 @@
 #define OTA_IMAGE_BUFFER_SIZE 4096
 #define OTA_WIFI_WAIT_MS 60000U
 #define OTA_WIFI_POLL_MS 1000U
+#define OTA_OWNER_WAIT_MS 60000U
 #define OTA_DEFERRED_POLL_MS 1000U
 #define OTA_CHECK_INTERVAL_MS UINT32_C(86400000)
 #define OTA_CHECK_JITTER_MS UINT32_C(3600000)
@@ -170,6 +171,26 @@ static esp_err_t wait_for_wifi(void)
         waited_ms += OTA_WIFI_POLL_MS;
     }
     return ESP_OK;
+}
+
+static esp_err_t wait_for_owner_state(void)
+{
+    uint32_t waited_ms = 0U;
+    for (;;) {
+        if (protocol_task_ota_blocked()) {
+            return ESP_ERR_INVALID_STATE;
+        }
+        if (!ota_policy_should_wait_for_owner(
+                protocol_task_owner_state_ready(), waited_ms,
+                OTA_OWNER_WAIT_MS)) {
+            /* This wait must remain bounded and fail open. A device whose
+             * owner can never become ready must still be updatable rather
+             * than being stranded forever by a bad configuration. */
+            return ESP_OK;
+        }
+        vTaskDelay(pdMS_TO_TICKS(OTA_WIFI_POLL_MS));
+        waited_ms += OTA_WIFI_POLL_MS;
+    }
 }
 
 static uint8_t progress_percentage(esp_https_ota_handle_t handle,
@@ -443,6 +464,12 @@ static esp_err_t perform_check(void)
         memset(&stored, 0, sizeof(stored));
         set_state(result == ESP_ERR_INVALID_STATE ? PROTOCOL_OTA_IDLE
                                                   : PROTOCOL_OTA_FAILED);
+        return result;
+    }
+    result = wait_for_owner_state();
+    if (result != ESP_OK) {
+        memset(&stored, 0, sizeof(stored));
+        set_state(PROTOCOL_OTA_IDLE);
         return result;
     }
 

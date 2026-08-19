@@ -87,6 +87,15 @@ static void test_either_live_focus_state_defers_update(void)
     assert(ota_policy_update_deferred(true, true));
 }
 
+static void test_owner_wait_is_bounded_and_readiness_wins(void)
+{
+    assert(ota_policy_should_wait_for_owner(false, 0U, 60000U));
+    assert(ota_policy_should_wait_for_owner(false, 59999U, 60000U));
+    assert(!ota_policy_should_wait_for_owner(false, 60000U, 60000U));
+    assert(!ota_policy_should_wait_for_owner(false, 60001U, 60000U));
+    assert(!ota_policy_should_wait_for_owner(true, 0U, 60000U));
+}
+
 static void test_day_scale_delays_convert_without_32_bit_overflow(void)
 {
     assert(ota_policy_delay_ticks(82800000U, 100U) == 8280000U);
@@ -113,6 +122,7 @@ int main(void)
     test_urls_reject_unsafe_or_truncated_inputs();
     test_metadata_is_bounded_and_tied_to_its_version();
     test_either_live_focus_state_defers_update();
+    test_owner_wait_is_bounded_and_readiness_wins();
     test_day_scale_delays_convert_without_32_bit_overflow();
     test_download_deadlines_bound_stalls_and_slow_trickles();
     puts("test_ota_policy: OK");

@@ -46,6 +46,11 @@ bool ota_policy_parse_metadata(
 bool ota_policy_update_deferred(bool interrupt_live,
                                 bool progress_timer_running);
 
+/** Wait for host state only until the bounded owner-readiness deadline. */
+bool ota_policy_should_wait_for_owner(bool owner_state_ready,
+                                      uint32_t waited_ms,
+                                      uint32_t limit_ms);
+
 /** Convert a millisecond interval without overflowing a 32-bit multiply. */
 uint32_t ota_policy_delay_ticks(uint32_t milliseconds,
                                 uint32_t ticks_per_second);

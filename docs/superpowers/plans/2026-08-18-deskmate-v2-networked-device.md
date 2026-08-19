@@ -2058,7 +2058,7 @@ so, because a UI that silently changes destination is a UI that will be mistrust
   routes.
 - Produces: nothing later tasks depend on.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Add to `companion/apps/deskmate/tests/components.test.tsx`, reusing the existing render
 helpers:
@@ -2096,7 +2096,7 @@ helpers:
   });
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 From `companion/apps/deskmate/`:
 
@@ -2106,14 +2106,14 @@ bun test tests/components.test.tsx
 
 Expected: FAIL — `renderNetworkPanel` does not exist.
 
-- [ ] **Step 3: Add the typed IPC commands**
+- [x] **Step 3: Add the typed IPC commands**
 
 In `src-tauri/src/lib.rs` add commands mirroring the existing typed-IPC pattern:
 `provision_device(config)`, `factory_reset_device()`, and `set_server_endpoint(url,
 admin_token)`. Each returns the same typed error shape the existing commands use, so the
 UI's error handling does not fork.
 
-- [ ] **Step 4: Build the panel**
+- [x] **Step 4: Build the panel**
 
 Create `NetworkPanel.tsx` showing: current tier, WiFi state, RSSI and IP; a form for
 SSID, passphrase and server URL; buttons to pair (write `tier: networked`), unpair
@@ -2124,7 +2124,7 @@ not pretend to show a stored value.
 Follow the accessibility conventions established by the M3 settings work: labelled
 controls, keyboard reachable, and status changes announced.
 
-- [ ] **Step 5: Route settings writes by tier**
+- [x] **Step 5: Route settings writes by tier**
 
 In `useAppState.ts`, when the device reports `networked`, send configuration edits to the
 server's `PUT /v1/devices/{id}/config` instead of down the serial link. A failed write
@@ -2132,7 +2132,7 @@ must surface as a typed error and must **not** be described as "your last workin
 settings" — that mislabeling defect was fixed in the playlists work and must not
 reappear.
 
-- [ ] **Step 6: Run the app gates**
+- [x] **Step 6: Run the app gates**
 
 From `companion/apps/deskmate/`:
 
@@ -2147,7 +2147,7 @@ Use `biome lint` and `biome format`, not `biome check` — `check` additionally 
 assists including `organizeImports`, which this project has never enforced and which
 reports pre-existing failures on an untouched tree.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add companion/apps/deskmate

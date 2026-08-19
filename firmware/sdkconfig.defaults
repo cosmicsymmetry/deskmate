@@ -14,6 +14,16 @@ CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y
 CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF=y
 CONFIG_ESP_TLS_USING_MBEDTLS=y
 CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
+# mbedTLS defaults to MBEDTLS_INTERNAL_MEM_ALLOC, which confines every TLS
+# allocation to internal DRAM. On this board internal DRAM is already spoken
+# for by LVGL's draw buffers and WiFi's static .bss, so mbedtls_ssl_setup()
+# cannot obtain its SSL_IN_CONTENT_LEN buffer and returns -0x7F00
+# (MBEDTLS_ERR_SSL_ALLOC_FAILED) before any socket work happens. Every TLS
+# connection then fails identically -- the WSS link never opens and the OTA
+# check never reaches the server -- while status still reports megabytes of
+# free heap, because that heap is PSRAM, the one pool mbedTLS was forbidden.
+# Observed on hardware 2026-08-19; see docs/hardware/board-notes.md.
+CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
 CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 
 # LVGL reads the single checked-in firmware/lv_conf.h instead of synthesizing

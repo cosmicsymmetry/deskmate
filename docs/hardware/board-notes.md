@@ -2034,3 +2034,91 @@ Two notes for whoever hits this next:
   carrying the actual figures was **invisible**: the post-scheduler console goes to UART0
   only, and even switching the primary console to USB Serial JTAG did not surface it, so
   `esp_rom_printf` probes were required. Same blindfold as 2026-08-13.
+
+## V2 Task 8 — networked link root-caused and fixed, verified 2026-08-19
+
+First physical execution of Task 8 Step 8. The board never reached the server, and
+the cause was in the build, not the network.
+
+### Symptom
+
+Provisioned networked (`dev-0003`, `wss://deskmate.rodi.one/v1/device/link`), the
+board reported `tier: networked`, `wifi_state: connected`, `ip: 192.168.8.168`,
+`capabilities: 203` — but `online: false` and `ota_state: failed`, indefinitely.
+`GET /v1/devices/dev-0003` returned `connected: false, last_seen_unix_ms: null`.
+Uptime climbed monotonically past 119 s with `free_heap` byte-flat, so there was no
+reboot loop; the device was stable and simply never connected.
+
+### Root cause
+
+`CONFIG_MBEDTLS_INTERNAL_MEM_ALLOC=y` — ESP-IDF's default — confines every mbedTLS
+allocation to **internal DRAM**. Internal DRAM on this board is already committed to
+LVGL's draw buffers and WiFi's static `.bss` (the same budget behind the V1 boot
+crash-loop recorded above), so the 16 KB `MBEDTLS_SSL_IN_CONTENT_LEN` buffer could
+not be obtained and `mbedtls_ssl_setup()` failed **before any socket work**:
+
+```
+E esp-tls-mbedtls: mbedtls_ssl_setup returned -0x7F00   (MBEDTLS_ERR_SSL_ALLOC_FAILED)
+E websocket_client: transport_error=ESP_ERR_MBEDTLS_SSL_SETUP_FAILED
+```
+
+One cause produced every symptom: no WSS link, no OTA check reaching the server, no
+traffic at the origin, no reboot, and a correctly widening reconnect backoff.
+
+**`free_heap` is not a TLS health signal on this board.** It read 8,340,243 bytes
+throughout — overwhelmingly PSRAM, the one pool mbedTLS was forbidden to touch. A
+device here can report 8 MB free and still fail every handshake.
+
+### Fix
+
+`CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y` in `firmware/sdkconfig.defaults`, so TLS
+allocates from the 8 MB PSRAM. Commented at the setting.
+
+Verified on the board the same day: on the first boot after flashing, the server
+logged `firmware check device_id=dev-0003` and `device link established
+device_id=dev-0003`, and `GET /v1/devices/dev-0003` returned `connected: true` with a
+full `AppSnapshot` (`port_name: "network:dev-0003"`, `valid_frames: 39`,
+`reconnects: 0`). The panel left the standalone fallback and rendered the server's
+`DigitalClock` card.
+
+### Diagnosis required a temporary console build
+
+The protocol link uses **USB-Serial-JTAG** (`usb_link.c`) and the console is UART0
+with `CONFIG_ESP_CONSOLE_SECONDARY_NONE`, so no device log is reachable over the
+cable in a shipping build. A diagnostic build with
+`CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y` was used to read the mbedTLS error; it
+interleaves log output with protocol frames and must never supply acceptance
+evidence. `firmware/sdkconfig` is gitignored, so no tracked file changed. Note that
+`idf.py fullclean` does **not** remove `firmware/sdkconfig`, and a stale one silently
+overrides `SDKCONFIG_DEFAULTS` — delete it explicitly when switching config sets.
+
+### Deployment defects found alongside, both on the live server
+
+1. **`RUST_LOG` was unset**, so `tracing_subscriber::fmt::init()`'s `EnvFilter`
+   defaulted to **ERROR** and discarded every device-link diagnostic. The only
+   visible startup line is the `println!` in `main.rs:68`; the `tracing::info!`
+   directly beneath it was being dropped, which made logging look alive while
+   reporting nothing. **Task 8 Step 8's first observation — "the server logs an
+   accepted connection" — could not have passed as deployed.** Set to
+   `info,server=debug`; original saved as `/etc/deskmate/server.env.bak-20260819`.
+2. **`DESKMATE_FIRMWARE_DIR` did not exist** while `DESKMATE_FIRMWARE_VERSION` was
+   `1.0.0`, so `/v1/device/firmware` advertised an update whose image could not be
+   downloaded, and the device failed the install on every boot. That — not a device
+   fault — is what `ota_state: failed` meant. Directory created; version corrected.
+   Must be set deliberately before Task 11.
+
+### Two corrections to Task 8 Step 8's checklist
+
+- Its third observation expects the panel to stay on the standalone clock because
+  "no config has been sent yet". The server holds a **default** config
+  (`config.origin: "defaults"`) and applies it on connect, so the panel leaves the
+  fallback immediately. The wording is wrong, not the behaviour.
+- Early-boot TLS failures are normal: `net_link_start()` runs before DHCP/DNS, so the
+  first attempts fail `ESP_ERR_ESP_TLS_CANNOT_RESOLVE_HOSTNAME` (`getaddrinfo()
+  returns 202`) at t≈1.5 s before the backoff succeeds. Do not confuse these with
+  `ESP_ERR_MBEDTLS_SSL_SETUP_FAILED`.
+
+Task 8's four observations are **not** all discharged by this entry: the accepted
+connection and the status round-trips are evidenced above, but the killed-server
+reconnect observation has not been run against a deliberately stopped server, and
+the panel observation needs re-running under the corrected expectation.

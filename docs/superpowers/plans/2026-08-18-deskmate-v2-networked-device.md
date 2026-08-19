@@ -1587,6 +1587,34 @@ and logs the device's status response; the device's panel stays on the standalon
 (no config has been sent yet, which is correct); and killing the server leaves the device
 retrying with visibly widening gaps rather than rebooting or spinning.
 
+> **Executed 2026-08-19. Two of the four are discharged; the step's own wording was
+> wrong in two places, and the run found the defect that made the whole task
+> impossible.** Full evidence in `docs/hardware/board-notes.md` under "V2 Task 8 —
+> networked link root-caused and fixed".
+>
+> The board could never have connected: `CONFIG_MBEDTLS_INTERNAL_MEM_ALLOC=y` confined
+> mbedTLS to internal DRAM, which LVGL and WiFi have already spent, so
+> `mbedtls_ssl_setup()` returned `-0x7F00` before any socket work. Fixed by
+> `CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y` (`62e5aea`).
+>
+> 1. **Accepted connection — PASS**, but only after fixing the server: `RUST_LOG` was
+>    unset, so `tracing_subscriber`'s filter defaulted to ERROR and discarded every
+>    device-link line. **This observation was unpassable as deployed.**
+> 2. **Periodic status round-trips — PASS.** `valid_frames` climbed 35 → 52 → 64 with
+>    `online: true` and uptime advancing.
+> 3. **Panel stays on the standalone clock — WORDING IS WRONG.** The server holds a
+>    *default* config (`config.origin: "defaults"`) and applies it on connect, so the
+>    panel correctly leaves the fallback and renders the server's clock card. Amend the
+>    expectation; do not change the code.
+> 4. **Killing the server — PARTIAL.** A ~65 s outage was survived with no reboot and
+>    an unattended reconnect, but the *widening gaps* were only ever observed on the
+>    diagnostic-console build (8.8 s → 13.6 s, against failing TLS). Not discharged on
+>    the shipping build.
+>
+> Also note for anyone reading a boot log: `net_link_start()` runs before DHCP/DNS, so
+> the first attempts legitimately fail `ESP_ERR_ESP_TLS_CANNOT_RESOLVE_HOSTNAME` at
+> t≈1.5 s. Those are not the defect above.
+
 - [ ] **Step 9: Record and commit**
 
 Add the dated board-notes entry, then:
@@ -1883,6 +1911,35 @@ Confirm all five: the panel leaves the standalone clock and renders the configur
 the weather card shows real fetched data; **quitting the Mac app changes nothing**;
 unplugging USB entirely changes nothing; and tapping a pomodoro card starts it, proving
 events travel up and state comes back down over the network.
+
+> **Executed 2026-08-19 once Task 8's TLS defect was fixed. Four pass; one needs a
+> re-run.** Session evidence in `~/deskmate-hw-sessions/2026-08-19-v2-exit-gate/`.
+>
+> 1. **Configured cards render — PASS.** Clock, weather and pomodoro cards all drawn.
+> 2. **Weather shows real fetched data — PASS.** `Tbilisi, Georgia`, **31°**, `Clear`,
+>    fetched server-side with no Mac app running.
+> 3. **Quitting the Mac app changes nothing — WEAK PASS, re-run required.** The app was
+>    launched and quit with no observable effect, but the USB cable was not attached to
+>    the Mac at the time, so the app had nothing to contend over. This cannot show the
+>    property that matters — that the app *declines* a device the server owns, i.e.
+>    Task 10's behaviour, which remains unverified on hardware.
+> 4. **Unplugging USB changes nothing — PASS.** `uptime_ms` continuous at 1,177,925 ms
+>    across the pull; panel unchanged; still `connected: true` over WiFi. Note the
+>    board has a battery, so this is link loss, **not** power loss.
+> 5. **Tapping a pomodoro starts it — PASS.** Server read `state: running,
+>    remaining_seconds: 263` at 09:48:59 and the panel read `ELAPSED 00:57` at
+>    09:49:19; both imply a tap at ~09:48:22 from independent clocks. The timer then
+>    ran to completion and drove the panel to `Done` over the network.
+>
+> **Step 9's required tap latency was not obtained.** The tap happened unobserved and
+> the server does not log device events at a level the journal captured, so no latency
+> figure exists. A deliberate run with a known tap instant is still owed.
+>
+> Two behaviours worth carrying: an admin config apply **silently discards a running
+> pomodoro** (it replaces runtime state per `docs/config/v4.md`), which is what
+> destroyed the first tap; and timed rotation **appeared to stall on the pomodoro
+> entry** after two correct transitions — recorded as an anomaly, not a verified
+> defect, since it rests on five frames and an inferred start time.
 
 - [ ] **Step 9: Record and commit**
 

@@ -851,6 +851,10 @@ struct WorkerState {
     connected: bool,
     ever_connected: bool,
     needs_full_sync: bool,
+    /// Latched only after this runtime receives an explicit `WrongTier` refusal.
+    /// A Networked status alone cannot establish non-ownership because the server's
+    /// WebSocket runtime legitimately drives devices that report that tier.
+    ownership_refused: bool,
     generation: u64,
     next_connect: Instant,
     last_published: Option<AppSnapshot>,
@@ -877,6 +881,7 @@ impl WorkerState {
             connected: false,
             ever_connected: false,
             needs_full_sync: true,
+            ownership_refused: false,
             generation: 0,
             next_connect: now,
             last_published: None,
@@ -2081,7 +2086,7 @@ fn synchronize_full(
     device: &mut dyn RuntimeDevice,
     now: Instant,
 ) -> Result<(), RuntimeError> {
-    if server_owns_live_device(state) {
+    if ownership_was_refused(state) {
         return Ok(());
     }
     state.needs_full_sync = true;
@@ -2117,7 +2122,7 @@ fn synchronize_pending(
     device: &mut dyn RuntimeDevice,
     now: Instant,
 ) -> Result<(), RuntimeError> {
-    if server_owns_live_device(state) {
+    if ownership_was_refused(state) {
         return Ok(());
     }
     if state.needs_full_sync {
@@ -2145,7 +2150,7 @@ fn push_dirty_widgets(
     state: &mut WorkerState,
     device: &mut dyn RuntimeDevice,
 ) -> Result<(), RuntimeError> {
-    if server_owns_live_device(state) {
+    if ownership_was_refused(state) {
         return Ok(());
     }
     let dirty: Vec<String> = state.dirty_widgets.iter().cloned().collect();
@@ -2160,7 +2165,7 @@ fn push_dirty_widgets(
                 state.push_rejections.remove(&widget_id);
             }
             Err(error) if is_wrong_tier(&error) => {
-                mark_server_owned(state);
+                mark_ownership_refused(state);
                 return Ok(());
             }
             Err(DeviceError::Rejected(error)) if error.code == protocol::ErrorCode::Busy => {}
@@ -2184,7 +2189,7 @@ fn send_screen(
     state: &mut WorkerState,
     device: &mut dyn RuntimeDevice,
 ) -> Result<(), RuntimeError> {
-    if server_owns_live_device(state) {
+    if ownership_was_refused(state) {
         return Ok(());
     }
     if !state.active_screen_dirty {
@@ -2205,7 +2210,7 @@ fn flush_interrupts(
     device: &mut dyn RuntimeDevice,
     now: Instant,
 ) -> Result<(), RuntimeError> {
-    if server_owns_live_device(state) {
+    if ownership_was_refused(state) {
         return Ok(());
     }
     loop {
@@ -2240,7 +2245,7 @@ fn flush_interrupts(
                 );
             }
             Err(error) if is_wrong_tier(&error) => {
-                mark_server_owned(state);
+                mark_ownership_refused(state);
                 return Ok(());
             }
             Err(DeviceError::Rejected(error)) if error.code == protocol::ErrorCode::Busy => {
@@ -2261,7 +2266,7 @@ fn send_time_sync(
     state: &mut WorkerState,
     device: &mut dyn RuntimeDevice,
 ) -> Result<bool, RuntimeError> {
-    if server_owns_live_device(state) {
+    if ownership_was_refused(state) {
         return Ok(false);
     }
     let now = Utc::now();
@@ -2276,8 +2281,8 @@ fn send_time_sync(
     )
 }
 
-fn server_owns_live_device(state: &WorkerState) -> bool {
-    matches!(state.device.tier, Some(DeviceTier::Networked))
+fn ownership_was_refused(state: &WorkerState) -> bool {
+    state.ownership_refused
 }
 
 fn is_wrong_tier(error: &DeviceError) -> bool {
@@ -2296,14 +2301,15 @@ fn sync_device_result(
     match result {
         Ok(()) => Ok(true),
         Err(error) if is_wrong_tier(&error) => {
-            mark_server_owned(state);
+            mark_ownership_refused(state);
             Ok(false)
         }
         Err(error) => Err(device_runtime_error(&error)),
     }
 }
 
-fn mark_server_owned(state: &mut WorkerState) {
+fn mark_ownership_refused(state: &mut WorkerState) {
+    state.ownership_refused = true;
     state.device.tier = Some(DeviceTier::Networked);
     state.needs_full_sync = true;
     state.runtime = if state.config.preferences.paused {
@@ -2430,8 +2436,9 @@ fn update_device_status(
         host_dropped_events: diagnostics.locally_dropped_events,
         detected_event_gaps: diagnostics.detected_event_gaps,
     };
-    if matches!(state.device.tier, Some(DeviceTier::Networked)) {
-        mark_server_owned(state);
+    if state.ownership_refused && matches!(state.device.tier, Some(DeviceTier::Local)) {
+        state.ownership_refused = false;
+        state.needs_full_sync = true;
     }
 }
 
@@ -2590,7 +2597,7 @@ mod tests {
     }
 
     #[test]
-    fn wrong_tier_sync_result_marks_server_ownership_without_an_error() {
+    fn wrong_tier_sync_result_latches_non_ownership_without_an_error() {
         let now = Instant::now();
         let mut scheduler = Scheduler::new(
             now,
@@ -2616,6 +2623,7 @@ mod tests {
 
         assert!(!applied);
         assert_eq!(state.device.tier, Some(DeviceTier::Networked));
+        assert!(state.ownership_refused);
         assert!(
             state.needs_full_sync,
             "local recovery still needs a full replay"

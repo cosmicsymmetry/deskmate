@@ -714,7 +714,7 @@ fn v2_status_and_networking_capability_survive_into_the_device_snapshot() {
 }
 
 #[test]
-fn networked_tier_suppresses_sync_attempts_and_local_tier_recovers_them() {
+fn wrong_tier_refusal_stops_retries_and_local_tier_recovers() {
     let control = MockDeviceControl::default();
     let mut device_status = status(42);
     device_status.tier = protocol::Tier::Networked;
@@ -725,13 +725,14 @@ fn networked_tier_suppresses_sync_attempts_and_local_tier_recovers_them() {
     let networked = wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
         snapshot.device.connection == ConnectionState::Online
             && snapshot.device.tier == Some(DeviceTier::Networked)
+            && control.time_sync_attempts() >= 1
     });
     thread::sleep(Duration::from_millis(100));
 
     assert_eq!(
         control.time_sync_attempts(),
-        0,
-        "server ownership must suppress the host's full-sync retry loop"
+        1,
+        "an explicit WrongTier refusal must suppress the host's full-sync retry loop"
     );
     assert_eq!(networked.runtime, RuntimeState::Running);
 
@@ -740,15 +741,51 @@ fn networked_tier_suppresses_sync_attempts_and_local_tier_recovers_them() {
     local_status.tier = protocol::Tier::Local;
     control.set_status(local_status);
     let recovered = wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
-        snapshot.device.tier == Some(DeviceTier::Local) && control.time_sync_attempts() == 1
+        snapshot.device.tier == Some(DeviceTier::Local) && control.time_sync_attempts() >= 2
     });
 
+    assert_eq!(control.time_sync_attempts(), 2);
     assert_eq!(recovered.runtime, RuntimeState::Running);
     assert!(
         control
             .operations()
             .iter()
             .any(|operation| matches!(operation, Operation::ApplyLayout(_)))
+    );
+    runtime.shutdown().unwrap();
+}
+
+#[test]
+fn networked_status_without_wrong_tier_keeps_websocket_owner_synchronizing() {
+    let control = MockDeviceControl::default();
+    let mut device_status = status(42);
+    device_status.tier = protocol::Tier::Networked;
+    control.set_status(device_status);
+    let mut runtime_options = options();
+    runtime_options.time_sync_interval = Duration::from_millis(20);
+
+    let runtime = RuntimeHandle::start(
+        full_config(),
+        Box::new(MockDevice::new(control.clone())),
+        Box::new(FixedRefresher {
+            delay: Duration::ZERO,
+        }),
+        runtime_options,
+    )
+    .unwrap();
+    let networked = wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
+        snapshot.device.connection == ConnectionState::Online
+            && snapshot.device.tier == Some(DeviceTier::Networked)
+    });
+    wait_for(Duration::from_secs(1), || control.time_sync_attempts() >= 3);
+
+    assert_eq!(networked.runtime, RuntimeState::Running);
+    assert!(
+        control
+            .operations()
+            .iter()
+            .any(|operation| matches!(operation, Operation::ApplyLayout(_))),
+        "a WebSocket owner must apply layout to a device that reports Networked"
     );
     runtime.shutdown().unwrap();
 }

@@ -2392,3 +2392,47 @@ scenario that produced the 409 before. **No `device link refused` line appears f
 either run** — the device now reconnects before its own stale link matters, so the
 refusal never fires. The single-owner guard is unchanged; it simply stopped being
 provoked.
+
+## V2 — two loose ends closed honestly, 2026-08-19
+
+### The "rotation stalls on the pomodoro entry" anomaly is RETRACTED
+
+Re-run deliberately with known timestamps: timed playlist, 15 s dwells, entries
+clock / weather / pomodoro, applied 12:23:48.
+
+```
+12:24:08  clock       12:24:38  pomodoro
+12:24:18  weather     12:24:47  pomodoro
+12:24:28  weather     12:24:57  clock
+                      12:25:07  weather
+```
+
+Two full cycles, each entry dwelling ~15 s, wrapping cleanly **past** the pomodoro.
+Rotation does not stall. The earlier suspicion rested on five frames and an inferred
+config-apply time, and the inference was simply wrong. No defect; nothing to fix.
+
+### Task 8 observation 4's "widening gaps" is still NOT observed on a shipping build
+
+An attempt to evidence it indirectly — vary the server outage length, measure how long
+the device takes to return — **does not work, and the method should not be repeated.**
+When the server returns, the device sits at a random point inside its current retry
+interval, so the measured delay is a uniform sample in [0, T], not T itself:
+
+| outage | time to return |
+|---|---|
+| 40 s | 32 s |
+| ~600 s | **10 s** |
+
+The longer outage returned *faster*. That is not evidence against widening; it is
+evidence the measurement carries almost no information. Two samples from two
+distributions cannot show one is wider.
+
+What *is* supported: the doubling curve is unit-tested (`test_reconnect_backoff`), the
+code is a plain 1 s → 60 s ramp, and the diagnostic console build showed consecutive
+gaps of 8.8 s → 13.6 s directly. What is missing is the observation under acceptance
+conditions, which needs the device's own retry log — i.e. a console build, which by
+this session's own rule cannot supply acceptance evidence.
+
+Also confirmed during those outages: `uptime_ms` climbed continuously past 1,187,131 ms
+with no reboot and no spin, and the device reconnected unattended after both a 40 s and
+a ~10 minute outage. That is the other half of the observation, and it does pass.

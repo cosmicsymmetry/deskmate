@@ -2376,3 +2376,19 @@ IP still back off normally.
 
 The general lesson is worth keeping: a retry curve that starts before its dependencies
 are up spends its patience on failures that were never informative.
+
+### Measured on the board after the fix (2026-08-19 11:59 UTC)
+
+Reset-to-`device link established`, from the server's own log:
+
+| run | reset | established | elapsed |
+|---|---|---|---|
+| baseline (before fix) | 11:32:04 | 11:32:44 | ~40 s, one `refused` |
+| 1 | 11:59:28 | 11:59:38 | **~10 s** |
+| 2 | 11:59:39 | 11:59:48 | **~10 s** |
+
+Run 2 reset immediately after run 1's link came up, so it is the same stale-socket
+scenario that produced the 409 before. **No `device link refused` line appears for
+either run** — the device now reconnects before its own stale link matters, so the
+refusal never fires. The single-owner guard is unchanged; it simply stopped being
+provoked.

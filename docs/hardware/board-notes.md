@@ -2252,3 +2252,42 @@ The protocol reports OTA *state* but never an OTA *reason*: no field in
 reports `ota_state: failed` and nothing else. Diagnosing this one required a
 console-build reflash of the board on the desk; a fleet device could not be diagnosed
 at all.
+
+## V2 Task 11 Step 10 — rollback verified on the board, 2026-08-19
+
+Deliberately broken image `m1-rollback-c2` (an early `abort()` before
+`ota_mark_running_image_valid()`) published and offered to a device running
+`m1-226-gaff8e7d`. Started from a full `idf.py flash` of `m1-225-g0ad1a51`, so the
+bootloader on the board is the one carrying `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE`.
+
+Observed, unattended end to end:
+
+```
+10:56:13  server: device link established
+10:56:14  server: firmware check current=m1-226-gaff8e7d
+10:56:14  server: device link closed          <- suspended for the download
+10:56:17..35  ota=downloading (18 s)
+10:56:41  m1-226-gaff8e7d  ota=checking  up=1941   <- back on B already
+10:56:47  m1-226-gaff8e7d  ota=failed    up=8021
+```
+
+Flash and otadata afterwards:
+
+```
+ota_0: m1-rollback-c2      otadata[0]: ota_seq=3 -> ota_0  state=4 (ABORTED)
+ota_1: m1-226-gaff8e7d     otadata[1]: ota_seq=2 -> ota_1  state=2 (VALID)
+```
+
+So C was really downloaded and installed, really booted, really failed to validate,
+and the **bootloader really rolled back** — the device returned to B with no reflash
+and no human intervention. The rollback path is now exercised rather than assumed.
+
+Two things fell out of this run:
+
+- The `device link closed` one second after the firmware check is the Task 11
+  serialization fix (`0ad1a51`) visible from the server side.
+- The trailing `ota=failed` is **not** a fault. After rolling back, the device checked
+  again, found the server still advertising the image that had just failed, and
+  refused to reinstall it — `reject_reinstall_of_failed_image()` doing its job. That
+  is CLAUDE.md's "refused forever" rule observed rather than assumed, and it is why a
+  corrected rebuild must carry a new version string.

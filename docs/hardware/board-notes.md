@@ -2291,3 +2291,64 @@ Two things fell out of this run:
   refused to reinstall it — `reject_reinstall_of_failed_image()` doing its job. That
   is CLAUDE.md's "refused forever" rule observed rather than assumed, and it is why a
   corrected rebuild must carry a new version string.
+
+## V2 Task 11 Step 11 — deferral FAILS on hardware, and why, 2026-08-19
+
+**Result: the update began while a pomodoro was running.** Not a near miss — a clean
+failure of the gate item.
+
+Setup: pomodoro confirmed `state: running, remaining_seconds: 268` server-side, version
+`m1-227-gf14f241` published and offered, board reset to trigger its boot check.
+
+```
+11:32:04  reset (pomodoro running, 268 s left)
+11:32:14  ota=checking      up=7101
+11:32:20  ota=downloading   up=13136
+11:32:32  ota=downloading   up=25221
+11:32:46  m1-227-gf14f241   ota=idle   <- updated anyway
+```
+
+### Root cause: the device has no link when the check runs
+
+```
+11:32:16  WARN device link refused: owner already live  device_id=dev-0003
+11:32:16  DEBUG firmware check                          current=m1-226-gaff8e7d
+11:32:17  WARN device link idle timeout, closing
+11:32:17  INFO device link closed
+11:32:44  INFO device link established                  <- 28 s after the reboot
+```
+
+The board rebooted and reconnected faster than the server noticed the old socket was
+dead, so **the server refused its own device** ("owner already live"). The stale link
+timed out a second later, but by then the device had backed off. The firmware check
+therefore ran with **no link at all**, so no host state had been replayed, so
+`protocol_task_ota_blocked()` saw no running pomodoro and the download proceeded.
+
+The deferral logic is not broken. The state it depends on is simply absent at the only
+moment a check ever happens — boot. Since the scheduled interval is 24 h, the guard as
+built protects a timer started *between* boots and essentially never protects one at
+boot, which is when the check actually fires.
+
+### Two systemic findings from the same run
+
+1. **A quick reboot costs ~28 s of disconnection.** The server's single-owner refusal
+   does not distinguish "a second device is impersonating this one" from "this device
+   just rebooted and its old socket is stale". The device is refused, backs off, and
+   waits. Reconnection is delayed by the guard meant to protect it.
+2. **A link drop discards a running pomodoro.** Before the reboot the timer read
+   `running, 268 s`; after reconnect it reads `idle, 300 s`. Task 9 Step 4 specifies
+   "on close, shut the runtime down so a reconnect starts cleanly", so the runtime is
+   torn down and rebuilt from stored config on every link close, taking live timer
+   state with it. Combined with the earlier finding that a config apply also resets a
+   running timer, **a networked pomodoro survives neither a config edit nor a link
+   blip** — and link blips are routine.
+
+### Not fixed in this session
+
+All three are entangled: the deferral needs both a link and replayed state at check
+time; the link is delayed by the refusal; and the state would be discarded by the
+reconnect anyway. Fixing the deferral alone would not make it work. The candidate
+directions — let a reconnecting device take over its own stale socket, persist or
+replay live timer state across a reconnect, or delay the boot check until state has
+arrived — are design decisions with real consequences, not local patches, and were
+left for the owner rather than chosen unilaterally.

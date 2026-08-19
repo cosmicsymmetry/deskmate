@@ -38,6 +38,18 @@ evidence, not repo content; `docs/hardware/board-notes.md` remains the
 durable record and cites the session directory and the specific frames
 behind each verdict.
 
+**A session directory is unversioned and has no undo. Append to `NOTES.md`,
+never overwrite it, and check whether one exists before writing — a session
+dated today may already belong to an earlier run.** Nothing here is under
+git, and the machine has no Time Machine destination and no local APFS
+snapshots, so a clobbered `NOTES.md` is gone. This happened on 2026-08-19:
+an agent resuming work on an existing session directory wrote a fresh
+`NOTES.md` over the morning board session's, destroying the state↔frame
+pairing for ~60 frames. The frames and `board-notes.md` survived, which is
+exactly why the durable record lives in the repo — but the pairing index is
+not recoverable, and the reconstruction now at the top of that file is
+inference, not observation.
+
 ## Workflow
 
 - **Framing preflight (every session):** one capture the agent reads to

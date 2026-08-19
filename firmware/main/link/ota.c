@@ -294,10 +294,20 @@ static esp_err_t install_update(const char *server_url,
     esp_https_ota_config_t ota_config = {
         .http_config = &http_config,
         .buffer_caps = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT,
+        // `final` is deliberately left NULL rather than set equal to
+        // `staging`. Naming the same partition twice -- the honest way to
+        // describe a single-partition update -- walks into a hole in
+        // esp_https_ota_begin(): when `final` is non-NULL it only assigns
+        // handle->partition.final inside `if (staging != final)`, with no
+        // else branch, so passing them equal leaves that pointer unset.
+        // get_description_from_image() then dereferences
+        // handle->partition.final->type and the device panics
+        // (LoadProhibited) before writing a byte. Leaving `final` NULL takes
+        // esp_https_ota_begin()'s own `final = staging` path, which is the
+        // semantics we want. Observed on hardware 2026-08-19 against
+        // ESP-IDF v5.5.5; see docs/hardware/board-notes.md.
         .partition = {
             .staging = update_partition,
-            .final = update_partition,
-            .finalize_with_copy = false,
         },
     };
     esp_https_ota_handle_t handle = NULL;

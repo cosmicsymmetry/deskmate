@@ -94,8 +94,11 @@ of letting code and documentation diverge.
   so ownership has one implementation, not two that must agree. Providers run server-side,
   which is what makes the display work with the Mac quit. The wire stays **protocol v1**
   and the config schema stays **v4**; V2 is additive only. New message types are 13
-  (`NETWORK_CONFIG`) and 14 (`FACTORY_RESET`); `CURRENT_CAPABILITIES` is now **75**
+  (`NETWORK_CONFIG`) and 14 (`FACTORY_RESET`); `CURRENT_CAPABILITIES` is now **203**
   (core widgets | config rotation | extended templates | firmware update | networking).
+  It read 75 for most of V2 because bit 7 was defined in Task 1 and never switched on;
+  the whole-branch review caught it. `docs/protocol/v1.md` gates NetworkConfig and
+  FactoryReset on that bit, so a conforming host could not have provisioned the device.
 - **Two plan amendments were added during execution and are marked as such in the plan.**
   Task 9b (persistent device identities) was added by explicit owner direction; Task 10a
   (the app-core boundary) was added because Task 10's implementer correctly refused to

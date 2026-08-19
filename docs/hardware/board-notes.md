@@ -2122,3 +2122,73 @@ Task 8's four observations are **not** all discharged by this entry: the accepte
 connection and the status round-trips are evidenced above, but the killed-server
 reconnect observation has not been run against a deliberately stopped server, and
 the panel observation needs re-running under the corrected expectation.
+
+## V2 Task 11 — OTA download panicked before writing a byte, root-caused and fixed 2026-08-19
+
+First physical execution of Task 11 Step 9. The happy path did not work.
+
+### Symptom
+
+With an update published and offered, the board cycled roughly every ten seconds:
+
+```
+10:13:34  ota=checking     up=4752
+10:13:39  ota=downloading  up=10322
+10:13:45  ota=checking     up=3973    <- rebooted
+10:13:50  ota=downloading  up=9571
+10:13:56  ota=checking     up=3053    <- rebooted
+```
+
+It never reached version B and always came back on version A.
+
+**This failure mode is nearly invisible from the host.** After each panic
+`ota_state` returns to `checking`, so a host polling status sees a device
+perpetually *about to* update rather than one that failed. Nothing in Task 11's
+checklist asks anyone to read `uptime_ms`, which was the only honest signal.
+
+### Root cause
+
+Console capture (diagnostic build) caught the panic immediately after
+`esp_https_ota: Writing to <ota_1> partition at offset 0x420000`:
+
+```
+Guru Meditation Error: Core 1 panic'ed (LoadProhibited). Exception was unhandled.
+Backtrace: 0x42098b2d 0x42099105 0x4200d5d1 0x4200d9cd 0x403802d1
+rst:0xc (RTC_SW_CPU_RST)
+```
+
+Symbolicated against the matching ELF:
+
+```
+get_description_from_image   esp_https_ota.c:598
+esp_https_ota_get_img_desc   esp_https_ota.c:645
+install_update               firmware/main/link/ota.c:321
+ota_task                     firmware/main/link/ota.c:464
+```
+
+`ota.c` passed `.staging` and `.final` as **the same partition pointer** — the
+straightforward way to describe a single-partition update. `esp_https_ota_begin()`
+(ESP-IDF v5.5.5, `esp_https_ota.c:501-512`) only assigns
+`handle->partition.final` inside `if (ota_config->partition.staging !=
+ota_config->partition.final)`, and that inner `if` has **no else branch**. Passing
+them equal therefore leaves `handle->partition.final` unset, and
+`get_description_from_image()` dereferences `handle->partition.final->type` at
+line 602. LoadProhibited, before a single byte is written.
+
+### Fix
+
+Leave `.final` NULL in `esp_https_ota_config_t` so `esp_https_ota_begin()` takes its
+own `final = staging` path, which is the intended semantics. One-field change in
+`firmware/main/link/ota.c`, commented at the site.
+
+### Notes for anyone repeating this
+
+- The coredump partition holds a dump, but `idf.py coredump-info` refuses it when the
+  build directory no longer contains the exact ELF that crashed
+  (`coredump SHA256(...) != app SHA256(...)`). Keep the ELF, or reproduce under the
+  console build instead.
+- The console is UART0 with `CONFIG_ESP_CONSOLE_SECONDARY_NONE` and the protocol link
+  owns USB-Serial-JTAG, so a shipping build cannot report a panic over the cable. A
+  diagnostic build with `CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y` is currently the only
+  way to see one; it interleaves logs with protocol frames and must not supply
+  acceptance evidence.

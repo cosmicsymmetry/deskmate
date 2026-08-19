@@ -2602,11 +2602,36 @@ from the server. Capture the panel with the webcam harness.
 Pair to networked, confirm USB config is refused with the wrong-tier error, unpair back
 to local, and confirm the Mac owns it again.
 
+> **NOT RUN, and it costs more than it reads.** `NetworkConfig` carries `token`, and the
+> server stores only SHA-256 digests, so the plaintext exists exactly once — at mint
+> time. Returning a device from local tier to networked therefore requires **minting a
+> new identity**: the board comes back under a new `device_id` with a fresh config and
+> the previous entry is orphaned. A tier round-trip costs one device identity.
+>
+> That follows from "secrets are never readable back over the wire" rather than being a
+> defect, but it makes this the wrong item to attempt unattended, since a failure leaves
+> the board with no owner. Run it with the cable and a hand present.
+
 - [ ] **Step 5: Gate item 3 — link loss and recovery**
 
 Kill the server; confirm the device falls to the standalone clock after the 45 s deadline
 and recovers when the server returns, **without a reboot**. Repeat by dropping WiFi
 instead of the server.
+
+> **Server variant PASSES 2026-08-19. WiFi variant NOT RUN.** Server stopped 20:53:23;
+> standalone fallback observed 20:54:38 (`00:54`, `Thu, Aug 20`, "Connect deskmate app",
+> local time correct for UTC+4, so SNTP holds the clock without a server); server
+> restarted 20:55:06; link back 20:55:31, ~25 s.
+>
+> *Without a reboot* is proven by uptime continuity, not by looking at the panel: the
+> board was reset at 20:51:44 and reported `uptime 224371 ms` at 20:55:31, against 227 s
+> of wall clock. The counter never restarted. Note `reconnects` reads 0 afterwards
+> because that is the freshly started **server** process's counter, not the device's.
+>
+> The WiFi-drop half needs router access or a hand. The tempting software substitute —
+> stopping the tunnel or Caddy — was rejected: Caddy on that host reverse-proxies about
+> seventeen unrelated services, so it would have taken the owner's homelab down
+> overnight to test one gate item.
 
 - [ ] **Step 6: Gate item 4 — OTA and rollback**
 
@@ -2624,6 +2649,26 @@ for that device for the duration.
 Run a 30-minute mixed soak with the radio up: rotation, taps, provider refreshes,
 interrupts. Confirm the heap is flat at the Step 2 baseline and the queue high-water
 stays bounded. Record the actual figures, not a verdict.
+
+> **PARTIAL 2026-08-19 — rotation and provider refreshes only; taps and interrupts were
+> not exercised, so this is not the mixed soak specified.** Window 20:57:42 → 21:27:55
+> UTC, 30 min 13 s, 31 samples at 60 s.
+>
+> | metric | result |
+> | --- | --- |
+> | connectivity | `conn=True` in all 31, never dropped |
+> | free heap | 28-byte band, 8310703–8310731, no trend, first and last identical |
+> | `ui_queue_high_water` | 2, constant |
+> | `event_queue_high_water` | 0, constant |
+> | malformed / crc / overflow / dropped | 0 throughout |
+> | uptime | 356472 → 2169118 ms continuous; delta matches wall clock, so no reboot |
+> | rotation | clock 11 / weather 11 / pomodoro 9 |
+>
+> The heap is **not** flat *at the Step 2 baseline* as worded: the fresh-boot baseline
+> was 8,310,267 and steady state sits ~456 bytes higher once link and providers are up.
+> No leak — no drift in either direction — but a fresh-boot figure and a steady-state
+> figure are different quantities and the checklist's wording invites comparing them as
+> if they were not.
 
 - [ ] **Step 9: Gate item 7 — alert replay across a network reconnect**
 

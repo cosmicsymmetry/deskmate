@@ -53,10 +53,33 @@ static void test_dropped_byte_counter_saturates(void)
     assert(net_ring_dropped_bytes(&ring) == UINT32_MAX);
 }
 
+static void test_clear_discards_bytes_and_preserves_diagnostics(void)
+{
+    uint8_t storage[4];
+    uint8_t output[4];
+    const uint8_t stale[] = {1U, 2U, 3U, 4U, 5U};
+    const uint8_t fresh[] = {6U, 7U};
+    net_ring_t ring;
+
+    net_ring_init(&ring, storage, sizeof(storage));
+    assert(net_ring_write(&ring, stale, sizeof(stale)) == sizeof(storage));
+    assert(net_ring_dropped_bytes(&ring) == 1U);
+
+    net_ring_clear(&ring);
+    assert(net_ring_used(&ring) == 0U);
+    assert(net_ring_dropped_bytes(&ring) == 1U);
+    assert(net_ring_read(&ring, output, sizeof(output)) == 0U);
+
+    assert(net_ring_write(&ring, fresh, sizeof(fresh)) == sizeof(fresh));
+    assert(net_ring_read(&ring, output, sizeof(output)) == sizeof(fresh));
+    assert(memcmp(output, fresh, sizeof(fresh)) == 0);
+}
+
 int main(void)
 {
     test_wraparound_split_copy_and_transitions();
     test_dropped_byte_counter_saturates();
+    test_clear_discards_bytes_and_preserves_diagnostics();
     puts("test_net_ring: OK");
     return 0;
 }

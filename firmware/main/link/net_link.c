@@ -17,6 +17,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "link/net_store.h"
+#include "link/protocol_task.h"
 #include "link/usb_link.h"
 #include "link/wifi_station.h"
 
@@ -107,6 +108,10 @@ static void websocket_event_handler(void *handler_arg,
     esp_websocket_event_data_t *event = event_data;
 
     if (event_id == WEBSOCKET_EVENT_CONNECTED) {
+        portENTER_CRITICAL(&s_rx_lock);
+        net_ring_clear(&s_rx_ring);
+        portEXIT_CRITICAL(&s_rx_lock);
+        protocol_task_reset_network_decoder();
         s_connected = true;
         s_connected_at_us = esp_timer_get_time();
         ESP_LOGI(TAG, "WebSocket connected");

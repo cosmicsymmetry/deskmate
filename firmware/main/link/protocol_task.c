@@ -79,6 +79,7 @@ static TaskHandle_t s_task;
 static const link_transport_t *s_transport;
 static bool s_owner_usb_restricted;
 static atomic_bool s_ota_blocked;
+static atomic_bool s_network_decoder_reset_requested;
 
 static void refresh_ota_blocked(const protocol_context_t *context)
 {
@@ -883,6 +884,10 @@ static void protocol_task(void *argument)
     for (;;) {
         size_t received = s_transport->read(
             chunk, sizeof(chunk), pdMS_TO_TICKS(PROTOCOL_READ_TIMEOUT_MS));
+        if (atomic_exchange_explicit(&s_network_decoder_reset_requested,
+                                     false, memory_order_acq_rel)) {
+            protocol_decoder_init(&context->decoder);
+        }
         if (received != 0U) {
             protocol_decoder_feed(&context->decoder, chunk, received,
                                   frame_callback, context);
@@ -932,6 +937,8 @@ esp_err_t protocol_task_start(void)
     protocol_network_config_t boot_network_config;
     net_store_load(&boot_network_config);
     memset(&boot_network_config, 0, sizeof(boot_network_config));
+    atomic_store_explicit(&s_network_decoder_reset_requested, false,
+                          memory_order_relaxed);
     if (net_store_current_tier() == PROTOCOL_TIER_NETWORKED &&
         net_link_start() == ESP_OK) {
         s_transport = net_link_transport();
@@ -965,6 +972,12 @@ esp_err_t protocol_task_start(void)
 bool protocol_task_is_running(void)
 {
     return s_task != NULL;
+}
+
+void protocol_task_reset_network_decoder(void)
+{
+    atomic_store_explicit(&s_network_decoder_reset_requested, true,
+                          memory_order_release);
 }
 
 bool protocol_task_ota_blocked(void)

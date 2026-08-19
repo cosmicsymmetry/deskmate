@@ -19,7 +19,7 @@ static const char *TAG = "deskmate";
 
 void app_main(void)
 {
-    ESP_LOGI(TAG, "deskmate M2 boot");
+    ESP_LOGI(TAG, "deskmate firmware boot");
     ESP_LOGI(TAG, "board: %dx%d LCD, QSPI CS=%d PCLK=%d D0-D3=%d,%d,%d,%d",
              BOARD_LCD_H_RES, BOARD_LCD_V_RES,
              BOARD_LCD_PIN_CS, BOARD_LCD_PIN_PCLK,

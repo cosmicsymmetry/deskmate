@@ -25,6 +25,16 @@ void net_ring_init(net_ring_t *ring, uint8_t *storage, size_t capacity)
     ring->dropped_bytes = 0U;
 }
 
+void net_ring_clear(net_ring_t *ring)
+{
+    if (ring == NULL) {
+        return;
+    }
+    ring->head = 0U;
+    ring->tail = 0U;
+    ring->used = 0U;
+}
+
 size_t net_ring_write(net_ring_t *ring, const uint8_t *data, size_t length)
 {
     if (ring == NULL || ring->storage == NULL || ring->capacity == 0U ||

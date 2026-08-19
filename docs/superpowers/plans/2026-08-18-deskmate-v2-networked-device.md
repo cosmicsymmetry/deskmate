@@ -2360,6 +2360,34 @@ version available; the panel shows the update takeover with advancing progress; 
 device reboots into version B; `status` reports version B; and the previous slot still
 holds version A.
 
+> **Executed 2026-08-19. Failed, root-caused, fixed, and now passes — but the first
+> "pass" had to be retracted.** Board-notes carries both entries.
+>
+> The first attempt never installed anything: the device panicked LoadProhibited the
+> moment `esp_https_ota` began writing, rebooted, checked again, and panicked again on
+> a ~10 s cycle. `ota.c` passed `.staging` and `.final` as the same partition pointer,
+> and `esp_https_ota_begin()` leaves `handle->partition.final` unassigned in exactly
+> that case. Fixed in `77f0e52`.
+>
+> The retry passed all five confirmations — **but only because the WSS link happened
+> not to be up while it ran.** With the link established the download died ~7 s in on
+> `esp-aes: Failed to allocate memory`: the AES accelerator's DMA buffers must come
+> from internal RAM, which two concurrent TLS sessions exhaust. Fixed in `0ad1a51` by
+> suspending the link for the duration of a download.
+>
+> Re-run 10:53 UTC with `connected: true` confirmed **before** the reset — the exact
+> condition that failed — passes all five: offer seen, takeover advancing 0→41→77%,
+> reboot into B, `status` reports B, and `ota_0`/`ota_1` read back as A and B.
+>
+> Two cautions for whoever repeats this. `ota_state` returns to `checking` after a
+> panic, so a host polling status sees a device *perpetually about to update* rather
+> than one failing — only `uptime_ms` going backwards reveals it, and nothing in this
+> checklist asks for that. And `PROJECT_VER` is resolved from `git describe` at CMake
+> **configure** time and cached, so a dirty tree silently reuses the previous version
+> string; publishing under it would poison a good image forever via
+> `reject_reinstall_of_failed_image()`. Use `version.txt` and read the embedded
+> descriptor back before publishing.
+
 - [ ] **Step 10: Verify rollback on the physical board**
 
 This is the check that matters most, because it is the one that saves a fleet. Build a
@@ -2369,6 +2397,26 @@ it, fails to validate, and **returns to version B on the next reset**.
 
 Do not skip this on the grounds that the code looks right. An unexercised rollback path
 is indistinguishable from a missing one.
+
+> **Executed 2026-08-19 — PASSES, unattended.** Broken image `m1-rollback-c2` (early
+> `abort()` before the validity gate) downloaded, installed, booted, failed to
+> validate, and the bootloader returned the board to `m1-226-gaff8e7d` with no reflash
+> and no human action. Proof from flash rather than inference:
+>
+> ```
+> ota_0: m1-rollback-c2     otadata[0]: ota_seq=3 -> ota_0  state=4 (ABORTED)
+> ota_1: m1-226-gaff8e7d    otadata[1]: ota_seq=2 -> ota_1  state=2 (VALID)
+> ```
+>
+> The run also exercised two things it was not aimed at: the server logged
+> `device link closed` one second after the firmware check, which is `0ad1a51`'s
+> suspension seen from the server side; and the `ota=failed` that follows the rollback
+> is `reject_reinstall_of_failed_image()` refusing to reinstall the image that had just
+> failed — CLAUDE.md's "refused forever" rule observed rather than assumed.
+>
+> The precondition in the deferral note above was met: this started from a full
+> `idf.py flash` of `m1-225-g0ad1a51`, so the bootloader on the board is the one
+> carrying `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE`.
 
 - [ ] **Step 11: Verify the deferral**
 

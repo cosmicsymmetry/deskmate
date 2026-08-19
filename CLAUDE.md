@@ -87,7 +87,38 @@ of letting code and documentation diverge.
   Three UX findings from that session are recorded in board-notes (takeover face
   indistinguishable from the completed card; sticky unreconciled optimistic red flash
   on tapping a completed pomodoro; host silently ignores stale-token dismissals).
-- **V2 (networked device) is software-complete and awaiting its physical exit gate.**
+- **V2's exit gate is OPEN: Task 11 Step 11 fails on hardware and cannot be closed by
+  re-running it.** The first physical session (2026-08-19) found and fixed three
+  firmware defects on paths that had been marked complete on software grounds, and left
+  one gate item failing. Do not describe V2 as software-complete.
+  - `62e5aea` — `CONFIG_MBEDTLS_INTERNAL_MEM_ALLOC` confined TLS to internal DRAM, which
+    LVGL and WiFi had already spent, so `mbedtls_ssl_setup()` failed before any socket
+    work. **The networked link had never once worked on hardware.** Fixed by
+    `CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y`. Note `free_heap` reads ~8 MB throughout —
+    that is PSRAM, so it is not a TLS health signal on this board.
+  - `77f0e52` — passing the same partition as `.staging` and `.final` left
+    `handle->partition.final` unassigned in `esp_https_ota_begin()`; the OTA download
+    panicked LoadProhibited before writing a byte. Leave `.final` NULL.
+  - `0ad1a51` — the hardware AES accelerator's DMA buffers must come from internal RAM,
+    so **two concurrent TLS sessions cannot coexist**: a download alongside the live WSS
+    link dies on `esp-aes: Failed to allocate memory`. `install_update()` now suspends
+    the link for the duration and resumes it on every failure path.
+  - **Open: the OTA deferral never defers.** Checks fire only at boot; at boot the
+    device reconnects faster than the server notices the old socket is dead, so the
+    server refuses its own device ("owner already live"), the device backs off, and the
+    check runs link-less with no replayed host state. Entangled with two systemic
+    findings — a quick reboot costs ~28 s offline, and a link drop discards a running
+    pomodoro (the runtime is torn down on close by design). Fixing the deferral alone
+    would not make it defer. Directions are recorded in board-notes; none was chosen.
+  - Verified and passing: the server owns the device, providers run server-side, real
+    weather renders with the Mac quit, a tap travels up and state comes back down,
+    pulling USB changes nothing, the Mac app holds the cable without taking the display
+    (`reconnects: 0`), OTA installs and reboots, and **rollback works unattended** —
+    otadata marks the broken image `ABORTED` and the previous slot `VALID`.
+  - Still owed: Task 8's widening-backoff observation on a shipping build, Task 9's tap
+    latency, the rotation stall on the pomodoro entry (anomaly, unchased), and an OTA
+    failure *reason* anywhere on the wire — `ota_state: failed` carries no cause, which
+    is why diagnosis needed a console reflash of a board on the desk.
   Plan `docs/superpowers/plans/2026-08-18-deskmate-v2-networked-device.md`, branch
   `feat/v2-networked-device`. The device joins WiFi, dials out over WSS to a single-tenant
   server, and that server owns it through the same `RuntimeDevice` seam the Mac app uses —

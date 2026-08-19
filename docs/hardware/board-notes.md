@@ -2695,16 +2695,29 @@ last_ota_error = "download: ESP_ERR_MBEDTLS_SSL_READ_FAILED"
 So it is not the image, not the server, not the tunnel and not the network. The only
 firmware change between the working and broken builds is `3f2aa03`.
 
-### Mechanism (prime suspect, fix in progress)
+### Mechanism: NOT established. The first hypothesis was wrong.
 
-`3f2aa03` installs a custom HTTP event handler (`download_http_event`) on the OTA
-download's `esp_http_client_config_t`. `esp_https_ota` installs and depends on its own
-event handling to read the image body, so displacing it breaks the read — which matches
-the SSL read failure exactly. The handler was never needed for the download stage: the
-perform loop already calls `esp_https_ota_get_status_code(handle)`.
+The initial suspect was that `3f2aa03`'s custom HTTP event handler (`download_http_event`)
+displaced one `esp_https_ota` relies on to read the image body. **That is refuted by the
+IDF 5.5.5 sources**, and the refutation should be kept so nobody re-derives it:
 
-The rule this is a case of: **do not instrument a subsystem by taking over a callback it
-owns.** The diagnostic is not worth the mechanism.
+- `esp_https_ota_begin()` passes the supplied config straight to
+  `esp_http_client_init()`; it never calls `esp_http_client_set_event_handler()`.
+- `esp_https_ota_perform()` reads the image with `esp_http_client_read()` directly.
+- `http_on_body()` copies the body *first*, then dispatches `HTTP_EVENT_ON_DATA`, and
+  ignores the callback's return value.
+- `HTTP_EVENT_ERROR` is dispatched only after the transport read has already failed.
+
+So a user event handler cannot displace an OTA body reader, because there is no
+event-driven body reader to displace.
+
+The remaining concrete suspect is **internal DRAM**: `3f2aa03` adds ~105 bytes of it
+(`s_last_error` plus its `portMUX_TYPE`), and `0ad1a51` already established that this
+board starves the AES accelerator's DMA allocations out of internal RAM. That is
+plausible and unproven; no second fix was invented for it.
+
+The isolation to `3f2aa03` is empirical and stands on the table above. What does not
+stand is any explanation of *why*.
 
 ### Why this matters beyond the bug
 

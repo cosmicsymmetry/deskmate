@@ -147,16 +147,20 @@ of letting code and documentation diverge.
     observability gap is **partly** closed: additive protocol-v1 `StatusResponse` key 30
     carries bounded `last_ota_error`, `GET /v1/devices/{id}` exposes it under
     `snapshot.device`, and it was verified on the board.
-  - **`3f2aa03` is a REGRESSION: it breaks OTA downloads.** It installs a custom HTTP
-    event handler on the download client, and `esp_https_ota` depends on its own event
-    handling to read the image body, so every download fails with
-    `download: ESP_ERR_MBEDTLS_SSL_READ_FAILED` — isolated on the board 2026-08-19 and
-    recorded in board-notes. **Do not flash a build carrying it.** The general rule:
-    never instrument a subsystem by taking over a callback it owns; the perform loop
-    already had `esp_https_ota_get_status_code()`. Two lessons stand on their own: every
-    gate stayed green through the whole thing, so green tests say nothing about whether
-    OTA still works; and `last_ota_error` is what made its own regression diagnosable,
-    which is the argument for the field rather than against it.
+  - **`3f2aa03` is a REGRESSION: it breaks OTA downloads.** Every download from a build
+    carrying it fails with `download: ESP_ERR_MBEDTLS_SSL_READ_FAILED`. **Do not flash a
+    build carrying it.** The commit is isolated empirically — the build before it
+    installs images fine, the build at it fails three times including on a known-good
+    image the server serves with HTTP 200 over both the LAN and the public tunnel — but
+    **the mechanism is NOT established.** An initial hypothesis (its custom HTTP event
+    handler displacing one `esp_https_ota` relies on) was refuted from the IDF 5.5
+    sources: `esp_https_ota_begin()` never calls `esp_http_client_set_event_handler()`
+    and `esp_https_ota_perform()` reads via `esp_http_client_read()` directly. The
+    remaining unproven suspect is the ~105 bytes of internal DRAM the commit adds
+    (`s_last_error` and its lock), against `0ad1a51`'s documented AES-DMA starvation.
+    Two lessons stand regardless: every gate stayed green throughout, so green tests say
+    nothing about whether OTA still works; and `last_ota_error` is what made its own
+    regression diagnosable, which argues for the field rather than against it.
   - Traps learned on the board, all still true: **a flashed build is reverted within a
     minute** unless `DESKMATE_FIRMWARE_VERSION` is moved to match, because the catalog
     pins the fleet and offers its version in either direction — a downgrade path exists

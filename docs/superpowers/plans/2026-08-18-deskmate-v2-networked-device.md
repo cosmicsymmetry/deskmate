@@ -2450,6 +2450,45 @@ proceeds once the pomodoro finishes.
 > state across a reconnect; delay the boot check until state has arrived — are design
 > decisions for the owner, deliberately not chosen in-session.
 
+> **Addressed in software 2026-08-19 by owner direction to decide and proceed
+> rather than return with options. Still UNOBSERVED on the board — this step stays
+> unchecked until it is re-run there.** All three entangled findings now have a fix:
+>
+> 1. *Reconnect delay* — already fixed before this work (`024b1ce`), measured ~40 s
+>    → ~10 s, with the `owner already live` refusal no longer provoked at all.
+> 2. *The boot check outran the link* — `3f83911`. `perform_check()` now waits on
+>    `protocol_task_owner_state_ready()` (link online **and** widget config present)
+>    for at most `OTA_OWNER_WAIT_MS` (60 s), not merely on `wifi_station_state()`.
+>    The wait is bounded and **fails open**: a device whose owner can never become
+>    ready must stay updatable, or a bad config would strand it un-updatable
+>    forever. The pure-C predicate `ota_policy_should_wait_for_owner()` is
+>    host-tested.
+> 3. *A link drop discarded the running pomodoro* — `12e5f4d`. The server built a
+>    `RuntimeHandle` per WebSocket and shut it down on close, making live timer and
+>    interrupt state a property of a transport connection. The runtime is now per
+>    device and long-lived; sockets attach as replaceable transports pinned by an
+>    attachment generation, and a reconnect replays time, layout, latest fields,
+>    active screen and live interrupts. `connected` in `GET /v1/devices/{id}` now
+>    reports socket liveness rather than runtime existence, so a retained runtime
+>    cannot make an unplugged device look attached.
+>
+> Fixes 2 and 3 are complementary and neither is sufficient alone: 2 gives the
+> guard a link to wait for, 3 gives it a running timer still there to see.
+>
+> Verified in software only. `make -C firmware/host_tests clean test`,
+> `idf.py -C firmware build`, `cargo fmt`/`clippy`/`test --workspace` all green,
+> including a new integration test
+> (`running_pomodoro_survives_link_close_and_reattach`) that starts a pomodoro,
+> drops the socket, and asserts the timer is still running and decremented after a
+> reattach. Note `cargo test` stops at the first failing test binary, so this suite
+> needs `--no-fail-fast` to be seen at all when an earlier one fails.
+>
+> **How to re-run Step 11 on the board:** start a pomodoro server-side, confirm
+> `state: running` via `GET /v1/devices/{id}`, publish a newer firmware version,
+> reset the board, and confirm the check defers — `ota` must not reach
+> `downloading` while the timer runs — then proceeds once it finishes. The reboot
+> is the point: it is the only moment a check actually fires.
+
 - [ ] **Step 12: Record and commit**
 
 ```bash

@@ -2436,3 +2436,67 @@ this session's own rule cannot supply acceptance evidence.
 Also confirmed during those outages: `uptime_ms` climbed continuously past 1,187,131 ms
 with no reboot and no spin, and the device reconnected unattended after both a 40 s and
 a ~10 minute outage. That is the other half of the observation, and it does pass.
+
+## V2 Task 11 Step 11 — blocker fixed in software, NOT yet observed, 2026-08-19
+
+The deferral failure recorded above has been root-caused into two remaining defects
+and both are fixed. **Nothing in this entry was seen on the board.** It exists so the
+next board session knows what to re-run and what to expect; the step stays open.
+
+### What was actually wrong
+
+Two independent defects, either of which alone would have kept the deferral useless:
+
+1. **The boot check waited on the radio, not on the owner.** `perform_check()` gated
+   on `wait_for_wifi()` (`wifi_station_state() == PROTOCOL_WIFI_CONNECTED`), while
+   the deferral gate `protocol_task_ota_blocked()` is computed from *host-pushed*
+   state — a live interrupt or a running progress timer in the widget model. The
+   station gets an IP seconds before the link is up and long before any state has
+   been replayed, so the guard read a variable that was provably empty at the only
+   moment it is consulted.
+2. **A link drop discarded the running pomodoro.** The server built a `RuntimeHandle`
+   per WebSocket and shut it down on close, so live timer and interrupt state was a
+   property of a transport connection rather than of the device.
+
+Fixing either alone would not have made the deferral work: the first gives the guard
+a link to wait for, the second gives it a running timer still there to see.
+
+### The fixes
+
+`3f83911` (firmware) adds `protocol_task_owner_state_ready()` — `link.online` **and**
+`widget_model_config(...) != NULL` — and a bounded `wait_for_owner_state()` of
+`OTA_OWNER_WAIT_MS` = 60 s after the WiFi wait, in both tiers. **The wait fails open
+by design:** on timeout the check proceeds anyway, because a device whose owner can
+never become ready must stay updatable rather than be stranded by a bad config. Same
+reasoning as the local-only image validity gate.
+
+`12e5f4d` (server) makes the runtime per-device and long-lived, with sockets
+attaching as replaceable transports pinned by a generation counter. A reconnect runs
+`connect()` and replays time, layout, latest fields, active screen and live
+interrupts. `connected` in `GET /v1/devices/{id}` now reports socket liveness rather
+than runtime existence, so a retained runtime cannot make an unplugged device look
+attached; single ownership still refuses a second concurrent owner, now by
+`compare_exchange` on the per-device entry.
+
+### What to expect when re-running it
+
+Start a pomodoro server-side, confirm `state: running`, publish a newer version,
+reset the board. The check should now stall at `ota=checking` while the timer runs
+rather than advancing to `downloading`, and proceed once the timer finishes. The
+reboot is the point — it is the only moment a check ever fires, since the interval is
+24 h.
+
+Two things worth watching, neither yet observed:
+
+- The bounded wait adds up to 60 s before a check when no owner appears. On a healthy
+  networked device the link now lands around 10 s, so the wait should be short.
+- With the runtime retained, `GET /v1/devices/{id}` returns a `snapshot` even while
+  `connected` is false. That is intended and is an improvement — the timer stays
+  visible while the board is offline — but it changes what the field means.
+
+### Carried forward as a V3 item
+
+`device_links` entries are now never removed, so a runtime is retained for every
+device that has ever connected, and `MAX_CONCURRENT_LINKS` no longer bounds the
+number of retained runtimes. For a single-tenant V2 with one board this is what was
+wanted. It needs a lifetime rule before more devices exist.

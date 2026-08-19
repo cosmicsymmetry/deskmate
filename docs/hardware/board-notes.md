@@ -2672,3 +2672,62 @@ surfaced only because the check was carried through to the board.
 
 `v2.0.0-nofile` is now permanently burned as a version string by
 `reject_reinstall_of_failed_image()`.
+
+## V2 — the OTA failure-reason commit broke OTA downloads, 2026-08-19 late
+
+**`3f2aa03` is a regression and must not be trusted as it stands.** Every OTA download
+from firmware carrying it fails:
+
+```
+last_ota_error = "download: ESP_ERR_MBEDTLS_SSL_READ_FAILED"
+```
+
+### Evidence that isolates it
+
+| observation | result |
+| --- | --- |
+| `v2.0.0-gate1` (before `3f2aa03`) downloading `v2.0.0-gate3` | **succeeded**, 21:31 |
+| `v2.0.0-gate3` (at `3f2aa03`) downloading `v2.0.0-gate4` | failed, 21:46 and 21:49 |
+| `v2.0.0-gate3` downloading `v2.0.0-gate1.bin`, a known-good, previously-installed image | failed, 21:52, same error |
+| server serving that file on the LAN | HTTP 200, 1,548,256 bytes |
+| server serving it through the public Cloudflare tunnel | HTTP 200, 1,548,256 bytes, 0.43 s |
+
+So it is not the image, not the server, not the tunnel and not the network. The only
+firmware change between the working and broken builds is `3f2aa03`.
+
+### Mechanism (prime suspect, fix in progress)
+
+`3f2aa03` installs a custom HTTP event handler (`download_http_event`) on the OTA
+download's `esp_http_client_config_t`. `esp_https_ota` installs and depends on its own
+event handling to read the image body, so displacing it breaks the read — which matches
+the SSL read failure exactly. The handler was never needed for the download stage: the
+perform loop already calls `esp_https_ota_get_status_code(handle)`.
+
+The rule this is a case of: **do not instrument a subsystem by taking over a callback it
+owns.** The diagnostic is not worth the mechanism.
+
+### Why this matters beyond the bug
+
+1. **Every gate was green.** Host tests, `idf.py build`, clippy and the full cargo
+   workspace all passed, before and after. Nothing in the software suite can reach this
+   path; only the board can. Treat "all tests green" on any `ota.c` change as saying
+   nothing about whether OTA still works.
+2. **The feature that broke OTA is what made the break diagnosable.** Without
+   `last_ota_error` this would have read `ota_state: failed` and nothing else — the
+   exact blindness the field was added to remove, and it would have cost another console
+   reflash to find. The field earns its keep even in the commit that introduced the bug.
+3. It also means the earlier hardware result stands: `last_ota_error` genuinely works.
+   What must be removed is only the event-handler mechanism behind the
+   `begin: HTTP <status>` refinement.
+
+### Board state
+
+Restored to `v2.0.0-gate1` over USB (otadata reset to initial, app written at 0x20000),
+because gate1 carries both verified fixes — the owner wait (`3f83911`) and the retained
+runtime (`12e5f4d`) — and none of this regression. Confirmed healthy afterwards:
+connected, `ota=idle` after a clean check, rotation running, every error counter 0,
+heap steady at ~8,310,600. The catalog is pinned to `v2.0.0-gate1` so it stays put.
+
+**Do not ship `3f2aa03` or the version strings `v2.0.0-gate3`/`v2.0.0-gate4` to a board.**
+Note `v2.0.0-nofile` and `v2.0.0-gate4` are now burned as version strings on this device
+by `reject_reinstall_of_failed_image()`.

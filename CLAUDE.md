@@ -125,10 +125,12 @@ of letting code and documentation diverge.
   a rollback test must start from a full `idf.py flash`; and a corrected rebuild published
   under the **same version string** as a failed one is refused forever, because the
   refusal keys on the version string rather than image content.
-- **Nothing in V2 has been verified on the physical board.** Task 8's four link
-  observations, Task 9's headline demo, and Task 11's OTA/rollback/deferral steps are all
-  open, along with the whole of Task 12's exit gate. Do not describe any of them as
-  observed.
+- **Tasks 8 through 12 are open on hardware.** Task 8's four link observations, Task 9's
+  headline demo, and Task 11's OTA/rollback/deferral steps are all unobserved, along with
+  the whole of Task 12's exit gate. Do not describe any of them as verified. Tasks 3, 4, 5
+  and 6 *were* verified on the board on 2026-08-18 and are recorded in
+  `docs/hardware/board-notes.md` — including the WiFi crash-loop root-cause — so do not
+  redo that work either.
 - V1 packaging/hardening is delivered
   (`docs/superpowers/plans/2026-08-15-deskmate-v1-packaging-hardening.md`): the
   repo has a private GitHub remote `cosmicsymmetry/deskmate` with a green `ci`

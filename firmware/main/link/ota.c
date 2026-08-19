@@ -21,6 +21,7 @@
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "link/net_link.h"
 #include "link/net_store.h"
 #include "link/protocol_task.h"
 #include "link/wifi_station.h"
@@ -245,6 +246,21 @@ static esp_err_t reject_reinstall_of_failed_image(
     return ESP_OK;
 }
 
+/* Reopens the link this download closed. Only the success path skips it, and
+ * only because it reboots: every failure must hand the server its device back,
+ * or one failed download would strand the display until the next reset. */
+static void resume_link_if_suspended(bool suspended)
+{
+    if (!suspended) {
+        return;
+    }
+    esp_err_t result = net_link_resume();
+    if (result != ESP_OK) {
+        ESP_LOGE(TAG, "could not resume the network link (%s); the device is "
+                      "offline until the next reset", esp_err_to_name(result));
+    }
+}
+
 static esp_err_t install_update(const char *server_url,
                                 const char *running_version,
                                 const ota_policy_metadata_t *metadata)
@@ -310,10 +326,23 @@ static esp_err_t install_update(const char *server_url,
             .staging = update_partition,
         },
     };
+    // Give the download the radio to itself. Two concurrent TLS sessions
+    // exhaust the internal DMA memory the hardware AES accelerator needs, and
+    // the download dies mid-transfer with "esp-aes: Failed to allocate
+    // memory". ESP_ERR_INVALID_STATE means there was no network link to
+    // suspend -- an OTA over the cable in local tier -- which is not a fault.
+    esp_err_t suspend_result = net_link_suspend();
+    bool link_suspended = suspend_result == ESP_OK;
+    if (!link_suspended && suspend_result != ESP_ERR_INVALID_STATE) {
+        ESP_LOGW(TAG, "could not suspend the network link (%s); downloading "
+                      "alongside it", esp_err_to_name(suspend_result));
+    }
+
     esp_https_ota_handle_t handle = NULL;
     result = esp_https_ota_begin(&ota_config, &handle);
     if (result != ESP_OK) {
         ota_screen_close();
+        resume_link_if_suspended(link_suspended);
         return result;
     }
     if (esp_https_ota_get_status_code(handle) != 200) {
@@ -375,6 +404,7 @@ static esp_err_t install_update(const char *server_url,
     handle = NULL;
     if (result != ESP_OK) {
         ota_screen_close();
+        resume_link_if_suspended(link_suspended);
         return result;
     }
     set_state(PROTOCOL_OTA_PENDING_VERIFY);
@@ -387,6 +417,7 @@ static esp_err_t install_update(const char *server_url,
 abort_update:
     (void)esp_https_ota_abort(handle);
     ota_screen_close();
+    resume_link_if_suspended(link_suspended);
     return result;
 }
 

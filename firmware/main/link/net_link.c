@@ -260,6 +260,44 @@ esp_err_t net_link_start(void)
     return ESP_OK;
 }
 
+esp_err_t net_link_suspend(void)
+{
+    if (s_client == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    // stop(), not close(): the client is configured with
+    // enable_close_reconnect, so a close would immediately dial again and
+    // reintroduce the very second TLS session this exists to avoid.
+    esp_err_t result = esp_websocket_client_stop(s_client);
+    if (result != ESP_OK) {
+        return result;
+    }
+    s_connected = false;
+    // Drop anything half-received. Resuming re-dials from scratch, so a
+    // frame straddling the suspend would otherwise be decoded against bytes
+    // from a different connection -- the same reasoning as the CONNECTED
+    // handler's clear.
+    portENTER_CRITICAL(&s_rx_lock);
+    net_ring_clear(&s_rx_ring);
+    portEXIT_CRITICAL(&s_rx_lock);
+    protocol_task_reset_network_decoder();
+    ESP_LOGI(TAG, "WebSocket suspended for firmware download");
+    return ESP_OK;
+}
+
+esp_err_t net_link_resume(void)
+{
+    if (s_client == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    esp_err_t result = esp_websocket_client_start(s_client);
+    if (result != ESP_OK) {
+        return result;
+    }
+    ESP_LOGI(TAG, "WebSocket resumed after firmware download");
+    return ESP_OK;
+}
+
 static size_t net_link_read(uint8_t *out, size_t capacity,
                             TickType_t timeout_ticks)
 {

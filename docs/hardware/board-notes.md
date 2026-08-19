@@ -2585,3 +2585,90 @@ Evidence: `~/deskmate-hw-sessions/2026-08-19-v2-exit-gate/`, frames
 `181106Z-step11-deferred-timer-running`, `181445Z-step11-timer-completed`,
 `202735Z-step11-updated-to-gate1`. Note the camera moved between the second and third,
 so those two must not be compared as if fixed.
+
+## V2 exit gate — unattended run, 2026-08-19 evening
+
+Run with the owner asleep, so only items needing no hands were attempted. Session
+evidence: `~/deskmate-hw-sessions/2026-08-19-v2-exit-gate/`.
+
+### Step 2 baseline (freshly booted networked device, 20:52)
+
+- Image **1,548,256 bytes** (`0x179FE0`), 63% of the app partition free.
+- Free heap **8,310,267**, byte-identical across three samples 40 s apart.
+- RSSI −37, `ui_queue_high_water` 1, `event_queue_high_water` 0, all error counters 0.
+
+### Gate item 3 — link loss and recovery: server half PASSES
+
+Server stopped 20:53:23; standalone fallback observed 20:54:38 (`00:54`, `Thu, Aug 20`,
+"Connect deskmate app" — local time correct for UTC+4, so SNTP holds the clock with no
+server); server started 20:55:06; link back 20:55:31, about 25 s.
+
+**"Without a reboot" is proven by uptime continuity, not by the panel** — the two look
+identical. The board was reset at 20:51:44 and reported `uptime 224371 ms` at 20:55:31
+against 227 s of wall clock, so the counter never restarted.
+
+Two traps for whoever reads these samples. `reconnects` reads **0** after recovery
+because that is the freshly started *server* process's counter, not the device's. And
+the running timer resets to `idle/300` across a server restart: runtime retention
+survives a link drop, not a restart of the process holding the runtime.
+
+**The WiFi half was NOT run.** It needs router access or a hand. The tempting software
+substitute was rejected on inspection: Caddy on that host reverse-proxies about
+seventeen unrelated services, so stopping the tunnel would have taken the owner's whole
+homelab down overnight to test one gate item.
+
+### Gate item 2 — tier switch: NOT RUN, and it costs a device identity
+
+`NetworkConfig` carries `token`, and the server stores only SHA-256 digests, so the
+plaintext exists exactly once, at mint time. Returning a device from local tier to
+networked therefore requires minting a **new identity**: the board returns under a new
+`device_id` with a fresh config and the previous entry is orphaned. That follows from
+"secrets are never readable back over the wire" rather than being a defect, but it makes
+this the wrong item to attempt unattended — a failure leaves the board with no owner.
+
+### Gate item 6 — 30-minute soak: PARTIAL
+
+20:57:42 → 21:27:55 UTC, 30 min 13 s, 31 samples at 60 s, 15 timelapse frames.
+
+| metric | result |
+| --- | --- |
+| connectivity | `conn=True` in all 31, never dropped |
+| free heap | 28-byte band, 8310703–8310731, no trend, first and last identical |
+| `ui_queue_high_water` | 2, constant |
+| `event_queue_high_water` | 0, constant |
+| malformed / crc / overflow / dropped | 0 throughout |
+| uptime | 356472 → 2169118 ms continuous, matching wall clock; no reboot |
+| rotation | clock 11 / weather 11 / pomodoro 9 |
+
+**Two qualifications that matter.** The heap is not "flat at the Step 2 baseline" as the
+checklist words it: the fresh-boot baseline was 8,310,267 and steady state sits about
+456 bytes higher once link and providers are up. There is no leak — no drift in either
+direction, and the run ends where it began — but those are different quantities.
+And **taps and interrupts were not exercised**, so this is not the mixed soak specified.
+
+### OTA failure reason — works on hardware, and is not yet good enough
+
+Provoked a real remote failure by pinning the catalog to `v2.0.0-nofile`, for which no
+image exists, so the URL returns HTTP 404. Board reset 21:33:05:
+
+```
+21:33:17  ota=checking  up=9369
+21:33:32  ota=failed    up=24584   last_ota_error = "begin: ESP_FAIL"
+```
+
+Where this morning's identical failure showed `ota_state: failed` and nothing else —
+which is what forced a console reflash of a working board — the cause is now readable
+over the wire without a cable.
+
+**But `begin: ESP_FAIL` still hides the 404.** `esp_https_ota_begin()` performs the first
+request itself and fails before the download stage, and ESP-IDF collapses the HTTP error
+into a bare `ESP_FAIL`, so the most likely remote failure — a missing, moved or
+unreadable image — still tells an operator nothing actionable. Follow-up: read
+`esp_http_client_get_status_code()` through `http_client_init_cb` so it renders
+`begin: HTTP 404`.
+
+Worth stating plainly: this weakness was invisible to a fully green test suite and
+surfaced only because the check was carried through to the board.
+
+`v2.0.0-nofile` is now permanently burned as a version string by
+`reject_reinstall_of_failed_image()`.

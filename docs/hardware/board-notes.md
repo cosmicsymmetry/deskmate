@@ -2500,3 +2500,88 @@ Two things worth watching, neither yet observed:
 device that has ever connected, and `MAX_CONCURRENT_LINKS` no longer bounds the
 number of retained runtimes. For a single-tenant V2 with one board this is what was
 wanted. It needs a lifetime rule before more devices exist.
+
+## V2 Task 11 Step 11 — deferral PASSES on hardware, 2026-08-19
+
+The failure recorded earlier today is closed. Both halves of the step were observed on
+the board, on a shipping build, in one continuous run.
+
+Setup: device on `v2.0.0-gate2` (carrying the owner-wait fix), firmware catalog pinned
+to `v2.0.0-gate1` so an update was genuinely available in both directions, config
+temporarily reduced to a single-entry pomodoro playlist so the card could not rotate
+away from a tap. Timer started by a human tap, confirmed `running, 290` server-side,
+board hard-reset over USB at 18:08:48 with the timer running.
+
+### It did not begin
+
+| time | ota | uptime | timer |
+| --- | --- | --- | --- |
+| 18:08:26 (pre-reset) | idle | 15748866 | running 290 |
+| 18:09:03 | idle | 13292 | running 253 |
+| 18:10:36 | idle | 107299 | running 159 |
+| 18:13:20 | idle | 269411 | completed 0 |
+
+`ota` never left `idle` and the version never moved, across the whole five-minute
+timer. The morning run was `downloading` by uptime 13136. `idle` rather than `checking`
+is what the code does: the owner wait returns `ESP_ERR_INVALID_STATE`, `perform_check`
+sets `PROTOCOL_OTA_IDLE`, and `ota_task` enters its deferral poll.
+
+### The timer survived the reboot
+
+`running 290` before the reset, `running 253` after it — counting continuously across a
+device reboot that took uptime back to 13 s. The morning run read `idle, 300` at this
+point. This is the retained-runtime fix observed on hardware, and it is the half that
+made the deferral meaningful: without it there would have been no running timer left
+for the guard to see.
+
+### It proceeded once the state cleared
+
+The completion alert is `on-timer-finish` with `hold: until-dismissed`, so
+`interrupt_live` stayed true and the deferral correctly held past the timer's end as
+well. One dismissing tap released it:
+
+```
+20:25:44  DEBUG firmware check  device_id=dev-0003  current=v2.0.0-gate2
+20:25:45  INFO  device link closed                  device_id=dev-0003
+20:26:11  INFO  device link established             device_id=dev-0003
+20:26:14  DEBUG firmware check  device_id=dev-0003  current=v2.0.0-gate1
+```
+
+The check fired within a second of the dismissal, the link was suspended for the
+download, and the device was back 26 s later on the new image. Afterwards:
+`version v2.0.0-gate1`, `ota idle`, `uptime 57356`, `connected true`, `reconnects 3`,
+every error counter 0. The panel showed the pomodoro card replayed after the update —
+`Focus 00:00`, `ELAPSED 05:00`, `STATUS Done` — matching the server's `completed 0`,
+so **the retained runtime survived the firmware update as well as the reboot.**
+
+### Three things to carry forward
+
+1. **An until-dismissed alert postpones firmware updates indefinitely.** Correct
+   behaviour — do not update while something is demanding attention — but it means an
+   unattended device with an undismissed alert will never update.
+2. **`GET /v1/devices/{id}` exposes no interrupt or alert field.** `snapshot` carries
+   config, runtime, device, providers, pomodoros, card_data, card_errors, persistence
+   and diagnostics, so "is an interrupt live" cannot be read from the wire and had to
+   be inferred. Same observability family as the missing OTA failure reason.
+3. **The sequence reads as a fault to an observer.** The owner reported the panel
+   "starting to reboot", then a disconnected period, then the pomodoro reappearing at
+   zero, and took all three for a malfunction. They are, in order: the update takeover
+   installing, the deliberate link suspension, and the retained runtime replaying
+   `completed` to a freshly booted device.
+
+### Trap found while staging this
+
+**A flashed build is silently reverted by the catalog.** `FirmwareCatalog::check()`
+offers its pinned version whenever the device's differs — in either direction — so a
+freshly flashed `v2.0.0-gate1` was replaced by `m1-233-g024b1ce` within a minute of
+`idf.py flash`. This is by design (`firmware.rs`: "Config, not a database: V2 has
+exactly one image live at a time"), but it means a downgrade path exists by design and
+that a board session must update the catalog pin, not just flash. Also note
+`firmware/version.txt` now pins the version explicitly, because `git describe` served a
+stale cached string from a dirty tree — the built binary carried `m1-233-g024b1ce`
+while `git describe` said `m1-239-g7de45c2-dirty`.
+
+Evidence: `~/deskmate-hw-sessions/2026-08-19-v2-exit-gate/`, frames
+`181106Z-step11-deferred-timer-running`, `181445Z-step11-timer-completed`,
+`202735Z-step11-updated-to-gate1`. Note the camera moved between the second and third,
+so those two must not be compared as if fixed.

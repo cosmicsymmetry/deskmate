@@ -2418,7 +2418,7 @@ is indistinguishable from a missing one.
 > `idf.py flash` of `m1-225-g0ad1a51`, so the bootloader on the board is the one
 > carrying `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE`.
 
-- [ ] **Step 11: Verify the deferral**
+- [x] **Step 11: Verify the deferral**
 
 Start a pomodoro, then trigger a check. Confirm the update does not begin, and that it
 proceeds once the pomodoro finishes.
@@ -2488,6 +2488,38 @@ proceeds once the pomodoro finishes.
 > reset the board, and confirm the check defers — `ota` must not reach
 > `downloading` while the timer runs — then proceeds once it finishes. The reboot
 > is the point: it is the only moment a check actually fires.
+
+> **RE-RUN 2026-08-19 — PASSES on hardware. Both halves.** Device on `v2.0.0-gate2`
+> (carrying the fix), catalog pinned to `v2.0.0-gate1` so an update was genuinely
+> available, timer started by tap and confirmed `running, 290` server-side, board
+> hard-reset at 18:08:48 with the timer running.
+>
+> *It did not begin.* `ota` stayed `idle` and the version stayed `v2.0.0-gate2` for the
+> whole five minutes. The morning run was already `downloading` by uptime 13136.
+> *The timer also survived the reboot* — `running 290` before the reset, `running 253`
+> after it, counting continuously across a reboot that took uptime back to 13 s, where
+> the morning run read `idle, 300`.
+>
+> *It proceeded once the state cleared.* The completion alert (`hold: until-dismissed`)
+> kept `interrupt_live` true, so the deferral correctly held past the timer as well;
+> one dismissing tap released it and the server logged the check within a second, the
+> link suspension for the download, and the device back 26 s later on the new image:
+>
+> ```
+> 20:25:44  firmware check  current=v2.0.0-gate2
+> 20:25:45  device link closed
+> 20:26:11  device link established
+> 20:26:14  firmware check  current=v2.0.0-gate1
+> ```
+>
+> Worth carrying: **an until-dismissed alert postpones firmware updates indefinitely**
+> until a human dismisses it. And `GET /v1/devices/{id}` exposes no interrupt or alert
+> field at all, so "is an interrupt live" cannot be read from the wire — the same
+> observability family as the missing OTA failure reason.
+>
+> Evidence: `~/deskmate-hw-sessions/2026-08-19-v2-exit-gate/`, frames
+> `181106Z-step11-deferred-timer-running`, `181445Z-step11-timer-completed`,
+> `202735Z-step11-updated-to-gate1`.
 
 - [ ] **Step 12: Record and commit**
 

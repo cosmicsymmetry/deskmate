@@ -129,6 +129,10 @@ export function factoryResetDevice(): Promise<void> {
   return invokeTyped("factory_reset_device");
 }
 
+export function chooseLocalOwnership(): Promise<NetworkSettings> {
+  return invokeTyped("use_local_ownership");
+}
+
 export function setPushingPaused(paused: boolean): Promise<void> {
   return invokeTyped("set_pushing_paused", { paused });
 }

@@ -92,6 +92,7 @@ export function App() {
     pairDevice,
     unpairDevice,
     factoryReset,
+    chooseLocalMode,
   } = useAppState();
   const [draft, setDraft] = useState<AppConfig | null>(null);
   const [selectedCardId, setSelectedCardId] = useState<string | null>(null);
@@ -475,6 +476,15 @@ export function App() {
           await refresh();
         }}
         onSaveServerAccess={saveServerAccess}
+        allowLocalOverride={
+          snapshot.device.tier === null &&
+          networkSettings.tier !== "local" &&
+          Boolean(networkSettings.server_url || networkSettings.device_id)
+        }
+        onUseLocalMode={async () => {
+          await chooseLocalMode();
+          await refresh();
+        }}
       />
 
       <div className="workspace">

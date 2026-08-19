@@ -26,7 +26,7 @@ use crate::commands::{PomodoroAction, RuntimeCommand, RuntimeError};
 use crate::scheduler::Scheduler;
 use crate::{
     AlertHold, AppConfig, AppSnapshot, CalendarSource, CardAlert, CardDataSnapshot, CardError,
-    CardSettings, ConnectionState, DeviceCounters, DeviceSnapshot, JsonFieldMapping,
+    CardSettings, ConnectionState, DeviceCounters, DeviceSnapshot, DeviceTier, JsonFieldMapping,
     PersistenceState, PomodoroSnapshot, PomodoroState, ProviderSnapshot, ProviderState,
     RuntimeDiagnostics, RuntimeState, WeatherUnits,
 };
@@ -2081,19 +2081,27 @@ fn synchronize_full(
     device: &mut dyn RuntimeDevice,
     now: Instant,
 ) -> Result<(), RuntimeError> {
+    if server_owns_live_device(state) {
+        return Ok(());
+    }
     state.needs_full_sync = true;
-    send_time_sync(state, device)?;
+    if !send_time_sync(state, device)? {
+        return Ok(());
+    }
     let compiled = state
         .config
         .compile(1)
         .expect("runtime config remains validated");
-    device
-        .apply_layout(
+    if !sync_device_result(
+        state,
+        device.apply_layout(
             compiled.layout.rotation,
             compiled.layout.widgets,
             compiled.layout.screens,
-        )
-        .map_err(|error| device_runtime_error(&error))?;
+        ),
+    )? {
+        return Ok(());
+    }
     state.dirty_widgets = state.latest_fields.keys().cloned().collect();
     push_dirty_widgets(state, device)?;
     state.active_screen_dirty = state.active_screen.is_some();
@@ -2109,6 +2117,9 @@ fn synchronize_pending(
     device: &mut dyn RuntimeDevice,
     now: Instant,
 ) -> Result<(), RuntimeError> {
+    if server_owns_live_device(state) {
+        return Ok(());
+    }
     if state.needs_full_sync {
         return synchronize_full(state, scheduler, device, now);
     }
@@ -2134,6 +2145,9 @@ fn push_dirty_widgets(
     state: &mut WorkerState,
     device: &mut dyn RuntimeDevice,
 ) -> Result<(), RuntimeError> {
+    if server_owns_live_device(state) {
+        return Ok(());
+    }
     let dirty: Vec<String> = state.dirty_widgets.iter().cloned().collect();
     for widget_id in dirty {
         let Some(fields) = state.latest_fields.get(&widget_id).cloned() else {
@@ -2144,6 +2158,10 @@ fn push_dirty_widgets(
             Ok(()) => {
                 state.dirty_widgets.remove(&widget_id);
                 state.push_rejections.remove(&widget_id);
+            }
+            Err(error) if is_wrong_tier(&error) => {
+                mark_server_owned(state);
+                return Ok(());
             }
             Err(DeviceError::Rejected(error)) if error.code == protocol::ErrorCode::Busy => {}
             Err(DeviceError::Rejected(error)) => {
@@ -2166,13 +2184,16 @@ fn send_screen(
     state: &mut WorkerState,
     device: &mut dyn RuntimeDevice,
 ) -> Result<(), RuntimeError> {
+    if server_owns_live_device(state) {
+        return Ok(());
+    }
     if !state.active_screen_dirty {
         return Ok(());
     }
-    if let Some(screen_id) = state.active_screen.clone() {
-        device
-            .activate_screen(screen_id)
-            .map_err(|error| device_runtime_error(&error))?;
+    if let Some(screen_id) = state.active_screen.clone()
+        && !sync_device_result(state, device.activate_screen(screen_id))?
+    {
+        return Ok(());
     }
     state.active_screen_dirty = false;
     Ok(())
@@ -2184,6 +2205,9 @@ fn flush_interrupts(
     device: &mut dyn RuntimeDevice,
     now: Instant,
 ) -> Result<(), RuntimeError> {
+    if server_owns_live_device(state) {
+        return Ok(());
+    }
     loop {
         let pending = state
             .interrupts
@@ -2215,6 +2239,10 @@ fn flush_interrupts(
                     now,
                 );
             }
+            Err(error) if is_wrong_tier(&error) => {
+                mark_server_owned(state);
+                return Ok(());
+            }
             Err(DeviceError::Rejected(error)) if error.code == protocol::ErrorCode::Busy => {
                 state
                     .interrupts
@@ -2229,16 +2257,60 @@ fn flush_interrupts(
     }
 }
 
-fn send_time_sync(state: &WorkerState, device: &mut dyn RuntimeDevice) -> Result<(), RuntimeError> {
+fn send_time_sync(
+    state: &mut WorkerState,
+    device: &mut dyn RuntimeDevice,
+) -> Result<bool, RuntimeError> {
+    if server_owns_live_device(state) {
+        return Ok(false);
+    }
     let now = Utc::now();
     let offset_minutes = crate::config::utc_offset_minutes(&state.config.preferences.timezone, now)
         .map_err(|message| RuntimeError::Device { message })?;
-    device
-        .time_sync(TimeSync {
+    sync_device_result(
+        state,
+        device.time_sync(TimeSync {
             unix_seconds: now.timestamp(),
             utc_offset_minutes: offset_minutes,
-        })
-        .map_err(|error| device_runtime_error(&error))
+        }),
+    )
+}
+
+fn server_owns_live_device(state: &WorkerState) -> bool {
+    matches!(state.device.tier, Some(DeviceTier::Networked))
+}
+
+fn is_wrong_tier(error: &DeviceError) -> bool {
+    matches!(
+        error,
+        DeviceError::Rejected(response) if response.code == protocol::ErrorCode::WrongTier
+    )
+}
+
+/// A `WrongTier` refusal is a fresh ownership observation, not a failed sync. Keep all
+/// pending host state for a later return to Local and stop issuing USB mutations now.
+fn sync_device_result(
+    state: &mut WorkerState,
+    result: Result<(), DeviceError>,
+) -> Result<bool, RuntimeError> {
+    match result {
+        Ok(()) => Ok(true),
+        Err(error) if is_wrong_tier(&error) => {
+            mark_server_owned(state);
+            Ok(false)
+        }
+        Err(error) => Err(device_runtime_error(&error)),
+    }
+}
+
+fn mark_server_owned(state: &mut WorkerState) {
+    state.device.tier = Some(DeviceTier::Networked);
+    state.needs_full_sync = true;
+    state.runtime = if state.config.preferences.paused {
+        RuntimeState::Paused
+    } else {
+        RuntimeState::Running
+    };
 }
 
 fn handle_device_error(
@@ -2358,6 +2430,9 @@ fn update_device_status(
         host_dropped_events: diagnostics.locally_dropped_events,
         detected_event_gaps: diagnostics.detected_event_gaps,
     };
+    if matches!(state.device.tier, Some(DeviceTier::Networked)) {
+        mark_server_owned(state);
+    }
 }
 
 fn pomodoro_state(state: EnginePomodoroState) -> PomodoroState {
@@ -2512,6 +2587,40 @@ mod tests {
             }
         }
         assert_eq!(completed_ids, ["one", "two", "three"]);
+    }
+
+    #[test]
+    fn wrong_tier_sync_result_marks_server_ownership_without_an_error() {
+        let now = Instant::now();
+        let mut scheduler = Scheduler::new(
+            now,
+            Duration::from_hours(1),
+            Duration::from_hours(1),
+            Duration::from_hours(1),
+        );
+        let mut state = WorkerState::new(AppConfig::default(), now, &mut scheduler);
+        state.device.tier = Some(DeviceTier::Local);
+        state.needs_full_sync = false;
+        state.runtime = RuntimeState::Error {
+            message: "old sync failure".into(),
+        };
+
+        let applied = sync_device_result(
+            &mut state,
+            Err(DeviceError::Rejected(protocol::ErrorResponse {
+                code: protocol::ErrorCode::WrongTier,
+                diagnostic: "server owns this device".into(),
+            })),
+        )
+        .unwrap();
+
+        assert!(!applied);
+        assert_eq!(state.device.tier, Some(DeviceTier::Networked));
+        assert!(
+            state.needs_full_sync,
+            "local recovery still needs a full replay"
+        );
+        assert_eq!(state.runtime, RuntimeState::Running);
     }
 
     // -- Rotation (Task 5) ---------------------------------------------------

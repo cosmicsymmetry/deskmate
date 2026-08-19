@@ -593,6 +593,7 @@ pub fn run() {
             commands::set_server_endpoint,
             commands::provision_device,
             commands::factory_reset_device,
+            commands::use_local_ownership,
             commands::set_pushing_paused,
             commands::control_pomodoro,
             commands::refresh_provider,

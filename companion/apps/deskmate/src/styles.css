@@ -422,6 +422,13 @@ h2 {
   margin-top: 18px;
 }
 
+.network-local-recovery {
+  flex-basis: 100%;
+  margin: 0 0 2px;
+  color: var(--ink-muted);
+  font-size: 0.72rem;
+}
+
 .network-announcement {
   min-height: 20px;
   padding: 0 22px 16px;

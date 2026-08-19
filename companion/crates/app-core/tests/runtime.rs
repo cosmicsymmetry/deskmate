@@ -78,6 +78,10 @@ struct MockState {
     /// Widgets whose pushes the device understands and refuses, exactly as real
     /// firmware does for a field the widget's template does not declare.
     refused_pushes: BTreeSet<String>,
+    /// Simulates the tier changing between the last status response and a host sync.
+    /// The rejection also changes later status responses to Networked, as hardware
+    /// does after accepting provisioning and rebooting into server ownership.
+    reject_time_sync_as_wrong_tier: bool,
 }
 
 #[derive(Default)]
@@ -179,6 +183,24 @@ impl MockDeviceControl {
             .unwrap()
             .refused_pushes
             .insert(widget_id.to_owned());
+    }
+
+    fn reject_time_sync_as_wrong_tier(&self) {
+        self.state.lock().unwrap().reject_time_sync_as_wrong_tier = true;
+    }
+
+    fn allow_time_sync(&self) {
+        self.state.lock().unwrap().reject_time_sync_as_wrong_tier = false;
+    }
+
+    fn time_sync_attempts(&self) -> usize {
+        self.state
+            .lock()
+            .unwrap()
+            .operations
+            .iter()
+            .filter(|operation| **operation == Operation::TimeSync)
+            .count()
     }
 }
 
@@ -293,9 +315,22 @@ impl RuntimeDevice for MockDevice {
 
     fn time_sync(&mut self, _sync: TimeSync) -> Result<(), DeviceError> {
         self.with_connected(|state| {
-            state.replay.time = true;
             state.operations.push(Operation::TimeSync);
-        })
+            if state.reject_time_sync_as_wrong_tier {
+                let mut device_status = state
+                    .status_override
+                    .clone()
+                    .unwrap_or_else(|| status(state.connection_count * 1_000 + 100));
+                device_status.tier = protocol::Tier::Networked;
+                state.status_override = Some(device_status);
+                return Err(DeviceError::Rejected(ErrorResponse {
+                    code: ErrorCode::WrongTier,
+                    diagnostic: "server owns this device".into(),
+                }));
+            }
+            state.replay.time = true;
+            Ok(())
+        })?
     }
 
     fn apply_layout(
@@ -675,6 +710,46 @@ fn v2_status_and_networking_capability_survive_into_the_device_snapshot() {
     assert_eq!(json["ip"], "192.168.1.42");
     assert_eq!(json["last_network_error"], "dns resolution timed out");
     assert_eq!(json["ota_state"], "downloading");
+    runtime.shutdown().unwrap();
+}
+
+#[test]
+fn networked_tier_suppresses_sync_attempts_and_local_tier_recovers_them() {
+    let control = MockDeviceControl::default();
+    let mut device_status = status(42);
+    device_status.tier = protocol::Tier::Networked;
+    control.set_status(device_status);
+    control.reject_time_sync_as_wrong_tier();
+
+    let runtime = start_runtime(full_config(), &control, Duration::ZERO);
+    let networked = wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
+        snapshot.device.connection == ConnectionState::Online
+            && snapshot.device.tier == Some(DeviceTier::Networked)
+    });
+    thread::sleep(Duration::from_millis(100));
+
+    assert_eq!(
+        control.time_sync_attempts(),
+        0,
+        "server ownership must suppress the host's full-sync retry loop"
+    );
+    assert_eq!(networked.runtime, RuntimeState::Running);
+
+    control.allow_time_sync();
+    let mut local_status = status(84);
+    local_status.tier = protocol::Tier::Local;
+    control.set_status(local_status);
+    let recovered = wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
+        snapshot.device.tier == Some(DeviceTier::Local) && control.time_sync_attempts() == 1
+    });
+
+    assert_eq!(recovered.runtime, RuntimeState::Running);
+    assert!(
+        control
+            .operations()
+            .iter()
+            .any(|operation| matches!(operation, Operation::ApplyLayout(_)))
+    );
     runtime.shutdown().unwrap();
 }
 

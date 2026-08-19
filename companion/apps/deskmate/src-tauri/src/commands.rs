@@ -79,6 +79,23 @@ impl ConfigSaveContext {
     }
 }
 
+#[derive(Clone)]
+struct ProvisionContext {
+    runtime: Arc<RuntimeHandle>,
+    network_store: Arc<NetworkSettingsStore>,
+    networked_config: Arc<NetworkedConfigProjection>,
+}
+
+impl ProvisionContext {
+    fn from_desktop(state: &DesktopState) -> Self {
+        Self {
+            runtime: Arc::clone(&state.runtime),
+            network_store: Arc::clone(&state.network_store),
+            networked_config: Arc::clone(&state.networked_config),
+        }
+    }
+}
+
 struct ServerSaveContext {
     config: ConfigSaveContext,
     server_client: ureq::Agent,
@@ -304,8 +321,15 @@ pub fn provision_device(
     state: State<'_, DesktopState>,
     request: ProvisionDeviceRequest,
 ) -> Result<NetworkSettings, IpcError> {
+    provision_device_with_context(ProvisionContext::from_desktop(&state), request)
+}
+
+fn provision_device_with_context(
+    context: ProvisionContext,
+    request: ProvisionDeviceRequest,
+) -> Result<NetworkSettings, IpcError> {
     validate_network_config_request(&request)?;
-    let snapshot = state.runtime.snapshot().map_err(IpcError::from)?;
+    let snapshot = context.runtime.snapshot().map_err(IpcError::from)?;
     let utc_offset_minutes =
         utc_offset_minutes(&snapshot.config.preferences.timezone, chrono::Utc::now()).map_err(
             |message| IpcError::Validation {
@@ -329,17 +353,22 @@ pub fn provision_device(
     let config = NetworkConfig {
         ssid: request.ssid,
         psk: request.passphrase,
-        server_url: request.server_url,
+        server_url: if matches!(tier, ProvisioningTier::Networked) {
+            device_link_url(&request.server_url)?
+        } else {
+            request.server_url
+        },
         device_id: request.device_id,
         token: request.device_token.clone(),
         utc_offset_minutes,
         tier,
     };
 
-    // Persist the public identity and ownership before dispatch. The device token
-    // has no desktop consumer after this command, so it is used only by the runtime
-    // provisioning request and is never retained on disk.
-    state
+    // Ownership changes only after the runtime-owned cable session confirms that the
+    // device accepted provisioning. The device token has no desktop consumer after
+    // this dispatch, so it is never retained on disk.
+    context.runtime.provision(config).map_err(IpcError::from)?;
+    context
         .network_store
         .save(NetworkSettingsUpdate::new(
             public_settings.server_url.clone(),
@@ -348,9 +377,8 @@ pub fn provision_device(
             None,
         ))
         .map_err(IpcError::from)?;
-    state.runtime.provision(config).map_err(IpcError::from)?;
     if matches!(tier, ProvisioningTier::Local) {
-        state.set_networked_config(None)?;
+        context.networked_config.replace(None)?;
     }
     Ok(public_settings)
 }
@@ -369,6 +397,36 @@ pub fn factory_reset_device(state: State<'_, DesktopState>) -> Result<(), IpcErr
         ))
         .map_err(IpcError::from)?;
     state.set_networked_config(None)
+}
+
+/// Explicit recovery for an endpoint saved before a device was successfully paired.
+/// This changes only the Mac's routing decision; a later live Networked status still
+/// wins and prevents the app from challenging server ownership over USB.
+#[tauri::command]
+pub fn use_local_ownership(state: State<'_, DesktopState>) -> Result<NetworkSettings, IpcError> {
+    use_local_ownership_with_context(&state.network_store, &state.networked_config)
+}
+
+fn use_local_ownership_with_context(
+    network_store: &NetworkSettingsStore,
+    networked_config: &NetworkedConfigProjection,
+) -> Result<NetworkSettings, IpcError> {
+    let current = network_store.load().settings().clone();
+    let settings = NetworkSettings {
+        server_url: current.server_url,
+        device_id: current.device_id,
+        tier: Some(app_core::DeviceTier::Local),
+    };
+    network_store
+        .save(NetworkSettingsUpdate::new(
+            settings.server_url.clone(),
+            settings.device_id.clone(),
+            settings.tier,
+            None,
+        ))
+        .map_err(IpcError::from)?;
+    networked_config.replace(None)?;
+    Ok(settings)
 }
 
 #[tauri::command]
@@ -1099,6 +1157,28 @@ fn validate_server_url(value: &str) -> Result<url::Url, IpcError> {
     Ok(url)
 }
 
+/// Converts the operator-facing HTTPS base into the device's fixed WebSocket link.
+/// Firmware derives HTTPS OTA routes back from the WSS authority, so paths, queries,
+/// and fragments on the admin base deliberately do not cross onto the device URL.
+fn device_link_url(server_url: &str) -> Result<String, IpcError> {
+    let mut url = validate_server_url(server_url)?;
+    if url.scheme() != "https" {
+        return Err(IpcError::InvalidPayload {
+            message: "server base URL must use HTTPS for secure device pairing".into(),
+        });
+    }
+    url.set_scheme("wss")
+        .map_err(|()| IpcError::InvalidPayload {
+            message: "server base URL cannot be converted to a secure device link".into(),
+        })?;
+    url.set_path("/v1/device/link");
+    url.set_query(None);
+    url.set_fragment(None);
+    let value = url.to_string();
+    validate_bounded(&value, MAX_SERVER_URL_BYTES, "derived device link URL")?;
+    Ok(value)
+}
+
 fn server_config_url(server_url: &str, device_id: &str) -> Result<url::Url, IpcError> {
     validate_target(device_id, MAX_DEVICE_ID_BYTES, "device ID")?;
     let mut url = validate_server_url(server_url)?;
@@ -1601,6 +1681,21 @@ mod tests {
     }
 
     #[test]
+    fn operator_server_base_derives_the_secure_device_link_url() {
+        assert_eq!(
+            device_link_url("https://desk.example/base?discard=yes#fragment").unwrap(),
+            "wss://desk.example/v1/device/link"
+        );
+        assert_eq!(
+            device_link_url("https://[2001:db8::1]:8443").unwrap(),
+            "wss://[2001:db8::1]:8443/v1/device/link"
+        );
+        let insecure = device_link_url("http://desk.example").unwrap_err();
+        assert!(matches!(insecure, IpcError::InvalidPayload { .. }));
+        assert!(insecure.to_string().contains("HTTPS"));
+    }
+
+    #[test]
     fn unplugged_server_identity_routes_networked_but_live_local_ownership_wins() {
         let mut settings = NetworkSettings {
             server_url: "https://desk.example".into(),
@@ -1675,6 +1770,107 @@ mod tests {
             !config_path.exists(),
             "the refused local draft reached ConfigStore"
         );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn failed_provision_does_not_record_an_ownership_transfer() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let serial = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "deskmate-failed-provision-{}-{serial}",
+            std::process::id()
+        ));
+        fs::create_dir(&directory).unwrap();
+        let network_store = Arc::new(NetworkSettingsStore::new(
+            directory.join("network-settings.json"),
+        ));
+        network_store
+            .save(NetworkSettingsUpdate::new(
+                "https://old.example",
+                "old-device",
+                Some(app_core::DeviceTier::Local),
+                None,
+            ))
+            .unwrap();
+        let runtime = Arc::new(
+            RuntimeHandle::start_serial(
+                AppConfig::default(),
+                Some("/definitely/not/a/deskmate-test-port".into()),
+            )
+            .unwrap(),
+        );
+        let context = ProvisionContext {
+            runtime: Arc::clone(&runtime),
+            network_store: Arc::clone(&network_store),
+            networked_config: Arc::new(NetworkedConfigProjection::default()),
+        };
+        let request = ProvisionDeviceRequest {
+            ssid: "home-network".into(),
+            passphrase: "wifi-secret".into(),
+            server_url: "https://desk.example".into(),
+            device_id: "desk-1".into(),
+            device_token: "device-secret".into(),
+            tier: app_core::DeviceTier::Networked,
+        };
+
+        let result = provision_device_with_context(context, request);
+        runtime.shutdown().unwrap();
+
+        assert!(matches!(result, Err(IpcError::Device { .. })));
+        assert_eq!(
+            network_store.load().settings(),
+            &NetworkSettings {
+                server_url: "https://old.example".into(),
+                device_id: "old-device".into(),
+                tier: Some(app_core::DeviceTier::Local),
+            },
+            "a rejected device command changed the saved ownership"
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn local_override_recovers_saved_routing_without_a_device_command() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let serial = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "deskmate-local-override-{}-{serial}",
+            std::process::id()
+        ));
+        fs::create_dir(&directory).unwrap();
+        let network_store = NetworkSettingsStore::new(directory.join("network-settings.json"));
+        network_store
+            .save(NetworkSettingsUpdate::new(
+                "https://desk.example",
+                "desk-1",
+                Some(app_core::DeviceTier::Networked),
+                Some("admin-secret".into()),
+            ))
+            .unwrap();
+        let projection = NetworkedConfigProjection::default();
+        let mut stale_server_config = AppConfig::default();
+        stale_server_config.preferences.timezone = "Asia/Tbilisi".into();
+        projection.replace(Some(stale_server_config)).unwrap();
+
+        let settings = use_local_ownership_with_context(&network_store, &projection).unwrap();
+
+        assert_eq!(settings.tier, Some(app_core::DeviceTier::Local));
+        assert_eq!(
+            network_store.load().settings().tier,
+            Some(app_core::DeviceTier::Local)
+        );
+        let mut projected = AppConfig::default();
+        projection.project(Some(app_core::DeviceTier::Networked), &mut projected);
+        assert_eq!(projected, AppConfig::default());
         fs::remove_dir_all(directory).unwrap();
     }
 

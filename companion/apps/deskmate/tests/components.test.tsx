@@ -27,6 +27,7 @@ import type {
   DraftValidation,
   NetworkSettings,
   PreviewFrame,
+  ProvisionDeviceInput,
   ValidationIssue,
 } from "../src/lib/types";
 import { ipcContractFixtures } from "../src/lib/types.contract";
@@ -58,6 +59,22 @@ let networkSettingsImpl: () => Promise<NetworkSettings> = async () => ({
   device_id: "desk-1",
   tier: "local",
 });
+let provisionImpl: (input: ProvisionDeviceInput) => Promise<NetworkSettings> = async (input) => ({
+  server_url: input.server_url,
+  device_id: input.device_id,
+  tier: input.tier,
+});
+let setServerEndpointImpl: (serverUrl: string, adminToken: string) => Promise<NetworkSettings> =
+  async (serverUrl) => ({
+    server_url: serverUrl,
+    device_id: "desk-1",
+    tier: "networked",
+  });
+let useLocalOwnershipImpl: () => Promise<NetworkSettings> = async () => ({
+  server_url: "https://desk.example",
+  device_id: "desk-1",
+  tier: "local",
+});
 
 mock.module("../src/lib/tauri", () => ({
   ...tauriModule,
@@ -68,6 +85,10 @@ mock.module("../src/lib/tauri", () => ({
   saveApplyConfig: (config: AppConfig) => saveImpl(config),
   saveServerConfig: (config: AppConfig) => serverSaveImpl(config),
   getNetworkSettings: () => networkSettingsImpl(),
+  provisionDevice: (input: ProvisionDeviceInput) => provisionImpl(input),
+  setServerEndpoint: (serverUrl: string, adminToken: string) =>
+    setServerEndpointImpl(serverUrl, adminToken),
+  chooseLocalOwnership: () => useLocalOwnershipImpl(),
   getAutostartStatus: async () => ({ enabled: false, preference_enabled: false }),
 }));
 
@@ -229,6 +250,8 @@ describe("settings accessibility and states", () => {
     const html = renderNetworkPanel({ tier: "local", wifiState: "down", ip: "" });
     expect(html).toContain("Owned by this Mac");
     expect(html).not.toContain("Owned by the server");
+    expect(html).toContain("Server base URL");
+    expect(html).toContain("secure WebSocket device link");
   });
 
   test("network panel says where settings are written once networked", () => {
@@ -326,11 +349,129 @@ describe("settings accessibility and states", () => {
       expect(inputValue("Device token")).toBe("");
       expect(inputValue("Admin token")).toBe("");
       expect(inputValue("WiFi network")).toBe("home-network");
-      expect(inputValue("Server URL")).toBe("https://desk.example");
+      expect(inputValue("Server base URL")).toBe("https://desk.example");
       expect(inputValue("Device ID")).toBe("desk-1");
     } finally {
       await act(async () => root.unmount());
       container.remove();
+    }
+  });
+
+  test("the mounted pairing flow provisions before persisting server access", async () => {
+    const order: string[] = [];
+    snapshotImpl = async () => snapshot;
+    networkSettingsImpl = async () => ({
+      server_url: "https://desk.example",
+      device_id: "desk-1",
+      tier: "local",
+    });
+    provisionImpl = async (input) => {
+      order.push("provision");
+      return {
+        server_url: input.server_url,
+        device_id: input.device_id,
+        tier: input.tier,
+      };
+    };
+    setServerEndpointImpl = async (serverUrl) => {
+      order.push("server-access");
+      return { server_url: serverUrl, device_id: "desk-1", tier: "networked" };
+    };
+    previewImpl = async () => ({ png_base64: "cHJldmlldw==", sample: false });
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const setInput = (labelText: string, value: string) => {
+      const label = [...container.querySelectorAll("label")].find((candidate) =>
+        candidate.querySelector("span")?.textContent?.includes(labelText),
+      );
+      const input = label?.querySelector("input");
+      expect(input).not.toBeNull();
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set?.call(input, value);
+      input?.dispatchEvent(new Event("input", { bubbles: true }));
+    };
+
+    try {
+      await act(async () => root.render(<App />));
+      await waitFor(() => expect(container.textContent).toContain("Network setup"));
+      await act(async () => {
+        setInput("WiFi network", "home-network");
+        setInput("WiFi passphrase", "wifi-secret");
+        setInput("Device token", "device-secret");
+        setInput("Admin token", "admin-secret");
+      });
+      const pair = buttonWithText(container, "Pair with server");
+      expect(pair?.disabled).toBe(false);
+      await act(async () => pair?.click());
+      await waitFor(() => expect(order).toHaveLength(2));
+
+      expect(order).toEqual(["provision", "server-access"]);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      provisionImpl = async (input) => ({
+        server_url: input.server_url,
+        device_id: input.device_id,
+        tier: input.tier,
+      });
+      setServerEndpointImpl = async (serverUrl) => ({
+        server_url: serverUrl,
+        device_id: "desk-1",
+        tier: "networked",
+      });
+    }
+  });
+
+  test("an unplugged incomplete pairing can explicitly return this Mac to local routing", async () => {
+    snapshotImpl = async () => ({
+      ...(structuredClone(snapshot) as AppSnapshot),
+      device: {
+        ...(structuredClone(snapshot.device) as AppSnapshot["device"]),
+        tier: null,
+      },
+    });
+    networkSettingsImpl = async () => ({
+      server_url: "https://desk.example",
+      device_id: "desk-1",
+      tier: null,
+    });
+    let overrideCalls = 0;
+    useLocalOwnershipImpl = async () => {
+      overrideCalls += 1;
+      return {
+        server_url: "https://desk.example",
+        device_id: "desk-1",
+        tier: "local",
+      };
+    };
+    previewImpl = async () => ({ png_base64: "cHJldmlldw==", sample: false });
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<App />));
+      await waitFor(() => expect(buttonWithText(container, "Use local on this Mac")).toBeDefined());
+      expect(container.textContent).toContain("changes only the Mac's routing");
+      await act(async () => buttonWithText(container, "Use local on this Mac")?.click());
+      await waitFor(() => expect(overrideCalls).toBe(1));
+      await waitFor(() => expect(buttonWithText(container, "Save & apply")).toBeDefined());
+      expect(buttonWithText(container, "Use local on this Mac")).toBeUndefined();
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      snapshotImpl = async () => snapshot;
+      networkSettingsImpl = async () => ({
+        server_url: "https://desk.example",
+        device_id: "desk-1",
+        tier: "local",
+      });
+      useLocalOwnershipImpl = async () => ({
+        server_url: "https://desk.example",
+        device_id: "desk-1",
+        tier: "local",
+      });
     }
   });
 

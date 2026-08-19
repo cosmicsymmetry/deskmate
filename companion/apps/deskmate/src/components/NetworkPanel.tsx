@@ -25,9 +25,11 @@ interface NetworkPanelProps {
   onUnpair: () => Promise<void>;
   onFactoryReset: () => Promise<void>;
   onSaveServerAccess?: (serverUrl: string, adminToken: string) => Promise<void>;
+  allowLocalOverride?: boolean;
+  onUseLocalMode?: () => Promise<void>;
 }
 
-type NetworkAction = "pair" | "unpair" | "factory-reset" | "server-access";
+type NetworkAction = "pair" | "unpair" | "factory-reset" | "server-access" | "local-override";
 
 function readableState(value: string | null): string {
   if (!value) {
@@ -46,6 +48,8 @@ export function NetworkPanel({
   onUnpair,
   onFactoryReset,
   onSaveServerAccess,
+  allowLocalOverride = false,
+  onUseLocalMode,
 }: NetworkPanelProps) {
   const [ssid, setSsid] = useState(settings.ssid);
   const [serverUrl, setServerUrl] = useState(settings.serverUrl);
@@ -192,7 +196,7 @@ export function NetworkPanel({
             </small>
           </label>
           <label className="field network-field--wide">
-            <span>Server URL</span>
+            <span>Server base URL</span>
             <input
               type="url"
               value={serverUrl}
@@ -200,6 +204,7 @@ export function NetworkPanel({
               placeholder="https://desk.example"
               onChange={(event) => setServerUrl(event.currentTarget.value)}
             />
+            <small>Enter the HTTPS base. Deskmate derives the secure WebSocket device link.</small>
           </label>
           <label className="field">
             <span>Device ID</span>
@@ -234,6 +239,12 @@ export function NetworkPanel({
         </div>
 
         <div className="network-actions">
+          {allowLocalOverride && onUseLocalMode && (
+            <p className="network-local-recovery">
+              Pairing was not confirmed over USB? This changes only the Mac's routing; it does not
+              reset the display.
+            </p>
+          )}
           <button
             className="button button--primary"
             type="submit"
@@ -259,6 +270,22 @@ export function NetworkPanel({
           >
             {busy === "server-access" ? "Saving access…" : "Save server access"}
           </button>
+          {allowLocalOverride && onUseLocalMode && (
+            <button
+              className="button button--quiet"
+              type="button"
+              disabled={busy !== null}
+              onClick={() =>
+                void run(
+                  "local-override",
+                  onUseLocalMode,
+                  "This Mac will use local routing. The display was not changed.",
+                )
+              }
+            >
+              {busy === "local-override" ? "Switching…" : "Use local on this Mac"}
+            </button>
+          )}
           <button
             className="button button--quiet"
             type="button"

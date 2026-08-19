@@ -11,6 +11,7 @@ import {
   saveServerConfig,
   setServerEndpoint,
   toIpcError,
+  chooseLocalOwnership,
 } from "./tauri";
 import type {
   AppConfig,
@@ -120,6 +121,7 @@ export interface AppStateValue {
   pairDevice: (input: PairDeviceInput) => Promise<void>;
   unpairDevice: () => Promise<void>;
   factoryReset: () => Promise<void>;
+  chooseLocalMode: () => Promise<void>;
 }
 
 export interface PairDeviceInput extends ProvisionDeviceInput {
@@ -231,7 +233,6 @@ export function useAppState(): AppStateValue {
 
   const pairDevice = useCallback(
     async (input: PairDeviceInput) => {
-      await saveServerAccess(input.server_url, input.admin_token);
       const settings = await provisionDevice({
         ssid: input.ssid,
         passphrase: input.passphrase,
@@ -241,6 +242,7 @@ export function useAppState(): AppStateValue {
         tier: input.tier,
       });
       acceptNetworkSettings(settings);
+      await saveServerAccess(input.server_url, input.admin_token);
     },
     [acceptNetworkSettings, saveServerAccess],
   );
@@ -260,6 +262,10 @@ export function useAppState(): AppStateValue {
   const factoryReset = useCallback(async () => {
     await factoryResetDevice();
     acceptNetworkSettings(await getNetworkSettings());
+  }, [acceptNetworkSettings]);
+
+  const chooseLocalMode = useCallback(async () => {
+    acceptNetworkSettings(await chooseLocalOwnership());
   }, [acceptNetworkSettings]);
 
   const saveConfig = useCallback(async (config: AppConfig) => {
@@ -336,5 +342,6 @@ export function useAppState(): AppStateValue {
     pairDevice,
     unpairDevice,
     factoryReset,
+    chooseLocalMode,
   };
 }

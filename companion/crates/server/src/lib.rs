@@ -280,6 +280,14 @@ impl LiveLink {
             .map(|runtime| runtime.connector.attach())
     }
 
+    pub(crate) fn last_ota_error(&self) -> Option<String> {
+        self.runtime
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .and_then(|runtime| runtime.connector.last_ota_error())
+    }
+
     fn take_runtime(&self) -> Option<ManagedRuntime> {
         self.runtime
             .lock()

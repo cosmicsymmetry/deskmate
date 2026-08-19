@@ -257,6 +257,7 @@ pub struct StatusResponse {
     pub ip: String,
     pub ota_state: OtaState,
     pub last_network_error: Option<String>,
+    pub last_ota_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -632,6 +633,9 @@ fn validate_message(message: &Message) -> Result<(), MessageError> {
             if let Some(diagnostic) = &status.last_network_error {
                 checked_text(diagnostic, 0, MAX_DIAGNOSTIC_LEN, "last network error")?;
             }
+            if let Some(diagnostic) = &status.last_ota_error {
+                checked_text(diagnostic, 0, MAX_DIAGNOSTIC_LEN, "last ota error")?;
+            }
             Ok(())
         }
         Message::TimeSync(sync) => {
@@ -764,7 +768,10 @@ fn encode_device_event_payload(encoder: &mut Encoder, event: &DeviceEvent) {
 }
 
 fn encode_status_payload(encoder: &mut Encoder, status: &StatusResponse) {
-    let entry_count = 24 + 5 + usize::from(status.last_network_error.is_some());
+    let entry_count = 24
+        + 5
+        + usize::from(status.last_network_error.is_some())
+        + usize::from(status.last_ota_error.is_some());
     encoder.map(entry_count);
     encoder.unsigned(0);
     encoder.unsigned(u64::from(status.protocol_version));
@@ -810,6 +817,10 @@ fn encode_status_payload(encoder: &mut Encoder, status: &StatusResponse) {
     encoder.unsigned(u64::from(status.ota_state as u8));
     if let Some(diagnostic) = &status.last_network_error {
         encoder.unsigned(29);
+        encoder.text(diagnostic);
+    }
+    if let Some(diagnostic) = &status.last_ota_error {
+        encoder.unsigned(30);
         encoder.text(diagnostic);
     }
 }
@@ -1353,6 +1364,7 @@ fn decode_status(payload: &[u8]) -> Result<StatusResponse, MessageError> {
     let mut ip = None;
     let mut ota_state = None;
     let mut last_network_error = None;
+    let mut last_ota_error = None;
     for _ in 0..len {
         match next_numeric_key(&mut decoder, &mut previous)? {
             0 => protocol_version = Some(read_u8(&mut decoder, "protocol version")?),
@@ -1404,6 +1416,7 @@ fn decode_status(payload: &[u8]) -> Result<StatusResponse, MessageError> {
             27 => ip = Some(decoder.text()?.to_owned()),
             28 => ota_state = Some(ota_state_from_wire(read_u8(&mut decoder, "ota state")?)?),
             29 => last_network_error = Some(decoder.text()?.to_owned()),
+            30 => last_ota_error = Some(decoder.text()?.to_owned()),
             _ => decoder.skip()?,
         }
     }
@@ -1439,6 +1452,7 @@ fn decode_status(payload: &[u8]) -> Result<StatusResponse, MessageError> {
         ip: ip.unwrap_or_default(),
         ota_state: ota_state.unwrap_or(OtaState::Idle),
         last_network_error,
+        last_ota_error,
     };
     validate_message(&Message::StatusResponse(value.clone()))?;
     Ok(value)
@@ -1523,6 +1537,7 @@ mod tests {
             ip: String::new(),
             ota_state: OtaState::Idle,
             last_network_error: None,
+            last_ota_error: None,
         }
     }
 
@@ -1661,12 +1676,42 @@ mod tests {
         status.ip = "192.168.1.42".into();
         status.ota_state = OtaState::Idle;
         status.last_network_error = Some("dns resolution timed out".into());
+        status.last_ota_error = Some("download: ESP_ERR_NO_MEM".into());
         let wire = encode_message(3, &Message::StatusResponse(status.clone())).expect("encode");
         let frame = decode_wire_frame(&wire).expect("decode frame");
         let Message::StatusResponse(decoded) = decode_message(&frame).expect("decode") else {
             panic!("wrong variant");
         };
         assert_eq!(decoded, status);
+    }
+
+    #[test]
+    fn status_response_ota_error_is_optional_and_bounded_on_decode() {
+        let payload = encode_payload(&Message::StatusResponse(status())).unwrap();
+        let Message::StatusResponse(decoded) =
+            decode_message(&Frame::new(TYPE_STATUS_RESPONSE, 1, payload.clone())).unwrap()
+        else {
+            panic!("decoded message should remain a status response");
+        };
+        assert_eq!(decoded.last_ota_error, None);
+
+        let mut boundary = status();
+        boundary.last_ota_error = Some("x".repeat(MAX_DIAGNOSTIC_LEN));
+        round_trip(&Message::StatusResponse(boundary));
+
+        let mut oversized_value = status();
+        oversized_value.last_ota_error = Some("x".repeat(MAX_DIAGNOSTIC_LEN + 1));
+        assert!(encode_message(1, &Message::StatusResponse(oversized_value)).is_err());
+
+        assert_eq!(payload[0], 0xb8, "status should use the extended map form");
+        let mut oversized_payload = payload;
+        oversized_payload[1] += 1;
+        oversized_payload.extend_from_slice(&[0x18, 30, 0x78, 97]);
+        oversized_payload.extend(std::iter::repeat_n(b'x', MAX_DIAGNOSTIC_LEN + 1));
+        assert_eq!(
+            decode_message(&Frame::new(TYPE_STATUS_RESPONSE, 1, oversized_payload)),
+            Err(MessageError::InvalidValue("last ota error"))
+        );
     }
 
     #[test]

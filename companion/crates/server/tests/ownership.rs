@@ -938,6 +938,10 @@ async fn admin_status_reports_live_state_without_device_secrets() {
         status["snapshot"]["device"]["connection"]["kind"], "online",
         "status omitted the runtime's live app-core connection state"
     );
+    assert_eq!(
+        status["snapshot"]["device"]["last_ota_error"], "download: ESP_ERR_NO_MEM",
+        "status omitted the device's actionable OTA failure reason"
+    );
 }
 
 #[tokio::test]

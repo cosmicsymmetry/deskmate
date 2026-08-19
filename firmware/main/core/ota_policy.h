@@ -58,3 +58,9 @@ uint32_t ota_policy_delay_ticks(uint32_t milliseconds,
 /** Bound both a stalled transfer and a pathologically slow trickle. */
 bool ota_policy_download_timed_out(uint64_t total_elapsed_us,
                                    uint64_t no_progress_elapsed_us);
+
+/** Format a human-readable OTA failure and truncate it to the wire bound. */
+void ota_policy_format_failure(char *out,
+                               size_t out_capacity,
+                               const char *stage,
+                               const char *detail);

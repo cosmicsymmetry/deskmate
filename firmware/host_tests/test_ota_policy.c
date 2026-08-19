@@ -116,6 +116,28 @@ static void test_download_deadlines_bound_stalls_and_slow_trickles(void)
         OTA_POLICY_NO_PROGRESS_TIMEOUT_US));
 }
 
+static void test_failure_reason_is_actionable_and_truncated_at_wire_bound(void)
+{
+    char failure[PROTOCOL_MAX_DIAGNOSTIC_LENGTH + 2U];
+    memset(failure, '!', sizeof(failure));
+    ota_policy_format_failure(failure,
+                              PROTOCOL_MAX_DIAGNOSTIC_LENGTH + 1U,
+                              "download", "ESP_ERR_NO_MEM");
+    assert(strcmp(failure, "download: ESP_ERR_NO_MEM") == 0);
+    assert(failure[PROTOCOL_MAX_DIAGNOSTIC_LENGTH + 1U] == '!');
+
+    char detail[PROTOCOL_MAX_DIAGNOSTIC_LENGTH + 2U];
+    memset(detail, 'x', sizeof(detail) - 1U);
+    detail[sizeof(detail) - 1U] = '\0';
+    ota_policy_format_failure(failure,
+                              PROTOCOL_MAX_DIAGNOSTIC_LENGTH + 1U,
+                              "verify", detail);
+    assert(strlen(failure) == PROTOCOL_MAX_DIAGNOSTIC_LENGTH);
+    assert(strncmp(failure, "verify: ", sizeof("verify: ") - 1U) == 0);
+    assert(failure[PROTOCOL_MAX_DIAGNOSTIC_LENGTH] == '\0');
+    assert(failure[PROTOCOL_MAX_DIAGNOSTIC_LENGTH + 1U] == '!');
+}
+
 int main(void)
 {
     test_urls_use_the_server_origin_and_https();
@@ -125,6 +147,7 @@ int main(void)
     test_owner_wait_is_bounded_and_readiness_wins();
     test_day_scale_delays_convert_without_32_bit_overflow();
     test_download_deadlines_bound_stalls_and_slow_trickles();
+    test_failure_reason_is_actionable_and_truncated_at_wire_bound();
     puts("test_ota_policy: OK");
     return 0;
 }

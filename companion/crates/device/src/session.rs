@@ -1035,6 +1035,7 @@ mod tests {
             ip: String::new(),
             ota_state: protocol::OtaState::Idle,
             last_network_error: None,
+            last_ota_error: None,
         }
     }
 

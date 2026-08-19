@@ -1,6 +1,7 @@
 #include "ota_policy.h"
 
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 
 #define CHECK_PATH "/v1/device/firmware?current="
@@ -319,4 +320,26 @@ bool ota_policy_download_timed_out(uint64_t total_elapsed_us,
 {
     return total_elapsed_us >= OTA_POLICY_TOTAL_TIMEOUT_US ||
            no_progress_elapsed_us >= OTA_POLICY_NO_PROGRESS_TIMEOUT_US;
+}
+
+void ota_policy_format_failure(char *out,
+                               size_t out_capacity,
+                               const char *stage,
+                               const char *detail)
+{
+    if (out == NULL || out_capacity == 0U) {
+        return;
+    }
+    if (stage == NULL) {
+        stage = "ota";
+    }
+    if (detail == NULL) {
+        detail = "unknown error";
+    }
+    size_t limit = out_capacity - 1U;
+    if (limit > PROTOCOL_MAX_DIAGNOSTIC_LENGTH) {
+        limit = PROTOCOL_MAX_DIAGNOSTIC_LENGTH;
+    }
+    (void)snprintf(out, limit + 1U, "%s: %s", stage, detail);
+    out[limit] = '\0';
 }

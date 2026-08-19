@@ -155,6 +155,8 @@ static void test_valid_fixtures(void)
                          9U);
     assert_valid_fixture("status_response_networked.bin",
                          PROTOCOL_TYPE_STATUS_RESPONSE, 3U);
+    assert_valid_fixture("status_response_ota_failed.bin",
+                         PROTOCOL_TYPE_STATUS_RESPONSE, 32U);
 }
 
 static void test_status_capability_handshake_and_legacy_defaults(void)
@@ -202,6 +204,64 @@ static void test_status_capability_handshake_and_legacy_defaults(void)
     assert(protocol_message_decode(&frame, &message) == PROTOCOL_MESSAGE_OK);
     assert(message.value.status.max_protocol_version == PROTOCOL_VERSION);
     assert(message.value.status.capabilities == PROTOCOL_LEGACY_CAPABILITIES);
+}
+
+static void test_status_last_ota_error_round_trip_and_legacy_default(void)
+{
+    size_t length = 0U;
+    uint8_t *fixture = read_fixture("status_response_networked.bin", &length);
+    protocol_frame_t frame;
+    assert(protocol_frame_decode(fixture, length, &frame) ==
+           PROTOCOL_FRAME_OK);
+    free(fixture);
+
+    protocol_message_t message;
+    assert(protocol_message_decode(&frame, &message) == PROTOCOL_MESSAGE_OK);
+    /* This fixture predates key 30, so its absence must remain decodable. */
+    assert(!message.value.status.has_last_ota_error);
+    assert(message.value.status.last_ota_error[0] == '\0');
+
+    uint8_t encoded[PROTOCOL_MAX_WIRE_FRAME];
+    size_t encoded_length = 0U;
+    assert(protocol_message_encode(frame.request_id, &message, encoded,
+                                   sizeof(encoded), &encoded_length) ==
+           PROTOCOL_MESSAGE_OK);
+    protocol_frame_t round_trip_frame;
+    assert(protocol_frame_decode(encoded, encoded_length,
+                                 &round_trip_frame) == PROTOCOL_FRAME_OK);
+    protocol_message_t decoded;
+    assert(protocol_message_decode(&round_trip_frame, &decoded) ==
+           PROTOCOL_MESSAGE_OK);
+    assert(!decoded.value.status.has_last_ota_error);
+
+    message.value.status.has_last_ota_error = true;
+    strcpy(message.value.status.last_ota_error,
+           "download: ESP_ERR_NO_MEM");
+    assert(protocol_message_encode(frame.request_id, &message, encoded,
+                                   sizeof(encoded), &encoded_length) ==
+           PROTOCOL_MESSAGE_OK);
+    assert(protocol_frame_decode(encoded, encoded_length,
+                                 &round_trip_frame) == PROTOCOL_FRAME_OK);
+    assert(protocol_message_decode(&round_trip_frame, &decoded) ==
+           PROTOCOL_MESSAGE_OK);
+    assert(decoded.value.status.has_last_ota_error);
+    assert(strcmp(decoded.value.status.last_ota_error,
+                  "download: ESP_ERR_NO_MEM") == 0);
+
+    memset(message.value.status.last_ota_error, 'x',
+           PROTOCOL_MAX_DIAGNOSTIC_LENGTH);
+    message.value.status
+        .last_ota_error[PROTOCOL_MAX_DIAGNOSTIC_LENGTH] = '\0';
+    assert(protocol_message_encode(frame.request_id, &message, encoded,
+                                   sizeof(encoded), &encoded_length) ==
+           PROTOCOL_MESSAGE_OK);
+    assert(protocol_frame_decode(encoded, encoded_length,
+                                 &round_trip_frame) == PROTOCOL_FRAME_OK);
+    assert(protocol_message_decode(&round_trip_frame, &decoded) ==
+           PROTOCOL_MESSAGE_OK);
+    assert(decoded.value.status.has_last_ota_error);
+    assert(strlen(decoded.value.status.last_ota_error) ==
+           PROTOCOL_MAX_DIAGNOSTIC_LENGTH);
 }
 
 static void assert_invalid_message_fixture(
@@ -555,6 +615,7 @@ int main(void)
     test_status_request_accepts_reserved_ota_trigger_id();
     test_valid_fixtures();
     test_status_capability_handshake_and_legacy_defaults();
+    test_status_last_ota_error_round_trip_and_legacy_default();
     test_incremental_decoder();
     test_overflow_resynchronizes();
     test_invalid_fixtures();

@@ -290,6 +290,8 @@ static void transmit_status(protocol_context_t *context, uint32_t request_id)
     status->latest_interrupt_token =
         interrupt_state_latest_token(&context->interrupts);
     status->ota_state = ota_state();
+    status->has_last_ota_error = ota_copy_last_error(
+        status->last_ota_error, sizeof(status->last_ota_error));
     status->wifi_state = wifi_station_state();
     status->wifi_rssi = wifi_station_rssi();
     wifi_station_copy_ip(status->ip, sizeof(status->ip));

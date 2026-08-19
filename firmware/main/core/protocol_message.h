@@ -260,6 +260,8 @@ typedef struct {
     protocol_ota_state_t ota_state;
     bool has_last_network_error;
     char last_network_error[PROTOCOL_MAX_DIAGNOSTIC_LENGTH + 1U];
+    bool has_last_ota_error;
+    char last_ota_error[PROTOCOL_MAX_DIAGNOSTIC_LENGTH + 1U];
 } protocol_status_response_t;
 
 typedef struct {

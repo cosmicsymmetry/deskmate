@@ -46,15 +46,22 @@
     (PROTOCOL_MAX_DEVICE_TOKEN_LENGTH + sizeof("Bearer "))
 
 typedef struct {
+    esp_err_t transport_error;
+} ota_http_diagnostic_t;
+
+typedef struct {
     char bytes[OTA_POLICY_MAX_METADATA_LENGTH + 1U];
     size_t length;
     bool overflow;
+    ota_http_diagnostic_t diagnostic;
 } metadata_response_t;
 
 static const char *TAG = "ota";
 static atomic_int s_state = ATOMIC_VAR_INIT(PROTOCOL_OTA_IDLE);
 static atomic_bool s_task_starting;
 static TaskHandle_t s_task;
+static portMUX_TYPE s_last_error_lock = portMUX_INITIALIZER_UNLOCKED;
+static char s_last_error[PROTOCOL_MAX_DIAGNOSTIC_LENGTH + 1U];
 
 static void set_state(protocol_ota_state_t state)
 {
@@ -67,12 +74,102 @@ protocol_ota_state_t ota_state(void)
         &s_state, memory_order_acquire);
 }
 
+static void lock_last_error(void)
+{
+    portENTER_CRITICAL(&s_last_error_lock);
+}
+
+static void unlock_last_error(void)
+{
+    portEXIT_CRITICAL(&s_last_error_lock);
+}
+
+static void clear_last_error(void)
+{
+    lock_last_error();
+    s_last_error[0] = '\0';
+    unlock_last_error();
+}
+
+static void set_failure_detail(const char *stage, const char *detail)
+{
+    char formatted[PROTOCOL_MAX_DIAGNOSTIC_LENGTH + 1U];
+    memset(formatted, 0, sizeof(formatted));
+    ota_policy_format_failure(formatted, sizeof(formatted), stage, detail);
+    lock_last_error();
+    memcpy(s_last_error, formatted, sizeof(s_last_error));
+    unlock_last_error();
+    set_state(PROTOCOL_OTA_FAILED);
+}
+
+static void set_failure(const char *stage, esp_err_t error)
+{
+    set_failure_detail(stage, esp_err_to_name(error));
+}
+
+static void set_http_failure(const char *stage, int status)
+{
+    char detail[32];
+    (void)snprintf(detail, sizeof(detail), "HTTP %d", status);
+    set_failure_detail(stage, detail);
+}
+
+bool ota_copy_last_error(char *out, size_t out_capacity)
+{
+    if (out == NULL || out_capacity == 0U) {
+        return false;
+    }
+    lock_last_error();
+    size_t length = strnlen(s_last_error, sizeof(s_last_error));
+    size_t copied = length < out_capacity - 1U ? length
+                                               : out_capacity - 1U;
+    memcpy(out, s_last_error, copied);
+    out[copied] = '\0';
+    unlock_last_error();
+    return length != 0U;
+}
+
+static void capture_http_error(esp_http_client_event_t *event,
+                               ota_http_diagnostic_t *diagnostic)
+{
+    if (event == NULL || diagnostic == NULL || event->client == NULL) {
+        return;
+    }
+    int tls_code = 0;
+    int tls_flags = 0;
+    esp_err_t error = esp_http_client_get_and_clear_last_tls_error(
+        event->client, &tls_code, &tls_flags);
+    if (error != ESP_OK) {
+        diagnostic->transport_error = error;
+    }
+}
+
+static esp_err_t prefer_transport_error(
+    esp_err_t result,
+    const ota_http_diagnostic_t *diagnostic)
+{
+    if (result == ESP_FAIL && diagnostic != NULL &&
+        diagnostic->transport_error != ESP_OK) {
+        return diagnostic->transport_error;
+    }
+    return result;
+}
+
 static esp_err_t metadata_http_event(esp_http_client_event_t *event)
 {
-    if (event == NULL || event->event_id != HTTP_EVENT_ON_DATA) {
+    if (event == NULL) {
         return ESP_OK;
     }
     metadata_response_t *response = event->user_data;
+    if (event->event_id == HTTP_EVENT_ERROR) {
+        if (response != NULL) {
+            capture_http_error(event, &response->diagnostic);
+        }
+        return ESP_OK;
+    }
+    if (event->event_id != HTTP_EVENT_ON_DATA) {
+        return ESP_OK;
+    }
     if (response == NULL || event->data == NULL || event->data_len < 0) {
         return ESP_FAIL;
     }
@@ -87,10 +184,22 @@ static esp_err_t metadata_http_event(esp_http_client_event_t *event)
     return ESP_OK;
 }
 
+static esp_err_t download_http_event(esp_http_client_event_t *event)
+{
+    if (event != NULL && event->event_id == HTTP_EVENT_ERROR) {
+        capture_http_error(event, event->user_data);
+    }
+    return ESP_OK;
+}
+
 static esp_err_t fetch_metadata(const char *check_url,
                                 const char *token,
-                                ota_policy_metadata_t *metadata)
+                                ota_policy_metadata_t *metadata,
+                                int *http_status)
 {
+    if (http_status != NULL) {
+        *http_status = 0;
+    }
     metadata_response_t *response = heap_caps_calloc(
         1U, sizeof(*response), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (response == NULL) {
@@ -138,7 +247,12 @@ static esp_err_t fetch_metadata(const char *check_url,
     int status = result == ESP_OK
                      ? esp_http_client_get_status_code(client)
                      : 0;
+    if (http_status != NULL) {
+        *http_status = status;
+    }
     (void)esp_http_client_cleanup(client);
+
+    result = prefer_transport_error(result, &response->diagnostic);
 
     if (result == ESP_OK && response->overflow) {
         result = ESP_ERR_INVALID_SIZE;
@@ -287,12 +401,14 @@ static esp_err_t install_update(const char *server_url,
                                 const ota_policy_metadata_t *metadata)
 {
     if (strcmp(metadata->version, running_version) == 0) {
+        set_failure("verify", ESP_ERR_INVALID_VERSION);
         return ESP_ERR_INVALID_VERSION;
     }
     char download_url[OTA_POLICY_MAX_URL_LENGTH + 1U];
     if (!ota_policy_build_download_url(server_url, metadata->path,
                                        download_url,
                                        sizeof(download_url))) {
+        set_failure("begin", ESP_ERR_INVALID_ARG);
         return ESP_ERR_INVALID_ARG;
     }
     if (protocol_task_ota_blocked()) {
@@ -303,19 +419,26 @@ static esp_err_t install_update(const char *server_url,
     const esp_partition_t *update_partition =
         esp_ota_get_next_update_partition(running_partition);
     if (running_partition == NULL || update_partition == NULL) {
+        set_failure("begin", ESP_ERR_NOT_FOUND);
         return ESP_ERR_NOT_FOUND;
     }
     esp_err_t result = reject_reinstall_of_failed_image(
         update_partition, metadata->version);
     if (result != ESP_OK) {
+        set_failure("verify", result);
         return result;
     }
 
     set_state(PROTOCOL_OTA_DOWNLOADING);
     bool screen_shown = ota_screen_show_progress(0U);
     if (!screen_shown) {
+        set_failure("begin", ESP_ERR_NO_MEM);
         return ESP_ERR_NO_MEM;
     }
+
+    ota_http_diagnostic_t http_diagnostic = {
+        .transport_error = ESP_OK,
+    };
 
     esp_http_client_config_t http_config = {
         .url = download_url,
@@ -327,6 +450,8 @@ static esp_err_t install_update(const char *server_url,
         .buffer_size = OTA_IMAGE_BUFFER_SIZE,
         .buffer_size_tx = OTA_HTTP_BUFFER_SIZE,
         .keep_alive_enable = true,
+        .event_handler = download_http_event,
+        .user_data = &http_diagnostic,
     };
     esp_https_ota_config_t ota_config = {
         .http_config = &http_config,
@@ -361,29 +486,36 @@ static esp_err_t install_update(const char *server_url,
 
     esp_https_ota_handle_t handle = NULL;
     result = esp_https_ota_begin(&ota_config, &handle);
+    result = prefer_transport_error(result, &http_diagnostic);
     if (result != ESP_OK) {
         ota_screen_close();
         resume_link_if_suspended(link_suspended);
+        set_failure("begin", result);
         return result;
     }
-    if (esp_https_ota_get_status_code(handle) != 200) {
+    int download_status = esp_https_ota_get_status_code(handle);
+    if (download_status != 200) {
         result = ESP_ERR_INVALID_RESPONSE;
+        set_http_failure("download", download_status);
         goto abort_update;
     }
 
     int image_size = esp_https_ota_get_image_size(handle);
     if (image_size <= 0 || (size_t)image_size > update_partition->size) {
         result = ESP_ERR_INVALID_SIZE;
+        set_failure("verify", result);
         goto abort_update;
     }
     esp_app_desc_t new_description;
     memset(&new_description, 0, sizeof(new_description));
     result = esp_https_ota_get_img_desc(handle, &new_description);
+    result = prefer_transport_error(result, &http_diagnostic);
     if (result != ESP_OK ||
         !image_version_matches(&new_description, metadata->version)) {
         if (result == ESP_OK) {
             result = ESP_ERR_INVALID_VERSION;
         }
+        set_failure("verify", result);
         goto abort_update;
     }
 
@@ -403,22 +535,26 @@ static esp_err_t install_update(const char *server_url,
                 (uint64_t)(now - started_at),
                 (uint64_t)(now - last_progress_at))) {
             result = ESP_ERR_TIMEOUT;
+            set_failure("download", result);
             goto abort_update;
         }
         uint8_t percentage = progress_percentage(handle, image_size);
         if (percentage != last_percentage) {
             if (!ota_screen_show_progress(percentage)) {
                 result = ESP_ERR_NO_MEM;
+                set_failure("download", result);
                 goto abort_update;
             }
             last_percentage = percentage;
         }
     } while (result == ESP_ERR_HTTPS_OTA_IN_PROGRESS);
 
+    result = prefer_transport_error(result, &http_diagnostic);
     if (result != ESP_OK || !esp_https_ota_is_complete_data_received(handle)) {
         if (result == ESP_OK) {
             result = ESP_ERR_INVALID_SIZE;
         }
+        set_failure("download", result);
         goto abort_update;
     }
     result = esp_https_ota_finish(handle);
@@ -426,6 +562,7 @@ static esp_err_t install_update(const char *server_url,
     if (result != ESP_OK) {
         ota_screen_close();
         resume_link_if_suspended(link_suspended);
+        set_failure("verify", result);
         return result;
     }
     set_state(PROTOCOL_OTA_PENDING_VERIFY);
@@ -462,8 +599,11 @@ static esp_err_t perform_check(void)
     esp_err_t result = wait_for_wifi();
     if (result != ESP_OK) {
         memset(&stored, 0, sizeof(stored));
-        set_state(result == ESP_ERR_INVALID_STATE ? PROTOCOL_OTA_IDLE
-                                                  : PROTOCOL_OTA_FAILED);
+        if (result == ESP_ERR_INVALID_STATE) {
+            set_state(PROTOCOL_OTA_IDLE);
+        } else {
+            set_failure("check", result);
+        }
         return result;
     }
     result = wait_for_owner_state();
@@ -476,7 +616,7 @@ static esp_err_t perform_check(void)
     char running_version[PROTOCOL_MAX_FIRMWARE_VERSION_LENGTH + 1U];
     if (!copy_running_version(running_version, sizeof(running_version))) {
         memset(&stored, 0, sizeof(stored));
-        set_state(PROTOCOL_OTA_FAILED);
+        set_failure("check", ESP_ERR_INVALID_VERSION);
         return ESP_ERR_INVALID_VERSION;
     }
     char check_url[OTA_POLICY_MAX_URL_LENGTH + 1U];
@@ -484,36 +624,43 @@ static esp_err_t perform_check(void)
                                     check_url, sizeof(check_url))) {
         memset(&stored, 0, sizeof(stored));
         memset(running_version, 0, sizeof(running_version));
-        set_state(PROTOCOL_OTA_FAILED);
+        set_failure("check", ESP_ERR_INVALID_ARG);
         return ESP_ERR_INVALID_ARG;
     }
 
     ota_policy_metadata_t metadata;
     memset(&metadata, 0, sizeof(metadata));
-    result = fetch_metadata(check_url, stored.token, &metadata);
+    int check_status = 0;
+    result = fetch_metadata(check_url, stored.token, &metadata,
+                            &check_status);
     memset(check_url, 0, sizeof(check_url));
     memset(stored.token, 0, sizeof(stored.token));
     if (result == ESP_ERR_NOT_FOUND) {
         memset(&stored, 0, sizeof(stored));
         memset(running_version, 0, sizeof(running_version));
+        clear_last_error();
         set_state(PROTOCOL_OTA_IDLE);
         return ESP_OK;
     }
     if (result != ESP_OK) {
         memset(&stored, 0, sizeof(stored));
         memset(running_version, 0, sizeof(running_version));
-        set_state(PROTOCOL_OTA_FAILED);
+        if (check_status != 0 && check_status != 200 &&
+            check_status != 204) {
+            set_http_failure("check", check_status);
+        } else {
+            set_failure("check", result);
+        }
         return result;
     }
 
+    clear_last_error();
     result = install_update(stored.server_url, running_version, &metadata);
     memset(&metadata, 0, sizeof(metadata));
     memset(&stored, 0, sizeof(stored));
     memset(running_version, 0, sizeof(running_version));
     if (result == ESP_ERR_INVALID_STATE) {
         set_state(PROTOCOL_OTA_IDLE);
-    } else if (result != ESP_OK) {
-        set_state(PROTOCOL_OTA_FAILED);
     }
     return result;
 }
@@ -573,7 +720,7 @@ esp_err_t ota_check_now(void)
     atomic_store_explicit(&s_task_starting, false, memory_order_release);
     if (created != pdPASS) {
         s_task = NULL;
-        set_state(PROTOCOL_OTA_FAILED);
+        set_failure("task", ESP_ERR_NO_MEM);
         return ESP_ERR_NO_MEM;
     }
     return blocked ? ESP_ERR_INVALID_STATE : ESP_OK;

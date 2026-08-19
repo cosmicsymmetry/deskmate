@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stddef.h>
 
 #include "esp_err.h"
 
@@ -31,3 +32,6 @@ esp_err_t ota_mark_running_image_valid(void);
 esp_err_t ota_check_now(void);
 
 protocol_ota_state_t ota_state(void);
+
+/** Copy the most recent OTA failure reason, if any, into a bounded buffer. */
+bool ota_copy_last_error(char *out, size_t out_capacity);

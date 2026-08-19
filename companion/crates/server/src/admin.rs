@@ -12,7 +12,7 @@ use axum::http::StatusCode;
 use axum::http::request::Parts;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
-use serde::Serialize;
+use serde::{Serialize, Serializer};
 
 use crate::ServerState;
 use crate::auth::bearer_token;
@@ -125,15 +125,17 @@ async fn get_device(
     let link = state.device_link(&device_id);
     let connected = link.as_ref().is_some_and(|link| link.is_live());
     let last_seen_unix_ms = link.as_ref().and_then(|link| link.last_seen_unix_ms());
+    let last_ota_error = link.as_ref().and_then(|link| link.last_ota_error());
     let runtime = link.and_then(|link| link.runtime());
     let config = state.configs().for_device(&device_id).status();
     let snapshot = if let Some(runtime) = runtime {
-        Some(
-            tokio::task::spawn_blocking(move || runtime.snapshot())
+        Some(AdminSnapshot {
+            snapshot: tokio::task::spawn_blocking(move || runtime.snapshot())
                 .await
                 .map_err(|_| AdminError::WorkerFailed)?
                 .map_err(AdminError::from)?,
-        )
+            last_ota_error,
+        })
     } else {
         None
     };
@@ -153,7 +155,55 @@ struct DeviceStatus {
     connected: bool,
     last_seen_unix_ms: Option<u64>,
     config: crate::store::DeviceConfigStatus,
-    snapshot: Option<AppSnapshot>,
+    snapshot: Option<AdminSnapshot>,
+}
+
+#[derive(Debug)]
+struct AdminSnapshot {
+    snapshot: AppSnapshot,
+    last_ota_error: Option<String>,
+}
+
+fn insert_last_ota_error(
+    snapshot: &mut serde_json::Value,
+    last_ota_error: Option<&str>,
+) -> Result<(), &'static str> {
+    let device = snapshot
+        .get_mut("device")
+        .and_then(serde_json::Value::as_object_mut)
+        .ok_or("snapshot device is not an object")?;
+    device.insert(
+        "last_ota_error".to_owned(),
+        serde_json::to_value(last_ota_error).map_err(|_| "last OTA error is not serializable")?,
+    );
+    Ok(())
+}
+
+impl Serialize for AdminSnapshot {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut value = serde_json::to_value(&self.snapshot).map_err(serde::ser::Error::custom)?;
+        insert_last_ota_error(&mut value, self.last_ota_error.as_deref())
+            .map_err(serde::ser::Error::custom)?;
+        value.serialize(serializer)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::insert_last_ota_error;
+
+    #[test]
+    fn ota_error_is_inserted_inside_snapshot_device() {
+        let mut snapshot = serde_json::json!({"device": {"ota_state": "failed"}});
+        insert_last_ota_error(&mut snapshot, Some("download: ESP_ERR_NO_MEM")).unwrap();
+        assert_eq!(
+            snapshot["device"]["last_ota_error"],
+            "download: ESP_ERR_NO_MEM"
+        );
+    }
 }
 
 enum SaveConfigError {

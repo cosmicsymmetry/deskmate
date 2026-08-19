@@ -289,5 +289,6 @@ fn sample_status() -> StatusResponse {
         ip: "192.0.2.10".to_owned(),
         ota_state: OtaState::Idle,
         last_network_error: None,
+        last_ota_error: Some("download: ESP_ERR_NO_MEM".to_owned()),
     }
 }

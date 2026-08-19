@@ -40,11 +40,31 @@ fn valid_golden_frames_decode() {
         "network_config.bin",
         "factory_reset.bin",
         "status_response_networked.bin",
+        "status_response_ota_failed.bin",
     ] {
         let frame =
             decode_wire_frame(&fixture(name)).unwrap_or_else(|error| panic!("{name}: {error}"));
         decode_message(&frame).unwrap_or_else(|error| panic!("{name}: {error}"));
     }
+}
+
+#[test]
+fn ota_failure_fixture_is_additive_to_old_status_frames() {
+    let old = decode_wire_frame(&fixture("status_response_networked.bin")).unwrap();
+    let protocol::Message::StatusResponse(old) = decode_message(&old).unwrap() else {
+        panic!("old fixture should remain a status response");
+    };
+    assert_eq!(old.last_ota_error, None);
+
+    let current = decode_wire_frame(&fixture("status_response_ota_failed.bin")).unwrap();
+    let protocol::Message::StatusResponse(current) = decode_message(&current).unwrap() else {
+        panic!("OTA fixture should be a status response");
+    };
+    assert_eq!(current.ota_state, protocol::OtaState::Failed);
+    assert_eq!(
+        current.last_ota_error.as_deref(),
+        Some("download: ESP_ERR_NO_MEM")
+    );
 }
 
 #[test]

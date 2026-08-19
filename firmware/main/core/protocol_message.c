@@ -1215,6 +1215,8 @@ static protocol_message_result_t decode_status(
     status->ota_state = PROTOCOL_OTA_IDLE;
     status->has_last_network_error = false;
     status->last_network_error[0] = '\0';
+    status->has_last_ota_error = false;
+    status->last_ota_error[0] = '\0';
     CborParser parser;
     CborValue contents;
     size_t count = 0U;
@@ -1260,6 +1262,14 @@ static protocol_message_result_t decode_status(
                 status->has_last_network_error = true;
             }
             present |= REQUIRED_BIT(29);
+        } else if (key == 30U) {
+            result = read_text(&contents, status->last_ota_error,
+                               sizeof(status->last_ota_error), 0U,
+                               PROTOCOL_MAX_DIAGNOSTIC_LENGTH);
+            if (result == PROTOCOL_MESSAGE_OK) {
+                status->has_last_ota_error = true;
+            }
+            present |= REQUIRED_BIT(30);
         } else if (key <= 25U || key == 28U) {
             uint64_t value = 0U;
             result = read_unsigned(&contents, &value);
@@ -1376,6 +1386,12 @@ static protocol_message_result_t validate_message(
         if (message->value.status.has_last_network_error &&
             !bounded_length(message->value.status.last_network_error,
                             sizeof(message->value.status.last_network_error),
+                            &length)) {
+            return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
+        }
+        if (message->value.status.has_last_ota_error &&
+            !bounded_length(message->value.status.last_ota_error,
+                            sizeof(message->value.status.last_ota_error),
                             &length)) {
             return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
         }
@@ -1694,7 +1710,8 @@ static protocol_message_result_t encode_status_payload(
 {
     CborEncoder map;
     size_t entry_count = 24U + 5U +
-                         (status->has_last_network_error ? 1U : 0U);
+                         (status->has_last_network_error ? 1U : 0U) +
+                         (status->has_last_ota_error ? 1U : 0U);
     protocol_message_result_t result = begin_map(root, &map, entry_count);
     if (result != PROTOCOL_MESSAGE_OK) return result;
     result = encode_pair_uint(&map, 0U, status->protocol_version);
@@ -1733,6 +1750,12 @@ static protocol_message_result_t encode_status_payload(
         result = encode_uint(&map, 29U);
         if (result == PROTOCOL_MESSAGE_OK) {
             result = encode_text(&map, status->last_network_error);
+        }
+    }
+    if (result == PROTOCOL_MESSAGE_OK && status->has_last_ota_error) {
+        result = encode_uint(&map, 30U);
+        if (result == PROTOCOL_MESSAGE_OK) {
+            result = encode_text(&map, status->last_ota_error);
         }
     }
     if (result != PROTOCOL_MESSAGE_OK) return result;

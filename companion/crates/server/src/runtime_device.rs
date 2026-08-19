@@ -246,6 +246,7 @@ pub(crate) struct SocketConnector {
     event_sender: SyncSender<ReceivedEvent>,
     diagnostics: Arc<DiagnosticCounters>,
     replay: Arc<Mutex<ReplayState>>,
+    latest_status: Arc<Mutex<Option<StatusResponse>>>,
 }
 
 impl SocketConnector {
@@ -271,6 +272,14 @@ impl SocketConnector {
     pub(crate) fn detach(&self) {
         self.transport.detach_current();
     }
+
+    pub(crate) fn last_ota_error(&self) -> Option<String> {
+        self.latest_status
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .and_then(|status| status.last_ota_error.clone())
+    }
 }
 
 /// The synchronous half handed to [`app_core::RuntimeHandle`].
@@ -280,6 +289,7 @@ pub struct WebSocketRuntimeDevice {
     events: Receiver<ReceivedEvent>,
     diagnostics: Arc<DiagnosticCounters>,
     replay: Arc<Mutex<ReplayState>>,
+    latest_status: Arc<Mutex<Option<StatusResponse>>>,
     connected_generation: Option<u64>,
     ever_connected: bool,
     latest_data_revision: u32,
@@ -303,11 +313,13 @@ impl WebSocketRuntimeDevice {
         let diagnostics = Arc::new(DiagnosticCounters::default());
         let transport = Arc::new(TransportSlot::default());
         let replay = Arc::new(Mutex::new(ReplayState::default()));
+        let latest_status = Arc::new(Mutex::new(None));
         let connector = SocketConnector {
             transport: Arc::clone(&transport),
             event_sender,
             diagnostics: Arc::clone(&diagnostics),
             replay: Arc::clone(&replay),
+            latest_status: Arc::clone(&latest_status),
         };
         (
             Self {
@@ -316,6 +328,7 @@ impl WebSocketRuntimeDevice {
                 events: event_receiver,
                 diagnostics,
                 replay,
+                latest_status,
                 connected_generation: None,
                 ever_connected: false,
                 latest_data_revision: 0,
@@ -356,6 +369,13 @@ impl WebSocketRuntimeDevice {
 
     fn request(&self, message: Message) -> Result<(u64, Message), DeviceError> {
         self.request_on_generation(None, message)
+    }
+
+    fn remember_status(&self, status: &StatusResponse) {
+        *self
+            .latest_status
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(status.clone());
     }
 
     fn connected_request(&self, message: Message) -> Result<Message, DeviceError> {
@@ -547,6 +567,7 @@ impl RuntimeDevice for WebSocketRuntimeDevice {
         let Message::StatusResponse(status) = response else {
             return Err(DeviceError::UnexpectedMessage);
         };
+        self.remember_status(&status);
         self.latest_data_revision = status.latest_revision;
         self.latest_config_revision = status.config_revision;
         self.capabilities = status.capabilities;
@@ -572,6 +593,7 @@ impl RuntimeDevice for WebSocketRuntimeDevice {
     fn status(&mut self) -> Result<StatusResponse, DeviceError> {
         match self.connected_request(Message::StatusRequest)? {
             Message::StatusResponse(status) => {
+                self.remember_status(&status);
                 self.capabilities = status.capabilities;
                 Ok(status)
             }
@@ -1119,6 +1141,7 @@ mod tests {
             ip: "192.0.2.10".into(),
             ota_state: OtaState::Idle,
             last_network_error: None,
+            last_ota_error: None,
         }
     }
 }

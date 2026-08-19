@@ -664,7 +664,98 @@ describe("settings accessibility and states", () => {
     }
   });
 
-  test("server validation rejections show every issue beside the save action", async () => {
+  test("the mounted app routes an unplugged persisted-networked save only to the server", async () => {
+    let liveSnapshot: AppSnapshot = {
+      ...(structuredClone(snapshot) as AppSnapshot),
+      has_saved_config: true,
+      device: {
+        ...(structuredClone(snapshot.device) as AppSnapshot["device"]),
+        tier: null,
+      },
+    };
+    let localWrites = 0;
+    let serverWrites = 0;
+    snapshotImpl = async () => liveSnapshot;
+    networkSettingsImpl = async () => ({
+      server_url: "https://desk.example",
+      device_id: "desk-1",
+      tier: "networked",
+    });
+    saveImpl = async () => {
+      localWrites += 1;
+      return { save: { generation: 1, warning: null } };
+    };
+    serverSaveImpl = async (config) => {
+      serverWrites += 1;
+      liveSnapshot = { ...liveSnapshot, config };
+      return { save: { generation: 2, warning: null } };
+    };
+    previewImpl = async () => ({ png_base64: "cHJldmlldw==", sample: false });
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<App />));
+      await waitFor(() => expect(buttonWithText(container, "Save to server")).toBeDefined());
+      await act(async () => buttonWithText(container, "○Manual")?.click());
+      await act(async () => buttonWithText(container, "Make active")?.click());
+      await waitFor(() =>
+        expect(buttonWithText(container, "Save to server")?.disabled).toBe(false),
+      );
+      await act(async () => buttonWithText(container, "Save to server")?.click());
+      await waitFor(() => expect(serverWrites).toBe(1));
+      expect(localWrites).toBe(0);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      snapshotImpl = async () => snapshot;
+      networkSettingsImpl = async () => ({
+        server_url: "https://desk.example",
+        device_id: "desk-1",
+        tier: "local",
+      });
+      saveImpl = async () => ({ save: { generation: 1, warning: null } });
+      serverSaveImpl = async () => ({ save: { generation: 1, warning: null } });
+    }
+  });
+
+  test("the mounted app refuses saving beside the button until ownership loads", async () => {
+    snapshotImpl = async () => ({
+      ...(structuredClone(snapshot) as AppSnapshot),
+      device: {
+        ...(structuredClone(snapshot.device) as AppSnapshot["device"]),
+        tier: null,
+      },
+    });
+    networkSettingsImpl = () => new Promise<NetworkSettings>(() => {});
+    previewImpl = async () => ({ png_base64: "cHJldmlldw==", sample: false });
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<App />));
+      await waitFor(() => expect(container.textContent).toContain("Workday"));
+      const unavailable = buttonWithText(container, "Ownership unavailable");
+      expect(unavailable?.disabled).toBe(true);
+      expect(container.textContent).toContain(
+        "Connect over USB to confirm ownership before saving.",
+      );
+      expect(buttonWithText(container, "Save & apply")).toBeUndefined();
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      snapshotImpl = async () => snapshot;
+      networkSettingsImpl = async () => ({
+        server_url: "https://desk.example",
+        device_id: "desk-1",
+        tier: "local",
+      });
+    }
+  });
+
+  test("server validation rejections show a bounded issue list beside the save action", async () => {
     const networkedSnapshot: AppSnapshot = {
       ...(structuredClone(snapshot) as AppSnapshot),
       has_saved_config: true,
@@ -682,15 +773,12 @@ describe("settings accessibility and states", () => {
     serverSaveImpl = async () => {
       throw new tauriModule.DeskmateCommandError({
         category: "validation",
-        message: "the server rejected this configuration with 2 validation issue(s)",
-        issues: [
-          { path: "cards[0].title", code: "empty", message: "Choose a card title." },
-          {
-            path: "active_playlist_id",
-            code: "missing-reference",
-            message: "Choose an active playlist.",
-          },
-        ],
+        message: "the server rejected this configuration with 7 validation issue(s)",
+        issues: Array.from({ length: 7 }, (_, index) => ({
+          path: `cards[${index}].title`,
+          code: "empty" as const,
+          message: `Server issue ${index + 1}.`,
+        })),
       });
     };
     previewImpl = async () => ({ png_base64: "cHJldmlldw==", sample: false });
@@ -710,11 +798,14 @@ describe("settings accessibility and states", () => {
 
       await waitFor(() =>
         expect(container.textContent).toContain(
-          "the server rejected this configuration with 2 validation issue(s)",
+          "the server rejected this configuration with 7 validation issue(s)",
         ),
       );
-      expect(container.textContent).toContain("Choose a card title.");
-      expect(container.textContent).toContain("Choose an active playlist.");
+      expect(container.textContent).toContain("Server issue 1.");
+      expect(container.textContent).toContain("Server issue 5.");
+      expect(container.textContent).not.toContain("Server issue 6.");
+      expect(container.textContent).not.toContain("Server issue 7.");
+      expect(container.textContent).toContain("and 2 more");
       expect(container.textContent).not.toContain("last working");
     } finally {
       await act(async () => root.unmount());

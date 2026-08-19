@@ -144,32 +144,14 @@ impl NetworkedConfigProjection {
     }
 }
 
-struct DesktopState {
-    runtime: Arc<RuntimeHandle>,
-    store: Arc<ConfigStore>,
+struct DesktopSnapshotProjector {
     network_store: Arc<NetworkSettingsStore>,
     networked_config: Arc<NetworkedConfigProjection>,
     last_known_tier: Mutex<Option<DeviceTier>>,
-    server_client: ureq::Agent,
     has_saved_config: Arc<AtomicBool>,
-    tray: TrayControls,
-    snapshot_worker: Mutex<Option<JoinHandle<()>>>,
-    mutation_lock: Arc<Mutex<()>>,
-    quitting: AtomicBool,
-    preview: preview::PreviewHandle,
 }
 
-/// The desktop IPC projection adds the one piece of persistence history the runtime
-/// intentionally does not own: whether settings have ever existed on disk. Flattening
-/// keeps the wire shape compatible with the frontend's single `AppSnapshot` DTO.
-#[derive(Debug, Clone, Serialize)]
-struct DesktopSnapshot {
-    #[serde(flatten)]
-    app: AppSnapshot,
-    has_saved_config: bool,
-}
-
-impl DesktopState {
+impl DesktopSnapshotProjector {
     fn project_snapshot(&self, mut app: AppSnapshot) -> DesktopSnapshot {
         if let Some(tier) = app.device.tier {
             self.remember_device_tier(tier);
@@ -180,10 +162,6 @@ impl DesktopState {
             app,
             has_saved_config: self.has_saved_config.load(Ordering::Acquire),
         }
-    }
-
-    fn set_networked_config(&self, config: Option<AppConfig>) -> Result<(), commands::IpcError> {
-        self.networked_config.replace(config)
     }
 
     fn remember_device_tier(&self, tier: DeviceTier) {
@@ -209,6 +187,41 @@ impl DesktopState {
             return;
         }
         *last_known = Some(tier);
+    }
+}
+
+struct DesktopState {
+    runtime: Arc<RuntimeHandle>,
+    store: Arc<ConfigStore>,
+    network_store: Arc<NetworkSettingsStore>,
+    networked_config: Arc<NetworkedConfigProjection>,
+    snapshot_projector: DesktopSnapshotProjector,
+    server_client: ureq::Agent,
+    has_saved_config: Arc<AtomicBool>,
+    tray: TrayControls,
+    snapshot_worker: Mutex<Option<JoinHandle<()>>>,
+    mutation_lock: Arc<Mutex<()>>,
+    quitting: AtomicBool,
+    preview: preview::PreviewHandle,
+}
+
+/// The desktop IPC projection adds the one piece of persistence history the runtime
+/// intentionally does not own: whether settings have ever existed on disk. Flattening
+/// keeps the wire shape compatible with the frontend's single `AppSnapshot` DTO.
+#[derive(Debug, Clone, Serialize)]
+struct DesktopSnapshot {
+    #[serde(flatten)]
+    app: AppSnapshot,
+    has_saved_config: bool,
+}
+
+impl DesktopState {
+    fn project_snapshot(&self, app: AppSnapshot) -> DesktopSnapshot {
+        self.snapshot_projector.project_snapshot(app)
+    }
+
+    fn set_networked_config(&self, config: Option<AppConfig>) -> Result<(), commands::IpcError> {
+        self.networked_config.replace(config)
     }
 
     fn toggle_paused(&self) -> Result<(), commands::IpcError> {
@@ -450,15 +463,23 @@ fn setup_app(app: &mut App) -> Result<(), Box<dyn Error>> {
     });
     let initial_snapshot = runtime.snapshot()?;
     let tray = create_tray(app, &initial_snapshot, autostart_enabled)?;
+    let networked_config = Arc::new(NetworkedConfigProjection::default());
+    let has_saved_config = Arc::new(AtomicBool::new(has_saved_config));
+    let snapshot_projector = DesktopSnapshotProjector {
+        network_store: Arc::clone(&network_store),
+        networked_config: Arc::clone(&networked_config),
+        last_known_tier: Mutex::new(last_known_tier),
+        has_saved_config: Arc::clone(&has_saved_config),
+    };
 
     app.manage(DesktopState {
         runtime: Arc::clone(&runtime),
         store,
         network_store,
-        networked_config: Arc::new(NetworkedConfigProjection::default()),
-        last_known_tier: Mutex::new(last_known_tier),
+        networked_config,
+        snapshot_projector,
         server_client: server_http_agent(),
-        has_saved_config: Arc::new(AtomicBool::new(has_saved_config)),
+        has_saved_config,
         tray,
         snapshot_worker: Mutex::new(None),
         mutation_lock: Arc::new(Mutex::new(())),
@@ -711,6 +732,78 @@ mod tests {
         let mut later_networked_config = AppConfig::default();
         projection.project(Some(DeviceTier::Networked), &mut later_networked_config);
         assert_eq!(later_networked_config, AppConfig::default());
+    }
+
+    #[test]
+    fn projecting_an_observed_tier_persists_it_for_the_next_cable_out_snapshot() {
+        use app_core::{DeviceCounters, DeviceSnapshot, NetworkSettingsUpdate};
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let serial = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "deskmate-tier-projection-{}-{serial}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let network_store = Arc::new(NetworkSettingsStore::new(
+            directory.join("network-settings.json"),
+        ));
+        network_store
+            .save(NetworkSettingsUpdate::new(
+                "https://desk.example",
+                "desk-1",
+                Some(DeviceTier::Local),
+                None,
+            ))
+            .unwrap();
+        let projector = DesktopSnapshotProjector {
+            network_store: Arc::clone(&network_store),
+            networked_config: Arc::new(NetworkedConfigProjection::default()),
+            last_known_tier: Mutex::new(Some(DeviceTier::Local)),
+            has_saved_config: Arc::new(AtomicBool::new(false)),
+        };
+        let snapshot = AppSnapshot {
+            config: AppConfig::default(),
+            runtime: RuntimeState::Running,
+            device: DeviceSnapshot {
+                connection: ConnectionState::Online,
+                port_name: Some("test-port".into()),
+                firmware_version: Some("2.0.0".into()),
+                protocol_version: Some(1),
+                max_protocol_version: Some(1),
+                capabilities: Vec::new(),
+                unknown_capability_bits: 0,
+                uptime_ms: None,
+                free_heap: None,
+                rotation: None,
+                tier: Some(DeviceTier::Networked),
+                wifi_state: None,
+                wifi_rssi: None,
+                ip: None,
+                last_network_error: None,
+                ota_state: None,
+                active_screen_id: None,
+                counters: DeviceCounters::default(),
+            },
+            providers: Vec::new(),
+            pomodoros: Vec::new(),
+            card_data: Vec::new(),
+            card_errors: Vec::new(),
+            persistence: PersistenceState::Clean,
+            diagnostics: app_core::RuntimeDiagnostics::default(),
+        };
+
+        let projected = projector.project_snapshot(snapshot);
+
+        assert_eq!(projected.app.device.tier, Some(DeviceTier::Networked));
+        assert_eq!(
+            network_store.load().settings().tier,
+            Some(DeviceTier::Networked)
+        );
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

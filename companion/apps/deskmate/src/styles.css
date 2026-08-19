@@ -1715,8 +1715,15 @@ h2 {
 }
 
 .save-error__issues {
+  max-height: min(120px, 20vh);
   margin: 4px 0 0;
   padding-left: 18px;
+  overflow-y: auto;
+}
+
+.save-error__more {
+  display: block;
+  margin-top: 3px;
 }
 
 /* Plain --ink, not --emit: this is body text on the light chrome surface,

@@ -53,6 +53,30 @@ type SaveState =
   | { kind: "error"; error: IpcError };
 
 const validDraft: DraftValidation = { valid: true, issues: [] };
+const MAX_RENDERED_SAVE_ISSUES = 5;
+
+function SaveError({ error }: { error: IpcError }) {
+  const issues = error.category === "validation" ? error.issues : [];
+  const visibleIssues = issues.slice(0, MAX_RENDERED_SAVE_ISSUES);
+  const hiddenIssueCount = issues.length - visibleIssues.length;
+  return (
+    <div className="save-error" role="alert">
+      <span>{error.message}</span>
+      {visibleIssues.length > 0 && (
+        <ul className="save-error__issues">
+          {visibleIssues.map((issue) => (
+            <li key={`${issue.path}:${issue.code}:${issue.message}`}>{issue.message}</li>
+          ))}
+        </ul>
+      )}
+      {hiddenIssueCount > 0 && (
+        <span className="save-error__more">
+          and {hiddenIssueCount} more issue{hiddenIssueCount === 1 ? "" : "s"}
+        </span>
+      )}
+    </div>
+  );
+}
 
 export function App() {
   const {
@@ -590,18 +614,7 @@ export function App() {
           {saveState.kind === "saved" && (
             <span className="save-success">✓ {saveState.message}</span>
           )}
-          {saveState.kind === "error" && (
-            <div className="save-error" role="alert">
-              <span>{saveState.error.message}</span>
-              {saveState.error.category === "validation" && saveState.error.issues.length > 0 && (
-                <ul className="save-error__issues">
-                  {saveState.error.issues.map((issue) => (
-                    <li key={`${issue.path}:${issue.code}:${issue.message}`}>{issue.message}</li>
-                  ))}
-                </ul>
-              )}
-            </div>
-          )}
+          {saveState.kind === "error" && <SaveError error={saveState.error} />}
           {ownershipTier === null && saveState.kind === "idle" && (
             <span className="save-error">Connect over USB to confirm ownership before saving.</span>
           )}

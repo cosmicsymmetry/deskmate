@@ -2352,3 +2352,27 @@ directions — let a reconnecting device take over its own stale socket, persist
 replay live timer state across a reconnect, or delay the boot check until state has
 arrived — are design decisions with real consequences, not local patches, and were
 left for the owner rather than chosen unilaterally.
+
+## V2 — correction: the ~28 s reconnect was the device's backoff, not the server, 2026-08-19
+
+The Step 11 entry above says the server's single-owner refusal "delays the device it is
+meant to protect". That misattributes it, and the record should not stand as written.
+
+The server behaved well: it refused the duplicate at 11:32:16.772 and had closed the
+stale link by 11:32:17.034 — **262 ms**. It was not slow to notice.
+
+The delay was the device's own reconnect curve. `net_link_start()` runs at
+protocol-task init, before DHCP completes, so the first attempts of every boot fail on
+`ESP_ERR_ESP_TLS_CANNOT_RESOLVE_HOSTNAME` by construction. `configure_next_reconnect()`
+advanced the backoff on each of those, so by the time the network could carry a
+connection the curve was already several doublings up the 1 s → 60 s ramp. The 409
+refusal then cost one more doubling on an already-large delay. Refusal was the last
+straw, not the cause.
+
+**Fix:** hold the backoff at its 1 s floor while `wifi_station_state()` is not
+`CONNECTED`, so failures that happened when there was no network to fail against do not
+penalise the first attempt that could have worked. Failures *after* the station has an
+IP still back off normally.
+
+The general lesson is worth keeping: a retry curve that starts before its dependencies
+are up spends its patience on failures that were never informative.

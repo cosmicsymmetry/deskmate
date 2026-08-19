@@ -88,8 +88,22 @@ static size_t ring_drain(uint8_t *out, size_t capacity)
 
 static void configure_next_reconnect(esp_websocket_client_handle_t client)
 {
-    uint32_t delay_ms = reconnect_backoff_next_delay_ms(
-        &s_reconnect_backoff);
+    // A failure while the station has no IP says nothing about the server's
+    // availability, so it must not advance the curve. net_link_start() runs
+    // at protocol-task init, before DHCP has finished, so the first attempts
+    // of every boot fail on DNS by construction
+    // (ESP_ERR_ESP_TLS_CANNOT_RESOLVE_HOSTNAME). Counting those doublings
+    // means arriving at the first attempt that could have worked already
+    // heavily delayed: a reboot on 2026-08-19 spent 28 s offline that way,
+    // most of it accumulated before the network existed. Hold at the 1 s
+    // floor until the link could actually carry a connection.
+    uint32_t delay_ms;
+    if (wifi_station_state() != PROTOCOL_WIFI_CONNECTED) {
+        reconnect_backoff_reset(&s_reconnect_backoff);
+        delay_ms = reconnect_backoff_peek_delay_ms(&s_reconnect_backoff);
+    } else {
+        delay_ms = reconnect_backoff_next_delay_ms(&s_reconnect_backoff);
+    }
     esp_err_t result = esp_websocket_client_set_reconnect_timeout(
         client, (int)delay_ms);
     if (result != ESP_OK) {

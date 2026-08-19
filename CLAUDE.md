@@ -146,10 +146,17 @@ of letting code and documentation diverge.
     tap latency. (The rotation-stall anomaly was retracted; there is no defect.) The OTA
     observability gap is **partly** closed: additive protocol-v1 `StatusResponse` key 30
     carries bounded `last_ota_error`, `GET /v1/devices/{id}` exposes it under
-    `snapshot.device`, and it was verified on the board — but a missing image renders
-    `begin: ESP_FAIL`, because `esp_https_ota_begin()` fails before the download stage
-    and IDF collapses the HTTP error, so the commonest remote failure still names no
-    cause. A green suite could not have shown that; only the board did.
+    `snapshot.device`, and it was verified on the board.
+  - **`3f2aa03` is a REGRESSION: it breaks OTA downloads.** It installs a custom HTTP
+    event handler on the download client, and `esp_https_ota` depends on its own event
+    handling to read the image body, so every download fails with
+    `download: ESP_ERR_MBEDTLS_SSL_READ_FAILED` — isolated on the board 2026-08-19 and
+    recorded in board-notes. **Do not flash a build carrying it.** The general rule:
+    never instrument a subsystem by taking over a callback it owns; the perform loop
+    already had `esp_https_ota_get_status_code()`. Two lessons stand on their own: every
+    gate stayed green through the whole thing, so green tests say nothing about whether
+    OTA still works; and `last_ota_error` is what made its own regression diagnosable,
+    which is the argument for the field rather than against it.
   - Traps learned on the board, all still true: **a flashed build is reverted within a
     minute** unless `DESKMATE_FIRMWARE_VERSION` is moved to match, because the catalog
     pins the fleet and offers its version in either direction — a downgrade path exists

@@ -2423,6 +2423,33 @@ is indistinguishable from a missing one.
 Start a pomodoro, then trigger a check. Confirm the update does not begin, and that it
 proceeds once the pomodoro finishes.
 
+> **Executed 2026-08-19 — FAILS. The update began while a pomodoro was running.**
+> Full detail in board-notes under "Step 11 — deferral FAILS on hardware, and why".
+>
+> The deferral logic is not the problem; the state it depends on is absent at the only
+> moment a check ever happens. Checks fire at boot (the interval is 24 h), and at boot
+> the device has no link: it reconnects faster than the server notices the previous
+> socket is dead, so the server **refuses its own device** with "owner already live".
+> The device backs off, the check runs link-less, no host state has been replayed, and
+> `protocol_task_ota_blocked()` sees nothing to defer to.
+>
+> Two systemic findings surfaced by the same run:
+> 1. **A quick reboot costs ~28 s offline** (refused 11:32:16, reconnected 11:32:44).
+>    The single-owner guard cannot distinguish a rebooted device from an impostor, so
+>    it delays the device it is meant to protect.
+> 2. **A link drop discards a running pomodoro** — `running, 268 s` before the reboot,
+>    `idle, 300 s` after. Task 9 Step 4 tears the runtime down on close by design.
+>    With config applies also resetting timers, a networked pomodoro survives neither
+>    a settings edit nor a link blip.
+>
+> **This step cannot be closed by re-running it, and V2's exit gate cannot be declared
+> passed while it stands.** The three findings are entangled: the deferral needs a link
+> *and* replayed state at check time, the link is delayed by the refusal, and the state
+> would be discarded by the reconnect regardless. Candidate directions — let a
+> reconnecting device take over its own stale socket; persist or replay live timer
+> state across a reconnect; delay the boot check until state has arrived — are design
+> decisions for the owner, deliberately not chosen in-session.
+
 - [ ] **Step 12: Record and commit**
 
 ```bash

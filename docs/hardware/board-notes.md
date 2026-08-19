@@ -2192,3 +2192,63 @@ own `final = staging` path, which is the intended semantics. One-field change in
   diagnostic build with `CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y` is currently the only
   way to see one; it interleaves logs with protocol frames and must not supply
   acceptance evidence.
+
+## V2 Task 11 — two concurrent TLS sessions break the download, fixed 2026-08-19
+
+Found while attempting Step 10's rollback test. The broken image C never installed:
+the download failed reproducibly ~7 s in, three times, including under the console
+build. The server was innocent — the offer was correct and
+`GET /v1/firmware/<version>.bin` returned HTTP 200 with the right embedded version —
+and it was not a timeout (those are 120 s no-progress, 1800 s total).
+
+### Root cause
+
+```
+I esp_https_ota: Starting OTA...
+I esp_https_ota: Writing to <ota_1> partition at offset 0x420000
+E esp-aes: Failed to allocate memory
+E esp-tls-mbedtls: read error :-0x0001
+E esp-tls-mbedtls: read error :-0x7180
+E esp_https_ota: data read -1, errno 0
+W ota: firmware check failed: ESP_FAIL
+```
+
+`esp-aes` is the **hardware AES accelerator**. Its DMA buffers must come from internal
+memory — PSRAM cannot serve DMA — and `CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL` reserves
+only 32 KB against 228 KB of internal RAM already committed to LVGL and WiFi. With the
+WSS protocol link live, a second TLS session for the download cannot get its buffers.
+
+Same family as this session's first defect: moving mbedTLS's own allocations to PSRAM
+(`CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC`) did **not** move the AES driver's DMA buffers,
+and it cannot — they are DMA by definition.
+
+### Fix
+
+`install_update()` suspends the WebSocket for the duration of the download and resumes
+it on every failure path (`0ad1a51`). Owner chose this over raising the internal
+reserve (which would take RAM from the pool behind two previous incidents) or
+disabling hardware AES (which would slow every TLS operation).
+
+Two implementation notes that matter:
+
+- **`stop()`, not `close()`.** The client sets `enable_close_reconnect`, so a graceful
+  close immediately re-dials and reintroduces the second session.
+- **Every failure path resumes.** Only success skips it, because it reboots. A failure
+  returning without reopening the link would leave the display server-less until the
+  next reset — a recoverable download failure turned into a dead device.
+
+### This retracts part of Step 9's earlier result
+
+Step 9's happy path was recorded as PASS earlier the same day. It did complete an
+update, but only because the WSS link happened not to be established while that
+download ran — the log shows it still failing `CANNOT_RESOLVE_HOSTNAME` at the time.
+**That pass was timing, not a working mechanism.** Step 9 must be re-run with the link
+established before OTA can be called verified.
+
+### Observability gap worth closing
+
+The protocol reports OTA *state* but never an OTA *reason*: no field in
+`StatusResponse`, none in the server's `AppSnapshot`. A device that fails to update
+reports `ota_state: failed` and nothing else. Diagnosing this one required a
+console-build reflash of the board on the desk; a fleet device could not be diagnosed
+at all.

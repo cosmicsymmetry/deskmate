@@ -3031,3 +3031,35 @@ display keeps working — which is the whole point of V2.
 
 **The board has a battery, so this is link independence, not power loss.** Do not record
 it as a power test; the true power-loss variant remains a separate thing.
+
+## V2 — the battery is short-lived, which qualifies "unplug is link loss", 2026-08-20
+
+The board ran flat while unplugged and powered itself off. Observed: after the gate item 1
+cable pull the board was left on battery, and some hours later it had gone — no USB port,
+no reply to `ping 192.168.8.168` from the server host, no link re-established after the
+path came back, and a webcam frame that was solid black because the panel was genuinely
+off rather than because the virtual camera misfired.
+
+**This qualifies a claim already in the record.** "USB unplug is link loss, not power
+loss" is true only over a short window. It held for the minutes of the item 1 demo; it
+does not hold for hours. Anything left unplugged long enough becomes a power test whether
+or not that was the intent, and the transition is silent — the device simply stops.
+
+Two practical consequences:
+
+- Keep the cable in for long-running work (soaks, overnight observation) unless the point
+  *is* to drain it.
+- When a board goes unreachable on every channel at once — no serial port, no ping, no
+  link — check power before diagnosing anything else. Every other explanation costs more
+  time and this one is free to test.
+
+An attempt at gate item 7 (alert replay across a reconnect) was in progress when this
+happened and is recorded as **not run**, not as a failure: reconstructing the timeline
+afterwards showed the board had already rebooted at ~14:15:12 — before the test window
+opened at 14:17:22 — so its premise never held. It is being re-run.
+
+One reading trap worth naming, because it nearly caught me: with the runtime retained, a
+`GET /v1/devices/{id}` snapshot is still served while the device is gone, and its `device`
+fields are the **last values received**, not current ones. `up=66761` looked like a live
+uptime from a freshly booted board; it was a frozen sample from before the link closed.
+`connected: false` beside it is the only thing that says so.

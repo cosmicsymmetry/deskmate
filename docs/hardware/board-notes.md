@@ -2782,3 +2782,42 @@ heap steady at ~8,310,600. The catalog is pinned to `v2.0.0-gate1` so it stays p
 **Do not ship `3f2aa03` or the version strings `v2.0.0-gate3`/`v2.0.0-gate4` to a board.**
 Note `v2.0.0-nofile` and `v2.0.0-gate4` are now burned as version strings on this device
 by `reject_reinstall_of_failed_image()`.
+
+## V2 gate item 3 — third failure variant: network path down, 2026-08-20
+
+Run with the owner's explicit authorisation to take the shared reverse proxy down
+("используй пока caddy, потом поменяем"), having first refused to do it unasked because
+Caddy fronts about twenty of their unrelated containers.
+
+**This is not the WiFi-drop variant.** The radio stays up; what breaks is the path to
+the server (Cloudflare → cloudflared → **Caddy**). It is a third, genuinely distinct
+failure mode from the server-process stop already recorded, because the failure appears
+at a different layer — an upstream that refuses rather than a socket that closes
+cleanly. **The true WiFi-drop half still needs router access and remains unrun.**
+
+| event | time (UTC) |
+| --- | --- |
+| Caddy stopped | 05:18:58 |
+| standalone fallback observed | 05:20:34 |
+| Caddy restarted | 05:20:40 |
+| link re-established | by 05:21:06 |
+
+Outage bounded to **102 s** by making the restart part of the same scripted step, so a
+slow operator could not extend someone else's downtime.
+
+- `052034Z-item3b-path-down` — standalone fallback: `09:20`, `Thu, Aug 20`, "Connect
+  deskmate app". Local time correct for UTC+4.
+
+**No reboot, again proven by uptime continuity:** 25,579,321 ms at 05:18:44 and
+25,722,382 ms at 05:21:06 — a delta of 143 s against 142 s of wall clock. `reconnects`
+went 0 → 1, and every error counter stayed 0, including `malformed_frames`, `crc_errors`
+and `dropped_responses`. `valid_frames` continued climbing without a gap.
+
+Recovery took about 26 s from the path returning.
+
+### Incidental: a seven-hour clean run
+
+Before this test the board had been up **25,579,321 ms (7.1 hours)** on `v2.0.0-gate1`
+with `reconnects: 0`, `valid_frames: 14546` and **every error counter at zero** — no
+link drop, no malformed frame, no dropped response, heap steady around 8,310,500. That
+is a longer continuous observation than any soak in the plan asks for, and it came free.

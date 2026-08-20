@@ -2632,6 +2632,19 @@ instead of the server.
 > stopping the tunnel or Caddy — was rejected: Caddy on that host reverse-proxies about
 > seventeen unrelated services, so it would have taken the owner's homelab down
 > overnight to test one gate item.
+>
+> **A third variant PASSES 2026-08-20: network path down.** The owner subsequently
+> authorised taking Caddy down, so it was run with the outage bounded to 102 s by
+> scripting the restart into the same step. Radio up, path broken: Caddy stopped
+> 05:18:58, standalone fallback observed 05:20:34, Caddy back 05:20:40, link
+> re-established by 05:21:06 (~26 s). No reboot — uptime 25,579,321 → 25,722,382 ms, a
+> 143 s delta against 142 s of wall clock. `reconnects` 0 → 1, every error counter
+> still 0.
+>
+> This is a distinct failure mode from the server stop — an upstream that refuses rather
+> than a socket that closes cleanly — and the device is indistinguishable from the
+> panel's side in both. **The true WiFi-drop half is still unrun**; it needs the radio
+> to actually lose its AP, which no server-side action can simulate.
 
 - [ ] **Step 6: Gate item 4 — OTA and rollback**
 

@@ -26,3 +26,7 @@ companion/apps/deskmate/dist/
 companion/apps/deskmate/src-tauri/gen/
 .vscode/
 .DS_Store
+
+# Impeccable design-session scratch (screenshots, review evidence)
+.impeccable/
+.playwright-mcp/

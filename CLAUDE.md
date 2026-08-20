@@ -147,8 +147,8 @@ of letting code and documentation diverge.
     observability gap is **partly** closed: additive protocol-v1 `StatusResponse` key 30
     carries bounded `last_ota_error`, `GET /v1/devices/{id}` exposes it under
     `snapshot.device`, and it was verified on the board.
-  - **`3f2aa03` is a REGRESSION: it breaks OTA downloads. Do not flash a build carrying
-    it.** Bisected on the board 2026-08-20 to **~105 bytes of static internal DRAM**
+  - **`3f2aa03` was a REGRESSION that broke OTA downloads; `5699f1d` fixes it and the
+    fix is verified on the board.** Do not flash anything between those two commits. Bisected on the board 2026-08-20 to **~105 bytes of static internal DRAM**
     (`s_last_error` and its `portMUX_TYPE`) — not to any of its logic. Three builds from
     the identical base decide it: the control downloads and installs, the same base plus
     those statics fails, and it fails whether or not a critical section touches them.
@@ -161,9 +161,12 @@ of letting code and documentation diverge.
     RAM — stops finding what it needs. Same class as V1's boot crash-loop, which was
     also a memory-layout shift. **Assume any addition to firmware statics can break OTA
     downloads, unpredictably, with every test green**, and verify the download on the
-    board after touching firmware statics. To restore `last_ota_error`, keep the reason
-    out of `.bss`: carry a compact numeric code and format it in the protocol task into
-    the status structure that already lives in PSRAM. Two lessons stand regardless:
+    board after touching firmware statics. `5699f1d` keeps the reason out of `.bss`: stage,
+    `esp_err_t` and HTTP status pack into two lock-free 32-bit atomic halves and the
+    string is formatted on read into the PSRAM-resident status buffer, taking `ota.c`'s
+    `.bss` from 9 to **17** bytes rather than ~114. Note a 64-bit atomic is **not** an
+    option here — GCC emits `__atomic_load_8`/`__atomic_store_8` and ESP-IDF backs those
+    with a global `portMUX`. Two lessons stand regardless:
     green tests say nothing about whether OTA still works, and `last_ota_error` is what
     made its own regression diagnosable, which argues for the field rather than against
     it.

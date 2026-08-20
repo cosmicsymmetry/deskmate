@@ -2961,3 +2961,47 @@ time; only the owner was gone, which is exactly the designed failure direction.
 This supersedes nothing already recorded, but it is much stronger evidence than the
 engineered 102-second Caddy outage: three hours versus one hundred seconds, and it cost
 nothing to obtain.
+
+## V2 — OTA download regression FIXED and verified on the board, 2026-08-20
+
+`5699f1d` removes the regression `3f2aa03` introduced, keeping the feature.
+
+The reason is no longer stored as a string. Stage, `esp_err_t` and HTTP status pack into
+a 64-bit logical value held as **two lock-free 32-bit atomic halves**, with the existing
+OTA state atomic supplying the generation that makes a torn read detectable. The string
+is formatted only on read, into the caller's `protocol_status_response_t` buffer, which
+already lives in PSRAM.
+
+**Measured, not estimated:** `nm` on `ota.c.obj` shows `.bss` going **9 → 17 bytes**
+(`s_last_error` is exactly 8), against roughly 114 before. Baseline symbols for
+comparison are `s_task_starting` 1, `s_state` 4, `s_task` 4.
+
+A `atomic_uint_least64_t` was the obvious shape and is **wrong on this silicon**: GCC
+reports 64-bit atomics as not always lock-free, emits `__atomic_load_8`/`__atomic_store_8`,
+and ESP-IDF backs those with a **global `portMUX_TYPE`** — which would have reinstated a
+lock, and a system-wide one at that. Worth remembering before reaching for a 64-bit
+atomic anywhere in this firmware.
+
+### Hardware verification
+
+| check | result |
+| --- | --- |
+| download an image (`v2.0.0-gate6` → `v2.0.0-gate1`) | **succeeded**, ~55 s, reset 09:06:06 → running gate1 09:07:01 |
+| missing image provokes a reported failure | `ota_state failed`, `last_ota_error = "begin: ESP_FAIL"` |
+| a successful check clears a stale reason | after reset with a valid catalog: `ota idle`, `last_ota_error = null` |
+
+The three builds immediately before this one could not download at all, so the download
+is the decisive evidence rather than the test suite, which was green throughout the
+regression.
+
+The `begin: HTTP <status>` refinement stays dropped: it needed a custom event handler on
+the download client, and a working update mechanism beats a better diagnostic about the
+update mechanism.
+
+**Board left on `v2.0.0-gate6`**, catalog pinned to it, `ota idle`, `last_ota_error null`,
+all error counters 0. Version strings burned on this device by
+`reject_reinstall_of_failed_image()`: `v2.0.0-nofile`, `v2.0.0-gate4`, `v2.0.0-absent`.
+
+**The standing hazard is unchanged and still applies:** 105 bytes broke this, so any
+addition to firmware statics can break OTA downloads with every test green. Verify a real
+download on the board after touching firmware statics.

@@ -2821,3 +2821,43 @@ Before this test the board had been up **25,579,321 ms (7.1 hours)** on `v2.0.0-
 with `reconnects: 0`, `valid_frames: 14546` and **every error counter at zero** — no
 link drop, no malformed frame, no dropped response, heap steady around 8,310,500. That
 is a longer continuous observation than any soak in the plan asks for, and it came free.
+
+## V2 gate item 2 — the non-destructive half PASSES, 2026-08-20
+
+The cable was exercised against a device in networked tier.
+`net_config_usb_message_allowed()` permits only `STATUS_REQUEST`, `NETWORK_CONFIG` and
+`FACTORY_RESET` there — the cable is the configurator, the server is the owner — and
+that is what the board does:
+
+| message over USB | result |
+| --- | --- |
+| `STATUS_REQUEST` | allowed; reported `tier networked`, `capabilities 0x…cb` (203), wifi connected, ip 192.168.8.168 |
+| `TIME_SYNC` | `error: device rejected request (WrongTier): device is owned over the network` |
+| `PUSH_DATA` | same typed refusal |
+| `ACTIVATE_SCREEN` | same typed refusal |
+| `TRIGGER_INTERRUPT` | same typed refusal |
+
+The device was unharmed by the attempts: `valid_frames` kept climbing, `malformed`,
+`crc`, `overflow` and `dropped_responses` all stayed 0, and the link stayed online.
+
+**Tooling note:** `deskmate-cli apply-config` could not be used for this. That subcommand
+dates from M2 and still expects the old `widgets`/`screens` document, so it rejects a
+schema-v4 config locally and never reaches the wire. `APPLY_CONFIG` is in the refused set
+by construction and travels the identical gate as `TIME_SYNC`, which was exercised — but
+to satisfy the checklist's wording literally, the CLI needs a v4-aware apply.
+
+### The destructive half is blocked on a secret, by design
+
+Going to local tier and back cannot be completed without the **WiFi SSID and PSK**.
+`net_store_erase()` calls `nvs_erase_all()`, so a factory reset wipes the credentials
+along with everything else, and `NetworkConfig` requires them to provision back. They are
+not recoverable from the device — the "secrets are never readable back" rule working as
+intended.
+
+Combined with the identity cost already recorded (returning to networked needs a
+plaintext token, so a new identity must be minted), **a tier round-trip costs one device
+identity and requires the WiFi password supplied out of band.** Neither is a defect; both
+make this the most expensive item in the gate.
+
+Checked while looking: the repository contains only `<ssid>`/`<psk>` placeholders. No real
+credentials are committed.

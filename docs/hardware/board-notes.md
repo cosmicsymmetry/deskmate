@@ -2861,3 +2861,65 @@ make this the most expensive item in the gate.
 
 Checked while looking: the repository contains only `<ssid>`/`<psk>` placeholders. No real
 credentials are committed.
+
+## V2 — OTA download regression BISECTED: 105 bytes of static DRAM, 2026-08-20
+
+Root cause found, isolated to a single variable, with a control. **The cause is not the
+instrumentation `3f2aa03` added. It is the storage.**
+
+### The experiment
+
+Three builds from the identical pre-`3f2aa03` base, each flashed and asked to download
+`v2.0.0-gate2` from the catalog:
+
+| build | what was added | download |
+| --- | --- | --- |
+| `v2.0.0-bisectC` (**control**) | nothing | **succeeded** — installed gate2 and rebooted into it |
+| `v2.0.0-bisectA` | `char[97]` + `portMUX_TYPE` statics, touched under `taskENTER_CRITICAL` | failed |
+| `v2.0.0-bisectB` | the same statics, touched without any critical section | failed |
+
+A exonerates nothing on its own; B exonerates the spinlock; C proves the base still
+works, so the bisect is valid rather than an environmental drift. What remains is **~105
+bytes of `.bss` in internal DRAM**.
+
+Also ruled out earlier, and worth not re-testing: the custom HTTP event handler (refuted
+from IDF sources *and* by removing it and still failing), the image, the server, the
+tunnel and the network.
+
+### It is layout, not capacity
+
+`idf.py size` on the control build:
+
+```
+DIRAM   219307 used  (64.17%)   122453 remain   341760 total
+IRAM     16384 used  (100.0%)        0 remain    16384 total
+```
+
+There are **122 KB of static DIRAM headroom**, so 105 bytes cannot be exhausting a
+budget. The effect must therefore be positional: shifting `.bss` by ~105 bytes moves the
+runtime heap's blocks, and something on the TLS/AES path — which `0ad1a51` established
+must allocate DMA-capable **internal** RAM — stops finding what it needs. The contiguity
+mechanism is inference; what is proven is that the 105 bytes are causal and that total
+capacity is not the constraint.
+
+This is the same class as V1's boot crash-loop, recorded above, where "the custom
+partition table itself was not the cause, only a contributing memory-layout shift".
+
+Note also **IRAM is 100% full with zero remaining.**
+
+### What this means, beyond one feature
+
+**Any addition to firmware statics can break OTA downloads, unpredictably, with every
+test green.** That is the standing hazard, not the `last_ota_error` feature. Before
+adding static state to firmware — especially anything reached from `ota.c` — assume the
+download path is at risk and verify it on the board.
+
+For `last_ota_error` specifically, the fix is to keep the reason out of internal DRAM:
+carry a compact numeric code (stage, `esp_err_t`, HTTP status) and format the string in
+the protocol task into the status structure that already lives in PSRAM, rather than
+holding a 97-byte buffer in `.bss`. Whether even a few bytes are safe is unknown, which
+is itself the point — the margin is not a number anyone currently knows.
+
+The deeper question the owner may want to answer first: *why* is the internal-RAM
+situation this brittle, and can headroom be bought back (LVGL buffers, WiFi/TLS
+tuning) so that adding a variable stops being a risk?

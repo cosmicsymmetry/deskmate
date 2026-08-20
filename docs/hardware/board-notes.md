@@ -3063,3 +3063,47 @@ One reading trap worth naming, because it nearly caught me: with the runtime ret
 fields are the **last values received**, not current ones. `up=66761` looked like a live
 uptime from a freshly booted board; it was a frozen sample from before the link closed.
 `connected: false` beside it is the only thing that says so.
+
+## V2 gate item 7 — alert replay across a reconnect PASSES, 2026-08-20
+
+Bounded-hold alert, fired while the link was down, delivered on reconnect. This is the
+path that has produced real defects twice, so it is worth the detail.
+
+Setup: pomodoro card, `duration_seconds` 120, alert `on-timer-finish` with a **bounded**
+hold of 600 s (not `until-dismissed` — the bounded variant is the one that broke before,
+when its countdown started at schedule time rather than delivery). Single-card playlist so
+the card could not rotate away from the tap.
+
+| event | time (UTC) |
+| --- | --- |
+| timer started by tap, confirmed `running/98` server-side | 18:40:56 |
+| path broken (Caddy stopped) — link closed | 18:40:58 |
+| timer completed **while offline** (98 s later) | ~18:42:34 |
+| path restored | 18:43:15 |
+| device link re-established | 18:44:06 |
+
+**Evidence of delivery is wire-level, not visual:** the device's `latest interrupt token`,
+read over the cable, went **60 → 85**. Before the test it was 60; after the reconnect it
+was 85, so an interrupt reached the device that had not before. Uptime was continuous
+across the whole window (1,268,941 → 1,346,860 ms), so this was a reconnect and not a
+reboot, and every error counter stayed 0.
+
+The path was broken rather than the server stopped, deliberately: restarting the server
+process destroys the runtime and the live timer with it, which would test "the server
+forgot" instead of "the server remembered while it could not reach the device".
+
+### Two things not resolved
+
+1. **The token jumped by 25, not 1.** Delivery is not in doubt — the counter moved — but
+   `busy_retry_and_reconnect_replay_reuse_identical_tokens` documents tokens as *reused*
+   across retries, so a jump of that size is unexplained. Possible token churn while
+   disconnected. Worth a look; it does not change the pass.
+2. **No panel frame exists for this run.** The webcam harness produced solid black on
+   every attempt, including with a 60-frame warmup, while the board was demonstrably
+   alive (link online, uptime climbing, CLI answering over USB). The physical OBSBOT is
+   held by its app and the virtual device returns black, so both paths are dead until the
+   app is sorted. This is the harness's own documented failure mode — "the virtual camera
+   can return a convincing wrong frame" — and it also weakens an earlier inference in this
+   session where a black frame was read as "the panel is off". That conclusion happened to
+   be right, but it was carried by the absent serial port and the failed ping, not by the
+   frame.

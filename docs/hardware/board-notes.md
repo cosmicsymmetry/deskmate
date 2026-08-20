@@ -3005,3 +3005,29 @@ all error counters 0. Version strings burned on this device by
 **The standing hazard is unchanged and still applies:** 105 bytes broke this, so any
 addition to firmware statics can break OTA downloads with every test green. Verify a real
 download on the board after touching firmware statics.
+
+## V2 gate item 1 — the headline demo PASSES, 2026-08-20
+
+USB physically unplugged at ~09:32, Mac companion app not running (checked: no Tauri
+process; the only node process is the parallel UI session's vite dev server, which never
+opens the port). `/dev/cu.usbmodem*` absent for the duration.
+
+The panel kept updating from the server throughout:
+
+| frame | what it shows |
+| --- | --- |
+| `093226Z-item1-cable-out-1` | weather card, **30°**, "Partly cloudy" — 31° the day before, so the provider data is live rather than frozen |
+| `093323Z-item1-cable-out-2` | rotation advanced |
+| `093347Z-item1-cable-out-3` | digital clock reading **13:33:50** with a ticking seconds field and the analog sub-dial — correct to the second for UTC+4 against a 09:33:47Z capture |
+| `093411Z-item1-cable-out-4` | rotation advanced again |
+
+Server side across the same window: `connected: true` continuously, `uptime` climbing
+1,285,241 → 1,397,265 ms with no discontinuity, `ota idle`, `reconnects` unchanged at 1,
+and `malformed`/`crc`/`overflow`/`dropped_responses`/`dropped_events` all 0. Rotation
+observed cycling clock → weather → pomodoro in the samples.
+
+So with no cable and no Mac app, the device is owned by the server over WiFi and the
+display keeps working — which is the whole point of V2.
+
+**The board has a battery, so this is link independence, not power loss.** Do not record
+it as a power test; the true power-loss variant remains a separate thing.

@@ -5,6 +5,9 @@ import type { PairDeviceInput } from "../lib/useAppState";
 
 interface NetworkDeviceView {
   tier: DeviceTier | null;
+  /** The USB link, in a word. Kept here rather than in the window chrome: it is a
+   *  pairing-and-troubleshooting fact, and it belongs beside the rest of them. */
+  link: string;
   wifiState: DeviceWifiState | null;
   wifiRssi: number | null;
   ip: string;
@@ -30,6 +33,15 @@ interface NetworkPanelProps {
 }
 
 type NetworkAction = "pair" | "unpair" | "factory-reset" | "server-access" | "local-override";
+
+/** Exported so the sheet can print it in its own head instead of this panel
+ *  carrying a second heading inside a titled dialog. */
+export function ownershipLabel(tier: DeviceTier | null): string {
+  if (tier === "local") {
+    return "Owned by this Mac";
+  }
+  return tier === "networked" ? "Owned by the server" : "Ownership unavailable";
+}
 
 function readableState(value: string | null): string {
   if (!value) {
@@ -93,11 +105,6 @@ export function NetworkPanel({
 
   const local = device.tier === "local";
   const networked = device.tier === "networked";
-  const ownership = local
-    ? "Owned by this Mac"
-    : networked
-      ? "Owned by the server"
-      : "Ownership unavailable";
   const destination = networked
     ? "Settings are saved to the server. The server sends them to this display."
     : local
@@ -111,22 +118,16 @@ export function NetworkPanel({
     adminToken !== "";
 
   return (
-    <section className="network-panel" aria-labelledby="network-heading">
-      <div className="panel-heading">
-        <div>
-          <p className="step-label">Network setup</p>
-          <h2 id="network-heading">Device ownership</h2>
-        </div>
-        <strong className={`ownership-badge ownership-badge--${device.tier ?? "unknown"}`}>
-          {ownership}
-        </strong>
-      </div>
-
+    <section className="network-panel" aria-label="Device ownership">
       <p className="settings-destination" role="status">
         {destination}
       </p>
 
       <dl className="network-status" aria-label="Device network status">
+        <div className="network-status__wide">
+          <dt>Link</dt>
+          <dd title={device.link}>{device.link}</dd>
+        </div>
         <div>
           <dt>WiFi</dt>
           <dd>{readableState(device.wifiState)}</dd>

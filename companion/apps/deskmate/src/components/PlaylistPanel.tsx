@@ -16,6 +16,7 @@ import {
   setEntryDwell,
   setPlaylistAdvance,
 } from "../lib/configDraft";
+import { Icon } from "./Icon";
 import {
   MAX_PLAYLIST_ENTRIES,
   MAX_PLAYLIST_NAME_LEN,
@@ -150,7 +151,6 @@ export function PlaylistPanel({ config, issues, onChange, onSelectCard }: Playli
     <section className="panel playlist-panel" aria-labelledby="playlist-heading">
       <div className="panel-heading">
         <div>
-          <p className="step-label">Playlists</p>
           <h2 id="playlist-heading">What plays, and when</h2>
         </div>
         <span className="count-badge numeral" id="playlist-capacity">
@@ -172,9 +172,12 @@ export function PlaylistPanel({ config, issues, onChange, onSelectCard }: Playli
                 aria-pressed={isSelected}
                 onClick={() => setSelectedPlaylistId(playlist.id)}
               >
-                <span aria-hidden="true">{isActive ? "●" : "○"}</span>
+                <span
+                  className={`playlist-tab__dot${isActive ? " is-active" : ""}`}
+                  aria-hidden="true"
+                />
                 <strong>{playlist.name}</strong>
-                {isActive && <small>◀ active</small>}
+                {isActive && <small>active</small>}
                 {!isSelected && playlistIssues.length > 0 && (
                   <span className="playlist-tab__issue-count numeral">{playlistIssues.length}</span>
                 )}
@@ -369,8 +372,8 @@ export function PlaylistPanel({ config, issues, onChange, onSelectCard }: Playli
                     onDragOver={(event) => event.preventDefault()}
                     onDrop={(event) => onDrop(event, index)}
                   >
-                    <span className="card-row__handle" aria-hidden="true">
-                      ⠿
+                    <span className="card-row__handle">
+                      <Icon name="grip" />
                     </span>
                     <span className="card-row__index numeral">{index + 1}</span>
                     <button
@@ -416,7 +419,7 @@ export function PlaylistPanel({ config, issues, onChange, onSelectCard }: Playli
                         disabled={index === 0}
                         onClick={() => moveTo(index, index - 1)}
                       >
-                        ↑
+                        <Icon name="up" />
                       </button>
                       <button
                         type="button"
@@ -424,7 +427,7 @@ export function PlaylistPanel({ config, issues, onChange, onSelectCard }: Playli
                         disabled={index === selectedPlaylist.entries.length - 1}
                         onClick={() => moveTo(index, index + 1)}
                       >
-                        ↓
+                        <Icon name="down" />
                       </button>
                     </span>
                     <button

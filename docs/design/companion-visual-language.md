@@ -1,8 +1,14 @@
 # Deskmate companion — visual language
 
 **Date:** 2026-08-06
-**Status:** Proposed. Authored during an unattended session; needs Rodion's approval.
-**Applies to:** `companion/apps/deskmate/src/**` and `src/styles.css`.
+**Status:** **SUPERSEDED, 2026-08-19.** This proposal was never approved. On being shown
+it, the owner chose "replace it — new visual world", and the companion app was rebuilt
+under **The Modular Face** (`DESIGN.md` at the repository root, direction seed
+ef112502). This file is kept as the record of what was tried and why, not as guidance.
+Nothing here constrains current work; in particular the `--panel-black` quarantine rule
+below is retired, because the successor world uses a true-black ground deliberately and
+in both colour schemes.
+**Applies to:** nothing. Historical record only.
 
 ## Thesis: the lit panel
 

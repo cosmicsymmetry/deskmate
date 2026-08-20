@@ -6,18 +6,17 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { App } from "../src/App";
 import { CardEditor } from "../src/components/CardEditor";
 import { CardList } from "../src/components/CardList";
-import { DeviceHeader } from "../src/components/DeviceHeader";
 import { DevicePreview } from "../src/components/DevicePreview";
-import { Filmstrip } from "../src/components/Filmstrip";
-import { NetworkPanel } from "../src/components/NetworkPanel";
+import { LoopRing } from "../src/components/LoopRing";
+import { NetworkPanel, ownershipLabel } from "../src/components/NetworkPanel";
 import { PlaylistPanel } from "../src/components/PlaylistPanel";
-import { ProviderStatus, formatProviderAge } from "../src/components/ProviderStatus";
 import {
   cardsContainerIssues,
   issuesForCard,
   issuesForPath,
   unclaimedIssues,
 } from "../src/lib/configDraft";
+import { formatProviderAge, providerTrouble } from "../src/lib/providers";
 import * as tauriModule from "../src/lib/tauri";
 import type {
   AppConfig,
@@ -186,7 +185,7 @@ function cardListConfig(
 describe("settings accessibility and states", () => {
   test("renders a non-blocking loading state before the first backend snapshot", () => {
     const html = renderToStaticMarkup(<App />);
-    expect(html).toContain("Opening your display settings");
+    expect(html).toContain("Waking the display");
     expect(html).toContain("background service keeps running");
   });
 
@@ -196,12 +195,15 @@ describe("settings accessibility and states", () => {
         card={card}
         issues={issues}
         pomodoro={null}
+        provider={null}
         timerBusy={false}
         filePickerBusy={false}
+        providerRefreshing={false}
         onChange={() => {}}
         onRemove={() => {}}
         onTimerAction={() => {}}
         onChooseCalendarFile={() => {}}
+        onRefreshProvider={() => {}}
       />,
     );
   }
@@ -232,6 +234,7 @@ describe("settings accessibility and states", () => {
       <NetworkPanel
         device={{
           tier,
+          link: "/dev/cu.usbmodem2101",
           wifiState,
           wifiRssi: wifiState === "connected" ? -54 : null,
           ip,
@@ -248,8 +251,9 @@ describe("settings accessibility and states", () => {
 
   test("network panel shows the device as locally owned before provisioning", () => {
     const html = renderNetworkPanel({ tier: "local", wifiState: "down", ip: "" });
-    expect(html).toContain("Owned by this Mac");
-    expect(html).not.toContain("Owned by the server");
+    expect(ownershipLabel("local")).toBe("Owned by this Mac");
+    expect(html).toContain("saved on this Mac and sent to the display over USB");
+    expect(html).not.toContain("saved to the server");
     expect(html).toContain("Server base URL");
     expect(html).toContain("secure WebSocket device link");
   });
@@ -262,7 +266,7 @@ describe("settings accessibility and states", () => {
       wifiState: "connected",
       ip: "192.168.1.42",
     });
-    expect(html).toContain("Owned by the server");
+    expect(ownershipLabel("networked")).toBe("Owned by the server");
     expect(html).toContain("192.168.1.42");
     expect(html).toContain("Settings are saved to the server");
   });
@@ -394,7 +398,7 @@ describe("settings accessibility and states", () => {
 
     try {
       await act(async () => root.render(<App />));
-      await waitFor(() => expect(container.textContent).toContain("Network setup"));
+      await waitFor(() => expect(container.textContent).toContain("Pair with server"));
       await act(async () => {
         setInput("WiFi network", "home-network");
         setInput("WiFi passphrase", "wifi-secret");
@@ -609,6 +613,9 @@ describe("settings accessibility and states", () => {
       <CardList
         config={config}
         issues={[]}
+        cardData={[]}
+        pomodoros={[]}
+        providers={[]}
         selectedCardId="first-clock-id"
         onSelect={() => {}}
         onAdd={() => {}}
@@ -635,6 +642,9 @@ describe("settings accessibility and states", () => {
       <CardList
         config={config}
         issues={[]}
+        cardData={[]}
+        pomodoros={[]}
+        providers={[]}
         selectedCardId={null}
         onSelect={() => {}}
         onAdd={() => {}}
@@ -645,7 +655,8 @@ describe("settings accessibility and states", () => {
     expect(addButtons.length).toBe(6);
     for (const button of addButtons) {
       expect(button).toContain('disabled=""');
-      expect(button).toContain(">Add ");
+      // Every add control still names the kind it adds.
+      expect(button).toMatch(/<strong>[^<]+<\/strong>/);
     }
   });
 
@@ -700,6 +711,9 @@ describe("settings accessibility and states", () => {
       <CardList
         config={config}
         issues={issues}
+        cardData={[]}
+        pomodoros={[]}
+        providers={[]}
         selectedCardId={null}
         onSelect={() => {}}
         onAdd={() => {}}
@@ -735,9 +749,9 @@ describe("settings accessibility and states", () => {
     try {
       await act(async () => root.render(<App />));
       await waitFor(() => expect(container.textContent).toContain("Workday"));
-      expect(container.textContent).not.toContain("A quick first setup");
+      expect(container.textContent).not.toContain("Make the display yours");
 
-      const manualTab = buttonWithText(container, "○Manual");
+      const manualTab = buttonWithText(container, "Manual");
       expect(manualTab).not.toBeUndefined();
       await act(async () => manualTab?.click());
       const makeActive = buttonWithText(container, "Make active");
@@ -745,8 +759,8 @@ describe("settings accessibility and states", () => {
       await act(async () => makeActive?.click());
 
       await waitFor(() => expect(container.textContent).toContain("Unsaved changes"));
-      expect(container.textContent).not.toContain("A quick first setup");
-      await waitFor(() => expect(container.textContent).toContain("●Manual◀ active"));
+      expect(container.textContent).not.toContain("Make the display yours");
+      await waitFor(() => expect(container.textContent).toContain("Manualactive"));
       await waitFor(() => {
         const save = buttonWithText(container, "Save & apply");
         expect(save?.disabled).toBe(false);
@@ -780,23 +794,23 @@ describe("settings accessibility and states", () => {
     const root = createRoot(container);
     try {
       await act(async () => root.render(<App />));
-      await waitFor(() => expect(container.textContent).toContain("A quick first setup"));
+      await waitFor(() => expect(container.textContent).toContain("Make the display yours"));
       expect(container.textContent).toContain("Save your settings");
 
-      await act(async () => buttonWithText(container, "○Manual")?.click());
+      await act(async () => buttonWithText(container, "Manual")?.click());
       await act(async () => buttonWithText(container, "Make active")?.click());
       await waitFor(() => expect(container.textContent).toContain("Unsaved changes"));
-      expect(container.textContent).toContain("A quick first setup");
+      expect(container.textContent).toContain("Make the display yours");
       await waitFor(() => {
         expect(buttonWithText(container, "Save & apply")?.disabled).toBe(false);
       });
       await act(async () => buttonWithText(container, "Save & apply")?.click());
-      await waitFor(() => expect(container.textContent).not.toContain("A quick first setup"));
+      await waitFor(() => expect(container.textContent).not.toContain("Make the display yours"));
 
-      await act(async () => buttonWithText(container, "○Workday")?.click());
+      await act(async () => buttonWithText(container, "Workday")?.click());
       await act(async () => buttonWithText(container, "Make active")?.click());
       await waitFor(() => expect(container.textContent).toContain("Unsaved changes"));
-      expect(container.textContent).not.toContain("A quick first setup");
+      expect(container.textContent).not.toContain("Make the display yours");
     } finally {
       await act(async () => root.unmount());
       container.remove();
@@ -839,7 +853,7 @@ describe("settings accessibility and states", () => {
     try {
       await act(async () => root.render(<App />));
       await waitFor(() => expect(buttonWithText(container, "Save to server")).toBeDefined());
-      await act(async () => buttonWithText(container, "○Manual")?.click());
+      await act(async () => buttonWithText(container, "Manual")?.click());
       await act(async () => buttonWithText(container, "Make active")?.click());
       await waitFor(() =>
         expect(buttonWithText(container, "Save to server")?.disabled).toBe(false),
@@ -930,7 +944,7 @@ describe("settings accessibility and states", () => {
     try {
       await act(async () => root.render(<App />));
       await waitFor(() => expect(container.textContent).toContain("Workday"));
-      await act(async () => buttonWithText(container, "○Manual")?.click());
+      await act(async () => buttonWithText(container, "Manual")?.click());
       await act(async () => buttonWithText(container, "Make active")?.click());
       await waitFor(() =>
         expect(buttonWithText(container, "Save to server")?.disabled).toBe(false),
@@ -1000,32 +1014,67 @@ describe("settings accessibility and states", () => {
     }
   });
 
-  test("renders disconnected, protocol mismatch, stale, and last-good copy", () => {
-    const mismatch = {
-      ...snapshot,
-      device: { ...snapshot.device, protocol_version: 2 as number },
-    };
-    const header = renderToStaticMarkup(
-      <DeviceHeader
-        snapshot={mismatch}
-        commandError={null}
-        busyAction={null}
-        onTogglePause={() => {}}
-      />,
-    );
-    expect(header).toContain("Display not connected");
-    expect(header).toContain("supports protocol 1");
+  test("a protocol the app cannot speak is stated in the work column, not a status bar", async () => {
+    // The header that used to carry this was removed; the sentence has to survive
+    // the move or a mismatched display fails silently.
+    snapshotImpl = async () => ({
+      ...(structuredClone(snapshot) as AppSnapshot),
+      device: { ...snapshot.device, protocol_version: 2 },
+    });
+    previewImpl = async () => ({ png_base64: "cHJldmlldw==", sample: false });
 
-    const providers = renderToStaticMarkup(
-      <ProviderStatus
-        providers={snapshot.providers}
-        cards={cards}
-        refreshingId={null}
-        onRefresh={() => {}}
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<App />));
+      await waitFor(() => expect(container.textContent).toContain("this app speaks protocol 1"));
+      // And the door to the settings sheet says something is wrong with it.
+      expect(container.querySelector(".topbar__settings.has-attention")).not.toBeNull();
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      snapshotImpl = async () => snapshot;
+    }
+  });
+
+  test("a feed in trouble is reported on its own card, not in a list of every feed", () => {
+    const troubled = snapshot.providers.find((provider) => provider.state.kind === "stale");
+    if (!troubled) {
+      throw new Error("fixture no longer carries a provider in trouble");
+    }
+    expect(providerTrouble(troubled)).toContain("Showing the last good data");
+    // A healthy provider is not news and says nothing at all.
+    expect(providerTrouble({ ...troubled, state: { kind: "fresh" } })).toBeNull();
+
+    const editor = renderToStaticMarkup(
+      <CardEditor
+        card={cards[0]}
+        issues={[]}
+        pomodoro={null}
+        provider={troubled}
+        timerBusy={false}
+        filePickerBusy={false}
+        providerRefreshing={false}
+        onChange={() => {}}
+        onRemove={() => {}}
+        onTimerAction={() => {}}
+        onChooseCalendarFile={() => {}}
+        onRefreshProvider={() => {}}
       />,
     );
-    expect(providers).toContain("Showing the last successful data");
-    expect(providers).toContain("Refresh now");
+    expect(editor).toContain("Showing the last good data");
+    expect(editor).toContain("Refresh");
+  });
+
+  test("the settings sheet carries the link and ownership facts the header used to", () => {
+    const html = renderNetworkPanel({
+      tier: "networked",
+      wifiState: "connected",
+      ip: "192.168.1.42",
+    });
+    expect(html).toContain("/dev/cu.usbmodem2101");
+    expect(ownershipLabel(null)).toBe("Ownership unavailable");
   });
 
   function calendarCard(id: string, title = "Up next"): CardSettings {
@@ -1296,32 +1345,32 @@ describe("settings accessibility and states", () => {
     };
   }
 
-  function renderFilmstrip(config: AppConfig): string {
+  function renderLoopRing(config: AppConfig): string {
     return renderToStaticMarkup(
-      <Filmstrip config={config} selectedCardId="first" onSelect={() => {}} onReorder={() => {}} />,
+      <LoopRing config={config} selectedCardId="first" onSelect={() => {}} onReorder={() => {}} />,
     );
   }
 
-  test("the filmstrip shows the loop length and only in-rotation cards", () => {
-    const html = renderFilmstrip(filmstripConfig());
+  test("the loop ring shows the loop length and only in-rotation cards", () => {
+    const html = renderLoopRing(filmstripConfig());
     expect(html).toMatch(/1 min 5 s/);
     expect(html).toContain("Desk");
     expect(html).toContain("Up next");
     expect(html).not.toContain("Focus");
   });
 
-  test("the filmstrip hides timings and the play control under manual advance", () => {
+  test("the loop ring hides timings and the play control under manual advance", () => {
     const config = filmstripConfig();
-    const html = renderFilmstrip({
+    const html = renderLoopRing({
       ...config,
       playlists: [{ ...config.playlists[0], advance: { kind: "manual" } }],
     });
     expect(html).not.toMatch(/\d+s</);
-    expect(html).not.toContain(">Play<");
+    expect(html).not.toContain("Play the loop");
     expect(html).toContain("Desk");
   });
 
-  test("filmstrip keyboard reorder maps visible segments back to playlist entry indexes", async () => {
+  test("loop ring keyboard reorder maps visible arcs back to playlist entry indexes", async () => {
     const initial = filmstripConfig();
     initial.playlists[0].entries = [
       { card_id: "first", dwell_seconds: 45 },
@@ -1333,7 +1382,7 @@ describe("settings accessibility and states", () => {
     function Harness() {
       const [config, setConfig] = useState(initial);
       return (
-        <Filmstrip
+        <LoopRing
           config={config}
           selectedCardId="first"
           onSelect={() => {}}
@@ -1350,7 +1399,7 @@ describe("settings accessibility and states", () => {
     const root = createRoot(container);
     try {
       await act(async () => root.render(<Harness />));
-      const firstSegment = container.querySelector<HTMLButtonElement>(".filmstrip-segment__button");
+      const firstSegment = container.querySelector<HTMLButtonElement>(".loop__entry-body");
       expect(firstSegment).not.toBeNull();
       await act(async () => {
         firstSegment?.dispatchEvent(

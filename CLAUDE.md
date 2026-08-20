@@ -104,6 +104,21 @@ of letting code and documentation diverge.
   the Tauri IPC bridge at `src/dev/`, so every device, provider, ownership and
   validation state renders without hardware (`?scenario=…`, `?theme=…`). It is absent
   from production builds.
+- **A subtraction pass followed on owner feedback (2026-08-21), and its rules are
+  durable.** The four-complication status header, the pause-syncing control, the data
+  sources panel, and the preview's label/resolution/caption were **removed, not moved
+  around** — the owner's objection was that the window read as knobs made for their own
+  sake. Do not reintroduce any of them. What replaced them: chrome is now a wordmark and
+  one Settings button (`TopBar.tsx`); device ownership, pairing and the device's link /
+  Wi-Fi / IP / update state live in a modal `<dialog>` (`SettingsSheet.tsx`), which is
+  the **only** disclosure in the product; protocol mismatch, runtime and command errors
+  are notices in the work column; the one useful thing the sources panel said survives as
+  a `stale` flag on the affected card tile plus an inline message and Refresh in that
+  card's editor (`lib/providers.ts`). `setPushingPaused` has no everyday control any
+  more, so a config that arrives already paused gets a one-off "Resume sending" notice —
+  keep that escape hatch. `DeviceHeader.tsx` and `ProviderStatus.tsx` are deleted.
+  Preferences (timezone, mounting, start-at-login) deliberately stayed in the work
+  column, not the sheet, because they are draft-bound and need the Save bar.
 - **V2's exit gate is OPEN, but no longer blocked.** Task 11 Step 11 failed on hardware
   on 2026-08-19 and **passed on a re-run the same day** after two real defects were
   fixed; what remains open is the gate's own unobserved items, not a blocker. The first

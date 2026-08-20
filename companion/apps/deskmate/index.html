@@ -3,10 +3,45 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="theme-color" content="#101820" />
+    <meta name="theme-color" content="#000000" />
     <title>Deskmate Settings</title>
   </head>
   <body>
+    <!--
+      DIRECTION CONTRACT — The Modular Face (seed ef112502)
+
+      THESIS: Deskmate's hardware is a small emissive rounded panel showing one
+      glanceable thing at a time, which is structurally a watch face clipped to a
+      monitor. So the app that composes it is built from the same parts:
+      complications on a grid, each owning one fact; rings wherever something has a
+      real proportion; huge rounded numerals. It refuses this category's arrangement
+      — a sidebar, a stack of grey cards, one blue button — because a face has no
+      navigation. Everything is already on it.
+
+      OWN-WORLD: True black ground (light mode a designed peer, not an inversion),
+      elevated tiles at #141416/#1F1F22, continuous 18px corner curvature, SF Pro
+      Rounded (`ui-rounded`, free under the Tauri CSP) for every numeral. Five
+      chromatic roles, each with exactly one meaning and no decorative use: live
+      #FA114F, good #30D158, act #0A84FF, warn #FF9F0A, bad #FF453A.
+
+      STORY: The owner sees the panel and its rotation first, edits one card, and
+      closes the loop. Nothing else asks for attention until something is wrong,
+      at which point it says so in a sentence.
+
+      FIRST VIEWPORT: The 448x368 preview at integer scale on true black with an
+      emissive bloom, anchoring a left rail, and under it the loop ring whose arcs
+      are dwell-proportional with the on-panel card lit. The work column scrolls to
+      its right; the save bar is pinned, naming its destination. The chrome is a
+      wordmark and one Settings button — no status band, because state that is
+      nominal 99% of the time is noise.
+
+      FORM: The Modular Face, candidate 1 of the derived list, user-pinned over the
+      roll's assignment (seed ef112502).
+
+      FINISH: unreviewed and undocumented is unfinished; this build ends with the
+      finish review, the verdict, DESIGN.md, and every shipping raster carrying its
+      provenance.
+    -->
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

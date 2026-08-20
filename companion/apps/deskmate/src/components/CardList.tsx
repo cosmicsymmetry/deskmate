@@ -1,3 +1,5 @@
+import { useEffect, useState } from "react";
+
 import {
   cardKindName,
   cardName,
@@ -5,36 +7,93 @@ import {
   issuesForCard,
   libraryCards,
 } from "../lib/configDraft";
-import type { AppConfig, CardKind, ValidationIssue } from "../lib/types";
+import { providerTrouble } from "../lib/providers";
+import { Icon } from "./Icon";
+import type {
+  AppConfig,
+  CardDataSnapshot,
+  CardKind,
+  CardSettings,
+  PomodoroSnapshot,
+  ProviderSnapshot,
+  ValidationIssue,
+} from "../lib/types";
 
 const MAX_CARDS = 8;
 
 interface CardListProps {
   config: AppConfig;
   issues: ValidationIssue[];
+  cardData: CardDataSnapshot[];
+  pomodoros: PomodoroSnapshot[];
+  providers: ProviderSnapshot[];
   selectedCardId: string | null;
   onSelect: (cardId: string) => void;
   onAdd: (kind: CardKind) => void;
   onRemove: (cardId: string) => void;
 }
 
-const addableKinds: { kind: CardKind; glyph: string; description: string }[] = [
-  { kind: "clock", glyph: "09:41", description: "Time and date" },
-  { kind: "pomodoro", glyph: "25", description: "Focus timer" },
-  { kind: "calendar", glyph: "≡", description: "Upcoming events" },
-  { kind: "weather", glyph: "☀", description: "Local conditions" },
-  { kind: "json-feed", glyph: "{ }", description: "Custom JSON data" },
-  { kind: "rss", glyph: "⟢", description: "Headlines feed" },
+const addableKinds: { kind: CardKind; description: string }[] = [
+  { kind: "clock", description: "Time and date" },
+  { kind: "pomodoro", description: "Focus timer" },
+  { kind: "calendar", description: "Upcoming events" },
+  { kind: "weather", description: "Local conditions" },
+  { kind: "json-feed", description: "Custom JSON data" },
+  { kind: "rss", description: "Headlines feed" },
 ];
 
-const glyphForKind = new Map(addableKinds.map(({ kind, glyph }) => [kind, glyph]));
+function fieldText(data: CardDataSnapshot | undefined, key: string): string | null {
+  const field = data?.fields.find((candidate) => candidate.key === key);
+  if (!field) {
+    return null;
+  }
+  return field.value.kind === "text" ? field.value.value : String(field.value.value);
+}
+
+/**
+ * The live face of a card, which is what makes these tiles complications rather
+ * than a list: each shows the thing its card is currently for. A card with no data
+ * yet says so with an em dash rather than borrowing a plausible-looking number.
+ */
+function tileValue(
+  card: CardSettings,
+  data: CardDataSnapshot | undefined,
+  pomodoro: PomodoroSnapshot | undefined,
+  now: Date,
+  timezone: string,
+): string {
+  switch (card.kind) {
+    case "clock":
+      try {
+        return new Intl.DateTimeFormat("en-GB", {
+          hour: "2-digit",
+          minute: "2-digit",
+          timeZone: timezone,
+        }).format(now);
+      } catch {
+        return "--:--";
+      }
+    case "pomodoro": {
+      const seconds = pomodoro?.remaining_seconds ?? card.duration_seconds;
+      return `${Math.floor(seconds / 60)}:${String(Math.floor(seconds % 60)).padStart(2, "0")}`;
+    }
+    case "weather":
+    case "json-feed":
+      return fieldText(data, "hero") ?? "—";
+    case "calendar":
+    case "rss": {
+      const rows = (data?.fields ?? []).filter((field) => field.key.startsWith("row"));
+      return rows.length > 0 ? String(rows.length) : "—";
+    }
+  }
+}
 
 function FieldIssues({ issues }: { issues: ValidationIssue[] }) {
   if (issues.length === 0) {
     return null;
   }
   return (
-    <ul className="field-errors card-row__issues" role="alert">
+    <ul className="field-errors card-tile__issues" role="alert">
       {issues.map((issue) => (
         <li key={`${issue.path}:${issue.code}`}>{issue.message}</li>
       ))}
@@ -45,6 +104,9 @@ function FieldIssues({ issues }: { issues: ValidationIssue[] }) {
 export function CardList({
   config,
   issues,
+  cardData,
+  pomodoros,
+  providers,
   selectedCardId,
   onSelect,
   onAdd,
@@ -57,12 +119,23 @@ export function CardList({
     config.playlists.flatMap((playlist) => playlist.entries.map((entry) => entry.card_id)),
   );
 
+  // A face whose clock does not move is a picture of a face. One tick a second is
+  // enough, and it is the only timer this component owns.
+  const [now, setNow] = useState(() => new Date());
+  const hasClock = cards.some((card) => card.kind === "clock");
+  useEffect(() => {
+    if (!hasClock) {
+      return;
+    }
+    const interval = window.setInterval(() => setNow(new Date()), 1000);
+    return () => window.clearInterval(interval);
+  }, [hasClock]);
+
   return (
-    <section className="panel card-list-panel" aria-labelledby="card-list-heading">
+    <section className="panel library" aria-labelledby="card-list-heading">
       <div className="panel-heading">
         <div>
-          <p className="step-label">Library</p>
-          <h2 id="card-list-heading">Every card</h2>
+          <h2 id="card-list-heading">Card library</h2>
         </div>
         <span className="count-badge numeral" id="card-capacity">
           {cards.length}/{MAX_CARDS}
@@ -70,7 +143,7 @@ export function CardList({
       </div>
 
       {containerIssues.length > 0 && (
-        <ul className="field-errors card-list-issues" role="alert">
+        <ul className="field-errors" role="alert">
           {containerIssues.map((issue) => (
             <li key={`${issue.path}:${issue.code}`}>{issue.message}</li>
           ))}
@@ -79,49 +152,59 @@ export function CardList({
 
       {cards.length === 0 ? (
         <div className="empty-state">
-          <strong>Your library is empty</strong>
-          <span>Add a card below, then place it in a playlist.</span>
+          <strong>No cards yet</strong>
+          <span>Add one below, then place it in a playlist.</span>
         </div>
       ) : (
-        <ul className="card-list library-list" aria-label="Card library">
+        <ul className="card-grid" aria-label="Card library">
           {cards.map((card) => {
             const cardIssues = issuesForCard(issues, config, card.id);
             const hasAlert = card.alert.kind !== "none";
             const isUnused = !usedCardIds.has(card.id);
+            const data = cardData.find((candidate) => candidate.card_id === card.id);
+            const pomodoro = pomodoros.find((candidate) => candidate.widget_id === card.id);
+            // The single fact the old data-sources panel carried that was worth
+            // keeping: which card's number you should not trust right now.
+            const stale =
+              providerTrouble(providers.find((candidate) => candidate.widget_id === card.id)) !==
+              null;
             return (
               <li
                 key={card.id}
-                className={`card-row library-row${selectedCardId === card.id ? " is-selected" : ""}`}
+                className={`card-tile${selectedCardId === card.id ? " is-selected" : ""}${
+                  cardIssues.length > 0 ? " has-issue" : ""
+                }`}
               >
-                <span className="library-row__glyph numeral" aria-hidden="true">
-                  {glyphForKind.get(card.kind)}
-                </span>
                 <button
                   type="button"
-                  className="card-row__body"
+                  className="card-tile__body"
                   aria-pressed={selectedCardId === card.id}
                   onClick={() => onSelect(card.id)}
                 >
-                  <strong>{cardName(card)}</strong>
-                  <small>{cardKindName(card.kind)}</small>
+                  <span className="tile-label">{cardKindName(card.kind)}</span>
+                  <strong className="card-tile__value numeral">
+                    {tileValue(card, data, pomodoro, now, config.preferences.timezone)}
+                  </strong>
+                  <span className="card-tile__name">{cardName(card)}</span>
                 </button>
-                <span className="card-row__badges">
-                  {hasAlert && <span className="status-badge">alerts</span>}
-                  {isUnused && <span className="status-badge status-badge--quiet">unused</span>}
+                <span className="card-tile__flags">
+                  {stale && <span className="flag flag--stale">stale</span>}
+                  {hasAlert && <span className="flag flag--alert">alerts</span>}
+                  {isUnused && <span className="flag">unused</span>}
                 </span>
                 <button
                   type="button"
-                  className="card-row__remove text-button text-button--danger"
+                  className="card-tile__remove"
                   aria-label={
                     cards.length === 1
                       ? `Remove ${cardName(card)} (keep at least one card)`
                       : `Remove ${cardName(card)}`
                   }
-                  title={cards.length === 1 ? "This is your only card." : undefined}
+                  title={cards.length === 1 ? "This is your only card." : "Remove"}
                   disabled={cards.length === 1}
                   onClick={() => onRemove(card.id)}
                 >
-                  Remove
+                  <Icon name="close" />
                 </button>
                 <FieldIssues issues={cardIssues} />
               </li>
@@ -131,8 +214,8 @@ export function CardList({
       )}
 
       <fieldset className="card-add">
-        <legend className="sr-only">Add a card</legend>
-        {addableKinds.map(({ kind, glyph, description }) => (
+        <legend className="tile-label">Add a card</legend>
+        {addableKinds.map(({ kind, description }) => (
           <button
             className="add-card"
             type="button"
@@ -141,14 +224,13 @@ export function CardList({
             disabled={atCapacity}
             aria-describedby={atCapacity ? "card-capacity" : undefined}
           >
-            <span className="add-card__glyph numeral" aria-hidden="true">
-              {glyph}
+            <span className="add-card__plus">
+              <Icon name="plus" />
             </span>
             <span>
-              <strong>Add {cardKindName(kind)}</strong>
+              <strong>{cardKindName(kind)}</strong>
               <small>{description}</small>
             </span>
-            <span aria-hidden="true">+</span>
           </button>
         ))}
       </fieldset>

@@ -322,6 +322,55 @@ bool ota_policy_download_timed_out(uint64_t total_elapsed_us,
            no_progress_elapsed_us >= OTA_POLICY_NO_PROGRESS_TIMEOUT_US;
 }
 
+#define OTA_FAILURE_STAGE_MASK UINT64_C(0x7)
+#define OTA_FAILURE_ERROR_SHIFT 3U
+#define OTA_FAILURE_HTTP_SHIFT 35U
+#define OTA_FAILURE_HTTP_MASK UINT64_C(0xffff)
+
+uint64_t ota_policy_pack_failure(ota_failure_stage_t stage,
+                                 int32_t error,
+                                 uint16_t http_status)
+{
+    return ((uint64_t)stage & OTA_FAILURE_STAGE_MASK) |
+           ((uint64_t)(uint32_t)error << OTA_FAILURE_ERROR_SHIFT) |
+           ((uint64_t)http_status << OTA_FAILURE_HTTP_SHIFT);
+}
+
+ota_failure_t ota_policy_unpack_failure(uint64_t packed)
+{
+    uint32_t error_bits =
+        (uint32_t)(packed >> OTA_FAILURE_ERROR_SHIFT);
+    int64_t signed_error = error_bits <= INT32_MAX
+                               ? (int64_t)error_bits
+                               : (int64_t)error_bits - INT64_C(0x100000000);
+    ota_failure_t failure = {
+        .stage = (ota_failure_stage_t)(packed & OTA_FAILURE_STAGE_MASK),
+        .error = (int32_t)signed_error,
+        .http_status = (uint16_t)(
+            (packed >> OTA_FAILURE_HTTP_SHIFT) & OTA_FAILURE_HTTP_MASK),
+    };
+    return failure;
+}
+
+const char *ota_policy_failure_stage_name(ota_failure_stage_t stage)
+{
+    switch (stage) {
+    case OTA_FAILURE_STAGE_TASK:
+        return "task";
+    case OTA_FAILURE_STAGE_CHECK:
+        return "check";
+    case OTA_FAILURE_STAGE_BEGIN:
+        return "begin";
+    case OTA_FAILURE_STAGE_DOWNLOAD:
+        return "download";
+    case OTA_FAILURE_STAGE_VERIFY:
+        return "verify";
+    case OTA_FAILURE_STAGE_NONE:
+    default:
+        return "ota";
+    }
+}
+
 void ota_policy_format_failure(char *out,
                                size_t out_capacity,
                                const char *stage,
@@ -341,5 +390,25 @@ void ota_policy_format_failure(char *out,
         limit = PROTOCOL_MAX_DIAGNOSTIC_LENGTH;
     }
     (void)snprintf(out, limit + 1U, "%s: %s", stage, detail);
+    out[limit] = '\0';
+}
+
+void ota_policy_format_http_failure(char *out,
+                                    size_t out_capacity,
+                                    const char *stage,
+                                    uint16_t http_status)
+{
+    if (out == NULL || out_capacity == 0U) {
+        return;
+    }
+    if (stage == NULL) {
+        stage = "ota";
+    }
+    size_t limit = out_capacity - 1U;
+    if (limit > PROTOCOL_MAX_DIAGNOSTIC_LENGTH) {
+        limit = PROTOCOL_MAX_DIAGNOSTIC_LENGTH;
+    }
+    (void)snprintf(out, limit + 1U, "%s: HTTP %u", stage,
+                   (unsigned)http_status);
     out[limit] = '\0';
 }

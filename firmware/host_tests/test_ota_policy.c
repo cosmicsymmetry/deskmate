@@ -136,6 +136,45 @@ static void test_failure_reason_is_actionable_and_truncated_at_wire_bound(void)
     assert(strncmp(failure, "verify: ", sizeof("verify: ") - 1U) == 0);
     assert(failure[PROTOCOL_MAX_DIAGNOSTIC_LENGTH] == '\0');
     assert(failure[PROTOCOL_MAX_DIAGNOSTIC_LENGTH + 1U] == '!');
+
+    ota_policy_format_http_failure(failure, sizeof(failure), "check", 500U);
+    assert(strcmp(failure, "check: HTTP 500") == 0);
+
+    ota_policy_format_failure(failure, sizeof(failure), "begin", "ESP_FAIL");
+    assert(strcmp(failure, "begin: ESP_FAIL") == 0);
+}
+
+static void test_failure_pack_is_lossless_at_field_boundaries(void)
+{
+    ota_failure_t failure = ota_policy_unpack_failure(
+        ota_policy_pack_failure(OTA_FAILURE_STAGE_DOWNLOAD,
+                                INT32_MIN, UINT16_MAX));
+    assert(failure.stage == OTA_FAILURE_STAGE_DOWNLOAD);
+    assert(failure.error == INT32_MIN);
+    assert(failure.http_status == UINT16_MAX);
+
+    failure = ota_policy_unpack_failure(
+        ota_policy_pack_failure(OTA_FAILURE_STAGE_VERIFY,
+                                INT32_MAX, 0U));
+    assert(failure.stage == OTA_FAILURE_STAGE_VERIFY);
+    assert(failure.error == INT32_MAX);
+    assert(failure.http_status == 0U);
+
+    failure = ota_policy_unpack_failure(0U);
+    assert(failure.stage == OTA_FAILURE_STAGE_NONE);
+    assert(failure.error == 0);
+    assert(failure.http_status == 0U);
+
+    assert(strcmp(ota_policy_failure_stage_name(OTA_FAILURE_STAGE_TASK),
+                  "task") == 0);
+    assert(strcmp(ota_policy_failure_stage_name(OTA_FAILURE_STAGE_CHECK),
+                  "check") == 0);
+    assert(strcmp(ota_policy_failure_stage_name(OTA_FAILURE_STAGE_BEGIN),
+                  "begin") == 0);
+    assert(strcmp(ota_policy_failure_stage_name(OTA_FAILURE_STAGE_DOWNLOAD),
+                  "download") == 0);
+    assert(strcmp(ota_policy_failure_stage_name(OTA_FAILURE_STAGE_VERIFY),
+                  "verify") == 0);
 }
 
 int main(void)
@@ -148,6 +187,7 @@ int main(void)
     test_day_scale_delays_convert_without_32_bit_overflow();
     test_download_deadlines_bound_stalls_and_slow_trickles();
     test_failure_reason_is_actionable_and_truncated_at_wire_bound();
+    test_failure_pack_is_lossless_at_field_boundaries();
     puts("test_ota_policy: OK");
     return 0;
 }

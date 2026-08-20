@@ -16,6 +16,21 @@ typedef struct {
     char path[OTA_POLICY_MAX_URL_LENGTH + 1U];
 } ota_policy_metadata_t;
 
+typedef enum {
+    OTA_FAILURE_STAGE_NONE = 0,
+    OTA_FAILURE_STAGE_TASK = 1,
+    OTA_FAILURE_STAGE_CHECK = 2,
+    OTA_FAILURE_STAGE_BEGIN = 3,
+    OTA_FAILURE_STAGE_DOWNLOAD = 4,
+    OTA_FAILURE_STAGE_VERIFY = 5,
+} ota_failure_stage_t;
+
+typedef struct {
+    ota_failure_stage_t stage;
+    int32_t error;
+    uint16_t http_status;
+} ota_failure_t;
+
 /** Build the authenticated update-check URL from a stored WSS link URL. */
 bool ota_policy_build_check_url(
     const char *server_url,
@@ -59,8 +74,31 @@ uint32_t ota_policy_delay_ticks(uint32_t milliseconds,
 bool ota_policy_download_timed_out(uint64_t total_elapsed_us,
                                    uint64_t no_progress_elapsed_us);
 
+/**
+ * Pack a complete OTA failure into one 64-bit value.
+ *
+ * Bits 0..2 are the stage, 3..34 are the exact two's-complement esp_err_t
+ * bits, and 35..50 are the HTTP status (zero when absent). Bits 51..63 are
+ * reserved as zero.
+ */
+uint64_t ota_policy_pack_failure(ota_failure_stage_t stage,
+                                 int32_t error,
+                                 uint16_t http_status);
+
+/** Recover every packed field without narrowing or sign loss. */
+ota_failure_t ota_policy_unpack_failure(uint64_t packed);
+
+/** Return the stable wire spelling for a failure stage. */
+const char *ota_policy_failure_stage_name(ota_failure_stage_t stage);
+
 /** Format a human-readable OTA failure and truncate it to the wire bound. */
 void ota_policy_format_failure(char *out,
                                size_t out_capacity,
                                const char *stage,
                                const char *detail);
+
+/** Format an HTTP failure directly into the caller's bounded buffer. */
+void ota_policy_format_http_failure(char *out,
+                                    size_t out_capacity,
+                                    const char *stage,
+                                    uint16_t http_status);

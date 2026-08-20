@@ -2923,3 +2923,41 @@ is itself the point — the margin is not a number anyone currently knows.
 The deeper question the owner may want to answer first: *why* is the internal-RAM
 situation this brittle, and can headroom be bought back (LVGL buffers, WiFi/TLS
 tuning) so that adding a variable stops being a risk?
+
+## V2 gate item 3 — a three-hour outage survived in place, 2026-08-20 (unplanned)
+
+A mains power cut took the homelab down while the board stayed on USB power and its own
+battery. This produced a far longer link-loss observation than any test in the plan, and
+it passes.
+
+| event | time (UTC) |
+| --- | --- |
+| last healthy network sample | 05:39:59 |
+| server host lost power | some point after that |
+| server process started again | 08:50:41 |
+| tunnel reachable again (Cloudflare 401, not 530) | 08:52:45 |
+| **device link established** | **08:52:46** |
+
+Device state throughout, read over the cable while the link was down: `wifi connected`
+(rssi −43, ip 192.168.8.168), **`link standalone`**, `ota idle`, every error counter 0.
+
+**No reboot across ~3¼ hours without an owner**, proven by uptime continuity on the same
+build: `up=203612` at 05:39:59 and `up=11992401` afterwards — a delta of 11,788,789 ms
+(3 h 16 m) against the same elapsed wall clock. The radio stayed associated the whole
+time; only the owner was gone, which is exactly the designed failure direction.
+
+### Two things worth keeping
+
+1. **The device reconnected one second after the path became reachable** — not after the
+   server started. `deskmate-server` had been listening since 08:50:41, but Cloudflare
+   answered 530 until 08:52:45, and the link came up at 08:52:46. For a networked-tier
+   device, "the server is up" means **the tunnel is connected**, not that the process is
+   running; the board dials the public URL, never the LAN address. A power-cut recovery
+   checklist should verify the tunnel, not just the unit.
+2. `reconnects` read **0** afterwards — again the freshly started *server* process's
+   counter, not the device's. This is the second time that has looked like a
+   contradiction; it is not.
+
+This supersedes nothing already recorded, but it is much stronger evidence than the
+engineered 102-second Caddy outage: three hours versus one hundred seconds, and it cost
+nothing to obtain.

@@ -963,7 +963,6 @@ esp_err_t protocol_task_start(void)
     interrupt_state_init(&s_context->interrupts);
     refresh_ota_snapshots(s_context);
     device_event_queue_init(&s_context->events);
-    ui_runtime_set_event_queue(&s_context->events);
     BaseType_t created = xTaskCreatePinnedToCore(
         protocol_task, "protocol", PROTOCOL_TASK_STACK_SIZE, s_context,
         PROTOCOL_TASK_PRIORITY, &s_task, PROTOCOL_TASK_CORE);
@@ -973,6 +972,15 @@ esp_err_t protocol_task_start(void)
         ESP_LOGE(TAG, "create protocol task failed");
         return ESP_ERR_NO_MEM;
     }
+    /* Published only after the context is certain to outlive it. carousel.c
+     * keeps this pointer in a static and dereferences it from the LVGL touch
+     * path, and main.c deliberately continues standalone -- display and touch
+     * alive -- when this function fails. Handing the queue over before the
+     * task exists would leave that static aimed at the PSRAM block freed
+     * above, so the next tap would write into freed memory. Ordering it here
+     * makes that unreachable by construction rather than by remembering to
+     * clear the pointer on each new failure path. */
+    ui_runtime_set_event_queue(&s_context->events);
     return ESP_OK;
 }
 

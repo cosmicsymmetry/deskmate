@@ -2567,7 +2567,7 @@ was not observed.
 - Consumes: everything.
 - Produces: the durable record.
 
-- [ ] **Step 1: Run the full software set before flashing**
+- [x] **Step 1: Run the full software set before flashing**
 
 ```sh
 make -C firmware/host_tests clean test
@@ -2585,6 +2585,20 @@ cargo test --workspace
 
 Do not flash on a red suite.
 
+> **PASSES 2026-08-21, whole set green.** Firmware host tests all OK; `idf.py build`
+> clean, image **1,549,648 bytes** (`0x17A550`), 63% of the app partition free. From
+> `companion/`: `cargo fmt --all --check` clean, `cargo clippy --workspace --all-targets
+> -- -D warnings` clean, `cargo test --workspace` all passing. Frontend `tsc --noEmit`,
+> `biome lint` and `bun test` (95 tests) clean.
+>
+> **Superseded the same day: firmware is no longer the image gate items 1 and 7 ran on.**
+> Two review fixes landed in `firmware/` after this suite passed — the event-queue
+> use-after-free in `protocol_task.c` and the OTA snapshot livelock in `ota.c`. The suite
+> was re-run green against them and static DRAM is unmoved (`ota.c` still 17 bytes,
+> `protocol_task.c` 16), but per this branch's own history a green suite is not evidence
+> that OTA downloads still work. **Re-verify the download on the board**, and treat the
+> 2026-08-20 gate observations as made on a previous image.
+
 - [ ] **Step 2: Capture the new heap and image baseline**
 
 Before the soak, record the image size from the build summary and the free-heap figure
@@ -2592,10 +2606,21 @@ from `status --json` on a freshly booted networked device. **Capture the baselin
 rather than deriving it from the soak**, or a regression can hide inside the
 re-baselining.
 
-- [ ] **Step 3: Gate item 1 — the headline demo**
+> **The 2026-08-19 baseline is STALE and must be recaptured.** It was taken at image
+> 1,548,256 bytes; `5699f1d` landed afterwards and the current image is **1,549,648**,
+> 1,392 bytes larger. Given that this branch already lost an OTA download to 105 bytes of
+> static DRAM, a heap figure captured against a different binary is not a baseline for
+> this one. Recapture both numbers on a fresh networked boot of the flashed image before
+> the Step 8 soak.
+
+- [x] **Step 3: Gate item 1 — the headline demo**
 
 Provision over USB, unplug the cable, quit the Mac app, and confirm cards keep updating
 from the server. Capture the panel with the webcam harness.
+
+> **PASSES 2026-08-20.** Recorded in `docs/hardware/board-notes.md` under "V2 gate item 1
+> — the headline demo PASSES, 2026-08-20", qualified by the battery note in "the battery
+> is short-lived, which qualifies 'unplug is link loss'".
 
 - [ ] **Step 4: Gate item 2 — tier switch both directions**
 
@@ -2683,12 +2708,15 @@ stays bounded. Record the actual figures, not a verdict.
 > figure are different quantities and the checklist's wording invites comparing them as
 > if they were not.
 
-- [ ] **Step 9: Gate item 7 — alert replay across a network reconnect**
+- [x] **Step 9: Gate item 7 — alert replay across a network reconnect**
 
 Schedule a bounded-hold alert, drop the link before it fires, and confirm it is delivered
 on reconnect. This path has produced real defects twice; the existing
 `companion/crates/app-core/examples/alert_replay_check.rs` is the closest precedent for
 how to drive it.
+
+> **PASSES 2026-08-20.** Recorded in `docs/hardware/board-notes.md` under "V2 gate item 7
+> — alert replay across a reconnect PASSES, 2026-08-20".
 
 - [ ] **Step 10: Record everything in board-notes**
 

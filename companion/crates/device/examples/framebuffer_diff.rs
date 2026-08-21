@@ -101,6 +101,17 @@ fn exclusion_reason(name: &str) -> Option<&'static str> {
              exceeding row-list's own registry maximum of 96 for that \
              field -- the device rejects this push",
         )
+    } else if name.starts_with("progress-ring--running-mid-countdown--") {
+        Some(
+            "a running ring keeps counting down from lv_tick_get() after its \
+             fields are pushed, so the device frame moves while the simulator's \
+             fixed fake tick freezes it -- the MM:SS label flips a second as \
+             soon as push-to-capture latency crosses 1000ms, making the \
+             comparison a race rather than a check. No running value avoids \
+             this. The case is kept for the deterministic simulator goldens, \
+             which do cover the running arc hue; paused-mid-countdown covers \
+             the same geometry here, and running-at-zero the running palette",
+        )
     } else {
         None
     }

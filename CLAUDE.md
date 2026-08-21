@@ -284,17 +284,27 @@ of letting code and documentation diverge.
   byte-identical via `framebuffer_diff` at both orientations, fallback and both transition
   directions confirmed by webcam at 90°. Two things are **not** verified: the fallback at
   270°, and the fallback's bottom margin (cropped in the available camera framing).
-- **`progress-ring--running-mid-countdown` cannot pass the framebuffer diff
-  deterministically.** `progress_ring.c`'s `current_remaining_ms` keeps counting a
-  *running* ring down from `lv_tick_get()` after its fields are pushed, while
-  `Simulator::render` draws the case's pinned `remaining_seconds` frozen, so whether the
-  capture lands before or after the device's next one-second tick decides the comparison.
-  Expect `total=54 identical=51 differing=1 excluded=2` with that case differing (it
-  alternated orientation between two runs on 2026-08-17), and treat any *other* differing
-  case as a real firmware/simulator disagreement. This also means V1 acceptance's recorded
-  "0 differing" was luck, not proof. Unfixed; the options are to pin `running: false` for
-  the compared case or to exclude it in `exclusion_reason()` as the
-  `row-list--truncation-boundary` pair already is.
+- **The framebuffer diff expects `total=58 identical=54 differing=0 excluded=4`, and any
+  differing case is now a real firmware/simulator disagreement** (fixed 2026-08-21).
+  `progress-ring--running-mid-countdown` could not pass deterministically:
+  `progress_ring.c`'s `current_remaining_ms` keeps counting a *running* ring down from
+  `lv_tick_get()` after its fields are pushed, while the simulator's fake tick is fixed
+  (an 840 ms anchor offset, `crates/lvgl-sim/csrc/sim_shim.c`), so the label's
+  `(remaining_ms + 999) / 1000` ceiling flips a second the moment push-to-capture latency
+  crosses 1000 ms. **No running value avoids this** — the label flips every second by
+  construction, whatever the duration — so "pin a different value" is not among the
+  options. Note this also means V1 acceptance's recorded "0 differing" was luck, not
+  proof, and that pre-2026-08-21 runs reported `total=54 … differing=1`.
+  The flakiness is only in the *device-vs-simulator* comparison; the simulator's own
+  goldens are deterministic. So the case is now **golden-only**: it stays in
+  `cases::golden_cases()` (it is the only pixel coverage of the running arc-indicator hue,
+  since a zero-length arc draws no indicator) and `exclusion_reason()` in
+  `framebuffer_diff.rs` excludes it from hardware, as the `row-list--truncation-boundary`
+  pair already was. Two new cases keep hardware coverage: `paused-mid-countdown` is the
+  same partial-arc geometry with the ring stopped, and `running-at-zero` is the only
+  running ring hardware can be compared on, covering the running status colour. Do not
+  "simplify" these back into one case, and do not flip `running-mid-countdown` to
+  `running: false` — that would delete the running-hue golden.
 - The webcam verification harness (`tools/hwcam/`, usage in
   `docs/hardware/webcam-harness.md`, spec
   `docs/superpowers/specs/2026-08-15-deskmate-webcam-harness-design.md`) was

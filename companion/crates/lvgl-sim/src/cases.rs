@@ -179,6 +179,24 @@ fn progress_ring_cases(cases: &mut Vec<(String, RenderRequest)>) {
     const NOW: i64 = 1_755_000_000;
     const DURATION_SECONDS: i64 = 1500;
 
+    // A running ring mid-countdown is the ONLY pixel coverage of the running
+    // arc-indicator hue: `running` drives the arc indicator and status text
+    // colours (`progress_ring.c`, `palette.hue` vs
+    // `DESKMATE_COLOR_TERTIARY`/`_PRIMARY`), and at a zero-length arc the
+    // indicator is not drawn at all. So this case has to stay -- but it can
+    // only be compared against a deterministic renderer.
+    //
+    // `current_remaining_ms` returns the pinned `remaining_ms` verbatim when the
+    // ring is stopped and derives it from `lv_tick_get()` when running. The
+    // simulator's fake tick is fixed (an 840ms anchor offset, see
+    // `csrc/sim_shim.c`), so this golden is stable; real hardware's
+    // push-to-capture latency is not, and the label's `(remaining_ms + 999) /
+    // 1000` ceiling flips a whole second the moment that latency crosses 1000ms.
+    // No running value avoids that: the label flips every second by
+    // construction, whatever the duration.
+    //
+    // It is therefore golden-only, and `framebuffer_diff.rs` excludes it from
+    // the physical comparison by name. See `exclusion_reason` there.
     case(
         cases,
         "progress-ring",
@@ -188,6 +206,44 @@ fn progress_ring_cases(cases: &mut Vec<(String, RenderRequest)>) {
             text("label", "Pomodoro"),
             integer("duration_seconds", DURATION_SECONDS),
             integer("remaining_seconds", 900),
+            boolean("running", true),
+        ],
+        NOW,
+        0,
+    );
+    // The hardware-comparable half of the case above: identical geometry at a
+    // partial arc (900/1500), which no other progress-ring case covers, with the
+    // ring stopped so both sides render the pinned value and the frame is stable.
+    case(
+        cases,
+        "progress-ring",
+        "paused-mid-countdown",
+        SimTemplate::ProgressRing,
+        &[
+            text("label", "Pomodoro"),
+            integer("duration_seconds", DURATION_SECONDS),
+            integer("remaining_seconds", 900),
+            boolean("running", false),
+        ],
+        NOW,
+        0,
+    );
+    // The only running ring that hardware can be compared on, and so the only
+    // on-device coverage of the running palette -- here the status text ("Done"
+    // in `palette.hue`), since a zero-length arc draws no indicator.
+    //
+    // It is deterministic because `current_remaining_ms` clamps to 0 as soon as
+    // `elapsed >= remaining_ms`, and with `remaining_ms` of 0 that holds for any
+    // elapsed at all. No other running value has that property.
+    case(
+        cases,
+        "progress-ring",
+        "running-at-zero",
+        SimTemplate::ProgressRing,
+        &[
+            text("label", "Pomodoro"),
+            integer("duration_seconds", DURATION_SECONDS),
+            integer("remaining_seconds", 0),
             boolean("running", true),
         ],
         NOW,

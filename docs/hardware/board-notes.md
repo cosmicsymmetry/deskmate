@@ -1792,9 +1792,28 @@ capture lands before or after the device's next one-second tick decides the comp
 Unrelated to this change — `progress_ring.c` was not touched, and the case pins
 `running: true`. It also means V1 acceptance's recorded `0 differing` was luck rather
 than proof, and that the expectation of `identical=52` in this plan was unattainable.
-Not fixed here (out of scope); options when someone does address it are to pin
-`running: false` for the compared case, or to exclude it in `exclusion_reason()` the way
-the `row-list--truncation-boundary` pair already is.
+Not fixed here (out of scope).
+
+> **FIXED 2026-08-21, and neither of the options guessed at above was the right one.**
+> Pinning `running: false` on the compared case would have deleted the only pixel
+> coverage of the running arc-indicator hue, and a plain exclusion would have lost the
+> partial-arc geometry with it — the other two progress-ring cases sit at the arc's
+> extremes (0 and full). A third option was available because the flakiness lives only in
+> the *device-vs-simulator* comparison: the simulator's own goldens are deterministic, so
+> the case is now **golden-only**, kept in `cases::golden_cases()` and excluded from
+> hardware by name in `exclusion_reason()`. Two deterministic cases replace its hardware
+> coverage: `paused-mid-countdown` (same 900/1500 partial arc, ring stopped, so both
+> sides render the pinned value) and `running-at-zero` (the only running ring hardware
+> can be compared on — `current_remaining_ms` clamps to 0 whenever
+> `elapsed >= remaining_ms`, which at 0 holds for any elapsed; it covers the running
+> status colour but not the arc hue, because a zero-length arc draws no indicator).
+>
+> Worth recording that **no running value could have worked**: the label's
+> `(remaining_ms + 999) / 1000` ceiling flips a second every second by construction,
+> whatever the duration, so "choose a steadier remaining_seconds" was never on the table.
+> The expectation from this date is `total=58 identical=54 differing=0 excluded=4`, and a
+> differing case is now a real disagreement rather than something to be recognised and
+> waved through.
 
 **PASSED (with a stated limit) — the standalone fallback screen at 90°.** This is the one
 surface the framebuffer diff cannot reach, because it has no golden case, so the webcam

@@ -3094,10 +3094,32 @@ forgot" instead of "the server remembered while it could not reach the device".
 
 ### Two things not resolved
 
-1. **The token jumped by 25, not 1.** Delivery is not in doubt — the counter moved — but
-   `busy_retry_and_reconnect_replay_reuse_identical_tokens` documents tokens as *reused*
-   across retries, so a jump of that size is unexplained. Possible token churn while
-   disconnected. Worth a look; it does not change the pass.
+1. **The token jumped by 25, not 1. ROOT-CAUSED AND FIXED 2026-08-21 — it was a host
+   defect, not token churn, and no interrupt was ever lost.** `update_device_status` in
+   `companion/crates/app-core/src/runtime.rs` advanced the arbiter's interrupt counter to
+   `max(latest_interrupt_token, latest_revision, config_revision)` on *every* status
+   response. Only the first of those counts interrupts: `latest_revision` is the
+   data-push counter (`link_state.c` stores `push->revision`) and `config_revision` is
+   the config counter, and both climb with ordinary traffic. So the next interrupt was
+   minted at *data revision + 1*. The device's 60 was its last accepted interrupt
+   (`interrupt_state.c` stores the host's token verbatim, and only on acceptance); its
+   data revision had reached 84 across the session's clock and weather pushes; the alert
+   was therefore minted 85. The gap was the distance between two unrelated counters.
+
+   The code's own comment described the revision term as a floor for "an older v1 image
+   that omits it", but it was applied unconditionally and forever. The fix gates it on
+   `latest_interrupt_token == 0` — a pre-M3 image (key 21 absent decodes to 0) or a
+   device that has accepted no interrupt yet, the only cases with no interrupt counter to
+   follow. Both branches are pinned by tests in `crates/app-core/tests/runtime.rs`:
+   `interrupt_tokens_do_not_follow_the_unrelated_revision_counters` reproduces this exact
+   observation in-process — it failed with `left: [85]`, the board's number — and
+   `an_absent_interrupt_counter_still_takes_the_revision_floor` keeps the legacy floor.
+
+   Two things this does **not** change: gate item 7 still passes (the counter moved, which
+   was always the evidence of delivery), and
+   `busy_retry_and_reconnect_replay_reuse_identical_tokens` was never contradicted — the
+   token was minted high once, not churned. Host-only Rust, so firmware statics are
+   untouched and the OTA download hazard does not apply.
 2. **No panel frame exists for this run.** The webcam harness produced solid black on
    every attempt, including with a 60-frame warmup, while the board was demonstrably
    alive (link online, uptime climbing, CLI answering over USB). The physical OBSBOT is

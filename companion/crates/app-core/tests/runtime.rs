@@ -2223,3 +2223,120 @@ fn card_data_carries_live_fields_and_excludes_library_only_cards() {
 
     runtime.shutdown().unwrap();
 }
+
+/// The interrupt token counter must follow the device's *interrupt* counter and
+/// nothing else. `latest_revision` and `config_revision` are the data-push and
+/// config counters; they climb with ordinary traffic and have no relationship to
+/// interrupts. Coupling them made a delivered interrupt arrive with a token 25
+/// higher than its predecessor during the 2026-08-20 hardware gate, which read as
+/// lost interrupts and cost a session's worth of doubt on a path that has already
+/// produced two real defects.
+#[test]
+fn interrupt_tokens_do_not_follow_the_unrelated_revision_counters() {
+    let control = MockDeviceControl::default();
+    let mut seeded = status(0);
+    // A session's worth of ordinary field pushes and config writes.
+    seeded.latest_revision = 84;
+    seeded.config_revision = 77;
+    control.set_status(seeded);
+    control.set_latest_interrupt_token(60);
+    let mut config = full_config();
+    for widget in &mut config.cards {
+        if let CardSettings::Pomodoro {
+            duration_seconds, ..
+        } = widget
+        {
+            *duration_seconds = 1;
+        }
+    }
+    let runtime = start_runtime(config, &control, Duration::ZERO);
+    wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
+        snapshot.device.connection == ConnectionState::Online
+    });
+    control.push_event(DeviceEvent {
+        sequence: 1,
+        kind: EventKind::Tap,
+        widget_id: "pomodoro".into(),
+        screen_id: "pomodoro".into(),
+        action: EventAction::StartPause,
+        interrupt_token: None,
+    });
+    wait_for(Duration::from_secs(2), || {
+        control
+            .operations()
+            .iter()
+            .any(|operation| matches!(operation, Operation::Interrupt(_)))
+    });
+    let tokens: Vec<u32> = control
+        .operations()
+        .iter()
+        .filter_map(|operation| match operation {
+            Operation::Interrupt(token) => Some(*token),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        tokens,
+        vec![61],
+        "the token must be one past the device's interrupt counter (60), not one past \
+         its data revision (84)"
+    );
+    runtime.shutdown().unwrap();
+}
+
+/// The other half of the same rule. `latest_interrupt_token` is additive in M3 and
+/// decodes to 0 when a pre-M3 image omits key 21, and 0 is also what a current image
+/// reports before it has accepted any interrupt. In both cases there is no interrupt
+/// counter to follow, so the revisions stay as the monotonic floor — starting above a
+/// counter the device has already issued is always accepted, starting below it is
+/// rejected as stale forever.
+#[test]
+fn an_absent_interrupt_counter_still_takes_the_revision_floor() {
+    let control = MockDeviceControl::default();
+    let mut seeded = status(0);
+    seeded.latest_revision = 84;
+    seeded.config_revision = 77;
+    control.set_status(seeded);
+    control.set_latest_interrupt_token(0);
+    let mut config = full_config();
+    for widget in &mut config.cards {
+        if let CardSettings::Pomodoro {
+            duration_seconds, ..
+        } = widget
+        {
+            *duration_seconds = 1;
+        }
+    }
+    let runtime = start_runtime(config, &control, Duration::ZERO);
+    wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
+        snapshot.device.connection == ConnectionState::Online
+    });
+    control.push_event(DeviceEvent {
+        sequence: 1,
+        kind: EventKind::Tap,
+        widget_id: "pomodoro".into(),
+        screen_id: "pomodoro".into(),
+        action: EventAction::StartPause,
+        interrupt_token: None,
+    });
+    wait_for(Duration::from_secs(2), || {
+        control
+            .operations()
+            .iter()
+            .any(|operation| matches!(operation, Operation::Interrupt(_)))
+    });
+    let tokens: Vec<u32> = control
+        .operations()
+        .iter()
+        .filter_map(|operation| match operation {
+            Operation::Interrupt(token) => Some(*token),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        tokens,
+        vec![85],
+        "with no interrupt counter to follow, the highest revision (84) is the floor"
+    );
+    runtime.shutdown().unwrap();
+}

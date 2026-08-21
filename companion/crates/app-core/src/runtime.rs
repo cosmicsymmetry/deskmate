@@ -2392,15 +2392,23 @@ fn update_device_status(
     device: &dyn RuntimeDevice,
 ) {
     let diagnostics = device.diagnostics();
-    // The dedicated field is additive in M3. Revisions provide a safe monotonic floor
-    // when talking to an older v1 image that omits it: interrupt tokens and revisions
-    // are all nonzero u32 counters, and starting higher is always accepted.
-    state.interrupts.advance_latest_token(
-        status
-            .latest_interrupt_token
-            .max(status.latest_revision)
-            .max(status.config_revision),
-    );
+    // The device's interrupt counter is the only thing that constrains the next token:
+    // firmware rejects `token <= latest_token` as stale, and that `latest_token` counts
+    // accepted interrupts alone. `latest_revision` and `config_revision` are the
+    // data-push and config counters, which climb with ordinary traffic.
+    //
+    // The dedicated field is additive in M3 and decodes to 0 when absent, so revisions
+    // stay as the floor for exactly that case — an older image, or one that has accepted
+    // no interrupt yet, where there is nothing better to start from. Applying them
+    // unconditionally instead coupled the token counter to unrelated traffic: on the
+    // 2026-08-20 hardware gate a delivered interrupt arrived as token 85 rather than 61,
+    // the gap being the device's data revision, which read as 24 lost interrupts.
+    let observed = if status.latest_interrupt_token == 0 {
+        status.latest_revision.max(status.config_revision)
+    } else {
+        status.latest_interrupt_token
+    };
+    state.interrupts.advance_latest_token(observed);
     state.device.connection = ConnectionState::Online;
     state.device.port_name = Some(port_name.into());
     state.device.firmware_version = Some(status.firmware_version.clone());

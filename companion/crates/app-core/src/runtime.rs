@@ -483,6 +483,7 @@ struct RuntimeDiagnosticCounters {
     provider_queue_full: AtomicU64,
     provider_results_discarded: AtomicU64,
     subscriber_snapshots_overwritten: AtomicU64,
+    interrupt_dismissals_ignored: AtomicU64,
 }
 
 impl RuntimeDiagnosticCounters {
@@ -496,6 +497,7 @@ impl RuntimeDiagnosticCounters {
             subscriber_snapshots_overwritten: self
                 .subscriber_snapshots_overwritten
                 .load(Ordering::Relaxed),
+            interrupt_dismissals_ignored: self.interrupt_dismissals_ignored.load(Ordering::Relaxed),
         }
     }
 }
@@ -1267,7 +1269,13 @@ fn run_runtime(
         if !state.connected && now >= state.next_connect {
             attempt_connect(&mut state, &mut scheduler, device.as_mut(), now, &options);
         }
-        drain_device_events(&mut state, &mut scheduler, device.as_mut(), now);
+        drain_device_events(
+            &mut state,
+            &mut scheduler,
+            device.as_mut(),
+            diagnostics,
+            now,
+        );
         run_scheduled_work(
             &mut state,
             &mut scheduler,
@@ -2017,6 +2025,7 @@ fn drain_device_events(
     state: &mut WorkerState,
     scheduler: &mut Scheduler,
     device: &mut dyn RuntimeDevice,
+    diagnostics: &RuntimeDiagnosticCounters,
     now: Instant,
 ) {
     while let Some(received) = device.try_recv_event() {
@@ -2064,15 +2073,25 @@ fn drain_device_events(
                 );
             }
             (EventKind::InterruptDismissed, EventAction::DismissInterrupt) => {
-                if let Some(token) = received.event.interrupt_token
-                    && state.interrupts.dismiss(token).is_ok()
-                {
+                let applied = received
+                    .event
+                    .interrupt_token
+                    .is_some_and(|token| state.interrupts.dismiss(token).is_ok());
+                if applied {
                     // A dismissal may promote a Pending interrupt to Active; the
                     // hold belongs to a specific token (see `arm_alert_hold`'s
                     // doc comment), so it must be re-armed from whichever
                     // interrupt is active now, not left pointing at the token
                     // that just left.
                     sync_alert_hold_to_active_interrupt(state, scheduler, now);
+                } else {
+                    // Declining is correct — there is nothing to dismiss — but it
+                    // must not be invisible. See the counter's doc comment: on
+                    // hardware, a tap the host knowingly declined and a tap whose
+                    // event never arrived look identical without this.
+                    diagnostics
+                        .interrupt_dismissals_ignored
+                        .fetch_add(1, Ordering::Relaxed);
                 }
             }
             _ => {}
@@ -2945,7 +2964,13 @@ mod tests {
             queued_event: Some(navigation_event("c")),
         };
 
-        drain_device_events(&mut state, &mut scheduler, &mut device, now);
+        drain_device_events(
+            &mut state,
+            &mut scheduler,
+            &mut device,
+            &RuntimeDiagnosticCounters::default(),
+            now,
+        );
 
         assert_eq!(
             state.active_rotation_index, 1,
@@ -3422,6 +3447,7 @@ mod tests {
             &mut StubDevice {
                 queued_event: Some(interrupt_dismissed_event("sticky", sticky_token)),
             },
+            &RuntimeDiagnosticCounters::default(),
             promotion_time,
         );
         assert_eq!(

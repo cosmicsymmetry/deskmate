@@ -247,6 +247,7 @@ export function mockSnapshot(config: AppConfig): AppSnapshot {
       provider_queue_full: 0,
       provider_results_discarded: 0,
       subscriber_snapshots_overwritten: 2,
+      interrupt_dismissals_ignored: 0,
     },
   };
 }

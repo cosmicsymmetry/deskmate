@@ -349,6 +349,7 @@ export interface RuntimeDiagnostics {
   provider_queue_full: number;
   provider_results_discarded: number;
   subscriber_snapshots_overwritten: number;
+  interrupt_dismissals_ignored: number;
 }
 
 export type PomodoroAction = "start" | "pause" | "toggle" | "reset";

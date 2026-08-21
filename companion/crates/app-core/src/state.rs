@@ -36,6 +36,18 @@ pub struct RuntimeDiagnostics {
     pub provider_queue_full: u64,
     pub provider_results_discarded: u64,
     pub subscriber_snapshots_overwritten: u64,
+    /// `InterruptDismissed` events the host received but could not apply,
+    /// because the arbiter no longer tracks the token they carry (or they
+    /// carry none at all).
+    ///
+    /// Not an error on its own: the common cause is benign, a bounded alert
+    /// hold expiring host-side and freeing the slot before the user got round
+    /// to tapping the overlay the device is still showing. But it was
+    /// previously invisible, and a hardware session spent time on a tap that
+    /// looked like it did nothing. A nonzero value here says the host saw the
+    /// tap and deliberately declined it, which is a different diagnosis from
+    /// the event never arriving at all.
+    pub interrupt_dismissals_ignored: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

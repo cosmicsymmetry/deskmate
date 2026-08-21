@@ -1709,6 +1709,25 @@ reconnect flush after a fresh boot) has not been performed.
    today because the firmware restores its own saved screen on a validated
    dismissal, but a debug log would make future sessions easier to read.
 
+   > **ADDRESSED 2026-08-21, as a counter rather than a log.** `app-core` has no
+   > logging facility at all, so a debug log would have meant adding a dependency
+   > to emit something a hardware session may not even capture. The runtime
+   > snapshot is what actually gets read on the board, so the signal went there:
+   > `RuntimeDiagnostics.interrupt_dismissals_ignored` counts every
+   > `InterruptDismissed` the host received and did not apply — unknown token, or
+   > no token at all. Declining is still correct; what changes is that it is now
+   > visible, so "the host saw my tap and declined it" and "the event never
+   > arrived" stop looking identical. Reachable in **both** tiers without extra
+   > work: it rides the existing `AppSnapshot`, so the networked tier gets it
+   > under `snapshot.diagnostics` in `GET /v1/devices/{id}`.
+   >
+   > Two tests pin it, because a counter that always increments is not a signal:
+   > one asserts an untracked token counts, and
+   > `pomodoro_events_complete_once_and_dismissed_interrupts_do_not_replay` now
+   > asserts a *valid* dismissal leaves it at zero. The field crosses the
+   > cross-language IPC contract, so `types.ts`, the generated
+   > `types.contract.ts` and the dev-harness fixture moved with it.
+
 Counters at session end: `valid=3261 malformed=0 crc=0 overflow=0`,
 `events dropped=1` (one event emitted while the link was down, dropped by
 design), `free_heap 8480619` — byte-identical to every prior record.

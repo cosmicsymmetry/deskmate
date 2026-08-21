@@ -236,7 +236,8 @@ export const ipcContractFixtures = {
       "provider_jobs_started": 3,
       "provider_queue_full": 4,
       "provider_results_discarded": 5,
-      "subscriber_snapshots_overwritten": 6
+      "subscriber_snapshots_overwritten": 6,
+      "interrupt_dismissals_ignored": 7
     },
     "has_saved_config": true
   },

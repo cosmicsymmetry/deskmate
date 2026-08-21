@@ -1101,6 +1101,16 @@ fn pomodoro_events_complete_once_and_dismissed_interrupts_do_not_replay() {
             .operations()
             .contains(&Operation::ReplayInterrupt(1))
     );
+    // The counter must stay at zero for a dismissal the host *did* apply, or it
+    // says nothing: one that always increments is not a signal.
+    assert_eq!(
+        runtime
+            .snapshot()
+            .unwrap()
+            .diagnostics
+            .interrupt_dismissals_ignored,
+        0
+    );
     runtime.shutdown().unwrap();
 }
 
@@ -2337,6 +2347,42 @@ fn an_absent_interrupt_counter_still_takes_the_revision_floor() {
         tokens,
         vec![85],
         "with no interrupt counter to follow, the highest revision (84) is the floor"
+    );
+    runtime.shutdown().unwrap();
+}
+
+/// A dismissal whose token the arbiter no longer tracks is deliberately not
+/// applied — but it must not be *invisible*. The common cause is benign (a
+/// bounded hold expired host-side and freed the slot before the user tapped the
+/// overlay the device was still showing), yet during the 2026-08-15 hardware
+/// session a tap that the host silently declined was indistinguishable from an
+/// event that never arrived, and the difference is the whole diagnosis.
+#[test]
+fn a_dismissal_for_an_untracked_token_is_counted_rather_than_silently_dropped() {
+    let control = MockDeviceControl::default();
+    let runtime = start_runtime(full_config(), &control, Duration::ZERO);
+    wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
+        snapshot.device.connection == ConnectionState::Online
+    });
+    // No interrupt was ever scheduled, so token 4242 is tracked by nobody.
+    control.push_event(DeviceEvent {
+        sequence: 1,
+        kind: EventKind::InterruptDismissed,
+        widget_id: "pomodoro".into(),
+        screen_id: "pomodoro".into(),
+        action: EventAction::DismissInterrupt,
+        interrupt_token: Some(4242),
+    });
+    wait_for_snapshot(&runtime, Duration::from_secs(2), |snapshot| {
+        snapshot.diagnostics.interrupt_dismissals_ignored == 1
+    });
+    assert_eq!(
+        runtime
+            .snapshot()
+            .unwrap()
+            .diagnostics
+            .interrupt_dismissals_ignored,
+        1
     );
     runtime.shutdown().unwrap();
 }

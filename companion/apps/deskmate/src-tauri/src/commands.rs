@@ -2403,6 +2403,7 @@ mod tests {
                     provider_queue_full: 4,
                     provider_results_discarded: 5,
                     subscriber_snapshots_overwritten: 6,
+                    interrupt_dismissals_ignored: 7,
                 },
             },
         };

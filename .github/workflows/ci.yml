@@ -17,7 +17,16 @@ jobs:
         with:
           name: firmware-managed-components
           path: firmware/managed_components
-      - uses: dtolnay/rust-toolchain@stable
+      # No floating `stable` here: the toolchain comes from
+      # companion/rust-toolchain.toml, so this job and a developer machine run
+      # the identical compiler and lint set. See that file for why.
+      - name: install pinned rust toolchain
+        working-directory: companion
+        run: |
+          rustup show active-toolchain || true
+          cargo --version
+          cargo clippy --version
+          cargo fmt --version
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: companion

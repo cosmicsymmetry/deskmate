@@ -1704,6 +1704,36 @@ reconnect flush after a fresh boot) has not been performed.
    ever reconciles — the "done" word flashes red and stays red until the next
    tap. Confirmed by the event stream: such taps arrive as `tap start-pause`,
    the host processes them, state does not change, nothing is pushed back.
+
+   > **The "nothing is pushed back" half is REFUTED in software, 2026-08-21. The
+   > observation stands; its explanation does not.** `control_pomodoro` does not
+   > gate on whether state changed — it inserts into `latest_fields`, marks the
+   > widget dirty and pushes unconditionally — and `Session::push_fields` has no
+   > unchanged-payload dedupe, so a real push goes out. `PomodoroUpdate.fields`
+   > always carries `running`, which on `Completed` is `false`. On the firmware
+   > side `progress_ring.c`'s patch calls `set_running_color(view, running)`
+   > unconditionally (no early return; the early return in `render_remaining`
+   > affects only the label text), and `carousel.c` states the intent outright:
+   > "Optimistic feedback is intentionally reconciled by the next full
+   > authoritative PushData snapshot". Pinned by
+   > `a_tap_on_a_completed_pomodoro_still_pushes_authoritative_state`.
+   >
+   > Two hypotheses were checked and dropped. The tapped surface was **not** the
+   > interrupt overlay: `carousel.c` returns early on an interrupt tap, emitting
+   > `DISMISS_INTERRUPT` without ever calling
+   > `template_view_apply_local_action`, so an overlay tap applies no optimistic
+   > feedback at all. And the device layer does not dedupe identical pushes.
+   >
+   > **What remains, for the board.** The leading candidate is that the push did
+   > not happen *on that occasion* rather than that it never happens:
+   > `control_pomodoro` only pushes inline when
+   > `state.connected && !preferences.paused`, so a paused config would leave the
+   > red standing until the next authoritative push. The cheap check is to tap a
+   > completed pomodoro and look for a `PushData` for that widget in the same
+   > second — if it is there and the red persists, the defect is in firmware's
+   > apply path and not in the host; if it is absent, read `preferences.paused`
+   > and the connection state at that moment. Do not "fix" this host-side
+   > without that evidence: the host is currently doing what both sides document.
 3. The host silently ignores an `InterruptDismissed` event whose token it no
    longer tracks (`runtime.rs`, the dismissal arm's `.is_ok()` gate) — benign
    today because the firmware restores its own saved screen on a validated

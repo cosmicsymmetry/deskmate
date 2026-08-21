@@ -2386,3 +2386,85 @@ fn a_dismissal_for_an_untracked_token_is_counted_rather_than_silently_dropped() 
     );
     runtime.shutdown().unwrap();
 }
+
+/// A tap on an already-Completed pomodoro is a deliberate host no-op
+/// (`engine::pomodoro::toggle` on `Completed` only refreshes), but the firmware
+/// applies optimistic local feedback on every START_PAUSE tap regardless of
+/// state -- `progress_ring_local_action` flips `progress_running` and repaints
+/// the arc and status text in the running hue. Only an authoritative push of
+/// `running: false` puts that back, because `progress_ring.c`'s patch path calls
+/// `set_running_color` unconditionally.
+///
+/// So the host must still push after a no-op tap. The 2026-08-15 hardware
+/// session recorded the red "done" sticking until the next tap and attributed it
+/// to the host pushing nothing back; this pins what the host actually does.
+#[test]
+fn a_tap_on_a_completed_pomodoro_still_pushes_authoritative_state() {
+    let control = MockDeviceControl::default();
+    let mut config = full_config();
+    for card in &mut config.cards {
+        if let CardSettings::Pomodoro {
+            duration_seconds,
+            alert,
+            ..
+        } = card
+        {
+            *duration_seconds = 1;
+            *alert = CardAlert::None;
+        }
+    }
+    let runtime = start_runtime(config, &control, Duration::ZERO);
+    wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
+        snapshot.device.connection == ConnectionState::Online
+    });
+    control.push_event(DeviceEvent {
+        sequence: 1,
+        kind: EventKind::Tap,
+        widget_id: "pomodoro".into(),
+        screen_id: "pomodoro".into(),
+        action: EventAction::StartPause,
+        interrupt_token: None,
+    });
+    wait_for_snapshot(&runtime, Duration::from_secs(3), |snapshot| {
+        snapshot
+            .pomodoros
+            .first()
+            .is_some_and(|pomodoro| pomodoro.state == PomodoroState::Completed)
+    });
+
+    let pushes_before = control
+        .operations()
+        .iter()
+        .filter(|operation| matches!(operation, Operation::Push(id) if id == "pomodoro"))
+        .count();
+
+    // The no-op tap.
+    control.push_event(DeviceEvent {
+        sequence: 2,
+        kind: EventKind::Tap,
+        widget_id: "pomodoro".into(),
+        screen_id: "pomodoro".into(),
+        action: EventAction::StartPause,
+        interrupt_token: None,
+    });
+    wait_for(Duration::from_secs(2), || {
+        control
+            .operations()
+            .iter()
+            .filter(|operation| matches!(operation, Operation::Push(id) if id == "pomodoro"))
+            .count()
+            > pushes_before
+    });
+
+    assert_eq!(
+        runtime
+            .snapshot()
+            .unwrap()
+            .pomodoros
+            .first()
+            .map(|pomodoro| pomodoro.state),
+        Some(PomodoroState::Completed),
+        "the tap must remain a no-op on host state"
+    );
+    runtime.shutdown().unwrap();
+}

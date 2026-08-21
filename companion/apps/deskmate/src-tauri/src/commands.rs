@@ -2356,7 +2356,7 @@ mod tests {
                     ota_state: None,
                     active_screen_id: Some("clock".into()),
                     counters: DeviceCounters {
-                        reconnects: 1,
+                        host_reconnects: 1,
                         valid_frames: 2,
                         malformed_frames: 3,
                         crc_errors: 4,

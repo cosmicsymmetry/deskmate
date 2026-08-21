@@ -2449,7 +2449,7 @@ fn update_device_status(
         .clone_from(&status.last_network_error);
     state.device.ota_state = Some(status.ota_state.into());
     state.device.counters = DeviceCounters {
-        reconnects: diagnostics.reconnects,
+        host_reconnects: diagnostics.reconnects,
         valid_frames: status.valid_frames,
         malformed_frames: status.malformed_frames,
         crc_errors: status.crc_errors,

@@ -264,7 +264,16 @@ impl From<protocol::OtaState> for DeviceOtaState {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceCounters {
-    pub reconnects: u64,
+    /// Reconnections performed by *this host process*, not by the device.
+    ///
+    /// Every other counter in this struct is reported by the device in its
+    /// `StatusResponse`; this one is the host's own tally, incremented when the
+    /// session re-establishes and replays. So it resets when the host restarts
+    /// while the device keeps running — reading 0 beside a device that has
+    /// plainly reconnected is correct, not a bug. It carries the `host_` prefix
+    /// for the same reason `host_dropped_events` does: to say whose number it is
+    /// in the JSON, where this comment is not visible.
+    pub host_reconnects: u64,
     pub valid_frames: u32,
     pub malformed_frames: u32,
     pub crc_errors: u32,

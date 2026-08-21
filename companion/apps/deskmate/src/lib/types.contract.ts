@@ -151,7 +151,7 @@ export const ipcContractFixtures = {
       "ota_state": null,
       "active_screen_id": "clock",
       "counters": {
-        "reconnects": 1,
+        "host_reconnects": 1,
         "valid_frames": 2,
         "malformed_frames": 3,
         "crc_errors": 4,

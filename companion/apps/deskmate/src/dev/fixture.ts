@@ -18,7 +18,7 @@ import type {
 } from "../lib/types";
 
 export const MOCK_COUNTERS: DeviceCounters = {
-  reconnects: 0,
+  host_reconnects: 0,
   valid_frames: 48213,
   malformed_frames: 0,
   crc_errors: 0,

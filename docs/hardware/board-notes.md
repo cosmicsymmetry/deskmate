@@ -3141,6 +3141,16 @@ uptime from a freshly booted board; it was a frozen sample from before the link 
 > `null` means never heard from, deliberately not `0`, which would read as "just now";
 > the subtraction saturates, because `SystemTime` is not monotonic and an NTP step
 > backwards would otherwise report an age of half a billion years.
+>
+> **The sibling trap in the same response is closed the same day, by renaming:
+> `counters.reconnects` is now `counters.host_reconnects`.** Every other counter in that
+> struct is reported by the device in its `StatusResponse`; that one is the host's own
+> tally, incremented when the session re-establishes and replays, so it resets when the
+> server process restarts while the device keeps running. Reading 0 beside a device that
+> has plainly reconnected is correct, and the 2026-08-19 note below already had to
+> explain exactly that in prose. The struct already carried `host_dropped_events`, so the
+> prefix is the convention rather than a new one. **Observations recorded before
+> 2026-08-21 name it `reconnects`; the number means the same thing.**
 
 ## V2 gate item 7 — alert replay across a reconnect PASSES, 2026-08-20
 

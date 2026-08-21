@@ -283,7 +283,7 @@ export type DeviceCapability =
   | "networking";
 
 export interface DeviceCounters {
-  reconnects: number;
+  host_reconnects: number;
   valid_frames: number;
   malformed_frames: number;
   crc_errors: number;

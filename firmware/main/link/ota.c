@@ -92,6 +92,24 @@ static uint_least32_t next_state_generation(uint_least32_t current)
            OTA_STATE_GENERATION_MASK;
 }
 
+/* The two retry paths below can be entered by a task that outranks the one
+ * holding the publication latch, on the same core. protocol_task runs at
+ * priority 5 pinned to core 1 and reaches them through transmit_status() and
+ * ota_check_now(); ota_task holds the latch at priority 4, also on core 1. A
+ * bare spin there is a livelock, not a stall: the latch holder can never be
+ * scheduled again on that core, so the device wedges until the watchdog.
+ * taskYIELD() does not fix it either -- it re-runs the scheduler, which picks
+ * the same highest-priority ready task -- so the retry has to leave the ready
+ * list outright for a tick. The contended window is two relaxed stores, so
+ * this is unreachable in practice and costs nothing when it is not taken. A
+ * mutex would also work and is deliberately not used: its handle would add a
+ * static to this file, and this branch has already lost OTA downloads once to
+ * a 105-byte shift in static DRAM. */
+static void snapshot_retry_backoff(void)
+{
+    vTaskDelay(1);
+}
+
 static void set_state(protocol_ota_state_t state)
 {
     uint_least32_t current = atomic_load_explicit(
@@ -117,13 +135,17 @@ static void set_state(protocol_ota_state_t state)
 
 protocol_ota_state_t ota_state(void)
 {
-    for (;;) {
-        uint_least32_t state = atomic_load_explicit(
-            &s_state, memory_order_acquire);
-        if ((state & OTA_STATE_SNAPSHOT_UPDATING) == 0U) {
-            return (protocol_ota_state_t)(state & OTA_STATE_VALUE_MASK);
-        }
-    }
+    /* Wait-free by construction. Both begin_snapshot_update() and set_state()
+     * preserve the state value bits, so those bits name a real state even
+     * while a publication is latched. Waiting for the latch would only trade
+     * the pre-publication state for the post-publication one -- each is a
+     * valid observation, and the caller already reads the state and the error
+     * snapshot through two separate calls, so waiting bought no consistency
+     * between them. It did put the highest-priority caller on this core into
+     * the spin described above, which is the whole hazard. */
+    uint_least32_t state = atomic_load_explicit(
+        &s_state, memory_order_acquire);
+    return (protocol_ota_state_t)(state & OTA_STATE_VALUE_MASK);
 }
 
 static uint_least32_t begin_snapshot_update(void)
@@ -132,6 +154,7 @@ static uint_least32_t begin_snapshot_update(void)
         &s_state, memory_order_relaxed);
     for (;;) {
         if ((current & OTA_STATE_SNAPSHOT_UPDATING) != 0U) {
+            snapshot_retry_backoff();
             current = atomic_load_explicit(&s_state, memory_order_relaxed);
             continue;
         }
@@ -173,6 +196,7 @@ static uint64_t load_last_error(void)
         uint_least32_t before = atomic_load_explicit(
             &s_state, memory_order_acquire);
         if ((before & OTA_STATE_SNAPSHOT_UPDATING) != 0U) {
+            snapshot_retry_backoff();
             continue;
         }
         uint32_t low = (uint32_t)atomic_load_explicit(

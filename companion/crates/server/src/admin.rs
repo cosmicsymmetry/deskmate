@@ -32,6 +32,11 @@ struct AdminAuthenticated;
 impl FromRequestParts<ServerState> for AdminAuthenticated {
     type Rejection = AdminError;
 
+    // axum's FromRequestParts declares `async fn`, so the signature is fixed by
+    // the trait even though this body never awaits. Rewriting it to return
+    // `std::future::ready` to satisfy the lint would obscure the extractor for
+    // no behavioural gain.
+    #[allow(clippy::unused_async_trait_impl)]
     async fn from_request_parts(
         parts: &mut Parts,
         state: &ServerState,

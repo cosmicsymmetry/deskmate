@@ -1,0 +1,21 @@
+# The Rust toolchain is pinned so CI and a developer machine resolve to the
+# identical compiler and lint set. This file is the single source of truth --
+# rustup honours it here and in CI, so there is no version to keep in sync.
+#
+# Why: on 2026-08-20 `main` went red with no code change of its own. CI used a
+# floating `stable`, which moved 1.97.1 -> 1.98.0 (released 2026-08-18), and
+# 1.98 added clippy::chunks_exact_to_as_chunks. With `-D warnings` a brand-new
+# lint became a build failure. Running the gates locally could not have caught
+# it: this repository's developer machine was still on 1.97.1, where that lint
+# does not exist. The firmware job already pins ESP-IDF to v5.5.5; this makes
+# the companion job equally reproducible.
+#
+# Bump deliberately, and run the full companion gate set from `companion/`
+# when you do:
+#     cargo fmt --all --check
+#     cargo clippy --workspace --all-targets --locked -- -D warnings
+#     cargo test --workspace --locked
+[toolchain]
+channel = "1.98.0"
+components = ["clippy", "rustfmt"]
+profile = "minimal"

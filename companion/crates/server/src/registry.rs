@@ -506,7 +506,7 @@ fn decode_digest(hex: &str) -> Result<[u8; 32], RegistryError> {
         return Err(invalid_store("token digest is not 64 lowercase hex bytes"));
     }
     let mut digest = [0u8; 32];
-    for (output, pair) in digest.iter_mut().zip(hex.as_bytes().chunks_exact(2)) {
+    for (output, pair) in digest.iter_mut().zip(hex.as_bytes().as_chunks::<2>().0) {
         let high = decode_hex_digit(pair[0])?;
         let low = decode_hex_digit(pair[1])?;
         *output = (high << 4) | low;

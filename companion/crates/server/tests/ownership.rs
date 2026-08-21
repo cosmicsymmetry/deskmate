@@ -30,6 +30,9 @@ async fn spawn_state(state: ServerState) -> (String, server::registry::DeviceIde
     )
 }
 
+// The Err type is tungstenite's, so its size is not ours to reduce, and boxing
+// it in a test helper would add indirection at every call site for nothing.
+#[allow(clippy::result_large_err)]
 async fn connect_device(
     host: &str,
     token: &str,

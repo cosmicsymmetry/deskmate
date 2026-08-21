@@ -3,8 +3,9 @@ import { useEffect, useState, type DragEvent, type FormEvent, type KeyboardEvent
 import {
   addEntry,
   addPlaylist,
+  cardLabel,
   cardMoveFromKey,
-  cardName,
+  cardTitle,
   cardsOutsidePlaylist,
   issuesForPath,
   moveEntry,
@@ -357,7 +358,12 @@ export function PlaylistPanel({ config, issues, onChange, onSelectCard }: Playli
             <ol className="playlist-entry-list" aria-label={`${selectedPlaylist.name} entries`}>
               {selectedPlaylist.entries.map((entry, index) => {
                 const card = config.cards.find((candidate) => candidate.id === entry.card_id);
-                const name = card ? cardName(card) : "Missing card";
+                const name = card ? cardLabel(card) : "Missing card";
+                const title = card ? cardTitle(card) : null;
+                // Two entries can share a template, so a control that acts on one of
+                // them has to say which: the owner's title is the only thing that
+                // distinguishes a second "ICS calendar" from the first.
+                const controlName = title ? `${name} — ${title}` : name;
                 const entryIssues = issuesForPath(
                   issues,
                   `playlists[${selectedIndex}].entries[${index}]`,
@@ -383,10 +389,14 @@ export function PlaylistPanel({ config, issues, onChange, onSelectCard }: Playli
                       onKeyDown={(event) => onKeyDown(event, index)}
                     >
                       <strong>{name}</strong>
-                      <small>{card ? "Select card" : "Reference needs attention"}</small>
+                      {card ? (
+                        title && <small>{title}</small>
+                      ) : (
+                        <small>Reference needs attention</small>
+                      )}
                     </button>
                     <label className="entry-dwell-field">
-                      <span className="sr-only">Dwell time for {name} in seconds</span>
+                      <span className="sr-only">Dwell time for {controlName} in seconds</span>
                       <input
                         type="number"
                         className="numeral"
@@ -415,7 +425,7 @@ export function PlaylistPanel({ config, issues, onChange, onSelectCard }: Playli
                     <span className="card-row__moves">
                       <button
                         type="button"
-                        aria-label={`Move ${name} up`}
+                        aria-label={`Move ${controlName} up`}
                         disabled={index === 0}
                         onClick={() => moveTo(index, index - 1)}
                       >
@@ -423,7 +433,7 @@ export function PlaylistPanel({ config, issues, onChange, onSelectCard }: Playli
                       </button>
                       <button
                         type="button"
-                        aria-label={`Move ${name} down`}
+                        aria-label={`Move ${controlName} down`}
                         disabled={index === selectedPlaylist.entries.length - 1}
                         onClick={() => moveTo(index, index + 1)}
                       >
@@ -456,7 +466,8 @@ export function PlaylistPanel({ config, issues, onChange, onSelectCard }: Playli
                 <option value="">Choose a card…</option>
                 {config.cards.map((card) => (
                   <option key={card.id} value={card.id} disabled={!outsideIds.has(card.id)}>
-                    {cardName(card)}
+                    {cardLabel(card)}
+                    {cardTitle(card) ? ` — ${cardTitle(card)}` : ""}
                     {!outsideIds.has(card.id) ? " — already added" : ""}
                   </option>
                 ))}

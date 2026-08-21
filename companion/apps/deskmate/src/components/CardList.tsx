@@ -2,7 +2,8 @@ import { useEffect, useState } from "react";
 
 import {
   cardKindName,
-  cardName,
+  cardLabel,
+  cardTitle,
   cardsContainerIssues,
   issuesForCard,
   libraryCards,
@@ -86,6 +87,13 @@ function tileValue(
       return rows.length > 0 ? String(rows.length) : "—";
     }
   }
+}
+
+/** Two cards can share a template, so a remove control names the owner's title too
+ *  when there is one — otherwise a screen reader hears "Remove Weather" twice. */
+function removeLabel(card: CardSettings): string {
+  const title = cardTitle(card);
+  return title ? `${cardLabel(card)} — ${title}` : cardLabel(card);
 }
 
 function FieldIssues({ issues }: { issues: ValidationIssue[] }) {
@@ -181,11 +189,14 @@ export function CardList({
                   aria-pressed={selectedCardId === card.id}
                   onClick={() => onSelect(card.id)}
                 >
-                  <span className="tile-label">{cardKindName(card.kind)}</span>
+                  {/* The template names the card here and everywhere else; the
+                      owner's own words sit under it, and are omitted rather than
+                      repeated when they were never typed. */}
+                  <span className="tile-label">{cardLabel(card)}</span>
                   <strong className="card-tile__value numeral">
                     {tileValue(card, data, pomodoro, now, config.preferences.timezone)}
                   </strong>
-                  <span className="card-tile__name">{cardName(card)}</span>
+                  {cardTitle(card) && <span className="card-tile__name">{cardTitle(card)}</span>}
                 </button>
                 <span className="card-tile__flags">
                   {stale && <span className="flag flag--stale">stale</span>}
@@ -197,8 +208,8 @@ export function CardList({
                   className="card-tile__remove"
                   aria-label={
                     cards.length === 1
-                      ? `Remove ${cardName(card)} (keep at least one card)`
-                      : `Remove ${cardName(card)}`
+                      ? `Remove ${removeLabel(card)} (keep at least one card)`
+                      : `Remove ${removeLabel(card)}`
                   }
                   title={cards.length === 1 ? "This is your only card." : "Remove"}
                   disabled={cards.length === 1}

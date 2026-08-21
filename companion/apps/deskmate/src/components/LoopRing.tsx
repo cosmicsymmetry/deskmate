@@ -32,6 +32,11 @@ const GAP_DEGREES = 2.4;
  * up to eight. Two arcs sharing a colour breaks the only mapping there is from an arc
  * back to its name in the legend.
  */
+/** Two entries can share a template, so a move control has to say which one. */
+function entryLabel(arc: { name: string; title: string | null }): string {
+  return arc.title ? `${arc.name} — ${arc.title}` : arc.name;
+}
+
 function rampStep(index: number, count: number): number {
   return count < 2 ? 0 : index / (count - 1);
 }
@@ -311,13 +316,16 @@ export function LoopRing({ config, selectedCardId, onSelect, onReorder }: LoopRi
                 onClick={() => onSelect(arc.cardId)}
                 onKeyDown={(event) => onKeyDown(event, index)}
               >
-                <span className="loop__entry-name">{arc.name}</span>
+                <span className="loop__entry-text">
+                  <span className="loop__entry-name">{arc.name}</span>
+                  {arc.title && <span className="loop__entry-title">{arc.title}</span>}
+                </span>
                 {isTimed && <span className="loop__entry-dwell numeral">{arc.dwellSeconds}s</span>}
               </button>
               <span className="loop__moves">
                 <button
                   type="button"
-                  aria-label={`Move ${arc.name} earlier`}
+                  aria-label={`Move ${entryLabel(arc)} earlier`}
                   disabled={index === 0}
                   onClick={() => moveTo(arc.cardId, index - 1)}
                 >
@@ -325,7 +333,7 @@ export function LoopRing({ config, selectedCardId, onSelect, onReorder }: LoopRi
                 </button>
                 <button
                   type="button"
-                  aria-label={`Move ${arc.name} later`}
+                  aria-label={`Move ${entryLabel(arc)} later`}
                   disabled={index === arcs.length - 1}
                   onClick={() => moveTo(arc.cardId, index + 1)}
                 >

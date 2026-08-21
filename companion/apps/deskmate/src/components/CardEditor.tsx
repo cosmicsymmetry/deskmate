@@ -1,5 +1,6 @@
 import {
-  cardKindName,
+  cardLabel,
+  cardTitle,
   issuesForField,
   numberValue,
   tapActionDescription,
@@ -142,8 +143,9 @@ export function CardEditor({
   return (
     <section className="panel editor-panel" aria-labelledby="editor-heading">
       <div className="panel-heading">
-        <div>
-          <h2 id="editor-heading">{cardKindName(card.kind)}</h2>
+        <div className="editor-title">
+          <h2 id="editor-heading">{cardLabel(card)}</h2>
+          {cardTitle(card) && <span className="editor-title__kind">{cardTitle(card)}</span>}
         </div>
         <button className="text-button text-button--danger" type="button" onClick={onRemove}>
           Remove
@@ -169,8 +171,6 @@ export function CardEditor({
       )}
 
       <div className="form-grid">
-        <p className="canvas-note">Clean 448 × 368 canvas · no status strip</p>
-
         {card.kind === "clock" && (
           <>
             <label className="field">

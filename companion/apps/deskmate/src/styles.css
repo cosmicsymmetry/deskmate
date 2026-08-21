@@ -212,6 +212,12 @@ h2 {
   letter-spacing: -0.018em;
 }
 
+h3 {
+  font-size: 0.95rem;
+  font-weight: 620;
+  letter-spacing: -0.012em;
+}
+
 .sr-only {
   position: absolute;
   overflow: hidden;
@@ -414,6 +420,26 @@ h2 {
 
 .sheet__head h2 {
   flex: 1;
+}
+
+.sheet__section {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* Sections inside the sheet are separated the same way the work column separates
+   its own: a hairline and space, never a nested card. */
+.sheet__section + .sheet__section {
+  padding-top: 16px;
+  border-top: 1px solid var(--hairline);
+}
+
+.sheet__section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
 }
 
 .sheet__close {
@@ -691,10 +717,28 @@ h2 {
   text-align: left;
 }
 
+/* The template names the row; the owner's words follow it in the same line, quiet,
+   which is what tells one "ICS calendar" from another. */
+.loop__entry-text {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  min-width: 0;
+}
+
 .loop__entry-name {
   overflow: hidden;
+  flex-shrink: 0;
   font-size: 0.8rem;
   font-weight: 540;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.loop__entry-title {
+  overflow: hidden;
+  color: var(--ink-3);
+  font-size: 0.72rem;
   white-space: nowrap;
   text-overflow: ellipsis;
 }
@@ -753,7 +797,7 @@ h2 {
   border-bottom: 1px solid var(--hairline);
 }
 
-/* The sheet's one section carries no border of its own: the dialog is the edge. */
+/* Panels re-homed into the sheet drop their own edges: the dialog is the edge. */
 .sheet .network-panel {
   padding: 0;
   border-bottom: 0;
@@ -769,6 +813,20 @@ h2 {
   align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
+}
+
+/* A card is titled by its name; its template is a quiet fact beside it. */
+.editor-title {
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+  min-width: 0;
+}
+
+.editor-title__kind {
+  color: var(--ink-3);
+  font-size: 0.72rem;
+  font-weight: 560;
 }
 
 .panel-heading--compact {
@@ -867,9 +925,11 @@ fieldset legend {
   color: var(--act);
 }
 
+/* The owner's own words for the card, under the template that names it. */
 .card-tile__name {
   overflow: hidden;
-  font-size: 0.75rem;
+  color: var(--ink-2);
+  font-size: 0.72rem;
   font-weight: 550;
   white-space: nowrap;
   text-overflow: ellipsis;
@@ -1060,8 +1120,7 @@ fieldset legend {
 }
 
 .field small,
-.behaviour-hint,
-.canvas-note {
+.behaviour-hint {
   color: var(--ink-3);
   font-size: 0.69rem;
   line-height: 1.45;
@@ -1082,16 +1141,6 @@ fieldset legend {
 
 .data-note > span {
   flex: 1;
-}
-
-.canvas-note {
-  margin-bottom: -4px;
-  color: var(--ink-3);
-  font-size: 0.66rem;
-  font-weight: 600;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
-  font-variant-numeric: tabular-nums;
 }
 
 .check-field {
@@ -1780,6 +1829,15 @@ fieldset legend {
   padding: 11px 18px;
   border-top: 1px solid var(--hairline);
   background: var(--tile);
+}
+/* The sheet's own save bar sits at the end of its scroll, not pinned to the window. */
+.save-bar--sheet {
+  position: sticky;
+  bottom: -20px;
+  margin: 4px -20px -20px;
+  border-top: 1px solid var(--hairline);
+  border-radius: 0;
+  background: var(--ground);
 }
 
 .save-bar__state {

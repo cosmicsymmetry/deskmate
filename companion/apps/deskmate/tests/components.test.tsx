@@ -543,14 +543,79 @@ describe("settings accessibility and states", () => {
     expect(weatherHtml).toContain("<span>Heading</span>");
   });
 
-  test("explains the clean canvas and never shows the wire id", () => {
+  test("a card is called the same thing everywhere, and that is its template", () => {
+    // Owner's rule: a card should say what it *is*. "Outside" and "Desk" teach a
+    // first-time reader nothing, so every surface that identifies a card leads with
+    // its template and carries the owner's own title as a quiet second line.
+    const config = cardListConfig(
+      [clockCard("internal-uuid-0001", "Desk")],
+      [{ card_id: "internal-uuid-0001", dwell_seconds: 45 }],
+    );
+    const library = renderToStaticMarkup(
+      <CardList
+        config={config}
+        issues={[]}
+        cardData={[]}
+        pomodoros={[]}
+        providers={[]}
+        selectedCardId="internal-uuid-0001"
+        onSelect={() => {}}
+        onAdd={() => {}}
+        onRemove={() => {}}
+      />,
+    );
+    const playlists = renderToStaticMarkup(
+      <PlaylistPanel config={config} issues={[]} onChange={() => {}} onSelectCard={() => {}} />,
+    );
+    const loop = renderToStaticMarkup(
+      <LoopRing config={config} selectedCardId={null} onSelect={() => {}} onReorder={() => {}} />,
+    );
+    const editor = renderCardEditor(clockCard("internal-uuid-0001", "Desk"));
+
+    expect(library).toContain('class="tile-label">Digital clock<');
+    expect(library).toContain('class="card-tile__name">Desk<');
+    expect(playlists).toContain("<strong>Digital clock</strong><small>Desk</small>");
+    expect(loop).toContain('class="loop__entry-name">Digital clock<');
+    expect(loop).toContain('class="loop__entry-title">Desk<');
+    expect(editor).toContain('id="editor-heading">Digital clock<');
+    // The generic "Select card" line the playlist row used to carry said nothing.
+    expect(playlists).not.toContain("Select card");
+  });
+
+  test("an untitled card is not labelled with its template twice", () => {
+    // The quiet line is the owner's words, so it is absent rather than a repeat of
+    // the label sitting directly above it.
+    const config = cardListConfig(
+      [clockCard("internal-uuid-0002", "")],
+      [{ card_id: "internal-uuid-0002", dwell_seconds: 20 }],
+    );
+    const library = renderToStaticMarkup(
+      <CardList
+        config={config}
+        issues={[]}
+        cardData={[]}
+        pomodoros={[]}
+        providers={[]}
+        selectedCardId={null}
+        onSelect={() => {}}
+        onAdd={() => {}}
+        onRemove={() => {}}
+      />,
+    );
+    expect(library).toContain("Digital clock");
+    expect(library).not.toContain("card-tile__name");
+  });
+
+  test("never shows the wire id", () => {
     // A distinctive id with no overlap with any visible label (unlike the
     // fixture's plain "clock", which is also a substring of the visible
     // "Digital clock" kind name and would make this assertion meaningless).
     const clock = clockCard("internal-uuid-0001", "Desk");
     const html = renderCardEditor(clock);
-    expect(html).toContain("Clean 448 × 368 canvas");
     expect(html).toContain("Show seconds");
+    // The canvas dimensions were a caption that never changed and never told the
+    // reader anything they could act on. It is gone; keep it gone.
+    expect(html).not.toContain("448");
     // IDs are wire identifiers, not something a person should see or edit.
     expect(html).not.toContain("Widget ID");
     expect(html).not.toContain("internal-uuid-0001");
@@ -676,8 +741,10 @@ describe("settings accessibility and states", () => {
     }
 
     await act(async () => root.render(<Harness />));
+    // Both entries are clocks, so the control names the owner's title as well as
+    // the template — which is the whole point of keeping the title around.
     const moveUp = container.querySelector<HTMLButtonElement>(
-      'button[aria-label="Move Up next up"]',
+      'button[aria-label="Move Digital clock — Up next up"]',
     );
     expect(moveUp).not.toBeNull();
     await act(async () => moveUp?.click());

@@ -117,8 +117,25 @@ of letting code and documentation diverge.
   card's editor (`lib/providers.ts`). `setPushingPaused` has no everyday control any
   more, so a config that arrives already paused gets a one-off "Resume sending" notice —
   keep that escape hatch. `DeviceHeader.tsx` and `ProviderStatus.tsx` are deleted.
-  Preferences (timezone, mounting, start-at-login) deliberately stayed in the work
-  column, not the sheet, because they are draft-bound and need the Save bar.
+  Preferences (timezone, mounting, start-at-login) moved into the sheet too, under a
+  "Display" section; because they are draft state, the sheet renders the **same**
+  `SaveBar.tsx` the window does (`variant="sheet"`), since a modal that can strand an
+  edit behind itself is a trap. The `Clean 448 x 368 canvas` caption is gone from the
+  card editor.
+- **A card is called the same thing on every surface, and that thing is its TEMPLATE.**
+  The library led each tile with its template ("Digital clock") while the ring legend,
+  the playlist row and the editor heading used the owner's title ("Desk"), so one card
+  appeared to have two names. The owner's rule, given explicitly after seeing the
+  opposite resolution and rejecting it: *a card should say what it is* — "Outside" and
+  "Desk" teach a first-time reader nothing where "Weather" and "Digital clock" do. So
+  `cardLabel()` (the template name) identifies a card in the library tile, ring legend,
+  playlist row, editor heading, picker and error notices, and `cardTitle()` (the owner's
+  words, null when never typed) is a quiet second line beside it — never absent, because
+  two cards can share a template and the title is then the only thing telling them
+  apart. For the same reason every control acting on one entry (move up/down, remove,
+  dwell) names `template — title`. Two regression tests pin this. `cardName()` still
+  exists for the old "title with a kind fallback" shape; prefer `cardLabel`/`cardTitle`
+  for anything user-visible.
 - **V2's exit gate is OPEN, but no longer blocked.** Task 11 Step 11 failed on hardware
   on 2026-08-19 and **passed on a re-run the same day** after two real defects were
   fixed; what remains open is the gate's own unobserved items, not a blocker. The first

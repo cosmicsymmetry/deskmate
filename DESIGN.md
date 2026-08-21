@@ -150,6 +150,12 @@ only text naming a value ("LINK", "ADD A CARD", "WORKDAY").
   anything you touch more than twice. Everything the design is about — cards, the loop,
   the panel — is on one surface, focused by luminance. This is what keeps the redesign
   from being slower than what it replaced.
+- **One card, one name — and the name says what the card is.** A card is identified by
+  its template on every surface: library tile, ring legend, playlist row, editor
+  heading, picker. The owner's own title rides beside it in quiet type, and is dropped
+  rather than repeated when none was typed. Two names for one object is the failure this
+  rule prevents; a label that teaches a first-time reader nothing ("Outside", "Desk") is
+  the failure it prevents second.
 - **A status bar is not information.** Four permanent complications reading Connected /
   Server / -54 dBm / Live answered questions asked twice in a device's life and charged
   every other session for it. State that is nominal 99% of the time is noise; state worth
@@ -234,5 +240,6 @@ opacity, because four hatched controls at once is noise instead of a signal.
   the product and it holds a *task*, not news: anything the sheet knows that is going
   wrong is also said in the open, on the button and in the work column.
 - Print a fact the user cannot act on, or that the thing beside it already shows.
+- Identify a card by the owner's title alone. The title disambiguates; it does not name.
 - Add a permanent status band. State earns its place by being abnormal.
 - Add a shadow anywhere except under the stage.

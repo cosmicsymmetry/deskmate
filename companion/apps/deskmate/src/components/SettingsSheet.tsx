@@ -5,7 +5,6 @@ import { Icon } from "./Icon";
 interface SettingsSheetProps {
   open: boolean;
   title: string;
-  badge?: ReactNode;
   onClose: () => void;
   children: ReactNode;
 }
@@ -16,7 +15,7 @@ interface SettingsSheetProps {
  * the focus trap, Escape, inertness of everything behind it, and the top layer —
  * so the sheet cannot be clipped by the scrolling columns it sits over.
  */
-export function SettingsSheet({ open, title, badge, onClose, children }: SettingsSheetProps) {
+export function SettingsSheet({ open, title, onClose, children }: SettingsSheetProps) {
   const ref = useRef<HTMLDialogElement | null>(null);
 
   useEffect(() => {
@@ -64,7 +63,6 @@ export function SettingsSheet({ open, title, badge, onClose, children }: Setting
       <div className="sheet__body">
         <div className="sheet__head">
           <h2 id="sheet-heading">{title}</h2>
-          {badge}
           <button
             className="sheet__close"
             type="button"

@@ -1,0 +1,113 @@
+import type { DeviceTier, DraftValidation, IpcError } from "../lib/types";
+import { Icon } from "./Icon";
+
+export type ValidationState =
+  | { kind: "idle"; result: DraftValidation }
+  | { kind: "checking"; result: DraftValidation }
+  | { kind: "ready"; result: DraftValidation }
+  | { kind: "error"; result: DraftValidation; error: IpcError };
+
+export type SaveState =
+  | { kind: "idle" }
+  | { kind: "saving" }
+  | { kind: "saved"; message: string }
+  | { kind: "error"; error: IpcError };
+
+const MAX_RENDERED_SAVE_ISSUES = 5;
+
+function SaveError({ error }: { error: IpcError }) {
+  const issues = error.category === "validation" ? error.issues : [];
+  const visibleIssues = issues.slice(0, MAX_RENDERED_SAVE_ISSUES);
+  const hiddenIssueCount = issues.length - visibleIssues.length;
+  return (
+    <div className="save-error" role="alert">
+      <span>{error.message}</span>
+      {visibleIssues.length > 0 && (
+        <ul className="save-error__issues">
+          {visibleIssues.map((issue) => (
+            <li key={`${issue.path}:${issue.code}:${issue.message}`}>{issue.message}</li>
+          ))}
+        </ul>
+      )}
+      {hiddenIssueCount > 0 && (
+        <span className="save-error__more">
+          and {hiddenIssueCount} more issue{hiddenIssueCount === 1 ? "" : "s"}
+        </span>
+      )}
+    </div>
+  );
+}
+
+interface SaveBarProps {
+  validation: ValidationState;
+  saveState: SaveState;
+  ownershipTier: DeviceTier | null;
+  dirty: boolean;
+  /** The sheet is modal, so the window's own save bar is unreachable while it is
+   *  open. Rather than let a preference edit strand itself behind a dialog, the
+   *  sheet renders this same bar — one implementation, so the two can never
+   *  disagree about whether the draft is saveable. */
+  variant?: "window" | "sheet";
+  onSave: () => void;
+}
+
+export function SaveBar({
+  validation,
+  saveState,
+  ownershipTier,
+  dirty,
+  variant = "window",
+  onSave,
+}: SaveBarProps) {
+  const networkedTier = ownershipTier === "networked";
+  const blocked =
+    !dirty ||
+    ownershipTier === null ||
+    validation.kind !== "ready" ||
+    !validation.result.valid ||
+    saveState.kind === "saving";
+
+  return (
+    <footer className={variant === "sheet" ? "save-bar save-bar--sheet" : "save-bar"}>
+      <div className="save-bar__state" aria-live="polite">
+        {validation.kind === "checking" && <span>Checking settings…</span>}
+        {validation.kind === "ready" && !validation.result.valid && (
+          <span className="save-error">
+            Fix {validation.result.issues.length} highlighted issue
+            {validation.result.issues.length === 1 ? "" : "s"} before saving.
+          </span>
+        )}
+        {validation.kind === "error" && (
+          <span className="save-error">Validation unavailable: {validation.error.message}</span>
+        )}
+        {saveState.kind === "saved" && (
+          <span className="save-success">
+            <Icon name="check" />
+            {saveState.message}
+          </span>
+        )}
+        {saveState.kind === "error" && <SaveError error={saveState.error} />}
+        {ownershipTier === null && saveState.kind === "idle" && (
+          <span className="save-error">Connect over USB to confirm ownership before saving.</span>
+        )}
+        {validation.kind === "ready" &&
+          validation.result.valid &&
+          saveState.kind === "idle" &&
+          ownershipTier !== null && (
+            <span>{dirty ? "Unsaved changes" : "Everything is up to date"}</span>
+          )}
+      </div>
+      <button className="button button--primary" type="button" disabled={blocked} onClick={onSave}>
+        {saveState.kind === "saving"
+          ? networkedTier
+            ? "Saving to server…"
+            : "Saving & applying…"
+          : ownershipTier === null
+            ? "Ownership unavailable"
+            : networkedTier
+              ? "Save to server"
+              : "Save & apply"}
+      </button>
+    </footer>
+  );
+}

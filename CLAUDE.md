@@ -87,6 +87,175 @@ of letting code and documentation diverge.
   Three UX findings from that session are recorded in board-notes (takeover face
   indistinguishable from the completed card; sticky unreconciled optimistic red flash
   on tapping a completed pomodoro; host silently ignores stale-token dismissals).
+- **The companion app's visual language is now `DESIGN.md` (The Modular Face), at the
+  repository root.** Delivered 2026-08-19 on explicit owner direction to replace the
+  previous world rather than refine it; the owner pinned the reference ("somewhat
+  resemble Apple Watch", a tool that conveys being organised and productive).
+  `docs/design/companion-visual-language.md` ("the lit panel") is **superseded** and
+  marked so in-file — its `--panel-black` quarantine rule is retired, because the
+  successor deliberately uses a true-black ground in both colour schemes. The card
+  library is complication tiles, the filmstrip is replaced by `LoopRing.tsx` (arc =
+  dwell, same `configDraft` helpers), and `Filmstrip.tsx` is deleted. Product truth
+  lives in `PRODUCT.md` at the root. Schema v4 and protocol v1 are untouched: this was
+  a presentation change only. Two rules worth not relearning: a label above a heading
+  and a card inside a card are both out, and `ui-rounded` (SF Pro Rounded) is the
+  numeral face because it is free under the Tauri CSP that blocks every font host.
+  A **dev-only browser harness** now exists: `VITE_DESKMATE_MOCK=1 bun run dev` aliases
+  the Tauri IPC bridge at `src/dev/`, so every device, provider, ownership and
+  validation state renders without hardware (`?scenario=…`, `?theme=…`). It is absent
+  from production builds.
+- **A subtraction pass followed on owner feedback (2026-08-21), and its rules are
+  durable.** The four-complication status header, the pause-syncing control, the data
+  sources panel, and the preview's label/resolution/caption were **removed, not moved
+  around** — the owner's objection was that the window read as knobs made for their own
+  sake. Do not reintroduce any of them. What replaced them: chrome is now a wordmark and
+  one Settings button (`TopBar.tsx`); device ownership, pairing and the device's link /
+  Wi-Fi / IP / update state live in a modal `<dialog>` (`SettingsSheet.tsx`), which is
+  the **only** disclosure in the product; protocol mismatch, runtime and command errors
+  are notices in the work column; the one useful thing the sources panel said survives as
+  a `stale` flag on the affected card tile plus an inline message and Refresh in that
+  card's editor (`lib/providers.ts`). `setPushingPaused` has no everyday control any
+  more, so a config that arrives already paused gets a one-off "Resume sending" notice —
+  keep that escape hatch. `DeviceHeader.tsx` and `ProviderStatus.tsx` are deleted.
+  Preferences (timezone, mounting, start-at-login) moved into the sheet too, under a
+  "Display" section; because they are draft state, the sheet renders the **same**
+  `SaveBar.tsx` the window does (`variant="sheet"`), since a modal that can strand an
+  edit behind itself is a trap. The `Clean 448 x 368 canvas` caption is gone from the
+  card editor.
+- **A card is called the same thing on every surface, and that thing is its TEMPLATE.**
+  The library led each tile with its template ("Digital clock") while the ring legend,
+  the playlist row and the editor heading used the owner's title ("Desk"), so one card
+  appeared to have two names. The owner's rule, given explicitly after seeing the
+  opposite resolution and rejecting it: *a card should say what it is* — "Outside" and
+  "Desk" teach a first-time reader nothing where "Weather" and "Digital clock" do. So
+  `cardLabel()` (the template name) identifies a card in the library tile, ring legend,
+  playlist row, editor heading, picker and error notices, and `cardTitle()` (the owner's
+  words, null when never typed) is a quiet second line beside it — never absent, because
+  two cards can share a template and the title is then the only thing telling them
+  apart. For the same reason every control acting on one entry (move up/down, remove,
+  dwell) names `template — title`. Two regression tests pin this. `cardName()` still
+  exists for the old "title with a kind fallback" shape; prefer `cardLabel`/`cardTitle`
+  for anything user-visible.
+- **V2's exit gate is OPEN, but no longer blocked.** Task 11 Step 11 failed on hardware
+  on 2026-08-19 and **passed on a re-run the same day** after two real defects were
+  fixed; what remains open is the gate's own unobserved items, not a blocker. The first
+  physical session found and fixed three firmware defects on paths that had been marked
+  complete on software grounds. Do not describe V2 as software-complete.
+  - `62e5aea` — `CONFIG_MBEDTLS_INTERNAL_MEM_ALLOC` confined TLS to internal DRAM, which
+    LVGL and WiFi had already spent, so `mbedtls_ssl_setup()` failed before any socket
+    work. **The networked link had never once worked on hardware.** Fixed by
+    `CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y`. Note `free_heap` reads ~8 MB throughout —
+    that is PSRAM, so it is not a TLS health signal on this board.
+  - `77f0e52` — passing the same partition as `.staging` and `.final` left
+    `handle->partition.final` unassigned in `esp_https_ota_begin()`; the OTA download
+    panicked LoadProhibited before writing a byte. Leave `.final` NULL.
+  - `0ad1a51` — the hardware AES accelerator's DMA buffers must come from internal RAM,
+    so **two concurrent TLS sessions cannot coexist**: a download alongside the live WSS
+    link dies on `esp-aes: Failed to allocate memory`. `install_update()` now suspends
+    the link for the duration and resumes it on every failure path.
+  - **Closed: the OTA deferral, which needed two fixes, not one.** `3f83911` — the boot
+    check waited on `wait_for_wifi()`, i.e. the radio, while the deferral gate reads
+    host-pushed state; it now also waits on `protocol_task_owner_state_ready()` (link
+    online **and** widget config present) for at most 60 s. **That wait is bounded and
+    fails open on purpose** — a device whose owner can never become ready must stay
+    updatable, or a bad config strands it. `12e5f4d` — the server built a
+    `RuntimeHandle` per WebSocket and shut it down on close, so a link drop discarded a
+    running pomodoro; the runtime is now per-device and long-lived, with sockets
+    attaching as replaceable transports pinned by a generation, and a reconnect replays
+    time, layout, fields, active screen and interrupts. Neither fix works alone: the
+    first gives the guard a link to wait for, the second a running timer to see.
+    Verified on the board 2026-08-19 — `ota` stayed `idle` for a full five-minute timer
+    with an update genuinely available, and installed within a second of the blocking
+    state clearing. **`connected` in `GET /v1/devices/{id}` now means "a socket is
+    live", not "a runtime exists"** — a retained runtime returns a `snapshot` while
+    disconnected, which is intended.
+  - Verified and passing: the server owns the device, providers run server-side, real
+    weather renders with the Mac quit, a tap travels up and state comes back down,
+    pulling USB changes nothing, the Mac app holds the cable without taking the display
+    (`reconnects: 0`), OTA installs and reboots, and **rollback works unattended** —
+    otadata marks the broken image `ABORTED` and the previous slot `VALID`.
+  - Still owed: Task 8's widening-backoff observation on a shipping build, and Task 9's
+    tap latency. (The rotation-stall anomaly was retracted; there is no defect.) The OTA
+    observability gap is **partly** closed: additive protocol-v1 `StatusResponse` key 30
+    carries bounded `last_ota_error`, `GET /v1/devices/{id}` exposes it under
+    `snapshot.device`, and it was verified on the board.
+  - **`3f2aa03` was a REGRESSION that broke OTA downloads; `5699f1d` fixes it and the
+    fix is verified on the board.** Do not flash anything between those two commits. Bisected on the board 2026-08-20 to **~105 bytes of static internal DRAM**
+    (`s_last_error` and its `portMUX_TYPE`) — not to any of its logic. Three builds from
+    the identical base decide it: the control downloads and installs, the same base plus
+    those statics fails, and it fails whether or not a critical section touches them.
+    Also ruled out: the custom HTTP event handler (refuted from IDF sources *and* by
+    removing it and still failing), the image, the server, the tunnel, the network.
+  - **This is layout, not capacity, and it is a standing hazard.** `idf.py size` reports
+    **122 KB of static DIRAM headroom** (219307/341760) and **IRAM 100% full**, so 105
+    bytes cannot be exhausting a budget; shifting `.bss` moves the runtime heap and
+    something on the TLS/AES path — which `0ad1a51` showed needs DMA-capable *internal*
+    RAM — stops finding what it needs. Same class as V1's boot crash-loop, which was
+    also a memory-layout shift. **Assume any addition to firmware statics can break OTA
+    downloads, unpredictably, with every test green**, and verify the download on the
+    board after touching firmware statics. `5699f1d` keeps the reason out of `.bss`: stage,
+    `esp_err_t` and HTTP status pack into two lock-free 32-bit atomic halves and the
+    string is formatted on read into the PSRAM-resident status buffer, taking `ota.c`'s
+    `.bss` from 9 to **17** bytes rather than ~114. Note a 64-bit atomic is **not** an
+    option here — GCC emits `__atomic_load_8`/`__atomic_store_8` and ESP-IDF backs those
+    with a global `portMUX`. Two lessons stand regardless:
+    green tests say nothing about whether OTA still works, and `last_ota_error` is what
+    made its own regression diagnosable, which argues for the field rather than against
+    it.
+  - Traps learned on the board, all still true: **a flashed build is reverted within a
+    minute** unless `DESKMATE_FIRMWARE_VERSION` is moved to match, because the catalog
+    pins the fleet and offers its version in either direction — a downgrade path exists
+    by design. **A tier round-trip costs a device identity**, since returning to
+    networked needs a plaintext token and only digests are stored. **An
+    until-dismissed alert postpones firmware updates indefinitely**, because it keeps
+    `interrupt_live` true. `firmware/version.txt` now pins the version explicitly; do
+    not rely on `git describe`, which serves a stale cached string from a dirty tree.
+  Plan `docs/superpowers/plans/2026-08-18-deskmate-v2-networked-device.md`, branch
+  `feat/v2-networked-device`. The device joins WiFi, dials out over WSS to a single-tenant
+  server, and that server owns it through the same `RuntimeDevice` seam the Mac app uses —
+  so ownership has one implementation, not two that must agree. Providers run server-side,
+  which is what makes the display work with the Mac quit. The wire stays **protocol v1**
+  and the config schema stays **v4**; V2 is additive only. New message types are 13
+  (`NETWORK_CONFIG`) and 14 (`FACTORY_RESET`); `CURRENT_CAPABILITIES` is now **203**
+  (core widgets | config rotation | extended templates | firmware update | networking).
+  It read 75 for most of V2 because bit 7 was defined in Task 1 and never switched on;
+  the whole-branch review caught it. `docs/protocol/v1.md` gates NetworkConfig and
+  FactoryReset on that bit, so a conforming host could not have provisioned the device.
+- **Two plan amendments were added during execution and are marked as such in the plan.**
+  Task 9b (persistent device identities) was added by explicit owner direction; Task 10a
+  (the app-core boundary) was added because Task 10's implementer correctly refused to
+  open a second `device::Session` from a Tauri command, which would have compiled, passed
+  its tests, and put two processes on one cable.
+- **The server is deployed and live at `deskmate.rodi.one`**, on the owner's homelab
+  (docker-vm), behind Cloudflare → cloudflared → Caddy, under the systemd unit in
+  `companion/crates/server/deploy/`. It is built for linux/x86_64 in a throwaway
+  `rust:1.97-bookworm` container over an rsync'd copy of `companion/` — no Rust toolchain
+  on the VM. Device URL is `wss://deskmate.rodi.one/v1/device/link`. Redeploy from a
+  `git archive HEAD` export, never the working tree.
+- **Device identities persist as SHA-256 digests, never as tokens.** Minting is the only
+  path that needs the plaintext; authentication only compares. Verified on the live
+  deployment: the plaintext does not appear in the store file, and a pre-restart token
+  still authenticates afterwards.
+- **Provisioning is a cable operation by design.** `WebSocketRuntimeDevice::provision` and
+  `factory_reset` return a typed unsupported-on-this-transport error. In networked tier
+  the cable is the *configurator* and the server is the *owner*; the firmware's tier gate
+  encodes exactly that. Do not add provisioning over the tunnel without specifying it
+  first.
+- **`CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y` changes boot behaviour, not just update
+  behaviour.** An image that does not call `esp_ota_mark_app_valid_cancel_rollback()`
+  within its validity window is rolled back on the next boot. The validity gate lives in
+  `ota_mark_running_image_valid()` and is deliberately free of every dependency that can
+  fail — no network, server, config, or NVS content stands between boot and marking valid.
+  Do not add one. Two consequences worth knowing: OTA does not update the bootloader, so
+  a rollback test must start from a full `idf.py flash`; and a corrected rebuild published
+  under the **same version string** as a failed one is refused forever, because the
+  refusal keys on the version string rather than image content.
+- **Tasks 8 through 12 are open on hardware.** Task 8's four link observations, Task 9's
+  headline demo, and Task 11's OTA/rollback/deferral steps are all unobserved, along with
+  the whole of Task 12's exit gate. Do not describe any of them as verified. Tasks 3, 4, 5
+  and 6 *were* verified on the board on 2026-08-18 and are recorded in
+  `docs/hardware/board-notes.md` — including the WiFi crash-loop root-cause — so do not
+  redo that work either.
 - V1 packaging/hardening is delivered
   (`docs/superpowers/plans/2026-08-15-deskmate-v1-packaging-hardening.md`): the
   repo has a private GitHub remote `cosmicsymmetry/deskmate` with a green `ci`

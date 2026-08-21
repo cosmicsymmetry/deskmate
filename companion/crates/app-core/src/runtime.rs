@@ -12,8 +12,8 @@ use device::{ConnectedSession, DeviceError, ReceivedEvent, SessionDiagnostics, c
 use engine::interrupts::InterruptArbiter;
 use engine::pomodoro::{Pomodoro, PomodoroState as EnginePomodoroState};
 use protocol::{
-    ActivateScreen, EventAction, EventKind, Field, FieldValue, ScreenConfig, StatusResponse,
-    TimeSync, TriggerInterrupt, WidgetConfig,
+    ActivateScreen, EventAction, EventKind, Field, FieldValue, NetworkConfig, ScreenConfig,
+    StatusResponse, TimeSync, TriggerInterrupt, WidgetConfig,
 };
 use providers::Provider;
 use providers::http::SystemHttpClient;
@@ -26,7 +26,7 @@ use crate::commands::{PomodoroAction, RuntimeCommand, RuntimeError};
 use crate::scheduler::Scheduler;
 use crate::{
     AlertHold, AppConfig, AppSnapshot, CalendarSource, CardAlert, CardDataSnapshot, CardError,
-    CardSettings, ConnectionState, DeviceCounters, DeviceSnapshot, JsonFieldMapping,
+    CardSettings, ConnectionState, DeviceCounters, DeviceSnapshot, DeviceTier, JsonFieldMapping,
     PersistenceState, PomodoroSnapshot, PomodoroState, ProviderSnapshot, ProviderState,
     RuntimeDiagnostics, RuntimeState, WeatherUnits,
 };
@@ -77,6 +77,8 @@ pub struct DeviceConnection {
 pub trait RuntimeDevice: Send + 'static {
     fn connect(&mut self) -> Result<DeviceConnection, DeviceError>;
     fn status(&mut self) -> Result<StatusResponse, DeviceError>;
+    fn provision(&mut self, config: &NetworkConfig) -> Result<(), DeviceError>;
+    fn factory_reset(&mut self) -> Result<(), DeviceError>;
     fn time_sync(&mut self, sync: TimeSync) -> Result<(), DeviceError>;
     fn apply_layout(
         &mut self,
@@ -129,6 +131,14 @@ impl RuntimeDevice for SerialRuntimeDevice {
 
     fn status(&mut self) -> Result<StatusResponse, DeviceError> {
         self.connected()?.session.status()
+    }
+
+    fn provision(&mut self, config: &NetworkConfig) -> Result<(), DeviceError> {
+        self.connected()?.session.provision(config).map(|_| ())
+    }
+
+    fn factory_reset(&mut self) -> Result<(), DeviceError> {
+        self.connected()?.session.factory_reset().map(|_| ())
     }
 
     fn time_sync(&mut self, sync: TimeSync) -> Result<(), DeviceError> {
@@ -730,6 +740,17 @@ impl RuntimeHandle {
         })
     }
 
+    /// Provision through the session already owned by the runtime worker. This command never
+    /// discovers or opens a serial port; disconnected runtimes fail before touching the device.
+    pub fn provision(&self, config: NetworkConfig) -> Result<(), RuntimeError> {
+        self.request(|reply| RuntimeCommand::Provision { config, reply })
+    }
+
+    /// Factory-reset through the runtime's existing connected session.
+    pub fn factory_reset(&self) -> Result<(), RuntimeError> {
+        self.request(|reply| RuntimeCommand::FactoryReset { reply })
+    }
+
     pub fn shutdown(&self) -> Result<(), RuntimeError> {
         let has_worker = self
             .worker
@@ -830,6 +851,10 @@ struct WorkerState {
     connected: bool,
     ever_connected: bool,
     needs_full_sync: bool,
+    /// Latched only after this runtime receives an explicit `WrongTier` refusal.
+    /// A Networked status alone cannot establish non-ownership because the server's
+    /// WebSocket runtime legitimately drives devices that report that tier.
+    ownership_refused: bool,
     generation: u64,
     next_connect: Instant,
     last_published: Option<AppSnapshot>,
@@ -856,6 +881,7 @@ impl WorkerState {
             connected: false,
             ever_connected: false,
             needs_full_sync: true,
+            ownership_refused: false,
             generation: 0,
             next_connect: now,
             last_published: None,
@@ -1213,6 +1239,7 @@ fn run_runtime(
                     &mut scheduler,
                     device.as_mut(),
                     diagnostics,
+                    options.reconnect_interval,
                 );
                 while !shutting_down {
                     let Ok(command) = command_receiver.try_recv() else {
@@ -1224,6 +1251,7 @@ fn run_runtime(
                         &mut scheduler,
                         device.as_mut(),
                         diagnostics,
+                        options.reconnect_interval,
                     );
                 }
             }
@@ -1262,6 +1290,7 @@ fn process_command(
     scheduler: &mut Scheduler,
     device: &mut dyn RuntimeDevice,
     diagnostics: &RuntimeDiagnosticCounters,
+    reconnect_interval: Duration,
 ) -> bool {
     diagnostics
         .commands_processed
@@ -1347,6 +1376,16 @@ fn process_command(
             } else {
                 Err(RuntimeError::UnknownScreen { screen_id })
             };
+            let _ = reply.send(result);
+        }
+        RuntimeCommand::Provision { config, reply } => {
+            let result =
+                run_runtime_device_command(state, reconnect_interval, || device.provision(&config));
+            let _ = reply.send(result);
+        }
+        RuntimeCommand::FactoryReset { reply } => {
+            let result =
+                run_runtime_device_command(state, reconnect_interval, || device.factory_reset());
             let _ = reply.send(result);
         }
         RuntimeCommand::Shutdown { reply } => {
@@ -2047,19 +2086,27 @@ fn synchronize_full(
     device: &mut dyn RuntimeDevice,
     now: Instant,
 ) -> Result<(), RuntimeError> {
+    if ownership_was_refused(state) {
+        return Ok(());
+    }
     state.needs_full_sync = true;
-    send_time_sync(state, device)?;
+    if !send_time_sync(state, device)? {
+        return Ok(());
+    }
     let compiled = state
         .config
         .compile(1)
         .expect("runtime config remains validated");
-    device
-        .apply_layout(
+    if !sync_device_result(
+        state,
+        device.apply_layout(
             compiled.layout.rotation,
             compiled.layout.widgets,
             compiled.layout.screens,
-        )
-        .map_err(|error| device_runtime_error(&error))?;
+        ),
+    )? {
+        return Ok(());
+    }
     state.dirty_widgets = state.latest_fields.keys().cloned().collect();
     push_dirty_widgets(state, device)?;
     state.active_screen_dirty = state.active_screen.is_some();
@@ -2075,6 +2122,9 @@ fn synchronize_pending(
     device: &mut dyn RuntimeDevice,
     now: Instant,
 ) -> Result<(), RuntimeError> {
+    if ownership_was_refused(state) {
+        return Ok(());
+    }
     if state.needs_full_sync {
         return synchronize_full(state, scheduler, device, now);
     }
@@ -2100,6 +2150,9 @@ fn push_dirty_widgets(
     state: &mut WorkerState,
     device: &mut dyn RuntimeDevice,
 ) -> Result<(), RuntimeError> {
+    if ownership_was_refused(state) {
+        return Ok(());
+    }
     let dirty: Vec<String> = state.dirty_widgets.iter().cloned().collect();
     for widget_id in dirty {
         let Some(fields) = state.latest_fields.get(&widget_id).cloned() else {
@@ -2110,6 +2163,10 @@ fn push_dirty_widgets(
             Ok(()) => {
                 state.dirty_widgets.remove(&widget_id);
                 state.push_rejections.remove(&widget_id);
+            }
+            Err(error) if is_wrong_tier(&error) => {
+                mark_ownership_refused(state);
+                return Ok(());
             }
             Err(DeviceError::Rejected(error)) if error.code == protocol::ErrorCode::Busy => {}
             Err(DeviceError::Rejected(error)) => {
@@ -2132,13 +2189,16 @@ fn send_screen(
     state: &mut WorkerState,
     device: &mut dyn RuntimeDevice,
 ) -> Result<(), RuntimeError> {
+    if ownership_was_refused(state) {
+        return Ok(());
+    }
     if !state.active_screen_dirty {
         return Ok(());
     }
-    if let Some(screen_id) = state.active_screen.clone() {
-        device
-            .activate_screen(screen_id)
-            .map_err(|error| device_runtime_error(&error))?;
+    if let Some(screen_id) = state.active_screen.clone()
+        && !sync_device_result(state, device.activate_screen(screen_id))?
+    {
+        return Ok(());
     }
     state.active_screen_dirty = false;
     Ok(())
@@ -2150,6 +2210,9 @@ fn flush_interrupts(
     device: &mut dyn RuntimeDevice,
     now: Instant,
 ) -> Result<(), RuntimeError> {
+    if ownership_was_refused(state) {
+        return Ok(());
+    }
     loop {
         let pending = state
             .interrupts
@@ -2181,6 +2244,10 @@ fn flush_interrupts(
                     now,
                 );
             }
+            Err(error) if is_wrong_tier(&error) => {
+                mark_ownership_refused(state);
+                return Ok(());
+            }
             Err(DeviceError::Rejected(error)) if error.code == protocol::ErrorCode::Busy => {
                 state
                     .interrupts
@@ -2195,16 +2262,61 @@ fn flush_interrupts(
     }
 }
 
-fn send_time_sync(state: &WorkerState, device: &mut dyn RuntimeDevice) -> Result<(), RuntimeError> {
+fn send_time_sync(
+    state: &mut WorkerState,
+    device: &mut dyn RuntimeDevice,
+) -> Result<bool, RuntimeError> {
+    if ownership_was_refused(state) {
+        return Ok(false);
+    }
     let now = Utc::now();
     let offset_minutes = crate::config::utc_offset_minutes(&state.config.preferences.timezone, now)
         .map_err(|message| RuntimeError::Device { message })?;
-    device
-        .time_sync(TimeSync {
+    sync_device_result(
+        state,
+        device.time_sync(TimeSync {
             unix_seconds: now.timestamp(),
             utc_offset_minutes: offset_minutes,
-        })
-        .map_err(|error| device_runtime_error(&error))
+        }),
+    )
+}
+
+fn ownership_was_refused(state: &WorkerState) -> bool {
+    state.ownership_refused
+}
+
+fn is_wrong_tier(error: &DeviceError) -> bool {
+    matches!(
+        error,
+        DeviceError::Rejected(response) if response.code == protocol::ErrorCode::WrongTier
+    )
+}
+
+/// A `WrongTier` refusal is a fresh ownership observation, not a failed sync. Keep all
+/// pending host state for a later return to Local and stop issuing USB mutations now.
+fn sync_device_result(
+    state: &mut WorkerState,
+    result: Result<(), DeviceError>,
+) -> Result<bool, RuntimeError> {
+    match result {
+        Ok(()) => Ok(true),
+        Err(error) if is_wrong_tier(&error) => {
+            mark_ownership_refused(state);
+            Ok(false)
+        }
+        Err(error) => Err(device_runtime_error(&error)),
+    }
+}
+
+fn mark_ownership_refused(state: &mut WorkerState) {
+    state.ownership_refused = true;
+    state.device.tier = Some(DeviceTier::Networked);
+    state.needs_full_sync = true;
+    state.runtime = if state.config.preferences.paused {
+        RuntimeState::Paused
+    } else {
+        RuntimeState::Running
+    };
 }
 
 fn handle_device_error(
@@ -2249,6 +2361,30 @@ fn device_runtime_error(error: &DeviceError) -> RuntimeError {
     }
 }
 
+fn runtime_command_device_error(
+    state: &mut WorkerState,
+    error: &DeviceError,
+    reconnect_interval: Duration,
+) -> RuntimeError {
+    if is_disconnect(error) {
+        mark_disconnected(state, error, Instant::now(), reconnect_interval);
+        RuntimeError::DeviceDisconnected
+    } else {
+        device_runtime_error(error)
+    }
+}
+
+fn run_runtime_device_command(
+    state: &mut WorkerState,
+    reconnect_interval: Duration,
+    operation: impl FnOnce() -> Result<(), DeviceError>,
+) -> Result<(), RuntimeError> {
+    if !state.connected {
+        return Err(RuntimeError::DeviceDisconnected);
+    }
+    operation().map_err(|error| runtime_command_device_error(state, &error, reconnect_interval))
+}
+
 fn update_device_status(
     state: &mut WorkerState,
     port_name: &str,
@@ -2276,6 +2412,15 @@ fn update_device_status(
     state.device.uptime_ms = Some(status.uptime_ms);
     state.device.free_heap = Some(status.free_heap);
     state.device.rotation = Some(status.rotation);
+    state.device.tier = Some(status.tier.into());
+    state.device.wifi_state = Some(status.wifi_state.into());
+    state.device.wifi_rssi = Some(status.wifi_rssi);
+    state.device.ip = Some(status.ip.clone());
+    state
+        .device
+        .last_network_error
+        .clone_from(&status.last_network_error);
+    state.device.ota_state = Some(status.ota_state.into());
     state.device.counters = DeviceCounters {
         reconnects: diagnostics.reconnects,
         valid_frames: status.valid_frames,
@@ -2291,6 +2436,10 @@ fn update_device_status(
         host_dropped_events: diagnostics.locally_dropped_events,
         detected_event_gaps: diagnostics.detected_event_gaps,
     };
+    if state.ownership_refused && matches!(state.device.tier, Some(DeviceTier::Local)) {
+        state.ownership_refused = false;
+        state.needs_full_sync = true;
+    }
 }
 
 fn pomodoro_state(state: EnginePomodoroState) -> PomodoroState {
@@ -2365,6 +2514,12 @@ fn empty_device(connection: ConnectionState) -> DeviceSnapshot {
         uptime_ms: None,
         free_heap: None,
         rotation: None,
+        tier: None,
+        wifi_state: None,
+        wifi_rssi: None,
+        ip: None,
+        last_network_error: None,
+        ota_state: None,
         active_screen_id: None,
         counters: DeviceCounters::default(),
     }
@@ -2439,6 +2594,41 @@ mod tests {
             }
         }
         assert_eq!(completed_ids, ["one", "two", "three"]);
+    }
+
+    #[test]
+    fn wrong_tier_sync_result_latches_non_ownership_without_an_error() {
+        let now = Instant::now();
+        let mut scheduler = Scheduler::new(
+            now,
+            Duration::from_hours(1),
+            Duration::from_hours(1),
+            Duration::from_hours(1),
+        );
+        let mut state = WorkerState::new(AppConfig::default(), now, &mut scheduler);
+        state.device.tier = Some(DeviceTier::Local);
+        state.needs_full_sync = false;
+        state.runtime = RuntimeState::Error {
+            message: "old sync failure".into(),
+        };
+
+        let applied = sync_device_result(
+            &mut state,
+            Err(DeviceError::Rejected(protocol::ErrorResponse {
+                code: protocol::ErrorCode::WrongTier,
+                diagnostic: "server owns this device".into(),
+            })),
+        )
+        .unwrap();
+
+        assert!(!applied);
+        assert_eq!(state.device.tier, Some(DeviceTier::Networked));
+        assert!(state.ownership_refused);
+        assert!(
+            state.needs_full_sync,
+            "local recovery still needs a full replay"
+        );
+        assert_eq!(state.runtime, RuntimeState::Running);
     }
 
     // -- Rotation (Task 5) ---------------------------------------------------
@@ -2559,6 +2749,12 @@ mod tests {
             unreachable!("stub device is never connected in these unit tests")
         }
         fn status(&mut self) -> Result<StatusResponse, DeviceError> {
+            unreachable!("stub device is never connected in these unit tests")
+        }
+        fn provision(&mut self, _config: &NetworkConfig) -> Result<(), DeviceError> {
+            unreachable!("stub device is never connected in these unit tests")
+        }
+        fn factory_reset(&mut self) -> Result<(), DeviceError> {
             unreachable!("stub device is never connected in these unit tests")
         }
         fn time_sync(&mut self, _sync: TimeSync) -> Result<(), DeviceError> {
@@ -2781,6 +2977,7 @@ mod tests {
             &mut scheduler,
             &mut device,
             &diagnostics,
+            Duration::from_secs(1),
         );
 
         assert!(!shutting_down);

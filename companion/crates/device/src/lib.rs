@@ -151,7 +151,9 @@ impl<T: Transport> DeviceClient<T> {
             | Message::PushData(_)
             | Message::ApplyConfig(_)
             | Message::ActivateScreen(_)
-            | Message::TriggerInterrupt(_) => Some(TYPE_ACK),
+            | Message::TriggerInterrupt(_)
+            | Message::NetworkConfig(_)
+            | Message::FactoryReset => Some(TYPE_ACK),
             Message::Heartbeat => Some(TYPE_HEARTBEAT_ACK),
             _ => None,
         }
@@ -409,6 +411,13 @@ mod tests {
             ui_queue_high_water: 0,
             config_revision: 0,
             latest_interrupt_token: 0,
+            tier: protocol::Tier::Local,
+            wifi_state: protocol::WifiState::Down,
+            wifi_rssi: 0,
+            ip: String::new(),
+            ota_state: protocol::OtaState::Idle,
+            last_network_error: None,
+            last_ota_error: None,
         }
     }
 

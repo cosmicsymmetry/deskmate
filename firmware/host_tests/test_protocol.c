@@ -62,6 +62,24 @@ static void test_crc(void)
     assert(protocol_crc32c(NULL, 0U) == 0U);
 }
 
+static void test_status_request_accepts_reserved_ota_trigger_id(void)
+{
+    protocol_message_t request = {.type = PROTOCOL_TYPE_STATUS_REQUEST};
+    uint8_t encoded[PROTOCOL_MAX_WIRE_FRAME];
+    size_t encoded_length = 0U;
+    assert(protocol_message_encode(UINT32_MAX, &request, encoded,
+                                   sizeof(encoded), &encoded_length) ==
+           PROTOCOL_MESSAGE_OK);
+
+    protocol_frame_t frame;
+    assert(protocol_frame_decode(encoded, encoded_length, &frame) ==
+           PROTOCOL_FRAME_OK);
+    assert(frame.request_id == UINT32_MAX);
+    protocol_message_t decoded;
+    assert(protocol_message_decode(&frame, &decoded) == PROTOCOL_MESSAGE_OK);
+    assert(decoded.type == PROTOCOL_TYPE_STATUS_REQUEST);
+}
+
 static void assert_valid_fixture(const char *name,
                                  uint8_t expected_type,
                                  uint32_t expected_request_id)
@@ -131,6 +149,14 @@ static void test_valid_fixtures(void)
                          18U);
     assert_valid_fixture("push_unknown_field.bin", PROTOCOL_TYPE_PUSH_DATA,
                          19U);
+    assert_valid_fixture("network_config.bin", PROTOCOL_TYPE_NETWORK_CONFIG,
+                         7U);
+    assert_valid_fixture("factory_reset.bin", PROTOCOL_TYPE_FACTORY_RESET,
+                         9U);
+    assert_valid_fixture("status_response_networked.bin",
+                         PROTOCOL_TYPE_STATUS_RESPONSE, 3U);
+    assert_valid_fixture("status_response_ota_failed.bin",
+                         PROTOCOL_TYPE_STATUS_RESPONSE, 32U);
 }
 
 static void test_status_capability_handshake_and_legacy_defaults(void)
@@ -146,22 +172,96 @@ static void test_status_capability_handshake_and_legacy_defaults(void)
     assert(protocol_message_decode(&frame, &message) == PROTOCOL_MESSAGE_OK);
     assert(message.value.status.max_protocol_version == PROTOCOL_MAX_VERSION);
     assert(message.value.status.capabilities == PROTOCOL_CURRENT_CAPABILITIES);
+    assert(PROTOCOL_CURRENT_CAPABILITIES == UINT64_C(203));
 
+    /* The additive networking fields (Task 1) keep the entry count at or
+     * above 24, so the map header stays in its two-byte extended form
+     * regardless of the exact count. Keys 22 (max_protocol_version) and 23
+     * (capabilities) are still encoded contiguously and in this order
+     * because keys are canonical; locate and drop them regardless of what
+     * now follows them on the wire. */
     assert(frame.payload_length >= 6U);
-    assert(frame.payload[0] == 0xb8U && frame.payload[1] == 0x18U);
-    assert(frame.payload[frame.payload_length - 4U] == 0x16U);
-    assert(frame.payload[frame.payload_length - 3U] == PROTOCOL_MAX_VERSION);
-    assert(frame.payload[frame.payload_length - 2U] == 0x17U);
-    assert(frame.payload[frame.payload_length - 1U] ==
-           PROTOCOL_CURRENT_CAPABILITIES);
-    memmove(frame.payload + 1U, frame.payload + 2U,
-            frame.payload_length - 6U);
-    frame.payload[0] = 0xb6U;
-    frame.payload_length -= 5U;
+    assert(frame.payload[0] == 0xb8U);
+    uint8_t original_count = frame.payload[1];
+    static const uint8_t pattern[] = {
+        0x16U, PROTOCOL_MAX_VERSION, 0x17U, 0x18U, 0xcbU};
+    size_t pattern_offset = 0U;
+    bool found = false;
+    for (size_t i = 2U; i + sizeof(pattern) <= frame.payload_length; ++i) {
+        if (memcmp(frame.payload + i, pattern, sizeof(pattern)) == 0) {
+            pattern_offset = i;
+            found = true;
+            break;
+        }
+    }
+    assert(found);
+    memmove(frame.payload + pattern_offset,
+            frame.payload + pattern_offset + sizeof(pattern),
+            frame.payload_length - pattern_offset - sizeof(pattern));
+    frame.payload_length -= (uint16_t)sizeof(pattern);
+    frame.payload[1] = (uint8_t)(original_count - 2U);
 
     assert(protocol_message_decode(&frame, &message) == PROTOCOL_MESSAGE_OK);
     assert(message.value.status.max_protocol_version == PROTOCOL_VERSION);
     assert(message.value.status.capabilities == PROTOCOL_LEGACY_CAPABILITIES);
+}
+
+static void test_status_last_ota_error_round_trip_and_legacy_default(void)
+{
+    size_t length = 0U;
+    uint8_t *fixture = read_fixture("status_response_networked.bin", &length);
+    protocol_frame_t frame;
+    assert(protocol_frame_decode(fixture, length, &frame) ==
+           PROTOCOL_FRAME_OK);
+    free(fixture);
+
+    protocol_message_t message;
+    assert(protocol_message_decode(&frame, &message) == PROTOCOL_MESSAGE_OK);
+    /* This fixture predates key 30, so its absence must remain decodable. */
+    assert(!message.value.status.has_last_ota_error);
+    assert(message.value.status.last_ota_error[0] == '\0');
+
+    uint8_t encoded[PROTOCOL_MAX_WIRE_FRAME];
+    size_t encoded_length = 0U;
+    assert(protocol_message_encode(frame.request_id, &message, encoded,
+                                   sizeof(encoded), &encoded_length) ==
+           PROTOCOL_MESSAGE_OK);
+    protocol_frame_t round_trip_frame;
+    assert(protocol_frame_decode(encoded, encoded_length,
+                                 &round_trip_frame) == PROTOCOL_FRAME_OK);
+    protocol_message_t decoded;
+    assert(protocol_message_decode(&round_trip_frame, &decoded) ==
+           PROTOCOL_MESSAGE_OK);
+    assert(!decoded.value.status.has_last_ota_error);
+
+    message.value.status.has_last_ota_error = true;
+    strcpy(message.value.status.last_ota_error,
+           "download: ESP_ERR_NO_MEM");
+    assert(protocol_message_encode(frame.request_id, &message, encoded,
+                                   sizeof(encoded), &encoded_length) ==
+           PROTOCOL_MESSAGE_OK);
+    assert(protocol_frame_decode(encoded, encoded_length,
+                                 &round_trip_frame) == PROTOCOL_FRAME_OK);
+    assert(protocol_message_decode(&round_trip_frame, &decoded) ==
+           PROTOCOL_MESSAGE_OK);
+    assert(decoded.value.status.has_last_ota_error);
+    assert(strcmp(decoded.value.status.last_ota_error,
+                  "download: ESP_ERR_NO_MEM") == 0);
+
+    memset(message.value.status.last_ota_error, 'x',
+           PROTOCOL_MAX_DIAGNOSTIC_LENGTH);
+    message.value.status
+        .last_ota_error[PROTOCOL_MAX_DIAGNOSTIC_LENGTH] = '\0';
+    assert(protocol_message_encode(frame.request_id, &message, encoded,
+                                   sizeof(encoded), &encoded_length) ==
+           PROTOCOL_MESSAGE_OK);
+    assert(protocol_frame_decode(encoded, encoded_length,
+                                 &round_trip_frame) == PROTOCOL_FRAME_OK);
+    assert(protocol_message_decode(&round_trip_frame, &decoded) ==
+           PROTOCOL_MESSAGE_OK);
+    assert(decoded.value.status.has_last_ota_error);
+    assert(strlen(decoded.value.status.last_ota_error) ==
+           PROTOCOL_MAX_DIAGNOSTIC_LENGTH);
 }
 
 static void assert_invalid_message_fixture(
@@ -380,6 +480,68 @@ static void test_invalid_time_has_specific_error(void)
            PROTOCOL_MESSAGE_ERR_INVALID_TIME);
 }
 
+static void test_network_config_rejects_oversized_ssid(void)
+{
+    // {1: "x"*33, 2: "p", 3: "s", 4: "d", 5: "t", 6: 0, 7: 0}: a canonical
+    // seven-entry network config map whose ssid exceeds the 32-byte bound.
+    uint8_t payload[64];
+    size_t offset = 0U;
+    payload[offset++] = 0xa7U;
+    payload[offset++] = 0x01U;
+    payload[offset++] = 0x78U;
+    payload[offset++] = 0x21U; /* text length 33 */
+    memset(payload + offset, 'x', 33U);
+    offset += 33U;
+    payload[offset++] = 0x02U;
+    payload[offset++] = 0x61U;
+    payload[offset++] = 'p';
+    payload[offset++] = 0x03U;
+    payload[offset++] = 0x61U;
+    payload[offset++] = 's';
+    payload[offset++] = 0x04U;
+    payload[offset++] = 0x61U;
+    payload[offset++] = 'd';
+    payload[offset++] = 0x05U;
+    payload[offset++] = 0x61U;
+    payload[offset++] = 't';
+    payload[offset++] = 0x06U;
+    payload[offset++] = 0x00U;
+    payload[offset++] = 0x07U;
+    payload[offset++] = 0x00U;
+
+    protocol_frame_t frame = {
+        .version = PROTOCOL_VERSION,
+        .message_type = PROTOCOL_TYPE_NETWORK_CONFIG,
+        .request_id = 30U,
+        .payload_length = (uint16_t)offset,
+    };
+    memcpy(frame.payload, payload, offset);
+    protocol_message_t message;
+    assert(protocol_message_decode(&frame, &message) ==
+           PROTOCOL_MESSAGE_ERR_INVALID_VALUE);
+}
+
+static void test_network_config_rejects_unknown_key(void)
+{
+    // {1: "s", 2: "p", 3: "u", 4: "d", 5: "t", 6: 0, 7: 0, 8: 0}: an
+    // otherwise-valid network config map with one unrecognized key (8).
+    const uint8_t payload[] = {
+        0xa8U, 0x01U, 0x61U, 's', 0x02U, 0x61U, 'p', 0x03U, 0x61U,
+        'u',   0x04U, 0x61U, 'd', 0x05U, 0x61U, 't', 0x06U, 0x00U,
+        0x07U, 0x00U, 0x08U, 0x00U,
+    };
+    protocol_frame_t frame = {
+        .version = PROTOCOL_VERSION,
+        .message_type = PROTOCOL_TYPE_NETWORK_CONFIG,
+        .request_id = 31U,
+        .payload_length = sizeof(payload),
+    };
+    memcpy(frame.payload, payload, sizeof(payload));
+    protocol_message_t message;
+    assert(protocol_message_decode(&frame, &message) ==
+           PROTOCOL_MESSAGE_ERR_INVALID_VALUE);
+}
+
 static void test_cardinal_display_rotations(void)
 {
     size_t length = 0U;
@@ -450,8 +612,10 @@ static void test_extended_template_kinds(void)
 int main(void)
 {
     test_crc();
+    test_status_request_accepts_reserved_ota_trigger_id();
     test_valid_fixtures();
     test_status_capability_handshake_and_legacy_defaults();
+    test_status_last_ota_error_round_trip_and_legacy_default();
     test_incremental_decoder();
     test_overflow_resynchronizes();
     test_invalid_fixtures();
@@ -459,6 +623,8 @@ int main(void)
     test_maximum_frames();
     test_excessive_cbor_nesting_is_rejected();
     test_invalid_time_has_specific_error();
+    test_network_config_rejects_oversized_ssid();
+    test_network_config_rejects_unknown_key();
     test_cardinal_display_rotations();
     test_config_landscape_rotations();
     test_extended_template_kinds();

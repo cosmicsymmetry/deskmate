@@ -3,10 +3,12 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
+use std::time::Duration;
 
 use app_core::{
-    AppSnapshot, ConfigOrigin, ConfigStore, ConnectionState, LoadOutcome, PersistenceState,
-    ProviderState, RuntimeHandle, RuntimeState, SAVED_SETTINGS_VALIDATION_FAILURE_MESSAGE,
+    AppConfig, AppSnapshot, ConfigOrigin, ConfigStore, ConnectionState, DeviceTier, LoadOutcome,
+    NetworkSettingsStore, PersistenceState, ProviderState, RuntimeHandle, RuntimeState,
+    SAVED_SETTINGS_VALIDATION_FAILURE_MESSAGE,
 };
 use serde::Serialize;
 use tauri::image::Image;
@@ -20,6 +22,7 @@ mod events;
 mod preview;
 
 const CONFIG_FILE_NAME: &str = "config.json";
+const NETWORK_SETTINGS_FILE_NAME: &str = "network-settings.json";
 const MAIN_WINDOW_LABEL: &str = "main";
 const TRAY_ID: &str = "deskmate";
 const STATUS_ITEM_ID: &str = "device-status";
@@ -114,13 +117,90 @@ impl TrayControls {
     }
 }
 
+#[derive(Default)]
+struct NetworkedConfigProjection(Mutex<Option<AppConfig>>);
+
+impl NetworkedConfigProjection {
+    fn project(&self, tier: Option<DeviceTier>, config: &mut AppConfig) {
+        if !matches!(tier, Some(DeviceTier::Networked)) {
+            return;
+        }
+        if let Ok(networked) = self.0.lock()
+            && let Some(networked) = networked.as_ref()
+        {
+            *config = networked.clone();
+        }
+    }
+
+    fn replace(&self, config: Option<AppConfig>) -> Result<(), commands::IpcError> {
+        *self.0.lock().map_err(|_| commands::IpcError::Internal {
+            message: "networked configuration state is unavailable".into(),
+        })? = config;
+        Ok(())
+    }
+
+    fn clear_for_local_save(&self) -> Result<(), commands::IpcError> {
+        self.replace(None)
+    }
+}
+
+struct DesktopSnapshotProjector {
+    network_store: Arc<NetworkSettingsStore>,
+    networked_config: Arc<NetworkedConfigProjection>,
+    last_known_tier: Mutex<Option<DeviceTier>>,
+    has_saved_config: Arc<AtomicBool>,
+}
+
+impl DesktopSnapshotProjector {
+    fn project_snapshot(&self, mut app: AppSnapshot) -> DesktopSnapshot {
+        if let Some(tier) = app.device.tier {
+            self.remember_device_tier(tier);
+        }
+        self.networked_config
+            .project(app.device.tier, &mut app.config);
+        DesktopSnapshot {
+            app,
+            has_saved_config: self.has_saved_config.load(Ordering::Acquire),
+        }
+    }
+
+    fn remember_device_tier(&self, tier: DeviceTier) {
+        let Ok(mut last_known) = self.last_known_tier.lock() else {
+            eprintln!("cannot remember display ownership tier");
+            return;
+        };
+        if *last_known == Some(tier) {
+            return;
+        }
+        let current = self.network_store.load().settings().clone();
+        if self
+            .network_store
+            .save(app_core::NetworkSettingsUpdate::new(
+                current.server_url,
+                current.device_id,
+                Some(tier),
+                None,
+            ))
+            .is_err()
+        {
+            eprintln!("cannot persist display ownership tier");
+            return;
+        }
+        *last_known = Some(tier);
+    }
+}
+
 struct DesktopState {
     runtime: Arc<RuntimeHandle>,
-    store: ConfigStore,
-    has_saved_config: AtomicBool,
+    store: Arc<ConfigStore>,
+    network_store: Arc<NetworkSettingsStore>,
+    networked_config: Arc<NetworkedConfigProjection>,
+    snapshot_projector: DesktopSnapshotProjector,
+    server_client: ureq::Agent,
+    has_saved_config: Arc<AtomicBool>,
     tray: TrayControls,
     snapshot_worker: Mutex<Option<JoinHandle<()>>>,
-    mutation_lock: Mutex<()>,
+    mutation_lock: Arc<Mutex<()>>,
     quitting: AtomicBool,
     preview: preview::PreviewHandle,
 }
@@ -137,14 +217,11 @@ struct DesktopSnapshot {
 
 impl DesktopState {
     fn project_snapshot(&self, app: AppSnapshot) -> DesktopSnapshot {
-        DesktopSnapshot {
-            app,
-            has_saved_config: self.has_saved_config.load(Ordering::Acquire),
-        }
+        self.snapshot_projector.project_snapshot(app)
     }
 
-    fn mark_config_saved(&self) {
-        self.has_saved_config.store(true, Ordering::Release);
+    fn set_networked_config(&self, config: Option<AppConfig>) -> Result<(), commands::IpcError> {
+        self.networked_config.replace(config)
     }
 
     fn toggle_paused(&self) -> Result<(), commands::IpcError> {
@@ -236,7 +313,9 @@ const fn runtime_error_log_label(error: &app_core::RuntimeError) -> &'static str
         app_core::RuntimeError::ResponseTimeout => "response-timeout",
         app_core::RuntimeError::UnknownWidget { .. } => "unknown-widget",
         app_core::RuntimeError::UnknownScreen { .. } => "unknown-screen",
-        app_core::RuntimeError::Device { .. } => "device",
+        app_core::RuntimeError::DeviceDisconnected | app_core::RuntimeError::Device { .. } => {
+            "device"
+        }
         app_core::RuntimeError::Provider { .. } => "provider",
     }
 }
@@ -348,7 +427,18 @@ fn setup_app(app: &mut App) -> Result<(), Box<dyn Error>> {
     let config_directory = app.path().app_data_dir()?;
     prepare_config_directory(&config_directory);
     let config_path = config_directory.join(CONFIG_FILE_NAME);
-    let store = ConfigStore::new(config_path);
+    let store = Arc::new(ConfigStore::new(config_path));
+    let network_store = Arc::new(NetworkSettingsStore::new(
+        config_directory.join(NETWORK_SETTINGS_FILE_NAME),
+    ));
+    let network_settings = network_store.load();
+    if network_settings.recovery().is_some() {
+        eprintln!("saved Deskmate network settings could not be read");
+    }
+    if network_store.discard_device_token().is_err() {
+        eprintln!("saved Deskmate device credential could not be discarded");
+    }
+    let last_known_tier = network_settings.settings().tier;
     let loaded = store.load();
     let has_saved_config = load_has_saved_config(&loaded);
     let auto_open_settings = auto_open_settings_on_launch(&loaded);
@@ -373,14 +463,26 @@ fn setup_app(app: &mut App) -> Result<(), Box<dyn Error>> {
     });
     let initial_snapshot = runtime.snapshot()?;
     let tray = create_tray(app, &initial_snapshot, autostart_enabled)?;
+    let networked_config = Arc::new(NetworkedConfigProjection::default());
+    let has_saved_config = Arc::new(AtomicBool::new(has_saved_config));
+    let snapshot_projector = DesktopSnapshotProjector {
+        network_store: Arc::clone(&network_store),
+        networked_config: Arc::clone(&networked_config),
+        last_known_tier: Mutex::new(last_known_tier),
+        has_saved_config: Arc::clone(&has_saved_config),
+    };
 
     app.manage(DesktopState {
         runtime: Arc::clone(&runtime),
         store,
-        has_saved_config: AtomicBool::new(has_saved_config),
+        network_store,
+        networked_config,
+        snapshot_projector,
+        server_client: server_http_agent(),
+        has_saved_config,
         tray,
         snapshot_worker: Mutex::new(None),
-        mutation_lock: Mutex::new(()),
+        mutation_lock: Arc::new(Mutex::new(())),
         quitting: AtomicBool::new(false),
         // One dedicated thread owns the process-wide `Simulator` for the app's
         // lifetime (see `preview` module docs); nothing else may construct one.
@@ -407,6 +509,16 @@ fn prepare_config_directory(path: &Path) {
         // into an application panic.
         eprintln!("cannot secure Deskmate configuration directory");
     }
+}
+
+fn server_http_agent() -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .timeout_global(Some(Duration::from_secs(15)))
+        // Validation details live in the 422 response body, so status handling
+        // belongs in the typed IPC mapper after the bounded body is read.
+        .http_status_as_error(false)
+        .build()
+        .into()
 }
 
 fn secure_config_directory(path: &Path) -> std::io::Result<()> {
@@ -476,6 +588,12 @@ pub fn run() {
             commands::get_app_snapshot,
             commands::validate_config_draft,
             commands::save_apply_config,
+            commands::save_server_config,
+            commands::get_network_settings,
+            commands::set_server_endpoint,
+            commands::provision_device,
+            commands::factory_reset_device,
+            commands::use_local_ownership,
             commands::set_pushing_paused,
             commands::control_pomodoro,
             commands::refresh_provider,
@@ -601,6 +719,95 @@ mod tests {
     }
 
     #[test]
+    fn a_local_save_clears_the_server_projection_and_unknown_tier_never_projects_it() {
+        let projection = NetworkedConfigProjection::default();
+        let mut server_config = AppConfig::default();
+        server_config.preferences.timezone = "Asia/Tbilisi".into();
+        projection.replace(Some(server_config.clone())).unwrap();
+
+        let mut unplugged_config = AppConfig::default();
+        projection.project(None, &mut unplugged_config);
+        assert_eq!(unplugged_config, AppConfig::default());
+
+        projection.clear_for_local_save().unwrap();
+        let mut later_networked_config = AppConfig::default();
+        projection.project(Some(DeviceTier::Networked), &mut later_networked_config);
+        assert_eq!(later_networked_config, AppConfig::default());
+    }
+
+    #[test]
+    fn projecting_an_observed_tier_persists_it_for_the_next_cable_out_snapshot() {
+        use app_core::{DeviceCounters, DeviceSnapshot, NetworkSettingsUpdate};
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let serial = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "deskmate-tier-projection-{}-{serial}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let network_store = Arc::new(NetworkSettingsStore::new(
+            directory.join("network-settings.json"),
+        ));
+        network_store
+            .save(NetworkSettingsUpdate::new(
+                "https://desk.example",
+                "desk-1",
+                Some(DeviceTier::Local),
+                None,
+            ))
+            .unwrap();
+        let projector = DesktopSnapshotProjector {
+            network_store: Arc::clone(&network_store),
+            networked_config: Arc::new(NetworkedConfigProjection::default()),
+            last_known_tier: Mutex::new(Some(DeviceTier::Local)),
+            has_saved_config: Arc::new(AtomicBool::new(false)),
+        };
+        let snapshot = AppSnapshot {
+            config: AppConfig::default(),
+            runtime: RuntimeState::Running,
+            device: DeviceSnapshot {
+                connection: ConnectionState::Online,
+                port_name: Some("test-port".into()),
+                firmware_version: Some("2.0.0".into()),
+                protocol_version: Some(1),
+                max_protocol_version: Some(1),
+                capabilities: Vec::new(),
+                unknown_capability_bits: 0,
+                uptime_ms: None,
+                free_heap: None,
+                rotation: None,
+                tier: Some(DeviceTier::Networked),
+                wifi_state: None,
+                wifi_rssi: None,
+                ip: None,
+                last_network_error: None,
+                ota_state: None,
+                active_screen_id: None,
+                counters: DeviceCounters::default(),
+            },
+            providers: Vec::new(),
+            pomodoros: Vec::new(),
+            card_data: Vec::new(),
+            card_errors: Vec::new(),
+            persistence: PersistenceState::Clean,
+            diagnostics: app_core::RuntimeDiagnostics::default(),
+        };
+
+        let projected = projector.project_snapshot(snapshot);
+
+        assert_eq!(projected.app.device.tier, Some(DeviceTier::Networked));
+        assert_eq!(
+            network_store.load().settings().tier,
+            Some(DeviceTier::Networked)
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn only_a_missing_settings_document_is_first_run() {
         let defaults = LoadOutcome::Loaded {
             config: AppConfig::default(),
@@ -668,6 +875,10 @@ mod tests {
             message: runtime_secret.into(),
         };
         assert_eq!(runtime_error_log_label(&runtime_error), "device");
+        assert_eq!(
+            runtime_error_log_label(&app_core::RuntimeError::DeviceDisconnected),
+            "device"
+        );
         let ipc_error = commands::IpcError::Device {
             message: runtime_secret.into(),
         };

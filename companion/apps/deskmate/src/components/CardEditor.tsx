@@ -1,16 +1,20 @@
 import {
-  cardKindName,
+  cardLabel,
+  cardTitle,
   issuesForField,
   numberValue,
   tapActionDescription,
   withAlert,
 } from "../lib/configDraft";
+import { providerTrouble } from "../lib/providers";
+import { Icon } from "./Icon";
 import type {
   AlertHold,
   CardAlert,
   CardSettings,
   JsonFieldMapping,
   PomodoroSnapshot,
+  ProviderSnapshot,
   ValidationIssue,
   WeatherUnits,
 } from "../lib/types";
@@ -26,12 +30,17 @@ interface CardEditorProps {
   /// reorder to invalidate.
   issues: ValidationIssue[];
   pomodoro: PomodoroSnapshot | null;
+  /// The feed behind this card, when it has one. Only ever rendered when it is in
+  /// trouble — see `providerTrouble`.
+  provider: ProviderSnapshot | null;
   timerBusy: boolean;
   filePickerBusy: boolean;
+  providerRefreshing: boolean;
   onChange: (card: CardSettings) => void;
   onRemove: () => void;
   onTimerAction: (action: "start" | "pause" | "reset") => void;
   onChooseCalendarFile: () => void;
+  onRefreshProvider: () => void;
 }
 
 function FieldIssues({ issues }: { issues: ValidationIssue[] }) {
@@ -100,19 +109,21 @@ export function CardEditor({
   card,
   issues,
   pomodoro,
+  provider,
   timerBusy,
   filePickerBusy,
+  providerRefreshing,
   onChange,
   onRemove,
   onTimerAction,
   onChooseCalendarFile,
+  onRefreshProvider,
 }: CardEditorProps) {
   if (!card) {
     return (
       <section className="panel editor-panel" aria-labelledby="editor-heading">
         <div className="panel-heading">
           <div>
-            <p className="step-label">Customize</p>
             <h2 id="editor-heading">Choose a card</h2>
           </div>
         </div>
@@ -125,24 +136,41 @@ export function CardEditor({
   }
 
   const fieldIssues = (field: string) => issuesForField(issues, field);
+  const trouble = providerTrouble(provider);
   const canAlert = card.kind === "pomodoro" || card.kind === "calendar";
   const setAlert = (alert: CardAlert) => onChange(withAlert(card, alert));
 
   return (
     <section className="panel editor-panel" aria-labelledby="editor-heading">
       <div className="panel-heading">
-        <div>
-          <p className="step-label">Customize</p>
-          <h2 id="editor-heading">{cardKindName(card.kind)}</h2>
+        <div className="editor-title">
+          <h2 id="editor-heading">{cardLabel(card)}</h2>
+          {cardTitle(card) && <span className="editor-title__kind">{cardTitle(card)}</span>}
         </div>
         <button className="text-button text-button--danger" type="button" onClick={onRemove}>
           Remove
         </button>
       </div>
 
-      <div className="form-grid">
-        <p className="canvas-note">Clean 448 × 368 canvas · no status strip</p>
+      {/* The recovery half of the removed data-sources panel, moved to where it is
+          actionable: beside the card whose data went bad, not in a list of every
+          feed in the app that was healthy anyway. */}
+      {trouble && (
+        <p className="data-note" role="status">
+          <span>{trouble}</span>
+          <button
+            className="text-button"
+            type="button"
+            disabled={providerRefreshing}
+            onClick={onRefreshProvider}
+          >
+            <Icon name="refresh" />
+            {providerRefreshing ? "Refreshing…" : "Refresh"}
+          </button>
+        </p>
+      )}
 
+      <div className="form-grid">
         {card.kind === "clock" && (
           <>
             <label className="field">

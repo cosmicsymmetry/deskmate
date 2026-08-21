@@ -14,6 +14,7 @@
  * All post functions are safe from non-LVGL tasks and never allocate.
  */
 esp_err_t ui_runtime_init(void);
+bool ui_runtime_is_initialized(void);
 void ui_runtime_set_event_queue(device_event_queue_t *event_queue);
 
 bool ui_runtime_show_view(const char *widget_id,

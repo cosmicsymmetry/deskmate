@@ -2,14 +2,17 @@ import { useEffect, useState } from "react";
 
 import { CardEditor } from "./components/CardEditor";
 import { CardList } from "./components/CardList";
-import { DeviceHeader } from "./components/DeviceHeader";
+import { Icon } from "./components/Icon";
+import { LoopRing } from "./components/LoopRing";
 import { DevicePreview } from "./components/DevicePreview";
-import { Filmstrip } from "./components/Filmstrip";
+import { NetworkPanel, ownershipLabel } from "./components/NetworkPanel";
 import { PlaylistPanel } from "./components/PlaylistPanel";
-import { ProviderStatus } from "./components/ProviderStatus";
+import { type SaveState, SaveBar, type ValidationState } from "./components/SaveBar";
+import { SettingsSheet } from "./components/SettingsSheet";
+import { TopBar } from "./components/TopBar";
 import {
   addCard,
-  cardName,
+  cardLabel,
   copyConfig,
   firstRunSteps,
   firstSelectableCard,
@@ -23,7 +26,6 @@ import {
   controlPomodoro,
   getAutostartStatus,
   refreshProvider,
-  saveApplyConfig,
   setAutostartEnabled,
   setPushingPaused,
   toIpcError,
@@ -31,6 +33,7 @@ import {
 } from "./lib/tauri";
 import type {
   AppConfig,
+  AppSnapshot,
   CardKind,
   CardSettings,
   DisplayOrientation,
@@ -40,22 +43,42 @@ import type {
 } from "./lib/types";
 import { useAppState } from "./lib/useAppState";
 
-type ValidationState =
-  | { kind: "idle"; result: DraftValidation }
-  | { kind: "checking"; result: DraftValidation }
-  | { kind: "ready"; result: DraftValidation }
-  | { kind: "error"; result: DraftValidation; error: IpcError };
-
-type SaveState =
-  | { kind: "idle" }
-  | { kind: "saving" }
-  | { kind: "saved"; message: string }
-  | { kind: "error"; error: IpcError };
+/**
+ * The USB link in one word, for the settings sheet. It used to be a permanent
+ * complication in the window chrome; it is a pairing-and-troubleshooting fact, so
+ * it sits with the rest of them now.
+ */
+function linkLabel(snapshot: AppSnapshot): string {
+  switch (snapshot.device.connection.kind) {
+    case "online":
+      return snapshot.device.port_name ?? "Connected";
+    case "connecting":
+      return "Looking for the display";
+    case "standalone":
+      return "Standalone";
+    case "disconnected":
+      return snapshot.device.connection.reason ?? "Not connected";
+  }
+}
 
 const validDraft: DraftValidation = { valid: true, issues: [] };
 
 export function App() {
-  const { snapshot, loading, error: stateError, refresh, dataGeneration } = useAppState();
+  const {
+    snapshot,
+    loading,
+    error: stateError,
+    refresh,
+    dataGeneration,
+    networkSettings,
+    ownershipTier,
+    saveConfig,
+    saveServerAccess,
+    pairDevice,
+    unpairDevice,
+    factoryReset,
+    chooseLocalMode,
+  } = useAppState();
   const [draft, setDraft] = useState<AppConfig | null>(null);
   const [selectedCardId, setSelectedCardId] = useState<string | null>(null);
   const [dirty, setDirty] = useState(false);
@@ -69,6 +92,7 @@ export function App() {
   const [refreshingProviderId, setRefreshingProviderId] = useState<string | null>(null);
   const [autostartEnabled, setAutostartValue] = useState(false);
   const [autostartMismatch, setAutostartMismatch] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   useEffect(() => {
     if (!snapshot || dirty) {
@@ -135,24 +159,18 @@ export function App() {
 
   if (loading && !snapshot) {
     return (
-      <main className="startup-state" aria-busy="true">
-        <span className="startup-mark" aria-hidden="true">
-          D
-        </span>
-        <p className="eyebrow">Deskmate</p>
-        <h1>Opening your display settings…</h1>
-        <p>The background service keeps running if this window is closed.</p>
+      <main className="startup" aria-busy="true">
+        <span className="startup__ring" aria-hidden="true" />
+        <h1>Waking the display…</h1>
+        <p>The background service keeps running even if you close this window.</p>
       </main>
     );
   }
 
   if (!snapshot || !draft) {
     return (
-      <main className="startup-state">
-        <span className="startup-mark startup-mark--error" aria-hidden="true">
-          !
-        </span>
-        <p className="eyebrow">Deskmate</p>
+      <main className="startup startup--error">
+        <span className="startup__ring startup__ring--error" aria-hidden="true" />
         <h1>Settings could not be loaded</h1>
         <p role="alert">{stateError?.message ?? "The background service is unavailable."}</p>
         <button className="button button--primary" type="button" onClick={() => void refresh()}>
@@ -173,6 +191,20 @@ export function App() {
   // just blocking Save with no highlighted control anywhere in the UI (see
   // `unclaimedIssues`).
   const leftoverIssues = unclaimedIssues(issues, draft);
+  const networkedTier = ownershipTier === "networked";
+  const localTier = ownershipTier === "local";
+  const selectedProvider =
+    snapshot.providers.find((candidate) => candidate.widget_id === selectedCardId) ?? null;
+  const protocolMismatch =
+    snapshot.device.protocol_version !== null && snapshot.device.protocol_version !== 1;
+  const paused = snapshot.config.preferences.paused || snapshot.runtime.kind === "paused";
+  // The settings button is silent while everything is nominal, and carries a dot
+  // only for the things whose answers live behind it.
+  const needsAttention =
+    ownershipTier === null ||
+    protocolMismatch ||
+    snapshot.device.wifi_state === "failed" ||
+    snapshot.device.last_network_error !== null;
 
   const replaceDraft = (next: AppConfig) => {
     setDraft(next);
@@ -238,20 +270,22 @@ export function App() {
     setSaveState({ kind: "saving" });
     setCommandError(null);
     try {
-      const result = await saveApplyConfig(draft);
+      const result = await saveConfig(draft);
       setDirty(false);
       setSaveState({
         kind: "saved",
         message: result.save.warning
           ? `Saved. ${result.save.warning.message}`
-          : snapshot.device.connection.kind === "online"
-            ? "Saved and applied to your display."
-            : "Saved. It will sync when your display reconnects.",
+          : networkedTier
+            ? "Saved to the server. The server will update your display."
+            : snapshot.device.connection.kind === "online"
+              ? "Saved and applied to your display."
+              : "Saved. It will sync when your display reconnects.",
       });
       await refresh();
     } catch (nextError) {
       const ipcError = toIpcError(nextError);
-      if (ipcError.category === "device") {
+      if (localTier && ipcError.category === "device") {
         setDirty(false);
         setSaveState({
           kind: "saved",
@@ -296,174 +330,218 @@ export function App() {
     snapshot.persistence.kind === "validation-failed" ? snapshot.persistence : null;
 
   return (
-    <div className="app-shell">
-      <DeviceHeader
-        snapshot={snapshot}
-        commandError={commandError ?? stateError}
-        busyAction={busyAction}
-        onTogglePause={() =>
-          void runAction("pause", () => setPushingPaused(!snapshot.config.preferences.paused))
-        }
-      />
+    <div className="app">
+      <TopBar attention={needsAttention} onOpenSettings={() => setSettingsOpen(true)} />
 
-      {persistenceValidation && (
-        <aside className="recovery-banner" role="alert">
-          <span aria-hidden="true">!</span>
-          <div>
-            <strong>{persistenceValidation.message}</strong>
-            <ul>
-              {persistenceValidation.issues.map((issue) => (
-                <li key={`${issue.path}:${issue.code}`}>{issue.message}</li>
-              ))}
-            </ul>
-            <p>The saved file was left untouched. Review the issues before saving again.</p>
-          </div>
-        </aside>
-      )}
-
-      {(persistenceError || autostartMismatch) && (
-        <aside className="recovery-banner" role="status">
-          <span aria-hidden="true">↺</span>
-          <div>
-            <strong>
-              {persistenceError ? "Settings file needs attention" : "Start-at-login differs"}
-            </strong>
-            <p>
-              {persistenceError
-                ? `${persistenceError}. The unreadable file was left untouched; review the settings shown here before saving a fresh valid configuration.`
-                : "The operating-system setting and saved preference differ. Choose your preference below to reconcile them."}
-            </p>
-          </div>
-        </aside>
-      )}
-
-      {/* A push the display understood and refused is card-scoped and actionable:
-          name the card and say what it refused, rather than parking the whole app in
-          an error state over one card's data. */}
-      {snapshot.card_errors.length > 0 && (
-        <aside className="recovery-banner" role="status">
-          <span aria-hidden="true">!</span>
-          <div>
-            <strong>
-              {snapshot.card_errors.length === 1
-                ? "The display refused one card's data"
-                : `The display refused ${snapshot.card_errors.length} cards' data`}
-            </strong>
-            {snapshot.card_errors.map((cardError) => {
-              const card = draft.cards.find((candidate) => candidate.id === cardError.card_id);
-              return (
-                <p key={cardError.card_id}>
-                  <strong>{card ? cardName(card) : cardError.card_id}</strong> — {cardError.message}
-                </p>
-              );
-            })}
-            <p>
-              Everything else kept updating. Adjust the card below and save to send its data again.
-            </p>
-          </div>
-        </aside>
-      )}
-
-      {/* A validation issue whose path no card-, playlist-, or preference-scoped
-          surface below claims (see `unclaimedIssues`) — e.g. `device.capabilities`,
-          emitted when the connected display lacks a feature the draft needs. Without
-          this, such an issue still disabled Save but was never shown anywhere,
-          which is strictly worse than not validating it at all. */}
-      {leftoverIssues.length > 0 && (
-        <aside className="recovery-banner" role="status">
-          <span aria-hidden="true">!</span>
-          <div>
-            <strong>
-              {leftoverIssues.length === 1
-                ? "One more thing needs attention"
-                : `${leftoverIssues.length} more things need attention`}
-            </strong>
-            {leftoverIssues.map((issue) => (
-              <p key={`${issue.path}:${issue.code}`}>{issue.message}</p>
-            ))}
-          </div>
-        </aside>
-      )}
-
-      {(() => {
-        const steps = firstRunSteps(draft, snapshot.has_saved_config);
-        if (steps.every((step) => step.done)) {
-          return null;
-        }
-        return (
-          <aside className="first-run" aria-labelledby="first-run-heading">
-            <div>
-              <p className="eyebrow">A quick first setup</p>
-              <h2 id="first-run-heading">Make the display yours</h2>
-            </div>
-            <ol>
-              {steps.map((step, index) => (
-                <li key={step.label} className={step.done ? "is-done" : ""}>
-                  <span className="numeral">{index + 1}</span> {step.label}
-                </li>
-              ))}
-            </ol>
-          </aside>
-        );
-      })()}
-
-      <div className="workspace">
-        <div className="workspace__editors">
-          <div className="library-playlists">
-            <CardList
-              config={draft}
-              issues={issues}
-              selectedCardId={selectedCardId}
-              onSelect={setSelectedCardId}
-              onAdd={handleAdd}
-              onRemove={handleRemoveCard}
-            />
-            <PlaylistPanel
-              config={draft}
-              issues={issues}
-              onChange={replaceDraft}
-              onSelectCard={setSelectedCardId}
-            />
-          </div>
-          <CardEditor
-            card={selectedWidget}
-            issues={cardIssues}
-            pomodoro={pomodoro}
-            timerBusy={busyAction === "timer"}
-            filePickerBusy={busyAction === "calendar-file"}
-            onChange={handleWidgetChange}
-            onRemove={handleRemove}
-            onTimerAction={handleTimerAction}
-            onChooseCalendarFile={handleChooseCalendarFile}
-          />
-        </div>
-
-        <aside className="workspace__preview">
+      <div className="face">
+        {/* The rail is the face: what the panel is showing, what the loop looks
+            like, and whether the data behind it is fresh. It stays put while the
+            work column scrolls, because every edit in that column is aimed at it. */}
+        <aside className="face__rail">
           <DevicePreview
             cards={draft.cards}
             selectedWidgetId={selectedCardId}
             orientation={draft.preferences.orientation}
             dataGeneration={dataGeneration}
           />
-          <Filmstrip
+          <LoopRing
             config={draft}
             selectedCardId={selectedCardId}
             onSelect={setSelectedCardId}
             onReorder={(next) => replaceDraft(next)}
           />
-          <ProviderStatus
-            providers={snapshot.providers}
-            cards={draft.cards}
-            refreshingId={refreshingProviderId}
-            onRefresh={handleProviderRefresh}
-          />
-          <section className="preferences-panel" aria-labelledby="preferences-heading">
-            <div className="panel-heading panel-heading--compact">
+        </aside>
+
+        <main className="face__work">
+          {/* What the header alert used to carry. A sentence in the column you are
+              already reading beats a permanent band that is blank 99% of the time. */}
+          {(protocolMismatch ||
+            snapshot.runtime.kind === "error" ||
+            commandError ||
+            stateError) && (
+            <aside className="notice notice--bad" role="alert">
               <div>
-                <p className="step-label">App preferences</p>
-                <h2 id="preferences-heading">Keep it current</h2>
+                <strong>
+                  {protocolMismatch
+                    ? `This display speaks protocol ${snapshot.device.protocol_version}; this app speaks protocol 1.`
+                    : snapshot.runtime.kind === "error"
+                      ? snapshot.runtime.message
+                      : (commandError ?? stateError)?.message}
+                </strong>
               </div>
-            </div>
+            </aside>
+          )}
+
+          {/* Nothing in this window can pause pushing any more — the control was
+              removed as a knob nobody reached for. A config saved while it was still
+              here can still arrive paused, so the way out has to stay reachable. */}
+          {paused && (
+            <aside className="notice notice--warn" role="status">
+              <div>
+                <strong>Sending to the display is paused</strong>
+                <p>Nothing you change here reaches the panel until you resume.</p>
+                <button
+                  className="button button--quiet"
+                  type="button"
+                  disabled={busyAction === "pause"}
+                  onClick={() => void runAction("pause", () => setPushingPaused(false))}
+                >
+                  {busyAction === "pause" ? "Resuming…" : "Resume sending"}
+                </button>
+              </div>
+            </aside>
+          )}
+
+          {persistenceValidation && (
+            <aside className="notice notice--bad" role="alert">
+              <div>
+                <strong>{persistenceValidation.message}</strong>
+                <ul>
+                  {persistenceValidation.issues.map((issue) => (
+                    <li key={`${issue.path}:${issue.code}`}>{issue.message}</li>
+                  ))}
+                </ul>
+                <p>The saved file was left untouched. Review the issues before saving again.</p>
+              </div>
+            </aside>
+          )}
+
+          {(persistenceError || autostartMismatch) && (
+            <aside className="notice notice--warn" role="status">
+              <div>
+                <strong>
+                  {persistenceError ? "Settings file needs attention" : "Start-at-login differs"}
+                </strong>
+                <p>
+                  {persistenceError
+                    ? `${persistenceError}. The unreadable file was left untouched; review the settings shown here before saving a fresh valid configuration.`
+                    : "The operating-system setting and saved preference differ. Choose your preference below to reconcile them."}
+                </p>
+              </div>
+            </aside>
+          )}
+
+          {/* A push the display understood and refused is card-scoped and actionable:
+              name the card and say what it refused, rather than parking the whole app in
+              an error state over one card's data. */}
+          {snapshot.card_errors.length > 0 && (
+            <aside className="notice notice--warn" role="status">
+              <div>
+                <strong>
+                  {snapshot.card_errors.length === 1
+                    ? "The display refused one card's data"
+                    : `The display refused ${snapshot.card_errors.length} cards' data`}
+                </strong>
+                {snapshot.card_errors.map((cardError) => {
+                  const card = draft.cards.find((candidate) => candidate.id === cardError.card_id);
+                  return (
+                    <p key={cardError.card_id}>
+                      <strong>{card ? cardLabel(card) : cardError.card_id}</strong> —{" "}
+                      {cardError.message}
+                    </p>
+                  );
+                })}
+                <p>
+                  Everything else kept updating. Adjust the card below and save to send its data
+                  again.
+                </p>
+              </div>
+            </aside>
+          )}
+
+          {/* A validation issue whose path no card-, playlist-, or preference-scoped
+              surface below claims (see `unclaimedIssues`) — e.g. `device.capabilities`,
+              emitted when the connected display lacks a feature the draft needs. Without
+              this, such an issue still disabled Save but was never shown anywhere,
+              which is strictly worse than not validating it at all. */}
+          {leftoverIssues.length > 0 && (
+            <aside className="notice notice--bad" role="status">
+              <div>
+                <strong>
+                  {leftoverIssues.length === 1
+                    ? "One more thing needs attention"
+                    : `${leftoverIssues.length} more things need attention`}
+                </strong>
+                {leftoverIssues.map((issue) => (
+                  <p key={`${issue.path}:${issue.code}`}>{issue.message}</p>
+                ))}
+              </div>
+            </aside>
+          )}
+
+          {(() => {
+            const steps = firstRunSteps(draft, snapshot.has_saved_config);
+            if (steps.every((step) => step.done)) {
+              return null;
+            }
+            const done = steps.filter((step) => step.done).length;
+            return (
+              <aside className="first-run" aria-labelledby="first-run-heading">
+                <div className="first-run__head">
+                  <div>
+                    <h2 id="first-run-heading">Make the display yours</h2>
+                  </div>
+                  <span className="first-run__count numeral">
+                    {done}/{steps.length}
+                  </span>
+                </div>
+                <ol className="first-run__steps">
+                  {steps.map((step, index) => (
+                    <li key={step.label} className={step.done ? "is-done" : ""}>
+                      <span className="first-run__pip numeral">
+                        {step.done ? <Icon name="check" /> : index + 1}
+                      </span>
+                      {step.label}
+                    </li>
+                  ))}
+                </ol>
+              </aside>
+            );
+          })()}
+
+          <CardList
+            config={draft}
+            issues={issues}
+            cardData={snapshot.card_data}
+            pomodoros={snapshot.pomodoros}
+            providers={snapshot.providers}
+            selectedCardId={selectedCardId}
+            onSelect={setSelectedCardId}
+            onAdd={handleAdd}
+            onRemove={handleRemoveCard}
+          />
+
+          <CardEditor
+            card={selectedWidget}
+            issues={cardIssues}
+            pomodoro={pomodoro}
+            provider={selectedProvider}
+            timerBusy={busyAction === "timer"}
+            filePickerBusy={busyAction === "calendar-file"}
+            providerRefreshing={refreshingProviderId === selectedCardId}
+            onChange={handleWidgetChange}
+            onRemove={handleRemove}
+            onTimerAction={handleTimerAction}
+            onChooseCalendarFile={handleChooseCalendarFile}
+            onRefreshProvider={() => selectedCardId && handleProviderRefresh(selectedCardId)}
+          />
+
+          <PlaylistPanel
+            config={draft}
+            issues={issues}
+            onChange={replaceDraft}
+            onSelectCard={setSelectedCardId}
+          />
+        </main>
+      </div>
+
+      {/* Ownership, pairing and the device's own network state: a first-run task and
+          a troubleshooting task, and nothing you look at while arranging cards. It
+          answers for itself here rather than taxing every session for the privilege. */}
+      <SettingsSheet open={settingsOpen} title="Settings" onClose={() => setSettingsOpen(false)}>
+        <section className="sheet__section" aria-labelledby="preferences-heading">
+          <h3 id="preferences-heading">Display</h3>
+          <div className="form-grid">
             <label className="field">
               <span>Display timezone</span>
               <input
@@ -525,48 +603,75 @@ export function App() {
                 <small>Disabled until you opt in.</small>
               </span>
             </label>
-          </section>
-        </aside>
-      </div>
+          </div>
+        </section>
 
-      <footer className="save-bar">
-        <div aria-live="polite">
-          {validation.kind === "checking" && <span>Checking settings…</span>}
-          {validation.kind === "ready" && !validation.result.valid && (
-            <span className="save-error">
-              Fix {validation.result.issues.length} highlighted issue
-              {validation.result.issues.length === 1 ? "" : "s"} before saving.
-            </span>
-          )}
-          {validation.kind === "error" && (
-            <span className="save-error">Validation unavailable: {validation.error.message}</span>
-          )}
-          {saveState.kind === "saved" && (
-            <span className="save-success">✓ {saveState.message}</span>
-          )}
-          {saveState.kind === "error" && (
-            <span className="save-error" role="alert">
-              {saveState.error.message}
-            </span>
-          )}
-          {validation.kind === "ready" && validation.result.valid && saveState.kind === "idle" && (
-            <span>{dirty ? "Unsaved changes" : "Everything is up to date"}</span>
-          )}
-        </div>
-        <button
-          className="button button--primary"
-          type="button"
-          disabled={
-            !dirty ||
-            validation.kind !== "ready" ||
-            !validation.result.valid ||
-            saveState.kind === "saving"
-          }
-          onClick={() => void handleSave()}
-        >
-          {saveState.kind === "saving" ? "Saving & applying…" : "Save & apply"}
-        </button>
-      </footer>
+        <section className="sheet__section" aria-labelledby="device-heading">
+          <div className="sheet__section-head">
+            <h3 id="device-heading">Device</h3>
+            <strong className={`ownership-badge ownership-badge--${ownershipTier ?? "unknown"}`}>
+              {ownershipLabel(ownershipTier)}
+            </strong>
+          </div>
+          <NetworkPanel
+            device={{
+              tier: ownershipTier,
+              link: linkLabel(snapshot),
+              wifiState: snapshot.device.wifi_state,
+              wifiRssi: snapshot.device.wifi_rssi,
+              ip: snapshot.device.ip ?? "",
+              lastNetworkError: snapshot.device.last_network_error,
+              otaState: snapshot.device.ota_state,
+            }}
+            settings={{
+              serverUrl: networkSettings.server_url,
+              deviceId: networkSettings.device_id,
+              ssid: "",
+            }}
+            onPair={async (input) => {
+              await pairDevice(input);
+              await refresh();
+            }}
+            onUnpair={async () => {
+              await unpairDevice();
+              await refresh();
+            }}
+            onFactoryReset={async () => {
+              await factoryReset();
+              await refresh();
+            }}
+            onSaveServerAccess={saveServerAccess}
+            allowLocalOverride={
+              snapshot.device.tier === null &&
+              networkSettings.tier !== "local" &&
+              Boolean(networkSettings.server_url || networkSettings.device_id)
+            }
+            onUseLocalMode={async () => {
+              await chooseLocalMode();
+              await refresh();
+            }}
+          />
+        </section>
+
+        {/* Preferences are draft state, so the sheet needs the same Save the window
+            has — a modal that can strand an edit behind itself is a trap. */}
+        <SaveBar
+          validation={validation}
+          saveState={saveState}
+          ownershipTier={ownershipTier}
+          dirty={dirty}
+          variant="sheet"
+          onSave={() => void handleSave()}
+        />
+      </SettingsSheet>
+
+      <SaveBar
+        validation={validation}
+        saveState={saveState}
+        ownershipTier={ownershipTier}
+        dirty={dirty}
+        onSave={() => void handleSave()}
+      />
     </div>
   );
 }

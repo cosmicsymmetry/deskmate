@@ -92,6 +92,9 @@ uint32_t widget_model_unknown_field_count(const widget_model_t *model);
 bool widget_model_widget_has_data(const widget_model_t *model,
                                   const char *widget_id);
 
+/** True when any configured progress-ring snapshot is currently running. */
+bool widget_model_has_running_progress(const widget_model_t *model);
+
 const template_field_state_t *widget_model_widget_fields(
     const widget_model_t *model,
     const char *widget_id);

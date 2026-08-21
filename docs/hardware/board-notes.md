@@ -1834,3 +1834,1276 @@ rendering was not itself observed. Do not describe it as verified.
 Incidental: the installed `/Applications/Deskmate.app` held `/dev/cu.usbmodem1101`
 exclusively and was quit (gracefully, via `osascript`) to free the port for flashing and
 for the diff runs. It was not running when these observations were taken.
+
+## V2 Task 3 — NVS persistence and the tier gate, verified 2026-08-18
+
+First firmware to persist anything across a reboot. Software change: an NVS-backed
+network config store (`firmware/main/link/net_store.c`), handlers for the two new
+provisioning message types, and the USB tier gate. Plan
+`docs/superpowers/plans/2026-08-18-deskmate-v2-networked-device.md`, spec
+`docs/superpowers/specs/2026-08-18-deskmate-v2-networked-device-design.md`.
+Flashed from `idf.py -C firmware -p /dev/cu.usbmodem3101 flash` at commit `77dc868`
+(`firmware_version` reported as `m1-170-g77dc868`, confirming the running image).
+No radio involved in any of this — the device never joined a network.
+
+Reboots were performed with `esptool --after hard_reset` rather than by unplugging USB.
+That is the correct instrument here: the board has a battery, so a USB unplug is link
+loss rather than power loss (recorded under the 2026-08-15 alert-replay entry), and NVS
+lives in flash, which survives a reset and a power cut identically. Each reboot was
+confirmed by a low `uptime_ms` in the following status.
+
+**PASSED — all six checks.**
+
+1. **Factory-fresh state reports local.** Before any provisioning, `status --json`
+   reported `tier: local`, `capabilities: 11`, `rotation: 90`, `valid_frames: 1`,
+   `malformed_frames: 0`.
+2. **Provisioning is accepted and acknowledged.** `provision ... --tier networked` ACKed,
+   exit 0, printing `(takes effect on next boot)`. The output named the ssid, server_url
+   and device_id and **did not print the passphrase or the token** — the never-expose-
+   secrets rule observed in practice, not only in review.
+3. **The tier survived a reboot.** After a hard reset, `status` reported
+   `tier: networked` at `uptime_ms: 12610`. This is the change's central claim and it
+   holds.
+4. **The cable is refused as an owner.** With the device in networked tier,
+   `push-data` over USB was rejected: `device rejected request (WrongTier): device is
+   owned over the network`, CLI exit code **13** (non-zero, so the failure is
+   scriptable). This is the first physically observable proof of the single-owner
+   invariant on the network tier.
+5. **Factory reset returns the device to local.** `factory-reset` ACKed; after a hard
+   reset `status` reported `tier: local` at `uptime_ms: 5807`.
+6. **An all-empty local config round-trips.** Provisioning with every string field empty
+   and `--tier local` ACKed, and after a reboot reported `tier: local` at
+   `uptime_ms: 5811`. This settles a question that could not be answered off-hardware:
+   `nvs_set_str` does accept the empty strings a factory-fresh local config writes.
+
+Counters stayed clean throughout: `malformed_frames: 0`, `free_heap` ~8.474 MB at every
+sample (8474155 / 8474123), `ui_queue_high_water: 1`. The panel showed no change at any
+point, which is correct — this task adds no UI.
+
+**Not covered by this session, and not claimed:** the radio, SNTP, the WebSocket
+transport, and OTA are all later tasks. A genuinely torn NVS write (power cut mid-save)
+was not induced; the code's mitigation is field ordering, with `tier` written last, so a
+fresh device cannot half-become networked.
+
+Incidental: `/Applications/Deskmate.app` held the serial port exclusively and was quit
+gracefully via `osascript` before flashing, as in the 2026-08-15 session. It was not
+running during any of these observations, and was left quit afterwards. The board
+enumerated as `/dev/cu.usbmodem3101` this session rather than `1101`.
+
+## V2 Task 4 — transport vtable refactor, verified 2026-08-18
+
+Pure refactor: `protocol_task.c`'s four `usb_link_*` call sites now route through a
+`link_transport_t` vtable, so Task 8's WebSocket transport can be a sibling rather than a
+special case. No behaviour was intended to change, so the gate is equivalence, not new
+function. Flashed at commit `660d226` (`firmware_version` `m1-172-g660d226`).
+
+**PASSED — behaviour identical to Task 3's verified state.**
+
+- Status in local tier reported `tier: local`, `malformed_frames: 0`, `valid_frames: 1`.
+- `push-data` in **local** tier was rejected with `UnknownWidget` — the informative
+  result, not merely a success: the tier gate passed the message through and the
+  *handler* rejected it because no widget is configured. The message reached its
+  destination.
+- Re-provisioned to networked, hard reset: `tier: networked` at `uptime_ms: 6125`, so
+  persistence still works across the refactor.
+- `push-data` in **networked** tier was rejected with `WrongTier` at CLI exit 13 — a
+  different rejection from the local-tier case, which is what proves the gate still
+  discriminates by tier rather than simply blocking or simply passing.
+- Restored to local tier with `factory-reset`.
+
+The two distinct rejections are the substance of this check. A refactor that had
+disturbed the gate's position would most likely have produced the same answer in both
+tiers.
+
+## V2 Task 5 — per-transport link deadline, sanity-checked 2026-08-18
+
+`link_state`'s host-loss deadline is now a per-transport value rather than the
+compile-time `PROTOCOL_LINK_TIMEOUT_MS`. USB keeps exactly 10000 ms; the 45000 ms value
+for the network transport is defined but has no consumer until Task 8. Flashed at commit
+`e257f33` (`firmware_version` `m1-174-ge257f33`).
+
+The plan defines no physical step for this task — its gate is the host tests, which pin
+the boundaries at 9999/10000 and 44999/45000. This was run anyway as cheap insurance,
+because the task rewired how the USB deadline is initialised.
+
+**PASSED — USB link healthy and unchanged.** `tier: local`, `online: true`,
+`malformed_frames: 0`, `free_heap` 8474107 (flat against Task 3's 8474155/8474123 to
+within normal variation). A second status three seconds later still reported
+`online: true` with `valid_frames: 2`, so the 10-second USB deadline is intact and the
+link is not flapping.
+
+Not covered: the 45000 ms network deadline cannot be exercised until a network transport
+exists (Task 8).
+
+## V2 Task 6 — WiFi station and SNTP, verified 2026-08-18
+
+The radio comes up for the first time. Flashed at commit `373b0ca` lineage
+(`baac85f` firmware + CLI status fields), board on `/dev/cu.usbmodem3101`.
+
+**A blocking defect was found and fixed first — see the entry below this one.** The
+first WiFi build crash-looped before reaching the clock screen; `s_context` was moved to
+PSRAM to make room. Everything here was observed on the fixed build.
+
+**PASSED — network half, read from `status --json`.**
+
+- `wifi_state: connected`, `ip: 192.168.8.168`, `wifi_rssi: -63`. The RSSI is a live
+  sample via `esp_wifi_sta_get_ap_info()`, not the join-instant value — a review finding
+  fixed before this run, because a frozen RSSI defeats the "wrong password versus out of
+  range" judgement the FAILED classification exists to support.
+- `tier: local`, correct for the free tier: the radio is up for SNTP and firmware only,
+  and no control connection to any server exists.
+- `uptime_ms: 282274` at the sample, ~4.7 minutes with no reboot. `malformed_frames: 0`.
+  `free_heap` 8,376,795.
+
+**PASSED — the standalone clock shows correct local time, observed by the repository
+owner directly.** The panel showed the correct local time when checked against UTC+4 at
+17:49 local / 13:49 UTC. The webcam harness was unavailable this session (see below), so
+this is a direct human observation rather than a captured frame.
+
+Worth stating precisely, because it is stronger than "no host attached": USB *was*
+connected throughout as a status-polling link, but **no configuration and no time-sync
+was ever pushed** — neither `status` nor `provision` sends one, and no config was ever
+applied, so the device sat on the standalone clock screen for the whole session. The
+displayed time can therefore only have come from SNTP supplying UTC plus the provisioned
+`utc_offset_minutes` of 240 supplying the zone. That is exactly the property Task 6
+exists to deliver.
+
+**NOT VERIFIED — the network-loss transition.** That pulling the network moves
+`wifi_state` to `connecting` without rebooting the device was not exercised; it needs the
+AP taken away or the board moved out of range, neither of which was available. The
+reconnect path is covered by review only.
+
+**NOT VERIFIED — anything requiring the webcam.** The harness failed this session and
+this exposed a latent defect in it: the physical **OBSBOT Meet 2 StreamCamera was absent
+from the `avfoundation` device list entirely** (only MacBook Pro Camera `[0]`, **OBSBOT
+Virtual Camera** `[1]` and Desk View `[2]` enumerated), while the OBSBOT Center system
+extension was running. `tools/hwcam/capture.sh` resolves the camera by matching the first
+video device whose name contains `OBSBOT`, which now matches the *Virtual* camera, and
+opening it fails with `Error opening input file 1`. The script's own comment explains it
+resolves by name because indices shift — but the match is too loose to tell the real
+camera from the virtual one. **Fix when next touching the harness: exclude `Virtual` from
+the match, and fail with a clear message when only the virtual device is present.**
+
+## V2 — WiFi crash-loop root-caused and fixed, 2026-08-18
+
+The first Task 6 build **crash-looped on every boot** and never reached the standalone
+clock: `ESP_ERROR_CHECK failed: esp_err_t 0x101 (ESP_ERR_NO_MEM)` at `main.c:61`,
+`expression: board_display_init()`.
+
+**Root cause: the WiFi stack's static DIRAM squeezed the LVGL draw buffers out of
+internal RAM.** `display.c` needs two internal-DMA buffers (flush plus rotation scratch,
+because `sw_rotate = true`): 2 x 47,104 = 94,208 B, and its guard requires a free block of
+95,232 B.
+
+Measured on the board with temporary `esp_rom_printf` probes:
+
+| | bytes |
+|---|---|
+| Largest contiguous `MALLOC_CAP_DMA` block at `board_display_init()` entry | **61,440** |
+| Required | 95,232 |
+| Shortfall | 33,792 |
+| Same figure measured during V1 | 110,592 |
+
+The block was identical at every probe point through expander reset, SPI bus init and
+`lvgl_port_init`, so nothing inside display init consumed it — the loss predated
+`app_main`. `idf.py size-components` attributed it: libpp 19,189 + libnet80211 12,422 +
+libphy 8,498 + liblwip 3,790 + libwpa_supplicant 1,371 = **45,270 B** of WiFi-stack
+DIRAM, against a measured drop of 49,152 B from V1.
+
+**Fix: `s_context` (54,616 B) moved from internal `.bss` to PSRAM.** The map file ranks
+internal `.bss` as `work_mem_int$0` 65,536 (LVGL's pool), `s_context` 54,616,
+`s_queue` 10,232 — roughly 130 KB, none of it DMA-requiring, on a board with 8 MB of idle
+PSRAM. Nothing in `protocol_context_t` is DMA'd: `usb_serial_jtag_write_bytes()` and
+`esp_websocket_client_send_bin()` both copy, and the context is touched only from the
+protocol task, never an ISR.
+
+**Result, measured: largest contiguous DMA block 61,440 -> 118,784 B**, a margin of
+23,552 B over the 95,232 requirement, with headroom for Task 8's TLS. One boot, zero
+crashes.
+
+Two notes for whoever hits this next:
+
+- **LVGL's 64 KiB pool is the bigger block but the wrong target.** `firmware/lv_conf.h`
+  is compiled by the `lvgl-sim` host harness, so changing LVGL's allocator would put V1's
+  pixel-exact golden-frame pipeline and all 54 goldens at risk. `s_context` is confined to
+  one file in `link/` and cannot affect the simulator.
+- **The error was legible only because of V1's defensive guard.** The explicit
+  `heap_caps_get_largest_free_block(MALLOC_CAP_DMA)` check added after the 2026-08-13
+  crash-loop turned what would have been an `IllegalInstruction` panic with a corrupted
+  backtrace into a named `ESP_ERR_NO_MEM` at one line. Note also that the `ESP_LOGE`
+  carrying the actual figures was **invisible**: the post-scheduler console goes to UART0
+  only, and even switching the primary console to USB Serial JTAG did not surface it, so
+  `esp_rom_printf` probes were required. Same blindfold as 2026-08-13.
+
+## V2 Task 8 — networked link root-caused and fixed, verified 2026-08-19
+
+First physical execution of Task 8 Step 8. The board never reached the server, and
+the cause was in the build, not the network.
+
+### Symptom
+
+Provisioned networked (`dev-0003`, `wss://deskmate.rodi.one/v1/device/link`), the
+board reported `tier: networked`, `wifi_state: connected`, `ip: 192.168.8.168`,
+`capabilities: 203` — but `online: false` and `ota_state: failed`, indefinitely.
+`GET /v1/devices/dev-0003` returned `connected: false, last_seen_unix_ms: null`.
+Uptime climbed monotonically past 119 s with `free_heap` byte-flat, so there was no
+reboot loop; the device was stable and simply never connected.
+
+### Root cause
+
+`CONFIG_MBEDTLS_INTERNAL_MEM_ALLOC=y` — ESP-IDF's default — confines every mbedTLS
+allocation to **internal DRAM**. Internal DRAM on this board is already committed to
+LVGL's draw buffers and WiFi's static `.bss` (the same budget behind the V1 boot
+crash-loop recorded above), so the 16 KB `MBEDTLS_SSL_IN_CONTENT_LEN` buffer could
+not be obtained and `mbedtls_ssl_setup()` failed **before any socket work**:
+
+```
+E esp-tls-mbedtls: mbedtls_ssl_setup returned -0x7F00   (MBEDTLS_ERR_SSL_ALLOC_FAILED)
+E websocket_client: transport_error=ESP_ERR_MBEDTLS_SSL_SETUP_FAILED
+```
+
+One cause produced every symptom: no WSS link, no OTA check reaching the server, no
+traffic at the origin, no reboot, and a correctly widening reconnect backoff.
+
+**`free_heap` is not a TLS health signal on this board.** It read 8,340,243 bytes
+throughout — overwhelmingly PSRAM, the one pool mbedTLS was forbidden to touch. A
+device here can report 8 MB free and still fail every handshake.
+
+### Fix
+
+`CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y` in `firmware/sdkconfig.defaults`, so TLS
+allocates from the 8 MB PSRAM. Commented at the setting.
+
+Verified on the board the same day: on the first boot after flashing, the server
+logged `firmware check device_id=dev-0003` and `device link established
+device_id=dev-0003`, and `GET /v1/devices/dev-0003` returned `connected: true` with a
+full `AppSnapshot` (`port_name: "network:dev-0003"`, `valid_frames: 39`,
+`reconnects: 0`). The panel left the standalone fallback and rendered the server's
+`DigitalClock` card.
+
+### Diagnosis required a temporary console build
+
+The protocol link uses **USB-Serial-JTAG** (`usb_link.c`) and the console is UART0
+with `CONFIG_ESP_CONSOLE_SECONDARY_NONE`, so no device log is reachable over the
+cable in a shipping build. A diagnostic build with
+`CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y` was used to read the mbedTLS error; it
+interleaves log output with protocol frames and must never supply acceptance
+evidence. `firmware/sdkconfig` is gitignored, so no tracked file changed. Note that
+`idf.py fullclean` does **not** remove `firmware/sdkconfig`, and a stale one silently
+overrides `SDKCONFIG_DEFAULTS` — delete it explicitly when switching config sets.
+
+### Deployment defects found alongside, both on the live server
+
+1. **`RUST_LOG` was unset**, so `tracing_subscriber::fmt::init()`'s `EnvFilter`
+   defaulted to **ERROR** and discarded every device-link diagnostic. The only
+   visible startup line is the `println!` in `main.rs:68`; the `tracing::info!`
+   directly beneath it was being dropped, which made logging look alive while
+   reporting nothing. **Task 8 Step 8's first observation — "the server logs an
+   accepted connection" — could not have passed as deployed.** Set to
+   `info,server=debug`; original saved as `/etc/deskmate/server.env.bak-20260819`.
+2. **`DESKMATE_FIRMWARE_DIR` did not exist** while `DESKMATE_FIRMWARE_VERSION` was
+   `1.0.0`, so `/v1/device/firmware` advertised an update whose image could not be
+   downloaded, and the device failed the install on every boot. That — not a device
+   fault — is what `ota_state: failed` meant. Directory created; version corrected.
+   Must be set deliberately before Task 11.
+
+### Two corrections to Task 8 Step 8's checklist
+
+- Its third observation expects the panel to stay on the standalone clock because
+  "no config has been sent yet". The server holds a **default** config
+  (`config.origin: "defaults"`) and applies it on connect, so the panel leaves the
+  fallback immediately. The wording is wrong, not the behaviour.
+- Early-boot TLS failures are normal: `net_link_start()` runs before DHCP/DNS, so the
+  first attempts fail `ESP_ERR_ESP_TLS_CANNOT_RESOLVE_HOSTNAME` (`getaddrinfo()
+  returns 202`) at t≈1.5 s before the backoff succeeds. Do not confuse these with
+  `ESP_ERR_MBEDTLS_SSL_SETUP_FAILED`.
+
+Task 8's four observations are **not** all discharged by this entry: the accepted
+connection and the status round-trips are evidenced above, but the killed-server
+reconnect observation has not been run against a deliberately stopped server, and
+the panel observation needs re-running under the corrected expectation.
+
+## V2 Task 11 — OTA download panicked before writing a byte, root-caused and fixed 2026-08-19
+
+First physical execution of Task 11 Step 9. The happy path did not work.
+
+### Symptom
+
+With an update published and offered, the board cycled roughly every ten seconds:
+
+```
+10:13:34  ota=checking     up=4752
+10:13:39  ota=downloading  up=10322
+10:13:45  ota=checking     up=3973    <- rebooted
+10:13:50  ota=downloading  up=9571
+10:13:56  ota=checking     up=3053    <- rebooted
+```
+
+It never reached version B and always came back on version A.
+
+**This failure mode is nearly invisible from the host.** After each panic
+`ota_state` returns to `checking`, so a host polling status sees a device
+perpetually *about to* update rather than one that failed. Nothing in Task 11's
+checklist asks anyone to read `uptime_ms`, which was the only honest signal.
+
+### Root cause
+
+Console capture (diagnostic build) caught the panic immediately after
+`esp_https_ota: Writing to <ota_1> partition at offset 0x420000`:
+
+```
+Guru Meditation Error: Core 1 panic'ed (LoadProhibited). Exception was unhandled.
+Backtrace: 0x42098b2d 0x42099105 0x4200d5d1 0x4200d9cd 0x403802d1
+rst:0xc (RTC_SW_CPU_RST)
+```
+
+Symbolicated against the matching ELF:
+
+```
+get_description_from_image   esp_https_ota.c:598
+esp_https_ota_get_img_desc   esp_https_ota.c:645
+install_update               firmware/main/link/ota.c:321
+ota_task                     firmware/main/link/ota.c:464
+```
+
+`ota.c` passed `.staging` and `.final` as **the same partition pointer** — the
+straightforward way to describe a single-partition update. `esp_https_ota_begin()`
+(ESP-IDF v5.5.5, `esp_https_ota.c:501-512`) only assigns
+`handle->partition.final` inside `if (ota_config->partition.staging !=
+ota_config->partition.final)`, and that inner `if` has **no else branch**. Passing
+them equal therefore leaves `handle->partition.final` unset, and
+`get_description_from_image()` dereferences `handle->partition.final->type` at
+line 602. LoadProhibited, before a single byte is written.
+
+### Fix
+
+Leave `.final` NULL in `esp_https_ota_config_t` so `esp_https_ota_begin()` takes its
+own `final = staging` path, which is the intended semantics. One-field change in
+`firmware/main/link/ota.c`, commented at the site.
+
+### Notes for anyone repeating this
+
+- The coredump partition holds a dump, but `idf.py coredump-info` refuses it when the
+  build directory no longer contains the exact ELF that crashed
+  (`coredump SHA256(...) != app SHA256(...)`). Keep the ELF, or reproduce under the
+  console build instead.
+- The console is UART0 with `CONFIG_ESP_CONSOLE_SECONDARY_NONE` and the protocol link
+  owns USB-Serial-JTAG, so a shipping build cannot report a panic over the cable. A
+  diagnostic build with `CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y` is currently the only
+  way to see one; it interleaves logs with protocol frames and must not supply
+  acceptance evidence.
+
+## V2 Task 11 — two concurrent TLS sessions break the download, fixed 2026-08-19
+
+Found while attempting Step 10's rollback test. The broken image C never installed:
+the download failed reproducibly ~7 s in, three times, including under the console
+build. The server was innocent — the offer was correct and
+`GET /v1/firmware/<version>.bin` returned HTTP 200 with the right embedded version —
+and it was not a timeout (those are 120 s no-progress, 1800 s total).
+
+### Root cause
+
+```
+I esp_https_ota: Starting OTA...
+I esp_https_ota: Writing to <ota_1> partition at offset 0x420000
+E esp-aes: Failed to allocate memory
+E esp-tls-mbedtls: read error :-0x0001
+E esp-tls-mbedtls: read error :-0x7180
+E esp_https_ota: data read -1, errno 0
+W ota: firmware check failed: ESP_FAIL
+```
+
+`esp-aes` is the **hardware AES accelerator**. Its DMA buffers must come from internal
+memory — PSRAM cannot serve DMA — and `CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL` reserves
+only 32 KB against 228 KB of internal RAM already committed to LVGL and WiFi. With the
+WSS protocol link live, a second TLS session for the download cannot get its buffers.
+
+Same family as this session's first defect: moving mbedTLS's own allocations to PSRAM
+(`CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC`) did **not** move the AES driver's DMA buffers,
+and it cannot — they are DMA by definition.
+
+### Fix
+
+`install_update()` suspends the WebSocket for the duration of the download and resumes
+it on every failure path (`0ad1a51`). Owner chose this over raising the internal
+reserve (which would take RAM from the pool behind two previous incidents) or
+disabling hardware AES (which would slow every TLS operation).
+
+Two implementation notes that matter:
+
+- **`stop()`, not `close()`.** The client sets `enable_close_reconnect`, so a graceful
+  close immediately re-dials and reintroduces the second session.
+- **Every failure path resumes.** Only success skips it, because it reboots. A failure
+  returning without reopening the link would leave the display server-less until the
+  next reset — a recoverable download failure turned into a dead device.
+
+### This retracts part of Step 9's earlier result
+
+Step 9's happy path was recorded as PASS earlier the same day. It did complete an
+update, but only because the WSS link happened not to be established while that
+download ran — the log shows it still failing `CANNOT_RESOLVE_HOSTNAME` at the time.
+**That pass was timing, not a working mechanism.** Step 9 must be re-run with the link
+established before OTA can be called verified.
+
+### Observability gap worth closing
+
+The protocol reports OTA *state* but never an OTA *reason*: no field in
+`StatusResponse`, none in the server's `AppSnapshot`. A device that fails to update
+reports `ota_state: failed` and nothing else. Diagnosing this one required a
+console-build reflash of the board on the desk; a fleet device could not be diagnosed
+at all.
+
+## V2 Task 11 Step 10 — rollback verified on the board, 2026-08-19
+
+Deliberately broken image `m1-rollback-c2` (an early `abort()` before
+`ota_mark_running_image_valid()`) published and offered to a device running
+`m1-226-gaff8e7d`. Started from a full `idf.py flash` of `m1-225-g0ad1a51`, so the
+bootloader on the board is the one carrying `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE`.
+
+Observed, unattended end to end:
+
+```
+10:56:13  server: device link established
+10:56:14  server: firmware check current=m1-226-gaff8e7d
+10:56:14  server: device link closed          <- suspended for the download
+10:56:17..35  ota=downloading (18 s)
+10:56:41  m1-226-gaff8e7d  ota=checking  up=1941   <- back on B already
+10:56:47  m1-226-gaff8e7d  ota=failed    up=8021
+```
+
+Flash and otadata afterwards:
+
+```
+ota_0: m1-rollback-c2      otadata[0]: ota_seq=3 -> ota_0  state=4 (ABORTED)
+ota_1: m1-226-gaff8e7d     otadata[1]: ota_seq=2 -> ota_1  state=2 (VALID)
+```
+
+So C was really downloaded and installed, really booted, really failed to validate,
+and the **bootloader really rolled back** — the device returned to B with no reflash
+and no human intervention. The rollback path is now exercised rather than assumed.
+
+Two things fell out of this run:
+
+- The `device link closed` one second after the firmware check is the Task 11
+  serialization fix (`0ad1a51`) visible from the server side.
+- The trailing `ota=failed` is **not** a fault. After rolling back, the device checked
+  again, found the server still advertising the image that had just failed, and
+  refused to reinstall it — `reject_reinstall_of_failed_image()` doing its job. That
+  is CLAUDE.md's "refused forever" rule observed rather than assumed, and it is why a
+  corrected rebuild must carry a new version string.
+
+## V2 Task 11 Step 11 — deferral FAILS on hardware, and why, 2026-08-19
+
+**Result: the update began while a pomodoro was running.** Not a near miss — a clean
+failure of the gate item.
+
+Setup: pomodoro confirmed `state: running, remaining_seconds: 268` server-side, version
+`m1-227-gf14f241` published and offered, board reset to trigger its boot check.
+
+```
+11:32:04  reset (pomodoro running, 268 s left)
+11:32:14  ota=checking      up=7101
+11:32:20  ota=downloading   up=13136
+11:32:32  ota=downloading   up=25221
+11:32:46  m1-227-gf14f241   ota=idle   <- updated anyway
+```
+
+### Root cause: the device has no link when the check runs
+
+```
+11:32:16  WARN device link refused: owner already live  device_id=dev-0003
+11:32:16  DEBUG firmware check                          current=m1-226-gaff8e7d
+11:32:17  WARN device link idle timeout, closing
+11:32:17  INFO device link closed
+11:32:44  INFO device link established                  <- 28 s after the reboot
+```
+
+The board rebooted and reconnected faster than the server noticed the old socket was
+dead, so **the server refused its own device** ("owner already live"). The stale link
+timed out a second later, but by then the device had backed off. The firmware check
+therefore ran with **no link at all**, so no host state had been replayed, so
+`protocol_task_ota_blocked()` saw no running pomodoro and the download proceeded.
+
+The deferral logic is not broken. The state it depends on is simply absent at the only
+moment a check ever happens — boot. Since the scheduled interval is 24 h, the guard as
+built protects a timer started *between* boots and essentially never protects one at
+boot, which is when the check actually fires.
+
+### Two systemic findings from the same run
+
+1. **A quick reboot costs ~28 s of disconnection.** The server's single-owner refusal
+   does not distinguish "a second device is impersonating this one" from "this device
+   just rebooted and its old socket is stale". The device is refused, backs off, and
+   waits. Reconnection is delayed by the guard meant to protect it.
+2. **A link drop discards a running pomodoro.** Before the reboot the timer read
+   `running, 268 s`; after reconnect it reads `idle, 300 s`. Task 9 Step 4 specifies
+   "on close, shut the runtime down so a reconnect starts cleanly", so the runtime is
+   torn down and rebuilt from stored config on every link close, taking live timer
+   state with it. Combined with the earlier finding that a config apply also resets a
+   running timer, **a networked pomodoro survives neither a config edit nor a link
+   blip** — and link blips are routine.
+
+### Not fixed in this session
+
+All three are entangled: the deferral needs both a link and replayed state at check
+time; the link is delayed by the refusal; and the state would be discarded by the
+reconnect anyway. Fixing the deferral alone would not make it work. The candidate
+directions — let a reconnecting device take over its own stale socket, persist or
+replay live timer state across a reconnect, or delay the boot check until state has
+arrived — are design decisions with real consequences, not local patches, and were
+left for the owner rather than chosen unilaterally.
+
+## V2 — correction: the ~28 s reconnect was the device's backoff, not the server, 2026-08-19
+
+The Step 11 entry above says the server's single-owner refusal "delays the device it is
+meant to protect". That misattributes it, and the record should not stand as written.
+
+The server behaved well: it refused the duplicate at 11:32:16.772 and had closed the
+stale link by 11:32:17.034 — **262 ms**. It was not slow to notice.
+
+The delay was the device's own reconnect curve. `net_link_start()` runs at
+protocol-task init, before DHCP completes, so the first attempts of every boot fail on
+`ESP_ERR_ESP_TLS_CANNOT_RESOLVE_HOSTNAME` by construction. `configure_next_reconnect()`
+advanced the backoff on each of those, so by the time the network could carry a
+connection the curve was already several doublings up the 1 s → 60 s ramp. The 409
+refusal then cost one more doubling on an already-large delay. Refusal was the last
+straw, not the cause.
+
+**Fix:** hold the backoff at its 1 s floor while `wifi_station_state()` is not
+`CONNECTED`, so failures that happened when there was no network to fail against do not
+penalise the first attempt that could have worked. Failures *after* the station has an
+IP still back off normally.
+
+The general lesson is worth keeping: a retry curve that starts before its dependencies
+are up spends its patience on failures that were never informative.
+
+### Measured on the board after the fix (2026-08-19 11:59 UTC)
+
+Reset-to-`device link established`, from the server's own log:
+
+| run | reset | established | elapsed |
+|---|---|---|---|
+| baseline (before fix) | 11:32:04 | 11:32:44 | ~40 s, one `refused` |
+| 1 | 11:59:28 | 11:59:38 | **~10 s** |
+| 2 | 11:59:39 | 11:59:48 | **~10 s** |
+
+Run 2 reset immediately after run 1's link came up, so it is the same stale-socket
+scenario that produced the 409 before. **No `device link refused` line appears for
+either run** — the device now reconnects before its own stale link matters, so the
+refusal never fires. The single-owner guard is unchanged; it simply stopped being
+provoked.
+
+## V2 — two loose ends closed honestly, 2026-08-19
+
+### The "rotation stalls on the pomodoro entry" anomaly is RETRACTED
+
+Re-run deliberately with known timestamps: timed playlist, 15 s dwells, entries
+clock / weather / pomodoro, applied 12:23:48.
+
+```
+12:24:08  clock       12:24:38  pomodoro
+12:24:18  weather     12:24:47  pomodoro
+12:24:28  weather     12:24:57  clock
+                      12:25:07  weather
+```
+
+Two full cycles, each entry dwelling ~15 s, wrapping cleanly **past** the pomodoro.
+Rotation does not stall. The earlier suspicion rested on five frames and an inferred
+config-apply time, and the inference was simply wrong. No defect; nothing to fix.
+
+### Task 8 observation 4's "widening gaps" is still NOT observed on a shipping build
+
+An attempt to evidence it indirectly — vary the server outage length, measure how long
+the device takes to return — **does not work, and the method should not be repeated.**
+When the server returns, the device sits at a random point inside its current retry
+interval, so the measured delay is a uniform sample in [0, T], not T itself:
+
+| outage | time to return |
+|---|---|
+| 40 s | 32 s |
+| ~600 s | **10 s** |
+
+The longer outage returned *faster*. That is not evidence against widening; it is
+evidence the measurement carries almost no information. Two samples from two
+distributions cannot show one is wider.
+
+What *is* supported: the doubling curve is unit-tested (`test_reconnect_backoff`), the
+code is a plain 1 s → 60 s ramp, and the diagnostic console build showed consecutive
+gaps of 8.8 s → 13.6 s directly. What is missing is the observation under acceptance
+conditions, which needs the device's own retry log — i.e. a console build, which by
+this session's own rule cannot supply acceptance evidence.
+
+Also confirmed during those outages: `uptime_ms` climbed continuously past 1,187,131 ms
+with no reboot and no spin, and the device reconnected unattended after both a 40 s and
+a ~10 minute outage. That is the other half of the observation, and it does pass.
+
+## V2 Task 11 Step 11 — blocker fixed in software, NOT yet observed, 2026-08-19
+
+The deferral failure recorded above has been root-caused into two remaining defects
+and both are fixed. **Nothing in this entry was seen on the board.** It exists so the
+next board session knows what to re-run and what to expect; the step stays open.
+
+### What was actually wrong
+
+Two independent defects, either of which alone would have kept the deferral useless:
+
+1. **The boot check waited on the radio, not on the owner.** `perform_check()` gated
+   on `wait_for_wifi()` (`wifi_station_state() == PROTOCOL_WIFI_CONNECTED`), while
+   the deferral gate `protocol_task_ota_blocked()` is computed from *host-pushed*
+   state — a live interrupt or a running progress timer in the widget model. The
+   station gets an IP seconds before the link is up and long before any state has
+   been replayed, so the guard read a variable that was provably empty at the only
+   moment it is consulted.
+2. **A link drop discarded the running pomodoro.** The server built a `RuntimeHandle`
+   per WebSocket and shut it down on close, so live timer and interrupt state was a
+   property of a transport connection rather than of the device.
+
+Fixing either alone would not have made the deferral work: the first gives the guard
+a link to wait for, the second gives it a running timer still there to see.
+
+### The fixes
+
+`3f83911` (firmware) adds `protocol_task_owner_state_ready()` — `link.online` **and**
+`widget_model_config(...) != NULL` — and a bounded `wait_for_owner_state()` of
+`OTA_OWNER_WAIT_MS` = 60 s after the WiFi wait, in both tiers. **The wait fails open
+by design:** on timeout the check proceeds anyway, because a device whose owner can
+never become ready must stay updatable rather than be stranded by a bad config. Same
+reasoning as the local-only image validity gate.
+
+`12e5f4d` (server) makes the runtime per-device and long-lived, with sockets
+attaching as replaceable transports pinned by a generation counter. A reconnect runs
+`connect()` and replays time, layout, latest fields, active screen and live
+interrupts. `connected` in `GET /v1/devices/{id}` now reports socket liveness rather
+than runtime existence, so a retained runtime cannot make an unplugged device look
+attached; single ownership still refuses a second concurrent owner, now by
+`compare_exchange` on the per-device entry.
+
+### What to expect when re-running it
+
+Start a pomodoro server-side, confirm `state: running`, publish a newer version,
+reset the board. The check should now stall at `ota=checking` while the timer runs
+rather than advancing to `downloading`, and proceed once the timer finishes. The
+reboot is the point — it is the only moment a check ever fires, since the interval is
+24 h.
+
+Two things worth watching, neither yet observed:
+
+- The bounded wait adds up to 60 s before a check when no owner appears. On a healthy
+  networked device the link now lands around 10 s, so the wait should be short.
+- With the runtime retained, `GET /v1/devices/{id}` returns a `snapshot` even while
+  `connected` is false. That is intended and is an improvement — the timer stays
+  visible while the board is offline — but it changes what the field means.
+
+### Carried forward as a V3 item
+
+`device_links` entries are now never removed, so a runtime is retained for every
+device that has ever connected, and `MAX_CONCURRENT_LINKS` no longer bounds the
+number of retained runtimes. For a single-tenant V2 with one board this is what was
+wanted. It needs a lifetime rule before more devices exist.
+
+## V2 Task 11 Step 11 — deferral PASSES on hardware, 2026-08-19
+
+The failure recorded earlier today is closed. Both halves of the step were observed on
+the board, on a shipping build, in one continuous run.
+
+Setup: device on `v2.0.0-gate2` (carrying the owner-wait fix), firmware catalog pinned
+to `v2.0.0-gate1` so an update was genuinely available in both directions, config
+temporarily reduced to a single-entry pomodoro playlist so the card could not rotate
+away from a tap. Timer started by a human tap, confirmed `running, 290` server-side,
+board hard-reset over USB at 18:08:48 with the timer running.
+
+### It did not begin
+
+| time | ota | uptime | timer |
+| --- | --- | --- | --- |
+| 18:08:26 (pre-reset) | idle | 15748866 | running 290 |
+| 18:09:03 | idle | 13292 | running 253 |
+| 18:10:36 | idle | 107299 | running 159 |
+| 18:13:20 | idle | 269411 | completed 0 |
+
+`ota` never left `idle` and the version never moved, across the whole five-minute
+timer. The morning run was `downloading` by uptime 13136. `idle` rather than `checking`
+is what the code does: the owner wait returns `ESP_ERR_INVALID_STATE`, `perform_check`
+sets `PROTOCOL_OTA_IDLE`, and `ota_task` enters its deferral poll.
+
+### The timer survived the reboot
+
+`running 290` before the reset, `running 253` after it — counting continuously across a
+device reboot that took uptime back to 13 s. The morning run read `idle, 300` at this
+point. This is the retained-runtime fix observed on hardware, and it is the half that
+made the deferral meaningful: without it there would have been no running timer left
+for the guard to see.
+
+### It proceeded once the state cleared
+
+The completion alert is `on-timer-finish` with `hold: until-dismissed`, so
+`interrupt_live` stayed true and the deferral correctly held past the timer's end as
+well. One dismissing tap released it:
+
+```
+20:25:44  DEBUG firmware check  device_id=dev-0003  current=v2.0.0-gate2
+20:25:45  INFO  device link closed                  device_id=dev-0003
+20:26:11  INFO  device link established             device_id=dev-0003
+20:26:14  DEBUG firmware check  device_id=dev-0003  current=v2.0.0-gate1
+```
+
+The check fired within a second of the dismissal, the link was suspended for the
+download, and the device was back 26 s later on the new image. Afterwards:
+`version v2.0.0-gate1`, `ota idle`, `uptime 57356`, `connected true`, `reconnects 3`,
+every error counter 0. The panel showed the pomodoro card replayed after the update —
+`Focus 00:00`, `ELAPSED 05:00`, `STATUS Done` — matching the server's `completed 0`,
+so **the retained runtime survived the firmware update as well as the reboot.**
+
+### Three things to carry forward
+
+1. **An until-dismissed alert postpones firmware updates indefinitely.** Correct
+   behaviour — do not update while something is demanding attention — but it means an
+   unattended device with an undismissed alert will never update.
+2. **`GET /v1/devices/{id}` exposes no interrupt or alert field.** `snapshot` carries
+   config, runtime, device, providers, pomodoros, card_data, card_errors, persistence
+   and diagnostics, so "is an interrupt live" cannot be read from the wire and had to
+   be inferred. Same observability family as the missing OTA failure reason.
+3. **The sequence reads as a fault to an observer.** The owner reported the panel
+   "starting to reboot", then a disconnected period, then the pomodoro reappearing at
+   zero, and took all three for a malfunction. They are, in order: the update takeover
+   installing, the deliberate link suspension, and the retained runtime replaying
+   `completed` to a freshly booted device.
+
+### Trap found while staging this
+
+**A flashed build is silently reverted by the catalog.** `FirmwareCatalog::check()`
+offers its pinned version whenever the device's differs — in either direction — so a
+freshly flashed `v2.0.0-gate1` was replaced by `m1-233-g024b1ce` within a minute of
+`idf.py flash`. This is by design (`firmware.rs`: "Config, not a database: V2 has
+exactly one image live at a time"), but it means a downgrade path exists by design and
+that a board session must update the catalog pin, not just flash. Also note
+`firmware/version.txt` now pins the version explicitly, because `git describe` served a
+stale cached string from a dirty tree — the built binary carried `m1-233-g024b1ce`
+while `git describe` said `m1-239-g7de45c2-dirty`.
+
+Evidence: `~/deskmate-hw-sessions/2026-08-19-v2-exit-gate/`, frames
+`181106Z-step11-deferred-timer-running`, `181445Z-step11-timer-completed`,
+`202735Z-step11-updated-to-gate1`. Note the camera moved between the second and third,
+so those two must not be compared as if fixed.
+
+## V2 exit gate — unattended run, 2026-08-19 evening
+
+Run with the owner asleep, so only items needing no hands were attempted. Session
+evidence: `~/deskmate-hw-sessions/2026-08-19-v2-exit-gate/`.
+
+### Step 2 baseline (freshly booted networked device, 20:52)
+
+- Image **1,548,256 bytes** (`0x179FE0`), 63% of the app partition free.
+- Free heap **8,310,267**, byte-identical across three samples 40 s apart.
+- RSSI −37, `ui_queue_high_water` 1, `event_queue_high_water` 0, all error counters 0.
+
+### Gate item 3 — link loss and recovery: server half PASSES
+
+Server stopped 20:53:23; standalone fallback observed 20:54:38 (`00:54`, `Thu, Aug 20`,
+"Connect deskmate app" — local time correct for UTC+4, so SNTP holds the clock with no
+server); server started 20:55:06; link back 20:55:31, about 25 s.
+
+**"Without a reboot" is proven by uptime continuity, not by the panel** — the two look
+identical. The board was reset at 20:51:44 and reported `uptime 224371 ms` at 20:55:31
+against 227 s of wall clock, so the counter never restarted.
+
+Two traps for whoever reads these samples. `reconnects` reads **0** after recovery
+because that is the freshly started *server* process's counter, not the device's. And
+the running timer resets to `idle/300` across a server restart: runtime retention
+survives a link drop, not a restart of the process holding the runtime.
+
+**The WiFi half was NOT run.** It needs router access or a hand. The tempting software
+substitute was rejected on inspection: Caddy on that host reverse-proxies about
+seventeen unrelated services, so stopping the tunnel would have taken the owner's whole
+homelab down overnight to test one gate item.
+
+### Gate item 2 — tier switch: NOT RUN, and it costs a device identity
+
+`NetworkConfig` carries `token`, and the server stores only SHA-256 digests, so the
+plaintext exists exactly once, at mint time. Returning a device from local tier to
+networked therefore requires minting a **new identity**: the board returns under a new
+`device_id` with a fresh config and the previous entry is orphaned. That follows from
+"secrets are never readable back over the wire" rather than being a defect, but it makes
+this the wrong item to attempt unattended — a failure leaves the board with no owner.
+
+### Gate item 6 — 30-minute soak: PARTIAL
+
+20:57:42 → 21:27:55 UTC, 30 min 13 s, 31 samples at 60 s, 15 timelapse frames.
+
+| metric | result |
+| --- | --- |
+| connectivity | `conn=True` in all 31, never dropped |
+| free heap | 28-byte band, 8310703–8310731, no trend, first and last identical |
+| `ui_queue_high_water` | 2, constant |
+| `event_queue_high_water` | 0, constant |
+| malformed / crc / overflow / dropped | 0 throughout |
+| uptime | 356472 → 2169118 ms continuous, matching wall clock; no reboot |
+| rotation | clock 11 / weather 11 / pomodoro 9 |
+
+**Two qualifications that matter.** The heap is not "flat at the Step 2 baseline" as the
+checklist words it: the fresh-boot baseline was 8,310,267 and steady state sits about
+456 bytes higher once link and providers are up. There is no leak — no drift in either
+direction, and the run ends where it began — but those are different quantities.
+And **taps and interrupts were not exercised**, so this is not the mixed soak specified.
+
+### OTA failure reason — works on hardware, and is not yet good enough
+
+Provoked a real remote failure by pinning the catalog to `v2.0.0-nofile`, for which no
+image exists, so the URL returns HTTP 404. Board reset 21:33:05:
+
+```
+21:33:17  ota=checking  up=9369
+21:33:32  ota=failed    up=24584   last_ota_error = "begin: ESP_FAIL"
+```
+
+Where this morning's identical failure showed `ota_state: failed` and nothing else —
+which is what forced a console reflash of a working board — the cause is now readable
+over the wire without a cable.
+
+**But `begin: ESP_FAIL` still hides the 404.** `esp_https_ota_begin()` performs the first
+request itself and fails before the download stage, and ESP-IDF collapses the HTTP error
+into a bare `ESP_FAIL`, so the most likely remote failure — a missing, moved or
+unreadable image — still tells an operator nothing actionable. Follow-up: read
+`esp_http_client_get_status_code()` through `http_client_init_cb` so it renders
+`begin: HTTP 404`.
+
+Worth stating plainly: this weakness was invisible to a fully green test suite and
+surfaced only because the check was carried through to the board.
+
+`v2.0.0-nofile` is now permanently burned as a version string by
+`reject_reinstall_of_failed_image()`.
+
+## V2 — the OTA failure-reason commit broke OTA downloads, 2026-08-19 late
+
+**`3f2aa03` is a regression and must not be trusted as it stands.** Every OTA download
+from firmware carrying it fails:
+
+```
+last_ota_error = "download: ESP_ERR_MBEDTLS_SSL_READ_FAILED"
+```
+
+### Evidence that isolates it
+
+| observation | result |
+| --- | --- |
+| `v2.0.0-gate1` (before `3f2aa03`) downloading `v2.0.0-gate3` | **succeeded**, 21:31 |
+| `v2.0.0-gate3` (at `3f2aa03`) downloading `v2.0.0-gate4` | failed, 21:46 and 21:49 |
+| `v2.0.0-gate3` downloading `v2.0.0-gate1.bin`, a known-good, previously-installed image | failed, 21:52, same error |
+| server serving that file on the LAN | HTTP 200, 1,548,256 bytes |
+| server serving it through the public Cloudflare tunnel | HTTP 200, 1,548,256 bytes, 0.43 s |
+
+So it is not the image, not the server, not the tunnel and not the network. The only
+firmware change between the working and broken builds is `3f2aa03`.
+
+### Mechanism: NOT established. The first hypothesis was wrong.
+
+The initial suspect was that `3f2aa03`'s custom HTTP event handler (`download_http_event`)
+displaced one `esp_https_ota` relies on to read the image body. **That is refuted by the
+IDF 5.5.5 sources**, and the refutation should be kept so nobody re-derives it:
+
+- `esp_https_ota_begin()` passes the supplied config straight to
+  `esp_http_client_init()`; it never calls `esp_http_client_set_event_handler()`.
+- `esp_https_ota_perform()` reads the image with `esp_http_client_read()` directly.
+- `http_on_body()` copies the body *first*, then dispatches `HTTP_EVENT_ON_DATA`, and
+  ignores the callback's return value.
+- `HTTP_EVENT_ERROR` is dispatched only after the transport read has already failed.
+
+So a user event handler cannot displace an OTA body reader, because there is no
+event-driven body reader to displace.
+
+The remaining concrete suspect is **internal DRAM**: `3f2aa03` adds ~105 bytes of it
+(`s_last_error` plus its `portMUX_TYPE`), and `0ad1a51` already established that this
+board starves the AES accelerator's DMA allocations out of internal RAM. That is
+plausible and unproven; no second fix was invented for it.
+
+The isolation to `3f2aa03` is empirical and stands on the table above. What does not
+stand is any explanation of *why*.
+
+### The handler hypothesis is now refuted by experiment too
+
+A build with the custom handler and all its status-capture machinery removed
+(`v2.0.0-gate5`) was flashed and tested at 22:09. **It still fails:**
+
+```
+gate5 (handler removed) -> failed   last_ota_error = "download: ESP_FAIL"
+```
+
+So removing the handler does not fix the download, matching what the IDF sources already
+said. Two hypotheses are now dead: the handler is not the mechanism, and neither is
+anything else that removal touched.
+
+Note the reason string got *worse* — `download: ESP_FAIL` instead of
+`download: ESP_ERR_MBEDTLS_SSL_READ_FAILED` — because the removed `prefer_transport_error`
+machinery was what surfaced the specific mbedTLS error. That machinery is worth keeping
+for its diagnostic value; it is not implicated in the regression.
+
+### Where a morning session should start
+
+The regression is somewhere inside `3f2aa03` and has not been bisected. It is a ~159-line
+diff to one file, so bisecting it is a bounded job:
+
+1. Build a variant with only the wire/protocol half of `3f2aa03` (the `StatusResponse`
+   key 30 plumbing) and none of the `ota.c` instrumentation. If downloads work, the
+   cause is in `ota.c`.
+2. Then add back the `ota.c` pieces in two halves — the static state
+   (`s_last_error` + its `portMUX_TYPE`, ~105 bytes of **internal DRAM**) versus the
+   failure-path string formatting.
+3. The DRAM half is the standing suspect, because `0ad1a51` established that this board
+   starves the AES accelerator's DMA allocations out of internal RAM, and `free_heap`
+   reports PSRAM so it cannot show this. `heap_caps_get_free_size(MALLOC_CAP_INTERNAL)`
+   around the download would settle it — and if it is the cause, the field's storage
+   simply needs to move out of DRAM.
+
+Do not attempt this by reasoning alone; every step needs a flash and a download attempt,
+because no host test reaches this path.
+
+### Why this matters beyond the bug
+
+1. **Every gate was green.** Host tests, `idf.py build`, clippy and the full cargo
+   workspace all passed, before and after. Nothing in the software suite can reach this
+   path; only the board can. Treat "all tests green" on any `ota.c` change as saying
+   nothing about whether OTA still works.
+2. **The feature that broke OTA is what made the break diagnosable.** Without
+   `last_ota_error` this would have read `ota_state: failed` and nothing else — the
+   exact blindness the field was added to remove, and it would have cost another console
+   reflash to find. The field earns its keep even in the commit that introduced the bug.
+3. It also means the earlier hardware result stands: `last_ota_error` genuinely works.
+   What must be removed is only the event-handler mechanism behind the
+   `begin: HTTP <status>` refinement.
+
+### Board state
+
+Restored to `v2.0.0-gate1` over USB (otadata reset to initial, app written at 0x20000),
+because gate1 carries both verified fixes — the owner wait (`3f83911`) and the retained
+runtime (`12e5f4d`) — and none of this regression. Confirmed healthy afterwards:
+connected, `ota=idle` after a clean check, rotation running, every error counter 0,
+heap steady at ~8,310,600. The catalog is pinned to `v2.0.0-gate1` so it stays put.
+
+**Do not ship `3f2aa03` or the version strings `v2.0.0-gate3`/`v2.0.0-gate4` to a board.**
+Note `v2.0.0-nofile` and `v2.0.0-gate4` are now burned as version strings on this device
+by `reject_reinstall_of_failed_image()`.
+
+## V2 gate item 3 — third failure variant: network path down, 2026-08-20
+
+Run with the owner's explicit authorisation to take the shared reverse proxy down
+("используй пока caddy, потом поменяем"), having first refused to do it unasked because
+Caddy fronts about twenty of their unrelated containers.
+
+**This is not the WiFi-drop variant.** The radio stays up; what breaks is the path to
+the server (Cloudflare → cloudflared → **Caddy**). It is a third, genuinely distinct
+failure mode from the server-process stop already recorded, because the failure appears
+at a different layer — an upstream that refuses rather than a socket that closes
+cleanly. **The true WiFi-drop half still needs router access and remains unrun.**
+
+| event | time (UTC) |
+| --- | --- |
+| Caddy stopped | 05:18:58 |
+| standalone fallback observed | 05:20:34 |
+| Caddy restarted | 05:20:40 |
+| link re-established | by 05:21:06 |
+
+Outage bounded to **102 s** by making the restart part of the same scripted step, so a
+slow operator could not extend someone else's downtime.
+
+- `052034Z-item3b-path-down` — standalone fallback: `09:20`, `Thu, Aug 20`, "Connect
+  deskmate app". Local time correct for UTC+4.
+
+**No reboot, again proven by uptime continuity:** 25,579,321 ms at 05:18:44 and
+25,722,382 ms at 05:21:06 — a delta of 143 s against 142 s of wall clock. `reconnects`
+went 0 → 1, and every error counter stayed 0, including `malformed_frames`, `crc_errors`
+and `dropped_responses`. `valid_frames` continued climbing without a gap.
+
+Recovery took about 26 s from the path returning.
+
+### Incidental: a seven-hour clean run
+
+Before this test the board had been up **25,579,321 ms (7.1 hours)** on `v2.0.0-gate1`
+with `reconnects: 0`, `valid_frames: 14546` and **every error counter at zero** — no
+link drop, no malformed frame, no dropped response, heap steady around 8,310,500. That
+is a longer continuous observation than any soak in the plan asks for, and it came free.
+
+## V2 gate item 2 — the non-destructive half PASSES, 2026-08-20
+
+The cable was exercised against a device in networked tier.
+`net_config_usb_message_allowed()` permits only `STATUS_REQUEST`, `NETWORK_CONFIG` and
+`FACTORY_RESET` there — the cable is the configurator, the server is the owner — and
+that is what the board does:
+
+| message over USB | result |
+| --- | --- |
+| `STATUS_REQUEST` | allowed; reported `tier networked`, `capabilities 0x…cb` (203), wifi connected, ip 192.168.8.168 |
+| `TIME_SYNC` | `error: device rejected request (WrongTier): device is owned over the network` |
+| `PUSH_DATA` | same typed refusal |
+| `ACTIVATE_SCREEN` | same typed refusal |
+| `TRIGGER_INTERRUPT` | same typed refusal |
+
+The device was unharmed by the attempts: `valid_frames` kept climbing, `malformed`,
+`crc`, `overflow` and `dropped_responses` all stayed 0, and the link stayed online.
+
+**Tooling note:** `deskmate-cli apply-config` could not be used for this. That subcommand
+dates from M2 and still expects the old `widgets`/`screens` document, so it rejects a
+schema-v4 config locally and never reaches the wire. `APPLY_CONFIG` is in the refused set
+by construction and travels the identical gate as `TIME_SYNC`, which was exercised — but
+to satisfy the checklist's wording literally, the CLI needs a v4-aware apply.
+
+### The destructive half is blocked on a secret, by design
+
+Going to local tier and back cannot be completed without the **WiFi SSID and PSK**.
+`net_store_erase()` calls `nvs_erase_all()`, so a factory reset wipes the credentials
+along with everything else, and `NetworkConfig` requires them to provision back. They are
+not recoverable from the device — the "secrets are never readable back" rule working as
+intended.
+
+Combined with the identity cost already recorded (returning to networked needs a
+plaintext token, so a new identity must be minted), **a tier round-trip costs one device
+identity and requires the WiFi password supplied out of band.** Neither is a defect; both
+make this the most expensive item in the gate.
+
+Checked while looking: the repository contains only `<ssid>`/`<psk>` placeholders. No real
+credentials are committed.
+
+## V2 — OTA download regression BISECTED: 105 bytes of static DRAM, 2026-08-20
+
+Root cause found, isolated to a single variable, with a control. **The cause is not the
+instrumentation `3f2aa03` added. It is the storage.**
+
+### The experiment
+
+Three builds from the identical pre-`3f2aa03` base, each flashed and asked to download
+`v2.0.0-gate2` from the catalog:
+
+| build | what was added | download |
+| --- | --- | --- |
+| `v2.0.0-bisectC` (**control**) | nothing | **succeeded** — installed gate2 and rebooted into it |
+| `v2.0.0-bisectA` | `char[97]` + `portMUX_TYPE` statics, touched under `taskENTER_CRITICAL` | failed |
+| `v2.0.0-bisectB` | the same statics, touched without any critical section | failed |
+
+A exonerates nothing on its own; B exonerates the spinlock; C proves the base still
+works, so the bisect is valid rather than an environmental drift. What remains is **~105
+bytes of `.bss` in internal DRAM**.
+
+Also ruled out earlier, and worth not re-testing: the custom HTTP event handler (refuted
+from IDF sources *and* by removing it and still failing), the image, the server, the
+tunnel and the network.
+
+### It is layout, not capacity
+
+`idf.py size` on the control build:
+
+```
+DIRAM   219307 used  (64.17%)   122453 remain   341760 total
+IRAM     16384 used  (100.0%)        0 remain    16384 total
+```
+
+There are **122 KB of static DIRAM headroom**, so 105 bytes cannot be exhausting a
+budget. The effect must therefore be positional: shifting `.bss` by ~105 bytes moves the
+runtime heap's blocks, and something on the TLS/AES path — which `0ad1a51` established
+must allocate DMA-capable **internal** RAM — stops finding what it needs. The contiguity
+mechanism is inference; what is proven is that the 105 bytes are causal and that total
+capacity is not the constraint.
+
+This is the same class as V1's boot crash-loop, recorded above, where "the custom
+partition table itself was not the cause, only a contributing memory-layout shift".
+
+Note also **IRAM is 100% full with zero remaining.**
+
+### What this means, beyond one feature
+
+**Any addition to firmware statics can break OTA downloads, unpredictably, with every
+test green.** That is the standing hazard, not the `last_ota_error` feature. Before
+adding static state to firmware — especially anything reached from `ota.c` — assume the
+download path is at risk and verify it on the board.
+
+For `last_ota_error` specifically, the fix is to keep the reason out of internal DRAM:
+carry a compact numeric code (stage, `esp_err_t`, HTTP status) and format the string in
+the protocol task into the status structure that already lives in PSRAM, rather than
+holding a 97-byte buffer in `.bss`. Whether even a few bytes are safe is unknown, which
+is itself the point — the margin is not a number anyone currently knows.
+
+The deeper question the owner may want to answer first: *why* is the internal-RAM
+situation this brittle, and can headroom be bought back (LVGL buffers, WiFi/TLS
+tuning) so that adding a variable stops being a risk?
+
+## V2 gate item 3 — a three-hour outage survived in place, 2026-08-20 (unplanned)
+
+A mains power cut took the homelab down while the board stayed on USB power and its own
+battery. This produced a far longer link-loss observation than any test in the plan, and
+it passes.
+
+| event | time (UTC) |
+| --- | --- |
+| last healthy network sample | 05:39:59 |
+| server host lost power | some point after that |
+| server process started again | 08:50:41 |
+| tunnel reachable again (Cloudflare 401, not 530) | 08:52:45 |
+| **device link established** | **08:52:46** |
+
+Device state throughout, read over the cable while the link was down: `wifi connected`
+(rssi −43, ip 192.168.8.168), **`link standalone`**, `ota idle`, every error counter 0.
+
+**No reboot across ~3¼ hours without an owner**, proven by uptime continuity on the same
+build: `up=203612` at 05:39:59 and `up=11992401` afterwards — a delta of 11,788,789 ms
+(3 h 16 m) against the same elapsed wall clock. The radio stayed associated the whole
+time; only the owner was gone, which is exactly the designed failure direction.
+
+### Two things worth keeping
+
+1. **The device reconnected one second after the path became reachable** — not after the
+   server started. `deskmate-server` had been listening since 08:50:41, but Cloudflare
+   answered 530 until 08:52:45, and the link came up at 08:52:46. For a networked-tier
+   device, "the server is up" means **the tunnel is connected**, not that the process is
+   running; the board dials the public URL, never the LAN address. A power-cut recovery
+   checklist should verify the tunnel, not just the unit.
+2. `reconnects` read **0** afterwards — again the freshly started *server* process's
+   counter, not the device's. This is the second time that has looked like a
+   contradiction; it is not.
+
+This supersedes nothing already recorded, but it is much stronger evidence than the
+engineered 102-second Caddy outage: three hours versus one hundred seconds, and it cost
+nothing to obtain.
+
+## V2 — OTA download regression FIXED and verified on the board, 2026-08-20
+
+`5699f1d` removes the regression `3f2aa03` introduced, keeping the feature.
+
+The reason is no longer stored as a string. Stage, `esp_err_t` and HTTP status pack into
+a 64-bit logical value held as **two lock-free 32-bit atomic halves**, with the existing
+OTA state atomic supplying the generation that makes a torn read detectable. The string
+is formatted only on read, into the caller's `protocol_status_response_t` buffer, which
+already lives in PSRAM.
+
+**Measured, not estimated:** `nm` on `ota.c.obj` shows `.bss` going **9 → 17 bytes**
+(`s_last_error` is exactly 8), against roughly 114 before. Baseline symbols for
+comparison are `s_task_starting` 1, `s_state` 4, `s_task` 4.
+
+A `atomic_uint_least64_t` was the obvious shape and is **wrong on this silicon**: GCC
+reports 64-bit atomics as not always lock-free, emits `__atomic_load_8`/`__atomic_store_8`,
+and ESP-IDF backs those with a **global `portMUX_TYPE`** — which would have reinstated a
+lock, and a system-wide one at that. Worth remembering before reaching for a 64-bit
+atomic anywhere in this firmware.
+
+### Hardware verification
+
+| check | result |
+| --- | --- |
+| download an image (`v2.0.0-gate6` → `v2.0.0-gate1`) | **succeeded**, ~55 s, reset 09:06:06 → running gate1 09:07:01 |
+| missing image provokes a reported failure | `ota_state failed`, `last_ota_error = "begin: ESP_FAIL"` |
+| a successful check clears a stale reason | after reset with a valid catalog: `ota idle`, `last_ota_error = null` |
+
+The three builds immediately before this one could not download at all, so the download
+is the decisive evidence rather than the test suite, which was green throughout the
+regression.
+
+The `begin: HTTP <status>` refinement stays dropped: it needed a custom event handler on
+the download client, and a working update mechanism beats a better diagnostic about the
+update mechanism.
+
+**Board left on `v2.0.0-gate6`**, catalog pinned to it, `ota idle`, `last_ota_error null`,
+all error counters 0. Version strings burned on this device by
+`reject_reinstall_of_failed_image()`: `v2.0.0-nofile`, `v2.0.0-gate4`, `v2.0.0-absent`.
+
+**The standing hazard is unchanged and still applies:** 105 bytes broke this, so any
+addition to firmware statics can break OTA downloads with every test green. Verify a real
+download on the board after touching firmware statics.
+
+## V2 gate item 1 — the headline demo PASSES, 2026-08-20
+
+USB physically unplugged at ~09:32, Mac companion app not running (checked: no Tauri
+process; the only node process is the parallel UI session's vite dev server, which never
+opens the port). `/dev/cu.usbmodem*` absent for the duration.
+
+The panel kept updating from the server throughout:
+
+| frame | what it shows |
+| --- | --- |
+| `093226Z-item1-cable-out-1` | weather card, **30°**, "Partly cloudy" — 31° the day before, so the provider data is live rather than frozen |
+| `093323Z-item1-cable-out-2` | rotation advanced |
+| `093347Z-item1-cable-out-3` | digital clock reading **13:33:50** with a ticking seconds field and the analog sub-dial — correct to the second for UTC+4 against a 09:33:47Z capture |
+| `093411Z-item1-cable-out-4` | rotation advanced again |
+
+Server side across the same window: `connected: true` continuously, `uptime` climbing
+1,285,241 → 1,397,265 ms with no discontinuity, `ota idle`, `reconnects` unchanged at 1,
+and `malformed`/`crc`/`overflow`/`dropped_responses`/`dropped_events` all 0. Rotation
+observed cycling clock → weather → pomodoro in the samples.
+
+So with no cable and no Mac app, the device is owned by the server over WiFi and the
+display keeps working — which is the whole point of V2.
+
+**The board has a battery, so this is link independence, not power loss.** Do not record
+it as a power test; the true power-loss variant remains a separate thing.
+
+## V2 — the battery is short-lived, which qualifies "unplug is link loss", 2026-08-20
+
+The board ran flat while unplugged and powered itself off. Observed: after the gate item 1
+cable pull the board was left on battery, and some hours later it had gone — no USB port,
+no reply to `ping 192.168.8.168` from the server host, no link re-established after the
+path came back, and a webcam frame that was solid black because the panel was genuinely
+off rather than because the virtual camera misfired.
+
+**This qualifies a claim already in the record.** "USB unplug is link loss, not power
+loss" is true only over a short window. It held for the minutes of the item 1 demo; it
+does not hold for hours. Anything left unplugged long enough becomes a power test whether
+or not that was the intent, and the transition is silent — the device simply stops.
+
+Two practical consequences:
+
+- Keep the cable in for long-running work (soaks, overnight observation) unless the point
+  *is* to drain it.
+- When a board goes unreachable on every channel at once — no serial port, no ping, no
+  link — check power before diagnosing anything else. Every other explanation costs more
+  time and this one is free to test.
+
+An attempt at gate item 7 (alert replay across a reconnect) was in progress when this
+happened and is recorded as **not run**, not as a failure: reconstructing the timeline
+afterwards showed the board had already rebooted at ~14:15:12 — before the test window
+opened at 14:17:22 — so its premise never held. It is being re-run.
+
+One reading trap worth naming, because it nearly caught me: with the runtime retained, a
+`GET /v1/devices/{id}` snapshot is still served while the device is gone, and its `device`
+fields are the **last values received**, not current ones. `up=66761` looked like a live
+uptime from a freshly booted board; it was a frozen sample from before the link closed.
+`connected: false` beside it is the only thing that says so.
+
+## V2 gate item 7 — alert replay across a reconnect PASSES, 2026-08-20
+
+Bounded-hold alert, fired while the link was down, delivered on reconnect. This is the
+path that has produced real defects twice, so it is worth the detail.
+
+Setup: pomodoro card, `duration_seconds` 120, alert `on-timer-finish` with a **bounded**
+hold of 600 s (not `until-dismissed` — the bounded variant is the one that broke before,
+when its countdown started at schedule time rather than delivery). Single-card playlist so
+the card could not rotate away from the tap.
+
+| event | time (UTC) |
+| --- | --- |
+| timer started by tap, confirmed `running/98` server-side | 18:40:56 |
+| path broken (Caddy stopped) — link closed | 18:40:58 |
+| timer completed **while offline** (98 s later) | ~18:42:34 |
+| path restored | 18:43:15 |
+| device link re-established | 18:44:06 |
+
+**Evidence of delivery is wire-level, not visual:** the device's `latest interrupt token`,
+read over the cable, went **60 → 85**. Before the test it was 60; after the reconnect it
+was 85, so an interrupt reached the device that had not before. Uptime was continuous
+across the whole window (1,268,941 → 1,346,860 ms), so this was a reconnect and not a
+reboot, and every error counter stayed 0.
+
+The path was broken rather than the server stopped, deliberately: restarting the server
+process destroys the runtime and the live timer with it, which would test "the server
+forgot" instead of "the server remembered while it could not reach the device".
+
+### Two things not resolved
+
+1. **The token jumped by 25, not 1.** Delivery is not in doubt — the counter moved — but
+   `busy_retry_and_reconnect_replay_reuse_identical_tokens` documents tokens as *reused*
+   across retries, so a jump of that size is unexplained. Possible token churn while
+   disconnected. Worth a look; it does not change the pass.
+2. **No panel frame exists for this run.** The webcam harness produced solid black on
+   every attempt, including with a 60-frame warmup, while the board was demonstrably
+   alive (link online, uptime climbing, CLI answering over USB). The physical OBSBOT is
+   held by its app and the virtual device returns black, so both paths are dead until the
+   app is sorted. This is the harness's own documented failure mode — "the virtual camera
+   can return a convincing wrong frame" — and it also weakens an earlier inference in this
+   session where a black frame was read as "the panel is off". That conclusion happened to
+   be right, but it was carried by the absent serial port and the failed ping, not by the
+   frame.

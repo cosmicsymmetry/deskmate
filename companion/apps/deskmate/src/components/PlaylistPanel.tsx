@@ -3,8 +3,9 @@ import { useEffect, useState, type DragEvent, type FormEvent, type KeyboardEvent
 import {
   addEntry,
   addPlaylist,
+  cardLabel,
   cardMoveFromKey,
-  cardName,
+  cardTitle,
   cardsOutsidePlaylist,
   issuesForPath,
   moveEntry,
@@ -16,6 +17,7 @@ import {
   setEntryDwell,
   setPlaylistAdvance,
 } from "../lib/configDraft";
+import { Icon } from "./Icon";
 import {
   MAX_PLAYLIST_ENTRIES,
   MAX_PLAYLIST_NAME_LEN,
@@ -150,7 +152,6 @@ export function PlaylistPanel({ config, issues, onChange, onSelectCard }: Playli
     <section className="panel playlist-panel" aria-labelledby="playlist-heading">
       <div className="panel-heading">
         <div>
-          <p className="step-label">Playlists</p>
           <h2 id="playlist-heading">What plays, and when</h2>
         </div>
         <span className="count-badge numeral" id="playlist-capacity">
@@ -172,9 +173,12 @@ export function PlaylistPanel({ config, issues, onChange, onSelectCard }: Playli
                 aria-pressed={isSelected}
                 onClick={() => setSelectedPlaylistId(playlist.id)}
               >
-                <span aria-hidden="true">{isActive ? "●" : "○"}</span>
+                <span
+                  className={`playlist-tab__dot${isActive ? " is-active" : ""}`}
+                  aria-hidden="true"
+                />
                 <strong>{playlist.name}</strong>
-                {isActive && <small>◀ active</small>}
+                {isActive && <small>active</small>}
                 {!isSelected && playlistIssues.length > 0 && (
                   <span className="playlist-tab__issue-count numeral">{playlistIssues.length}</span>
                 )}
@@ -354,7 +358,12 @@ export function PlaylistPanel({ config, issues, onChange, onSelectCard }: Playli
             <ol className="playlist-entry-list" aria-label={`${selectedPlaylist.name} entries`}>
               {selectedPlaylist.entries.map((entry, index) => {
                 const card = config.cards.find((candidate) => candidate.id === entry.card_id);
-                const name = card ? cardName(card) : "Missing card";
+                const name = card ? cardLabel(card) : "Missing card";
+                const title = card ? cardTitle(card) : null;
+                // Two entries can share a template, so a control that acts on one of
+                // them has to say which: the owner's title is the only thing that
+                // distinguishes a second "ICS calendar" from the first.
+                const controlName = title ? `${name} — ${title}` : name;
                 const entryIssues = issuesForPath(
                   issues,
                   `playlists[${selectedIndex}].entries[${index}]`,
@@ -369,8 +378,8 @@ export function PlaylistPanel({ config, issues, onChange, onSelectCard }: Playli
                     onDragOver={(event) => event.preventDefault()}
                     onDrop={(event) => onDrop(event, index)}
                   >
-                    <span className="card-row__handle" aria-hidden="true">
-                      ⠿
+                    <span className="card-row__handle">
+                      <Icon name="grip" />
                     </span>
                     <span className="card-row__index numeral">{index + 1}</span>
                     <button
@@ -380,10 +389,14 @@ export function PlaylistPanel({ config, issues, onChange, onSelectCard }: Playli
                       onKeyDown={(event) => onKeyDown(event, index)}
                     >
                       <strong>{name}</strong>
-                      <small>{card ? "Select card" : "Reference needs attention"}</small>
+                      {card ? (
+                        title && <small>{title}</small>
+                      ) : (
+                        <small>Reference needs attention</small>
+                      )}
                     </button>
                     <label className="entry-dwell-field">
-                      <span className="sr-only">Dwell time for {name} in seconds</span>
+                      <span className="sr-only">Dwell time for {controlName} in seconds</span>
                       <input
                         type="number"
                         className="numeral"
@@ -412,19 +425,19 @@ export function PlaylistPanel({ config, issues, onChange, onSelectCard }: Playli
                     <span className="card-row__moves">
                       <button
                         type="button"
-                        aria-label={`Move ${name} up`}
+                        aria-label={`Move ${controlName} up`}
                         disabled={index === 0}
                         onClick={() => moveTo(index, index - 1)}
                       >
-                        ↑
+                        <Icon name="up" />
                       </button>
                       <button
                         type="button"
-                        aria-label={`Move ${name} down`}
+                        aria-label={`Move ${controlName} down`}
                         disabled={index === selectedPlaylist.entries.length - 1}
                         onClick={() => moveTo(index, index + 1)}
                       >
-                        ↓
+                        <Icon name="down" />
                       </button>
                     </span>
                     <button
@@ -453,7 +466,8 @@ export function PlaylistPanel({ config, issues, onChange, onSelectCard }: Playli
                 <option value="">Choose a card…</option>
                 {config.cards.map((card) => (
                   <option key={card.id} value={card.id} disabled={!outsideIds.has(card.id)}>
-                    {cardName(card)}
+                    {cardLabel(card)}
+                    {cardTitle(card) ? ` — ${cardTitle(card)}` : ""}
                     {!outsideIds.has(card.id) ? " — already added" : ""}
                   </option>
                 ))}

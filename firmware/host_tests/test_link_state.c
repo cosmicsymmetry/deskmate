@@ -88,11 +88,37 @@ static void test_push_data(void)
     assert(state.has_push_data);
 }
 
+// The USB default must not move: ten M1 unplug/replug cycles were validated
+// against it. link_state_poll() returns true only at the online->standalone
+// transition (see test_liveness above and its doc comment), so "online"
+// below the deadline reads as false-until-the-instant-of-transition.
+static void test_default_timeout_is_unchanged(void)
+{
+    link_state_t state;
+    link_state_init(&state);
+    link_state_note_valid_request(&state, 0U);
+    assert(!link_state_poll(&state, 9999U));
+    assert(link_state_poll(&state, 10000U));
+}
+
+static void test_network_timeout_is_longer(void)
+{
+    link_state_t state;
+    link_state_init_with_timeout(&state, 45000U);
+    link_state_note_valid_request(&state, 0U);
+    // Well past the USB deadline, and still online.
+    assert(!link_state_poll(&state, 20000U));
+    assert(!link_state_poll(&state, 44999U));
+    assert(link_state_poll(&state, 45000U));
+}
+
 int main(void)
 {
     test_liveness();
     test_time();
     test_push_data();
+    test_default_timeout_is_unchanged();
+    test_network_timeout_is_longer();
     puts("test_link_state: OK");
     return 0;
 }

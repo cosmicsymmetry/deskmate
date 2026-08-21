@@ -37,11 +37,34 @@ fn valid_golden_frames_decode() {
         "error_unsupported_size.bin",
         "error_config_too_large.bin",
         "push_unknown_field.bin",
+        "network_config.bin",
+        "factory_reset.bin",
+        "status_response_networked.bin",
+        "status_response_ota_failed.bin",
     ] {
         let frame =
             decode_wire_frame(&fixture(name)).unwrap_or_else(|error| panic!("{name}: {error}"));
         decode_message(&frame).unwrap_or_else(|error| panic!("{name}: {error}"));
     }
+}
+
+#[test]
+fn ota_failure_fixture_is_additive_to_old_status_frames() {
+    let old = decode_wire_frame(&fixture("status_response_networked.bin")).unwrap();
+    let protocol::Message::StatusResponse(old) = decode_message(&old).unwrap() else {
+        panic!("old fixture should remain a status response");
+    };
+    assert_eq!(old.last_ota_error, None);
+
+    let current = decode_wire_frame(&fixture("status_response_ota_failed.bin")).unwrap();
+    let protocol::Message::StatusResponse(current) = decode_message(&current).unwrap() else {
+        panic!("OTA fixture should be a status response");
+    };
+    assert_eq!(current.ota_state, protocol::OtaState::Failed);
+    assert_eq!(
+        current.last_ota_error.as_deref(),
+        Some("download: ESP_ERR_NO_MEM")
+    );
 }
 
 #[test]
@@ -143,12 +166,15 @@ fn extended_template_kinds_round_trip() {
 }
 
 #[test]
-fn current_capabilities_advertise_extended_templates() {
+fn current_capabilities_advertise_implemented_features() {
     assert_eq!(
         protocol::CURRENT_CAPABILITIES,
         protocol::CAPABILITY_CORE_WIDGETS
             | protocol::CAPABILITY_CONFIG_ROTATION
-            | protocol::CAPABILITY_EXTENDED_TEMPLATES,
-        "extended templates must be advertised once firmware renders them"
+            | protocol::CAPABILITY_EXTENDED_TEMPLATES
+            | protocol::CAPABILITY_FIRMWARE_UPDATE
+            | protocol::CAPABILITY_NETWORKING,
+        "implemented firmware update and networking features must be advertised"
     );
+    assert_eq!(protocol::CURRENT_CAPABILITIES, 203);
 }

@@ -350,3 +350,26 @@ bool widget_model_widget_has_data(const widget_model_t *model,
     return index < config->widget_count &&
            model->widget_has_data[model->live_config_index][index];
 }
+
+bool widget_model_has_running_progress(const widget_model_t *model)
+{
+    const protocol_apply_config_t *config = widget_model_config(model);
+    if (config == NULL) {
+        return false;
+    }
+    for (size_t index = 0U; index < config->widget_count; ++index) {
+        if (config->widgets[index].template_kind !=
+            PROTOCOL_TEMPLATE_PROGRESS_RING) {
+            continue;
+        }
+        const template_field_state_t *fields =
+            &model->widget_fields[model->live_config_index][index];
+        const template_field_value_t *running = template_fields_get(
+            fields, "running");
+        if (running != NULL && running->type == PROTOCOL_FIELD_BOOLEAN &&
+            running->value.boolean) {
+            return true;
+        }
+    }
+    return false;
+}

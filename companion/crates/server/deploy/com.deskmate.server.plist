@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd job for the Deskmate server. See ../README.md for the full install
+  and cloudflared-tunnel runbook.
+
+  launchd has no native "read an env file" directive, so ProgramArguments
+  shells out to source /etc/deskmate/server.env (bind address, firmware
+  directory, admin token) before exec'ing the binary. `set -a` exports every
+  variable the env file defines so the binary sees them via std::env::var,
+  exactly as the systemd unit's EnvironmentFile does.
+
+  Install as ~/Library/LaunchAgents/com.deskmate.server.plist (per-user, runs
+  at login) or /Library/LaunchDaemons/com.deskmate.server.plist (system-wide,
+  runs at boot, needs `sudo launchctl load` and a root-writable log path).
+
+  No WorkingDirectory is set deliberately: launchd refuses to spawn a job
+  whose WorkingDirectory does not exist, and /var/lib/deskmate is absent on
+  a stock box until an operator runs README.md Sec.2's `install -d` -- a
+  missing WorkingDirectory would turn a first-time install into a silent
+  launch failure. The binary's own refusal to start with a relative
+  DESKMATE_FIRMWARE_DIR (see main.rs) already covers the real risk this
+  would have guarded against, without that start-time dependency.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.deskmate.server</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/sh</string>
+        <string>-c</string>
+        <string>set -a; . /etc/deskmate/server.env; exec /usr/local/bin/deskmate-server</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/usr/local/var/log/deskmate-server.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/usr/local/var/log/deskmate-server.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>RUST_LOG</key>
+        <string>info</string>
+    </dict>
+</dict>
+</plist>

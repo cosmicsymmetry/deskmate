@@ -1,22 +1,22 @@
 import { describe, expect, mock, test } from "bun:test";
-import { act, useState } from "react";
+import { act, type ComponentProps, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import { App } from "../src/App";
 import { CardEditor } from "../src/components/CardEditor";
 import { CardList } from "../src/components/CardList";
-import { DeviceHeader } from "../src/components/DeviceHeader";
 import { DevicePreview } from "../src/components/DevicePreview";
-import { Filmstrip } from "../src/components/Filmstrip";
+import { LoopRing } from "../src/components/LoopRing";
+import { NetworkPanel, ownershipLabel } from "../src/components/NetworkPanel";
 import { PlaylistPanel } from "../src/components/PlaylistPanel";
-import { ProviderStatus, formatProviderAge } from "../src/components/ProviderStatus";
 import {
   cardsContainerIssues,
   issuesForCard,
   issuesForPath,
   unclaimedIssues,
 } from "../src/lib/configDraft";
+import { formatProviderAge, providerTrouble } from "../src/lib/providers";
 import * as tauriModule from "../src/lib/tauri";
 import type {
   AppConfig,
@@ -24,10 +24,13 @@ import type {
   CardSettings,
   ConfigApplyResult,
   DraftValidation,
+  NetworkSettings,
   PreviewFrame,
+  ProvisionDeviceInput,
   ValidationIssue,
 } from "../src/lib/types";
 import { ipcContractFixtures } from "../src/lib/types.contract";
+import { resolveDeviceTier, saveConfigForTier } from "../src/lib/useAppState";
 
 const snapshot = ipcContractFixtures.snapshot;
 const cards = snapshot.config.cards;
@@ -47,6 +50,30 @@ let validateImpl: (config: AppConfig) => Promise<DraftValidation> = async () => 
 let saveImpl: (config: AppConfig) => Promise<ConfigApplyResult> = async () => ({
   save: { generation: 1, warning: null },
 });
+let serverSaveImpl: (config: AppConfig) => Promise<ConfigApplyResult> = async () => ({
+  save: { generation: 1, warning: null },
+});
+let networkSettingsImpl: () => Promise<NetworkSettings> = async () => ({
+  server_url: "https://desk.example",
+  device_id: "desk-1",
+  tier: "local",
+});
+let provisionImpl: (input: ProvisionDeviceInput) => Promise<NetworkSettings> = async (input) => ({
+  server_url: input.server_url,
+  device_id: input.device_id,
+  tier: input.tier,
+});
+let setServerEndpointImpl: (serverUrl: string, adminToken: string) => Promise<NetworkSettings> =
+  async (serverUrl) => ({
+    server_url: serverUrl,
+    device_id: "desk-1",
+    tier: "networked",
+  });
+let useLocalOwnershipImpl: () => Promise<NetworkSettings> = async () => ({
+  server_url: "https://desk.example",
+  device_id: "desk-1",
+  tier: "local",
+});
 
 mock.module("../src/lib/tauri", () => ({
   ...tauriModule,
@@ -55,6 +82,12 @@ mock.module("../src/lib/tauri", () => ({
   listenToAppState: async () => () => {},
   validateConfigDraft: (config: AppConfig) => validateImpl(config),
   saveApplyConfig: (config: AppConfig) => saveImpl(config),
+  saveServerConfig: (config: AppConfig) => serverSaveImpl(config),
+  getNetworkSettings: () => networkSettingsImpl(),
+  provisionDevice: (input: ProvisionDeviceInput) => provisionImpl(input),
+  setServerEndpoint: (serverUrl: string, adminToken: string) =>
+    setServerEndpointImpl(serverUrl, adminToken),
+  chooseLocalOwnership: () => useLocalOwnershipImpl(),
   getAutostartStatus: async () => ({ enabled: false, preference_enabled: false }),
 }));
 
@@ -152,7 +185,7 @@ function cardListConfig(
 describe("settings accessibility and states", () => {
   test("renders a non-blocking loading state before the first backend snapshot", () => {
     const html = renderToStaticMarkup(<App />);
-    expect(html).toContain("Opening your display settings");
+    expect(html).toContain("Waking the display");
     expect(html).toContain("background service keeps running");
   });
 
@@ -162,15 +195,341 @@ describe("settings accessibility and states", () => {
         card={card}
         issues={issues}
         pomodoro={null}
+        provider={null}
         timerBusy={false}
         filePickerBusy={false}
+        providerRefreshing={false}
         onChange={() => {}}
         onRemove={() => {}}
         onTimerAction={() => {}}
         onChooseCalendarFile={() => {}}
+        onRefreshProvider={() => {}}
       />,
     );
   }
+
+  function renderNetworkPanel({
+    tier,
+    wifiState,
+    ip,
+    ssid = "",
+  }: {
+    tier: "local" | "networked";
+    wifiState: "down" | "connected";
+    ip: string;
+    ssid?: string;
+  }) {
+    // Deliberately include hostile extra properties at the runtime boundary. The
+    // public prop type does not admit them, and the component must continue to ignore
+    // them if a stale/malicious caller supplies a wider object anyway.
+    const publicSettingsWithStoredSecrets = {
+      serverUrl: "https://desk.example",
+      deviceId: "desk-1",
+      ssid,
+      passphrase: "stored-wifi-secret",
+      deviceToken: "stored-device-secret",
+      adminToken: "stored-admin-secret",
+    };
+    return renderToStaticMarkup(
+      <NetworkPanel
+        device={{
+          tier,
+          link: "/dev/cu.usbmodem2101",
+          wifiState,
+          wifiRssi: wifiState === "connected" ? -54 : null,
+          ip,
+          lastNetworkError: null,
+          otaState: "idle",
+        }}
+        settings={publicSettingsWithStoredSecrets}
+        onPair={async () => {}}
+        onUnpair={async () => {}}
+        onFactoryReset={async () => {}}
+      />,
+    );
+  }
+
+  test("network panel shows the device as locally owned before provisioning", () => {
+    const html = renderNetworkPanel({ tier: "local", wifiState: "down", ip: "" });
+    expect(ownershipLabel("local")).toBe("Owned by this Mac");
+    expect(html).toContain("saved on this Mac and sent to the display over USB");
+    expect(html).not.toContain("saved to the server");
+    expect(html).toContain("Server base URL");
+    expect(html).toContain("secure WebSocket device link");
+  });
+
+  test("network panel says where settings are written once networked", () => {
+    // The destination changing invisibly is the failure mode worth pinning:
+    // the same edit goes to a different place depending on tier.
+    const html = renderNetworkPanel({
+      tier: "networked",
+      wifiState: "connected",
+      ip: "192.168.1.42",
+    });
+    expect(ownershipLabel("networked")).toBe("Owned by the server");
+    expect(html).toContain("192.168.1.42");
+    expect(html).toContain("Settings are saved to the server");
+  });
+
+  test("network panel renders public settings but never a stored secret", () => {
+    const html = renderNetworkPanel({
+      tier: "networked",
+      wifiState: "connected",
+      ip: "192.168.1.42",
+      ssid: "home-network",
+    });
+    expect(html).toContain("home-network");
+    expect(html).toContain("https://desk.example");
+    expect(html).toContain("desk-1");
+    expect(html).not.toContain("stored-wifi-secret");
+    expect(html).not.toContain("stored-device-secret");
+    expect(html).not.toContain("stored-admin-secret");
+  });
+
+  test("network panel accepts secrets once and clears them after pairing", async () => {
+    let submitted: Parameters<ComponentProps<typeof NetworkPanel>["onPair"]>[0] | null = null;
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const setInput = (labelText: string, value: string) => {
+      const label = [...container.querySelectorAll("label")].find((candidate) =>
+        candidate.querySelector("span")?.textContent?.includes(labelText),
+      );
+      const input = label?.querySelector("input");
+      expect(input).not.toBeNull();
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set?.call(input, value);
+      input?.dispatchEvent(new Event("input", { bubbles: true }));
+    };
+    const inputValue = (labelText: string) =>
+      [...container.querySelectorAll("label")]
+        .find((candidate) => candidate.querySelector("span")?.textContent?.includes(labelText))
+        ?.querySelector("input")?.value;
+
+    try {
+      await act(async () =>
+        root.render(
+          <NetworkPanel
+            device={{
+              tier: "local",
+              wifiState: "down",
+              wifiRssi: null,
+              ip: "",
+              lastNetworkError: null,
+              otaState: "idle",
+            }}
+            settings={{
+              serverUrl: "https://desk.example",
+              deviceId: "desk-1",
+              ssid: "home-network",
+            }}
+            onPair={async (input) => {
+              submitted = input;
+            }}
+            onUnpair={async () => {}}
+            onFactoryReset={async () => {}}
+            onSaveServerAccess={async () => {}}
+          />,
+        ),
+      );
+      await act(async () => {
+        setInput("WiFi passphrase", "wifi-secret-92");
+        setInput("Device token", "device-secret-17");
+        setInput("Admin token", "admin-secret-46");
+      });
+      const pair = buttonWithText(container, "Pair with server");
+      expect(pair?.disabled).toBe(false);
+      await act(async () => pair?.click());
+
+      expect(submitted).toMatchObject({
+        ssid: "home-network",
+        passphrase: "wifi-secret-92",
+        server_url: "https://desk.example",
+        device_id: "desk-1",
+        device_token: "device-secret-17",
+        admin_token: "admin-secret-46",
+        tier: "networked",
+      });
+      expect(inputValue("WiFi passphrase")).toBe("");
+      expect(inputValue("Device token")).toBe("");
+      expect(inputValue("Admin token")).toBe("");
+      expect(inputValue("WiFi network")).toBe("home-network");
+      expect(inputValue("Server base URL")).toBe("https://desk.example");
+      expect(inputValue("Device ID")).toBe("desk-1");
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("the mounted pairing flow provisions before persisting server access", async () => {
+    const order: string[] = [];
+    snapshotImpl = async () => snapshot;
+    networkSettingsImpl = async () => ({
+      server_url: "https://desk.example",
+      device_id: "desk-1",
+      tier: "local",
+    });
+    provisionImpl = async (input) => {
+      order.push("provision");
+      return {
+        server_url: input.server_url,
+        device_id: input.device_id,
+        tier: input.tier,
+      };
+    };
+    setServerEndpointImpl = async (serverUrl) => {
+      order.push("server-access");
+      return { server_url: serverUrl, device_id: "desk-1", tier: "networked" };
+    };
+    previewImpl = async () => ({ png_base64: "cHJldmlldw==", sample: false });
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const setInput = (labelText: string, value: string) => {
+      const label = [...container.querySelectorAll("label")].find((candidate) =>
+        candidate.querySelector("span")?.textContent?.includes(labelText),
+      );
+      const input = label?.querySelector("input");
+      expect(input).not.toBeNull();
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set?.call(input, value);
+      input?.dispatchEvent(new Event("input", { bubbles: true }));
+    };
+
+    try {
+      await act(async () => root.render(<App />));
+      await waitFor(() => expect(container.textContent).toContain("Pair with server"));
+      await act(async () => {
+        setInput("WiFi network", "home-network");
+        setInput("WiFi passphrase", "wifi-secret");
+        setInput("Device token", "device-secret");
+        setInput("Admin token", "admin-secret");
+      });
+      const pair = buttonWithText(container, "Pair with server");
+      expect(pair?.disabled).toBe(false);
+      await act(async () => pair?.click());
+      await waitFor(() => expect(order).toHaveLength(2));
+
+      expect(order).toEqual(["provision", "server-access"]);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      provisionImpl = async (input) => ({
+        server_url: input.server_url,
+        device_id: input.device_id,
+        tier: input.tier,
+      });
+      setServerEndpointImpl = async (serverUrl) => ({
+        server_url: serverUrl,
+        device_id: "desk-1",
+        tier: "networked",
+      });
+    }
+  });
+
+  test("an unplugged incomplete pairing can explicitly return this Mac to local routing", async () => {
+    snapshotImpl = async () => ({
+      ...(structuredClone(snapshot) as AppSnapshot),
+      device: {
+        ...(structuredClone(snapshot.device) as AppSnapshot["device"]),
+        tier: null,
+      },
+    });
+    networkSettingsImpl = async () => ({
+      server_url: "https://desk.example",
+      device_id: "desk-1",
+      tier: null,
+    });
+    let overrideCalls = 0;
+    useLocalOwnershipImpl = async () => {
+      overrideCalls += 1;
+      return {
+        server_url: "https://desk.example",
+        device_id: "desk-1",
+        tier: "local",
+      };
+    };
+    previewImpl = async () => ({ png_base64: "cHJldmlldw==", sample: false });
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<App />));
+      await waitFor(() => expect(buttonWithText(container, "Use local on this Mac")).toBeDefined());
+      expect(container.textContent).toContain("changes only the Mac's routing");
+      await act(async () => buttonWithText(container, "Use local on this Mac")?.click());
+      await waitFor(() => expect(overrideCalls).toBe(1));
+      await waitFor(() => expect(buttonWithText(container, "Save & apply")).toBeDefined());
+      expect(buttonWithText(container, "Use local on this Mac")).toBeUndefined();
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      snapshotImpl = async () => snapshot;
+      networkSettingsImpl = async () => ({
+        server_url: "https://desk.example",
+        device_id: "desk-1",
+        tier: "local",
+      });
+      useLocalOwnershipImpl = async () => ({
+        server_url: "https://desk.example",
+        device_id: "desk-1",
+        tier: "local",
+      });
+    }
+  });
+
+  test("the tier guard selects exactly one configuration destination", async () => {
+    let localWrites = 0;
+    let serverWrites = 0;
+    const destinations = {
+      local: async () => {
+        localWrites += 1;
+        return { save: { generation: 1, warning: null } };
+      },
+      server: async () => {
+        serverWrites += 1;
+        return { save: { generation: 2, warning: null } };
+      },
+    };
+
+    await saveConfigForTier("local", destinations);
+    expect({ localWrites, serverWrites }).toEqual({ localWrites: 1, serverWrites: 0 });
+    await saveConfigForTier("networked", destinations);
+    expect({ localWrites, serverWrites }).toEqual({ localWrites: 1, serverWrites: 1 });
+  });
+
+  test("an unplugged networked display never falls back to the cable", async () => {
+    let localWrites = 0;
+    let serverWrites = 0;
+    const tier = resolveDeviceTier(null, {
+      server_url: "https://desk.example",
+      device_id: "desk-1",
+      tier: "networked",
+    });
+
+    await saveConfigForTier(tier, {
+      local: async () => {
+        localWrites += 1;
+        return { save: { generation: 1, warning: null } };
+      },
+      server: async () => {
+        serverWrites += 1;
+        return { save: { generation: 2, warning: null } };
+      },
+    });
+
+    expect({ localWrites, serverWrites }).toEqual({ localWrites: 0, serverWrites: 1 });
+  });
+
+  test("legacy server settings without a persisted tier still refuse the cable", async () => {
+    const tier = resolveDeviceTier(null, {
+      server_url: "https://desk.example",
+      device_id: "desk-1",
+      tier: null,
+    });
+    expect(tier).toBe("networked");
+  });
 
   test("names the clock card's title field rather than calling it a heading", () => {
     // The clock faces draw no title chip, so the field only names the card in
@@ -184,14 +543,79 @@ describe("settings accessibility and states", () => {
     expect(weatherHtml).toContain("<span>Heading</span>");
   });
 
-  test("explains the clean canvas and never shows the wire id", () => {
+  test("a card is called the same thing everywhere, and that is its template", () => {
+    // Owner's rule: a card should say what it *is*. "Outside" and "Desk" teach a
+    // first-time reader nothing, so every surface that identifies a card leads with
+    // its template and carries the owner's own title as a quiet second line.
+    const config = cardListConfig(
+      [clockCard("internal-uuid-0001", "Desk")],
+      [{ card_id: "internal-uuid-0001", dwell_seconds: 45 }],
+    );
+    const library = renderToStaticMarkup(
+      <CardList
+        config={config}
+        issues={[]}
+        cardData={[]}
+        pomodoros={[]}
+        providers={[]}
+        selectedCardId="internal-uuid-0001"
+        onSelect={() => {}}
+        onAdd={() => {}}
+        onRemove={() => {}}
+      />,
+    );
+    const playlists = renderToStaticMarkup(
+      <PlaylistPanel config={config} issues={[]} onChange={() => {}} onSelectCard={() => {}} />,
+    );
+    const loop = renderToStaticMarkup(
+      <LoopRing config={config} selectedCardId={null} onSelect={() => {}} onReorder={() => {}} />,
+    );
+    const editor = renderCardEditor(clockCard("internal-uuid-0001", "Desk"));
+
+    expect(library).toContain('class="tile-label">Digital clock<');
+    expect(library).toContain('class="card-tile__name">Desk<');
+    expect(playlists).toContain("<strong>Digital clock</strong><small>Desk</small>");
+    expect(loop).toContain('class="loop__entry-name">Digital clock<');
+    expect(loop).toContain('class="loop__entry-title">Desk<');
+    expect(editor).toContain('id="editor-heading">Digital clock<');
+    // The generic "Select card" line the playlist row used to carry said nothing.
+    expect(playlists).not.toContain("Select card");
+  });
+
+  test("an untitled card is not labelled with its template twice", () => {
+    // The quiet line is the owner's words, so it is absent rather than a repeat of
+    // the label sitting directly above it.
+    const config = cardListConfig(
+      [clockCard("internal-uuid-0002", "")],
+      [{ card_id: "internal-uuid-0002", dwell_seconds: 20 }],
+    );
+    const library = renderToStaticMarkup(
+      <CardList
+        config={config}
+        issues={[]}
+        cardData={[]}
+        pomodoros={[]}
+        providers={[]}
+        selectedCardId={null}
+        onSelect={() => {}}
+        onAdd={() => {}}
+        onRemove={() => {}}
+      />,
+    );
+    expect(library).toContain("Digital clock");
+    expect(library).not.toContain("card-tile__name");
+  });
+
+  test("never shows the wire id", () => {
     // A distinctive id with no overlap with any visible label (unlike the
     // fixture's plain "clock", which is also a substring of the visible
     // "Digital clock" kind name and would make this assertion meaningless).
     const clock = clockCard("internal-uuid-0001", "Desk");
     const html = renderCardEditor(clock);
-    expect(html).toContain("Clean 448 × 368 canvas");
     expect(html).toContain("Show seconds");
+    // The canvas dimensions were a caption that never changed and never told the
+    // reader anything they could act on. It is gone; keep it gone.
+    expect(html).not.toContain("448");
     // IDs are wire identifiers, not something a person should see or edit.
     expect(html).not.toContain("Widget ID");
     expect(html).not.toContain("internal-uuid-0001");
@@ -254,6 +678,9 @@ describe("settings accessibility and states", () => {
       <CardList
         config={config}
         issues={[]}
+        cardData={[]}
+        pomodoros={[]}
+        providers={[]}
         selectedCardId="first-clock-id"
         onSelect={() => {}}
         onAdd={() => {}}
@@ -280,6 +707,9 @@ describe("settings accessibility and states", () => {
       <CardList
         config={config}
         issues={[]}
+        cardData={[]}
+        pomodoros={[]}
+        providers={[]}
         selectedCardId={null}
         onSelect={() => {}}
         onAdd={() => {}}
@@ -290,7 +720,8 @@ describe("settings accessibility and states", () => {
     expect(addButtons.length).toBe(6);
     for (const button of addButtons) {
       expect(button).toContain('disabled=""');
-      expect(button).toContain(">Add ");
+      // Every add control still names the kind it adds.
+      expect(button).toMatch(/<strong>[^<]+<\/strong>/);
     }
   });
 
@@ -310,8 +741,10 @@ describe("settings accessibility and states", () => {
     }
 
     await act(async () => root.render(<Harness />));
+    // Both entries are clocks, so the control names the owner's title as well as
+    // the template — which is the whole point of keeping the title around.
     const moveUp = container.querySelector<HTMLButtonElement>(
-      'button[aria-label="Move Up next up"]',
+      'button[aria-label="Move Digital clock — Up next up"]',
     );
     expect(moveUp).not.toBeNull();
     await act(async () => moveUp?.click());
@@ -345,6 +778,9 @@ describe("settings accessibility and states", () => {
       <CardList
         config={config}
         issues={issues}
+        cardData={[]}
+        pomodoros={[]}
+        providers={[]}
         selectedCardId={null}
         onSelect={() => {}}
         onAdd={() => {}}
@@ -380,9 +816,9 @@ describe("settings accessibility and states", () => {
     try {
       await act(async () => root.render(<App />));
       await waitFor(() => expect(container.textContent).toContain("Workday"));
-      expect(container.textContent).not.toContain("A quick first setup");
+      expect(container.textContent).not.toContain("Make the display yours");
 
-      const manualTab = buttonWithText(container, "○Manual");
+      const manualTab = buttonWithText(container, "Manual");
       expect(manualTab).not.toBeUndefined();
       await act(async () => manualTab?.click());
       const makeActive = buttonWithText(container, "Make active");
@@ -390,8 +826,8 @@ describe("settings accessibility and states", () => {
       await act(async () => makeActive?.click());
 
       await waitFor(() => expect(container.textContent).toContain("Unsaved changes"));
-      expect(container.textContent).not.toContain("A quick first setup");
-      await waitFor(() => expect(container.textContent).toContain("●Manual◀ active"));
+      expect(container.textContent).not.toContain("Make the display yours");
+      await waitFor(() => expect(container.textContent).toContain("Manualactive"));
       await waitFor(() => {
         const save = buttonWithText(container, "Save & apply");
         expect(save?.disabled).toBe(false);
@@ -425,28 +861,184 @@ describe("settings accessibility and states", () => {
     const root = createRoot(container);
     try {
       await act(async () => root.render(<App />));
-      await waitFor(() => expect(container.textContent).toContain("A quick first setup"));
+      await waitFor(() => expect(container.textContent).toContain("Make the display yours"));
       expect(container.textContent).toContain("Save your settings");
 
-      await act(async () => buttonWithText(container, "○Manual")?.click());
+      await act(async () => buttonWithText(container, "Manual")?.click());
       await act(async () => buttonWithText(container, "Make active")?.click());
       await waitFor(() => expect(container.textContent).toContain("Unsaved changes"));
-      expect(container.textContent).toContain("A quick first setup");
+      expect(container.textContent).toContain("Make the display yours");
       await waitFor(() => {
         expect(buttonWithText(container, "Save & apply")?.disabled).toBe(false);
       });
       await act(async () => buttonWithText(container, "Save & apply")?.click());
-      await waitFor(() => expect(container.textContent).not.toContain("A quick first setup"));
+      await waitFor(() => expect(container.textContent).not.toContain("Make the display yours"));
 
-      await act(async () => buttonWithText(container, "○Workday")?.click());
+      await act(async () => buttonWithText(container, "Workday")?.click());
       await act(async () => buttonWithText(container, "Make active")?.click());
       await waitFor(() => expect(container.textContent).toContain("Unsaved changes"));
-      expect(container.textContent).not.toContain("A quick first setup");
+      expect(container.textContent).not.toContain("Make the display yours");
     } finally {
       await act(async () => root.unmount());
       container.remove();
       snapshotImpl = async () => snapshot;
       saveImpl = async () => ({ save: { generation: 1, warning: null } });
+    }
+  });
+
+  test("the mounted app routes an unplugged persisted-networked save only to the server", async () => {
+    let liveSnapshot: AppSnapshot = {
+      ...(structuredClone(snapshot) as AppSnapshot),
+      has_saved_config: true,
+      device: {
+        ...(structuredClone(snapshot.device) as AppSnapshot["device"]),
+        tier: null,
+      },
+    };
+    let localWrites = 0;
+    let serverWrites = 0;
+    snapshotImpl = async () => liveSnapshot;
+    networkSettingsImpl = async () => ({
+      server_url: "https://desk.example",
+      device_id: "desk-1",
+      tier: "networked",
+    });
+    saveImpl = async () => {
+      localWrites += 1;
+      return { save: { generation: 1, warning: null } };
+    };
+    serverSaveImpl = async (config) => {
+      serverWrites += 1;
+      liveSnapshot = { ...liveSnapshot, config };
+      return { save: { generation: 2, warning: null } };
+    };
+    previewImpl = async () => ({ png_base64: "cHJldmlldw==", sample: false });
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<App />));
+      await waitFor(() => expect(buttonWithText(container, "Save to server")).toBeDefined());
+      await act(async () => buttonWithText(container, "Manual")?.click());
+      await act(async () => buttonWithText(container, "Make active")?.click());
+      await waitFor(() =>
+        expect(buttonWithText(container, "Save to server")?.disabled).toBe(false),
+      );
+      await act(async () => buttonWithText(container, "Save to server")?.click());
+      await waitFor(() => expect(serverWrites).toBe(1));
+      expect(localWrites).toBe(0);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      snapshotImpl = async () => snapshot;
+      networkSettingsImpl = async () => ({
+        server_url: "https://desk.example",
+        device_id: "desk-1",
+        tier: "local",
+      });
+      saveImpl = async () => ({ save: { generation: 1, warning: null } });
+      serverSaveImpl = async () => ({ save: { generation: 1, warning: null } });
+    }
+  });
+
+  test("the mounted app refuses saving beside the button until ownership loads", async () => {
+    snapshotImpl = async () => ({
+      ...(structuredClone(snapshot) as AppSnapshot),
+      device: {
+        ...(structuredClone(snapshot.device) as AppSnapshot["device"]),
+        tier: null,
+      },
+    });
+    networkSettingsImpl = () => new Promise<NetworkSettings>(() => {});
+    previewImpl = async () => ({ png_base64: "cHJldmlldw==", sample: false });
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<App />));
+      await waitFor(() => expect(container.textContent).toContain("Workday"));
+      const unavailable = buttonWithText(container, "Ownership unavailable");
+      expect(unavailable?.disabled).toBe(true);
+      expect(container.textContent).toContain(
+        "Connect over USB to confirm ownership before saving.",
+      );
+      expect(buttonWithText(container, "Save & apply")).toBeUndefined();
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      snapshotImpl = async () => snapshot;
+      networkSettingsImpl = async () => ({
+        server_url: "https://desk.example",
+        device_id: "desk-1",
+        tier: "local",
+      });
+    }
+  });
+
+  test("server validation rejections show a bounded issue list beside the save action", async () => {
+    const networkedSnapshot: AppSnapshot = {
+      ...(structuredClone(snapshot) as AppSnapshot),
+      has_saved_config: true,
+      device: {
+        ...(structuredClone(snapshot.device) as AppSnapshot["device"]),
+        tier: "networked",
+      },
+    };
+    snapshotImpl = async () => networkedSnapshot;
+    networkSettingsImpl = async () => ({
+      server_url: "https://desk.example",
+      device_id: "desk-1",
+      tier: "networked",
+    });
+    serverSaveImpl = async () => {
+      throw new tauriModule.DeskmateCommandError({
+        category: "validation",
+        message: "the server rejected this configuration with 7 validation issue(s)",
+        issues: Array.from({ length: 7 }, (_, index) => ({
+          path: `cards[${index}].title`,
+          code: "empty" as const,
+          message: `Server issue ${index + 1}.`,
+        })),
+      });
+    };
+    previewImpl = async () => ({ png_base64: "cHJldmlldw==", sample: false });
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<App />));
+      await waitFor(() => expect(container.textContent).toContain("Workday"));
+      await act(async () => buttonWithText(container, "Manual")?.click());
+      await act(async () => buttonWithText(container, "Make active")?.click());
+      await waitFor(() =>
+        expect(buttonWithText(container, "Save to server")?.disabled).toBe(false),
+      );
+      await act(async () => buttonWithText(container, "Save to server")?.click());
+
+      await waitFor(() =>
+        expect(container.textContent).toContain(
+          "the server rejected this configuration with 7 validation issue(s)",
+        ),
+      );
+      expect(container.textContent).toContain("Server issue 1.");
+      expect(container.textContent).toContain("Server issue 5.");
+      expect(container.textContent).not.toContain("Server issue 6.");
+      expect(container.textContent).not.toContain("Server issue 7.");
+      expect(container.textContent).toContain("and 2 more");
+      expect(container.textContent).not.toContain("last working");
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      snapshotImpl = async () => snapshot;
+      networkSettingsImpl = async () => ({
+        server_url: "https://desk.example",
+        device_id: "desk-1",
+        tier: "local",
+      });
+      serverSaveImpl = async () => ({ save: { generation: 1, warning: null } });
     }
   });
 
@@ -489,32 +1081,67 @@ describe("settings accessibility and states", () => {
     }
   });
 
-  test("renders disconnected, protocol mismatch, stale, and last-good copy", () => {
-    const mismatch = {
-      ...snapshot,
-      device: { ...snapshot.device, protocol_version: 2 as number },
-    };
-    const header = renderToStaticMarkup(
-      <DeviceHeader
-        snapshot={mismatch}
-        commandError={null}
-        busyAction={null}
-        onTogglePause={() => {}}
-      />,
-    );
-    expect(header).toContain("Display not connected");
-    expect(header).toContain("supports protocol 1");
+  test("a protocol the app cannot speak is stated in the work column, not a status bar", async () => {
+    // The header that used to carry this was removed; the sentence has to survive
+    // the move or a mismatched display fails silently.
+    snapshotImpl = async () => ({
+      ...(structuredClone(snapshot) as AppSnapshot),
+      device: { ...snapshot.device, protocol_version: 2 },
+    });
+    previewImpl = async () => ({ png_base64: "cHJldmlldw==", sample: false });
 
-    const providers = renderToStaticMarkup(
-      <ProviderStatus
-        providers={snapshot.providers}
-        cards={cards}
-        refreshingId={null}
-        onRefresh={() => {}}
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<App />));
+      await waitFor(() => expect(container.textContent).toContain("this app speaks protocol 1"));
+      // And the door to the settings sheet says something is wrong with it.
+      expect(container.querySelector(".topbar__settings.has-attention")).not.toBeNull();
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      snapshotImpl = async () => snapshot;
+    }
+  });
+
+  test("a feed in trouble is reported on its own card, not in a list of every feed", () => {
+    const troubled = snapshot.providers.find((provider) => provider.state.kind === "stale");
+    if (!troubled) {
+      throw new Error("fixture no longer carries a provider in trouble");
+    }
+    expect(providerTrouble(troubled)).toContain("Showing the last good data");
+    // A healthy provider is not news and says nothing at all.
+    expect(providerTrouble({ ...troubled, state: { kind: "fresh" } })).toBeNull();
+
+    const editor = renderToStaticMarkup(
+      <CardEditor
+        card={cards[0]}
+        issues={[]}
+        pomodoro={null}
+        provider={troubled}
+        timerBusy={false}
+        filePickerBusy={false}
+        providerRefreshing={false}
+        onChange={() => {}}
+        onRemove={() => {}}
+        onTimerAction={() => {}}
+        onChooseCalendarFile={() => {}}
+        onRefreshProvider={() => {}}
       />,
     );
-    expect(providers).toContain("Showing the last successful data");
-    expect(providers).toContain("Refresh now");
+    expect(editor).toContain("Showing the last good data");
+    expect(editor).toContain("Refresh");
+  });
+
+  test("the settings sheet carries the link and ownership facts the header used to", () => {
+    const html = renderNetworkPanel({
+      tier: "networked",
+      wifiState: "connected",
+      ip: "192.168.1.42",
+    });
+    expect(html).toContain("/dev/cu.usbmodem2101");
+    expect(ownershipLabel(null)).toBe("Ownership unavailable");
   });
 
   function calendarCard(id: string, title = "Up next"): CardSettings {
@@ -785,32 +1412,32 @@ describe("settings accessibility and states", () => {
     };
   }
 
-  function renderFilmstrip(config: AppConfig): string {
+  function renderLoopRing(config: AppConfig): string {
     return renderToStaticMarkup(
-      <Filmstrip config={config} selectedCardId="first" onSelect={() => {}} onReorder={() => {}} />,
+      <LoopRing config={config} selectedCardId="first" onSelect={() => {}} onReorder={() => {}} />,
     );
   }
 
-  test("the filmstrip shows the loop length and only in-rotation cards", () => {
-    const html = renderFilmstrip(filmstripConfig());
+  test("the loop ring shows the loop length and only in-rotation cards", () => {
+    const html = renderLoopRing(filmstripConfig());
     expect(html).toMatch(/1 min 5 s/);
     expect(html).toContain("Desk");
     expect(html).toContain("Up next");
     expect(html).not.toContain("Focus");
   });
 
-  test("the filmstrip hides timings and the play control under manual advance", () => {
+  test("the loop ring hides timings and the play control under manual advance", () => {
     const config = filmstripConfig();
-    const html = renderFilmstrip({
+    const html = renderLoopRing({
       ...config,
       playlists: [{ ...config.playlists[0], advance: { kind: "manual" } }],
     });
     expect(html).not.toMatch(/\d+s</);
-    expect(html).not.toContain(">Play<");
+    expect(html).not.toContain("Play the loop");
     expect(html).toContain("Desk");
   });
 
-  test("filmstrip keyboard reorder maps visible segments back to playlist entry indexes", async () => {
+  test("loop ring keyboard reorder maps visible arcs back to playlist entry indexes", async () => {
     const initial = filmstripConfig();
     initial.playlists[0].entries = [
       { card_id: "first", dwell_seconds: 45 },
@@ -822,7 +1449,7 @@ describe("settings accessibility and states", () => {
     function Harness() {
       const [config, setConfig] = useState(initial);
       return (
-        <Filmstrip
+        <LoopRing
           config={config}
           selectedCardId="first"
           onSelect={() => {}}
@@ -839,7 +1466,7 @@ describe("settings accessibility and states", () => {
     const root = createRoot(container);
     try {
       await act(async () => root.render(<Harness />));
-      const firstSegment = container.querySelector<HTMLButtonElement>(".filmstrip-segment__button");
+      const firstSegment = container.querySelector<HTMLButtonElement>(".loop__entry-body");
       expect(firstSegment).not.toBeNull();
       await act(async () => {
         firstSegment?.dispatchEvent(

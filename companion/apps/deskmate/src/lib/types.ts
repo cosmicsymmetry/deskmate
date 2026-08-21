@@ -236,8 +236,40 @@ export interface DeviceSnapshot {
   uptime_ms: number | null;
   free_heap: number | null;
   rotation: number | null;
+  tier: DeviceTier | null;
+  wifi_state: DeviceWifiState | null;
+  wifi_rssi: number | null;
+  ip: string | null;
+  last_network_error: string | null;
+  ota_state: DeviceOtaState | null;
   active_screen_id: string | null;
   counters: DeviceCounters;
+}
+
+export type DeviceTier = "local" | "networked";
+
+export type DeviceWifiState = "down" | "connecting" | "connected" | "failed";
+
+export type DeviceOtaState = "idle" | "checking" | "downloading" | "pending-verify" | "failed";
+
+/** The persisted, non-secret portion of the Mac app's server settings. */
+export interface NetworkSettings {
+  server_url: string;
+  device_id: string;
+  tier: DeviceTier | null;
+}
+
+/**
+ * A write-only provisioning request. Secret fields are accepted by IPC but are
+ * deliberately absent from every response, snapshot, and event type.
+ */
+export interface ProvisionDeviceInput {
+  ssid: string;
+  passphrase: string;
+  server_url: string;
+  device_id: string;
+  device_token: string;
+  tier: DeviceTier;
 }
 
 export type DeviceCapability =
@@ -247,7 +279,8 @@ export type DeviceCapability =
   | "extended-templates"
   | "host-tap-actions"
   | "asset-transfer"
-  | "firmware-update";
+  | "firmware-update"
+  | "networking";
 
 export interface DeviceCounters {
   reconnects: number;

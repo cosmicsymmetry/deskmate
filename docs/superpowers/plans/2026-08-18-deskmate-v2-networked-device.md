@@ -94,7 +94,7 @@ Used verbatim by every task that touches these fields.
 
 ---
 
-### Task 1: Wire contract — new types, capability, bounds
+### Task 1:1 Wire contract — new types, capability, bounds
 
 Everything downstream depends on these names, so this task defines them in both
 languages and pins them with cross-language golden frames. No radio, no NVS, no server.
@@ -114,7 +114,7 @@ languages and pins them with cross-language golden frames. No radio, no NVS, no 
   `PROTOCOL_CAPABILITY_NETWORKING`, and the Rust mirrors `NetworkConfig`, `Tier`,
   `WifiState`, `OtaState`. Every later task uses these names exactly as spelled here.
 
-- [ ] **Step 1: Write the failing Rust round-trip test**
+- [x] **Step 1: Write the failing Rust round-trip test**
 
 Append to `companion/crates/protocol/src/message.rs`'s test module:
 
@@ -156,7 +156,7 @@ Append to `companion/crates/protocol/src/message.rs`'s test module:
     }
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 From `companion/`:
 
@@ -167,7 +167,7 @@ cargo test -p protocol network_config factory_reset
 Expected: compile failure — `NetworkConfig`, `Tier`, `MAX_SSID_LEN` and
 `Message::FactoryReset` do not exist.
 
-- [ ] **Step 3: Add the Rust constants and types**
+- [x] **Step 3: Add the Rust constants and types**
 
 In `companion/crates/protocol/src/message.rs`, beside the existing capability constants:
 
@@ -230,7 +230,7 @@ matching `Heartbeat`. Enforce every bound from the table in the Global Constrain
 section during encode **and** decode; `utc_offset_minutes` reuses the existing
 `MIN_UTC_OFFSET_MINUTES`/`MAX_UTC_OFFSET_MINUTES` range.
 
-- [ ] **Step 4: Run the Rust tests to verify they pass**
+- [x] **Step 4: Run the Rust tests to verify they pass**
 
 ```sh
 cargo test -p protocol network_config factory_reset
@@ -238,7 +238,7 @@ cargo test -p protocol network_config factory_reset
 
 Expected: PASS.
 
-- [ ] **Step 5: Add the additive StatusResponse fields**
+- [x] **Step 5: Add the additive StatusResponse fields**
 
 Extend `StatusResponse` with `tier: Tier`, `wifi_state: WifiState`, `wifi_rssi: i8`,
 `ip: String`, `ota_state: OtaState`, and `last_network_error: Option<String>` (bounded by
@@ -266,7 +266,7 @@ existing key. Add:
 If `StatusResponse::current()` does not exist, use whichever constructor
 `generate-fixtures.rs` already uses for `status_response.bin`.
 
-- [ ] **Step 6: Generate the new golden fixtures**
+- [x] **Step 6: Generate the new golden fixtures**
 
 Add three frames to `companion/crates/protocol/examples/generate-fixtures.rs`:
 `network_config.bin` (all fields at maximum length), `factory_reset.bin`, and
@@ -279,7 +279,7 @@ cargo run -p protocol --example generate-fixtures
 Add the three names to the `valid_golden_frames_decode` list in
 `companion/crates/protocol/tests/fixtures.rs`.
 
-- [ ] **Step 7: Write the failing C fixture assertions**
+- [x] **Step 7: Write the failing C fixture assertions**
 
 In `firmware/host_tests/test_protocol.c`, inside `test_valid_fixtures()`, add:
 
@@ -293,7 +293,7 @@ In `firmware/host_tests/test_protocol.c`, inside `test_valid_fixtures()`, add:
 The third argument is the frame's sequence number; use the values passed to
 `encode_message` in Step 6.
 
-- [ ] **Step 8: Run the C tests to verify they fail**
+- [x] **Step 8: Run the C tests to verify they fail**
 
 ```sh
 make -C firmware/host_tests clean test
@@ -301,7 +301,7 @@ make -C firmware/host_tests clean test
 
 Expected: `test_protocol` FAILS — the C decoder rejects type 13 as unsupported.
 
-- [ ] **Step 9: Mirror the contract in C**
+- [x] **Step 9: Mirror the contract in C**
 
 In `firmware/main/core/protocol_message.h` add the two enum members to
 `protocol_message_type_t`, add `PROTOCOL_ERROR_WRONG_TIER = 15` to
@@ -347,7 +347,7 @@ unknown or duplicate keys, reject any string exceeding its bound, and reject an
 out-of-range `utc_offset_minutes`. Encode the additive status keys in the same
 deterministic key order used by the Rust side.
 
-- [ ] **Step 10: Run the C tests to verify they pass**
+- [x] **Step 10: Run the C tests to verify they pass**
 
 ```sh
 make -C firmware/host_tests clean test
@@ -355,14 +355,14 @@ make -C firmware/host_tests clean test
 
 Expected: all pass, including the three new fixture assertions.
 
-- [ ] **Step 11: Add rejection tests for malformed network config**
+- [x] **Step 11: Add rejection tests for malformed network config**
 
 In `firmware/host_tests/test_protocol.c`, add a test that a `network_config` frame whose
 `ssid` is 33 bytes decodes to `PROTOCOL_MESSAGE_ERR_*` rather than succeeding, and that a
 frame with an unknown map key inside the network-config map is rejected. Build the
 malformed bytes by hand in the test, as the existing malformed-frame tests do.
 
-- [ ] **Step 12: Run the full gates**
+- [x] **Step 12: Run the full gates**
 
 From the repository root:
 
@@ -380,7 +380,7 @@ cargo test --workspace
 
 Expected: all pass.
 
-- [ ] **Step 13: Commit**
+- [x] **Step 13: Commit**
 
 ```bash
 git add firmware/main/core/protocol_message.h firmware/main/core/protocol_message.c \
@@ -405,7 +405,7 @@ Claude-Session: https://claude.ai/code/session_01SwAMBn6h8WMLU4ADiA8LwG"
 
 ---
 
-### Task 2: Tier state machine and config validation (pure C)
+### Task 2:2 Tier state machine and config validation (pure C)
 
 The rules that decide whether a stored config is usable, and what tier the device runs
 in, belong in `core/` where they are host-testable without a board. This task writes no
@@ -422,7 +422,7 @@ ESP-IDF code.
   `net_config_usb_message_allowed()`, and `net_config_error_t`. Tasks 3, 8 and 11 call
   these by exactly these names.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `firmware/host_tests/test_net_config.c`:
 
@@ -562,7 +562,7 @@ int main(void)
 }
 ```
 
-- [ ] **Step 2: Register the test target**
+- [x] **Step 2: Register the test target**
 
 In `firmware/host_tests/Makefile`, add `test_net_config` to the `test:` prerequisite
 list and to the run list, then add the rule:
@@ -572,7 +572,7 @@ test_net_config: test_net_config.c ../main/core/net_config.c $(PROTOCOL_SRCS)
 	$(CC) $(CFLAGS) -I$(CBOR_DIR) -o $@ $^
 ```
 
-- [ ] **Step 3: Run the test to verify it fails**
+- [x] **Step 3: Run the test to verify it fails**
 
 ```sh
 make -C firmware/host_tests clean test
@@ -580,7 +580,7 @@ make -C firmware/host_tests clean test
 
 Expected: compile failure — `net_config.h` does not exist.
 
-- [ ] **Step 4: Write the header**
+- [x] **Step 4: Write the header**
 
 Create `firmware/main/core/net_config.h`:
 
@@ -625,14 +625,14 @@ bool net_config_usb_message_allowed(protocol_tier_t tier,
                                     protocol_message_type_t type);
 ```
 
-- [ ] **Step 5: Write the minimal implementation**
+- [x] **Step 5: Write the minimal implementation**
 
 Create `firmware/main/core/net_config.c` implementing exactly the three functions. Use
 `strncmp(config->server_url, "wss://", 6) == 0` for the TLS check and treat a
 `NULL` config as `NET_CONFIG_ERR_MISSING_SSID` with an effective tier of local. Include
 only `<string.h>` and the two project headers — no ESP-IDF.
 
-- [ ] **Step 6: Run the test to verify it passes**
+- [x] **Step 6: Run the test to verify it passes**
 
 ```sh
 make -C firmware/host_tests clean test
@@ -640,7 +640,7 @@ make -C firmware/host_tests clean test
 
 Expected: all pass, including `test_net_config`.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add firmware/main/core/net_config.c firmware/main/core/net_config.h \
@@ -659,7 +659,7 @@ Claude-Session: https://claude.ai/code/session_01SwAMBn6h8WMLU4ADiA8LwG"
 
 ---
 
-### Task 3: NVS persistence and provisioning over USB
+### Task 3:3 NVS persistence and provisioning over USB
 
 The device's first use of NVS. This task ends with a real, board-testable deliverable
 that needs no radio at all: `deskmate-cli` can provision the device over the cable, the
@@ -682,7 +682,7 @@ messages on USB.
   `net_store_current_tier()`. Tasks 6, 8 and 11 read the stored config through
   `net_store_load()`.
 
-- [ ] **Step 1: Write the header**
+- [x] **Step 1: Write the header**
 
 Create `firmware/main/link/net_store.h`:
 
@@ -713,7 +713,7 @@ esp_err_t net_store_erase(void);
 protocol_tier_t net_store_current_tier(void);
 ```
 
-- [ ] **Step 2: Implement the store**
+- [x] **Step 2: Implement the store**
 
 Create `firmware/main/link/net_store.c`. Use one namespace `"deskmate"` with
 `nvs_get_str`/`nvs_set_str` per field and `nvs_get_i8` for `tier`, `nvs_get_i16` for
@@ -727,7 +727,7 @@ Create `firmware/main/link/net_store.c`. Use one namespace `"deskmate"` with
   failure returns the error and leaves the previous config intact.
 - Log at `ESP_LOGW` on any degradation, and never log a PSK or token value.
 
-- [ ] **Step 3: Initialise NVS at boot**
+- [x] **Step 3: Initialise NVS at boot**
 
 In `firmware/main/main.c`, before `board_display_init()`:
 
@@ -744,7 +744,7 @@ In `firmware/main/main.c`, before `board_display_init()`:
     ESP_ERROR_CHECK(nvs_status);
 ```
 
-- [ ] **Step 4: Handle the two new messages in `protocol_task.c`**
+- [x] **Step 4: Handle the two new messages in `protocol_task.c`**
 
 Add cases to the message dispatch:
 
@@ -755,7 +755,7 @@ Add cases to the message dispatch:
   well-defined event rather than a hot swap.
 - `PROTOCOL_TYPE_FACTORY_RESET`: `net_store_erase()`, then ACK.
 
-- [ ] **Step 5: Apply the tier gate to USB messages**
+- [x] **Step 5: Apply the tier gate to USB messages**
 
 At the top of the dispatch, before acting on any message that arrived on the USB
 transport:
@@ -768,13 +768,13 @@ transport:
     }
 ```
 
-- [ ] **Step 6: Populate the additive status fields**
+- [x] **Step 6: Populate the additive status fields**
 
 In the status builder (around `protocol_task.c:213`), set `status->tier` from
 `net_store_current_tier()`. Leave `wifi_state` at `PROTOCOL_WIFI_DOWN`, `wifi_rssi` at 0,
 `ip` empty and `ota_state` at `PROTOCOL_OTA_IDLE` — Tasks 6 and 11 fill those in.
 
-- [ ] **Step 7: Build the firmware**
+- [x] **Step 7: Build the firmware**
 
 ```sh
 . "$HOME/esp/esp-idf/export.sh"
@@ -784,7 +784,7 @@ idf.py -C firmware build
 Expected: builds with no warnings. Remember to add `nvs_flash` to the component
 requirements in `firmware/main/CMakeLists.txt` if the build cannot find it.
 
-- [ ] **Step 8: Add host-side provisioning to the device crate and CLI**
+- [x] **Step 8: Add host-side provisioning to the device crate and CLI**
 
 In `companion/crates/device/src/session.rs` add `provision(&mut self, config:
 &NetworkConfig) -> Result<...>` and `factory_reset(&mut self) -> Result<...>`, both
@@ -799,7 +799,7 @@ In `companion/crates/deskmate-cli/src/main.rs` add two commands to the dispatch 
 
 Update the usage text so `unknown command` errors stay accurate.
 
-- [ ] **Step 9: Run the workspace gates**
+- [x] **Step 9: Run the workspace gates**
 
 From `companion/`:
 
@@ -811,7 +811,7 @@ cargo test --workspace
 
 Expected: all pass.
 
-- [ ] **Step 10: Verify on the physical board**
+- [x] **Step 10: Verify on the physical board**
 
 Flash and exercise the round trip. This is the first hardware gate in V2 and it needs no
 radio.
@@ -836,12 +836,12 @@ ACKs; **after a power cycle** status reports `tier: networked`; a `push-data` co
 fails with the wrong-tier error; and `factory-reset` followed by a power cycle returns
 status to `tier: local`.
 
-- [ ] **Step 11: Record the observation**
+- [x] **Step 11: Record the observation**
 
 Add a dated entry to `docs/hardware/board-notes.md` recording exactly what was observed,
 including anything that did not pass. Do not write "verified" against anything not seen.
 
-- [ ] **Step 12: Commit**
+- [x] **Step 12: Commit**
 
 ```bash
 git add firmware/main/link/net_store.c firmware/main/link/net_store.h \
@@ -867,7 +867,7 @@ Claude-Session: https://claude.ai/code/session_01SwAMBn6h8WMLU4ADiA8LwG"
 
 ---
 
-### Task 4: Transport vtable
+### Task 4:4 Transport vtable
 
 A pure refactor with no behaviour change, so that Task 8 can add a second transport
 without touching the protocol task's logic. `protocol_task.c` calls `usb_link_*` at four
@@ -883,7 +883,7 @@ sites today: lines 184, 240, 624 and 729.
 - Produces: `link_transport_t` and `usb_link_transport()`. Task 8 adds
   `net_link_transport()` with the identical shape.
 
-- [ ] **Step 1: Define the vtable**
+- [x] **Step 1: Define the vtable**
 
 Create `firmware/main/link/link_transport.h`:
 
@@ -914,7 +914,7 @@ typedef struct {
 } link_transport_t;
 ```
 
-- [ ] **Step 2: Expose the USB implementation**
+- [x] **Step 2: Expose the USB implementation**
 
 Add to `firmware/main/link/usb_link.h`:
 
@@ -928,14 +928,14 @@ const link_transport_t *usb_link_transport(void);
 Implement it in `usb_link.c` as a `static const link_transport_t` whose members point at
 the existing `usb_link_read`, `usb_link_write_frame` and `usb_link_rx_dropped_bytes`.
 
-- [ ] **Step 3: Route the protocol task through the vtable**
+- [x] **Step 3: Route the protocol task through the vtable**
 
 In `protocol_task.c`, hold `static const link_transport_t *s_transport;`, initialise it to
 `usb_link_transport()`, and replace the four direct calls with
 `s_transport->write_frame(...)`, `s_transport->dropped_bytes()` and
 `s_transport->read(...)`.
 
-- [ ] **Step 4: Build and confirm nothing changed**
+- [x] **Step 4: Build and confirm nothing changed**
 
 ```sh
 make -C firmware/host_tests clean test
@@ -946,13 +946,13 @@ idf.py -C firmware build
 Expected: both pass. Host tests do not compile `protocol_task.c`, so they should be
 untouched — run them to prove that rather than to discover it.
 
-- [ ] **Step 5: Verify behaviour is unchanged on the board**
+- [x] **Step 5: Verify behaviour is unchanged on the board**
 
 Flash and run `cargo run -p deskmate-cli -- status --port <serial-port>` plus one
 `push-data`. Expected: identical behaviour to Task 3. A refactor that changes observable
 behaviour is a failed refactor — stop and diagnose rather than continuing.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add firmware/main/link/link_transport.h firmware/main/link/usb_link.c \
@@ -969,7 +969,7 @@ Claude-Session: https://claude.ai/code/session_01SwAMBn6h8WMLU4ADiA8LwG"
 
 ---
 
-### Task 5: Per-transport link timeout
+### Task 5:5 Per-transport link timeout
 
 `link_state.c:29` compares against the compile-time `PROTOCOL_LINK_TIMEOUT_MS`. Over the
 internet, 10 s will flap and drop the device to the standalone clock on ordinary jitter.
@@ -985,7 +985,7 @@ USB must keep 10000 ms; the network transport uses 45000 ms.
 - Produces: `link_state_init_with_timeout(link_state_t *, uint32_t timeout_ms)`.
   `link_state_init()` keeps its existing signature and behaviour.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Add to `firmware/host_tests/test_link_state.c`:
 
@@ -1013,7 +1013,7 @@ static void test_network_timeout_is_longer(void)
 }
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 ```sh
 make -C firmware/host_tests clean test
@@ -1021,7 +1021,7 @@ make -C firmware/host_tests clean test
 
 Expected: compile failure — `link_state_init_with_timeout` is undefined.
 
-- [ ] **Step 3: Add the timeout to the state**
+- [x] **Step 3: Add the timeout to the state**
 
 Add `uint32_t timeout_ms;` to `link_state_t` in `link_state.h` and declare:
 
@@ -1036,7 +1036,7 @@ void link_state_init_with_timeout(link_state_t *state, uint32_t timeout_ms);
 In `link_state.c`, make `link_state_init()` call the new function with
 `PROTOCOL_LINK_TIMEOUT_MS`, and change line 29's comparison to use `state->timeout_ms`.
 
-- [ ] **Step 4: Run the test to verify it passes**
+- [x] **Step 4: Run the test to verify it passes**
 
 ```sh
 make -C firmware/host_tests clean test
@@ -1044,12 +1044,12 @@ make -C firmware/host_tests clean test
 
 Expected: all pass, including the two new cases.
 
-- [ ] **Step 5: Initialise from the active transport**
+- [x] **Step 5: Initialise from the active transport**
 
 In `protocol_task.c`, replace the `link_state_init(...)` call with
 `link_state_init_with_timeout(&state, s_transport->link_timeout_ms)`.
 
-- [ ] **Step 6: Build and commit**
+- [x] **Step 6: Build and commit**
 
 ```sh
 . "$HOME/esp/esp-idf/export.sh"
@@ -1073,7 +1073,7 @@ Claude-Session: https://claude.ai/code/session_01SwAMBn6h8WMLU4ADiA8LwG"
 
 ---
 
-### Task 6: WiFi station and SNTP
+### Task 6:6 WiFi station and SNTP
 
 The radio comes up on both tiers. This task ends with a board-testable deliverable that
 still involves no server: the device joins WiFi and the standalone clock shows correct
@@ -1090,7 +1090,7 @@ local time with no host attached at all.
   `wifi_station_ip()`, and `wifi_station_time_synced()`. Tasks 8 and 11 gate their work
   on `wifi_station_state() == PROTOCOL_WIFI_CONNECTED`.
 
-- [ ] **Step 1: Write the header**
+- [x] **Step 1: Write the header**
 
 Create `firmware/main/link/wifi_station.h`:
 
@@ -1124,7 +1124,7 @@ const char *wifi_station_ip(void);
 bool wifi_station_time_synced(void);
 ```
 
-- [ ] **Step 2: Implement the station**
+- [x] **Step 2: Implement the station**
 
 Create `firmware/main/link/wifi_station.c` using `esp_netif_init()`,
 `esp_event_loop_create_default()`, `esp_netif_create_default_wifi_sta()`,
@@ -1141,18 +1141,18 @@ Create `firmware/main/link/wifi_station.c` using `esp_netif_init()`,
   where the existing host time-sync path applies it — follow `link_state_local_seconds()`
   rather than adding a second convention.
 
-- [ ] **Step 3: Start the station at boot**
+- [x] **Step 3: Start the station at boot**
 
 In `firmware/main/main.c`, after NVS init and the display bring-up, call
 `wifi_station_start()` and log the result. Do not block boot on it: the clock screen must
 appear whether or not WiFi ever joins.
 
-- [ ] **Step 4: Report WiFi in status**
+- [x] **Step 4: Report WiFi in status**
 
 In `protocol_task.c`'s status builder, fill `wifi_state`, `wifi_rssi` and `ip` from the
 three accessors. The SSID and PSK are never reported.
 
-- [ ] **Step 5: Build**
+- [x] **Step 5: Build**
 
 ```sh
 . "$HOME/esp/esp-idf/export.sh"
@@ -1162,7 +1162,7 @@ idf.py -C firmware build
 Expected: builds clean. Note the image size from the build summary and record it — this
 is the start of the re-baselining the spec §3.4 requires.
 
-- [ ] **Step 6: Verify on the physical board**
+- [x] **Step 6: Verify on the physical board**
 
 Flash, then provision credentials for a real network with `--tier local`:
 
@@ -1178,7 +1178,7 @@ with no host attached (unplug the cable and use the webcam harness per
 `docs/hardware/webcam-harness.md`); the time survives a reboot with no host; and pulling
 the network makes `wifi_state` go to `connecting` without rebooting the device.
 
-- [ ] **Step 7: Record the observation and commit**
+- [x] **Step 7: Record the observation and commit**
 
 Add the dated entry to `docs/hardware/board-notes.md`, including the new image size and
 free-heap figure. Then:
@@ -1204,7 +1204,7 @@ Claude-Session: https://claude.ai/code/session_01SwAMBn6h8WMLU4ADiA8LwG"
 
 ---
 
-### Task 7: Server skeleton — device link, auth, firmware endpoints
+### Task 7:7 Server skeleton — device link, auth, firmware endpoints
 
 A new workspace crate. This task has no device involvement at all and is testable
 entirely with `cargo test`: a WebSocket client with a good token gets a session, a bad
@@ -1224,7 +1224,7 @@ token is refused, and the firmware endpoints answer correctly.
   `authenticate(&self, token: &str) -> Option<DeviceId>`, and
   `server::ServerState`. Task 9 adds the ownership runtime behind this same router.
 
-- [ ] **Step 1: Create the crate and register it**
+- [x] **Step 1: Create the crate and register it**
 
 Add `"crates/server"` to `members` in `companion/Cargo.toml`. Create
 `companion/crates/server/Cargo.toml` depending on `protocol` (path), `axum` with the `ws`
@@ -1233,7 +1233,7 @@ feature, `tokio` with `rt-multi-thread`, `macros` and `signal`, `serde` with `de
 `edition`, `rust-version`, `license` and `[lints]` from the workspace as the other crates
 do.
 
-- [ ] **Step 2: Write the failing test**
+- [x] **Step 2: Write the failing test**
 
 Create `companion/crates/server/tests/device_link.rs`:
 
@@ -1329,7 +1329,7 @@ async fn firmware_check_refuses_an_unknown_token() {
 
 Add `tokio-tungstenite`, `reqwest` and `http` as `[dev-dependencies]`.
 
-- [ ] **Step 3: Run the test to verify it fails**
+- [x] **Step 3: Run the test to verify it fails**
 
 From `companion/`:
 
@@ -1339,7 +1339,7 @@ cargo test -p server
 
 Expected: compile failure — the crate has no `app`, `ServerState` or `registry`.
 
-- [ ] **Step 4: Implement the registry**
+- [x] **Step 4: Implement the registry**
 
 `src/registry.rs`: a `Registry` holding `Mutex<HashMap<String, DeviceId>>` mapping token
 to device. `mint()` generates a `device_id` (`dev-0001` style, monotonic) and a random
@@ -1348,7 +1348,7 @@ token of at least 32 bytes rendered as hex, inserts it, and returns
 device id. Compare tokens in constant time — a plain `==` on a secret invites timing
 analysis, and the fix costs one dependency-free helper.
 
-- [ ] **Step 5: Implement auth extraction and the router**
+- [x] **Step 5: Implement auth extraction and the router**
 
 `src/auth.rs`: parse `Authorization: Bearer <token>`, returning `401` on a missing,
 malformed or unknown token. `src/lib.rs`: `ServerState` holding the registry and, later, the runtime, with
@@ -1363,7 +1363,7 @@ nothing yet. Task 9 replaces the body of this handler with the ownership runtime
 the requested version matches the newest available, otherwise `200` with
 `{"version": ..., "url": ...}`. Serve images from a configured directory.
 
-- [ ] **Step 6: Run the tests to verify they pass**
+- [x] **Step 6: Run the tests to verify they pass**
 
 ```sh
 cargo test -p server
@@ -1371,13 +1371,13 @@ cargo test -p server
 
 Expected: all five pass.
 
-- [ ] **Step 7: Add the binary entry point**
+- [x] **Step 7: Add the binary entry point**
 
 `src/main.rs`: read a bind address, a firmware directory and an admin token from
 environment variables, build `ServerState`, and serve with graceful shutdown on
 `SIGINT`/`SIGTERM`. Print the bind address at startup.
 
-- [ ] **Step 8: Write the deployment unit and its runbook**
+- [x] **Step 8: Write the deployment unit and its runbook**
 
 The spec's §5.4 commits to "a single binary plus `cloudflared`, run under systemd or
 launchd". Create `companion/crates/server/deploy/` holding a `launchd` plist and a
@@ -1387,7 +1387,7 @@ where the admin token is expected to live. A server that only ever runs from a d
 shell is not deployed, and the runbook is what makes the tunnel hostname reproducible
 across restarts.
 
-- [ ] **Step 9: Run the workspace gates and commit**
+- [x] **Step 9: Run the workspace gates and commit**
 
 ```sh
 cargo fmt --all --check
@@ -1413,7 +1413,7 @@ Claude-Session: https://claude.ai/code/session_01SwAMBn6h8WMLU4ADiA8LwG"
 
 ---
 
-### Task 8: WebSocket transport on the device
+### Task 8:8 WebSocket transport on the device
 
 The device dials out and the existing frames flow over the socket. Deliverable: a
 networked device answers `status` from the server rather than from the cable.
@@ -1430,13 +1430,13 @@ networked device answers `status` from the server rather than from the cable.
 - Produces: `net_link_start()` and `net_link_transport()`, matching
   `usb_link_transport()`'s shape with `link_timeout_ms = 45000`.
 
-- [ ] **Step 1: Add the dependencies**
+- [x] **Step 1: Add the dependencies**
 
 Add `espressif/esp_websocket_client` to `firmware/main/idf_component.yml`. In
 `firmware/sdkconfig.defaults` enable `CONFIG_ESP_TLS_USING_MBEDTLS=y` and
 `CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y` so `esp_crt_bundle_attach` is available.
 
-- [ ] **Step 2: Write the header**
+- [x] **Step 2: Write the header**
 
 Create `firmware/main/link/net_link.h`:
 
@@ -1460,7 +1460,7 @@ esp_err_t net_link_start(void);
 const link_transport_t *net_link_transport(void);
 ```
 
-- [ ] **Step 3: Implement the client**
+- [x] **Step 3: Implement the client**
 
 Create `firmware/main/link/net_link.c`:
 
@@ -1479,7 +1479,7 @@ Create `firmware/main/link/net_link.c`:
 - Treat every received byte as untrusted: the frame decoder already bounds lengths, and
   the ring must never be indexed past its capacity.
 
-- [ ] **Step 4: Select the transport by tier**
+- [x] **Step 4: Select the transport by tier**
 
 In `protocol_task.c`, choose the transport once at task start:
 
@@ -1498,7 +1498,7 @@ reader** that runs `net_config_usb_message_allowed()` and never becomes the owne
 transport. Keep that reader small: it handles status, network-config, factory-reset and
 heartbeat only.
 
-- [ ] **Step 5: Echo frames on the server so the link is observable**
+- [x] **Step 5: Echo frames on the server so the link is observable**
 
 In `companion/crates/server/src/device_link.rs`, decode each binary message with
 `protocol::decode_wire_frame` + `decode_message`, log the message type at `info`, and
@@ -1506,7 +1506,7 @@ answer `StatusRequest` with a `StatusResponse` so the round trip is provable bef
 runtime exists. Reject a message that fails to decode by closing the socket — malformed
 input from a device is as suspect as malformed input from a host.
 
-- [ ] **Step 6: Re-run malformed-input coverage over the WSS path**
+- [x] **Step 6: Re-run malformed-input coverage over the WSS path**
 
 The spec's §7.1 requires this explicitly, and it is the step most easily skipped on the
 grounds that "it is the same decoder". It is the same decoder reached through a different
@@ -1526,7 +1526,7 @@ five shapes *to* the board over the network transport and asserts, via a followi
 `uptime_ms` before and after. Framing recovery without a reboot is the rule from
 `CLAUDE.md`, and the network path has never been tested against it.
 
-- [ ] **Step 7: Build and run the server locally**
+- [x] **Step 7: Build and run the server locally**
 
 ```sh
 . "$HOME/esp/esp-idf/export.sh"
@@ -1543,7 +1543,34 @@ Expose it with `cloudflared tunnel --url http://localhost:<port>` and note the p
 `https://` hostname it prints. The device's `server_url` is that hostname with the
 `wss://` scheme and the `/v1/device/link` path.
 
+
+> **Delivered differently, and permanently.** No `cloudflared --url` quick tunnel was
+> used. The repository owner elected to give the server a real home on the existing
+> homelab instead: it is built for linux/x86_64 in a throwaway `rust:1.97-bookworm`
+> container over an rsync'd copy of `companion/` (no Rust toolchain on the VM), installed
+> to `/usr/local/bin/deskmate-server` on docker-vm, and run under this plan's own systemd
+> unit with `/etc/deskmate/server.env`. Public path: Cloudflare HTTPS -> `cloudflared`
+> (orion) -> Caddy (docker-vm:80) -> `192.168.8.20:8443`. The device URL is
+> **`wss://deskmate.rodi.one/v1/device/link`**. Proven end to end from the Mac on
+> 2026-08-18: `GET /` returns 404 from axum's own router, and `/v1/device/link` and
+> `/v1/device/firmware` both return 401. Caddy carries no edge auth by design -- the
+> device and the companion each send their own bearer in `Authorization`, which
+> `basic_auth` would consume.
+
 - [ ] **Step 8: Verify on the physical board**
+
+> **DEFERRED to Task 9's board session -- this is a plan defect, not a choice.** Step 8
+> requires provisioning with "a token minted by the server", but `Registry::mint()` has no
+> HTTP route until **Task 9 Step 5** creates `POST /v1/devices`, and the registry is
+> in-memory with no persistence. There is currently no way to obtain a device token at
+> all, so this step is not executable as written at Task 8. Writing a throwaway bootstrap
+> route or seed variable would mean unreviewed code whose only purpose is to be deleted
+> one task later. Task 9 needs the same board and the same server, so Task 8's four
+> observations (accepted connection; periodic status round-trips; panel stays on the
+> standalone clock; killing the server yields visibly widening reconnect gaps, not a
+> reboot or a spin) are carried into that session as separately-recorded items.
+> Task 8 is **software complete / hardware open**, the same split Task 3 used.
+
 
 Provision with the tunnel hostname and a token minted by the server, then power cycle:
 
@@ -1555,10 +1582,38 @@ cargo run -p deskmate-cli -- provision --port <serial-port> \
     --offset-minutes 240 --tier networked
 ```
 
-Confirm all four: the server logs an accepted connection; it logs incoming heartbeats;
-the device's panel stays on the standalone clock (no config has been sent yet, which is
-correct); and killing the server leaves the device retrying with visibly widening gaps
-rather than rebooting or spinning.
+Confirm all four: the server logs an accepted connection; it periodically requests status
+and logs the device's status response; the device's panel stays on the standalone clock
+(no config has been sent yet, which is correct); and killing the server leaves the device
+retrying with visibly widening gaps rather than rebooting or spinning.
+
+> **Executed 2026-08-19. Two of the four are discharged; the step's own wording was
+> wrong in two places, and the run found the defect that made the whole task
+> impossible.** Full evidence in `docs/hardware/board-notes.md` under "V2 Task 8 —
+> networked link root-caused and fixed".
+>
+> The board could never have connected: `CONFIG_MBEDTLS_INTERNAL_MEM_ALLOC=y` confined
+> mbedTLS to internal DRAM, which LVGL and WiFi have already spent, so
+> `mbedtls_ssl_setup()` returned `-0x7F00` before any socket work. Fixed by
+> `CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y` (`62e5aea`).
+>
+> 1. **Accepted connection — PASS**, but only after fixing the server: `RUST_LOG` was
+>    unset, so `tracing_subscriber`'s filter defaulted to ERROR and discarded every
+>    device-link line. **This observation was unpassable as deployed.**
+> 2. **Periodic status round-trips — PASS.** `valid_frames` climbed 35 → 52 → 64 with
+>    `online: true` and uptime advancing.
+> 3. **Panel stays on the standalone clock — WORDING IS WRONG.** The server holds a
+>    *default* config (`config.origin: "defaults"`) and applies it on connect, so the
+>    panel correctly leaves the fallback and renders the server's clock card. Amend the
+>    expectation; do not change the code.
+> 4. **Killing the server — PARTIAL.** A ~65 s outage was survived with no reboot and
+>    an unattended reconnect, but the *widening gaps* were only ever observed on the
+>    diagnostic-console build (8.8 s → 13.6 s, against failing TLS). Not discharged on
+>    the shipping build.
+>
+> Also note for anyone reading a boot log: `net_link_start()` runs before DHCP/DNS, so
+> the first attempts legitimately fail `ESP_ERR_ESP_TLS_CANNOT_RESOLVE_HOSTNAME` at
+> t≈1.5 s. Those are not the defect above.
 
 - [ ] **Step 9: Record and commit**
 
@@ -1588,7 +1643,7 @@ Claude-Session: https://claude.ai/code/session_01SwAMBn6h8WMLU4ADiA8LwG"
 
 ---
 
-### Task 9: Server owns the device
+### Task 9:9 Server owns the device
 
 The milestone's centre. `app-core`'s `RuntimeDevice` trait is the seam: the server
 implements it over the WebSocket and calls the same `RuntimeHandle` the Mac app uses, so
@@ -1606,7 +1661,7 @@ ownership has one implementation rather than two that must agree.
   `POST /v1/devices`, `PUT /v1/devices/{id}/config`, `GET /v1/devices/{id}`. Task 10's
   Mac UI calls exactly these.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `companion/crates/server/tests/ownership.rs`:
 
@@ -1762,7 +1817,7 @@ Create `companion/crates/server/tests/fixtures/one-clock-card.json` holding a mi
 valid schema-v4 config with a single clock card whose id is `clock-1` in the active
 playlist. Add `futures-util` to `[dev-dependencies]`.
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 ```sh
 cargo test -p server ownership
@@ -1770,7 +1825,7 @@ cargo test -p server ownership
 
 Expected: compile failure — the admin routes do not exist.
 
-- [ ] **Step 3: Implement `WebSocketRuntimeDevice`**
+- [x] **Step 3: Implement `WebSocketRuntimeDevice`**
 
 `src/runtime_device.rs` implements every `RuntimeDevice` method by encoding the matching
 `protocol::Message` and awaiting its ACK over the socket:
@@ -1797,14 +1852,14 @@ impl RuntimeDevice for WebSocketRuntimeDevice {
 The trait is synchronous and `Send + 'static`, so bridge to the async socket with a
 channel pair rather than blocking on a runtime inside these methods.
 
-- [ ] **Step 4: Start the runtime when a device connects**
+- [x] **Step 4: Start the runtime when a device connects**
 
 In `src/device_link.rs`, on an authenticated upgrade: refuse if that device already has a
 live link, then construct `WebSocketRuntimeDevice`, call `RuntimeHandle::start(...)` with
 the stored config, and hold both until the socket closes. On close, shut the runtime down
 so a reconnect starts cleanly.
 
-- [ ] **Step 5: Implement config storage and the admin API**
+- [x] **Step 5: Implement config storage and the admin API**
 
 `src/store.rs`: load and save a schema-v4 `AppConfig` as JSON on disk using
 `app_core::ConfigStore`, so the server and the Mac app validate configuration
@@ -1813,13 +1868,13 @@ identically. `src/admin.rs`: `POST /v1/devices` mints an identity;
 live `RuntimeHandle`; `GET /v1/devices/{id}` returns connection state, last-seen time and
 the current `AppSnapshot` summary. All three require the admin token.
 
-- [ ] **Step 6: Enable providers server-side**
+- [x] **Step 6: Enable providers server-side**
 
 Construct `RuntimeOptions` with `SystemProviderRefresher` and
 `SystemCalendarRefresher`, so weather, ICS calendar, RSS and JSON feeds are fetched by
 the server. This is what makes the device work with the Mac off.
 
-- [ ] **Step 7: Run the tests to verify they pass**
+- [x] **Step 7: Run the tests to verify they pass**
 
 ```sh
 cargo test -p server
@@ -1831,6 +1886,16 @@ cargo test --workspace
 Expected: all pass.
 
 - [ ] **Step 8: The headline demo, on the physical board**
+
+> **DEFERRED to the morning board session**, together with Task 8's four carried
+> observations. Everything this step needs on the software side is in place and the server
+> is deployed at `wss://deskmate.rodi.one/v1/device/link`; what is missing is the board and
+> a human to watch the panel, tap a card, quit the Mac app and pull the cable. The five
+> claims to confirm are unchanged: the panel leaves the standalone clock and renders the
+> configured cards; the weather card shows real fetched data; quitting the Mac app changes
+> nothing; unplugging USB changes nothing; and tapping a pomodoro card starts it, with the
+> observed latency recorded.
+
 
 With the server running behind the tunnel and the device provisioned as networked from
 Task 8:
@@ -1846,6 +1911,35 @@ Confirm all five: the panel leaves the standalone clock and renders the configur
 the weather card shows real fetched data; **quitting the Mac app changes nothing**;
 unplugging USB entirely changes nothing; and tapping a pomodoro card starts it, proving
 events travel up and state comes back down over the network.
+
+> **Executed 2026-08-19 once Task 8's TLS defect was fixed. Four pass; one needs a
+> re-run.** Session evidence in `~/deskmate-hw-sessions/2026-08-19-v2-exit-gate/`.
+>
+> 1. **Configured cards render — PASS.** Clock, weather and pomodoro cards all drawn.
+> 2. **Weather shows real fetched data — PASS.** `Tbilisi, Georgia`, **31°**, `Clear`,
+>    fetched server-side with no Mac app running.
+> 3. **Quitting the Mac app changes nothing — WEAK PASS, re-run required.** The app was
+>    launched and quit with no observable effect, but the USB cable was not attached to
+>    the Mac at the time, so the app had nothing to contend over. This cannot show the
+>    property that matters — that the app *declines* a device the server owns, i.e.
+>    Task 10's behaviour, which remains unverified on hardware.
+> 4. **Unplugging USB changes nothing — PASS.** `uptime_ms` continuous at 1,177,925 ms
+>    across the pull; panel unchanged; still `connected: true` over WiFi. Note the
+>    board has a battery, so this is link loss, **not** power loss.
+> 5. **Tapping a pomodoro starts it — PASS.** Server read `state: running,
+>    remaining_seconds: 263` at 09:48:59 and the panel read `ELAPSED 00:57` at
+>    09:49:19; both imply a tap at ~09:48:22 from independent clocks. The timer then
+>    ran to completion and drove the panel to `Done` over the network.
+>
+> **Step 9's required tap latency was not obtained.** The tap happened unobserved and
+> the server does not log device events at a level the journal captured, so no latency
+> figure exists. A deliberate run with a known tap instant is still owed.
+>
+> Two behaviours worth carrying: an admin config apply **silently discards a running
+> pomodoro** (it replaces runtime state per `docs/config/v4.md`), which is what
+> destroyed the first tap; and timed rotation **appeared to stall on the pomodoro
+> entry** after two correct transitions — recorded as an anomaly, not a verified
+> defect, since it rests on five frames and an inferred start time.
 
 - [ ] **Step 9: Record and commit**
 
@@ -1872,7 +1966,139 @@ Claude-Session: https://claude.ai/code/session_01SwAMBn6h8WMLU4ADiA8LwG"
 
 ---
 
-### Task 10: Companion app — provisioning and tier UI
+### Task 9b:9b Device identities survive a restart (amendment)
+
+**Added 2026-08-19 by explicit direction of the repository owner**, after Task 9's review
+classified in-memory identities as a limitation whose documentation did not exist. This
+was not in the approved plan; it is recorded here rather than left to diverge.
+
+The problem is operational, not theoretical. `deploy/deskmate-server.service` sets
+`Restart=on-failure` with `RestartSec=2`, so an unattended crash silently deprovisions
+every device. The board then presents a token the server has never heard of, 401s
+forever, and can only be recovered with a USB cable — which is precisely the failure mode
+V2 exists to remove.
+
+**The owner's decision, and the one refinement made to it.** The owner accepted storing
+device credentials on disk, reasoning that a desk accessory sits next to the computer it
+serves. Note the file does not live next to the board: it lives on the shared homelab VM
+that also fronts unrelated services through the same tunnel. That does not change the
+decision, but it makes the cheaper form of it clearly correct — **store a SHA-256 of each
+token, never the token**. `POST /v1/devices` is the only code path that ever needs the
+plaintext, and it has it in hand at mint time; `Registry::authenticate` only ever needs to
+*verify*. A copy of the state file therefore grants nothing. Because the token is 32 bytes
+of CSPRNG output rather than a human-chosen secret, a plain digest is sufficient and a
+password KDF would buy nothing.
+
+**Files:**
+- Modify: `companion/crates/server/src/registry.rs`, `src/lib.rs`, `src/main.rs`
+- Modify: `companion/crates/server/deploy/README.md`, `deploy/deskmate-server.env.example`
+- Modify: `companion/crates/server/tests/ownership.rs`
+
+**Interfaces:**
+- Consumes: Task 7's `Registry`/`DeviceIdentity` and Task 9's `ConfigStore`-backed state
+  directory.
+- Produces: a `Registry` that loads at boot and persists on mint, holding digests only.
+
+- [x] **Step 1: Write the failing tests**
+
+Cover, at minimum: a minted identity authenticates after the registry is dropped and
+reloaded from the same path; the persisted bytes contain the digest and **not** the token
+(assert the literal token string is absent from the file); a corrupt or truncated store
+degrades to an empty registry rather than panicking or refusing to start; and `mint`
+remains monotonic across a reload rather than reissuing an existing `dev-NNNN` id.
+
+- [x] **Step 2: Persist digests, not tokens**
+
+`authenticate` hashes the presented token and compares digests in constant time, keeping
+the existing whole-table scan on a miss so a rejection's cost still cannot vary with how
+many leading bytes matched. The store is a file under the same state directory
+`DESKMATE_CONFIG_DIR` already lives in, created `0600`, written by the same
+write-temp-then-rename discipline `app_core::ConfigStore` uses so a crash mid-write cannot
+leave a half-file.
+
+- [x] **Step 3: Fail toward a working device, never a locked-out one**
+
+An unreadable store must not prevent the server starting; a device that cannot be
+authenticated must log enough to distinguish "unknown token" from "store failed to load",
+without printing the token or any prefix of it.
+
+- [x] **Step 4: Update the runbook and the env example**
+
+Replace the limitation text Task 9's fix round added with the resulting behaviour, and say
+where the file lives, what it contains, and that losing it means re-minting rather than
+recovering.
+
+- [x] **Step 5: Run the gates and commit**
+
+---
+
+### Task 10a:10a The app-core boundary Task 10 needs (amendment)
+
+**Added 2026-08-19.** Task 10's implementer stopped and reported BLOCKED rather than
+writing code, and it was right to. Task 10 assumes the Tauri shell can call
+`device::Session::provision` and `factory_reset` and can see the device's tier. Neither
+reaches the app: the Mac talks to the board through `app_core::RuntimeHandle`, which owns
+the serial port exclusively and exposes no provisioning or factory-reset command, and
+`SerialRuntimeDevice` keeps its `ConnectedSession` private.
+
+**Opening a second `device::Session` from a Tauri command is the wrong answer** even
+though it would compile and pass tests. It would compete with the live app-core session
+for the same port, make provisioning timing-dependent, and reintroduce exactly the
+multi-process ownership hole M2 suffered and M3 was built to close. The implementer
+declined to do it; this task exists so nobody does it later under time pressure.
+
+Three gaps, all in `companion/crates/app-core/`:
+
+1. `DeviceSnapshot` carries none of V2's additive status fields — no `tier`, `wifi_state`,
+   `wifi_rssi`, `ip`, `last_network_error` or `ota_state`. `runtime::update_device_status`
+   receives them from the wire and drops them on the floor. `DeviceCapability` also stops
+   at `FirmwareUpdate`, so `CAPABILITY_NETWORKING` reads as unknown.
+2. There is no provisioning or factory-reset path through the single owner.
+3. There is nowhere to keep the server base URL, device id, and the write-only admin and
+   device tokens. **They must not go into `AppConfig`** — the plan's Global Constraints
+   freeze the config schema at v4 with no migration, and `ConfigStore` is strict, so an
+   added field is a contract break, not a convenience.
+
+**Files:**
+- Modify: `companion/crates/app-core/src/runtime.rs`, `src/state.rs`
+- Create: a small separate settings store in `companion/crates/app-core/` for the network
+  credentials, alongside `ConfigStore` rather than inside it
+
+**Interfaces:**
+- Consumes: Task 3's `provision`/`factory_reset` on `device::Session`.
+- Produces: the projected status fields, two runtime commands, and the credential store
+  that Task 10's UI and typed IPC consume.
+
+- [x] **Step 1: Write the failing tests**
+
+Cover: every additive V2 status field surviving the wire-to-snapshot projection;
+`CAPABILITY_NETWORKING` decoding rather than reading as unknown; a provisioning command
+executing on the **existing** session with no second port open; and the credential store
+round-tripping without touching `AppConfig`.
+
+- [x] **Step 2: Project the V2 status fields into `DeviceSnapshot`**
+
+Additive only. This is the third time in this project that firmware has filled a status
+field nothing consumes — it cost a wasted board session at Task 3 and was caught again at
+Task 6. Project every field, not only the ones Task 10 happens to render.
+
+- [x] **Step 3: Add provisioning and factory-reset runtime commands**
+
+They execute on the existing `SerialRuntimeDevice`/`ConnectedSession`. No second session,
+ever. A provisioning attempt while the runtime is disconnected must return a typed error,
+not open a port of its own.
+
+- [x] **Step 4: Add the credential store**
+
+Server base URL, device id, admin token, device token. Tokens are write-only: accepted,
+never returned to a caller, never present in any snapshot or event. `AppConfig` is
+untouched and `docs/config/v4.md` stays the frozen contract.
+
+- [x] **Step 5: Run the gates and commit**
+
+---
+
+### Task 10:10 Companion app — provisioning and tier UI
 
 The Mac app becomes the setup surface. In local tier it writes settings to the device as
 it does today; in networked tier it writes them to the server and shows that it is doing
@@ -1889,7 +2115,7 @@ so, because a UI that silently changes destination is a UI that will be mistrust
   routes.
 - Produces: nothing later tasks depend on.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Add to `companion/apps/deskmate/tests/components.test.tsx`, reusing the existing render
 helpers:
@@ -1927,7 +2153,7 @@ helpers:
   });
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 From `companion/apps/deskmate/`:
 
@@ -1937,14 +2163,14 @@ bun test tests/components.test.tsx
 
 Expected: FAIL — `renderNetworkPanel` does not exist.
 
-- [ ] **Step 3: Add the typed IPC commands**
+- [x] **Step 3: Add the typed IPC commands**
 
 In `src-tauri/src/lib.rs` add commands mirroring the existing typed-IPC pattern:
 `provision_device(config)`, `factory_reset_device()`, and `set_server_endpoint(url,
 admin_token)`. Each returns the same typed error shape the existing commands use, so the
 UI's error handling does not fork.
 
-- [ ] **Step 4: Build the panel**
+- [x] **Step 4: Build the panel**
 
 Create `NetworkPanel.tsx` showing: current tier, WiFi state, RSSI and IP; a form for
 SSID, passphrase and server URL; buttons to pair (write `tier: networked`), unpair
@@ -1955,7 +2181,7 @@ not pretend to show a stored value.
 Follow the accessibility conventions established by the M3 settings work: labelled
 controls, keyboard reachable, and status changes announced.
 
-- [ ] **Step 5: Route settings writes by tier**
+- [x] **Step 5: Route settings writes by tier**
 
 In `useAppState.ts`, when the device reports `networked`, send configuration edits to the
 server's `PUT /v1/devices/{id}/config` instead of down the serial link. A failed write
@@ -1963,7 +2189,7 @@ must surface as a typed error and must **not** be described as "your last workin
 settings" — that mislabeling defect was fixed in the playlists work and must not
 reappear.
 
-- [ ] **Step 6: Run the app gates**
+- [x] **Step 6: Run the app gates**
 
 From `companion/apps/deskmate/`:
 
@@ -1978,7 +2204,7 @@ Use `biome lint` and `biome format`, not `biome check` — `check` additionally 
 assists including `organizeImports`, which this project has never enforced and which
 reports pre-existing failures on an untouched tree.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add companion/apps/deskmate
@@ -1998,7 +2224,7 @@ Claude-Session: https://claude.ai/code/session_01SwAMBn6h8WMLU4ADiA8LwG"
 
 ---
 
-### Task 11: Firmware update and rollback
+### Task 11:11 Firmware update and rollback
 
 The last feature task. V1 already poured the foundation: `ota_0`/`ota_1` at 4 MB each,
 `otadata`, and an OTA-aware bootloader.
@@ -2015,7 +2241,7 @@ The last feature task. V1 already poured the foundation: `ota_0`/`ota_1` at 4 MB
   firmware endpoints.
 - Produces: `ota_mark_running_image_valid()`, `ota_check_now()`, `ota_state()`.
 
-- [ ] **Step 1: Enable rollback**
+- [x] **Step 1: Enable rollback**
 
 In `firmware/sdkconfig.defaults`:
 
@@ -2023,7 +2249,7 @@ In `firmware/sdkconfig.defaults`:
 CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 ```
 
-- [ ] **Step 2: Write the header**
+- [x] **Step 2: Write the header**
 
 Create `firmware/main/link/ota.h`:
 
@@ -2058,7 +2284,7 @@ esp_err_t ota_check_now(void);
 protocol_ota_state_t ota_state(void);
 ```
 
-- [ ] **Step 3: Implement the update path**
+- [x] **Step 3: Implement the update path**
 
 Create `firmware/main/link/ota.c`:
 
@@ -2073,21 +2299,21 @@ Create `firmware/main/link/ota.c`:
   cleanly, set state to `PROTOCOL_OTA_FAILED`, and leave the running image untouched.
 - Schedule: at boot and every 24 h thereafter with jitter, in **both** tiers.
 
-- [ ] **Step 4: Implement the validity gate**
+- [x] **Step 4: Implement the validity gate**
 
 `ota_mark_running_image_valid()` checks `esp_ota_get_state_partition()` for
 `ESP_OTA_IMG_PENDING_VERIFY`; if so, verify the four local conditions and call
 `esp_ota_mark_app_valid_cancel_rollback()`. Call it from `main.c` **after** the display,
 LVGL, NVS and protocol task are all up — not before, or the check proves nothing.
 
-- [ ] **Step 5: Build the progress takeover**
+- [x] **Step 5: Build the progress takeover**
 
 Create `firmware/main/ui/ota_screen.c` showing "Updating" with a percentage, following
 the existing template style helpers. Guard every LVGL call with
 `lvgl_port_lock()`/`lvgl_port_unlock()` — this runs from the OTA task, not an LVGL
 callback.
 
-- [ ] **Step 6: Switch the capability bit on**
+- [x] **Step 6: Switch the capability bit on**
 
 In `firmware/main/core/protocol_message.h` add `PROTOCOL_CAPABILITY_FIRMWARE_UPDATE` to
 `PROTOCOL_CURRENT_CAPABILITIES`, and mirror it in `CURRENT_CAPABILITIES` in
@@ -2095,11 +2321,11 @@ In `firmware/main/core/protocol_message.h` add `PROTOCOL_CAPABILITY_FIRMWARE_UPD
 capability value — with networking (bit 7) and firmware update (bit 6) the value becomes
 `0b1100_1011` = **203**.
 
-- [ ] **Step 7: Report OTA state in status**
+- [x] **Step 7: Report OTA state in status**
 
 Fill `status->ota_state` from `ota_state()` in the status builder.
 
-- [ ] **Step 8: Run the gates**
+- [x] **Step 8: Run the gates**
 
 ```sh
 make -C firmware/host_tests clean test
@@ -2117,11 +2343,50 @@ cargo test --workspace
 
 - [ ] **Step 9: Verify the happy path on the physical board**
 
+> **DEFERRED to the morning board session.** Steps 9-11 need the device. Two things the
+> owner must know before starting, both established by review rather than guesswork:
+> **(1) start from a full `idf.py flash`** of bootloader + partition table + otadata + app.
+> Rollback is a *bootloader* feature and OTA does not update the bootloader, so a board
+> still carrying the pre-Task-11 bootloader will accept the new app and never roll it
+> back — Step 10 would appear to fail for reasons unrelated to this code.
+> **(2) a corrected rebuild published under the same version string as a failed one is
+> refused forever**, because the refusal keys on the version string rather than image
+> content. Bump the version or reflash over USB.
+
+
 Build version A, flash it over USB, then build version B with a visible difference and
 place it in the server's firmware directory. Confirm all five: the device reports the new
 version available; the panel shows the update takeover with advancing progress; the
 device reboots into version B; `status` reports version B; and the previous slot still
 holds version A.
+
+> **Executed 2026-08-19. Failed, root-caused, fixed, and now passes — but the first
+> "pass" had to be retracted.** Board-notes carries both entries.
+>
+> The first attempt never installed anything: the device panicked LoadProhibited the
+> moment `esp_https_ota` began writing, rebooted, checked again, and panicked again on
+> a ~10 s cycle. `ota.c` passed `.staging` and `.final` as the same partition pointer,
+> and `esp_https_ota_begin()` leaves `handle->partition.final` unassigned in exactly
+> that case. Fixed in `77f0e52`.
+>
+> The retry passed all five confirmations — **but only because the WSS link happened
+> not to be up while it ran.** With the link established the download died ~7 s in on
+> `esp-aes: Failed to allocate memory`: the AES accelerator's DMA buffers must come
+> from internal RAM, which two concurrent TLS sessions exhaust. Fixed in `0ad1a51` by
+> suspending the link for the duration of a download.
+>
+> Re-run 10:53 UTC with `connected: true` confirmed **before** the reset — the exact
+> condition that failed — passes all five: offer seen, takeover advancing 0→41→77%,
+> reboot into B, `status` reports B, and `ota_0`/`ota_1` read back as A and B.
+>
+> Two cautions for whoever repeats this. `ota_state` returns to `checking` after a
+> panic, so a host polling status sees a device *perpetually about to update* rather
+> than one failing — only `uptime_ms` going backwards reveals it, and nothing in this
+> checklist asks for that. And `PROJECT_VER` is resolved from `git describe` at CMake
+> **configure** time and cached, so a dirty tree silently reuses the previous version
+> string; publishing under it would poison a good image forever via
+> `reject_reinstall_of_failed_image()`. Use `version.txt` and read the embedded
+> descriptor back before publishing.
 
 - [ ] **Step 10: Verify rollback on the physical board**
 
@@ -2133,10 +2398,128 @@ it, fails to validate, and **returns to version B on the next reset**.
 Do not skip this on the grounds that the code looks right. An unexercised rollback path
 is indistinguishable from a missing one.
 
-- [ ] **Step 11: Verify the deferral**
+> **Executed 2026-08-19 — PASSES, unattended.** Broken image `m1-rollback-c2` (early
+> `abort()` before the validity gate) downloaded, installed, booted, failed to
+> validate, and the bootloader returned the board to `m1-226-gaff8e7d` with no reflash
+> and no human action. Proof from flash rather than inference:
+>
+> ```
+> ota_0: m1-rollback-c2     otadata[0]: ota_seq=3 -> ota_0  state=4 (ABORTED)
+> ota_1: m1-226-gaff8e7d    otadata[1]: ota_seq=2 -> ota_1  state=2 (VALID)
+> ```
+>
+> The run also exercised two things it was not aimed at: the server logged
+> `device link closed` one second after the firmware check, which is `0ad1a51`'s
+> suspension seen from the server side; and the `ota=failed` that follows the rollback
+> is `reject_reinstall_of_failed_image()` refusing to reinstall the image that had just
+> failed — CLAUDE.md's "refused forever" rule observed rather than assumed.
+>
+> The precondition in the deferral note above was met: this started from a full
+> `idf.py flash` of `m1-225-g0ad1a51`, so the bootloader on the board is the one
+> carrying `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE`.
+
+- [x] **Step 11: Verify the deferral**
 
 Start a pomodoro, then trigger a check. Confirm the update does not begin, and that it
 proceeds once the pomodoro finishes.
+
+> **Executed 2026-08-19 — FAILS. The update began while a pomodoro was running.**
+> Full detail in board-notes under "Step 11 — deferral FAILS on hardware, and why".
+>
+> The deferral logic is not the problem; the state it depends on is absent at the only
+> moment a check ever happens. Checks fire at boot (the interval is 24 h), and at boot
+> the device has no link: it reconnects faster than the server notices the previous
+> socket is dead, so the server **refuses its own device** with "owner already live".
+> The device backs off, the check runs link-less, no host state has been replayed, and
+> `protocol_task_ota_blocked()` sees nothing to defer to.
+>
+> Two systemic findings surfaced by the same run:
+> 1. **A quick reboot costs ~28 s offline** (refused 11:32:16, reconnected 11:32:44).
+>    The single-owner guard cannot distinguish a rebooted device from an impostor, so
+>    it delays the device it is meant to protect.
+> 2. **A link drop discards a running pomodoro** — `running, 268 s` before the reboot,
+>    `idle, 300 s` after. Task 9 Step 4 tears the runtime down on close by design.
+>    With config applies also resetting timers, a networked pomodoro survives neither
+>    a settings edit nor a link blip.
+>
+> **This step cannot be closed by re-running it, and V2's exit gate cannot be declared
+> passed while it stands.** The three findings are entangled: the deferral needs a link
+> *and* replayed state at check time, the link is delayed by the refusal, and the state
+> would be discarded by the reconnect regardless. Candidate directions — let a
+> reconnecting device take over its own stale socket; persist or replay live timer
+> state across a reconnect; delay the boot check until state has arrived — are design
+> decisions for the owner, deliberately not chosen in-session.
+
+> **Addressed in software 2026-08-19 by owner direction to decide and proceed
+> rather than return with options. Still UNOBSERVED on the board — this step stays
+> unchecked until it is re-run there.** All three entangled findings now have a fix:
+>
+> 1. *Reconnect delay* — already fixed before this work (`024b1ce`), measured ~40 s
+>    → ~10 s, with the `owner already live` refusal no longer provoked at all.
+> 2. *The boot check outran the link* — `3f83911`. `perform_check()` now waits on
+>    `protocol_task_owner_state_ready()` (link online **and** widget config present)
+>    for at most `OTA_OWNER_WAIT_MS` (60 s), not merely on `wifi_station_state()`.
+>    The wait is bounded and **fails open**: a device whose owner can never become
+>    ready must stay updatable, or a bad config would strand it un-updatable
+>    forever. The pure-C predicate `ota_policy_should_wait_for_owner()` is
+>    host-tested.
+> 3. *A link drop discarded the running pomodoro* — `12e5f4d`. The server built a
+>    `RuntimeHandle` per WebSocket and shut it down on close, making live timer and
+>    interrupt state a property of a transport connection. The runtime is now per
+>    device and long-lived; sockets attach as replaceable transports pinned by an
+>    attachment generation, and a reconnect replays time, layout, latest fields,
+>    active screen and live interrupts. `connected` in `GET /v1/devices/{id}` now
+>    reports socket liveness rather than runtime existence, so a retained runtime
+>    cannot make an unplugged device look attached.
+>
+> Fixes 2 and 3 are complementary and neither is sufficient alone: 2 gives the
+> guard a link to wait for, 3 gives it a running timer still there to see.
+>
+> Verified in software only. `make -C firmware/host_tests clean test`,
+> `idf.py -C firmware build`, `cargo fmt`/`clippy`/`test --workspace` all green,
+> including a new integration test
+> (`running_pomodoro_survives_link_close_and_reattach`) that starts a pomodoro,
+> drops the socket, and asserts the timer is still running and decremented after a
+> reattach. Note `cargo test` stops at the first failing test binary, so this suite
+> needs `--no-fail-fast` to be seen at all when an earlier one fails.
+>
+> **How to re-run Step 11 on the board:** start a pomodoro server-side, confirm
+> `state: running` via `GET /v1/devices/{id}`, publish a newer firmware version,
+> reset the board, and confirm the check defers — `ota` must not reach
+> `downloading` while the timer runs — then proceeds once it finishes. The reboot
+> is the point: it is the only moment a check actually fires.
+
+> **RE-RUN 2026-08-19 — PASSES on hardware. Both halves.** Device on `v2.0.0-gate2`
+> (carrying the fix), catalog pinned to `v2.0.0-gate1` so an update was genuinely
+> available, timer started by tap and confirmed `running, 290` server-side, board
+> hard-reset at 18:08:48 with the timer running.
+>
+> *It did not begin.* `ota` stayed `idle` and the version stayed `v2.0.0-gate2` for the
+> whole five minutes. The morning run was already `downloading` by uptime 13136.
+> *The timer also survived the reboot* — `running 290` before the reset, `running 253`
+> after it, counting continuously across a reboot that took uptime back to 13 s, where
+> the morning run read `idle, 300`.
+>
+> *It proceeded once the state cleared.* The completion alert (`hold: until-dismissed`)
+> kept `interrupt_live` true, so the deferral correctly held past the timer as well;
+> one dismissing tap released it and the server logged the check within a second, the
+> link suspension for the download, and the device back 26 s later on the new image:
+>
+> ```
+> 20:25:44  firmware check  current=v2.0.0-gate2
+> 20:25:45  device link closed
+> 20:26:11  device link established
+> 20:26:14  firmware check  current=v2.0.0-gate1
+> ```
+>
+> Worth carrying: **an until-dismissed alert postpones firmware updates indefinitely**
+> until a human dismisses it. And `GET /v1/devices/{id}` exposes no interrupt or alert
+> field at all, so "is an interrupt live" cannot be read from the wire — the same
+> observability family as the missing OTA failure reason.
+>
+> Evidence: `~/deskmate-hw-sessions/2026-08-19-v2-exit-gate/`, frames
+> `181106Z-step11-deferred-timer-running`, `181445Z-step11-timer-completed`,
+> `202735Z-step11-updated-to-gate1`.
 
 - [ ] **Step 12: Record and commit**
 
@@ -2167,7 +2550,7 @@ Claude-Session: https://claude.ai/code/session_01SwAMBn6h8WMLU4ADiA8LwG"
 
 ---
 
-### Task 12: Physical exit gate and documentation
+### Task 12:12 Physical exit gate and documentation
 
 The spec's §7.2 gate, run as one session on the physical board, plus the durable record.
 This task cannot be completed by an agent alone: flashing, cable pulls, touching and
@@ -2219,11 +2602,49 @@ from the server. Capture the panel with the webcam harness.
 Pair to networked, confirm USB config is refused with the wrong-tier error, unpair back
 to local, and confirm the Mac owns it again.
 
+> **NOT RUN, and it costs more than it reads.** `NetworkConfig` carries `token`, and the
+> server stores only SHA-256 digests, so the plaintext exists exactly once — at mint
+> time. Returning a device from local tier to networked therefore requires **minting a
+> new identity**: the board comes back under a new `device_id` with a fresh config and
+> the previous entry is orphaned. A tier round-trip costs one device identity.
+>
+> That follows from "secrets are never readable back over the wire" rather than being a
+> defect, but it makes this the wrong item to attempt unattended, since a failure leaves
+> the board with no owner. Run it with the cable and a hand present.
+
 - [ ] **Step 5: Gate item 3 — link loss and recovery**
 
 Kill the server; confirm the device falls to the standalone clock after the 45 s deadline
 and recovers when the server returns, **without a reboot**. Repeat by dropping WiFi
 instead of the server.
+
+> **Server variant PASSES 2026-08-19. WiFi variant NOT RUN.** Server stopped 20:53:23;
+> standalone fallback observed 20:54:38 (`00:54`, `Thu, Aug 20`, "Connect deskmate app",
+> local time correct for UTC+4, so SNTP holds the clock without a server); server
+> restarted 20:55:06; link back 20:55:31, ~25 s.
+>
+> *Without a reboot* is proven by uptime continuity, not by looking at the panel: the
+> board was reset at 20:51:44 and reported `uptime 224371 ms` at 20:55:31, against 227 s
+> of wall clock. The counter never restarted. Note `reconnects` reads 0 afterwards
+> because that is the freshly started **server** process's counter, not the device's.
+>
+> The WiFi-drop half needs router access or a hand. The tempting software substitute —
+> stopping the tunnel or Caddy — was rejected: Caddy on that host reverse-proxies about
+> seventeen unrelated services, so it would have taken the owner's homelab down
+> overnight to test one gate item.
+>
+> **A third variant PASSES 2026-08-20: network path down.** The owner subsequently
+> authorised taking Caddy down, so it was run with the outage bounded to 102 s by
+> scripting the restart into the same step. Radio up, path broken: Caddy stopped
+> 05:18:58, standalone fallback observed 05:20:34, Caddy back 05:20:40, link
+> re-established by 05:21:06 (~26 s). No reboot — uptime 25,579,321 → 25,722,382 ms, a
+> 143 s delta against 142 s of wall clock. `reconnects` 0 → 1, every error counter
+> still 0.
+>
+> This is a distinct failure mode from the server stop — an upstream that refuses rather
+> than a socket that closes cleanly — and the device is indistinguishable from the
+> panel's side in both. **The true WiFi-drop half is still unrun**; it needs the radio
+> to actually lose its AP, which no server-side action can simulate.
 
 - [ ] **Step 6: Gate item 4 — OTA and rollback**
 
@@ -2241,6 +2662,26 @@ for that device for the duration.
 Run a 30-minute mixed soak with the radio up: rotation, taps, provider refreshes,
 interrupts. Confirm the heap is flat at the Step 2 baseline and the queue high-water
 stays bounded. Record the actual figures, not a verdict.
+
+> **PARTIAL 2026-08-19 — rotation and provider refreshes only; taps and interrupts were
+> not exercised, so this is not the mixed soak specified.** Window 20:57:42 → 21:27:55
+> UTC, 30 min 13 s, 31 samples at 60 s.
+>
+> | metric | result |
+> | --- | --- |
+> | connectivity | `conn=True` in all 31, never dropped |
+> | free heap | 28-byte band, 8310703–8310731, no trend, first and last identical |
+> | `ui_queue_high_water` | 2, constant |
+> | `event_queue_high_water` | 0, constant |
+> | malformed / crc / overflow / dropped | 0 throughout |
+> | uptime | 356472 → 2169118 ms continuous; delta matches wall clock, so no reboot |
+> | rotation | clock 11 / weather 11 / pomodoro 9 |
+>
+> The heap is **not** flat *at the Step 2 baseline* as worded: the fresh-boot baseline
+> was 8,310,267 and steady state sits ~456 bytes higher once link and providers are up.
+> No leak — no drift in either direction — but a fresh-boot figure and a steady-state
+> figure are different quantities and the checklist's wording invites comparing them as
+> if they were not.
 
 - [ ] **Step 9: Gate item 7 — alert replay across a network reconnect**
 

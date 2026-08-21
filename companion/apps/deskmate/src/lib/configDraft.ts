@@ -64,6 +64,29 @@ export function cardName(card: CardSettings): string {
   }
 }
 
+/**
+ * What a card is called on every surface that identifies one: the library tile, the
+ * ring legend, the playlist row, the editor heading, the picker.
+ *
+ * It is the template's name, not the owner's title, by explicit owner direction: a
+ * person meeting a card called "Outside" or "Desk" for the first time learns nothing
+ * from it, where "Weather" and "Digital clock" say what the thing is. The owner's own
+ * words survive as `cardTitle` — a quiet second line beside the label, never the
+ * thing that names the card.
+ */
+export function cardLabel(card: CardSettings): string {
+  return cardKindName(card.kind);
+}
+
+/**
+ * The owner's words for this card, if they typed any. Null rather than a fallback,
+ * because a secondary line repeating the label it sits under is worse than no line.
+ */
+export function cardTitle(card: CardSettings): string | null {
+  const typed = card.kind === "pomodoro" ? card.label : card.title;
+  return typed.trim() === "" ? null : typed;
+}
+
 export function cardKindName(kind: CardKind): string {
   switch (kind) {
     case "clock":
@@ -464,6 +487,10 @@ export function cardFields(
 export interface FilmstripSegment {
   cardId: string;
   name: string;
+  /// The owner's own words for this card, or null when they typed none. Two cards
+  /// can share a template, so the loop needs something besides `name` to tell an
+  /// "ICS calendar" from the other "ICS calendar" sitting two rows below it.
+  title: string | null;
   dwellSeconds: number;
   widthPercent: number;
   offsetPercent: number;
@@ -495,7 +522,8 @@ export function filmstripSegments(config: AppConfig): FilmstripSegment[] {
     const widthPercent = total > 0 ? (dwellSeconds[index] / total) * 100 : equalShare;
     const segment: FilmstripSegment = {
       cardId: card.id,
-      name: cardName(card),
+      name: cardLabel(card),
+      title: cardTitle(card),
       dwellSeconds: dwellSeconds[index],
       widthPercent,
       offsetPercent: offset,

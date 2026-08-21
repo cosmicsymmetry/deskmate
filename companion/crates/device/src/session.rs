@@ -6,10 +6,11 @@ use std::time::{Duration, Instant};
 
 use protocol::{
     Ack, ActivateScreen, ApplyConfig, CAPABILITY_CONFIG_ROTATION, CAPABILITY_CORE_WIDGETS,
-    Deframer, DeviceEvent, EventAction, EventKind, Field, HeartbeatAck, Message, PushData,
-    ScreenConfig, StatusResponse, TYPE_ACTIVATE_SCREEN, TYPE_APPLY_CONFIG, TYPE_PUSH_DATA,
-    TYPE_TIME_SYNC, TYPE_TRIGGER_INTERRUPT, TimeSync, TriggerInterrupt, WidgetConfig,
-    decode_message, encode_message,
+    Deframer, DeviceEvent, EventAction, EventKind, Field, HeartbeatAck, Message, NetworkConfig,
+    PushData, ScreenConfig, StatusResponse, TYPE_ACTIVATE_SCREEN, TYPE_APPLY_CONFIG,
+    TYPE_FACTORY_RESET, TYPE_NETWORK_CONFIG, TYPE_PUSH_DATA, TYPE_TIME_SYNC,
+    TYPE_TRIGGER_INTERRUPT, TimeSync, TriggerInterrupt, WidgetConfig, decode_message,
+    encode_message,
 };
 
 use crate::{
@@ -298,6 +299,34 @@ impl<T: Transport + Send + 'static> DeviceSession<T> {
         match self.request(Message::TriggerInterrupt(interrupt))? {
             Message::Ack(ack)
                 if ack.acknowledged_type == TYPE_TRIGGER_INTERRUPT && ack.revision.is_none() =>
+            {
+                Ok(ack)
+            }
+            _ => Err(DeviceError::UnexpectedMessage),
+        }
+    }
+
+    /// Provision the device's network config over USB. The device persists
+    /// this and applies the resulting tier on its *next* boot -- it never
+    /// hot-swaps ownership mid-session, so this ACK does not mean the device
+    /// is networked yet.
+    pub fn provision(&self, config: &NetworkConfig) -> Result<Ack, DeviceError> {
+        match self.request(Message::NetworkConfig(config.clone()))? {
+            Message::Ack(ack)
+                if ack.acknowledged_type == TYPE_NETWORK_CONFIG && ack.revision.is_none() =>
+            {
+                Ok(ack)
+            }
+            _ => Err(DeviceError::UnexpectedMessage),
+        }
+    }
+
+    /// Erase the device's persisted network config, returning it to
+    /// factory-fresh local tier on its next boot.
+    pub fn factory_reset(&self) -> Result<Ack, DeviceError> {
+        match self.request(Message::FactoryReset)? {
+            Message::Ack(ack)
+                if ack.acknowledged_type == TYPE_FACTORY_RESET && ack.revision.is_none() =>
             {
                 Ok(ack)
             }
@@ -1000,6 +1029,13 @@ mod tests {
             ui_queue_high_water: 0,
             config_revision,
             latest_interrupt_token: 0,
+            tier: protocol::Tier::Local,
+            wifi_state: protocol::WifiState::Down,
+            wifi_rssi: 0,
+            ip: String::new(),
+            ota_state: protocol::OtaState::Idle,
+            last_network_error: None,
+            last_ota_error: None,
         }
     }
 
@@ -1027,6 +1063,14 @@ mod tests {
             }),
             Message::TriggerInterrupt(_) => Message::Ack(Ack {
                 acknowledged_type: TYPE_TRIGGER_INTERRUPT,
+                revision: None,
+            }),
+            Message::NetworkConfig(_) => Message::Ack(Ack {
+                acknowledged_type: TYPE_NETWORK_CONFIG,
+                revision: None,
+            }),
+            Message::FactoryReset => Message::Ack(Ack {
+                acknowledged_type: TYPE_FACTORY_RESET,
                 revision: None,
             }),
             _ => panic!("unexpected fake request: {request:?}"),
@@ -1456,5 +1500,48 @@ mod tests {
         assert!(second_state.lock().unwrap().requests.is_empty());
         assert_eq!(session.latest_data_revision(), 8);
         assert_eq!(session.latest_config_revision(), 4);
+    }
+
+    #[test]
+    fn provision_sends_the_config_and_returns_the_ack() {
+        let (transport, state) = FakeTransport::new(status(0, 0, 100));
+        let session = DeviceSession::with_options(
+            transport,
+            &status(0, 0, 100),
+            options(Duration::from_mins(1), 8),
+        );
+        let network_config = NetworkConfig {
+            ssid: "desk-wifi".into(),
+            psk: "hunter2".into(),
+            server_url: "wss://example.invalid/v1/device/link".into(),
+            device_id: "dev-0001".into(),
+            token: "placeholder".into(),
+            utc_offset_minutes: 240,
+            tier: protocol::Tier::Networked,
+        };
+        let ack = session.provision(&network_config).unwrap();
+        assert_eq!(ack.acknowledged_type, TYPE_NETWORK_CONFIG);
+        assert_eq!(ack.revision, None);
+        assert_eq!(
+            state.lock().unwrap().requests.last(),
+            Some(&Message::NetworkConfig(network_config))
+        );
+    }
+
+    #[test]
+    fn factory_reset_sends_the_request_and_returns_the_ack() {
+        let (transport, state) = FakeTransport::new(status(0, 0, 100));
+        let session = DeviceSession::with_options(
+            transport,
+            &status(0, 0, 100),
+            options(Duration::from_mins(1), 8),
+        );
+        let ack = session.factory_reset().unwrap();
+        assert_eq!(ack.acknowledged_type, TYPE_FACTORY_RESET);
+        assert_eq!(ack.revision, None);
+        assert_eq!(
+            state.lock().unwrap().requests.last(),
+            Some(&Message::FactoryReset)
+        );
     }
 }

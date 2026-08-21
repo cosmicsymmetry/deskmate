@@ -3,6 +3,7 @@
 #include <limits.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdatomic.h>
 #include <string.h>
 #include <sys/time.h>
 
@@ -11,18 +12,26 @@
 #include "core/device_event_queue.h"
 #include "core/interrupt_state.h"
 #include "core/link_state.h"
+#include "core/net_config.h"
+#include "core/ota_policy.h"
 #include "core/protocol_frame.h"
 #include "core/protocol_message.h"
 #include "core/widget_model.h"
 #include "esp_app_desc.h"
 #include "esp_check.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "link/dev_capture.h"
+#include "link/link_transport.h"
+#include "link/net_link.h"
+#include "link/net_store.h"
+#include "link/ota.h"
 #include "link/usb_link.h"
+#include "link/wifi_station.h"
 #include "ui/ui_runtime.h"
 
 #define PROTOCOL_TASK_STACK_SIZE 8192U
@@ -36,6 +45,7 @@
 
 typedef struct {
     protocol_decoder_t decoder;
+    protocol_decoder_t restricted_usb_decoder;
     link_state_t link;
     widget_model_t model;
     interrupt_state_t interrupts;
@@ -50,11 +60,41 @@ typedef struct {
     uint32_t overflow_frames;
     uint32_t dropped_responses;
     uint32_t dropped_events;
+    const link_transport_t *response_transport;
 } protocol_context_t;
 
 static const char *TAG = "protocol";
-static protocol_context_t s_context;
+// Allocated from PSRAM in protocol_task_start(), not a static internal-RAM
+// object: protocol_context_t is 58,736 B, which would crowd out the internal
+// MALLOC_CAP_DMA headroom board_display_init() needs for its LVGL flush and
+// software-rotation buffers once WiFi's static internal .bss landed (see
+// docs/hardware/board-notes.md). Nothing in this struct is DMA'd -- see
+// transmit()/transmit_device_event(), which hand context->wire to
+// usb_link_write_frame() (copies into the USB driver's own ring buffer) and,
+// from Task 8 on, esp_websocket_client_send_bin() (also copies) -- and the
+// struct is only ever touched from this task, never an ISR, so PSRAM cache
+// access is safe here.
+static protocol_context_t *s_context;
 static TaskHandle_t s_task;
+static const link_transport_t *s_transport;
+static bool s_owner_usb_restricted;
+static atomic_bool s_ota_blocked;
+static atomic_bool s_owner_state_ready;
+static atomic_bool s_network_decoder_reset_requested;
+
+static void refresh_ota_snapshots(const protocol_context_t *context)
+{
+    bool interrupt_live = interrupt_state_active(&context->interrupts) != NULL;
+    bool progress_running = widget_model_has_running_progress(&context->model);
+    atomic_store_explicit(
+        &s_ota_blocked,
+        ota_policy_update_deferred(interrupt_live, progress_running),
+        memory_order_release);
+    atomic_store_explicit(
+        &s_owner_state_ready,
+        context->link.online && widget_model_config(&context->model) != NULL,
+        memory_order_release);
+}
 
 static uint64_t uptime_ms(void)
 {
@@ -181,8 +221,9 @@ static void transmit(protocol_context_t *context,
         request_id, message, context->wire, sizeof(context->wire),
         &wire_length);
     if (result != PROTOCOL_MESSAGE_OK ||
-        usb_link_write_frame(context->wire, wire_length,
-                             pdMS_TO_TICKS(PROTOCOL_WRITE_TIMEOUT_MS)) !=
+        context->response_transport->write_frame(
+            context->wire, wire_length,
+            pdMS_TO_TICKS(PROTOCOL_WRITE_TIMEOUT_MS)) !=
             ESP_OK) {
         increment_saturating(&context->dropped_responses);
     }
@@ -237,7 +278,7 @@ static void transmit_status(protocol_context_t *context, uint32_t request_id)
     status->crc_errors = context->crc_errors;
     status->overflow_frames = context->overflow_frames;
     status->dropped_responses = context->dropped_responses;
-    status->rx_dropped_bytes = usb_link_rx_dropped_bytes();
+    status->rx_dropped_bytes = s_transport->dropped_bytes();
     status->dropped_events = saturating_add(
         context->dropped_events,
         device_event_queue_dropped(&context->events));
@@ -248,6 +289,13 @@ static void transmit_status(protocol_context_t *context, uint32_t request_id)
     status->config_revision = widget_model_config_revision(&context->model);
     status->latest_interrupt_token =
         interrupt_state_latest_token(&context->interrupts);
+    status->ota_state = ota_state();
+    status->has_last_ota_error = ota_copy_last_error(
+        status->last_ota_error, sizeof(status->last_ota_error));
+    status->wifi_state = wifi_station_state();
+    status->wifi_rssi = wifi_station_rssi();
+    wifi_station_copy_ip(status->ip, sizeof(status->ip));
+    status->tier = net_store_current_tier();
     transmit(context, request_id, reply);
 }
 
@@ -489,8 +537,76 @@ static void dispatch_trigger_interrupt(protocol_context_t *context,
                  false, 0U);
 }
 
+// Distinguishes why an incoming NETWORK_CONFIG command was rejected, for a
+// host-side diagnostic. Never includes a field value -- ssid/psk/server_url/
+// token are never safe to echo back onto the wire.
+static const char *network_config_error_diagnostic(net_config_error_t error)
+{
+    switch (error) {
+        case NET_CONFIG_ERR_MISSING_SSID:
+            return "networked tier requires ssid";
+        case NET_CONFIG_ERR_MISSING_SERVER_URL:
+            return "networked tier requires server_url";
+        case NET_CONFIG_ERR_MISSING_TOKEN:
+            return "networked tier requires token";
+        case NET_CONFIG_ERR_INSECURE_URL:
+            return "server URL must use wss://";
+        case NET_CONFIG_ERR_INVALID_TIER:
+            return "invalid tier";
+        case NET_CONFIG_ERR_INVALID_UTC_OFFSET:
+            return "utc offset out of range";
+        case NET_CONFIG_OK:
+        default:
+            return "invalid network config";
+    }
+}
+
+static void dispatch_network_config(protocol_context_t *context,
+                                    uint32_t request_id)
+{
+    const protocol_network_config_t *config =
+        &context->message.value.network_config;
+    // Reject-on-write, distinct from the store's degrade-on-read rule: a
+    // NETWORK_CONFIG message is the host asking to pair, and if the config
+    // cannot produce the tier it asks for, the host must be told the
+    // request failed rather than receiving an ACK for a config that will
+    // silently boot local. Only NET_CONFIG_OK (which a factory-fresh local
+    // config with every field empty satisfies) is persisted. Returning here
+    // means net_store_save() is never reached on any rejection path, so a
+    // rejected write cannot land a partial update over a previously-stored
+    // valid config.
+    net_config_error_t validation = net_config_validate(config);
+    if (validation != NET_CONFIG_OK) {
+        transmit_error(context, request_id, PROTOCOL_ERROR_INVALID_PAYLOAD,
+                       network_config_error_diagnostic(validation));
+        return;
+    }
+    if (net_store_save(config) != ESP_OK) {
+        transmit_error(context, request_id, PROTOCOL_ERROR_INTERNAL,
+                       "failed to persist network config");
+        return;
+    }
+    // The new tier takes effect on the next boot, not live: net_store_save()
+    // never updates net_store_current_tier()'s cache, so this ACK does not
+    // change what net_config_usb_message_allowed() enforces for the rest of
+    // this session.
+    transmit_ack(context, request_id, PROTOCOL_TYPE_NETWORK_CONFIG, false, 0U);
+}
+
+static void dispatch_factory_reset(protocol_context_t *context,
+                                   uint32_t request_id)
+{
+    if (net_store_erase() != ESP_OK) {
+        transmit_error(context, request_id, PROTOCOL_ERROR_INTERNAL,
+                       "failed to erase network config");
+        return;
+    }
+    transmit_ack(context, request_id, PROTOCOL_TYPE_FACTORY_RESET, false, 0U);
+}
+
 static void dispatch_request(protocol_context_t *context,
-                             const protocol_frame_t *frame)
+                             const protocol_frame_t *frame,
+                             bool restricted_usb)
 {
 #ifdef DESKMATE_DEV_DIAG
     // Dev-only framebuffer capture (spec §3.2.3): 0x7E/0x7F sit outside
@@ -543,14 +659,28 @@ static void dispatch_request(protocol_context_t *context,
         context->message.type != PROTOCOL_TYPE_HEARTBEAT &&
         context->message.type != PROTOCOL_TYPE_APPLY_CONFIG &&
         context->message.type != PROTOCOL_TYPE_ACTIVATE_SCREEN &&
-        context->message.type != PROTOCOL_TYPE_TRIGGER_INTERRUPT) {
+        context->message.type != PROTOCOL_TYPE_TRIGGER_INTERRUPT &&
+        context->message.type != PROTOCOL_TYPE_NETWORK_CONFIG &&
+        context->message.type != PROTOCOL_TYPE_FACTORY_RESET) {
         transmit_error(context, frame->request_id,
                        PROTOCOL_ERROR_UNSUPPORTED_MESSAGE,
                        "response type sent as request");
         return;
     }
 
-    if (link_state_note_valid_request(&context->link, uptime_ms())) {
+    if (restricted_usb &&
+        !net_config_usb_message_allowed(net_store_current_tier(),
+                                        context->message.type)) {
+        transmit_error(context, frame->request_id, PROTOCOL_ERROR_WRONG_TIER,
+                       "device is owned over the network");
+        return;
+    }
+
+    // Configurator traffic over USB must not establish or keep alive the
+    // network owner's link. In local tier the owner itself is USB, so the
+    // same messages still drive the ordinary link state there.
+    if (!restricted_usb &&
+        link_state_note_valid_request(&context->link, uptime_ms())) {
         ui_runtime_set_online(true);
         if (widget_model_config(&context->model) != NULL) {
             (void)show_current_content(context);
@@ -560,6 +690,15 @@ static void dispatch_request(protocol_context_t *context,
     switch (context->message.type) {
     case PROTOCOL_TYPE_STATUS_REQUEST:
         transmit_status(context, frame->request_id);
+        if (frame->request_id == OTA_CHECK_STATUS_REQUEST_ID &&
+            context->response_transport == usb_link_transport()) {
+            esp_err_t ota_result = ota_check_now();
+            if (ota_result != ESP_OK &&
+                ota_result != ESP_ERR_INVALID_STATE) {
+                ESP_LOGW(TAG, "USB firmware check trigger failed: %s",
+                         esp_err_to_name(ota_result));
+            }
+        }
         break;
     case PROTOCOL_TYPE_TIME_SYNC:
         dispatch_time_sync(context, frame->request_id);
@@ -576,6 +715,12 @@ static void dispatch_request(protocol_context_t *context,
     case PROTOCOL_TYPE_TRIGGER_INTERRUPT:
         dispatch_trigger_interrupt(context, frame->request_id);
         break;
+    case PROTOCOL_TYPE_NETWORK_CONFIG:
+        dispatch_network_config(context, frame->request_id);
+        break;
+    case PROTOCOL_TYPE_FACTORY_RESET:
+        dispatch_factory_reset(context, frame->request_id);
+        break;
     case PROTOCOL_TYPE_HEARTBEAT: {
         protocol_message_t *reply = &context->message;
         memset(reply, 0, sizeof(*reply));
@@ -589,11 +734,12 @@ static void dispatch_request(protocol_context_t *context,
     }
 }
 
-static void frame_callback(protocol_frame_result_t result,
-                           const protocol_frame_t *frame,
-                           void *opaque)
+static void handle_frame(protocol_frame_result_t result,
+                         const protocol_frame_t *frame,
+                         protocol_context_t *context,
+                         const link_transport_t *response_transport,
+                         bool restricted_usb)
 {
-    protocol_context_t *context = opaque;
     if (result == PROTOCOL_FRAME_ERR_CHECKSUM) {
         increment_saturating(&context->crc_errors);
         return;
@@ -607,7 +753,24 @@ static void frame_callback(protocol_frame_result_t result,
         return;
     }
     increment_saturating(&context->valid_frames);
-    dispatch_request(context, frame);
+    context->response_transport = response_transport;
+    dispatch_request(context, frame, restricted_usb);
+    context->response_transport = s_transport;
+}
+
+static void frame_callback(protocol_frame_result_t result,
+                           const protocol_frame_t *frame,
+                           void *opaque)
+{
+    handle_frame(result, frame, opaque, s_transport,
+                 s_owner_usb_restricted);
+}
+
+static void restricted_usb_frame_callback(protocol_frame_result_t result,
+                                          const protocol_frame_t *frame,
+                                          void *opaque)
+{
+    handle_frame(result, frame, opaque, usb_link_transport(), true);
 }
 
 static void transmit_device_event(protocol_context_t *context,
@@ -621,8 +784,8 @@ static void transmit_device_event(protocol_context_t *context,
     protocol_message_result_t result = protocol_message_encode(
         0U, message, context->wire, sizeof(context->wire), &wire_length);
     if (result != PROTOCOL_MESSAGE_OK ||
-        usb_link_write_frame(context->wire, wire_length,
-                             pdMS_TO_TICKS(PROTOCOL_EVENT_WRITE_TIMEOUT_MS)) !=
+        s_transport->write_frame(context->wire, wire_length,
+                                 pdMS_TO_TICKS(PROTOCOL_EVENT_WRITE_TIMEOUT_MS)) !=
             ESP_OK) {
         increment_saturating(&context->dropped_events);
     }
@@ -726,17 +889,35 @@ static void protocol_task(void *argument)
     protocol_context_t *context = argument;
     uint8_t chunk[PROTOCOL_READ_CHUNK_SIZE];
     for (;;) {
-        size_t received = usb_link_read(
+        size_t received = s_transport->read(
             chunk, sizeof(chunk), pdMS_TO_TICKS(PROTOCOL_READ_TIMEOUT_MS));
+        if (atomic_exchange_explicit(&s_network_decoder_reset_requested,
+                                     false, memory_order_acq_rel)) {
+            protocol_decoder_init(&context->decoder);
+        }
         if (received != 0U) {
             protocol_decoder_feed(&context->decoder, chunk, received,
                                   frame_callback, context);
         }
+        if (s_transport != usb_link_transport()) {
+            size_t usb_received = usb_link_read(chunk, sizeof(chunk), 0U);
+            if (usb_received != 0U) {
+                protocol_decoder_feed(&context->restricted_usb_decoder,
+                                      chunk, usb_received,
+                                      restricted_usb_frame_callback, context);
+            }
+        }
         process_device_events(context);
+        // Pumps the UI-facing half of an SNTP time sync. Must run on this
+        // task (see wifi_station_poll()'s doc comment) -- the SNTP
+        // notification callback runs on the unpinned lwIP tcpip task, which
+        // is not safe to let touch ui_runtime's spinlocks directly.
+        wifi_station_poll();
         if (link_state_poll(&context->link, uptime_ms())) {
             ui_runtime_set_online(false);
             ESP_LOGI(TAG, "link standalone after timeout");
         }
+        refresh_ota_snapshots(context);
     }
 }
 
@@ -744,17 +925,75 @@ esp_err_t protocol_task_start(void)
 {
     ESP_RETURN_ON_FALSE(s_task == NULL, ESP_ERR_INVALID_STATE, TAG,
                         "protocol task already running");
-    memset(&s_context, 0, sizeof(s_context));
-    protocol_decoder_init(&s_context.decoder);
-    link_state_init(&s_context.link);
-    widget_model_init(&s_context.model);
-    interrupt_state_init(&s_context.interrupts);
-    device_event_queue_init(&s_context.events);
-    ui_runtime_set_event_queue(&s_context.events);
+    // Allocate before anything else touches the context (including
+    // net_store_load() below): a failure here must be reported through this
+    // function's return value rather than left to be discovered by some
+    // later NULL dereference. heap_caps_calloc() already zero-fills, so no
+    // separate memset() is needed. On any later failure in this function the
+    // allocation is released so a caller that retries protocol_task_start()
+    // (main.c does not today, but nothing here should assume that) doesn't
+    // leak it.
+    s_context = heap_caps_calloc(1, sizeof(*s_context), MALLOC_CAP_SPIRAM);
+    ESP_RETURN_ON_FALSE(s_context != NULL, ESP_ERR_NO_MEM, TAG,
+                        "allocate protocol context from PSRAM");
+    // Populate net_store_current_tier()'s cache once, synchronously, before
+    // any USB message can reach its reader gate. The loaded config itself
+    // isn't needed here -- only its side effect on the tier cache -- so
+    // zero it immediately after: it briefly held a PSK and a token, and
+    // this stack region must not keep carrying them once its job is done.
+    protocol_network_config_t boot_network_config;
+    net_store_load(&boot_network_config);
+    memset(&boot_network_config, 0, sizeof(boot_network_config));
+    atomic_store_explicit(&s_network_decoder_reset_requested, false,
+                          memory_order_relaxed);
+    if (net_store_current_tier() == PROTOCOL_TIER_NETWORKED &&
+        net_link_start() == ESP_OK) {
+        s_transport = net_link_transport();
+    } else {
+        s_transport = usb_link_transport();
+    }
+    s_owner_usb_restricted =
+        net_store_current_tier() == PROTOCOL_TIER_NETWORKED &&
+        s_transport == usb_link_transport();
+    s_context->response_transport = s_transport;
+    protocol_decoder_init(&s_context->decoder);
+    protocol_decoder_init(&s_context->restricted_usb_decoder);
+    link_state_init_with_timeout(&s_context->link, s_transport->link_timeout_ms);
+    widget_model_init(&s_context->model);
+    interrupt_state_init(&s_context->interrupts);
+    refresh_ota_snapshots(s_context);
+    device_event_queue_init(&s_context->events);
+    ui_runtime_set_event_queue(&s_context->events);
     BaseType_t created = xTaskCreatePinnedToCore(
-        protocol_task, "protocol", PROTOCOL_TASK_STACK_SIZE, &s_context,
+        protocol_task, "protocol", PROTOCOL_TASK_STACK_SIZE, s_context,
         PROTOCOL_TASK_PRIORITY, &s_task, PROTOCOL_TASK_CORE);
-    ESP_RETURN_ON_FALSE(created == pdPASS, ESP_ERR_NO_MEM, TAG,
-                        "create protocol task");
+    if (created != pdPASS) {
+        heap_caps_free(s_context);
+        s_context = NULL;
+        ESP_LOGE(TAG, "create protocol task failed");
+        return ESP_ERR_NO_MEM;
+    }
     return ESP_OK;
+}
+
+bool protocol_task_is_running(void)
+{
+    return s_task != NULL;
+}
+
+void protocol_task_reset_network_decoder(void)
+{
+    atomic_store_explicit(&s_network_decoder_reset_requested, true,
+                          memory_order_release);
+}
+
+bool protocol_task_ota_blocked(void)
+{
+    return atomic_load_explicit(&s_ota_blocked, memory_order_acquire);
+}
+
+bool protocol_task_owner_state_ready(void)
+{
+    return atomic_load_explicit(&s_owner_state_ready,
+                                memory_order_acquire);
 }

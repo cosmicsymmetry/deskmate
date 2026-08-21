@@ -315,6 +315,28 @@ static void test_timeout_retains_replay_state(void)
            WIDGET_MODEL_PUSH_UNKNOWN_WIDGET);
 }
 
+static void test_running_progress_is_visible_to_ota_policy(void)
+{
+    widget_model_init(&s_model);
+    assert(!widget_model_has_running_progress(&s_model));
+    protocol_apply_config_t config = config_two_screens(1U);
+    assert(widget_model_apply_config(&s_model, &config) ==
+           WIDGET_MODEL_CONFIG_APPLIED);
+    assert(!widget_model_has_running_progress(&s_model));
+
+    widget_model_update_t update;
+    protocol_push_data_t push = timer_push(1U);
+    assert(widget_model_apply_push(&s_model, &push, &update) ==
+           WIDGET_MODEL_PUSH_ACCEPTED);
+    assert(widget_model_has_running_progress(&s_model));
+
+    push = timer_push(2U);
+    push.fields[2].value.boolean = false;
+    assert(widget_model_apply_push(&s_model, &push, &update) ==
+           WIDGET_MODEL_PUSH_ACCEPTED);
+    assert(!widget_model_has_running_progress(&s_model));
+}
+
 int main(void)
 {
     test_atomic_config_and_navigation();
@@ -322,6 +344,7 @@ int main(void)
     test_config_preflight_does_not_mutate_model();
     test_extended_templates_are_accepted();
     test_timeout_retains_replay_state();
+    test_running_progress_is_visible_to_ota_policy();
     printf("test_widget_model: OK (%zu-byte fixed model)\n", sizeof(s_model));
     return 0;
 }

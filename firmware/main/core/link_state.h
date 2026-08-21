@@ -12,6 +12,7 @@ typedef struct {
     uint64_t last_valid_request_ms;
     int16_t utc_offset_minutes;
     uint32_t latest_revision;
+    uint32_t timeout_ms;
     protocol_push_data_t push_data;
 } link_state_t;
 
@@ -22,6 +23,12 @@ typedef enum {
 } link_state_push_result_t;
 
 void link_state_init(link_state_t *state);
+
+/**
+ * Initialise with an explicit host-loss deadline. link_state_init() delegates
+ * here with PROTOCOL_LINK_TIMEOUT_MS, so the USB path is bit-identical.
+ */
+void link_state_init_with_timeout(link_state_t *state, uint32_t timeout_ms);
 
 /** Record a valid request and return true only on standalone -> online. */
 bool link_state_note_valid_request(link_state_t *state, uint64_t now_ms);

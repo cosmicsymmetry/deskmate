@@ -1,19 +1,12 @@
 use std::collections::HashMap;
 use std::fmt;
-use std::fs::{self, File};
-use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use atomic_write_file::AtomicWriteFile;
-#[cfg(unix)]
-use atomic_write_file::unix::OpenOptionsExt as AtomicOpenOptionsExt;
 use serde::{Deserialize, Serialize};
 
-#[cfg(unix)]
-use std::os::unix::fs::{OpenOptionsExt as UnixOpenOptionsExt, PermissionsExt};
-
 use crate::config::{DEFAULT_PLAYLIST_ID, DEFAULT_PLAYLIST_NAME};
+use crate::secure_file::{self, BoundedReadError, FileIoError};
 use crate::{
     AlertHold, AppConfig, AppPreferences, AssetSettings, CURRENT_SCHEMA_VERSION, CalendarSource,
     CardAlert, CardSettings, CarouselAdvance, DisplayTemplate, JsonFieldMapping, Playlist,
@@ -94,15 +87,20 @@ impl ConfigStore {
             });
         }
 
-        let parent = usable_parent(&self.path)?;
-        fs::create_dir_all(parent).map_err(|error| io_error("create config directory", &error))?;
-        write_and_replace(&self.path, &bytes)?;
+        let parent =
+            secure_file::usable_parent(&self.path).ok_or_else(|| StoreError::InvalidPath {
+                message: format!("{} has no parent directory", self.path.display()),
+            })?;
+        secure_file::create_directory(parent)
+            .map_err(|error| secure_io_error("config directory", error))?;
+        secure_file::write_and_replace(&self.path, &bytes)
+            .map_err(|error| secure_io_error("config", error))?;
 
         state.generation = state.generation.saturating_add(1);
         state.last_good = Some(config.clone());
-        let warning = sync_parent(parent).err().map(|error| StoreWarning::Io {
-            operation: "sync config directory".into(),
-            message: error.to_string(),
+        let warning = secure_file::sync_parent(parent).err().map(|error| {
+            let (operation, message) = error.into_strings("config directory");
+            StoreWarning::Io { operation, message }
         });
         Ok(SaveReceipt {
             generation: state.generation,
@@ -1181,33 +1179,10 @@ fn legacy_widget_id(widget: &LegacyWidgetSettings) -> &str {
 }
 
 fn read_bounded(path: &Path) -> Result<Option<Vec<u8>>, StoreError> {
-    read_bounded_with_mode_repair(path, secure_open_config)
-}
-
-fn read_bounded_with_mode_repair(
-    path: &Path,
-    repair_mode: impl FnOnce(&File) -> io::Result<()>,
-) -> Result<Option<Vec<u8>>, StoreError> {
-    let file = match File::open(path) {
-        Ok(file) => file,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(io_error("open config", &error)),
-    };
-    // Permission repair is defense in depth. A readable, valid configuration must
-    // still load when chmod is unavailable (for example on a read-only volume or
-    // after a root-owned backup restore).
-    let _ = repair_mode(&file);
-    let mut bytes = Vec::new();
-    file.take((MAX_CONFIG_FILE_BYTES + 1) as u64)
-        .read_to_end(&mut bytes)
-        .map_err(|error| io_error("read config", &error))?;
-    if bytes.len() > MAX_CONFIG_FILE_BYTES {
-        Err(StoreError::TooLarge {
-            maximum: MAX_CONFIG_FILE_BYTES,
-        })
-    } else {
-        Ok(Some(bytes))
-    }
+    secure_file::read_bounded(path, MAX_CONFIG_FILE_BYTES).map_err(|error| match error {
+        BoundedReadError::Io(error) => secure_io_error("config", error),
+        BoundedReadError::TooLarge { maximum } => StoreError::TooLarge { maximum },
+    })
 }
 
 fn recovered(state: &StoreState, error: StoreError) -> LoadOutcome {
@@ -1235,75 +1210,16 @@ fn fallback(state: &StoreState) -> (AppConfig, ConfigOrigin) {
     }
 }
 
-fn usable_parent(path: &Path) -> Result<&Path, StoreError> {
-    let parent = path.parent().ok_or_else(|| StoreError::InvalidPath {
-        message: format!("{} has no parent directory", path.display()),
-    })?;
-    if parent.as_os_str().is_empty() {
-        Ok(Path::new("."))
-    } else {
-        Ok(parent)
-    }
-}
-
-fn write_and_replace(target: &Path, bytes: &[u8]) -> Result<(), StoreError> {
-    let mut options = AtomicWriteFile::options();
-    secure_atomic_options(&mut options);
-    let mut file = options
-        .open(target)
-        .map_err(|error| io_error("create temporary config", &error))?;
-    file.write_all(bytes)
-        .map_err(|error| io_error("write temporary config", &error))?;
-    file.write_all(b"\n")
-        .map_err(|error| io_error("finish temporary config", &error))?;
-    file.commit()
-        .map_err(|error| io_error("sync and replace config", &error))
-}
-
-/// Existing dogfood installs may have inherited the process umask's `0644` mode.
-/// Tighten the descriptor before reading so an upgrade repairs that state immediately.
-#[cfg(unix)]
-fn secure_open_config(file: &File) -> io::Result<()> {
-    file.set_permissions(fs::Permissions::from_mode(0o600))
-}
-
-#[cfg(not(unix))]
-fn secure_open_config(_file: &File) -> io::Result<()> {
-    Ok(())
-}
-
-/// Do not preserve a permissive mode from an older destination when atomically
-/// replacing it. The temporary file is private from the moment it is created.
-#[cfg(unix)]
-fn secure_atomic_options(options: &mut atomic_write_file::OpenOptions) {
-    options.preserve_mode(false);
-    options.mode(0o600);
-}
-
-#[cfg(not(unix))]
-fn secure_atomic_options(_options: &mut atomic_write_file::OpenOptions) {}
-
-#[cfg(unix)]
-fn sync_parent(parent: &Path) -> io::Result<()> {
-    File::open(parent)?.sync_all()
-}
-
-#[cfg(not(unix))]
-fn sync_parent(_parent: &Path) -> io::Result<()> {
-    Ok(())
-}
-
-fn io_error(operation: &str, error: &io::Error) -> StoreError {
-    StoreError::Io {
-        operation: operation.into(),
-        message: error.to_string(),
-    }
+fn secure_io_error(subject: &str, error: FileIoError) -> StoreError {
+    let (operation, message) = error.into_strings(subject);
+    StoreError::Io { operation, message }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+    use std::{fs, io};
 
     #[test]
     fn failed_mode_repair_does_not_discard_valid_config() {
@@ -1321,14 +1237,15 @@ mod tests {
         )
         .unwrap();
 
-        let bytes = read_bounded_with_mode_repair(&path, |_| {
-            Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "injected chmod failure",
-            ))
-        })
-        .unwrap()
-        .unwrap();
+        let bytes =
+            secure_file::read_bounded_with_mode_repair(&path, MAX_CONFIG_FILE_BYTES, |_| {
+                Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "injected chmod failure",
+                ))
+            })
+            .unwrap()
+            .unwrap();
         let (config, origin) = decode_config(&bytes).unwrap();
 
         assert_eq!(origin, ConfigOrigin::Current);

@@ -6,6 +6,8 @@
 #include "esp_err.h"
 #include "freertos/FreeRTOS.h"
 
+#include "link/link_transport.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -38,6 +40,9 @@ esp_err_t usb_link_write_frame(const uint8_t *frame, size_t length,
 
 /** Reserved transport-drop counter; native driver overflow is not observable. */
 uint32_t usb_link_rx_dropped_bytes(void);
+
+/** The USB transport. `link_timeout_ms` is PROTOCOL_LINK_TIMEOUT_MS (10000). */
+const link_transport_t *usb_link_transport(void);
 
 #ifdef __cplusplus
 }

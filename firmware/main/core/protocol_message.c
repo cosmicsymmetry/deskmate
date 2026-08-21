@@ -325,6 +325,111 @@ static protocol_message_result_t decode_push_data(
                                             : PROTOCOL_MESSAGE_ERR_MISSING_FIELD;
 }
 
+static protocol_message_result_t validate_network_config(
+    const protocol_network_config_t *config)
+{
+    size_t length = 0U;
+    if (!bounded_length(config->ssid, sizeof(config->ssid), &length) ||
+        !bounded_length(config->psk, sizeof(config->psk), &length) ||
+        !bounded_length(config->server_url, sizeof(config->server_url),
+                        &length) ||
+        !bounded_length(config->device_id, sizeof(config->device_id),
+                        &length) ||
+        !bounded_length(config->token, sizeof(config->token), &length)) {
+        return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
+    }
+    if (config->utc_offset_minutes < PROTOCOL_MIN_UTC_OFFSET_MINUTES ||
+        config->utc_offset_minutes > PROTOCOL_MAX_UTC_OFFSET_MINUTES) {
+        return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
+    }
+    if (config->tier != PROTOCOL_TIER_LOCAL &&
+        config->tier != PROTOCOL_TIER_NETWORKED) {
+        return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
+    }
+    return PROTOCOL_MESSAGE_OK;
+}
+
+static protocol_message_result_t decode_network_config(
+    const protocol_frame_t *frame,
+    protocol_network_config_t *config)
+{
+    CborParser parser;
+    CborValue contents;
+    size_t count = 0U;
+    protocol_message_result_t result = open_payload_map(
+        frame->payload, frame->payload_length, &parser, &contents, &count);
+    if (result != PROTOCOL_MESSAGE_OK) {
+        return result;
+    }
+    uint32_t present = 0U;
+    uint64_t previous = 0U;
+    bool has_previous = false;
+    for (size_t i = 0U; i < count; ++i) {
+        uint64_t key = 0U;
+        result = read_key(&contents, &key, &previous, &has_previous);
+        if (result != PROTOCOL_MESSAGE_OK) {
+            return result;
+        }
+        if (key == 1U) {
+            result = read_text(&contents, config->ssid, sizeof(config->ssid),
+                               0U, PROTOCOL_MAX_SSID_LENGTH);
+        } else if (key == 2U) {
+            result = read_text(&contents, config->psk, sizeof(config->psk),
+                               0U, PROTOCOL_MAX_PSK_LENGTH);
+        } else if (key == 3U) {
+            result = read_text(&contents, config->server_url,
+                               sizeof(config->server_url), 0U,
+                               PROTOCOL_MAX_SERVER_URL_LENGTH);
+        } else if (key == 4U) {
+            result = read_text(&contents, config->device_id,
+                               sizeof(config->device_id), 0U,
+                               PROTOCOL_MAX_DEVICE_ID_LENGTH);
+        } else if (key == 5U) {
+            result = read_text(&contents, config->token,
+                               sizeof(config->token), 0U,
+                               PROTOCOL_MAX_DEVICE_TOKEN_LENGTH);
+        } else if (key == 6U) {
+            int64_t offset = 0;
+            result = read_signed(&contents, &offset);
+            if (result == PROTOCOL_MESSAGE_OK &&
+                (offset < PROTOCOL_MIN_UTC_OFFSET_MINUTES ||
+                 offset > PROTOCOL_MAX_UTC_OFFSET_MINUTES)) {
+                result = PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
+            }
+            if (result == PROTOCOL_MESSAGE_OK) {
+                config->utc_offset_minutes = (int16_t)offset;
+            }
+        } else if (key == 7U) {
+            uint64_t raw = 0U;
+            result = read_unsigned(&contents, &raw);
+            if (result == PROTOCOL_MESSAGE_OK &&
+                raw != (uint64_t)PROTOCOL_TIER_LOCAL &&
+                raw != (uint64_t)PROTOCOL_TIER_NETWORKED) {
+                result = PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
+            }
+            if (result == PROTOCOL_MESSAGE_OK) {
+                config->tier = (protocol_tier_t)raw;
+            }
+        } else {
+            /* Unlike the other additive message types, network config is a
+             * closed, security-sensitive schema: an unrecognized key is
+             * rejected rather than skipped. */
+            return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
+        }
+        if (result != PROTOCOL_MESSAGE_OK) {
+            return result;
+        }
+        present |= REQUIRED_BIT((uint32_t)key);
+    }
+    uint32_t required = REQUIRED_BIT(1) | REQUIRED_BIT(2) | REQUIRED_BIT(3) |
+                        REQUIRED_BIT(4) | REQUIRED_BIT(5) | REQUIRED_BIT(6) |
+                        REQUIRED_BIT(7);
+    if ((present & required) != required) {
+        return PROTOCOL_MESSAGE_ERR_MISSING_FIELD;
+    }
+    return validate_network_config(config);
+}
+
 static protocol_message_result_t validate_apply_config(
     const protocol_apply_config_t *config)
 {
@@ -884,7 +989,9 @@ static protocol_message_result_t decode_ack(const protocol_frame_t *frame,
         ack->acknowledged_type != PROTOCOL_TYPE_PUSH_DATA &&
         ack->acknowledged_type != PROTOCOL_TYPE_APPLY_CONFIG &&
         ack->acknowledged_type != PROTOCOL_TYPE_ACTIVATE_SCREEN &&
-        ack->acknowledged_type != PROTOCOL_TYPE_TRIGGER_INTERRUPT) {
+        ack->acknowledged_type != PROTOCOL_TYPE_TRIGGER_INTERRUPT &&
+        ack->acknowledged_type != PROTOCOL_TYPE_NETWORK_CONFIG &&
+        ack->acknowledged_type != PROTOCOL_TYPE_FACTORY_RESET) {
         return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
     }
     if (revision_required != ack->has_revision) {
@@ -955,7 +1062,7 @@ static protocol_message_result_t decode_error(const protocol_frame_t *frame,
             result = read_unsigned(&contents, &code);
             if (result == PROTOCOL_MESSAGE_OK &&
                 (code < PROTOCOL_ERROR_MALFORMED_FRAME ||
-                 code > PROTOCOL_ERROR_CONFIG_TOO_LARGE)) {
+                 code > PROTOCOL_ERROR_WRONG_TIER)) {
                 result = PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
             }
             reply->code = (protocol_error_code_t)code;
@@ -1073,6 +1180,24 @@ static protocol_message_result_t assign_status_unsigned(
     case 23:
         status->capabilities = value;
         break;
+    case 24:
+        if (value > (uint64_t)PROTOCOL_TIER_NETWORKED) {
+            return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
+        }
+        status->tier = (protocol_tier_t)value;
+        break;
+    case 25:
+        if (value > (uint64_t)PROTOCOL_WIFI_FAILED) {
+            return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
+        }
+        status->wifi_state = (protocol_wifi_state_t)value;
+        break;
+    case 28:
+        if (value > (uint64_t)PROTOCOL_OTA_FAILED) {
+            return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
+        }
+        status->ota_state = (protocol_ota_state_t)value;
+        break;
     default:
         return PROTOCOL_MESSAGE_ERR_ARGUMENT;
     }
@@ -1083,6 +1208,15 @@ static protocol_message_result_t decode_status(
     const protocol_frame_t *frame,
     protocol_status_response_t *status)
 {
+    status->tier = PROTOCOL_TIER_LOCAL;
+    status->wifi_state = PROTOCOL_WIFI_DOWN;
+    status->wifi_rssi = 0;
+    status->ip[0] = '\0';
+    status->ota_state = PROTOCOL_OTA_IDLE;
+    status->has_last_network_error = false;
+    status->last_network_error[0] = '\0';
+    status->has_last_ota_error = false;
+    status->last_ota_error[0] = '\0';
     CborParser parser;
     CborValue contents;
     size_t count = 0U;
@@ -1105,7 +1239,38 @@ static protocol_message_result_t decode_status(
                                sizeof(status->firmware_version), 1U,
                                PROTOCOL_MAX_FIRMWARE_VERSION_LENGTH);
             present |= REQUIRED_BIT(1);
-        } else if (key <= 23U) {
+        } else if (key == 26U) {
+            int64_t rssi = 0;
+            result = read_signed(&contents, &rssi);
+            if (result == PROTOCOL_MESSAGE_OK &&
+                (rssi < INT8_MIN || rssi > INT8_MAX)) {
+                result = PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
+            }
+            if (result == PROTOCOL_MESSAGE_OK) {
+                status->wifi_rssi = (int8_t)rssi;
+            }
+            present |= REQUIRED_BIT(26);
+        } else if (key == 27U) {
+            result = read_text(&contents, status->ip, sizeof(status->ip), 0U,
+                               PROTOCOL_MAX_IP_LENGTH);
+            present |= REQUIRED_BIT(27);
+        } else if (key == 29U) {
+            result = read_text(&contents, status->last_network_error,
+                               sizeof(status->last_network_error), 0U,
+                               PROTOCOL_MAX_DIAGNOSTIC_LENGTH);
+            if (result == PROTOCOL_MESSAGE_OK) {
+                status->has_last_network_error = true;
+            }
+            present |= REQUIRED_BIT(29);
+        } else if (key == 30U) {
+            result = read_text(&contents, status->last_ota_error,
+                               sizeof(status->last_ota_error), 0U,
+                               PROTOCOL_MAX_DIAGNOSTIC_LENGTH);
+            if (result == PROTOCOL_MESSAGE_OK) {
+                status->has_last_ota_error = true;
+            }
+            present |= REQUIRED_BIT(30);
+        } else if (key <= 25U || key == 28U) {
             uint64_t value = 0U;
             result = read_unsigned(&contents, &value);
             if (result == PROTOCOL_MESSAGE_OK) {
@@ -1181,6 +1346,10 @@ protocol_message_result_t protocol_message_decode(
                                         &message->value.trigger_interrupt);
     case PROTOCOL_TYPE_DEVICE_EVENT:
         return decode_device_event(frame, &message->value.device_event);
+    case PROTOCOL_TYPE_NETWORK_CONFIG:
+        return decode_network_config(frame, &message->value.network_config);
+    case PROTOCOL_TYPE_FACTORY_RESET:
+        return require_empty_map(frame);
     default:
         return PROTOCOL_MESSAGE_ERR_UNSUPPORTED_TYPE;
     }
@@ -1209,6 +1378,35 @@ static protocol_message_result_t validate_message(
              message->value.status.rotation != 270U)) {
             return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
         }
+        if (!bounded_length(message->value.status.ip,
+                            sizeof(message->value.status.ip), &length) ||
+            length > PROTOCOL_MAX_IP_LENGTH) {
+            return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
+        }
+        if (message->value.status.has_last_network_error &&
+            !bounded_length(message->value.status.last_network_error,
+                            sizeof(message->value.status.last_network_error),
+                            &length)) {
+            return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
+        }
+        if (message->value.status.has_last_ota_error &&
+            !bounded_length(message->value.status.last_ota_error,
+                            sizeof(message->value.status.last_ota_error),
+                            &length)) {
+            return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
+        }
+        if (message->value.status.tier != PROTOCOL_TIER_LOCAL &&
+            message->value.status.tier != PROTOCOL_TIER_NETWORKED) {
+            return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
+        }
+        if (message->value.status.wifi_state < PROTOCOL_WIFI_DOWN ||
+            message->value.status.wifi_state > PROTOCOL_WIFI_FAILED) {
+            return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
+        }
+        if (message->value.status.ota_state < PROTOCOL_OTA_IDLE ||
+            message->value.status.ota_state > PROTOCOL_OTA_FAILED) {
+            return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
+        }
         return PROTOCOL_MESSAGE_OK;
     case PROTOCOL_TYPE_TIME_SYNC:
         if (message->value.time_sync.unix_seconds <
@@ -1232,7 +1430,11 @@ static protocol_message_result_t validate_message(
              message->value.ack.acknowledged_type !=
                  PROTOCOL_TYPE_ACTIVATE_SCREEN &&
              message->value.ack.acknowledged_type !=
-                 PROTOCOL_TYPE_TRIGGER_INTERRUPT) ||
+                 PROTOCOL_TYPE_TRIGGER_INTERRUPT &&
+             message->value.ack.acknowledged_type !=
+                 PROTOCOL_TYPE_NETWORK_CONFIG &&
+             message->value.ack.acknowledged_type !=
+                 PROTOCOL_TYPE_FACTORY_RESET) ||
             (((message->value.ack.acknowledged_type ==
                    PROTOCOL_TYPE_PUSH_DATA ||
                message->value.ack.acknowledged_type ==
@@ -1299,12 +1501,16 @@ static protocol_message_result_t validate_message(
         return validate_device_event(&message->value.device_event);
     case PROTOCOL_TYPE_ERROR:
         if (message->value.error.code < PROTOCOL_ERROR_MALFORMED_FRAME ||
-            message->value.error.code > PROTOCOL_ERROR_CONFIG_TOO_LARGE ||
+            message->value.error.code > PROTOCOL_ERROR_WRONG_TIER ||
             !bounded_length(message->value.error.diagnostic,
                             sizeof(message->value.error.diagnostic),
                             &length)) {
             return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
         }
+        return PROTOCOL_MESSAGE_OK;
+    case PROTOCOL_TYPE_NETWORK_CONFIG:
+        return validate_network_config(&message->value.network_config);
+    case PROTOCOL_TYPE_FACTORY_RESET:
         return PROTOCOL_MESSAGE_OK;
     default:
         return PROTOCOL_MESSAGE_ERR_UNSUPPORTED_TYPE;
@@ -1475,12 +1681,38 @@ static protocol_message_result_t encode_apply_config_payload(
     return result;
 }
 
+static protocol_message_result_t encode_network_config_payload(
+    CborEncoder *root,
+    const protocol_network_config_t *config)
+{
+    CborEncoder map;
+    protocol_message_result_t result = begin_map(root, &map, 7U);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 1U);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_text(&map, config->ssid);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 2U);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_text(&map, config->psk);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 3U);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_text(&map, config->server_url);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 4U);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_text(&map, config->device_id);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 5U);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_text(&map, config->token);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 6U);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_int(&map, config->utc_offset_minutes);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_pair_uint(&map, 7U, config->tier);
+    if (result == PROTOCOL_MESSAGE_OK) result = end_map(root, &map);
+    return result;
+}
+
 static protocol_message_result_t encode_status_payload(
     CborEncoder *root,
     const protocol_status_response_t *status)
 {
     CborEncoder map;
-    protocol_message_result_t result = begin_map(root, &map, 24U);
+    size_t entry_count = 24U + 5U +
+                         (status->has_last_network_error ? 1U : 0U) +
+                         (status->has_last_ota_error ? 1U : 0U);
+    protocol_message_result_t result = begin_map(root, &map, entry_count);
     if (result != PROTOCOL_MESSAGE_OK) return result;
     result = encode_pair_uint(&map, 0U, status->protocol_version);
     if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 1U);
@@ -1507,6 +1739,25 @@ static protocol_message_result_t encode_status_payload(
     if (result == PROTOCOL_MESSAGE_OK) result = encode_pair_uint(&map, 21U, status->latest_interrupt_token);
     if (result == PROTOCOL_MESSAGE_OK) result = encode_pair_uint(&map, 22U, status->max_protocol_version);
     if (result == PROTOCOL_MESSAGE_OK) result = encode_pair_uint(&map, 23U, status->capabilities);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_pair_uint(&map, 24U, status->tier);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_pair_uint(&map, 25U, status->wifi_state);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 26U);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_int(&map, status->wifi_rssi);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 27U);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_text(&map, status->ip);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_pair_uint(&map, 28U, status->ota_state);
+    if (result == PROTOCOL_MESSAGE_OK && status->has_last_network_error) {
+        result = encode_uint(&map, 29U);
+        if (result == PROTOCOL_MESSAGE_OK) {
+            result = encode_text(&map, status->last_network_error);
+        }
+    }
+    if (result == PROTOCOL_MESSAGE_OK && status->has_last_ota_error) {
+        result = encode_uint(&map, 30U);
+        if (result == PROTOCOL_MESSAGE_OK) {
+            result = encode_text(&map, status->last_ota_error);
+        }
+    }
     if (result != PROTOCOL_MESSAGE_OK) return result;
     return end_map(root, &map);
 }
@@ -1523,11 +1774,16 @@ static protocol_message_result_t encode_payload(
     switch (message->type) {
     case PROTOCOL_TYPE_STATUS_REQUEST:
     case PROTOCOL_TYPE_HEARTBEAT:
+    case PROTOCOL_TYPE_FACTORY_RESET:
         result = begin_map(&root, &map, 0U);
         if (result == PROTOCOL_MESSAGE_OK) result = end_map(&root, &map);
         break;
     case PROTOCOL_TYPE_STATUS_RESPONSE:
         result = encode_status_payload(&root, &message->value.status);
+        break;
+    case PROTOCOL_TYPE_NETWORK_CONFIG:
+        result = encode_network_config_payload(&root,
+                                               &message->value.network_config);
         break;
     case PROTOCOL_TYPE_TIME_SYNC:
         result = begin_map(&root, &map, 2U);

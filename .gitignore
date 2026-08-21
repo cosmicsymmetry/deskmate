@@ -15,6 +15,10 @@ firmware/host_tests/test_interrupt_state
 firmware/host_tests/test_device_event_queue
 firmware/host_tests/test_weather_icon
 firmware/host_tests/test_clock_source
+firmware/host_tests/test_net_config
+firmware/host_tests/test_net_ring
+firmware/host_tests/test_ota_policy
+firmware/host_tests/test_reconnect_backoff
 firmware/host_tests/*.dSYM/
 companion/target/
 companion/apps/deskmate/node_modules/
@@ -22,3 +26,7 @@ companion/apps/deskmate/dist/
 companion/apps/deskmate/src-tauri/gen/
 .vscode/
 .DS_Store
+
+# Impeccable design-session scratch (screenshots, review evidence)
+.impeccable/
+.playwright-mcp/

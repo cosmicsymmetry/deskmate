@@ -15,6 +15,14 @@ the link is down, release firmware, and real-panel artifacts.
   ~2.5 s autofocus warmup baked in, camera resolved by the name `OBSBOT` at
   every call. Prints the frame path on stdout; exit 1 if the camera is
   missing or the capture fails, exit 2 on usage errors.
+  Geometry and device are overridable via `HWCAM_DEVICE`, `HWCAM_VIDEO_SIZE`,
+  `HWCAM_FRAMERATE` and `HWCAM_WARMUP_FRAMES`, because which camera is
+  reachable depends on how the OBSBOT software is running: **when its app is
+  open it holds the physical `OBSBOT Meet 2 StreamCamera` and publishes a
+  processed feed as `OBSBOT Virtual Camera`, which offers 1920x1080@60
+  only.** Asking the held physical device for 4K fails with an I/O error, not
+  a resolution error, so the failure does not name its cause. For that setup:
+  `HWCAM_DEVICE='OBSBOT Virtual' HWCAM_VIDEO_SIZE=1920x1080 HWCAM_FRAMERATE=60`.
 - `tools/hwcam/timelapse.sh <session-dir> <interval-s> [label]` — loops
   capture until killed; the soak monitor. Interval is the sleep between
   shots (≥ 15 s); true period ≈ interval + 5 s. Start/stop/failure lines go
@@ -29,6 +37,18 @@ and for timelapses the sampling rule used when reviewing). Sessions are
 evidence, not repo content; `docs/hardware/board-notes.md` remains the
 durable record and cites the session directory and the specific frames
 behind each verdict.
+
+**A session directory is unversioned and has no undo. Append to `NOTES.md`,
+never overwrite it, and check whether one exists before writing — a session
+dated today may already belong to an earlier run.** Nothing here is under
+git, and the machine has no Time Machine destination and no local APFS
+snapshots, so a clobbered `NOTES.md` is gone. This happened on 2026-08-19:
+an agent resuming work on an existing session directory wrote a fresh
+`NOTES.md` over the morning board session's, destroying the state↔frame
+pairing for ~60 frames. The frames and `board-notes.md` survived, which is
+exactly why the durable record lives in the repo — but the pairing index is
+not recoverable, and the reconstruction now at the top of that file is
+inference, not observation.
 
 ## Workflow
 
@@ -49,5 +69,13 @@ behind each verdict.
   removes the need for human eyes, not human hands.
 - One camera consumer at a time: a video call can steal the OBSBOT; capture
   fails loudly, timelapse logs and continues.
+- **The virtual camera can return a convincing wrong frame.** "Fails loudly"
+  holds for the physical device but *not* for `OBSBOT Virtual Camera`: with
+  video switched off in the OBSBOT app it keeps producing frames, emitting the
+  app's logo placeholder. `capture.sh` succeeds and writes a valid JPEG of
+  something that is not the board. An agent judging frames must confirm the
+  panel is actually present before reading anything off it; a capture that
+  succeeds is not evidence that the board was photographed. Observed
+  2026-08-19.
 - Captures cost ~5 s of camera hold each; do not schedule below 15 s
   intervals.

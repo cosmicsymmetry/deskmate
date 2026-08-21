@@ -62,18 +62,14 @@ export function DevicePreview({
   }, [widget?.id, widget?.kind, orientation, dataGeneration]);
 
   return (
-    <section className="preview-panel" aria-labelledby="preview-heading">
-      <div className="preview-heading">
-        <div>
-          <p className="step-label">Device preview</p>
-          <h2 id="preview-heading">448 × 368 landscape</h2>
-        </div>
-        <span>Rendered by the device's own templates · exact pixels</span>
-      </div>
-      <div className="device-shell">
-        <div className="device-screen">
+    /* No caption, no resolution, no label. The panel is the one object in the
+       window that looks exactly like the thing it represents, so it identifies
+       itself; anything printed around it was describing what you can already see. */
+    <section className="stage" aria-label="What the display is showing">
+      <div className="stage__frame">
+        <div className="stage__screen">
           {unavailable || !widget ? (
-            <p className="preview-unavailable">
+            <p className="stage__unavailable">
               {widget ? "Preview unavailable" : "No cards configured"}
             </p>
           ) : frame ? (
@@ -84,9 +80,8 @@ export function DevicePreview({
               src={`data:image/png;base64,${frame.pngBase64}`}
             />
           ) : null}
-          {frame?.sample && <span className="preview-sample-badge">No data yet</span>}
+          {frame?.sample && <span className="stage__badge">No data yet</span>}
         </div>
-        <span className="device-port" aria-hidden="true" />
       </div>
     </section>
   );

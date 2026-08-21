@@ -1,7 +1,9 @@
 pub mod commands;
 pub mod config;
+pub mod network_settings;
 pub mod runtime;
 mod scheduler;
+mod secure_file;
 pub mod state;
 pub mod store;
 
@@ -23,6 +25,13 @@ pub use config::{
     RefreshPolicy, UpdateChannel, UpdateCheckPolicy, UpdaterSettings, ValidationCode,
     ValidationIssue, WeatherUnits, WidgetTapAction, utc_offset_minutes,
 };
+pub use network_settings::{
+    MAX_NETWORK_SETTINGS_FILE_BYTES, NETWORK_SETTINGS_FORMAT_VERSION, NetworkSettings,
+    NetworkSettingsLoadOutcome, NetworkSettingsOrigin, NetworkSettingsSaveReceipt,
+    NetworkSettingsStore, NetworkSettingsStoreError, NetworkSettingsStoreWarning,
+    NetworkSettingsUpdate,
+};
+pub use protocol::{NetworkConfig, Tier as ProvisioningTier};
 pub use providers::ics::MAX_ICS_BYTES;
 pub use runtime::{
     CalendarRefreshRequest, CalendarRefreshResult, CalendarRefresher, DeviceConnection,
@@ -32,8 +41,9 @@ pub use runtime::{
 };
 pub use state::{
     AppSnapshot, CardDataSnapshot, CardError, CardField, CardFieldValue, ConnectionState,
-    DeviceCapability, DeviceCounters, DeviceSnapshot, PersistenceState, PomodoroSnapshot,
-    PomodoroState, ProviderSnapshot, ProviderState, RuntimeDiagnostics, RuntimeState,
+    DeviceCapability, DeviceCounters, DeviceOtaState, DeviceSnapshot, DeviceTier, DeviceWifiState,
+    PersistenceState, PomodoroSnapshot, PomodoroState, ProviderSnapshot, ProviderState,
+    RuntimeDiagnostics, RuntimeState,
 };
 pub use store::{
     ConfigOrigin, ConfigStore, LoadOutcome, MAX_CONFIG_FILE_BYTES,

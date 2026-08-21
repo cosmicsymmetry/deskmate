@@ -2,10 +2,15 @@
 // its command macro contract even when the handler only borrows them internally.
 #![allow(clippy::needless_pass_by_value)]
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+
 use app_core::{
-    AppConfig, CardField, CardFieldValue, DisplayOrientation, DisplayTemplate,
-    MAX_CONFIG_FILE_BYTES, MAX_ICS_BYTES, MAX_ICS_SOURCE_LEN, MAX_WIDGET_ID_LEN, PomodoroAction,
-    RuntimeError, SaveReceipt, StoreError, ValidationIssue, utc_offset_minutes,
+    AppConfig, CardField, CardFieldValue, ConfigStore, DisplayOrientation, DisplayTemplate,
+    MAX_CONFIG_FILE_BYTES, MAX_ICS_BYTES, MAX_ICS_SOURCE_LEN, MAX_WIDGET_ID_LEN, NetworkConfig,
+    NetworkSettings, NetworkSettingsStore, NetworkSettingsStoreError, NetworkSettingsUpdate,
+    PomodoroAction, ProvisioningTier, RuntimeError, RuntimeHandle, SaveReceipt, StoreError,
+    ValidationIssue, utc_offset_minutes,
 };
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
@@ -14,7 +19,17 @@ use tauri::{AppHandle, Manager, State};
 use tauri_plugin_autostart::ManagerExt;
 use tauri_plugin_dialog::DialogExt;
 
-use crate::{DesktopSnapshot, DesktopState, MAIN_WINDOW_LABEL};
+use crate::{DesktopSnapshot, DesktopState, MAIN_WINDOW_LABEL, NetworkedConfigProjection};
+
+// These are the protocol-v1 NetworkConfig bounds. app-core deliberately exposes the
+// command type, not protocol implementation constants, so the shell repeats them at
+// its untrusted IPC edge and the runtime remains the final encoder-side authority.
+const MAX_SSID_BYTES: usize = 32;
+const MAX_PASSPHRASE_BYTES: usize = 64;
+const MAX_SERVER_URL_BYTES: usize = 128;
+const MAX_DEVICE_ID_BYTES: usize = 32;
+const MAX_DEVICE_TOKEN_BYTES: usize = 128;
+const MAX_SERVER_ERROR_BYTES: usize = 64 * 1_024;
 
 /// The draft travels as a bounded JSON envelope so an IPC caller cannot make serde
 /// allocate an arbitrarily deep application document before domain validation runs.
@@ -39,6 +54,83 @@ pub struct DraftValidation {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConfigApplyResult {
     pub save: SaveReceipt,
+}
+
+#[derive(Clone)]
+struct ConfigSaveContext {
+    runtime: Arc<RuntimeHandle>,
+    store: Arc<ConfigStore>,
+    network_store: Arc<NetworkSettingsStore>,
+    networked_config: Arc<NetworkedConfigProjection>,
+    has_saved_config: Arc<AtomicBool>,
+    mutation_lock: Arc<Mutex<()>>,
+}
+
+impl ConfigSaveContext {
+    fn from_desktop(state: &DesktopState) -> Self {
+        Self {
+            runtime: Arc::clone(&state.runtime),
+            store: Arc::clone(&state.store),
+            network_store: Arc::clone(&state.network_store),
+            networked_config: Arc::clone(&state.networked_config),
+            has_saved_config: Arc::clone(&state.has_saved_config),
+            mutation_lock: Arc::clone(&state.mutation_lock),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct ProvisionContext {
+    runtime: Arc<RuntimeHandle>,
+    network_store: Arc<NetworkSettingsStore>,
+    networked_config: Arc<NetworkedConfigProjection>,
+}
+
+impl ProvisionContext {
+    fn from_desktop(state: &DesktopState) -> Self {
+        Self {
+            runtime: Arc::clone(&state.runtime),
+            network_store: Arc::clone(&state.network_store),
+            networked_config: Arc::clone(&state.networked_config),
+        }
+    }
+}
+
+struct ServerSaveContext {
+    config: ConfigSaveContext,
+    server_client: ureq::Agent,
+}
+
+/// Secret-bearing IPC inputs intentionally implement neither `Debug` nor `Serialize`.
+/// Their only outbound projection is `NetworkSettings`, which contains public fields.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServerEndpointRequest {
+    server_url: String,
+    admin_token: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProvisionDeviceRequest {
+    ssid: String,
+    passphrase: String,
+    server_url: String,
+    device_id: String,
+    device_token: String,
+    tier: app_core::DeviceTier,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServerConfigRequest {
+    draft: DraftPayload,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+enum ServerErrorBody {
+    InvalidConfig { issues: Vec<ValidationIssue> },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -191,7 +283,356 @@ pub fn save_apply_config(
     draft: DraftPayload,
 ) -> Result<ConfigApplyResult, IpcError> {
     let config = parse_valid_draft(&draft)?;
-    save_and_apply(&state, config)
+    save_and_apply(ConfigSaveContext::from_desktop(&state), config)
+}
+
+#[tauri::command]
+pub fn get_network_settings(state: State<'_, DesktopState>) -> NetworkSettings {
+    state.network_store.load().settings().clone()
+}
+
+#[tauri::command]
+pub fn set_server_endpoint(
+    state: State<'_, DesktopState>,
+    request: ServerEndpointRequest,
+) -> Result<NetworkSettings, IpcError> {
+    validate_server_url(&request.server_url)?;
+    validate_secret(&request.admin_token, 4_096, "admin token")?;
+    let current = state.network_store.load().settings().clone();
+    let settings = NetworkSettings {
+        server_url: request.server_url,
+        device_id: current.device_id,
+        tier: current.tier,
+    };
+    state
+        .network_store
+        .save(NetworkSettingsUpdate::new(
+            settings.server_url.clone(),
+            settings.device_id.clone(),
+            None,
+            Some(request.admin_token),
+        ))
+        .map_err(IpcError::from)?;
+    Ok(settings)
+}
+
+#[tauri::command]
+pub fn provision_device(
+    state: State<'_, DesktopState>,
+    request: ProvisionDeviceRequest,
+) -> Result<NetworkSettings, IpcError> {
+    provision_device_with_context(ProvisionContext::from_desktop(&state), request)
+}
+
+fn provision_device_with_context(
+    context: ProvisionContext,
+    request: ProvisionDeviceRequest,
+) -> Result<NetworkSettings, IpcError> {
+    validate_network_config_request(&request)?;
+    let snapshot = context.runtime.snapshot().map_err(IpcError::from)?;
+    let utc_offset_minutes =
+        utc_offset_minutes(&snapshot.config.preferences.timezone, chrono::Utc::now()).map_err(
+            |message| IpcError::Validation {
+                message,
+                issues: vec![ValidationIssue {
+                    path: "preferences.timezone".into(),
+                    code: app_core::ValidationCode::InvalidTimezone,
+                    message: "Choose a valid display timezone before provisioning.".into(),
+                }],
+            },
+        )?;
+    let tier = match request.tier {
+        app_core::DeviceTier::Local => ProvisioningTier::Local,
+        app_core::DeviceTier::Networked => ProvisioningTier::Networked,
+    };
+    let public_settings = NetworkSettings {
+        server_url: request.server_url.clone(),
+        device_id: request.device_id.clone(),
+        tier: Some(request.tier),
+    };
+    let config = NetworkConfig {
+        ssid: request.ssid,
+        psk: request.passphrase,
+        server_url: if matches!(tier, ProvisioningTier::Networked) {
+            device_link_url(&request.server_url)?
+        } else {
+            request.server_url
+        },
+        device_id: request.device_id,
+        token: request.device_token.clone(),
+        utc_offset_minutes,
+        tier,
+    };
+
+    // Ownership changes only after the runtime-owned cable session confirms that the
+    // device accepted provisioning. The device token has no desktop consumer after
+    // this dispatch, so it is never retained on disk.
+    context.runtime.provision(config).map_err(IpcError::from)?;
+    context
+        .network_store
+        .save(NetworkSettingsUpdate::new(
+            public_settings.server_url.clone(),
+            public_settings.device_id.clone(),
+            public_settings.tier,
+            None,
+        ))
+        .map_err(IpcError::from)?;
+    if matches!(tier, ProvisioningTier::Local) {
+        context.networked_config.replace(None)?;
+    }
+    Ok(public_settings)
+}
+
+#[tauri::command]
+pub fn factory_reset_device(state: State<'_, DesktopState>) -> Result<(), IpcError> {
+    state.runtime.factory_reset().map_err(IpcError::from)?;
+    let current = state.network_store.load().settings().clone();
+    state
+        .network_store
+        .save(NetworkSettingsUpdate::new(
+            current.server_url,
+            current.device_id,
+            Some(app_core::DeviceTier::Local),
+            None,
+        ))
+        .map_err(IpcError::from)?;
+    state.set_networked_config(None)
+}
+
+/// Explicit recovery for an endpoint saved before a device was successfully paired.
+/// This changes only the Mac's routing decision; a later live Networked status still
+/// wins and prevents the app from challenging server ownership over USB.
+#[tauri::command]
+pub fn use_local_ownership(state: State<'_, DesktopState>) -> Result<NetworkSettings, IpcError> {
+    use_local_ownership_with_context(&state.network_store, &state.networked_config)
+}
+
+fn use_local_ownership_with_context(
+    network_store: &NetworkSettingsStore,
+    networked_config: &NetworkedConfigProjection,
+) -> Result<NetworkSettings, IpcError> {
+    let current = network_store.load().settings().clone();
+    let settings = NetworkSettings {
+        server_url: current.server_url,
+        device_id: current.device_id,
+        tier: Some(app_core::DeviceTier::Local),
+    };
+    network_store
+        .save(NetworkSettingsUpdate::new(
+            settings.server_url.clone(),
+            settings.device_id.clone(),
+            settings.tier,
+            None,
+        ))
+        .map_err(IpcError::from)?;
+    networked_config.replace(None)?;
+    Ok(settings)
+}
+
+#[tauri::command]
+pub async fn save_server_config(
+    state: State<'_, DesktopState>,
+    request: ServerConfigRequest,
+) -> Result<ConfigApplyResult, IpcError> {
+    let config = parse_valid_draft(&request.draft)?;
+    let context = ServerSaveContext {
+        config: ConfigSaveContext::from_desktop(&state),
+        server_client: state.server_client.clone(),
+    };
+    tauri::async_runtime::spawn_blocking(move || save_server_config_blocking(context, config))
+        .await
+        .map_err(|_| IpcError::RuntimeUnavailable {
+            message: "the server request worker stopped unexpectedly".into(),
+        })?
+}
+
+fn save_server_config_blocking(
+    context: ServerSaveContext,
+    config: AppConfig,
+) -> Result<ConfigApplyResult, IpcError> {
+    let prepared = prepare_server_save(&context, config)?;
+
+    // Network I/O must never hold `mutation_lock`: sync Tauri commands and tray
+    // handlers use that same lock on the main thread. The local authoring mirror was
+    // linearized above; a remote failure therefore reports both destinations honestly.
+    let response = context
+        .config
+        .network_store
+        .with_admin_token(|admin_token| {
+            put_server_config(
+                &context.server_client,
+                &prepared.url,
+                admin_token,
+                &prepared.body,
+            )
+        })
+        .map_err(IpcError::from)
+        .and_then(|response| {
+            response.ok_or_else(|| IpcError::InvalidPayload {
+                message: "Enter the admin token in Network setup before saving to the server."
+                    .into(),
+            })
+        })
+        .and_then(|response| response)
+        .map_err(server_error_after_local_save)?;
+    let (status, response_body) = response;
+    if !(200..300).contains(&status) {
+        return Err(server_error_after_local_save(server_failure(
+            status,
+            &response_body,
+        )));
+    }
+
+    Ok(ConfigApplyResult {
+        save: prepared.save,
+    })
+}
+
+struct PreparedServerSave {
+    url: String,
+    body: Vec<u8>,
+    save: SaveReceipt,
+}
+
+fn prepare_server_save(
+    context: &ServerSaveContext,
+    mut config: AppConfig,
+) -> Result<PreparedServerSave, IpcError> {
+    let _mutation = context
+        .config
+        .mutation_lock
+        .lock()
+        .map_err(|_| IpcError::Internal {
+            message: "desktop mutation lock is unavailable".into(),
+        })?;
+    let snapshot = context.config.runtime.snapshot().map_err(IpcError::from)?;
+    merge_command_owned_preferences(&mut config, &snapshot.config);
+    let compiled = config.compile(1).map_err(|error| IpcError::Validation {
+        message: "configuration requires device features not implemented by this build".into(),
+        issues: error.issues,
+    })?;
+    ensure_device_compatibility(&snapshot.device, compiled.required_capabilities)?;
+
+    let settings = context.config.network_store.load().settings().clone();
+    if !server_owns_device(snapshot.device.tier, &settings) {
+        return Err(IpcError::InvalidPayload {
+            message: "display ownership is not known to be networked; connect it over USB to confirm ownership before saving".into(),
+        });
+    }
+    let url = server_config_url(&settings.server_url, &settings.device_id)?.to_string();
+    let body = serde_json::to_vec(&config).map_err(|_| IpcError::Internal {
+        message: "configuration could not be serialized for the server".into(),
+    })?;
+    context
+        .config
+        .network_store
+        .with_admin_token(|admin_token| validate_secret(admin_token, 4_096, "admin token"))
+        .map_err(IpcError::from)?
+        .ok_or_else(|| IpcError::InvalidPayload {
+            message: "Enter the admin token in Network setup before saving to the server.".into(),
+        })??;
+
+    context
+        .config
+        .network_store
+        .save(NetworkSettingsUpdate::new(
+            settings.server_url,
+            settings.device_id,
+            Some(app_core::DeviceTier::Networked),
+            None,
+        ))
+        .map_err(IpcError::from)?;
+
+    // The server is authoritative in networked tier. Keep a local authoring mirror,
+    // but deliberately do not call RuntimeHandle::apply_config: that would put a
+    // config write onto the restricted USB link and challenge the server's ownership.
+    let save = persist_config_parts(
+        &context.config.runtime,
+        &context.config.store,
+        &context.config.has_saved_config,
+        &config,
+    )?;
+    context.config.networked_config.replace(Some(config))?;
+    Ok(PreparedServerSave { url, body, save })
+}
+
+fn server_error_after_local_save(error: IpcError) -> IpcError {
+    fn message(message: String) -> String {
+        format!(
+            "The draft was saved on this Mac, but the server destination did not succeed: {message}"
+        )
+    }
+    match error {
+        IpcError::InvalidPayload { message: value } => IpcError::InvalidPayload {
+            message: message(value),
+        },
+        IpcError::PayloadTooLarge {
+            message: value,
+            maximum_bytes,
+        } => IpcError::PayloadTooLarge {
+            message: message(value),
+            maximum_bytes,
+        },
+        IpcError::Validation {
+            message: value,
+            issues,
+        } => IpcError::Validation {
+            message: message(value),
+            issues,
+        },
+        IpcError::Persistence { message: value } => IpcError::Persistence {
+            message: message(value),
+        },
+        IpcError::RuntimeBusy { message: value } => IpcError::RuntimeBusy {
+            message: message(value),
+        },
+        IpcError::RuntimeUnavailable { message: value } => IpcError::RuntimeUnavailable {
+            message: message(value),
+        },
+        IpcError::NotFound { message: value } => IpcError::NotFound {
+            message: message(value),
+        },
+        IpcError::Device { message: value } => IpcError::Device {
+            message: message(value),
+        },
+        IpcError::Provider { message: value } => IpcError::Provider {
+            message: message(value),
+        },
+        IpcError::Autostart { message: value } => IpcError::Autostart {
+            message: message(value),
+        },
+        IpcError::Window { message: value } => IpcError::Window {
+            message: message(value),
+        },
+        IpcError::Internal { message: value } => IpcError::Internal {
+            message: message(value),
+        },
+    }
+}
+
+fn server_owns_device(tier: Option<app_core::DeviceTier>, settings: &NetworkSettings) -> bool {
+    match tier {
+        Some(app_core::DeviceTier::Networked) => true,
+        Some(app_core::DeviceTier::Local) => false,
+        None => {
+            matches!(settings.tier, Some(app_core::DeviceTier::Networked))
+                || (settings.tier.is_none()
+                    && (!settings.server_url.is_empty() || !settings.device_id.is_empty()))
+        }
+    }
+}
+
+fn local_owns_device(tier: Option<app_core::DeviceTier>, settings: &NetworkSettings) -> bool {
+    match tier {
+        Some(app_core::DeviceTier::Local) => true,
+        Some(app_core::DeviceTier::Networked) => false,
+        None => {
+            matches!(settings.tier, Some(app_core::DeviceTier::Local))
+                || (settings.tier.is_none()
+                    && settings.server_url.is_empty()
+                    && settings.device_id.is_empty())
+        }
+    }
 }
 
 #[tauri::command]
@@ -462,24 +903,50 @@ pub(crate) fn set_autostart(
 }
 
 fn save_and_apply(
-    state: &DesktopState,
+    context: ConfigSaveContext,
     mut config: AppConfig,
 ) -> Result<ConfigApplyResult, IpcError> {
-    let _mutation = state.mutation_lock.lock().map_err(|_| IpcError::Internal {
-        message: "desktop mutation lock is unavailable".into(),
-    })?;
-    let snapshot = state.runtime.snapshot().map_err(IpcError::from)?;
+    let _mutation = context
+        .mutation_lock
+        .lock()
+        .map_err(|_| IpcError::Internal {
+            message: "desktop mutation lock is unavailable".into(),
+        })?;
+    let snapshot = context.runtime.snapshot().map_err(IpcError::from)?;
+    let settings = context.network_store.load().settings().clone();
+    if !local_owns_device(snapshot.device.tier, &settings) {
+        return Err(IpcError::InvalidPayload {
+            message: local_save_refusal(&settings).into(),
+        });
+    }
     merge_command_owned_preferences(&mut config, &snapshot.config);
     let compiled = config.compile(1).map_err(|error| IpcError::Validation {
         message: "configuration requires device features not implemented by this build".into(),
         issues: error.issues,
     })?;
     ensure_device_compatibility(&snapshot.device, compiled.required_capabilities)?;
-    let save = persist_config(state, &config)?;
+    let save = persist_config_parts(
+        &context.runtime,
+        &context.store,
+        &context.has_saved_config,
+        &config,
+    )?;
+    context.networked_config.clear_for_local_save()?;
     // Keep a valid saved draft queued even when immediate device application reports
     // a transport failure. RuntimeHandle has already replaced its replay set then.
-    state.runtime.apply_config(config).map_err(IpcError::from)?;
+    context
+        .runtime
+        .apply_config(config)
+        .map_err(IpcError::from)?;
     Ok(ConfigApplyResult { save })
+}
+
+fn local_save_refusal(settings: &NetworkSettings) -> &'static str {
+    if !settings.server_url.is_empty() && settings.device_id.is_empty() {
+        "a server endpoint is configured, but no device is paired; enter a device ID or connect over USB to confirm ownership"
+    } else {
+        "the display is owned by the server; save this configuration to the server instead"
+    }
 }
 
 fn ensure_device_compatibility(
@@ -546,23 +1013,34 @@ fn describe_capabilities(bits: u64) -> String {
 }
 
 fn persist_config(state: &DesktopState, config: &AppConfig) -> Result<SaveReceipt, IpcError> {
-    state
-        .runtime
+    persist_config_parts(
+        &state.runtime,
+        &state.store,
+        &state.has_saved_config,
+        config,
+    )
+}
+
+fn persist_config_parts(
+    runtime: &RuntimeHandle,
+    store: &ConfigStore,
+    has_saved_config: &AtomicBool,
+    config: &AppConfig,
+) -> Result<SaveReceipt, IpcError> {
+    runtime
         .set_persistence_state(app_core::PersistenceState::Saving)
         .map_err(IpcError::from)?;
-    match state.store.save(config) {
+    match store.save(config) {
         Ok(receipt) => {
-            state.mark_config_saved();
-            state
-                .runtime
+            has_saved_config.store(true, Ordering::Release);
+            runtime
                 .set_persistence_state(app_core::PersistenceState::Clean)
                 .map_err(IpcError::from)?;
             Ok(receipt)
         }
         Err(error) => {
             let message = error.to_string();
-            let _ = state
-                .runtime
+            let _ = runtime
                 .set_persistence_state(app_core::PersistenceState::RecoverableError { message });
             Err(IpcError::from(error))
         }
@@ -616,6 +1094,173 @@ fn parse_draft(draft: &DraftPayload) -> Result<AppConfig, IpcError> {
     })
 }
 
+fn validate_network_config_request(request: &ProvisionDeviceRequest) -> Result<(), IpcError> {
+    validate_bounded(&request.ssid, MAX_SSID_BYTES, "WiFi network")?;
+    validate_bounded(&request.passphrase, MAX_PASSPHRASE_BYTES, "WiFi passphrase")?;
+    validate_bounded(&request.server_url, MAX_SERVER_URL_BYTES, "server URL")?;
+    validate_bounded(&request.device_id, MAX_DEVICE_ID_BYTES, "device ID")?;
+    validate_bounded(
+        &request.device_token,
+        MAX_DEVICE_TOKEN_BYTES,
+        "device token",
+    )?;
+    if matches!(request.tier, app_core::DeviceTier::Networked) {
+        validate_target(&request.ssid, MAX_SSID_BYTES, "WiFi network")?;
+        validate_server_url(&request.server_url)?;
+        validate_target(&request.device_id, MAX_DEVICE_ID_BYTES, "device ID")?;
+        validate_secret(
+            &request.device_token,
+            MAX_DEVICE_TOKEN_BYTES,
+            "device token",
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_bounded(value: &str, maximum: usize, label: &str) -> Result<(), IpcError> {
+    if value.len() > maximum {
+        return Err(IpcError::InvalidPayload {
+            message: format!("{label} must be at most {maximum} UTF-8 bytes"),
+        });
+    }
+    Ok(())
+}
+
+fn validate_secret(value: &str, maximum: usize, label: &str) -> Result<(), IpcError> {
+    if value.is_empty() {
+        return Err(IpcError::InvalidPayload {
+            message: format!("{label} must not be empty"),
+        });
+    }
+    if value.contains(['\r', '\n']) {
+        return Err(IpcError::InvalidPayload {
+            message: format!("{label} contains an invalid line break"),
+        });
+    }
+    validate_bounded(value, maximum, label)
+}
+
+fn validate_server_url(value: &str) -> Result<url::Url, IpcError> {
+    validate_target(value, MAX_SERVER_URL_BYTES, "server URL")?;
+    let url = url::Url::parse(value).map_err(|_| IpcError::InvalidPayload {
+        message: "server URL must be an absolute HTTP or HTTPS URL".into(),
+    })?;
+    if !matches!(url.scheme(), "http" | "https")
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
+        return Err(IpcError::InvalidPayload {
+            message: "server URL must be an absolute HTTP or HTTPS URL without credentials".into(),
+        });
+    }
+    Ok(url)
+}
+
+/// Converts the operator-facing HTTPS base into the device's fixed WebSocket link.
+/// Firmware derives HTTPS OTA routes back from the WSS authority, so paths, queries,
+/// and fragments on the admin base deliberately do not cross onto the device URL.
+fn device_link_url(server_url: &str) -> Result<String, IpcError> {
+    let mut url = validate_server_url(server_url)?;
+    if url.scheme() != "https" {
+        return Err(IpcError::InvalidPayload {
+            message: "server base URL must use HTTPS for secure device pairing".into(),
+        });
+    }
+    url.set_scheme("wss")
+        .map_err(|()| IpcError::InvalidPayload {
+            message: "server base URL cannot be converted to a secure device link".into(),
+        })?;
+    url.set_path("/v1/device/link");
+    url.set_query(None);
+    url.set_fragment(None);
+    let value = url.to_string();
+    validate_bounded(&value, MAX_SERVER_URL_BYTES, "derived device link URL")?;
+    Ok(value)
+}
+
+fn server_config_url(server_url: &str, device_id: &str) -> Result<url::Url, IpcError> {
+    validate_target(device_id, MAX_DEVICE_ID_BYTES, "device ID")?;
+    let mut url = validate_server_url(server_url)?;
+    url.set_query(None);
+    url.set_fragment(None);
+    let mut segments = url
+        .path_segments_mut()
+        .map_err(|()| IpcError::InvalidPayload {
+            message: "server URL cannot be used as a base URL".into(),
+        })?;
+    segments
+        .pop_if_empty()
+        .push("v1")
+        .push("devices")
+        .push(device_id)
+        .push("config");
+    drop(segments);
+    Ok(url)
+}
+
+fn put_server_config(
+    agent: &ureq::Agent,
+    url: &str,
+    admin_token: &str,
+    body: &[u8],
+) -> Result<(u16, Vec<u8>), IpcError> {
+    let mut response = agent
+        .put(url)
+        .header("Authorization", format!("Bearer {admin_token}"))
+        .content_type("application/json")
+        .send(body)
+        .map_err(|_| IpcError::RuntimeUnavailable {
+            message: "the configured server could not be reached".into(),
+        })?;
+    let status = response.status().as_u16();
+    let response_body = if status == 422 {
+        let body = response
+            .body_mut()
+            .with_config()
+            .limit(MAX_SERVER_ERROR_BYTES.saturating_add(1) as u64)
+            .read_to_vec()
+            .map_err(|_| IpcError::RuntimeUnavailable {
+                message: "the server returned an unreadable error response".into(),
+            })?;
+        if body.len() > MAX_SERVER_ERROR_BYTES {
+            return Err(IpcError::RuntimeUnavailable {
+                message: "the server returned an oversized error response".into(),
+            });
+        }
+        body
+    } else {
+        Vec::new()
+    };
+    Ok((status, response_body))
+}
+
+fn server_failure(status: u16, body: &[u8]) -> IpcError {
+    match status {
+        401 => IpcError::InvalidPayload {
+            message: "the server rejected the admin token".into(),
+        },
+        404 => IpcError::NotFound {
+            message: "the configured device was not found on the server".into(),
+        },
+        422 => match serde_json::from_slice::<ServerErrorBody>(body) {
+            Ok(ServerErrorBody::InvalidConfig { issues }) => IpcError::Validation {
+                message: format!(
+                    "the server rejected this configuration with {} validation issue(s)",
+                    issues.len()
+                ),
+                issues,
+            },
+            Err(_) => IpcError::RuntimeUnavailable {
+                message: "the server rejected the configuration without validation details".into(),
+            },
+        },
+        _ => IpcError::RuntimeUnavailable {
+            message: format!("the server rejected the configuration (HTTP {status})"),
+        },
+    }
+}
+
 fn validate_target(value: &str, maximum: usize, label: &str) -> Result<(), IpcError> {
     if value.trim().is_empty() {
         return Err(IpcError::InvalidPayload {
@@ -662,6 +1307,9 @@ impl From<RuntimeError> for IpcError {
                     message: error.to_string(),
                 }
             }
+            RuntimeError::DeviceDisconnected => Self::Device {
+                message: "device is disconnected".into(),
+            },
             RuntimeError::Device { message } => Self::Device { message },
             RuntimeError::Provider { message } => Self::Provider { message },
         }
@@ -678,6 +1326,14 @@ impl From<StoreError> for IpcError {
             other => Self::Persistence {
                 message: other.to_string(),
             },
+        }
+    }
+}
+
+impl From<NetworkSettingsStoreError> for IpcError {
+    fn from(error: NetworkSettingsStoreError) -> Self {
+        Self::Persistence {
+            message: error.to_string(),
         }
     }
 }
@@ -994,6 +1650,10 @@ mod tests {
             }),
             IpcError::Provider { .. }
         ));
+        assert!(matches!(
+            IpcError::from(RuntimeError::DeviceDisconnected),
+            IpcError::Device { .. }
+        ));
     }
 
     #[test]
@@ -1009,6 +1669,454 @@ mod tests {
         assert_eq!(draft.preferences.timezone, "Asia/Tbilisi");
         assert!(draft.preferences.paused);
         assert!(draft.preferences.autostart);
+    }
+
+    #[test]
+    fn server_config_url_preserves_the_base_path_and_encodes_the_device_id() {
+        let url = server_config_url("https://desk.example/base/?discard=yes", "desk one").unwrap();
+        assert_eq!(
+            url.as_str(),
+            "https://desk.example/base/v1/devices/desk%20one/config"
+        );
+    }
+
+    #[test]
+    fn operator_server_base_derives_the_secure_device_link_url() {
+        assert_eq!(
+            device_link_url("https://desk.example/base?discard=yes#fragment").unwrap(),
+            "wss://desk.example/v1/device/link"
+        );
+        assert_eq!(
+            device_link_url("https://[2001:db8::1]:8443").unwrap(),
+            "wss://[2001:db8::1]:8443/v1/device/link"
+        );
+        let insecure = device_link_url("http://desk.example").unwrap_err();
+        assert!(matches!(insecure, IpcError::InvalidPayload { .. }));
+        assert!(insecure.to_string().contains("HTTPS"));
+    }
+
+    #[test]
+    fn unplugged_server_identity_routes_networked_but_live_local_ownership_wins() {
+        let mut settings = NetworkSettings {
+            server_url: "https://desk.example".into(),
+            device_id: "desk-1".into(),
+            tier: Some(app_core::DeviceTier::Networked),
+        };
+        assert!(server_owns_device(None, &settings));
+        assert!(!local_owns_device(None, &settings));
+        assert!(!server_owns_device(
+            Some(app_core::DeviceTier::Local),
+            &settings
+        ));
+        assert!(local_owns_device(
+            Some(app_core::DeviceTier::Local),
+            &settings
+        ));
+
+        settings.tier = None;
+        assert!(server_owns_device(None, &settings));
+        settings.server_url.clear();
+        settings.device_id.clear();
+        assert!(!server_owns_device(None, &settings));
+        assert!(local_owns_device(None, &settings));
+    }
+
+    #[test]
+    fn actual_local_save_refuses_persisted_network_ownership_before_writing() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let serial = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "deskmate-local-ownership-{}-{serial}",
+            std::process::id()
+        ));
+        fs::create_dir(&directory).unwrap();
+        let config_path = directory.join("config.json");
+        let network_store = Arc::new(NetworkSettingsStore::new(
+            directory.join("network-settings.json"),
+        ));
+        network_store
+            .save(NetworkSettingsUpdate::new(
+                "https://desk.example",
+                "desk-1",
+                Some(app_core::DeviceTier::Networked),
+                Some("admin-secret".into()),
+            ))
+            .unwrap();
+        let runtime = Arc::new(
+            RuntimeHandle::start_serial(
+                AppConfig::default(),
+                Some("/definitely/not/a/deskmate-test-port".into()),
+            )
+            .unwrap(),
+        );
+        let context = ConfigSaveContext {
+            runtime: Arc::clone(&runtime),
+            store: Arc::new(ConfigStore::new(&config_path)),
+            network_store,
+            networked_config: Arc::new(NetworkedConfigProjection::default()),
+            has_saved_config: Arc::new(AtomicBool::new(false)),
+            mutation_lock: Arc::new(Mutex::new(())),
+        };
+
+        let result = save_and_apply(context, AppConfig::default());
+        runtime.shutdown().unwrap();
+
+        assert!(matches!(result, Err(IpcError::InvalidPayload { .. })));
+        assert!(
+            !config_path.exists(),
+            "the refused local draft reached ConfigStore"
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn failed_provision_does_not_record_an_ownership_transfer() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let serial = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "deskmate-failed-provision-{}-{serial}",
+            std::process::id()
+        ));
+        fs::create_dir(&directory).unwrap();
+        let network_store = Arc::new(NetworkSettingsStore::new(
+            directory.join("network-settings.json"),
+        ));
+        network_store
+            .save(NetworkSettingsUpdate::new(
+                "https://old.example",
+                "old-device",
+                Some(app_core::DeviceTier::Local),
+                None,
+            ))
+            .unwrap();
+        let runtime = Arc::new(
+            RuntimeHandle::start_serial(
+                AppConfig::default(),
+                Some("/definitely/not/a/deskmate-test-port".into()),
+            )
+            .unwrap(),
+        );
+        let context = ProvisionContext {
+            runtime: Arc::clone(&runtime),
+            network_store: Arc::clone(&network_store),
+            networked_config: Arc::new(NetworkedConfigProjection::default()),
+        };
+        let request = ProvisionDeviceRequest {
+            ssid: "home-network".into(),
+            passphrase: "wifi-secret".into(),
+            server_url: "https://desk.example".into(),
+            device_id: "desk-1".into(),
+            device_token: "device-secret".into(),
+            tier: app_core::DeviceTier::Networked,
+        };
+
+        let result = provision_device_with_context(context, request);
+        runtime.shutdown().unwrap();
+
+        assert!(matches!(result, Err(IpcError::Device { .. })));
+        assert_eq!(
+            network_store.load().settings(),
+            &NetworkSettings {
+                server_url: "https://old.example".into(),
+                device_id: "old-device".into(),
+                tier: Some(app_core::DeviceTier::Local),
+            },
+            "a rejected device command changed the saved ownership"
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn local_override_recovers_saved_routing_without_a_device_command() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let serial = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "deskmate-local-override-{}-{serial}",
+            std::process::id()
+        ));
+        fs::create_dir(&directory).unwrap();
+        let network_store = NetworkSettingsStore::new(directory.join("network-settings.json"));
+        network_store
+            .save(NetworkSettingsUpdate::new(
+                "https://desk.example",
+                "desk-1",
+                Some(app_core::DeviceTier::Networked),
+                Some("admin-secret".into()),
+            ))
+            .unwrap();
+        let projection = NetworkedConfigProjection::default();
+        let mut stale_server_config = AppConfig::default();
+        stale_server_config.preferences.timezone = "Asia/Tbilisi".into();
+        projection.replace(Some(stale_server_config)).unwrap();
+
+        let settings = use_local_ownership_with_context(&network_store, &projection).unwrap();
+
+        assert_eq!(settings.tier, Some(app_core::DeviceTier::Local));
+        assert_eq!(
+            network_store.load().settings().tier,
+            Some(app_core::DeviceTier::Local)
+        );
+        let mut projected = AppConfig::default();
+        projection.project(Some(app_core::DeviceTier::Networked), &mut projected);
+        assert_eq!(projected, AppConfig::default());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn incomplete_server_identity_refusal_does_not_claim_server_ownership() {
+        let settings = NetworkSettings {
+            server_url: "https://desk.example".into(),
+            device_id: String::new(),
+            tier: None,
+        };
+
+        assert_eq!(
+            local_save_refusal(&settings),
+            "a server endpoint is configured, but no device is paired; enter a device ID or connect over USB to confirm ownership"
+        );
+    }
+
+    #[test]
+    fn a_remote_failure_after_mirroring_names_both_destination_results() {
+        let error = server_error_after_local_save(IpcError::Validation {
+            message: "the server rejected this configuration".into(),
+            issues: vec![ValidationIssue {
+                path: "cards[0].title".into(),
+                code: ValidationCode::Empty,
+                message: "Choose a title.".into(),
+            }],
+        });
+
+        assert!(matches!(
+            error,
+            IpcError::Validation { message, issues }
+                if message.contains("saved on this Mac")
+                    && message.contains("server destination did not succeed")
+                    && issues.len() == 1
+        ));
+    }
+
+    #[test]
+    fn server_request_runs_after_the_mutation_lock_is_released() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let serial = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "deskmate-server-lock-{}-{serial}",
+            std::process::id()
+        ));
+        fs::create_dir(&directory).unwrap();
+        let config_path = directory.join("config.json");
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let network_store = Arc::new(NetworkSettingsStore::new(
+            directory.join("network-settings.json"),
+        ));
+        network_store
+            .save(NetworkSettingsUpdate::new(
+                format!("http://{address}"),
+                "desk-1",
+                Some(app_core::DeviceTier::Networked),
+                Some("admin-secret".into()),
+            ))
+            .unwrap();
+        let runtime = Arc::new(
+            RuntimeHandle::start_serial(
+                AppConfig::default(),
+                Some("/definitely/not/a/deskmate-test-port".into()),
+            )
+            .unwrap(),
+        );
+        let mutation_lock = Arc::new(Mutex::new(()));
+        let context = ServerSaveContext {
+            config: ConfigSaveContext {
+                runtime: Arc::clone(&runtime),
+                store: Arc::new(ConfigStore::new(&config_path)),
+                network_store,
+                networked_config: Arc::new(NetworkedConfigProjection::default()),
+                has_saved_config: Arc::new(AtomicBool::new(false)),
+                mutation_lock: Arc::clone(&mutation_lock),
+            },
+            server_client: crate::server_http_agent(),
+        };
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            assert!(
+                mutation_lock.try_lock().is_ok(),
+                "the server request started while the desktop mutation lock was held"
+            );
+            let mut request = Vec::new();
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let mut chunk = [0_u8; 1_024];
+                let length = stream.read(&mut chunk).unwrap();
+                assert_ne!(length, 0, "request ended before its HTTP headers");
+                request.extend_from_slice(&chunk[..length]);
+            }
+            let header_end = request
+                .windows(4)
+                .position(|window| window == b"\r\n\r\n")
+                .unwrap()
+                + 4;
+            let headers = String::from_utf8_lossy(&request[..header_end]).to_ascii_lowercase();
+            let content_length = headers
+                .lines()
+                .find_map(|line| line.strip_prefix("content-length: "))
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(0);
+            while request.len() < header_end + content_length {
+                let mut chunk = [0_u8; 1_024];
+                let length = stream.read(&mut chunk).unwrap();
+                assert_ne!(length, 0, "request ended before its HTTP body");
+                request.extend_from_slice(&chunk[..length]);
+            }
+            assert!(String::from_utf8_lossy(&request).starts_with("PUT "));
+            stream
+                .write_all(
+                    b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .unwrap();
+        });
+
+        let result = save_server_config_blocking(context, AppConfig::default());
+        server.join().unwrap();
+        runtime.shutdown().unwrap();
+
+        assert!(
+            config_path.exists(),
+            "the local authoring mirror was not saved"
+        );
+        assert!(matches!(
+            result,
+            Err(IpcError::RuntimeUnavailable { message })
+                if message.contains("saved on this Mac")
+                    && message.contains("server destination did not succeed")
+        ));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn server_invalid_config_is_the_existing_validation_ipc_category() {
+        let error = server_failure(
+            422,
+            br#"{"kind":"invalid-config","issues":[{"path":"cards[0].title","code":"empty","message":"Choose a title."}]}"#,
+        );
+        assert!(matches!(
+            &error,
+            IpcError::Validation { message, issues }
+                if issues.len() == 1
+                    && issues[0].path == "cards[0].title"
+                    && message.contains("server rejected")
+                    && !message.contains("last working")
+        ));
+        assert_eq!(error.log_label(), "validation");
+
+        let malformed = server_failure(422, b"not-json");
+        assert!(matches!(malformed, IpcError::RuntimeUnavailable { .. }));
+        assert!(!matches!(malformed, IpcError::Device { .. }));
+    }
+
+    #[test]
+    fn server_transport_keeps_the_bounded_422_validation_body() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let body = br#"{"kind":"invalid-config","issues":[{"path":"cards","code":"empty","message":"Add a card."}]}"#;
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let mut chunk = [0_u8; 1_024];
+                let length = stream.read(&mut chunk).unwrap();
+                assert_ne!(length, 0, "request ended before its HTTP headers");
+                request.extend_from_slice(&chunk[..length]);
+            }
+            let header_end = request
+                .windows(4)
+                .position(|window| window == b"\r\n\r\n")
+                .unwrap()
+                + 4;
+            let headers = String::from_utf8_lossy(&request[..header_end]).to_ascii_lowercase();
+            let content_length = headers
+                .lines()
+                .find_map(|line| line.strip_prefix("content-length: "))
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(0);
+            while request.len() < header_end + content_length {
+                let mut chunk = [0_u8; 1_024];
+                let length = stream.read(&mut chunk).unwrap();
+                assert_ne!(length, 0, "request ended before its HTTP body");
+                request.extend_from_slice(&chunk[..length]);
+            }
+            let request = String::from_utf8_lossy(&request);
+            assert!(request.starts_with("PUT /v1/devices/desk-1/config "));
+            assert!(
+                request
+                    .to_ascii_lowercase()
+                    .contains("authorization: bearer admin-secret")
+            );
+            write!(
+                stream,
+                "HTTP/1.1 422 Unprocessable Entity\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )
+            .unwrap();
+            stream.write_all(body).unwrap();
+        });
+
+        let (status, response_body) = put_server_config(
+            &crate::server_http_agent(),
+            &format!("http://{address}/v1/devices/desk-1/config"),
+            "admin-secret",
+            b"{}",
+        )
+        .unwrap();
+        server.join().unwrap();
+        assert_eq!(status, 422);
+        assert!(matches!(
+            server_failure(status, &response_body),
+            IpcError::Validation { issues, .. }
+                if issues.len() == 1 && issues[0].message == "Add a card."
+        ));
+    }
+
+    #[test]
+    fn networked_provisioning_requires_public_identity_and_write_only_token() {
+        let request = ProvisionDeviceRequest {
+            ssid: "home".into(),
+            passphrase: String::new(),
+            server_url: "https://desk.example".into(),
+            device_id: "desk-1".into(),
+            device_token: "device-secret".into(),
+            tier: app_core::DeviceTier::Networked,
+        };
+        assert!(validate_network_config_request(&request).is_ok());
+
+        let missing = ProvisionDeviceRequest {
+            device_token: String::new(),
+            ..request
+        };
+        let error = validate_network_config_request(&missing).unwrap_err();
+        assert!(matches!(error, IpcError::InvalidPayload { .. }));
+        assert!(!error.to_string().contains("device-secret"));
     }
 
     #[test]
@@ -1240,6 +2348,12 @@ mod tests {
                     uptime_ms: Some(42),
                     free_heap: Some(123_456),
                     rotation: Some(90),
+                    tier: None,
+                    wifi_state: None,
+                    wifi_rssi: None,
+                    ip: None,
+                    last_network_error: None,
+                    ota_state: None,
                     active_screen_id: Some("clock".into()),
                     counters: DeviceCounters {
                         reconnects: 1,
@@ -1492,6 +2606,7 @@ mod tests {
                 DeviceCapability::HostTapActions,
                 DeviceCapability::AssetTransfer,
                 DeviceCapability::FirmwareUpdate,
+                DeviceCapability::Networking,
             ],
             runtime_states,
             connection_states,

@@ -3132,6 +3132,16 @@ fields are the **last values received**, not current ones. `up=66761` looked lik
 uptime from a freshly booted board; it was a frozen sample from before the link closed.
 `connected: false` beside it is the only thing that says so.
 
+> **Closed 2026-08-21: the snapshot now says how old it is, inside `device`.**
+> `snapshot.device.observed_age_seconds` is injected next to the values it qualifies, by
+> the same mechanism that already puts `last_ota_error` there. The information was not
+> strictly absent before — `last_seen_unix_ms` sits at the top level — but as raw epoch
+> milliseconds several screens away from the numbers it governs, which is why it was
+> missed. A frozen `uptime_ms` beside `observed_age_seconds: 412` cannot be read as live.
+> `null` means never heard from, deliberately not `0`, which would read as "just now";
+> the subtraction saturates, because `SystemTime` is not monotonic and an NTP step
+> backwards would otherwise report an age of half a billion years.
+
 ## V2 gate item 7 — alert replay across a reconnect PASSES, 2026-08-20
 
 Bounded-hold alert, fired while the link was down, delivered on reconnect. This is the

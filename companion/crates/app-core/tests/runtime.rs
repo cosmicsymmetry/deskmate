@@ -2389,7 +2389,7 @@ fn a_dismissal_for_an_untracked_token_is_counted_rather_than_silently_dropped() 
 
 /// A tap on an already-Completed pomodoro is a deliberate host no-op
 /// (`engine::pomodoro::toggle` on `Completed` only refreshes), but the firmware
-/// applies optimistic local feedback on every START_PAUSE tap regardless of
+/// applies optimistic local feedback on every `START_PAUSE` tap regardless of
 /// state -- `progress_ring_local_action` flips `progress_running` and repaints
 /// the arc and status text in the running hue. Only an authoritative push of
 /// `running: false` puts that back, because `progress_ring.c`'s patch path calls

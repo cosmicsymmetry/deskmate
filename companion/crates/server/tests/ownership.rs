@@ -945,6 +945,17 @@ async fn admin_status_reports_live_state_without_device_secrets() {
         status["snapshot"]["device"]["last_ota_error"], "download: ESP_ERR_NO_MEM",
         "status omitted the device's actionable OTA failure reason"
     );
+    // The runtime is retained across a link drop, so every field under `device`
+    // is the last value received rather than a current one, and a frozen
+    // uptime_ms reads exactly like a live one. This is what says how old the
+    // sample is, and it has to sit next to the values it qualifies -- the
+    // top-level `connected` was missed once already.
+    assert!(
+        status["snapshot"]["device"]["observed_age_seconds"]
+            .as_u64()
+            .is_some_and(|age| age < 10),
+        "status omitted how old the device sample is, or reported a nonsense age: {status}"
+    );
 }
 
 #[tokio::test]

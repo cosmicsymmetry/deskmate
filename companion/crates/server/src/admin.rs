@@ -140,6 +140,7 @@ async fn get_device(
                 .map_err(|_| AdminError::WorkerFailed)?
                 .map_err(AdminError::from)?,
             last_ota_error,
+            observed_age_seconds: observed_age_seconds(last_seen_unix_ms, now_unix_ms()),
         })
     } else {
         None
@@ -167,6 +168,31 @@ struct DeviceStatus {
 struct AdminSnapshot {
     snapshot: AppSnapshot,
     last_ota_error: Option<String>,
+    /// How long ago the device was last heard from, in seconds.
+    ///
+    /// The runtime is retained across a link drop by design, so this endpoint
+    /// still serves a snapshot while the device is gone -- and every field under
+    /// `device` is then the *last value received*, not a current one. A frozen
+    /// `uptime_ms` reads exactly like a live one from a freshly booted board,
+    /// which nearly cost the 2026-08-19 session a wrong conclusion. `connected`
+    /// says so, but it sits at the top level, several screens away from the
+    /// numbers it qualifies. This rides *inside* `device`, next to them.
+    observed_age_seconds: Option<u64>,
+}
+
+fn now_unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| u64::try_from(duration.as_millis()).ok())
+        .unwrap_or(0)
+}
+
+/// Seconds between `last_seen` and `now`, or `None` when the device has never
+/// been heard from. Saturating: a clock that moves backwards between the two
+/// samples reports 0 rather than wrapping to a nonsense age.
+fn observed_age_seconds(last_seen_unix_ms: Option<u64>, now_unix_ms: u64) -> Option<u64> {
+    last_seen_unix_ms.map(|last_seen| now_unix_ms.saturating_sub(last_seen) / 1000)
 }
 
 fn insert_last_ota_error(
@@ -184,6 +210,22 @@ fn insert_last_ota_error(
     Ok(())
 }
 
+fn insert_observed_age_seconds(
+    snapshot: &mut serde_json::Value,
+    observed_age_seconds: Option<u64>,
+) -> Result<(), &'static str> {
+    let device = snapshot
+        .get_mut("device")
+        .and_then(serde_json::Value::as_object_mut)
+        .ok_or("snapshot device is not an object")?;
+    device.insert(
+        "observed_age_seconds".to_owned(),
+        serde_json::to_value(observed_age_seconds)
+            .map_err(|_| "observed age is not serializable")?,
+    );
+    Ok(())
+}
+
 impl Serialize for AdminSnapshot {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -192,13 +234,44 @@ impl Serialize for AdminSnapshot {
         let mut value = serde_json::to_value(&self.snapshot).map_err(serde::ser::Error::custom)?;
         insert_last_ota_error(&mut value, self.last_ota_error.as_deref())
             .map_err(serde::ser::Error::custom)?;
+        insert_observed_age_seconds(&mut value, self.observed_age_seconds)
+            .map_err(serde::ser::Error::custom)?;
         value.serialize(serializer)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::insert_last_ota_error;
+    use super::{insert_last_ota_error, insert_observed_age_seconds, observed_age_seconds};
+
+    #[test]
+    fn observed_age_is_inserted_beside_the_values_it_qualifies() {
+        let mut snapshot = serde_json::json!({"device": {"uptime_ms": 66761}});
+        insert_observed_age_seconds(&mut snapshot, Some(412)).unwrap();
+        // Inside `device`, next to the frozen uptime -- not at the top level,
+        // where it would be as easy to miss as `connected` was.
+        assert_eq!(snapshot["device"]["observed_age_seconds"], 412);
+        assert_eq!(snapshot["device"]["uptime_ms"], 66761);
+    }
+
+    #[test]
+    fn a_device_never_heard_from_has_no_age_rather_than_a_zero_one() {
+        // Zero would read as "heard from just now", which is the opposite of
+        // the truth for a device that has never connected.
+        assert_eq!(observed_age_seconds(None, 1_000_000), None);
+        let mut snapshot = serde_json::json!({"device": {}});
+        insert_observed_age_seconds(&mut snapshot, None).unwrap();
+        assert!(snapshot["device"]["observed_age_seconds"].is_null());
+    }
+
+    #[test]
+    fn observed_age_saturates_rather_than_wrapping_on_a_backwards_clock() {
+        // SystemTime is not monotonic: NTP can step it backwards between the
+        // sample and the read. Wrapping would turn a fresh device into one last
+        // seen half a billion years ago.
+        assert_eq!(observed_age_seconds(Some(2_000), 1_000), Some(0));
+        assert_eq!(observed_age_seconds(Some(1_000), 413_000), Some(412));
+    }
 
     #[test]
     fn ota_error_is_inserted_inside_snapshot_device() {

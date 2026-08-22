@@ -797,15 +797,36 @@ static void dispatch_asset_release(protocol_context_t *context,
     // Ordering hazard this call must resolve: compaction below can physically
     // move blob bytes, which invalidates any lv_font_t rasterized from an
     // asset_flash_map() pointer, so every such face must be gone before
-    // asset_flash_execute_compaction() runs. As of this task, nothing in
-    // firmware/main calls font_registry_acquire() -- that wiring lands in a
-    // later stage that renders template text from stored fonts -- so
-    // ref_count can never be nonzero here and this reset is unconditionally
-    // safe today. When that caller exists, resetting the registry out from
-    // under a card that is currently on screen becomes a use-after-free
-    // hazard again and this call must move behind draining/invalidating that
-    // caller's live references (e.g. re-showing the active view after the
-    // registry is cleared) before compaction is allowed to proceed.
+    // asset_flash_execute_compaction() runs.
+    //
+    // There IS now a font_registry_acquire() caller in this tree: the
+    // DESKMATE_DEV_DIAG-only probe (link/dev_capture.c's
+    // dev_capture_handle_asset_probe(), Task 13). It always releases before
+    // returning, so ref_count is back to 0 by the time this function can
+    // observe it -- but font_registry_reset() destroys every open face
+    // unconditionally, regardless of ref_count, and an LVGL label that was
+    // styled with an acquired lv_font_t* keeps that raw pointer after its
+    // acquirer calls font_registry_release(); release only means the
+    // registry's own table stops pinning the face, not that nothing else
+    // still points at it. So a screen built from an asset font is stale --
+    // and unsafe to redraw -- the moment this reset runs, whether or not
+    // anything is still "acquired" at the time. The pinned-face counter
+    // below cannot detect this case; it only catches a caller still holding
+    // ref_count > 0, not a screen holding a dangling pointer after release.
+    // The same destruction is also reachable with no AssetRelease/GC
+    // involved at all: once font_registry_release() drops ref_count to 0,
+    // a later font_registry_acquire() for a *different* digest or pixel
+    // size can pick that now-unpinned entry as claim_slot()'s LRU victim
+    // and destroy it out from under a screen that still points at it.
+    //
+    // This reset stays safe TODAY only because the sole caller is dev-only,
+    // and only for a single probe/capture pair with nothing else touching
+    // the registry in between -- not because the hazard above is closed.
+    // No production template renders from an asset font yet (that wiring is
+    // later stage scope). When one does, this call must move behind
+    // draining/invalidating that renderer's live references (e.g.
+    // re-showing or tearing down every asset-font screen before reset runs,
+    // not just checking ref_count) before compaction is allowed to proceed.
     if (!lvgl_port_lock(0U)) {
         transmit_error(context, request_id, PROTOCOL_ERROR_INTERNAL,
                        "display lock unavailable");

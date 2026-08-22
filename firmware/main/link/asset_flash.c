@@ -208,17 +208,17 @@ esp_err_t asset_flash_execute_compaction(const asset_move_t *moves, size_t count
 
     /* core/asset_store.c's asset_store_plan_compaction visits committed
      * records in ascending blob offset and packs survivors forward starting
-     * at 0, so for every emitted move to_offset <= from_offset, and a move's
-     * destination interval never reaches into a later move's still-unread
-     * source (each move's [to_offset, to_offset+length) ends at or before
-     * the next move's to_offset, which is itself <= that move's from_offset).
-     * That means moves[] is already sorted ascending by both from_offset and
-     * to_offset in emission order -- verified by reading that loop, not
-     * assumed here. This loop still checks the ascending-to_offset half of
-     * that invariant rather than trusting it silently, since a violation
-     * would mean this function's forward-pack copy is unsafe. */
+     * at 0, so for every emitted move to_offset <= from_offset, and moves
+     * are gapless: to_offset picks up exactly where the previous move's
+     * destination ended, with no unused byte in between. That means
+     * moves[] is already sorted ascending by both from_offset and to_offset
+     * in emission order -- verified by reading that loop, not assumed here.
+     * This loop checks the full invariant (gapless, non-overlapping,
+     * to_offset <= from_offset) rather than trusting it silently: a gap
+     * would leave a hole in blob_buffer sized from uninitialized PSRAM
+     * below, and any other violation would make the forward-pack copy
+     * unsafe. */
     uint32_t total_length = 0U;
-    uint32_t previous_to_offset = 0U;
     for (size_t i = 0U; i < count; i++) {
         const asset_move_t *move = &moves[i];
         if (move->record_index >= s_store.record_capacity) {
@@ -227,7 +227,9 @@ esp_err_t asset_flash_execute_compaction(const asset_move_t *moves, size_t count
         if (move->to_offset > move->from_offset) {
             return ESP_ERR_INVALID_STATE;
         }
-        if (i > 0U && move->to_offset < previous_to_offset) {
+        if (move->to_offset != total_length) {
+            /* Must equal the running end of every move packed so far --
+             * catches both a gap and an overlap/out-of-order entry. */
             return ESP_ERR_INVALID_STATE;
         }
         if (move->length > s_store.blob_region_size ||
@@ -235,7 +237,6 @@ esp_err_t asset_flash_execute_compaction(const asset_move_t *moves, size_t count
             move->to_offset > s_store.blob_region_size - move->length) {
             return ESP_ERR_INVALID_ARG;
         }
-        previous_to_offset = move->to_offset;
         total_length = move->to_offset + move->length;
     }
 
@@ -292,53 +293,75 @@ esp_err_t asset_flash_execute_compaction(const asset_move_t *moves, size_t count
         }
     }
 
-    /* Header + record array: back up the header verbatim (this file has no
-     * business knowing its field layout -- that is core/asset_store.c's
-     * private encoding), erase the whole sector-aligned region ahead of the
-     * blob region (blob_region_offset is always a round_up_to_sector()
-     * result), restore the header byte-for-byte, then write only the
-     * surviving records. Every other slot -- dead, still-uncommitted, or
-     * simply unused -- stays erased, which is exactly "free" in this
-     * format. */
-    {
-        uint8_t header_backup[ASSET_HEADER_BYTES];
-        if (io_read(NULL, 0U, header_backup, sizeof header_backup) != 0) {
-            err = ESP_FAIL;
-            goto done;
-        }
-        if (io_erase(NULL, 0U, s_store.blob_region_offset) != 0) {
-            err = ESP_FAIL;
-            goto done;
-        }
-        if (io_write(NULL, 0U, header_backup, sizeof header_backup) != 0) {
-            err = ESP_FAIL;
-            goto done;
-        }
-        for (size_t i = 0U; i < count; i++) {
-            uint8_t bytes[ASSET_RECORD_BYTES];
-            asset_store_record_encode(&kept[i], bytes);
-            uint32_t record_offset =
-                ASSET_HEADER_BYTES + moves[i].record_index * ASSET_RECORD_BYTES;
-            if (io_write(NULL, record_offset, bytes, sizeof bytes) != 0) {
-                err = ESP_FAIL;
-                goto done;
-            }
-        }
+    /* Back up the header verbatim before erasing anything -- this file has
+     * no business knowing its field layout, that is core/asset_store.c's
+     * private encoding, so this is a byte-for-byte copy, not a re-derive. */
+    uint8_t header_backup[ASSET_HEADER_BYTES];
+    if (io_read(NULL, 0U, header_backup, sizeof header_backup) != 0) {
+        err = ESP_FAIL;
+        goto done;
     }
 
-    /* Blob region: erase the whole thing -- this reclaims both the dead
-     * space between surviving assets and the true tail past the new,
-     * smaller high-water mark in one aligned call -- then write the
-     * compacted buffer back as a single run starting at offset 0. */
+    /* Erase both regions before writing either one. Everything either erase
+     * would destroy has already been read into PSRAM above (kept[] and
+     * blob_buffer), so nothing here can lose unread data. The header's
+     * sector is included in this erase -- blob_region_offset is always a
+     * round_up_to_sector() result, so [0, blob_region_offset) is exactly
+     * the header + record array's sector-aligned span -- which is *why*
+     * the header write below has to be the last thing this function does:
+     * from this point until that final write, offset 0 reads erased
+     * (0xFF), not "DMAS", so asset_store_open() cannot mistake a partially
+     * written compaction for a valid, committed store. */
+    if (io_erase(NULL, 0U, s_store.blob_region_offset) != 0) {
+        err = ESP_FAIL;
+        goto done;
+    }
     if (io_erase(NULL, s_store.blob_region_offset, s_store.blob_region_size) != 0) {
         err = ESP_FAIL;
         goto done;
     }
+
+    /* Write the blob bytes, then the record array (offset ASSET_HEADER_BYTES
+     * onward -- this never touches offset 0..ASSET_HEADER_BYTES, so it
+     * cannot race the header's commit role below), then -- last -- the
+     * header.
+     *
+     * That ordering is the whole crash-safety argument: a power loss at any
+     * point before the final header write leaves offset 0 erased, so
+     * asset_store_open() returns ASSET_STORE_ERR_NOT_FORMATTED and
+     * asset_flash_init() reformats to an empty, self-consistent store that
+     * the host re-syncs from scratch. The alternative this replaced --
+     * writing the record array (with offsets already repointed at the new,
+     * not-yet-written blob layout) before the blob region was rewritten --
+     * left a *valid-looking* store whose committed records pointed at
+     * stale, pre-compaction bytes: asset_store_open() has no way to
+     * cross-check a record's offset against blob content, so nothing would
+     * ever detect it. Do not reorder the header write earlier than last;
+     * doing so reintroduces that silent corruption. */
     if (total_length > 0U) {
         if (io_write(NULL, s_store.blob_region_offset, blob_buffer, total_length) != 0) {
             err = ESP_FAIL;
             goto done;
         }
+    }
+    for (size_t i = 0U; i < count; i++) {
+        uint8_t bytes[ASSET_RECORD_BYTES];
+        asset_store_record_encode(&kept[i], bytes);
+        uint32_t record_offset =
+            ASSET_HEADER_BYTES + moves[i].record_index * ASSET_RECORD_BYTES;
+        if (io_write(NULL, record_offset, bytes, sizeof bytes) != 0) {
+            err = ESP_FAIL;
+            goto done;
+        }
+    }
+    /* Commit point. esp_partition_write has no alignment requirement for an
+     * unencrypted partition (the 16-byte offset/length rule only applies
+     * when the partition's `encrypted` flag is set -- `assets` in
+     * partitions.csv carries no such flag), so this 32-byte write at
+     * offset 0 needs no special handling. */
+    if (io_write(NULL, 0U, header_backup, sizeof header_backup) != 0) {
+        err = ESP_FAIL;
+        goto done;
     }
 
 done:

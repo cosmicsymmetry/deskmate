@@ -1,10 +1,13 @@
 #include "sim_shim.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 #include "lvgl.h"
+#include "core/asset_store.h"
 #include "core/clock_source.h"
 #include "core/template_fields.h"
+#include "ui/font_registry.h"
 #include "ui/template_view.h"
 
 #define SIM_WIDTH 448
@@ -15,6 +18,22 @@ static uint16_t s_frame[SIM_WIDTH * SIM_HEIGHT];
 static uint32_t s_fake_tick;
 
 static uint32_t sim_tick_cb(void) { return s_fake_tick; }
+
+/* Shared by sim_render and sim_render_asset_font: copies the just-flushed
+ * frame out, applying the 180° flip that models the 270° mount. */
+static void copy_frame_out(bool orientation_flipped, uint16_t *out_pixels)
+{
+    if (orientation_flipped) {
+        /* The firmware's "flipped" mount is a 180° rotation of the logical
+         * canvas (LV_DISPLAY_ROTATION_90 vs 270 on the physical panel). */
+        for (size_t index = 0; index < (size_t)SIM_WIDTH * SIM_HEIGHT; ++index) {
+            out_pixels[index] =
+                s_frame[(size_t)SIM_WIDTH * SIM_HEIGHT - 1 - index];
+        }
+    } else {
+        memcpy(out_pixels, s_frame, sizeof(s_frame));
+    }
+}
 
 static void sim_flush_cb(lv_display_t *display, const lv_area_t *area,
                          uint8_t *px_map)
@@ -130,16 +149,240 @@ bool sim_render(int template_kind, const sim_field_t *fields,
         s_fake_tick += 40;
         lv_timer_handler();
     }
-    if (orientation_flipped) {
-        /* The firmware's "flipped" mount is a 180° rotation of the logical
-         * canvas (LV_DISPLAY_ROTATION_90 vs 270 on the physical panel). */
-        for (size_t index = 0; index < (size_t)SIM_WIDTH * SIM_HEIGHT; ++index) {
-            out_pixels[index] =
-                s_frame[(size_t)SIM_WIDTH * SIM_HEIGHT - 1 - index];
-        }
-    } else {
-        memcpy(out_pixels, s_frame, sizeof(s_frame));
-    }
+    copy_frame_out(orientation_flipped, out_pixels);
     clock_source_clear_override();
+    return true;
+}
+
+/* ---------------------------------------------------------------------
+ * Task 12: RAM-backed asset store shim.
+ *
+ * The spec's parity obligation (see the module doc in cases.rs and the
+ * task-12 brief) is that the simulator resolves the same digest to the
+ * same bytes the device would. On device that path is
+ * link/asset_flash.c's esp_partition-backed asset_flash_io_t feeding
+ * core/asset_store.c, with link/protocol_task.c's protocol_asset_resolver
+ * bridging asset_store_find()+asset_flash_map() into
+ * font_registry_init()'s asset_resolver_fn (see font_registry.h's own
+ * comment on why that indirection exists: ui/font_registry.c carries no
+ * ESP-IDF include specifically so it can compile here).
+ *
+ * This shim reuses the *same* core/asset_store.c unmodified (see build.rs),
+ * backed by a plain heap buffer instead of esp_partition_*, exactly like
+ * firmware/host_tests/test_asset_store.c's fake flash. That is the whole
+ * point: asset_store_format/open/reserve/commit/find behave identically to
+ * the device's, so a digest registered here resolves through the identical
+ * on-flash record format the device would decode -- only the I/O
+ * (RAM vs NOR flash) differs, not the format or the lookup.
+ * --------------------------------------------------------------------- */
+
+/* 64 KiB, matching test_asset_store.c's FAKE_SIZE -- ample for the handful
+ * of small test fonts this shim ever registers (the committed golden asset
+ * is ~4 KiB; see assets.rs). */
+#define SIM_ASSET_FLASH_BYTES (64U * 1024U)
+#define SIM_ASSET_RECORD_CAPACITY 8U
+
+static uint8_t s_asset_flash[SIM_ASSET_FLASH_BYTES];
+static asset_store_t s_asset_store;
+static bool s_asset_store_ready;
+
+static int sim_asset_io_read(void *ctx, uint32_t offset, void *out, size_t length)
+{
+    (void)ctx;
+    if ((size_t)offset + length > SIM_ASSET_FLASH_BYTES) {
+        return -1;
+    }
+    memcpy(out, s_asset_flash + offset, length);
+    return 0;
+}
+
+static int sim_asset_io_write(void *ctx, uint32_t offset, const void *data,
+                              size_t length)
+{
+    (void)ctx;
+    if ((size_t)offset + length > SIM_ASSET_FLASH_BYTES) {
+        return -1;
+    }
+    /* NOR semantics: writes only clear bits. Matches
+     * firmware/main/link/asset_flash.c's io_write and
+     * test_asset_store.c's fake_write -- core/asset_store.c's commit-bit
+     * trick depends on this being faithfully modelled, not a plain
+     * memcpy. */
+    const uint8_t *src = data;
+    for (size_t i = 0; i < length; ++i) {
+        s_asset_flash[offset + i] &= src[i];
+    }
+    return 0;
+}
+
+static int sim_asset_io_erase(void *ctx, uint32_t offset, size_t length)
+{
+    (void)ctx;
+    if ((size_t)offset + length > SIM_ASSET_FLASH_BYTES) {
+        return -1;
+    }
+    memset(s_asset_flash + offset, 0xFF, length);
+    return 0;
+}
+
+static const asset_flash_io_t s_sim_asset_io = {
+    .read = sim_asset_io_read,
+    .write = sim_asset_io_write,
+    .erase = sim_asset_io_erase,
+    .ctx = NULL,
+};
+
+static bool ensure_asset_store(void)
+{
+    if (s_asset_store_ready) {
+        return true;
+    }
+    if (asset_store_format(&s_sim_asset_io, SIM_ASSET_FLASH_BYTES,
+                           SIM_ASSET_RECORD_CAPACITY) != ASSET_STORE_OK) {
+        return false;
+    }
+    if (asset_store_open(&s_asset_store, &s_sim_asset_io, SIM_ASSET_FLASH_BYTES) !=
+        ASSET_STORE_OK) {
+        return false;
+    }
+    s_asset_store_ready = true;
+    return true;
+}
+
+/* Inserts a committed record plus its blob for `digest`, if not already
+ * present. A second registration of the same digest is a harmless no-op
+ * (not an error) so a golden case that registers its font on every render
+ * -- once per orientation -- does not have to track whether this is the
+ * first call. */
+bool sim_asset_register(const uint8_t *digest, const uint8_t *bytes, uint32_t len,
+                        uint8_t kind)
+{
+    if (digest == NULL || bytes == NULL || len == 0U) {
+        return false;
+    }
+    if (!ensure_asset_store()) {
+        return false;
+    }
+
+    asset_record_t existing;
+    if (asset_store_find(&s_asset_store, digest, &existing, NULL) == ASSET_STORE_OK) {
+        return true;
+    }
+
+    uint32_t index = 0U;
+    uint32_t blob_offset = 0U;
+    if (asset_store_reserve(&s_asset_store, digest, kind, len, &index,
+                            &blob_offset) != ASSET_STORE_OK) {
+        return false;
+    }
+    if (sim_asset_io_write(NULL, s_asset_store.blob_region_offset + blob_offset,
+                           bytes, len) != 0) {
+        return false;
+    }
+    if (asset_store_commit(&s_asset_store, index) != ASSET_STORE_OK) {
+        return false;
+    }
+    return true;
+}
+
+/* font_registry_init()'s asset_resolver_fn. Mirrors
+ * link/protocol_task.c's protocol_asset_resolver exactly, except the
+ * mapped pointer comes straight out of the RAM buffer above instead of
+ * link/asset_flash.c's esp_partition_mmap -- there is no flash to map on
+ * the host, and s_asset_flash already IS the "mapped" bytes. */
+static bool sim_asset_resolver(const uint8_t *digest, const void **out_ptr,
+                               uint32_t *out_len, uint8_t *out_kind)
+{
+    if (!s_asset_store_ready) {
+        return false;
+    }
+    asset_record_t record;
+    if (asset_store_find(&s_asset_store, digest, &record, NULL) != ASSET_STORE_OK) {
+        return false;
+    }
+    *out_ptr = s_asset_flash + s_asset_store.blob_region_offset + record.offset;
+    *out_len = record.length;
+    *out_kind = record.kind;
+    return true;
+}
+
+static void *s_font_registry_table;
+static bool s_font_registry_ready;
+
+static bool ensure_font_registry(void)
+{
+    if (s_font_registry_ready) {
+        return true;
+    }
+    size_t table_bytes = font_registry_table_bytes();
+    s_font_registry_table = malloc(table_bytes);
+    if (s_font_registry_table == NULL) {
+        return false;
+    }
+    if (font_registry_init(sim_asset_resolver, s_font_registry_table, table_bytes) !=
+        FONT_REGISTRY_OK) {
+        free(s_font_registry_table);
+        s_font_registry_table = NULL;
+        return false;
+    }
+    s_font_registry_ready = true;
+    return true;
+}
+
+bool sim_render_asset_font(const uint8_t *digest, const uint8_t *ttf_bytes,
+                           uint32_t ttf_len, int32_t pixel_size, const char *text,
+                           bool orientation_flipped, uint16_t *out_pixels)
+{
+    if (!sim_init() || out_pixels == NULL || digest == NULL || ttf_bytes == NULL ||
+        text == NULL) {
+        return false;
+    }
+    if (!sim_asset_register(digest, ttf_bytes, ttf_len, (uint8_t)ASSET_KIND_FONT)) {
+        return false;
+    }
+    if (!ensure_font_registry()) {
+        return false;
+    }
+
+    lv_font_t *font = font_registry_acquire(digest, pixel_size);
+    if (font == NULL) {
+        return false;
+    }
+    font_registry_warm(font, text);
+
+    /* A bare screen + centred label, deliberately not template_view.c's
+     * card chrome: this golden pins raw font rendering parity, not any
+     * one template's layout. Colours match template_style.c's canvas/
+     * primary-text convention (DESKMATE_COLOR_CANVAS / _PRIMARY) so the
+     * PNG still reads as a plausible Deskmate frame. */
+    lv_obj_t *screen = lv_obj_create(NULL);
+    if (screen == NULL) {
+        font_registry_release(font);
+        return false;
+    }
+    lv_obj_remove_flag(screen, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(screen, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, 0);
+
+    lv_obj_t *label = lv_label_create(screen);
+    lv_obj_remove_style_all(label);
+    lv_obj_set_style_text_font(label, font, 0);
+    lv_obj_set_style_text_color(label, lv_color_hex(0xf5f5f7), 0);
+    lv_label_set_text(label, text);
+    lv_obj_center(label);
+
+    /* auto_del=true deletes whatever screen was previously active (a prior
+     * template render or asset-font render), exactly like
+     * template_view_show's own lv_screen_load_anim call. */
+    lv_screen_load_anim(screen, LV_SCREEN_LOAD_ANIM_NONE, 0U, 0U, true);
+
+    s_fake_tick = (s_fake_tick / 1000U + 1U) * 1000U;
+    for (int cycle = 0; cycle < 4; ++cycle) {
+        s_fake_tick += 40;
+        lv_timer_handler();
+    }
+
+    copy_frame_out(orientation_flipped, out_pixels);
+    font_registry_release(font);
     return true;
 }

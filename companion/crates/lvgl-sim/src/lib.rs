@@ -17,6 +17,11 @@ use std::time::{Duration, Instant};
 /// `cases.rs`'s module doc for why it lives here instead of under `tests/`.
 pub mod cases;
 
+/// Task 12: the runtime font asset used by the asset-store parity golden,
+/// and the `Simulator::render_asset_font_png` FFI wrapper for it. See its
+/// module doc for why the vendored TTF is patched before being subset.
+pub mod assets;
+
 pub const LOGICAL_WIDTH: u32 = 448;
 pub const LOGICAL_HEIGHT: u32 = 368;
 
@@ -279,24 +284,32 @@ impl Simulator {
     /// RGB PNG.
     pub fn render_png(&mut self, request: &RenderRequest) -> Result<Vec<u8>, SimError> {
         let pixels = self.render(request)?;
-        let mut rgb = Vec::with_capacity(pixels.len() * 3);
-        for pixel in &pixels {
-            rgb.push((((pixel >> 11) & 0x1f) as u8) << 3); // R5 -> 8
-            rgb.push((((pixel >> 5) & 0x3f) as u8) << 2); // G6 -> 8
-            rgb.push(((pixel & 0x1f) as u8) << 3); // B5 -> 8
-        }
-        let mut out = Vec::new();
-        {
-            let mut encoder = png::Encoder::new(&mut out, LOGICAL_WIDTH, LOGICAL_HEIGHT);
-            encoder.set_color(png::ColorType::Rgb);
-            encoder.set_depth(png::BitDepth::Eight);
-            let mut writer = encoder.write_header().map_err(|_| SimError::EncodeFailed)?;
-            writer
-                .write_image_data(&rgb)
-                .map_err(|_| SimError::EncodeFailed)?;
-        }
-        Ok(out)
+        pixels_to_png(&pixels)
     }
+}
+
+/// Encodes 448*368 RGB565 pixels (logical landscape, as returned by
+/// [`Simulator::render`]) as an 8-bit RGB PNG. Shared by
+/// [`Simulator::render_png`] and `assets::Simulator::render_asset_font_png`
+/// (Task 12) so the two render paths produce bit-identical PNG encoding.
+pub(crate) fn pixels_to_png(pixels: &[u16]) -> Result<Vec<u8>, SimError> {
+    let mut rgb = Vec::with_capacity(pixels.len() * 3);
+    for pixel in pixels {
+        rgb.push((((pixel >> 11) & 0x1f) as u8) << 3); // R5 -> 8
+        rgb.push((((pixel >> 5) & 0x3f) as u8) << 2); // G6 -> 8
+        rgb.push(((pixel & 0x1f) as u8) << 3); // B5 -> 8
+    }
+    let mut out = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut out, LOGICAL_WIDTH, LOGICAL_HEIGHT);
+        encoder.set_color(png::ColorType::Rgb);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().map_err(|_| SimError::EncodeFailed)?;
+        writer
+            .write_image_data(&rgb)
+            .map_err(|_| SimError::EncodeFailed)?;
+    }
+    Ok(out)
 }
 
 impl Drop for Simulator {

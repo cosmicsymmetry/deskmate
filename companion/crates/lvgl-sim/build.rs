@@ -15,6 +15,12 @@ fn main() {
         "template_fields.c",
         "protocol_message.c",
         "protocol_frame.c",
+        // Task 12: the runtime asset store, compiled unmodified so the
+        // simulator's digest -> bytes lookup uses the identical format and
+        // logic the device's link/asset_flash.c backs with real flash
+        // I/O -- see csrc/sim_shim.c's RAM-backed asset_flash_io_t.
+        "asset_store.c",
+        "asset_transfer.c",
     ] {
         sources.push(firmware.join("main/core").join(core));
     }
@@ -31,6 +37,9 @@ fn main() {
         sources.push(firmware.join("main/ui/templates").join(template));
     }
     sources.push(firmware.join("main/ui/template_view.c"));
+    // Task 12: free of ESP-IDF includes by design (see its own header
+    // comment) specifically so it can compile into this host binary.
+    sources.push(firmware.join("main/ui/font_registry.c"));
     for font in [
         "deskmate_font_18.c",
         "deskmate_font_28.c",

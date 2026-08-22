@@ -25,3 +25,19 @@ bool sim_render(int template_kind,
                 int64_t now_unix_seconds,
                 bool orientation_flipped,
                 uint16_t *out_pixels);
+
+/* Task 12: renders `text` centred on the 448x368 canvas using a runtime
+ * font asset, exercising the same digest -> bytes -> lv_font_t path the
+ * device's protocol_asset_resolver/font_registry does -- see sim_shim.c's
+ * RAM-backed asset store shim. `digest` must be exactly ASSET_DIGEST_BYTES
+ * (32) bytes; `ttf_bytes`/`ttf_len` is the font file to register under that
+ * digest (registration is idempotent per digest, so re-registering the same
+ * bytes under the same digest across calls is harmless). Returns false if
+ * registration, font acquisition, or rendering fails. */
+bool sim_render_asset_font(const uint8_t *digest,
+                           const uint8_t *ttf_bytes,
+                           uint32_t ttf_len,
+                           int32_t pixel_size,
+                           const char *text,
+                           bool orientation_flipped,
+                           uint16_t *out_pixels);

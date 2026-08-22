@@ -562,3 +562,52 @@ pub fn golden_cases() -> Vec<(String, RenderRequest)> {
     icon_badge_text_cases(&mut cases);
     cases
 }
+
+/// Task 12: one case rendering a runtime font asset, deliberately not a
+/// `RenderRequest`/`SimTemplate` case. It exercises a wholly different
+/// path than every case above — `font_registry_acquire` against a digest
+/// registered in `csrc/sim_shim.c`'s RAM-backed asset store, not
+/// `template_view_show` against a baked `deskmate_font_*` face — so it
+/// cannot be pushed through the device's `TemplateKind`/`PushData` wire
+/// messages the way `golden_cases()` can. That is also why
+/// [`asset_font_cases`] is a separate function, not folded into
+/// [`golden_cases`]: `companion/crates/device/examples/framebuffer_diff.rs`
+/// iterates `golden_cases()` and pushes every entry to physical hardware
+/// over the protocol, and there is no wire message for "register this font
+/// blob under this digest" (that is provisioned by `AssetBegin`/
+/// `AssetChunk`/`AssetCommit`, a whole transfer protocol out of scope for
+/// this simulator-only parity check). Rendered by
+/// `Simulator::render_asset_font_png` (`src/assets.rs`) and pinned by
+/// `tests/asset_font.rs` against `tests/golden/asset-font/` — a
+/// subdirectory, not `tests/golden/` directly, so `tests/golden.rs`'s
+/// orphan-PNG check (which only lists `tests/golden/*.png`, non-recursive)
+/// never sees these files and does not need to know about this case table.
+pub struct AssetFontCase {
+    pub digest: [u8; 32],
+    pub ttf_bytes: &'static [u8],
+    pub pixel_size: i32,
+    pub text: String,
+    pub orientation: SimOrientation,
+}
+
+/// `asset-font--72px-digits`: `12:34` at 72px, deliberately none of the
+/// four baked sizes (18/28/56/96 — `firmware/main/ui/templates/
+/// template_internal.h`'s `DESKMATE_FONT_*`), so nothing about this render
+/// could accidentally be satisfied by a baked face instead of the runtime
+/// one. Both orientations, matching every other case in this file.
+pub fn asset_font_cases() -> Vec<(String, AssetFontCase)> {
+    let mut cases = Vec::new();
+    for (orientation_slug, orientation) in orientations() {
+        cases.push((
+            format!("asset-font--72px-digits--{orientation_slug}"),
+            AssetFontCase {
+                digest: crate::assets::INTER_SUBSET_SHA256,
+                ttf_bytes: crate::assets::INTER_SUBSET_TTF,
+                pixel_size: 72,
+                text: "12:34".to_string(),
+                orientation,
+            },
+        ));
+    }
+    cases
+}

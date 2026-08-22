@@ -598,8 +598,13 @@ Required behaviour:
 
 - `asset_store_find` scans records, matching only `ASSET_STATE_COMMITTED` entries whose
   digest compares equal. Returns `ASSET_STORE_ERR_NOT_FOUND` otherwise.
-- `asset_store_reserve` places the blob at the current high-water mark (the maximum
-  `offset + length` across committed *and* uncommitted records), takes the first record
+- `asset_store_reserve` places the blob at the current high-water mark — the maximum
+  `offset + length` across **committed, uncommitted, and dead** records. Dead records
+  must count: `asset_store_mark_dead` only clears a state byte, leaving every blob byte
+  physically present and un-erased, and NOR writes clear bits only. Excluding them lets
+  the next reservation land on a dead blob and AND itself into garbage, which commits
+  and reads back as a valid asset. Space is reclaimable only by compaction. It takes the
+  first record
   slot whose state is `ASSET_STATE_UNCOMMITTED` and whose digest bytes are all `0xFF`,
   and writes the record with `state` left erased. Returns `ASSET_STORE_ERR_FULL` when
   either the blob region or the record array cannot fit the request.

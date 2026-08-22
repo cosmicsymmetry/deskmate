@@ -129,6 +129,125 @@ static void test_open_rejects_overflowing_record_capacity(void)
     assert(asset_store_open(&store, &io, FAKE_SIZE) == ASSET_STORE_ERR_CORRUPT);
 }
 
+static asset_store_t formatted_store(asset_flash_io_t *io)
+{
+    memset(g_flash, 0x00, sizeof g_flash);
+    *io = fake_io();
+    asset_store_t store;
+    assert(asset_store_format(io, FAKE_SIZE, 64U) == ASSET_STORE_OK);
+    assert(asset_store_open(&store, io, FAKE_SIZE) == ASSET_STORE_OK);
+    return store;
+}
+
+static void digest_of(uint8_t seed, uint8_t *out)
+{
+    memset(out, seed, ASSET_DIGEST_BYTES);
+}
+
+static void test_uncommitted_reservation_is_not_findable(void)
+{
+    asset_flash_io_t io;
+    asset_store_t store = formatted_store(&io);
+    uint8_t digest[ASSET_DIGEST_BYTES];
+    digest_of(0x11, digest);
+    uint32_t index = 0U, blob = 0U;
+
+    assert(asset_store_reserve(&store, digest, ASSET_KIND_FONT, 100U, &index, &blob)
+           == ASSET_STORE_OK);
+    /* This is the crash-safety property: a transfer interrupted before commit
+     * must never surface as a usable asset. */
+    assert(asset_store_find(&store, digest, NULL, NULL) == ASSET_STORE_ERR_NOT_FOUND);
+
+    assert(asset_store_commit(&store, index) == ASSET_STORE_OK);
+    assert(asset_store_find(&store, digest, NULL, NULL) == ASSET_STORE_OK);
+}
+
+static void test_reserve_rejects_blob_overflow(void)
+{
+    asset_flash_io_t io;
+    asset_store_t store = formatted_store(&io);
+    uint8_t digest[ASSET_DIGEST_BYTES];
+    digest_of(0x22, digest);
+    uint32_t index = 0U, blob = 0U;
+
+    assert(asset_store_reserve(&store, digest, ASSET_KIND_FONT,
+                               store.blob_region_size + 1U, &index, &blob)
+           == ASSET_STORE_ERR_FULL);
+}
+
+static void test_duplicate_digest_reports_already_present(void)
+{
+    asset_flash_io_t io;
+    asset_store_t store = formatted_store(&io);
+    uint8_t digest[ASSET_DIGEST_BYTES];
+    digest_of(0x33, digest);
+    uint32_t index = 0U, blob = 0U;
+
+    assert(asset_store_reserve(&store, digest, ASSET_KIND_FONT, 64U, &index, &blob)
+           == ASSET_STORE_OK);
+    assert(asset_store_commit(&store, index) == ASSET_STORE_OK);
+    /* Content addressing means a second push of the same bytes is a no-op.
+     * This is the whole inventory protocol -- see plan Task 5. */
+    assert(asset_store_find(&store, digest, NULL, NULL) == ASSET_STORE_OK);
+}
+
+static void test_compaction_plan_drops_unreferenced_and_packs(void)
+{
+    asset_flash_io_t io;
+    asset_store_t store = formatted_store(&io);
+    uint8_t keep_digest[ASSET_DIGEST_BYTES];
+    uint8_t drop_digest[ASSET_DIGEST_BYTES];
+    digest_of(0xAA, keep_digest);
+    digest_of(0xBB, drop_digest);
+    uint32_t index = 0U, blob = 0U;
+
+    assert(asset_store_reserve(&store, drop_digest, ASSET_KIND_FONT, 4096U,
+                               &index, &blob) == ASSET_STORE_OK);
+    assert(asset_store_commit(&store, index) == ASSET_STORE_OK);
+    assert(asset_store_reserve(&store, keep_digest, ASSET_KIND_FONT, 512U,
+                               &index, &blob) == ASSET_STORE_OK);
+    assert(asset_store_commit(&store, index) == ASSET_STORE_OK);
+
+    const uint8_t *keep[1] = { keep_digest };
+    asset_move_t moves[8];
+    size_t move_count = 0U;
+    assert(asset_store_plan_compaction(&store, keep, 1U, moves, 8U, &move_count)
+           == ASSET_STORE_OK);
+
+    assert(move_count == 1U);
+    assert(moves[0].length == 512U);
+    assert(moves[0].to_offset == 0U); /* survivor packs down to the region start */
+    assert(moves[0].from_offset == 4096U);
+}
+
+static void test_compaction_plan_reports_capacity_exhaustion(void)
+{
+    asset_flash_io_t io;
+    asset_store_t store = formatted_store(&io);
+    uint8_t digest[ASSET_DIGEST_BYTES];
+    const uint8_t *keep[2];
+    uint8_t d0[ASSET_DIGEST_BYTES], d1[ASSET_DIGEST_BYTES];
+    uint32_t index = 0U, blob = 0U;
+
+    digest_of(0xC0, d0);
+    digest_of(0xC1, d1);
+    keep[0] = d0;
+    keep[1] = d1;
+    for (uint8_t i = 0; i < 2; i++) {
+        digest_of((uint8_t)(0xC0 + i), digest);
+        assert(asset_store_reserve(&store, digest, ASSET_KIND_FONT, 256U,
+                                   &index, &blob) == ASSET_STORE_OK);
+        assert(asset_store_commit(&store, index) == ASSET_STORE_OK);
+    }
+
+    asset_move_t moves[1];
+    size_t move_count = 0U;
+    /* A caller-supplied buffer that is too small must be an error, never a
+     * silent truncation that would delete surviving assets. */
+    assert(asset_store_plan_compaction(&store, keep, 2U, moves, 1U, &move_count)
+           == ASSET_STORE_ERR_FULL);
+}
+
 int main(void)
 {
     test_format_then_open_roundtrips();
@@ -136,5 +255,10 @@ int main(void)
     test_record_encode_decode_roundtrips();
     test_record_decode_rejects_unknown_kind();
     test_open_rejects_overflowing_record_capacity();
+    test_uncommitted_reservation_is_not_findable();
+    test_reserve_rejects_blob_overflow();
+    test_duplicate_digest_reports_already_present();
+    test_compaction_plan_drops_unreferenced_and_packs();
+    test_compaction_plan_reports_capacity_exhaustion();
     return 0;
 }

@@ -81,6 +81,29 @@ static bool asset_state_is_valid(uint8_t state)
     }
 }
 
+/* Absolute flash offset of record `index`. Safe against overflow as long as
+ * index < store->record_capacity for a store that came from asset_store_open
+ * (which already rejected any record_capacity that would make this wrap) --
+ * every caller below checks that bound first. */
+static uint32_t record_offset(uint32_t index)
+{
+    return ASSET_HEADER_BYTES + index * ASSET_RECORD_BYTES;
+}
+
+/* A record slot is free (never reserved) only when it is both erased state
+ * and erased digest. State alone is not enough: a record that was reserved
+ * but never committed also reads ASSET_STATE_UNCOMMITTED, and its digest
+ * must not be mistaken for free space. */
+static bool digest_is_all_ff(const uint8_t *digest)
+{
+    for (size_t i = 0U; i < ASSET_DIGEST_BYTES; i++) {
+        if (digest[i] != 0xFFU) {
+            return false;
+        }
+    }
+    return true;
+}
+
 asset_store_result_t asset_store_format(const asset_flash_io_t *io,
                                         uint32_t partition_size,
                                         uint32_t record_capacity)
@@ -204,5 +227,320 @@ asset_store_result_t asset_store_record_decode(const uint8_t *bytes,
     out->length = read_u32_le(bytes + REC_OFFSET_LENGTH);
     out->kind = kind;
     out->state = state;
+    return ASSET_STORE_OK;
+}
+
+asset_store_result_t asset_store_find(const asset_store_t *store,
+                                      const uint8_t *digest,
+                                      asset_record_t *out_record,
+                                      uint32_t *out_index)
+{
+    if (store == NULL || store->io == NULL || store->io->read == NULL || digest == NULL) {
+        return ASSET_STORE_ERR_ARGUMENT;
+    }
+
+    for (uint32_t index = 0U; index < store->record_capacity; index++) {
+        uint8_t bytes[ASSET_RECORD_BYTES];
+        if (store->io->read(store->io->ctx, record_offset(index), bytes, sizeof bytes) != 0) {
+            return ASSET_STORE_ERR_IO;
+        }
+        /* Only a committed entry is a usable asset -- an uncommitted
+         * reservation is exactly the interrupted-transfer case this format
+         * exists to make safe, and a dead one is superseded. */
+        if (bytes[REC_OFFSET_STATE] != ASSET_STATE_COMMITTED) {
+            continue;
+        }
+        if (memcmp(bytes + REC_OFFSET_DIGEST, digest, ASSET_DIGEST_BYTES) != 0) {
+            continue;
+        }
+
+        asset_record_t record;
+        if (asset_store_record_decode(bytes, &record) != ASSET_STORE_OK) {
+            return ASSET_STORE_ERR_CORRUPT;
+        }
+        if (out_record != NULL) {
+            *out_record = record;
+        }
+        if (out_index != NULL) {
+            *out_index = index;
+        }
+        return ASSET_STORE_OK;
+    }
+
+    return ASSET_STORE_ERR_NOT_FOUND;
+}
+
+asset_store_result_t asset_store_reserve(const asset_store_t *store,
+                                         const uint8_t *digest, uint8_t kind,
+                                         uint32_t length, uint32_t *out_index,
+                                         uint32_t *out_blob_offset)
+{
+    if (store == NULL || store->io == NULL || store->io->read == NULL ||
+        store->io->write == NULL || digest == NULL || out_index == NULL ||
+        out_blob_offset == NULL) {
+        return ASSET_STORE_ERR_ARGUMENT;
+    }
+    if (!asset_kind_is_valid(kind)) {
+        return ASSET_STORE_ERR_ARGUMENT;
+    }
+    if (length == 0U || length > ASSET_MAX_BYTES) {
+        return ASSET_STORE_ERR_ARGUMENT;
+    }
+
+    uint32_t high_water = 0U;
+    bool free_found = false;
+    uint32_t free_index = 0U;
+
+    for (uint32_t index = 0U; index < store->record_capacity; index++) {
+        uint8_t bytes[ASSET_RECORD_BYTES];
+        if (store->io->read(store->io->ctx, record_offset(index), bytes, sizeof bytes) != 0) {
+            return ASSET_STORE_ERR_IO;
+        }
+        uint8_t state = bytes[REC_OFFSET_STATE];
+        bool is_free_slot = (state == ASSET_STATE_UNCOMMITTED) &&
+            digest_is_all_ff(bytes + REC_OFFSET_DIGEST);
+
+        if (!free_found && is_free_slot) {
+            free_found = true;
+            free_index = index;
+        }
+
+        /* High-water mark spans committed and uncommitted (in-flight)
+         * records only -- a dead record's space is reclaimable but not yet
+         * reclaimed until compaction actually moves bytes, so it does not
+         * bound where the next reservation may land. */
+        if (!is_free_slot && (state == ASSET_STATE_COMMITTED || state == ASSET_STATE_UNCOMMITTED)) {
+            uint32_t offset = read_u32_le(bytes + REC_OFFSET_OFFSET);
+            uint32_t rec_length = read_u32_le(bytes + REC_OFFSET_LENGTH);
+            /* offset/length are untrusted flash content; bound them before
+             * summing so a corrupt record cannot wrap high_water. */
+            if (rec_length > store->blob_region_size ||
+                offset > store->blob_region_size - rec_length) {
+                return ASSET_STORE_ERR_CORRUPT;
+            }
+            uint32_t end = offset + rec_length;
+            if (end > high_water) {
+                high_water = end;
+            }
+        }
+    }
+
+    if (!free_found) {
+        return ASSET_STORE_ERR_FULL;
+    }
+    if (length > store->blob_region_size || high_water > store->blob_region_size - length) {
+        return ASSET_STORE_ERR_FULL;
+    }
+
+    asset_record_t record;
+    memcpy(record.digest, digest, ASSET_DIGEST_BYTES);
+    record.offset = high_water;
+    record.length = length;
+    record.kind = kind;
+    record.state = ASSET_STATE_UNCOMMITTED; /* left erased; commit clears it later */
+
+    uint8_t bytes[ASSET_RECORD_BYTES];
+    asset_store_record_encode(&record, bytes);
+    /* The slot is currently fully erased (0xFF), so writing the whole
+     * encoded record -- including its erased state byte and erased
+     * reserved tail -- is a pure bit-clear, matching every other flash
+     * write in this module. */
+    if (store->io->write(store->io->ctx, record_offset(free_index), bytes, sizeof bytes) != 0) {
+        return ASSET_STORE_ERR_IO;
+    }
+
+    *out_index = free_index;
+    *out_blob_offset = high_water;
+    return ASSET_STORE_OK;
+}
+
+asset_store_result_t asset_store_commit(const asset_store_t *store, uint32_t index)
+{
+    if (store == NULL || store->io == NULL || store->io->write == NULL) {
+        return ASSET_STORE_ERR_ARGUMENT;
+    }
+    if (index >= store->record_capacity) {
+        return ASSET_STORE_ERR_ARGUMENT;
+    }
+
+    uint8_t state = ASSET_STATE_COMMITTED;
+    if (store->io->write(store->io->ctx, record_offset(index) + REC_OFFSET_STATE, &state,
+                         1U) != 0) {
+        return ASSET_STORE_ERR_IO;
+    }
+    return ASSET_STORE_OK;
+}
+
+asset_store_result_t asset_store_mark_dead(const asset_store_t *store, uint32_t index)
+{
+    if (store == NULL || store->io == NULL || store->io->write == NULL) {
+        return ASSET_STORE_ERR_ARGUMENT;
+    }
+    if (index >= store->record_capacity) {
+        return ASSET_STORE_ERR_ARGUMENT;
+    }
+
+    uint8_t state = ASSET_STATE_DEAD;
+    if (store->io->write(store->io->ctx, record_offset(index) + REC_OFFSET_STATE, &state,
+                         1U) != 0) {
+        return ASSET_STORE_ERR_IO;
+    }
+    return ASSET_STORE_OK;
+}
+
+asset_store_result_t asset_store_stats(const asset_store_t *store,
+                                       asset_store_stats_t *out_stats)
+{
+    if (store == NULL || store->io == NULL || store->io->read == NULL || out_stats == NULL) {
+        return ASSET_STORE_ERR_ARGUMENT;
+    }
+
+    uint32_t committed_count = 0U;
+    uint32_t used_blob_bytes = 0U;
+    uint32_t reclaimable_blob_bytes = 0U;
+    /* Tracks used + reclaimable, kept <= blob_region_size by construction
+     * (checked before every add below), so none of these running sums can
+     * ever wrap a uint32_t even if flash content is corrupt. */
+    uint32_t accounted_bytes = 0U;
+
+    for (uint32_t index = 0U; index < store->record_capacity; index++) {
+        uint8_t bytes[ASSET_RECORD_BYTES];
+        if (store->io->read(store->io->ctx, record_offset(index), bytes, sizeof bytes) != 0) {
+            return ASSET_STORE_ERR_IO;
+        }
+        uint8_t state = bytes[REC_OFFSET_STATE];
+        if (state != ASSET_STATE_COMMITTED && state != ASSET_STATE_DEAD) {
+            continue;
+        }
+
+        uint32_t length = read_u32_le(bytes + REC_OFFSET_LENGTH);
+        if (length > store->blob_region_size - accounted_bytes) {
+            return ASSET_STORE_ERR_CORRUPT;
+        }
+        accounted_bytes += length;
+
+        if (state == ASSET_STATE_COMMITTED) {
+            committed_count++;
+            used_blob_bytes += length;
+        } else {
+            reclaimable_blob_bytes += length;
+        }
+    }
+
+    out_stats->committed_count = committed_count;
+    out_stats->used_blob_bytes = used_blob_bytes;
+    out_stats->reclaimable_blob_bytes = reclaimable_blob_bytes;
+    out_stats->free_blob_bytes = store->blob_region_size - accounted_bytes;
+    return ASSET_STORE_OK;
+}
+
+asset_store_result_t asset_store_plan_compaction(const asset_store_t *store,
+                                                 const uint8_t *const *keep,
+                                                 size_t keep_count,
+                                                 asset_move_t *moves,
+                                                 size_t moves_capacity,
+                                                 size_t *out_move_count)
+{
+    if (store == NULL || store->io == NULL || store->io->read == NULL ||
+        out_move_count == NULL) {
+        return ASSET_STORE_ERR_ARGUMENT;
+    }
+    if (keep_count > 0U && keep == NULL) {
+        return ASSET_STORE_ERR_ARGUMENT;
+    }
+    if (moves_capacity > 0U && moves == NULL) {
+        return ASSET_STORE_ERR_ARGUMENT;
+    }
+
+    size_t move_count = 0U;
+    uint32_t to_offset = 0U;
+    bool have_last = false;
+    uint32_t last_offset = 0U;
+    uint32_t last_index = 0U;
+
+    /* There is no offset index on flash, so committed records are visited
+     * in ascending blob offset by repeatedly selecting the smallest offset
+     * strictly past the previously emitted one (ties broken by record
+     * index, which only matters for already-corrupt duplicate offsets and
+     * exists to guarantee this loop still terminates). This costs
+     * O(record_capacity^2), which is fine: asset counts on this device are
+     * small and this only runs as a maintenance step, never per frame. */
+    for (;;) {
+        bool have_next = false;
+        uint32_t next_offset = 0U;
+        uint32_t next_index = 0U;
+        uint8_t next_bytes[ASSET_RECORD_BYTES];
+
+        for (uint32_t index = 0U; index < store->record_capacity; index++) {
+            uint8_t bytes[ASSET_RECORD_BYTES];
+            if (store->io->read(store->io->ctx, record_offset(index), bytes, sizeof bytes) != 0) {
+                return ASSET_STORE_ERR_IO;
+            }
+            if (bytes[REC_OFFSET_STATE] != ASSET_STATE_COMMITTED) {
+                continue;
+            }
+            uint32_t offset = read_u32_le(bytes + REC_OFFSET_OFFSET);
+
+            bool after_last = !have_last || offset > last_offset ||
+                (offset == last_offset && index > last_index);
+            if (!after_last) {
+                continue;
+            }
+            bool better = !have_next || offset < next_offset ||
+                (offset == next_offset && index < next_index);
+            if (better) {
+                have_next = true;
+                next_offset = offset;
+                next_index = index;
+                memcpy(next_bytes, bytes, sizeof bytes);
+            }
+        }
+
+        if (!have_next) {
+            break; /* no committed record left past the previous pick */
+        }
+
+        have_last = true;
+        last_offset = next_offset;
+        last_index = next_index;
+
+        uint32_t length = read_u32_le(next_bytes + REC_OFFSET_LENGTH);
+        /* offset/length are untrusted flash content; bound them the same
+         * way asset_store_reserve and asset_store_stats do. */
+        if (length > store->blob_region_size ||
+            next_offset > store->blob_region_size - length) {
+            return ASSET_STORE_ERR_CORRUPT;
+        }
+
+        bool keep_this = false;
+        for (size_t k = 0U; k < keep_count; k++) {
+            if (memcmp(next_bytes + REC_OFFSET_DIGEST, keep[k], ASSET_DIGEST_BYTES) == 0) {
+                keep_this = true;
+                break;
+            }
+        }
+        if (!keep_this) {
+            continue;
+        }
+
+        /* Never truncate: a caller-supplied buffer too small to hold the
+         * whole plan must fail outright, or the caller could apply a
+         * partial plan that silently deletes survivors past the cutoff. */
+        if (move_count >= moves_capacity) {
+            return ASSET_STORE_ERR_FULL;
+        }
+        if (length > store->blob_region_size - to_offset) {
+            return ASSET_STORE_ERR_CORRUPT;
+        }
+
+        moves[move_count].from_offset = next_offset;
+        moves[move_count].to_offset = to_offset;
+        moves[move_count].length = length;
+        moves[move_count].record_index = next_index;
+        move_count++;
+        to_offset += length;
+    }
+
+    *out_move_count = move_count;
     return ASSET_STORE_OK;
 }

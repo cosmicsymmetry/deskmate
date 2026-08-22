@@ -73,3 +73,37 @@ asset_store_result_t asset_store_open(asset_store_t *store,
 void asset_store_record_encode(const asset_record_t *record, uint8_t *out);
 asset_store_result_t asset_store_record_decode(const uint8_t *bytes,
                                                asset_record_t *out);
+
+typedef struct {
+    uint32_t committed_count;
+    uint32_t used_blob_bytes;
+    uint32_t free_blob_bytes;
+    uint32_t reclaimable_blob_bytes;
+} asset_store_stats_t;
+
+typedef struct {
+    uint32_t from_offset;
+    uint32_t to_offset;
+    uint32_t length;
+    uint32_t record_index;
+} asset_move_t;
+
+/* `out_record` and `out_index` may be NULL when the caller only needs presence. */
+asset_store_result_t asset_store_find(const asset_store_t *store,
+                                      const uint8_t *digest,
+                                      asset_record_t *out_record,
+                                      uint32_t *out_index);
+asset_store_result_t asset_store_reserve(const asset_store_t *store,
+                                         const uint8_t *digest, uint8_t kind,
+                                         uint32_t length, uint32_t *out_index,
+                                         uint32_t *out_blob_offset);
+asset_store_result_t asset_store_commit(const asset_store_t *store, uint32_t index);
+asset_store_result_t asset_store_mark_dead(const asset_store_t *store, uint32_t index);
+asset_store_result_t asset_store_stats(const asset_store_t *store,
+                                       asset_store_stats_t *out_stats);
+asset_store_result_t asset_store_plan_compaction(const asset_store_t *store,
+                                                 const uint8_t *const *keep,
+                                                 size_t keep_count,
+                                                 asset_move_t *moves,
+                                                 size_t moves_capacity,
+                                                 size_t *out_move_count);

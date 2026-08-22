@@ -77,7 +77,7 @@ fn admin_credential_and_tier_round_trip_with_the_secret_redacted_from_readback()
         serde_json::from_slice::<AppConfig>(&config_before)
             .unwrap()
             .schema_version,
-        4
+        5
     );
 }
 

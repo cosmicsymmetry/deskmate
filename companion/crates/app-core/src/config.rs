@@ -75,6 +75,21 @@ mod strict_tagged_enum {
         Interval { minutes: u16 },
     }
 
+    /// Mirrors `super::AssetKind`. The device now rasterizes any size from a TTF
+    /// at runtime, so `font` carries no pixel size and no glyph ranges; `icon-font`
+    /// carries a TTF plus a name→codepoint map so a plugin can write a symbolic
+    /// icon name instead of a raw codepoint; `image` carries no extra fields
+    /// because the host converts the source to an LVGL binary image itself.
+    #[derive(Debug, Serialize, Deserialize)]
+    #[serde(tag = "kind", rename_all = "kebab-case")]
+    pub enum AssetKindInner {
+        Font,
+        IconFont {
+            glyphs: Vec<super::IconGlyphMapping>,
+        },
+        Image,
+    }
+
     /// Mirrors `super::CardSettings`. Fields that are themselves internally
     /// tagged enums are typed as the outer, validating public type so that
     /// deserializing a card recursively re-validates every nested tagged object.
@@ -211,6 +226,16 @@ mod strict_tagged_enum {
         }
     }
 
+    impl ValidatingDeserialize for AssetKindInner {
+        fn allowed_fields(kind: &str) -> Option<&'static [&'static str]> {
+            match kind {
+                "font" | "image" => Some(&["kind"]),
+                "icon-font" => Some(&["kind", "glyphs"]),
+                _ => None,
+            }
+        }
+    }
+
     impl ValidatingDeserialize for CardSettingsInner {
         fn allowed_fields(kind: &str) -> Option<&'static [&'static str]> {
             match kind {
@@ -306,7 +331,7 @@ mod strict_tagged_enum {
     }
 }
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 4;
+pub const CURRENT_SCHEMA_VERSION: u32 = 5;
 pub(crate) const DEFAULT_PLAYLIST_ID: &str = "my-playlist";
 pub(crate) const DEFAULT_PLAYLIST_NAME: &str = "My playlist";
 pub const MAX_WIDGET_TITLE_LEN: usize = 64;
@@ -323,9 +348,8 @@ pub const MAX_ASSETS: usize = 16;
 pub const MAX_ASSET_SOURCE_LEN: usize = 2_048;
 pub const MAX_ASSET_BYTES: u32 = 262_144;
 pub const MAX_TOTAL_ASSET_BYTES: u32 = 1_048_576;
-pub const MAX_ICON_DIMENSION: u16 = 128;
-pub const MAX_FONT_GLYPHS: u16 = 512;
-pub const MAX_GLYPH_RANGES: usize = 16;
+pub const MAX_ICON_GLYPHS: usize = 256;
+pub const MAX_ICON_GLYPH_NAME_LEN: usize = 64;
 pub const MAX_HOST_ACTION_TARGET_LEN: usize = 2_048;
 pub const MAX_UPDATE_ARTIFACT_BYTES: u32 = 1_048_576;
 pub const MAX_UPDATE_VERSION_LEN: usize = 64;
@@ -719,11 +743,11 @@ impl AppConfig {
                         ValidationCode::MissingReference,
                         format!("asset {asset_id:?} does not exist"),
                     )),
-                    Some(kind) if !matches!(kind, AssetKind::Icon { .. }) => {
+                    Some(kind) if !matches!(kind, AssetKind::IconFont { .. }) => {
                         issues.push(ValidationIssue::new(
                             format!("cards[{index}].template.icon_asset_id"),
                             ValidationCode::InvalidComposition,
-                            "icon template must reference an icon asset",
+                            "icon template must reference an icon-font asset",
                         ));
                     }
                     Some(_) => {}
@@ -816,13 +840,6 @@ impl AppConfig {
             }
             widgets.push(widget);
         }
-        if !self.assets.is_empty() {
-            compatibility_issues.push(ValidationIssue::new(
-                "assets",
-                ValidationCode::RequiresCapability,
-                "asset transfer is not implemented by this build",
-            ));
-        }
         if !compatibility_issues.is_empty() {
             return Err(ConfigValidationError {
                 issues: compatibility_issues,
@@ -851,6 +868,7 @@ impl AppConfig {
                 screens,
             },
             initial_pushes,
+            assets: self.assets.clone(),
             required_capabilities: self.required_device_capabilities(),
         })
     }
@@ -1794,24 +1812,44 @@ pub enum AssetSource {
     File(String),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+/// The device rasterizes glyphs at any size from a TTF/OTF at runtime (`tiny_ttf`),
+/// so unlike v4's `Icon { width, height }` / `Font { pixel_size, glyph_ranges }`, no
+/// v5 variant pins a size or a pre-baked glyph set.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum AssetKind {
-    Icon {
-        width: u16,
-        height: u16,
-    },
-    Font {
-        pixel_size: u16,
-        glyph_ranges: Vec<GlyphRange>,
-    },
+    /// A TTF/OTF text font. Size is chosen per text node at render time.
+    Font,
+    /// A TTF/OTF icon font plus a name→codepoint map, so a plugin can write
+    /// `icon: "cloud-rain"` instead of a raw codepoint.
+    IconFont { glyphs: Vec<IconGlyphMapping> },
+    /// An LVGL binary image, converted host-side so the device needs no PNG
+    /// decoder.
+    Image,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+impl<'de> Deserialize<'de> for AssetKind {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let inner: strict_tagged_enum::AssetKindInner =
+            strict_tagged_enum::validate_and_deserialize(&value)
+                .map_err(serde::de::Error::custom)?;
+        Ok(match inner {
+            strict_tagged_enum::AssetKindInner::Font => Self::Font,
+            strict_tagged_enum::AssetKindInner::IconFont { glyphs } => Self::IconFont { glyphs },
+            strict_tagged_enum::AssetKindInner::Image => Self::Image,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct GlyphRange {
-    pub start: u32,
-    pub end: u32,
+pub struct IconGlyphMapping {
+    pub name: String,
+    pub codepoint: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1860,6 +1898,7 @@ pub struct FirmwareArtifactMetadata {
 pub struct CompiledAppConfig {
     pub layout: ApplyConfig,
     pub initial_pushes: Vec<PushData>,
+    pub assets: Vec<AssetSettings>,
     pub required_capabilities: u64,
 }
 
@@ -2257,62 +2296,38 @@ impl AssetSettings {
             ));
         }
         match &self.kind {
-            AssetKind::Icon { width, height } => {
-                if !(1..=MAX_ICON_DIMENSION).contains(width)
-                    || !(1..=MAX_ICON_DIMENSION).contains(height)
-                {
+            AssetKind::Font | AssetKind::Image => {}
+            AssetKind::IconFont { glyphs } => {
+                if glyphs.is_empty() || glyphs.len() > MAX_ICON_GLYPHS {
                     issues.push(ValidationIssue::new(
-                        format!("{path}.kind"),
+                        format!("{path}.kind.glyphs"),
                         ValidationCode::OutOfRange,
-                        format!("icon dimensions must be 1..={MAX_ICON_DIMENSION} pixels"),
+                        format!("icon-font must contain 1..={MAX_ICON_GLYPHS} glyph mappings"),
                     ));
                 }
-            }
-            AssetKind::Font {
-                pixel_size,
-                glyph_ranges,
-            } => {
-                if !(8..=96).contains(pixel_size) {
-                    issues.push(ValidationIssue::new(
-                        format!("{path}.kind.pixel_size"),
-                        ValidationCode::OutOfRange,
-                        "font pixel size must be 8..=96",
-                    ));
-                }
-                if glyph_ranges.is_empty() || glyph_ranges.len() > MAX_GLYPH_RANGES {
-                    issues.push(ValidationIssue::new(
-                        format!("{path}.kind.glyph_ranges"),
-                        ValidationCode::OutOfRange,
-                        format!("font must contain 1..={MAX_GLYPH_RANGES} glyph ranges"),
-                    ));
-                }
-                let mut glyph_count = 0_u32;
-                let mut previous_end = None;
-                for (index, range) in glyph_ranges.iter().enumerate() {
-                    let includes_surrogate = range.start <= 0xdfff && range.end >= 0xd800;
-                    let overlaps_or_unsorted = previous_end.is_some_and(|end| range.start <= end);
-                    if range.start > range.end
-                        || range.end > 0x0010_ffff
-                        || includes_surrogate
-                        || overlaps_or_unsorted
-                    {
+                let mut seen_names = HashSet::with_capacity(glyphs.len());
+                for (index, glyph) in glyphs.iter().enumerate() {
+                    validate_identifier(
+                        &format!("{path}.kind.glyphs[{index}].name"),
+                        &glyph.name,
+                        MAX_ICON_GLYPH_NAME_LEN,
+                        issues,
+                    );
+                    if !seen_names.insert(glyph.name.as_str()) {
                         issues.push(ValidationIssue::new(
-                            format!("{path}.kind.glyph_ranges[{index}]"),
-                            ValidationCode::OutOfRange,
-                            "glyph ranges must be ascending, non-overlapping Unicode scalar values",
+                            format!("{path}.kind.glyphs[{index}].name"),
+                            ValidationCode::DuplicateId,
+                            format!("icon name {:?} is duplicated", glyph.name),
                         ));
-                    } else {
-                        glyph_count =
-                            glyph_count.saturating_add(range.end.saturating_sub(range.start) + 1);
-                        previous_end = Some(range.end);
                     }
-                }
-                if glyph_count > u32::from(MAX_FONT_GLYPHS) {
-                    issues.push(ValidationIssue::new(
-                        format!("{path}.kind.glyph_ranges"),
-                        ValidationCode::TooMany,
-                        format!("font must contain at most {MAX_FONT_GLYPHS} glyphs"),
-                    ));
+                    let is_surrogate = (0xd800..=0xdfff).contains(&glyph.codepoint);
+                    if glyph.codepoint > 0x0010_ffff || is_surrogate {
+                        issues.push(ValidationIssue::new(
+                            format!("{path}.kind.glyphs[{index}].codepoint"),
+                            ValidationCode::OutOfRange,
+                            "codepoint must be a valid Unicode scalar value",
+                        ));
+                    }
                 }
             }
         }

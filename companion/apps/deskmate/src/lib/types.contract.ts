@@ -4,7 +4,7 @@ import type { IpcContractFixtures } from "./types";
 export const ipcContractFixtures = {
   "snapshot": {
     "config": {
-      "schema_version": 4,
+      "schema_version": 5,
       "preferences": {
         "timezone": "Asia/Tbilisi",
         "autostart": true,
@@ -243,7 +243,7 @@ export const ipcContractFixtures = {
   },
   "configs": [
     {
-      "schema_version": 4,
+      "schema_version": 5,
       "preferences": {
         "timezone": "Asia/Tbilisi",
         "autostart": true,
@@ -658,24 +658,24 @@ export const ipcContractFixtures = {
   "asset_sources": [
     {
       "kind": "file",
-      "value": "/tmp/weather-icons.bin"
+      "value": "/tmp/weather-icons.ttf"
     }
   ],
   "asset_kinds": [
     {
-      "kind": "icon",
-      "width": 32,
-      "height": 32
+      "kind": "font"
     },
     {
-      "kind": "font",
-      "pixel_size": 18,
-      "glyph_ranges": [
+      "kind": "icon-font",
+      "glyphs": [
         {
-          "start": 32,
-          "end": 126
+          "name": "cloud-rain",
+          "codepoint": 63273
         }
       ]
+    },
+    {
+      "kind": "image"
     }
   ],
   "update_channels": [

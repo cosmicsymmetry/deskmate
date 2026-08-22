@@ -1349,7 +1349,7 @@ mod tests {
         CURRENT_SCHEMA_VERSION, CalendarSource, CardAlert, CardDataSnapshot, CardError, CardField,
         CardFieldValue, CardSettings, CarouselAdvance, ConnectionState, DeviceCapability,
         DeviceCounters, DeviceSnapshot, DisplayOrientation, DisplayTemplate,
-        FirmwareArtifactMetadata, GlyphRange, PersistenceState, Playlist, PlaylistEntry,
+        FirmwareArtifactMetadata, IconGlyphMapping, PersistenceState, Playlist, PlaylistEntry,
         PomodoroSnapshot, PomodoroState, ProviderSnapshot, ProviderState, RefreshPolicy,
         RuntimeDiagnostics, RuntimeError, RuntimeState, SAVED_SETTINGS_VALIDATION_FAILURE_MESSAGE,
         StoreWarning, UpdateChannel, UpdateCheckPolicy, UpdaterSettings, ValidationCode,
@@ -2566,19 +2566,16 @@ mod tests {
                 RefreshPolicy::Interval { minutes: 15 },
             ],
             weather_units: vec![WeatherUnits::Metric, WeatherUnits::Imperial],
-            asset_sources: vec![AssetSource::File("/tmp/weather-icons.bin".into())],
+            asset_sources: vec![AssetSource::File("/tmp/weather-icons.ttf".into())],
             asset_kinds: vec![
-                AssetKind::Icon {
-                    width: 32,
-                    height: 32,
-                },
-                AssetKind::Font {
-                    pixel_size: 18,
-                    glyph_ranges: vec![GlyphRange {
-                        start: 0x20,
-                        end: 0x7e,
+                AssetKind::Font,
+                AssetKind::IconFont {
+                    glyphs: vec![IconGlyphMapping {
+                        name: "cloud-rain".into(),
+                        codepoint: 0xf729,
                     }],
                 },
+                AssetKind::Image,
             ],
             update_channels: vec![
                 UpdateChannel::Stable,

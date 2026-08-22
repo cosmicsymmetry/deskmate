@@ -30,12 +30,9 @@ export function copyConfig(config: AppConfig): AppConfig {
       ...asset,
       source: { ...asset.source },
       kind:
-        asset.kind.kind === "icon"
-          ? { ...asset.kind }
-          : {
-              ...asset.kind,
-              glyph_ranges: asset.kind.glyph_ranges.map((range) => ({ ...range })),
-            },
+        asset.kind.kind === "icon-font"
+          ? { ...asset.kind, glyphs: asset.kind.glyphs.map((glyph) => ({ ...glyph })) }
+          : { ...asset.kind },
     })),
     playlists: config.playlists.map((playlist) => ({
       ...playlist,

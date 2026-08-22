@@ -1,11 +1,12 @@
 use app_core::{
-    AlertHold, AppConfig, AppSnapshot, AssetSettings, CalendarSource, CardAlert, CardDataSnapshot,
-    CardError, CardField, CardFieldValue, CardSettings, CarouselAdvance, ConnectionState,
-    DeviceCounters, DeviceSnapshot, DisplayTemplate, FirmwareArtifactMetadata, JsonFieldMapping,
-    MAX_ASSET_BYTES, MAX_PLAYLIST_ENTRIES, MAX_PLAYLIST_NAME_LEN, MAX_PLAYLISTS,
-    MAX_PROVIDER_URL_LEN, MAX_UPDATE_ARTIFACT_BYTES, PersistenceState, Playlist, PlaylistEntry,
-    PomodoroSnapshot, PomodoroState, ProviderSnapshot, ProviderState, RefreshPolicy,
-    RuntimeDiagnostics, RuntimeState, ValidationCode, WeatherUnits, WidgetTapAction,
+    AlertHold, AppConfig, AppSnapshot, AssetKind, AssetSettings, AssetSource, CalendarSource,
+    CardAlert, CardDataSnapshot, CardError, CardField, CardFieldValue, CardSettings,
+    CarouselAdvance, ConnectionState, DeviceCounters, DeviceSnapshot, DisplayTemplate,
+    FirmwareArtifactMetadata, JsonFieldMapping, MAX_ASSET_BYTES, MAX_PLAYLIST_ENTRIES,
+    MAX_PLAYLIST_NAME_LEN, MAX_PLAYLISTS, MAX_PROVIDER_URL_LEN, MAX_UPDATE_ARTIFACT_BYTES,
+    PersistenceState, Playlist, PlaylistEntry, PomodoroSnapshot, PomodoroState, ProviderSnapshot,
+    ProviderState, RefreshPolicy, RuntimeDiagnostics, RuntimeState, ValidationCode, WeatherUnits,
+    WidgetTapAction,
 };
 use protocol::{
     CAPABILITY_ASSET_TRANSFER, CAPABILITY_CONFIG_ROTATION, CAPABILITY_CORE_WIDGETS,
@@ -16,7 +17,7 @@ use protocol::{
 const DEFAULT_JSON: &str = include_str!("fixtures/default.json");
 const FULL_JSON: &str = include_str!("fixtures/full.json");
 const INVALID_JSON: &str = include_str!("fixtures/invalid.json");
-const FUTURE_JSON: &str = include_str!("fixtures/future-v5.json");
+const FUTURE_JSON: &str = include_str!("fixtures/future-v6.json");
 const MALFORMED_JSON: &str = include_str!("fixtures/malformed.json");
 const CARD_SURFACE_JSON: &str = include_str!("fixtures/card-surface.json");
 
@@ -176,15 +177,20 @@ fn card_surface_is_closed_bounded_and_capability_gated() {
         | CAPABILITY_ASSET_TRANSFER;
     assert_eq!(config.required_device_capabilities(), expected_capabilities);
 
+    // `HostTapActions` (open-url/open-application/dismiss) is still reserved and
+    // unimplemented on the wire (docs/protocol/v1.md), so the weather/json-feed/rss
+    // cards here still fail to compile with RequiresCapability. Schema v5 opens the
+    // seam specifically for *assets*: this fixture's two assets no longer
+    // contribute an issue, which is what distinguishes this from the pre-v5
+    // behavior where every issue here could equally have been the asset rejection.
     let first = config.compile(9).unwrap_err();
     let second = config.compile(9).unwrap_err();
     assert_eq!(first, second);
-    assert!(
-        first
-            .issues
-            .iter()
-            .all(|issue| issue.code == ValidationCode::RequiresCapability)
-    );
+    assert_eq!(first.issues.len(), 3);
+    for issue in &first.issues {
+        assert_eq!(issue.code, ValidationCode::RequiresCapability);
+        assert!(!issue.path.starts_with("assets"));
+    }
 }
 
 #[test]
@@ -213,6 +219,61 @@ fn card_surface_rejects_oversized_sources_and_asset_budgets() {
             "missing {expected:?}: {error:?}"
         );
     }
+}
+
+#[test]
+fn asset_budget_total_is_enforced() {
+    let config = AppConfig {
+        assets: (0..5)
+            .map(|index| AssetSettings {
+                id: format!("asset-{index}"),
+                source: AssetSource::File(format!("/tmp/{index}.ttf")),
+                kind: AssetKind::Font,
+                maximum_bytes: MAX_ASSET_BYTES,
+            })
+            .collect(),
+        ..AppConfig::default()
+    };
+
+    let issues = config.validate().expect_err("over budget");
+    assert!(issues.issues.iter().any(|issue| issue.path == "assets"));
+}
+
+#[test]
+fn font_asset_no_longer_carries_a_pixel_size() {
+    // The four-size ceiling is gone: size is chosen per text node at render time
+    // (tiny_ttf rasterizes on demand), so pinning one in the config would be
+    // meaningless. The unknown-field rejection on the tagged `kind` object is what
+    // this test actually exercises: `AssetKind` is a hand-written `Deserialize`
+    // (`strict_tagged_enum::AssetKindInner`) precisely because serde's
+    // `deny_unknown_fields` is a silent no-op on internally tagged enums.
+    let json = r#"{
+        "id": "inter",
+        "source": { "kind": "file", "value": "/f.ttf" },
+        "kind": { "kind": "font", "pixel_size": 48 },
+        "maximum_bytes": 262144
+    }"#;
+    assert!(serde_json::from_str::<AssetSettings>(json).is_err());
+}
+
+#[test]
+fn a_font_asset_compiles_and_requires_the_asset_transfer_capability() {
+    let mut config = AppConfig::default();
+    config.assets.push(AssetSettings {
+        id: "inter".into(),
+        source: AssetSource::File("/tmp/inter.ttf".into()),
+        kind: AssetKind::Font,
+        maximum_bytes: MAX_ASSET_BYTES,
+    });
+    config.validate().unwrap();
+    assert_ne!(
+        config.required_device_capabilities() & CAPABILITY_ASSET_TRANSFER,
+        0
+    );
+
+    let compiled = config.compile(1).expect("assets must compile now");
+    assert_eq!(compiled.assets.len(), 1);
+    assert_eq!(compiled.assets[0].id, "inter");
 }
 
 #[test]
@@ -293,8 +354,8 @@ fn malformed_and_unknown_json_are_rejected_by_serde() {
     assert!(serde_json::from_str::<AppConfig>(MALFORMED_JSON).is_err());
 
     let with_unknown = DEFAULT_JSON.replace(
-        "\"schema_version\": 4,",
-        "\"schema_version\": 4, \"unexpected\": true,",
+        "\"schema_version\": 5,",
+        "\"schema_version\": 5, \"unexpected\": true,",
     );
     assert!(serde_json::from_str::<AppConfig>(&with_unknown).is_err());
 
@@ -1164,9 +1225,9 @@ fn entry(card_id: &str) -> PlaylistEntry {
 }
 
 #[test]
-fn default_config_is_v4_with_one_playlist() {
+fn default_config_is_v5_with_one_playlist() {
     let config = AppConfig::default();
-    assert_eq!(config.schema_version, 4);
+    assert_eq!(config.schema_version, 5);
     assert_eq!(config.playlists.len(), 1);
     assert_eq!(config.active_playlist_id, config.playlists[0].id);
     assert_eq!(config.playlists[0].entries.len(), 1);

@@ -40,7 +40,7 @@ import { ipcContractFixtures } from "../src/lib/types.contract";
 
 function initialConfig(): AppConfig {
   return {
-    schema_version: 4,
+    schema_version: 5,
     preferences: {
       timezone: "UTC",
       autostart: false,
@@ -589,7 +589,7 @@ describe("configuration draft helpers", () => {
 
   test("contract fixtures expose cards, not widgets or screens", () => {
     const config = ipcContractFixtures.snapshot.config;
-    expect(config.schema_version).toBe(4);
+    expect(config.schema_version).toBe(5);
     expect(Array.isArray(config.cards)).toBe(true);
     expect(Array.isArray(config.playlists)).toBe(true);
     expect("widgets" in config).toBe(false);

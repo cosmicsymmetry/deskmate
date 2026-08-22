@@ -125,6 +125,7 @@ pub enum ConfigOrigin {
     MigratedV1,
     MigratedV2,
     MigratedV3,
+    MigratedV4,
     LastGood,
 }
 
@@ -940,6 +941,7 @@ fn synthesize_playlist(
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn decode_config(bytes: &[u8]) -> Result<(AppConfig, ConfigOrigin), StoreError> {
     let text = std::str::from_utf8(bytes).map_err(|_| StoreError::InvalidUtf8)?;
     let header: VersionHeader =
@@ -953,6 +955,32 @@ fn decode_config(bytes: &[u8]) -> Result<(AppConfig, ConfigOrigin), StoreError> 
             })?,
             ConfigOrigin::Current,
         ),
+        4 => {
+            // v4's asset variants (`icon { width, height }`, `font { pixel_size,
+            // glyph_ranges }`) encoded the pre-tiny_ttf design where glyphs were
+            // baked at a fixed size. `config.rs`'s compile step has always
+            // rejected a non-empty `assets` array, so no saved v4 config has ever
+            // contained one, which makes this migration a version bump with no
+            // data transformation: the current (v5) `AppConfig` shape parses a
+            // v4 document unchanged because `assets` is always empty.
+            let legacy: AppConfig =
+                serde_json::from_str(text).map_err(|error| StoreError::InvalidJson {
+                    message: error.to_string(),
+                })?;
+            if legacy.schema_version != 4 {
+                return Err(StoreError::UnsupportedVersion {
+                    found: legacy.schema_version,
+                    supported: CURRENT_SCHEMA_VERSION,
+                });
+            }
+            (
+                AppConfig {
+                    schema_version: CURRENT_SCHEMA_VERSION,
+                    ..legacy
+                },
+                ConfigOrigin::MigratedV4,
+            )
+        }
         3 => {
             let legacy: LegacyConfigV3 =
                 serde_json::from_str(text).map_err(|error| StoreError::InvalidJson {

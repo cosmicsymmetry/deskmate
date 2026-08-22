@@ -129,14 +129,15 @@ export interface AssetSettings {
   id: string;
   source: { kind: "file"; value: string };
   kind:
-    | { kind: "icon"; width: number; height: number }
-    | { kind: "font"; pixel_size: number; glyph_ranges: GlyphRange[] };
+    | { kind: "font" }
+    | { kind: "icon-font"; glyphs: IconGlyphMapping[] }
+    | { kind: "image" };
   maximum_bytes: number;
 }
 
-export interface GlyphRange {
-  start: number;
-  end: number;
+export interface IconGlyphMapping {
+  name: string;
+  codepoint: number;
 }
 
 export type CarouselAdvance = { kind: "manual" } | { kind: "timed"; default_dwell_seconds: number };

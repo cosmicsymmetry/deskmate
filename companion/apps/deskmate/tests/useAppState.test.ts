@@ -40,8 +40,8 @@ async function flushPromises() {
 }
 
 describe("startAppStateSubscription", () => {
-  test("the subscription fixture carries schema-v4 playlists", () => {
-    expect(snapshot.config.schema_version).toBe(4);
+  test("the subscription fixture carries schema-v5 playlists", () => {
+    expect(snapshot.config.schema_version).toBe(5);
     expect(snapshot.config.playlists.map((playlist) => playlist.id)).toEqual(["workday", "manual"]);
     expect(snapshot.config.active_playlist_id).toBe("workday");
   });

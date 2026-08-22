@@ -131,14 +131,14 @@ fn save_round_trips_and_migration_is_explicit() {
     fs::write(&path, include_bytes!("fixtures/legacy-v0.json")).unwrap();
     let migrated = store.load();
     assert_eq!(migrated.origin(), ConfigOrigin::MigratedV0);
-    assert_eq!(migrated.config().schema_version, 4);
+    assert_eq!(migrated.config().schema_version, 5);
     assert_eq!(migrated.config().preferences.timezone, "Europe/Paris");
     assert!(!migrated.config().preferences.autostart);
 
     fs::write(&path, include_bytes!("fixtures/released-m3-v1.json")).unwrap();
     let migrated = store.load();
     assert_eq!(migrated.origin(), ConfigOrigin::MigratedV1);
-    assert_eq!(migrated.config().schema_version, 4);
+    assert_eq!(migrated.config().schema_version, 5);
     assert_eq!(migrated.config().preferences.timezone, "Asia/Tbilisi");
     assert_eq!(migrated.config().cards.len(), 3);
     assert_eq!(
@@ -248,7 +248,7 @@ fn v3_migrates_to_one_playlist_preserving_rotation_order_and_dwell() {
     assert!(outcome.recovery().is_none());
 
     let config = outcome.config();
-    assert_eq!(config.schema_version, 4);
+    assert_eq!(config.schema_version, 5);
     assert_eq!(config.active_playlist_id, "my-playlist");
     assert_eq!(config.playlists.len(), 1);
     let playlist = &config.playlists[0];
@@ -385,8 +385,32 @@ fn v3_all_alert_only_migrates_to_valid_config() {
 }
 
 #[test]
-fn v0_v1_v2_migrate_directly_to_v4() {
-    let directory = TestDirectory::new("legacy-direct-to-v4");
+fn v4_config_migrates_to_v5_unchanged() {
+    // config.rs's compile step has always rejected a non-empty `assets` array, so no
+    // saved v4 config has ever contained one: migration to v5 is a version bump with
+    // no data transformation.
+    let directory = TestDirectory::new("v4-migration");
+    let path = directory.config_path();
+    let store = ConfigStore::new(&path);
+    fs::write(&path, include_bytes!("fixtures/v4-roundtrip.json")).unwrap();
+
+    let outcome = store.load();
+    assert_eq!(outcome.origin(), ConfigOrigin::MigratedV4);
+    assert!(outcome.recovery().is_none());
+
+    let config = outcome.config();
+    assert_eq!(config.schema_version, 5);
+    assert!(config.assets.is_empty());
+    assert_eq!(config.preferences.timezone, "Asia/Tbilisi");
+    assert_eq!(config.active_playlist_id, "workday");
+    assert_eq!(config.playlists[0].entries.len(), 2);
+    assert_eq!(config.cards.len(), 2);
+    assert!(config.validate().is_ok());
+}
+
+#[test]
+fn v0_v1_v2_migrate_directly_to_v5() {
+    let directory = TestDirectory::new("legacy-direct-to-v5");
     let path = directory.config_path();
     let store = ConfigStore::new(&path);
 
@@ -411,7 +435,7 @@ fn v0_v1_v2_migrate_directly_to_v4() {
         let outcome = store.load();
         assert_eq!(outcome.origin(), origin);
         assert!(outcome.recovery().is_none());
-        assert_eq!(outcome.config().schema_version, 4);
+        assert_eq!(outcome.config().schema_version, 5);
         assert_eq!(outcome.config().playlists.len(), 1);
         let entry_ids: Vec<&str> = outcome.config().playlists[0]
             .entries
@@ -460,7 +484,7 @@ fn malformed_truncated_and_oversized_files_preserve_bytes_and_last_good() {
     ));
     assert_eq!(fs::metadata(&path).unwrap().len(), oversized.len() as u64);
 
-    let future = include_bytes!("fixtures/future-v5.json");
+    let future = include_bytes!("fixtures/future-v6.json");
     fs::write(&path, future).unwrap();
     let recovered = store.load();
     assert_eq!(recovered.origin(), ConfigOrigin::LastGood);
@@ -468,8 +492,8 @@ fn malformed_truncated_and_oversized_files_preserve_bytes_and_last_good() {
     assert_eq!(
         recovered.recovery(),
         Some(StoreError::UnsupportedVersion {
-            found: 5,
-            supported: 4,
+            found: 6,
+            supported: 5,
         })
     );
     assert_eq!(fs::read(&path).unwrap(), future);
@@ -563,7 +587,7 @@ fn v2_documents_migrate_to_cards_in_screen_order() {
     assert!(outcome.recovery().is_none());
 
     let config = outcome.config();
-    assert_eq!(config.schema_version, 4);
+    assert_eq!(config.schema_version, 5);
 
     // Order follows screens[], not widgets[] (the fixture deliberately lists the
     // pomodoro widget before the clock widget, but the clock screen comes first).
@@ -618,7 +642,7 @@ fn migrated_v2_documents_always_satisfy_the_rotation_rule() {
 }
 
 #[test]
-fn future_v5_is_a_recoverable_error_preserving_bytes() {
+fn future_v6_is_a_recoverable_error_preserving_bytes() {
     let directory = TestDirectory::new("future-version");
     let path = directory.config_path();
     let store = ConfigStore::new(&path);
@@ -627,7 +651,7 @@ fn future_v5_is_a_recoverable_error_preserving_bytes() {
     last_good.preferences.autostart = true;
     store.save(&last_good).unwrap();
 
-    let future = include_bytes!("fixtures/future-v5.json");
+    let future = include_bytes!("fixtures/future-v6.json");
     fs::write(&path, future).unwrap();
 
     let outcome = store.load();
@@ -636,8 +660,8 @@ fn future_v5_is_a_recoverable_error_preserving_bytes() {
     assert!(matches!(
         outcome.recovery(),
         Some(StoreError::UnsupportedVersion {
-            found: 5,
-            supported: 4
+            found: 6,
+            supported: 5
         })
     ));
     // The unreadable source bytes are never rewritten.

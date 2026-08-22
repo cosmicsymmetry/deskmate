@@ -19,6 +19,7 @@ pub const LEGACY_CAPABILITIES: u64 = CAPABILITY_CORE_WIDGETS;
 pub const CURRENT_CAPABILITIES: u64 = CAPABILITY_CORE_WIDGETS
     | CAPABILITY_CONFIG_ROTATION
     | CAPABILITY_EXTENDED_TEMPLATES
+    | CAPABILITY_ASSET_TRANSFER
     | CAPABILITY_FIRMWARE_UPDATE
     | CAPABILITY_NETWORKING;
 pub const LINK_TIMEOUT_MS: u64 = 10_000;
@@ -42,6 +43,14 @@ pub const MAX_SERVER_URL_LEN: usize = 128;
 pub const MAX_DEVICE_TOKEN_LEN: usize = 128;
 pub const MAX_DEVICE_ID_LEN: usize = 32;
 pub const MAX_IP_LEN: usize = 15;
+/// 1920, not the 2034-byte envelope cap: the CBOR map header, the 32-byte
+/// digest with its bstr header, the offset key/value, and the data bstr
+/// header cost roughly 46 bytes; this leaves deliberate margin. Must match
+/// firmware's `PROTOCOL_MAX_ASSET_CHUNK_BYTES` exactly.
+pub const MAX_ASSET_CHUNK_BYTES: usize = 1920;
+pub const MAX_ASSET_DIGESTS: usize = 32;
+pub const ASSET_DIGEST_LEN: usize = 32;
+const MAX_ASSET_TOTAL_LENGTH: u32 = 1_048_576;
 
 pub const TYPE_STATUS_REQUEST: u8 = 1;
 pub const TYPE_STATUS_RESPONSE: u8 = 2;
@@ -57,6 +66,10 @@ pub const TYPE_TRIGGER_INTERRUPT: u8 = 11;
 pub const TYPE_DEVICE_EVENT: u8 = 12;
 pub const TYPE_NETWORK_CONFIG: u8 = 13;
 pub const TYPE_FACTORY_RESET: u8 = 14;
+pub const TYPE_ASSET_BEGIN: u8 = 15;
+pub const TYPE_ASSET_CHUNK: u8 = 16;
+pub const TYPE_ASSET_COMMIT: u8 = 17;
+pub const TYPE_ASSET_RELEASE: u8 = 18;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -137,6 +150,14 @@ pub enum OtaState {
     Failed = 4,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum AssetKind {
+    Font = 1,
+    IconFont = 2,
+    Image = 3,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NetworkConfig {
     pub ssid: String,
@@ -146,6 +167,31 @@ pub struct NetworkConfig {
     pub token: String,
     pub utc_offset_minutes: i16,
     pub tier: Tier,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AssetBegin {
+    pub digest: [u8; ASSET_DIGEST_LEN],
+    pub kind: AssetKind,
+    pub total_length: u32,
+    pub volatile: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssetChunk {
+    pub digest: [u8; ASSET_DIGEST_LEN],
+    pub offset: u32,
+    pub data: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AssetCommit {
+    pub digest: [u8; ASSET_DIGEST_LEN],
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssetRelease {
+    pub digests: Vec<[u8; ASSET_DIGEST_LEN]>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -223,6 +269,9 @@ pub struct TimeSync {
 pub struct Ack {
     pub acknowledged_type: u8,
     pub revision: Option<u32>,
+    /// `Some` iff `acknowledged_type == TYPE_ASSET_BEGIN`; both directions
+    /// enforce this symmetrically on encode and decode.
+    pub already_present: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -332,6 +381,10 @@ pub enum Message {
     DeviceEvent(DeviceEvent),
     NetworkConfig(NetworkConfig),
     FactoryReset,
+    AssetBegin(AssetBegin),
+    AssetChunk(AssetChunk),
+    AssetCommit(AssetCommit),
+    AssetRelease(AssetRelease),
 }
 
 impl Message {
@@ -352,7 +405,33 @@ impl Message {
             Self::DeviceEvent(_) => TYPE_DEVICE_EVENT,
             Self::NetworkConfig(_) => TYPE_NETWORK_CONFIG,
             Self::FactoryReset => TYPE_FACTORY_RESET,
+            Self::AssetBegin(_) => TYPE_ASSET_BEGIN,
+            Self::AssetChunk(_) => TYPE_ASSET_CHUNK,
+            Self::AssetCommit(_) => TYPE_ASSET_COMMIT,
+            Self::AssetRelease(_) => TYPE_ASSET_RELEASE,
         }
+    }
+
+    /// Encodes this message as a complete wire frame.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MessageError`] if the message fails validation, its payload
+    /// exceeds the frame's maximum size, or `request_id` is inconsistent
+    /// with the message type.
+    pub fn encode(&self, request_id: u32) -> Result<Vec<u8>, MessageError> {
+        encode_message(request_id, self)
+    }
+
+    /// Decodes a complete wire frame into a message.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MessageError`] if the bytes are not a well-formed frame or
+    /// the payload fails to decode into a known message.
+    pub fn decode(wire: &[u8]) -> Result<Message, MessageError> {
+        let frame = crate::frame::decode_wire_frame(wire)?;
+        decode_message(&frame)
     }
 }
 
@@ -479,6 +558,15 @@ fn ota_state_from_wire(value: u8) -> Result<OtaState, MessageError> {
     }
 }
 
+fn asset_kind_from_wire(value: u8) -> Result<AssetKind, MessageError> {
+    match value {
+        1 => Ok(AssetKind::Font),
+        2 => Ok(AssetKind::IconFont),
+        3 => Ok(AssetKind::Image),
+        _ => Err(MessageError::InvalidValue("asset kind")),
+    }
+}
+
 fn event_kind(value: u8) -> Result<EventKind, MessageError> {
     match value {
         1 => Ok(EventKind::Tap),
@@ -508,6 +596,27 @@ fn validate_network_config(config: &NetworkConfig) -> Result<(), MessageError> {
     checked_text(&config.token, 0, MAX_DEVICE_TOKEN_LEN, "token")?;
     if !(MIN_UTC_OFFSET_MINUTES..=MAX_UTC_OFFSET_MINUTES).contains(&config.utc_offset_minutes) {
         return Err(MessageError::InvalidValue("UTC offset"));
+    }
+    Ok(())
+}
+
+fn validate_asset_begin(begin: &AssetBegin) -> Result<(), MessageError> {
+    if begin.total_length == 0 || begin.total_length > MAX_ASSET_TOTAL_LENGTH {
+        return Err(MessageError::InvalidValue("asset total length"));
+    }
+    Ok(())
+}
+
+fn validate_asset_chunk(chunk: &AssetChunk) -> Result<(), MessageError> {
+    if chunk.data.len() > MAX_ASSET_CHUNK_BYTES {
+        return Err(MessageError::InvalidValue("asset chunk data too large"));
+    }
+    Ok(())
+}
+
+fn validate_asset_release(release: &AssetRelease) -> Result<(), MessageError> {
+    if release.digests.len() > MAX_ASSET_DIGESTS {
+        return Err(MessageError::InvalidValue("too many asset digests"));
     }
     Ok(())
 }
@@ -651,6 +760,7 @@ fn validate_message(message: &Message) -> Result<(), MessageError> {
         Message::Ack(ack) => {
             let revision_required =
                 matches!(ack.acknowledged_type, TYPE_PUSH_DATA | TYPE_APPLY_CONFIG);
+            let already_present_required = ack.acknowledged_type == TYPE_ASSET_BEGIN;
             if !matches!(
                 ack.acknowledged_type,
                 TYPE_TIME_SYNC
@@ -660,6 +770,10 @@ fn validate_message(message: &Message) -> Result<(), MessageError> {
                     | TYPE_TRIGGER_INTERRUPT
                     | TYPE_NETWORK_CONFIG
                     | TYPE_FACTORY_RESET
+                    | TYPE_ASSET_BEGIN
+                    | TYPE_ASSET_CHUNK
+                    | TYPE_ASSET_COMMIT
+                    | TYPE_ASSET_RELEASE
             ) {
                 return Err(MessageError::InvalidValue("acknowledged type"));
             }
@@ -668,6 +782,9 @@ fn validate_message(message: &Message) -> Result<(), MessageError> {
             }
             if ack.revision == Some(0) {
                 return Err(MessageError::InvalidValue("ack revision"));
+            }
+            if already_present_required != ack.already_present.is_some() {
+                return Err(MessageError::InvalidValue("ack already present"));
             }
             Ok(())
         }
@@ -695,6 +812,9 @@ fn validate_message(message: &Message) -> Result<(), MessageError> {
         }
         Message::DeviceEvent(event) => validate_device_event(event),
         Message::NetworkConfig(config) => validate_network_config(config),
+        Message::AssetBegin(begin) => validate_asset_begin(begin),
+        Message::AssetChunk(chunk) => validate_asset_chunk(chunk),
+        Message::AssetRelease(release) => validate_asset_release(release),
         _ => Ok(()),
     }
 }
@@ -843,6 +963,7 @@ fn encode_network_config_payload(encoder: &mut Encoder, config: &NetworkConfig) 
     encoder.unsigned(u64::from(config.tier as u8));
 }
 
+#[allow(clippy::too_many_lines)]
 fn encode_payload(message: &Message) -> Result<Vec<u8>, MessageError> {
     validate_message(message)?;
     let mut encoder = Encoder::new();
@@ -891,12 +1012,19 @@ fn encode_payload(message: &Message) -> Result<Vec<u8>, MessageError> {
         }
         Message::DeviceEvent(event) => encode_device_event_payload(&mut encoder, event),
         Message::Ack(ack) => {
-            encoder.map(if ack.revision.is_some() { 2 } else { 1 });
+            let field_count = 1
+                + usize::from(ack.revision.is_some())
+                + usize::from(ack.already_present.is_some());
+            encoder.map(field_count);
             encoder.unsigned(0);
             encoder.unsigned(u64::from(ack.acknowledged_type));
             if let Some(revision) = ack.revision {
                 encoder.unsigned(1);
                 encoder.unsigned(u64::from(revision));
+            }
+            if let Some(already_present) = ack.already_present {
+                encoder.unsigned(2);
+                encoder.boolean(already_present);
             }
         }
         Message::HeartbeatAck(ack) => {
@@ -913,6 +1041,39 @@ fn encode_payload(message: &Message) -> Result<Vec<u8>, MessageError> {
         }
         Message::StatusResponse(status) => encode_status_payload(&mut encoder, status),
         Message::NetworkConfig(config) => encode_network_config_payload(&mut encoder, config),
+        Message::AssetBegin(begin) => {
+            encoder.map(4);
+            encoder.unsigned(0);
+            encoder.bytes(&begin.digest);
+            encoder.unsigned(1);
+            encoder.unsigned(u64::from(begin.kind as u8));
+            encoder.unsigned(2);
+            encoder.unsigned(u64::from(begin.total_length));
+            encoder.unsigned(3);
+            encoder.boolean(begin.volatile);
+        }
+        Message::AssetChunk(chunk) => {
+            encoder.map(3);
+            encoder.unsigned(0);
+            encoder.bytes(&chunk.digest);
+            encoder.unsigned(1);
+            encoder.unsigned(u64::from(chunk.offset));
+            encoder.unsigned(2);
+            encoder.bytes(&chunk.data);
+        }
+        Message::AssetCommit(commit) => {
+            encoder.map(1);
+            encoder.unsigned(0);
+            encoder.bytes(&commit.digest);
+        }
+        Message::AssetRelease(release) => {
+            encoder.map(1);
+            encoder.unsigned(0);
+            encoder.array(release.digests.len());
+            for digest in &release.digests {
+                encoder.bytes(digest);
+            }
+        }
     }
     let payload = encoder.into_bytes();
     if payload.len() > MAX_PAYLOAD_SIZE {
@@ -956,6 +1117,11 @@ fn read_u16(decoder: &mut Decoder<'_>, name: &'static str) -> Result<u16, Messag
 
 fn read_u32(decoder: &mut Decoder<'_>, name: &'static str) -> Result<u32, MessageError> {
     u32::try_from(decoder.unsigned()?).map_err(|_| MessageError::InvalidValue(name))
+}
+
+fn read_digest(decoder: &mut Decoder<'_>) -> Result<[u8; ASSET_DIGEST_LEN], MessageError> {
+    let raw = decoder.bytes()?;
+    <[u8; ASSET_DIGEST_LEN]>::try_from(raw).map_err(|_| MessageError::InvalidValue("asset digest"))
 }
 
 fn require_empty_map(payload: &[u8]) -> Result<(), MessageError> {
@@ -1274,10 +1440,12 @@ fn decode_ack(payload: &[u8]) -> Result<Ack, MessageError> {
     let mut previous = None;
     let mut acknowledged_type = None;
     let mut revision = None;
+    let mut already_present = None;
     for _ in 0..len {
         match next_numeric_key(&mut decoder, &mut previous)? {
             0 => acknowledged_type = Some(read_u8(&mut decoder, "acknowledged type")?),
             1 => revision = Some(read_u32(&mut decoder, "revision")?),
+            2 => already_present = Some(decoder.boolean()?),
             _ => decoder.skip()?,
         }
     }
@@ -1285,8 +1453,112 @@ fn decode_ack(payload: &[u8]) -> Result<Ack, MessageError> {
     let value = Ack {
         acknowledged_type: acknowledged_type.ok_or(MessageError::MissingField(0))?,
         revision,
+        already_present,
     };
     validate_message(&Message::Ack(value))?;
+    Ok(value)
+}
+
+fn decode_asset_begin(payload: &[u8]) -> Result<AssetBegin, MessageError> {
+    let mut decoder = Decoder::new(payload);
+    let len = decoder.map_len()?;
+    let mut previous = None;
+    let mut digest = None;
+    let mut kind = None;
+    let mut total_length = None;
+    let mut volatile = None;
+    for _ in 0..len {
+        match next_numeric_key(&mut decoder, &mut previous)? {
+            0 => digest = Some(read_digest(&mut decoder)?),
+            1 => kind = Some(asset_kind_from_wire(read_u8(&mut decoder, "asset kind")?)?),
+            2 => total_length = Some(read_u32(&mut decoder, "asset total length")?),
+            3 => volatile = Some(decoder.boolean()?),
+            _ => decoder.skip()?,
+        }
+    }
+    decoder.finish()?;
+    let value = AssetBegin {
+        digest: digest.ok_or(MessageError::MissingField(0))?,
+        kind: kind.ok_or(MessageError::MissingField(1))?,
+        total_length: total_length.ok_or(MessageError::MissingField(2))?,
+        volatile: volatile.ok_or(MessageError::MissingField(3))?,
+    };
+    validate_asset_begin(&value)?;
+    Ok(value)
+}
+
+fn decode_asset_chunk(payload: &[u8]) -> Result<AssetChunk, MessageError> {
+    let mut decoder = Decoder::new(payload);
+    let len = decoder.map_len()?;
+    let mut previous = None;
+    let mut digest = None;
+    let mut offset = None;
+    let mut data = None;
+    for _ in 0..len {
+        match next_numeric_key(&mut decoder, &mut previous)? {
+            0 => digest = Some(read_digest(&mut decoder)?),
+            1 => offset = Some(read_u32(&mut decoder, "asset chunk offset")?),
+            2 => data = Some(decoder.bytes()?.to_vec()),
+            _ => decoder.skip()?,
+        }
+    }
+    decoder.finish()?;
+    let value = AssetChunk {
+        digest: digest.ok_or(MessageError::MissingField(0))?,
+        offset: offset.ok_or(MessageError::MissingField(1))?,
+        data: data.ok_or(MessageError::MissingField(2))?,
+    };
+    validate_asset_chunk(&value)?;
+    Ok(value)
+}
+
+fn decode_asset_commit(payload: &[u8]) -> Result<AssetCommit, MessageError> {
+    let mut decoder = Decoder::new(payload);
+    let len = decoder.map_len()?;
+    let mut previous = None;
+    let mut digest = None;
+    for _ in 0..len {
+        match next_numeric_key(&mut decoder, &mut previous)? {
+            0 => digest = Some(read_digest(&mut decoder)?),
+            _ => decoder.skip()?,
+        }
+    }
+    decoder.finish()?;
+    Ok(AssetCommit {
+        digest: digest.ok_or(MessageError::MissingField(0))?,
+    })
+}
+
+fn decode_asset_digests(
+    decoder: &mut Decoder<'_>,
+) -> Result<Vec<[u8; ASSET_DIGEST_LEN]>, MessageError> {
+    let count = decoder.array_len()?;
+    if count > MAX_ASSET_DIGESTS {
+        return Err(MessageError::InvalidValue("too many asset digests"));
+    }
+    let mut digests = Vec::with_capacity(count);
+    for _ in 0..count {
+        digests.push(read_digest(decoder)?);
+    }
+    Ok(digests)
+}
+
+fn decode_asset_release(payload: &[u8]) -> Result<AssetRelease, MessageError> {
+    let mut decoder = Decoder::new(payload);
+    let len = decoder.map_len()?;
+    let mut previous = None;
+    let mut digests = None;
+    for _ in 0..len {
+        match next_numeric_key(&mut decoder, &mut previous)? {
+            0 => digests = Some(decode_asset_digests(&mut decoder)?),
+            _ => decoder.skip()?,
+        }
+    }
+    decoder.finish()?;
+    let value = AssetRelease {
+        digests: digests.ok_or(MessageError::MissingField(0))?,
+    };
+    validate_asset_release(&value)?;
     Ok(value)
 }
 
@@ -1494,6 +1766,10 @@ pub fn decode_message(frame: &Frame) -> Result<Message, MessageError> {
             require_empty_map(&frame.payload)?;
             Message::FactoryReset
         }
+        TYPE_ASSET_BEGIN => Message::AssetBegin(decode_asset_begin(&frame.payload)?),
+        TYPE_ASSET_CHUNK => Message::AssetChunk(decode_asset_chunk(&frame.payload)?),
+        TYPE_ASSET_COMMIT => Message::AssetCommit(decode_asset_commit(&frame.payload)?),
+        TYPE_ASSET_RELEASE => Message::AssetRelease(decode_asset_release(&frame.payload)?),
         other => return Err(MessageError::UnsupportedType(other)),
     };
     Ok(message)
@@ -1563,6 +1839,7 @@ mod tests {
         round_trip(&Message::Ack(Ack {
             acknowledged_type: TYPE_TIME_SYNC,
             revision: None,
+            already_present: None,
         }));
         round_trip(&Message::PushData(PushData {
             widget_id: "weather".into(),
@@ -1725,8 +2002,10 @@ mod tests {
         // Keys 21 (latest_interrupt_token), 22 (max_protocol_version), and 23
         // (capabilities) are still encoded contiguously and in this order
         // because keys are canonical; locate and drop them regardless of
-        // what now follows them on the wire.
-        let pattern = [0x15, 0x09, 0x16, 0x01, 0x17, 0x18, 0xcb];
+        // what now follows them on the wire. The last byte is
+        // CURRENT_CAPABILITIES (235 = 0xeb) in its one-byte CBOR form; it
+        // moves whenever a capability bit is added to the constant.
+        let pattern = [0x15, 0x09, 0x16, 0x01, 0x17, 0x18, 0xeb];
         let offset = payload
             .windows(pattern.len())
             .position(|window| window == pattern)
@@ -1858,5 +2137,127 @@ mod tests {
             decode_message(&frame),
             Err(MessageError::UnsupportedType(99))
         );
+    }
+
+    #[test]
+    fn current_capabilities_is_235() {
+        // Bit 7 was defined and never set for most of V2; the constant read 75
+        // instead of 203 and a conforming host could not have provisioned the
+        // device. Pin the number so the same omission cannot recur.
+        assert_eq!(CURRENT_CAPABILITIES, 235);
+    }
+
+    #[test]
+    fn asset_begin_roundtrips() {
+        let message = Message::AssetBegin(AssetBegin {
+            digest: [0x5a; 32],
+            kind: AssetKind::Font,
+            total_length: 4096,
+            volatile: false,
+        });
+        let frame = message.encode(7).expect("encode");
+        let decoded = Message::decode(&frame).expect("decode");
+        assert_eq!(decoded, message);
+    }
+
+    #[test]
+    fn asset_chunk_roundtrips() {
+        let message = Message::AssetChunk(AssetChunk {
+            digest: [0x11; 32],
+            offset: 512,
+            data: vec![0xab; 128],
+        });
+        let frame = message.encode(8).expect("encode");
+        let decoded = Message::decode(&frame).expect("decode");
+        assert_eq!(decoded, message);
+    }
+
+    #[test]
+    fn asset_commit_roundtrips() {
+        let message = Message::AssetCommit(AssetCommit { digest: [0x22; 32] });
+        let frame = message.encode(9).expect("encode");
+        let decoded = Message::decode(&frame).expect("decode");
+        assert_eq!(decoded, message);
+    }
+
+    #[test]
+    fn asset_release_roundtrips() {
+        let message = Message::AssetRelease(AssetRelease {
+            digests: vec![[0x33; 32], [0x44; 32]],
+        });
+        let frame = message.encode(10).expect("encode");
+        let decoded = Message::decode(&frame).expect("decode");
+        assert_eq!(decoded, message);
+    }
+
+    #[test]
+    fn ack_already_present_roundtrips_on_asset_begin() {
+        let message = Message::Ack(Ack {
+            acknowledged_type: TYPE_ASSET_BEGIN,
+            revision: None,
+            already_present: Some(true),
+        });
+        let frame = message.encode(11).expect("encode");
+        let decoded = Message::decode(&frame).expect("decode");
+        assert_eq!(decoded, message);
+    }
+
+    #[test]
+    fn asset_chunk_rejects_oversize_data() {
+        let message = Message::AssetChunk(AssetChunk {
+            digest: [0x01; 32],
+            offset: 0,
+            data: vec![0u8; MAX_ASSET_CHUNK_BYTES + 1],
+        });
+        assert!(matches!(
+            message.encode(8),
+            Err(MessageError::InvalidValue("asset chunk data too large"))
+        ));
+    }
+
+    #[test]
+    fn asset_release_rejects_too_many_digests() {
+        let message = Message::AssetRelease(AssetRelease {
+            digests: vec![[0u8; 32]; MAX_ASSET_DIGESTS + 1],
+        });
+        assert!(matches!(
+            message.encode(9),
+            Err(MessageError::InvalidValue("too many asset digests"))
+        ));
+    }
+
+    #[test]
+    fn asset_begin_rejects_out_of_range_total_length() {
+        let mut too_small = Message::AssetBegin(AssetBegin {
+            digest: [0x5a; 32],
+            kind: AssetKind::Image,
+            total_length: 0,
+            volatile: true,
+        });
+        assert!(too_small.encode(7).is_err());
+        if let Message::AssetBegin(begin) = &mut too_small {
+            begin.total_length = 1_048_577;
+        }
+        assert!(too_small.encode(7).is_err());
+    }
+
+    #[test]
+    fn already_present_is_rejected_on_non_asset_begin_acks() {
+        let message = Message::Ack(Ack {
+            acknowledged_type: TYPE_ASSET_COMMIT,
+            revision: None,
+            already_present: Some(true),
+        });
+        assert!(message.encode(10).is_err());
+    }
+
+    #[test]
+    fn already_present_is_required_on_asset_begin_acks() {
+        let message = Message::Ack(Ack {
+            acknowledged_type: TYPE_ASSET_BEGIN,
+            revision: None,
+            already_present: None,
+        });
+        assert!(message.encode(12).is_err());
     }
 }

@@ -1048,30 +1048,37 @@ mod tests {
             Message::TimeSync(_) => Message::Ack(Ack {
                 acknowledged_type: TYPE_TIME_SYNC,
                 revision: None,
+                already_present: None,
             }),
             Message::PushData(push) => Message::Ack(Ack {
                 acknowledged_type: TYPE_PUSH_DATA,
                 revision: Some(push.revision),
+                already_present: None,
             }),
             Message::ApplyConfig(config) => Message::Ack(Ack {
                 acknowledged_type: TYPE_APPLY_CONFIG,
                 revision: Some(config.revision),
+                already_present: None,
             }),
             Message::ActivateScreen(_) => Message::Ack(Ack {
                 acknowledged_type: TYPE_ACTIVATE_SCREEN,
                 revision: None,
+                already_present: None,
             }),
             Message::TriggerInterrupt(_) => Message::Ack(Ack {
                 acknowledged_type: TYPE_TRIGGER_INTERRUPT,
                 revision: None,
+                already_present: None,
             }),
             Message::NetworkConfig(_) => Message::Ack(Ack {
                 acknowledged_type: TYPE_NETWORK_CONFIG,
                 revision: None,
+                already_present: None,
             }),
             Message::FactoryReset => Message::Ack(Ack {
                 acknowledged_type: TYPE_FACTORY_RESET,
                 revision: None,
+                already_present: None,
             }),
             _ => panic!("unexpected fake request: {request:?}"),
         }

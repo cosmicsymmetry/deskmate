@@ -172,9 +172,10 @@ fn current_capabilities_advertise_implemented_features() {
         protocol::CAPABILITY_CORE_WIDGETS
             | protocol::CAPABILITY_CONFIG_ROTATION
             | protocol::CAPABILITY_EXTENDED_TEMPLATES
+            | protocol::CAPABILITY_ASSET_TRANSFER
             | protocol::CAPABILITY_FIRMWARE_UPDATE
             | protocol::CAPABILITY_NETWORKING,
-        "implemented firmware update and networking features must be advertised"
+        "implemented asset transfer, firmware update, and networking features must be advertised"
     );
-    assert_eq!(protocol::CURRENT_CAPABILITIES, 203);
+    assert_eq!(protocol::CURRENT_CAPABILITIES, 235);
 }

@@ -393,6 +393,7 @@ impl WebSocketRuntimeDevice {
             Message::Ack(Ack {
                 acknowledged_type: received_type,
                 revision: received_revision,
+                ..
             }) if *received_type == acknowledged_type && *received_revision == revision => Ok(()),
             _ => Err(DeviceError::UnexpectedMessage),
         }
@@ -1081,18 +1082,22 @@ mod tests {
                     Message::TimeSync(_) => Message::Ack(Ack {
                         acknowledged_type: protocol::TYPE_TIME_SYNC,
                         revision: None,
+                        already_present: None,
                     }),
                     Message::ApplyConfig(config) => Message::Ack(Ack {
                         acknowledged_type: protocol::TYPE_APPLY_CONFIG,
                         revision: Some(config.revision),
+                        already_present: None,
                     }),
                     Message::PushData(push) => Message::Ack(Ack {
                         acknowledged_type: protocol::TYPE_PUSH_DATA,
                         revision: Some(push.revision),
+                        already_present: None,
                     }),
                     Message::ActivateScreen(_) => Message::Ack(Ack {
                         acknowledged_type: protocol::TYPE_ACTIVATE_SCREEN,
                         revision: None,
+                        already_present: None,
                     }),
                     unexpected => panic!("unexpected test actor request: {unexpected:?}"),
                 };

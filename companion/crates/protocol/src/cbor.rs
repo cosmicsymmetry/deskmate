@@ -83,6 +83,11 @@ impl Encoder {
         self.bytes.extend_from_slice(value.as_bytes());
     }
 
+    pub fn bytes(&mut self, value: &[u8]) {
+        self.argument(2, u64::try_from(value.len()).unwrap());
+        self.bytes.extend_from_slice(value);
+    }
+
     pub fn boolean(&mut self, value: bool) {
         self.bytes.push(if value { 0xf5 } else { 0xf4 });
     }
@@ -201,6 +206,18 @@ impl<'a> Decoder<'a> {
         let raw = self.bytes.get(self.pos..end).ok_or(CborError::Eof)?;
         self.pos = end;
         std::str::from_utf8(raw).map_err(|_| CborError::InvalidUtf8)
+    }
+
+    pub fn bytes(&mut self) -> Result<&'a [u8], CborError> {
+        let (major, value) = self.head()?;
+        if major != 2 {
+            return Err(CborError::InvalidType);
+        }
+        let len = usize::try_from(value).map_err(|_| CborError::Overflow)?;
+        let end = self.pos.checked_add(len).ok_or(CborError::Overflow)?;
+        let raw = self.bytes.get(self.pos..end).ok_or(CborError::Eof)?;
+        self.pos = end;
+        Ok(raw)
     }
 
     pub fn boolean(&mut self) -> Result<bool, CborError> {

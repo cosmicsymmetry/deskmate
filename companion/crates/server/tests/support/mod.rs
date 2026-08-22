@@ -227,22 +227,27 @@ async fn reply(socket: &mut DeviceSocket, request_id: u32, request: &Message) {
         Message::TimeSync(_) => Message::Ack(Ack {
             acknowledged_type: protocol::TYPE_TIME_SYNC,
             revision: None,
+            already_present: None,
         }),
         Message::ApplyConfig(config) => Message::Ack(Ack {
             acknowledged_type: protocol::TYPE_APPLY_CONFIG,
             revision: Some(config.revision),
+            already_present: None,
         }),
         Message::PushData(push) => Message::Ack(Ack {
             acknowledged_type: protocol::TYPE_PUSH_DATA,
             revision: Some(push.revision),
+            already_present: None,
         }),
         Message::ActivateScreen(_) => Message::Ack(Ack {
             acknowledged_type: protocol::TYPE_ACTIVATE_SCREEN,
             revision: None,
+            already_present: None,
         }),
         Message::TriggerInterrupt(_) => Message::Ack(Ack {
             acknowledged_type: protocol::TYPE_TRIGGER_INTERRUPT,
             revision: None,
+            already_present: None,
         }),
         Message::Heartbeat => Message::HeartbeatAck(HeartbeatAck { uptime_ms: 1_234 }),
         other => panic!("server sent an unexpected device request: {other:?}"),

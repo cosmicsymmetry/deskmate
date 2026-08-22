@@ -307,6 +307,7 @@ fn fixture_messages() -> Vec<(&'static str, u32, Message)> {
             Message::Ack(Ack {
                 acknowledged_type: 3,
                 revision: None,
+                already_present: None,
             }),
         ),
         (
@@ -337,6 +338,7 @@ fn fixture_messages() -> Vec<(&'static str, u32, Message)> {
             Message::Ack(Ack {
                 acknowledged_type: 5,
                 revision: Some(7),
+                already_present: None,
             }),
         ),
         ("heartbeat.bin", 4, Message::Heartbeat),
@@ -364,6 +366,7 @@ fn fixture_messages() -> Vec<(&'static str, u32, Message)> {
             Message::Ack(Ack {
                 acknowledged_type: 9,
                 revision: Some(1),
+                already_present: None,
             }),
         ),
         (
@@ -384,6 +387,7 @@ fn fixture_messages() -> Vec<(&'static str, u32, Message)> {
             Message::Ack(Ack {
                 acknowledged_type: 10,
                 revision: None,
+                already_present: None,
             }),
         ),
         (
@@ -401,6 +405,7 @@ fn fixture_messages() -> Vec<(&'static str, u32, Message)> {
             Message::Ack(Ack {
                 acknowledged_type: 11,
                 revision: None,
+                already_present: None,
             }),
         ),
         (

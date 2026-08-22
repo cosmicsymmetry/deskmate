@@ -298,6 +298,10 @@ typedef struct {
     char last_network_error[PROTOCOL_MAX_DIAGNOSTIC_LENGTH + 1U];
     bool has_last_ota_error;
     char last_ota_error[PROTOCOL_MAX_DIAGNOSTIC_LENGTH + 1U];
+    bool has_asset_store_stats;
+    uint32_t asset_store_used_bytes;
+    uint32_t asset_store_free_bytes;
+    uint32_t asset_count;
 } protocol_status_response_t;
 
 typedef struct {

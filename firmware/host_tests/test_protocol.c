@@ -278,6 +278,53 @@ static void test_status_last_ota_error_round_trip_and_legacy_default(void)
            PROTOCOL_MAX_DIAGNOSTIC_LENGTH);
 }
 
+static void test_status_asset_store_stats_round_trip_and_legacy_default(void)
+{
+    size_t length = 0U;
+    uint8_t *fixture = read_fixture("status_response_networked.bin", &length);
+    protocol_frame_t frame;
+    assert(protocol_frame_decode(fixture, length, &frame) ==
+           PROTOCOL_FRAME_OK);
+    free(fixture);
+
+    protocol_message_t message;
+    assert(protocol_message_decode(&frame, &message) == PROTOCOL_MESSAGE_OK);
+    /* This fixture predates key 31, so its absence must remain decodable. */
+    assert(!message.value.status.has_asset_store_stats);
+    assert(message.value.status.asset_store_used_bytes == 0U);
+    assert(message.value.status.asset_store_free_bytes == 0U);
+    assert(message.value.status.asset_count == 0U);
+
+    uint8_t encoded[PROTOCOL_MAX_WIRE_FRAME];
+    size_t encoded_length = 0U;
+    assert(protocol_message_encode(frame.request_id, &message, encoded,
+                                   sizeof(encoded), &encoded_length) ==
+           PROTOCOL_MESSAGE_OK);
+    protocol_frame_t round_trip_frame;
+    assert(protocol_frame_decode(encoded, encoded_length,
+                                 &round_trip_frame) == PROTOCOL_FRAME_OK);
+    protocol_message_t decoded;
+    assert(protocol_message_decode(&round_trip_frame, &decoded) ==
+           PROTOCOL_MESSAGE_OK);
+    assert(!decoded.value.status.has_asset_store_stats);
+
+    message.value.status.has_asset_store_stats = true;
+    message.value.status.asset_store_used_bytes = 4096U;
+    message.value.status.asset_store_free_bytes = 6291456U;
+    message.value.status.asset_count = 3U;
+    assert(protocol_message_encode(frame.request_id, &message, encoded,
+                                   sizeof(encoded), &encoded_length) ==
+           PROTOCOL_MESSAGE_OK);
+    assert(protocol_frame_decode(encoded, encoded_length,
+                                 &round_trip_frame) == PROTOCOL_FRAME_OK);
+    assert(protocol_message_decode(&round_trip_frame, &decoded) ==
+           PROTOCOL_MESSAGE_OK);
+    assert(decoded.value.status.has_asset_store_stats);
+    assert(decoded.value.status.asset_store_used_bytes == 4096U);
+    assert(decoded.value.status.asset_store_free_bytes == 6291456U);
+    assert(decoded.value.status.asset_count == 3U);
+}
+
 static void assert_invalid_message_fixture(
     const char *name,
     protocol_message_result_t expected)
@@ -884,6 +931,7 @@ int main(void)
     test_valid_fixtures();
     test_status_capability_handshake_and_legacy_defaults();
     test_status_last_ota_error_round_trip_and_legacy_default();
+    test_status_asset_store_stats_round_trip_and_legacy_default();
     test_incremental_decoder();
     test_overflow_resynchronizes();
     test_invalid_fixtures();

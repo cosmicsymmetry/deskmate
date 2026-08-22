@@ -1494,6 +1494,68 @@ static protocol_message_result_t assign_status_unsigned(
     return PROTOCOL_MESSAGE_OK;
 }
 
+static protocol_message_result_t decode_asset_store_stats(
+    CborValue *value,
+    protocol_status_response_t *status)
+{
+    if (!cbor_value_is_map(value)) {
+        return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
+    }
+    size_t count = 0U;
+    CborError error = cbor_value_get_map_length(value, &count);
+    if (error != CborNoError) {
+        return cbor_result(error);
+    }
+    CborValue fields;
+    error = cbor_value_enter_container(value, &fields);
+    if (error != CborNoError) {
+        return cbor_result(error);
+    }
+    uint32_t present = 0U;
+    uint64_t previous = 0U;
+    bool has_previous = false;
+    for (size_t i = 0U; i < count; ++i) {
+        uint64_t key = 0U;
+        protocol_message_result_t result =
+            read_key(&fields, &key, &previous, &has_previous);
+        if (result != PROTOCOL_MESSAGE_OK) {
+            return result;
+        }
+        if (key <= 2U) {
+            uint64_t raw = 0U;
+            result = read_unsigned(&fields, &raw);
+            if (result == PROTOCOL_MESSAGE_OK && raw > UINT32_MAX) {
+                result = PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
+            }
+            if (result == PROTOCOL_MESSAGE_OK) {
+                if (key == 0U) {
+                    status->asset_store_used_bytes = (uint32_t)raw;
+                } else if (key == 1U) {
+                    status->asset_store_free_bytes = (uint32_t)raw;
+                } else {
+                    status->asset_count = (uint32_t)raw;
+                }
+            }
+            present |= REQUIRED_BIT((uint32_t)key);
+        } else {
+            result = skip_value(&fields);
+        }
+        if (result != PROTOCOL_MESSAGE_OK) {
+            return result;
+        }
+    }
+    error = cbor_value_leave_container(value, &fields);
+    if (error != CborNoError) {
+        return cbor_result(error);
+    }
+    uint32_t required = REQUIRED_BIT(0) | REQUIRED_BIT(1) | REQUIRED_BIT(2);
+    if ((present & required) != required) {
+        return PROTOCOL_MESSAGE_ERR_MISSING_FIELD;
+    }
+    status->has_asset_store_stats = true;
+    return PROTOCOL_MESSAGE_OK;
+}
+
 static protocol_message_result_t decode_status(
     const protocol_frame_t *frame,
     protocol_status_response_t *status)
@@ -1507,6 +1569,10 @@ static protocol_message_result_t decode_status(
     status->last_network_error[0] = '\0';
     status->has_last_ota_error = false;
     status->last_ota_error[0] = '\0';
+    status->has_asset_store_stats = false;
+    status->asset_store_used_bytes = 0U;
+    status->asset_store_free_bytes = 0U;
+    status->asset_count = 0U;
     CborParser parser;
     CborValue contents;
     size_t count = 0U;
@@ -1560,6 +1626,9 @@ static protocol_message_result_t decode_status(
                 status->has_last_ota_error = true;
             }
             present |= REQUIRED_BIT(30);
+        } else if (key == 31U) {
+            result = decode_asset_store_stats(&contents, status);
+            present |= REQUIRED_BIT(31);
         } else if (key <= 25U || key == 28U) {
             uint64_t value = 0U;
             result = read_unsigned(&contents, &value);
@@ -2045,7 +2114,8 @@ static protocol_message_result_t encode_status_payload(
     CborEncoder map;
     size_t entry_count = 24U + 5U +
                          (status->has_last_network_error ? 1U : 0U) +
-                         (status->has_last_ota_error ? 1U : 0U);
+                         (status->has_last_ota_error ? 1U : 0U) +
+                         (status->has_asset_store_stats ? 1U : 0U);
     protocol_message_result_t result = begin_map(root, &map, entry_count);
     if (result != PROTOCOL_MESSAGE_OK) return result;
     result = encode_pair_uint(&map, 0U, status->protocol_version);
@@ -2090,6 +2160,27 @@ static protocol_message_result_t encode_status_payload(
         result = encode_uint(&map, 30U);
         if (result == PROTOCOL_MESSAGE_OK) {
             result = encode_text(&map, status->last_ota_error);
+        }
+    }
+    if (result == PROTOCOL_MESSAGE_OK && status->has_asset_store_stats) {
+        result = encode_uint(&map, 31U);
+        if (result == PROTOCOL_MESSAGE_OK) {
+            CborEncoder stats_map;
+            result = begin_map(&map, &stats_map, 3U);
+            if (result == PROTOCOL_MESSAGE_OK) {
+                result = encode_pair_uint(&stats_map, 0U,
+                                          status->asset_store_used_bytes);
+            }
+            if (result == PROTOCOL_MESSAGE_OK) {
+                result = encode_pair_uint(&stats_map, 1U,
+                                          status->asset_store_free_bytes);
+            }
+            if (result == PROTOCOL_MESSAGE_OK) {
+                result = encode_pair_uint(&stats_map, 2U, status->asset_count);
+            }
+            if (result == PROTOCOL_MESSAGE_OK) {
+                result = end_map(&map, &stats_map);
+            }
         }
     }
     if (result != PROTOCOL_MESSAGE_OK) return result;

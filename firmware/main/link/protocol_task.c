@@ -9,6 +9,8 @@
 
 #include "board/board.h"
 #include "board/display.h"
+#include "core/asset_store.h"
+#include "core/asset_transfer.h"
 #include "core/device_event_queue.h"
 #include "core/interrupt_state.h"
 #include "core/link_state.h"
@@ -21,10 +23,12 @@
 #include "esp_check.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_lvgl_port.h"
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "link/asset_flash.h"
 #include "link/dev_capture.h"
 #include "link/link_transport.h"
 #include "link/net_link.h"
@@ -32,6 +36,7 @@
 #include "link/ota.h"
 #include "link/usb_link.h"
 #include "link/wifi_station.h"
+#include "ui/font_registry.h"
 #include "ui/ui_runtime.h"
 
 #define PROTOCOL_TASK_STACK_SIZE 8192U
@@ -53,6 +58,13 @@ typedef struct {
     protocol_message_t message;
     protocol_device_event_t event;
     ui_view_context_t view_context;
+    // Owned here, not a static in asset_transfer.c/asset_flash.c: this is
+    // the only in-flight asset transfer the device tracks, and it lives for
+    // exactly as long as the rest of this task's state (see the PSRAM
+    // allocation note above protocol_context_t's static instance).
+    asset_transfer_t asset_transfer;
+    uint32_t asset_transfer_record_index;
+    uint32_t asset_transfer_blob_offset;
     uint8_t wire[PROTOCOL_MAX_WIRE_FRAME];
     uint32_t valid_frames;
     uint32_t malformed_frames;
@@ -65,7 +77,7 @@ typedef struct {
 
 static const char *TAG = "protocol";
 // Allocated from PSRAM in protocol_task_start(), not a static internal-RAM
-// object: protocol_context_t is 58,736 B, which would crowd out the internal
+// object: protocol_context_t is 58,792 B, which would crowd out the internal
 // MALLOC_CAP_DMA headroom board_display_init() needs for its LVGL flush and
 // software-rotation buffers once WiFi's static internal .bss landed (see
 // docs/hardware/board-notes.md). Nothing in this struct is DMA'd -- see
@@ -296,6 +308,19 @@ static void transmit_status(protocol_context_t *context, uint32_t request_id)
     status->wifi_rssi = wifi_station_rssi();
     wifi_station_copy_ip(status->ip, sizeof(status->ip));
     status->tier = net_store_current_tier();
+    // Key 31 is omitted, not encoded empty, when the store never formatted
+    // (docs/protocol/v1.md): asset_store_stats() returns
+    // ASSET_STORE_ERR_ARGUMENT for a store whose asset_store_open() never
+    // succeeded, in which case has_asset_store_stats stays false from this
+    // function's leading memset and encode_status_payload() skips the key.
+    asset_store_stats_t asset_stats;
+    if (asset_store_stats(asset_flash_store(), &asset_stats) ==
+        ASSET_STORE_OK) {
+        status->has_asset_store_stats = true;
+        status->asset_store_used_bytes = asset_stats.used_blob_bytes;
+        status->asset_store_free_bytes = asset_stats.free_blob_bytes;
+        status->asset_count = asset_stats.committed_count;
+    }
     transmit(context, request_id, reply);
 }
 
@@ -311,6 +336,19 @@ static void transmit_ack(protocol_context_t *context,
     reply->value.ack.acknowledged_type = acknowledged_type;
     reply->value.ack.has_revision = has_revision;
     reply->value.ack.revision = revision;
+    transmit(context, request_id, reply);
+}
+
+static void transmit_asset_begin_ack(protocol_context_t *context,
+                                     uint32_t request_id,
+                                     bool already_present)
+{
+    protocol_message_t *reply = &context->message;
+    memset(reply, 0, sizeof(*reply));
+    reply->type = PROTOCOL_TYPE_ACK;
+    reply->value.ack.acknowledged_type = PROTOCOL_TYPE_ASSET_BEGIN;
+    reply->value.ack.has_already_present = true;
+    reply->value.ack.already_present = already_present;
     transmit(context, request_id, reply);
 }
 
@@ -604,6 +642,225 @@ static void dispatch_factory_reset(protocol_context_t *context,
     transmit_ack(context, request_id, PROTOCOL_TYPE_FACTORY_RESET, false, 0U);
 }
 
+// font_registry_init()'s asset_resolver_fn: resolves a committed asset's
+// digest to its mapped, read-only blob bytes. This is the only place
+// core/font_registry.c (no ESP-IDF include, so it cannot call these itself)
+// meets link/asset_flash.c's flash-backed store.
+static bool protocol_asset_resolver(const uint8_t *digest, const void **out_ptr,
+                                    uint32_t *out_len, uint8_t *out_kind)
+{
+    asset_record_t record;
+    if (asset_store_find(asset_flash_store(), digest, &record, NULL) !=
+        ASSET_STORE_OK) {
+        return false;
+    }
+    if (asset_flash_map(&record, out_ptr) != ESP_OK) {
+        return false;
+    }
+    *out_len = record.length;
+    *out_kind = record.kind;
+    return true;
+}
+
+static void dispatch_asset_begin(protocol_context_t *context,
+                                 uint32_t request_id)
+{
+    const protocol_asset_begin_t *begin = &context->message.value.asset_begin;
+    // The volatile (PSRAM) tier is for rasterized frames and arrives in a
+    // later stage; storing one to flash instead would burn the partition's
+    // write endurance on a refresh cycle, exactly what that tier exists to
+    // avoid. Refuse explicitly rather than silently downgrading to durable.
+    if (begin->volatile_tier) {
+        transmit_error(context, request_id, PROTOCOL_ERROR_UNSUPPORTED_MESSAGE,
+                       "volatile assets are not supported yet");
+        return;
+    }
+    // A second AssetBegin while a transfer is active means the host gave up
+    // on the first one; abort it before deciding how to handle this one so
+    // a stale in-memory transfer can never straddle two different digests.
+    if (context->asset_transfer.active) {
+        asset_transfer_abort(&context->asset_transfer);
+    }
+    asset_record_t existing;
+    if (asset_store_find(asset_flash_store(), begin->digest, &existing,
+                         NULL) == ASSET_STORE_OK) {
+        transmit_asset_begin_ack(context, request_id, true);
+        return;
+    }
+    uint32_t index = 0U;
+    uint32_t blob_offset = 0U;
+    if (asset_store_reserve(asset_flash_store(), begin->digest,
+                            (uint8_t)begin->kind, begin->total_length, &index,
+                            &blob_offset) != ASSET_STORE_OK) {
+        transmit_error(context, request_id, PROTOCOL_ERROR_INVALID_PAYLOAD,
+                       "asset store reserve failed");
+        return;
+    }
+    if (asset_transfer_begin(&context->asset_transfer, begin->digest,
+                             (uint8_t)begin->kind, begin->total_length,
+                             false) != ASSET_TRANSFER_OK) {
+        transmit_error(context, request_id, PROTOCOL_ERROR_INVALID_PAYLOAD,
+                       "asset transfer begin failed");
+        return;
+    }
+    context->asset_transfer_record_index = index;
+    context->asset_transfer_blob_offset = blob_offset;
+    transmit_asset_begin_ack(context, request_id, false);
+}
+
+static void dispatch_asset_chunk(protocol_context_t *context,
+                                 uint32_t request_id)
+{
+    const protocol_asset_chunk_t *chunk = &context->message.value.asset_chunk;
+    asset_transfer_result_t result = asset_transfer_accept_chunk(
+        &context->asset_transfer, chunk->digest, chunk->offset,
+        (uint32_t)chunk->data_length);
+    if (result == ASSET_TRANSFER_DUPLICATE) {
+        // The lost-Ack path: the host resent a chunk we already wrote
+        // because our Ack for it never arrived. Acknowledge again without
+        // rewriting -- rewriting here would apply those bytes twice.
+        transmit_ack(context, request_id, PROTOCOL_TYPE_ASSET_CHUNK, false,
+                     0U);
+        return;
+    }
+    if (result != ASSET_TRANSFER_OK) {
+        asset_transfer_abort(&context->asset_transfer);
+        transmit_error(context, request_id, PROTOCOL_ERROR_INVALID_PAYLOAD,
+                       "asset chunk rejected");
+        return;
+    }
+    if (asset_flash_write_blob(
+            context->asset_transfer_blob_offset + chunk->offset, chunk->data,
+            chunk->data_length) != ESP_OK) {
+        asset_transfer_abort(&context->asset_transfer);
+        transmit_error(context, request_id, PROTOCOL_ERROR_INTERNAL,
+                       "asset blob write failed");
+        return;
+    }
+    transmit_ack(context, request_id, PROTOCOL_TYPE_ASSET_CHUNK, false, 0U);
+}
+
+static void dispatch_asset_commit(protocol_context_t *context,
+                                  uint32_t request_id)
+{
+    const protocol_asset_commit_t *commit =
+        &context->message.value.asset_commit;
+    if (!context->asset_transfer.active ||
+        memcmp(commit->digest, context->asset_transfer.digest,
+              ASSET_DIGEST_BYTES) != 0 ||
+        !asset_transfer_is_complete(&context->asset_transfer)) {
+        transmit_error(context, request_id, PROTOCOL_ERROR_INVALID_PAYLOAD,
+                       "asset transfer not complete");
+        return;
+    }
+    if (asset_store_commit(asset_flash_store(),
+                           context->asset_transfer_record_index) !=
+        ASSET_STORE_OK) {
+        transmit_error(context, request_id, PROTOCOL_ERROR_INTERNAL,
+                       "asset store commit failed");
+        return;
+    }
+    asset_transfer_abort(&context->asset_transfer);
+    transmit_ack(context, request_id, PROTOCOL_TYPE_ASSET_COMMIT, false, 0U);
+}
+
+static void dispatch_asset_release(protocol_context_t *context,
+                                   uint32_t request_id)
+{
+    const protocol_asset_release_t *release =
+        &context->message.value.asset_release;
+    const asset_store_t *store = asset_flash_store();
+
+    // font_registry_reset() destroys every open lv_font_t face
+    // unconditionally, including any with outstanding font_registry_acquire()
+    // callers, and it calls into LVGL/tiny_ttf (lv_tiny_ttf_destroy) to do
+    // it -- both reasons it must run under lvgl_port_lock(), matching every
+    // other LVGL mutation this task makes from outside the LVGL task.
+    //
+    // Ordering hazard this call must resolve: compaction below can physically
+    // move blob bytes, which invalidates any lv_font_t rasterized from an
+    // asset_flash_map() pointer, so every such face must be gone before
+    // asset_flash_execute_compaction() runs. As of this task, nothing in
+    // firmware/main calls font_registry_acquire() -- that wiring lands in a
+    // later stage that renders template text from stored fonts -- so
+    // ref_count can never be nonzero here and this reset is unconditionally
+    // safe today. When that caller exists, resetting the registry out from
+    // under a card that is currently on screen becomes a use-after-free
+    // hazard again and this call must move behind draining/invalidating that
+    // caller's live references (e.g. re-showing the active view after the
+    // registry is cleared) before compaction is allowed to proceed.
+    if (!lvgl_port_lock(0U)) {
+        transmit_error(context, request_id, PROTOCOL_ERROR_INTERNAL,
+                       "display lock unavailable");
+        return;
+    }
+    font_registry_reset();
+    lvgl_port_unlock();
+
+    for (uint32_t index = 0U; index < store->record_capacity; ++index) {
+        uint8_t bytes[ASSET_RECORD_BYTES];
+        if (asset_flash_io()->read(asset_flash_io()->ctx,
+                                   ASSET_HEADER_BYTES +
+                                       index * ASSET_RECORD_BYTES,
+                                   bytes, sizeof(bytes)) != 0) {
+            transmit_error(context, request_id, PROTOCOL_ERROR_INTERNAL,
+                           "asset store read failed");
+            return;
+        }
+        asset_record_t record;
+        if (asset_store_record_decode(bytes, &record) != ASSET_STORE_OK) {
+            // Most commonly an untouched slot: still-erased bytes decode a
+            // kind of 0xFF, which is not a defined asset_kind_t, so decode()
+            // correctly refuses it. That is never a committed record worth
+            // pruning, so skip it rather than fail the whole release; a
+            // genuinely corrupt committed record is skipped the same way and
+            // is left for a future find()/stats() caller to surface.
+            continue;
+        }
+        if (record.state != ASSET_STATE_COMMITTED) {
+            continue;
+        }
+        bool keep = false;
+        for (size_t k = 0U; k < release->digest_count; ++k) {
+            if (memcmp(record.digest, release->digests[k],
+                      ASSET_DIGEST_BYTES) == 0) {
+                keep = true;
+                break;
+            }
+        }
+        if (!keep &&
+            asset_store_mark_dead(store, index) != ASSET_STORE_OK) {
+            transmit_error(context, request_id, PROTOCOL_ERROR_INTERNAL,
+                           "asset store mark dead failed");
+            return;
+        }
+    }
+
+    // move_count can never exceed release->digest_count (plan_compaction
+    // only emits a move for a committed record matching an entry in `keep`),
+    // and digest_count is already bounded to PROTOCOL_MAX_ASSET_DIGESTS by
+    // decode, so a buffer of that size is never truncated.
+    const uint8_t *keep_ptrs[PROTOCOL_MAX_ASSET_DIGESTS];
+    for (size_t i = 0U; i < release->digest_count; ++i) {
+        keep_ptrs[i] = release->digests[i];
+    }
+    asset_move_t moves[PROTOCOL_MAX_ASSET_DIGESTS];
+    size_t move_count = 0U;
+    if (asset_store_plan_compaction(store, keep_ptrs, release->digest_count,
+                                    moves, PROTOCOL_MAX_ASSET_DIGESTS,
+                                    &move_count) != ASSET_STORE_OK) {
+        transmit_error(context, request_id, PROTOCOL_ERROR_INTERNAL,
+                       "asset compaction planning failed");
+        return;
+    }
+    if (asset_flash_execute_compaction(moves, move_count) != ESP_OK) {
+        transmit_error(context, request_id, PROTOCOL_ERROR_INTERNAL,
+                       "asset compaction failed");
+        return;
+    }
+    transmit_ack(context, request_id, PROTOCOL_TYPE_ASSET_RELEASE, false, 0U);
+}
+
 static void dispatch_request(protocol_context_t *context,
                              const protocol_frame_t *frame,
                              bool restricted_usb)
@@ -661,10 +918,36 @@ static void dispatch_request(protocol_context_t *context,
         context->message.type != PROTOCOL_TYPE_ACTIVATE_SCREEN &&
         context->message.type != PROTOCOL_TYPE_TRIGGER_INTERRUPT &&
         context->message.type != PROTOCOL_TYPE_NETWORK_CONFIG &&
-        context->message.type != PROTOCOL_TYPE_FACTORY_RESET) {
+        context->message.type != PROTOCOL_TYPE_FACTORY_RESET &&
+        context->message.type != PROTOCOL_TYPE_ASSET_BEGIN &&
+        context->message.type != PROTOCOL_TYPE_ASSET_CHUNK &&
+        context->message.type != PROTOCOL_TYPE_ASSET_COMMIT &&
+        context->message.type != PROTOCOL_TYPE_ASSET_RELEASE) {
         transmit_error(context, frame->request_id,
                        PROTOCOL_ERROR_UNSUPPORTED_MESSAGE,
                        "response type sent as request");
+        return;
+    }
+
+    // Mirrors how types 13-14 are documented as gated on capability bit 7
+    // (docs/protocol/v1.md): a conforming host never sends these without
+    // seeing the bit in StatusResponse, but the device still refuses
+    // explicitly rather than trusting that. PROTOCOL_CURRENT_CAPABILITIES is
+    // a compile-time constant that always includes bit 5 today, so this
+    // check cannot currently fail -- it exists so a future build profile
+    // that omits the bit stays correctly refused rather than silently
+    // accepting messages its firmware.h did not compile support for.
+    bool is_asset_message =
+        context->message.type == PROTOCOL_TYPE_ASSET_BEGIN ||
+        context->message.type == PROTOCOL_TYPE_ASSET_CHUNK ||
+        context->message.type == PROTOCOL_TYPE_ASSET_COMMIT ||
+        context->message.type == PROTOCOL_TYPE_ASSET_RELEASE;
+    if (is_asset_message &&
+        (PROTOCOL_CURRENT_CAPABILITIES & PROTOCOL_CAPABILITY_ASSET_TRANSFER) ==
+            0U) {
+        transmit_error(context, frame->request_id,
+                       PROTOCOL_ERROR_UNSUPPORTED_MESSAGE,
+                       "asset transfer not supported");
         return;
     }
 
@@ -720,6 +1003,18 @@ static void dispatch_request(protocol_context_t *context,
         break;
     case PROTOCOL_TYPE_FACTORY_RESET:
         dispatch_factory_reset(context, frame->request_id);
+        break;
+    case PROTOCOL_TYPE_ASSET_BEGIN:
+        dispatch_asset_begin(context, frame->request_id);
+        break;
+    case PROTOCOL_TYPE_ASSET_CHUNK:
+        dispatch_asset_chunk(context, frame->request_id);
+        break;
+    case PROTOCOL_TYPE_ASSET_COMMIT:
+        dispatch_asset_commit(context, frame->request_id);
+        break;
+    case PROTOCOL_TYPE_ASSET_RELEASE:
+        dispatch_asset_release(context, frame->request_id);
         break;
     case PROTOCOL_TYPE_HEARTBEAT: {
         protocol_message_t *reply = &context->message;
@@ -936,6 +1231,36 @@ esp_err_t protocol_task_start(void)
     s_context = heap_caps_calloc(1, sizeof(*s_context), MALLOC_CAP_SPIRAM);
     ESP_RETURN_ON_FALSE(s_context != NULL, ESP_ERR_NO_MEM, TAG,
                         "allocate protocol context from PSRAM");
+    // Asset store and font registry are independent of the network/USB
+    // transport decided below, and their failure is not fatal to the rest
+    // of the device: main.c's standalone-clock contract must survive a
+    // missing or corrupt assets partition just as it survives a missing
+    // network. A failed asset_flash_init() leaves asset_flash_store() with
+    // no opened store, so every asset_store_* call downstream fails cleanly
+    // (ASSET_STORE_ERR_ARGUMENT) rather than touching unopened state, and
+    // StatusResponse key 31 is omitted per its own doc comment above.
+    esp_err_t asset_flash_result = asset_flash_init();
+    if (asset_flash_result != ESP_OK) {
+        ESP_LOGW(TAG, "asset flash init failed: %s",
+                esp_err_to_name(asset_flash_result));
+    } else {
+        // The font registry's LRU table is not glyph data but is larger
+        // than this file wants to add to internal-RAM .bss (font_registry.h),
+        // so it is allocated here, once, from PSRAM and handed in; the
+        // registry keeps the pointer itself (font_registry.c's own static),
+        // not this task's context, so nothing here needs to retain it.
+        size_t font_table_bytes = font_registry_table_bytes();
+        void *font_table_storage =
+            heap_caps_malloc(font_table_bytes, MALLOC_CAP_SPIRAM);
+        if (font_table_storage == NULL) {
+            ESP_LOGW(TAG, "font registry table allocation failed");
+        } else if (font_registry_init(protocol_asset_resolver,
+                                      font_table_storage,
+                                      font_table_bytes) != FONT_REGISTRY_OK) {
+            heap_caps_free(font_table_storage);
+            ESP_LOGW(TAG, "font registry init failed");
+        }
+    }
     // Populate net_store_current_tier()'s cache once, synchronously, before
     // any USB message can reach its reader gate. The loaded config itself
     // isn't needed here -- only its side effect on the tier cache -- so

@@ -11,6 +11,7 @@ idf_component_register(
          "core/protocol_message.c"
          "core/reconnect_backoff.c"
          "core/template_fields.c" "core/timefmt.c" "core/widget_model.c"
+         "link/asset_flash.c"
          "link/dev_capture.c" "link/net_link.c" "link/net_store.c"
          "link/ota.c" "link/protocol_task.c" "link/usb_link.c"
          "link/wifi_station.c" "ui/carousel.c"

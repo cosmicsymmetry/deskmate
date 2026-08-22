@@ -1704,7 +1704,15 @@ git commit -m "feat: reconcile device assets from the server"
 - Produces: `sim_asset_register(digest, bytes, len)` — the shim that resolves a digest
   to bytes without ESP-IDF.
 
-**This task discharges the parity obligation the spec records in §6.** Today the
+**This task BEGINS discharging the parity obligation the spec records in §6 — it does
+not complete it.** What the golden proves is that the simulator, built from the firmware's
+own `asset_store.c`, `font_registry.c` and LVGL sources, can resolve a digest to bytes and
+rasterize a runtime font correctly. It does **not** prove simulator-vs-firmware agreement,
+because `cases::golden_cases()` is also driven onto hardware by
+`device/examples/framebuffer_diff.rs` via `TemplateKind`/`PushData`, and no wire message
+exists for "register this font blob" — so an asset-font case cannot ride that path. The
+obligation is closed only by Task 13's on-device probe plus Task 14's hardware comparison.
+Do not cite this task alone as closing §6. Today the
 simulator compiles the firmware's own font `.c` files, so both hosts rasterize
 identically by construction. Once fonts are runtime assets that stops being automatic:
 the simulator must resolve **the same digest to the same bytes** as the device. If it

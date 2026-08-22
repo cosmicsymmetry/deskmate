@@ -391,11 +391,38 @@ asset_store_result_t asset_store_reserve(const asset_store_t *store,
 
 asset_store_result_t asset_store_commit(const asset_store_t *store, uint32_t index)
 {
-    if (store == NULL || store->io == NULL || store->io->write == NULL) {
+    if (store == NULL || store->io == NULL || store->io->read == NULL ||
+        store->io->write == NULL) {
         return ASSET_STORE_ERR_ARGUMENT;
     }
     if (index >= store->record_capacity) {
         return ASSET_STORE_ERR_ARGUMENT;
+    }
+
+    /* Defence in depth against a caller (protocol_task's AssetCommit
+     * handler) whose in-RAM transfer bookkeeping has desynced from this
+     * slot's actual on-flash state -- e.g. a compaction that ran between
+     * reserve() and commit() and, because the record was still
+     * UNCOMMITTED and therefore excluded from the kept set, erased its
+     * digest/offset/length/kind back to 0xFF without the caller's
+     * knowledge. Writing COMMITTED over that would silently mint a
+     * "valid" record with a length of 0xFFFFFFFF, which every future
+     * asset_store_reserve()/asset_store_stats() call would then trip over
+     * as corruption -- turning one desync into a bricked store. Refuse
+     * instead: the slot must decode cleanly, be in the UNCOMMITTED state
+     * a reservation leaves it in, and carry a real (not all-erased)
+     * digest. */
+    uint8_t bytes[ASSET_RECORD_BYTES];
+    if (store->io->read(store->io->ctx, record_offset(index), bytes, sizeof bytes) != 0) {
+        return ASSET_STORE_ERR_IO;
+    }
+    asset_record_t record;
+    if (asset_store_record_decode(bytes, &record) != ASSET_STORE_OK) {
+        return ASSET_STORE_ERR_CORRUPT;
+    }
+    if (record.state != ASSET_STATE_UNCOMMITTED ||
+        digest_is_all_ff(bytes + REC_OFFSET_DIGEST)) {
+        return ASSET_STORE_ERR_CORRUPT;
     }
 
     uint8_t state = ASSET_STATE_COMMITTED;

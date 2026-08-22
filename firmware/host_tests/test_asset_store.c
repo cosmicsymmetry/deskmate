@@ -311,6 +311,33 @@ static void test_stats_free_blob_bytes_matches_what_reserve_will_grant(void)
            == ASSET_STORE_OK);
 }
 
+static void test_commit_rejects_a_record_wiped_out_from_under_it(void)
+{
+    asset_flash_io_t io;
+    asset_store_t store = formatted_store(&io);
+    uint8_t digest[ASSET_DIGEST_BYTES];
+    digest_of(0x44, digest);
+    uint32_t index = 0U, blob = 0U;
+
+    assert(asset_store_reserve(&store, digest, ASSET_KIND_FONT, 64U, &index, &blob)
+           == ASSET_STORE_OK);
+
+    /* Simulate a compaction (or any other actor) erasing this record's
+     * bytes out from under an in-flight reservation before commit runs --
+     * exactly what an AssetRelease racing an unaborted
+     * AssetBegin/AssetChunk/AssetCommit sequence used to leave behind
+     * (protocol_task.c's dispatch_asset_release now aborts first, but this
+     * pins the store's own defence in depth against the same desync from
+     * any other source). This manipulates the fake flash directly rather
+     * than through the store API -- nothing in the public API can produce
+     * this state on its own, which is exactly why the store must not trust
+     * that it can't happen. */
+    memset(g_flash + ASSET_HEADER_BYTES + index * ASSET_RECORD_BYTES, 0xFF,
+           ASSET_RECORD_BYTES);
+
+    assert(asset_store_commit(&store, index) == ASSET_STORE_ERR_CORRUPT);
+}
+
 int main(void)
 {
     test_format_then_open_roundtrips();
@@ -325,5 +352,6 @@ int main(void)
     test_compaction_plan_reports_capacity_exhaustion();
     test_reserve_does_not_reuse_dead_but_uncompacted_space();
     test_stats_free_blob_bytes_matches_what_reserve_will_grant();
+    test_commit_rejects_a_record_wiped_out_from_under_it();
     return 0;
 }

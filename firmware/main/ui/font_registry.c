@@ -156,6 +156,20 @@ void font_registry_reset(void)
     for (uint32_t i = 0; i < FONT_REGISTRY_MAX_OPEN_FACES; ++i) {
         font_registry_entry_t *entry = &s_table[i];
         if (entry->in_use) {
+            /* This destroys the face out from under any outstanding
+             * font_registry_acquire() caller -- there are none as of this
+             * writing (nothing in firmware/main acquires yet; see the
+             * caller-side note in protocol_task.c's AssetRelease handler),
+             * but a caller that regresses this must not fail silently as a
+             * dangling lv_font_t* used from LVGL's draw path. Loud rather
+             * than a return-value check because this function's signature
+             * (void, no error path) cannot itself refuse. */
+            if (entry->ref_count > 0) {
+                LV_LOG_ERROR("font_registry_reset: destroying pinned face "
+                             "(slot %u, ref_count %u) -- caller holds a "
+                             "dangling lv_font_t*",
+                             (unsigned)i, (unsigned)entry->ref_count);
+            }
             lv_tiny_ttf_destroy(entry->font);
         }
     }

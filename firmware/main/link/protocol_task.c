@@ -771,6 +771,23 @@ static void dispatch_asset_release(protocol_context_t *context,
         &context->message.value.asset_release;
     const asset_store_t *store = asset_flash_store();
 
+    // An active transfer's reserved-but-uncommitted record is, by
+    // definition, absent from `release`'s digest list (the host cannot name
+    // a digest it hasn't finished sending), so the mark-dead/compaction scan
+    // below would exclude that slot from the compacted record array while
+    // the in-RAM asset_transfer_t keeps pointing at it. A chunk landing
+    // after that point writes into a blob region compaction has already
+    // repacked out from under it, and a later AssetCommit would flip a
+    // wiped, all-0xFF-content slot to COMMITTED -- corrupting the store for
+    // every future asset_store_reserve()/asset_store_stats() call. Abort
+    // (not reject-with-Busy) so this can never race: the host's resumable
+    // design already handles an abort by simply re-sending AssetBegin for a
+    // fresh reservation, whereas rejecting the release risks a stuck
+    // transfer permanently blocking GC.
+    if (context->asset_transfer.active) {
+        asset_transfer_abort(&context->asset_transfer);
+    }
+
     // font_registry_reset() destroys every open lv_font_t face
     // unconditionally, including any with outstanding font_registry_acquire()
     // callers, and it calls into LVGL/tiny_ttf (lv_tiny_ttf_destroy) to do

@@ -153,7 +153,11 @@ impl<T: Transport> DeviceClient<T> {
             | Message::ActivateScreen(_)
             | Message::TriggerInterrupt(_)
             | Message::NetworkConfig(_)
-            | Message::FactoryReset => Some(TYPE_ACK),
+            | Message::FactoryReset
+            | Message::AssetBegin(_)
+            | Message::AssetChunk(_)
+            | Message::AssetCommit(_)
+            | Message::AssetRelease(_) => Some(TYPE_ACK),
             Message::Heartbeat => Some(TYPE_HEARTBEAT_ACK),
             _ => None,
         }

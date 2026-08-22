@@ -15,8 +15,9 @@ use app_core::{
 use chrono::Utc;
 use device::{DeviceError, ReceivedEvent, SessionDiagnostics, TransportError};
 use protocol::{
-    DeviceEvent, ErrorCode, ErrorResponse, EventAction, EventKind, Field, FieldValue,
-    PROTOCOL_VERSION, ScreenConfig, StatusResponse, TimeSync, TriggerInterrupt, WidgetConfig,
+    Ack, AssetBegin, AssetChunk, AssetCommit, AssetRelease, DeviceEvent, ErrorCode, ErrorResponse,
+    EventAction, EventKind, Field, FieldValue, PROTOCOL_VERSION, ScreenConfig, StatusResponse,
+    TimeSync, TriggerInterrupt, WidgetConfig,
 };
 
 const FULL_JSON: &str = include_str!("fixtures/full.json");
@@ -381,6 +382,26 @@ impl RuntimeDevice for MockDevice {
                 .insert(interrupt.token, interrupt.clone());
             state.operations.push(Operation::Interrupt(interrupt.token));
         })
+    }
+
+    fn send_asset_begin(&mut self, _begin: AssetBegin) -> Result<Ack, DeviceError> {
+        self.with_connected(|_state| Ack {
+            acknowledged_type: protocol::TYPE_ASSET_BEGIN,
+            revision: None,
+            already_present: Some(false),
+        })
+    }
+
+    fn send_asset_chunk(&mut self, _chunk: AssetChunk) -> Result<(), DeviceError> {
+        self.with_connected(|_state| ())
+    }
+
+    fn send_asset_commit(&mut self, _commit: AssetCommit) -> Result<(), DeviceError> {
+        self.with_connected(|_state| ())
+    }
+
+    fn send_asset_release(&mut self, _release: AssetRelease) -> Result<(), DeviceError> {
+        self.with_connected(|_state| ())
     }
 
     fn try_recv_event(&mut self) -> Option<ReceivedEvent> {

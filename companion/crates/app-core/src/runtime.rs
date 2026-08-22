@@ -12,8 +12,9 @@ use device::{ConnectedSession, DeviceError, ReceivedEvent, SessionDiagnostics, c
 use engine::interrupts::InterruptArbiter;
 use engine::pomodoro::{Pomodoro, PomodoroState as EnginePomodoroState};
 use protocol::{
-    ActivateScreen, EventAction, EventKind, Field, FieldValue, NetworkConfig, ScreenConfig,
-    StatusResponse, TimeSync, TriggerInterrupt, WidgetConfig,
+    Ack, ActivateScreen, AssetBegin, AssetChunk, AssetCommit, AssetRelease, EventAction, EventKind,
+    Field, FieldValue, NetworkConfig, ScreenConfig, StatusResponse, TimeSync, TriggerInterrupt,
+    WidgetConfig,
 };
 use providers::Provider;
 use providers::http::SystemHttpClient;
@@ -89,6 +90,19 @@ pub trait RuntimeDevice: Send + 'static {
     fn push_fields(&mut self, widget_id: String, fields: Vec<Field>) -> Result<(), DeviceError>;
     fn activate_screen(&mut self, screen_id: String) -> Result<(), DeviceError>;
     fn trigger_interrupt(&mut self, interrupt: TriggerInterrupt) -> Result<(), DeviceError>;
+    /// Reserve (or re-attach to) storage for one asset. Unlike `provision`/
+    /// `factory_reset`, this must work on every transport: the server owning
+    /// the device over the tunnel is the entire point of networked tier, so
+    /// there is no typed unsupported-on-this-transport refusal here. The
+    /// `already_present` flag on the returned `Ack` is the whole inventory
+    /// protocol -- a caller that sees `true` sends no chunks.
+    fn send_asset_begin(&mut self, begin: AssetBegin) -> Result<Ack, DeviceError>;
+    fn send_asset_chunk(&mut self, chunk: AssetChunk) -> Result<(), DeviceError>;
+    fn send_asset_commit(&mut self, commit: AssetCommit) -> Result<(), DeviceError>;
+    /// Tell the device the full set of digests that should survive. The
+    /// device aborts any transfer still in flight, marks committed records
+    /// absent from this set dead, and compacts.
+    fn send_asset_release(&mut self, release: AssetRelease) -> Result<(), DeviceError>;
     fn try_recv_event(&mut self) -> Option<ReceivedEvent>;
     fn diagnostics(&self) -> SessionDiagnostics;
 }
@@ -176,6 +190,22 @@ impl RuntimeDevice for SerialRuntimeDevice {
             .session
             .trigger_interrupt(interrupt)
             .map(|_| ())
+    }
+
+    fn send_asset_begin(&mut self, begin: AssetBegin) -> Result<Ack, DeviceError> {
+        self.connected()?.session.asset_begin(begin)
+    }
+
+    fn send_asset_chunk(&mut self, chunk: AssetChunk) -> Result<(), DeviceError> {
+        self.connected()?.session.asset_chunk(chunk).map(|_| ())
+    }
+
+    fn send_asset_commit(&mut self, commit: AssetCommit) -> Result<(), DeviceError> {
+        self.connected()?.session.asset_commit(commit).map(|_| ())
+    }
+
+    fn send_asset_release(&mut self, release: AssetRelease) -> Result<(), DeviceError> {
+        self.connected()?.session.asset_release(release).map(|_| ())
     }
 
     fn try_recv_event(&mut self) -> Option<ReceivedEvent> {
@@ -2807,6 +2837,18 @@ mod tests {
         }
         fn trigger_interrupt(&mut self, _interrupt: TriggerInterrupt) -> Result<(), DeviceError> {
             Ok(())
+        }
+        fn send_asset_begin(&mut self, _begin: AssetBegin) -> Result<Ack, DeviceError> {
+            unreachable!("stub device is never connected in these unit tests")
+        }
+        fn send_asset_chunk(&mut self, _chunk: AssetChunk) -> Result<(), DeviceError> {
+            unreachable!("stub device is never connected in these unit tests")
+        }
+        fn send_asset_commit(&mut self, _commit: AssetCommit) -> Result<(), DeviceError> {
+            unreachable!("stub device is never connected in these unit tests")
+        }
+        fn send_asset_release(&mut self, _release: AssetRelease) -> Result<(), DeviceError> {
+            unreachable!("stub device is never connected in these unit tests")
         }
         fn try_recv_event(&mut self) -> Option<ReceivedEvent> {
             self.queued_event.take()

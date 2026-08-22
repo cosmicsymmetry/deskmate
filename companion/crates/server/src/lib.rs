@@ -14,6 +14,7 @@
 //! `firmware`.
 
 mod admin;
+pub mod asset_sync;
 mod auth;
 mod device_link;
 pub mod firmware;

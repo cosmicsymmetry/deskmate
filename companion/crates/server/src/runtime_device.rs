@@ -18,8 +18,9 @@ use device::{DeviceError, ReceivedEvent, SessionDiagnostics, TransportError};
 use futures_util::stream::SplitSink;
 use futures_util::{SinkExt, StreamExt};
 use protocol::{
-    Ack, ActivateScreen, ApplyConfig, ErrorCode, ErrorResponse, Field, Message, NetworkConfig,
-    PushData, ScreenConfig, StatusResponse, TimeSync, TriggerInterrupt, WidgetConfig,
+    Ack, ActivateScreen, ApplyConfig, AssetBegin, AssetChunk, AssetCommit, AssetRelease, ErrorCode,
+    ErrorResponse, Field, Message, NetworkConfig, PushData, ScreenConfig, StatusResponse, TimeSync,
+    TriggerInterrupt, WidgetConfig,
 };
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::time::{Instant, MissedTickBehavior, interval, timeout};
@@ -689,6 +690,41 @@ impl RuntimeDevice for WebSocketRuntimeDevice {
         Ok(())
     }
 
+    /// Unlike `provision`/`factory_reset`, asset transfer is not cable-only:
+    /// the server owning the device over the tunnel is the entire point of
+    /// networked tier, so this is a plain request/reply exactly like
+    /// `push_fields`. Not part of reconnect replay (`remember_success`) --
+    /// `AssetSync::reconcile` re-derives its own state from `already_present`
+    /// on every pass rather than trusting a stale replay log.
+    fn send_asset_begin(&mut self, begin: AssetBegin) -> Result<Ack, DeviceError> {
+        let response = self.connected_request(Message::AssetBegin(begin))?;
+        match response {
+            Message::Ack(ack)
+                if ack.acknowledged_type == protocol::TYPE_ASSET_BEGIN
+                    && ack.revision.is_none()
+                    && ack.already_present.is_some() =>
+            {
+                Ok(ack)
+            }
+            _ => Err(DeviceError::UnexpectedMessage),
+        }
+    }
+
+    fn send_asset_chunk(&mut self, chunk: AssetChunk) -> Result<(), DeviceError> {
+        let response = self.connected_request(Message::AssetChunk(chunk))?;
+        Self::require_ack(&response, protocol::TYPE_ASSET_CHUNK, None)
+    }
+
+    fn send_asset_commit(&mut self, commit: AssetCommit) -> Result<(), DeviceError> {
+        let response = self.connected_request(Message::AssetCommit(commit))?;
+        Self::require_ack(&response, protocol::TYPE_ASSET_COMMIT, None)
+    }
+
+    fn send_asset_release(&mut self, release: AssetRelease) -> Result<(), DeviceError> {
+        let response = self.connected_request(Message::AssetRelease(release))?;
+        Self::require_ack(&response, protocol::TYPE_ASSET_RELEASE, None)
+    }
+
     fn try_recv_event(&mut self) -> Option<ReceivedEvent> {
         self.events.try_recv().ok()
     }
@@ -901,7 +937,11 @@ fn expected_response_type(message: &Message) -> Option<u8> {
         | Message::ActivateScreen(_)
         | Message::TriggerInterrupt(_)
         | Message::NetworkConfig(_)
-        | Message::FactoryReset => Some(protocol::TYPE_ACK),
+        | Message::FactoryReset
+        | Message::AssetBegin(_)
+        | Message::AssetChunk(_)
+        | Message::AssetCommit(_)
+        | Message::AssetRelease(_) => Some(protocol::TYPE_ACK),
         Message::Heartbeat => Some(protocol::TYPE_HEARTBEAT_ACK),
         _ => None,
     }

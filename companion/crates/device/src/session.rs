@@ -5,10 +5,11 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use protocol::{
-    Ack, ActivateScreen, ApplyConfig, CAPABILITY_CONFIG_ROTATION, CAPABILITY_CORE_WIDGETS,
-    Deframer, DeviceEvent, EventAction, EventKind, Field, HeartbeatAck, Message, NetworkConfig,
-    PushData, ScreenConfig, StatusResponse, TYPE_ACTIVATE_SCREEN, TYPE_APPLY_CONFIG,
-    TYPE_FACTORY_RESET, TYPE_NETWORK_CONFIG, TYPE_PUSH_DATA, TYPE_TIME_SYNC,
+    Ack, ActivateScreen, ApplyConfig, AssetBegin, AssetChunk, AssetCommit, AssetRelease,
+    CAPABILITY_CONFIG_ROTATION, CAPABILITY_CORE_WIDGETS, Deframer, DeviceEvent, EventAction,
+    EventKind, Field, HeartbeatAck, Message, NetworkConfig, PushData, ScreenConfig, StatusResponse,
+    TYPE_ACTIVATE_SCREEN, TYPE_APPLY_CONFIG, TYPE_ASSET_BEGIN, TYPE_ASSET_CHUNK, TYPE_ASSET_COMMIT,
+    TYPE_ASSET_RELEASE, TYPE_FACTORY_RESET, TYPE_NETWORK_CONFIG, TYPE_PUSH_DATA, TYPE_TIME_SYNC,
     TYPE_TRIGGER_INTERRUPT, TimeSync, TriggerInterrupt, WidgetConfig, decode_message,
     encode_message,
 };
@@ -327,6 +328,62 @@ impl<T: Transport + Send + 'static> DeviceSession<T> {
         match self.request(Message::FactoryReset)? {
             Message::Ack(ack)
                 if ack.acknowledged_type == TYPE_FACTORY_RESET && ack.revision.is_none() =>
+            {
+                Ok(ack)
+            }
+            _ => Err(DeviceError::UnexpectedMessage),
+        }
+    }
+
+    /// Reserve (or re-attach to) storage for one asset. Unlike `provision` and
+    /// `factory_reset`, asset transfer is not cable-only -- the same seam
+    /// drives both the serial and networked transports, so this is a plain
+    /// request/reply like `push_fields`. The `Ack`'s `already_present` tells
+    /// the caller whether to skip chunking entirely (content addressing is
+    /// the inventory protocol; see `server::asset_sync`).
+    pub fn asset_begin(&self, begin: AssetBegin) -> Result<Ack, DeviceError> {
+        match self.request(Message::AssetBegin(begin))? {
+            Message::Ack(ack)
+                if ack.acknowledged_type == TYPE_ASSET_BEGIN
+                    && ack.revision.is_none()
+                    && ack.already_present.is_some() =>
+            {
+                Ok(ack)
+            }
+            _ => Err(DeviceError::UnexpectedMessage),
+        }
+    }
+
+    pub fn asset_chunk(&self, chunk: AssetChunk) -> Result<Ack, DeviceError> {
+        match self.request(Message::AssetChunk(chunk))? {
+            Message::Ack(ack)
+                if ack.acknowledged_type == TYPE_ASSET_CHUNK && ack.revision.is_none() =>
+            {
+                Ok(ack)
+            }
+            _ => Err(DeviceError::UnexpectedMessage),
+        }
+    }
+
+    pub fn asset_commit(&self, commit: AssetCommit) -> Result<Ack, DeviceError> {
+        match self.request(Message::AssetCommit(commit))? {
+            Message::Ack(ack)
+                if ack.acknowledged_type == TYPE_ASSET_COMMIT && ack.revision.is_none() =>
+            {
+                Ok(ack)
+            }
+            _ => Err(DeviceError::UnexpectedMessage),
+        }
+    }
+
+    /// Tell the device the full set of digests that should survive. The
+    /// device aborts any in-flight transfer, marks committed records absent
+    /// from this set dead, and compacts -- so this must carry every desired
+    /// digest, not just the ones this session happened to (re)upload.
+    pub fn asset_release(&self, release: AssetRelease) -> Result<Ack, DeviceError> {
+        match self.request(Message::AssetRelease(release))? {
+            Message::Ack(ack)
+                if ack.acknowledged_type == TYPE_ASSET_RELEASE && ack.revision.is_none() =>
             {
                 Ok(ack)
             }

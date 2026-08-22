@@ -1016,13 +1016,26 @@ Extend the `Ack` validator (`protocol_message.c` around line 985): add the four 
 types to the accepted-type list with `revision_required = false`, and enforce that
 `has_already_present` is true **iff** `acknowledged_type == PROTOCOL_TYPE_ASSET_BEGIN`.
 
-- [ ] **Step 5: Update the protocol document**
+- [ ] **Step 5: Fix the host-test include path**
+
+`protocol_message.h` now includes `core/asset_store.h`, which
+`firmware/host_tests/Makefile`'s `test_protocol` rule cannot find — it compiles with
+`-I$(CBOR_DIR)` only. Add `-I../main` to that rule:
+
+```make
+test_protocol: test_protocol.c $(PROTOCOL_SRCS)
+	$(CC) $(CFLAGS) -I$(CBOR_DIR) -I../main -o $@ $^
+```
+
+Check every other rule that compiles `$(PROTOCOL_SRCS)` and add `-I../main` there too.
+
+- [ ] **Step 6: Update the protocol document**
 
 In `docs/protocol/v1.md`, add rows 15–18 to the registry table, document the four
 payloads and the new `Ack` key in the CBOR section, and note that all four are gated on
 capability bit 5. State that the current capability value is `235`.
 
-- [ ] **Step 6: Run the tests**
+- [ ] **Step 7: Run the tests**
 
 ```sh
 make -C firmware/host_tests clean test
@@ -1030,11 +1043,11 @@ make -C firmware/host_tests clean test
 
 Expected: PASS.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
 git add firmware/main/core/protocol_message.h firmware/main/core/protocol_message.c \
-        firmware/host_tests/test_protocol.c docs/protocol/v1.md
+        firmware/host_tests/test_protocol.c firmware/host_tests/Makefile docs/protocol/v1.md
 git commit -m "feat: add asset transfer message types and switch on capability bit 5"
 ```
 
@@ -1254,10 +1267,17 @@ git commit -m "feat: back the asset store with the assets partition and mmap"
 - Modify: `firmware/lv_conf.h:1052`, `firmware/main/CMakeLists.txt`
 
 **Interfaces:**
-- Consumes: Task 3's `asset_store_find`; Task 7's `asset_flash_map`,
-  `asset_flash_store`.
-- Produces: `font_registry_init()`, `font_registry_acquire(digest, pixel_size)` →
-  `lv_font_t *`, `font_registry_release(font)`, `font_registry_reset()`.
+- Consumes: nothing at compile time. The digest→bytes resolver is injected, so this
+  task does **not** depend on Task 7.
+- Produces: `asset_resolver_fn`, `font_registry_result_t`, `font_registry_init(resolver)`,
+  `font_registry_acquire(digest, pixel_size)` → `lv_font_t *`,
+  `font_registry_release(font)`, `font_registry_reset()`, `font_registry_warm()`.
+
+> **Controller ruling (pre-flight scan).** This file must contain **no ESP-IDF
+> include and no `esp_err_t`**, because Task 12 compiles it into `lvgl-sim`, which
+> builds firmware C on the host with no ESP-IDF present. As originally drafted Task 8
+> and Task 12 could not both hold. The resolver callback is the fix, and it also honours
+> the repo's standing rule that hardware-independent logic stays free of ESP-IDF.
 
 This is the task that lifts the four-size ceiling. `lv_tiny_ttf_create_data_ex()` takes
 the mmap'd TTF pointer and any pixel size, so `deskmate_font_18/28/56/96` stop being
@@ -1288,7 +1308,20 @@ something else to make room.
 #include "core/asset_store.h"
 #include "lvgl.h"
 
-esp_err_t font_registry_init(void);
+/* Resolves a digest to mapped asset bytes. Firmware passes an
+ * asset_flash-backed resolver (wired in Task 9); lvgl-sim passes a RAM-backed
+ * one (Task 12). This indirection is why this file carries no ESP-IDF include
+ * and can therefore be compiled into the simulator like every other ui/ file. */
+typedef bool (*asset_resolver_fn)(const uint8_t *digest, const void **out_ptr,
+                                  uint32_t *out_len, uint8_t *out_kind);
+
+typedef enum {
+    FONT_REGISTRY_OK = 0,
+    FONT_REGISTRY_ERR_ARGUMENT,
+    FONT_REGISTRY_ERR_MEMORY,
+} font_registry_result_t;
+
+font_registry_result_t font_registry_init(asset_resolver_fn resolver);
 
 /* Returns a font for `digest` rendered at `pixel_size`, or NULL if the asset
  * is absent or not a font. Call under lvgl_port_lock(). */
@@ -1306,9 +1339,9 @@ void font_registry_warm(lv_font_t *font, const char *glyphs);
 
 - [ ] **Step 4: Implement**
 
-An LRU keyed by `(digest, pixel_size)` over at most 8 open faces. On a miss:
-`asset_store_find()` → accept `ASSET_KIND_FONT` **and** `ASSET_KIND_ICON_FONT`, reject
-`ASSET_KIND_IMAGE` → `asset_flash_map()` →
+An LRU keyed by `(digest, pixel_size)` over at most 8 open faces. On a miss: call the
+injected `asset_resolver_fn` → accept `ASSET_KIND_FONT` **and** `ASSET_KIND_ICON_FONT`,
+reject `ASSET_KIND_IMAGE` →
 `lv_tiny_ttf_create_data_ex(ptr, record.length, pixel_size, LV_FONT_KERNING_NORMAL,
 cache_size)`. On eviction, `lv_tiny_ttf_destroy()`.
 
@@ -1386,13 +1419,20 @@ Encode `{31: {0: used, 1: free, 2: count}}` from `asset_store_stats()`. Follow k
 29–30's precedent: omit the key entirely when the store is unformatted, and document
 that a reader which does not see it treats the device as having no asset store.
 
-- [ ] **Step 3: Add the capability gate**
+- [ ] **Step 3: Wire the flash-backed font resolver**
+
+Task 8 left `font_registry_init()` taking an `asset_resolver_fn`. Implement that
+resolver here, over `asset_flash_store()` + `asset_flash_map()`, and call
+`font_registry_init()` once at boot after `asset_flash_init()`. This is the only place
+the two halves meet.
+
+- [ ] **Step 4: Add the capability gate**
 
 Reject all four types with `PROTOCOL_ERROR_UNSUPPORTED_MESSAGE` when
 `PROTOCOL_CAPABILITY_ASSET_TRANSFER` is not advertised. This mirrors how types 13–14
 gate on bit 7 and keeps `docs/protocol/v1.md` truthful.
 
-- [ ] **Step 4: Build and run every host test**
+- [ ] **Step 5: Build and run every host test**
 
 ```sh
 make -C firmware/host_tests clean test
@@ -1400,7 +1440,7 @@ make -C firmware/host_tests clean test
 idf.py -C firmware build
 ```
 
-- [ ] **Step 5: Update the protocol document and commit**
+- [ ] **Step 6: Update the protocol document and commit**
 
 Add key 31 to the `StatusResponse` table in `docs/protocol/v1.md`.
 

@@ -305,11 +305,18 @@ asset_store_result_t asset_store_reserve(const asset_store_t *store,
             free_index = index;
         }
 
-        /* High-water mark spans committed and uncommitted (in-flight)
-         * records only -- a dead record's space is reclaimable but not yet
-         * reclaimed until compaction actually moves bytes, so it does not
-         * bound where the next reservation may land. */
-        if (!is_free_slot && (state == ASSET_STATE_COMMITTED || state == ASSET_STATE_UNCOMMITTED)) {
+        /* High-water mark spans committed, uncommitted (in-flight), AND
+         * dead records. The store is append-only: mark_dead only clears a
+         * state byte, it never erases the blob bytes a dead record once
+         * claimed, so that space is reclaimable but NOT reclaimed until
+         * compaction physically moves bytes. Excluding dead records here
+         * would let a fresh reservation land on top of a dead record's
+         * still-present bytes, and since NOR writes only clear bits, the
+         * result is `old & new` -- silent corruption of the new asset. Do
+         * not "optimise" dead records back out of this scan. */
+        if (!is_free_slot &&
+            (state == ASSET_STATE_COMMITTED || state == ASSET_STATE_UNCOMMITTED ||
+             state == ASSET_STATE_DEAD)) {
             uint32_t offset = read_u32_le(bytes + REC_OFFSET_OFFSET);
             uint32_t rec_length = read_u32_le(bytes + REC_OFFSET_LENGTH);
             /* offset/length are untrusted flash content; bound them before

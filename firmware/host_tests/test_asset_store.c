@@ -248,6 +248,34 @@ static void test_compaction_plan_reports_capacity_exhaustion(void)
            == ASSET_STORE_ERR_FULL);
 }
 
+static void test_reserve_does_not_reuse_dead_but_uncompacted_space(void)
+{
+    asset_flash_io_t io;
+    asset_store_t store = formatted_store(&io);
+    uint8_t dead_digest[ASSET_DIGEST_BYTES];
+    uint8_t new_digest[ASSET_DIGEST_BYTES];
+    digest_of(0xD0, dead_digest);
+    digest_of(0xD1, new_digest);
+    uint32_t index = 0U, blob = 0U;
+
+    /* The store is append-only: mark_dead only clears a state byte, it
+     * never erases the blob bytes it once claimed. Only compaction (which
+     * this test never runs) reclaims that space. So a reservation made
+     * after a mark_dead, with no compaction in between, must still land at
+     * or past the dead record's end -- landing inside it would let a NOR
+     * bit-clear write silently corrupt the new asset with the old one's
+     * leftover bits. */
+    assert(asset_store_reserve(&store, dead_digest, ASSET_KIND_FONT, 4096U,
+                               &index, &blob) == ASSET_STORE_OK);
+    assert(asset_store_commit(&store, index) == ASSET_STORE_OK);
+    assert(asset_store_mark_dead(&store, index) == ASSET_STORE_OK);
+
+    uint32_t new_index = 0U, new_blob = 0U;
+    assert(asset_store_reserve(&store, new_digest, ASSET_KIND_FONT, 512U,
+                               &new_index, &new_blob) == ASSET_STORE_OK);
+    assert(new_blob >= 4096U);
+}
+
 int main(void)
 {
     test_format_then_open_roundtrips();
@@ -260,5 +288,6 @@ int main(void)
     test_duplicate_digest_reports_already_present();
     test_compaction_plan_drops_unreferenced_and_packs();
     test_compaction_plan_reports_capacity_exhaustion();
+    test_reserve_does_not_reuse_dead_but_uncompacted_space();
     return 0;
 }

@@ -4,6 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "core/asset_store.h"
 #include "protocol_frame.h"
 
 #define PROTOCOL_LINK_TIMEOUT_MS 10000U
@@ -35,6 +36,7 @@
     (PROTOCOL_CAPABILITY_CORE_WIDGETS |                          \
      PROTOCOL_CAPABILITY_CONFIG_ROTATION |                       \
      PROTOCOL_CAPABILITY_EXTENDED_TEMPLATES |                    \
+     PROTOCOL_CAPABILITY_ASSET_TRANSFER |                        \
      PROTOCOL_CAPABILITY_FIRMWARE_UPDATE |                       \
      PROTOCOL_CAPABILITY_NETWORKING)
 #define PROTOCOL_MAX_SSID_LENGTH 32U
@@ -43,6 +45,11 @@
 #define PROTOCOL_MAX_DEVICE_TOKEN_LENGTH 128U
 #define PROTOCOL_MAX_DEVICE_ID_LENGTH 32U
 #define PROTOCOL_MAX_IP_LENGTH 15U
+/* 1920, not the 2034-byte envelope cap: the CBOR map header, the 32-byte
+ * digest with its bstr header, the offset key/value, and the data bstr
+ * header cost roughly 46 bytes; this leaves deliberate margin. */
+#define PROTOCOL_MAX_ASSET_CHUNK_BYTES 1920U
+#define PROTOCOL_MAX_ASSET_DIGESTS 32U
 
 typedef enum {
     PROTOCOL_TYPE_STATUS_REQUEST = 1,
@@ -59,6 +66,10 @@ typedef enum {
     PROTOCOL_TYPE_DEVICE_EVENT = 12,
     PROTOCOL_TYPE_NETWORK_CONFIG = 13,
     PROTOCOL_TYPE_FACTORY_RESET = 14,
+    PROTOCOL_TYPE_ASSET_BEGIN = 15,
+    PROTOCOL_TYPE_ASSET_CHUNK = 16,
+    PROTOCOL_TYPE_ASSET_COMMIT = 17,
+    PROTOCOL_TYPE_ASSET_RELEASE = 18,
 } protocol_message_type_t;
 
 typedef enum {
@@ -153,6 +164,29 @@ typedef struct {
 } protocol_network_config_t;
 
 typedef struct {
+    uint8_t digest[ASSET_DIGEST_BYTES];
+    asset_kind_t kind;
+    uint32_t total_length;
+    bool volatile_tier;
+} protocol_asset_begin_t;
+
+typedef struct {
+    uint8_t digest[ASSET_DIGEST_BYTES];
+    uint32_t offset;
+    uint8_t data[PROTOCOL_MAX_ASSET_CHUNK_BYTES];
+    size_t data_length;
+} protocol_asset_chunk_t;
+
+typedef struct {
+    uint8_t digest[ASSET_DIGEST_BYTES];
+} protocol_asset_commit_t;
+
+typedef struct {
+    uint8_t digests[PROTOCOL_MAX_ASSET_DIGESTS][ASSET_DIGEST_BYTES];
+    size_t digest_count;
+} protocol_asset_release_t;
+
+typedef struct {
     char widget_id[PROTOCOL_MAX_WIDGET_ID_LENGTH + 1U];
     protocol_template_kind_t template_kind;
     protocol_size_class_t size_class;
@@ -226,6 +260,8 @@ typedef struct {
     uint8_t acknowledged_type;
     bool has_revision;
     uint32_t revision;
+    bool has_already_present;
+    bool already_present;
 } protocol_ack_t;
 
 typedef struct {
@@ -287,6 +323,10 @@ typedef struct {
         protocol_trigger_interrupt_t trigger_interrupt;
         protocol_device_event_t device_event;
         protocol_network_config_t network_config;
+        protocol_asset_begin_t asset_begin;
+        protocol_asset_chunk_t asset_chunk;
+        protocol_asset_commit_t asset_commit;
+        protocol_asset_release_t asset_release;
     } value;
 } protocol_message_t;
 

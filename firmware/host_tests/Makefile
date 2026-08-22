@@ -36,19 +36,19 @@ test_timefmt: test_timefmt.c ../main/core/timefmt.c
 	$(CC) $(CFLAGS) -o $@ $^
 
 test_protocol: test_protocol.c $(PROTOCOL_SRCS)
-	$(CC) $(CFLAGS) -I$(CBOR_DIR) -o $@ $^
+	$(CC) $(CFLAGS) -I$(CBOR_DIR) -I../main -o $@ $^
 
 test_link_state: test_link_state.c ../main/core/link_state.c
-	$(CC) $(CFLAGS) -o $@ $^
+	$(CC) $(CFLAGS) -I../main -o $@ $^
 
 test_template_fields: test_template_fields.c ../main/core/template_fields.c \
 	$(PROTOCOL_SRCS)
-	$(CC) $(CFLAGS) -I$(CBOR_DIR) -o $@ $^
+	$(CC) $(CFLAGS) -I$(CBOR_DIR) -I../main -o $@ $^
 
 test_widget_model: test_widget_model.c ../main/core/widget_model.c \
 	../main/core/template_fields.c ../main/core/link_state.c \
 	$(PROTOCOL_SRCS)
-	$(CC) $(CFLAGS) -I$(CBOR_DIR) -o $@ $^
+	$(CC) $(CFLAGS) -I$(CBOR_DIR) -I../main -o $@ $^
 
 test_ui_command_queue: test_ui_command_queue.c \
 	../main/ui/ui_command_queue.c ../main/core/template_fields.c
@@ -59,11 +59,11 @@ test_navigation: test_navigation.c ../main/core/navigation.c
 
 test_interrupt_state: test_interrupt_state.c \
 	../main/core/interrupt_state.c
-	$(CC) $(CFLAGS) -o $@ $^
+	$(CC) $(CFLAGS) -I../main -o $@ $^
 
 test_device_event_queue: test_device_event_queue.c \
 	../main/core/device_event_queue.c
-	$(CC) $(CFLAGS) -o $@ $^
+	$(CC) $(CFLAGS) -I../main -o $@ $^
 
 test_weather_icon: test_weather_icon.c \
 	../main/ui/templates/weather_icon.c
@@ -73,7 +73,7 @@ test_clock_source: test_clock_source.c ../main/core/clock_source.c
 	$(CC) $(CFLAGS) -o $@ $^
 
 test_net_config: test_net_config.c ../main/core/net_config.c $(PROTOCOL_SRCS)
-	$(CC) $(CFLAGS) -I$(CBOR_DIR) -o $@ $^
+	$(CC) $(CFLAGS) -I$(CBOR_DIR) -I../main -o $@ $^
 
 test_net_ring: test_net_ring.c ../main/core/net_ring.c
 	$(CC) $(CFLAGS) -o $@ $^
@@ -83,7 +83,7 @@ test_reconnect_backoff: test_reconnect_backoff.c \
 	$(CC) $(CFLAGS) -o $@ $^
 
 test_ota_policy: test_ota_policy.c ../main/core/ota_policy.c
-	$(CC) $(CFLAGS) -o $@ $^
+	$(CC) $(CFLAGS) -I../main -o $@ $^
 
 test_asset_store: test_asset_store.c ../main/core/asset_store.c
 	$(CC) $(CFLAGS) -I../main -o $@ $^

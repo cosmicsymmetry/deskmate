@@ -133,6 +133,58 @@ static protocol_message_result_t read_text(CborValue *value,
     return PROTOCOL_MESSAGE_OK;
 }
 
+static protocol_message_result_t read_bytes_exact(CborValue *value,
+                                                   uint8_t *destination,
+                                                   size_t exact_length)
+{
+    if (!cbor_value_is_byte_string(value)) {
+        return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
+    }
+    size_t length = 0U;
+    CborError error = cbor_value_calculate_string_length(value, &length);
+    if (error != CborNoError) {
+        return cbor_result(error);
+    }
+    if (length != exact_length) {
+        return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
+    }
+    size_t copied = exact_length;
+    CborValue next;
+    error = cbor_value_copy_byte_string(value, destination, &copied, &next);
+    if (error != CborNoError) {
+        return cbor_result(error);
+    }
+    *value = next;
+    return PROTOCOL_MESSAGE_OK;
+}
+
+static protocol_message_result_t read_bytes_bounded(CborValue *value,
+                                                     uint8_t *destination,
+                                                     size_t max_length,
+                                                     size_t *out_length)
+{
+    if (!cbor_value_is_byte_string(value)) {
+        return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
+    }
+    size_t length = 0U;
+    CborError error = cbor_value_calculate_string_length(value, &length);
+    if (error != CborNoError) {
+        return cbor_result(error);
+    }
+    if (length > max_length) {
+        return PROTOCOL_MESSAGE_ERR_TOO_LARGE;
+    }
+    size_t copied = max_length;
+    CborValue next;
+    error = cbor_value_copy_byte_string(value, destination, &copied, &next);
+    if (error != CborNoError) {
+        return cbor_result(error);
+    }
+    *value = next;
+    *out_length = copied;
+    return PROTOCOL_MESSAGE_OK;
+}
+
 static protocol_message_result_t read_key(CborValue *contents,
                                            uint64_t *key,
                                            uint64_t *previous,
@@ -500,6 +552,232 @@ static protocol_message_result_t validate_apply_config(
         if (!found) {
             return PROTOCOL_MESSAGE_ERR_UNKNOWN_WIDGET;
         }
+    }
+    return PROTOCOL_MESSAGE_OK;
+}
+
+static protocol_message_result_t decode_asset_begin(
+    const protocol_frame_t *frame,
+    protocol_asset_begin_t *begin)
+{
+    CborParser parser;
+    CborValue contents;
+    size_t count = 0U;
+    protocol_message_result_t result = open_payload_map(
+        frame->payload, frame->payload_length, &parser, &contents, &count);
+    if (result != PROTOCOL_MESSAGE_OK) {
+        return result;
+    }
+    uint32_t present = 0U;
+    uint64_t previous = 0U;
+    bool has_previous = false;
+    for (size_t i = 0U; i < count; ++i) {
+        uint64_t key = 0U;
+        result = read_key(&contents, &key, &previous, &has_previous);
+        if (result != PROTOCOL_MESSAGE_OK) {
+            return result;
+        }
+        if (key == 0U) {
+            result = read_bytes_exact(&contents, begin->digest,
+                                      ASSET_DIGEST_BYTES);
+        } else if (key == 1U) {
+            uint64_t raw = 0U;
+            result = read_unsigned(&contents, &raw);
+            if (result == PROTOCOL_MESSAGE_OK) {
+                if (raw != (uint64_t)ASSET_KIND_FONT &&
+                    raw != (uint64_t)ASSET_KIND_ICON_FONT &&
+                    raw != (uint64_t)ASSET_KIND_IMAGE) {
+                    result = PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
+                } else {
+                    begin->kind = (asset_kind_t)raw;
+                }
+            }
+        } else if (key == 2U) {
+            uint64_t raw = 0U;
+            result = read_unsigned(&contents, &raw);
+            if (result == PROTOCOL_MESSAGE_OK &&
+                (raw == 0U || raw > (uint64_t)ASSET_MAX_BYTES)) {
+                result = PROTOCOL_MESSAGE_ERR_TOO_LARGE;
+            }
+            if (result == PROTOCOL_MESSAGE_OK) {
+                begin->total_length = (uint32_t)raw;
+            }
+        } else if (key == 3U) {
+            result = read_boolean(&contents, &begin->volatile_tier);
+        } else {
+            result = skip_value(&contents);
+        }
+        if (result != PROTOCOL_MESSAGE_OK) {
+            return result;
+        }
+        if (key <= 3U) {
+            present |= REQUIRED_BIT((uint32_t)key);
+        }
+    }
+    uint32_t required =
+        REQUIRED_BIT(0) | REQUIRED_BIT(1) | REQUIRED_BIT(2) | REQUIRED_BIT(3);
+    if ((present & required) != required) {
+        return PROTOCOL_MESSAGE_ERR_MISSING_FIELD;
+    }
+    return PROTOCOL_MESSAGE_OK;
+}
+
+static protocol_message_result_t decode_asset_chunk(
+    const protocol_frame_t *frame,
+    protocol_asset_chunk_t *chunk)
+{
+    CborParser parser;
+    CborValue contents;
+    size_t count = 0U;
+    protocol_message_result_t result = open_payload_map(
+        frame->payload, frame->payload_length, &parser, &contents, &count);
+    if (result != PROTOCOL_MESSAGE_OK) {
+        return result;
+    }
+    uint32_t present = 0U;
+    uint64_t previous = 0U;
+    bool has_previous = false;
+    for (size_t i = 0U; i < count; ++i) {
+        uint64_t key = 0U;
+        result = read_key(&contents, &key, &previous, &has_previous);
+        if (result != PROTOCOL_MESSAGE_OK) {
+            return result;
+        }
+        if (key == 0U) {
+            result = read_bytes_exact(&contents, chunk->digest,
+                                      ASSET_DIGEST_BYTES);
+        } else if (key == 1U) {
+            uint64_t raw = 0U;
+            result = read_unsigned(&contents, &raw);
+            if (result == PROTOCOL_MESSAGE_OK && raw > UINT32_MAX) {
+                result = PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
+            }
+            if (result == PROTOCOL_MESSAGE_OK) {
+                chunk->offset = (uint32_t)raw;
+            }
+        } else if (key == 2U) {
+            result = read_bytes_bounded(&contents, chunk->data,
+                                        PROTOCOL_MAX_ASSET_CHUNK_BYTES,
+                                        &chunk->data_length);
+        } else {
+            result = skip_value(&contents);
+        }
+        if (result != PROTOCOL_MESSAGE_OK) {
+            return result;
+        }
+        if (key <= 2U) {
+            present |= REQUIRED_BIT((uint32_t)key);
+        }
+    }
+    uint32_t required = REQUIRED_BIT(0) | REQUIRED_BIT(1) | REQUIRED_BIT(2);
+    if ((present & required) != required) {
+        return PROTOCOL_MESSAGE_ERR_MISSING_FIELD;
+    }
+    return PROTOCOL_MESSAGE_OK;
+}
+
+static protocol_message_result_t decode_asset_commit(
+    const protocol_frame_t *frame,
+    protocol_asset_commit_t *commit)
+{
+    CborParser parser;
+    CborValue contents;
+    size_t count = 0U;
+    protocol_message_result_t result = open_payload_map(
+        frame->payload, frame->payload_length, &parser, &contents, &count);
+    if (result != PROTOCOL_MESSAGE_OK) {
+        return result;
+    }
+    uint32_t present = 0U;
+    uint64_t previous = 0U;
+    bool has_previous = false;
+    for (size_t i = 0U; i < count; ++i) {
+        uint64_t key = 0U;
+        result = read_key(&contents, &key, &previous, &has_previous);
+        if (result != PROTOCOL_MESSAGE_OK) {
+            return result;
+        }
+        if (key == 0U) {
+            result = read_bytes_exact(&contents, commit->digest,
+                                      ASSET_DIGEST_BYTES);
+            present |= REQUIRED_BIT(0);
+        } else {
+            result = skip_value(&contents);
+        }
+        if (result != PROTOCOL_MESSAGE_OK) {
+            return result;
+        }
+    }
+    if ((present & REQUIRED_BIT(0)) == 0U) {
+        return PROTOCOL_MESSAGE_ERR_MISSING_FIELD;
+    }
+    return PROTOCOL_MESSAGE_OK;
+}
+
+static protocol_message_result_t decode_asset_digests(
+    CborValue *value,
+    protocol_asset_release_t *release)
+{
+    if (!cbor_value_is_array(value)) {
+        return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
+    }
+    size_t count = 0U;
+    CborError error = cbor_value_get_array_length(value, &count);
+    if (error != CborNoError) {
+        return cbor_result(error);
+    }
+    if (count > PROTOCOL_MAX_ASSET_DIGESTS) {
+        return PROTOCOL_MESSAGE_ERR_TOO_LARGE;
+    }
+    CborValue items;
+    error = cbor_value_enter_container(value, &items);
+    if (error != CborNoError) {
+        return cbor_result(error);
+    }
+    for (size_t i = 0U; i < count; ++i) {
+        protocol_message_result_t result = read_bytes_exact(
+            &items, release->digests[i], ASSET_DIGEST_BYTES);
+        if (result != PROTOCOL_MESSAGE_OK) {
+            return result;
+        }
+    }
+    release->digest_count = count;
+    return cbor_result(cbor_value_leave_container(value, &items));
+}
+
+static protocol_message_result_t decode_asset_release(
+    const protocol_frame_t *frame,
+    protocol_asset_release_t *release)
+{
+    CborParser parser;
+    CborValue contents;
+    size_t count = 0U;
+    protocol_message_result_t result = open_payload_map(
+        frame->payload, frame->payload_length, &parser, &contents, &count);
+    if (result != PROTOCOL_MESSAGE_OK) {
+        return result;
+    }
+    uint32_t present = 0U;
+    uint64_t previous = 0U;
+    bool has_previous = false;
+    for (size_t i = 0U; i < count; ++i) {
+        uint64_t key = 0U;
+        result = read_key(&contents, &key, &previous, &has_previous);
+        if (result != PROTOCOL_MESSAGE_OK) {
+            return result;
+        }
+        if (key == 0U) {
+            result = decode_asset_digests(&contents, release);
+            present |= REQUIRED_BIT(0);
+        } else {
+            result = skip_value(&contents);
+        }
+        if (result != PROTOCOL_MESSAGE_OK) {
+            return result;
+        }
+    }
+    if ((present & REQUIRED_BIT(0)) == 0U) {
+        return PROTOCOL_MESSAGE_ERR_MISSING_FIELD;
     }
     return PROTOCOL_MESSAGE_OK;
 }
@@ -972,6 +1250,9 @@ static protocol_message_result_t decode_ack(const protocol_frame_t *frame,
                 ack->has_revision = true;
                 ack->revision = (uint32_t)value;
             }
+        } else if (key == 2U) {
+            result = read_boolean(&contents, &ack->already_present);
+            ack->has_already_present = true;
         } else {
             result = skip_value(&contents);
         }
@@ -985,19 +1266,28 @@ static protocol_message_result_t decode_ack(const protocol_frame_t *frame,
     bool revision_required =
         ack->acknowledged_type == PROTOCOL_TYPE_PUSH_DATA ||
         ack->acknowledged_type == PROTOCOL_TYPE_APPLY_CONFIG;
+    bool already_present_required =
+        ack->acknowledged_type == PROTOCOL_TYPE_ASSET_BEGIN;
     if (ack->acknowledged_type != PROTOCOL_TYPE_TIME_SYNC &&
         ack->acknowledged_type != PROTOCOL_TYPE_PUSH_DATA &&
         ack->acknowledged_type != PROTOCOL_TYPE_APPLY_CONFIG &&
         ack->acknowledged_type != PROTOCOL_TYPE_ACTIVATE_SCREEN &&
         ack->acknowledged_type != PROTOCOL_TYPE_TRIGGER_INTERRUPT &&
         ack->acknowledged_type != PROTOCOL_TYPE_NETWORK_CONFIG &&
-        ack->acknowledged_type != PROTOCOL_TYPE_FACTORY_RESET) {
+        ack->acknowledged_type != PROTOCOL_TYPE_FACTORY_RESET &&
+        ack->acknowledged_type != PROTOCOL_TYPE_ASSET_BEGIN &&
+        ack->acknowledged_type != PROTOCOL_TYPE_ASSET_CHUNK &&
+        ack->acknowledged_type != PROTOCOL_TYPE_ASSET_COMMIT &&
+        ack->acknowledged_type != PROTOCOL_TYPE_ASSET_RELEASE) {
         return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
     }
     if (revision_required != ack->has_revision) {
         return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
     }
     if (ack->has_revision && ack->revision == 0U) {
+        return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
+    }
+    if (already_present_required != ack->has_already_present) {
         return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
     }
     return PROTOCOL_MESSAGE_OK;
@@ -1350,6 +1640,14 @@ protocol_message_result_t protocol_message_decode(
         return decode_network_config(frame, &message->value.network_config);
     case PROTOCOL_TYPE_FACTORY_RESET:
         return require_empty_map(frame);
+    case PROTOCOL_TYPE_ASSET_BEGIN:
+        return decode_asset_begin(frame, &message->value.asset_begin);
+    case PROTOCOL_TYPE_ASSET_CHUNK:
+        return decode_asset_chunk(frame, &message->value.asset_chunk);
+    case PROTOCOL_TYPE_ASSET_COMMIT:
+        return decode_asset_commit(frame, &message->value.asset_commit);
+    case PROTOCOL_TYPE_ASSET_RELEASE:
+        return decode_asset_release(frame, &message->value.asset_release);
     default:
         return PROTOCOL_MESSAGE_ERR_UNSUPPORTED_TYPE;
     }
@@ -1420,31 +1718,33 @@ static protocol_message_result_t validate_message(
             return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
         }
         return PROTOCOL_MESSAGE_OK;
-    case PROTOCOL_TYPE_ACK:
-        if ((message->value.ack.acknowledged_type !=
-                 PROTOCOL_TYPE_TIME_SYNC &&
-             message->value.ack.acknowledged_type !=
-                 PROTOCOL_TYPE_PUSH_DATA &&
-             message->value.ack.acknowledged_type !=
-                 PROTOCOL_TYPE_APPLY_CONFIG &&
-             message->value.ack.acknowledged_type !=
-                 PROTOCOL_TYPE_ACTIVATE_SCREEN &&
-             message->value.ack.acknowledged_type !=
-                 PROTOCOL_TYPE_TRIGGER_INTERRUPT &&
-             message->value.ack.acknowledged_type !=
-                 PROTOCOL_TYPE_NETWORK_CONFIG &&
-             message->value.ack.acknowledged_type !=
-                 PROTOCOL_TYPE_FACTORY_RESET) ||
-            (((message->value.ack.acknowledged_type ==
-                   PROTOCOL_TYPE_PUSH_DATA ||
-               message->value.ack.acknowledged_type ==
-                   PROTOCOL_TYPE_APPLY_CONFIG)) !=
-             message->value.ack.has_revision) ||
-            (message->value.ack.has_revision &&
-             message->value.ack.revision == 0U)) {
+    case PROTOCOL_TYPE_ACK: {
+        const protocol_ack_t *ack = &message->value.ack;
+        bool acknowledged_type_valid =
+            ack->acknowledged_type == PROTOCOL_TYPE_TIME_SYNC ||
+            ack->acknowledged_type == PROTOCOL_TYPE_PUSH_DATA ||
+            ack->acknowledged_type == PROTOCOL_TYPE_APPLY_CONFIG ||
+            ack->acknowledged_type == PROTOCOL_TYPE_ACTIVATE_SCREEN ||
+            ack->acknowledged_type == PROTOCOL_TYPE_TRIGGER_INTERRUPT ||
+            ack->acknowledged_type == PROTOCOL_TYPE_NETWORK_CONFIG ||
+            ack->acknowledged_type == PROTOCOL_TYPE_FACTORY_RESET ||
+            ack->acknowledged_type == PROTOCOL_TYPE_ASSET_BEGIN ||
+            ack->acknowledged_type == PROTOCOL_TYPE_ASSET_CHUNK ||
+            ack->acknowledged_type == PROTOCOL_TYPE_ASSET_COMMIT ||
+            ack->acknowledged_type == PROTOCOL_TYPE_ASSET_RELEASE;
+        bool revision_required =
+            ack->acknowledged_type == PROTOCOL_TYPE_PUSH_DATA ||
+            ack->acknowledged_type == PROTOCOL_TYPE_APPLY_CONFIG;
+        bool already_present_required =
+            ack->acknowledged_type == PROTOCOL_TYPE_ASSET_BEGIN;
+        if (!acknowledged_type_valid ||
+            revision_required != ack->has_revision ||
+            (ack->has_revision && ack->revision == 0U) ||
+            already_present_required != ack->has_already_present) {
             return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
         }
         return PROTOCOL_MESSAGE_OK;
+    }
     case PROTOCOL_TYPE_PUSH_DATA: {
         const protocol_push_data_t *push = &message->value.push_data;
         if (!bounded_length(push->widget_id, sizeof(push->widget_id),
@@ -1793,12 +2093,20 @@ static protocol_message_result_t encode_payload(
         if (result == PROTOCOL_MESSAGE_OK) result = encode_int(&map, message->value.time_sync.utc_offset_minutes);
         if (result == PROTOCOL_MESSAGE_OK) result = end_map(&root, &map);
         break;
-    case PROTOCOL_TYPE_ACK:
-        result = begin_map(&root, &map, message->value.ack.has_revision ? 2U : 1U);
+    case PROTOCOL_TYPE_ACK: {
+        size_t ack_field_count = 1U;
+        if (message->value.ack.has_revision) ++ack_field_count;
+        if (message->value.ack.has_already_present) ++ack_field_count;
+        result = begin_map(&root, &map, ack_field_count);
         if (result == PROTOCOL_MESSAGE_OK) result = encode_pair_uint(&map, 0U, message->value.ack.acknowledged_type);
         if (result == PROTOCOL_MESSAGE_OK && message->value.ack.has_revision) result = encode_pair_uint(&map, 1U, message->value.ack.revision);
+        if (result == PROTOCOL_MESSAGE_OK && message->value.ack.has_already_present) {
+            result = encode_uint(&map, 2U);
+            if (result == PROTOCOL_MESSAGE_OK) result = encode_bool(&map, message->value.ack.already_present);
+        }
         if (result == PROTOCOL_MESSAGE_OK) result = end_map(&root, &map);
         break;
+    }
     case PROTOCOL_TYPE_PUSH_DATA:
         result = begin_map(&root, &map, 3U);
         if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 0U);

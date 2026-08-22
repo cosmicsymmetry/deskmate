@@ -468,7 +468,7 @@ static void test_reserve_rejects_blob_overflow(void)
            == ASSET_STORE_ERR_FULL);
 }
 
-static void test_duplicate_digest_reports_already_present(void)
+static void test_committed_record_is_findable_by_digest(void)
 {
     asset_flash_io_t io;
     asset_store_t store = formatted_store(&io);
@@ -479,8 +479,9 @@ static void test_duplicate_digest_reports_already_present(void)
     assert(asset_store_reserve(&store, digest, ASSET_KIND_FONT, 64U, &index, &blob)
            == ASSET_STORE_OK);
     assert(asset_store_commit(&store, index) == ASSET_STORE_OK);
-    /* Content addressing means a second push of the same bytes is a no-op.
-     * This is the whole inventory protocol -- see plan Task 5. */
+    /* `reserve` does NOT deduplicate; the inventory protocol lives in Task 5's
+     * AssetBegin -> already_present handler. This only pins that a committed
+     * record is findable by its digest. */
     assert(asset_store_find(&store, digest, NULL, NULL) == ASSET_STORE_OK);
 }
 
@@ -611,8 +612,14 @@ Required behaviour:
 - `asset_store_commit` writes the single byte `ASSET_STATE_COMMITTED` at the record's
   state offset. No erase, no read-modify-write.
 - `asset_store_mark_dead` writes `ASSET_STATE_DEAD` (`0x00`) — also a pure bit-clear.
-- `asset_store_stats` sums committed lengths for `used_blob_bytes`, dead lengths for
-  `reclaimable_blob_bytes`, and reports the region remainder as `free_blob_bytes`.
+- `asset_store_stats` sums committed lengths for `used_blob_bytes` and dead lengths for
+  `reclaimable_blob_bytes`. **`free_blob_bytes` must come from the same high-water
+  helper `asset_store_reserve` uses**, so the figure equals what a reservation will
+  actually grant. Computing it as a plain region remainder makes an in-flight
+  (uncommitted) record invisible, and Task 9 ships these numbers to the host in
+  `StatusResponse` key 31 — an interrupted transfer would then advertise space the
+  device refuses to allocate. used + reclaimable + free need not sum to the region
+  while a transfer is in flight; that is deliberate.
 - `asset_store_plan_compaction` walks committed records in ascending `offset`, emits a
   move for each digest present in `keep`, assigning `to_offset` as a running total from
   zero. Returns `ASSET_STORE_ERR_FULL` if `moves_capacity` is insufficient — never

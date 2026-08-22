@@ -19,6 +19,7 @@
 #include "freertos/FreeRTOS.h"
 #include "link/usb_link.h"
 #include "lvgl.h"
+#include "ui/font_registry.h"
 
 // Captures the *pre-flush* logical frame: lv_snapshot_take_to_draw_buf()
 // re-renders the object tree through LVGL's normal software draw path into
@@ -136,6 +137,81 @@ void dev_capture_handle_request(uint32_t request_id)
     }
 
     heap_caps_free(buffer);
+}
+
+// Pinned to match lvgl-sim's asset-font golden exactly (Task 12,
+// companion/crates/lvgl-sim/src/cases.rs's asset_font_cases() /
+// csrc/sim_shim.c's sim_render_asset_font()): 72px, "12:34", warmed glyph
+// set "0123456789:", true-black canvas (0x000000), text colour 0xf5f5f7,
+// centred. A mismatch in any of these makes the device/simulator
+// comparison meaningless, not just wrong.
+#define DEV_ASSET_PROBE_PIXEL_SIZE 72
+#define DEV_ASSET_PROBE_TEXT "12:34"
+#define DEV_ASSET_PROBE_WARM_GLYPHS "0123456789:"
+#define DEV_ASSET_PROBE_BG_COLOR 0x000000U
+#define DEV_ASSET_PROBE_TEXT_COLOR 0xf5f5f7U
+
+void dev_capture_handle_asset_probe(const uint8_t *digest)
+{
+    if (digest == NULL) {
+        ESP_LOGW(TAG, "asset probe: null digest");
+        return;
+    }
+
+    lvgl_port_lock(0);
+
+    lv_font_t *font =
+        font_registry_acquire(digest, DEV_ASSET_PROBE_PIXEL_SIZE);
+    if (font == NULL) {
+        lvgl_port_unlock();
+        ESP_LOGW(TAG, "asset probe: font_registry_acquire failed");
+        return;
+    }
+    font_registry_warm(font, DEV_ASSET_PROBE_WARM_GLYPHS);
+
+    // Bare screen + centred label, deliberately not template_view.c's card
+    // chrome -- this probe pins raw runtime-font rendering parity against
+    // sim_render_asset_font(), not any one template's layout.
+    lv_obj_t *screen = lv_obj_create(NULL);
+    if (screen == NULL) {
+        font_registry_release(font);
+        lvgl_port_unlock();
+        ESP_LOGW(TAG, "asset probe: screen allocation failed");
+        return;
+    }
+    lv_obj_remove_flag(screen, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(screen, lv_color_hex(DEV_ASSET_PROBE_BG_COLOR),
+                              0);
+    lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, 0);
+
+    lv_obj_t *label = lv_label_create(screen);
+    if (label == NULL) {
+        lv_obj_delete(screen);
+        font_registry_release(font);
+        lvgl_port_unlock();
+        ESP_LOGW(TAG, "asset probe: label allocation failed");
+        return;
+    }
+    lv_obj_remove_style_all(label);
+    lv_obj_set_style_text_font(label, font, 0);
+    lv_obj_set_style_text_color(
+        label, lv_color_hex(DEV_ASSET_PROBE_TEXT_COLOR), 0);
+    lv_label_set_text(label, DEV_ASSET_PROBE_TEXT);
+    lv_obj_center(label);
+
+    // auto_del=true deletes whatever screen was previously active (the
+    // standalone clock, a template render, or a prior probe render), the
+    // same call template_view_show() uses.
+    lv_screen_load_anim(screen, LV_SCREEN_LOAD_ANIM_NONE, 0U, 0U, true);
+
+    // The active screen now holds the font (LVGL keeps its own reference
+    // via the label's style), so this probe's own hold is released once
+    // the screen is live -- matching sim_render_asset_font(), which
+    // releases immediately after copying the flushed frame out.
+    font_registry_release(font);
+
+    lvgl_port_unlock();
+    ESP_LOGI(TAG, "asset probe rendered at %dpx", DEV_ASSET_PROBE_PIXEL_SIZE);
 }
 
 #endif // DESKMATE_DEV_DIAG

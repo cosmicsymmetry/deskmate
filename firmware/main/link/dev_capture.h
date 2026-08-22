@@ -14,6 +14,20 @@
 
 #include <stdint.h>
 
+// Host -> device: render a runtime asset font onto the active screen so a
+// following DEV_CAPTURE_REQUEST_TYPE capture can be compared against
+// lvgl-sim's `asset-font--72px-digits` golden
+// (companion/crates/lvgl-sim/src/cases.rs). Payload is exactly
+// ASSET_DIGEST_BYTES (32) raw bytes: the asset store digest of a font
+// already committed via AssetBegin/AssetChunk/AssetCommit (this probe does
+// not implement transfer). Text ("12:34") and pixel size (72) are pinned
+// to match the golden, not carried on the wire -- only the digest varies,
+// so this stays useful for other assets without risking a mismatched
+// comparison. Any other payload length, or a request before the referenced
+// asset is committed, is rejected/no-ops the same way malformed release
+// requests are (protocol_task.c's dispatch, not this file).
+#define DEV_ASSET_PROBE_REQUEST_TYPE 0x7DU
+
 // Host -> device: request a framebuffer capture. Carries no payload; any
 // non-empty payload is rejected the same way malformed release requests
 // are (protocol_task.c's dispatch, not this file).
@@ -37,5 +51,21 @@
 // simply ends the response early (the host times out waiting for the
 // missing chunk rather than getting a wrong one).
 void dev_capture_handle_request(uint32_t request_id);
+
+// Handles one 0x7D request end to end: acquires `digest` at 72px through
+// font_registry_acquire() (Task 8/9), warms the digits+colon glyphs, and
+// draws "12:34" centred on a fresh full-screen black canvas -- the same
+// bare screen + centred label lvgl-sim's sim_render_asset_font() builds
+// (csrc/sim_shim.c), not template_view.c's card chrome, so the two frames
+// are comparable pixel for pixel. Runs under lvgl_port_lock()/
+// lvgl_port_unlock() because it mutates LVGL objects from the protocol
+// task, not an LVGL callback. Releases the acquired font on every path,
+// including a failed acquire or a failed screen/label allocation, so a
+// later font_registry_reset() during garbage collection never destroys a
+// face this probe still holds. `digest` must point to exactly
+// ASSET_DIGEST_BYTES readable bytes; the caller (protocol_task.c's
+// dispatch) is responsible for validating the request payload length
+// before calling this.
+void dev_capture_handle_asset_probe(const uint8_t *digest);
 
 #endif // DESKMATE_DEV_DIAG

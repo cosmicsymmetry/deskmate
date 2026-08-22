@@ -104,6 +104,54 @@ static bool digest_is_all_ff(const uint8_t *digest)
     return true;
 }
 
+/* The single source of truth for how much of the blob region is spoken for.
+ * Spans committed, in-flight (uncommitted, non-free) AND dead records: a
+ * dead record's bytes are reclaimable but not reclaimed until compaction
+ * physically moves them (see asset_store_reserve's own comment on why dead
+ * records count), and an in-flight reservation already occupies the space
+ * asset_store_reserve will refuse to hand out twice. asset_store_reserve
+ * and asset_store_stats both call this, so "how much reserve will grant"
+ * and "how much stats reports as free" cannot drift apart -- a caller that
+ * reads stats and then reserves that many bytes must succeed. */
+static asset_store_result_t compute_high_water(const asset_store_t *store,
+                                               uint32_t *out_high_water)
+{
+    uint32_t high_water = 0U;
+
+    for (uint32_t index = 0U; index < store->record_capacity; index++) {
+        uint8_t bytes[ASSET_RECORD_BYTES];
+        if (store->io->read(store->io->ctx, record_offset(index), bytes, sizeof bytes) != 0) {
+            return ASSET_STORE_ERR_IO;
+        }
+        uint8_t state = bytes[REC_OFFSET_STATE];
+        bool is_free_slot = (state == ASSET_STATE_UNCOMMITTED) &&
+            digest_is_all_ff(bytes + REC_OFFSET_DIGEST);
+        if (is_free_slot) {
+            continue;
+        }
+        if (state != ASSET_STATE_COMMITTED && state != ASSET_STATE_UNCOMMITTED &&
+            state != ASSET_STATE_DEAD) {
+            continue;
+        }
+
+        uint32_t offset = read_u32_le(bytes + REC_OFFSET_OFFSET);
+        uint32_t rec_length = read_u32_le(bytes + REC_OFFSET_LENGTH);
+        /* offset/length are untrusted flash content; bound them before
+         * summing so a corrupt record cannot wrap high_water. */
+        if (rec_length > store->blob_region_size ||
+            offset > store->blob_region_size - rec_length) {
+            return ASSET_STORE_ERR_CORRUPT;
+        }
+        uint32_t end = offset + rec_length;
+        if (end > high_water) {
+            high_water = end;
+        }
+    }
+
+    *out_high_water = high_water;
+    return ASSET_STORE_OK;
+}
+
 asset_store_result_t asset_store_format(const asset_flash_io_t *io,
                                         uint32_t partition_size,
                                         uint32_t record_capacity)
@@ -287,48 +335,28 @@ asset_store_result_t asset_store_reserve(const asset_store_t *store,
         return ASSET_STORE_ERR_ARGUMENT;
     }
 
+    /* High-water mark spans committed, uncommitted (in-flight), AND dead
+     * records -- see compute_high_water's own comment for why dead records
+     * count (their bytes are not reclaimed until compaction) and why this
+     * is the same computation asset_store_stats uses for free_blob_bytes. */
     uint32_t high_water = 0U;
+    asset_store_result_t hw_result = compute_high_water(store, &high_water);
+    if (hw_result != ASSET_STORE_OK) {
+        return hw_result;
+    }
+
     bool free_found = false;
     uint32_t free_index = 0U;
-
     for (uint32_t index = 0U; index < store->record_capacity; index++) {
         uint8_t bytes[ASSET_RECORD_BYTES];
         if (store->io->read(store->io->ctx, record_offset(index), bytes, sizeof bytes) != 0) {
             return ASSET_STORE_ERR_IO;
         }
-        uint8_t state = bytes[REC_OFFSET_STATE];
-        bool is_free_slot = (state == ASSET_STATE_UNCOMMITTED) &&
-            digest_is_all_ff(bytes + REC_OFFSET_DIGEST);
-
-        if (!free_found && is_free_slot) {
+        if (bytes[REC_OFFSET_STATE] == ASSET_STATE_UNCOMMITTED &&
+            digest_is_all_ff(bytes + REC_OFFSET_DIGEST)) {
             free_found = true;
             free_index = index;
-        }
-
-        /* High-water mark spans committed, uncommitted (in-flight), AND
-         * dead records. The store is append-only: mark_dead only clears a
-         * state byte, it never erases the blob bytes a dead record once
-         * claimed, so that space is reclaimable but NOT reclaimed until
-         * compaction physically moves bytes. Excluding dead records here
-         * would let a fresh reservation land on top of a dead record's
-         * still-present bytes, and since NOR writes only clear bits, the
-         * result is `old & new` -- silent corruption of the new asset. Do
-         * not "optimise" dead records back out of this scan. */
-        if (!is_free_slot &&
-            (state == ASSET_STATE_COMMITTED || state == ASSET_STATE_UNCOMMITTED ||
-             state == ASSET_STATE_DEAD)) {
-            uint32_t offset = read_u32_le(bytes + REC_OFFSET_OFFSET);
-            uint32_t rec_length = read_u32_le(bytes + REC_OFFSET_LENGTH);
-            /* offset/length are untrusted flash content; bound them before
-             * summing so a corrupt record cannot wrap high_water. */
-            if (rec_length > store->blob_region_size ||
-                offset > store->blob_region_size - rec_length) {
-                return ASSET_STORE_ERR_CORRUPT;
-            }
-            uint32_t end = offset + rec_length;
-            if (end > high_water) {
-                high_water = end;
-            }
+            break;
         }
     }
 
@@ -402,6 +430,22 @@ asset_store_result_t asset_store_stats(const asset_store_t *store,
         return ASSET_STORE_ERR_ARGUMENT;
     }
 
+    /* free_blob_bytes is derived from the exact same high-water computation
+     * asset_store_reserve uses to place the next blob, not from
+     * (region - used - reclaimable). Deriving it from the sums would fold
+     * an in-flight (uncommitted) reservation's bytes into "free", since
+     * uncommitted records are neither used nor reclaimable -- which is
+     * precisely how a caller could read free space that reserve then
+     * refuses to grant. used_blob_bytes/reclaimable_blob_bytes deliberately
+     * stay committed-only/dead-only, so used + reclaimable + free need not
+     * sum to blob_region_size while a transfer is in flight; the gap is
+     * exactly the uncommitted bytes, and that is intentional. */
+    uint32_t high_water = 0U;
+    asset_store_result_t hw_result = compute_high_water(store, &high_water);
+    if (hw_result != ASSET_STORE_OK) {
+        return hw_result;
+    }
+
     uint32_t committed_count = 0U;
     uint32_t used_blob_bytes = 0U;
     uint32_t reclaimable_blob_bytes = 0U;
@@ -437,7 +481,10 @@ asset_store_result_t asset_store_stats(const asset_store_t *store,
     out_stats->committed_count = committed_count;
     out_stats->used_blob_bytes = used_blob_bytes;
     out_stats->reclaimable_blob_bytes = reclaimable_blob_bytes;
-    out_stats->free_blob_bytes = store->blob_region_size - accounted_bytes;
+    /* high_water <= blob_region_size always holds: compute_high_water only
+     * ever grows high_water to a record's `end`, and every `end` is
+     * bounds-checked against blob_region_size before being considered. */
+    out_stats->free_blob_bytes = store->blob_region_size - high_water;
     return ASSET_STORE_OK;
 }
 

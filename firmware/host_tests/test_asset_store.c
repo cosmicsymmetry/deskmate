@@ -175,7 +175,7 @@ static void test_reserve_rejects_blob_overflow(void)
            == ASSET_STORE_ERR_FULL);
 }
 
-static void test_duplicate_digest_reports_already_present(void)
+static void test_committed_record_is_findable_by_digest(void)
 {
     asset_flash_io_t io;
     asset_store_t store = formatted_store(&io);
@@ -186,8 +186,11 @@ static void test_duplicate_digest_reports_already_present(void)
     assert(asset_store_reserve(&store, digest, ASSET_KIND_FONT, 64U, &index, &blob)
            == ASSET_STORE_OK);
     assert(asset_store_commit(&store, index) == ASSET_STORE_OK);
-    /* Content addressing means a second push of the same bytes is a no-op.
-     * This is the whole inventory protocol -- see plan Task 5. */
+    /* asset_store_reserve does not deduplicate by digest -- that is a
+     * deliberate design choice, not an oversight. Content-addressed
+     * deduplication is Task 5's job, via the AssetBegin handler reporting
+     * already_present after calling asset_store_find itself. This test
+     * only pins that a committed record is findable by its digest. */
     assert(asset_store_find(&store, digest, NULL, NULL) == ASSET_STORE_OK);
 }
 
@@ -276,6 +279,38 @@ static void test_reserve_does_not_reuse_dead_but_uncompacted_space(void)
     assert(new_blob >= 4096U);
 }
 
+static void test_stats_free_blob_bytes_matches_what_reserve_will_grant(void)
+{
+    asset_flash_io_t io;
+    asset_store_t store = formatted_store(&io);
+    uint8_t digest_a[ASSET_DIGEST_BYTES];
+    uint8_t digest_b[ASSET_DIGEST_BYTES];
+    digest_of(0xE0, digest_a);
+    digest_of(0xE1, digest_b);
+    uint32_t index = 0U, blob = 0U;
+
+    /* Reserve almost the whole region, leaving a small remainder, but do
+     * NOT commit it -- an in-flight reservation (a transfer stalled or
+     * dropped mid-font) already occupies that space. If free_blob_bytes
+     * were derived from (region - used - reclaimable) instead of the same
+     * high-water computation reserve uses, it would report the whole
+     * region as free here, and the second reserve below -- for exactly
+     * the amount stats just claimed was free -- would fail with
+     * ASSET_STORE_ERR_FULL. */
+    uint32_t reserved_length = store.blob_region_size - 100U;
+    assert(asset_store_reserve(&store, digest_a, ASSET_KIND_FONT, reserved_length,
+                               &index, &blob) == ASSET_STORE_OK);
+
+    asset_store_stats_t stats;
+    assert(asset_store_stats(&store, &stats) == ASSET_STORE_OK);
+    assert(stats.free_blob_bytes == 100U);
+
+    uint32_t new_index = 0U, new_blob = 0U;
+    assert(asset_store_reserve(&store, digest_b, ASSET_KIND_FONT,
+                               stats.free_blob_bytes, &new_index, &new_blob)
+           == ASSET_STORE_OK);
+}
+
 int main(void)
 {
     test_format_then_open_roundtrips();
@@ -285,9 +320,10 @@ int main(void)
     test_open_rejects_overflowing_record_capacity();
     test_uncommitted_reservation_is_not_findable();
     test_reserve_rejects_blob_overflow();
-    test_duplicate_digest_reports_already_present();
+    test_committed_record_is_findable_by_digest();
     test_compaction_plan_drops_unreferenced_and_packs();
     test_compaction_plan_reports_capacity_exhaustion();
     test_reserve_does_not_reuse_dead_but_uncompacted_space();
+    test_stats_free_blob_bytes_matches_what_reserve_will_grant();
     return 0;
 }

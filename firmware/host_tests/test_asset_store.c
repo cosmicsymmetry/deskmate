@@ -93,11 +93,48 @@ static void test_record_decode_rejects_unknown_kind(void)
     assert(asset_store_record_decode(bytes, &out) == ASSET_STORE_ERR_CORRUPT);
 }
 
+/* record_capacity is read straight off flash by asset_store_open, with no
+ * upper bound of its own -- only the multiplication against
+ * ASSET_RECORD_BYTES catches an out-of-range value, and that multiplication
+ * silently wraps in 32 bits if it isn't bounded first. 0x04000001 * 64 mod
+ * 2^32 == 64, which would otherwise slip past the "does the record array
+ * fit before the blob region" check with a plausible-looking
+ * blob_region_offset. Hand-craft the header directly: nothing that goes
+ * through asset_store_format can produce this record_capacity, since the
+ * fix rejects it there too. */
+static void test_open_rejects_overflowing_record_capacity(void)
+{
+    memset(g_flash, 0xFF, sizeof g_flash);
+    memcpy(g_flash + 0U, ASSET_STORE_MAGIC, 4U);
+    g_flash[4] = 1U; /* format version LE u32 = 1 */
+    g_flash[5] = 0U;
+    g_flash[6] = 0U;
+    g_flash[7] = 0U;
+    g_flash[8] = 0x01U; /* record_capacity LE u32 = 0x04000001 */
+    g_flash[9] = 0x00U;
+    g_flash[10] = 0x00U;
+    g_flash[11] = 0x04U;
+    g_flash[12] = 0x00U; /* blob_region_offset LE u32 = 4096 */
+    g_flash[13] = 0x10U;
+    g_flash[14] = 0x00U;
+    g_flash[15] = 0x00U;
+    g_flash[16] = 0U; /* blob_region_size LE u32 = 0 */
+    g_flash[17] = 0U;
+    g_flash[18] = 0U;
+    g_flash[19] = 0U;
+
+    asset_flash_io_t io = fake_io();
+    asset_store_t store;
+
+    assert(asset_store_open(&store, &io, FAKE_SIZE) == ASSET_STORE_ERR_CORRUPT);
+}
+
 int main(void)
 {
     test_format_then_open_roundtrips();
     test_open_rejects_bad_magic();
     test_record_encode_decode_roundtrips();
     test_record_decode_rejects_unknown_kind();
+    test_open_rejects_overflowing_record_capacity();
     return 0;
 }

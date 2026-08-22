@@ -47,6 +47,16 @@ static uint32_t round_up_to_sector(uint32_t value)
     return value + (ASSET_STORE_SECTOR_SIZE - remainder);
 }
 
+/* record_capacity * ASSET_RECORD_BYTES is computed as uint32_t * uint32_t
+ * further down; done unchecked, a large enough record_capacity wraps
+ * silently instead of failing the size check that follows it. This bounds
+ * record_capacity to whatever the multiplication (plus the header) can
+ * hold in 32 bits, so the multiplication below it can never overflow. */
+static bool record_capacity_fits(uint32_t record_capacity)
+{
+    return record_capacity <= (UINT32_MAX - ASSET_HEADER_BYTES) / ASSET_RECORD_BYTES;
+}
+
 static bool asset_kind_is_valid(uint8_t kind)
 {
     switch (kind) {
@@ -76,6 +86,9 @@ asset_store_result_t asset_store_format(const asset_flash_io_t *io,
                                         uint32_t record_capacity)
 {
     if (io == NULL || io->read == NULL || io->write == NULL || io->erase == NULL) {
+        return ASSET_STORE_ERR_ARGUMENT;
+    }
+    if (!record_capacity_fits(record_capacity)) {
         return ASSET_STORE_ERR_ARGUMENT;
     }
 
@@ -133,6 +146,15 @@ asset_store_result_t asset_store_open(asset_store_t *store,
     uint32_t record_capacity = read_u32_le(header + HDR_OFFSET_RECORD_CAPACITY);
     uint32_t blob_region_offset = read_u32_le(header + HDR_OFFSET_BLOB_REGION_OFFSET);
     uint32_t blob_region_size = read_u32_le(header + HDR_OFFSET_BLOB_REGION_SIZE);
+
+    /* record_capacity comes straight off flash here, so an out-of-range
+     * value (corrupt header, or a hostile one) must be rejected before the
+     * multiplication below it, not after -- otherwise it wraps and this
+     * whole check can be defeated by choosing a capacity that overflows
+     * back down to something small. */
+    if (!record_capacity_fits(record_capacity)) {
+        return ASSET_STORE_ERR_CORRUPT;
+    }
 
     /* blob_region_offset must fit the record array it follows, and the
      * whole blob region must fit inside the partition -- both are cheap

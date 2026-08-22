@@ -1169,10 +1169,41 @@ cd companion && cargo fmt --all --check \
 
 Expected: PASS. Existing tests that construct `Ack` need the new field added.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Add the new types to the shared fixture corpus**
+
+`protocol/fixtures/v1/` holds 49 `.bin` files that are this project's real cross-language
+contract. `companion/crates/protocol/examples/generate-fixtures.rs` writes them, and
+**both** `companion/crates/protocol/tests/fixtures.rs` and
+`firmware/host_tests/test_protocol.c` read them — the latter via `FIXTURE_DIRECTORY`,
+whose `assert_valid_fixture()` re-encodes each decoded message and `memcmp`s the result
+against the file. That round-trip is the only mechanism proving the two implementations
+agree byte for byte; unit tests on either side cannot.
+
+Add fixtures for `asset_begin`, `asset_chunk`, `asset_commit`, `asset_release`, and an
+`ack` carrying `already_present` — that last one is the only fixture that can pin the
+`Some`-iff-type-15 rule across languages. Firmware's list is explicit rather than a
+directory walk, so add matching `assert_valid_fixture()` calls to `test_valid_fixtures()`
+as well.
+
+Choose payloads that can actually catch a divergence: a non-trivial digest, a
+`total_length` and `offset` large enough to exercise multi-byte CBOR integer encoding,
+non-empty chunk data, and a release array with more than one digest. An all-minimal
+fixture passes even when the two encoders disagree about everything interesting.
+
+- [ ] **Step 6: Run both suites and commit**
+
+```sh
+make -C firmware/host_tests clean test
+```
+
+If firmware's `memcmp` fails, the two encoders genuinely disagree — report it, do not
+adjust the fixture to make it pass.
 
 ```bash
-git add companion/crates/protocol/src/message.rs companion/crates/protocol/src/lib.rs
+git add companion/crates/protocol/src/message.rs companion/crates/protocol/src/lib.rs \
+        companion/crates/protocol/examples/generate-fixtures.rs \
+        companion/crates/protocol/tests/fixtures.rs \
+        firmware/host_tests/test_protocol.c protocol/fixtures/v1/
 git commit -m "feat: encode and decode asset transfer messages on the host"
 ```
 
@@ -1232,9 +1263,22 @@ esp_err_t asset_flash_execute_compaction(const asset_move_t *moves, size_t count
 - `asset_flash_map` calls `esp_partition_mmap(partition, blob_region_offset +
   record->offset, record->length, ESP_PARTITION_MMAP_DATA, out_ptr, &handle)`.
   Mmap handles are held in a PSRAM-allocated table, not a static array.
-- `asset_flash_execute_compaction` copies each move's bytes through a PSRAM staging
-  buffer, lowest `to_offset` first so a forward-packing move never overwrites a source
-  it has not yet read, then rewrites the record array and erases the tail.
+- `asset_flash_execute_compaction` reads every surviving record and blob into a PSRAM
+  staging buffer **before any erase** — a per-move flash-to-flash copy is unsafe, because
+  destination space can hold a dead record's un-erased bytes and NOR writes only clear
+  bits. It then erases, and writes in this order: **blobs, then the record array, then
+  the header last**.
+
+  **The header write is the commit point, and the ordering is load-bearing.** Writing the
+  record array (carrying each survivor's new packed `offset`) before the blob bytes leaves
+  a window where power loss yields a store that opens perfectly — valid magic, every
+  record `COMMITTED` — whose offsets point into the *pre-compaction* blob layout, i.e. at
+  another asset's bytes. `asset_store_open` does not cross-check record offsets against
+  blob content, so nothing detects it and a font simply renders garbage. Writing the
+  header last instead means any interruption leaves the magic erased,
+  `asset_store_open` returns `ASSET_STORE_ERR_NOT_FORMATTED`, `asset_flash_init`
+  reformats, and the host re-syncs. Compaction is deliberately not atomic — the host holds
+  every asset — but it must fail **closed**.
 
 **Memory rule for this file:** the partition handle and the mmap table are the only
 module state. Keep `.bss` to pointers — a handful of bytes, not buffers. Every buffer

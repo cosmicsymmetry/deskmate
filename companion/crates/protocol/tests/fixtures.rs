@@ -41,6 +41,11 @@ fn valid_golden_frames_decode() {
         "factory_reset.bin",
         "status_response_networked.bin",
         "status_response_ota_failed.bin",
+        "asset_begin.bin",
+        "ack_asset_begin.bin",
+        "asset_chunk.bin",
+        "asset_commit.bin",
+        "asset_release.bin",
     ] {
         let frame =
             decode_wire_frame(&fixture(name)).unwrap_or_else(|error| panic!("{name}: {error}"));

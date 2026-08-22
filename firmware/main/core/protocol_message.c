@@ -1812,6 +1812,33 @@ static protocol_message_result_t validate_message(
         return validate_network_config(&message->value.network_config);
     case PROTOCOL_TYPE_FACTORY_RESET:
         return PROTOCOL_MESSAGE_OK;
+    case PROTOCOL_TYPE_ASSET_BEGIN: {
+        const protocol_asset_begin_t *begin = &message->value.asset_begin;
+        if (begin->kind != ASSET_KIND_FONT &&
+            begin->kind != ASSET_KIND_ICON_FONT &&
+            begin->kind != ASSET_KIND_IMAGE) {
+            return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
+        }
+        if (begin->total_length == 0U ||
+            begin->total_length > (uint32_t)ASSET_MAX_BYTES) {
+            return PROTOCOL_MESSAGE_ERR_TOO_LARGE;
+        }
+        return PROTOCOL_MESSAGE_OK;
+    }
+    case PROTOCOL_TYPE_ASSET_CHUNK:
+        if (message->value.asset_chunk.data_length >
+            PROTOCOL_MAX_ASSET_CHUNK_BYTES) {
+            return PROTOCOL_MESSAGE_ERR_TOO_LARGE;
+        }
+        return PROTOCOL_MESSAGE_OK;
+    case PROTOCOL_TYPE_ASSET_COMMIT:
+        return PROTOCOL_MESSAGE_OK;
+    case PROTOCOL_TYPE_ASSET_RELEASE:
+        if (message->value.asset_release.digest_count >
+            PROTOCOL_MAX_ASSET_DIGESTS) {
+            return PROTOCOL_MESSAGE_ERR_TOO_LARGE;
+        }
+        return PROTOCOL_MESSAGE_OK;
     default:
         return PROTOCOL_MESSAGE_ERR_UNSUPPORTED_TYPE;
     }
@@ -1837,6 +1864,13 @@ static protocol_message_result_t encode_text(CborEncoder *encoder,
 static protocol_message_result_t encode_bool(CborEncoder *encoder, bool value)
 {
     return cbor_result(cbor_encode_boolean(encoder, value));
+}
+
+static protocol_message_result_t encode_bytes(CborEncoder *encoder,
+                                               const uint8_t *data,
+                                               size_t length)
+{
+    return cbor_result(cbor_encode_byte_string(encoder, data, length));
 }
 
 static protocol_message_result_t begin_map(CborEncoder *parent,
@@ -2062,6 +2096,85 @@ static protocol_message_result_t encode_status_payload(
     return end_map(root, &map);
 }
 
+static protocol_message_result_t encode_asset_begin_payload(
+    CborEncoder *root,
+    const protocol_asset_begin_t *begin)
+{
+    CborEncoder map;
+    protocol_message_result_t result = begin_map(root, &map, 4U);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 0U);
+    if (result == PROTOCOL_MESSAGE_OK) {
+        result = encode_bytes(&map, begin->digest, ASSET_DIGEST_BYTES);
+    }
+    if (result == PROTOCOL_MESSAGE_OK) {
+        result = encode_pair_uint(&map, 1U, (uint64_t)begin->kind);
+    }
+    if (result == PROTOCOL_MESSAGE_OK) {
+        result = encode_pair_uint(&map, 2U, begin->total_length);
+    }
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 3U);
+    if (result == PROTOCOL_MESSAGE_OK) {
+        result = encode_bool(&map, begin->volatile_tier);
+    }
+    if (result == PROTOCOL_MESSAGE_OK) result = end_map(root, &map);
+    return result;
+}
+
+static protocol_message_result_t encode_asset_chunk_payload(
+    CborEncoder *root,
+    const protocol_asset_chunk_t *chunk)
+{
+    CborEncoder map;
+    protocol_message_result_t result = begin_map(root, &map, 3U);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 0U);
+    if (result == PROTOCOL_MESSAGE_OK) {
+        result = encode_bytes(&map, chunk->digest, ASSET_DIGEST_BYTES);
+    }
+    if (result == PROTOCOL_MESSAGE_OK) {
+        result = encode_pair_uint(&map, 1U, chunk->offset);
+    }
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 2U);
+    if (result == PROTOCOL_MESSAGE_OK) {
+        result = encode_bytes(&map, chunk->data, chunk->data_length);
+    }
+    if (result == PROTOCOL_MESSAGE_OK) result = end_map(root, &map);
+    return result;
+}
+
+static protocol_message_result_t encode_asset_commit_payload(
+    CborEncoder *root,
+    const protocol_asset_commit_t *commit)
+{
+    CborEncoder map;
+    protocol_message_result_t result = begin_map(root, &map, 1U);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 0U);
+    if (result == PROTOCOL_MESSAGE_OK) {
+        result = encode_bytes(&map, commit->digest, ASSET_DIGEST_BYTES);
+    }
+    if (result == PROTOCOL_MESSAGE_OK) result = end_map(root, &map);
+    return result;
+}
+
+static protocol_message_result_t encode_asset_release_payload(
+    CborEncoder *root,
+    const protocol_asset_release_t *release)
+{
+    CborEncoder map;
+    CborEncoder digests;
+    protocol_message_result_t result = begin_map(root, &map, 1U);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 0U);
+    if (result == PROTOCOL_MESSAGE_OK) {
+        result = begin_array(&map, &digests, release->digest_count);
+    }
+    for (size_t i = 0U;
+         result == PROTOCOL_MESSAGE_OK && i < release->digest_count; ++i) {
+        result = encode_bytes(&digests, release->digests[i], ASSET_DIGEST_BYTES);
+    }
+    if (result == PROTOCOL_MESSAGE_OK) result = end_map(&map, &digests);
+    if (result == PROTOCOL_MESSAGE_OK) result = end_map(root, &map);
+    return result;
+}
+
 static protocol_message_result_t encode_payload(
     const protocol_message_t *message,
     uint8_t *payload,
@@ -2163,6 +2276,18 @@ static protocol_message_result_t encode_payload(
         if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 1U);
         if (result == PROTOCOL_MESSAGE_OK) result = encode_text(&map, message->value.error.diagnostic);
         if (result == PROTOCOL_MESSAGE_OK) result = end_map(&root, &map);
+        break;
+    case PROTOCOL_TYPE_ASSET_BEGIN:
+        result = encode_asset_begin_payload(&root, &message->value.asset_begin);
+        break;
+    case PROTOCOL_TYPE_ASSET_CHUNK:
+        result = encode_asset_chunk_payload(&root, &message->value.asset_chunk);
+        break;
+    case PROTOCOL_TYPE_ASSET_COMMIT:
+        result = encode_asset_commit_payload(&root, &message->value.asset_commit);
+        break;
+    case PROTOCOL_TYPE_ASSET_RELEASE:
+        result = encode_asset_release_payload(&root, &message->value.asset_release);
         break;
     default:
         return PROTOCOL_MESSAGE_ERR_UNSUPPORTED_TYPE;

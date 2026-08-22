@@ -3,13 +3,26 @@ use std::fs;
 use std::path::PathBuf;
 
 use protocol::{
-    Ack, ActivateScreen, ApplyConfig, CURRENT_CAPABILITIES, DeviceEvent, ErrorCode, ErrorResponse,
-    EventAction, EventKind, Field, FieldValue, Frame, HeartbeatAck, InterruptPolicy,
-    MAX_CONFIG_SCREENS, MAX_CONFIG_WIDGETS, MAX_DEVICE_TOKEN_LEN, MAX_PAYLOAD_SIZE,
-    MAX_PROTOCOL_VERSION, MAX_WIRE_FRAME, Message, NetworkConfig, OtaState, PushData, ScreenConfig,
-    SizeClass, StatusResponse, TapAction, TemplateKind, Tier, TimeSync, TriggerInterrupt,
-    WidgetConfig, WifiState, encode_message,
+    Ack, ActivateScreen, ApplyConfig, AssetBegin, AssetChunk, AssetCommit, AssetKind, AssetRelease,
+    CURRENT_CAPABILITIES, DeviceEvent, ErrorCode, ErrorResponse, EventAction, EventKind, Field,
+    FieldValue, Frame, HeartbeatAck, InterruptPolicy, MAX_CONFIG_SCREENS, MAX_CONFIG_WIDGETS,
+    MAX_DEVICE_TOKEN_LEN, MAX_PAYLOAD_SIZE, MAX_PROTOCOL_VERSION, MAX_WIRE_FRAME, Message,
+    NetworkConfig, OtaState, PushData, ScreenConfig, SizeClass, StatusResponse, TYPE_ASSET_BEGIN,
+    TapAction, TemplateKind, Tier, TimeSync, TriggerInterrupt, WidgetConfig, WifiState,
+    encode_message,
 };
+
+/// A 32-byte digest with distinct, non-zero, ascending bytes starting at
+/// `start` (wrapping). Used instead of an all-zero or all-repeated digest so
+/// a byte-order or truncation bug in either encoder would actually change
+/// the fixture instead of silently matching.
+fn digest_pattern(start: u8) -> [u8; 32] {
+    let mut digest = [0u8; 32];
+    for (index, byte) in digest.iter_mut().enumerate() {
+        *byte = start.wrapping_add(u8::try_from(index).unwrap());
+    }
+    digest
+}
 
 fn minimum_config() -> ApplyConfig {
     ApplyConfig {
@@ -506,6 +519,61 @@ fn fixture_messages() -> Vec<(&'static str, u32, Message)> {
                     key: "future_field".into(),
                     value: FieldValue::Boolean(true),
                 }],
+            }),
+        ),
+        (
+            "asset_begin.bin",
+            20,
+            // total_length pinned at the maximum (1_048_576 = 0x100000)
+            // forces the 4-byte CBOR unsigned form (> 0xffff); a digest
+            // with distinct bytes catches any byte-order/truncation bug.
+            Message::AssetBegin(AssetBegin {
+                digest: digest_pattern(0x10),
+                kind: AssetKind::Image,
+                total_length: 1_048_576,
+                volatile: true,
+            }),
+        ),
+        (
+            "ack_asset_begin.bin",
+            20,
+            // The only fixture pinning the already_present: Some-iff-type-15
+            // rule across languages.
+            Message::Ack(Ack {
+                acknowledged_type: TYPE_ASSET_BEGIN,
+                revision: None,
+                already_present: Some(true),
+            }),
+        ),
+        (
+            "asset_chunk.bin",
+            21,
+            // offset = 0x10000 also forces the 4-byte CBOR form; data is
+            // non-empty and non-repeating.
+            Message::AssetChunk(AssetChunk {
+                digest: digest_pattern(0x40),
+                offset: 65_536,
+                data: (0..64u8).map(|index| index ^ 0xa5).collect(),
+            }),
+        ),
+        (
+            "asset_commit.bin",
+            22,
+            Message::AssetCommit(AssetCommit {
+                digest: digest_pattern(0x70),
+            }),
+        ),
+        (
+            "asset_release.bin",
+            23,
+            // More than one digest: an implementation that only handles a
+            // single-element array would still pass a one-digest fixture.
+            Message::AssetRelease(AssetRelease {
+                digests: vec![
+                    digest_pattern(0x10),
+                    digest_pattern(0x40),
+                    digest_pattern(0x70),
+                ],
             }),
         ),
     ]

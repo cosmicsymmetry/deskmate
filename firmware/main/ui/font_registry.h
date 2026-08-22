@@ -56,8 +56,15 @@ void font_registry_release(lv_font_t *font);
 
 /* Destroys every open face and clears the table. Call before compaction
  * invalidates mmap pointers -- compaction moves blobs, so a font surviving
- * it would read moved bytes. */
-void font_registry_reset(void);
+ * it would read moved bytes.
+ *
+ * Returns the number of destroyed faces that still had ref_count > 0 --
+ * i.e. a caller was holding an acquired lv_font_t* across this call and now
+ * holds a dangling pointer. This file has no ESP-IDF include (lvgl-sim
+ * compiles it on the host) and no LVGL logging config of its own, so it
+ * cannot itself log the hazard; the caller, which already has a working log
+ * sink, is expected to surface a nonzero result loudly. */
+uint32_t font_registry_reset(void);
 
 /* Rasterizes every codepoint in `glyphs` into the face's own glyph/bitmap
  * cache ahead of first paint, so a cold 96px digit does not rasterize

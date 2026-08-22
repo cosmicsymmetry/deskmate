@@ -811,8 +811,20 @@ static void dispatch_asset_release(protocol_context_t *context,
                        "display lock unavailable");
         return;
     }
-    font_registry_reset();
+    // font_registry.c has no ESP-IDF include and no LVGL logging config of
+    // its own (see its header), so it cannot log a regression of the "safe
+    // today" claim above itself -- it counts pinned destructions and hands
+    // the count back. This task already has a working log sink, so surface
+    // a nonzero count loudly rather than let a future caller's dangling
+    // pointer fail silently.
+    uint32_t pinned_faces_destroyed = font_registry_reset();
     lvgl_port_unlock();
+    if (pinned_faces_destroyed > 0U) {
+        ESP_LOGE(TAG,
+                "AssetRelease destroyed %u still-referenced font face(s); "
+                "a caller now holds a dangling lv_font_t*",
+                (unsigned)pinned_faces_destroyed);
+    }
 
     for (uint32_t index = 0U; index < store->record_capacity; ++index) {
         uint8_t bytes[ASSET_RECORD_BYTES];

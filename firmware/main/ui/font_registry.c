@@ -148,11 +148,12 @@ void font_registry_release(lv_font_t *font)
     }
 }
 
-void font_registry_reset(void)
+uint32_t font_registry_reset(void)
 {
     if (s_table == NULL) {
-        return;
+        return 0U;
     }
+    uint32_t pinned_destroyed = 0U;
     for (uint32_t i = 0; i < FONT_REGISTRY_MAX_OPEN_FACES; ++i) {
         font_registry_entry_t *entry = &s_table[i];
         if (entry->in_use) {
@@ -161,20 +162,21 @@ void font_registry_reset(void)
              * writing (nothing in firmware/main acquires yet; see the
              * caller-side note in protocol_task.c's AssetRelease handler),
              * but a caller that regresses this must not fail silently as a
-             * dangling lv_font_t* used from LVGL's draw path. Loud rather
-             * than a return-value check because this function's signature
-             * (void, no error path) cannot itself refuse. */
+             * dangling lv_font_t* used from LVGL's draw path. This file has
+             * no ESP-IDF include and no LVGL logging config of its own (see
+             * the header), so it cannot log the hazard itself; it counts
+             * pinned destructions instead and hands the count back so the
+             * caller -- which has a working log sink -- can be loud about
+             * it. */
             if (entry->ref_count > 0) {
-                LV_LOG_ERROR("font_registry_reset: destroying pinned face "
-                             "(slot %u, ref_count %u) -- caller holds a "
-                             "dangling lv_font_t*",
-                             (unsigned)i, (unsigned)entry->ref_count);
+                ++pinned_destroyed;
             }
             lv_tiny_ttf_destroy(entry->font);
         }
     }
     memset(s_table, 0, font_registry_table_bytes());
     s_generation = 0;
+    return pinned_destroyed;
 }
 
 void font_registry_warm(lv_font_t *font, const char *glyphs)

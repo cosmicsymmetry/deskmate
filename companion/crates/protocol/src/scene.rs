@@ -632,6 +632,33 @@ fn encode_node_payload(encoder: &mut Encoder, node: &SceneNode) {
     }
 }
 
+/// Encodes `scene` as the **standalone** CBOR payload firmware's
+/// `scene_decode(payload, length, out)` accepts — the scene map on its own,
+/// with no `PushScene` envelope around it.
+///
+/// The device normally reaches a scene through that envelope
+/// ([`crate::Message::PushScene`], whose key 2 nests the identical map), and
+/// `scene_decode()` and `scene_decode_map()` share one decoder body, so the two
+/// entry points cannot disagree about the bytes. This one exists for callers
+/// that hold a `Scene` and want the device's own decoder to build it without
+/// inventing a link: `companion/crates/lvgl-sim` hands the result straight to
+/// `scene_decode()` so the simulator renders a scene it decoded from the wire
+/// shape rather than one it constructed field by field, which is what makes the
+/// stage-2a parity gate compare like with like.
+///
+/// # Errors
+///
+/// Returns [`MessageError::InvalidValue`] naming the first bound
+/// [`validate_scene`] rejects. Validating here rather than at the call site is
+/// deliberate: an unvalidated scene encodes fine and is then refused by the
+/// decoder at the far end, which is a much later and much vaguer failure.
+pub fn encode_scene_payload(scene: &Scene) -> Result<Vec<u8>, MessageError> {
+    validate_scene(scene)?;
+    let mut encoder = Encoder::new();
+    encode_scene(&mut encoder, scene);
+    Ok(encoder.into_bytes())
+}
+
 pub(crate) fn encode_scene(encoder: &mut Encoder, scene: &Scene) {
     encoder.map(3);
     encoder.unsigned(0);
@@ -1031,6 +1058,60 @@ mod tests {
                 .chain("x".repeat(64).chars())
                 .collect::<String>()
         ));
+    }
+
+    /// The standalone payload is the same map `PushScene` nests under its key
+    /// 2, so [`encode_scene_payload`] and [`decode_scene`] must be inverses of
+    /// each other over exactly those bytes — that is what lets
+    /// `companion/crates/lvgl-sim` hand the result to the device's own
+    /// `scene_decode()` and get the scene it started with.
+    #[test]
+    fn encode_scene_payload_round_trips_through_the_decoder() {
+        let scene = Scene {
+            revision: 7,
+            background: 0x0011_2233,
+            nodes: vec![
+                SceneNode::Rect(SceneRect {
+                    x: 8,
+                    y: 16,
+                    w: 32,
+                    h: 24,
+                    radius: 4,
+                    fill: 0x00ff_8f2e,
+                    opacity: 200,
+                }),
+                SceneNode::Text(SceneText {
+                    x: 0,
+                    baseline_y: 100,
+                    w: 448,
+                    align: SceneAlign::Center,
+                    font: SceneFont::Baked(SceneFontTier::Hero),
+                    color: 0x00f5_f5f7,
+                    value: SceneValue::Binding("time:HH:mm".to_string()),
+                    ellipsize: false,
+                }),
+            ],
+        };
+        let payload = encode_scene_payload(&scene).expect("valid scene encodes");
+        let mut decoder = Decoder::new(&payload);
+        assert_eq!(decode_scene(&mut decoder).expect("decodes"), scene);
+    }
+
+    /// An off-canvas scene is refused where it is built, not at the far end.
+    #[test]
+    fn encode_scene_payload_refuses_an_invalid_scene() {
+        let scene = Scene {
+            revision: 1,
+            background: 0,
+            nodes: vec![SceneNode::Rect(SceneRect {
+                x: SCENE_CANVAS_WIDTH,
+                y: 0,
+                w: 8,
+                h: 8,
+                ..SceneRect::default()
+            })],
+        };
+        assert!(encode_scene_payload(&scene).is_err());
     }
 
     /// Writes `{0: revision, 1: background, 2: <array header>}` and then

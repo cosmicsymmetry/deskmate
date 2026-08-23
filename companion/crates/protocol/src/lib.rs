@@ -33,5 +33,6 @@ pub use scene::{
     MAX_SCENE_BINDING_LEN, MAX_SCENE_GLYPH_NAME_LEN, MAX_SCENE_LINE_POINTS, MAX_SCENE_NODES,
     MAX_SCENE_SCALE_TICKS, MAX_SCENE_TEXT_LEN, SCENE_CANVAS_HEIGHT, SCENE_CANVAS_WIDTH, Scene,
     SceneAlign, SceneArc, SceneFont, SceneFontTier, SceneGlyph, SceneImage, SceneLine, SceneNode,
-    SceneRect, SceneScale, SceneText, SceneValue, binding_is_valid, validate_scene,
+    SceneRect, SceneScale, SceneText, SceneValue, binding_is_valid, encode_scene_payload,
+    validate_scene,
 };

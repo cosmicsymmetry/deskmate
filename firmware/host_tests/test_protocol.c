@@ -998,12 +998,15 @@ static protocol_message_result_t decode_push_scene_frame(const uint8_t *payload,
     return protocol_message_decode(&frame, message);
 }
 
-/* Writes {0: card_id, 1: revision, 2: {0: 9, 1: 0, 2: [rect x node_count]}}. */
-static size_t build_push_scene_payload(uint8_t *out, const char *card_id,
-                                       uint32_t revision, size_t node_count)
+/* Writes {0: card_id, 1: revision, 2: {0: 9, 1: 0, 2: [rect x node_count]}},
+ * and with `trailing_unknown_key` a fourth entry {3: 42} AFTER the scene. */
+static size_t build_push_scene_payload_with(uint8_t *out, const char *card_id,
+                                            uint32_t revision,
+                                            size_t node_count,
+                                            bool trailing_unknown_key)
 {
     size_t offset = 0U;
-    offset = append_map_header_cbor(out, offset, 3U);
+    offset = append_map_header_cbor(out, offset, trailing_unknown_key ? 4U : 3U);
     offset = append_uint_cbor(out, offset, 0U);
     offset = append_text_cbor(out, offset, card_id);
     offset = append_uint_cbor(out, offset, 1U);
@@ -1019,7 +1022,18 @@ static size_t build_push_scene_payload(uint8_t *out, const char *card_id,
     for (size_t i = 0U; i < node_count; ++i) {
         offset = append_minimal_rect_node_cbor(out, offset);
     }
+    if (trailing_unknown_key) {
+        offset = append_uint_cbor(out, offset, 3U);
+        offset = append_uint_cbor(out, offset, 42U);
+    }
     return offset;
+}
+
+static size_t build_push_scene_payload(uint8_t *out, const char *card_id,
+                                       uint32_t revision, size_t node_count)
+{
+    return build_push_scene_payload_with(out, card_id, revision, node_count,
+                                         false);
 }
 
 static void test_push_scene_roundtrips(void)
@@ -1182,6 +1196,41 @@ static void test_push_scene_rejects_an_off_canvas_node(void)
     free(message);
 }
 
+/* THE test for the one line the extraction to scene_decode_map() genuinely
+ * added: cbor_value_leave_container() at the end of that function.
+ *
+ * Every other PushScene test and both fixtures end the payload map at key 2,
+ * so the loop exits the moment the scene is decoded and a parent cursor left
+ * parked inside the scene map is never read. Nothing would notice it. That
+ * matters because docs/protocol/v1.md promises unknown integer keys are
+ * SKIPPED so a later revision can add a field, and for this message that
+ * promise rests entirely on that one line.
+ *
+ * Confirmed to fail with the leave_container call removed -- decoding the
+ * trailing key 3 off a mispositioned cursor does not yield a payload the
+ * decoder accepts. Do not "simplify" this back into the roundtrip test by
+ * dropping the trailing key. */
+static void test_push_scene_skips_an_unknown_key_after_the_scene(void)
+{
+    uint8_t payload[PROTOCOL_MAX_PAYLOAD_SIZE];
+    size_t offset =
+        build_push_scene_payload_with(payload, "clock", 6U, 2U, true);
+
+    protocol_message_t *message = malloc(sizeof *message);
+    assert(message != NULL);
+    assert(decode_push_scene_frame(payload, offset, message) ==
+           PROTOCOL_MESSAGE_OK);
+    /* Not merely accepted -- the scene either side of the skipped key is
+     * still fully and correctly decoded. */
+    assert(strcmp(message->value.push_scene.card_id, "clock") == 0);
+    assert(message->value.push_scene.revision == 6U);
+    assert(message->value.push_scene.scene.revision == 9U);
+    assert(message->value.push_scene.scene.node_count == 2U);
+    assert(message->value.push_scene.scene.nodes[1].kind == SCENE_NODE_RECT);
+    assert(message->value.push_scene.scene.nodes[1].value.rect.h == 11);
+    free(message);
+}
+
 static void test_push_scene_rejects_a_zero_revision(void)
 {
     uint8_t payload[PROTOCOL_MAX_PAYLOAD_SIZE];
@@ -1261,6 +1310,7 @@ int main(void)
     test_push_scene_roundtrips();
     test_push_scene_rejects_a_scene_over_the_node_cap();
     test_push_scene_rejects_an_off_canvas_node();
+    test_push_scene_skips_an_unknown_key_after_the_scene();
     test_push_scene_rejects_a_zero_revision();
     test_ack_for_push_scene_requires_a_revision();
     puts("test_protocol: OK");

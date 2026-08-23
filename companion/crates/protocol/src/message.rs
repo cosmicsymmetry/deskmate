@@ -2316,6 +2316,40 @@ mod tests {
         );
     }
 
+    /// The mirror of C's `test_push_scene_skips_an_unknown_key_after_the_scene`.
+    ///
+    /// `docs/protocol/v1.md` promises unknown integer keys are skipped so a
+    /// later revision can add a field. Every other `PushScene` test and both
+    /// fixtures end the payload map at key 2, so nothing else reads the
+    /// decoder's position AFTER the nested scene -- on the firmware side that
+    /// is what makes `cbor_value_leave_container()` untested, and on this side
+    /// it is what makes the `_ => decoder.skip()?` arm untested for anything
+    /// following a scene.
+    #[test]
+    fn push_scene_skips_an_unknown_key_after_the_scene() {
+        let push = PushScene {
+            card_id: "clock".into(),
+            revision: 6,
+            scene: sample_scene(),
+        };
+        // Hand-built rather than encoded: a conforming encoder never emits an
+        // unknown key, which is exactly why this case needs one.
+        let mut encoder = Encoder::new();
+        encoder.map(4);
+        encoder.unsigned(0);
+        encoder.text(&push.card_id);
+        encoder.unsigned(1);
+        encoder.unsigned(u64::from(push.revision));
+        encoder.unsigned(2);
+        crate::scene::encode_scene(&mut encoder, &push.scene);
+        encoder.unsigned(3);
+        encoder.unsigned(42);
+
+        let frame = Frame::new(TYPE_PUSH_SCENE, 45, encoder.into_bytes());
+        // Not merely accepted -- everything before the skipped key survives.
+        assert_eq!(decode_message(&frame), Ok(Message::PushScene(push)));
+    }
+
     #[test]
     fn push_scene_rejects_an_off_canvas_node() {
         let message = Message::PushScene(PushScene {

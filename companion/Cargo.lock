@@ -2149,6 +2149,7 @@ dependencies = [
  "cc",
  "glob",
  "png 0.17.16",
+ "protocol",
  "sha2",
 ]
 

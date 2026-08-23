@@ -3217,3 +3217,68 @@ forgot" instead of "the server remembered while it could not reach the device".
    session where a black frame was read as "the panel is off". That conclusion happened to
    be right, but it was carried by the absent serial port and the failed ping, not by the
    frame.
+
+## Reconnect backoff does not widen on the WSS path — observed 2026-08-23
+
+Observed on the physical board while away from the home network, so the device was
+failing to reach `deskmate.rodi.one` continuously. Captured by reading the USB serial
+line directly (see the second finding below for why the CLI could not be used).
+
+**Task 8's owed exit-gate observation is answered, and the answer is no.** Over ~60
+seconds of uninterrupted failure the reconnect interval stayed flat at roughly
+0.85–1.2 s with jitter, and never widened:
+
+```
+E (126651) esp-tls: couldn't get hostname for :deskmate.rodi.one: getaddrinfo() returns 202
+W (126671) net_link: WebSocket TLS/transport failure, status=0, error_type=tcp_transport
+I (126681) websocket_client: Reconnect after 1130 ms
+...
+I (129031) websocket_client: Reconnect after 1090 ms
+I (130051) websocket_client: Reconnect after  980 ms
+I (132891) websocket_client: Reconnect after  990 ms
+I (141141) websocket_client: Reconnect after 1160 ms
+```
+
+The gap between successive `net_link: WebSocket disconnected after an error` lines is
+~1 s throughout, from uptime 126 s to 142 s.
+
+`net_link.c` does use the backoff module — `s_reconnect_backoff` at :37,
+`reconnect_backoff_next_delay_ms()` at :105 — but `:247` passes
+`reconnect_backoff_peek_delay_ms()` into the websocket client's `.reconnect_timeout_ms`
+**at client construction**. `esp_websocket_client` then runs its own auto-reconnect on
+that initial value, so a widening computed later never reaches the thing actually
+scheduling the retries. `core/reconnect_backoff.c`'s host tests pass because the module
+is correct in isolation; it simply is not governing this path.
+
+Practical consequence: a device that cannot resolve its server retries DNS about once a
+second indefinitely. Not diagnosed further here and **not fixed** — recorded so the gate
+item is answered by evidence rather than left open.
+
+Also confirmed in the same capture: `wifi_station: WiFi disconnected, reason=201`
+(`NO_AP_FOUND`) — the device was not associated at all, it was looking for an SSID that
+was not present, which is why every `getaddrinfo` failed.
+
+## A diagnostic build puts console logs on the protocol pipe — observed 2026-08-23
+
+The device was running `v2.0.0-swaes6` (the software-AES experiment build; the repo's
+`firmware/version.txt` was pinned to it, and the clean `f6cb0ea` tree pins
+`v2.0.0-gate6`). `deskmate-cli status` failed every attempt with
+`malformed device response: Cobs`, and a raw read of `/dev/cu.usbmodem3101` showed
+ESP-IDF log text rather than framed packets.
+
+`link/usb_link.c` carries the protocol over **`usb_serial_jtag`**, and
+`sdkconfig.defaults` deliberately keeps the console on UART0
+(`CONFIG_ESP_CONSOLE_UART_DEFAULT=y`, `CONFIG_ESP_CONSOLE_SECONDARY_NONE=y`). The diag
+build evidently routes the console onto the USB-Serial-JTAG instead, so logs and protocol
+frames interleave on one pipe and COBS framing cannot survive.
+
+This violates the repo's own standing rule — keep diagnostic logs out of the machine
+protocol byte stream.
+
+**Corrected later the same day:** the impact is narrower than first written. Once the
+device came back online and stopped logging, `deskmate-cli status` decoded cleanly
+against the *same* `v2.0.0-swaes6` build. So the collision only corrupts framing **while
+the device is actively emitting log lines** — at the time of the first observation it was
+failing DNS roughly once a second, so every frame was interleaved with error output. A
+quiet diag build is usable over the cable; a diag build in a fault loop is not, which is
+precisely when you most need to reach it. Treat it as a hazard, not an absolute block.

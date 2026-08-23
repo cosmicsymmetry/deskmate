@@ -761,6 +761,15 @@ mod tests {
             })
             .collect();
         let range_start = scalar(source, ".range_start = ");
+        // The indexing below reads glyph_dsc[list_index + 1]. That is only the
+        // right glyph while glyph_id_start is 1, which a regenerated subset
+        // need not preserve -- and taking it from a comment would turn this
+        // provenance barrier into a rubber stamp comparing the wrong glyphs.
+        assert_eq!(
+            1,
+            scalar(source, ".glyph_id_start = "),
+            "the advance lookup below assumes glyph_id_start == 1"
+        );
         let list = source
             .split_once("static const uint16_t unicode_list_0[] = {")
             .expect("a sparse cmap list")
@@ -784,7 +793,7 @@ mod tests {
 
         move |ch| {
             let index = codepoints.iter().position(|&c| c == ch as u32)?;
-            // glyph_id_start is 1 in every baked subset, and glyph_dsc[0] is
+            // glyph_id_start is asserted to be 1 above, and glyph_dsc[0] is
             // the reserved entry, so the sparse list's Nth codepoint is
             // glyph_dsc[N + 1].
             advances.get(index + 1).copied()

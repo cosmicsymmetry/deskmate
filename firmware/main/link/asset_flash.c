@@ -312,6 +312,19 @@ esp_err_t asset_flash_execute_compaction(const asset_move_t *moves, size_t count
     esp_err_t err = ESP_OK;
     asset_record_t *kept = NULL;
     uint8_t *blob_buffer = NULL;
+    // Set true immediately before the first erase call below (not after it
+    // succeeds -- esp_partition_erase_range can fail partway through and
+    // still have physically erased the header's sector before the error).
+    // Any failure from that point on leaves flash reading NOT_FORMATTED
+    // (offset 0 erased, not "DMAS") until this function's own final header
+    // write -- which is the crash-safety property the comment below the
+    // erase calls documents -- but a live in-RAM s_store does not
+    // automatically agree once that happens. Without this flag, a caller
+    // that keeps going after this function returns an error would still see
+    // committed()/find()/reserve() all succeed against a store the next
+    // reboot's asset_flash_init() will discover has no header and silently
+    // reformat, discarding anything committed since.
+    bool past_point_of_no_return = false;
 
     /* Read every surviving record's current bytes, and every surviving
      * blob's current bytes, into PSRAM before erasing anything. Flash
@@ -381,6 +394,7 @@ esp_err_t asset_flash_execute_compaction(const asset_move_t *moves, size_t count
      * from this point until that final write, offset 0 reads erased
      * (0xFF), not "DMAS", so asset_store_open() cannot mistake a partially
      * written compaction for a valid, committed store. */
+    past_point_of_no_return = true;
     if (io_erase(NULL, 0U, s_store.blob_region_offset) != 0) {
         err = ESP_FAIL;
         goto done;
@@ -436,5 +450,25 @@ esp_err_t asset_flash_execute_compaction(const asset_move_t *moves, size_t count
 done:
     heap_caps_free(kept);
     heap_caps_free(blob_buffer);
+    if (err != ESP_OK && past_point_of_no_return) {
+        // The header's sector is gone from flash and this function is not
+        // going to restore it. Degrade exactly the way a failed
+        // asset_flash_init() already degrades (see protocol_task.c's own
+        // comment on that): zeroing s_store makes every asset_store_*() call
+        // fail cleanly with ASSET_STORE_ERR_ARGUMENT (they all check
+        // store->io == NULL first), and clearing s_partition makes this
+        // file's own ESP_RETURN_ON_FALSE(s_partition != NULL, ...) guards
+        // refuse every later asset_flash_map()/write_blob()/
+        // execute_compaction() call with ESP_ERR_INVALID_STATE instead of
+        // touching a store that flash no longer agrees exists. The loss is
+        // then visible immediately -- every asset operation starts failing
+        // -- rather than silently discovered (and silently reformatted
+        // away) only at the next boot.
+        ESP_LOGE(TAG, "compaction failed past the point of no return (%s); "
+                "asset store invalidated until reboot",
+                esp_err_to_name(err));
+        memset(&s_store, 0, sizeof s_store);
+        s_partition = NULL;
+    }
     return err;
 }

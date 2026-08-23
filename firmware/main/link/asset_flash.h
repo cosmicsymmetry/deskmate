@@ -26,4 +26,11 @@ void asset_flash_unmap(const void *ptr);
 
 esp_err_t asset_flash_write_blob(uint32_t blob_offset, const void *data,
                                  size_t length);
+/* On a failure after the point of no return (the header's sector has been
+ * erased and not yet rewritten), this invalidates the in-RAM store and every
+ * later asset_flash_*()/asset_store_*() call degrades cleanly, the same way
+ * a failed asset_flash_init() already degrades -- rather than silently
+ * continuing to serve committed records whose backing header is gone from
+ * flash until the next reboot's asset_flash_init() discovers it and
+ * reformats, discarding whatever else was committed in between. */
 esp_err_t asset_flash_execute_compaction(const asset_move_t *moves, size_t count);

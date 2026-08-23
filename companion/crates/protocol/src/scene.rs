@@ -1033,6 +1033,87 @@ mod tests {
         ));
     }
 
+    /// Writes `{0: revision, 1: background, 2: <array header>}` and then
+    /// whatever `body` appends, so a test can hand the decoder an array
+    /// header that LIES about how much follows it.
+    fn scene_with_node_array(claimed: usize, body: impl FnOnce(&mut Encoder)) -> Vec<u8> {
+        let mut encoder = Encoder::new();
+        encoder.map(3);
+        encoder.unsigned(0);
+        encoder.unsigned(1);
+        encoder.unsigned(1);
+        encoder.unsigned(0);
+        encoder.unsigned(2);
+        encoder.array(claimed);
+        body(&mut encoder);
+        encoder.into_bytes()
+    }
+
+    fn minimal_rect_node(encoder: &mut Encoder) {
+        encoder.map(2);
+        encoder.unsigned(0);
+        encoder.unsigned(1); // RECT
+        encoder.unsigned(1);
+        encoder.map(4);
+        for (key, value) in [(0, 4), (1, 5), (2, 10), (3, 11)] {
+            encoder.unsigned(key);
+            encoder.unsigned(value);
+        }
+    }
+
+    /// The validate()-masking trap, on the side with no sanitizer to catch
+    /// what the assertion misses.
+    ///
+    /// `decode_scene`'s pre-allocation bound and `validate_scene` return the
+    /// identical error for a count over the cap, so a payload of 25 real
+    /// nodes cannot tell them apart: delete the pre-check and the test stays
+    /// green. What is lost is not correctness of the verdict but WHEN it is
+    /// reached -- `Decoder::array_len` returns the raw host-supplied count
+    /// with no relation to the bytes remaining, so a five-byte
+    /// `0x9a FFFFFFFF` header would reach `Vec::with_capacity(4_294_967_295)`
+    /// before anything rejected it.
+    ///
+    /// The discriminating input is a header that LIES: it claims 1000 nodes
+    /// and carries one. Correct code rejects the count before reading a
+    /// single node; code without the pre-check reads until the bytes run out
+    /// and fails with a CBOR error instead. Asserting the exact error is
+    /// therefore a real barrier.
+    #[test]
+    fn a_node_array_header_is_bounded_before_anything_is_read() {
+        let bytes = scene_with_node_array(1000, minimal_rect_node);
+        let mut decoder = Decoder::new(&bytes);
+        assert_eq!(
+            decode_scene(&mut decoder),
+            Err(MessageError::InvalidValue("scene node count"))
+        );
+    }
+
+    /// The same trap and the same fix for a LINE's coordinate arrays, whose
+    /// pre-check is masked by `validate_node`'s point-count bound.
+    #[test]
+    fn a_line_point_array_header_is_bounded_before_anything_is_read() {
+        let bytes = scene_with_node_array(1, |encoder| {
+            encoder.map(2);
+            encoder.unsigned(0);
+            encoder.unsigned(3); // LINE
+            encoder.unsigned(1);
+            encoder.map(3);
+            encoder.unsigned(0);
+            encoder.array(1000); // claims 1000 points ...
+            encoder.signed(1); // ... and carries one.
+            encoder.unsigned(1);
+            encoder.array(1);
+            encoder.signed(1);
+            encoder.unsigned(2);
+            encoder.signed(4);
+        });
+        let mut decoder = Decoder::new(&bytes);
+        assert_eq!(
+            decode_scene(&mut decoder),
+            Err(MessageError::InvalidValue("scene line point count"))
+        );
+    }
+
     #[test]
     fn a_full_turn_is_a_multiple_of_360_not_a_degenerate_arc() {
         // Not behaviour this module implements -- it is the convention the

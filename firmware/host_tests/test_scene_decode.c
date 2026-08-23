@@ -1134,15 +1134,27 @@ static void test_a_non_map_payload_is_rejected(void)
     free(scene);
 }
 
+/* The three argument-guard exits are held to the same contract as every
+ * other exit: on ANY non-OK result node_count is 0. They are the exits most
+ * likely to be reached by a caller whose scene_t came from
+ * heap_caps_malloc() rather than calloc(), so "the decoder did not touch
+ * it" and "the decoder left it empty" are not the same promise at all.
+ * new_scene() poisons the allocation with 0xAA precisely so this test can
+ * tell those two apart. */
 static void test_null_arguments_are_rejected(void)
 {
     scene_t *scene = new_scene();
     static const uint8_t empty_map[] = {0xA0U};
 
     assert(scene_decode(NULL, 1U, scene) == SCENE_MODEL_ERR_ARGUMENT);
+    assert(scene->node_count == 0U);
+
     assert(scene_decode(empty_map, sizeof empty_map, NULL) ==
            SCENE_MODEL_ERR_ARGUMENT);
+
+    memset(scene, 0xAA, sizeof *scene);
     assert(scene_decode(empty_map, 0U, scene) == SCENE_MODEL_ERR_ARGUMENT);
+    assert(scene->node_count == 0U);
 
     free(scene);
 }

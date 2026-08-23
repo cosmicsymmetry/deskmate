@@ -878,11 +878,18 @@ static scene_model_result_t decode_nodes(CborValue *value, scene_t *out,
 scene_model_result_t scene_decode(const uint8_t *payload, size_t length,
                                   scene_t *out)
 {
+    /* Cleared BEFORE the argument guard, not after it. The contract in
+     * scene_model.h promises node_count is 0 on ANY non-OK result, and a
+     * caller whose scene_t came from heap_caps_malloc() rather than
+     * calloc() would otherwise read uninitialised heap as a node count on
+     * exactly these three exits. "Did not touch it" is not "left it
+     * empty". */
+    if (out != NULL) {
+        memset(out, 0, sizeof *out);
+    }
     if (payload == NULL || out == NULL || length == 0U) {
         return SCENE_MODEL_ERR_ARGUMENT;
     }
-
-    memset(out, 0, sizeof *out);
 
     CborParser parser;
     CborValue contents;

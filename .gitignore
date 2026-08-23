@@ -23,6 +23,7 @@ firmware/host_tests/test_asset_store
 firmware/host_tests/test_asset_transfer
 firmware/host_tests/test_scene_model
 firmware/host_tests/test_scene_binding
+firmware/host_tests/test_scene_decode
 firmware/host_tests/test_font_registry
 firmware/host_tests/*.dSYM/
 companion/target/

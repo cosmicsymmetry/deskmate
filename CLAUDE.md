@@ -410,9 +410,15 @@ handoff:
 
 ```sh
 make -C firmware/host_tests clean test
+make -C firmware/host_tests sanitize
 . "$HOME/esp/esp-idf/export.sh"
 idf.py -C firmware build
 ```
+
+`sanitize` is not optional for firmware work: two of `core/scene_decode.c`'s bounds
+guard out-of-bounds *writes* that `scene_model_validate()` then reports with the same
+error code the test asserts, so the plain suite passes against a decoder with both
+deleted. ASan is their only proof, and CI now runs it too.
 
 For companion work, run formatting, linting, and workspace tests from `companion/` once
 that workspace exists:

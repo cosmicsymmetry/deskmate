@@ -90,13 +90,21 @@ jobs:
       # Host tests run inside the IDF container AFTER idf.py build because
       # firmware/managed_components/ (tinycbor sources) is gitignored and only
       # exists once the component manager has fetched dependencies.
+      #
+      # The `sanitize` pass is not a nicety. Two of scene_decode.c's bounds --
+      # the node-array cap and the line-point cap -- guard out-of-bounds
+      # WRITES whose only symptom is the write itself: with either bound
+      # deleted, scene_model_validate() still returns the same error code the
+      # test asserts, so the plain suite passes against the broken decoder.
+      # ASan is what distinguishes them, and there is no way to rewrite either
+      # test so it fails without it.
       - name: idf build + host tests
         uses: espressif/esp-idf-ci-action@v1
         with:
           esp_idf_version: v5.5.5
           target: esp32s3
           path: firmware
-          command: idf.py build && make -C host_tests clean test
+          command: idf.py build && make -C host_tests clean test && make -C host_tests sanitize
       - name: verify firmware lockfile unchanged
         run: git diff --exit-code -- firmware/dependencies.lock
       # lvgl-sim compiles these exact lockfile-resolved sources on macOS. Keep

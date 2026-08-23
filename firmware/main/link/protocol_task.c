@@ -85,7 +85,10 @@ typedef struct {
 
 static const char *TAG = "protocol";
 // Allocated from PSRAM in protocol_task_start(), not a static internal-RAM
-// object: protocol_context_t is 58,792 B, which would crowd out the internal
+// object: protocol_context_t is 62,128 B -- it grew from 58,792 B when
+// protocol_push_scene_t put a scene_t inside protocol_message_t's union
+// (core/protocol_message.h), which is exactly the kind of growth this
+// allocation exists to absorb -- and it would crowd out the internal
 // MALLOC_CAP_DMA headroom board_display_init() needs for its LVGL flush and
 // software-rotation buffers once WiFi's static internal .bss landed (see
 // docs/hardware/board-notes.md). Nothing in this struct is DMA'd -- see

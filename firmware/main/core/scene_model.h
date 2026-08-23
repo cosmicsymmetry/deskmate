@@ -193,3 +193,53 @@ typedef enum {
 } scene_model_result_t;
 
 scene_model_result_t scene_model_validate(const scene_t *scene);
+
+/* Decodes one scene from an untrusted CBOR payload into caller-owned
+ * storage. Implemented in core/scene_decode.c, which is the only file in
+ * core/ that includes TinyCBOR -- this header and scene_model.c stay free
+ * of it so the simulator and host tests can build scenes directly.
+ *
+ * The wire shape, key by key, is documented at the top of scene_decode.c.
+ *
+ * `out` is caller-owned deliberately. sizeof(scene_t) is ~6 KB
+ * (SCENE_MAX_NODES x 256 bytes), which on this board has to be placed on
+ * purpose -- link/protocol_task.c PSRAM-allocates its context for exactly
+ * this reason -- and must never land on a task stack or in .bss by
+ * accident. This function creates no scene_t of its own.
+ *
+ * VALIDATION CONTRACT -- exact, and relied upon by callers:
+ *
+ *   On SCENE_MODEL_OK, `*out` has ALREADY PASSED scene_model_validate().
+ *   scene_decode() calls it once, on the fully populated scene, before
+ *   returning OK. A caller that obtained a scene from here does not need
+ *   to validate it again. (ui/scene_view.c still validates, because
+ *   scene_view_show() also accepts scenes built directly in C by the
+ *   simulator and the host tests, which never pass through here.)
+ *
+ *   On ANY non-OK result, `out->node_count` is 0. The scene is refused
+ *   WHOLE -- a payload whose last node carries an unparseable binding
+ *   yields no nodes at all, never a half-rendered panel -- and what is
+ *   left behind is an empty scene, which is safe to hand anywhere,
+ *   though it draws nothing.
+ *
+ * Result mapping. scene_model_result_t has no CBOR-specific code and none
+ * is added, so every structural failure lands on ERR_ARGUMENT:
+ *
+ *   SCENE_MODEL_ERR_ARGUMENT   NULL/empty argument, or the payload is not
+ *                              a well-formed, canonical, complete CBOR
+ *                              scene map: wrong major type, missing
+ *                              required key, duplicate or non-increasing
+ *                              key, invalid UTF-8, trailing bytes, a
+ *                              byte string of the wrong length, or
+ *                              nesting past CBOR_PARSER_MAX_RECURSIONS.
+ *   SCENE_MODEL_ERR_NODE_COUNT more than SCENE_MAX_NODES nodes.
+ *   SCENE_MODEL_ERR_NODE_KIND  a node kind outside scene_node_kind_t.
+ *   SCENE_MODEL_ERR_TEXT       a text, binding, or glyph name past its
+ *                              cap, or a binding scene_binding_parse()
+ *                              rejects.
+ *   SCENE_MODEL_ERR_GEOMETRY   a numeric field outside the range of the
+ *                              C type that holds it, or a line's two
+ *                              coordinate arrays disagreeing in length.
+ *   ...plus anything scene_model_validate() itself returns. */
+scene_model_result_t scene_decode(const uint8_t *payload, size_t length,
+                                  scene_t *out);

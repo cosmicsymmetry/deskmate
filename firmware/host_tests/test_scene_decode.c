@@ -888,6 +888,10 @@ static void test_a_decoded_scene_has_been_validated(void)
 
     assert(scene_decode(b.bytes, b.length, scene) ==
            SCENE_MODEL_ERR_GEOMETRY);
+    /* A model rejection clears node_count too, so the contract's "on any
+     * non-OK result node_count is 0" holds for the validation half as well
+     * as for the decoding half. */
+    assert(scene->node_count == 0U);
 
     free(scene);
 }

@@ -306,6 +306,17 @@ static bool sim_asset_resolver(const uint8_t *digest, const void **out_ptr,
     return true;
 }
 
+/* font_registry_init()'s asset_release_fn. link/asset_flash.c's counterpart
+ * (asset_flash_unmap) gives back an esp_partition_mmap() handle; the
+ * resolver above never created one -- it handed back a direct pointer into
+ * s_asset_flash, which is not a mapping and needs no unmapping. Still wired
+ * in (rather than passing NULL) so the sim exercises the same
+ * acquire/evict/release call pattern real firmware does. */
+static void sim_asset_release(const void *ptr)
+{
+    (void)ptr;
+}
+
 static void *s_font_registry_table;
 static bool s_font_registry_ready;
 
@@ -319,7 +330,8 @@ static bool ensure_font_registry(void)
     if (s_font_registry_table == NULL) {
         return false;
     }
-    if (font_registry_init(sim_asset_resolver, s_font_registry_table, table_bytes) !=
+    if (font_registry_init(sim_asset_resolver, sim_asset_release,
+                           s_font_registry_table, table_bytes) !=
         FONT_REGISTRY_OK) {
         free(s_font_registry_table);
         s_font_registry_table = NULL;

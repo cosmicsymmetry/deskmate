@@ -14,6 +14,15 @@
 typedef bool (*asset_resolver_fn)(const uint8_t *digest, const void **out_ptr,
                                   uint32_t *out_len, uint8_t *out_kind);
 
+/* Releases a mapping previously handed back through `out_ptr` by
+ * asset_resolver_fn, once this registry is done reading it. Injected for the
+ * same reason the resolver is: firmware's caller wires this to
+ * asset_flash_unmap() (link/asset_flash.c, ESP-IDF-only), lvgl-sim's caller
+ * wires a no-op (its resolver hands back a direct pointer into simulated
+ * flash, nothing to unmap). May be NULL, meaning "nothing to release" --
+ * every call site below already guards on that. */
+typedef void (*asset_release_fn)(const void *ptr);
+
 typedef enum {
     FONT_REGISTRY_OK = 0,
     FONT_REGISTRY_ERR_ARGUMENT,
@@ -42,6 +51,7 @@ typedef enum {
 size_t font_registry_table_bytes(void);
 
 font_registry_result_t font_registry_init(asset_resolver_fn resolver,
+                                          asset_release_fn release,
                                           void *table_storage,
                                           size_t table_storage_size);
 

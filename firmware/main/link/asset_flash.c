@@ -7,6 +7,12 @@
 #include "esp_log.h"
 #include "esp_partition.h"
 
+// FONT_REGISTRY_MAX_OPEN_FACES: this file's only caller of asset_flash_map()
+// is font_registry.c's resolver (via protocol_asset_resolver), one call per
+// (digest, pixel_size) miss -- see the mmap handle table sizing comment
+// below for why that makes this the right bound.
+#include "ui/font_registry.h"
+
 /* 64 committed records is the capacity core/asset_store.c's own host tests
  * format and open against (docs/superpowers/plans/2026-08-22-deskmate-asset-
  * store.md's Task 2 fixtures assert record_capacity == 64). Deskmate ships a
@@ -29,9 +35,19 @@ static const char *TAG = "asset_flash";
  * instead of living here. */
 static const esp_partition_t *s_partition;
 static asset_store_t s_store;
-static esp_partition_mmap_handle_t *s_mmap_handles;
-static uint32_t s_mmap_handle_count;
-static uint32_t s_mmap_handle_capacity;
+
+// One outstanding esp_partition_mmap() call, and the pointer it returned --
+// the pointer is what asset_flash_unmap() is given back, since that is the
+// only handle its caller (font_registry.c, via the injected asset_release_fn)
+// ever sees.
+typedef struct {
+    const void *ptr;
+    esp_partition_mmap_handle_t handle;
+} mmap_entry_t;
+
+static mmap_entry_t *s_mmap_entries;
+static uint32_t s_mmap_entry_count;
+static uint32_t s_mmap_entry_capacity;
 
 static int io_read(void *ctx, uint32_t offset, void *out, size_t length)
 {
@@ -132,18 +148,28 @@ esp_err_t asset_flash_init(void)
                 (unsigned)reclaimed_count);
     }
 
-    /* Sized to record_capacity: at most one outstanding mmap per record slot
-     * can ever exist, since every mapped record came from a distinct
-     * committed slot. That bounds the table without guessing at how many
-     * faces font_registry happens to keep open. */
-    s_mmap_handle_capacity = s_store.record_capacity;
-    s_mmap_handles = heap_caps_malloc(
-        (size_t)s_mmap_handle_capacity * sizeof(*s_mmap_handles), MALLOC_CAP_SPIRAM);
-    if (s_mmap_handles == NULL) {
+    /* NOT sized to record_capacity. That was this file's original reasoning
+     * ("at most one outstanding mmap per record slot can ever exist") and it
+     * is false: font_registry_acquire() misses per (digest, pixel_size), not
+     * per record, so one committed record can be mapped again for every
+     * distinct pixel size it is rendered at, and again after every LRU
+     * eviction (whole-branch review finding 2). asset_flash_map() is only
+     * ever called from font_registry.c's injected resolver, and
+     * font_registry.c bounds its own open-face count to
+     * FONT_REGISTRY_MAX_OPEN_FACES with LRU eviction -- so *that* is the
+     * true bound on outstanding mappings, as long as every eviction and
+     * every font_registry_reset() releases its mapping via
+     * asset_flash_unmap() (the asset_release_fn font_registry_init() is
+     * given below). It is not record_capacity coincidentally being larger
+     * that keeps this safe; it is font_registry.c's own LRU bound. */
+    s_mmap_entry_capacity = FONT_REGISTRY_MAX_OPEN_FACES;
+    s_mmap_entries = heap_caps_malloc(
+        (size_t)s_mmap_entry_capacity * sizeof(*s_mmap_entries), MALLOC_CAP_SPIRAM);
+    if (s_mmap_entries == NULL) {
         s_partition = NULL;
         return ESP_ERR_NO_MEM;
     }
-    s_mmap_handle_count = 0U;
+    s_mmap_entry_count = 0U;
 
     ESP_LOGI(TAG, "asset store open: %u records, %u blob bytes",
             (unsigned)s_store.record_capacity, (unsigned)s_store.blob_region_size);
@@ -169,7 +195,7 @@ esp_err_t asset_flash_map(const asset_record_t *record, const void **out_ptr)
     ESP_RETURN_ON_FALSE(record->length <= s_store.blob_region_size &&
                             record->offset <= s_store.blob_region_size - record->length,
                         ESP_ERR_INVALID_ARG, TAG, "record out of range");
-    ESP_RETURN_ON_FALSE(s_mmap_handle_count < s_mmap_handle_capacity, ESP_ERR_NO_MEM,
+    ESP_RETURN_ON_FALSE(s_mmap_entry_count < s_mmap_entry_capacity, ESP_ERR_NO_MEM,
                         TAG, "mmap handle table full");
 
     esp_partition_mmap_handle_t handle;
@@ -179,8 +205,32 @@ esp_err_t asset_flash_map(const asset_record_t *record, const void **out_ptr)
     if (err != ESP_OK) {
         return err;
     }
-    s_mmap_handles[s_mmap_handle_count++] = handle;
+    s_mmap_entries[s_mmap_entry_count].ptr = *out_ptr;
+    s_mmap_entries[s_mmap_entry_count].handle = handle;
+    s_mmap_entry_count++;
     return ESP_OK;
+}
+
+void asset_flash_unmap(const void *ptr)
+{
+    if (ptr == NULL) {
+        return;
+    }
+    for (uint32_t i = 0U; i < s_mmap_entry_count; i++) {
+        if (s_mmap_entries[i].ptr != ptr) {
+            continue;
+        }
+        esp_partition_munmap(s_mmap_entries[i].handle);
+        // Swap-remove: mapping order carries no meaning once a mapping is
+        // outstanding, so moving the last live entry into the freed slot
+        // keeps this O(1) instead of shifting the whole array down.
+        s_mmap_entry_count--;
+        s_mmap_entries[i] = s_mmap_entries[s_mmap_entry_count];
+        return;
+    }
+    // Not found: either already released, or invalidated out from under the
+    // caller by a compaction's unmap_all(). Both are legitimate per this
+    // function's documented contract, so this is not logged as an error.
 }
 
 esp_err_t asset_flash_write_blob(uint32_t blob_offset, const void *data, size_t length)
@@ -199,19 +249,21 @@ esp_err_t asset_flash_write_blob(uint32_t blob_offset, const void *data, size_t 
     return ESP_OK;
 }
 
-/* Releases every mmap handle this module has outstanding. Called at the
- * start of compaction: asset_flash_map's own contract says a mapped pointer
- * "stays valid until the next compaction", and protocol_task's AssetRelease
- * handler already destroys the lv_font_t objects built on top of those
- * pointers (font_registry_reset()) before calling here -- but font_registry
- * has no ESP-IDF include and so cannot itself release the underlying
+/* Releases every mmap handle this module has outstanding, regardless of
+ * whether font_registry.c already released its own via asset_flash_unmap().
+ * Called at the start of compaction: asset_flash_map's own contract says a
+ * mapped pointer "stays valid until the next compaction [or
+ * asset_flash_unmap()]", and protocol_task's AssetRelease handler already
+ * destroys the lv_font_t objects built on top of those pointers
+ * (font_registry_reset()) before calling here -- but font_registry has no
+ * ESP-IDF include and so cannot itself release the underlying
  * esp_partition_mmap handles. That is this file's job. */
 static void unmap_all(void)
 {
-    for (uint32_t i = 0U; i < s_mmap_handle_count; i++) {
-        esp_partition_munmap(s_mmap_handles[i]);
+    for (uint32_t i = 0U; i < s_mmap_entry_count; i++) {
+        esp_partition_munmap(s_mmap_entries[i].handle);
     }
-    s_mmap_handle_count = 0U;
+    s_mmap_entry_count = 0U;
 }
 
 esp_err_t asset_flash_execute_compaction(const asset_move_t *moves, size_t count)

@@ -10,14 +10,20 @@ typedef struct {
     uint8_t digest[ASSET_DIGEST_BYTES];
     int32_t pixel_size;
     lv_font_t *font;
+    // The resolver's out_ptr for this face -- remembered so it can be handed
+    // back to s_release() when this entry is destroyed. A face is not the
+    // pointer it was built from (lv_tiny_ttf_create_data_ex gives no way to
+    // recover it), so this is the only record of what to release.
+    const void *asset_ptr;
     uint32_t last_used;
     uint16_t ref_count;
     bool in_use;
 } font_registry_entry_t;
 
-/* Module state: three words. The table itself is caller-supplied (see the
+/* Module state: four words. The table itself is caller-supplied (see the
  * header for why); nothing here scales with FONT_REGISTRY_MAX_OPEN_FACES. */
 static asset_resolver_fn s_resolver;
+static asset_release_fn s_release;
 static font_registry_entry_t *s_table;
 static uint32_t s_generation;
 
@@ -27,6 +33,7 @@ size_t font_registry_table_bytes(void)
 }
 
 font_registry_result_t font_registry_init(asset_resolver_fn resolver,
+                                          asset_release_fn release,
                                           void *table_storage,
                                           size_t table_storage_size)
 {
@@ -38,11 +45,23 @@ font_registry_result_t font_registry_init(asset_resolver_fn resolver,
     }
 
     s_resolver = resolver;
+    s_release = release; /* may be NULL -- see the header */
     s_table = (font_registry_entry_t *)table_storage;
     memset(s_table, 0, font_registry_table_bytes());
     s_generation = 0;
 
     return FONT_REGISTRY_OK;
+}
+
+// Destroys one entry's LVGL face and releases the mapping it was built from,
+// in that order: lv_tiny_ttf_destroy may still read the mapped bytes while
+// tearing down its internal caches, so the mapping must outlive it.
+static void destroy_entry(font_registry_entry_t *entry)
+{
+    lv_tiny_ttf_destroy(entry->font);
+    if (s_release != NULL) {
+        s_release(entry->asset_ptr);
+    }
 }
 
 static font_registry_entry_t *find_open(const uint8_t *digest, int32_t pixel_size)
@@ -80,7 +99,7 @@ static font_registry_entry_t *claim_slot(void)
         return NULL;
     }
 
-    lv_tiny_ttf_destroy(victim->font);
+    destroy_entry(victim);
     memset(victim, 0, sizeof(*victim));
     return victim;
 }
@@ -125,6 +144,7 @@ lv_font_t *font_registry_acquire(const uint8_t *digest, int32_t pixel_size)
     memcpy(slot->digest, digest, ASSET_DIGEST_BYTES);
     slot->pixel_size = pixel_size;
     slot->font = font;
+    slot->asset_ptr = ptr;
     slot->ref_count = 1;
     slot->last_used = ++s_generation;
     slot->in_use = true;
@@ -171,7 +191,7 @@ uint32_t font_registry_reset(void)
             if (entry->ref_count > 0) {
                 ++pinned_destroyed;
             }
-            lv_tiny_ttf_destroy(entry->font);
+            destroy_entry(entry);
         }
     }
     memset(s_table, 0, font_registry_table_bytes());

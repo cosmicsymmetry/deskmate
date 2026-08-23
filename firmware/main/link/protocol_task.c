@@ -1368,7 +1368,7 @@ esp_err_t protocol_task_start(void)
             heap_caps_malloc(font_table_bytes, MALLOC_CAP_SPIRAM);
         if (font_table_storage == NULL) {
             ESP_LOGW(TAG, "font registry table allocation failed");
-        } else if (font_registry_init(protocol_asset_resolver,
+        } else if (font_registry_init(protocol_asset_resolver, asset_flash_unmap,
                                       font_table_storage,
                                       font_table_bytes) != FONT_REGISTRY_OK) {
             heap_caps_free(font_table_storage);

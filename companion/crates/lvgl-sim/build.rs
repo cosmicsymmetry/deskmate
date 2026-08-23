@@ -21,6 +21,17 @@ fn main() {
         // I/O -- see csrc/sim_shim.c's RAM-backed asset_flash_io_t.
         "asset_store.c",
         "asset_transfer.c",
+        // Task 8 (stage 2a): the scene model, its CBOR decoder and its
+        // binding evaluator, compiled unmodified for the same reason
+        // ui/scene_view.c below is -- the stage-2 parity gate compares a
+        // device framebuffer against a simulator framebuffer, and that is
+        // only meaningful while both run the same translation units. All
+        // four are free of ESP-IDF includes by design (see ui/scene_view.h's
+        // header comment), so any compile failure here is a violated
+        // constraint, not a simulator problem.
+        "scene_model.c",
+        "scene_decode.c",
+        "scene_binding.c",
     ] {
         sources.push(firmware.join("main/core").join(core));
     }
@@ -40,6 +51,9 @@ fn main() {
     // Task 12: free of ESP-IDF includes by design (see its own header
     // comment) specifically so it can compile into this host binary.
     sources.push(firmware.join("main/ui/font_registry.c"));
+    // Task 8: the scene interpreter. Its header states the no-ESP-IDF rule
+    // and names this simulator as the reason for it.
+    sources.push(firmware.join("main/ui/scene_view.c"));
     for font in [
         "deskmate_font_18.c",
         "deskmate_font_28.c",

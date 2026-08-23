@@ -115,9 +115,13 @@ export function getNetworkSettings(): Promise<NetworkSettings> {
   return invokeTyped("get_network_settings");
 }
 
-export function setServerEndpoint(serverUrl: string, adminToken: string): Promise<NetworkSettings> {
+export function setServerEndpoint(
+  serverUrl: string,
+  deviceId: string,
+  adminToken: string,
+): Promise<NetworkSettings> {
   return invokeTyped("set_server_endpoint", {
-    request: { server_url: serverUrl, admin_token: adminToken },
+    request: { server_url: serverUrl, device_id: deviceId, admin_token: adminToken },
   });
 }
 

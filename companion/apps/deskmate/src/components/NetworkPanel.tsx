@@ -27,7 +27,7 @@ interface NetworkPanelProps {
   onPair: (input: PairDeviceInput) => Promise<void>;
   onUnpair: () => Promise<void>;
   onFactoryReset: () => Promise<void>;
-  onSaveServerAccess?: (serverUrl: string, adminToken: string) => Promise<void>;
+  onSaveServerAccess?: (serverUrl: string, deviceId: string, adminToken: string) => Promise<void>;
   allowLocalOverride?: boolean;
   onUseLocalMode?: () => Promise<void>;
 }
@@ -263,7 +263,7 @@ export function NetworkPanel({
               }
               void run(
                 "server-access",
-                () => onSaveServerAccess(serverUrl, adminToken),
+                () => onSaveServerAccess(serverUrl, deviceId, adminToken),
                 "Server access was saved for this app session.",
                 "admin",
               );

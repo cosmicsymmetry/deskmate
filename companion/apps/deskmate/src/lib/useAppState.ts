@@ -117,7 +117,7 @@ export interface AppStateValue {
   networkSettings: NetworkSettings;
   ownershipTier: DeviceTier | null;
   saveConfig: (config: AppConfig) => Promise<ConfigApplyResult>;
-  saveServerAccess: (serverUrl: string, adminToken: string) => Promise<void>;
+  saveServerAccess: (serverUrl: string, deviceId: string, adminToken: string) => Promise<void>;
   pairDevice: (input: PairDeviceInput) => Promise<void>;
   unpairDevice: () => Promise<void>;
   factoryReset: () => Promise<void>;
@@ -224,8 +224,8 @@ export function useAppState(): AppStateValue {
   }, [acceptError, acceptSnapshot]);
 
   const saveServerAccess = useCallback(
-    async (serverUrl: string, adminToken: string) => {
-      const settings = await setServerEndpoint(serverUrl, adminToken);
+    async (serverUrl: string, deviceId: string, adminToken: string) => {
+      const settings = await setServerEndpoint(serverUrl, deviceId, adminToken);
       acceptNetworkSettings(settings);
     },
     [acceptNetworkSettings],
@@ -242,7 +242,7 @@ export function useAppState(): AppStateValue {
         tier: input.tier,
       });
       acceptNetworkSettings(settings);
-      await saveServerAccess(input.server_url, input.admin_token);
+      await saveServerAccess(input.server_url, input.device_id, input.admin_token);
     },
     [acceptNetworkSettings, saveServerAccess],
   );

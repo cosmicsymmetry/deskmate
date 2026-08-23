@@ -107,6 +107,7 @@ struct ServerSaveContext {
 #[serde(deny_unknown_fields)]
 pub struct ServerEndpointRequest {
     server_url: String,
+    device_id: String,
     admin_token: String,
 }
 
@@ -296,16 +297,32 @@ pub fn set_server_endpoint(
     state: State<'_, DesktopState>,
     request: ServerEndpointRequest,
 ) -> Result<NetworkSettings, IpcError> {
+    set_server_endpoint_with_context(&state.network_store, request)
+}
+
+fn set_server_endpoint_with_context(
+    network_store: &NetworkSettingsStore,
+    request: ServerEndpointRequest,
+) -> Result<NetworkSettings, IpcError> {
     validate_server_url(&request.server_url)?;
     validate_secret(&request.admin_token, 4_096, "admin token")?;
-    let current = state.network_store.load().settings().clone();
+    let current = network_store.load().settings().clone();
+    // A blank box means "leave the stored id alone", which keeps the pre-pairing
+    // endpoint save working. Anything typed is authoritative: without this, a Mac
+    // that knows the tier but not the id has no path to the id at all, since pairing
+    // demands a device token the server retains only as a digest.
+    let device_id = if request.device_id.trim().is_empty() {
+        current.device_id
+    } else {
+        validate_target(&request.device_id, MAX_DEVICE_ID_BYTES, "device ID")?;
+        request.device_id
+    };
     let settings = NetworkSettings {
         server_url: request.server_url,
-        device_id: current.device_id,
+        device_id,
         tier: current.tier,
     };
-    state
-        .network_store
+    network_store
         .save(NetworkSettingsUpdate::new(
             settings.server_url.clone(),
             settings.device_id.clone(),
@@ -1341,6 +1358,21 @@ impl From<NetworkSettingsStoreError> for IpcError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A private directory named for the test that owns it, so parallel runs of these
+    /// store-backed tests cannot collide on one path.
+    fn scratch_directory(label: &str) -> std::path::PathBuf {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let serial = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory =
+            std::env::temp_dir().join(format!("deskmate-{label}-{}-{serial}", std::process::id()));
+        fs::create_dir(&directory).unwrap();
+        directory
+    }
     use std::fs;
     use std::path::Path;
 
@@ -1719,6 +1751,77 @@ mod tests {
         settings.device_id.clear();
         assert!(!server_owns_device(None, &settings));
         assert!(local_owns_device(None, &settings));
+    }
+
+    /// A Mac that has only ever *observed* a networked board knows its tier but not
+    /// its id: `remember_device_tier` persists the tier alone. Pairing cannot supply
+    /// the id either, because that needs a plaintext device token the server keeps
+    /// only as a digest. Saving server access is therefore the one path left, so the
+    /// id typed beside the URL has to survive it.
+    #[test]
+    fn saving_server_access_persists_the_typed_device_id() {
+        let directory = scratch_directory("server-access-device-id");
+        let network_store = NetworkSettingsStore::new(directory.join("network-settings.json"));
+        network_store
+            .save(NetworkSettingsUpdate::new(
+                "",
+                "",
+                Some(app_core::DeviceTier::Networked),
+                None,
+            ))
+            .unwrap();
+
+        let settings = set_server_endpoint_with_context(
+            &network_store,
+            ServerEndpointRequest {
+                server_url: "https://desk.example".into(),
+                device_id: "dev-0003".into(),
+                admin_token: "admin-secret".into(),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(settings.device_id, "dev-0003");
+        assert_eq!(
+            NetworkSettingsStore::new(directory.join("network-settings.json"))
+                .load()
+                .settings()
+                .device_id,
+            "dev-0003",
+            "the typed device id never reached the settings file"
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// Saving an endpoint before a device is paired is a supported flow -- it is what
+    /// `use_local_ownership` exists to recover from -- so a blank box must mean "leave
+    /// the id alone" rather than "erase the id I already have".
+    #[test]
+    fn saving_server_access_keeps_the_stored_device_id_when_the_box_is_blank() {
+        let directory = scratch_directory("server-access-blank-device-id");
+        let network_store = NetworkSettingsStore::new(directory.join("network-settings.json"));
+        network_store
+            .save(NetworkSettingsUpdate::new(
+                "https://old.example",
+                "dev-0003",
+                Some(app_core::DeviceTier::Networked),
+                None,
+            ))
+            .unwrap();
+
+        let settings = set_server_endpoint_with_context(
+            &network_store,
+            ServerEndpointRequest {
+                server_url: "https://desk.example".into(),
+                device_id: "   ".into(),
+                admin_token: "admin-secret".into(),
+            },
+        )
+        .expect("a blank device id must not fail the save");
+
+        assert_eq!(settings.device_id, "dev-0003");
+        assert_eq!(settings.server_url, "https://desk.example");
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

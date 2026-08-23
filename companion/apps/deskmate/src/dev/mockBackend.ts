@@ -311,12 +311,16 @@ export async function mockInvoke<T>(command: string, args?: Record<string, unkno
     }
     case "choose_ics_file":
       return delay("/Users/you/Calendars/work.ics") as Promise<T>;
-    case "set_server_endpoint":
+    case "set_server_endpoint": {
+      const request = requireArgs(args).request as { server_url: string; device_id: string };
       network = {
         ...network,
-        server_url: (requireArgs(args).request as { server_url: string }).server_url,
+        server_url: request.server_url,
+        // Blank means "leave the stored id alone", matching set_server_endpoint.
+        device_id: request.device_id.trim() === "" ? network.device_id : request.device_id,
       };
       return delay(network) as Promise<T>;
+    }
     case "provision_device": {
       const request = args?.request as {
         server_url: string;

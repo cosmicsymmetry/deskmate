@@ -1022,9 +1022,33 @@ mod tests {
         assert_eq!(0, trigo_sin(180));
         assert_eq!(-32768, trigo_sin(270));
         assert_eq!(-16384, trigo_sin(330));
+        // Odd angles too: the round ones alone would not catch a transcription
+        // slip in the middle of the table.
+        assert_eq!(572, trigo_sin(1));
+        assert_eq!(22763, trigo_sin(44));
+        assert_eq!(32763, trigo_sin(89));
+        assert_eq!(32763, trigo_sin(91));
+        assert_eq!(-32763, trigo_sin(269));
         // The C normalises with while-loops, so out-of-turn angles wrap.
         assert_eq!(trigo_sin(30), trigo_sin(390));
         assert_eq!(trigo_sin(330), trigo_sin(-30));
+    }
+
+    /// `lv_math.c`'s table is `round(sin(d) * 32768)` at every whole degree, so
+    /// the whole transcription can be checked without pasting it twice. A
+    /// float sine is *not* what the builder may use at runtime -- the device
+    /// reads the table, and only the table is guaranteed to round the way the
+    /// device rounds -- but it is a fine oracle for the transcription.
+    #[test]
+    fn the_transcribed_sine_table_has_no_typo() {
+        for (degrees, &entry) in SIN_0_90.iter().enumerate() {
+            let degrees = u16::try_from(degrees).expect("the table is 91 entries long");
+            let expected = (f64::from(degrees).to_radians().sin() * 32768.0).round();
+            assert!(
+                (expected - f64::from(entry)).abs() < f64::EPSILON,
+                "sin0_90_table[{degrees}] is {entry}, want {expected}"
+            );
+        }
     }
 
     // ------------------------------------------------------- the wire budget

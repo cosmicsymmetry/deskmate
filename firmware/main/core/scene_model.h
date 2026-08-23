@@ -201,6 +201,12 @@ scene_model_result_t scene_model_validate(const scene_t *scene);
  *
  * The wire shape, key by key, is documented at the top of scene_decode.c.
  *
+ * A scene arriving NESTED inside another message -- PushScene's key 2 --
+ * cannot come through here, because this function validates its buffer as
+ * a complete standalone payload. core/scene_decode.h declares
+ * scene_decode_map(), the shared body both entry points run, for that
+ * caller. Everything below applies identically to it.
+ *
  * `out` is caller-owned deliberately. sizeof(scene_t) is ~6 KB
  * (SCENE_MAX_NODES x 256 bytes), which on this board has to be placed on
  * purpose -- link/protocol_task.c PSRAM-allocates its context for exactly

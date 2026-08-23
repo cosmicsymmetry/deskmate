@@ -1,9 +1,9 @@
-#include "scene_model.h"
+#include "scene_decode.h"
 
 #include <string.h>
 
-#include "cbor.h"
 #include "scene_binding.h"
+#include "scene_model.h"
 
 /* ------------------------------------------------------------------
  * The scene wire shape.
@@ -97,34 +97,31 @@ static scene_model_result_t cbor_result(CborError error)
     return error == CborNoError ? SCENE_MODEL_OK : SCENE_MODEL_ERR_ARGUMENT;
 }
 
-static scene_model_result_t open_scene_map(const uint8_t *payload,
-                                            size_t payload_length,
-                                            CborParser *parser,
-                                            CborValue *contents,
-                                            size_t *map_length)
+/* Parses and whole-payload-validates a standalone scene buffer, leaving
+ * `root` positioned AT the scene map without entering it -- entering is
+ * scene_decode_map()'s job, so that one function is the only place a scene
+ * map is read.
+ *
+ * The flag set is unchanged from before that extraction, CborValidate-
+ * CompleteData included: a standalone payload with trailing bytes is not a
+ * scene. A scene nested in a larger message inherits the equivalent
+ * guarantees from its enclosing payload's own root validation -- see
+ * scene_decode.h. */
+static scene_model_result_t open_scene_payload(const uint8_t *payload,
+                                                size_t payload_length,
+                                                CborParser *parser,
+                                                CborValue *root)
 {
-    CborValue root;
     CborError error =
-        cbor_parser_init(payload, payload_length, 0, parser, &root);
+        cbor_parser_init(payload, payload_length, 0, parser, root);
     if (error != CborNoError) {
         return cbor_result(error);
     }
     error = cbor_value_validate(
-        &root,
+        root,
         CborValidateCanonicalFormat | CborValidateMapKeysAreUnique |
             CborValidateUtf8 | CborValidateCompleteData |
             CborValidateNoUndefined | CborValidateNoTags);
-    if (error != CborNoError) {
-        return cbor_result(error);
-    }
-    if (!cbor_value_is_map(&root)) {
-        return SCENE_MODEL_ERR_ARGUMENT;
-    }
-    error = cbor_value_get_map_length(&root, map_length);
-    if (error != CborNoError) {
-        return cbor_result(error);
-    }
-    error = cbor_value_enter_container(&root, contents);
     return cbor_result(error);
 }
 
@@ -893,32 +890,32 @@ static scene_model_result_t decode_nodes(CborValue *value, scene_t *out,
     return cbor_result(cbor_value_leave_container(value, &items));
 }
 
-scene_model_result_t scene_decode(const uint8_t *payload, size_t length,
-                                  scene_t *out)
+/* The scene map itself. Split out of scene_decode() so a scene nested
+ * under another message's key -- PushScene's key 2 -- decodes through this
+ * exact code rather than a second implementation of it. See
+ * scene_decode.h for what a caller must have established before calling,
+ * and for the result contract, which is unchanged. */
+scene_model_result_t scene_decode_map(CborValue *value, scene_t *out)
 {
-    /* Cleared BEFORE the argument guard, not after it. The contract in
-     * scene_model.h promises node_count is 0 on ANY non-OK result, and a
-     * caller whose scene_t came from heap_caps_malloc() rather than
-     * calloc() would otherwise read uninitialised heap as a node count on
-     * exactly these three exits. "Did not touch it" is not "left it
-     * empty". */
-    if (out != NULL) {
-        memset(out, 0, sizeof *out);
-    }
-    if (payload == NULL || out == NULL || length == 0U) {
+    if (value == NULL || out == NULL) {
         return SCENE_MODEL_ERR_ARGUMENT;
     }
+    /* Cleared on entry rather than trusted from the caller: the contract
+     * promises node_count is 0 on ANY non-OK result, including the
+     * is-it-a-map rejection immediately below, and a caller whose scene_t
+     * came from heap_caps_malloc() rather than calloc() would otherwise
+     * read uninitialised heap as a node count. "Did not touch it" is not
+     * "left it empty". */
+    out->node_count = 0U;
 
-    CborParser parser;
     CborValue contents;
     size_t count = 0U;
-    scene_model_result_t status =
-        open_scene_map(payload, length, &parser, &contents, &count);
+    scene_model_result_t status = enter_map(value, &contents, &count);
     if (status != SCENE_MODEL_OK) {
         return status;
     }
 
-    /* Held back until the whole payload has decoded, so every failure path
+    /* Held back until the whole map has decoded, so every failure path
      * below leaves out->node_count at 0 and no partially decoded node is
      * reachable. This is what "refused whole" means concretely. */
     uint32_t node_count = 0U;
@@ -948,6 +945,16 @@ scene_model_result_t scene_decode(const uint8_t *payload, size_t length,
         return SCENE_MODEL_ERR_ARGUMENT;
     }
 
+    /* Advances the CALLER's cursor past this map, which is what lets an
+     * enclosing decoder go on reading its own sibling keys. A standalone
+     * payload has no siblings, so this was not needed before the split;
+     * skipping it on a nested scene would leave the parent parked inside
+     * the scene. */
+    status = cbor_result(cbor_value_leave_container(value, &contents));
+    if (status != SCENE_MODEL_OK) {
+        return status;
+    }
+
     out->node_count = node_count;
 
     /* The validation half of this function's contract -- see scene_model.h.
@@ -959,4 +966,28 @@ scene_model_result_t scene_decode(const uint8_t *payload, size_t length,
         out->node_count = 0U;
     }
     return validation;
+}
+
+scene_model_result_t scene_decode(const uint8_t *payload, size_t length,
+                                  scene_t *out)
+{
+    /* Cleared BEFORE the argument guard, not after it, for the same reason
+     * scene_decode_map() clears node_count on entry -- and kept here as
+     * well as there because these three exits return without ever reaching
+     * it. */
+    if (out != NULL) {
+        memset(out, 0, sizeof *out);
+    }
+    if (payload == NULL || out == NULL || length == 0U) {
+        return SCENE_MODEL_ERR_ARGUMENT;
+    }
+
+    CborParser parser;
+    CborValue root;
+    scene_model_result_t status =
+        open_scene_payload(payload, length, &parser, &root);
+    if (status != SCENE_MODEL_OK) {
+        return status;
+    }
+    return scene_decode_map(&root, out);
 }

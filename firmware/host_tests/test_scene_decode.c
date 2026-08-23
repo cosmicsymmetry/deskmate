@@ -719,6 +719,25 @@ static void test_a_missing_required_key_is_rejected(void)
     free(scene);
 }
 
+/* A node map carrying a kind but no payload. Nothing downstream catches
+ * this: a RECT with a zeroed union is a 0x0 rect at the origin, which
+ * scene_model_validate() accepts as perfectly on-canvas. Only the node
+ * map's required-key mask sees it. */
+static void test_a_node_without_a_payload_is_rejected(void)
+{
+    builder_t b;
+    scene_t *scene = new_scene();
+
+    begin_scene(&b, 1U, 0U, 1U);
+    put_map(&b, 1U);
+    put_uint(&b, 0U);
+    put_uint(&b, SCENE_NODE_RECT);
+
+    assert(scene_decode(b.bytes, b.length, scene) == SCENE_MODEL_ERR_ARGUMENT);
+
+    free(scene);
+}
+
 static void test_a_node_missing_a_required_geometry_key_is_rejected(void)
 {
     builder_t b;
@@ -760,6 +779,11 @@ static void test_an_omitted_align_defaults_to_left(void)
     free(scene);
 }
 
+/* The truncation has to land on a LEGAL coordinate for this test to mean
+ * anything. 0x1'0000'000A narrowed to int32 is 10 -- an ordinary on-canvas
+ * x that scene_model_validate() would wave straight through. A test using
+ * INT32_MAX + 1 proves nothing, because that narrows to INT32_MIN and the
+ * model rejects the negative for its own reasons. */
 static void test_a_coordinate_outside_int32_is_rejected(void)
 {
     builder_t b;
@@ -772,13 +796,67 @@ static void test_a_coordinate_outside_int32_is_rejected(void)
     put_uint(&b, 1U);
     put_map(&b, 4U);
     put_uint(&b, 0U);
-    put_int(&b, (int64_t)INT32_MAX + 1);
+    put_int(&b, INT64_C(0x10000000A));
     put_uint(&b, 1U);
     put_int(&b, 0);
     put_uint(&b, 2U);
     put_int(&b, 10);
     put_uint(&b, 3U);
     put_int(&b, 10);
+
+    assert(scene_decode(b.bytes, b.length, scene) ==
+           SCENE_MODEL_ERR_GEOMETRY);
+
+    free(scene);
+}
+
+/* Same reasoning for the unsigned readers. A revision of 0x1'0000'0007
+ * narrows to 7, and nothing downstream constrains a revision at all, so
+ * only the decoder can catch this. */
+static void test_an_unsigned_outside_uint32_is_rejected(void)
+{
+    builder_t b;
+    scene_t *scene = new_scene();
+
+    b.length = 0U;
+    put_map(&b, 3U);
+    put_uint(&b, 0U);
+    put_uint(&b, UINT64_C(0x100000007));
+    put_uint(&b, 1U);
+    put_uint(&b, 0U);
+    put_uint(&b, 2U);
+    put_array(&b, 0U);
+
+    assert(scene_decode(b.bytes, b.length, scene) ==
+           SCENE_MODEL_ERR_GEOMETRY);
+
+    free(scene);
+}
+
+/* And for the one uint8 field. An opacity of 256 narrows to 0 -- fully
+ * transparent, which the model does not constrain, so a rect the host asked
+ * to draw opaque would silently vanish. */
+static void test_an_opacity_outside_uint8_is_rejected(void)
+{
+    builder_t b;
+    scene_t *scene = new_scene();
+
+    begin_scene(&b, 1U, 0U, 1U);
+    put_map(&b, 2U);
+    put_uint(&b, 0U);
+    put_uint(&b, SCENE_NODE_RECT);
+    put_uint(&b, 1U);
+    put_map(&b, 5U);
+    put_uint(&b, 0U);
+    put_int(&b, 0);
+    put_uint(&b, 1U);
+    put_int(&b, 0);
+    put_uint(&b, 2U);
+    put_int(&b, 10);
+    put_uint(&b, 3U);
+    put_int(&b, 10);
+    put_uint(&b, 6U);
+    put_uint(&b, 256U);
 
     assert(scene_decode(b.bytes, b.length, scene) ==
            SCENE_MODEL_ERR_GEOMETRY);
@@ -816,6 +894,40 @@ static void test_more_line_points_than_the_cap_is_rejected(void)
     free(scene);
 }
 
+/* SCENE_MAX_LINE_POINTS + 1 is not enough to prove the decoder bounds this
+ * itself: nine points still fit inside scene_node_t, and
+ * scene_model_validate() rejects the count afterwards anyway, so the two
+ * are indistinguishable. 1800 points is 7200 bytes against a 6144-byte
+ * scene_t, which leaves the allocation entirely -- the only version of this
+ * test the decoder's own bound can be the reason for. */
+static void test_a_line_point_array_far_past_the_cap_is_rejected(void)
+{
+    builder_t b;
+    scene_t *scene = new_scene();
+    const size_t huge = 1800U;
+
+    begin_scene(&b, 1U, 0U, 1U);
+    put_map(&b, 2U);
+    put_uint(&b, 0U);
+    put_uint(&b, SCENE_NODE_LINE);
+    put_uint(&b, 1U);
+    put_map(&b, 3U);
+    put_uint(&b, 0U);
+    put_array(&b, huge);
+    for (size_t i = 0U; i < huge; i++) {
+        put_int(&b, 1);
+    }
+    put_uint(&b, 1U);
+    put_array(&b, 0U);
+    put_uint(&b, 2U);
+    put_int(&b, 2);
+
+    assert(scene_decode(b.bytes, b.length, scene) ==
+           SCENE_MODEL_ERR_GEOMETRY);
+
+    free(scene);
+}
+
 static void test_mismatched_line_point_arrays_are_rejected(void)
 {
     builder_t b;
@@ -841,6 +953,119 @@ static void test_mismatched_line_point_arrays_are_rejected(void)
 
     assert(scene_decode(b.bytes, b.length, scene) ==
            SCENE_MODEL_ERR_GEOMETRY);
+
+    free(scene);
+}
+
+/* A TEXT node with no value map is not a text node. Without this the map
+ * would decode to value.kind 0 and an empty literal, which the model
+ * accepts -- a blank string drawn where the host meant words. */
+static void test_a_text_node_without_a_value_is_rejected(void)
+{
+    builder_t b;
+    scene_t *scene = new_scene();
+
+    begin_scene(&b, 1U, 0U, 1U);
+    put_map(&b, 2U);
+    put_uint(&b, 0U);
+    put_uint(&b, SCENE_NODE_TEXT);
+    put_uint(&b, 1U);
+    put_map(&b, 4U);
+    put_uint(&b, 0U);
+    put_int(&b, 10);
+    put_uint(&b, 1U);
+    put_int(&b, 200);
+    put_uint(&b, 2U);
+    put_int(&b, 400);
+    put_uint(&b, 4U);
+    put_baked_font(&b, SCENE_FONT_BODY);
+
+    assert(scene_decode(b.bytes, b.length, scene) == SCENE_MODEL_ERR_ARGUMENT);
+
+    free(scene);
+}
+
+static void test_a_text_node_without_a_font_is_rejected(void)
+{
+    builder_t b;
+    scene_t *scene = new_scene();
+
+    begin_scene(&b, 1U, 0U, 1U);
+    put_map(&b, 2U);
+    put_uint(&b, 0U);
+    put_uint(&b, SCENE_NODE_TEXT);
+    put_uint(&b, 1U);
+    put_map(&b, 4U);
+    put_uint(&b, 0U);
+    put_int(&b, 10);
+    put_uint(&b, 1U);
+    put_int(&b, 200);
+    put_uint(&b, 2U);
+    put_int(&b, 400);
+    put_uint(&b, 6U);
+    put_literal_value(&b, "hi");
+
+    assert(scene_decode(b.bytes, b.length, scene) == SCENE_MODEL_ERR_ARGUMENT);
+
+    free(scene);
+}
+
+/* A font map with no kind. Only the decoder's required mask sees this;
+ * validate_font() would reject kind 0 too, but with a different code, and
+ * the point is that the wire contract says the key is mandatory. */
+static void test_a_font_without_a_kind_is_rejected(void)
+{
+    builder_t b;
+    scene_t *scene = new_scene();
+
+    begin_scene(&b, 1U, 0U, 1U);
+    put_map(&b, 2U);
+    put_uint(&b, 0U);
+    put_uint(&b, SCENE_NODE_TEXT);
+    put_uint(&b, 1U);
+    put_map(&b, 5U);
+    put_uint(&b, 0U);
+    put_int(&b, 10);
+    put_uint(&b, 1U);
+    put_int(&b, 200);
+    put_uint(&b, 2U);
+    put_int(&b, 400);
+    put_uint(&b, 4U);
+    put_map(&b, 1U);
+    put_uint(&b, 1U);
+    put_uint(&b, SCENE_FONT_BODY);
+    put_uint(&b, 6U);
+    put_literal_value(&b, "hi");
+
+    assert(scene_decode(b.bytes, b.length, scene) == SCENE_MODEL_ERR_ARGUMENT);
+
+    free(scene);
+}
+
+/* A GLYPH with no name draws nothing. The model cannot catch it -- an
+ * omitted name is the empty string, which is NUL-terminated and therefore
+ * valid as far as scene_model_validate() is concerned. */
+static void test_a_glyph_without_a_name_is_rejected(void)
+{
+    builder_t b;
+    scene_t *scene = new_scene();
+
+    begin_scene(&b, 1U, 0U, 1U);
+    put_map(&b, 2U);
+    put_uint(&b, 0U);
+    put_uint(&b, SCENE_NODE_GLYPH);
+    put_uint(&b, 1U);
+    put_map(&b, 4U);
+    put_uint(&b, 0U);
+    put_int(&b, 30);
+    put_uint(&b, 1U);
+    put_int(&b, 60);
+    put_uint(&b, 2U);
+    put_int(&b, 40);
+    put_uint(&b, 3U);
+    put_bytes(&b, k_digest, sizeof k_digest);
+
+    assert(scene_decode(b.bytes, b.length, scene) == SCENE_MODEL_ERR_ARGUMENT);
 
     free(scene);
 }
@@ -940,11 +1165,19 @@ int main(void)
     test_trailing_bytes_after_the_scene_are_rejected();
     test_recursion_is_bounded();
     test_a_missing_required_key_is_rejected();
+    test_a_node_without_a_payload_is_rejected();
     test_a_node_missing_a_required_geometry_key_is_rejected();
     test_an_omitted_align_defaults_to_left();
     test_a_coordinate_outside_int32_is_rejected();
+    test_an_unsigned_outside_uint32_is_rejected();
+    test_an_opacity_outside_uint8_is_rejected();
     test_more_line_points_than_the_cap_is_rejected();
+    test_a_line_point_array_far_past_the_cap_is_rejected();
     test_mismatched_line_point_arrays_are_rejected();
+    test_a_text_node_without_a_value_is_rejected();
+    test_a_text_node_without_a_font_is_rejected();
+    test_a_font_without_a_kind_is_rejected();
+    test_a_glyph_without_a_name_is_rejected();
     test_a_digest_of_the_wrong_length_is_rejected();
     test_a_decoded_scene_has_been_validated();
     test_a_non_map_payload_is_rejected();

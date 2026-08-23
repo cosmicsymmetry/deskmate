@@ -397,6 +397,13 @@ fn time_text(now: NaiveDateTime) -> String {
 /// with C's truncating division, and the offsets are fixed-point sine and
 /// cosine of `rotation + angle`, arithmetic-shifted down by `LV_TRIGO_SHIFT`.
 fn hand_line(origin: (i32, i32), length: i32, value: i32, width: i32, color: u32) -> SceneLine {
+    // The clamp is a faithful port, but note the parity precondition it hides:
+    // at actual_length == half_box the C hand touches the scale's own box edge,
+    // and the C hand is a *child of the scale*, so LVGL clips its rounded cap
+    // to that 112px box -- while this scene's hand is a child of the
+    // full-canvas container and is not clipped. The two agree only while
+    // `length + width / 2 < half_box`. DigitalClock is comfortably inside it
+    // (42 + 2 = 44 < 56); a future face reusing this helper may not be.
     let half_box = DIAL_BOX / 2;
     let actual_length = if length >= half_box {
         half_box
@@ -434,9 +441,25 @@ fn hand_line(origin: (i32, i32), length: i32, value: i32, width: i32, color: u32
 ///
 /// The node order is `digital_clock.c`'s creation order, which is its z-order:
 /// the reading, the seconds, the date module and its label, the dial module,
-/// the dial, then the two hands over it. `OBJ_STATE` has no node — it is the
-/// shared state footer, and in the OK state `template_view.c:99` sets it to the
-/// empty string, which draws nothing.
+/// the dial, then the two hands over it.
+///
+/// # `OBJ_STATE` has no node, and what that demands of a parity fixture
+///
+/// `OBJ_STATE` (`digital_clock.c:144-147`) is the shared state footer. In the
+/// OK state `template_view.c:99` sets it to the empty string, which draws
+/// nothing, so the scene omits it.
+///
+/// **A fixture comparing this scene against the C face must drive the C side
+/// through the state-update path** — `template_view.c`'s `update_data_state()`,
+/// i.e. the full `template_view_show`/`template_view_patch` push — and not
+/// merely leave `stale` and `error` unset. `digital_clock.c` creates that label
+/// and *never* sets its text; `lv_label.c:764` assigns `LV_LABEL_DEFAULT_TEXT`
+/// in the constructor, and `firmware/lv_conf.h`'s
+/// `LV_WIDGETS_HAS_DEFAULT_VALUE 1` makes that default the literal string
+/// `"Text"` (the simulator compiles the same `lv_conf.h`). So a harness that
+/// calls `digital_clock_create()` and `digital_clock_tick()` directly renders
+/// the word "Text" bottom-centre, in a region neither implementation looks
+/// like it draws — a very expensive pixel-diff hunt for a fixture mistake.
 pub fn build_digital_clock_scene(card: &ClockCard, metrics: &BakedFontMetrics) -> Scene {
     let mut nodes = Vec::with_capacity(8);
 

@@ -65,6 +65,14 @@ typedef struct {
     asset_transfer_t asset_transfer;
     uint32_t asset_transfer_record_index;
     uint32_t asset_transfer_blob_offset;
+    // True exactly when asset_transfer_record_index names a reservation that
+    // is UNCOMMITTED on flash and not yet either committed or reclaimed.
+    // Distinct from asset_transfer.active: a chunk-write failure or rejected
+    // chunk aborts the in-RAM transfer (asset_transfer_abort resets
+    // asset_transfer to inactive) while the on-flash reservation survives --
+    // this flag is what still remembers it needs reclaiming. See
+    // abandon_pending_reservation().
+    bool asset_reservation_pending;
     uint8_t wire[PROTOCOL_MAX_WIRE_FRAME];
     uint32_t valid_frames;
     uint32_t malformed_frames;
@@ -662,6 +670,32 @@ static bool protocol_asset_resolver(const uint8_t *digest, const void **out_ptr,
     return true;
 }
 
+// Reclaims a reservation this context abandoned -- whether the in-RAM
+// transfer over it is still marked active (a second AssetBegin superseding
+// the first) or was already aborted out from under it (a rejected/failed
+// AssetChunk, which resets asset_transfer to inactive but leaves the
+// on-flash record UNCOMMITTED). Without this, an interrupted transfer's
+// reservation is reclaimed only by AssetRelease/compaction -- and the host
+// never sends AssetRelease on this path (AssetSync::reconcile returns at the
+// first AssetBegin failure), so repeated interrupted retries permanently
+// consume blob space. Best-effort: a mark-dead failure here is no worse than
+// the pre-fix behavior (nothing ever reclaimed it), so this still clears the
+// flag rather than retrying it forever on every future AssetBegin.
+static void abandon_pending_reservation(protocol_context_t *context)
+{
+    if (!context->asset_reservation_pending) {
+        return;
+    }
+    if (asset_store_mark_dead(asset_flash_store(),
+                              context->asset_transfer_record_index) !=
+        ASSET_STORE_OK) {
+        ESP_LOGW(TAG,
+                "failed to reclaim abandoned asset reservation (index %u)",
+                (unsigned)context->asset_transfer_record_index);
+    }
+    context->asset_reservation_pending = false;
+}
+
 static void dispatch_asset_begin(protocol_context_t *context,
                                  uint32_t request_id)
 {
@@ -678,9 +712,14 @@ static void dispatch_asset_begin(protocol_context_t *context,
     // A second AssetBegin while a transfer is active means the host gave up
     // on the first one; abort it before deciding how to handle this one so
     // a stale in-memory transfer can never straddle two different digests.
+    // The on-flash reservation behind it (this context's own, or one left by
+    // an earlier AssetChunk failure) is reclaimed the same way regardless of
+    // whether the in-RAM transfer is still active -- see
+    // abandon_pending_reservation().
     if (context->asset_transfer.active) {
         asset_transfer_abort(&context->asset_transfer);
     }
+    abandon_pending_reservation(context);
     asset_record_t existing;
     if (asset_store_find(asset_flash_store(), begin->digest, &existing,
                          NULL) == ASSET_STORE_OK) {
@@ -699,12 +738,17 @@ static void dispatch_asset_begin(protocol_context_t *context,
     if (asset_transfer_begin(&context->asset_transfer, begin->digest,
                              (uint8_t)begin->kind, begin->total_length,
                              false) != ASSET_TRANSFER_OK) {
+        // The reservation above succeeded but the in-RAM transfer could not
+        // start; nothing else will ever learn this index, so reclaim it now
+        // rather than leaking it the same way an interrupted transfer would.
+        asset_store_mark_dead(asset_flash_store(), index);
         transmit_error(context, request_id, PROTOCOL_ERROR_INVALID_PAYLOAD,
                        "asset transfer begin failed");
         return;
     }
     context->asset_transfer_record_index = index;
     context->asset_transfer_blob_offset = blob_offset;
+    context->asset_reservation_pending = true;
     transmit_asset_begin_ack(context, request_id, false);
 }
 
@@ -760,6 +804,9 @@ static void dispatch_asset_commit(protocol_context_t *context,
                        "asset store commit failed");
         return;
     }
+    // Committed, not abandoned: this reservation must not be reclaimed by a
+    // future abandon_pending_reservation() call.
+    context->asset_reservation_pending = false;
     asset_transfer_abort(&context->asset_transfer);
     transmit_ack(context, request_id, PROTOCOL_TYPE_ASSET_COMMIT, false, 0U);
 }

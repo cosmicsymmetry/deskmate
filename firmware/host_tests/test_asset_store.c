@@ -311,6 +311,82 @@ static void test_stats_free_blob_bytes_matches_what_reserve_will_grant(void)
            == ASSET_STORE_OK);
 }
 
+/* Finding 1 (whole-branch review, 2026-08-22): an AssetBegin/AssetChunk
+ * transfer interrupted before AssetCommit -- link drop, host crash, power
+ * loss -- leaves its reservation UNCOMMITTED with a real digest. No in-RAM
+ * asset_transfer_t survives a reboot, so that record can never be completed;
+ * asset_flash_init() must reclaim it at boot (asset_store_reclaim_boot_orphans),
+ * or it is counted as spoken-for by every future asset_store_reserve() call
+ * forever, with no path back to free space short of a reflash. */
+static void test_boot_reclaim_marks_orphaned_uncommitted_dead(void)
+{
+    asset_flash_io_t io;
+    asset_store_t store = formatted_store(&io);
+    uint8_t digest[ASSET_DIGEST_BYTES];
+    digest_of(0x55, digest);
+    uint32_t index = 0U, blob = 0U;
+
+    /* Reserve and never commit -- the interrupted-transfer case. */
+    assert(asset_store_reserve(&store, digest, ASSET_KIND_FONT, 4096U, &index,
+                               &blob) == ASSET_STORE_OK);
+
+    asset_store_stats_t stats_before;
+    assert(asset_store_stats(&store, &stats_before) == ASSET_STORE_OK);
+    /* An in-flight (uncommitted) reservation is neither used nor
+     * reclaimable by design (see asset_store_stats's own comment) -- that
+     * is exactly the invisible, unrecoverable state this finding is about. */
+    assert(stats_before.reclaimable_blob_bytes == 0U);
+
+    uint32_t reclaimed_count = 0U;
+    assert(asset_store_reclaim_boot_orphans(&store, &reclaimed_count) ==
+          ASSET_STORE_OK);
+    assert(reclaimed_count == 1U);
+
+    asset_store_stats_t stats_after;
+    assert(asset_store_stats(&store, &stats_after) == ASSET_STORE_OK);
+    /* The orphan is now an ordinary dead record: reclaimable by the next
+     * compaction instead of permanently unaccounted-for. */
+    assert(stats_after.reclaimable_blob_bytes == 4096U);
+    assert(stats_after.used_blob_bytes == 0U);
+
+    /* Calling it again with nothing left to reclaim is a no-op. */
+    uint32_t reclaimed_again = 0U;
+    assert(asset_store_reclaim_boot_orphans(&store, &reclaimed_again) ==
+          ASSET_STORE_OK);
+    assert(reclaimed_again == 0U);
+}
+
+/* A never-written slot (state UNCOMMITTED, digest all-0xFF -- free space)
+ * and a committed record must both survive the boot reclaim untouched: only
+ * a real abandoned reservation is an orphan. */
+static void test_boot_reclaim_leaves_free_and_committed_slots_alone(void)
+{
+    asset_flash_io_t io;
+    asset_store_t store = formatted_store(&io);
+    uint8_t digest[ASSET_DIGEST_BYTES];
+    digest_of(0x66, digest);
+    uint32_t index = 0U, blob = 0U;
+
+    assert(asset_store_reserve(&store, digest, ASSET_KIND_FONT, 128U, &index,
+                               &blob) == ASSET_STORE_OK);
+    assert(asset_store_commit(&store, index) == ASSET_STORE_OK);
+
+    uint32_t reclaimed_count = 0U;
+    assert(asset_store_reclaim_boot_orphans(&store, &reclaimed_count) ==
+          ASSET_STORE_OK);
+    assert(reclaimed_count == 0U);
+
+    /* Committed record is untouched -- still findable. */
+    assert(asset_store_find(&store, digest, NULL, NULL) == ASSET_STORE_OK);
+
+    asset_store_stats_t stats;
+    assert(asset_store_stats(&store, &stats) == ASSET_STORE_OK);
+    assert(stats.used_blob_bytes == 128U);
+    assert(stats.reclaimable_blob_bytes == 0U);
+    /* The other 63 never-written slots stayed free, not orphaned. */
+    assert(stats.committed_count == 1U);
+}
+
 static void test_commit_rejects_a_record_wiped_out_from_under_it(void)
 {
     asset_flash_io_t io;
@@ -352,6 +428,8 @@ int main(void)
     test_compaction_plan_reports_capacity_exhaustion();
     test_reserve_does_not_reuse_dead_but_uncompacted_space();
     test_stats_free_blob_bytes_matches_what_reserve_will_grant();
+    test_boot_reclaim_marks_orphaned_uncommitted_dead();
+    test_boot_reclaim_leaves_free_and_committed_slots_alone();
     test_commit_rejects_a_record_wiped_out_from_under_it();
     return 0;
 }

@@ -115,6 +115,23 @@ esp_err_t asset_flash_init(void)
         return map_store_result(result);
     }
 
+    /* No in-RAM asset_transfer_t survives a reboot, so any record still
+     * UNCOMMITTED with a real digest at this point is a reservation
+     * abandoned by a transfer that was interrupted before AssetCommit --
+     * link drop, host crash, or power loss. Reclaim it now, or it is
+     * counted as spoken-for by every future asset_store_reserve() forever,
+     * with no path back to free space short of a reflash. */
+    uint32_t reclaimed_count = 0U;
+    result = asset_store_reclaim_boot_orphans(&s_store, &reclaimed_count);
+    if (result != ASSET_STORE_OK) {
+        s_partition = NULL;
+        return map_store_result(result);
+    }
+    if (reclaimed_count > 0U) {
+        ESP_LOGW(TAG, "reclaimed %u abandoned asset reservation(s) at boot",
+                (unsigned)reclaimed_count);
+    }
+
     /* Sized to record_capacity: at most one outstanding mmap per record slot
      * can ever exist, since every mapped record came from a distinct
      * committed slot. That bounds the table without guessing at how many

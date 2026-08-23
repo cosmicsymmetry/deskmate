@@ -450,6 +450,40 @@ asset_store_result_t asset_store_mark_dead(const asset_store_t *store, uint32_t 
     return ASSET_STORE_OK;
 }
 
+asset_store_result_t asset_store_reclaim_boot_orphans(const asset_store_t *store,
+                                                       uint32_t *out_reclaimed_count)
+{
+    if (store == NULL || store->io == NULL || store->io->read == NULL ||
+        store->io->write == NULL) {
+        return ASSET_STORE_ERR_ARGUMENT;
+    }
+
+    uint32_t reclaimed_count = 0U;
+    for (uint32_t index = 0U; index < store->record_capacity; index++) {
+        uint8_t bytes[ASSET_RECORD_BYTES];
+        if (store->io->read(store->io->ctx, record_offset(index), bytes, sizeof bytes) != 0) {
+            return ASSET_STORE_ERR_IO;
+        }
+        if (bytes[REC_OFFSET_STATE] != ASSET_STATE_UNCOMMITTED) {
+            continue;
+        }
+        if (digest_is_all_ff(bytes + REC_OFFSET_DIGEST)) {
+            continue; /* never written -- free space, not an orphan */
+        }
+
+        asset_store_result_t result = asset_store_mark_dead(store, index);
+        if (result != ASSET_STORE_OK) {
+            return result;
+        }
+        reclaimed_count++;
+    }
+
+    if (out_reclaimed_count != NULL) {
+        *out_reclaimed_count = reclaimed_count;
+    }
+    return ASSET_STORE_OK;
+}
+
 asset_store_result_t asset_store_stats(const asset_store_t *store,
                                        asset_store_stats_t *out_stats)
 {

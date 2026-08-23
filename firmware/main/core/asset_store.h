@@ -99,6 +99,20 @@ asset_store_result_t asset_store_reserve(const asset_store_t *store,
                                          uint32_t *out_blob_offset);
 asset_store_result_t asset_store_commit(const asset_store_t *store, uint32_t index);
 asset_store_result_t asset_store_mark_dead(const asset_store_t *store, uint32_t index);
+/* Marks every UNCOMMITTED record that carries a real (non-all-0xFF) digest
+ * as DEAD. Call once at boot, after asset_store_open(): no in-RAM transfer
+ * survives a reboot, so any such record is, by definition, an abandoned
+ * reservation left by a transfer that was interrupted (link drop, host
+ * crash, power loss) before AssetCommit ever ran. Left UNCOMMITTED, it would
+ * otherwise be counted as spoken-for forever by asset_store_reserve's
+ * high-water computation, with no path back to free space short of a
+ * reflash -- marking it DEAD instead makes it ordinary reclaimable space the
+ * next compaction (any future AssetRelease) can pack away. A slot that was
+ * simply never written also reads UNCOMMITTED but keeps an all-0xFF digest,
+ * which this deliberately leaves untouched: that is free space, not an
+ * abandoned reservation. `out_reclaimed_count` may be NULL. */
+asset_store_result_t asset_store_reclaim_boot_orphans(const asset_store_t *store,
+                                                       uint32_t *out_reclaimed_count);
 asset_store_result_t asset_store_stats(const asset_store_t *store,
                                        asset_store_stats_t *out_stats);
 asset_store_result_t asset_store_plan_compaction(const asset_store_t *store,

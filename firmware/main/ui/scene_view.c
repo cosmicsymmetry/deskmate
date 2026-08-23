@@ -1,0 +1,828 @@
+#include "ui/scene_view.h"
+
+#include <string.h>
+
+#include "lvgl.h"
+#include "ui/fonts/deskmate_fonts.h"
+
+/* ------------------------------------------------------------------
+ * What this file relies on, and therefore does not re-check.
+ *
+ * scene_model_validate() (core/scene_model.c) is called once at the top of
+ * scene_view_show() and it already guarantees, for every node: geometry
+ * inside the 448x368 canvas with no int32 wrap, non-negative extents,
+ * NUL-terminated text/binding/glyph-name arrays, a legal font reference, a
+ * legal text alignment, and 2..SCENE_MAX_LINE_POINTS line points. None of
+ * that is checked again here. Redundant defensive validation has concealed
+ * three defects on this plan already; the model is the one place those
+ * bounds live.
+ *
+ * Three things the model deliberately does NOT bound were assigned to the
+ * renderer instead (plan ruling 7): an arc's start/end degrees, an arc's
+ * stroke width, and a line's stroke width. They are normalised/clamped here,
+ * at their point of use, and nowhere else.
+ *
+ * One thing the model does not constrain and cannot: scene_value_t.kind.
+ * Anything that is not SCENE_VALUE_BINDING is read as a literal, which is
+ * always safe because the literal array is NUL-terminated and bounded.
+ * ------------------------------------------------------------------ */
+
+/* A binding-valued node, remembered so scene_view_refresh_bindings() can
+ * update it without rebuilding the screen. This is the whole of the
+ * node -> object identity mechanism: only nodes that can change are
+ * recorded, in scene order, each holding its own already-parsed binding.
+ * Nodes that cannot change are drawn once and forgotten. */
+typedef struct {
+    lv_obj_t *object;
+    scene_binding_t binding;
+    /* SCENE_NODE_ARC only: the sweep the binding scales, captured at build
+     * time because the node it came from is not retained. */
+    int32_t arc_start_deg;
+    int32_t arc_span_deg;
+    uint8_t kind; /* scene_node_kind_t */
+} scene_bound_node_t;
+
+/* Per-scene state. Allocated from the LVGL heap and owned by the screen --
+ * NOT a file-scope table. A fixed SCENE_MAX_NODES table would be ~1.7 KB of
+ * DIRAM .bss, and on this board a ~105-byte .bss shift once broke OTA
+ * downloads outright with every test green. The only file-scope objects this
+ * module adds are the three pointers below. */
+typedef struct {
+    lv_obj_t *screen;
+    uint32_t bound_count;
+    scene_bound_node_t bound[]; /* exactly bound_count entries */
+} scene_view_state_t;
+
+/* An `image` node's LVGL descriptor plus the asset mapping it reads through.
+ * lv_image stores the bare descriptor pointer and the descriptor stores a
+ * bare pointer into mapped flash, so both must outlive the object; they are
+ * freed and released together on the object's LV_EVENT_DELETE. */
+typedef struct {
+    lv_image_dsc_t dsc;
+    const void *mapping;
+} scene_image_asset_t;
+
+static scene_view_state_t *s_state;
+static asset_resolver_fn s_asset_resolver;
+static asset_release_fn s_asset_release;
+
+/* Longest string a binding may render, matched to the literal capacity so a
+ * bound node can say exactly as much as a literal one. */
+#define SCENE_VIEW_TEXT_CAPACITY (SCENE_MAX_TEXT_BYTES + 1U)
+
+/* ---------------------------------------------------------------- fonts */
+
+/* The four baked tiers resolve to the identical lv_font_t objects the C
+ * templates use -- ui/templates/template_internal.h's DESKMATE_FONT_CAPTION /
+ * _BODY / _DISPLAY / _HERO are (&deskmate_font_18) / (&deskmate_font_28) /
+ * (&deskmate_font_56) / (&deskmate_font_96). That pointer identity is what
+ * makes the parity gate winnable, so if those macros are ever repointed this
+ * function must move with them. The macros themselves are not used here
+ * because template_internal.h drags in the whole template vocabulary, and
+ * this file's dependency surface is load-bearing (see the header). */
+static const lv_font_t *baked_font(scene_font_tier_t tier)
+{
+    switch (tier) {
+    case SCENE_FONT_CAPTION:
+        return &deskmate_font_18;
+    case SCENE_FONT_BODY:
+        return &deskmate_font_28;
+    case SCENE_FONT_DISPLAY:
+        return &deskmate_font_56;
+    case SCENE_FONT_HERO:
+        return &deskmate_font_96;
+    default:
+        break;
+    }
+    return NULL;
+}
+
+/* Drops one object's hold on a registry face, at the only moment
+ * font_registry.h's ownership contract permits it: after the object styled
+ * with that face is gone. LVGL stores the bare lv_font_t* and takes no
+ * reference of its own, so releasing any earlier would leave the face
+ * unpinned while a live label still draws with it -- and the very next
+ * acquire of a different face could then evict it. Mirrors
+ * link/dev_capture.c's release_probe_font(). */
+static void release_font_cb(lv_event_t *event)
+{
+    font_registry_release((lv_font_t *)lv_event_get_user_data(event));
+}
+
+/* Resolves a font reference. `*out_acquired` is non-NULL only for the
+ * registry path, and its caller then owns exactly one acquire. Baked tiers
+ * are compiled-in objects: they are never acquired and never released.
+ *
+ * Returns NULL when a registry face could not be acquired -- all
+ * FONT_REGISTRY_MAX_OPEN_FACES slots full and pinned, a missing or non-font
+ * digest, a rasterizer failure. Every caller turns that into a refusal of the
+ * whole scene. */
+static const lv_font_t *resolve_font(const scene_font_ref_t *ref,
+                                     lv_font_t **out_acquired)
+{
+    *out_acquired = NULL;
+    if (ref->kind == SCENE_FONT_ASSET) {
+        lv_font_t *font = font_registry_acquire(ref->digest, ref->pixel_size);
+        *out_acquired = font;
+        return font;
+    }
+    return baked_font(ref->baked);
+}
+
+/* ------------------------------------------------------------- geometry */
+
+/* digital_clock.c:44's baseline_offset() is the distance from a label box's
+ * TOP edge down to the baseline of the type set in it:
+ *
+ *     baseline_offset(f) = lv_font_get_line_height(f) - f->base_line
+ *
+ * because base_line is measured UP from the bottom of the line box, so
+ * line_height - base_line counts down from the top instead.
+ *
+ * A scene text node carries the baseline, not the box top (see
+ * scene_model.h's field comment), so placing it is the exact inverse:
+ *
+ *     top = baseline_y - baseline_offset(f)
+ *         = baseline_y - (lv_font_get_line_height(f) - f->base_line)
+ *
+ * Substituting back gives top + baseline_offset(f) == baseline_y, i.e. the
+ * baseline of the type in the placed box lands on baseline_y, which is the
+ * whole contract. This is the highest-risk line in the file: an error here is
+ * invisible to every host test and only surfaces as a failed pixel diff. */
+static int32_t baseline_offset(const lv_font_t *font)
+{
+    return lv_font_get_line_height(font) - font->base_line;
+}
+
+static int32_t baseline_box_top(int32_t baseline_y, const lv_font_t *font)
+{
+    return baseline_y - baseline_offset(font);
+}
+
+/* The templates set alignment inside a fixed-width label box with
+ * lv_obj_set_style_text_align() -- see template_style.c's
+ * deskmate_label_box(), which the faces call with LV_TEXT_ALIGN_LEFT and
+ * LV_TEXT_ALIGN_CENTER. The scene enum maps straight onto that, and NOT onto
+ * lv_obj_align(), which would move the box rather than the type in it and so
+ * would break the baseline contract above. */
+static lv_text_align_t align_to_lv(scene_align_t align)
+{
+    switch (align) {
+    case SCENE_ALIGN_CENTER:
+        return LV_TEXT_ALIGN_CENTER;
+    case SCENE_ALIGN_RIGHT:
+        return LV_TEXT_ALIGN_RIGHT;
+    case SCENE_ALIGN_LEFT:
+    default:
+        break;
+    }
+    return LV_TEXT_ALIGN_LEFT;
+}
+
+/* LVGL's arc setters subtract 360 exactly once, so an angle handed to them
+ * must already lie in [0, 360]. 360 is deliberately kept distinct from 0: a
+ * whole-circle arc is spelled start=0 end=360 -- progress_ring.c does exactly
+ * that -- and folding it to 0 would draw nothing at all. */
+static int32_t arc_angle(int32_t degrees)
+{
+    int32_t value = degrees % 360;
+    if (value < 0) {
+        value += 360;
+    }
+    if (value == 0 && degrees != 0) {
+        value = 360;
+    }
+    return value;
+}
+
+/* Stroke clamps. The model leaves both unbounded on purpose (plan ruling 7:
+ * "renderer concerns"), so they are bounded here. An arc stroke wider than
+ * its radius would reach past the centre; a line stroke wider than the canvas
+ * is meaningless. Both inputs are already known non-negative. */
+static int32_t clamp_arc_width(int32_t width, int32_t radius)
+{
+    return width > radius ? radius : width;
+}
+
+static int32_t clamp_line_width(int32_t width)
+{
+    return width > SCENE_CANVAS_HEIGHT ? SCENE_CANVAS_HEIGHT : width;
+}
+
+/* -------------------------------------------------------------- values */
+
+static bool value_is_bound(const scene_value_t *value)
+{
+    return value->kind == SCENE_VALUE_BINDING;
+}
+
+/* Evaluates one binding into `out`. A placeholder ("--", "--:--") is a
+ * SCENE_BINDING_OK result and renders as itself. A genuine failure -- an
+ * unparseable format, a field value longer than a literal may be -- renders
+ * NOTHING for that node rather than failing the whole scene: one broken
+ * binding should cost its own node, not the other 23. */
+static void evaluate_binding(const scene_binding_t *binding,
+                             const scene_binding_context_t *context,
+                             char *out, size_t capacity)
+{
+    if (context == NULL ||
+        scene_binding_evaluate(binding, context, out, capacity) !=
+            SCENE_BINDING_OK) {
+        out[0] = '\0';
+    }
+}
+
+/* Reads an evaluated `timer.pct` as a percentage. Anything that is not a run
+ * of digits -- notably the "--" placeholder an inactive timer produces -- is
+ * read as 0, which collapses the arc to its start angle. */
+static int32_t parse_percent(const char *text)
+{
+    int32_t value = 0;
+    if (text[0] == '\0') {
+        return 0;
+    }
+    for (const char *cursor = text; *cursor != '\0'; ++cursor) {
+        if (*cursor < '0' || *cursor > '9') {
+            return 0;
+        }
+        value = value * 10 + (*cursor - '0');
+        if (value >= 100) {
+            return 100;
+        }
+    }
+    return value;
+}
+
+static void apply_arc_binding(const scene_bound_node_t *bound,
+                              const char *evaluated)
+{
+    int32_t percent = parse_percent(evaluated);
+    int32_t end = bound->arc_start_deg + bound->arc_span_deg * percent / 100;
+    lv_arc_set_end_angle(bound->object, (lv_value_precise_t)arc_angle(end));
+}
+
+/* ------------------------------------------------------------- builders */
+
+/* `rect` -- the same object template_style.c's deskmate_module() builds: a
+ * styleless lv_obj that neither scrolls nor takes clicks, carrying only a
+ * fill and a corner radius. remove_style_all() is what strips the theme's
+ * border, padding and scrollbars. */
+static lv_obj_t *build_rect(lv_obj_t *parent, const scene_rect_t *rect)
+{
+    lv_obj_t *object = lv_obj_create(parent);
+    if (object == NULL) {
+        return NULL;
+    }
+    lv_obj_remove_style_all(object);
+    lv_obj_remove_flag(object, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_size(object, rect->w, rect->h);
+    lv_obj_set_pos(object, rect->x, rect->y);
+    lv_obj_set_style_bg_color(object, lv_color_hex(rect->fill), 0);
+    lv_obj_set_style_bg_opa(object, (lv_opa_t)rect->opacity, 0);
+    lv_obj_set_style_radius(object, rect->radius < 0 ? 0 : rect->radius, 0);
+    return object;
+}
+
+/* `arc` -- one stroke, drawn the way progress_ring.c draws its meaningful
+ * arc: a square lv_arc of side 2r positioned so LVGL's own centre lands on
+ * (cx, cy), knob removed, not clickable. The node carries a single colour, so
+ * it is a single stroke: it is drawn on LV_PART_INDICATOR and the background
+ * track on LV_PART_MAIN is made transparent. A progress ring in scene form is
+ * therefore two arc nodes -- a dim full-circle track and a bound indicator --
+ * which is exactly what progress_ring.c draws.
+ *
+ * Angles are LVGL's raw convention with rotation left at 0: 0 degrees is 3
+ * o'clock and they increase clockwise. The server emits absolute angles; the
+ * device applies no rotation of its own. */
+static lv_obj_t *build_arc(lv_obj_t *parent, const scene_arc_t *arc)
+{
+    lv_obj_t *object = lv_arc_create(parent);
+    if (object == NULL) {
+        return NULL;
+    }
+    lv_obj_set_size(object, arc->r * 2, arc->r * 2);
+    lv_obj_set_pos(object, arc->cx - arc->r, arc->cy - arc->r);
+    lv_obj_remove_style(object, NULL, LV_PART_KNOB);
+    lv_obj_remove_flag(object, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_arc_opa(object, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_arc_color(object, lv_color_hex(arc->color),
+                               LV_PART_INDICATOR);
+    lv_obj_set_style_arc_width(object, clamp_arc_width(arc->width, arc->r),
+                               LV_PART_INDICATOR);
+    lv_obj_set_style_arc_rounded(object, arc->rounded, LV_PART_INDICATOR);
+    lv_arc_set_angles(object, (lv_value_precise_t)arc_angle(arc->start_deg),
+                      (lv_value_precise_t)arc_angle(arc->end_deg));
+    return object;
+}
+
+/* Frees a line's point array once the line that reads it is gone. lv_line
+ * stores the array by pointer and never copies it. */
+static void free_points_cb(lv_event_t *event)
+{
+    lv_free(lv_event_get_user_data(event));
+}
+
+/* `line` -- styled like the clock hands in digital_clock.c: a coloured,
+ * rounded stroke. Every lv_line in the firmware is rounded, so scene lines
+ * are too. Points are absolute canvas coordinates and the object sits at the
+ * canvas origin, so lv_line's LV_SIZE_CONTENT self-size (max x, max y from
+ * its origin) always encloses them. */
+static lv_obj_t *build_line(lv_obj_t *parent, const scene_line_t *line)
+{
+    lv_point_precise_t *points =
+        lv_malloc(sizeof(lv_point_precise_t) * line->point_count);
+    if (points == NULL) {
+        return NULL;
+    }
+    for (uint32_t i = 0U; i < line->point_count; i++) {
+        points[i].x = (lv_value_precise_t)line->xs[i];
+        points[i].y = (lv_value_precise_t)line->ys[i];
+    }
+
+    lv_obj_t *object = lv_line_create(parent);
+    if (object == NULL) {
+        lv_free(points);
+        return NULL;
+    }
+    lv_obj_add_event_cb(object, free_points_cb, LV_EVENT_DELETE, points);
+    lv_obj_set_style_line_color(object, lv_color_hex(line->color), 0);
+    lv_obj_set_style_line_width(object, clamp_line_width(line->width), 0);
+    lv_obj_set_style_line_rounded(object, true, 0);
+    lv_line_set_points(object, points, line->point_count);
+    lv_obj_set_pos(object, 0, 0);
+    return object;
+}
+
+/* `text` -- an lv_label in a fixed-width, one-line box, positioned by
+ * baseline. The box is what makes alignment mean anything: template_style.c's
+ * deskmate_label_box() pins the height to exactly one line of the tier for
+ * the same reason, because with LV_SIZE_CONTENT height LVGL breaks an
+ * over-long run onto further lines instead of honouring the mode.
+ *
+ * Long mode: DOTS when the node asks to ellipsize (deskmate_label_box's
+ * choice), otherwise CLIP. CLIP is not merely "no dots" -- it sets LVGL's
+ * expand flag, so the text stays on one line and is clipped to the box rather
+ * than wrapping a too-wide word onto an invisible second line. */
+static lv_obj_t *build_text(lv_obj_t *parent, const scene_text_t *text,
+                            const scene_binding_context_t *context,
+                            scene_binding_t *out_binding, bool *out_is_bound)
+{
+    lv_font_t *acquired = NULL;
+    const lv_font_t *font = resolve_font(&text->font, &acquired);
+    if (font == NULL) {
+        return NULL;
+    }
+
+    lv_obj_t *label = lv_label_create(parent);
+    if (label == NULL) {
+        if (acquired != NULL) {
+            font_registry_release(acquired);
+        }
+        return NULL;
+    }
+    /* Registered before anything else can fail, so every later exit path --
+     * including deleting the whole candidate screen -- releases the face. */
+    if (acquired != NULL) {
+        lv_obj_add_event_cb(label, release_font_cb, LV_EVENT_DELETE, acquired);
+    }
+
+    lv_obj_set_style_text_font(label, font, 0);
+    lv_obj_set_style_text_color(label, lv_color_hex(text->color), 0);
+    lv_obj_set_style_text_align(label, align_to_lv(text->align), 0);
+    lv_label_set_long_mode(label, text->ellipsize ? LV_LABEL_LONG_MODE_DOTS
+                                                  : LV_LABEL_LONG_MODE_CLIP);
+    lv_obj_set_width(label, text->w);
+    lv_obj_set_height(label, lv_font_get_line_height(font));
+
+    char buffer[SCENE_VIEW_TEXT_CAPACITY];
+    const char *initial = text->value.literal;
+    *out_is_bound = false;
+    if (value_is_bound(&text->value)) {
+        /* A binding that will not parse renders nothing and is not recorded,
+         * so no later refresh can resurrect it. */
+        initial = "";
+        if (scene_binding_parse(text->value.binding, out_binding) ==
+            SCENE_BINDING_OK) {
+            *out_is_bound = true;
+            evaluate_binding(out_binding, context, buffer, sizeof buffer);
+            initial = buffer;
+        }
+    }
+    lv_label_set_text(label, initial);
+    lv_obj_set_pos(label, text->x, baseline_box_top(text->baseline_y, font));
+    return label;
+}
+
+/* Releases an image node's asset mapping and descriptor together, once the
+ * lv_image reading through both is gone. */
+static void release_image_cb(lv_event_t *event)
+{
+    scene_image_asset_t *asset =
+        (scene_image_asset_t *)lv_event_get_user_data(event);
+    if (asset == NULL) {
+        return;
+    }
+    if (s_asset_release != NULL && asset->mapping != NULL) {
+        s_asset_release(asset->mapping);
+    }
+    lv_free(asset);
+}
+
+/* `image` -- an lv_image over the mapped asset bytes. The asset is an LVGL
+ * binary image (converted server-side, spec section 1: "the device needs no
+ * PNG decoder"), whose file layout is an lv_image_header_t followed by the
+ * pixel data. That is not itself an lv_image_dsc_t, so one is built pointing
+ * into the mapping rather than copying the pixels: the mapping is flash, and
+ * copying it would cost PSRAM for nothing. */
+static lv_obj_t *build_image(lv_obj_t *parent, const scene_image_t *image)
+{
+    const void *bytes = NULL;
+    uint32_t length = 0U;
+    uint8_t kind = 0U;
+
+    if (s_asset_resolver == NULL) {
+        return NULL;
+    }
+    if (!s_asset_resolver(image->digest, &bytes, &length, &kind)) {
+        return NULL;
+    }
+    if (bytes == NULL || kind != (uint8_t)ASSET_KIND_IMAGE ||
+        length <= (uint32_t)sizeof(lv_image_header_t)) {
+        if (s_asset_release != NULL && bytes != NULL) {
+            s_asset_release(bytes);
+        }
+        return NULL;
+    }
+
+    scene_image_asset_t *asset = lv_malloc(sizeof *asset);
+    if (asset == NULL) {
+        if (s_asset_release != NULL) {
+            s_asset_release(bytes);
+        }
+        return NULL;
+    }
+    lv_memzero(asset, sizeof *asset);
+    memcpy(&asset->dsc.header, bytes, sizeof(lv_image_header_t));
+    asset->dsc.data = (const uint8_t *)bytes + sizeof(lv_image_header_t);
+    asset->dsc.data_size = length - (uint32_t)sizeof(lv_image_header_t);
+    asset->mapping = bytes;
+
+    lv_obj_t *object = NULL;
+    if (asset->dsc.header.magic == LV_IMAGE_HEADER_MAGIC) {
+        object = lv_image_create(parent);
+    }
+    if (object == NULL) {
+        if (s_asset_release != NULL) {
+            s_asset_release(asset->mapping);
+        }
+        lv_free(asset);
+        return NULL;
+    }
+    lv_obj_add_event_cb(object, release_image_cb, LV_EVENT_DELETE, asset);
+    lv_image_set_src(object, &asset->dsc);
+    /* Sized from the node rather than from the asset header, so a blob that
+     * does not match what the server said it laid out is clipped to the
+     * declared box instead of silently overflowing its neighbours. */
+    lv_obj_set_size(object, image->w, image->h);
+    lv_obj_set_pos(object, image->x, image->y);
+    if (image->recolor) {
+        lv_obj_set_style_image_recolor(object, lv_color_hex(image->color), 0);
+        lv_obj_set_style_image_recolor_opa(object, LV_OPA_COVER, 0);
+    }
+    return object;
+}
+
+/* `glyph` -- an lv_label carrying one codepoint in an icon font, positioned
+ * by baseline exactly as `text` is. Icon fonts are always assets, so this
+ * always goes through the registry.
+ *
+ * NAME RESOLUTION: there is no device-side icon-name -> codepoint map, and
+ * none is specified anywhere in this plan. The server holds the icon font and
+ * its map and validates that a plugin's `icon: "cloud-rain"` resolves (spec
+ * section 1), so resolution belongs there, next to every other layout
+ * decision. This accepts the resolved forms it can emit: "U+XXXX" hex, or the
+ * glyph's own UTF-8 bytes. An unresolved name falls through as literal text,
+ * which renders as placeholder boxes -- visible and diagnosable, rather than
+ * an invisible missing icon. */
+static uint32_t glyph_codepoint(const char *name)
+{
+    uint32_t codepoint = 0U;
+    size_t digits = 0U;
+
+    if ((name[0] != 'U' && name[0] != 'u') || name[1] != '+') {
+        return 0U;
+    }
+    for (const char *cursor = name + 2; *cursor != '\0'; ++cursor) {
+        uint32_t nibble;
+        if (*cursor >= '0' && *cursor <= '9') {
+            nibble = (uint32_t)(*cursor - '0');
+        } else if (*cursor >= 'a' && *cursor <= 'f') {
+            nibble = (uint32_t)(*cursor - 'a') + 10U;
+        } else if (*cursor >= 'A' && *cursor <= 'F') {
+            nibble = (uint32_t)(*cursor - 'A') + 10U;
+        } else {
+            return 0U;
+        }
+        if (digits >= 6U) {
+            return 0U;
+        }
+        codepoint = (codepoint << 4) | nibble;
+        ++digits;
+    }
+    if (digits == 0U || codepoint == 0U || codepoint > 0x10FFFFU) {
+        return 0U;
+    }
+    return codepoint;
+}
+
+/* Writes `name`'s glyph as UTF-8 into `out` (at least 5 bytes plus room for
+ * the name itself). */
+static void glyph_text(const char *name, char *out, size_t capacity)
+{
+    uint32_t codepoint = glyph_codepoint(name);
+    size_t length = 0U;
+
+    if (codepoint == 0U) {
+        size_t name_length = strlen(name);
+        if (name_length >= capacity) {
+            name_length = capacity - 1U;
+        }
+        memcpy(out, name, name_length);
+        out[name_length] = '\0';
+        return;
+    }
+    if (codepoint < 0x80U) {
+        out[length++] = (char)codepoint;
+    } else if (codepoint < 0x800U) {
+        out[length++] = (char)(0xC0U | (codepoint >> 6));
+        out[length++] = (char)(0x80U | (codepoint & 0x3FU));
+    } else if (codepoint < 0x10000U) {
+        out[length++] = (char)(0xE0U | (codepoint >> 12));
+        out[length++] = (char)(0x80U | ((codepoint >> 6) & 0x3FU));
+        out[length++] = (char)(0x80U | (codepoint & 0x3FU));
+    } else {
+        out[length++] = (char)(0xF0U | (codepoint >> 18));
+        out[length++] = (char)(0x80U | ((codepoint >> 12) & 0x3FU));
+        out[length++] = (char)(0x80U | ((codepoint >> 6) & 0x3FU));
+        out[length++] = (char)(0x80U | (codepoint & 0x3FU));
+    }
+    out[length] = '\0';
+}
+
+static lv_obj_t *build_glyph(lv_obj_t *parent, const scene_glyph_t *glyph)
+{
+    lv_font_t *font = font_registry_acquire(glyph->digest, glyph->size);
+    if (font == NULL) {
+        return NULL;
+    }
+    lv_obj_t *label = lv_label_create(parent);
+    if (label == NULL) {
+        font_registry_release(font);
+        return NULL;
+    }
+    lv_obj_add_event_cb(label, release_font_cb, LV_EVENT_DELETE, font);
+    lv_obj_set_style_text_font(label, font, 0);
+    lv_obj_set_style_text_color(label, lv_color_hex(glyph->color), 0);
+
+    char text[SCENE_MAX_GLYPH_NAME + 1U];
+    glyph_text(glyph->name, text, sizeof text);
+    lv_label_set_text(label, text);
+    lv_obj_set_pos(label, glyph->x, baseline_box_top(glyph->baseline_y, font));
+    return label;
+}
+
+/* --------------------------------------------------------- the lifecycle */
+
+/* Frees the per-scene state when its screen goes away. LVGL sends
+ * LV_EVENT_DELETE to an object before recursing into its children, so this
+ * runs before the labels release their faces -- which is fine, because a
+ * face's release is bound to its own label and does not read this state. */
+static void screen_deleted_cb(lv_event_t *event)
+{
+    scene_view_state_t *state =
+        (scene_view_state_t *)lv_event_get_user_data(event);
+    if (state == NULL) {
+        return;
+    }
+    if (s_state == state) {
+        s_state = NULL;
+    }
+    lv_free(state);
+}
+
+static uint32_t count_bound_nodes(const scene_t *scene)
+{
+    uint32_t count = 0U;
+    for (uint32_t i = 0U; i < scene->node_count; i++) {
+        const scene_node_t *node = &scene->nodes[i];
+        if (node->kind == SCENE_NODE_TEXT &&
+            value_is_bound(&node->value.text.value)) {
+            ++count;
+        } else if (node->kind == SCENE_NODE_ARC &&
+                   node->value.arc.end_binding[0] != '\0') {
+            ++count;
+        }
+    }
+    return count;
+}
+
+/* Builds every node into `parent`, recording the binding-valued ones.
+ * Returns false on the first node that cannot be rendered as specified; the
+ * caller then destroys the whole candidate screen, which is what releases any
+ * faces already acquired. */
+static bool build_nodes(lv_obj_t *parent, const scene_t *scene,
+                        const scene_binding_context_t *context,
+                        scene_view_state_t *state)
+{
+    char buffer[SCENE_VIEW_TEXT_CAPACITY];
+
+    for (uint32_t i = 0U; i < scene->node_count; i++) {
+        const scene_node_t *node = &scene->nodes[i];
+        lv_obj_t *object = NULL;
+
+        switch (node->kind) {
+        case SCENE_NODE_RECT:
+            object = build_rect(parent, &node->value.rect);
+            break;
+
+        case SCENE_NODE_ARC: {
+            const scene_arc_t *arc = &node->value.arc;
+            scene_binding_t binding;
+
+            object = build_arc(parent, arc);
+            if (object == NULL || arc->end_binding[0] == '\0') {
+                break;
+            }
+            /* A binding that will not parse leaves the arc at the static
+             * sweep the scene declared, and is not recorded -- so no later
+             * refresh can move it. */
+            if (scene_binding_parse(arc->end_binding, &binding) !=
+                SCENE_BINDING_OK) {
+                break;
+            }
+            scene_bound_node_t *bound = &state->bound[state->bound_count++];
+            bound->object = object;
+            bound->kind = (uint8_t)SCENE_NODE_ARC;
+            bound->binding = binding;
+            bound->arc_start_deg = arc_angle(arc->start_deg);
+            bound->arc_span_deg =
+                arc_angle(arc->end_deg) - bound->arc_start_deg;
+            if (bound->arc_span_deg < 0) {
+                bound->arc_span_deg += 360;
+            }
+            evaluate_binding(&bound->binding, context, buffer, sizeof buffer);
+            apply_arc_binding(bound, buffer);
+            break;
+        }
+
+        case SCENE_NODE_LINE:
+            object = build_line(parent, &node->value.line);
+            break;
+
+        case SCENE_NODE_TEXT: {
+            scene_binding_t binding;
+            bool is_bound = false;
+
+            object = build_text(parent, &node->value.text, context, &binding,
+                                &is_bound);
+            if (object != NULL && is_bound) {
+                scene_bound_node_t *bound =
+                    &state->bound[state->bound_count++];
+                bound->object = object;
+                bound->kind = (uint8_t)SCENE_NODE_TEXT;
+                bound->binding = binding;
+            }
+            break;
+        }
+
+        case SCENE_NODE_IMAGE:
+            object = build_image(parent, &node->value.image);
+            break;
+
+        case SCENE_NODE_GLYPH:
+            object = build_glyph(parent, &node->value.glyph);
+            break;
+
+        default:
+            break;
+        }
+
+        if (object == NULL) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void scene_view_set_asset_resolver(asset_resolver_fn resolver,
+                                   asset_release_fn release)
+{
+    s_asset_resolver = resolver;
+    s_asset_release = release;
+}
+
+bool scene_view_show(const scene_t *scene,
+                     const scene_binding_context_t *context)
+{
+    if (scene == NULL || scene_model_validate(scene) != SCENE_MODEL_OK) {
+        return false;
+    }
+
+    size_t bytes = sizeof(scene_view_state_t) +
+                   (size_t)count_bound_nodes(scene) *
+                       sizeof(scene_bound_node_t);
+    scene_view_state_t *state = lv_malloc(bytes);
+    if (state == NULL) {
+        return false;
+    }
+    lv_memzero(state, bytes);
+
+    /* Built against local state so a refusal leaves the currently displayed
+     * screen and its object graph untouched -- template_view_show()'s
+     * candidate pattern, and the reason a scene that cannot be rendered never
+     * blanks the panel. */
+    lv_obj_t *screen = lv_obj_create(NULL);
+    if (screen == NULL) {
+        lv_free(state);
+        return false;
+    }
+    lv_obj_remove_flag(screen, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(screen, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(screen, lv_color_hex(scene->background), 0);
+    lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, 0);
+
+    /* The same styleless full-canvas container template_view.c puts under its
+     * screen. It exists so node coordinates are absolute canvas coordinates
+     * with no theme padding between them and the screen edge -- which is what
+     * lets a scene land on the same pixels as the C face it reproduces. It
+     * must not win hit testing; the carousel screen owns taps. */
+    lv_obj_t *content = lv_obj_create(screen);
+    if (content == NULL) {
+        lv_obj_delete(screen);
+        lv_free(state);
+        return false;
+    }
+    lv_obj_remove_style_all(content);
+    lv_obj_remove_flag(content,
+                       LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_width(content, LV_PCT(100));
+    lv_obj_set_height(content, LV_PCT(100));
+    lv_obj_align(content, LV_ALIGN_CENTER, 0, 0);
+
+    if (!build_nodes(content, scene, context, state)) {
+        /* Deleting the screen sends LV_EVENT_DELETE down the whole tree,
+         * which is what releases every face acquired so far. */
+        lv_obj_delete(screen);
+        lv_free(state);
+        return false;
+    }
+
+    state->screen = screen;
+    lv_obj_add_event_cb(screen, screen_deleted_cb, LV_EVENT_DELETE, state);
+    /* Published before the load, because loading with auto_del deletes the
+     * outgoing screen and its callback must see that it is no longer the
+     * live state. */
+    s_state = state;
+    lv_screen_load_anim(screen, LV_SCREEN_LOAD_ANIM_NONE, 0U, 0U, true);
+    return true;
+}
+
+void scene_view_refresh_bindings(const scene_binding_context_t *context)
+{
+    char buffer[SCENE_VIEW_TEXT_CAPACITY];
+
+    if (s_state == NULL || context == NULL) {
+        return;
+    }
+    for (uint32_t i = 0U; i < s_state->bound_count; i++) {
+        const scene_bound_node_t *bound = &s_state->bound[i];
+        evaluate_binding(&bound->binding, context, buffer, sizeof buffer);
+        if (bound->kind == (uint8_t)SCENE_NODE_ARC) {
+            apply_arc_binding(bound, buffer);
+        } else {
+            lv_label_set_text(bound->object, buffer);
+        }
+    }
+}
+
+bool scene_view_destroy(void)
+{
+    if (s_state == NULL) {
+        return true;
+    }
+    if (lv_screen_active() == s_state->screen) {
+        return false;
+    }
+    lv_obj_delete(s_state->screen);
+    return true;
+}
+
+bool scene_view_active(void)
+{
+    return s_state != NULL && lv_screen_active() == s_state->screen;
+}
+
+lv_obj_t *scene_view_screen(void)
+{
+    return s_state != NULL ? s_state->screen : NULL;
+}

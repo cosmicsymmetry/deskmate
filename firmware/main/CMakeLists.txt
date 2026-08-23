@@ -20,6 +20,7 @@ idf_component_register(
          "ui/clock_screen.c"
          "ui/ota_screen.c"
          "ui/font_registry.c"
+         "ui/scene_view.c"
          "ui/template_view.c" "ui/ui_command_queue.c"
          "ui/ui_runtime.c"
          "ui/templates/analog_clock.c" "ui/templates/big_number_label.c"

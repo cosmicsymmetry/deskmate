@@ -630,8 +630,18 @@ save the work, since stage 2b cannot retire the C `DigitalClock` without it eith
 `scene_view` issues the same `lv_scale_*` calls and the pixels match by construction. This
 is consistent with the model as it already is: `SCENE_NODE_ARC` already maps to `lv_arc`,
 so this is a widget-mapped display list, not a primitive rasterizer. `sizeof(scene_node_t)`
-must not grow — `scene_line_t`'s 8-point array is the union's current largest member and
-the scale node fits under it, so the 2034-byte wire envelope is unaffected.
+must not grow. **Corrected after measurement:** the union's largest member is
+`scene_text_t` at **252 bytes** — it carries the 128-byte literal and the 49-byte binding
+inline — not `scene_line_t` at 76, as this amendment first claimed. `scene_node_t` is
+**256 bytes** and unchanged; `scene_scale_t` is 24, so it fits far more comfortably than
+the original rationale argued. The wire envelope is unaffected either way, because the
+2034-byte bound applies to the CBOR encoding, not to the decoded struct.
+
+Note the consequence, which is pre-existing rather than introduced here: `scene_t` is
+`SCENE_MAX_NODES` × 256 ≈ **6 KB in RAM**. On a board with 0 bytes of IRAM headroom, where
+~105 bytes of static DRAM once broke OTA outright, that is not a structure that can sit on
+a stack or in `.bss` by accident. Task 3 decodes into one and must place it deliberately —
+`protocol_task.c` already PSRAM-allocates its context for exactly this reason.
 
 Task 1b runs **before Task 3**, so the wire tasks pick the node up naturally and Task 7
 emits it. Its brief is `.superpowers/sdd/2026-08-23-deskmate-scene-renderer/task-1b-brief.md`.

@@ -6,28 +6,113 @@
 //! *port* of `firmware/main/ui/templates/digital_clock.c`, not a re-derivation:
 //! read that file before changing a number here, and change the number there
 //! first if the layout is genuinely meant to move.
+//!
+//! # What the host decides, and what the device still decides
+//!
+//! The host does all layout. It does **not** do all evaluation: the reading and
+//! the seconds are `time:` bindings the device re-renders on its own tick, so a
+//! scene pushed once keeps telling the time. The dial's hands and the date
+//! module are not bindable — a `SCENE_NODE_SCALE` carries no needle and there is
+//! no date binding — so those two are drawn for [`ClockCard::local_now`] and go
+//! stale until the host pushes again. A host that wants a live dial pushes once
+//! a minute.
+//!
+//! # Three coordinate systems, and the one translation that matters
+//!
+//! `digital_clock.c` nests its objects: the hero and the modules sit on a
+//! full-canvas, style-stripped root; the date label sits inside the date
+//! module; the dial sits inside the dial module; and **the two hands are
+//! children of the `lv_scale`**, which positions them from its own box centre.
+//! A scene has no nesting — every node is a sibling under one full-canvas
+//! container at the canvas origin — so this module resolves each chain to
+//! absolute canvas coordinates. `hand_points()` is where that matters most; see
+//! its comment.
 
-use chrono::NaiveDateTime;
-use protocol::{Scene, SceneFontTier};
+use chrono::{Datelike, NaiveDateTime, Timelike};
+use protocol::{
+    SCENE_CANVAS_WIDTH, Scene, SceneAlign, SceneFont, SceneFontTier, SceneLine, SceneNode,
+    SceneRect, SceneScale, SceneText, SceneValue,
+};
 
-// -------------------------------------------------------------------------
-// Stubs. Replaced by the implementation commit.
-// -------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// The design-system constants, from template_internal.h.
+// ---------------------------------------------------------------------------
 
-/// The card-level inputs `digital_clock.c` draws from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ClockCard {
-    /// Echoed as the scene's own revision.
-    pub revision: u32,
-    pub show_seconds: bool,
-    /// The local wall-clock instant the dial's hands and the date module are
-    /// drawn for. The reading itself is a device-side `time:` binding, so it
-    /// ticks between pushes; the hands and the date do not.
-    pub local_now: NaiveDateTime,
-}
+/// `DESKMATE_GRID`.
+const GRID: i32 = 8;
+/// `DESKMATE_MARGIN`.
+const MARGIN: i32 = 3 * GRID;
+/// `DESKMATE_RADIUS_MODULE`.
+const RADIUS_MODULE: i32 = 3 * GRID;
+
+/// `DESKMATE_COLOR_CANVAS`.
+const COLOR_CANVAS: u32 = 0x0000_0000;
+/// `DESKMATE_COLOR_PRIMARY`.
+const COLOR_PRIMARY: u32 = 0x00f5_f5f7;
+/// `DESKMATE_COLOR_SURFACE`.
+const COLOR_SURFACE: u32 = 0x001a_1a1f;
+/// `deskmate_palette(PROTOCOL_TEMPLATE_DIGITAL_CLOCK).hue`. Both clock faces
+/// share one identity, so this is also the analog clock's hue.
+const CLOCK_HUE: u32 = 0x00ff_8f2e;
+
+// ---------------------------------------------------------------------------
+// digital_clock.c's own geometry. Ported, not re-derived.
+// ---------------------------------------------------------------------------
+
+/// `TIME_Y`.
+const TIME_Y: i32 = 8 * GRID;
+/// `MODULE_Y`.
+const MODULE_Y: i32 = 22 * GRID;
+/// `MODULE_H`.
+const MODULE_H: i32 = 17 * GRID;
+/// `DATE_W`.
+const DATE_W: i32 = 28 * GRID;
+/// `DIAL_X`.
+const DIAL_X: i32 = 33 * GRID;
+/// `DIAL_W`.
+const DIAL_W: i32 = 20 * GRID;
+/// `DIAL_BOX`.
+const DIAL_BOX: i32 = 14 * GRID;
+/// `DIAL_RANGE` — a 12-hour dial in minutes, so one scale positions both hands.
+const DIAL_RANGE: i32 = 720;
+/// `HAND_HOUR_LEN`.
+const HAND_HOUR_LEN: i32 = 28;
+/// `HAND_MINUTE_LEN`.
+const HAND_MINUTE_LEN: i32 = 42;
+/// `lv_obj_set_style_line_width(OBJ_HAND_HOUR, 6, 0)`, `digital_clock.c:135`.
+const HAND_HOUR_WIDTH: i32 = 6;
+/// `lv_obj_set_style_line_width(OBJ_HAND_MINUTE, 4, 0)`, `digital_clock.c:141`.
+const HAND_MINUTE_WIDTH: i32 = 4;
+/// `lv_scale_set_total_tick_count(OBJ_DIAL, 13)` — one tick per hour, with the
+/// thirteenth landing back on twelve.
+const DIAL_TOTAL_TICKS: u32 = 13;
+/// `lv_scale_set_major_tick_every(OBJ_DIAL, 3)`.
+const DIAL_MAJOR_TICK_EVERY: u32 = 3;
+/// `lv_scale_set_angle_range(OBJ_DIAL, 360)`. Fixed in `scene_view.c` too, as
+/// `SCENE_SCALE_ANGLE_RANGE`, so it is not a wire field.
+const DIAL_ANGLE_RANGE: i32 = 360;
+/// `lv_scale_set_rotation(OBJ_DIAL, 270)` — twelve o'clock. Fixed in
+/// `scene_view.c` as `SCENE_SCALE_ROTATION`.
+const DIAL_ROTATION: i32 = 270;
+/// The gap `digital_clock.c:203` puts between the hero and the seconds.
+const SECONDS_GAP: i32 = 2 * GRID;
+
+/// The reading, evaluated on the device so it ticks between pushes.
+const TIME_BINDING: &str = "time:HH:mm";
+/// The superior figure, on the hero's baseline.
+const SECONDS_BINDING: &str = "time:ss";
+
+// ---------------------------------------------------------------------------
+// Baked font metrics.
+// ---------------------------------------------------------------------------
 
 /// Whole-pixel advance widths for the glyph classes the digits-only
-/// `DISPLAY`/`HERO` subsets carry.
+/// `DISPLAY`/`HERO` subsets carry (spec §5.2: `0-9`, `:`, `-`, `%`, U+00B0).
+///
+/// One `digit` field covers all ten, because every baked face gives the ten
+/// digits the same advance — tabular figures are the point of the typeface
+/// choice. `the_baked_font_metrics_match_the_shipped_font_sources` reads the
+/// shipped sources and fails if that ever stops being true.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NumericAdvances {
     pub digit: i32,
@@ -37,13 +122,40 @@ pub struct NumericAdvances {
     pub degree: i32,
 }
 
+impl NumericAdvances {
+    fn advance(self, character: char) -> Option<i32> {
+        match character {
+            '0'..='9' => Some(self.digit),
+            ':' => Some(self.colon),
+            '-' => Some(self.hyphen),
+            '%' => Some(self.percent),
+            '\u{b0}' => Some(self.degree),
+            _ => None,
+        }
+    }
+}
+
+/// One baked tier's metrics, as the device reads them out of the `lv_font_t`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TierMetrics {
+    /// `lv_font_get_line_height(font)`.
     pub line_height: i32,
+    /// `font->base_line`, measured up from the bottom of the line box.
     pub base_line: i32,
+    /// `None` for a full-range tier, whose advances this table deliberately
+    /// does not reproduce: `deskmate_number_font()` never measures one, and a
+    /// partial table that looked complete would be worse than no table.
     pub numeric: Option<NumericAdvances>,
 }
 
+/// The four faces `tools/genfonts.sh` bakes, addressed by the role the C
+/// templates address them by.
+///
+/// The numbers are transcribed from `firmware/main/ui/fonts/deskmate_font_*.c`
+/// — the same bytes the device links — and a test re-reads those files and
+/// fails on any disagreement. That test is the whole provenance argument: a
+/// baseline offset invented here would be invisible to every other check and
+/// would surface only as a failed pixel diff.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BakedFontMetrics {
     pub caption: TierMetrics,
@@ -53,60 +165,411 @@ pub struct BakedFontMetrics {
 }
 
 impl BakedFontMetrics {
+    /// The metrics of the faces this repository ships.
     pub const SHIPPED: Self = Self {
+        // deskmate_font_18.c — full range, so no numeric table.
         caption: TierMetrics {
-            line_height: 0,
-            base_line: 0,
+            line_height: 22,
+            base_line: 4,
             numeric: None,
         },
+        // deskmate_font_28.c — full range: the only tier with letters, and the
+        // only one carrying the '.' LV_LABEL_LONG_DOT appends.
         body: TierMetrics {
-            line_height: 0,
-            base_line: 0,
+            line_height: 36,
+            base_line: 7,
             numeric: None,
         },
+        // deskmate_font_56.c — digits-only subset.
         display: TierMetrics {
-            line_height: 0,
-            base_line: 0,
-            numeric: None,
+            line_height: 43,
+            base_line: 1,
+            numeric: Some(NumericAdvances {
+                digit: 36,
+                colon: 18,
+                hyphen: 26,
+                percent: 56,
+                degree: 26,
+            }),
         },
+        // deskmate_font_96.c — digits-only subset.
         hero: TierMetrics {
-            line_height: 0,
-            base_line: 0,
-            numeric: None,
+            line_height: 72,
+            base_line: 1,
+            numeric: Some(NumericAdvances {
+                digit: 62,
+                colon: 31,
+                hyphen: 45,
+                percent: 96,
+                degree: 44,
+            }),
         },
     };
 
-    pub fn tier(&self, _tier: SceneFontTier) -> TierMetrics {
-        self.caption
+    pub fn tier(&self, tier: SceneFontTier) -> TierMetrics {
+        match tier {
+            SceneFontTier::Caption => self.caption,
+            SceneFontTier::Body => self.body,
+            SceneFontTier::Display => self.display,
+            SceneFontTier::Hero => self.hero,
+        }
     }
 
-    pub fn baseline_offset(&self, _tier: SceneFontTier) -> i32 {
-        0
+    /// `digital_clock.c:44`'s `baseline_offset()`: the distance from a label
+    /// box's top edge to the baseline of the type in it.
+    ///
+    /// `scene_view.c`'s `baseline_box_top()` is the exact inverse, so a text
+    /// node's `baseline_y` must be `box_top + baseline_offset(tier)`.
+    pub fn baseline_offset(&self, tier: SceneFontTier) -> i32 {
+        let metrics = self.tier(tier);
+        metrics.line_height - metrics.base_line
     }
 
-    pub fn measure(&self, _tier: SceneFontTier, _text: &str) -> Option<i32> {
-        None
+    /// `lv_text_get_size()`'s width for one line of `text` at `tier`, with
+    /// `letter_space` 0.
+    ///
+    /// Returns `None` when the tier carries no numeric table, or when `text`
+    /// steps outside the subset — the two cases where this side must not
+    /// pretend to know what the device would measure.
+    pub fn measure(&self, tier: SceneFontTier, text: &str) -> Option<i32> {
+        let numeric = self.tier(tier).numeric?;
+        // lv_text_get_width sums the advances and trims one trailing
+        // letter_space; at letter_space 0 that is a plain sum.
+        text.chars().try_fold(0, |width, character| {
+            numeric.advance(character).map(|advance| width + advance)
+        })
     }
 }
 
-pub fn text_is_numeric(_text: &str) -> bool {
-    false
+// ---------------------------------------------------------------------------
+// Tier selection — a port of template_internal.h.
+// ---------------------------------------------------------------------------
+
+/// `deskmate_text_is_numeric()` (`template_internal.h:109`).
+///
+/// True when every character is covered by the digits-only `DISPLAY`/`HERO`
+/// subsets. The C walks bytes and special-cases U+00B0's two-byte UTF-8
+/// sequence; walking `char`s is the same predicate over valid UTF-8, which a
+/// Rust `&str` always is. An empty string is not numeric — callers substitute
+/// their own placeholder first.
+pub fn text_is_numeric(text: &str) -> bool {
+    !text.is_empty()
+        && text
+            .chars()
+            .all(|c| matches!(c, '0'..='9' | ':' | '-' | '%' | '\u{b0}'))
 }
 
-pub fn number_font_tier(
-    _text: &str,
-    _max_width: i32,
-    _metrics: &BakedFontMetrics,
-) -> SceneFontTier {
+/// `deskmate_number_font()` (`template_internal.h:136`): the largest tier that
+/// both covers `text`'s glyphs and fits `max_width` on one line, walking
+/// `HERO` → `DISPLAY` → `BODY`.
+///
+/// `BODY` is the floor for the C's two reasons: it is the only tier with
+/// letters, and the only one that can ellipsize, since its range includes the
+/// `.` `LV_LABEL_LONG_DOT` appends.
+///
+/// `digital_clock.c` does **not** call this — it pins `DESKMATE_FONT_HERO` for
+/// the reading — so neither does [`build_digital_clock_scene`]. It is ported
+/// here for the faces that do, and because pinning a tier is only safe if the
+/// rule would have agreed; `the_ported_tier_rule_agrees_with_the_heros_pin`
+/// asserts it does.
+pub fn number_font_tier(text: &str, max_width: i32, metrics: &BakedFontMetrics) -> SceneFontTier {
+    if !text_is_numeric(text) {
+        return SceneFontTier::Body;
+    }
+    for tier in [SceneFontTier::Hero, SceneFontTier::Display] {
+        if metrics
+            .measure(tier, text)
+            .is_some_and(|width| width <= max_width)
+        {
+            return tier;
+        }
+    }
     SceneFontTier::Body
 }
 
-pub fn build_digital_clock_scene(_card: &ClockCard, _metrics: &BakedFontMetrics) -> Scene {
-    Scene::default()
+// ---------------------------------------------------------------------------
+// LVGL's fixed-point trigonometry, for the hands.
+// ---------------------------------------------------------------------------
+
+/// `lv_math.c`'s `sin0_90_table`, transcribed. The hands' endpoints are
+/// whatever `lv_scale_set_line_needle_value()` computes, and it computes them
+/// from this table, so a floating-point sine would land a pixel elsewhere.
+const SIN_0_90: [i32; 91] = [
+    0, 572, 1144, 1715, 2286, 2856, 3425, 3993, 4560, 5126, 5690, 6252, 6813, 7371, 7927, 8481,
+    9032, 9580, 10126, 10668, 11207, 11743, 12275, 12803, 13328, 13848, 14365, 14876, 15384, 15886,
+    16384, 16877, 17364, 17847, 18324, 18795, 19261, 19720, 20174, 20622, 21063, 21498, 21926,
+    22348, 22763, 23170, 23571, 23965, 24351, 24730, 25102, 25466, 25822, 26170, 26510, 26842,
+    27166, 27482, 27789, 28088, 28378, 28660, 28932, 29197, 29452, 29698, 29935, 30163, 30382,
+    30592, 30792, 30983, 31164, 31336, 31499, 31651, 31795, 31928, 32052, 32166, 32270, 32365,
+    32449, 32524, 32588, 32643, 32688, 32723, 32748, 32763, 32768,
+];
+
+/// `LV_TRIGO_SHIFT`.
+const TRIGO_SHIFT: u32 = 15;
+
+/// `lv_trigo_sin()`. The C normalises with `while` loops; `rem_euclid` is the
+/// same map for every input.
+fn trigo_sin(angle: i32) -> i32 {
+    let normalised = angle.rem_euclid(360);
+    let index = match normalised {
+        0..90 => normalised,
+        90..180 => 180 - normalised,
+        180..270 => normalised - 180,
+        _ => 360 - normalised,
+    };
+    let magnitude = SIN_0_90[usize::try_from(index).expect("the index is in 0..=90")];
+    let signed = if normalised >= 180 {
+        -magnitude
+    } else {
+        magnitude
+    };
+    // The C saturates +-32767 to +-32768. No entry in the table is 32767, so
+    // this is inert today; it is kept because the table is transcribed and a
+    // regenerated one could reach it.
+    match signed {
+        32767 => 32768,
+        -32767 => -32768,
+        other => other,
+    }
 }
 
-fn trigo_sin(_angle: i32) -> i32 {
-    0
+/// `lv_trigo_cos()`.
+fn trigo_cos(angle: i32) -> i32 {
+    trigo_sin(angle + 90)
+}
+
+// ---------------------------------------------------------------------------
+// The builder.
+// ---------------------------------------------------------------------------
+
+/// The card-level inputs `digital_clock.c` draws from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClockCard {
+    /// Echoed as the scene's own revision.
+    pub revision: u32,
+    /// `digital_clock_patch()`'s `show_seconds` field. False hides the seconds
+    /// in the C and drops the node here; both draw the same pixels, and
+    /// neither moves anything else, because the hero is left-anchored.
+    pub show_seconds: bool,
+    /// The local wall-clock instant the dial's hands and the date module are
+    /// drawn for. The reading itself is a device-side `time:` binding, so it
+    /// ticks between pushes; the hands and the date do not.
+    pub local_now: NaiveDateTime,
+}
+
+/// `timefmt.c`'s `DOW`, which `digital_clock_tick()` indexes with
+/// `(tm_wday + 6) % 7` — i.e. Monday-based.
+const WEEKDAYS: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+/// `timefmt.c`'s `MON`.
+const MONTHS: [&str; 12] = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
+
+/// `timefmt_date()`: `"%s, %s %d"`, with an unpadded day.
+fn date_text(now: NaiveDateTime) -> String {
+    let weekday = WEEKDAYS[usize::try_from(now.weekday().num_days_from_monday())
+        .expect("chrono returns 0..=6 days from Monday")];
+    let month = MONTHS[usize::try_from(now.month0()).expect("chrono returns a month0 of 0..=11")];
+    format!("{weekday}, {month} {}", now.day())
+}
+
+/// `timefmt_hhmm()`: `"%02d:%02d"`. The host renders it only to *measure* it —
+/// the node carries a binding, so the device renders the reading itself.
+fn time_text(now: NaiveDateTime) -> String {
+    format!("{:02}:{:02}", now.hour(), now.minute())
+}
+
+/// One clock hand: its two endpoints in absolute canvas coordinates, plus
+/// the stroke `digital_clock.c` gives it.
+///
+/// **This is the translation the C does not have to do.** In
+/// `digital_clock.c:132` the hands are `lv_line` children of the `lv_scale`,
+/// and `lv_scale_set_line_needle_value()` writes their points in the *scale's*
+/// frame — `(box/2, box/2)` for the pivot — after aligning the line to the
+/// scale's top-left. A scene `LINE` node is in absolute canvas coordinates
+/// with its object at the canvas origin (`scene_view.c`'s `build_line()` ends
+/// with `lv_obj_set_pos(object, 0, 0)`), and `scene_scale_t`'s own header says
+/// "whatever emits their endpoints must derive that centre itself". So the
+/// scale's top-left is added to every point.
+///
+/// The rest is `lv_scale_set_line_needle_value()` line for line: the needle
+/// length is clamped to half the box, the value is mapped onto the angle range
+/// with C's truncating division, and the offsets are fixed-point sine and
+/// cosine of `rotation + angle`, arithmetic-shifted down by `LV_TRIGO_SHIFT`.
+fn hand_line(origin: (i32, i32), length: i32, value: i32, width: i32, color: u32) -> SceneLine {
+    let half_box = DIAL_BOX / 2;
+    let actual_length = if length >= half_box {
+        half_box
+    } else if length >= 0 {
+        length
+    } else if length + half_box < 0 {
+        0
+    } else {
+        half_box + length
+    };
+
+    // scale->range_min is 0 and scale->range_max is DIAL_RANGE.
+    let angle = if value < 0 {
+        0
+    } else if value > DIAL_RANGE {
+        DIAL_ANGLE_RANGE
+    } else {
+        DIAL_ANGLE_RANGE * value / DIAL_RANGE
+    };
+
+    let offset_x = (actual_length * trigo_cos(DIAL_ROTATION + angle)) >> TRIGO_SHIFT;
+    let offset_y = (actual_length * trigo_sin(DIAL_ROTATION + angle)) >> TRIGO_SHIFT;
+
+    let pivot_x = origin.0 + half_box;
+    let pivot_y = origin.1 + half_box;
+    SceneLine {
+        xs: vec![pivot_x, pivot_x + offset_x],
+        ys: vec![pivot_y, pivot_y + offset_y],
+        width,
+        color,
+    }
+}
+
+/// Builds the whole `DigitalClock` face as a scene.
+///
+/// The node order is `digital_clock.c`'s creation order, which is its z-order:
+/// the reading, the seconds, the date module and its label, the dial module,
+/// the dial, then the two hands over it. `OBJ_STATE` has no node — it is the
+/// shared state footer, and in the OK state `template_view.c:99` sets it to the
+/// empty string, which draws nothing.
+pub fn build_digital_clock_scene(card: &ClockCard, metrics: &BakedFontMetrics) -> Scene {
+    let mut nodes = Vec::with_capacity(8);
+
+    // --- the reading. digital_clock.c:69-74.
+    //
+    // The tier is HERO because the C pins HERO; see number_font_tier's doc.
+    // The width is deliberately generous: the C label is content-sized while a
+    // scene text node is a fixed box, and a box measured exactly risks a
+    // one-pixel clip if the device's measurement differs. LEFT alignment
+    // starts at the box edge and LONG_MODE_CLIP suppresses wrapping, so extra
+    // width costs nothing.
+    let hero_baseline = TIME_Y + metrics.baseline_offset(SceneFontTier::Hero);
+    nodes.push(SceneNode::Text(SceneText {
+        x: MARGIN,
+        baseline_y: hero_baseline,
+        w: SCENE_CANVAS_WIDTH - MARGIN,
+        align: SceneAlign::Left,
+        font: SceneFont::Baked(SceneFontTier::Hero),
+        color: COLOR_PRIMARY,
+        value: SceneValue::Binding(TIME_BINDING.to_string()),
+        ellipsize: false,
+    }));
+
+    // --- the seconds. digital_clock.c:80-84, positioned by :202-205.
+    //
+    // The C re-anchors this after every tick, because the hero is
+    // content-sized: OUT_RIGHT_TOP of the hero, one 2*GRID gap along, with a y
+    // offset of baseline_offset(HERO) - baseline_offset(DISPLAY). That offset
+    // exists to put the two on one baseline, so in a baseline-addressed scene
+    // it collapses to "the same baseline_y". The x has to be computed, and it
+    // is safe to compute once because every digit in the HERO subset has the
+    // same advance -- so "HH:mm" measures the same width at every minute of
+    // the day. A test walks all 1440 of them.
+    if card.show_seconds {
+        let hero_width = metrics
+            .measure(SceneFontTier::Hero, &time_text(card.local_now))
+            .expect("a HH:mm reading is inside the HERO subset");
+        let seconds_x = MARGIN + hero_width + SECONDS_GAP;
+        nodes.push(SceneNode::Text(SceneText {
+            x: seconds_x,
+            baseline_y: hero_baseline,
+            w: SCENE_CANVAS_WIDTH - seconds_x,
+            align: SceneAlign::Left,
+            font: SceneFont::Baked(SceneFontTier::Display),
+            color: CLOCK_HUE,
+            value: SceneValue::Binding(SECONDS_BINDING.to_string()),
+            ellipsize: false,
+        }));
+    }
+
+    // --- the date module and its one label. digital_clock.c:89-98.
+    nodes.push(SceneNode::Rect(SceneRect {
+        x: MARGIN,
+        y: MODULE_Y,
+        w: DATE_W,
+        h: MODULE_H,
+        radius: RADIUS_MODULE,
+        fill: COLOR_SURFACE,
+        opacity: u8::MAX,
+    }));
+    // The date is the module's whole content -- no eyebrow names it -- so the
+    // value centres in the surface.
+    let value_line = metrics.tier(SceneFontTier::Body).line_height;
+    let stack_top = (MODULE_H - value_line) / 2;
+    nodes.push(SceneNode::Text(SceneText {
+        // deskmate_label_box() is called with x = DESKMATE_MARGIN *inside* the
+        // module, whose own origin is DESKMATE_MARGIN on the canvas.
+        x: MARGIN + MARGIN,
+        baseline_y: MODULE_Y + stack_top + metrics.baseline_offset(SceneFontTier::Body),
+        // Exactly deskmate_label_box()'s width, not a generous one: this box is
+        // fixed on both sides, and a wider one would ellipsize differently.
+        w: DATE_W - 2 * MARGIN,
+        align: SceneAlign::Left,
+        font: SceneFont::Baked(SceneFontTier::Body),
+        color: COLOR_PRIMARY,
+        // No binding renders a date, so the host formats it. It goes stale at
+        // local midnight until the next push.
+        value: SceneValue::Literal(date_text(card.local_now)),
+        // deskmate_label_box() uses LV_LABEL_LONG_DOT.
+        ellipsize: true,
+    }));
+
+    // --- the dial module and the dial. digital_clock.c:100-127.
+    nodes.push(SceneNode::Rect(SceneRect {
+        x: DIAL_X,
+        y: MODULE_Y,
+        w: DIAL_W,
+        h: MODULE_H,
+        radius: RADIUS_MODULE,
+        fill: COLOR_SURFACE,
+        opacity: u8::MAX,
+    }));
+    let dial_origin = (
+        DIAL_X + (DIAL_W - DIAL_BOX) / 2,
+        MODULE_Y + (MODULE_H - DIAL_BOX) / 2,
+    );
+    nodes.push(SceneNode::Scale(SceneScale {
+        x: dial_origin.0,
+        y: dial_origin.1,
+        box_size: DIAL_BOX,
+        total_tick_count: DIAL_TOTAL_TICKS,
+        major_tick_every: DIAL_MAJOR_TICK_EVERY,
+        // Only the major ticks carry the face's hue; the minor ticks are the
+        // fixed DESKMATE_COLOR_TERTIARY grey, which scene_view.c owns.
+        major_tick_color: CLOCK_HUE,
+    }));
+
+    // --- the two hands. digital_clock.c:132-142, driven by :207-213.
+    //
+    // A 12-hour dial in minutes, so one scale positions both: the hour hand at
+    // h*60+m and the minute hand at m*12.
+    let hour = i32::try_from(card.local_now.hour()).expect("chrono returns an hour of 0..=23");
+    let minute = i32::try_from(card.local_now.minute()).expect("chrono returns a minute of 0..=59");
+    nodes.push(SceneNode::Line(hand_line(
+        dial_origin,
+        HAND_HOUR_LEN,
+        (hour % 12) * 60 + minute,
+        HAND_HOUR_WIDTH,
+        COLOR_PRIMARY,
+    )));
+    nodes.push(SceneNode::Line(hand_line(
+        dial_origin,
+        HAND_MINUTE_LEN,
+        minute * 12,
+        HAND_MINUTE_WIDTH,
+        CLOCK_HUE,
+    )));
+
+    Scene {
+        revision: card.revision,
+        background: COLOR_CANVAS,
+        nodes,
+    }
 }
 
 #[cfg(test)]
@@ -215,6 +678,16 @@ mod tests {
                 "{path}: tier lookup"
             );
 
+            // A face carries a numeric table here exactly when it is one of
+            // the two digits-only subsets, which the baked source shows as a
+            // sparse cmap. Without this, dropping a table would make the
+            // advance assertions below vanish rather than fail.
+            let is_subset = source.contains("LV_FONT_FMT_TXT_CMAP_SPARSE_TINY");
+            assert_eq!(
+                is_subset,
+                expected.numeric.is_some(),
+                "{path}: subset faces carry a numeric table and full-range faces do not"
+            );
             let Some(numeric) = expected.numeric else {
                 continue;
             };
@@ -570,10 +1043,13 @@ mod tests {
             }),
         )
         .expect("a digital clock scene fits one envelope");
-        let payload = decode_wire_frame(&wire).expect("a well-formed frame").payload;
+        let payload = decode_wire_frame(&wire)
+            .expect("a well-formed frame")
+            .payload;
         assert!(payload.len() <= MAX_PAYLOAD_SIZE);
         // Pinned so a node added here shows up as a budget change rather than
-        // as a surprise at 2034.
-        assert_eq!(0, payload.len(), "encoded PushScene payload");
+        // as a surprise at 2034. 283 of 2034 is 14% of one envelope, which is
+        // the headroom that lets the plan refuse a second chunk protocol.
+        assert_eq!(283, payload.len(), "encoded PushScene payload");
     }
 }

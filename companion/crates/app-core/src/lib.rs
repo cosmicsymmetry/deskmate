@@ -33,16 +33,16 @@ pub use network_settings::{
     NetworkSettingsUpdate,
 };
 pub use protocol::{NetworkConfig, Tier as ProvisioningTier};
-pub use scene_build::{
-    BakedFontMetrics, ClockCard, NumericAdvances, TierMetrics, build_digital_clock_scene,
-    number_font_tier, text_is_numeric,
-};
 pub use providers::ics::MAX_ICS_BYTES;
 pub use runtime::{
     CalendarRefreshRequest, CalendarRefreshResult, CalendarRefresher, DeviceConnection,
     ProviderRefreshRequest, ProviderRefreshResult, ProviderRefresher, ProviderRequest,
     RuntimeDevice, RuntimeHandle, RuntimeOptions, RuntimeSubscription, SerialRuntimeDevice,
     SystemCalendarRefresher, SystemProviderRefresher,
+};
+pub use scene_build::{
+    BakedFontMetrics, ClockCard, NumericAdvances, TierMetrics, build_digital_clock_scene,
+    number_font_tier, text_is_numeric,
 };
 pub use state::{
     AppSnapshot, CardDataSnapshot, CardError, CardField, CardFieldValue, ConnectionState,

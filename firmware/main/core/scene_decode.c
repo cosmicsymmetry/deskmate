@@ -897,16 +897,25 @@ static scene_model_result_t decode_nodes(CborValue *value, scene_t *out,
  * and for the result contract, which is unchanged. */
 scene_model_result_t scene_decode_map(CborValue *value, scene_t *out)
 {
+    /* Cleared BEFORE the argument guard, not after it -- the same ordering
+     * scene_decode() needs, and for the same reason. The contract in
+     * scene_decode.h promises node_count is 0 on ANY non-OK result without
+     * qualification, and a `value == NULL` call with a valid `out` is a
+     * non-OK result; a caller whose scene_t came from heap_caps_malloc()
+     * rather than calloc() would otherwise read uninitialised heap as a
+     * node count. "Did not touch it" is not "left it empty".
+     *
+     * Cleared on entry rather than trusted from the caller for the same
+     * reason it covers the is-it-a-map rejection below: this function owes
+     * the guarantee itself. It clears the COUNT only, not the whole ~6 KB
+     * struct -- the node array below the count is meaningless either way,
+     * and the sole caller has already zeroed its message. */
+    if (out != NULL) {
+        out->node_count = 0U;
+    }
     if (value == NULL || out == NULL) {
         return SCENE_MODEL_ERR_ARGUMENT;
     }
-    /* Cleared on entry rather than trusted from the caller: the contract
-     * promises node_count is 0 on ANY non-OK result, including the
-     * is-it-a-map rejection immediately below, and a caller whose scene_t
-     * came from heap_caps_malloc() rather than calloc() would otherwise
-     * read uninitialised heap as a node count. "Did not touch it" is not
-     * "left it empty". */
-    out->node_count = 0U;
 
     CborValue contents;
     size_t count = 0U;

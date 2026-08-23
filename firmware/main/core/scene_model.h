@@ -238,8 +238,10 @@ scene_model_result_t scene_model_validate(const scene_t *scene);
  *                              cap, or a binding scene_binding_parse()
  *                              rejects.
  *   SCENE_MODEL_ERR_GEOMETRY   a numeric field outside the range of the
- *                              C type that holds it, or a line's two
- *                              coordinate arrays disagreeing in length.
+ *                              C type that holds it, a line coordinate
+ *                              array longer than SCENE_MAX_LINE_POINTS,
+ *                              or a line's two coordinate arrays
+ *                              disagreeing in length.
  *   ...plus anything scene_model_validate() itself returns. */
 scene_model_result_t scene_decode(const uint8_t *payload, size_t length,
                                   scene_t *out);

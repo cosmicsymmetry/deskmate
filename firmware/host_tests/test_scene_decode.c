@@ -431,7 +431,14 @@ static void test_more_nodes_than_the_cap_is_rejected(void)
 
     assert(scene_decode(b.bytes, b.length, scene) ==
            SCENE_MODEL_ERR_NODE_COUNT);
-    /* Refused whole: not clipped to the first 24. */
+    /* Refused whole: not clipped to the first 24.
+     *
+     * MASKED WITHOUT ASan: scene_model_validate() returns this same code
+     * for a node_count over the cap, so both assertions hold even against
+     * a decoder whose own cap has been deleted -- after it has written
+     * out->nodes[24] past the allocation. The decoder's bound is proved
+     * only when this runs under the sanitizer (`make -C firmware/host_tests
+     * sanitize`, which CI now runs). Do not delete that as duplication. */
     assert(scene->node_count == 0U);
 
     free(scene);
@@ -888,6 +895,12 @@ static void test_more_line_points_than_the_cap_is_rejected(void)
     put_uint(&b, 2U);
     put_int(&b, 2);
 
+    /* MASKED WITHOUT ASan, for the same reason as the node cap above:
+     * line_within_canvas() rejects a point_count over SCENE_MAX_LINE_POINTS
+     * with this same code, so a decoder with no cap of its own still
+     * satisfies the assertion -- having written a ninth point over
+     * scene_line_t's arrays first. Its far-past-the-cap sibling below is
+     * what proves the decoder's bound; this case documents the boundary. */
     assert(scene_decode(b.bytes, b.length, scene) ==
            SCENE_MODEL_ERR_GEOMETRY);
 

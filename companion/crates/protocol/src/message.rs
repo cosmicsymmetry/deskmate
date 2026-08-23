@@ -4,6 +4,7 @@ use core::fmt;
 
 use crate::cbor::{CborError, Decoder, Encoder, deterministic_key_before};
 use crate::frame::{Frame, FrameError, MAX_PAYLOAD_SIZE, encode_frame};
+use crate::scene::{Scene, decode_scene, encode_scene, validate_scene};
 
 pub const PROTOCOL_VERSION: u8 = 1;
 pub const MAX_PROTOCOL_VERSION: u8 = 1;
@@ -15,13 +16,21 @@ pub const CAPABILITY_HOST_TAP_ACTIONS: u64 = 1 << 4;
 pub const CAPABILITY_ASSET_TRANSFER: u64 = 1 << 5;
 pub const CAPABILITY_FIRMWARE_UPDATE: u64 = 1 << 6;
 pub const CAPABILITY_NETWORKING: u64 = 1 << 7;
+/// Gates `PushScene` (type 19). A host that does not see this bit in the
+/// device's `StatusResponse` must not send one -- the same contract
+/// `NetworkConfig` and `FactoryReset` have under bit 7. Defining a bit is not
+/// switching it on: bit 7 sat defined-but-dark for most of V2 and the constant
+/// read 75 instead of 203, so [`CURRENT_CAPABILITIES`] is pinned by a test in
+/// both languages.
+pub const CAPABILITY_SCENE_RENDER: u64 = 1 << 8;
 pub const LEGACY_CAPABILITIES: u64 = CAPABILITY_CORE_WIDGETS;
 pub const CURRENT_CAPABILITIES: u64 = CAPABILITY_CORE_WIDGETS
     | CAPABILITY_CONFIG_ROTATION
     | CAPABILITY_EXTENDED_TEMPLATES
     | CAPABILITY_ASSET_TRANSFER
     | CAPABILITY_FIRMWARE_UPDATE
-    | CAPABILITY_NETWORKING;
+    | CAPABILITY_NETWORKING
+    | CAPABILITY_SCENE_RENDER;
 pub const LINK_TIMEOUT_MS: u64 = 10_000;
 pub const MAX_WIDGET_ID_LEN: usize = 32;
 pub const MAX_SCREEN_ID_LEN: usize = 32;
@@ -70,6 +79,11 @@ pub const TYPE_ASSET_BEGIN: u8 = 15;
 pub const TYPE_ASSET_CHUNK: u8 = 16;
 pub const TYPE_ASSET_COMMIT: u8 = 17;
 pub const TYPE_ASSET_RELEASE: u8 = 18;
+pub const TYPE_PUSH_SCENE: u8 = 19;
+
+/// Same 32 bytes as a widget id, and for the same reason: a card id is an
+/// identifier the host chose, not free text.
+pub const MAX_CARD_ID_LEN: usize = 32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -192,6 +206,17 @@ pub struct AssetCommit {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AssetRelease {
     pub digests: Vec<[u8; ASSET_DIGEST_LEN]>,
+}
+
+/// One card's whole display list, replacing whatever that card drew before.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PushScene {
+    pub card_id: String,
+    /// Required and nonzero, like `PushData`'s and `ApplyConfig`'s: a scene
+    /// the host cannot pin a revision to is one it cannot tell apart from the
+    /// scene already on the panel.
+    pub revision: u32,
+    pub scene: Scene,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -385,6 +410,7 @@ pub enum Message {
     AssetChunk(AssetChunk),
     AssetCommit(AssetCommit),
     AssetRelease(AssetRelease),
+    PushScene(PushScene),
 }
 
 impl Message {
@@ -409,6 +435,7 @@ impl Message {
             Self::AssetChunk(_) => TYPE_ASSET_CHUNK,
             Self::AssetCommit(_) => TYPE_ASSET_COMMIT,
             Self::AssetRelease(_) => TYPE_ASSET_RELEASE,
+            Self::PushScene(_) => TYPE_PUSH_SCENE,
         }
     }
 
@@ -720,6 +747,10 @@ fn validate_push(push: &PushData) -> Result<(), MessageError> {
     Ok(())
 }
 
+/// One arm per message type; it grows by a few lines whenever the protocol
+/// gains one, and splitting it would put a type's bounds somewhere other than
+/// with every other type's.
+#[allow(clippy::too_many_lines)]
 fn validate_message(message: &Message) -> Result<(), MessageError> {
     match message {
         Message::StatusResponse(status) => {
@@ -758,8 +789,10 @@ fn validate_message(message: &Message) -> Result<(), MessageError> {
             Ok(())
         }
         Message::Ack(ack) => {
-            let revision_required =
-                matches!(ack.acknowledged_type, TYPE_PUSH_DATA | TYPE_APPLY_CONFIG);
+            let revision_required = matches!(
+                ack.acknowledged_type,
+                TYPE_PUSH_DATA | TYPE_APPLY_CONFIG | TYPE_PUSH_SCENE
+            );
             let already_present_required = ack.acknowledged_type == TYPE_ASSET_BEGIN;
             if !matches!(
                 ack.acknowledged_type,
@@ -774,6 +807,7 @@ fn validate_message(message: &Message) -> Result<(), MessageError> {
                     | TYPE_ASSET_CHUNK
                     | TYPE_ASSET_COMMIT
                     | TYPE_ASSET_RELEASE
+                    | TYPE_PUSH_SCENE
             ) {
                 return Err(MessageError::InvalidValue("acknowledged type"));
             }
@@ -815,6 +849,13 @@ fn validate_message(message: &Message) -> Result<(), MessageError> {
         Message::AssetBegin(begin) => validate_asset_begin(begin),
         Message::AssetChunk(chunk) => validate_asset_chunk(chunk),
         Message::AssetRelease(release) => validate_asset_release(release),
+        Message::PushScene(push) => {
+            checked_text(&push.card_id, 1, MAX_CARD_ID_LEN, "card id")?;
+            if push.revision == 0 {
+                return Err(MessageError::InvalidValue("scene revision"));
+            }
+            validate_scene(&push.scene)
+        }
         _ => Ok(()),
     }
 }
@@ -1074,6 +1115,7 @@ fn encode_payload(message: &Message) -> Result<Vec<u8>, MessageError> {
                 encoder.bytes(digest);
             }
         }
+        Message::PushScene(push) => encode_push_scene_payload(&mut encoder, push),
     }
     let payload = encoder.into_bytes();
     if payload.len() > MAX_PAYLOAD_SIZE {
@@ -1459,6 +1501,41 @@ fn decode_ack(payload: &[u8]) -> Result<Ack, MessageError> {
     Ok(value)
 }
 
+fn encode_push_scene_payload(encoder: &mut Encoder, push: &PushScene) {
+    encoder.map(3);
+    encoder.unsigned(0);
+    encoder.text(&push.card_id);
+    encoder.unsigned(1);
+    encoder.unsigned(u64::from(push.revision));
+    encoder.unsigned(2);
+    encode_scene(encoder, &push.scene);
+}
+
+fn decode_push_scene(payload: &[u8]) -> Result<PushScene, MessageError> {
+    let mut decoder = Decoder::new(payload);
+    let len = decoder.map_len()?;
+    let mut previous = None;
+    let mut card_id = None;
+    let mut revision = None;
+    let mut scene = None;
+    for _ in 0..len {
+        match next_numeric_key(&mut decoder, &mut previous)? {
+            0 => card_id = Some(decoder.text()?.to_owned()),
+            1 => revision = Some(read_u32(&mut decoder, "scene revision")?),
+            2 => scene = Some(decode_scene(&mut decoder)?),
+            _ => decoder.skip()?,
+        }
+    }
+    decoder.finish()?;
+    let value = PushScene {
+        card_id: card_id.ok_or(MessageError::MissingField(0))?,
+        revision: revision.ok_or(MessageError::MissingField(1))?,
+        scene: scene.ok_or(MessageError::MissingField(2))?,
+    };
+    validate_message(&Message::PushScene(value.clone()))?;
+    Ok(value)
+}
+
 fn decode_asset_begin(payload: &[u8]) -> Result<AssetBegin, MessageError> {
     let mut decoder = Decoder::new(payload);
     let len = decoder.map_len()?;
@@ -1770,6 +1847,7 @@ pub fn decode_message(frame: &Frame) -> Result<Message, MessageError> {
         TYPE_ASSET_CHUNK => Message::AssetChunk(decode_asset_chunk(&frame.payload)?),
         TYPE_ASSET_COMMIT => Message::AssetCommit(decode_asset_commit(&frame.payload)?),
         TYPE_ASSET_RELEASE => Message::AssetRelease(decode_asset_release(&frame.payload)?),
+        TYPE_PUSH_SCENE => Message::PushScene(decode_push_scene(&frame.payload)?),
         other => return Err(MessageError::UnsupportedType(other)),
     };
     Ok(message)
@@ -1778,6 +1856,9 @@ pub fn decode_message(frame: &Frame) -> Result<Message, MessageError> {
 #[cfg(test)]
 mod tests {
     use crate::frame::decode_wire_frame;
+    use crate::scene::{
+        MAX_SCENE_NODES, SceneFont, SceneFontTier, SceneNode, SceneRect, SceneText, SceneValue,
+    };
 
     use super::*;
 
@@ -2002,10 +2083,12 @@ mod tests {
         // Keys 21 (latest_interrupt_token), 22 (max_protocol_version), and 23
         // (capabilities) are still encoded contiguously and in this order
         // because keys are canonical; locate and drop them regardless of
-        // what now follows them on the wire. The last byte is
-        // CURRENT_CAPABILITIES (235 = 0xeb) in its one-byte CBOR form; it
-        // moves whenever a capability bit is added to the constant.
-        let pattern = [0x15, 0x09, 0x16, 0x01, 0x17, 0x18, 0xeb];
+        // what now follows them on the wire. The tail is
+        // CURRENT_CAPABILITIES; adding bit 8 took it from 235 to 491, which
+        // moved it out of CBOR's one-byte form (0x18 0xeb) into its two-byte
+        // one (0x19 0x01 0xeb). It moves again whenever a capability bit is
+        // added to the constant.
+        let pattern = [0x15, 0x09, 0x16, 0x01, 0x17, 0x19, 0x01, 0xeb];
         let offset = payload
             .windows(pattern.len())
             .position(|window| window == pattern)
@@ -2147,6 +2230,14 @@ mod tests {
         assert_eq!(CURRENT_CAPABILITIES, 491);
         assert_eq!(CAPABILITY_SCENE_RENDER, 256);
         assert_ne!(CURRENT_CAPABILITIES & CAPABILITY_SCENE_RENDER, 0);
+    }
+
+    /// Encodes a `PushScene` payload WITHOUT validating it, so the decode
+    /// direction can be handed something a conforming host would never send.
+    fn encode_push_scene_payload_unchecked(push: &PushScene) -> Vec<u8> {
+        let mut encoder = Encoder::new();
+        encode_push_scene_payload(&mut encoder, push);
+        encoder.into_bytes()
     }
 
     fn sample_scene() -> Scene {

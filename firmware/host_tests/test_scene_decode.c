@@ -1042,6 +1042,80 @@ static void test_a_font_without_a_kind_is_rejected(void)
     free(scene);
 }
 
+/* An asset font that names no digest can never resolve to a face. It is
+ * the one font field scene_model_validate() does not cover -- validate_font()
+ * checks only pixel_size for SCENE_FONT_ASSET -- so without the decoder's
+ * conditional required key this returns SCENE_MODEL_OK and fails at draw
+ * time instead. */
+static void test_an_asset_font_without_a_digest_is_rejected(void)
+{
+    builder_t b;
+    scene_t *scene = new_scene();
+
+    begin_scene(&b, 1U, 0U, 1U);
+    put_map(&b, 2U);
+    put_uint(&b, 0U);
+    put_uint(&b, SCENE_NODE_TEXT);
+    put_uint(&b, 1U);
+    put_map(&b, 5U);
+    put_uint(&b, 0U);
+    put_int(&b, 10);
+    put_uint(&b, 1U);
+    put_int(&b, 200);
+    put_uint(&b, 2U);
+    put_int(&b, 400);
+    put_uint(&b, 4U);
+    put_map(&b, 2U);
+    put_uint(&b, 0U);
+    put_uint(&b, SCENE_FONT_ASSET);
+    put_uint(&b, 3U);
+    put_int(&b, 20);
+    put_uint(&b, 6U);
+    put_literal_value(&b, "hi");
+
+    assert(scene_decode(b.bytes, b.length, scene) == SCENE_MODEL_ERR_ARGUMENT);
+
+    free(scene);
+}
+
+/* The same font map WITH its digest is accepted, so the case above is
+ * rejected for the missing digest and not for the asset kind itself. */
+static void test_an_asset_font_with_a_digest_is_accepted(void)
+{
+    builder_t b;
+    scene_t *scene = new_scene();
+
+    begin_scene(&b, 1U, 0U, 1U);
+    put_map(&b, 2U);
+    put_uint(&b, 0U);
+    put_uint(&b, SCENE_NODE_TEXT);
+    put_uint(&b, 1U);
+    put_map(&b, 5U);
+    put_uint(&b, 0U);
+    put_int(&b, 10);
+    put_uint(&b, 1U);
+    put_int(&b, 200);
+    put_uint(&b, 2U);
+    put_int(&b, 400);
+    put_uint(&b, 4U);
+    put_map(&b, 3U);
+    put_uint(&b, 0U);
+    put_uint(&b, SCENE_FONT_ASSET);
+    put_uint(&b, 2U);
+    put_bytes(&b, k_digest, sizeof k_digest);
+    put_uint(&b, 3U);
+    put_int(&b, 20);
+    put_uint(&b, 6U);
+    put_literal_value(&b, "hi");
+
+    assert(scene_decode(b.bytes, b.length, scene) == SCENE_MODEL_OK);
+    assert(scene->nodes[0].value.text.font.kind == SCENE_FONT_ASSET);
+    assert(memcmp(scene->nodes[0].value.text.font.digest, k_digest,
+                  sizeof k_digest) == 0);
+
+    free(scene);
+}
+
 /* A GLYPH with no name draws nothing. The model cannot catch it -- an
  * omitted name is the empty string, which is NUL-terminated and therefore
  * valid as far as scene_model_validate() is concerned. */
@@ -1189,6 +1263,8 @@ int main(void)
     test_a_text_node_without_a_value_is_rejected();
     test_a_text_node_without_a_font_is_rejected();
     test_a_font_without_a_kind_is_rejected();
+    test_an_asset_font_without_a_digest_is_rejected();
+    test_an_asset_font_with_a_digest_is_accepted();
     test_a_glyph_without_a_name_is_rejected();
     test_a_digest_of_the_wrong_length_is_rejected();
     test_a_decoded_scene_has_been_validated();

@@ -50,17 +50,24 @@
  *          is a renderer constant, not a wire field -- see scene_scale_t.
  *
  * font     {0: kind, 1: baked (tier), 2: digest (32 bytes), 3: pixel_size}
- *          required 0. Which of 1-3 matter depends on the kind, and
- *          validate_font() in scene_model.c is what decides: an omitted
- *          tier or pixel_size leaves 0 behind, which that function rejects
- *          for the kind that needs it. Nothing is re-checked here.
+ *          required 0, plus 2 when the kind is SCENE_FONT_ASSET. The tier
+ *          and pixel_size are left to validate_font() in scene_model.c --
+ *          an omitted one leaves 0 behind, which that function rejects for
+ *          the kind that needs it. The DIGEST is the exception, and the
+ *          reason this map has a conditional required key: validate_font()
+ *          checks only pixel_size for an asset font (scene_model.c), so an
+ *          all-zero digest would sail through and fail at draw time when
+ *          the asset lookup missed. An asset font with no digest can never
+ *          resolve, so it is refused here instead.
  * value    {0: kind, 1: literal (text), 2: binding (text)}
  *          required 0; literal and binding default to "".
  *
- * Neither the font map's digest nor the value map's two strings are
- * required, which is what keeps a 24-node scene inside the 2034-byte
- * payload: a baked-font TEXT node would otherwise carry 34 wasted bytes of
- * digest, and 24 of those alone would nearly fill the envelope.
+ * A BAKED font carries no digest, and the value map's two strings are
+ * optional, which is what keeps a 24-node scene inside the 2034-byte
+ * payload: were a digest required unconditionally, a baked-font TEXT node
+ * would carry 34 wasted bytes of it, and 24 of those alone would nearly
+ * fill the envelope. That is why the digest is required for the asset kind
+ * specifically rather than for the map as a whole.
  *
  * ------------------------------------------------------------------
  * Decoding style.
@@ -519,11 +526,22 @@ static scene_model_result_t decode_font(CborValue *value,
             present |= REQUIRED_BIT((uint32_t)key);
         }
     }
-    /* Only the kind is required. Whether the tier or the pixel size had to
-     * come with it depends on that kind, and validate_font() in
+    /* The kind is always required. Whether the TIER or the PIXEL SIZE had
+     * to come with it depends on that kind, and validate_font() in
      * scene_model.c is where that lives -- it rejects a zero tier and an
-     * out-of-range pixel size, so neither is re-checked here. */
+     * out-of-range pixel size, so neither is re-checked here.
+     *
+     * The DIGEST is the one thing validate_font() does not cover: for
+     * SCENE_FONT_ASSET it checks pixel_size and nothing else, so a font
+     * map of {0: 2, 3: 20} would decode to an asset font with an all-zero
+     * digest and be reported OK. That scene cannot draw -- the asset
+     * lookup misses -- and this plan's rule is to refuse a scene whole
+     * rather than let it fail at draw time. */
     if ((present & UINT32_C(0x01)) != UINT32_C(0x01)) {
+        return SCENE_MODEL_ERR_ARGUMENT;
+    }
+    if (font->kind == SCENE_FONT_ASSET &&
+        (present & REQUIRED_BIT(2)) == 0U) {
         return SCENE_MODEL_ERR_ARGUMENT;
     }
     return cbor_result(cbor_value_leave_container(value, &fields));

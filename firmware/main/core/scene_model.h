@@ -67,6 +67,26 @@ typedef enum {
 
 typedef struct { int32_t x, y, w, h, radius; uint32_t fill; uint8_t opacity; }
     scene_rect_t;
+/* `start_deg`/`end_deg` are absolute canvas angles in LVGL's convention: 0
+ * degrees is 3 o'clock and they increase CLOCKWISE. `start_deg` is the
+ * origin and the arc sweeps clockwise from it to `end_deg`; a difference
+ * that comes out negative is read as the clockwise sweep landing on
+ * `end_deg`, so 270 -> 90 sweeps from twelve o'clock through three (the
+ * right half), never anticlockwise through nine. LVGL's own words for the
+ * scale, from lv_arc.h: "0 deg: right, 90 bottom".
+ *
+ * A FULL TURN is spelled as a nonzero exact multiple of 360: a ring starting
+ * at twelve o'clock is `start_deg = 270, end_deg = 630`. It is NOT spelled
+ * `start_deg == end_deg`, which is a degenerate empty arc and draws nothing.
+ * The renderer derives the sweep from the raw difference before folding
+ * either endpoint, precisely so that spelling survives -- see
+ * ui/scene_view.c's arc_origin()/arc_span(). Emitting `end_deg = start_deg +
+ * 359` to dodge the question instead leaves a gap that is plainly visible at
+ * a gauge's stroke width.
+ *
+ * `end_binding` scales that sweep rather than replacing it: the arc is drawn
+ * from `start_deg` through `end_deg - start_deg` times the bound percentage,
+ * so the declared pair is the 100% geometry. */
 typedef struct { int32_t cx, cy, r, start_deg, end_deg, width; uint32_t color;
                  bool rounded; char end_binding[SCENE_MAX_BINDING + 1U]; }
     scene_arc_t;

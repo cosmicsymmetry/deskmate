@@ -9,22 +9,33 @@
  * What this file relies on, and therefore does not re-check.
  *
  * scene_model_validate() (core/scene_model.c) is called once at the top of
- * scene_view_show() and it already guarantees, for every node: geometry
- * inside the 448x368 canvas with no int32 wrap, non-negative extents,
- * NUL-terminated text/binding/glyph-name arrays, a legal font reference, a
- * legal text alignment, and 2..SCENE_MAX_LINE_POINTS line points. None of
- * that is checked again here. Redundant defensive validation has concealed
- * three defects on this plan already; the model is the one place those
- * bounds live.
+ * scene_view_show(). What it guarantees, for every node, is: geometry inside
+ * the 448x368 canvas with no int32 wrap, non-negative extents,
+ * NUL-terminated text/binding/glyph-name arrays, a legal text alignment on
+ * TEXT nodes, a legal font reference on TEXT nodes, and
+ * 2..SCENE_MAX_LINE_POINTS line points. None of that is checked again here.
+ * Redundant defensive validation has concealed four defects on this plan
+ * already; the model is the one place those bounds live.
  *
- * Three things the model deliberately does NOT bound were assigned to the
- * renderer instead (plan ruling 7): an arc's start/end degrees, an arc's
- * stroke width, and a line's stroke width. They are normalised/clamped here,
- * at their point of use, and nowhere else.
+ * This list is load-bearing -- the whole safety argument of this file is that
+ * it is exact -- so what it deliberately does NOT cover is spelled out too:
  *
- * One thing the model does not constrain and cannot: scene_value_t.kind.
- * Anything that is not SCENE_VALUE_BINDING is read as a literal, which is
- * always safe because the literal array is NUL-terminated and bounded.
+ *  - A GLYPH's font is not validated. validate_font() runs only for
+ *    SCENE_NODE_TEXT (scene_model.c:192); a glyph carries a bare digest and
+ *    a `size` checked only as 0 <= size <= canvas (scene_model.c:92-97), so
+ *    a size of 0 reaches font_registry_acquire(). That is safe without a
+ *    check here because the registry rejects pixel_size <= 0 and returns
+ *    NULL, and NULL refuses the scene -- which is the same outcome any other
+ *    unavailable face gets. It is safe by the registry's contract, not by
+ *    the model's.
+ *  - An arc's start/end degrees and stroke width, and a line's stroke width,
+ *    are unbounded by design (plan ruling 7 assigned them to the renderer).
+ *    They are normalised/clamped here, at their point of use, and nowhere
+ *    else.
+ *  - scene_value_t.kind is not constrained and cannot be. Anything that is
+ *    not SCENE_VALUE_BINDING is read as a literal, which is always safe
+ *    because the literal array is NUL-terminated and bounded.
+ *  - A rect's radius is not constrained; a negative one is read as 0.
  * ------------------------------------------------------------------ */
 
 /* A binding-valued node, remembered so scene_view_refresh_bindings() can
@@ -36,8 +47,8 @@ typedef struct {
     lv_obj_t *object;
     scene_binding_t binding;
     /* SCENE_NODE_ARC only: the sweep the binding scales, captured at build
-     * time because the node it came from is not retained. */
-    int32_t arc_start_deg;
+     * time because the node it came from is not retained. The origin needs no
+     * entry here -- it lives on the object as its rotation. */
     int32_t arc_span_deg;
     uint8_t kind; /* scene_node_kind_t */
 } scene_bound_node_t;
@@ -179,20 +190,58 @@ static lv_text_align_t align_to_lv(scene_align_t align)
     return LV_TEXT_ALIGN_LEFT;
 }
 
-/* LVGL's arc setters subtract 360 exactly once, so an angle handed to them
- * must already lie in [0, 360]. 360 is deliberately kept distinct from 0: a
- * whole-circle arc is spelled start=0 end=360 -- progress_ring.c does exactly
- * that -- and folding it to 0 would draw nothing at all. */
-static int32_t arc_angle(int32_t degrees)
+/* An arc is placed the way progress_ring.c places one: the ORIGIN travels on
+ * the object's rotation and the sweep is set as angles 0..span.
+ *
+ * That arrangement is not a stylistic echo, it is the only one that can draw
+ * a full turn. lv_arc_set_start_angle()/set_end_angle() each fold their
+ * argument with a single `if (x > 360) x -= 360` (lv_arc.c:167, :189), so
+ * feeding them absolute angles loses exactly one bit of information: a whole
+ * circle beginning anywhere but three o'clock -- say start_deg=270,
+ * end_deg=630 -- folds to set_angles(270, 270), and lv_draw_arc draws
+ * nothing when start == end. progress_ring.c:190-193 avoids that by calling
+ * lv_arc_set_rotation(270) and then lv_arc_set_bg_angles(0, 360): the
+ * rotation carries the twelve-o'clock origin so the fold can never truncate
+ * the turn. scene_arc_t has no rotation field, so the origin is derived from
+ * start_deg here and the same arrangement is reproduced.
+ *
+ * The origin, in [0, 360). Normalised before the setter because
+ * lv_arc_set_rotation() reduces with a `while` loop (lv_arc.c:271-272), which
+ * an untrusted wire value near INT32_MAX would spin through ~6 million
+ * times. */
+static int32_t arc_origin(int32_t degrees)
 {
     int32_t value = degrees % 360;
     if (value < 0) {
         value += 360;
     }
-    if (value == 0 && degrees != 0) {
-        value = 360;
-    }
     return value;
+}
+
+/* The clockwise sweep from start_deg to end_deg, in (0, 360], or 0.
+ *
+ * Derived from the RAW difference, before either endpoint is folded, which
+ * is what preserves a full turn: end_deg - start_deg == 360 is a whole
+ * circle, and so is any other nonzero exact multiple. start_deg == end_deg
+ * is NOT a full turn -- it is a degenerate empty arc, and drawing nothing is
+ * the right answer for it. A negative difference is read the way LVGL reads
+ * one of its own (lv_arc.c:225-226): as the clockwise sweep that lands on
+ * end_deg.
+ *
+ * The subtraction widens to int64 first because both endpoints are untrusted
+ * int32s and int32 difference can wrap. */
+static int32_t arc_span(int32_t start_deg, int32_t end_deg)
+{
+    int64_t raw = (int64_t)end_deg - (int64_t)start_deg;
+    int32_t span = (int32_t)(raw % 360);
+
+    if (span < 0) {
+        span += 360;
+    }
+    if (span == 0 && raw != 0) {
+        span = 360;
+    }
+    return span;
 }
 
 /* Stroke clamps. The model leaves both unbounded on purpose (plan ruling 7:
@@ -253,12 +302,17 @@ static int32_t parse_percent(const char *text)
     return value;
 }
 
+/* Scales the arc's sweep to the bound percentage. The indicator's start
+ * angle stays at 0 and the object's rotation carries the origin (see
+ * arc_origin/arc_span), so only the end angle moves, and it can never exceed
+ * the 360 the setter's fold would truncate: span <= 360 and percent <= 100. */
 static void apply_arc_binding(const scene_bound_node_t *bound,
                               const char *evaluated)
 {
     int32_t percent = parse_percent(evaluated);
-    int32_t end = bound->arc_start_deg + bound->arc_span_deg * percent / 100;
-    lv_arc_set_end_angle(bound->object, (lv_value_precise_t)arc_angle(end));
+    lv_arc_set_end_angle(
+        bound->object,
+        (lv_value_precise_t)(bound->arc_span_deg * percent / 100));
 }
 
 /* ------------------------------------------------------------- builders */
@@ -291,9 +345,11 @@ static lv_obj_t *build_rect(lv_obj_t *parent, const scene_rect_t *rect)
  * therefore two arc nodes -- a dim full-circle track and a bound indicator --
  * which is exactly what progress_ring.c draws.
  *
- * Angles are LVGL's raw convention with rotation left at 0: 0 degrees is 3
- * o'clock and they increase clockwise. The server emits absolute angles; the
- * device applies no rotation of its own. */
+ * Angles use LVGL's convention -- 0 degrees is 3 o'clock, increasing
+ * clockwise -- and are absolute on the canvas: `start_deg` is the origin and
+ * the sweep runs clockwise to `end_deg`. The object's rotation carries that
+ * origin and the indicator is set to 0..span, which is what lets a full turn
+ * survive LVGL's single-subtraction fold; see arc_origin() and arc_span(). */
 static lv_obj_t *build_arc(lv_obj_t *parent, const scene_arc_t *arc)
 {
     lv_obj_t *object = lv_arc_create(parent);
@@ -310,8 +366,10 @@ static lv_obj_t *build_arc(lv_obj_t *parent, const scene_arc_t *arc)
     lv_obj_set_style_arc_width(object, clamp_arc_width(arc->width, arc->r),
                                LV_PART_INDICATOR);
     lv_obj_set_style_arc_rounded(object, arc->rounded, LV_PART_INDICATOR);
-    lv_arc_set_angles(object, (lv_value_precise_t)arc_angle(arc->start_deg),
-                      (lv_value_precise_t)arc_angle(arc->end_deg));
+    lv_arc_set_rotation(object, arc_origin(arc->start_deg));
+    lv_arc_set_angles(object, (lv_value_precise_t)0,
+                      (lv_value_precise_t)arc_span(arc->start_deg,
+                                                   arc->end_deg));
     return object;
 }
 
@@ -664,12 +722,7 @@ static bool build_nodes(lv_obj_t *parent, const scene_t *scene,
             bound->object = object;
             bound->kind = (uint8_t)SCENE_NODE_ARC;
             bound->binding = binding;
-            bound->arc_start_deg = arc_angle(arc->start_deg);
-            bound->arc_span_deg =
-                arc_angle(arc->end_deg) - bound->arc_start_deg;
-            if (bound->arc_span_deg < 0) {
-                bound->arc_span_deg += 360;
-            }
+            bound->arc_span_deg = arc_span(arc->start_deg, arc->end_deg);
             evaluate_binding(&bound->binding, context, buffer, sizeof buffer);
             apply_arc_binding(bound, buffer);
             break;

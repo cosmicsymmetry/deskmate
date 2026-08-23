@@ -55,25 +55,59 @@ font_registry_result_t font_registry_init(asset_resolver_fn resolver,
                                           void *table_storage,
                                           size_t table_storage_size);
 
+/* OWNERSHIP CONTRACT -- read before styling an LVGL object with an acquired
+ * face.
+ *
+ * An acquired face stays alive until it is released: the registry never
+ * evicts a face with an outstanding acquire, and font_registry_reset()
+ * refuses outright while one exists. Nothing else keeps a face alive.
+ * In particular **LVGL takes no reference**: lv_obj_set_style_text_font()
+ * stores the bare lv_font_t* and neither copies nor counts it, so an object
+ * styled with a face is still pointing at it long after the code that
+ * acquired it has returned.
+ *
+ * Therefore: a caller that hands a face to an LVGL object owns that acquire
+ * for the object's whole lifetime, and releases only after the object is
+ * destroyed -- not when the styling call returns. Releasing early leaves the
+ * face unpinned, and the very next acquire of a different (digest,
+ * pixel_size) can pick it as the LRU victim and destroy it out from under a
+ * screen that is still drawing with it. With FONT_REGISTRY_MAX_OPEN_FACES
+ * slots that is ordinary behaviour, not an exotic one.
+ *
+ * The cost of the contract is a hard ceiling: a screen wanting more than
+ * FONT_REGISTRY_MAX_OPEN_FACES distinct faces at once gets NULL for the
+ * surplus rather than thrashing. Handle NULL -- fall back to a baked font or
+ * refuse the scene; never draw with it. */
+
 /* Returns a font for `digest` rendered at `pixel_size`, or NULL if the asset
  * is absent, not a font (ASSET_KIND_FONT / ASSET_KIND_ICON_FONT only), fails
  * to rasterize, or every open face slot is both full and pinned by an
  * outstanding caller. Call under lvgl_port_lock(). Each successful call must
- * be paired with font_registry_release(). */
+ * be paired with font_registry_release() -- see the contract above for
+ * when. */
 lv_font_t *font_registry_acquire(const uint8_t *digest, int32_t pixel_size);
 
+/* Drops one acquire. The face is not destroyed here; it merely becomes
+ * eligible for eviction and for font_registry_reset(). Ignores a NULL or
+ * unknown pointer. */
 void font_registry_release(lv_font_t *font);
 
-/* Destroys every open face and clears the table. Call before compaction
- * invalidates mmap pointers -- compaction moves blobs, so a font surviving
- * it would read moved bytes.
+/* Destroys every open face and clears the table -- but only if no face has an
+ * outstanding acquire. Call before compaction invalidates mmap pointers:
+ * compaction moves blobs, so a font surviving it would read moved bytes.
  *
- * Returns the number of destroyed faces that still had ref_count > 0 --
- * i.e. a caller was holding an acquired lv_font_t* across this call and now
- * holds a dangling pointer. This file has no ESP-IDF include (lvgl-sim
- * compiles it on the host) and no LVGL logging config of its own, so it
- * cannot itself log the hazard; the caller, which already has a working log
- * sink, is expected to surface a nonzero result loudly. */
+ * Returns the number of still-acquired faces, and a nonzero return means
+ * **nothing was destroyed and the registry is unchanged**. It is not a
+ * warning to log past -- it is a refusal, and compaction must not proceed.
+ * Destroying a pinned face would trade a stale mapping for a dangling
+ * lv_font_t* that LVGL's draw path dereferences, which is strictly worse and
+ * invisible until it crashes.
+ *
+ * The caller's recovery is to drop those references and call again: destroy
+ * the LVGL objects holding them (which releases their acquires), reset,
+ * compact, then rebuild. A caller with no such teardown to run should
+ * refuse the whole operation and let the host retry -- a deferred garbage
+ * collection is recoverable, a dangling font pointer is not. */
 uint32_t font_registry_reset(void);
 
 /* Rasterizes every codepoint in `glyphs` into the face's own glyph/bitmap

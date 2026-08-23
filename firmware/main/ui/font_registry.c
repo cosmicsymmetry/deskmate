@@ -125,12 +125,24 @@ lv_font_t *font_registry_acquire(const uint8_t *digest, int32_t pixel_size)
     if (!s_resolver(digest, &ptr, &len, &kind)) {
         return NULL;
     }
+    /* From here on the mapping is ours, so every failure exit owes the
+     * resolver its release -- the same handle leak destroy_entry() already
+     * avoids on eviction. The all-pinned exit below is not a corner case
+     * under the header's ownership contract: a renderer holding its faces
+     * for its objects' lifetimes reaches it whenever a screen wants more
+     * than FONT_REGISTRY_MAX_OPEN_FACES of them. */
     if (kind != (uint8_t)ASSET_KIND_FONT && kind != (uint8_t)ASSET_KIND_ICON_FONT) {
+        if (s_release != NULL) {
+            s_release(ptr);
+        }
         return NULL;
     }
 
     font_registry_entry_t *slot = claim_slot();
     if (slot == NULL) {
+        if (s_release != NULL) {
+            s_release(ptr);
+        }
         return NULL;
     }
 
@@ -138,6 +150,9 @@ lv_font_t *font_registry_acquire(const uint8_t *digest, int32_t pixel_size)
                                                  LV_FONT_KERNING_NORMAL,
                                                  LV_TINY_TTF_CACHE_GLYPH_CNT);
     if (font == NULL) {
+        if (s_release != NULL) {
+            s_release(ptr);
+        }
         return NULL;
     }
 
@@ -173,30 +188,35 @@ uint32_t font_registry_reset(void)
     if (s_table == NULL) {
         return 0U;
     }
-    uint32_t pinned_destroyed = 0U;
+    /* Count first, destroy second. A pinned face means an LVGL object is
+     * still styled with it (the header's ownership contract), and destroying
+     * it would hand LVGL's draw path a dangling pointer -- a worse and far
+     * quieter failure than the stale mapping this reset exists to prevent.
+     * So a single pin refuses the whole reset: the table is left exactly as
+     * it was, and the caller must tear those objects down and call again.
+     * All-or-nothing rather than "destroy the unpinned ones anyway" because
+     * a partial reset buys the caller nothing -- compaction cannot proceed
+     * either way -- while leaving the registry in a state nobody asked
+     * for. */
+    uint32_t pinned = 0U;
+    for (uint32_t i = 0; i < FONT_REGISTRY_MAX_OPEN_FACES; ++i) {
+        if (s_table[i].in_use && s_table[i].ref_count > 0) {
+            ++pinned;
+        }
+    }
+    if (pinned > 0U) {
+        return pinned;
+    }
+
     for (uint32_t i = 0; i < FONT_REGISTRY_MAX_OPEN_FACES; ++i) {
         font_registry_entry_t *entry = &s_table[i];
         if (entry->in_use) {
-            /* This destroys the face out from under any outstanding
-             * font_registry_acquire() caller -- there are none as of this
-             * writing (nothing in firmware/main acquires yet; see the
-             * caller-side note in protocol_task.c's AssetRelease handler),
-             * but a caller that regresses this must not fail silently as a
-             * dangling lv_font_t* used from LVGL's draw path. This file has
-             * no ESP-IDF include and no LVGL logging config of its own (see
-             * the header), so it cannot log the hazard itself; it counts
-             * pinned destructions instead and hands the count back so the
-             * caller -- which has a working log sink -- can be loud about
-             * it. */
-            if (entry->ref_count > 0) {
-                ++pinned_destroyed;
-            }
             destroy_entry(entry);
         }
     }
     memset(s_table, 0, font_registry_table_bytes());
     s_generation = 0;
-    return pinned_destroyed;
+    return 0U;
 }
 
 void font_registry_warm(lv_font_t *font, const char *glyphs)

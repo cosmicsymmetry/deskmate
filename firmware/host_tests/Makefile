@@ -14,7 +14,7 @@ test: test_timefmt test_protocol test_link_state test_template_fields \
 	test_interrupt_state test_device_event_queue test_weather_icon \
 	test_clock_source test_net_config test_net_ring test_reconnect_backoff \
 	test_ota_policy test_asset_store test_asset_transfer test_scene_model \
-	test_scene_binding
+	test_scene_binding test_font_registry
 	./test_timefmt
 	./test_protocol
 	./test_link_state
@@ -34,6 +34,7 @@ test: test_timefmt test_protocol test_link_state test_template_fields \
 	./test_asset_transfer
 	./test_scene_model
 	./test_scene_binding
+	./test_font_registry
 
 test_timefmt: test_timefmt.c ../main/core/timefmt.c
 	$(CC) $(CFLAGS) -o $@ $^
@@ -103,6 +104,12 @@ test_scene_binding: test_scene_binding.c ../main/core/scene_binding.c \
 	../main/core/timefmt.c
 	$(CC) $(CFLAGS) -I../main -o $@ $^
 
+# -Istubs supplies host_tests/stubs/lvgl.h, the four-symbol stand-in that
+# lets font_registry.c's reference-counting/eviction policy be tested without
+# building LVGL. See that header for why.
+test_font_registry: test_font_registry.c ../main/ui/font_registry.c
+	$(CC) $(CFLAGS) -I../main -Istubs -o $@ $^
+
 sanitize: clean
 	$(MAKE) CFLAGS="$(CFLAGS) -O1 -g -fsanitize=address,undefined" test
 
@@ -122,6 +129,7 @@ clean:
 	rm -f test_asset_transfer
 	rm -f test_scene_model
 	rm -f test_scene_binding
+	rm -f test_font_registry
 	rm -rf test_timefmt.dSYM test_protocol.dSYM test_link_state.dSYM \
 		test_template_fields.dSYM test_widget_model.dSYM
 	rm -rf test_ui_command_queue.dSYM
@@ -138,4 +146,5 @@ clean:
 	rm -rf test_asset_transfer.dSYM
 	rm -rf test_scene_model.dSYM
 	rm -rf test_scene_binding.dSYM
+	rm -rf test_font_registry.dSYM
 .PHONY: test sanitize clean

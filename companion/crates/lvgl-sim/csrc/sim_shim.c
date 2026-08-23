@@ -341,6 +341,13 @@ static bool ensure_font_registry(void)
     return true;
 }
 
+/* Drops a screen's hold on its registry face when that screen is deleted --
+ * the mirror of dev_capture.c's release_probe_font(). */
+static void release_registry_font(lv_event_t *event)
+{
+    font_registry_release((lv_font_t *)lv_event_get_user_data(event));
+}
+
 bool sim_render_asset_font(const uint8_t *digest, const uint8_t *ttf_bytes,
                            uint32_t ttf_len, int32_t pixel_size, const char *text,
                            bool orientation_flipped, uint16_t *out_pixels)
@@ -383,6 +390,16 @@ bool sim_render_asset_font(const uint8_t *digest, const uint8_t *ttf_bytes,
     lv_label_set_text(label, text);
     lv_obj_center(label);
 
+    /* Hand this render's acquire to the screen, mirroring the device probe
+     * (firmware/main/link/dev_capture.c). LVGL stores the bare lv_font_t* in
+     * the label's style and takes no reference of its own, so releasing
+     * inline would leave the face unpinned -- and therefore evictable -- for
+     * as long as this screen stays the active one. font_registry.h's
+     * ownership contract calls for the release to happen when the objects
+     * styled with the face are destroyed, which for a screen is its delete
+     * event. The auto_del below is what fires it, on the next render. */
+    lv_obj_add_event_cb(screen, release_registry_font, LV_EVENT_DELETE, font);
+
     /* auto_del=true deletes whatever screen was previously active (a prior
      * template render or asset-font render), exactly like
      * template_view_show's own lv_screen_load_anim call. */
@@ -395,6 +412,5 @@ bool sim_render_asset_font(const uint8_t *digest, const uint8_t *ttf_bytes,
     }
 
     copy_frame_out(orientation_flipped, out_pixels);
-    font_registry_release(font);
     return true;
 }

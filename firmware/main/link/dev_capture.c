@@ -151,6 +151,18 @@ void dev_capture_handle_request(uint32_t request_id)
 #define DEV_ASSET_PROBE_BG_COLOR 0x000000U
 #define DEV_ASSET_PROBE_TEXT_COLOR 0xf5f5f7U
 
+// Drops the probe screen's hold on its face when that screen is deleted --
+// which is the moment the last LVGL object styled with the face goes away,
+// and so the earliest moment font_registry.h's ownership contract permits
+// the release. Binding it to the object rather than releasing inline is what
+// keeps the face pinned (and therefore un-evictable, and un-resettable) for
+// exactly as long as something is drawing with it.
+static void release_probe_font(lv_event_t *event)
+{
+    lv_font_t *font = (lv_font_t *)lv_event_get_user_data(event);
+    font_registry_release(font);
+}
+
 void dev_capture_handle_asset_probe(const uint8_t *digest)
 {
     if (digest == NULL) {
@@ -199,16 +211,19 @@ void dev_capture_handle_asset_probe(const uint8_t *digest)
     lv_label_set_text(label, DEV_ASSET_PROBE_TEXT);
     lv_obj_center(label);
 
+    // Hand this probe's acquire to the screen. LVGL stores the bare
+    // lv_font_t* in the label's style and takes no reference of its own, so
+    // releasing here -- with the screen about to become the live one --
+    // would leave the face unpinned while it is still being drawn, and the
+    // next acquire or AssetRelease could destroy it underneath. The delete
+    // callback releases it instead, when the screen (and with it the label)
+    // is actually gone.
+    lv_obj_add_event_cb(screen, release_probe_font, LV_EVENT_DELETE, font);
+
     // auto_del=true deletes whatever screen was previously active (the
     // standalone clock, a template render, or a prior probe render), the
     // same call template_view_show() uses.
     lv_screen_load_anim(screen, LV_SCREEN_LOAD_ANIM_NONE, 0U, 0U, true);
-
-    // The active screen now holds the font (LVGL keeps its own reference
-    // via the label's style), so this probe's own hold is released once
-    // the screen is live -- matching sim_render_asset_font(), which
-    // releases immediately after copying the flushed frame out.
-    font_registry_release(font);
 
     lvgl_port_unlock();
     ESP_LOGI(TAG, "asset probe rendered at %dpx", DEV_ASSET_PROBE_PIXEL_SIZE);

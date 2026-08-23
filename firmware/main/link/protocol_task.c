@@ -835,63 +835,50 @@ static void dispatch_asset_release(protocol_context_t *context,
         asset_transfer_abort(&context->asset_transfer);
     }
 
-    // font_registry_reset() destroys every open lv_font_t face
-    // unconditionally, including any with outstanding font_registry_acquire()
-    // callers, and it calls into LVGL/tiny_ttf (lv_tiny_ttf_destroy) to do
-    // it -- both reasons it must run under lvgl_port_lock(), matching every
-    // other LVGL mutation this task makes from outside the LVGL task.
+    // Compaction below physically moves blob bytes, which invalidates every
+    // lv_font_t rasterized from an asset_flash_map() pointer. So every open
+    // face must be gone before asset_flash_execute_compaction() runs, and
+    // font_registry_reset() is what makes that true. It calls into
+    // LVGL/tiny_ttf (lv_tiny_ttf_destroy), so it runs under lvgl_port_lock()
+    // like every other LVGL mutation this task makes from outside the LVGL
+    // task.
     //
-    // Ordering hazard this call must resolve: compaction below can physically
-    // move blob bytes, which invalidates any lv_font_t rasterized from an
-    // asset_flash_map() pointer, so every such face must be gone before
-    // asset_flash_execute_compaction() runs.
+    // A nonzero return is a REFUSAL, not a warning: some LVGL object is
+    // still styled with an acquired face (LVGL keeps the bare pointer and
+    // takes no reference of its own -- see font_registry.h's ownership
+    // contract), the registry destroyed nothing, and compaction therefore
+    // must not proceed. Deferring the garbage collection costs the host a
+    // retry; compacting anyway would leave a live screen drawing from moved
+    // bytes. Nothing has been mutated at this point -- the mark-dead scan
+    // below has not run yet -- so returning here leaves the store exactly as
+    // it was found.
     //
-    // There IS now a font_registry_acquire() caller in this tree: the
-    // DESKMATE_DEV_DIAG-only probe (link/dev_capture.c's
-    // dev_capture_handle_asset_probe(), Task 13). It always releases before
-    // returning, so ref_count is back to 0 by the time this function can
-    // observe it -- but font_registry_reset() destroys every open face
-    // unconditionally, regardless of ref_count, and an LVGL label that was
-    // styled with an acquired lv_font_t* keeps that raw pointer after its
-    // acquirer calls font_registry_release(); release only means the
-    // registry's own table stops pinning the face, not that nothing else
-    // still points at it. So a screen built from an asset font is stale --
-    // and unsafe to redraw -- the moment this reset runs, whether or not
-    // anything is still "acquired" at the time. The pinned-face counter
-    // below cannot detect this case; it only catches a caller still holding
-    // ref_count > 0, not a screen holding a dangling pointer after release.
-    // The same destruction is also reachable with no AssetRelease/GC
-    // involved at all: once font_registry_release() drops ref_count to 0,
-    // a later font_registry_acquire() for a *different* digest or pixel
-    // size can pick that now-unpinned entry as claim_slot()'s LRU victim
-    // and destroy it out from under a screen that still points at it.
-    //
-    // This reset stays safe TODAY only because the sole caller is dev-only,
-    // and only for a single probe/capture pair with nothing else touching
-    // the registry in between -- not because the hazard above is closed.
-    // No production template renders from an asset font yet (that wiring is
-    // later stage scope). When one does, this call must move behind
-    // draining/invalidating that renderer's live references (e.g.
-    // re-showing or tearing down every asset-font screen before reset runs,
-    // not just checking ref_count) before compaction is allowed to proceed.
+    // The caller-side recovery, when this device grows a renderer that holds
+    // asset faces (the scene renderer, later in this stage), is to tear that
+    // renderer's objects down here first: destroying them releases their
+    // acquires, the reset then succeeds, compaction runs, and the scene is
+    // rebuilt afterwards against the moved blobs. Until that renderer exists
+    // the only holder is the DESKMATE_DEV_DIAG asset probe
+    // (link/dev_capture.c), which pins its face for as long as its screen is
+    // the active one -- so a release arriving while a probe render is up is
+    // correctly deferred until some other screen replaces it.
     if (!lvgl_port_lock(0U)) {
         transmit_error(context, request_id, PROTOCOL_ERROR_INTERNAL,
                        "display lock unavailable");
         return;
     }
-    // font_registry.c has no ESP-IDF include and no LVGL logging config of
-    // its own (see its header), so it cannot log a regression of the "safe
-    // today" claim above itself -- it counts pinned destructions and hands
-    // the count back. This task already has a working log sink, so surface
-    // a nonzero count loudly rather than let a future caller's dangling
-    // pointer fail silently.
-    uint32_t pinned_faces_destroyed = font_registry_reset();
+    uint32_t pinned_faces = font_registry_reset();
     lvgl_port_unlock();
-    if (pinned_faces_destroyed > 0U) {
-        ESP_LOGE(TAG,
-                "AssetRelease destroyed %u still-referenced font face(s); "
-                "a caller now holds a dangling lv_font_t*",
-                (unsigned)pinned_faces_destroyed);
+    if (pinned_faces > 0U) {
+        // font_registry.c has no ESP-IDF include and no LVGL logging config
+        // of its own (see its header), so it hands the count back rather
+        // than logging; this task has a working sink.
+        ESP_LOGW(TAG,
+                "AssetRelease deferred: %u font face(s) still in use",
+                (unsigned)pinned_faces);
+        transmit_error(context, request_id, PROTOCOL_ERROR_BUSY,
+                       "font faces in use");
+        return;
     }
 
     for (uint32_t index = 0U; index < store->record_capacity; ++index) {

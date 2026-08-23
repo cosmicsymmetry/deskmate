@@ -235,6 +235,117 @@ static void test_a_huge_coordinate_does_not_wrap_the_bounds_check(void)
     assert(scene_model_validate(&scene) == SCENE_MODEL_ERR_GEOMETRY);
 }
 
+static scene_t scale_scene(void)
+{
+    scene_t scene = minimal_scene();
+    scene.nodes[0].kind = SCENE_NODE_SCALE;
+    scene.nodes[0].value.scale.x = 10;
+    scene.nodes[0].value.scale.y = 10;
+    scene.nodes[0].value.scale.box = 50;
+    scene.nodes[0].value.scale.total_tick_count = 13U;
+    scene.nodes[0].value.scale.major_tick_every = 3U;
+    return scene;
+}
+
+static void test_a_scale_within_bounds_validates(void)
+{
+    scene_t scene = scale_scene();
+    assert(scene_model_validate(&scene) == SCENE_MODEL_OK);
+}
+
+static void test_a_scale_extending_past_canvas_width_is_rejected(void)
+{
+    scene_t scene = scale_scene();
+    scene.nodes[0].value.scale.x = SCENE_CANVAS_WIDTH;
+    assert(scene_model_validate(&scene) == SCENE_MODEL_ERR_GEOMETRY);
+}
+
+static void test_a_scale_extending_past_canvas_height_is_rejected(void)
+{
+    scene_t scene = scale_scene();
+    scene.nodes[0].value.scale.y = SCENE_CANVAS_HEIGHT;
+    assert(scene_model_validate(&scene) == SCENE_MODEL_ERR_GEOMETRY);
+}
+
+static void test_a_scale_with_too_many_ticks_is_rejected(void)
+{
+    scene_t scene = scale_scene();
+    scene.nodes[0].value.scale.total_tick_count =
+        SCENE_SCALE_MAX_TOTAL_TICKS + 1U;
+    assert(scene_model_validate(&scene) == SCENE_MODEL_ERR_GEOMETRY);
+}
+
+static void test_a_scale_with_too_few_ticks_is_rejected(void)
+{
+    scene_t scene = scale_scene();
+    scene.nodes[0].value.scale.total_tick_count = 1U;
+    assert(scene_model_validate(&scene) == SCENE_MODEL_ERR_GEOMETRY);
+}
+
+static void test_a_scale_with_major_tick_every_zero_is_rejected(void)
+{
+    scene_t scene = scale_scene();
+    scene.nodes[0].value.scale.major_tick_every = 0U;
+    assert(scene_model_validate(&scene) == SCENE_MODEL_ERR_GEOMETRY);
+}
+
+static void test_a_scale_with_major_tick_every_past_total_is_rejected(void)
+{
+    scene_t scene = scale_scene();
+    scene.nodes[0].value.scale.major_tick_every =
+        scene.nodes[0].value.scale.total_tick_count + 1U;
+    assert(scene_model_validate(&scene) == SCENE_MODEL_ERR_GEOMETRY);
+}
+
+static void test_a_scale_geometry_field_at_int32_max_does_not_wrap(void)
+{
+    /* Same wrap hazard as test_a_huge_coordinate_does_not_wrap_the_bounds_check,
+     * proven again for SCALE's own geometry check rather than assumed from
+     * rect's. */
+    scene_t scene = scale_scene();
+    scene.nodes[0].value.scale.x = INT32_MAX;
+    scene.nodes[0].value.scale.box = 10;
+    assert(scene_model_validate(&scene) == SCENE_MODEL_ERR_GEOMETRY);
+}
+
+static void test_arc_span_of_a_full_turn_is_360(void)
+{
+    assert(scene_model_arc_span(270, 630) == 360);
+}
+
+static void test_arc_span_of_a_partial_sweep(void)
+{
+    assert(scene_model_arc_span(270, 450) == 180);
+}
+
+static void test_arc_span_of_a_negative_raw_difference(void)
+{
+    assert(scene_model_arc_span(270, 90) == 180);
+}
+
+static void test_arc_span_of_equal_endpoints_is_zero(void)
+{
+    assert(scene_model_arc_span(270, 270) == 0);
+}
+
+static void test_arc_span_does_not_wrap_at_int32_extremes(void)
+{
+    /* An int32 subtraction of these two wraps to a raw difference of 1
+     * (INT32_MIN - INT32_MAX mod 2^32 == 1), which would yield a 1-degree
+     * span. Widening to int64 before subtracting gives the correct 105. */
+    assert(scene_model_arc_span(INT32_MAX, INT32_MIN) == 105);
+}
+
+static void test_arc_origin_wraps_a_full_turn(void)
+{
+    assert(scene_model_arc_origin(630) == 270);
+}
+
+static void test_arc_origin_normalises_a_negative_angle(void)
+{
+    assert(scene_model_arc_origin(-90) == 270);
+}
+
 int main(void)
 {
     test_a_minimal_scene_validates();
@@ -258,5 +369,20 @@ int main(void)
     test_a_line_with_populated_points_validates();
     test_a_line_with_a_non_first_point_outside_canvas_is_rejected();
     test_a_huge_coordinate_does_not_wrap_the_bounds_check();
+    test_a_scale_within_bounds_validates();
+    test_a_scale_extending_past_canvas_width_is_rejected();
+    test_a_scale_extending_past_canvas_height_is_rejected();
+    test_a_scale_with_too_many_ticks_is_rejected();
+    test_a_scale_with_too_few_ticks_is_rejected();
+    test_a_scale_with_major_tick_every_zero_is_rejected();
+    test_a_scale_with_major_tick_every_past_total_is_rejected();
+    test_a_scale_geometry_field_at_int32_max_does_not_wrap();
+    test_arc_span_of_a_full_turn_is_360();
+    test_arc_span_of_a_partial_sweep();
+    test_arc_span_of_a_negative_raw_difference();
+    test_arc_span_of_equal_endpoints_is_zero();
+    test_arc_span_does_not_wrap_at_int32_extremes();
+    test_arc_origin_wraps_a_full_turn();
+    test_arc_origin_normalises_a_negative_angle();
     return 0;
 }

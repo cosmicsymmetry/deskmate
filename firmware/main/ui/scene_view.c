@@ -12,10 +12,12 @@
  * scene_view_show(). What it guarantees, for every node, is: geometry inside
  * the 448x368 canvas with no int32 wrap, non-negative extents,
  * NUL-terminated text/binding/glyph-name arrays, a legal text alignment on
- * TEXT nodes, a legal font reference on TEXT nodes, and
- * 2..SCENE_MAX_LINE_POINTS line points. None of that is checked again here.
- * Redundant defensive validation has concealed four defects on this plan
- * already; the model is the one place those bounds live.
+ * TEXT nodes, a legal font reference on TEXT nodes, 2..SCENE_MAX_LINE_POINTS
+ * line points, and -- for SCALE -- 2..SCENE_SCALE_MAX_TOTAL_TICKS total
+ * ticks with major_tick_every in [1, total_tick_count]. None of that is
+ * checked again here. Redundant defensive validation has concealed four
+ * defects on this plan already; the model is the one place those bounds
+ * live.
  *
  * This list is load-bearing -- the whole safety argument of this file is that
  * it is exact -- so what it deliberately does NOT cover is spelled out too:
@@ -205,44 +207,10 @@ static lv_text_align_t align_to_lv(scene_align_t align)
  * the turn. scene_arc_t has no rotation field, so the origin is derived from
  * start_deg here and the same arrangement is reproduced.
  *
- * The origin, in [0, 360). Normalised before the setter because
- * lv_arc_set_rotation() reduces with a `while` loop (lv_arc.c:271-272), which
- * an untrusted wire value near INT32_MAX would spin through ~6 million
- * times. */
-static int32_t arc_origin(int32_t degrees)
-{
-    int32_t value = degrees % 360;
-    if (value < 0) {
-        value += 360;
-    }
-    return value;
-}
-
-/* The clockwise sweep from start_deg to end_deg, in (0, 360], or 0.
- *
- * Derived from the RAW difference, before either endpoint is folded, which
- * is what preserves a full turn: end_deg - start_deg == 360 is a whole
- * circle, and so is any other nonzero exact multiple. start_deg == end_deg
- * is NOT a full turn -- it is a degenerate empty arc, and drawing nothing is
- * the right answer for it. A negative difference is read the way LVGL reads
- * one of its own (lv_arc.c:225-226): as the clockwise sweep that lands on
- * end_deg.
- *
- * The subtraction widens to int64 first because both endpoints are untrusted
- * int32s and int32 difference can wrap. */
-static int32_t arc_span(int32_t start_deg, int32_t end_deg)
-{
-    int64_t raw = (int64_t)end_deg - (int64_t)start_deg;
-    int32_t span = (int32_t)(raw % 360);
-
-    if (span < 0) {
-        span += 360;
-    }
-    if (span == 0 && raw != 0) {
-        span = 360;
-    }
-    return span;
-}
+ * The origin/sweep math itself (scene_model_arc_origin()/
+ * scene_model_arc_span()) lives in core/scene_model.c: it is pure integer
+ * arithmetic with zero LVGL dependency, so it is host-tested directly there
+ * rather than only indirectly through this file's `lv_*` calls. */
 
 /* Stroke clamps. The model leaves both unbounded on purpose (plan ruling 7:
  * "renderer concerns"), so they are bounded here. An arc stroke wider than
@@ -304,8 +272,9 @@ static int32_t parse_percent(const char *text)
 
 /* Scales the arc's sweep to the bound percentage. The indicator's start
  * angle stays at 0 and the object's rotation carries the origin (see
- * arc_origin/arc_span), so only the end angle moves, and it can never exceed
- * the 360 the setter's fold would truncate: span <= 360 and percent <= 100. */
+ * scene_model_arc_origin()/scene_model_arc_span()), so only the end angle
+ * moves, and it can never exceed the 360 the setter's fold would truncate:
+ * span <= 360 and percent <= 100. */
 static void apply_arc_binding(const scene_bound_node_t *bound,
                               const char *evaluated)
 {
@@ -349,7 +318,8 @@ static lv_obj_t *build_rect(lv_obj_t *parent, const scene_rect_t *rect)
  * clockwise -- and are absolute on the canvas: `start_deg` is the origin and
  * the sweep runs clockwise to `end_deg`. The object's rotation carries that
  * origin and the indicator is set to 0..span, which is what lets a full turn
- * survive LVGL's single-subtraction fold; see arc_origin() and arc_span(). */
+ * survive LVGL's single-subtraction fold; see scene_model_arc_origin() and
+ * scene_model_arc_span(). */
 static lv_obj_t *build_arc(lv_obj_t *parent, const scene_arc_t *arc)
 {
     lv_obj_t *object = lv_arc_create(parent);
@@ -366,10 +336,10 @@ static lv_obj_t *build_arc(lv_obj_t *parent, const scene_arc_t *arc)
     lv_obj_set_style_arc_width(object, clamp_arc_width(arc->width, arc->r),
                                LV_PART_INDICATOR);
     lv_obj_set_style_arc_rounded(object, arc->rounded, LV_PART_INDICATOR);
-    lv_arc_set_rotation(object, arc_origin(arc->start_deg));
+    lv_arc_set_rotation(object, scene_model_arc_origin(arc->start_deg));
     lv_arc_set_angles(object, (lv_value_precise_t)0,
-                      (lv_value_precise_t)arc_span(arc->start_deg,
-                                                   arc->end_deg));
+                      (lv_value_precise_t)scene_model_arc_span(arc->start_deg,
+                                                               arc->end_deg));
     return object;
 }
 
@@ -649,6 +619,60 @@ static lv_obj_t *build_glyph(lv_obj_t *parent, const scene_glyph_t *glyph)
     return label;
 }
 
+/* The dial's fixed geometry and styling -- everything digital_clock.c never
+ * varies. See scene_scale_t's field comment in scene_model.h for why these
+ * are renderer constants rather than wire fields. */
+#define SCENE_SCALE_VALUE_RANGE_MAX 720 /* digital_clock.c's DIAL_RANGE */
+#define SCENE_SCALE_ANGLE_RANGE     360
+#define SCENE_SCALE_ROTATION        270 /* twelve o'clock */
+#define SCENE_SCALE_MINOR_TICK_WIDTH  2
+#define SCENE_SCALE_MINOR_TICK_LENGTH 6
+#define SCENE_SCALE_MAJOR_TICK_WIDTH  3
+#define SCENE_SCALE_MAJOR_TICK_LENGTH 11
+/* DESKMATE_COLOR_TERTIARY (template_internal.h) -- the minor tick colour
+ * never varies by widget instance, unlike the major tick's palette.hue, so
+ * it stays a constant here rather than becoming a wire field. */
+#define SCENE_SCALE_MINOR_TICK_COLOR 0x5c5c66U
+
+/* `scale` -- an lv_scale styled and driven exactly as digital_clock.c's dial
+ * is (digital_clock.c:103-131): same calls, same order, same fixed
+ * constants for everything that file never varies. Reproducing the call
+ * sequence, not merely its visual effect, is the whole point of this node --
+ * see scene_scale_t's field comment for why. */
+static lv_obj_t *build_scale(lv_obj_t *parent, const scene_scale_t *scale)
+{
+    lv_obj_t *object = lv_scale_create(parent);
+    if (object == NULL) {
+        return NULL;
+    }
+    lv_obj_set_size(object, scale->box, scale->box);
+    lv_obj_set_pos(object, scale->x, scale->y);
+    lv_scale_set_mode(object, LV_SCALE_MODE_ROUND_INNER);
+    lv_scale_set_label_show(object, false);
+    lv_scale_set_total_tick_count(object, scale->total_tick_count);
+    lv_scale_set_major_tick_every(object, scale->major_tick_every);
+    lv_scale_set_range(object, 0, SCENE_SCALE_VALUE_RANGE_MAX);
+    lv_scale_set_angle_range(object, SCENE_SCALE_ANGLE_RANGE);
+    lv_scale_set_rotation(object, SCENE_SCALE_ROTATION);
+    lv_obj_set_style_arc_width(object, 0, LV_PART_MAIN);
+    /* minor ticks */
+    lv_obj_set_style_line_color(object, lv_color_hex(SCENE_SCALE_MINOR_TICK_COLOR),
+                                LV_PART_ITEMS);
+    lv_obj_set_style_line_width(object, SCENE_SCALE_MINOR_TICK_WIDTH,
+                                LV_PART_ITEMS);
+    lv_obj_set_style_length(object, SCENE_SCALE_MINOR_TICK_LENGTH,
+                            LV_PART_ITEMS);
+    /* major ticks */
+    lv_obj_set_style_line_color(object, lv_color_hex(scale->major_tick_color),
+                                LV_PART_INDICATOR);
+    lv_obj_set_style_line_width(object, SCENE_SCALE_MAJOR_TICK_WIDTH,
+                                LV_PART_INDICATOR);
+    lv_obj_set_style_length(object, SCENE_SCALE_MAJOR_TICK_LENGTH,
+                            LV_PART_INDICATOR);
+    lv_obj_set_style_line_opa(object, LV_OPA_70, LV_PART_INDICATOR);
+    return object;
+}
+
 /* --------------------------------------------------------- the lifecycle */
 
 /* Frees the per-scene state when its screen goes away. LVGL sends
@@ -722,7 +746,8 @@ static bool build_nodes(lv_obj_t *parent, const scene_t *scene,
             bound->object = object;
             bound->kind = (uint8_t)SCENE_NODE_ARC;
             bound->binding = binding;
-            bound->arc_span_deg = arc_span(arc->start_deg, arc->end_deg);
+            bound->arc_span_deg =
+                scene_model_arc_span(arc->start_deg, arc->end_deg);
             evaluate_binding(&bound->binding, context, buffer, sizeof buffer);
             apply_arc_binding(bound, buffer);
             break;
@@ -754,6 +779,10 @@ static bool build_nodes(lv_obj_t *parent, const scene_t *scene,
 
         case SCENE_NODE_GLYPH:
             object = build_glyph(parent, &node->value.glyph);
+            break;
+
+        case SCENE_NODE_SCALE:
+            object = build_scale(parent, &node->value.scale);
             break;
 
         default:

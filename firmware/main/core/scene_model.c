@@ -87,6 +87,33 @@ static bool text_within_canvas(const scene_text_t *text)
     return true;
 }
 
+static bool scale_within_canvas(const scene_scale_t *scale)
+{
+    return rect_within_canvas(scale->x, scale->y, scale->box, scale->box);
+}
+
+/* Bounds only -- see scene_scale_t's field comment in scene_model.h for the
+ * full justification. total_tick_count in [2, SCENE_SCALE_MAX_TOTAL_TICKS]
+ * (0/1 draws nothing, same reasoning as line_within_canvas rejecting a line
+ * under 2 points); major_tick_every in [1, total_tick_count] (0 is a
+ * meaningless "no major ticks" LVGL already tolerates, but this model
+ * rejects it rather than accept a value with no visible effect; anything
+ * past total_tick_count draws the same single major tick at index 0 as
+ * major_tick_every == total_tick_count does, so it is rejected as
+ * redundant). */
+static bool scale_ticks_valid(const scene_scale_t *scale)
+{
+    if (scale->total_tick_count < 2U ||
+        scale->total_tick_count > SCENE_SCALE_MAX_TOTAL_TICKS) {
+        return false;
+    }
+    if (scale->major_tick_every < 1U ||
+        scale->major_tick_every > scale->total_tick_count) {
+        return false;
+    }
+    return true;
+}
+
 static bool glyph_within_canvas(const scene_glyph_t *glyph)
 {
     if (glyph->x < 0 || glyph->size < 0) {
@@ -117,6 +144,45 @@ static bool glyph_within_canvas(const scene_glyph_t *glyph)
 static bool nul_terminated(const char *buf, size_t buf_size)
 {
     return memchr(buf, '\0', buf_size) != NULL;
+}
+
+/* The origin, in [0, 360). Normalised here because
+ * lv_arc_set_rotation() reduces with a `while` loop (lv_arc.c:271-272), which
+ * an untrusted wire value near INT32_MAX would spin through ~6 million
+ * times. See scene_arc_t's field comment for the angle convention. */
+int32_t scene_model_arc_origin(int32_t degrees)
+{
+    int32_t value = degrees % 360;
+    if (value < 0) {
+        value += 360;
+    }
+    return value;
+}
+
+/* The clockwise sweep from start_deg to end_deg, in (0, 360], or 0.
+ *
+ * Derived from the RAW difference, before either endpoint is folded, which
+ * is what preserves a full turn: end_deg - start_deg == 360 is a whole
+ * circle, and so is any other nonzero exact multiple. start_deg == end_deg
+ * is NOT a full turn -- it is a degenerate empty arc, and drawing nothing is
+ * the right answer for it. A negative difference is read the way LVGL reads
+ * one of its own (lv_arc.c:225-226): as the clockwise sweep that lands on
+ * end_deg.
+ *
+ * The subtraction widens to int64 first because both endpoints are untrusted
+ * int32s and int32 difference can wrap. */
+int32_t scene_model_arc_span(int32_t start_deg, int32_t end_deg)
+{
+    int64_t raw = (int64_t)end_deg - (int64_t)start_deg;
+    int32_t span = (int32_t)(raw % 360);
+
+    if (span < 0) {
+        span += 360;
+    }
+    if (span == 0 && raw != 0) {
+        span = 360;
+    }
+    return span;
 }
 
 static scene_model_result_t validate_font(const scene_font_ref_t *font)
@@ -218,6 +284,15 @@ scene_model_result_t scene_model_validate(const scene_t *scene)
             if (!nul_terminated(node->value.glyph.name,
                                  sizeof node->value.glyph.name)) {
                 return SCENE_MODEL_ERR_TEXT;
+            }
+            break;
+
+        case SCENE_NODE_SCALE:
+            if (!scale_within_canvas(&node->value.scale)) {
+                return SCENE_MODEL_ERR_GEOMETRY;
+            }
+            if (!scale_ticks_valid(&node->value.scale)) {
+                return SCENE_MODEL_ERR_GEOMETRY;
             }
             break;
 

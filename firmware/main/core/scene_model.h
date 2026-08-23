@@ -13,6 +13,10 @@
 #define SCENE_MAX_LINE_POINTS 8U
 #define SCENE_MAX_GLYPH_NAME 32U
 #define SCENE_MAX_BINDING    48U
+/* A SCALE node's total_tick_count is bounded here, not just clamped at the
+ * renderer, because LVGL redraws every tick on each invalidation with no cap
+ * of its own -- see scene_scale_t's field comment for why 361. */
+#define SCENE_SCALE_MAX_TOTAL_TICKS 361U
 
 typedef enum {
     SCENE_NODE_RECT = 1,
@@ -21,6 +25,7 @@ typedef enum {
     SCENE_NODE_TEXT = 4,
     SCENE_NODE_IMAGE = 5,
     SCENE_NODE_GLYPH = 6,
+    SCENE_NODE_SCALE = 7,
 } scene_node_kind_t;
 
 /* The four faces baked by tools/genfonts.sh. Kept as a tier rather than a
@@ -80,9 +85,9 @@ typedef struct { int32_t x, y, w, h, radius; uint32_t fill; uint8_t opacity; }
  * `start_deg == end_deg`, which is a degenerate empty arc and draws nothing.
  * The renderer derives the sweep from the raw difference before folding
  * either endpoint, precisely so that spelling survives -- see
- * ui/scene_view.c's arc_origin()/arc_span(). Emitting `end_deg = start_deg +
- * 359` to dodge the question instead leaves a gap that is plainly visible at
- * a gauge's stroke width.
+ * scene_model_arc_origin()/scene_model_arc_span() below. Emitting `end_deg =
+ * start_deg + 359` to dodge the question instead leaves a gap that is
+ * plainly visible at a gauge's stroke width.
  *
  * `end_binding` scales that sweep rather than replacing it: the arc is drawn
  * from `start_deg` through `end_deg - start_deg` times the bound percentage,
@@ -90,6 +95,13 @@ typedef struct { int32_t x, y, w, h, radius; uint32_t fill; uint8_t opacity; }
 typedef struct { int32_t cx, cy, r, start_deg, end_deg, width; uint32_t color;
                  bool rounded; char end_binding[SCENE_MAX_BINDING + 1U]; }
     scene_arc_t;
+
+/* The origin and sweep an ARC node is drawn with -- pure integer math, used
+ * by ui/scene_view.c's ARC renderer and host-tested directly in
+ * test_scene_model.c, with zero LVGL dependency. See scene_arc_t's field
+ * comment above for the angle convention these implement. */
+int32_t scene_model_arc_origin(int32_t degrees);
+int32_t scene_model_arc_span(int32_t start_deg, int32_t end_deg);
 typedef struct { int32_t xs[SCENE_MAX_LINE_POINTS], ys[SCENE_MAX_LINE_POINTS];
                  uint32_t point_count; int32_t width; uint32_t color; }
     scene_line_t;
@@ -107,6 +119,49 @@ typedef struct { int32_t x, baseline_y, size; uint8_t digest[ASSET_DIGEST_BYTES]
                  char name[SCENE_MAX_GLYPH_NAME + 1U]; uint32_t color; }
     scene_glyph_t;
 
+/* SCENE_NODE_SCALE reproduces `lv_scale_create` the way digital_clock.c's
+ * dial does it (digital_clock.c:103-131): a square LV_SCALE_MODE_ROUND_INNER
+ * scale with its labels hidden and its own arc invisible, drawn as ticks
+ * only. `(x, y)` is the scale's box top-left in absolute canvas
+ * coordinates, same as every other node; `box` is a single side length,
+ * not a `w`/`h` pair, because every scale this node has ever needed to draw
+ * is square -- `lv_obj_set_size(dial, DIAL_BOX, DIAL_BOX)` passes the same
+ * value twice, so a second dimension would be a wire field nobody sets.
+ *
+ * The renderer pins the rest of the dial to the exact constants
+ * digital_clock.c uses -- angle range 360, rotation 270 (twelve o'clock),
+ * value range 0..720, minor tick width/length, major tick width/length/
+ * opacity, and the fixed grey minor-tick colour -- because nothing in that
+ * file ever varies them. Only `total_tick_count`, `major_tick_every`, and
+ * the major tick's colour do (per widget instance and per accent palette),
+ * so only those are fields here.
+ *
+ * `total_tick_count` and `major_tick_every` are bounded at validation
+ * (SCENE_SCALE_MAX_TOTAL_TICKS, and major_tick_every in
+ * [1, total_tick_count]) because LVGL redraws every tick on each
+ * invalidation with no cap of its own: an untrusted host asking for
+ * billions of ticks would stall the render task, not merely draw an ugly
+ * dial. 361 is one tick per degree of the full circle the renderer always
+ * draws (angle_range is fixed at 360), so nothing legitimate needs more.
+ *
+ * `major_tick_color` is the major tick's colour only -- `palette.hue` in
+ * digital_clock.c, the one thing that changes between two clock cards with
+ * different accent colours. The minor ticks stay the fixed
+ * DESKMATE_COLOR_TERTIARY grey every template uses, so that colour is a
+ * renderer default, not a field.
+ *
+ * BOX ORIGIN: LVGL positions everything drawn on a scale -- its ticks, and
+ * any needle -- from the scale object's own centre, which is `(x + box/2, y
+ * + box/2)` here, not this node's top-left and not the canvas origin. This
+ * node's two clock hands are ordinary LINE nodes in absolute canvas
+ * coordinates (scene_view.c does not reparent them under the scale the way
+ * digital_clock.c parents its lv_line hands under the lv_scale), so
+ * whatever emits their endpoints must derive that centre itself; this node
+ * carries no needle. */
+typedef struct { int32_t x, y, box; uint32_t total_tick_count;
+                 uint32_t major_tick_every; uint32_t major_tick_color; }
+    scene_scale_t;
+
 typedef struct {
     scene_node_kind_t kind;
     union {
@@ -116,6 +171,7 @@ typedef struct {
         scene_text_t text;
         scene_image_t image;
         scene_glyph_t glyph;
+        scene_scale_t scale;
     } value;
 } scene_node_t;
 

@@ -3282,3 +3282,46 @@ the device is actively emitting log lines** — at the time of the first observa
 failing DNS roughly once a second, so every frame was interleaved with error output. A
 quiet diag build is usable over the cable; a diag build in a fault loop is not, which is
 precisely when you most need to reach it. Treat it as a hazard, not an absolute block.
+
+## Task 14 minimal OTA gate — INCONCLUSIVE on hotel WiFi, 2026-08-23
+
+Stage 1's hardware gate was reduced by owner direction to a single check: does a build
+carrying the asset store's static footprint still download and install over the air.
+
+**Partially answered yes, incidentally.** `v2.0.0-gate6` (= `f6cb0ea`, which contains
+Task 9 and therefore the full `.bss` growth) was downloaded and installed over the
+network by this device earlier the same day, twice. So the asset store's static footprint
+does not by itself break OTA.
+
+**The fix-wave delta is unproven.** `v2.0.0-gate11` was built from `fe1356f` (all four
+whole-branch fixes), published, and pinned. Two attempts, both `ota_state: failed`, device
+remained on `gate6`.
+
+**Not recorded as a regression, because the evidence points at RF:**
+
+- `.bss` at `gate11` is **102,608 — byte-identical to `gate6`**, which downloaded fine.
+  The fix wave's new `static asset_release_fn s_release` landed inside existing linker
+  alignment padding, which also resolves the "unexplained slack" noted earlier.
+- WiFi RSSI was **-72 dBm** when `gate6` downloaded successfully, **-75** at the first
+  `gate11` attempt and **-93** at the second. -93 dBm is borderline unusable for a
+  sustained 1.5 MB TLS transfer.
+- The server logged the firmware *check* for both attempts but **no download request at
+  all**, consistent with failing before or during connection setup rather than a
+  mid-transfer abort.
+
+Retest on a stable network before drawing any conclusion. Do **not** bisect on this
+evidence.
+
+### Real observability defect found regardless of cause
+
+`ota_state` read `failed` while `last_ota_error` was **absent** on both attempts. That
+field exists precisely so an OTA failure is diagnosable — it is what made `3f2aa03`'s own
+regression findable. Only two code paths set `PROTOCOL_OTA_FAILED` (`ota.c:224`, `:236`)
+and both pack a stage, so a `FAILED` state with `OTA_FAILURE_STAGE_NONE` should not be
+reachable. One candidate worth checking: `clear_last_error()` (`ota.c:215-218`) stores a
+zero packed value while preserving the *current* state, so if it runs while the state is
+already `FAILED` it produces exactly this — failed with no reason. Not diagnosed further.
+
+The catalog was reverted to `v2.0.0-gate6` so the device does not retry a failing 1.5 MB
+download daily over a weak link. `v2.0.0-gate11.bin` remains published and ready to pin
+when the retest happens.

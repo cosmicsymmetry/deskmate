@@ -22,7 +22,7 @@ The spec's stage 2 is "scene renderer + wire, then re-express all six templates 
 framebuffer-diff them." Decomposed, that is over twenty tasks. This plan covers **2a**:
 the format, the wire, the interpreter, the bindings, and **one** template — `DigitalClock`
 — reproduced pixel for pixel. That single template exercises the entire chain (text at
-three tiers, a rect module, an arc dial, two line hands, a live binding) and is a complete,
+three tiers, a rect module, a scale dial, two line hands, a live binding) and is a complete,
 gated, shippable slice.
 
 **Stage 2b** re-expresses the remaining five templates and retires the C ones. Its plan is
@@ -607,6 +607,42 @@ git commit -m "feat: add the closed scene binding set"
 
 ---
 
+## AMENDMENT (added during execution, 2026-08-23): Task 1b, the scale node
+
+**This section was not in the plan as written.** It was added by controller ruling during
+execution, and the two corrections above (the overview's "arc dial", and Task 9's "arc
+angle convention") belong to it.
+
+The plan rested on a factual error about the template it exists to reproduce.
+`digital_clock.c:103` builds the dial with `lv_scale_create` — a scale **widget** whose 13
+ticks LVGL generates internally, with minor ticks at width 2 / length 6 / `TERTIARY` and
+major ticks at width 3 / length 11 / `LV_OPA_70`. It is not an arc and not a set of lines.
+Only the two hands are `lv_line`. The six node kinds in Task 1 therefore cannot express the
+dial, which made **Task 9 — the byte-identical parity gate this plan exists for —
+unwinnable as written**.
+
+Two alternatives were rejected. Emitting 13 line nodes would require reproducing LVGL's own
+radial tick-endpoint math and rounding exactly: thirteen independent chances to be off by
+one pixel, failing only at Task 9 across a wide search space. Descoping the dial would not
+save the work, since stage 2b cannot retire the C `DigitalClock` without it either.
+
+**Task 1b adds `SCENE_NODE_SCALE`**, carrying only the fields `digital_clock.c` varies, so
+`scene_view` issues the same `lv_scale_*` calls and the pixels match by construction. This
+is consistent with the model as it already is: `SCENE_NODE_ARC` already maps to `lv_arc`,
+so this is a widget-mapped display list, not a primitive rasterizer. `sizeof(scene_node_t)`
+must not grow — `scene_line_t`'s 8-point array is the union's current largest member and
+the scale node fits under it, so the 2034-byte wire envelope is unaffected.
+
+Task 1b runs **before Task 3**, so the wire tasks pick the node up naturally and Task 7
+emits it. Its brief is `.superpowers/sdd/2026-08-23-deskmate-scene-renderer/task-1b-brief.md`.
+
+A consequence worth recording: the concern that raised this — that `scene_line_t` has no
+opacity field — is **dissolved**, not deferred. The `LV_OPA_70` lives on the scale's major
+ticks and the two hands are full-opacity lines, so no opacity field is added to
+`scene_line_t`.
+
+---
+
 ### Task 3: Scene decoder
 
 **Files:**
@@ -914,7 +950,7 @@ Assert the two framebuffers are **byte-identical**.
 - [ ] **Step 2: Run it and expect it to fail first**
 
 It will not pass on the first attempt. The likely culprits, in order: baseline arithmetic
-off by the `line_height`/`base_line` derivation; the dial's arc angle convention (LVGL
+off by the `line_height`/`base_line` derivation; the dial's scale rotation and tick counts (LVGL
 measures from 3 o'clock, the template may not); hand endpoints rounding differently;
 a colour taken from the wrong palette entry.
 

@@ -5,6 +5,7 @@
 #include <stdint.h>
 
 #include "core/asset_store.h"
+#include "core/scene_model.h"
 #include "protocol_frame.h"
 
 #define PROTOCOL_LINK_TIMEOUT_MS 10000U
@@ -31,6 +32,12 @@
 #define PROTOCOL_CAPABILITY_ASSET_TRANSFER (UINT64_C(1) << 5)
 #define PROTOCOL_CAPABILITY_FIRMWARE_UPDATE (UINT64_C(1) << 6)
 #define PROTOCOL_CAPABILITY_NETWORKING (UINT64_C(1) << 7)
+/* Gates PushScene (type 19). A host that does not see this bit must not
+ * send one -- the same contract NetworkConfig and FactoryReset have under
+ * bit 7. Defining a bit is not switching it on: bit 7 sat defined-but-dark
+ * for most of V2 and the constant read 75 instead of 203, so the value
+ * below is pinned by a test in both languages. */
+#define PROTOCOL_CAPABILITY_SCENE_RENDER (UINT64_C(1) << 8)
 #define PROTOCOL_LEGACY_CAPABILITIES PROTOCOL_CAPABILITY_CORE_WIDGETS
 #define PROTOCOL_CURRENT_CAPABILITIES                            \
     (PROTOCOL_CAPABILITY_CORE_WIDGETS |                          \
@@ -38,7 +45,8 @@
      PROTOCOL_CAPABILITY_EXTENDED_TEMPLATES |                    \
      PROTOCOL_CAPABILITY_ASSET_TRANSFER |                        \
      PROTOCOL_CAPABILITY_FIRMWARE_UPDATE |                       \
-     PROTOCOL_CAPABILITY_NETWORKING)
+     PROTOCOL_CAPABILITY_NETWORKING |                            \
+     PROTOCOL_CAPABILITY_SCENE_RENDER)
 #define PROTOCOL_MAX_SSID_LENGTH 32U
 #define PROTOCOL_MAX_PSK_LENGTH 64U
 #define PROTOCOL_MAX_SERVER_URL_LENGTH 128U
@@ -50,6 +58,9 @@
  * header cost roughly 46 bytes; this leaves deliberate margin. */
 #define PROTOCOL_MAX_ASSET_CHUNK_BYTES 1920U
 #define PROTOCOL_MAX_ASSET_DIGESTS 32U
+/* Same 32 bytes as a widget id, and for the same reason: a card id is an
+ * identifier the host chose, not free text. */
+#define PROTOCOL_MAX_CARD_ID_LENGTH 32U
 
 typedef enum {
     PROTOCOL_TYPE_STATUS_REQUEST = 1,
@@ -70,6 +81,7 @@ typedef enum {
     PROTOCOL_TYPE_ASSET_CHUNK = 16,
     PROTOCOL_TYPE_ASSET_COMMIT = 17,
     PROTOCOL_TYPE_ASSET_RELEASE = 18,
+    PROTOCOL_TYPE_PUSH_SCENE = 19,
 } protocol_message_type_t;
 
 typedef enum {
@@ -251,6 +263,20 @@ typedef struct {
     protocol_field_t fields[PROTOCOL_MAX_FIELD_COUNT];
 } protocol_push_data_t;
 
+/* PushScene: one card's whole display list, replacing whatever that card
+ * drew before. `scene` is embedded by value rather than pointed at because
+ * protocol_message_t is the decoder's single destination and nothing here
+ * allocates -- but it is ~6 KB, which makes protocol_message_t ~6.4 KB.
+ * link/protocol_task.c holds its one instance inside the PSRAM-allocated
+ * protocol_context_t, so this costs no internal DRAM and nothing on the
+ * 8 KiB task stack; a new caller putting a protocol_message_t on a stack
+ * would, and must not. */
+typedef struct {
+    char card_id[PROTOCOL_MAX_CARD_ID_LENGTH + 1U];
+    uint32_t revision;
+    scene_t scene;
+} protocol_push_scene_t;
+
 typedef struct {
     int64_t unix_seconds;
     int16_t utc_offset_minutes;
@@ -331,6 +357,7 @@ typedef struct {
         protocol_asset_chunk_t asset_chunk;
         protocol_asset_commit_t asset_commit;
         protocol_asset_release_t asset_release;
+        protocol_push_scene_t push_scene;
     } value;
 } protocol_message_t;
 

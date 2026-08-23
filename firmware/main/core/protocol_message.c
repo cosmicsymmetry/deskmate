@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "cbor.h"
+#include "core/scene_decode.h"
 
 #define REQUIRED_BIT(key) (UINT32_C(1) << (key))
 
@@ -616,6 +617,83 @@ static protocol_message_result_t decode_asset_begin(
     }
     uint32_t required =
         REQUIRED_BIT(0) | REQUIRED_BIT(1) | REQUIRED_BIT(2) | REQUIRED_BIT(3);
+    if ((present & required) != required) {
+        return PROTOCOL_MESSAGE_ERR_MISSING_FIELD;
+    }
+    return PROTOCOL_MESSAGE_OK;
+}
+
+/* Every structural scene failure is a payload the device refuses; the only
+ * distinction worth carrying into the protocol's own vocabulary is "too
+ * many nodes", which is a capacity answer a host can act on by splitting
+ * the scene rather than by fixing its encoder. scene_model_result_t
+ * deliberately has no CBOR-specific code (see scene_model.h), so the rest
+ * cannot be told apart here either. */
+static protocol_message_result_t scene_result(scene_model_result_t status)
+{
+    switch (status) {
+    case SCENE_MODEL_OK:
+        return PROTOCOL_MESSAGE_OK;
+    case SCENE_MODEL_ERR_NODE_COUNT:
+        return PROTOCOL_MESSAGE_ERR_TOO_LARGE;
+    default:
+        return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
+    }
+}
+
+static protocol_message_result_t decode_push_scene(
+    const protocol_frame_t *frame,
+    protocol_push_scene_t *push)
+{
+    CborParser parser;
+    CborValue contents;
+    size_t count = 0U;
+    /* open_payload_map() validates the WHOLE payload at the root --
+     * canonical form, unique keys, UTF-8, complete data, no undefined, no
+     * tags -- so the scene nested under key 2 inherits all of it. That is
+     * what lets scene_decode_map() read a sub-map without re-validating;
+     * see core/scene_decode.h. */
+    protocol_message_result_t result = open_payload_map(
+        frame->payload, frame->payload_length, &parser, &contents, &count);
+    if (result != PROTOCOL_MESSAGE_OK) {
+        return result;
+    }
+    uint32_t present = 0U;
+    uint64_t previous = 0U;
+    bool has_previous = false;
+    for (size_t i = 0U; i < count; ++i) {
+        uint64_t key = 0U;
+        result = read_key(&contents, &key, &previous, &has_previous);
+        if (result != PROTOCOL_MESSAGE_OK) {
+            return result;
+        }
+        if (key == 0U) {
+            result = read_text(&contents, push->card_id,
+                               sizeof(push->card_id), 1U,
+                               PROTOCOL_MAX_CARD_ID_LENGTH);
+        } else if (key == 1U) {
+            uint64_t raw = 0U;
+            result = read_unsigned(&contents, &raw);
+            if (result == PROTOCOL_MESSAGE_OK &&
+                (raw == 0U || raw > UINT32_MAX)) {
+                result = PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
+            }
+            if (result == PROTOCOL_MESSAGE_OK) {
+                push->revision = (uint32_t)raw;
+            }
+        } else if (key == 2U) {
+            result = scene_result(scene_decode_map(&contents, &push->scene));
+        } else {
+            result = skip_value(&contents);
+        }
+        if (result != PROTOCOL_MESSAGE_OK) {
+            return result;
+        }
+        if (key <= 2U) {
+            present |= REQUIRED_BIT((uint32_t)key);
+        }
+    }
+    uint32_t required = REQUIRED_BIT(0) | REQUIRED_BIT(1) | REQUIRED_BIT(2);
     if ((present & required) != required) {
         return PROTOCOL_MESSAGE_ERR_MISSING_FIELD;
     }
@@ -1265,7 +1343,8 @@ static protocol_message_result_t decode_ack(const protocol_frame_t *frame,
     }
     bool revision_required =
         ack->acknowledged_type == PROTOCOL_TYPE_PUSH_DATA ||
-        ack->acknowledged_type == PROTOCOL_TYPE_APPLY_CONFIG;
+        ack->acknowledged_type == PROTOCOL_TYPE_APPLY_CONFIG ||
+        ack->acknowledged_type == PROTOCOL_TYPE_PUSH_SCENE;
     bool already_present_required =
         ack->acknowledged_type == PROTOCOL_TYPE_ASSET_BEGIN;
     if (ack->acknowledged_type != PROTOCOL_TYPE_TIME_SYNC &&
@@ -1278,7 +1357,8 @@ static protocol_message_result_t decode_ack(const protocol_frame_t *frame,
         ack->acknowledged_type != PROTOCOL_TYPE_ASSET_BEGIN &&
         ack->acknowledged_type != PROTOCOL_TYPE_ASSET_CHUNK &&
         ack->acknowledged_type != PROTOCOL_TYPE_ASSET_COMMIT &&
-        ack->acknowledged_type != PROTOCOL_TYPE_ASSET_RELEASE) {
+        ack->acknowledged_type != PROTOCOL_TYPE_ASSET_RELEASE &&
+        ack->acknowledged_type != PROTOCOL_TYPE_PUSH_SCENE) {
         return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
     }
     if (revision_required != ack->has_revision) {
@@ -1717,6 +1797,8 @@ protocol_message_result_t protocol_message_decode(
         return decode_asset_commit(frame, &message->value.asset_commit);
     case PROTOCOL_TYPE_ASSET_RELEASE:
         return decode_asset_release(frame, &message->value.asset_release);
+    case PROTOCOL_TYPE_PUSH_SCENE:
+        return decode_push_scene(frame, &message->value.push_scene);
     default:
         return PROTOCOL_MESSAGE_ERR_UNSUPPORTED_TYPE;
     }
@@ -1800,10 +1882,12 @@ static protocol_message_result_t validate_message(
             ack->acknowledged_type == PROTOCOL_TYPE_ASSET_BEGIN ||
             ack->acknowledged_type == PROTOCOL_TYPE_ASSET_CHUNK ||
             ack->acknowledged_type == PROTOCOL_TYPE_ASSET_COMMIT ||
-            ack->acknowledged_type == PROTOCOL_TYPE_ASSET_RELEASE;
+            ack->acknowledged_type == PROTOCOL_TYPE_ASSET_RELEASE ||
+            ack->acknowledged_type == PROTOCOL_TYPE_PUSH_SCENE;
         bool revision_required =
             ack->acknowledged_type == PROTOCOL_TYPE_PUSH_DATA ||
-            ack->acknowledged_type == PROTOCOL_TYPE_APPLY_CONFIG;
+            ack->acknowledged_type == PROTOCOL_TYPE_APPLY_CONFIG ||
+            ack->acknowledged_type == PROTOCOL_TYPE_PUSH_SCENE;
         bool already_present_required =
             ack->acknowledged_type == PROTOCOL_TYPE_ASSET_BEGIN;
         if (!acknowledged_type_valid ||
@@ -1908,6 +1992,20 @@ static protocol_message_result_t validate_message(
             return PROTOCOL_MESSAGE_ERR_TOO_LARGE;
         }
         return PROTOCOL_MESSAGE_OK;
+    case PROTOCOL_TYPE_PUSH_SCENE: {
+        const protocol_push_scene_t *push = &message->value.push_scene;
+        if (!bounded_length(push->card_id, sizeof(push->card_id), &length) ||
+            length == 0U || push->revision == 0U) {
+            return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
+        }
+        /* The scene's own invariants belong to scene_model_validate(), and
+         * are checked here rather than restated. Note it does NOT cover
+         * bindings -- scene_binding_parse() is applied on the DECODE path
+         * only, because a binding is untrusted input rather than a bound
+         * on this struct, and pulling that parser in here would put it in
+         * the encode path of every message. */
+        return scene_result(scene_model_validate(&push->scene));
+    }
     default:
         return PROTOCOL_MESSAGE_ERR_UNSUPPORTED_TYPE;
     }
@@ -2266,6 +2364,372 @@ static protocol_message_result_t encode_asset_release_payload(
     return result;
 }
 
+/* ------------------------------------------------------------------
+ * The scene encoder.
+ *
+ * The device never SENDS a PushScene. This exists so the cross-language
+ * fixture corpus can prove the two implementations agree byte for byte:
+ * firmware/host_tests/test_protocol.c decodes protocol/fixtures/v1/
+ * push_scene.bin, re-encodes it here, and memcmp's the result against the
+ * file the Rust encoder wrote. Without an encoder on this side that check
+ * would not exist for the largest and most nested message on the wire.
+ *
+ * CANONICAL EMISSION RULE, and both languages must follow it or the
+ * round-trip above fails: a required key is always emitted; an OPTIONAL key
+ * is emitted only when its value differs from the default the decoder would
+ * have supplied. That is not tidiness -- it is what keeps a 24-node scene
+ * inside the 2034-byte payload (see the wire-shape comment at the top of
+ * core/scene_decode.c). The defaults are: RECT radius 0, fill 0, opacity
+ * 255; ARC color 0, rounded false, end_binding ""; LINE color 0; TEXT align
+ * LEFT, color 0, ellipsize false; IMAGE recolor false, color 0; GLYPH color
+ * 0; SCALE major_tick_color 0; the value map's literal and binding "".
+ * ------------------------------------------------------------------ */
+
+static size_t scene_rect_entries(const scene_rect_t *rect)
+{
+    return 4U + (rect->radius != 0 ? 1U : 0U) + (rect->fill != 0U ? 1U : 0U) +
+           (rect->opacity != UINT8_MAX ? 1U : 0U);
+}
+
+static protocol_message_result_t encode_scene_rect(CborEncoder *parent,
+                                                    const scene_rect_t *rect)
+{
+    CborEncoder map;
+    protocol_message_result_t result =
+        begin_map(parent, &map, scene_rect_entries(rect));
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 0U);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_int(&map, rect->x);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 1U);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_int(&map, rect->y);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 2U);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_int(&map, rect->w);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 3U);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_int(&map, rect->h);
+    if (result == PROTOCOL_MESSAGE_OK && rect->radius != 0) {
+        result = encode_uint(&map, 4U);
+        if (result == PROTOCOL_MESSAGE_OK) result = encode_int(&map, rect->radius);
+    }
+    if (result == PROTOCOL_MESSAGE_OK && rect->fill != 0U) {
+        result = encode_pair_uint(&map, 5U, rect->fill);
+    }
+    if (result == PROTOCOL_MESSAGE_OK && rect->opacity != UINT8_MAX) {
+        result = encode_pair_uint(&map, 6U, rect->opacity);
+    }
+    if (result == PROTOCOL_MESSAGE_OK) result = end_map(parent, &map);
+    return result;
+}
+
+static protocol_message_result_t encode_scene_arc(CborEncoder *parent,
+                                                   const scene_arc_t *arc)
+{
+    CborEncoder map;
+    size_t entries = 6U + (arc->color != 0U ? 1U : 0U) +
+                     (arc->rounded ? 1U : 0U) +
+                     (arc->end_binding[0] != '\0' ? 1U : 0U);
+    protocol_message_result_t result = begin_map(parent, &map, entries);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 0U);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_int(&map, arc->cx);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 1U);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_int(&map, arc->cy);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 2U);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_int(&map, arc->r);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 3U);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_int(&map, arc->start_deg);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 4U);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_int(&map, arc->end_deg);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 5U);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_int(&map, arc->width);
+    if (result == PROTOCOL_MESSAGE_OK && arc->color != 0U) {
+        result = encode_pair_uint(&map, 6U, arc->color);
+    }
+    if (result == PROTOCOL_MESSAGE_OK && arc->rounded) {
+        result = encode_uint(&map, 7U);
+        if (result == PROTOCOL_MESSAGE_OK) result = encode_bool(&map, true);
+    }
+    if (result == PROTOCOL_MESSAGE_OK && arc->end_binding[0] != '\0') {
+        result = encode_uint(&map, 8U);
+        if (result == PROTOCOL_MESSAGE_OK) result = encode_text(&map, arc->end_binding);
+    }
+    if (result == PROTOCOL_MESSAGE_OK) result = end_map(parent, &map);
+    return result;
+}
+
+static protocol_message_result_t encode_scene_points(CborEncoder *map,
+                                                      uint64_t key,
+                                                      const int32_t *points,
+                                                      uint32_t count)
+{
+    protocol_message_result_t result = encode_uint(map, key);
+    CborEncoder array;
+    if (result == PROTOCOL_MESSAGE_OK) result = begin_array(map, &array, count);
+    for (uint32_t i = 0U; result == PROTOCOL_MESSAGE_OK && i < count; ++i) {
+        result = encode_int(&array, points[i]);
+    }
+    if (result == PROTOCOL_MESSAGE_OK) result = end_map(map, &array);
+    return result;
+}
+
+static protocol_message_result_t encode_scene_line(CborEncoder *parent,
+                                                    const scene_line_t *line)
+{
+    CborEncoder map;
+    protocol_message_result_t result =
+        begin_map(parent, &map, 3U + (line->color != 0U ? 1U : 0U));
+    if (result == PROTOCOL_MESSAGE_OK) {
+        result = encode_scene_points(&map, 0U, line->xs, line->point_count);
+    }
+    if (result == PROTOCOL_MESSAGE_OK) {
+        result = encode_scene_points(&map, 1U, line->ys, line->point_count);
+    }
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 2U);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_int(&map, line->width);
+    if (result == PROTOCOL_MESSAGE_OK && line->color != 0U) {
+        result = encode_pair_uint(&map, 3U, line->color);
+    }
+    if (result == PROTOCOL_MESSAGE_OK) result = end_map(parent, &map);
+    return result;
+}
+
+/* A BAKED font carries its tier and no digest; an ASSET font carries its
+ * digest and pixel size and no tier. Emitting the other half either way
+ * would spend 34 bytes a node on a field the decoder ignores. */
+static protocol_message_result_t encode_scene_font(CborEncoder *parent,
+                                                    const scene_font_ref_t *font)
+{
+    CborEncoder map;
+    bool asset = font->kind == SCENE_FONT_ASSET;
+    protocol_message_result_t result = begin_map(parent, &map, asset ? 3U : 2U);
+    if (result == PROTOCOL_MESSAGE_OK) {
+        result = encode_pair_uint(&map, 0U, (uint64_t)font->kind);
+    }
+    if (result == PROTOCOL_MESSAGE_OK && !asset) {
+        result = encode_pair_uint(&map, 1U, (uint64_t)font->baked);
+    }
+    if (result == PROTOCOL_MESSAGE_OK && asset) {
+        result = encode_uint(&map, 2U);
+        if (result == PROTOCOL_MESSAGE_OK) {
+            result = encode_bytes(&map, font->digest, ASSET_DIGEST_BYTES);
+        }
+        if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 3U);
+        if (result == PROTOCOL_MESSAGE_OK) result = encode_int(&map, font->pixel_size);
+    }
+    if (result == PROTOCOL_MESSAGE_OK) result = end_map(parent, &map);
+    return result;
+}
+
+static protocol_message_result_t encode_scene_value(CborEncoder *parent,
+                                                     const scene_value_t *value)
+{
+    CborEncoder map;
+    size_t entries = 1U + (value->literal[0] != '\0' ? 1U : 0U) +
+                     (value->binding[0] != '\0' ? 1U : 0U);
+    protocol_message_result_t result = begin_map(parent, &map, entries);
+    if (result == PROTOCOL_MESSAGE_OK) {
+        result = encode_pair_uint(&map, 0U, (uint64_t)value->kind);
+    }
+    if (result == PROTOCOL_MESSAGE_OK && value->literal[0] != '\0') {
+        result = encode_uint(&map, 1U);
+        if (result == PROTOCOL_MESSAGE_OK) result = encode_text(&map, value->literal);
+    }
+    if (result == PROTOCOL_MESSAGE_OK && value->binding[0] != '\0') {
+        result = encode_uint(&map, 2U);
+        if (result == PROTOCOL_MESSAGE_OK) result = encode_text(&map, value->binding);
+    }
+    if (result == PROTOCOL_MESSAGE_OK) result = end_map(parent, &map);
+    return result;
+}
+
+static protocol_message_result_t encode_scene_text(CborEncoder *parent,
+                                                    const scene_text_t *text)
+{
+    CborEncoder map;
+    size_t entries = 5U + (text->align != SCENE_ALIGN_LEFT ? 1U : 0U) +
+                     (text->color != 0U ? 1U : 0U) +
+                     (text->ellipsize ? 1U : 0U);
+    protocol_message_result_t result = begin_map(parent, &map, entries);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 0U);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_int(&map, text->x);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 1U);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_int(&map, text->baseline_y);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 2U);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_int(&map, text->w);
+    if (result == PROTOCOL_MESSAGE_OK && text->align != SCENE_ALIGN_LEFT) {
+        result = encode_pair_uint(&map, 3U, (uint64_t)text->align);
+    }
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 4U);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_scene_font(&map, &text->font);
+    if (result == PROTOCOL_MESSAGE_OK && text->color != 0U) {
+        result = encode_pair_uint(&map, 5U, text->color);
+    }
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 6U);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_scene_value(&map, &text->value);
+    if (result == PROTOCOL_MESSAGE_OK && text->ellipsize) {
+        result = encode_uint(&map, 7U);
+        if (result == PROTOCOL_MESSAGE_OK) result = encode_bool(&map, true);
+    }
+    if (result == PROTOCOL_MESSAGE_OK) result = end_map(parent, &map);
+    return result;
+}
+
+static protocol_message_result_t encode_scene_image(CborEncoder *parent,
+                                                     const scene_image_t *image)
+{
+    CborEncoder map;
+    size_t entries = 5U + (image->recolor ? 1U : 0U) +
+                     (image->color != 0U ? 1U : 0U);
+    protocol_message_result_t result = begin_map(parent, &map, entries);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 0U);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_int(&map, image->x);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 1U);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_int(&map, image->y);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 2U);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_int(&map, image->w);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 3U);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_int(&map, image->h);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 4U);
+    if (result == PROTOCOL_MESSAGE_OK) {
+        result = encode_bytes(&map, image->digest, ASSET_DIGEST_BYTES);
+    }
+    if (result == PROTOCOL_MESSAGE_OK && image->recolor) {
+        result = encode_uint(&map, 5U);
+        if (result == PROTOCOL_MESSAGE_OK) result = encode_bool(&map, true);
+    }
+    if (result == PROTOCOL_MESSAGE_OK && image->color != 0U) {
+        result = encode_pair_uint(&map, 6U, image->color);
+    }
+    if (result == PROTOCOL_MESSAGE_OK) result = end_map(parent, &map);
+    return result;
+}
+
+static protocol_message_result_t encode_scene_glyph(CborEncoder *parent,
+                                                     const scene_glyph_t *glyph)
+{
+    CborEncoder map;
+    protocol_message_result_t result =
+        begin_map(parent, &map, 5U + (glyph->color != 0U ? 1U : 0U));
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 0U);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_int(&map, glyph->x);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 1U);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_int(&map, glyph->baseline_y);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 2U);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_int(&map, glyph->size);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 3U);
+    if (result == PROTOCOL_MESSAGE_OK) {
+        result = encode_bytes(&map, glyph->digest, ASSET_DIGEST_BYTES);
+    }
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 4U);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_text(&map, glyph->name);
+    if (result == PROTOCOL_MESSAGE_OK && glyph->color != 0U) {
+        result = encode_pair_uint(&map, 5U, glyph->color);
+    }
+    if (result == PROTOCOL_MESSAGE_OK) result = end_map(parent, &map);
+    return result;
+}
+
+static protocol_message_result_t encode_scene_scale(CborEncoder *parent,
+                                                     const scene_scale_t *scale)
+{
+    CborEncoder map;
+    protocol_message_result_t result =
+        begin_map(parent, &map, 5U + (scale->major_tick_color != 0U ? 1U : 0U));
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 0U);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_int(&map, scale->x);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 1U);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_int(&map, scale->y);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 2U);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_int(&map, scale->box);
+    if (result == PROTOCOL_MESSAGE_OK) {
+        result = encode_pair_uint(&map, 3U, scale->total_tick_count);
+    }
+    if (result == PROTOCOL_MESSAGE_OK) {
+        result = encode_pair_uint(&map, 4U, scale->major_tick_every);
+    }
+    if (result == PROTOCOL_MESSAGE_OK && scale->major_tick_color != 0U) {
+        result = encode_pair_uint(&map, 5U, scale->major_tick_color);
+    }
+    if (result == PROTOCOL_MESSAGE_OK) result = end_map(parent, &map);
+    return result;
+}
+
+static protocol_message_result_t encode_scene_node(CborEncoder *parent,
+                                                    const scene_node_t *node)
+{
+    CborEncoder map;
+    protocol_message_result_t result = begin_map(parent, &map, 2U);
+    if (result == PROTOCOL_MESSAGE_OK) {
+        result = encode_pair_uint(&map, 0U, (uint64_t)node->kind);
+    }
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 1U);
+    if (result == PROTOCOL_MESSAGE_OK) {
+        switch (node->kind) {
+        case SCENE_NODE_RECT:
+            result = encode_scene_rect(&map, &node->value.rect);
+            break;
+        case SCENE_NODE_ARC:
+            result = encode_scene_arc(&map, &node->value.arc);
+            break;
+        case SCENE_NODE_LINE:
+            result = encode_scene_line(&map, &node->value.line);
+            break;
+        case SCENE_NODE_TEXT:
+            result = encode_scene_text(&map, &node->value.text);
+            break;
+        case SCENE_NODE_IMAGE:
+            result = encode_scene_image(&map, &node->value.image);
+            break;
+        case SCENE_NODE_GLYPH:
+            result = encode_scene_glyph(&map, &node->value.glyph);
+            break;
+        case SCENE_NODE_SCALE:
+            result = encode_scene_scale(&map, &node->value.scale);
+            break;
+        default:
+            /* Unreachable: validate_message() ran scene_model_validate()
+             * before encode_payload() was called, and it refuses any kind
+             * outside this switch. */
+            result = PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
+            break;
+        }
+    }
+    if (result == PROTOCOL_MESSAGE_OK) result = end_map(parent, &map);
+    return result;
+}
+
+static protocol_message_result_t encode_push_scene_payload(
+    CborEncoder *root,
+    const protocol_push_scene_t *push)
+{
+    CborEncoder map;
+    protocol_message_result_t result = begin_map(root, &map, 3U);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 0U);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_text(&map, push->card_id);
+    if (result == PROTOCOL_MESSAGE_OK) {
+        result = encode_pair_uint(&map, 1U, push->revision);
+    }
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 2U);
+    CborEncoder scene;
+    if (result == PROTOCOL_MESSAGE_OK) result = begin_map(&map, &scene, 3U);
+    if (result == PROTOCOL_MESSAGE_OK) {
+        result = encode_pair_uint(&scene, 0U, push->scene.revision);
+    }
+    if (result == PROTOCOL_MESSAGE_OK) {
+        result = encode_pair_uint(&scene, 1U, push->scene.background);
+    }
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&scene, 2U);
+    CborEncoder nodes;
+    if (result == PROTOCOL_MESSAGE_OK) {
+        result = begin_array(&scene, &nodes, push->scene.node_count);
+    }
+    for (uint32_t i = 0U;
+         result == PROTOCOL_MESSAGE_OK && i < push->scene.node_count; ++i) {
+        result = encode_scene_node(&nodes, &push->scene.nodes[i]);
+    }
+    if (result == PROTOCOL_MESSAGE_OK) result = end_map(&scene, &nodes);
+    if (result == PROTOCOL_MESSAGE_OK) result = end_map(&map, &scene);
+    if (result == PROTOCOL_MESSAGE_OK) result = end_map(root, &map);
+    return result;
+}
+
 static protocol_message_result_t encode_payload(
     const protocol_message_t *message,
     uint8_t *payload,
@@ -2379,6 +2843,9 @@ static protocol_message_result_t encode_payload(
         break;
     case PROTOCOL_TYPE_ASSET_RELEASE:
         result = encode_asset_release_payload(&root, &message->value.asset_release);
+        break;
+    case PROTOCOL_TYPE_PUSH_SCENE:
+        result = encode_push_scene_payload(&root, &message->value.push_scene);
         break;
     default:
         return PROTOCOL_MESSAGE_ERR_UNSUPPORTED_TYPE;

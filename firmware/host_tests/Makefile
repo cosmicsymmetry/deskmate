@@ -6,8 +6,16 @@ CBOR_SRCS = $(CBOR_DIR)/cborencoder.c \
 	$(CBOR_DIR)/cborparser.c \
 	$(CBOR_DIR)/cborparser_float.c \
 	$(CBOR_DIR)/cborvalidation.c
+# core/protocol_message.c decodes PushScene's nested scene map through
+# scene_decode_map(), so every binary that links it now links the scene
+# module too -- and scene_binding.c, which the scene decoder calls to refuse
+# a binding the device could not evaluate, and timefmt.c/asset_store.c
+# beneath those.
+SCENE_SRCS = ../main/core/scene_decode.c ../main/core/scene_model.c \
+	../main/core/scene_binding.c ../main/core/timefmt.c \
+	../main/core/asset_store.c
 PROTOCOL_SRCS = ../main/core/protocol_frame.c ../main/core/protocol_message.c \
-	$(CBOR_SRCS)
+	$(SCENE_SRCS) $(CBOR_SRCS)
 
 test: test_timefmt test_protocol test_link_state test_template_fields \
 	test_widget_model test_ui_command_queue test_navigation \

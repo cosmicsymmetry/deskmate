@@ -59,11 +59,18 @@ void dev_capture_handle_request(uint32_t request_id);
 // (csrc/sim_shim.c), not template_view.c's card chrome, so the two frames
 // are comparable pixel for pixel. Runs under lvgl_port_lock()/
 // lvgl_port_unlock() because it mutates LVGL objects from the protocol
-// task, not an LVGL callback. Releases the acquired font on every path,
-// including a failed acquire or a failed screen/label allocation, so a
-// later font_registry_reset() during garbage collection never destroys a
-// face this probe still holds. `digest` must point to exactly
-// ASSET_DIGEST_BYTES readable bytes; the caller (protocol_task.c's
+// task, not an LVGL callback. On success it HANDS its acquire to the screen
+// rather than releasing inline -- an LV_EVENT_DELETE callback releases the
+// face when the screen (and the label styled with it) is destroyed, because
+// LVGL keeps the bare lv_font_t* and takes no reference of its own. So the
+// face stays pinned for exactly as long as something draws with it, which
+// is what makes it un-evictable; the failure paths, which never reach a
+// live screen, still release inline. One consequence: an AssetRelease
+// arriving while a probe render is on the panel is answered with
+// PROTOCOL_ERROR_BUSY and deferred -- font_registry_reset() refuses while
+// any face is pinned rather than destroying one this probe is still using.
+// Load another screen and the release succeeds. `digest` must point to
+// exactly ASSET_DIGEST_BYTES readable bytes; the caller (protocol_task.c's
 // dispatch) is responsible for validating the request payload length
 // before calling this.
 void dev_capture_handle_asset_probe(const uint8_t *digest);

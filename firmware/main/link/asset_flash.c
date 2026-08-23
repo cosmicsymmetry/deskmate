@@ -9,8 +9,8 @@
 
 // FONT_REGISTRY_MAX_OPEN_FACES: this file's only caller of asset_flash_map()
 // is font_registry.c's resolver (via protocol_asset_resolver), one call per
-// (digest, pixel_size) miss -- see the mmap handle table sizing comment
-// below for why that makes this the right bound.
+// (digest, pixel_size) miss -- see ASSET_FLASH_MMAP_CAPACITY below for why
+// that makes this the right bound, and why it is not the exact bound.
 #include "ui/font_registry.h"
 
 /* 64 committed records is the capacity core/asset_store.c's own host tests
@@ -20,6 +20,27 @@
  * choice for a fresh partition, not something asset_flash.c decides per
  * asset, so it lives here rather than in core/. */
 #define ASSET_FLASH_RECORD_CAPACITY 64U
+
+/* Outstanding esp_partition_mmap() handles this file will hold at once.
+ * FONT_REGISTRY_MAX_OPEN_FACES, plus ONE. The +1 is not slack: it is the
+ * transient overlap inside an evicting font_registry_acquire(), which
+ * resolves -- and therefore maps -- before claim_slot() destroys its LRU
+ * victim and unmaps that victim's blob. For the length of that window the
+ * new mapping and the doomed one coexist, so a table sized to exactly
+ * FONT_REGISTRY_MAX_OPEN_FACES refuses the ninth map with ESP_ERR_NO_MEM
+ * before eviction can ever run. That is what a full registry did on this
+ * device until 2026-08-23: acquire returned NULL with every slot unpinned,
+ * LRU eviction was unreachable, and font_registry.h documented a contract
+ * the hardware could not honour. Resolving before claiming is deliberate
+ * (font_registry.c: "so an absent or non-font digest never costs a live
+ * face"), so the table gives way, not the ordering. */
+#define ASSET_FLASH_MMAP_CAPACITY (FONT_REGISTRY_MAX_OPEN_FACES + 1U)
+
+_Static_assert(ASSET_FLASH_MMAP_CAPACITY > FONT_REGISTRY_MAX_OPEN_FACES,
+               "the mmap table must exceed the registry's open-face bound: an "
+               "evicting acquire maps its new face before unmapping its LRU "
+               "victim, so the two coexist and an exact fit makes eviction "
+               "unreachable");
 
 /* firmware/partitions.csv: "assets, data, 0x40, , 6M,". 0x40 is the first
  * subtype value ESP-IDF's partition table format reserves for
@@ -156,13 +177,14 @@ esp_err_t asset_flash_init(void)
      * eviction (whole-branch review finding 2). asset_flash_map() is only
      * ever called from font_registry.c's injected resolver, and
      * font_registry.c bounds its own open-face count to
-     * FONT_REGISTRY_MAX_OPEN_FACES with LRU eviction -- so *that* is the
-     * true bound on outstanding mappings, as long as every eviction and
-     * every font_registry_reset() releases its mapping via
-     * asset_flash_unmap() (the asset_release_fn font_registry_init() is
-     * given below). It is not record_capacity coincidentally being larger
-     * that keeps this safe; it is font_registry.c's own LRU bound. */
-    s_mmap_entry_capacity = FONT_REGISTRY_MAX_OPEN_FACES;
+     * FONT_REGISTRY_MAX_OPEN_FACES with LRU eviction -- so *that*, plus the
+     * one transient mapping ASSET_FLASH_MMAP_CAPACITY explains, is the true
+     * bound on outstanding mappings, as long as every eviction and every
+     * font_registry_reset() releases its mapping via asset_flash_unmap()
+     * (the asset_release_fn font_registry_init() is given below). It is not
+     * record_capacity coincidentally being larger that keeps this safe; it
+     * is font_registry.c's own LRU bound. */
+    s_mmap_entry_capacity = ASSET_FLASH_MMAP_CAPACITY;
     s_mmap_entries = heap_caps_malloc(
         (size_t)s_mmap_entry_capacity * sizeof(*s_mmap_entries), MALLOC_CAP_SPIRAM);
     if (s_mmap_entries == NULL) {

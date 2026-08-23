@@ -77,7 +77,13 @@ font_registry_result_t font_registry_init(asset_resolver_fn resolver,
  * The cost of the contract is a hard ceiling: a screen wanting more than
  * FONT_REGISTRY_MAX_OPEN_FACES distinct faces at once gets NULL for the
  * surplus rather than thrashing. Handle NULL -- fall back to a baked font or
- * refuse the scene; never draw with it. */
+ * refuse the scene; never draw with it.
+ *
+ * One path sits outside the contract: font_registry_init() adopts a fresh
+ * table without destroying whatever the previous one held, so re-initialising
+ * a live registry leaks every open face and its mapping. It is called exactly
+ * once, at startup, and that is the only supported use -- it is not a reset
+ * that ignores pins. Use font_registry_reset() for that. */
 
 /* Returns a font for `digest` rendered at `pixel_size`, or NULL if the asset
  * is absent, not a font (ASSET_KIND_FONT / ASSET_KIND_ICON_FONT only), fails

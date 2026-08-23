@@ -818,23 +818,6 @@ static void dispatch_asset_release(protocol_context_t *context,
         &context->message.value.asset_release;
     const asset_store_t *store = asset_flash_store();
 
-    // An active transfer's reserved-but-uncommitted record is, by
-    // definition, absent from `release`'s digest list (the host cannot name
-    // a digest it hasn't finished sending), so the mark-dead/compaction scan
-    // below would exclude that slot from the compacted record array while
-    // the in-RAM asset_transfer_t keeps pointing at it. A chunk landing
-    // after that point writes into a blob region compaction has already
-    // repacked out from under it, and a later AssetCommit would flip a
-    // wiped, all-0xFF-content slot to COMMITTED -- corrupting the store for
-    // every future asset_store_reserve()/asset_store_stats() call. Abort
-    // (not reject-with-Busy) so this can never race: the host's resumable
-    // design already handles an abort by simply re-sending AssetBegin for a
-    // fresh reservation, whereas rejecting the release risks a stuck
-    // transfer permanently blocking GC.
-    if (context->asset_transfer.active) {
-        asset_transfer_abort(&context->asset_transfer);
-    }
-
     // Compaction below physically moves blob bytes, which invalidates every
     // lv_font_t rasterized from an asset_flash_map() pointer. So every open
     // face must be gone before asset_flash_execute_compaction() runs, and
@@ -849,9 +832,14 @@ static void dispatch_asset_release(protocol_context_t *context,
     // contract), the registry destroyed nothing, and compaction therefore
     // must not proceed. Deferring the garbage collection costs the host a
     // retry; compacting anyway would leave a live screen drawing from moved
-    // bytes. Nothing has been mutated at this point -- the mark-dead scan
-    // below has not run yet -- so returning here leaves the store exactly as
-    // it was found.
+    // bytes.
+    //
+    // This runs FIRST, before the transfer abort below, precisely so the
+    // refusal changes nothing: no record is marked dead, no reservation is
+    // orphaned, and no in-flight transfer is destroyed on behalf of a
+    // collection that then did not happen. A path whose whole point is "let
+    // the host retry" must not leave wreckage behind, and the abort below is
+    // only justified by the mark-dead scan that a refusal never reaches.
     //
     // The caller-side recovery, when this device grows a renderer that holds
     // asset faces (the scene renderer, later in this stage), is to tear that
@@ -879,6 +867,23 @@ static void dispatch_asset_release(protocol_context_t *context,
         transmit_error(context, request_id, PROTOCOL_ERROR_BUSY,
                        "font faces in use");
         return;
+    }
+
+    // An active transfer's reserved-but-uncommitted record is, by
+    // definition, absent from `release`'s digest list (the host cannot name
+    // a digest it hasn't finished sending), so the mark-dead/compaction scan
+    // below would exclude that slot from the compacted record array while
+    // the in-RAM asset_transfer_t keeps pointing at it. A chunk landing
+    // after that point writes into a blob region compaction has already
+    // repacked out from under it, and a later AssetCommit would flip a
+    // wiped, all-0xFF-content slot to COMMITTED -- corrupting the store for
+    // every future asset_store_reserve()/asset_store_stats() call. Abort
+    // (not reject-with-Busy) so this can never race: the host's resumable
+    // design already handles an abort by simply re-sending AssetBegin for a
+    // fresh reservation, whereas rejecting the release risks a stuck
+    // transfer permanently blocking GC.
+    if (context->asset_transfer.active) {
+        asset_transfer_abort(&context->asset_transfer);
     }
 
     for (uint32_t index = 0U; index < store->record_capacity; ++index) {

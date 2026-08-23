@@ -161,6 +161,8 @@ static void test_valid_fixtures(void)
     assert_valid_fixture("ack_asset_begin.bin", PROTOCOL_TYPE_ACK, 20U);
     assert_valid_fixture("asset_chunk.bin", PROTOCOL_TYPE_ASSET_CHUNK, 21U);
     assert_valid_fixture("asset_commit.bin", PROTOCOL_TYPE_ASSET_COMMIT, 22U);
+    assert_valid_fixture("push_scene.bin", PROTOCOL_TYPE_PUSH_SCENE, 24U);
+    assert_valid_fixture("ack_scene.bin", PROTOCOL_TYPE_ACK, 24U);
     assert_valid_fixture("asset_release.bin", PROTOCOL_TYPE_ASSET_RELEASE,
                          23U);
 }
@@ -917,11 +919,312 @@ static void test_ack_carries_already_present_only_for_asset_begin(void)
            == PROTOCOL_MESSAGE_ERR_INVALID_VALUE);
 }
 
-static void test_current_capabilities_is_235(void)
+static void test_current_capabilities_is_491(void)
 {
     /* Bit 7 sat defined-but-dark for most of V2 and a conforming host could
      * not provision the device. Pin the number, not the expression. */
-    assert(PROTOCOL_CURRENT_CAPABILITIES == UINT64_C(235));
+    assert(PROTOCOL_CURRENT_CAPABILITIES == UINT64_C(491));
+    /* And pin the newest bit on its own, so a future edit that drops it from
+     * the union fails here rather than at a host that gates on it. */
+    assert((PROTOCOL_CURRENT_CAPABILITIES &
+            PROTOCOL_CAPABILITY_SCENE_RENDER) != 0U);
+    assert(PROTOCOL_CAPABILITY_SCENE_RENDER == UINT64_C(256));
+}
+
+/* ------------------------------------------------------------------
+ * PushScene (type 19).
+ *
+ * The payload is {0: card_id, 1: revision, 2: <scene map>}; the scene map's
+ * own shape is documented at the top of core/scene_decode.c. These helpers
+ * hand-build it, because a scene is far too nested to spell out as a hex
+ * literal the way the small fixed maps above are.
+ * ------------------------------------------------------------------ */
+
+static size_t append_map_header_cbor(uint8_t *out, size_t offset, size_t count)
+{
+    assert(count < 24U);
+    out[offset++] = (uint8_t)(0xa0U | count);
+    return offset;
+}
+
+static size_t append_text_cbor(uint8_t *out, size_t offset, const char *text)
+{
+    size_t length = strlen(text);
+    assert(length < 24U);
+    out[offset++] = (uint8_t)(0x60U | length);
+    memcpy(out + offset, text, length);
+    return offset + length;
+}
+
+/* The smallest legal RECT node: {0: kind, 1: {0: x, 1: y, 2: w, 3: h}}.
+ * Every one of these is INSIDE the canvas and otherwise valid, which is what
+ * makes the node-cap test below able to fail for the count and nothing
+ * else. */
+static size_t append_minimal_rect_node_cbor(uint8_t *out, size_t offset)
+{
+    offset = append_map_header_cbor(out, offset, 2U);
+    offset = append_uint_cbor(out, offset, 0U);
+    offset = append_uint_cbor(out, offset, 1U); /* SCENE_NODE_RECT */
+    offset = append_uint_cbor(out, offset, 1U);
+    offset = append_map_header_cbor(out, offset, 4U);
+    offset = append_uint_cbor(out, offset, 0U);
+    offset = append_uint_cbor(out, offset, 4U);
+    offset = append_uint_cbor(out, offset, 1U);
+    offset = append_uint_cbor(out, offset, 5U);
+    offset = append_uint_cbor(out, offset, 2U);
+    offset = append_uint_cbor(out, offset, 10U);
+    offset = append_uint_cbor(out, offset, 3U);
+    offset = append_uint_cbor(out, offset, 11U);
+    return offset;
+}
+
+static protocol_message_result_t decode_push_scene_frame(const uint8_t *payload,
+                                                         size_t payload_length,
+                                                         protocol_message_t *message)
+{
+    protocol_frame_t frame = {
+        .version = PROTOCOL_VERSION,
+        .message_type = PROTOCOL_TYPE_PUSH_SCENE,
+        .request_id = 45U,
+        .payload_length = (uint16_t)payload_length,
+    };
+    assert(payload_length <= sizeof frame.payload);
+    memcpy(frame.payload, payload, payload_length);
+    return protocol_message_decode(&frame, message);
+}
+
+/* Writes {0: card_id, 1: revision, 2: {0: 9, 1: 0, 2: [rect x node_count]}}. */
+static size_t build_push_scene_payload(uint8_t *out, const char *card_id,
+                                       uint32_t revision, size_t node_count)
+{
+    size_t offset = 0U;
+    offset = append_map_header_cbor(out, offset, 3U);
+    offset = append_uint_cbor(out, offset, 0U);
+    offset = append_text_cbor(out, offset, card_id);
+    offset = append_uint_cbor(out, offset, 1U);
+    offset = append_uint_cbor(out, offset, revision);
+    offset = append_uint_cbor(out, offset, 2U);
+    offset = append_map_header_cbor(out, offset, 3U);
+    offset = append_uint_cbor(out, offset, 0U);
+    offset = append_uint_cbor(out, offset, 9U); /* scene revision */
+    offset = append_uint_cbor(out, offset, 1U);
+    offset = append_uint_cbor(out, offset, 0U); /* background */
+    offset = append_uint_cbor(out, offset, 2U);
+    offset = append_array_header_cbor(out, offset, node_count);
+    for (size_t i = 0U; i < node_count; ++i) {
+        offset = append_minimal_rect_node_cbor(out, offset);
+    }
+    return offset;
+}
+
+static void test_push_scene_roundtrips(void)
+{
+    /* A RECT, and a TEXT whose value is a binding: the text node drags in
+     * the nested font and value maps, which nothing else on this message
+     * exercises. */
+    uint8_t payload[PROTOCOL_MAX_PAYLOAD_SIZE];
+    size_t offset = 0U;
+    offset = append_map_header_cbor(payload, offset, 3U);
+    offset = append_uint_cbor(payload, offset, 0U);
+    offset = append_text_cbor(payload, offset, "clock");
+    offset = append_uint_cbor(payload, offset, 1U);
+    offset = append_uint_cbor(payload, offset, 7U);
+    offset = append_uint_cbor(payload, offset, 2U);
+    offset = append_map_header_cbor(payload, offset, 3U);
+    offset = append_uint_cbor(payload, offset, 0U);
+    offset = append_uint_cbor(payload, offset, 9U);
+    offset = append_uint_cbor(payload, offset, 1U);
+    offset = append_uint_cbor(payload, offset, 0U);
+    offset = append_uint_cbor(payload, offset, 2U);
+    offset = append_array_header_cbor(payload, offset, 2U);
+    offset = append_minimal_rect_node_cbor(payload, offset);
+    /* TEXT: {0: kind, 1: {0: x, 1: baseline_y, 2: w, 4: font, 6: value}} */
+    offset = append_map_header_cbor(payload, offset, 2U);
+    offset = append_uint_cbor(payload, offset, 0U);
+    offset = append_uint_cbor(payload, offset, 4U); /* SCENE_NODE_TEXT */
+    offset = append_uint_cbor(payload, offset, 1U);
+    offset = append_map_header_cbor(payload, offset, 5U);
+    offset = append_uint_cbor(payload, offset, 0U);
+    offset = append_uint_cbor(payload, offset, 16U);
+    offset = append_uint_cbor(payload, offset, 1U);
+    offset = append_uint_cbor(payload, offset, 200U);
+    offset = append_uint_cbor(payload, offset, 2U);
+    offset = append_uint_cbor(payload, offset, 400U);
+    offset = append_uint_cbor(payload, offset, 4U);
+    offset = append_map_header_cbor(payload, offset, 2U);
+    offset = append_uint_cbor(payload, offset, 0U);
+    offset = append_uint_cbor(payload, offset, 1U); /* SCENE_FONT_BAKED */
+    offset = append_uint_cbor(payload, offset, 1U);
+    offset = append_uint_cbor(payload, offset, 2U); /* SCENE_FONT_BODY */
+    offset = append_uint_cbor(payload, offset, 6U);
+    offset = append_map_header_cbor(payload, offset, 2U);
+    offset = append_uint_cbor(payload, offset, 0U);
+    offset = append_uint_cbor(payload, offset, 2U); /* SCENE_VALUE_BINDING */
+    offset = append_uint_cbor(payload, offset, 2U);
+    offset = append_text_cbor(payload, offset, "time:HH:mm");
+
+    protocol_message_t *message = malloc(sizeof *message);
+    assert(message != NULL);
+    assert(decode_push_scene_frame(payload, offset, message) ==
+           PROTOCOL_MESSAGE_OK);
+    assert(message->type == PROTOCOL_TYPE_PUSH_SCENE);
+    assert(strcmp(message->value.push_scene.card_id, "clock") == 0);
+    assert(message->value.push_scene.revision == 7U);
+    assert(message->value.push_scene.scene.revision == 9U);
+    assert(message->value.push_scene.scene.node_count == 2U);
+    assert(message->value.push_scene.scene.nodes[0].kind == SCENE_NODE_RECT);
+    assert(message->value.push_scene.scene.nodes[0].value.rect.w == 10);
+    assert(message->value.push_scene.scene.nodes[0].value.rect.opacity == 255U);
+    assert(message->value.push_scene.scene.nodes[1].kind == SCENE_NODE_TEXT);
+    assert(message->value.push_scene.scene.nodes[1].value.text.align ==
+           SCENE_ALIGN_LEFT);
+    assert(strcmp(message->value.push_scene.scene.nodes[1].value.text.value.binding,
+                  "time:HH:mm") == 0);
+
+    /* Re-encoded, the payload must come back byte-identical: the omitted
+     * optional keys stay omitted, which is the rule the cross-language
+     * fixture depends on. */
+    uint8_t wire[PROTOCOL_MAX_WIRE_FRAME];
+    size_t wire_length = 0U;
+    assert(protocol_message_encode(45U, message, wire, sizeof wire,
+                                   &wire_length) == PROTOCOL_MESSAGE_OK);
+    protocol_frame_t frame;
+    assert(protocol_frame_decode(wire, wire_length, &frame) ==
+           PROTOCOL_FRAME_OK);
+    assert(frame.payload_length == offset);
+    assert(memcmp(frame.payload, payload, offset) == 0);
+    free(message);
+}
+
+/* The trap this test is built around: scene_model_validate() rejects a
+ * node_count over the cap with the SAME code the decoder's own bound
+ * produces, so an assertion on the result alone cannot tell a working
+ * decoder from one that has already written past nodes[23].
+ *
+ * What it DOES prove, unconditionally, is that this message type routes its
+ * nested map into the scene decoder and propagates the refusal: a PushScene
+ * handler that skipped key 2, or swallowed the scene decoder's verdict,
+ * returns OK here. Every other part of the envelope is deliberately
+ * acceptable to the message layer -- a legal card_id, a nonzero revision,
+ * sorted keys, and 25 individually valid RECT nodes -- so the count is the
+ * only thing left that can refuse it.
+ *
+ * MASKED WITHOUT ASan: the decoder's own bound is proved only under
+ * `make -C firmware/host_tests sanitize`, where the overflowing write into
+ * this heap-allocated message is a heap-buffer-overflow. Same reasoning as
+ * test_scene_decode.c's node-cap case; do not delete either as duplication.
+ */
+static void test_push_scene_rejects_a_scene_over_the_node_cap(void)
+{
+    uint8_t payload[PROTOCOL_MAX_PAYLOAD_SIZE];
+    size_t offset =
+        build_push_scene_payload(payload, "clock", 3U, SCENE_MAX_NODES + 1U);
+
+    protocol_message_t *message = malloc(sizeof *message);
+    assert(message != NULL);
+    assert(decode_push_scene_frame(payload, offset, message) ==
+           PROTOCOL_MESSAGE_ERR_TOO_LARGE);
+    /* Refused whole, not clipped to the first 24. */
+    assert(message->value.push_scene.scene.node_count == 0U);
+
+    /* The same payload one node smaller is accepted, so the cap is the
+     * reason and nothing else about these nodes is. */
+    offset = build_push_scene_payload(payload, "clock", 3U, SCENE_MAX_NODES);
+    assert(decode_push_scene_frame(payload, offset, message) ==
+           PROTOCOL_MESSAGE_OK);
+    assert(message->value.push_scene.scene.node_count == SCENE_MAX_NODES);
+    free(message);
+}
+
+/* A distinct result class from the node cap, so the assertion above is
+ * about the count rather than about "some scene problem". */
+static void test_push_scene_rejects_an_off_canvas_node(void)
+{
+    uint8_t payload[PROTOCOL_MAX_PAYLOAD_SIZE];
+    size_t offset = 0U;
+    offset = append_map_header_cbor(payload, offset, 3U);
+    offset = append_uint_cbor(payload, offset, 0U);
+    offset = append_text_cbor(payload, offset, "clock");
+    offset = append_uint_cbor(payload, offset, 1U);
+    offset = append_uint_cbor(payload, offset, 3U);
+    offset = append_uint_cbor(payload, offset, 2U);
+    offset = append_map_header_cbor(payload, offset, 3U);
+    offset = append_uint_cbor(payload, offset, 0U);
+    offset = append_uint_cbor(payload, offset, 9U);
+    offset = append_uint_cbor(payload, offset, 1U);
+    offset = append_uint_cbor(payload, offset, 0U);
+    offset = append_uint_cbor(payload, offset, 2U);
+    offset = append_array_header_cbor(payload, offset, 1U);
+    offset = append_map_header_cbor(payload, offset, 2U);
+    offset = append_uint_cbor(payload, offset, 0U);
+    offset = append_uint_cbor(payload, offset, 1U); /* SCENE_NODE_RECT */
+    offset = append_uint_cbor(payload, offset, 1U);
+    offset = append_map_header_cbor(payload, offset, 4U);
+    offset = append_uint_cbor(payload, offset, 0U);
+    offset = append_uint_cbor(payload, offset, 0U);
+    offset = append_uint_cbor(payload, offset, 1U);
+    offset = append_uint_cbor(payload, offset, 0U);
+    offset = append_uint_cbor(payload, offset, 2U);
+    offset = append_uint_cbor(payload, offset, 4096U); /* wider than 448 */
+    offset = append_uint_cbor(payload, offset, 3U);
+    offset = append_uint_cbor(payload, offset, 10U);
+
+    protocol_message_t *message = malloc(sizeof *message);
+    assert(message != NULL);
+    assert(decode_push_scene_frame(payload, offset, message) ==
+           PROTOCOL_MESSAGE_ERR_INVALID_VALUE);
+    assert(message->value.push_scene.scene.node_count == 0U);
+    free(message);
+}
+
+static void test_push_scene_rejects_a_zero_revision(void)
+{
+    uint8_t payload[PROTOCOL_MAX_PAYLOAD_SIZE];
+    size_t offset = build_push_scene_payload(payload, "clock", 0U, 1U);
+    protocol_message_t *message = malloc(sizeof *message);
+    assert(message != NULL);
+    assert(decode_push_scene_frame(payload, offset, message) ==
+           PROTOCOL_MESSAGE_ERR_INVALID_VALUE);
+    free(message);
+}
+
+static protocol_message_result_t decode_ack_for(uint8_t acknowledged_type,
+                                                bool with_revision)
+{
+    uint8_t payload[16];
+    size_t offset = 0U;
+    offset = append_map_header_cbor(payload, offset, with_revision ? 2U : 1U);
+    offset = append_uint_cbor(payload, offset, 0U);
+    offset = append_uint_cbor(payload, offset, acknowledged_type);
+    if (with_revision) {
+        offset = append_uint_cbor(payload, offset, 1U);
+        offset = append_uint_cbor(payload, offset, 5U);
+    }
+
+    protocol_frame_t frame = {
+        .version = PROTOCOL_VERSION,
+        .message_type = PROTOCOL_TYPE_ACK,
+        .request_id = 46U,
+        .payload_length = (uint16_t)offset,
+    };
+    memcpy(frame.payload, payload, offset);
+    protocol_message_t message;
+    return protocol_message_decode(&frame, &message);
+}
+
+static void test_ack_for_push_scene_requires_a_revision(void)
+{
+    /* Like PushData and ApplyConfig, and unlike every other acknowledged
+     * type: a scene the host cannot pin a revision to is a scene it cannot
+     * tell apart from the one already on the panel. */
+    assert(decode_ack_for(PROTOCOL_TYPE_PUSH_SCENE, true) ==
+           PROTOCOL_MESSAGE_OK);
+    assert(decode_ack_for(PROTOCOL_TYPE_PUSH_SCENE, false) ==
+           PROTOCOL_MESSAGE_ERR_INVALID_VALUE);
+    /* The rule is per-type, not global: ActivateScreen must still refuse
+     * one. */
+    assert(decode_ack_for(PROTOCOL_TYPE_ACTIVATE_SCREEN, true) ==
+           PROTOCOL_MESSAGE_ERR_INVALID_VALUE);
 }
 
 int main(void)
@@ -949,7 +1252,12 @@ int main(void)
     test_asset_chunk_rejects_oversize_data();
     test_asset_release_rejects_too_many_digests();
     test_ack_carries_already_present_only_for_asset_begin();
-    test_current_capabilities_is_235();
+    test_current_capabilities_is_491();
+    test_push_scene_roundtrips();
+    test_push_scene_rejects_a_scene_over_the_node_cap();
+    test_push_scene_rejects_an_off_canvas_node();
+    test_push_scene_rejects_a_zero_revision();
+    test_ack_for_push_scene_requires_a_revision();
     puts("test_protocol: OK");
     return 0;
 }

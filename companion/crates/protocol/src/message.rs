@@ -2140,11 +2140,137 @@ mod tests {
     }
 
     #[test]
-    fn current_capabilities_is_235() {
+    fn current_capabilities_is_491() {
         // Bit 7 was defined and never set for most of V2; the constant read 75
         // instead of 203 and a conforming host could not have provisioned the
         // device. Pin the number so the same omission cannot recur.
-        assert_eq!(CURRENT_CAPABILITIES, 235);
+        assert_eq!(CURRENT_CAPABILITIES, 491);
+        assert_eq!(CAPABILITY_SCENE_RENDER, 256);
+        assert_ne!(CURRENT_CAPABILITIES & CAPABILITY_SCENE_RENDER, 0);
+    }
+
+    fn sample_scene() -> Scene {
+        Scene {
+            revision: 9,
+            background: 0x0000_0000,
+            nodes: vec![
+                SceneNode::Rect(SceneRect {
+                    x: 4,
+                    y: 5,
+                    w: 10,
+                    h: 11,
+                    ..SceneRect::default()
+                }),
+                SceneNode::Text(SceneText {
+                    x: 16,
+                    baseline_y: 200,
+                    w: 400,
+                    font: SceneFont::Baked(SceneFontTier::Body),
+                    value: SceneValue::Binding("time:HH:mm".into()),
+                    ..SceneText::default()
+                }),
+            ],
+        }
+    }
+
+    #[test]
+    fn push_scene_roundtrips() {
+        let message = Message::PushScene(PushScene {
+            card_id: "clock".into(),
+            revision: 7,
+            scene: sample_scene(),
+        });
+        let wire = message.encode(45).unwrap();
+        assert_eq!(Message::decode(&wire).unwrap(), message);
+    }
+
+    #[test]
+    fn push_scene_rejects_a_scene_over_the_node_cap() {
+        // Every node is individually valid and inside the canvas, and the
+        // envelope around them is one the message layer accepts, so the count
+        // is the only thing that can refuse this.
+        let node = SceneNode::Rect(SceneRect {
+            x: 4,
+            y: 5,
+            w: 10,
+            h: 11,
+            ..SceneRect::default()
+        });
+        let at_cap = PushScene {
+            card_id: "clock".into(),
+            revision: 3,
+            scene: Scene {
+                revision: 9,
+                background: 0,
+                nodes: vec![node.clone(); MAX_SCENE_NODES],
+            },
+        };
+        let wire = Message::PushScene(at_cap.clone()).encode(45).unwrap();
+        assert!(Message::decode(&wire).is_ok());
+
+        let mut over_cap = at_cap;
+        over_cap.scene.nodes.push(node);
+        // The encoder refuses to emit it at all ...
+        assert_eq!(
+            Message::PushScene(over_cap.clone()).encode(45),
+            Err(MessageError::InvalidValue("scene node count"))
+        );
+        // ... and a hand-built frame carrying one is refused on decode, which
+        // is the direction that matters for an untrusted peer.
+        let payload = encode_push_scene_payload_unchecked(&over_cap);
+        let frame = Frame::new(TYPE_PUSH_SCENE, 45, payload);
+        assert_eq!(
+            decode_message(&frame),
+            Err(MessageError::InvalidValue("scene node count"))
+        );
+    }
+
+    #[test]
+    fn push_scene_rejects_an_off_canvas_node() {
+        let message = Message::PushScene(PushScene {
+            card_id: "clock".into(),
+            revision: 3,
+            scene: Scene {
+                revision: 9,
+                background: 0,
+                nodes: vec![SceneNode::Rect(SceneRect {
+                    x: 0,
+                    y: 0,
+                    w: 4096,
+                    h: 10,
+                    ..SceneRect::default()
+                })],
+            },
+        });
+        assert!(message.encode(45).is_err());
+    }
+
+    #[test]
+    fn push_scene_rejects_a_zero_revision() {
+        let message = Message::PushScene(PushScene {
+            card_id: "clock".into(),
+            revision: 0,
+            scene: sample_scene(),
+        });
+        assert!(message.encode(45).is_err());
+    }
+
+    #[test]
+    fn ack_for_push_scene_requires_a_revision() {
+        let with = Message::Ack(Ack {
+            acknowledged_type: TYPE_PUSH_SCENE,
+            revision: Some(5),
+            already_present: None,
+        });
+        let wire = with.encode(45).unwrap();
+        assert_eq!(Message::decode(&wire).unwrap(), with);
+
+        let without = Message::Ack(Ack {
+            acknowledged_type: TYPE_PUSH_SCENE,
+            revision: None,
+            already_present: None,
+        });
+        assert!(without.encode(45).is_err());
     }
 
     #[test]

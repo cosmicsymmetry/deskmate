@@ -619,14 +619,6 @@ asset_store_result_t asset_store_plan_compaction(const asset_store_t *store,
         last_offset = next_offset;
         last_index = next_index;
 
-        uint32_t length = read_u32_le(next_bytes + REC_OFFSET_LENGTH);
-        /* offset/length are untrusted flash content; bound them the same
-         * way asset_store_reserve and asset_store_stats do. */
-        if (length > store->blob_region_size ||
-            next_offset > store->blob_region_size - length) {
-            return ASSET_STORE_ERR_CORRUPT;
-        }
-
         bool keep_this = false;
         for (size_t k = 0U; k < keep_count; k++) {
             if (memcmp(next_bytes + REC_OFFSET_DIGEST, keep[k], ASSET_DIGEST_BYTES) == 0) {
@@ -635,6 +627,36 @@ asset_store_result_t asset_store_plan_compaction(const asset_store_t *store,
             }
         }
         if (!keep_this) {
+            /* Not kept: dispatch_asset_release's own mark-dead pass (which
+             * runs before this plan is built) already flips a not-kept
+             * committed record's state to DEAD -- using
+             * asset_store_record_decode(), which validates kind/state but
+             * not offset/length -- so a corrupt, not-kept record should
+             * never even reach here still COMMITTED. This branch stays
+             * defensive of that anyway: it drops the record either way, so
+             * it never needs to look at its (possibly corrupt) offset/length. */
+            continue;
+        }
+
+        uint32_t length = read_u32_le(next_bytes + REC_OFFSET_LENGTH);
+        /* offset/length are untrusted flash content; bound them the same
+         * way asset_store_reserve and asset_store_stats do. Unlike those, a
+         * failure here must not fail the whole plan: a digest the host still
+         * wants kept can name a record whose offset/length were corrupted on
+         * flash independently of its digest/state (this format has no way to
+         * detect that beyond exactly this bounds check). Refusing to plan
+         * *any* compaction over one unusable kept record would wedge
+         * AssetRelease -- and therefore all GC -- forever, since the host
+         * has no way to stop asking for a digest it still believes it sent.
+         * Skip it instead: it is unusable regardless, and a record excluded
+         * from the returned plan simply does not survive compaction (only
+         * moves[] entries are re-committed). This cannot drop a genuinely
+         * valid survivor -- last_offset/last_index already advanced above so
+         * the scan still makes forward progress, and to_offset (this
+         * record's would-be destination) is left untouched, so every later
+         * kept record still packs from the correct base. */
+        if (length > store->blob_region_size ||
+            next_offset > store->blob_region_size - length) {
             continue;
         }
 
@@ -644,8 +666,16 @@ asset_store_result_t asset_store_plan_compaction(const asset_store_t *store,
         if (move_count >= moves_capacity) {
             return ASSET_STORE_ERR_FULL;
         }
+        /* Same reasoning as the bounds check above, for the one corruption
+         * shape it cannot catch on its own: an individually in-range record
+         * that still cannot pack without overlapping an already-accepted
+         * survivor. On flash this format itself ever produces, that cannot
+         * happen -- asset_store_reserve's high-water accounting guarantees
+         * committed ranges never overlap -- so reaching this is corruption,
+         * not a real layout. Skip for the same reason as above; to_offset is
+         * untouched here too, so a later valid survivor is unaffected. */
         if (length > store->blob_region_size - to_offset) {
-            return ASSET_STORE_ERR_CORRUPT;
+            continue;
         }
 
         moves[move_count].from_offset = next_offset;

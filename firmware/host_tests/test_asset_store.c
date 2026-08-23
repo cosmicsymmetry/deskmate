@@ -387,6 +387,78 @@ static void test_boot_reclaim_leaves_free_and_committed_slots_alone(void)
     assert(stats.committed_count == 1U);
 }
 
+/* Finding 3 (whole-branch review, 2026-08-22): a committed record whose
+ * offset/length were corrupted on flash independently of its digest/state
+ * (bit rot -- this format has no way to detect it beyond the bounds check
+ * itself) used to fail asset_store_plan_compaction() outright when that
+ * record's digest was still in the caller's keep set, because the bounds
+ * check ran unconditionally before the keep/not-keep decision. That wedges
+ * AssetRelease -- and therefore all GC -- permanently: the host has no way
+ * to stop asking to keep a digest it still believes it sent. The fix skips
+ * an unusable kept record instead of failing the whole plan. */
+static void test_compaction_skips_corrupt_kept_record_instead_of_failing(void)
+{
+    asset_flash_io_t io;
+    asset_store_t store = formatted_store(&io);
+    uint8_t valid_digest[ASSET_DIGEST_BYTES];
+    uint8_t corrupt_digest[ASSET_DIGEST_BYTES];
+    digest_of(0x78, valid_digest);
+    digest_of(0x77, corrupt_digest);
+
+    /* An entirely ordinary kept record, reserved (and so landing at a lower
+     * blob offset) before the one that gets corrupted below, to prove the
+     * skip does not drop a genuinely valid survivor found earlier in the
+     * scan. Both records are reserved and committed while everything is
+     * still valid -- asset_store_reserve()/asset_store_commit() run
+     * compute_high_water() internally, which has its own (unrelated,
+     * out-of-scope-for-this-fix) bounds check over every record, so
+     * corruption must not be introduced until both calls are done. */
+    uint32_t valid_index = 0U, valid_blob = 0U;
+    assert(asset_store_reserve(&store, valid_digest, ASSET_KIND_FONT, 128U,
+                               &valid_index, &valid_blob) == ASSET_STORE_OK);
+    assert(asset_store_commit(&store, valid_index) == ASSET_STORE_OK);
+
+    uint32_t corrupt_index = 0U, corrupt_blob = 0U;
+    assert(asset_store_reserve(&store, corrupt_digest, ASSET_KIND_FONT, 64U,
+                               &corrupt_index, &corrupt_blob) == ASSET_STORE_OK);
+    assert(asset_store_commit(&store, corrupt_index) == ASSET_STORE_OK);
+
+    /* Now corrupt only the second record's length field directly in the
+     * fake flash array -- bypassing the store's own write path entirely,
+     * exactly like test_commit_rejects_a_record_wiped_out_from_under_it
+     * does -- so it decodes as an ordinary COMMITTED record with a real
+     * digest except for an out-of-range length. The record layout
+     * (digest[32] + offset[4] + length[4] + ...) is asset_store.c's private
+     * encoding, not exported by the header; ASSET_DIGEST_BYTES + 4 is the
+     * length field's offset, mirroring how
+     * test_record_decode_rejects_unknown_kind already hand-derives the
+     * kind/state byte offsets below. plan_compaction() itself never calls
+     * compute_high_water(), so this is safe to introduce only now, with no
+     * further reserve()/commit()/stats() call to trip over it. */
+    uint8_t bogus_length[4] = { 0xFFU, 0xFFU, 0xFFU, 0xFFU };
+    memcpy(g_flash + ASSET_HEADER_BYTES + corrupt_index * ASSET_RECORD_BYTES +
+              ASSET_DIGEST_BYTES + 4U,
+          bogus_length, sizeof bogus_length);
+
+    const uint8_t *keep[2] = { valid_digest, corrupt_digest };
+    asset_move_t moves[8];
+    size_t move_count = 0U;
+
+    /* The whole point of this fix: a corrupt kept record must not fail the
+     * entire plan (that would wedge AssetRelease, and therefore GC,
+     * permanently -- the host has no way to stop asking for a digest it
+     * still believes it sent). */
+    assert(asset_store_plan_compaction(&store, keep, 2U, moves, 8U,
+                                       &move_count) == ASSET_STORE_OK);
+
+    /* The corrupt record does not survive -- it is unusable regardless of
+     * what the host asked for -- but the valid survivor found before it is
+     * still planned, proving the skip did not drop it. */
+    assert(move_count == 1U);
+    assert(moves[0].length == 128U);
+    assert(moves[0].record_index == valid_index);
+}
+
 static void test_commit_rejects_a_record_wiped_out_from_under_it(void)
 {
     asset_flash_io_t io;
@@ -430,6 +502,7 @@ int main(void)
     test_stats_free_blob_bytes_matches_what_reserve_will_grant();
     test_boot_reclaim_marks_orphaned_uncommitted_dead();
     test_boot_reclaim_leaves_free_and_committed_slots_alone();
+    test_compaction_skips_corrupt_kept_record_instead_of_failing();
     test_commit_rejects_a_record_wiped_out_from_under_it();
     return 0;
 }

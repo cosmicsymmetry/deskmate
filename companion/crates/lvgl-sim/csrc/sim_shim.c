@@ -6,8 +6,11 @@
 #include "lvgl.h"
 #include "core/asset_store.h"
 #include "core/clock_source.h"
+#include "core/scene_binding.h"
+#include "core/scene_model.h"
 #include "core/template_fields.h"
 #include "ui/font_registry.h"
+#include "ui/scene_view.h"
 #include "ui/template_view.h"
 
 #define SIM_WIDTH 448
@@ -411,6 +414,137 @@ bool sim_render_asset_font(const uint8_t *digest, const uint8_t *ttf_bytes,
         lv_timer_handler();
     }
 
+    copy_frame_out(orientation_flipped, out_pixels);
+    return true;
+}
+
+/* ---------------------------------------------------------------------
+ * Task 8 (stage 2a): scene rendering.
+ *
+ * The whole of the simulator's scene support. It adds no rendering logic
+ * of its own -- ui/scene_view.c does all of it, compiled from the
+ * firmware tree by build.rs -- only the three things the host has no
+ * equivalent of: somewhere to put a decoded scene_t, a `field.` lookup,
+ * and the LVGL binary image wrapper an `image` node reads.
+ * --------------------------------------------------------------------- */
+
+/* The decoded scene. A file-scope static rather than a local because
+ * sizeof(scene_t) is ~6 KB -- the same reason link/protocol_task.c
+ * PSRAM-allocates its copy rather than putting one on a task stack (see
+ * scene_model.h's scene_decode() comment). Nothing here is reentrant
+ * anyway: src/lib.rs's SIMULATOR_CLAIMED already pins the whole shim to
+ * one caller at a time. */
+static scene_t s_scene;
+
+typedef struct {
+    const sim_scene_field_t *fields;
+    size_t count;
+} sim_scene_field_table_t;
+
+/* scene_binding.h's scene_field_fn. Returning NULL for an unknown name is
+ * not an error: scene_binding_evaluate() renders the "--" placeholder for
+ * it, which is exactly what the device does for a provider that has not
+ * reported yet, and a golden that pins that state is worth having. */
+static const char *sim_scene_field_lookup(void *ctx, const char *name)
+{
+    const sim_scene_field_table_t *table = (const sim_scene_field_table_t *)ctx;
+    if (table == NULL || name == NULL) {
+        return NULL;
+    }
+    for (size_t i = 0; i < table->count; ++i) {
+        if (table->fields[i].name != NULL &&
+            strcmp(table->fields[i].name, name) == 0) {
+            return table->fields[i].value;
+        }
+    }
+    return NULL;
+}
+
+size_t sim_build_rgb565_image(int32_t width, int32_t height,
+                              const uint16_t *pixels, uint8_t *out,
+                              size_t out_capacity)
+{
+    if (width <= 0 || height <= 0 || pixels == NULL || out == NULL) {
+        return 0U;
+    }
+    size_t stride = (size_t)width * sizeof(uint16_t);
+    size_t data_bytes = stride * (size_t)height;
+    size_t total = sizeof(lv_image_header_t) + data_bytes;
+    if (out_capacity < total) {
+        return 0U;
+    }
+
+    lv_image_header_t header;
+    lv_memzero(&header, sizeof header);
+    header.magic = LV_IMAGE_HEADER_MAGIC;
+    header.cf = LV_COLOR_FORMAT_RGB565;
+    header.flags = 0U;
+    header.w = (uint32_t)width;
+    header.h = (uint32_t)height;
+    header.stride = (uint32_t)stride;
+
+    memcpy(out, &header, sizeof header);
+    memcpy(out + sizeof header, pixels, data_bytes);
+    return total;
+}
+
+bool sim_render_scene(const uint8_t *payload, size_t payload_length,
+                      int16_t utc_offset_minutes, int64_t now_unix_seconds,
+                      bool timer_active, uint32_t timer_remaining_ms,
+                      uint8_t timer_pct, const sim_scene_field_t *fields,
+                      size_t field_count, bool orientation_flipped,
+                      uint16_t *out_pixels)
+{
+    if (!sim_init() || out_pixels == NULL || payload == NULL ||
+        payload_length == 0U) {
+        return false;
+    }
+    /* Both stores are wired unconditionally, not only when a scene happens
+     * to name an asset: whether this scene has an image or an asset-font
+     * node is the payload's business, and a renderer that silently refused
+     * one because the host had not pre-armed the right lookup would be a
+     * confusing failure to debug. */
+    if (!ensure_asset_store() || !ensure_font_registry()) {
+        return false;
+    }
+    /* scene_view.c refuses any scene containing an `image` node until this
+     * is called (see scene_view_set_asset_resolver's own comment). It reads
+     * the same RAM-backed store font_registry_init() was given above, which
+     * mirrors the device: link/protocol_task.c hands its one
+     * asset_flash-backed protocol_asset_resolver to both. */
+    scene_view_set_asset_resolver(sim_asset_resolver, sim_asset_release);
+
+    if (scene_decode(payload, payload_length, &s_scene) != SCENE_MODEL_OK) {
+        return false;
+    }
+
+    sim_scene_field_table_t table = {
+        .fields = fields,
+        .count = (fields == NULL) ? 0U : field_count,
+    };
+    scene_binding_context_t context = {
+        .unix_seconds = now_unix_seconds,
+        .utc_offset_minutes = utc_offset_minutes,
+        .timer_active = timer_active,
+        .timer_remaining_ms = timer_remaining_ms,
+        .timer_pct = timer_pct,
+        .field = sim_scene_field_lookup,
+        .field_ctx = &table,
+    };
+    /* Every binding is evaluated inside this call, so `context` and the
+     * table it points at only have to outlive it. */
+    if (!scene_view_show(&s_scene, &context)) {
+        return false;
+    }
+
+    /* The same fixed tick phase sim_render pins, for the same reason: the
+     * counter is process-global and monotonic, so without this a scene
+     * golden would depend on how many renders ran before it. */
+    s_fake_tick = (s_fake_tick / 1000U + 1U) * 1000U;
+    for (int cycle = 0; cycle < 4; ++cycle) {
+        s_fake_tick += 40;
+        lv_timer_handler();
+    }
     copy_frame_out(orientation_flipped, out_pixels);
     return true;
 }

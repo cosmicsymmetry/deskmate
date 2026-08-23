@@ -22,6 +22,12 @@ pub mod cases;
 /// module doc for why the vendored TTF is patched before being subset.
 pub mod assets;
 
+/// Task 8: rendering a declarative scene through the firmware's own decoder
+/// and `ui/scene_view.c` interpreter, the device-side half of the plugin
+/// display list. See its module doc for why it goes through the wire format
+/// rather than filling a `scene_t` over FFI.
+pub mod scene;
+
 pub const LOGICAL_WIDTH: u32 = 448;
 pub const LOGICAL_HEIGHT: u32 = 368;
 
@@ -70,7 +76,11 @@ pub struct RenderRequest {
 }
 
 /// Errors from simulator setup or rendering.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Deliberately not `Copy`: [`SimError::SceneInvalid`] carries the protocol
+/// validator's own reason, and losing that reason to keep the enum a scalar
+/// would trade the only diagnostic a rejected scene has for nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SimError {
     /// A `Simulator` already exists in this process; LVGL's global state
     /// (via the shim's static display/frame buffers) allows exactly one.
@@ -82,6 +92,14 @@ pub enum SimError {
     RenderFailed,
     /// PNG encoding of a successfully rendered frame failed.
     EncodeFailed,
+    /// Task 8: the scene failed `protocol::validate_scene`, the host mirror of
+    /// the device's `scene_model_validate()`. Caught before encoding, so the
+    /// reason survives; the device would have refused the same scene with no
+    /// reason attached.
+    SceneInvalid(protocol::MessageError),
+    /// Task 8: an asset a scene names could not be put in the simulator's
+    /// asset store — a full store, or a malformed image.
+    AssetRegistrationFailed,
 }
 
 impl fmt::Display for SimError {
@@ -91,6 +109,10 @@ impl fmt::Display for SimError {
             SimError::InitFailed => "LVGL simulator initialization failed",
             SimError::RenderFailed => "template render failed",
             SimError::EncodeFailed => "PNG encoding failed",
+            SimError::SceneInvalid(reason) => {
+                return write!(f, "scene rejected by the protocol validator: {reason}");
+            }
+            SimError::AssetRegistrationFailed => "scene asset registration failed",
         };
         f.write_str(message)
     }
@@ -135,7 +157,7 @@ unsafe extern "C" {
 /// copying at the NUL and renders everything before it; truncating here
 /// instead of blanking matches that behavior so the preview shows the same
 /// prefix the firmware would.
-fn truncated_cstring(s: &str) -> CString {
+pub(crate) fn truncated_cstring(s: &str) -> CString {
     match CString::new(s) {
         Ok(cstring) => cstring,
         Err(err) => {

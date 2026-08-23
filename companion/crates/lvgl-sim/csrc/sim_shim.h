@@ -41,3 +41,68 @@ bool sim_render_asset_font(const uint8_t *digest,
                            const char *text,
                            bool orientation_flipped,
                            uint16_t *out_pixels);
+
+/* ---------------------------------------------------------------------
+ * Task 8 (stage 2a): scene rendering.
+ * ------------------------------------------------------------------ */
+
+/* One `field.<name>` binding's current value, as a provider would have
+ * reported it. Looked up by name, exactly as the device's
+ * scene_field_fn does. */
+typedef struct {
+    const char *name;
+    const char *value;
+} sim_scene_field_t;
+
+/* Registers an asset blob under `digest` in the RAM-backed asset store,
+ * idempotently per digest (a second registration of the same digest is a
+ * no-op, not an error, so a case may register on every render). `kind` is
+ * an asset_kind_t: 1 font, 2 icon font, 3 image. Returns false if the
+ * store is full or the arguments are empty.
+ *
+ * Font assets reach ui/scene_view.c through font_registry_acquire();
+ * image assets reach it through the resolver sim_render_scene installs
+ * with scene_view_set_asset_resolver(). Both read this one store. */
+bool sim_asset_register(const uint8_t *digest, const uint8_t *bytes,
+                        uint32_t len, uint8_t kind);
+
+/* Wraps `width` x `height` host-endian RGB565 `pixels` in the LVGL binary
+ * image layout an `image` node expects -- an lv_image_header_t followed by
+ * the pixel data, which is what scene_view.c's build_image() reads back.
+ *
+ * The header is built here rather than in Rust on purpose: it is a
+ * bitfield struct whose byte layout is the compiler's business, and a
+ * caller that guessed it wrong would produce a blob the renderer silently
+ * refuses. Callers own the pixels; this owns only the wrapper.
+ *
+ * Returns the number of bytes written to `out`, or 0 if `out_capacity` is
+ * too small or an argument is invalid. */
+size_t sim_build_rgb565_image(int32_t width, int32_t height,
+                              const uint16_t *pixels, uint8_t *out,
+                              size_t out_capacity);
+
+/* Decodes `payload` -- the standalone CBOR scene map firmware's
+ * scene_decode() takes, as written by protocol::encode_scene_payload --
+ * and renders it through ui/scene_view.c's interpreter.
+ *
+ * Going through the decoder rather than filling a scene_t over FFI is the
+ * point: the device builds its scene_t from these same bytes with this
+ * same code, so the parity gate compares two renders of one decode path,
+ * not a render of the wire against a render of a hand-built struct.
+ *
+ * The binding context is assembled from the remaining arguments;
+ * `fields` resolves `field.<name>` bindings and may be NULL when
+ * `field_count` is 0. `orientation_flipped` selects the 270° mount, as in
+ * sim_render. Writes 448*368 RGB565 pixels (logical landscape) into
+ * out_pixels.
+ *
+ * Returns false -- leaving out_pixels untouched -- if the payload does not
+ * decode, or if scene_view_show() refuses the scene (an asset it could not
+ * acquire, an allocation failure). Any asset a node names must already be
+ * registered with sim_asset_register(). */
+bool sim_render_scene(const uint8_t *payload, size_t payload_length,
+                      int16_t utc_offset_minutes, int64_t now_unix_seconds,
+                      bool timer_active, uint32_t timer_remaining_ms,
+                      uint8_t timer_pct, const sim_scene_field_t *fields,
+                      size_t field_count, bool orientation_flipped,
+                      uint16_t *out_pixels);

@@ -7,6 +7,11 @@ rust-version.workspace = true
 
 [dependencies]
 png = "0.17"
+# Task 8: the scene model and its CBOR encoder. `render_scene` hands the
+# firmware's own scene_decode() the bytes protocol::encode_scene_payload
+# writes, so the simulator and the device build their scene_t from the same
+# payload with the same decoder.
+protocol = { path = "../protocol" }
 
 [dev-dependencies]
 # Task 12: verifies assets::INTER_SUBSET_SHA256 still matches the committed

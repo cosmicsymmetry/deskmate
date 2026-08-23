@@ -53,10 +53,15 @@ of letting code and documentation diverge.
   config contract is `docs/config/v3.md`. The V1 playlists plan
   (`docs/superpowers/plans/2026-08-11-deskmate-v1-playlists.md`) is delivered: schema v4
   replaces per-card `presence` and the global carousel with the card library and named
-  playlists, one active, while preserving the wire and firmware; the current frozen
-  contract is `docs/config/v4.md`. That plan also **FIXED** the validation-mislabeling
-  defect: a validation failure preserves genuine last-good state, remains typed, and is
-  never presented as "your last working settings". M4 Task 3 (the `AnalogClock`,
+  playlists, one active, while preserving the wire and firmware. Schema v4 was
+  superseded by **v5** on 2026-08-22 (`0c7c467`, "reshape config assets for runtime
+  fonts"); the current frozen contract is `docs/config/v5.md`. A server built before
+  that commit rejects every save with `schema version 5 is not supported; expected 4`,
+  so redeploy the server whenever the schema moves — the app and the server carry
+  independent copies of `CURRENT_SCHEMA_VERSION`. That plan also **FIXED** the
+  validation-mislabeling defect: a validation failure preserves genuine last-good
+  state, remains typed, and is never presented as "your last working settings".
+  M4 Task 3 (the `AnalogClock`,
   `BigNumberLabel`, and `IconBadgeText` templates; wire kinds 4-6) is complete —
   `CURRENT_CAPABILITIES` is now `11` (core widgets | config rotation | extended
   templates) — and was physically verified on 2026-08-11, recorded in
@@ -229,9 +234,14 @@ of letting code and documentation diverge.
 - **The server is deployed and live at `deskmate.rodi.one`**, on the owner's homelab
   (docker-vm), behind Cloudflare → cloudflared → Caddy, under the systemd unit in
   `companion/crates/server/deploy/`. It is built for linux/x86_64 in a throwaway
-  `rust:1.97-bookworm` container over an rsync'd copy of `companion/` — no Rust toolchain
-  on the VM. Device URL is `wss://deskmate.rodi.one/v1/device/link`. Redeploy from a
-  `git archive HEAD` export, never the working tree.
+  container matching `companion/rust-toolchain.toml` (**`rust:1.98-bookworm`** since the
+  1.98.0 pin) over an rsync'd copy of `companion/` — no Rust toolchain on the VM. Reach
+  the VM over **Tailscale** (`docker-vm`, 100.93.166.123): `~/.ssh/config` pins its LAN
+  address, which is unreachable from any other network. `sudo -n` works there, and a
+  previous deploy leaves a root-owned `companion/target/` — keep it and replace only the
+  sources, which turns a cold build into roughly 40 seconds. Device URL is
+  `wss://deskmate.rodi.one/v1/device/link`. Redeploy from a `git archive HEAD` export,
+  never the working tree.
 - **Device identities persist as SHA-256 digests, never as tokens.** Minting is the only
   path that needs the plaintext; authentication only compares. Verified on the live
   deployment: the plaintext does not appear in the store file, and a pre-restart token

@@ -3325,3 +3325,71 @@ already `FAILED` it produces exactly this — failed with no reason. Not diagnos
 The catalog was reverted to `v2.0.0-gate6` so the device does not retry a failing 1.5 MB
 download daily over a weak link. `v2.0.0-gate11.bin` remains published and ready to pin
 when the retest happens.
+
+## The board's identity is `dev-0005`, and the registry is the only source for it — 2026-08-23
+
+Configuring the Mac app against the server failed twice in a row this morning for two
+unrelated reasons. Both are recorded because both cost real time and neither is
+discoverable from the app's own error text.
+
+### The current device identity is `dev-0005`
+
+This file said `dev-0003` (see the 2026-08-18 entry), and it was three identities stale.
+The live registry at `/var/lib/deskmate/configs/device-identities.json` holds
+`dev-0001` … `dev-0005` with `next_sequence: 5`, and the server log shows the board
+dialling in continuously as `dev-0005`:
+
+```
+09:39:18  INFO server::device_link: device link established  device_id=dev-0005
+```
+
+Every re-pair mints a new identity — that is the "a tier round-trip costs a device
+identity" rule in CLAUDE.md, seen from the other side. **Read the registry, not this
+file, when you need the board's current id.** A prose note in a document cannot track a
+value that changes whenever someone re-pairs.
+
+Pushing a config to a stale-but-minted id **succeeds and reports success**. `PUT
+/v1/devices/{id}/config` accepts a config for any minted identity whether or not a device
+is attached, because a device must be configurable while unplugged; nothing in the
+protocol distinguishes "stored for later" from "delivered". The app's confirmation was
+truthful — the save reached the server — and the panel simply never changed.
+
+The reliable tell is `GET /v1/devices/{id}`: **`connected: false` together with
+`last_seen_unix_ms: null` and no `snapshot` means the identity has never been used at
+all.** Since `12e5f4d` made runtimes per-device and long-lived, any identity that has ever
+connected retains a runtime and still returns a snapshot while disconnected. Absent
+snapshot is therefore a much stronger signal than a false `connected`.
+
+Orphans left in place, not pruned: `dev-0003.json` and `dev-0004.json` configs, plus the
+dead `dev-0001`/`dev-0002` identities. Deleting an identity is irreversible — only digests
+are stored — so this needs an explicit decision rather than a tidy-up.
+
+### The deployed server was a schema version behind the app
+
+Before the id problem was visible, every save was rejected with:
+
+```json
+{"path":"schema_version","code":"unsupported-version",
+ "message":"schema version 4 is not supported; expected 5"}
+```
+
+The app and the server carry **independent** copies of `CURRENT_SCHEMA_VERSION`. Schema v5
+landed 2026-08-22 in `0c7c467`; the deployed binary was built 2026-08-21 13:23. Redeploy
+the server whenever the schema moves — the mismatch surfaces only as a validation failure
+on the first save, which reads like a config problem rather than a deploy problem.
+
+Redeploy notes worth keeping: reach the VM over **Tailscale** (`docker-vm`,
+100.93.166.123), because `~/.ssh/config` pins its LAN address `192.168.8.20`, which is
+unreachable from any other network. The build container must match
+`companion/rust-toolchain.toml` (**`rust:1.98-bookworm`** since the 1.98.0 pin), and the
+previous deploy leaves a root-owned `companion/target/` — keep it and replace only the
+sources, which turns a cold build into ~40 seconds. Verify without writing anything by
+PUTting a deliberately old-versioned body and reading which version the server names back.
+
+### Unrelated observation, not diagnosed
+
+`DESKMATE_SERVER_BIND=192.168.8.20:8443` — a LAN interface, not the loopback the runbook
+specifies. The tunnel is the only thing that needs to reach the server, so this exposes the
+admin surface, guarded by one bearer token, to the whole LAN. Also `systemctl` reported
+`Consumed 46min 24.911s CPU time` across roughly two days with no device attached for most
+of it. Neither was changed.

@@ -10,6 +10,7 @@ idf_component_register(
          "core/protocol_frame.c"
          "core/protocol_message.c"
          "core/reconnect_backoff.c"
+         "core/scene_model.c"
          "core/template_fields.c" "core/timefmt.c" "core/widget_model.c"
          "link/asset_flash.c"
          "link/dev_capture.c" "link/net_link.c" "link/net_store.c"

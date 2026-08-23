@@ -21,6 +21,7 @@ firmware/host_tests/test_ota_policy
 firmware/host_tests/test_reconnect_backoff
 firmware/host_tests/test_asset_store
 firmware/host_tests/test_asset_transfer
+firmware/host_tests/test_scene_model
 firmware/host_tests/*.dSYM/
 companion/target/
 companion/apps/deskmate/node_modules/

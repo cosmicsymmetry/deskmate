@@ -7,7 +7,9 @@ use protocol::{
     CURRENT_CAPABILITIES, DeviceEvent, ErrorCode, ErrorResponse, EventAction, EventKind, Field,
     FieldValue, Frame, HeartbeatAck, InterruptPolicy, MAX_CONFIG_SCREENS, MAX_CONFIG_WIDGETS,
     MAX_DEVICE_TOKEN_LEN, MAX_PAYLOAD_SIZE, MAX_PROTOCOL_VERSION, MAX_WIRE_FRAME, Message,
-    NetworkConfig, OtaState, PushData, ScreenConfig, SizeClass, StatusResponse, TYPE_ASSET_BEGIN,
+    NetworkConfig, OtaState, PushData, PushScene, Scene, SceneAlign, SceneArc, SceneFont,
+    SceneFontTier, SceneGlyph, SceneImage, SceneLine, SceneNode, SceneRect, SceneScale, SceneText,
+    SceneValue, ScreenConfig, SizeClass, StatusResponse, TYPE_ASSET_BEGIN, TYPE_PUSH_SCENE,
     TapAction, TemplateKind, Tier, TimeSync, TriggerInterrupt, WidgetConfig, WifiState,
     encode_message,
 };
@@ -22,6 +24,120 @@ fn digest_pattern(start: u8) -> [u8; 32] {
         *byte = start.wrapping_add(u8::try_from(index).unwrap());
     }
     digest
+}
+
+/// A scene reaching every corner of the format at once.
+///
+/// All seven node kinds; a text node bound to a clock and another carrying a
+/// literal with its optional align/colour/ellipsize set; an arc with an
+/// `end_binding` and a full-turn sweep spelled the way the renderer reads one
+/// (270 -> 630, not start == end); coordinates past 255 so the multi-byte CBOR
+/// integer forms are exercised in both directions; and colours that are
+/// neither 0 nor 0xFFFFFF, so a byte-order or default-omission disagreement
+/// between the two encoders changes the file instead of hiding in it.
+///
+/// An all-minimal scene would pass even if the encoders disagreed, which is
+/// why `push_scene_min.bin` exists alongside this rather than instead of it:
+/// that one is the omitted-optional-keys case, this one is the present-keys
+/// case, and only the pair covers the canonical emission rule in both
+/// directions.
+fn rich_scene() -> Scene {
+    Scene {
+        revision: 4_294_967_295,
+        background: 0x0011_2233,
+        nodes: vec![
+            SceneNode::Rect(SceneRect {
+                x: 0,
+                y: 0,
+                w: 448,
+                h: 368,
+                radius: 24,
+                fill: 0x0018_1A1F,
+                opacity: 0xC8,
+            }),
+            SceneNode::Arc(SceneArc {
+                cx: 224,
+                cy: 184,
+                r: 160,
+                start_deg: 270,
+                end_deg: 630,
+                width: 12,
+                color: 0x00FF_9F0A,
+                rounded: true,
+                end_binding: "timer.pct".into(),
+            }),
+            SceneNode::Line(SceneLine {
+                xs: vec![224, 300, 380],
+                ys: vec![184, 120, 96],
+                width: 6,
+                color: 0x0032_D74B,
+            }),
+            SceneNode::Text(SceneText {
+                x: 16,
+                baseline_y: 300,
+                w: 416,
+                align: SceneAlign::Center,
+                font: SceneFont::Baked(SceneFontTier::Hero),
+                color: 0x00F2_F2F7,
+                value: SceneValue::Binding("time:HH:mm".into()),
+                ellipsize: false,
+            }),
+            SceneNode::Text(SceneText {
+                x: 16,
+                baseline_y: 340,
+                w: 416,
+                align: SceneAlign::Left,
+                font: SceneFont::Asset {
+                    digest: digest_pattern(0xA0),
+                    pixel_size: 28,
+                },
+                color: 0,
+                value: SceneValue::Literal("Wednesday 23 August".into()),
+                ellipsize: true,
+            }),
+            SceneNode::Image(SceneImage {
+                x: 320,
+                y: 24,
+                w: 96,
+                h: 96,
+                digest: digest_pattern(0xB0),
+                recolor: true,
+                color: 0x0064_D2FF,
+            }),
+            SceneNode::Glyph(SceneGlyph {
+                x: 24,
+                baseline_y: 120,
+                size: 64,
+                digest: digest_pattern(0xC0),
+                name: "cloud-rain".into(),
+                color: 0x00FF_D60A,
+            }),
+            SceneNode::Scale(SceneScale {
+                x: 74,
+                y: 34,
+                box_size: 300,
+                total_tick_count: 361,
+                major_tick_every: 30,
+                major_tick_color: 0x00BF_5AF2,
+            }),
+        ],
+    }
+}
+
+/// The other half of the pair: every optional key at its default, so the file
+/// pins that both encoders OMIT them rather than spelling them out.
+fn minimal_scene() -> Scene {
+    Scene {
+        revision: 1,
+        background: 0,
+        nodes: vec![SceneNode::Rect(SceneRect {
+            x: 4,
+            y: 5,
+            w: 10,
+            h: 11,
+            ..SceneRect::default()
+        })],
+    }
 }
 
 fn minimum_config() -> ApplyConfig {
@@ -561,6 +677,36 @@ fn fixture_messages() -> Vec<(&'static str, u32, Message)> {
             22,
             Message::AssetCommit(AssetCommit {
                 digest: digest_pattern(0x70),
+            }),
+        ),
+        (
+            "push_scene.bin",
+            24,
+            Message::PushScene(PushScene {
+                card_id: "clock".into(),
+                revision: 12,
+                scene: rich_scene(),
+            }),
+        ),
+        (
+            "ack_scene.bin",
+            24,
+            // PushScene joins PushData and ApplyConfig as the third
+            // acknowledged type whose revision is required rather than
+            // optional; this fixture pins that across languages.
+            Message::Ack(Ack {
+                acknowledged_type: TYPE_PUSH_SCENE,
+                revision: Some(12),
+                already_present: None,
+            }),
+        ),
+        (
+            "push_scene_min.bin",
+            25,
+            Message::PushScene(PushScene {
+                card_id: "c".into(),
+                revision: 1,
+                scene: minimal_scene(),
             }),
         ),
         (

@@ -46,6 +46,9 @@ fn valid_golden_frames_decode() {
         "asset_chunk.bin",
         "asset_commit.bin",
         "asset_release.bin",
+        "push_scene.bin",
+        "push_scene_min.bin",
+        "ack_scene.bin",
     ] {
         let frame =
             decode_wire_frame(&fixture(name)).unwrap_or_else(|error| panic!("{name}: {error}"));
@@ -179,8 +182,68 @@ fn current_capabilities_advertise_implemented_features() {
             | protocol::CAPABILITY_EXTENDED_TEMPLATES
             | protocol::CAPABILITY_ASSET_TRANSFER
             | protocol::CAPABILITY_FIRMWARE_UPDATE
-            | protocol::CAPABILITY_NETWORKING,
-        "implemented asset transfer, firmware update, and networking features must be advertised"
+            | protocol::CAPABILITY_NETWORKING
+            | protocol::CAPABILITY_SCENE_RENDER,
+        "implemented asset transfer, firmware update, networking, and scene \
+         rendering features must be advertised"
     );
-    assert_eq!(protocol::CURRENT_CAPABILITIES, 235);
+    assert_eq!(protocol::CURRENT_CAPABILITIES, 491);
+}
+
+#[test]
+fn push_scene_fixtures_carry_what_they_are_meant_to() {
+    let frame = decode_wire_frame(&fixture("push_scene.bin")).unwrap();
+    let protocol::Message::PushScene(push) = decode_message(&frame).unwrap() else {
+        panic!("push_scene.bin should be a PushScene");
+    };
+    assert_eq!(push.card_id, "clock");
+    assert_eq!(push.revision, 12);
+    // Every node kind, once: an all-minimal fixture would pass even if the
+    // two encoders disagreed about the kinds it left out.
+    assert_eq!(push.scene.nodes.len(), 8);
+    let kinds: Vec<std::mem::Discriminant<protocol::SceneNode>> = push
+        .scene
+        .nodes
+        .iter()
+        .map(std::mem::discriminant)
+        .collect();
+    for probe in [
+        protocol::SceneNode::Rect(protocol::SceneRect::default()),
+        protocol::SceneNode::Arc(protocol::SceneArc::default()),
+        protocol::SceneNode::Line(protocol::SceneLine::default()),
+        protocol::SceneNode::Text(protocol::SceneText::default()),
+        protocol::SceneNode::Image(protocol::SceneImage::default()),
+        protocol::SceneNode::Glyph(protocol::SceneGlyph::default()),
+        protocol::SceneNode::Scale(protocol::SceneScale::default()),
+    ] {
+        assert!(
+            kinds.contains(&std::mem::discriminant(&probe)),
+            "the rich fixture must cover every node kind"
+        );
+    }
+
+    // The minimal fixture is the other half of the canonical emission rule:
+    // every optional key at its default, so the file proves both encoders
+    // omit them rather than spelling them out.
+    let minimal = decode_wire_frame(&fixture("push_scene_min.bin")).unwrap();
+    let protocol::Message::PushScene(minimal) = decode_message(&minimal).unwrap() else {
+        panic!("push_scene_min.bin should be a PushScene");
+    };
+    assert_eq!(minimal.scene.nodes.len(), 1);
+    let protocol::SceneNode::Rect(rect) = &minimal.scene.nodes[0] else {
+        panic!("the minimal fixture's only node is a rect");
+    };
+    // An omitted opacity means opaque, which is the one default that is not
+    // the zero value.
+    assert_eq!(rect.opacity, u8::MAX);
+    assert_eq!(
+        *rect,
+        protocol::SceneRect {
+            x: 4,
+            y: 5,
+            w: 10,
+            h: 11,
+            ..protocol::SceneRect::default()
+        }
+    );
 }

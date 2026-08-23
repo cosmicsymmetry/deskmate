@@ -98,6 +98,11 @@ static bool glyph_within_canvas(const scene_glyph_t *glyph)
     if (glyph->x > SCENE_CANVAS_WIDTH - glyph->size) {
         return false;
     }
+    /* baseline_y is a baseline, not a box edge -- same reasoning as
+     * text_within_canvas above. This module has no font metrics, so it
+     * cannot know a baseline-anchored glyph's true vertical extent; only
+     * the baseline itself is checked against the canvas, and the renderer
+     * clips. */
     if (glyph->baseline_y < 0 || glyph->baseline_y > SCENE_CANVAS_HEIGHT) {
         return false;
     }
@@ -161,6 +166,10 @@ scene_model_result_t scene_model_validate(const scene_t *scene)
             if (!arc_within_canvas(&node->value.arc)) {
                 return SCENE_MODEL_ERR_GEOMETRY;
             }
+            if (!nul_terminated(node->value.arc.end_binding,
+                                 sizeof node->value.arc.end_binding)) {
+                return SCENE_MODEL_ERR_TEXT;
+            }
             break;
 
         case SCENE_NODE_LINE:
@@ -184,6 +193,14 @@ scene_model_result_t scene_model_validate(const scene_t *scene)
             if (font_result != SCENE_MODEL_OK) {
                 return font_result;
             }
+            switch (text->align) {
+            case SCENE_ALIGN_LEFT:
+            case SCENE_ALIGN_CENTER:
+            case SCENE_ALIGN_RIGHT:
+                break;
+            default:
+                return SCENE_MODEL_ERR_GEOMETRY;
+            }
             break;
         }
 
@@ -197,6 +214,10 @@ scene_model_result_t scene_model_validate(const scene_t *scene)
         case SCENE_NODE_GLYPH:
             if (!glyph_within_canvas(&node->value.glyph)) {
                 return SCENE_MODEL_ERR_GEOMETRY;
+            }
+            if (!nul_terminated(node->value.glyph.name,
+                                 sizeof node->value.glyph.name)) {
+                return SCENE_MODEL_ERR_TEXT;
             }
             break;
 

@@ -11,21 +11,22 @@
  * scene_model_validate() (core/scene_model.c) is called once at the top of
  * scene_view_show(). What it guarantees, for every node, is: geometry inside
  * the 448x368 canvas with no int32 wrap, non-negative extents,
- * NUL-terminated text/binding/glyph-name arrays, a legal text alignment on
- * TEXT nodes, a legal font reference on TEXT nodes, 2..SCENE_MAX_LINE_POINTS
- * line points, and -- for SCALE -- 2..SCENE_SCALE_MAX_TOTAL_TICKS total
- * ticks with major_tick_every in [1, total_tick_count]. None of that is
- * checked again here. Redundant defensive validation has concealed four
- * defects on this plan already; the model is the one place those bounds
- * live.
+ * NUL-terminated text/binding/glyph-name/arc-end-binding arrays, a legal
+ * text alignment on TEXT nodes, a legal font reference on TEXT nodes,
+ * 2..SCENE_MAX_LINE_POINTS line points, and -- for SCALE --
+ * 2..SCENE_SCALE_MAX_TOTAL_TICKS total ticks with major_tick_every in
+ * [1, total_tick_count]. None of that is checked again here. Redundant
+ * defensive validation has concealed four defects on this plan already; the
+ * model is the one place those bounds live.
  *
  * This list is load-bearing -- the whole safety argument of this file is that
  * it is exact -- so what it deliberately does NOT cover is spelled out too:
  *
  *  - A GLYPH's font is not validated. validate_font() runs only for
- *    SCENE_NODE_TEXT (scene_model.c:192); a glyph carries a bare digest and
- *    a `size` checked only as 0 <= size <= canvas (scene_model.c:92-97), so
- *    a size of 0 reaches font_registry_acquire(). That is safe without a
+ *    SCENE_NODE_TEXT, at its call site in scene_model_validate()'s TEXT
+ *    case; a glyph carries a bare digest and a `size` checked only as
+ *    0 <= size <= canvas, in glyph_within_canvas(), so a size of 0 reaches
+ *    font_registry_acquire(). That is safe without a
  *    check here because the registry rejects pixel_size <= 0 and returns
  *    NULL, and NULL refuses the scene -- which is the same outcome any other
  *    unavailable face gets. It is safe by the registry's contract, not by

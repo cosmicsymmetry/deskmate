@@ -10,6 +10,7 @@
 #include "esp_lvgl_port.h"
 #include "lvgl.h"
 #include "ota_screen.h"
+#include "scene_view.h"
 #include "template_view.h"
 #include "ui_command_queue.h"
 
@@ -83,6 +84,12 @@ static void consume_command(const ui_command_t *command)
         template_view_deactivate();
         carousel_unbind();
         clock_screen_show_in_lvgl();
+        /* Loading the clock deletes the scene's screen (auto_del), which is
+         * what drops its hold on every asset font it acquired. This covers
+         * the one case that does not: clock_screen_show_in_lvgl()
+         * early-returns when the clock is already the active screen, which
+         * would leave a built-but-unshown scene alive. */
+        (void)scene_view_destroy();
         s_active_widget_id[0] = '\0';
         break;
     case UI_COMMAND_SHOW_VIEW:
@@ -127,12 +134,17 @@ static void consume_command(const ui_command_t *command)
         }
         break;
     case UI_COMMAND_LINK_STATE: {
-        bool template_was_active = template_view_active();
+        /* A scene counts as host content exactly as a template view does:
+         * both are the host's face, and losing the host must restore the
+         * standalone clock rather than leave a frozen one up. */
+        bool host_content_was_active =
+            template_view_active() || scene_view_active();
         clock_screen_set_online(command->online);
-        if (!command->online && template_was_active) {
+        if (!command->online && host_content_was_active) {
             template_view_deactivate();
             carousel_unbind();
             clock_screen_show_in_lvgl();
+            (void)scene_view_destroy();
             s_active_widget_id[0] = '\0';
         }
         break;

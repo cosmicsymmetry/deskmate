@@ -4,8 +4,10 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdatomic.h>
+#include <stdio.h>
 #include <string.h>
 #include <sys/time.h>
+#include <time.h>
 
 #include "board/board.h"
 #include "board/display.h"
@@ -18,6 +20,7 @@
 #include "core/ota_policy.h"
 #include "core/protocol_frame.h"
 #include "core/protocol_message.h"
+#include "core/scene_binding.h"
 #include "core/widget_model.h"
 #include "esp_app_desc.h"
 #include "esp_check.h"
@@ -36,7 +39,10 @@
 #include "link/ota.h"
 #include "link/usb_link.h"
 #include "link/wifi_station.h"
+#include "ui/clock_screen.h"
 #include "ui/font_registry.h"
+#include "ui/ota_screen.h"
+#include "ui/scene_view.h"
 #include "ui/ui_runtime.h"
 
 #define PROTOCOL_TASK_STACK_SIZE 8192U
@@ -47,6 +53,11 @@
 #define PROTOCOL_WRITE_TIMEOUT_MS 200U
 #define PROTOCOL_EVENT_WRITE_TIMEOUT_MS 10U
 #define PROTOCOL_EVENTS_PER_POLL 2U
+// The scene's binding tick, matched to ui/template_view.c's 250 ms so a
+// seconds-resolution `time:` binding lands on the same cadence the C faces
+// redraw at. This task's read timeout is 50 ms, so the loop below sees this
+// deadline with plenty of margin.
+#define PROTOCOL_SCENE_TICK_MS 250U
 
 typedef struct {
     protocol_decoder_t decoder;
@@ -73,6 +84,24 @@ typedef struct {
     // this flag is what still remembers it needs reclaiming. See
     // abandon_pending_reservation().
     bool asset_reservation_pending;
+    // The scene currently on the panel, retained after scene_view_show()
+    // consumed it. It is kept for exactly one caller: the asset-GC teardown
+    // in dispatch_asset_release(), which must destroy the renderer's objects
+    // (that is what releases their font faces) before compaction moves the
+    // blobs those faces were rasterized from, and then put the scene back.
+    // Without a retained copy there is nothing to put back -- the decoded
+    // one lives in `message`, which every subsequent Ack or Error overwrites.
+    // ~6 KB, and in PSRAM for the same reason protocol_message_t's copy is.
+    scene_t scene;
+    char scene_card_id[PROTOCOL_MAX_CARD_ID_LENGTH + 1U];
+    bool scene_live;
+    uint64_t scene_tick_ms;
+    // uptime at the last PushData for the scene's card, so a running timer
+    // binding counts down between pushes instead of freezing.
+    uint64_t scene_timer_anchor_ms;
+    // One slot, for rendering an integer field into text; see
+    // scene_field_lookup() for why one is enough.
+    char scene_field_text[24];
     uint8_t wire[PROTOCOL_MAX_WIRE_FRAME];
     uint32_t valid_frames;
     uint32_t malformed_frames;
@@ -200,6 +229,13 @@ static bool show_carousel_screen(protocol_context_t *context)
     strcpy(view->next_screen_id, config->screens[next].screen_id);
     strcpy(view->next_widget_id, config->screens[next].widget_id);
     view->tap_action = widget->tap_action;
+    // A template view is on its way to the panel; ui_runtime's queue
+    // consumer loads its screen with auto_del, which deletes the scene's
+    // screen and (through ui/scene_view.c's delete callback) drops its hold
+    // on every asset face. Stop ticking bindings for a scene on its way out:
+    // the tick would be a harmless no-op once that delete lands, but it
+    // would take the LVGL lock four times a second to discover that.
+    context->scene_live = false;
     return ui_runtime_show_view(widget->widget_id, widget->template_kind,
                                 widget->size_class, fields, view);
 }
@@ -224,6 +260,13 @@ static bool show_active_interrupt(protocol_context_t *context)
     strcpy(view->screen_id, context->interrupts.saved_screen_id);
     view->interrupt = true;
     view->interrupt_token = active->token;
+    // A template view is on its way to the panel; ui_runtime's queue
+    // consumer loads its screen with auto_del, which deletes the scene's
+    // screen and (through ui/scene_view.c's delete callback) drops its hold
+    // on every asset face. Stop ticking bindings for a scene on its way out:
+    // the tick would be a harmless no-op once that delete lands, but it
+    // would take the LVGL lock four times a second to discover that.
+    context->scene_live = false;
     return ui_runtime_show_view(widget->widget_id, widget->template_kind,
                                 PROTOCOL_SIZE_FULL, fields, view);
 }
@@ -233,6 +276,168 @@ static bool show_current_content(protocol_context_t *context)
     return interrupt_state_active(&context->interrupts) != NULL
                ? show_active_interrupt(context)
                : show_carousel_screen(context);
+}
+
+// ------------------------------------------------------------------ scenes
+
+/* scene_binding.h's scene_field_fn: resolves `field.<name>` against the
+ * pushed provider data for the widget whose id matches the live scene's card
+ * id. Card ids and widget ids are the same 32-byte identifier space (see
+ * PROTOCOL_MAX_CARD_ID_LENGTH) and PushData is still the only message that
+ * carries provider values, so the widget model IS the field source -- there
+ * is no second store to keep in step with it.
+ *
+ * NULL for an unknown name is not an error: scene_binding_evaluate() renders
+ * the "--" placeholder for it, which is exactly the state of a provider that
+ * has not reported yet. */
+static const char *scene_field_lookup(void *ctx, const char *name)
+{
+    protocol_context_t *context = ctx;
+    if (context == NULL || name == NULL) {
+        return NULL;
+    }
+    const template_field_state_t *fields = widget_model_widget_fields(
+        &context->model, context->scene_card_id);
+    if (fields == NULL) {
+        return NULL;
+    }
+    const template_field_value_t *value = template_fields_get(fields, name);
+    if (value == NULL) {
+        return NULL;
+    }
+    if (value->type == PROTOCOL_FIELD_TEXT) {
+        return value->value.text;
+    }
+    if (value->type == PROTOCOL_FIELD_BOOLEAN) {
+        return value->value.boolean ? "true" : "false";
+    }
+    // One scratch slot is enough because scene_binding_evaluate() copies the
+    // returned string into the caller's buffer before scene_view asks for
+    // the next binding; two integer-valued fields in one scene never hold
+    // this at the same time.
+    snprintf(context->scene_field_text, sizeof(context->scene_field_text),
+             "%lld", (long long)value->value.integer);
+    return context->scene_field_text;
+}
+
+/* Fills the timer half of the binding context from the same progress-ring
+ * snapshot ui/templates/progress_ring.c draws from, counted down locally
+ * between pushes exactly as that file's current_remaining_ms() does.
+ * Without the local countdown a `timer.remaining:` binding would freeze
+ * between host pushes, on a device whose whole reason for evaluating
+ * bindings itself is that the face keeps moving when the link does not.
+ *
+ * A card that is not a progress ring leaves timer_active false, which
+ * renders the "--" placeholder -- the same thing an absent field renders.
+ * `timer_active` means a timer snapshot exists, not that it is running: a
+ * paused pomodoro must still show its remaining time. */
+static void fill_timer_bindings(const protocol_context_t *context,
+                                scene_binding_context_t *binding)
+{
+    const template_field_state_t *fields = widget_model_widget_fields(
+        &context->model, context->scene_card_id);
+    if (fields == NULL ||
+        fields->template_kind != PROTOCOL_TEMPLATE_PROGRESS_RING) {
+        return;
+    }
+    const template_field_value_t *duration =
+        template_fields_get(fields, "duration_seconds");
+    const template_field_value_t *remaining =
+        template_fields_get(fields, "remaining_seconds");
+    const template_field_value_t *running =
+        template_fields_get(fields, "running");
+    if (duration == NULL || remaining == NULL || running == NULL ||
+        duration->value.integer <= 0) {
+        return;
+    }
+    int64_t total_ms = duration->value.integer * INT64_C(1000);
+    int64_t remaining_ms = remaining->value.integer * INT64_C(1000);
+    if (running->value.boolean) {
+        remaining_ms -= (int64_t)(uptime_ms() - context->scene_timer_anchor_ms);
+    }
+    if (remaining_ms < 0) {
+        remaining_ms = 0;
+    } else if (remaining_ms > total_ms) {
+        remaining_ms = total_ms;
+    }
+    binding->timer_active = true;
+    binding->timer_remaining_ms = (uint32_t)remaining_ms;
+    binding->timer_pct =
+        (uint8_t)(((total_ms - remaining_ms) * INT64_C(100)) / total_ms);
+}
+
+static void fill_scene_binding_context(protocol_context_t *context,
+                                       scene_binding_context_t *binding)
+{
+    memset(binding, 0, sizeof(*binding));
+    // The same clock ui/clock_screen.c reads: TimeSync calls settimeofday(),
+    // so a `time:` binding and the standalone clock can never disagree.
+    binding->unix_seconds = (int64_t)time(NULL);
+    binding->utc_offset_minutes = context->link.utc_offset_minutes;
+    binding->field = scene_field_lookup;
+    binding->field_ctx = context;
+    fill_timer_bindings(context, binding);
+}
+
+typedef enum {
+    SHOW_SCENE_OK = 0,
+    /* The scene could not be rendered exactly as specified: an unallocatable
+     * object, or an asset that could not be acquired. */
+    SHOW_SCENE_REFUSED,
+    /* Something else owns the panel right now -- retryable, and a different
+     * answer to the host than "your scene is wrong", which it is not. */
+    SHOW_SCENE_BUSY,
+} show_scene_result_t;
+
+/* Builds `scene` onto the panel.
+ *
+ * Called from this task, not handed to ui_runtime's command queue, for a
+ * reason that is not convenience: sizeof(scene_t) is ~6 KB, and ui_command_t
+ * is a pair of file-scope statics in internal DRAM whose combined size is
+ * asserted under 16 KB. Putting a scene through that queue would put ~12 KB
+ * of scene into .bss, on a board where a ~105-byte .bss shift once broke OTA
+ * downloads outright. Passing a pointer through the queue instead would hand
+ * the LVGL task a pointer into `message`, which the very next frame
+ * overwrites. So the handoff is synchronous under lvgl_port_lock(), which is
+ * the mechanism CLAUDE.md names for LVGL calls made outside LVGL callbacks
+ * and the one dispatch_asset_release() already uses for font_registry_reset().
+ * The LVGL task cannot be inside a callback while this lock is held. */
+static show_scene_result_t show_scene(protocol_context_t *context,
+                                      const scene_t *scene)
+{
+    scene_binding_context_t binding;
+    fill_scene_binding_context(context, &binding);
+    if (!lvgl_port_lock(0U)) {
+        return SHOW_SCENE_BUSY;
+    }
+    show_scene_result_t result = SHOW_SCENE_BUSY;
+    // The OTA task owns the panel until it reboots or restores the clock.
+    // ui_runtime's queue consumer drops SHOW_* commands for that reason and
+    // this path does not go through that queue, so it makes the same check.
+    if (!ota_screen_active_in_lvgl()) {
+        result = scene_view_show(scene, &binding) ? SHOW_SCENE_OK
+                                                  : SHOW_SCENE_REFUSED;
+    }
+    lvgl_port_unlock();
+    return result;
+}
+
+/* Re-evaluates the live scene's bindings in place. The clock tick and a
+ * PushData field update both come through here and neither rebuilds the
+ * scene -- that is the whole reason ui/scene_view.c keeps a node -> object
+ * table. Silently does nothing when no scene is live. */
+static void refresh_scene_bindings(protocol_context_t *context)
+{
+    if (!context->scene_live) {
+        return;
+    }
+    scene_binding_context_t binding;
+    fill_scene_binding_context(context, &binding);
+    if (!lvgl_port_lock(0U)) {
+        return;
+    }
+    scene_view_refresh_bindings(&binding);
+    lvgl_port_unlock();
 }
 
 static void transmit(protocol_context_t *context,
@@ -443,8 +648,63 @@ static void dispatch_push_data(protocol_context_t *context,
                                         update.dirty_mask);
         }
     }
+    // The scene's binding context reads its `field.` values straight out of
+    // the widget model updated above, so there is nothing further to copy:
+    // re-evaluating the bindings in place is the whole update. Deliberately
+    // NOT a rebuild -- a rebuild would re-acquire every asset face and
+    // reload the screen to change one label.
+    if (context->scene_live &&
+        strcmp(context->scene_card_id, push->widget_id) == 0) {
+        context->scene_timer_anchor_ms = uptime_ms();
+        refresh_scene_bindings(context);
+    }
     transmit_ack(context, request_id, PROTOCOL_TYPE_PUSH_DATA, true,
                  context->link.latest_revision);
+}
+
+static void dispatch_push_scene(protocol_context_t *context,
+                                uint32_t request_id)
+{
+    const protocol_push_scene_t *push = &context->message.value.push_scene;
+    // Published before the show so the first paint's `field.` and `timer.`
+    // bindings resolve against THIS card rather than the outgoing one, and
+    // restored on refusal so a scene that never rendered cannot redirect the
+    // live scene's lookups.
+    char previous_card_id[sizeof(context->scene_card_id)];
+    memcpy(previous_card_id, context->scene_card_id,
+           sizeof(previous_card_id));
+    if (strcmp(previous_card_id, push->card_id) != 0) {
+        context->scene_timer_anchor_ms = uptime_ms();
+    }
+    memcpy(context->scene_card_id, push->card_id,
+           sizeof(context->scene_card_id));
+
+    show_scene_result_t result = show_scene(context, &push->scene);
+    if (result != SHOW_SCENE_OK) {
+        memcpy(context->scene_card_id, previous_card_id,
+               sizeof(context->scene_card_id));
+        // scene_view_show() refuses without touching the live screen (it
+        // builds onto a candidate screen and loads it only once every node
+        // and every asset succeeded), so whatever was on the panel -- the
+        // previous scene, a template view, or the standalone clock -- is
+        // still on it. This path never blanks the display.
+        if (result == SHOW_SCENE_BUSY) {
+            transmit_error(context, request_id, PROTOCOL_ERROR_BUSY,
+                           "display unavailable");
+        } else {
+            transmit_error(context, request_id, PROTOCOL_ERROR_INVALID_PAYLOAD,
+                           "scene could not be rendered");
+        }
+        return;
+    }
+    // Retained only after the show succeeded, and copied before
+    // transmit_ack() reuses context->message for the reply.
+    context->scene = push->scene;
+    context->scene_live = true;
+    context->scene_tick_ms = uptime_ms();
+    uint32_t revision = push->revision;
+    transmit_ack(context, request_id, PROTOCOL_TYPE_PUSH_SCENE, true,
+                 revision);
 }
 
 static protocol_error_code_t config_error_code(
@@ -814,63 +1074,18 @@ static void dispatch_asset_commit(protocol_context_t *context,
     transmit_ack(context, request_id, PROTOCOL_TYPE_ASSET_COMMIT, false, 0U);
 }
 
-static void dispatch_asset_release(protocol_context_t *context,
-                                   uint32_t request_id)
+/* The mark-dead scan and the compaction, split out so the teardown sequence
+ * below can wrap them: every one of its five failure exits has to be
+ * followed by the same scene rebuild, and duplicating that five times is how
+ * one of them ends up missing it. Returns false with *error_code and
+ * *diagnostic set. */
+static bool collect_released_assets(protocol_context_t *context,
+                                    protocol_error_code_t *error_code,
+                                    const char **diagnostic)
 {
     const protocol_asset_release_t *release =
         &context->message.value.asset_release;
     const asset_store_t *store = asset_flash_store();
-
-    // Compaction below physically moves blob bytes, which invalidates every
-    // lv_font_t rasterized from an asset_flash_map() pointer. So every open
-    // face must be gone before asset_flash_execute_compaction() runs, and
-    // font_registry_reset() is what makes that true. It calls into
-    // LVGL/tiny_ttf (lv_tiny_ttf_destroy), so it runs under lvgl_port_lock()
-    // like every other LVGL mutation this task makes from outside the LVGL
-    // task.
-    //
-    // A nonzero return is a REFUSAL, not a warning: some LVGL object is
-    // still styled with an acquired face (LVGL keeps the bare pointer and
-    // takes no reference of its own -- see font_registry.h's ownership
-    // contract), the registry destroyed nothing, and compaction therefore
-    // must not proceed. Deferring the garbage collection costs the host a
-    // retry; compacting anyway would leave a live screen drawing from moved
-    // bytes.
-    //
-    // This runs FIRST, before the transfer abort below, precisely so the
-    // refusal changes nothing: no record is marked dead, no reservation is
-    // orphaned, and no in-flight transfer is destroyed on behalf of a
-    // collection that then did not happen. A path whose whole point is "let
-    // the host retry" must not leave wreckage behind, and the abort below is
-    // only justified by the mark-dead scan that a refusal never reaches.
-    //
-    // The caller-side recovery, when this device grows a renderer that holds
-    // asset faces (the scene renderer, later in this stage), is to tear that
-    // renderer's objects down here first: destroying them releases their
-    // acquires, the reset then succeeds, compaction runs, and the scene is
-    // rebuilt afterwards against the moved blobs. Until that renderer exists
-    // the only holder is the DESKMATE_DEV_DIAG asset probe
-    // (link/dev_capture.c), which pins its face for as long as its screen is
-    // the active one -- so a release arriving while a probe render is up is
-    // correctly deferred until some other screen replaces it.
-    if (!lvgl_port_lock(0U)) {
-        transmit_error(context, request_id, PROTOCOL_ERROR_INTERNAL,
-                       "display lock unavailable");
-        return;
-    }
-    uint32_t pinned_faces = font_registry_reset();
-    lvgl_port_unlock();
-    if (pinned_faces > 0U) {
-        // font_registry.c has no ESP-IDF include and no LVGL logging config
-        // of its own (see its header), so it hands the count back rather
-        // than logging; this task has a working sink.
-        ESP_LOGW(TAG,
-                "AssetRelease deferred: %u font face(s) still in use",
-                (unsigned)pinned_faces);
-        transmit_error(context, request_id, PROTOCOL_ERROR_BUSY,
-                       "font faces in use");
-        return;
-    }
 
     // An active transfer's reserved-but-uncommitted record is, by
     // definition, absent from `release`'s digest list (the host cannot name
@@ -895,9 +1110,9 @@ static void dispatch_asset_release(protocol_context_t *context,
                                    ASSET_HEADER_BYTES +
                                        index * ASSET_RECORD_BYTES,
                                    bytes, sizeof(bytes)) != 0) {
-            transmit_error(context, request_id, PROTOCOL_ERROR_INTERNAL,
-                           "asset store read failed");
-            return;
+            *error_code = PROTOCOL_ERROR_INTERNAL;
+            *diagnostic = "asset store read failed";
+            return false;
         }
         asset_record_t record;
         if (asset_store_record_decode(bytes, &record) != ASSET_STORE_OK) {
@@ -922,9 +1137,9 @@ static void dispatch_asset_release(protocol_context_t *context,
         }
         if (!keep &&
             asset_store_mark_dead(store, index) != ASSET_STORE_OK) {
-            transmit_error(context, request_id, PROTOCOL_ERROR_INTERNAL,
-                           "asset store mark dead failed");
-            return;
+            *error_code = PROTOCOL_ERROR_INTERNAL;
+            *diagnostic = "asset store mark dead failed";
+            return false;
         }
     }
 
@@ -941,13 +1156,117 @@ static void dispatch_asset_release(protocol_context_t *context,
     if (asset_store_plan_compaction(store, keep_ptrs, release->digest_count,
                                     moves, PROTOCOL_MAX_ASSET_DIGESTS,
                                     &move_count) != ASSET_STORE_OK) {
-        transmit_error(context, request_id, PROTOCOL_ERROR_INTERNAL,
-                       "asset compaction planning failed");
-        return;
+        *error_code = PROTOCOL_ERROR_INTERNAL;
+        *diagnostic = "asset compaction planning failed";
+        return false;
     }
     if (asset_flash_execute_compaction(moves, move_count) != ESP_OK) {
+        *error_code = PROTOCOL_ERROR_INTERNAL;
+        *diagnostic = "asset compaction failed";
+        return false;
+    }
+    return true;
+}
+
+static void dispatch_asset_release(protocol_context_t *context,
+                                   uint32_t request_id)
+{
+    // Compaction physically moves blob bytes, which invalidates every
+    // lv_font_t rasterized from an asset_flash_map() pointer. So every open
+    // face must be gone before asset_flash_execute_compaction() runs, and
+    // font_registry_reset() is what makes that true. It calls into
+    // LVGL/tiny_ttf (lv_tiny_ttf_destroy), so it runs under lvgl_port_lock()
+    // like every other LVGL mutation this task makes from outside the LVGL
+    // task.
+    //
+    // A nonzero return from the reset is a REFUSAL, not a warning: some LVGL
+    // object is still styled with an acquired face (LVGL keeps the bare
+    // pointer and takes no reference of its own -- see font_registry.h's
+    // ownership contract), the registry destroyed nothing, and compaction
+    // therefore must not proceed. Deferring the collection costs the host a
+    // retry; compacting anyway would leave a live screen drawing from moved
+    // bytes.
+    //
+    // That refusal is a safety net and not a solution: a scene holding asset
+    // faces would trip it forever, and asset garbage collection would simply
+    // stop working on this device. The teardown below is the solution, and
+    // it is a SEQUENCE rather than a call:
+    //
+    //   1. load another screen -- scene_view_destroy() refuses while its own
+    //      scene is the active one, so something else has to be on the glass
+    //      first, and the standalone clock is the screen this device always
+    //      has;
+    //   2. destroy the scene, which is what actually releases the faces: its
+    //      objects drop their acquires from their LV_EVENT_DELETE handlers;
+    //   3. reset the registry, which now succeeds;
+    //   4. compact;
+    //   5. rebuild the scene, re-acquiring every face against the moved
+    //      blobs.
+    //
+    // Step 1 is why the retained copy of the scene exists at all: after step
+    // 2 there is nothing left to rebuild from. Note step 1 usually performs
+    // step 2 on its own -- lv_screen_load_anim() with auto_del deletes the
+    // outgoing screen synchronously when time and delay are both 0 -- and
+    // the explicit destroy is what covers the case where the clock screen
+    // was already active and clock_screen_show_in_lvgl() early-returns.
+    //
+    // The rebuild runs on EVERY exit path after the teardown, including the
+    // refusal and each store failure, so that a release which changes
+    // nothing also leaves the panel showing what it was showing. The other
+    // holder of a face is the DESKMATE_DEV_DIAG asset probe
+    // (link/dev_capture.c), which this task cannot tear down; a release
+    // arriving while a probe render is up is still correctly deferred.
+    if (!lvgl_port_lock(0U)) {
         transmit_error(context, request_id, PROTOCOL_ERROR_INTERNAL,
-                       "asset compaction failed");
+                       "display lock unavailable");
+        return;
+    }
+    // Never while the OTA takeover owns the panel: swapping it for the clock
+    // to collect assets would hide a running update. font_registry_reset()
+    // then refuses (the scene still pins its faces) and the host retries,
+    // which is the correct outcome.
+    bool rebuild_scene = context->scene_live && !ota_screen_active_in_lvgl();
+    if (rebuild_scene) {
+        clock_screen_show_in_lvgl();
+        (void)scene_view_destroy();
+        context->scene_live = false;
+    }
+    uint32_t pinned_faces = font_registry_reset();
+    lvgl_port_unlock();
+
+    if (pinned_faces > 0U) {
+        // font_registry.c has no ESP-IDF include and no LVGL logging config
+        // of its own (see its header), so it hands the count back rather
+        // than logging; this task has a working sink.
+        ESP_LOGW(TAG,
+                "AssetRelease deferred: %u font face(s) still in use",
+                (unsigned)pinned_faces);
+        if (rebuild_scene) {
+            context->scene_live =
+                show_scene(context, &context->scene) == SHOW_SCENE_OK;
+        }
+        transmit_error(context, request_id, PROTOCOL_ERROR_BUSY,
+                       "font faces in use");
+        return;
+    }
+
+    protocol_error_code_t error_code = PROTOCOL_ERROR_INTERNAL;
+    const char *diagnostic = "asset release failed";
+    bool collected = collect_released_assets(context, &error_code,
+                                             &diagnostic);
+    if (rebuild_scene) {
+        // Re-acquires every face from the compacted store. A scene naming an
+        // asset the host has just released cannot be rebuilt, and is refused
+        // whole rather than drawn with a substitute face -- the clock stays
+        // up and the host learns from the next Ack's absence of a scene.
+        context->scene_live =
+            show_scene(context, &context->scene) == SHOW_SCENE_OK;
+        if (!context->scene_live) {
+            ESP_LOGW(TAG, "scene not rebuilt after asset collection");
+        }
+    }
+    if (!collected) {
+        transmit_error(context, request_id, error_code, diagnostic);
         return;
     }
     transmit_ack(context, request_id, PROTOCOL_TYPE_ASSET_RELEASE, false, 0U);
@@ -1019,44 +1338,27 @@ static void dispatch_request(protocol_context_t *context,
                        "invalid CBOR payload");
         return;
     }
-    if (context->message.type != PROTOCOL_TYPE_STATUS_REQUEST &&
-        context->message.type != PROTOCOL_TYPE_TIME_SYNC &&
-        context->message.type != PROTOCOL_TYPE_PUSH_DATA &&
-        context->message.type != PROTOCOL_TYPE_HEARTBEAT &&
-        context->message.type != PROTOCOL_TYPE_APPLY_CONFIG &&
-        context->message.type != PROTOCOL_TYPE_ACTIVATE_SCREEN &&
-        context->message.type != PROTOCOL_TYPE_TRIGGER_INTERRUPT &&
-        context->message.type != PROTOCOL_TYPE_NETWORK_CONFIG &&
-        context->message.type != PROTOCOL_TYPE_FACTORY_RESET &&
-        context->message.type != PROTOCOL_TYPE_ASSET_BEGIN &&
-        context->message.type != PROTOCOL_TYPE_ASSET_CHUNK &&
-        context->message.type != PROTOCOL_TYPE_ASSET_COMMIT &&
-        context->message.type != PROTOCOL_TYPE_ASSET_RELEASE) {
+    // One table, in core/protocol_message.c, for both halves of the
+    // question: is this a request at all, and does this build advertise the
+    // capability bit docs/protocol/v1.md gates it on? It lives there rather
+    // than here so a host test can assert that every advertised bit really
+    // is dispatched -- bit 8 shipped set while this function still answered
+    // type 19 with "response type sent as request", and no test could see
+    // it while the policy was three inline conditions in an ESP-IDF-only
+    // file. A conforming host never sends a message its capabilities did
+    // not offer, but the device refuses explicitly rather than trusting it.
+    protocol_request_gate_t gate = protocol_message_request_gate(
+        context->message.type, PROTOCOL_CURRENT_CAPABILITIES);
+    if (gate == PROTOCOL_REQUEST_NOT_A_REQUEST) {
         transmit_error(context, frame->request_id,
                        PROTOCOL_ERROR_UNSUPPORTED_MESSAGE,
                        "response type sent as request");
         return;
     }
-
-    // Mirrors how types 13-14 are documented as gated on capability bit 7
-    // (docs/protocol/v1.md): a conforming host never sends these without
-    // seeing the bit in StatusResponse, but the device still refuses
-    // explicitly rather than trusting that. PROTOCOL_CURRENT_CAPABILITIES is
-    // a compile-time constant that always includes bit 5 today, so this
-    // check cannot currently fail -- it exists so a future build profile
-    // that omits the bit stays correctly refused rather than silently
-    // accepting messages its firmware.h did not compile support for.
-    bool is_asset_message =
-        context->message.type == PROTOCOL_TYPE_ASSET_BEGIN ||
-        context->message.type == PROTOCOL_TYPE_ASSET_CHUNK ||
-        context->message.type == PROTOCOL_TYPE_ASSET_COMMIT ||
-        context->message.type == PROTOCOL_TYPE_ASSET_RELEASE;
-    if (is_asset_message &&
-        (PROTOCOL_CURRENT_CAPABILITIES & PROTOCOL_CAPABILITY_ASSET_TRANSFER) ==
-            0U) {
+    if (gate == PROTOCOL_REQUEST_MISSING_CAPABILITY) {
         transmit_error(context, frame->request_id,
                        PROTOCOL_ERROR_UNSUPPORTED_MESSAGE,
-                       "asset transfer not supported");
+                       "capability not supported by this build");
         return;
     }
 
@@ -1124,6 +1426,9 @@ static void dispatch_request(protocol_context_t *context,
         break;
     case PROTOCOL_TYPE_ASSET_RELEASE:
         dispatch_asset_release(context, frame->request_id);
+        break;
+    case PROTOCOL_TYPE_PUSH_SCENE:
+        dispatch_push_scene(context, frame->request_id);
         break;
     case PROTOCOL_TYPE_HEARTBEAT: {
         protocol_message_t *reply = &context->message;
@@ -1319,7 +1624,20 @@ static void protocol_task(void *argument)
         wifi_station_poll();
         if (link_state_poll(&context->link, uptime_ms())) {
             ui_runtime_set_online(false);
+            // ui_runtime's LINK_STATE handler restores the standalone clock,
+            // which deletes the scene's screen. Stop ticking its bindings.
+            context->scene_live = false;
             ESP_LOGI(TAG, "link standalone after timeout");
+        }
+        // ui/scene_view.c owns no timer of its own by design -- it is
+        // compiled into the host simulator, where an LVGL timer would be a
+        // second clock the parity gate has to agree with. So the tick is
+        // here, on the one task that already owns every value a binding
+        // reads.
+        if (context->scene_live &&
+            uptime_ms() - context->scene_tick_ms >= PROTOCOL_SCENE_TICK_MS) {
+            context->scene_tick_ms = uptime_ms();
+            refresh_scene_bindings(context);
         }
         refresh_ota_snapshots(context);
     }
@@ -1340,6 +1658,26 @@ esp_err_t protocol_task_start(void)
     s_context = heap_caps_calloc(1, sizeof(*s_context), MALLOC_CAP_SPIRAM);
     ESP_RETURN_ON_FALSE(s_context != NULL, ESP_ERR_NO_MEM, TAG,
                         "allocate protocol context from PSRAM");
+    // The digest -> mapped-bytes lookup that `image` and asset-font scene
+    // nodes read through. The same protocol_asset_resolver/asset_flash_unmap
+    // pair font_registry_init() gets below, because they are the same
+    // question asked by two callers -- ui/scene_view.c cannot ask it itself,
+    // having no ESP-IDF include.
+    //
+    // Installed unconditionally and before anything can push a scene, not
+    // folded into the asset_flash_init() success branch below: until this
+    // call lands, scene_view_show() refuses ANY scene containing an image
+    // node, whole, and says nothing about why. A resolver over a store that
+    // failed to open refuses the same scene with the same outcome, but by a
+    // path that is visible in the asset-store logs. Two failure modes that
+    // look identical from the panel and differ entirely in diagnosability;
+    // this picks the diagnosable one. lvgl-sim wires its own pair for
+    // exactly the same reason (crates/lvgl-sim/csrc/sim_shim.c).
+    //
+    // No lvgl_port_lock(): this stores two function pointers and touches no
+    // LVGL object, and it runs before the protocol task exists, so nothing
+    // can be reading them yet.
+    scene_view_set_asset_resolver(protocol_asset_resolver, asset_flash_unmap);
     // Asset store and font registry are independent of the network/USB
     // transport decided below, and their failure is not fatal to the rest
     // of the device: main.c's standalone-clock contract must survive a

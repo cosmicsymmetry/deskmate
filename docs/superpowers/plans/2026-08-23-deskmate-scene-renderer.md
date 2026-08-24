@@ -976,16 +976,48 @@ C templates exactly.
 
 **Files:**
 - Modify: `firmware/main/link/protocol_task.c`, `firmware/main/ui/ui_runtime.c`
+- Also modified during execution: `firmware/main/core/protocol_message.h/.c`,
+  `firmware/host_tests/test_protocol.c` — the capability gate moved into `core/` so a
+  host test could reach it; see below.
 
-- [ ] Dispatch message 19: decode, validate, gate on capability bit 8, hand to
+- [x] Dispatch message 19: decode, validate, gate on capability bit 8, hand to
       `scene_view_show()` under `lvgl_port_lock()`, `Ack` with the revision.
-- [ ] On `PushData`, update the field values the binding context reads and call
+- [x] On `PushData`, update the field values the binding context reads and call
       `scene_view_refresh_bindings()` — do not rebuild the scene.
-- [ ] On the clock tick, refresh time bindings the same way.
-- [ ] **Preserve the standalone clock.** A scene that fails to decode or validate must
+- [x] On the clock tick, refresh time bindings the same way.
+- [x] **Preserve the standalone clock.** A scene that fails to decode or validate must
       leave the previous scene up, or fall back to the clock — never blank the panel. Add
       a test for the malformed-scene path.
-- [ ] Build, report `.bss`/IRAM, commit.
+- [x] Build, report `.bss`/IRAM, commit.
+
+**Delivered 2026-08-24** (`0e96c50`, `e82d636`). Notes that outlive the task:
+
+- The capability gate is `protocol_message_request_gate()` in `core/protocol_message.c`,
+  not three inline conditions in `protocol_task.c`. It moved so a host test can assert
+  the invariant that broke here: *every capability bit advertised in
+  `PROTOCOL_CURRENT_CAPABILITIES` has its message types dispatchable.* Bit 8 had shipped
+  set while dispatch answered type 19 with "response type sent as request", the mirror of
+  V2's bit 7 sitting defined-but-dark. The gate also implements the bit-7 gating on
+  NetworkConfig/FactoryReset that `docs/protocol/v1.md` already documented and the device
+  did not enforce.
+- **The asset-GC teardown is a sequence:** load the clock → `scene_view_destroy()` →
+  `font_registry_reset()` → compact → rebuild from the retained `scene_t`. The rebuild
+  runs on every exit after the teardown, including the `BUSY` refusal, so a release that
+  changes nothing leaves the panel unchanged too. It is skipped entirely while the OTA
+  screen owns the panel, which correctly leaves the release deferred.
+- The scene handoff is **synchronous under `lvgl_port_lock()`**, not via `ui_runtime`'s
+  command queue: `ui_command_t` is a pair of internal-DRAM statics and `sizeof(scene_t)`
+  is ~6 KB, so queueing a scene by value would add ~12 KB of `.bss`, and queueing a
+  pointer would hand the LVGL task a pointer into `message` that the next frame
+  overwrites.
+- The binding tick lives in the protocol task loop at 250 ms (`template_view.c`'s
+  cadence). `scene_view.c` owns no timer by design — it compiles into the simulator.
+- **`.bss` moved, for the first time this plan: 102,608 → 102,624 (+16).** The map file
+  attributes all of it to `ui/scene_view.c`'s three file-scope pointers (12 bytes,
+  16 after alignment), which existed since Task 4 but were garbage-collected while
+  nothing called into the file. `protocol_task.c`'s own `.bss` is byte-identical, `.data`
+  is unchanged at 23,128, and IRAM is unchanged at 16,384/16,384 with 0 remaining. Task
+  11's OTA-download check on the board is therefore **required, not optional.**
 
 ---
 

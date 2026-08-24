@@ -103,7 +103,7 @@ fn every_node_kind_has_a_case() {
 fn every_case_flips_to_an_exact_reversal() {
     let mut sim = Simulator::new().expect("simulator");
     let cases = cases::scene_cases();
-    for pair in cases.chunks(2) {
+    for pair in cases.as_chunks::<2>().0 {
         let (landscape_name, landscape) = &pair[0];
         let (flipped_name, flipped) = &pair[1];
         assert!(

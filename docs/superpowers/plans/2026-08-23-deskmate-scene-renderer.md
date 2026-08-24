@@ -85,7 +85,8 @@ this stage but it is not §3, and nothing in this plan should be read as impleme
 | `firmware/main/ui/font_registry.c` | The deferred use-after-free fix — stage 2 is its first real consumer. |
 | `companion/crates/protocol/src/scene.rs` | Host scene types, encode/decode, shared fixtures. |
 | `companion/crates/app-core/src/scene_build.rs` | Template → scene, including baseline and tier selection. |
-| `companion/crates/lvgl-sim/src/cases.rs` | Scene golden cases, including the parity pair. |
+| `companion/crates/lvgl-sim/src/cases.rs` | Scene golden cases (one per node kind, both orientations). |
+| `companion/crates/app-core/tests/scene_parity.rs` | **The parity gate.** Delivered here, not in `cases.rs` — see Task 9. |
 
 Splitting decode from the model keeps the hostile-input surface in one reviewable file, and
 keeps `scene_model.c` free of TinyCBOR so the simulator and host tests can construct scenes
@@ -946,7 +947,8 @@ committing. A golden nobody looked at pins whatever bug shipped with it.
 ### Task 9: The parity gate
 
 **Files:**
-- Modify: `companion/crates/lvgl-sim/src/cases.rs`
+- Create: `companion/crates/app-core/tests/scene_parity.rs` **(delivered here, not in
+  `cases.rs` as originally planned — see the note below)**
 - Modify: `companion/crates/device/examples/framebuffer_diff.rs` if needed
 
 **This task is the reason the plan exists.** Everything before it is unproven.

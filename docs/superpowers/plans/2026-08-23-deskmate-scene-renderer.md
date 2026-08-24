@@ -117,7 +117,7 @@ would be work with no consumer.
 This file holds types and bounds only — no CBOR (Task 3) and no LVGL (Task 5). That split
 is what lets host tests and the simulator build scenes directly.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `firmware/host_tests/test_scene_model.c`:
 
@@ -209,7 +209,7 @@ int main(void)
 }
 ```
 
-- [ ] **Step 2: Run to confirm it fails**
+- [x] **Step 2: Run to confirm it fails**
 
 ```sh
 make -C firmware/host_tests test_scene_model
@@ -217,7 +217,7 @@ make -C firmware/host_tests test_scene_model
 
 Expected: FAIL — `core/scene_model.h: No such file or directory`.
 
-- [ ] **Step 3: Write the header**
+- [x] **Step 3: Write the header**
 
 Create `firmware/main/core/scene_model.h`:
 
@@ -343,7 +343,7 @@ typedef enum {
 scene_model_result_t scene_model_validate(const scene_t *scene);
 ```
 
-- [ ] **Step 4: Implement `scene_model_validate`**
+- [x] **Step 4: Implement `scene_model_validate`**
 
 Required behaviour, all covered by Step 1's tests:
 
@@ -360,7 +360,7 @@ Required behaviour, all covered by Step 1's tests:
 - A `SCENE_FONT_BAKED` ref whose tier is outside `scene_font_tier_t` → `ERR_FONT`.
   A `SCENE_FONT_ASSET` ref with `pixel_size` outside `8..200` → `ERR_FONT`.
 
-- [ ] **Step 5: Register in both build systems and `.gitignore`**
+- [x] **Step 5: Register in both build systems and `.gitignore`**
 
 Add to `firmware/host_tests/Makefile`'s `test:` dependency list, its run list, and:
 
@@ -374,7 +374,7 @@ Add `"core/scene_model.c"` to `SRCS` in `firmware/main/CMakeLists.txt`, and
 `firmware/host_tests/test_scene_model` to `.gitignore` — that file lists every host-test
 binary individually, and stage 1 left two out.
 
-- [ ] **Step 6: Run and commit**
+- [x] **Step 6: Run and commit**
 
 ```sh
 make -C firmware/host_tests clean test
@@ -406,7 +406,7 @@ host. That is what keeps this surface small enough to audit and is why the set i
 rather than an expression language. Evaluation is a pure function over an explicit context
 so it is fully host-testable — no clock, no LVGL, no globals.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `firmware/host_tests/test_scene_binding.c`:
 
@@ -515,13 +515,13 @@ int main(void)
 }
 ```
 
-- [ ] **Step 2: Run to confirm failure**
+- [x] **Step 2: Run to confirm failure**
 
 ```sh
 make -C firmware/host_tests test_scene_binding
 ```
 
-- [ ] **Step 3: Write the header**
+- [x] **Step 3: Write the header**
 
 ```c
 #pragma once
@@ -574,7 +574,7 @@ scene_binding_result_t scene_binding_evaluate(
     char *out, size_t out_capacity);
 ```
 
-- [ ] **Step 4: Implement**
+- [x] **Step 4: Implement**
 
 - `scene_binding_parse` recognises exactly four prefixes: `time:`, `timer.remaining:`,
   `timer.pct`, `field.`. Anything else is `ERR_UNKNOWN`.
@@ -589,7 +589,7 @@ scene_binding_result_t scene_binding_evaluate(
 - Every write is bounded by `out_capacity`; a value that will not fit returns
   `ERR_CAPACITY` and writes nothing.
 
-- [ ] **Step 5: Register, run, commit**
+- [x] **Step 5: Register, run, commit**
 
 Makefile rule mirrors Task 1's, adding `../main/core/timefmt.c`. Add
 `"core/scene_binding.c"` to `SRCS` and the binary to `.gitignore`.
@@ -674,7 +674,7 @@ invent a second decoding style.
 **CBOR shape.** Scene: `{0: revision, 1: background, 2: [node, …]}`. Node:
 `{0: kind, 1: <kind-specific map>}`. Keep every map's keys in deterministic order.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `firmware/host_tests/test_scene_decode.c` with hand-built CBOR, following
 `test_protocol.c`'s fixture-builder style. Cover at minimum:
@@ -697,13 +697,13 @@ call `scene_binding_parse()` while decoding, so a scene carrying a binding the d
 cannot evaluate is refused **whole**. Accepting it and failing at draw time would leave the
 panel half-rendered.
 
-- [ ] **Step 2: Run to confirm failure, then implement**
+- [x] **Step 2: Run to confirm failure, then implement**
 
 Add `scene_decode()`'s declaration to `scene_model.h` and implement it in a **separate**
 `scene_decode.c`, so `scene_model.c` stays free of TinyCBOR and the simulator can build
 scenes directly.
 
-- [ ] **Step 3: Register, run, commit**
+- [x] **Step 3: Register, run, commit**
 
 ```make
 test_scene_decode: test_scene_decode.c ../main/core/scene_decode.c \
@@ -750,7 +750,7 @@ validator.
 > on **both** sides. Bit 7 sat defined-but-unset for most of V2 and the constant read 75
 > instead of 203; a conforming host could not have provisioned the device.
 
-- [ ] **Step 1: Failing tests, both languages**
+- [x] **Step 1: Failing tests, both languages**
 
 C, in `test_protocol.c`: `test_push_scene_roundtrips`,
 `test_push_scene_rejects_a_scene_over_the_node_cap`,
@@ -759,20 +759,20 @@ C, in `test_protocol.c`: `test_push_scene_roundtrips`,
 
 Rust, in `message.rs`: the mirror set plus `current_capabilities_is_491`.
 
-- [ ] **Step 2: Run both to confirm failure**
+- [x] **Step 2: Run both to confirm failure**
 
 ```sh
 make -C firmware/host_tests test_protocol
 export PATH="$HOME/.cargo/bin:$PATH" && cd companion && cargo test -p protocol
 ```
 
-- [ ] **Step 3: Implement both sides**
+- [x] **Step 3: Implement both sides**
 
 Mirror `decode_asset_begin`'s structure on the C side and `AssetBegin`'s on the Rust side.
 Bounds must match exactly across languages: 24 nodes, 128-byte text, 48-byte binding,
 8 line points.
 
-- [ ] **Step 4: Add fixtures to the shared corpus — do not skip this**
+- [x] **Step 4: Add fixtures to the shared corpus — do not skip this**
 
 `protocol/fixtures/v1/` is read by **both** `companion/crates/protocol/tests/fixtures.rs`
 and `firmware/host_tests/test_protocol.c`, whose `assert_valid_fixture()` re-encodes each
@@ -784,12 +784,12 @@ Add `push_scene.bin` and `ack_scene.bin`. Give the scene fixture **every node ki
 binding, a multi-byte CBOR coordinate, and a non-trivial colour. An all-minimal fixture
 passes even when the encoders disagree.
 
-- [ ] **Step 5: Update `docs/protocol/v1.md`**
+- [x] **Step 5: Update `docs/protocol/v1.md`**
 
 Add row 19 to the registry, document the payload and the scene map, note the bit-8 gate,
 and state that the current capability value is `491`.
 
-- [ ] **Step 6: Run every gate and commit**
+- [x] **Step 6: Run every gate and commit**
 
 ```sh
 make -C firmware/host_tests clean test
@@ -822,7 +822,7 @@ Follow `firmware/main/ui/template_view.c` for lifecycle shape — it is the exis
 equivalent and its `show`/`destroy`/`active`/`screen` surface is the one the rest of the UI
 already knows how to drive.
 
-- [ ] **Step 1: Implement the six node renderers**
+- [x] **Step 1: Implement the six node renderers**
 
 - `rect` → `lv_obj_t` with radius, `bg_color`, `bg_opa`; scrollbars and borders removed.
 - `arc` → `lv_arc` with start/end angle, width, rounded caps.
@@ -838,14 +838,14 @@ Resolve a `SCENE_FONT_BAKED` tier to the identical `lv_font_t *` the C templates
 `DESKMATE_FONT_CAPTION`/`BODY`/`DISPLAY`/`HERO` from `ui/templates/template_internal.h`.
 That identity is what makes the parity gate winnable.
 
-- [ ] **Step 2: Implement binding refresh without rebuilding**
+- [x] **Step 2: Implement binding refresh without rebuilding**
 
 `scene_view_refresh_bindings()` re-evaluates only nodes whose value is a binding and
 updates those labels (and any arc with an `end_binding`) in place. This is the scene
 model's replacement for `template_view_patch()` — a clock tick must not rebuild the screen,
 and a `PushData` field update must not either.
 
-- [ ] **Step 3: Build and commit**
+- [x] **Step 3: Build and commit**
 
 ```sh
 . "$HOME/esp/esp-idf/export.sh" && idf.py -C firmware build && idf.py -C firmware size
@@ -889,7 +889,7 @@ Two viable fixes; pick one and justify it in your report:
 Whichever you choose, `font_registry_reset()` must remain safe to call before compaction —
 compaction moves the mapped bytes, so a face surviving it reads moved memory.
 
-- [ ] **Steps: test, implement, build, commit** following the established pattern. Add a
+- [x] **Steps: test, implement, build, commit** following the established pattern. Add a
       host test for whatever part is host-testable and say plainly which part is not.
 
 ---
@@ -918,7 +918,7 @@ Two things the host must reproduce that are easy to miss:
    `DISPLAY` depending on whether the string fits. The host now makes that choice and emits
    a fixed tier. Port the same rule.
 
-- [ ] **Steps: failing test, implement, gates, commit.** The test asserts the emitted
+- [x] **Steps: failing test, implement, gates, commit.** The test asserts the emitted
       scene's node count, kinds, and a few exact coordinates against the C constants.
 
 ---
@@ -951,13 +951,13 @@ committing. A golden nobody looked at pins whatever bug shipped with it.
 
 **This task is the reason the plan exists.** Everything before it is unproven.
 
-- [ ] **Step 1: Add the paired case**
+- [x] **Step 1: Add the paired case**
 
 For a fixed time and a fixed `show_seconds`, render **both**: the shipped
 `DigitalClock` C template via the existing path, and Task 7's scene via `scene_view`.
 Assert the two framebuffers are **byte-identical**.
 
-- [ ] **Step 2: Run it and expect it to fail first**
+- [x] **Step 2: Run it and expect it to fail first**
 
 It will not pass on the first attempt. The likely culprits, in order: baseline arithmetic
 off by the `line_height`/`base_line` derivation; the dial's scale rotation and tick counts (LVGL
@@ -968,7 +968,21 @@ Fix until identical. **Do not** relax the assertion to "close enough" — a fuzz
 is worth nothing, and the whole argument for the scene renderer is that it can replace the
 C templates exactly.
 
-- [ ] **Step 3: Extend to both orientations, then commit**
+- [x] **Step 3: Extend to both orientations, then commit**
+
+**Delivered, in `companion/crates/app-core/tests/scene_parity.rs`, not
+`lvgl-sim/src/cases.rs` as this section's Files list says.** That file's own header
+records the reason: nominating `cases.rs` would mean `lvgl-sim` naming `app-core`,
+closing a cycle onto the existing `app-core -> device -> lvgl-sim` chain. Cargo
+would tolerate it — `device -> lvgl-sim` is a dev-dependency, so the normal-dependency
+graph stays acyclic — but it buys nothing: the gate needs neither a committed golden
+nor a hardware push, so it renders both sides in-process and compares them directly,
+leaving `cases.rs`'s `golden_cases()` at its pinned shape. A judgement call, not a
+correction of the brief. The gate covers `INSTANTS` (7 pinned instants) × seconds
+shown/hidden × two orientations = 28 comparisons, of which 14 are independent — the
+flipped-orientation half is `sim_shim.c`'s `copy_frame_out` reversing the finished
+buffer index-by-index, so `flipped(A) == flipped(B)` iff `A == B` and carries no
+additional information. Real 270° geometry is provable only on hardware.
 
 ---
 

@@ -717,6 +717,7 @@ static void dispatch_push_scene(protocol_context_t *context,
     char previous_card_id[sizeof(context->scene_card_id)];
     memcpy(previous_card_id, context->scene_card_id,
            sizeof(previous_card_id));
+    uint64_t previous_timer_anchor_ms = context->scene_timer_anchor_ms;
     if (strcmp(previous_card_id, push->card_id) != 0) {
         context->scene_timer_anchor_ms = uptime_ms();
     }
@@ -727,6 +728,7 @@ static void dispatch_push_scene(protocol_context_t *context,
     if (result != SHOW_SCENE_OK) {
         memcpy(context->scene_card_id, previous_card_id,
                sizeof(context->scene_card_id));
+        context->scene_timer_anchor_ms = previous_timer_anchor_ms;
         // scene_view_show() refuses without touching the live screen (it
         // builds onto a candidate screen and loads it only once every node
         // and every asset succeeded), so whatever was on the panel -- the

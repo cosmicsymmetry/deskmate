@@ -37,6 +37,57 @@ bool protocol_template_kind_valid(protocol_template_kind_t kind)
            kind <= PROTOCOL_TEMPLATE_ICON_BADGE_TEXT;
 }
 
+/* The capability bit docs/protocol/v1.md gates `type` on, or 0 for a request
+ * every conforming device answers. One place, so a new gated message cannot
+ * be added to the dispatch table without deciding which bit it rides on. */
+static uint64_t request_capability(protocol_message_type_t type)
+{
+    switch (type) {
+    case PROTOCOL_TYPE_NETWORK_CONFIG:
+    case PROTOCOL_TYPE_FACTORY_RESET:
+        return PROTOCOL_CAPABILITY_NETWORKING;
+    case PROTOCOL_TYPE_ASSET_BEGIN:
+    case PROTOCOL_TYPE_ASSET_CHUNK:
+    case PROTOCOL_TYPE_ASSET_COMMIT:
+    case PROTOCOL_TYPE_ASSET_RELEASE:
+        return PROTOCOL_CAPABILITY_ASSET_TRANSFER;
+    case PROTOCOL_TYPE_PUSH_SCENE:
+        return PROTOCOL_CAPABILITY_SCENE_RENDER;
+    default:
+        return 0U;
+    }
+}
+
+protocol_request_gate_t protocol_message_request_gate(
+    protocol_message_type_t type,
+    uint64_t capabilities)
+{
+    switch (type) {
+    case PROTOCOL_TYPE_STATUS_REQUEST:
+    case PROTOCOL_TYPE_TIME_SYNC:
+    case PROTOCOL_TYPE_PUSH_DATA:
+    case PROTOCOL_TYPE_HEARTBEAT:
+    case PROTOCOL_TYPE_APPLY_CONFIG:
+    case PROTOCOL_TYPE_ACTIVATE_SCREEN:
+    case PROTOCOL_TYPE_TRIGGER_INTERRUPT:
+    case PROTOCOL_TYPE_NETWORK_CONFIG:
+    case PROTOCOL_TYPE_FACTORY_RESET:
+    case PROTOCOL_TYPE_ASSET_BEGIN:
+    case PROTOCOL_TYPE_ASSET_CHUNK:
+    case PROTOCOL_TYPE_ASSET_COMMIT:
+    case PROTOCOL_TYPE_ASSET_RELEASE:
+    case PROTOCOL_TYPE_PUSH_SCENE:
+        break;
+    default:
+        return PROTOCOL_REQUEST_NOT_A_REQUEST;
+    }
+    uint64_t required = request_capability(type);
+    if (required != 0U && (capabilities & required) == 0U) {
+        return PROTOCOL_REQUEST_MISSING_CAPABILITY;
+    }
+    return PROTOCOL_REQUEST_DISPATCHABLE;
+}
+
 static protocol_message_result_t open_payload_map(
     const uint8_t *payload,
     size_t payload_length,

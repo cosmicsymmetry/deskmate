@@ -382,6 +382,35 @@ typedef enum {
 
 bool protocol_template_kind_valid(protocol_template_kind_t kind);
 
+typedef enum {
+    PROTOCOL_REQUEST_DISPATCHABLE = 0,
+    /* A response-only type (Ack, Error, StatusResponse, HeartbeatAck,
+     * DeviceEvent) arriving as a request. */
+    PROTOCOL_REQUEST_NOT_A_REQUEST,
+    /* A request type whose capability bit this build does not advertise. */
+    PROTOCOL_REQUEST_MISSING_CAPABILITY,
+} protocol_request_gate_t;
+
+/* The device's request-admission policy: whether a build advertising
+ * `capabilities` dispatches `type` when it arrives as a request.
+ *
+ * It lives here, rather than inline in link/protocol_task.c where it is
+ * used, for one reason: it is the only part of dispatch a host test can
+ * reach, and the failure it guards against has bitten this project once
+ * already in mirror image. Bit 7 was defined and never set, so a conforming
+ * host could not provision the device at all; the inverse -- a bit
+ * advertised whose messages are refused -- is worse, because the host acts
+ * on the advertisement. Keeping the table and PROTOCOL_CURRENT_CAPABILITIES
+ * in the same header lets test_protocol.c assert the two agree, for every
+ * bit, rather than for whichever one someone remembered.
+ *
+ * `capabilities` is a parameter and not PROTOCOL_CURRENT_CAPABILITIES so
+ * that a build profile omitting a bit is refused explicitly rather than
+ * silently accepting messages its firmware did not compile support for. */
+protocol_request_gate_t protocol_message_request_gate(
+    protocol_message_type_t type,
+    uint64_t capabilities);
+
 protocol_message_result_t protocol_message_decode(
     const protocol_frame_t *frame,
     protocol_message_t *message);

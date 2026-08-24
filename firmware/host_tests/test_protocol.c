@@ -1281,6 +1281,162 @@ static void test_ack_for_push_scene_requires_a_revision(void)
            PROTOCOL_MESSAGE_ERR_INVALID_VALUE);
 }
 
+/* ------------------------------------------------------------------
+ * The device's request-admission policy (protocol_message_request_gate).
+ *
+ * This is the one part of link/protocol_task.c's dispatch a host test can
+ * reach, and it is here because the whole point of Task 10 is closing a gap
+ * between what StatusResponse advertises and what dispatch answers.
+ * ------------------------------------------------------------------ */
+
+static void test_every_advertised_capability_is_actually_dispatchable(void)
+{
+    /* The defect this pins, stated as an invariant rather than as a list:
+     * for every message type gated on a capability bit, the bit being
+     * advertised in PROTOCOL_CURRENT_CAPABILITIES and the type being
+     * dispatched must be the same fact. Bit 7 once sat defined-but-dark, so
+     * a conforming host could not provision the device; bit 8 shipped set
+     * while dispatch still answered UnsupportedMessage for type 19, which is
+     * worse, because the host acts on the advertisement. */
+    static const struct {
+        protocol_message_type_t type;
+        uint64_t capability;
+    } gated[] = {
+        {PROTOCOL_TYPE_NETWORK_CONFIG, PROTOCOL_CAPABILITY_NETWORKING},
+        {PROTOCOL_TYPE_FACTORY_RESET, PROTOCOL_CAPABILITY_NETWORKING},
+        {PROTOCOL_TYPE_ASSET_BEGIN, PROTOCOL_CAPABILITY_ASSET_TRANSFER},
+        {PROTOCOL_TYPE_ASSET_CHUNK, PROTOCOL_CAPABILITY_ASSET_TRANSFER},
+        {PROTOCOL_TYPE_ASSET_COMMIT, PROTOCOL_CAPABILITY_ASSET_TRANSFER},
+        {PROTOCOL_TYPE_ASSET_RELEASE, PROTOCOL_CAPABILITY_ASSET_TRANSFER},
+        {PROTOCOL_TYPE_PUSH_SCENE, PROTOCOL_CAPABILITY_SCENE_RENDER},
+    };
+    for (size_t i = 0U; i < sizeof gated / sizeof gated[0]; ++i) {
+        assert((PROTOCOL_CURRENT_CAPABILITIES & gated[i].capability) != 0U);
+        assert(protocol_message_request_gate(
+                   gated[i].type, PROTOCOL_CURRENT_CAPABILITIES) ==
+               PROTOCOL_REQUEST_DISPATCHABLE);
+        /* And the gate is a gate: strip the bit and the same type is
+         * refused for the capability, not accepted anyway. */
+        assert(protocol_message_request_gate(
+                   gated[i].type,
+                   PROTOCOL_CURRENT_CAPABILITIES & ~gated[i].capability) ==
+               PROTOCOL_REQUEST_MISSING_CAPABILITY);
+    }
+}
+
+static void test_response_types_are_not_dispatchable_as_requests(void)
+{
+    static const protocol_message_type_t responses[] = {
+        PROTOCOL_TYPE_STATUS_RESPONSE, PROTOCOL_TYPE_ACK,
+        PROTOCOL_TYPE_HEARTBEAT_ACK,   PROTOCOL_TYPE_ERROR,
+        PROTOCOL_TYPE_DEVICE_EVENT,
+    };
+    for (size_t i = 0U; i < sizeof responses / sizeof responses[0]; ++i) {
+        assert(protocol_message_request_gate(
+                   responses[i], PROTOCOL_CURRENT_CAPABILITIES) ==
+               PROTOCOL_REQUEST_NOT_A_REQUEST);
+    }
+    /* PushScene must not be swept up by that rule -- it was, before Task 10,
+     * and the device answered a type-19 frame with "response type sent as
+     * request". */
+    assert(protocol_message_request_gate(PROTOCOL_TYPE_PUSH_SCENE,
+                                         PROTOCOL_CURRENT_CAPABILITIES) !=
+           PROTOCOL_REQUEST_NOT_A_REQUEST);
+}
+
+/* Builds the roundtrip test's two-node scene with `binding` on the TEXT
+ * node, so two calls differ in exactly one string. */
+static size_t build_push_scene_payload_with_binding(uint8_t *payload,
+                                                    const char *binding)
+{
+    size_t offset = 0U;
+    offset = append_map_header_cbor(payload, offset, 3U);
+    offset = append_uint_cbor(payload, offset, 0U);
+    offset = append_text_cbor(payload, offset, "clock");
+    offset = append_uint_cbor(payload, offset, 1U);
+    offset = append_uint_cbor(payload, offset, 7U);
+    offset = append_uint_cbor(payload, offset, 2U);
+    offset = append_map_header_cbor(payload, offset, 3U);
+    offset = append_uint_cbor(payload, offset, 0U);
+    offset = append_uint_cbor(payload, offset, 9U);
+    offset = append_uint_cbor(payload, offset, 1U);
+    offset = append_uint_cbor(payload, offset, 0U);
+    offset = append_uint_cbor(payload, offset, 2U);
+    offset = append_array_header_cbor(payload, offset, 1U);
+    offset = append_map_header_cbor(payload, offset, 2U);
+    offset = append_uint_cbor(payload, offset, 0U);
+    offset = append_uint_cbor(payload, offset, 4U); /* SCENE_NODE_TEXT */
+    offset = append_uint_cbor(payload, offset, 1U);
+    offset = append_map_header_cbor(payload, offset, 5U);
+    offset = append_uint_cbor(payload, offset, 0U);
+    offset = append_uint_cbor(payload, offset, 16U);
+    offset = append_uint_cbor(payload, offset, 1U);
+    offset = append_uint_cbor(payload, offset, 200U);
+    offset = append_uint_cbor(payload, offset, 2U);
+    offset = append_uint_cbor(payload, offset, 400U);
+    offset = append_uint_cbor(payload, offset, 4U);
+    offset = append_map_header_cbor(payload, offset, 2U);
+    offset = append_uint_cbor(payload, offset, 0U);
+    offset = append_uint_cbor(payload, offset, 1U); /* SCENE_FONT_BAKED */
+    offset = append_uint_cbor(payload, offset, 1U);
+    offset = append_uint_cbor(payload, offset, 2U); /* SCENE_FONT_BODY */
+    offset = append_uint_cbor(payload, offset, 6U);
+    offset = append_map_header_cbor(payload, offset, 2U);
+    offset = append_uint_cbor(payload, offset, 0U);
+    offset = append_uint_cbor(payload, offset, 2U); /* SCENE_VALUE_BINDING */
+    offset = append_uint_cbor(payload, offset, 2U);
+    offset = append_text_cbor(payload, offset, binding);
+    return offset;
+}
+
+/* The malformed-scene path, written to survive this plan's recurring trap.
+ *
+ * scene_decode() calls scene_model_validate(), which re-checks several of
+ * the same bounds, so a payload that is merely "one past a cap" is refused
+ * identically by a correct device and by a broken one -- a mutation sweep
+ * found six survivors of exactly that shape. So the malformation here is a
+ * binding the device cannot evaluate, which ONLY the decoder refuses:
+ * scene_model_validate() checks that a binding array is NUL-terminated and
+ * within SCENE_MAX_BINDING and deliberately does not parse it (see
+ * ui/scene_view.c's header comment listing what the model does and does not
+ * guarantee). One layer, not two.
+ *
+ * And the assertion that fails against a BROKEN DISPATCH rather than
+ * against the already-proven decoder is the second one: a device that
+ * advertises bit 8 and has no dispatch arm for type 19 also refuses this
+ * frame -- with UnsupportedMessage, because it never looks at the content.
+ * A device that dispatches 19 refuses it as an invalid payload while still
+ * reporting the type as dispatchable. Both halves together are what
+ * distinguish them; either alone does not.
+ */
+static void test_a_malformed_scene_is_refused_by_content_not_by_type(void)
+{
+    uint8_t payload[PROTOCOL_MAX_PAYLOAD_SIZE];
+    protocol_message_t *message = malloc(sizeof *message);
+    assert(message != NULL);
+
+    size_t offset =
+        build_push_scene_payload_with_binding(payload, "shell:rm -rf /");
+    assert(decode_push_scene_frame(payload, offset, message) ==
+           PROTOCOL_MESSAGE_ERR_INVALID_VALUE);
+    /* Refused whole. link/protocol_task.c never reaches scene_view_show()
+     * on this path, so the panel keeps whatever it was showing; there is no
+     * half-decoded scene here for a careless dispatch to render. */
+    assert(message->value.push_scene.scene.node_count == 0U);
+
+    assert(protocol_message_request_gate(PROTOCOL_TYPE_PUSH_SCENE,
+                                         PROTOCOL_CURRENT_CAPABILITIES) ==
+           PROTOCOL_REQUEST_DISPATCHABLE);
+
+    /* The same payload with an evaluable binding is accepted, so the binding
+     * is the only reason the first one was not. */
+    offset = build_push_scene_payload_with_binding(payload, "time:HH:mm");
+    assert(decode_push_scene_frame(payload, offset, message) ==
+           PROTOCOL_MESSAGE_OK);
+    assert(message->value.push_scene.scene.node_count == 1U);
+    free(message);
+}
+
 int main(void)
 {
     test_crc();
@@ -1313,6 +1469,9 @@ int main(void)
     test_push_scene_skips_an_unknown_key_after_the_scene();
     test_push_scene_rejects_a_zero_revision();
     test_ack_for_push_scene_requires_a_revision();
+    test_every_advertised_capability_is_actually_dispatchable();
+    test_response_types_are_not_dispatchable_as_requests();
+    test_a_malformed_scene_is_refused_by_content_not_by_type();
     puts("test_protocol: OK");
     return 0;
 }

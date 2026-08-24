@@ -254,11 +254,16 @@ impl Simulator {
     /// decoded scene — an asset it could not acquire, or an allocation
     /// failure.
     pub fn render_scene(&mut self, request: &SceneRenderRequest) -> Result<Vec<u16>, SimError> {
+        // Validate/encode before touching the (process-global) asset store:
+        // a scene the protocol validator rejects should leave no trace there.
+        // Registration is idempotent per digest and the store is bounded, so
+        // the previous register-then-validate order was harmless, but this is
+        // the cheaper order and removes the surprise.
+        let payload = encode_scene_payload(&request.scene).map_err(SimError::SceneInvalid)?;
+
         for asset in &request.assets {
             register_asset(asset)?;
         }
-
-        let payload = encode_scene_payload(&request.scene).map_err(SimError::SceneInvalid)?;
 
         // Keep the CStrings alive across the call: RawSceneField only holds
         // pointers into them.

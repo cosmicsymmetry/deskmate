@@ -15,12 +15,16 @@
 //! # Why it lives here and not in `lvgl-sim/src/cases.rs`
 //!
 //! The brief nominated `cases.rs`, which is where every other golden case lives.
-//! It cannot be: the scene under test is built by `app-core::scene_build`, and
-//! `app-core -> device -> lvgl-sim` is an existing dependency edge, so
-//! `lvgl-sim` naming `app-core` would be a cycle. The gate therefore sits on the
-//! `app-core` side with `lvgl-sim` as a dev-dependency. Nothing about the
-//! comparison needs the case table: both halves are rendered in-process here,
-//! and `golden_cases()` is left at its pinned 58-case shape.
+//! Putting it there would mean `lvgl-sim` naming `app-core`, closing a cycle on
+//! the existing `app-core -> device -> lvgl-sim` chain. Cargo would in fact
+//! tolerate that — `device -> lvgl-sim` is itself a dev-dependency, so the
+//! normal-dependency graph stays acyclic and cycles closed through dev edges are
+//! legal. So this is a judgement, not an impossibility: paying that cost buys
+//! nothing here, because the case table exists so `tests/golden.rs` and
+//! `crates/device/examples/framebuffer_diff.rs` can iterate one matrix, and this
+//! gate needs neither a committed golden nor a hardware push. Both halves are
+//! rendered in-process and compared directly, and `golden_cases()` stays at its
+//! pinned 58-case shape.
 //!
 //! # Driving the C side
 //!
@@ -252,6 +256,21 @@ struct Difference {
 }
 
 fn diff(template: &[u16], scene: &[u16]) -> Option<Difference> {
+    // `zip` below stops at the shorter side, so two frames of different lengths
+    // would compare only their common prefix and could report "identical" while
+    // one of them was truncated. Both render paths are fixed-size today, which
+    // makes this incidentally safe rather than structurally safe; asserting it
+    // is one line and removes the distinction.
+    assert_eq!(
+        template.len(),
+        scene.len(),
+        "the two frames must be the same length for a full-frame comparison"
+    );
+    assert_eq!(
+        template.len(),
+        (LOGICAL_WIDTH * LOGICAL_HEIGHT) as usize,
+        "a frame must be the whole 448x368 canvas"
+    );
     let mut difference = Difference {
         count: 0,
         min_x: u32::MAX,
@@ -459,6 +478,22 @@ fn neither_half_of_the_gate_renders_a_blank_canvas() {
 /// builder that ignored the flag — or a C patch path that stopped hiding the
 /// label — would still satisfy the gate, because the gate only ever compares
 /// like against like.
+///
+/// # This test is load-bearing for a second reason: the shared frame buffer
+///
+/// `csrc/sim_shim.c` keeps **one process-global `s_frame`**, and both
+/// `sim_render` and `sim_render_scene` copy their result out of it. So a
+/// `render_scene` that set up its screen but never actually flushed would not
+/// fail — it would hand back whatever the *previous* render left in `s_frame`,
+/// which in the gate's interleaved loop is the C template frame it is about to
+/// be compared against. That is a vacuous pass, and neither an exact-equality
+/// assertion nor a not-blank check can see it.
+///
+/// **The call order below is what closes it, and must not be rearranged:**
+/// C(true), C(false), scene(true), scene(false). The two scene renders are
+/// consecutive, so an echoing `render_scene` would return the same stale frame
+/// twice and fail this `assert_ne!`. Interleaving the calls, or comparing a
+/// scene frame against a template frame here, would silently reopen the hole.
 #[test]
 fn hiding_the_seconds_changes_both_halves() {
     let mut sim = Simulator::new().expect("simulator");

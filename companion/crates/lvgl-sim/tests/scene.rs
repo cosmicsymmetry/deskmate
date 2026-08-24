@@ -89,11 +89,16 @@ fn every_node_kind_has_a_case() {
 }
 
 /// The 270° mount is a 180° rotation of the logical canvas, so every case's
-/// two goldens must be exact reversals of each other. Checked over the whole
-/// table rather than one scene because each node kind has its own geometry
-/// path — an arc's rotation, a scale's tick angles, a baseline-anchored
-/// label — and a kind that broke the relation would otherwise be pinned as
-/// correct by its own golden.
+/// two goldens must be exact reversals of each other.
+///
+/// This does *not* exercise per-node-kind orientation handling: `sim_shim.c`'s
+/// `copy_frame_out` reaches "flipped" by reversing the frame buffer
+/// index-by-index after the landscape render, without LVGL ever being told to
+/// rotate, so no node kind's geometry is re-evaluated here. What this test
+/// actually pins is `copy_frame_out`'s reversal and render determinism — plus
+/// it is why the "flipped" goldens have a real job: they are the 270°
+/// reference Tasks 9 and 10 compare the *device* against, where the rotation
+/// is real and per-node-kind geometry genuinely is exercised.
 #[test]
 fn every_case_flips_to_an_exact_reversal() {
     let mut sim = Simulator::new().expect("simulator");

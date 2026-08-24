@@ -79,6 +79,16 @@ font_registry_result_t font_registry_init(asset_resolver_fn resolver,
  * surplus rather than thrashing. Handle NULL -- fall back to a baked font or
  * refuse the scene; never draw with it.
  *
+ * During a screen change the real bound is the UNION of outgoing and
+ * incoming faces, not just the incoming screen's own count: scene_view_show()
+ * acquires everything the candidate screen needs before
+ * lv_screen_load_anim(..., auto_del=true) deletes the outgoing screen and
+ * releases its holds, so both sets are pinned at once for that window.
+ * Shared (digest, pixel_size) pairs are deduplicated by find_open(), so only
+ * genuinely distinct faces across the two screens count twice. Latent today
+ * -- stage 2a's only scenes use baked fonts, which never touch this registry
+ * -- but a real constraint once a scene acquires asset fonts.
+ *
  * One path sits outside the contract: font_registry_init() adopts a fresh
  * table without destroying whatever the previous one held, so re-initialising
  * a live registry leaks every open face and its mapping. It is called exactly

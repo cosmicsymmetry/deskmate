@@ -488,16 +488,56 @@ size_t sim_build_rgb565_image(int32_t width, int32_t height,
     return total;
 }
 
-bool sim_render_scene(const uint8_t *payload, size_t payload_length,
-                      int16_t utc_offset_minutes, int64_t now_unix_seconds,
-                      bool timer_active, uint32_t timer_remaining_ms,
-                      uint8_t timer_pct, const sim_scene_field_t *fields,
-                      size_t field_count, bool orientation_flipped,
-                      uint16_t *out_pixels)
+/* Maps scene_decode()'s scene_model_result_t onto the SIM_SCENE_ERR_DECODE_*
+ * subrange, in the same order the two enums are declared in -- see
+ * sim_scene_result_t's own comment in sim_shim.h for why this is not folded
+ * into one code. */
+static sim_scene_result_t map_decode_result(scene_model_result_t result)
 {
-    if (!sim_init() || out_pixels == NULL || payload == NULL ||
-        payload_length == 0U) {
-        return false;
+    switch (result) {
+    case SCENE_MODEL_OK:
+        return SIM_SCENE_OK;
+    case SCENE_MODEL_ERR_ARGUMENT:
+        return SIM_SCENE_ERR_DECODE_ARGUMENT;
+    case SCENE_MODEL_ERR_NODE_COUNT:
+        return SIM_SCENE_ERR_DECODE_NODE_COUNT;
+    case SCENE_MODEL_ERR_NODE_KIND:
+        return SIM_SCENE_ERR_DECODE_NODE_KIND;
+    case SCENE_MODEL_ERR_GEOMETRY:
+        return SIM_SCENE_ERR_DECODE_GEOMETRY;
+    case SCENE_MODEL_ERR_TEXT:
+        return SIM_SCENE_ERR_DECODE_TEXT;
+    case SCENE_MODEL_ERR_FONT:
+        return SIM_SCENE_ERR_DECODE_FONT;
+    default:
+        return SIM_SCENE_ERR_DECODE_ARGUMENT;
+    }
+}
+
+/* Advances the fake tick by one boundary-plus-four-ticks phase, shared by
+ * every renderer that must run LVGL's refresh timer at a golden-stable
+ * instant -- see sim_init()'s comment for why the phase itself matters. */
+static void advance_fake_tick_phase(void)
+{
+    s_fake_tick = (s_fake_tick / 1000U + 1U) * 1000U;
+    for (int cycle = 0; cycle < 4; ++cycle) {
+        s_fake_tick += 40;
+        lv_timer_handler();
+    }
+}
+
+sim_scene_result_t sim_render_scene(const uint8_t *payload, size_t payload_length,
+                                    int16_t utc_offset_minutes, int64_t now_unix_seconds,
+                                    bool timer_active, uint32_t timer_remaining_ms,
+                                    uint8_t timer_pct, const sim_scene_field_t *fields,
+                                    size_t field_count, bool orientation_flipped,
+                                    uint16_t *out_pixels)
+{
+    if (payload == NULL || payload_length == 0U || out_pixels == NULL) {
+        return SIM_SCENE_ERR_ARGUMENT;
+    }
+    if (!sim_init()) {
+        return SIM_SCENE_ERR_SETUP;
     }
     /* Both stores are wired unconditionally, not only when a scene happens
      * to name an asset: whether this scene has an image or an asset-font
@@ -505,7 +545,7 @@ bool sim_render_scene(const uint8_t *payload, size_t payload_length,
      * one because the host had not pre-armed the right lookup would be a
      * confusing failure to debug. */
     if (!ensure_asset_store() || !ensure_font_registry()) {
-        return false;
+        return SIM_SCENE_ERR_SETUP;
     }
     /* scene_view.c refuses any scene containing an `image` node until this
      * is called (see scene_view_set_asset_resolver's own comment). It reads
@@ -514,8 +554,10 @@ bool sim_render_scene(const uint8_t *payload, size_t payload_length,
      * asset_flash-backed protocol_asset_resolver to both. */
     scene_view_set_asset_resolver(sim_asset_resolver, sim_asset_release);
 
-    if (scene_decode(payload, payload_length, &s_scene) != SCENE_MODEL_OK) {
-        return false;
+    scene_model_result_t decode_result =
+        scene_decode(payload, payload_length, &s_scene);
+    if (decode_result != SCENE_MODEL_OK) {
+        return map_decode_result(decode_result);
     }
 
     sim_scene_field_table_t table = {
@@ -534,17 +576,13 @@ bool sim_render_scene(const uint8_t *payload, size_t payload_length,
     /* Every binding is evaluated inside this call, so `context` and the
      * table it points at only have to outlive it. */
     if (!scene_view_show(&s_scene, &context)) {
-        return false;
+        return SIM_SCENE_ERR_SHOW;
     }
 
     /* The same fixed tick phase sim_render pins, for the same reason: the
      * counter is process-global and monotonic, so without this a scene
      * golden would depend on how many renders ran before it. */
-    s_fake_tick = (s_fake_tick / 1000U + 1U) * 1000U;
-    for (int cycle = 0; cycle < 4; ++cycle) {
-        s_fake_tick += 40;
-        lv_timer_handler();
-    }
+    advance_fake_tick_phase();
     copy_frame_out(orientation_flipped, out_pixels);
-    return true;
+    return SIM_SCENE_OK;
 }

@@ -81,6 +81,45 @@ size_t sim_build_rgb565_image(int32_t width, int32_t height,
                               const uint16_t *pixels, uint8_t *out,
                               size_t out_capacity);
 
+/* Why sim_render_scene returns a status rather than a bool.
+ *
+ * Two very different things can go wrong, and Task 9's parity gate is the
+ * caller most likely to hit one of them:
+ *
+ *   - THE DECODER REFUSED THE BYTES. This is the failure mode the
+ *     encode/decode design introduces: protocol::encode_scene_payload and
+ *     core/scene_decode.c disagreeing about the wire shape. It says nothing
+ *     about assets or drawing, and it must be diagnosable without a
+ *     debugger, so scene_decode()'s scene_model_result_t is carried out
+ *     whole -- one SIM_SCENE_ERR_DECODE_* per scene_model_result_t code,
+ *     rather than folded into a single "decode failed".
+ *   - THE RENDERER REFUSED THE SCENE. scene_view_show() returning false:
+ *     an asset it could not acquire, or an allocation failure. Nothing to
+ *     do with the bytes.
+ *
+ * Collapsing those into one bool made the difference invisible, which is
+ * exactly the wrong trade for the one gate that has to explain itself. */
+typedef enum {
+    SIM_SCENE_OK = 0,
+    /* NULL/empty payload or out_pixels. */
+    SIM_SCENE_ERR_ARGUMENT,
+    /* sim_init, the asset store, or the font registry could not be brought
+     * up -- nothing about this scene. */
+    SIM_SCENE_ERR_SETUP,
+    /* scene_view_show() refused: an asset it could not acquire, or an
+     * allocation failure. The previous screen is left up. */
+    SIM_SCENE_ERR_SHOW,
+    /* scene_decode() refusals. One per scene_model_result_t, in that
+     * enum's own order, so a new model result cannot be silently mapped
+     * onto an existing one. */
+    SIM_SCENE_ERR_DECODE_ARGUMENT,
+    SIM_SCENE_ERR_DECODE_NODE_COUNT,
+    SIM_SCENE_ERR_DECODE_NODE_KIND,
+    SIM_SCENE_ERR_DECODE_GEOMETRY,
+    SIM_SCENE_ERR_DECODE_TEXT,
+    SIM_SCENE_ERR_DECODE_FONT,
+} sim_scene_result_t;
+
 /* Decodes `payload` -- the standalone CBOR scene map firmware's
  * scene_decode() takes, as written by protocol::encode_scene_payload --
  * and renders it through ui/scene_view.c's interpreter.
@@ -96,13 +135,17 @@ size_t sim_build_rgb565_image(int32_t width, int32_t height,
  * sim_render. Writes 448*368 RGB565 pixels (logical landscape) into
  * out_pixels.
  *
- * Returns false -- leaving out_pixels untouched -- if the payload does not
- * decode, or if scene_view_show() refuses the scene (an asset it could not
- * acquire, an allocation failure). Any asset a node names must already be
- * registered with sim_asset_register(). */
-bool sim_render_scene(const uint8_t *payload, size_t payload_length,
-                      int16_t utc_offset_minutes, int64_t now_unix_seconds,
-                      bool timer_active, uint32_t timer_remaining_ms,
-                      uint8_t timer_pct, const sim_scene_field_t *fields,
-                      size_t field_count, bool orientation_flipped,
-                      uint16_t *out_pixels);
+ * Returns SIM_SCENE_OK, or the reason it failed -- see sim_scene_result_t
+ * above. out_pixels is left untouched on every failure. Any asset a node
+ * names must already be registered with sim_asset_register(). */
+sim_scene_result_t sim_render_scene(const uint8_t *payload,
+                                    size_t payload_length,
+                                    int16_t utc_offset_minutes,
+                                    int64_t now_unix_seconds,
+                                    bool timer_active,
+                                    uint32_t timer_remaining_ms,
+                                    uint8_t timer_pct,
+                                    const sim_scene_field_t *fields,
+                                    size_t field_count,
+                                    bool orientation_flipped,
+                                    uint16_t *out_pixels);

@@ -100,6 +100,20 @@ pub enum SimError {
     /// Task 8: an asset a scene names could not be put in the simulator's
     /// asset store — a full store, or a malformed image.
     AssetRegistrationFailed,
+    /// Task 8: `sim_render_scene`'s own `sim_init`, asset store, or font
+    /// registry setup failed. Nothing about this scene's bytes or content —
+    /// see `SceneDecodeFailed` and `SceneRenderRefused` for those.
+    SceneSetupFailed,
+    /// Task 8: `firmware/main/core/scene_decode.c`'s `scene_decode()` refused
+    /// the encoded payload. This is the failure mode the encode/decode design
+    /// introduces — the encoder and decoder disagreeing about the wire shape
+    /// — and it must stay distinguishable from `SceneRenderRefused` (a
+    /// drawing-time failure) without a debugger.
+    SceneDecodeFailed(scene::SceneDecodeReason),
+    /// Task 8: `firmware/main/ui/scene_view.c`'s `scene_view_show()` refused
+    /// the decoded scene — an asset it could not acquire, or an allocation
+    /// failure. The payload decoded fine; drawing it did not work.
+    SceneRenderRefused,
 }
 
 impl fmt::Display for SimError {
@@ -113,6 +127,11 @@ impl fmt::Display for SimError {
                 return write!(f, "scene rejected by the protocol validator: {reason}");
             }
             SimError::AssetRegistrationFailed => "scene asset registration failed",
+            SimError::SceneSetupFailed => "scene renderer setup failed",
+            SimError::SceneDecodeFailed(reason) => {
+                return write!(f, "scene payload rejected by scene_decode(): {reason}");
+            }
+            SimError::SceneRenderRefused => "scene_view_show() refused the decoded scene",
         };
         f.write_str(message)
     }

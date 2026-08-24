@@ -31,11 +31,102 @@
 //! scene happens to contain one.
 
 use std::ffi::CString;
+use std::fmt;
 use std::os::raw::c_char;
 
 use protocol::{Scene, encode_scene_payload};
 
 use crate::{LOGICAL_HEIGHT, LOGICAL_WIDTH, SimError, SimOrientation, Simulator, pixels_to_png};
+
+/// Why `firmware/main/core/scene_decode.c`'s `scene_decode()` refused a
+/// payload — one variant per `scene_model_result_t` error code
+/// (`firmware/main/core/scene_model.h`), in that enum's own declaration
+/// order, mirroring `csrc/sim_shim.h`'s `sim_scene_result_t` subrange. Kept
+/// distinct rather than a single "decode failed" so a new model result
+/// cannot be silently mapped onto an existing one, and so a rejected wire
+/// payload is diagnosable without a debugger.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SceneDecodeReason {
+    /// `SCENE_MODEL_ERR_ARGUMENT`: NULL/empty argument, or the payload is not
+    /// a well-formed CBOR map.
+    Argument,
+    /// `SCENE_MODEL_ERR_NODE_COUNT`: more than `SCENE_MAX_NODES` nodes.
+    NodeCount,
+    /// `SCENE_MODEL_ERR_NODE_KIND`: a node kind outside `scene_node_kind_t`.
+    NodeKind,
+    /// `SCENE_MODEL_ERR_GEOMETRY`: a numeric field outside the range of the
+    /// type it decodes into.
+    Geometry,
+    /// `SCENE_MODEL_ERR_TEXT`: a text, binding, or glyph name past its bound.
+    Text,
+    /// `SCENE_MODEL_ERR_FONT`: an invalid font/asset reference.
+    Font,
+}
+
+impl fmt::Display for SceneDecodeReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let message = match self {
+            SceneDecodeReason::Argument => "malformed argument or payload",
+            SceneDecodeReason::NodeCount => "too many nodes",
+            SceneDecodeReason::NodeKind => "unknown node kind",
+            SceneDecodeReason::Geometry => "numeric field out of range",
+            SceneDecodeReason::Text => "text, binding, or glyph name past its bound",
+            SceneDecodeReason::Font => "invalid font or asset reference",
+        };
+        f.write_str(message)
+    }
+}
+
+/// `sim_scene_result_t` in `csrc/sim_shim.h`, as the plain `i32` its C enum
+/// compiles to. Kept private: callers only ever see the mapped [`SimError`].
+#[allow(dead_code)]
+mod raw_result {
+    pub const OK: i32 = 0;
+    pub const ERR_ARGUMENT: i32 = 1;
+    pub const ERR_SETUP: i32 = 2;
+    pub const ERR_SHOW: i32 = 3;
+    pub const ERR_DECODE_ARGUMENT: i32 = 4;
+    pub const ERR_DECODE_NODE_COUNT: i32 = 5;
+    pub const ERR_DECODE_NODE_KIND: i32 = 6;
+    pub const ERR_DECODE_GEOMETRY: i32 = 7;
+    pub const ERR_DECODE_TEXT: i32 = 8;
+    pub const ERR_DECODE_FONT: i32 = 9;
+}
+
+/// Maps `sim_render_scene`'s raw `sim_scene_result_t` onto `Result<(),
+/// SimError>`. `ERR_ARGUMENT` (a NULL `payload` or `out_pixels`) can never
+/// happen from this binding — `payload` is always the non-empty output of
+/// `encode_scene_payload` and `out_pixels` is always sized to
+/// `LOGICAL_WIDTH * LOGICAL_HEIGHT` — so it is treated as an internal
+/// invariant violation rather than given its own public `SimError` variant.
+fn map_sim_scene_result(raw: i32) -> Result<(), SimError> {
+    match raw {
+        raw_result::OK => Ok(()),
+        raw_result::ERR_SETUP => Err(SimError::SceneSetupFailed),
+        raw_result::ERR_SHOW => Err(SimError::SceneRenderRefused),
+        raw_result::ERR_DECODE_ARGUMENT => {
+            Err(SimError::SceneDecodeFailed(SceneDecodeReason::Argument))
+        }
+        raw_result::ERR_DECODE_NODE_COUNT => {
+            Err(SimError::SceneDecodeFailed(SceneDecodeReason::NodeCount))
+        }
+        raw_result::ERR_DECODE_NODE_KIND => {
+            Err(SimError::SceneDecodeFailed(SceneDecodeReason::NodeKind))
+        }
+        raw_result::ERR_DECODE_GEOMETRY => {
+            Err(SimError::SceneDecodeFailed(SceneDecodeReason::Geometry))
+        }
+        raw_result::ERR_DECODE_TEXT => Err(SimError::SceneDecodeFailed(SceneDecodeReason::Text)),
+        raw_result::ERR_DECODE_FONT => Err(SimError::SceneDecodeFailed(SceneDecodeReason::Font)),
+        raw_result::ERR_ARGUMENT => {
+            unreachable!(
+                "sim_render_scene reported SIM_SCENE_ERR_ARGUMENT, but this binding always \
+                 passes a non-empty payload and a fully-sized out_pixels buffer"
+            )
+        }
+        other => unreachable!("sim_render_scene returned unknown sim_scene_result_t {other}"),
+    }
+}
 
 /// `ASSET_KIND_FONT` in `firmware/main/core/asset_store.h`.
 const ASSET_KIND_FONT: u8 = 1;
@@ -140,7 +231,7 @@ unsafe extern "C" {
         field_count: usize,
         orientation_flipped: bool,
         out_pixels: *mut u16,
-    ) -> bool;
+    ) -> i32;
 }
 
 impl Simulator {
@@ -155,9 +246,13 @@ impl Simulator {
     /// (which mirrors `scene_model_validate`, so this is the same refusal the
     /// device would issue, just earlier and with a reason attached);
     /// [`SimError::AssetRegistrationFailed`] if an asset could not be stored;
-    /// [`SimError::RenderFailed`] if the payload does not decode or
-    /// `scene_view_show()` refuses it — an asset it could not acquire, or an
-    /// allocation failure.
+    /// [`SimError::SceneSetupFailed`] if the renderer's own setup (`sim_init`,
+    /// the asset store, or the font registry) failed, unrelated to this
+    /// scene; [`SimError::SceneDecodeFailed`] if `scene_decode()` refused the
+    /// encoded payload, carrying which `scene_model_result_t` reason;
+    /// [`SimError::SceneRenderRefused`] if `scene_view_show()` refused the
+    /// decoded scene — an asset it could not acquire, or an allocation
+    /// failure.
     pub fn render_scene(&mut self, request: &SceneRenderRequest) -> Result<Vec<u16>, SimError> {
         for asset in &request.assets {
             register_asset(asset)?;
@@ -195,7 +290,7 @@ impl Simulator {
         // alive for the duration of this call; `pixels` has exactly
         // LOGICAL_WIDTH * LOGICAL_HEIGHT elements, matching what
         // sim_render_scene writes (SIM_WIDTH * SIM_HEIGHT in the shim).
-        let ok = unsafe {
+        let status = unsafe {
             sim_render_scene(
                 payload.as_ptr(),
                 payload.len(),
@@ -210,11 +305,8 @@ impl Simulator {
                 pixels.as_mut_ptr(),
             )
         };
-        if ok {
-            Ok(pixels)
-        } else {
-            Err(SimError::RenderFailed)
-        }
+        map_sim_scene_result(status)?;
+        Ok(pixels)
     }
 
     /// Renders like [`Simulator::render_scene`] and encodes the result as an
@@ -373,7 +465,7 @@ mod tests {
         };
         assert_eq!(
             sim.render_scene(&request(scene)),
-            Err(SimError::RenderFailed)
+            Err(SimError::SceneRenderRefused)
         );
     }
 

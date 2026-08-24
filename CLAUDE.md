@@ -226,6 +226,47 @@ of letting code and documentation diverge.
   It read 75 for most of V2 because bit 7 was defined in Task 1 and never switched on;
   the whole-branch review caught it. `docs/protocol/v1.md` gates NetworkConfig and
   FactoryReset on that bit, so a conforming host could not have provisioned the device.
+- **The scene renderer is delivered on `feat/v2-networked-device`, software-complete and
+  unverified on hardware.** Plan
+  `docs/superpowers/plans/2026-08-23-deskmate-scene-renderer.md`, spec
+  `docs/superpowers/specs/2026-08-22-deskmate-plugin-scene-rendering-design.md` (stage 2a of
+  five). A host now pushes a **declarative display list** — absolutely-positioned nodes on the
+  448x368 canvas — instead of a template being hand-written in C and compiled into firmware.
+  The chain is `app-core`'s builder -> `protocol::encode_scene_payload` -> CBOR over **message
+  19 (`PushScene`)** -> `core/scene_decode.c` -> `core/scene_model.c` validation ->
+  `ui/scene_view.c` into LVGL objects. **`PROTOCOL_CURRENT_CAPABILITIES` is now 491** (bit 8,
+  `+256`); the wire stays protocol v1, additive only, and the config schema is untouched.
+  - **The gate that justifies the whole thing passed**: the host-built scene reproduces the
+    shipped `DigitalClock` C template **byte-identically**, with no tolerance —
+    `companion/crates/app-core/tests/scene_parity.rs`. It is **7 instants x seconds
+    shown/hidden x two orientations = 28 comparisons, of which 14 are independent**. Do not
+    quote 28 as a count of evidence: the flipped half is `sim_shim.c`'s `copy_frame_out`
+    reversing the finished buffer index-by-index, so `flipped(A) == flipped(B)` iff `A == B`.
+    **Real 270-degree geometry is provable only on hardware.**
+  - The gate exercises the **real codec**, not a parallel one: the simulator encodes to CBOR and
+    decodes with the firmware's own `scene_decode()` rather than marshalling over FFI. That is
+    deliberate — a device-vs-simulator comparison is structurally blind to defects in code the
+    two SHARE, which is how a full-circle arc that drew nothing survived until a reading review.
+  - **Text nodes are baseline-anchored** (`baseline_y`, not a box top), because
+    `digital_clock.c:44` positions type by `line_height - base_line`. **The dial is an
+    `lv_scale`, not an arc** — the plan mis-modelled it, and `SCENE_NODE_SCALE` was added by
+    amendment so the pixels match by construction rather than by porting LVGL's tick trig.
+  - **`.bss` moved 102,608 -> 102,624**; `.data` 23,128 and IRAM 16,384/16,384-with-0-remaining
+    are unchanged. The +16 is `scene_view.c`'s three existing pointers becoming reachable, not
+    new state (verified in `deskmate.map`). **An OTA-download check on the board is therefore
+    required before this is trusted** — this repo has twice lost days to memory-layout shifts
+    with every test green.
+  - **Nothing has run on hardware.** Also unproven: `timer.remaining`/`timer.pct` have no pixel
+    coverage; only `DigitalClock` is reproduced, so `deskmate_number_font()`'s tier step-down is
+    never exercised and `BakedFontMetrics::measure()` is checked at exactly one string width;
+    the date box's truncation is unexercised; and the asset-GC teardown has **no automated
+    test** — it spans four LVGL/ESP-IDF-bound files with no simulator seam. Four on-device
+    observations for it are specified at the end of the plan's Task 10 section.
+  - `make -C firmware/host_tests sanitize` is now in CI and in Verification below, because two
+    decoder bounds have **no other proof**: delete them and the plain suite still passes, since
+    the out-of-bounds write is then rejected by `scene_model_validate()` with the same error
+    code the test asserts.
+
 - **Two plan amendments were added during execution and are marked as such in the plan.**
   Task 9b (persistent device identities) was added by explicit owner direction; Task 10a
   (the app-core boundary) was added because Task 10's implementer correctly refused to

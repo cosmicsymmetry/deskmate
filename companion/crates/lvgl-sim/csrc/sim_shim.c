@@ -47,6 +47,28 @@ static void sim_flush_cb(lv_display_t *display, const lv_area_t *area,
     lv_display_flush_ready(display);
 }
 
+/* Shared by sim_render, sim_render_asset_font and sim_render_scene: starts
+ * every render on a 1000ms fake-tick boundary, then advances four ×40ms
+ * ticks so LVGL runs its refresh timer.
+ *
+ * The tick counter is process-global and monotonic (LVGL timers must never
+ * see it move backwards), so without pinning the phase, the instant a render
+ * begins at would depend on how many renders preceded it -- and anything
+ * whose pixels derive from elapsed ticks (e.g. progress_ring's arc value)
+ * would then differ purely because a case was added earlier in the table.
+ * Pinning the phase makes every golden independent of case ordering, and
+ * extracting it here keeps the three renderers provably in the same phase --
+ * see sim_init()'s own comment on why the first render's anchor/boundary
+ * offset matters too. */
+static void advance_fake_tick_phase(void)
+{
+    s_fake_tick = (s_fake_tick / 1000U + 1U) * 1000U;
+    for (int cycle = 0; cycle < 4; ++cycle) {
+        s_fake_tick += 40;
+        lv_timer_handler();
+    }
+}
+
 bool sim_init(void)
 {
     if (s_display != NULL) {
@@ -137,21 +159,7 @@ bool sim_render(int template_kind, const sim_field_t *fields,
         clock_source_clear_override();
         return false;
     }
-    /* Advance fake time so LVGL runs its refresh timer.
-     *
-     * Start every render on a 1000ms boundary. The tick counter is process
-     * global and monotonic (LVGL timers must never see it move backwards),
-     * so without this the phase a render begins at depends on how many
-     * renders preceded it — and the progress ring, whose arc value is
-     * derived from elapsed ticks since its patch, would then produce
-     * different pixels purely because a case was added earlier in the
-     * table. Pinning the phase makes every golden independent of case
-     * ordering. */
-    s_fake_tick = (s_fake_tick / 1000U + 1U) * 1000U;
-    for (int cycle = 0; cycle < 4; ++cycle) {
-        s_fake_tick += 40;
-        lv_timer_handler();
-    }
+    advance_fake_tick_phase();
     copy_frame_out(orientation_flipped, out_pixels);
     clock_source_clear_override();
     return true;
@@ -408,11 +416,7 @@ bool sim_render_asset_font(const uint8_t *digest, const uint8_t *ttf_bytes,
      * template_view_show's own lv_screen_load_anim call. */
     lv_screen_load_anim(screen, LV_SCREEN_LOAD_ANIM_NONE, 0U, 0U, true);
 
-    s_fake_tick = (s_fake_tick / 1000U + 1U) * 1000U;
-    for (int cycle = 0; cycle < 4; ++cycle) {
-        s_fake_tick += 40;
-        lv_timer_handler();
-    }
+    advance_fake_tick_phase();
 
     copy_frame_out(orientation_flipped, out_pixels);
     return true;
@@ -514,18 +518,6 @@ static sim_scene_result_t map_decode_result(scene_model_result_t result)
     }
 }
 
-/* Advances the fake tick by one boundary-plus-four-ticks phase, shared by
- * every renderer that must run LVGL's refresh timer at a golden-stable
- * instant -- see sim_init()'s comment for why the phase itself matters. */
-static void advance_fake_tick_phase(void)
-{
-    s_fake_tick = (s_fake_tick / 1000U + 1U) * 1000U;
-    for (int cycle = 0; cycle < 4; ++cycle) {
-        s_fake_tick += 40;
-        lv_timer_handler();
-    }
-}
-
 sim_scene_result_t sim_render_scene(const uint8_t *payload, size_t payload_length,
                                     int16_t utc_offset_minutes, int64_t now_unix_seconds,
                                     bool timer_active, uint32_t timer_remaining_ms,
@@ -579,9 +571,6 @@ sim_scene_result_t sim_render_scene(const uint8_t *payload, size_t payload_lengt
         return SIM_SCENE_ERR_SHOW;
     }
 
-    /* The same fixed tick phase sim_render pins, for the same reason: the
-     * counter is process-global and monotonic, so without this a scene
-     * golden would depend on how many renders ran before it. */
     advance_fake_tick_phase();
     copy_frame_out(orientation_flipped, out_pixels);
     return SIM_SCENE_OK;

@@ -1401,13 +1401,22 @@ static size_t build_push_scene_payload_with_binding(uint8_t *payload,
  * ui/scene_view.c's header comment listing what the model does and does not
  * guarantee). One layer, not two.
  *
- * And the assertion that fails against a BROKEN DISPATCH rather than
- * against the already-proven decoder is the second one: a device that
- * advertises bit 8 and has no dispatch arm for type 19 also refuses this
- * frame -- with UnsupportedMessage, because it never looks at the content.
- * A device that dispatches 19 refuses it as an invalid payload while still
- * reporting the type as dispatchable. Both halves together are what
- * distinguish them; either alone does not.
+ * WHAT THIS TEST DOES NOT COVER, stated plainly because it would be easy to
+ * read the assertions as covering it. The second assertion pins the GATE
+ * TABLE, not the DISPATCH ARM. A device whose gate answers DISPATCHABLE
+ * while dispatch_request()'s switch has no `case PROTOCOL_TYPE_PUSH_SCENE`
+ * still passes this test. Nothing here reaches dispatch_push_scene() at all
+ * -- not its scene_card_id restore on refusal, not its Busy/InvalidPayload
+ * split, not its "the previous scene stays up" property -- because
+ * link/protocol_task.c is an ESP-IDF-only translation unit that no host
+ * binary can link, and extracting those decisions into core/ would mean
+ * moving LVGL and lvgl_port calls there. That is a real gap; it is covered
+ * only by Task 11 on the board. What the gate table being wrong DOES catch
+ * is the specific defect Task 10 existed to close (bit advertised, type
+ * declared not-a-request), and dispatch_request()'s `default` arm now
+ * answers PROTOCOL_ERROR_INTERNAL rather than falling through silently, so
+ * a missing arm is at least a visible error to the host instead of no
+ * reply at all.
  */
 static void test_a_malformed_scene_is_refused_by_content_not_by_type(void)
 {

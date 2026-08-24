@@ -94,6 +94,16 @@ typedef struct {
     // ~6 KB, and in PSRAM for the same reason protocol_message_t's copy is.
     scene_t scene;
     char scene_card_id[PROTOCOL_MAX_CARD_ID_LENGTH + 1U];
+    // A HINT, never an authority. The thing that actually decides whether a
+    // scene is on the panel -- and therefore whether anything is pinning
+    // font faces or holding a mapped-blob pointer -- is the renderer's own
+    // screen, scene_view_screen(), which only an LVGL-lock holder may read.
+    // This flag exists purely so the 250 ms tick can skip taking that lock
+    // when no scene has been shown, so it is only ever set true by an
+    // observed successful show and only ever cleared by the renderer's own
+    // answer, never by this task predicting a queued screen change that may
+    // not land. Every decision that can damage something -- the asset-GC
+    // teardown, the rebuild -- reads the authority instead.
     bool scene_live;
     uint64_t scene_tick_ms;
     // uptime at the last PushData for the scene's card, so a running timer
@@ -229,13 +239,6 @@ static bool show_carousel_screen(protocol_context_t *context)
     strcpy(view->next_screen_id, config->screens[next].screen_id);
     strcpy(view->next_widget_id, config->screens[next].widget_id);
     view->tap_action = widget->tap_action;
-    // A template view is on its way to the panel; ui_runtime's queue
-    // consumer loads its screen with auto_del, which deletes the scene's
-    // screen and (through ui/scene_view.c's delete callback) drops its hold
-    // on every asset face. Stop ticking bindings for a scene on its way out:
-    // the tick would be a harmless no-op once that delete lands, but it
-    // would take the LVGL lock four times a second to discover that.
-    context->scene_live = false;
     return ui_runtime_show_view(widget->widget_id, widget->template_kind,
                                 widget->size_class, fields, view);
 }
@@ -260,13 +263,6 @@ static bool show_active_interrupt(protocol_context_t *context)
     strcpy(view->screen_id, context->interrupts.saved_screen_id);
     view->interrupt = true;
     view->interrupt_token = active->token;
-    // A template view is on its way to the panel; ui_runtime's queue
-    // consumer loads its screen with auto_del, which deletes the scene's
-    // screen and (through ui/scene_view.c's delete callback) drops its hold
-    // on every asset face. Stop ticking bindings for a scene on its way out:
-    // the tick would be a harmless no-op once that delete lands, but it
-    // would take the LVGL lock four times a second to discover that.
-    context->scene_live = false;
     return ui_runtime_show_view(widget->widget_id, widget->template_kind,
                                 PROTOCOL_SIZE_FULL, fields, view);
 }
@@ -384,8 +380,9 @@ typedef enum {
     /* The scene could not be rendered exactly as specified: an unallocatable
      * object, or an asset that could not be acquired. */
     SHOW_SCENE_REFUSED,
-    /* Something else owns the panel right now -- retryable, and a different
-     * answer to the host than "your scene is wrong", which it is not. */
+    /* Something else owns the panel right now (in practice: the OTA
+     * takeover) -- retryable, and a different answer to the host than "your
+     * scene is wrong", which it is not. */
     SHOW_SCENE_BUSY,
 } show_scene_result_t;
 
@@ -401,7 +398,15 @@ typedef enum {
  * overwrites. So the handoff is synchronous under lvgl_port_lock(), which is
  * the mechanism CLAUDE.md names for LVGL calls made outside LVGL callbacks
  * and the one dispatch_asset_release() already uses for font_registry_reset().
- * The LVGL task cannot be inside a callback while this lock is held. */
+ * The LVGL task cannot be inside a callback while this lock is held.
+ *
+ * Note lvgl_port_lock(0U) does NOT mean "try": esp_lvgl_port maps a 0 timeout
+ * onto portMAX_DELAY, so it blocks until the mutex is free and never returns
+ * false. The failure branch below is therefore unreachable defensively-coded
+ * dead weight kept only to match the shape of every other lock site in this
+ * file. The real cost to be aware of is the blocking itself: this task now
+ * waits on the LVGL mutex on every scene show, every asset release, and the
+ * 250 ms binding tick -- four times a second whenever a scene is up. */
 static show_scene_result_t show_scene(protocol_context_t *context,
                                       const scene_t *scene)
 {
@@ -422,22 +427,61 @@ static show_scene_result_t show_scene(protocol_context_t *context,
     return result;
 }
 
-/* Re-evaluates the live scene's bindings in place. The clock tick and a
- * PushData field update both come through here and neither rebuilds the
- * scene -- that is the whole reason ui/scene_view.c keeps a node -> object
- * table. Silently does nothing when no scene is live. */
-static void refresh_scene_bindings(protocol_context_t *context)
+/* Whether `scene` reads any byte that compaction can move: an image node's
+ * mapped blob, an asset-font text node, or a glyph node. It is answered from
+ * the retained model rather than from the font registry because the registry
+ * only knows about FACES -- an `image` node holds a bare pointer into mapped
+ * flash inside its lv_image_dsc_t (ui/scene_view.c's scene_image_asset_t)
+ * and pins nothing the registry can count. font_registry_reset() would
+ * happily return 0 with such an image live, and compaction would then move
+ * the bytes underneath it.
+ *
+ * A scene that reads nothing of the sort cannot be invalidated by
+ * compaction, so it does not need to be torn down and rebuilt -- which is
+ * the difference between a release costing a visible clock-then-scene screen
+ * flap and costing nothing. Every scene this stage ships is in that class:
+ * the DigitalClock scene is baked fonts and geometry only.
+ *
+ * Deliberately conservative: anything that is not provably baked counts as
+ * an asset reference, because a false negative here would put compaction
+ * under a live mapping. */
+static bool scene_reads_asset_bytes(const scene_t *scene)
 {
-    if (!context->scene_live) {
-        return;
+    for (uint32_t i = 0U; i < scene->node_count; ++i) {
+        const scene_node_t *node = &scene->nodes[i];
+        if (node->kind == SCENE_NODE_IMAGE ||
+            node->kind == SCENE_NODE_GLYPH) {
+            return true;
+        }
+        if (node->kind == SCENE_NODE_TEXT &&
+            node->value.text.font.kind != SCENE_FONT_BAKED) {
+            return true;
+        }
     }
+    return false;
+}
+
+/* Re-evaluates the live scene's bindings in place, and returns whether a
+ * scene is still on the panel. The clock tick and a PushData field update
+ * both come through here and neither rebuilds the scene -- that is the whole
+ * reason ui/scene_view.c keeps a node -> object table.
+ *
+ * The return value is what keeps context->scene_live honest without a second
+ * mechanism: this function already holds the lock the authority must be read
+ * under, so it reads it while it is there. A scene retired by a screen change
+ * this task never observed (a queued view command, a link-loss clock restore)
+ * costs exactly one no-op refresh before the hint self-corrects. */
+static bool refresh_scene_bindings(protocol_context_t *context)
+{
     scene_binding_context_t binding;
     fill_scene_binding_context(context, &binding);
     if (!lvgl_port_lock(0U)) {
-        return;
+        return context->scene_live;
     }
     scene_view_refresh_bindings(&binding);
+    bool still_live = scene_view_screen() != NULL;
     lvgl_port_unlock();
+    return still_live;
 }
 
 static void transmit(protocol_context_t *context,
@@ -656,7 +700,7 @@ static void dispatch_push_data(protocol_context_t *context,
     if (context->scene_live &&
         strcmp(context->scene_card_id, push->widget_id) == 0) {
         context->scene_timer_anchor_ms = uptime_ms();
-        refresh_scene_bindings(context);
+        context->scene_live = refresh_scene_bindings(context);
     }
     transmit_ack(context, request_id, PROTOCOL_TYPE_PUSH_DATA, true,
                  context->link.latest_revision);
@@ -1211,22 +1255,40 @@ static void dispatch_asset_release(protocol_context_t *context,
     // was already active and clock_screen_show_in_lvgl() early-returns.
     //
     // The rebuild runs on EVERY exit path after the teardown, including the
-    // refusal and each store failure, so that a release which changes
-    // nothing also leaves the panel showing what it was showing. The other
-    // holder of a face is the DESKMATE_DEV_DIAG asset probe
-    // (link/dev_capture.c), which this task cannot tear down; a release
-    // arriving while a probe render is up is still correctly deferred.
+    // refusal and each store failure. The other holder of a face is the
+    // DESKMATE_DEV_DIAG asset probe (link/dev_capture.c), which this task
+    // cannot tear down; a release arriving while a probe render is up is
+    // still correctly deferred.
+    //
+    // WHAT DECIDES that a scene is up is scene_view_screen(), the renderer's
+    // own state, and NOT context->scene_live. The two are allowed to
+    // disagree: a queued view change can fail to land (ui_command_queue_push
+    // can drop, template_view_show can fail), leaving a scene alive that
+    // this task no longer believes in, and show_scene() bypasses that queue
+    // entirely, so a PushScene racing a queued SHOW_VIEW can leave the
+    // opposite. Gating the teardown on the belief would, in the first case,
+    // skip a teardown a live scene needed and block collection until some
+    // later screen change; in the second it would put a stale scene back
+    // over a live template face. Reading the authority under the lock we
+    // already hold costs nothing and cannot be wrong.
     if (!lvgl_port_lock(0U)) {
         transmit_error(context, request_id, PROTOCOL_ERROR_INTERNAL,
                        "display lock unavailable");
         return;
     }
-    // Never while the OTA takeover owns the panel: swapping it for the clock
-    // to collect assets would hide a running update. font_registry_reset()
-    // then refuses (the scene still pins its faces) and the host retries,
-    // which is the correct outcome.
-    bool rebuild_scene = context->scene_live && !ota_screen_active_in_lvgl();
-    if (rebuild_scene) {
+    // Three conditions, and each one earns its place:
+    //  - a scene really is on the panel (the authority, see above);
+    //  - it reads bytes compaction can move -- a scene of baked fonts and
+    //    geometry survives compaction untouched, so tearing it down would
+    //    buy a visible screen flap and nothing else;
+    //  - the OTA takeover does not own the panel. Swapping it for the clock
+    //    to collect assets would hide a running update, so leave it alone;
+    //    font_registry_reset() then refuses if the scene pins a face and the
+    //    host retries, which is the correct outcome.
+    bool torn_down = scene_view_screen() != NULL &&
+                     scene_reads_asset_bytes(&context->scene) &&
+                     !ota_screen_active_in_lvgl();
+    if (torn_down) {
         clock_screen_show_in_lvgl();
         (void)scene_view_destroy();
         context->scene_live = false;
@@ -1241,10 +1303,20 @@ static void dispatch_asset_release(protocol_context_t *context,
         ESP_LOGW(TAG,
                 "AssetRelease deferred: %u font face(s) still in use",
                 (unsigned)pinned_faces);
-        if (rebuild_scene) {
-            context->scene_live =
-                show_scene(context, &context->scene) == SHOW_SCENE_OK;
+        // BUSY is Task 6's word for "nothing happened, retry", so it may
+        // only be sent when nothing did happen. If the teardown ran and the
+        // scene came back, that is still true. If the scene could NOT be
+        // restored, the panel has changed and answering BUSY would assert
+        // the opposite of the truth -- so say what actually happened, and
+        // say it in terms the host can act on: re-push the scene.
+        if (torn_down &&
+            show_scene(context, &context->scene) != SHOW_SCENE_OK) {
+            ESP_LOGW(TAG, "scene not rebuilt after asset collection");
+            transmit_error(context, request_id, PROTOCOL_ERROR_INTERNAL,
+                           "font faces in use; scene dropped, re-push it");
+            return;
         }
+        context->scene_live = torn_down;
         transmit_error(context, request_id, PROTOCOL_ERROR_BUSY,
                        "font faces in use");
         return;
@@ -1254,11 +1326,18 @@ static void dispatch_asset_release(protocol_context_t *context,
     const char *diagnostic = "asset release failed";
     bool collected = collect_released_assets(context, &error_code,
                                              &diagnostic);
-    if (rebuild_scene) {
-        // Re-acquires every face from the compacted store. A scene naming an
-        // asset the host has just released cannot be rebuilt, and is refused
-        // whole rather than drawn with a substitute face -- the clock stays
-        // up and the host learns from the next Ack's absence of a scene.
+    if (torn_down) {
+        // Re-acquires every face and re-maps every blob from the compacted
+        // store. A scene naming an asset the host has just released cannot
+        // be rebuilt, and is refused whole rather than drawn with a
+        // substitute face: the clock stays up and this logs the loss.
+        //
+        // The Ack below still goes out in that case, and deliberately: the
+        // release genuinely succeeded, and protocol v1's Ack for type 18
+        // carries no field in which a device could report a side effect on
+        // its display. Nothing in the wire tells the host its scene is gone
+        // -- a host that releases an asset its own live scene uses gets
+        // silence and this log line. Recorded as a gap, not papered over.
         context->scene_live =
             show_scene(context, &context->scene) == SHOW_SCENE_OK;
         if (!context->scene_live) {
@@ -1439,6 +1518,17 @@ static void dispatch_request(protocol_context_t *context,
         break;
     }
     default:
+        // Unreachable: the gate above admits exactly the types this switch
+        // handles. It answers rather than falling through silently because
+        // the two lists are maintained in different files, and the failure
+        // of a type the gate calls DISPATCHABLE with no arm here is a host
+        // waiting forever for a reply that is never coming -- the hardest
+        // possible symptom to trace back to a missing `case`. A reply the
+        // host can see is worth the four lines.
+        ESP_LOGE(TAG, "no handler for dispatchable message type %u",
+                 (unsigned)context->message.type);
+        transmit_error(context, frame->request_id, PROTOCOL_ERROR_INTERNAL,
+                       "no handler for this message type");
         break;
     }
 }
@@ -1624,9 +1714,6 @@ static void protocol_task(void *argument)
         wifi_station_poll();
         if (link_state_poll(&context->link, uptime_ms())) {
             ui_runtime_set_online(false);
-            // ui_runtime's LINK_STATE handler restores the standalone clock,
-            // which deletes the scene's screen. Stop ticking its bindings.
-            context->scene_live = false;
             ESP_LOGI(TAG, "link standalone after timeout");
         }
         // ui/scene_view.c owns no timer of its own by design -- it is
@@ -1637,7 +1724,7 @@ static void protocol_task(void *argument)
         if (context->scene_live &&
             uptime_ms() - context->scene_tick_ms >= PROTOCOL_SCENE_TICK_MS) {
             context->scene_tick_ms = uptime_ms();
-            refresh_scene_bindings(context);
+            context->scene_live = refresh_scene_bindings(context);
         }
         refresh_ota_snapshots(context);
     }

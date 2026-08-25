@@ -44,29 +44,16 @@
 use std::env;
 use std::process;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
+use device::framebuffer_capture::capture_framebuffer;
 use device::{DeviceClient, Transport, connect};
 use lvgl_sim::{RenderRequest, SimFieldValue, SimOrientation, SimTemplate, Simulator, cases};
 use protocol::{
-    ActivateScreen, ApplyConfig, Deframer, Field, FieldValue, Frame, InterruptPolicy, Message,
-    PushData, ScreenConfig, SizeClass, TYPE_ACTIVATE_SCREEN, TYPE_APPLY_CONFIG, TYPE_ERROR,
-    TapAction, TemplateKind, TimeSync, WidgetConfig, crc32c, decode_message, encode_frame,
+    ActivateScreen, ApplyConfig, Field, FieldValue, InterruptPolicy, Message, PushData,
+    ScreenConfig, SizeClass, TYPE_ACTIVATE_SCREEN, TYPE_APPLY_CONFIG, TapAction, TemplateKind,
+    TimeSync, WidgetConfig,
 };
-
-/// Dev-only message ids (spec §3.2.3), outside the frozen release range
-/// (`protocol_message_type_t`'s 1-12 in `firmware/main/core/protocol_message.h`).
-/// Kept local to this example rather than added to the `protocol` crate:
-/// they are not part of the release wire contract.
-const CAPTURE_REQUEST_TYPE: u8 = 0x7E;
-const CAPTURE_CHUNK_TYPE: u8 = 0x7F;
-const CHUNK_HEADER_LEN: usize = 12; // {offset: u32, total: u32, crc32: u32}, all little-endian.
-
-const FRAME_WIDTH: usize = lvgl_sim::LOGICAL_WIDTH as usize;
-const FRAME_HEIGHT: usize = lvgl_sim::LOGICAL_HEIGHT as usize;
-const FRAME_BYTES: usize = FRAME_WIDTH * FRAME_HEIGHT * 2; // RGB565.
-
-const CAPTURE_TIMEOUT: Duration = Duration::from_secs(5);
 /// Gives the UI command queue (20 ms poll) generous margin to drain the
 /// config/push/time-sync commands and redraw before the capture request,
 /// while staying well clear of the 1 s mark that would roll the just-synced
@@ -198,116 +185,6 @@ fn diff_pixels(expected: &[u16], actual: &[u16]) -> (usize, u32) {
     (differing, max_delta)
 }
 
-fn write_all(transport: &mut impl Transport, bytes: &[u8]) -> Result<(), String> {
-    let mut written = 0;
-    while written < bytes.len() {
-        let count = transport
-            .write(&bytes[written..])
-            .map_err(|error| error.to_string())?;
-        if count == 0 {
-            return Err("device disconnected during write".into());
-        }
-        written += count;
-    }
-    Ok(())
-}
-
-/// Sends a 0x7E capture request and reassembles the 0x7F chunk stream. Runs
-/// on the raw transport (not `DeviceClient`, which only knows the release
-/// message set) with its own `Deframer`, then hands the transport back so
-/// the caller can resume issuing ordinary requests through a fresh
-/// `DeviceClient`.
-fn capture_framebuffer<T: Transport>(
-    client: DeviceClient<T>,
-    request_id: u32,
-) -> (DeviceClient<T>, Result<Vec<u8>, String>) {
-    let mut transport = client.into_transport();
-    let result = (|| -> Result<Vec<u8>, String> {
-        let wire = encode_frame(&Frame::new(CAPTURE_REQUEST_TYPE, request_id, Vec::new()))
-            .map_err(|error| error.to_string())?;
-        write_all(&mut transport, &wire)?;
-
-        let mut deframer = Deframer::new();
-        let mut read_buffer = [0u8; 512];
-        let deadline = Instant::now() + CAPTURE_TIMEOUT;
-        let mut frame_buffer = vec![0u8; FRAME_BYTES];
-        let mut total: Option<u32> = None;
-        let mut bytes_received = 0usize;
-
-        while bytes_received < FRAME_BYTES {
-            if Instant::now() >= deadline {
-                return Err(format!(
-                    "timed out after {bytes_received}/{FRAME_BYTES} bytes -- \
-                     is the device a DESKMATE_DEV_DIAG=1 build?"
-                ));
-            }
-            let count = transport
-                .read(&mut read_buffer)
-                .map_err(|error| error.to_string())?;
-            if count == 0 {
-                continue;
-            }
-            for result in deframer.push(&read_buffer[..count]) {
-                let frame =
-                    result.map_err(|error| format!("malformed capture response: {error}"))?;
-                if frame.request_id != request_id {
-                    return Err(format!(
-                        "capture response request ID mismatch: expected {request_id}, received {}",
-                        frame.request_id
-                    ));
-                }
-                if frame.message_type == TYPE_ERROR {
-                    let message = decode_message(&frame).map_err(|error| error.to_string())?;
-                    return Err(format!("device rejected capture request: {message:?}"));
-                }
-                if frame.message_type != CAPTURE_CHUNK_TYPE {
-                    return Err(format!(
-                        "unexpected response message type 0x{:02x}",
-                        frame.message_type
-                    ));
-                }
-                if frame.payload.len() < CHUNK_HEADER_LEN {
-                    return Err("capture chunk shorter than its header".into());
-                }
-                let offset = u32::from_le_bytes(frame.payload[0..4].try_into().unwrap()) as usize;
-                let chunk_total = u32::from_le_bytes(frame.payload[4..8].try_into().unwrap());
-                let chunk_crc = u32::from_le_bytes(frame.payload[8..12].try_into().unwrap());
-                let data = &frame.payload[CHUNK_HEADER_LEN..];
-                if crc32c(data) != chunk_crc {
-                    return Err(format!("chunk at offset {offset} failed its CRC"));
-                }
-                match total {
-                    None if chunk_total as usize == FRAME_BYTES => total = Some(chunk_total),
-                    None => {
-                        return Err(format!(
-                            "capture total {chunk_total} does not match the expected \
-                             {FRAME_BYTES}-byte frame"
-                        ));
-                    }
-                    Some(expected) if expected != chunk_total => {
-                        return Err("capture total changed mid-stream".into());
-                    }
-                    Some(_) => {}
-                }
-                let end = offset.saturating_add(data.len());
-                if end > frame_buffer.len() {
-                    return Err(format!(
-                        "chunk at offset {offset} (length {}) overruns the {FRAME_BYTES}-byte frame",
-                        data.len()
-                    ));
-                }
-                frame_buffer[offset..end].copy_from_slice(data);
-                bytes_received += data.len();
-                if bytes_received >= FRAME_BYTES {
-                    break;
-                }
-            }
-        }
-        Ok(frame_buffer)
-    })();
-    (DeviceClient::new(transport), result)
-}
-
 fn apply_case_config(
     client: &mut DeviceClient<impl Transport>,
     revision: u32,
@@ -427,7 +304,7 @@ fn run_case<T: Transport>(
     let (client, capture) = capture_framebuffer(client, request_id);
     let raw = match capture {
         Ok(raw) => raw,
-        Err(error) => return (client, Err(error)),
+        Err(error) => return (client, Err(error.to_string())),
     };
 
     let actual = maybe_flip(bytes_to_pixels(&raw), request.orientation);

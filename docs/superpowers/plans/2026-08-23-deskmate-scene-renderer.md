@@ -1125,7 +1125,8 @@ couple them.
 - **The dev-only 0x7E framebuffer capture is not gated by any of that.** `dispatch_request`
   intercepts `DEV_CAPTURE_REQUEST_TYPE` under `#ifdef DESKMATE_DEV_DIAG` and returns,
   *before* the decode, the capability gate and the tier gate. Capture works over USB in
-  either tier. That is what makes a byte-exact panel check possible at all.
+  either tier. That is what makes a byte-exact device-interpreter check possible at all;
+  as corrected below, the capture is pre-flush and therefore is not panel readback.
 
 So Task 11's second line becomes:
 
@@ -1135,11 +1136,12 @@ So Task 11's second line becomes:
       `scene_view` -> LVGL end to end, on the release image the fleet actually runs. **No
       flash and no tier change**, so it costs a deploy and a minute. This is an observation,
       not a pixel claim -- record it as one.
-- [ ] **Byte-exact parity on the panel, both orientations** (Task 11a's harness). This is
-      the one that answers the question the parity gate provably cannot: the gate's flipped
-      half is `sim_shim.c` reversing a finished buffer, so **real 270-degree geometry is
-      only ever proven here**. Costs a `DESKMATE_DEV_DIAG=1` flash, a trip through local
-      tier, and therefore a device identity; a release flash and a re-provision restore it.
+- [ ] **Byte-exact scene-interpreter parity at both configured rotations** (Task 11a's
+      harness). This runs the bytes through the real device decoder and interpreter, which
+      the host parity gate cannot do. Its flipped half still cannot prove the physical
+      270-degree flush transform because 0x7E captures before that transform; that remains
+      a physical observation. Costs a `DESKMATE_DEV_DIAG=1` flash, a trip through local tier,
+      and therefore a device identity; a release flash and a re-provision restore it.
 
 Run them in that order. The first is nearly free and is worth having before committing to
 the second.
@@ -1156,14 +1158,14 @@ the harness **cannot** be another case inside `framebuffer_diff.rs`; the depende
 points the wrong way. It goes in `app-core/examples/`, beside `alert_replay_check.rs`,
 which is the precedent for a hardware check that needs the whole stack.
 
-- [ ] **Step 1: share the capture plumbing.** Move the 0x7E request / 0x7F chunk
+- [x] **Step 1: share the capture plumbing.** Move the 0x7E request / 0x7F chunk
       reassembly, the CRC check and the RGB565 frame constants out of
       `examples/framebuffer_diff.rs` and into the `device` crate. `framebuffer_diff.rs`
       keeps working through the shared code -- a second hand-rolled copy of a reassembler
       is how two harnesses come to disagree about what the device sent. The dev-only
       message ids stay out of the `protocol` crate for the reason its comment already
       gives: they are not part of the release wire contract.
-- [ ] **Step 2: the check itself.** For each orientation in {90, 270} and each of the
+- [x] **Step 2: the check itself.** For each orientation in {90, 270} and each of the
       parity gate's cases, apply the rotation, push `Message::PushScene` carrying
       `build_digital_clock_scene(&ClockCard { .. }, &BakedFontMetrics::SHIPPED)`, time-sync
       last (`framebuffer_diff.rs` explains why: `dispatch_time_sync` enqueues the redraw and
@@ -1171,15 +1173,42 @@ which is the precedent for a hardware check that needs the whole stack.
       `Simulator::render_scene` of the identical `SceneRenderRequest`. Reuse
       `tests/scene_parity.rs`'s `Difference`/`diff` reporting shape rather than a bare
       "differs" -- a pixel count and a bounding box localise a failure; a boolean does not.
-- [ ] **Step 3: the asset-free scene cases too, if they cost nothing.** `cases::scene_cases()`
+- [x] **Step 3: the asset-free scene cases too, if they cost nothing.** `cases::scene_cases()`
       is one scene per `scene_node_kind_t` at both orientations. Those needing no registered
       asset can go through the same loop for free. Any case that needs one is **excluded with
       a stated reason**, the way `framebuffer_diff.rs` already excludes
       `row-list--truncation-boundary` and `progress-ring--running-mid-countdown` -- an
       exclusion with a reason is evidence; a silently skipped case is not.
-- [ ] **Step 4: gates.** `cargo fmt --all --check`, `cargo clippy --workspace
-      --all-targets -- -D warnings`, `cargo test --workspace`. The example must compile in
-      CI even though only hardware can run it.
+- [x] **Step 4: gates.** `cargo fmt --all --check`, `cargo clippy --workspace
+      --all-targets -- -D warnings`, `cargo test --workspace --no-run`. The example must
+      compile in CI even though only hardware can run it.
+
+**Implementation correction (2026-08-25):** the amendment's claim that this capture can
+prove the physical 270-degree panel geometry was wrong. `dev_capture.c` explicitly
+re-renders `lv_screen_active()` into a **pre-flush logical buffer**; the 90/270 software
+rotation happens only later in the flush path, and the raw 0x7E bytes are identical at
+both orientations. Like `framebuffer_diff`, the harness reverses the flipped capture on
+the host before comparison. It proves the real decoder/interpreter's logical pixels while
+the board is configured at both rotations, but it cannot prove the physical 270-degree
+flush transform byte for byte without a different firmware-side capture or panel readback.
+The harness says this in its startup output rather than overstating the evidence.
+
+Four node-kind scenes are runnable at both orientations: rect, arc, line and scale. Image
+and glyph are excluded because they require registered assets and asset transfer is out of
+scope. Text is also excluded: its resolving binding is `field.status`, but device
+`PushData` retains only fields registered by one of the six built-in templates, and none
+registers `status`; the unknown field is counted and discarded, so the device would render
+`--` where the identical simulator request renders `SYNCED`. Mutating that case to a
+different field would stop it being the same request. All six exclusions are printed with
+their reasons.
+
+One more sequencing fact was absent from the amendment: `ApplyConfig`/`PushData` enqueue
+template UI work, while `PushScene` shows synchronously under the LVGL lock. The harness
+first gives those queued commands the same 300 ms drain window, or a delayed template show
+can delete an already-acknowledged scene. It then pushes the scene, time-syncs last, and
+uses the specified 300 ms settle window for the scene binding tick. The software gates
+passed with the requested CI compile gate `cargo test --workspace --no-run`; the physical
+check remains open below.
 
 **This harness is not a substitute for the first check.** It runs against a
 `DESKMATE_DEV_DIAG=1` image over a cable, which is neither the image nor the path the

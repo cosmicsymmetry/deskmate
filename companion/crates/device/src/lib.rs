@@ -8,6 +8,7 @@ use protocol::{
     TYPE_TIME_SYNC, TimeSync, decode_message, encode_message,
 };
 
+pub mod framebuffer_capture;
 mod session;
 
 pub use session::{

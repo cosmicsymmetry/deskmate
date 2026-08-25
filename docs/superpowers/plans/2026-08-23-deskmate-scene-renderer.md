@@ -1060,22 +1060,22 @@ from the server.
 - Modify: `companion/crates/server/src/runtime_device.rs`, `companion/crates/server/src/admin.rs`
 - Modify: every other `RuntimeDevice` implementation, test doubles included
 
-- [ ] **Step 1: `Session::push_scene(&self, push: PushScene) -> Result<Ack, DeviceError>`**,
+- [x] **Step 1: `Session::push_scene(&self, push: PushScene) -> Result<Ack, DeviceError>`**,
       shaped exactly like `activate_screen` / `asset_begin`: a plain request/reply that
       rejects anything but the matching `Ack`. Firmware acks `PushScene` *with* the
       revision, so the match arm must require it and check it equals the one sent -- that
       is the only host-side proof the device accepted the revision it was given. No
       capability check here; `Session` is a thin transport, and the device already gates
       on bit 8 in `protocol_message_request_gate()`.
-- [ ] **Step 2: `RuntimeDevice::push_scene(&mut self, push: PushScene)`.** Both real
+- [x] **Step 2: `RuntimeDevice::push_scene(&mut self, push: PushScene)`.** Both real
       implementations delegate to the session. This goes on the trait, not on the
       WebSocket type alone: ownership has one implementation, not two that must agree, and
       Task 10a exists because that rule was nearly broken once already.
-- [ ] **Step 3: `RuntimeHandle::push_scene`, as a runtime command.** The route must not
+- [x] **Step 3: `RuntimeHandle::push_scene`, as a runtime command.** The route must not
       open a `device::Session` of its own -- that would put two processes on one cable,
       which is exactly what Task 10a refused. It enqueues a command the way
       `activate_screen` does, and the single owning worker sends it.
-- [ ] **Step 4: `POST /v1/devices/{id}/scene`**, behind the admin token with the other
+- [x] **Step 4: `POST /v1/devices/{id}/scene`**, behind the admin token with the other
       three routes. The body names the template and its inputs, not a serialised scene:
       `{"card_id": string, "revision": u32, "template": "digital_clock",
       "show_seconds": bool, "local_now": "YYYY-MM-DDTHH:MM:SS"}`. The server calls
@@ -1083,9 +1083,22 @@ from the server.
       same builder the parity gate compares against the C template, so the panel is shown
       the scene the golden was rendered from and there is no second JSON representation to
       drift. An unknown template is a typed 400.
-- [ ] **Step 5: gates.** `cargo fmt --all --check`, `cargo clippy --workspace
+- [x] **Step 5: gates.** `cargo fmt --all --check`, `cargo clippy --workspace
       --all-targets -- -D warnings`, `cargo test --workspace`. No firmware change, so
       `.bss` cannot move and this task needs no reflash.
+
+**Delivered 2026-08-25** (`4d81b22`). Two notes that outlive the task:
+
+- `DeviceClient::expected_response` in `device/src/lib.rs` also had to learn that
+  `PushScene` is answered by an `Ack`. Without it the session rejects the message
+  locally as `InvalidRequest`, before any transport is touched -- a second, quieter
+  place the wire contract is written down.
+- **The capability precheck immediately caught a fixture describing an impossible
+  device.** The server's shared `support::sample_status()` advertised bits 0, 1 and 3 --
+  no networking bit -- though every peer in those tests reached the server over WSS,
+  which requires it. It now advertises `CURRENT_CAPABILITIES`, with the reason recorded
+  in place. This is the same class of defect as bit 7 sitting defined-but-dark for most
+  of V2: a capability claim nothing was checking.
 
 **This is deliberately not render negotiation.** The spec's §3 resolves scene-vs-raster
 per card per revision, and stage 3 is where the shipped clock card starts drawing itself

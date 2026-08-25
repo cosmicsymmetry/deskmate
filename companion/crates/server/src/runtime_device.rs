@@ -19,8 +19,8 @@ use futures_util::stream::SplitSink;
 use futures_util::{SinkExt, StreamExt};
 use protocol::{
     Ack, ActivateScreen, ApplyConfig, AssetBegin, AssetChunk, AssetCommit, AssetRelease, ErrorCode,
-    ErrorResponse, Field, Message, NetworkConfig, PushData, ScreenConfig, StatusResponse, TimeSync,
-    TriggerInterrupt, WidgetConfig,
+    ErrorResponse, Field, Message, NetworkConfig, PushData, PushScene, ScreenConfig,
+    StatusResponse, TimeSync, TriggerInterrupt, WidgetConfig,
 };
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::time::{Instant, MissedTickBehavior, interval, timeout};
@@ -674,6 +674,22 @@ impl RuntimeDevice for WebSocketRuntimeDevice {
         Ok(())
     }
 
+    fn push_scene(&mut self, push: PushScene) -> Result<(), DeviceError> {
+        if self.connected_generation.is_none() {
+            return Err(DeviceError::NoDevice);
+        }
+        let required = protocol::CAPABILITY_SCENE_RENDER;
+        if self.capabilities & required != required {
+            return Err(DeviceError::MissingCapabilities {
+                required,
+                available: self.capabilities,
+            });
+        }
+        let revision = push.revision;
+        let response = self.connected_request(Message::PushScene(push))?;
+        Self::require_ack(&response, protocol::TYPE_PUSH_SCENE, Some(revision))
+    }
+
     fn activate_screen(&mut self, screen_id: String) -> Result<(), DeviceError> {
         let request = Message::ActivateScreen(ActivateScreen { screen_id });
         let response = self.connected_request(request.clone())?;
@@ -941,7 +957,8 @@ fn expected_response_type(message: &Message) -> Option<u8> {
         | Message::AssetBegin(_)
         | Message::AssetChunk(_)
         | Message::AssetCommit(_)
-        | Message::AssetRelease(_) => Some(protocol::TYPE_ACK),
+        | Message::AssetRelease(_)
+        | Message::PushScene(_) => Some(protocol::TYPE_ACK),
         Message::Heartbeat => Some(protocol::TYPE_HEARTBEAT_ACK),
         _ => None,
     }
@@ -1113,12 +1130,77 @@ mod tests {
         assert_eq!(replayed.len(), 5);
     }
 
-    fn spawn_test_actor(mut peer: super::SocketPeer) -> std::thread::JoinHandle<Vec<Message>> {
+    #[test]
+    fn push_scene_delegates_to_the_connected_websocket_transport() {
+        let (mut device, connector) = super::WebSocketRuntimeDevice::channel("dev-1".into());
+        let actor = spawn_test_actor(connector.attach());
+        device.connect().expect("connect");
+        let push = protocol::PushScene {
+            card_id: "clock".into(),
+            revision: 7,
+            scene: protocol::Scene {
+                revision: 7,
+                background: 0,
+                nodes: Vec::new(),
+            },
+        };
+
+        device.push_scene(push.clone()).expect("push scene");
+        connector.detach();
+
+        let requests = actor.join().expect("actor joins");
+        assert!(matches!(requests.first(), Some(Message::StatusRequest)));
+        assert_eq!(requests.get(1), Some(&Message::PushScene(push)));
+        assert_eq!(requests.len(), 2);
+    }
+
+    #[test]
+    fn websocket_firmware_without_scene_render_refuses_before_wire_mutation() {
+        let (mut device, connector) = super::WebSocketRuntimeDevice::channel("dev-1".into());
+        let mut legacy = sample_status();
+        legacy.capabilities &= !protocol::CAPABILITY_SCENE_RENDER;
+        let actor = spawn_test_actor_with_status(connector.attach(), legacy.clone());
+        device.connect().expect("connect");
+
+        assert_eq!(
+            device.push_scene(protocol::PushScene {
+                card_id: "clock".into(),
+                revision: 7,
+                scene: protocol::Scene {
+                    revision: 7,
+                    background: 0,
+                    nodes: Vec::new(),
+                },
+            }),
+            Err(DeviceError::MissingCapabilities {
+                required: protocol::CAPABILITY_SCENE_RENDER,
+                available: legacy.capabilities,
+            })
+        );
+        connector.detach();
+
+        let requests = actor.join().expect("actor joins");
+        assert_eq!(requests, vec![Message::StatusRequest]);
+        assert!(
+            requests
+                .iter()
+                .all(|request| !matches!(request, Message::PushScene(_)))
+        );
+    }
+
+    fn spawn_test_actor(peer: super::SocketPeer) -> std::thread::JoinHandle<Vec<Message>> {
+        spawn_test_actor_with_status(peer, sample_status())
+    }
+
+    fn spawn_test_actor_with_status(
+        mut peer: super::SocketPeer,
+        status: StatusResponse,
+    ) -> std::thread::JoinHandle<Vec<Message>> {
         std::thread::spawn(move || {
             let mut requests = Vec::new();
             while let Some(command) = peer.commands.blocking_recv() {
                 let response = match &command.message {
-                    Message::StatusRequest => Message::StatusResponse(sample_status()),
+                    Message::StatusRequest => Message::StatusResponse(status.clone()),
                     Message::TimeSync(_) => Message::Ack(Ack {
                         acknowledged_type: protocol::TYPE_TIME_SYNC,
                         revision: None,
@@ -1137,6 +1219,11 @@ mod tests {
                     Message::ActivateScreen(_) => Message::Ack(Ack {
                         acknowledged_type: protocol::TYPE_ACTIVATE_SCREEN,
                         revision: None,
+                        already_present: None,
+                    }),
+                    Message::PushScene(push) => Message::Ack(Ack {
+                        acknowledged_type: protocol::TYPE_PUSH_SCENE,
+                        revision: Some(push.revision),
                         already_present: None,
                     }),
                     unexpected => panic!("unexpected test actor request: {unexpected:?}"),
@@ -1158,7 +1245,8 @@ mod tests {
             max_protocol_version: protocol::MAX_PROTOCOL_VERSION,
             capabilities: protocol::CAPABILITY_CORE_WIDGETS
                 | protocol::CAPABILITY_CONFIG_ROTATION
-                | protocol::CAPABILITY_EXTENDED_TEMPLATES,
+                | protocol::CAPABILITY_EXTENDED_TEMPLATES
+                | protocol::CAPABILITY_SCENE_RENDER,
             firmware_version: "test-device".into(),
             uptime_ms: 1_234,
             free_heap: 5_678,

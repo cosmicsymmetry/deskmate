@@ -13,8 +13,8 @@ use engine::interrupts::InterruptArbiter;
 use engine::pomodoro::{Pomodoro, PomodoroState as EnginePomodoroState};
 use protocol::{
     Ack, ActivateScreen, AssetBegin, AssetChunk, AssetCommit, AssetRelease, EventAction, EventKind,
-    Field, FieldValue, NetworkConfig, ScreenConfig, StatusResponse, TimeSync, TriggerInterrupt,
-    WidgetConfig,
+    Field, FieldValue, NetworkConfig, PushScene, ScreenConfig, StatusResponse, TimeSync,
+    TriggerInterrupt, WidgetConfig,
 };
 use providers::Provider;
 use providers::http::SystemHttpClient;
@@ -23,7 +23,7 @@ use providers::json_feed::{JsonFeedOptions, JsonFeedProvider, JsonMapping as Pro
 use providers::rss::{RssOptions, RssProvider};
 use providers::weather::{WeatherOptions, WeatherProvider, WeatherUnits as ProviderWeatherUnits};
 
-use crate::commands::{PomodoroAction, RuntimeCommand, RuntimeError};
+use crate::commands::{CommandReply, PomodoroAction, RuntimeCommand, RuntimeError};
 use crate::scheduler::Scheduler;
 use crate::{
     AlertHold, AppConfig, AppSnapshot, CalendarSource, CardAlert, CardDataSnapshot, CardError,
@@ -88,6 +88,7 @@ pub trait RuntimeDevice: Send + 'static {
         screens: Vec<ScreenConfig>,
     ) -> Result<(), DeviceError>;
     fn push_fields(&mut self, widget_id: String, fields: Vec<Field>) -> Result<(), DeviceError>;
+    fn push_scene(&mut self, push: PushScene) -> Result<(), DeviceError>;
     fn activate_screen(&mut self, screen_id: String) -> Result<(), DeviceError>;
     fn trigger_interrupt(&mut self, interrupt: TriggerInterrupt) -> Result<(), DeviceError>;
     /// Reserve (or re-attach to) storage for one asset. Unlike `provision`/
@@ -176,6 +177,10 @@ impl RuntimeDevice for SerialRuntimeDevice {
             .session
             .push_fields(widget_id, fields)
             .map(|_| ())
+    }
+
+    fn push_scene(&mut self, push: PushScene) -> Result<(), DeviceError> {
+        self.connected()?.session.push_scene(push).map(|_| ())
     }
 
     fn activate_screen(&mut self, screen_id: String) -> Result<(), DeviceError> {
@@ -770,6 +775,10 @@ impl RuntimeHandle {
             screen_id: screen_id.into(),
             reply,
         })
+    }
+
+    pub fn push_scene(&self, push: PushScene) -> Result<(), RuntimeError> {
+        self.request(|reply| RuntimeCommand::PushScene { push, reply })
     }
 
     /// Provision through the session already owned by the runtime worker. This command never
@@ -1396,35 +1405,23 @@ fn process_command(
             let _ = reply.send(result);
         }
         RuntimeCommand::ActivateScreen { screen_id, reply } => {
-            let ids = rotation_card_ids(&state.config);
-            let result = if let Some(index) = ids.iter().position(|id| *id == screen_id) {
-                state.active_screen = Some(screen_id.clone());
-                state.device.active_screen_id = Some(screen_id.clone());
-                state.active_screen_dirty = true;
-                // An explicit activation is a manual override, same as a physical
-                // swipe: restart the dwell from the card just landed on instead of
-                // advancing early from wherever rotation last left off.
-                state.active_rotation_index = index;
-                scheduler.set_rotation(current_dwell(&state.config, index), Instant::now());
-                if state.connected && !state.config.preferences.paused {
-                    send_screen(state, device)
-                } else {
-                    Ok(())
-                }
-            } else {
-                Err(RuntimeError::UnknownScreen { screen_id })
-            };
+            let result = activate_screen_command(state, scheduler, device, screen_id);
             let _ = reply.send(result);
+        }
+        RuntimeCommand::PushScene { push, reply } => {
+            reply_to_runtime_device_command(&reply, state, reconnect_interval, || {
+                device.push_scene(push)
+            });
         }
         RuntimeCommand::Provision { config, reply } => {
-            let result =
-                run_runtime_device_command(state, reconnect_interval, || device.provision(&config));
-            let _ = reply.send(result);
+            reply_to_runtime_device_command(&reply, state, reconnect_interval, || {
+                device.provision(&config)
+            });
         }
         RuntimeCommand::FactoryReset { reply } => {
-            let result =
-                run_runtime_device_command(state, reconnect_interval, || device.factory_reset());
-            let _ = reply.send(result);
+            reply_to_runtime_device_command(&reply, state, reconnect_interval, || {
+                device.factory_reset()
+            });
         }
         RuntimeCommand::Shutdown { reply } => {
             let _ = reply.send(Ok(()));
@@ -1432,6 +1429,31 @@ fn process_command(
         }
     }
     false
+}
+
+fn activate_screen_command(
+    state: &mut WorkerState,
+    scheduler: &mut Scheduler,
+    device: &mut dyn RuntimeDevice,
+    screen_id: String,
+) -> Result<(), RuntimeError> {
+    let ids = rotation_card_ids(&state.config);
+    let Some(index) = ids.iter().position(|id| *id == screen_id) else {
+        return Err(RuntimeError::UnknownScreen { screen_id });
+    };
+    state.active_screen = Some(screen_id.clone());
+    state.device.active_screen_id = Some(screen_id);
+    state.active_screen_dirty = true;
+    // An explicit activation is a manual override, same as a physical
+    // swipe: restart the dwell from the card just landed on instead of
+    // advancing early from wherever rotation last left off.
+    state.active_rotation_index = index;
+    scheduler.set_rotation(current_dwell(&state.config, index), Instant::now());
+    if state.connected && !state.config.preferences.paused {
+        send_screen(state, device)
+    } else {
+        Ok(())
+    }
 }
 
 fn attempt_connect(
@@ -2434,6 +2456,19 @@ fn run_runtime_device_command(
     operation().map_err(|error| runtime_command_device_error(state, &error, reconnect_interval))
 }
 
+fn reply_to_runtime_device_command(
+    reply: &CommandReply,
+    state: &mut WorkerState,
+    reconnect_interval: Duration,
+    operation: impl FnOnce() -> Result<(), DeviceError>,
+) {
+    let _ = reply.send(run_runtime_device_command(
+        state,
+        reconnect_interval,
+        operation,
+    ));
+}
+
 fn update_device_status(
     state: &mut WorkerState,
     port_name: &str,
@@ -2833,6 +2868,9 @@ mod tests {
             unreachable!("stub device is never connected in these unit tests")
         }
         fn activate_screen(&mut self, _screen_id: String) -> Result<(), DeviceError> {
+            unreachable!("stub device is never connected in these unit tests")
+        }
+        fn push_scene(&mut self, _push: PushScene) -> Result<(), DeviceError> {
             unreachable!("stub device is never connected in these unit tests")
         }
         fn trigger_interrupt(&mut self, _interrupt: TriggerInterrupt) -> Result<(), DeviceError> {

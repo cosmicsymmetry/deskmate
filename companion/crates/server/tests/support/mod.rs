@@ -87,6 +87,37 @@ pub async fn drive_until_push(socket: &mut DeviceSocket, widget_id: &str) -> pro
     .expect("timed out waiting for the expected data push")
 }
 
+pub async fn drive_until_scene(socket: &mut DeviceSocket) -> protocol::PushScene {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            match socket.next().await {
+                Some(Ok(WsMessage::Binary(bytes))) => {
+                    let frame = protocol::decode_wire_frame(&bytes)
+                        .expect("device received a malformed frame");
+                    let message = protocol::decode_message(&frame)
+                        .expect("device received an undecodable message");
+                    let target = matches!(&message, Message::PushScene(_));
+                    reply(socket, frame.request_id, &message).await;
+                    if target {
+                        let Message::PushScene(push) = message else {
+                            unreachable!("target is true only for PushScene");
+                        };
+                        return push;
+                    }
+                }
+                Some(Ok(WsMessage::Ping(payload))) => {
+                    socket.send(WsMessage::Pong(payload)).await.unwrap();
+                }
+                Some(Ok(other)) => panic!("unexpected WebSocket message: {other:?}"),
+                Some(Err(error)) => panic!("WebSocket read failed: {error}"),
+                None => panic!("socket closed before the expected scene arrived"),
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for the expected scene")
+}
+
 /// Drives a runtime's first connection through full synchronization and the
 /// initial scheduled status/time-sync work. Do not use this for reattachment:
 /// a retained scheduler does not restart those periodic deadlines.
@@ -249,6 +280,11 @@ async fn reply(socket: &mut DeviceSocket, request_id: u32, request: &Message) {
             revision: None,
             already_present: None,
         }),
+        Message::PushScene(push) => Message::Ack(Ack {
+            acknowledged_type: protocol::TYPE_PUSH_SCENE,
+            revision: Some(push.revision),
+            already_present: None,
+        }),
         Message::Heartbeat => Message::HeartbeatAck(HeartbeatAck { uptime_ms: 1_234 }),
         other => panic!("server sent an unexpected device request: {other:?}"),
     };
@@ -264,9 +300,11 @@ fn sample_status() -> StatusResponse {
     StatusResponse {
         protocol_version: protocol::PROTOCOL_VERSION,
         max_protocol_version: protocol::MAX_PROTOCOL_VERSION,
-        capabilities: protocol::CAPABILITY_CORE_WIDGETS
-            | protocol::CAPABILITY_CONFIG_ROTATION
-            | protocol::CAPABILITY_EXTENDED_TEMPLATES,
+        // A device that reached this server over WSS advertised networking
+        // capability to get here. Use the full shipping set so this shared
+        // fixture cannot describe an impossible tunnel peer or mask the next
+        // host-side capability gate.
+        capabilities: protocol::CURRENT_CAPABILITIES,
         firmware_version: "test-device".to_owned(),
         uptime_ms: 1_234,
         free_heap: 5_678,

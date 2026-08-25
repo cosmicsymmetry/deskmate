@@ -16,8 +16,8 @@ use chrono::Utc;
 use device::{DeviceError, ReceivedEvent, SessionDiagnostics, TransportError};
 use protocol::{
     Ack, AssetBegin, AssetChunk, AssetCommit, AssetRelease, DeviceEvent, ErrorCode, ErrorResponse,
-    EventAction, EventKind, Field, FieldValue, PROTOCOL_VERSION, ScreenConfig, StatusResponse,
-    TimeSync, TriggerInterrupt, WidgetConfig,
+    EventAction, EventKind, Field, FieldValue, PROTOCOL_VERSION, PushScene, Scene, ScreenConfig,
+    StatusResponse, TimeSync, TriggerInterrupt, WidgetConfig,
 };
 
 const FULL_JSON: &str = include_str!("fixtures/full.json");
@@ -31,6 +31,7 @@ enum Operation {
     TimeSync,
     ApplyLayout(u16),
     Push(String),
+    PushScene(PushScene),
     Activate(String),
     Interrupt(u32),
     ReplayTime,
@@ -371,6 +372,10 @@ impl RuntimeDevice for MockDevice {
             state.replay.active_screen = Some(screen_id.clone());
             state.operations.push(Operation::Activate(screen_id));
         })
+    }
+
+    fn push_scene(&mut self, push: PushScene) -> Result<(), DeviceError> {
+        self.with_connected(|state| state.operations.push(Operation::PushScene(push)))
     }
 
     fn trigger_interrupt(&mut self, interrupt: TriggerInterrupt) -> Result<(), DeviceError> {
@@ -847,6 +852,38 @@ fn provision_and_factory_reset_use_the_runtime_owned_device_without_reconnecting
         operations
             .iter()
             .filter(|operation| **operation == Operation::FactoryReset)
+            .count(),
+        1
+    );
+    runtime.shutdown().unwrap();
+}
+
+#[test]
+fn push_scene_uses_the_runtime_owned_device_without_reconnecting() {
+    let control = MockDeviceControl::default();
+    let runtime = start_runtime(full_config(), &control, Duration::ZERO);
+    wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
+        snapshot.device.connection == ConnectionState::Online
+    });
+    let connections_before = control.connection_count();
+    let push = PushScene {
+        card_id: "clock".into(),
+        revision: 7,
+        scene: Scene {
+            revision: 7,
+            background: 0,
+            nodes: Vec::new(),
+        },
+    };
+
+    runtime.push_scene(push.clone()).unwrap();
+
+    assert_eq!(control.connection_count(), connections_before);
+    assert_eq!(
+        control
+            .operations()
+            .iter()
+            .filter(|operation| **operation == Operation::PushScene(push.clone()))
             .count(),
         1
     );

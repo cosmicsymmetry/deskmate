@@ -291,8 +291,8 @@ mod tests {
     };
     use device::{ReceivedEvent, SessionDiagnostics};
     use protocol::{
-        Ack, Field, NetworkConfig, ScreenConfig, StatusResponse, TYPE_ASSET_BEGIN, TimeSync,
-        TriggerInterrupt, WidgetConfig,
+        Ack, Field, NetworkConfig, PushScene, ScreenConfig, StatusResponse, TYPE_ASSET_BEGIN,
+        TimeSync, TriggerInterrupt, WidgetConfig,
     };
 
     use super::*;
@@ -404,6 +404,9 @@ mod tests {
             unreachable!("FakeDevice only exercises asset transfer in these tests")
         }
         fn activate_screen(&mut self, _screen_id: String) -> Result<(), DeviceError> {
+            unreachable!("FakeDevice only exercises asset transfer in these tests")
+        }
+        fn push_scene(&mut self, _push: PushScene) -> Result<(), DeviceError> {
             unreachable!("FakeDevice only exercises asset transfer in these tests")
         }
         fn trigger_interrupt(&mut self, _interrupt: TriggerInterrupt) -> Result<(), DeviceError> {

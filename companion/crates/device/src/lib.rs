@@ -157,7 +157,8 @@ impl<T: Transport> DeviceClient<T> {
             | Message::AssetBegin(_)
             | Message::AssetChunk(_)
             | Message::AssetCommit(_)
-            | Message::AssetRelease(_) => Some(TYPE_ACK),
+            | Message::AssetRelease(_)
+            | Message::PushScene(_) => Some(TYPE_ACK),
             Message::Heartbeat => Some(TYPE_HEARTBEAT_ACK),
             _ => None,
         }

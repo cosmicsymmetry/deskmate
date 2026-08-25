@@ -7,11 +7,11 @@ use std::time::{Duration, Instant};
 use protocol::{
     Ack, ActivateScreen, ApplyConfig, AssetBegin, AssetChunk, AssetCommit, AssetRelease,
     CAPABILITY_CONFIG_ROTATION, CAPABILITY_CORE_WIDGETS, Deframer, DeviceEvent, EventAction,
-    EventKind, Field, HeartbeatAck, Message, NetworkConfig, PushData, ScreenConfig, StatusResponse,
-    TYPE_ACTIVATE_SCREEN, TYPE_APPLY_CONFIG, TYPE_ASSET_BEGIN, TYPE_ASSET_CHUNK, TYPE_ASSET_COMMIT,
-    TYPE_ASSET_RELEASE, TYPE_FACTORY_RESET, TYPE_NETWORK_CONFIG, TYPE_PUSH_DATA, TYPE_TIME_SYNC,
-    TYPE_TRIGGER_INTERRUPT, TimeSync, TriggerInterrupt, WidgetConfig, decode_message,
-    encode_message,
+    EventKind, Field, HeartbeatAck, Message, NetworkConfig, PushData, PushScene, ScreenConfig,
+    StatusResponse, TYPE_ACTIVATE_SCREEN, TYPE_APPLY_CONFIG, TYPE_ASSET_BEGIN, TYPE_ASSET_CHUNK,
+    TYPE_ASSET_COMMIT, TYPE_ASSET_RELEASE, TYPE_FACTORY_RESET, TYPE_NETWORK_CONFIG, TYPE_PUSH_DATA,
+    TYPE_PUSH_SCENE, TYPE_TIME_SYNC, TYPE_TRIGGER_INTERRUPT, TimeSync, TriggerInterrupt,
+    WidgetConfig, decode_message, encode_message,
 };
 
 use crate::{
@@ -289,6 +289,19 @@ impl<T: Transport + Send + 'static> DeviceSession<T> {
         match self.request(Message::ActivateScreen(activation))? {
             Message::Ack(ack)
                 if ack.acknowledged_type == TYPE_ACTIVATE_SCREEN && ack.revision.is_none() =>
+            {
+                Ok(ack)
+            }
+            _ => Err(DeviceError::UnexpectedMessage),
+        }
+    }
+
+    pub fn push_scene(&self, push: PushScene) -> Result<Ack, DeviceError> {
+        ensure_capabilities(protocol::CAPABILITY_SCENE_RENDER, self.capabilities())?;
+        let revision = push.revision;
+        match self.request(Message::PushScene(push))? {
+            Message::Ack(ack)
+                if ack.acknowledged_type == TYPE_PUSH_SCENE && ack.revision == Some(revision) =>
             {
                 Ok(ack)
             }
@@ -980,6 +993,7 @@ mod tests {
 
     enum ReplyMode {
         Normal,
+        Response(Message),
         Fragmented,
         EventBeforeReply(DeviceEvent),
         EventAfterReply(DeviceEvent),
@@ -1013,11 +1027,16 @@ mod tests {
                 decode_message(&frame).map_err(|error| TransportError::Io(error.to_string()))?;
             let mut state = self.state.lock().unwrap();
             state.requests.push(request.clone());
-            let response = fake_response(&state.status, &request);
+            let response = match state.reply_modes.front() {
+                Some(ReplyMode::Response(response)) => response.clone(),
+                _ => fake_response(&state.status, &request),
+            };
             let response_wire = encode_message(frame.request_id, &response)
                 .map_err(|error| TransportError::Io(error.to_string()))?;
             match state.reply_modes.pop_front().unwrap_or(ReplyMode::Normal) {
-                ReplyMode::Normal => state.reads.push_back(Ok(response_wire)),
+                ReplyMode::Normal | ReplyMode::Response(_) => {
+                    state.reads.push_back(Ok(response_wire));
+                }
                 ReplyMode::Fragmented => {
                     let split = response_wire.len() / 2;
                     state.reads.push_back(Ok(response_wire[..split].to_vec()));
@@ -1137,7 +1156,24 @@ mod tests {
                 revision: None,
                 already_present: None,
             }),
+            Message::PushScene(push) => Message::Ack(Ack {
+                acknowledged_type: protocol::TYPE_PUSH_SCENE,
+                revision: Some(push.revision),
+                already_present: None,
+            }),
             _ => panic!("unexpected fake request: {request:?}"),
+        }
+    }
+
+    fn scene_push(revision: u32) -> protocol::PushScene {
+        protocol::PushScene {
+            card_id: "clock".into(),
+            revision,
+            scene: protocol::Scene {
+                revision,
+                background: 0,
+                nodes: Vec::new(),
+            },
         }
     }
 
@@ -1332,6 +1368,77 @@ mod tests {
             state.lock().unwrap().requests.last(),
             Some(Message::PushData(PushData { revision: 42, .. }))
         ));
+    }
+
+    #[test]
+    fn push_scene_requires_the_ack_type_and_revision_it_sent() {
+        let (transport, state) = FakeTransport::new(status(0, 0, 100));
+        let session = DeviceSession::with_options(
+            transport,
+            &status(0, 0, 100),
+            options(Duration::from_mins(1), 8),
+        );
+
+        let push = scene_push(7);
+        let ack = session.push_scene(push.clone()).unwrap();
+        assert_eq!(ack.revision, Some(7));
+        assert_eq!(
+            state.lock().unwrap().requests.last(),
+            Some(&Message::PushScene(push))
+        );
+
+        state
+            .lock()
+            .unwrap()
+            .reply_modes
+            .push_back(ReplyMode::Response(Message::Ack(Ack {
+                acknowledged_type: protocol::TYPE_PUSH_SCENE,
+                revision: Some(8),
+                already_present: None,
+            })));
+        assert_eq!(
+            session.push_scene(scene_push(7)),
+            Err(DeviceError::UnexpectedMessage)
+        );
+
+        state
+            .lock()
+            .unwrap()
+            .reply_modes
+            .push_back(ReplyMode::Response(Message::Ack(Ack {
+                acknowledged_type: TYPE_PUSH_DATA,
+                revision: Some(7),
+                already_present: None,
+            })));
+        assert_eq!(
+            session.push_scene(scene_push(7)),
+            Err(DeviceError::UnexpectedMessage)
+        );
+    }
+
+    #[test]
+    fn firmware_without_scene_render_refuses_push_scene_before_wire_mutation() {
+        let mut legacy = status(0, 0, 100);
+        legacy.capabilities &= !protocol::CAPABILITY_SCENE_RENDER;
+        let (transport, state) = FakeTransport::new(legacy.clone());
+        let session =
+            DeviceSession::with_options(transport, &legacy, options(Duration::from_mins(1), 8));
+
+        assert_eq!(
+            session.push_scene(scene_push(7)),
+            Err(DeviceError::MissingCapabilities {
+                required: protocol::CAPABILITY_SCENE_RENDER,
+                available: legacy.capabilities,
+            })
+        );
+        assert!(
+            state
+                .lock()
+                .unwrap()
+                .requests
+                .iter()
+                .all(|request| !matches!(request, Message::PushScene(_)))
+        );
     }
 
     #[test]

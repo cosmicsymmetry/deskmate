@@ -1,8 +1,8 @@
 //! Admin-token-protected provisioning, configuration, and status routes.
 
 use app_core::{
-    AppConfig, AppSnapshot, MAX_CONFIG_FILE_BYTES, RuntimeError, SaveReceipt, StoreError,
-    ValidationIssue,
+    AppConfig, AppSnapshot, BakedFontMetrics, ClockCard, MAX_CONFIG_FILE_BYTES, RuntimeError,
+    SaveReceipt, StoreError, ValidationIssue, build_digital_clock_scene,
 };
 use axum::Json;
 use axum::Router;
@@ -12,7 +12,9 @@ use axum::http::StatusCode;
 use axum::http::request::Parts;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
-use serde::{Serialize, Serializer};
+use chrono::NaiveDateTime;
+use protocol::PushScene;
+use serde::{Deserialize, Serialize, Serializer};
 
 use crate::ServerState;
 use crate::auth::bearer_token;
@@ -25,6 +27,7 @@ pub(crate) fn routes() -> Router<ServerState> {
             "/v1/devices/{id}/config",
             put(put_config).layer(DefaultBodyLimit::max(MAX_CONFIG_FILE_BYTES)),
         )
+        .route("/v1/devices/{id}/scene", post(post_scene))
 }
 
 struct AdminAuthenticated;
@@ -117,6 +120,62 @@ async fn put_config(
     device_config.record_current();
 
     Ok(Json(receipt))
+}
+
+#[derive(Deserialize)]
+struct PushSceneRequest {
+    card_id: String,
+    revision: u32,
+    template: String,
+    show_seconds: bool,
+    local_now: String,
+}
+
+async fn post_scene(
+    State(state): State<ServerState>,
+    _admin: AdminAuthenticated,
+    Path(device_id): Path<String>,
+    payload: Result<Json<PushSceneRequest>, JsonRejection>,
+) -> Result<StatusCode, AdminError> {
+    if !state.registry().contains_device(&device_id) {
+        return Err(AdminError::NotFound);
+    }
+    let Json(request) = payload.map_err(|rejection| AdminError::InvalidJson {
+        status: rejection.status(),
+        message: rejection.body_text(),
+    })?;
+    if request.template != "digital_clock" {
+        return Err(AdminError::InvalidScene {
+            message: format!("unknown scene template {:?}", request.template),
+        });
+    }
+    let local_now = NaiveDateTime::parse_from_str(&request.local_now, "%Y-%m-%dT%H:%M:%S")
+        .map_err(|_| AdminError::InvalidScene {
+            message: "local_now must use YYYY-MM-DDTHH:MM:SS".into(),
+        })?;
+    let scene = build_digital_clock_scene(
+        &ClockCard {
+            revision: request.revision,
+            show_seconds: request.show_seconds,
+            local_now,
+        },
+        &BakedFontMetrics::SHIPPED,
+    );
+    let push = PushScene {
+        card_id: request.card_id,
+        revision: request.revision,
+        scene,
+    };
+    let runtime = state
+        .device_link(&device_id)
+        .and_then(|link| link.runtime())
+        .ok_or_else(|| AdminError::from(RuntimeError::DeviceDisconnected))?;
+    tokio::task::spawn_blocking(move || runtime.push_scene(push))
+        .await
+        .map_err(|_| AdminError::WorkerFailed)?
+        .map_err(AdminError::from)?;
+
+    Ok(StatusCode::OK)
 }
 
 async fn get_device(
@@ -294,6 +353,7 @@ enum AdminError {
     Unauthorized,
     NotFound,
     InvalidJson { status: StatusCode, message: String },
+    InvalidScene { message: String },
     InvalidConfig { issues: Vec<ValidationIssue> },
     Store { message: String },
     Runtime { status: StatusCode, message: String },
@@ -346,6 +406,7 @@ impl From<RuntimeError> for AdminError {
 #[serde(tag = "kind", rename_all = "kebab-case")]
 enum ErrorBody<'a> {
     InvalidJson { message: &'a str },
+    InvalidScene { message: &'a str },
     InvalidConfig { issues: &'a [ValidationIssue] },
     Store { message: &'a str },
     Runtime { message: &'a str },
@@ -360,6 +421,11 @@ impl IntoResponse for AdminError {
             Self::InvalidJson { status, message } => {
                 (status, Json(ErrorBody::InvalidJson { message: &message })).into_response()
             }
+            Self::InvalidScene { message } => (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorBody::InvalidScene { message: &message }),
+            )
+                .into_response(),
             Self::InvalidConfig { issues } => (
                 StatusCode::UNPROCESSABLE_ENTITY,
                 Json(ErrorBody::InvalidConfig { issues: &issues }),

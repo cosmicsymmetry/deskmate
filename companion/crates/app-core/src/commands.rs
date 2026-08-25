@@ -1,6 +1,7 @@
 use std::fmt;
 use std::sync::mpsc::SyncSender;
 
+use protocol::PushScene;
 use serde::{Deserialize, Serialize};
 
 use crate::{AppConfig, NetworkConfig, PersistenceState, ValidationIssue};
@@ -80,6 +81,10 @@ pub(crate) enum RuntimeCommand {
     },
     ActivateScreen {
         screen_id: String,
+        reply: CommandReply,
+    },
+    PushScene {
+        push: PushScene,
         reply: CommandReply,
     },
     Provision {

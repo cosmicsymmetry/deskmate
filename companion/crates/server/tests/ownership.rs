@@ -589,6 +589,73 @@ async fn scene_route_rejects_an_unknown_template_with_a_typed_bad_request() {
 }
 
 #[tokio::test]
+async fn scene_route_rejects_a_zero_revision_with_a_typed_bad_request() {
+    let (host, identity, admin_token) = spawn().await;
+    let response = reqwest::Client::new()
+        .post(format!(
+            "http://{host}/v1/devices/{}/scene",
+            identity.device_id
+        ))
+        .bearer_auth(admin_token)
+        .header("Content-Type", "application/json")
+        .body(
+            serde_json::json!({
+                "card_id": "clock-1",
+                "revision": 0,
+                "template": "digital_clock",
+                "show_seconds": true,
+                "local_now": "2026-08-25T14:37:42",
+            })
+            .to_string(),
+        )
+        .send()
+        .await
+        .expect("scene request");
+    assert_eq!(response.status(), 400);
+    let error: serde_json::Value =
+        serde_json::from_str(&response.text().await.expect("typed error body"))
+            .expect("typed error JSON");
+    assert_eq!(error["kind"], "invalid-scene");
+    assert!(
+        error["message"]
+            .as_str()
+            .unwrap()
+            .contains("scene revision")
+    );
+}
+
+#[tokio::test]
+async fn scene_route_rejects_an_overlong_card_id_with_a_typed_bad_request() {
+    let (host, identity, admin_token) = spawn().await;
+    let response = reqwest::Client::new()
+        .post(format!(
+            "http://{host}/v1/devices/{}/scene",
+            identity.device_id
+        ))
+        .bearer_auth(admin_token)
+        .header("Content-Type", "application/json")
+        .body(
+            serde_json::json!({
+                "card_id": "clock-id-that-is-more-than-32-bytes",
+                "revision": 17,
+                "template": "digital_clock",
+                "show_seconds": true,
+                "local_now": "2026-08-25T14:37:42",
+            })
+            .to_string(),
+        )
+        .send()
+        .await
+        .expect("scene request");
+    assert_eq!(response.status(), 400);
+    let error: serde_json::Value =
+        serde_json::from_str(&response.text().await.expect("typed error body"))
+            .expect("typed error JSON");
+    assert_eq!(error["kind"], "invalid-scene");
+    assert!(error["message"].as_str().unwrap().contains("card id"));
+}
+
+#[tokio::test]
 async fn scene_route_rejects_a_malformed_local_instant_with_a_typed_bad_request() {
     let (host, identity, admin_token) = spawn().await;
     let response = reqwest::Client::new()

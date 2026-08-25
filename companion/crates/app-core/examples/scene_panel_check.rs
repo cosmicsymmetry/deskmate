@@ -47,6 +47,12 @@ use protocol::{
     TimeSync, WidgetConfig,
 };
 
+// The capture module cannot import the simulator, so CI compiles this example to pin their dimensions together.
+const _: () = assert!(
+    device::framebuffer_capture::FRAME_WIDTH == lvgl_sim::LOGICAL_WIDTH as usize
+        && device::framebuffer_capture::FRAME_HEIGHT == lvgl_sim::LOGICAL_HEIGHT as usize,
+);
+
 const CARD_ID: &str = "scene-check";
 const SCREEN_ID: &str = "scene-check-screen";
 const SETTLE: Duration = Duration::from_millis(300);

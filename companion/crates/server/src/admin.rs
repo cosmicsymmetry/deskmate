@@ -13,7 +13,7 @@ use axum::http::request::Parts;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use chrono::NaiveDateTime;
-use protocol::PushScene;
+use protocol::{Message, PushScene, validate_message};
 use serde::{Deserialize, Serialize, Serializer};
 
 use crate::ServerState;
@@ -166,6 +166,11 @@ async fn post_scene(
         revision: request.revision,
         scene,
     };
+    validate_message(&Message::PushScene(push.clone())).map_err(|error| {
+        AdminError::InvalidScene {
+            message: error.to_string(),
+        }
+    })?;
     let runtime = state
         .device_link(&device_id)
         .and_then(|link| link.runtime())

@@ -747,11 +747,17 @@ fn validate_push(push: &PushData) -> Result<(), MessageError> {
     Ok(())
 }
 
-/// One arm per message type; it grows by a few lines whenever the protocol
-/// gains one, and splitting it would put a type's bounds somewhere other than
-/// with every other type's.
+/// Checks a message against the wire contract before a host sends it, without
+/// requiring an encode attempt and a later failure to interpret.
+///
+/// # Errors
+///
+/// Returns [`MessageError`] when the message violates the wire contract.
+// One arm per message type; it grows by a few lines whenever the protocol
+// gains one, and splitting it would put a type's bounds somewhere other than
+// with every other type's.
 #[allow(clippy::too_many_lines)]
-fn validate_message(message: &Message) -> Result<(), MessageError> {
+pub fn validate_message(message: &Message) -> Result<(), MessageError> {
     match message {
         Message::StatusResponse(status) => {
             if status.protocol_version != PROTOCOL_VERSION {

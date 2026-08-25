@@ -27,7 +27,7 @@ pub use message::{
     TYPE_HEARTBEAT, TYPE_HEARTBEAT_ACK, TYPE_NETWORK_CONFIG, TYPE_PUSH_DATA, TYPE_PUSH_SCENE,
     TYPE_STATUS_REQUEST, TYPE_STATUS_RESPONSE, TYPE_TIME_SYNC, TYPE_TRIGGER_INTERRUPT, TapAction,
     TemplateKind, Tier, TimeSync, TriggerInterrupt, WidgetConfig, WifiState, decode_message,
-    encode_message, template_kind_from_wire,
+    encode_message, template_kind_from_wire, validate_message,
 };
 pub use scene::{
     MAX_SCENE_BINDING_LEN, MAX_SCENE_GLYPH_NAME_LEN, MAX_SCENE_LINE_POINTS, MAX_SCENE_NODES,

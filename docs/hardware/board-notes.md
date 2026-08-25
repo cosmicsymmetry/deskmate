@@ -3393,3 +3393,66 @@ specifies. The tunnel is the only thing that needs to reach the server, so this 
 admin surface, guarded by one bearer token, to the whole LAN. Also `systemctl` reported
 `Consumed 46min 24.911s CPU time` across roughly two days with no device attached for most
 of it. Neither was changed.
+
+## Scene renderer OTA + boot — verified 2026-08-25
+
+First hardware run of the scene-renderer branch (`v2.0.0-scene1`, built at
+`55d1a97`). **The OTA download works with the moved `.bss`.** That was the one
+check the branch could not close on software grounds: `.bss` went 102,608 →
+102,624 (+16, `scene_view.c`'s three existing pointers becoming reachable once
+Task 10 linked the file), and this board has twice lost days to a memory-layout
+shift breaking OTA outright with every test green (`3f2aa03`).
+
+Observed, `dev-0005` over `deskmate.rodi.one`:
+
+- **Attempt 1 FAILED** — `ota_state: failed`, `last_ota_error: "download: ESP_FAIL"`,
+  device rolled back and stayed on `v2.0.0-gate6`. RSSI -77.
+- **Attempt 2 SUCCEEDED** — identical image, same location, same signal band
+  (-75..-82). Downloaded, installed, rebooted onto `v2.0.0-scene1`, and marked
+  itself valid (uptime passed the rollback window and stayed on the new slot).
+
+**Ruling: the first failure was transient, not the `.bss` hazard.** The
+layout-shift failure mode documented for `3f2aa03` is *deterministic* — three
+builds from an identical base decided it, and the bad one failed every time,
+"whether or not a critical section touches them". A retry of the identical
+image succeeding is not that signature. Same inconclusive-then-fine pattern as
+the `gate11` attempt on 2026-08-23. Ruled out by direct test, not inference:
+the image fetched clean over the public URL from the Mac (HTTP 200, 1,599,376
+bytes, md5 `768e1351…` matching the local build, 21 MB/s), and `ota_0`/`ota_1`
+are 4 MB against a 1.6 MB image.
+
+Also confirmed on the new firmware: `capabilities` carries bit 8
+(`unknown_capability_bits: 0x0000000000000100` — the DEPLOYED SERVER PREDATES
+this branch and has no name for it, which is why it reads as unknown rather
+than as `scene-render`; the device is advertising 491 correctly). Protocol v1,
+tier networked, rotation 270, `active_screen_id: clock`. Counters clean after
+~2 minutes: 0 `crc_errors`, 0 `malformed_frames`, 0 `overflow_frames`, 75
+`valid_frames`, `ui_queue_high_water` 1.
+
+### Two operational findings from this session
+
+1. **The device checks for firmware exactly twice a day and cannot be asked.**
+   `ota.c:43` sets `OTA_CHECK_INTERVAL_MS` to 86,400,000 (24 h, ±1 h jitter),
+   and `ota_task` checks once immediately at boot. The firmware *has* a
+   force-check path — `ota_check_now()` (`ota.c:809`), reached by a request
+   carrying `OTA_CHECK_STATUS_REQUEST_ID` (`protocol_task.c:1468`) — but
+   **nothing host-side sends it**: the server has only three admin routes
+   (create device, get device, put config), and neither the Mac app nor the
+   `device`/`protocol` crates reference it. So publishing an image and waiting
+   does nothing; a power cycle is the only way to trigger an update. Note a USB
+   unplug will NOT do it — the board has a battery, so that is link loss, not
+   power loss.
+2. **Nothing reports free INTERNAL DRAM, which is the one number that would
+   diagnose this failure class.** `free_heap` reads ~8.3 MB, which is PSRAM and
+   already recorded as useless as a TLS health signal on this board. When an OTA
+   download fails, there is currently no way to distinguish "internal DRAM
+   exhausted on the TLS/AES path" from RF without bisecting builds.
+
+### Not verified
+
+The scene renderer itself has **not** been exercised on the panel. All four of
+the asset-GC teardown observations require pushing a scene with an asset font,
+and **the server cannot push a scene** — no file under
+`companion/crates/server/src/` references `PushScene`, `Scene` or
+`encode_scene_payload`, and `build_digital_clock_scene`'s only caller is the
+parity test. The device can receive and render one; nothing sends one yet.

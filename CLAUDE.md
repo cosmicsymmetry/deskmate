@@ -256,7 +256,36 @@ of letting code and documentation diverge.
     new state (verified in `deskmate.map`). **An OTA-download check on the board is therefore
     required before this is trusted** — this repo has twice lost days to memory-layout shifts
     with every test green.
-  - **Nothing has run on hardware.** Also unproven: `timer.remaining`/`timer.pct` have no pixel
+  - **The OTA download passed on the board on 2026-08-25** with the moved `.bss`, on
+    `v2.0.0-scene1`. It failed once and succeeded on a retry of the identical image at the
+    same signal; recorded as transient, because the documented layout-shift failure mode is
+    *deterministic*. **The renderer itself has still never drawn on the panel.**
+  - **A host can now push a scene** (Task 10b, `4d81b22`): `Session::push_scene` ->
+    `RuntimeDevice::push_scene` -> a `RuntimeHandle` command -> `POST /v1/devices/{id}/scene`.
+    The route names a template and its inputs and calls `build_digital_clock_scene`, so there
+    is no second JSON representation of a scene to drift. It never opens a `device::Session`
+    of its own. This is **not** render negotiation — the spec's §3 policy is stage 3 work.
+  - **`protocol::validate_message` is public and is the one place the wire's bounds live.**
+    Call it before sending rather than restating a rule the protocol already states.
+  - **The dev-only 0x7E capture is PRE-FLUSH, and therefore cannot prove panel rotation.**
+    `dev_capture.c` re-renders the object tree with `lv_snapshot_take_to_draw_buf()` into an
+    offscreen buffer outside the CO5300 flush pipeline; the 90/270 software rotation and
+    `board_lcd_rounder_cb`'s even-pixel rounding both happen at flush time. The raw capture is
+    byte-identical at either rotation and the host reverses it exactly as `sim_shim.c` does —
+    so `framebuffer_diff` and `scene_panel_check` carry the SAME `flipped(A) == flipped(B)`
+    blindness as the host parity gate. **The physical 270-degree transform is only ever proven
+    by looking at the panel.** This was mis-stated in a plan amendment on 2026-08-25 and
+    corrected the same day; the firmware comment had said it all along.
+  - `companion/crates/app-core/examples/scene_panel_check.rs` byte-compares the device's
+    interpreter against the simulator. It needs **local tier** (in networked tier
+    `s_owner_usb_restricted` refuses `ApplyConfig`/`PushScene`/`TimeSync` over the cable with
+    `WRONG_TIER`) and a `DESKMATE_DEV_DIAG=1` build, so running it costs a device identity.
+    Since `lvgl-sim` compiles the same firmware C *and* links the same baked fonts, what it
+    can still catch is target codegen, ESP-IDF's LVGL configuration, and memory behaviour —
+    not a defect in code the two share. Its `text` node case cannot run at all: it binds
+    `field.status`, and device `PushData` retains only fields some built-in template
+    registers, none of which registers `status`.
+  - **Nothing has drawn on hardware.** Also unproven: `timer.remaining`/`timer.pct` have no pixel
     coverage; only `DigitalClock` is reproduced, so `deskmate_number_font()`'s tier step-down is
     never exercised and `BakedFontMetrics::measure()` is checked at exactly one string width;
     the date box's truncation is unexercised; and the asset-GC teardown has **no automated

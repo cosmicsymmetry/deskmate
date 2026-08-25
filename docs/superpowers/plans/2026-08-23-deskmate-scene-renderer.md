@@ -1238,6 +1238,63 @@ Minimal, per the owner's standing direction that hardware checks are kept small:
 - [ ] Record both in `docs/hardware/board-notes.md`, stating plainly what was observed and
       what was not.
 
+### Running Task 11 (added 2026-08-25, when both halves became runnable)
+
+Both checks are software-ready. Run them in this order: the first is nearly free and is
+worth having before committing to the second, which costs a device identity.
+
+**Check 1 — the scene on the panel, over the shipping path.** No flash, no tier change.
+
+1. Redeploy the server from a `git archive HEAD` export (CLAUDE.md's deploy notes, and
+   `companion/crates/server/deploy/README.md`). The deployed build predates this branch
+   and has no `/scene` route; `unknown_capability_bits: 0x100` in the 2026-08-25 board
+   session is that same staleness showing through.
+2. Push a scene, substituting the live device id and admin token:
+
+   ```sh
+   curl -sS -X POST "https://deskmate.rodi.one/v1/devices/$DEVICE/scene" \
+     -H "Authorization: Bearer $DESKMATE_ADMIN_TOKEN" \
+     -H 'Content-Type: application/json' \
+     -d '{"card_id":"clock","revision":1,"template":"digital_clock",
+          "show_seconds":true,"local_now":"2026-08-25T14:37:42"}'
+   ```
+
+   `card_id` need not name a card in the device's config: `dispatch_push_scene` uses it
+   only to scope `field.`/`timer.` binding lookups, and the scene takes the panel either
+   way. `revision` must be nonzero and `card_id` 1..32 bytes, or the route answers a typed
+   400 before anything reaches the wire.
+3. Look at the panel, at both rotations (rotation is a config field, so it moves via the
+   config PUT). Capture with `tools/hwcam/capture.sh` if a record is wanted.
+4. **Watch out for the rotation tick replacing the scene.** A scene is shown synchronously,
+   but the runtime's next timed rotation sends an `ActivateScreen` that puts a template view
+   back. Pause the config, or give the active playlist one card and a long dwell, for as
+   long as the scene needs to stay up.
+
+This half proves the shipping path end to end on the release image, and it is the **only**
+check that sees the 90/270 flush transform and `board_lcd_rounder_cb` at all. Record it as
+an observation; it is not a pixel claim.
+
+**Check 2 — byte-exact interpreter diff.** Costs a device identity; see the amendment above
+for what it does and does not prove before deciding it is worth that.
+
+```sh
+. "$HOME/esp/esp-idf/export.sh"
+idf.py -C firmware -DDESKMATE_DEV_DIAG=1 -p /dev/cu.usbmodem101 flash
+# then put the device in local tier, or every case aborts with WRONG_TIER
+cd companion && cargo run -p app-core --example scene_panel_check -- --port /dev/cu.usbmodem101
+```
+
+Expect `SUMMARY total=42 identical=36 differing=0 errored=0 excluded=6`. The harness
+detects and explains both prerequisite failures rather than emitting a wall of timeouts:
+a `WRONG_TIER` response means the device is still networked, and capture timeouts on the
+first case mean the image is not a `DESKMATE_DEV_DIAG=1` build.
+
+Restoring networked tier afterwards needs a **new** device identity minted on the server
+(only digests are stored, so the old plaintext token is gone), then a release flash and a
+re-provision over the cable. Move `firmware/version.txt` to match whatever is flashed, or
+the catalog offers the fleet a downgrade within the minute.
+
+
 Everything else stage 1 deferred — glyph-cache timing, asset persistence, stack high-water
 — stays deferred unless one of the above surfaces something.
 

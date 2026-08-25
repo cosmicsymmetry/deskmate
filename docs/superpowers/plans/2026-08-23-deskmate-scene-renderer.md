@@ -1037,16 +1037,162 @@ additional information. Real 270° geometry is provable only on hardware.
 
 ---
 
+## AMENDMENT (added during execution, 2026-08-25): Task 10b, the host-side push path
+
+Task 11's second check -- *the parity case on the panel* -- is blocked by something no
+task in this plan owned. The device can receive and render a scene; **nothing can send
+one.** `RuntimeDevice` has no `push_scene`, `device::Session` has no `push_scene`, and
+`build_digital_clock_scene`'s only caller is the parity test. This was found on the board
+on 2026-08-25 and is the reason the panel check did not run that session.
+
+The cable is not a way around it. `net_config_usb_message_allowed()` admits only
+status / heartbeat / ack / error / event / `NetworkConfig` / `FactoryReset` over USB in
+networked tier, so a `PushScene` from `deskmate-cli` is refused with `WRONG_TIER` --
+correctly, because the server owns the display. Flipping the device to local tier to
+dodge that costs a device identity, since only digests are stored. The scene has to come
+from the server.
+
+### Task 10b: `push_scene` through the one ownership seam
+
+**Files:**
+- Modify: `companion/crates/device/src/session.rs`
+- Modify: `companion/crates/app-core/src/runtime.rs`
+- Modify: `companion/crates/server/src/runtime_device.rs`, `companion/crates/server/src/admin.rs`
+- Modify: every other `RuntimeDevice` implementation, test doubles included
+
+- [ ] **Step 1: `Session::push_scene(&self, push: PushScene) -> Result<Ack, DeviceError>`**,
+      shaped exactly like `activate_screen` / `asset_begin`: a plain request/reply that
+      rejects anything but the matching `Ack`. Firmware acks `PushScene` *with* the
+      revision, so the match arm must require it and check it equals the one sent -- that
+      is the only host-side proof the device accepted the revision it was given. No
+      capability check here; `Session` is a thin transport, and the device already gates
+      on bit 8 in `protocol_message_request_gate()`.
+- [ ] **Step 2: `RuntimeDevice::push_scene(&mut self, push: PushScene)`.** Both real
+      implementations delegate to the session. This goes on the trait, not on the
+      WebSocket type alone: ownership has one implementation, not two that must agree, and
+      Task 10a exists because that rule was nearly broken once already.
+- [ ] **Step 3: `RuntimeHandle::push_scene`, as a runtime command.** The route must not
+      open a `device::Session` of its own -- that would put two processes on one cable,
+      which is exactly what Task 10a refused. It enqueues a command the way
+      `activate_screen` does, and the single owning worker sends it.
+- [ ] **Step 4: `POST /v1/devices/{id}/scene`**, behind the admin token with the other
+      three routes. The body names the template and its inputs, not a serialised scene:
+      `{"card_id": string, "revision": u32, "template": "digital_clock",
+      "show_seconds": bool, "local_now": "YYYY-MM-DDTHH:MM:SS"}`. The server calls
+      `build_digital_clock_scene(&ClockCard { .. }, &BakedFontMetrics::SHIPPED)` -- the
+      same builder the parity gate compares against the C template, so the panel is shown
+      the scene the golden was rendered from and there is no second JSON representation to
+      drift. An unknown template is a typed 400.
+- [ ] **Step 5: gates.** `cargo fmt --all --check`, `cargo clippy --workspace
+      --all-targets -- -D warnings`, `cargo test --workspace`. No firmware change, so
+      `.bss` cannot move and this task needs no reflash.
+
+**This is deliberately not render negotiation.** The spec's §3 resolves scene-vs-raster
+per card per revision, and stage 3 is where the shipped clock card starts drawing itself
+as a scene. This task adds the *path* and one dev-facing trigger for it, and decides no
+policy. What it buys is Task 11's panel check, and every later stage's hardware check.
+
+---
+
+
+## AMENDMENT (added during execution, 2026-08-25): Task 11a, and Task 11 split in two
+
+Task 11's panel check was written as one line -- "push the scene, confirm the panel
+matches the simulator golden at both orientations" -- and reading the code to run it
+showed it is two checks with different costs, different strengths, and no reason to
+couple them.
+
+**What the transports allow, established by reading the firmware rather than assumed:**
+
+- `s_owner_usb_restricted` (`protocol_task.c`) is set at boot to *networked tier*, and
+  every USB frame is then dispatched with `restricted_usb`. So `PushScene`, `ApplyConfig`,
+  `PushData` and `TimeSync` over the cable are refused with `WRONG_TIER` while the device
+  is networked. Driving the panel from USB requires local tier, and a tier round trip
+  costs a device identity.
+- **The dev-only 0x7E framebuffer capture is not gated by any of that.** `dispatch_request`
+  intercepts `DEV_CAPTURE_REQUEST_TYPE` under `#ifdef DESKMATE_DEV_DIAG` and returns,
+  *before* the decode, the capability gate and the tier gate. Capture works over USB in
+  either tier. That is what makes a byte-exact panel check possible at all.
+
+So Task 11's second line becomes:
+
+- [ ] **The scene on the panel, over the shipping path.** Device on `v2.0.0-scene1` in
+      networked tier, server carrying Task 10b: `POST /v1/devices/{id}/scene` and look at
+      the panel. Proves server -> WSS -> `scene_decode` -> `scene_model_validate` ->
+      `scene_view` -> LVGL end to end, on the release image the fleet actually runs. **No
+      flash and no tier change**, so it costs a deploy and a minute. This is an observation,
+      not a pixel claim -- record it as one.
+- [ ] **Byte-exact parity on the panel, both orientations** (Task 11a's harness). This is
+      the one that answers the question the parity gate provably cannot: the gate's flipped
+      half is `sim_shim.c` reversing a finished buffer, so **real 270-degree geometry is
+      only ever proven here**. Costs a `DESKMATE_DEV_DIAG=1` flash, a trip through local
+      tier, and therefore a device identity; a release flash and a re-provision restore it.
+
+Run them in that order. The first is nearly free and is worth having before committing to
+the second.
+
+### Task 11a: the scene panel check harness
+
+**Files:**
+- Add: `companion/crates/app-core/examples/scene_panel_check.rs`
+- Modify: `companion/crates/device/src/` -- extract the 0x7E capture plumbing from
+  `examples/framebuffer_diff.rs` into the crate so both callers share it
+
+`build_digital_clock_scene` lives in `app-core`, and `app-core -> device -> lvgl-sim`, so
+the harness **cannot** be another case inside `framebuffer_diff.rs`; the dependency edge
+points the wrong way. It goes in `app-core/examples/`, beside `alert_replay_check.rs`,
+which is the precedent for a hardware check that needs the whole stack.
+
+- [ ] **Step 1: share the capture plumbing.** Move the 0x7E request / 0x7F chunk
+      reassembly, the CRC check and the RGB565 frame constants out of
+      `examples/framebuffer_diff.rs` and into the `device` crate. `framebuffer_diff.rs`
+      keeps working through the shared code -- a second hand-rolled copy of a reassembler
+      is how two harnesses come to disagree about what the device sent. The dev-only
+      message ids stay out of the `protocol` crate for the reason its comment already
+      gives: they are not part of the release wire contract.
+- [ ] **Step 2: the check itself.** For each orientation in {90, 270} and each of the
+      parity gate's cases, apply the rotation, push `Message::PushScene` carrying
+      `build_digital_clock_scene(&ClockCard { .. }, &BakedFontMetrics::SHIPPED)`, time-sync
+      last (`framebuffer_diff.rs` explains why: `dispatch_time_sync` enqueues the redraw and
+      the UI queue drains FIFO), settle, capture, and byte-compare against
+      `Simulator::render_scene` of the identical `SceneRenderRequest`. Reuse
+      `tests/scene_parity.rs`'s `Difference`/`diff` reporting shape rather than a bare
+      "differs" -- a pixel count and a bounding box localise a failure; a boolean does not.
+- [ ] **Step 3: the asset-free scene cases too, if they cost nothing.** `cases::scene_cases()`
+      is one scene per `scene_node_kind_t` at both orientations. Those needing no registered
+      asset can go through the same loop for free. Any case that needs one is **excluded with
+      a stated reason**, the way `framebuffer_diff.rs` already excludes
+      `row-list--truncation-boundary` and `progress-ring--running-mid-countdown` -- an
+      exclusion with a reason is evidence; a silently skipped case is not.
+- [ ] **Step 4: gates.** `cargo fmt --all --check`, `cargo clippy --workspace
+      --all-targets -- -D warnings`, `cargo test --workspace`. The example must compile in
+      CI even though only hardware can run it.
+
+**This harness is not a substitute for the first check.** It runs against a
+`DESKMATE_DEV_DIAG=1` image over a cable, which is neither the image nor the path the
+product ships. It proves pixels; the shipping-path observation proves the path.
+
+---
+
+
 ### Task 11: Hardware verification (owner)
 
 Minimal, per the owner's standing direction that hardware checks are kept small:
 
-- [ ] **An OTA download on the physical board**, from a build carrying this stage's
+- [x] **An OTA download on the physical board**, from a build carrying this stage's
       `.bss`. This is the only check that catches the failure mode this codebase has proven
       no test can see, and stage 1's attempt was left **inconclusive** on a weak hotel link
       (RSSI -72 → -93, no download request reaching the server). Run it on a stable network.
-- [ ] **The parity case on the panel**: push the scene, confirm the panel matches the
-      simulator golden at both orientations.
+      **Passed 2026-08-25** on `v2.0.0-scene1` (built at `55d1a97`) over
+      `deskmate.rodi.one`: the first attempt failed with `download: ESP_FAIL` and the
+      second succeeded with the identical image at the same signal, installed, rebooted
+      and marked itself valid. Recorded as transient rather than the `.bss` hazard,
+      because that hazard is deterministic -- see `docs/hardware/board-notes.md`,
+      "Scene renderer OTA + boot -- verified 2026-08-25".
+- [ ] **The scene on the panel, over the shipping path** (see the Task 11a amendment
+      above, which splits this line in two and states what each half proves). Needs Task
+      10b: the 2026-08-25 session found that no host can send a `PushScene` at all.
+- [ ] **Byte-exact parity on the panel, both orientations.** Needs Task 11a's harness.
 - [ ] Record both in `docs/hardware/board-notes.md`, stating plainly what was observed and
       what was not.
 

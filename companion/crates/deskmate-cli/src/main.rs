@@ -651,11 +651,7 @@ fn exit_code(error: &AppError) -> i32 {
         AppError::Device(DeviceError::Timeout) => 11,
         AppError::Device(DeviceError::VersionMismatch(_)) => 12,
         AppError::Device(DeviceError::Rejected(_)) => 13,
-        AppError::Device(
-            DeviceError::MalformedResponse(_)
-            | DeviceError::UnexpectedRequestId { .. }
-            | DeviceError::UnexpectedMessage,
-        ) => 14,
+        AppError::Device(DeviceError::MalformedResponse(_) | DeviceError::UnexpectedMessage) => 14,
         AppError::Host(_) | AppError::Device(_) => 15,
     }
 }

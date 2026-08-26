@@ -49,7 +49,6 @@ pub enum DeviceError {
     Timeout,
     Transport(TransportError),
     MalformedResponse(String),
-    UnexpectedRequestId { expected: u32, received: u32 },
     UnexpectedMessage,
     VersionMismatch(u8),
     Rejected(ErrorResponse),
@@ -65,10 +64,6 @@ impl fmt::Display for DeviceError {
             Self::Timeout => f.write_str("device request timed out"),
             Self::Transport(error) => error.fmt(f),
             Self::MalformedResponse(error) => write!(f, "malformed device response: {error}"),
-            Self::UnexpectedRequestId { expected, received } => write!(
-                f,
-                "response request ID mismatch (expected {expected}, received {received})"
-            ),
             Self::UnexpectedMessage => f.write_str("device returned an unexpected message type"),
             Self::VersionMismatch(version) => {
                 write!(f, "unsupported device protocol version {version}")
@@ -191,15 +186,12 @@ impl<T: Transport> DeviceClient<T> {
             if count == 0 {
                 continue;
             }
-            if let Some(framed) = self.deframer.push(&chunk[..count]).into_iter().next() {
+            for framed in self.deframer.push(&chunk[..count]) {
                 let frame = framed.map_err(|error: FrameError| {
                     DeviceError::MalformedResponse(error.to_string())
                 })?;
                 if frame.request_id != request_id {
-                    return Err(DeviceError::UnexpectedRequestId {
-                        expected: request_id,
-                        received: frame.request_id,
-                    });
+                    continue;
                 }
                 let message = decode_message(&frame).map_err(message_error)?;
                 if let Message::Error(error) = message {
@@ -460,20 +452,28 @@ mod tests {
     }
 
     #[test]
-    fn request_id_mismatch_is_reported() {
-        let response = encode_message(9, &Message::StatusResponse(status())).unwrap();
+    fn late_response_does_not_displace_the_current_response() {
+        let stale = encode_message(9, &Message::StatusResponse(status())).unwrap();
+        let response = encode_message(1, &Message::StatusResponse(status())).unwrap();
         let fake = FakeTransport {
-            reads: VecDeque::from([Ok(response)]),
+            reads: VecDeque::from([Ok(stale), Ok(response)]),
             ..FakeTransport::default()
         };
         let mut client = DeviceClient::new(fake);
-        assert_eq!(
-            client.status(),
-            Err(DeviceError::UnexpectedRequestId {
-                expected: 1,
-                received: 9
-            })
-        );
+        assert_eq!(client.status().unwrap(), status());
+    }
+
+    #[test]
+    fn two_late_responses_cannot_form_a_cascade() {
+        let stale_first = encode_message(41, &Message::StatusResponse(status())).unwrap();
+        let stale_second = encode_message(42, &Message::StatusResponse(status())).unwrap();
+        let response = encode_message(1, &Message::StatusResponse(status())).unwrap();
+        let fake = FakeTransport {
+            reads: VecDeque::from([Ok(stale_first), Ok(stale_second), Ok(response)]),
+            ..FakeTransport::default()
+        };
+        let mut client = DeviceClient::new(fake);
+        assert_eq!(client.status().unwrap(), status());
     }
 
     #[test]

@@ -577,20 +577,20 @@ impl<T: Transport> SessionConnection<T> {
                         continue;
                     }
                 };
-                let message = decode_message(&frame).map_err(message_error)?;
                 if frame.request_id == 0 {
-                    match message {
+                    match decode_message(&frame).map_err(message_error)? {
                         Message::DeviceEvent(event) => self.route_event(event),
                         _ => return Err(DeviceError::UnexpectedMessage),
                     }
                     continue;
                 }
                 if frame.request_id != request_id {
-                    return Err(DeviceError::UnexpectedRequestId {
-                        expected: request_id,
-                        received: frame.request_id,
-                    });
+                    self.diagnostics
+                        .unexpected_device_frames
+                        .fetch_add(1, Ordering::Relaxed);
+                    continue;
                 }
+                let message = decode_message(&frame).map_err(message_error)?;
                 if response.is_some() {
                     return Err(DeviceError::UnexpectedMessage);
                 }
@@ -995,6 +995,7 @@ mod tests {
         Normal,
         Response(Message),
         Fragmented,
+        StaleResponseBeforeReply(u32),
         EventBeforeReply(DeviceEvent),
         EventAfterReply(DeviceEvent),
         NoReply,
@@ -1041,6 +1042,12 @@ mod tests {
                     let split = response_wire.len() / 2;
                     state.reads.push_back(Ok(response_wire[..split].to_vec()));
                     state.reads.push_back(Ok(response_wire[split..].to_vec()));
+                }
+                ReplyMode::StaleResponseBeforeReply(stale_request_id) => {
+                    let mut coalesced = encode_message(stale_request_id, &response)
+                        .map_err(|error| TransportError::Io(error.to_string()))?;
+                    coalesced.extend(response_wire);
+                    state.reads.push_back(Ok(coalesced));
                 }
                 ReplyMode::EventBeforeReply(event) => {
                     let mut coalesced = encode_message(0, &Message::DeviceEvent(event))
@@ -1274,6 +1281,24 @@ mod tests {
                 .sequence,
             2
         );
+    }
+
+    #[test]
+    fn late_response_does_not_fail_the_session_request_waiting_for_its_own_response() {
+        let (transport, state) = FakeTransport::new(status(7, 3, 100));
+        state
+            .lock()
+            .unwrap()
+            .reply_modes
+            .push_back(ReplyMode::StaleResponseBeforeReply(41));
+        let session = DeviceSession::with_options(
+            transport,
+            &status(7, 3, 100),
+            options(Duration::from_mins(1), 8),
+        );
+
+        assert_eq!(session.status().unwrap(), status(7, 3, 100));
+        assert_eq!(session.diagnostics().unexpected_device_frames, 1);
     }
 
     #[test]

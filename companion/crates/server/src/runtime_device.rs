@@ -893,22 +893,31 @@ impl SocketPeer {
                 continue;
             }
 
-            let Some(waiting) = pending.take() else {
-                self.diagnostics
-                    .unexpected_device_frames
-                    .fetch_add(1, Ordering::Relaxed);
-                continue;
-            };
-            if frame.request_id != waiting.request_id {
-                let _ = waiting.response.send(Err(DeviceError::UnexpectedRequestId {
-                    expected: waiting.request_id,
-                    received: frame.request_id,
-                }));
+            // Correlate AFTER decoding, never before. Decoding is what rejects a
+            // hostile frame and closes the link; screening on the request id
+            // first would let an undecodable frame carrying an unmatched id slip
+            // past that check entirely, which `hostile_device.rs` catches.
+            //
+            // Peek before taking: a reply whose id is not the one awaited belongs
+            // to a request this host already abandoned, and must not displace the
+            // request currently in flight. Taking first is what let one late reply
+            // fail the next request, whose own late reply then failed the one
+            // after it -- a cascade that ends only when traffic stops. Observed on
+            // hardware 2026-08-25 as "expected 472, received 471" widening to
+            // "expected 485, received 478". The waiting request keeps its own
+            // deadline, so a reply that never arrives still ends as a timeout.
+            if pending
+                .as_ref()
+                .is_none_or(|waiting| waiting.request_id != frame.request_id)
+            {
                 self.diagnostics
                     .unexpected_device_frames
                     .fetch_add(1, Ordering::Relaxed);
                 continue;
             }
+            let Some(waiting) = pending.take() else {
+                continue;
+            };
             let response = match message {
                 Message::Error(error) => Err(DeviceError::Rejected(error)),
                 message if message.type_id() == waiting.expected_type => Ok(message),
@@ -999,6 +1008,9 @@ fn mark_seen(last_seen_unix_ms: &AtomicU64) {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
     use app_core::RuntimeDevice;
     use device::DeviceError;
     use protocol::{
@@ -1006,7 +1018,7 @@ mod tests {
         TimeSync, WifiState,
     };
 
-    use super::SocketPeer;
+    use super::{PendingRequest, SocketPeer};
 
     fn network_config() -> NetworkConfig {
         NetworkConfig {
@@ -1063,6 +1075,35 @@ mod tests {
             super::RESPONSE_WAIT_TIMEOUT > super::REQUEST_TIMEOUT,
             "the actor must clear a pending request before its caller can time out"
         );
+    }
+
+    #[test]
+    fn late_response_does_not_consume_the_websocket_request_waiting_for_its_own_response() {
+        let (device, connector) = super::WebSocketRuntimeDevice::channel("dev-1".into());
+        let mut peer = connector.attach();
+        let (response_sender, response_receiver) = mpsc::sync_channel(1);
+        let mut pending = Some(PendingRequest {
+            request_id: 2,
+            expected_type: protocol::TYPE_STATUS_RESPONSE,
+            deadline: tokio::time::Instant::now() + Duration::from_secs(1),
+            response: response_sender,
+        });
+        let mut responses =
+            protocol::encode_message(1, &Message::StatusResponse(sample_status())).unwrap();
+        responses.extend(
+            protocol::encode_message(2, &Message::StatusResponse(sample_status())).unwrap(),
+        );
+
+        assert!(peer.handle_binary(&responses, "dev-1", &mut pending));
+        assert_eq!(
+            response_receiver
+                .recv_timeout(Duration::from_millis(50))
+                .expect("matching response is delivered")
+                .expect("matching response succeeds"),
+            Message::StatusResponse(sample_status())
+        );
+        assert!(pending.is_none());
+        assert_eq!(device.diagnostics().unexpected_device_frames, 1);
     }
 
     #[test]

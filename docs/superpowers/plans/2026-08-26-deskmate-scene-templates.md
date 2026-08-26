@@ -435,3 +435,110 @@ template fails the second.
 
 Stage 3 — retiring the C templates, the plugin manifest, and curated plugins — is planned at
 this plan's exit, from the ledger.
+
+---
+
+## AMENDMENT (added before execution, 2026-08-26): the chips need a node, not a host-side port
+
+Reading `template_style.c` to review Task 2 turned up a blocker this plan did not contain,
+and it governs the task order rather than one task.
+
+**`deskmate_chip()` is an `lv_label` with a background**, so its pill is content-sized:
+`text_width + 2 * pad_hor`, with `pad_ver` derived from `DESKMATE_CHIP_HEIGHT` and
+`letter_space` set to 1. A scene expresses that as a rect plus a text node, and the rect's
+width has to be *exactly* the label's rendered width or the byte-exact gate fails.
+
+**The host cannot compute that width today, and making it able to is the wrong move.**
+`BakedFontMetrics` carries `numeric: None` for Caption and Body, because those are the
+full-range faces — and `deskmate_font_18.c` and `deskmate_font_28.c` both ship
+`kern_dsc = &kern_pairs` with `kern_scale = 16`, while the digits-only faces ship
+`kern_dsc = NULL`. So measuring alphabetic text means reimplementing
+`lv_font_get_glyph_dsc_fmt_txt()`'s advance lookup, its kern-pair lookup in 4.4 format, and
+`letter_space`, on the host, and keeping that port correct against a vendored LVGL.
+
+**This plan already knows that is the wrong answer.** Stage 2a modelled the dial as an arc,
+found it was an `lv_scale`, and resolved it by adding `SCENE_NODE_SCALE` "so the pixels
+match by construction rather than by porting LVGL's tick trig". Porting LVGL's *text* metrics
+is the same decision, with a larger surface and a subtler failure mode: a kerning bug shows
+up as a few pixels on one chip in one card, which is exactly what a byte-exact gate would
+catch and exactly what nothing else would.
+
+**And all five remaining templates keep their chips** (clock faces are the only ones that
+dropped them, on 2026-08-17), so this blocks every template task, not just Task 2.
+
+### The revised order
+
+Both node additions are folded into one firmware task, which runs **first** rather than
+last. That keeps the stage's hardware cost at what it already was — **one OTA download, one
+power cycle** — because two node kinds landing in one image need one verification, not two.
+
+| Was | Now |
+| --- | --- |
+| Task 1 — table-driven gate | unchanged, still first |
+| Task 6 — rotated-rect node, last | **Task 1b — styled-label node AND rotated-rect node, together, second** |
+| Tasks 2-5 — four host-only templates | unchanged in content, but now all five are host-only once 1b lands |
+| Task 6 — AnalogClock | host-only builder work, no firmware |
+| Task 7 — ledger | unchanged, still last |
+
+### Task 1b: the styled-label and rotated-rect nodes
+
+**Files:** as Task 6 listed, plus `firmware/main/ui/templates/template_style.c` read (not
+modified) as the reference for the label's exact style calls.
+
+```rust
+/// A text label that draws its own background: `deskmate_chip()`,
+/// `deskmate_eyebrow()`, and BigNumberLabel's pill are all this shape. The
+/// node carries the STYLE and the device sizes the box, because the box is
+/// `text_width + 2 * pad_hor` and text width depends on per-glyph advances,
+/// kern pairs in 4.4 format and `letter_space` -- LVGL's own arithmetic,
+/// which the host would otherwise have to reimplement and keep correct
+/// against a vendored LVGL. Same reasoning as `SCENE_NODE_SCALE`.
+pub struct SceneLabel {
+    pub x: i32,
+    pub y: i32,
+    pub font: SceneFont,
+    pub value: SceneValue,
+    pub ink: u32,
+    pub fill: u32,
+    /// `LV_OPA_TRANSP` fill makes this an eyebrow rather than a chip, so one
+    /// node covers both without a kind flag.
+    pub fill_opacity: u8,
+    pub radius: i32,
+    pub pad_hor: i32,
+    pub pad_ver: i32,
+    pub letter_space: i32,
+    /// `deskmate_chip_set_text()` HIDES a chip given an empty string rather
+    /// than drawing a collapsed blob, and `icon-badge-text--empty-badge`
+    /// pins that. The device must do the same, or that golden breaks.
+    pub hide_when_empty: bool,
+}
+```
+
+- [ ] **Step 1: Write the failing decoder tests for BOTH nodes** in
+      `firmware/host_tests/test_scene_decode.c` and `test_scene_model.c`, including the
+      bounds cases, and run `make -C firmware/host_tests sanitize` — two existing decoder
+      bounds have no other proof, because `scene_model_validate()` reports an
+      out-of-bounds write with the same error code the plain test asserts.
+- [ ] **Step 2: Run both suites to confirm failure.**
+- [ ] **Step 3: Implement both nodes.** In `scene_view.c`, `SceneLabel` must make the same
+      style calls `deskmate_chip()` makes, in the same order, rather than approximating
+      them — that is the entire point of the node. `SceneRotRect` is as the original Task 6
+      specified.
+- [ ] **Step 4: Fixtures for both, in both languages' corpora.**
+- [ ] **Step 5: Update `docs/protocol/v1.md`** — the node table and the scene map.
+- [ ] **Step 6: Simulator cases for both node kinds at both orientations.**
+- [ ] **Step 7: Build, record `.bss`/`.data`/IRAM deltas, and treat any movement as the
+      standing hazard it is.** Two node kinds is the largest single firmware addition in
+      this stage; it is also the only one.
+- [ ] **Step 8: Gates and commit.** `feat: add the styled-label and rotated-rect scene nodes`
+- [ ] **Step 9 (owner, hardware): one OTA download on the board**, exactly as the original
+      Task 6 Step 9 specified — publish, move `firmware/version.txt` to match, power-cycle.
+      **This is the whole hardware cost of stage 2b.**
+
+### What this changes about the template tasks
+
+Nothing in their content, but their premise improves: with `SceneLabel` available, a chip is
+one node whose pixels match by construction, so no template task needs text measurement.
+`BakedFontMetrics::measure()` stays what it is — a numeric-tier measurement used for
+`number_font_tier()`'s step-down decision, which is a *tier choice*, not a box size, and is
+correct without kerning because the digits-only faces have none.

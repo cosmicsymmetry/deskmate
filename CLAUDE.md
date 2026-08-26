@@ -268,6 +268,11 @@ of letting code and documentation diverge.
     The route names a template and its inputs and calls `build_digital_clock_scene`, so there
     is no second JSON representation of a scene to drift. It never opens a `device::Session`
     of its own. This is **not** render negotiation — the spec's §3 policy is stage 3 work.
+  - **A full-turn `SceneArc` is byte-identical to LVGL's circular border**, at the drawn
+    object's unadjusted radius and border width — proven by the parity gate on `RowList`'s
+    count ring (`OBJ_COUNT`), which has a 2px border and no fill where no scene node has a
+    border field. Nothing was tuned to make it true. Also: **a bordered `lv_obj` insets its
+    content origin by the border width**, so text inside one sits that far in.
   - **`protocol::validate_message` is public and is the one place the wire's bounds live.**
     Call it before sending rather than restating a rule the protocol already states.
   - **The dev-only 0x7E capture is PRE-FLUSH, and therefore cannot prove panel rotation.**

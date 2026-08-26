@@ -39,8 +39,9 @@
 //! [`build_digital_clock_scene`]'s own doc comment.
 
 use app_core::scene_build::{
-    BakedFontMetrics, BigNumberCard, ClockCard, RowListCard, build_big_number_label_scene,
-    build_digital_clock_scene, build_row_list_scene,
+    BakedFontMetrics, BigNumberCard, ClockCard, IconBadgeCard, RowListCard,
+    build_big_number_label_scene, build_digital_clock_scene, build_icon_badge_text_scene,
+    build_row_list_scene,
 };
 use chrono::{NaiveDate, NaiveDateTime};
 use lvgl_sim::scene::SceneRenderRequest;
@@ -50,14 +51,20 @@ use lvgl_sim::{
 };
 use std::collections::BTreeSet;
 
-const EXPECTED_TEMPLATES: [SimTemplate; 3] = [
+const EXPECTED_TEMPLATES: [SimTemplate; 4] = [
     SimTemplate::DigitalClock,
     SimTemplate::BigNumberLabel,
     SimTemplate::RowList,
+    SimTemplate::IconBadgeText,
 ];
 
 /// `big_number_label.c`'s `CONTENT_WIDTH`.
 const BIG_NUMBER_CONTENT_WIDTH: i32 = 448 - 2 * 24;
+
+/// `icon_badge_text.c` passes `DESKMATE_COLOR_SURFACE` to
+/// `weather_icon_render()` because the icon container is inset into the
+/// surface tile, not placed directly on the black canvas.
+const ICON_TILE_BACKGROUND: u32 = 0x001a_1a1f;
 
 struct ParityCase {
     /// `template--variant--orientation`, used for the PNG dump path on failure.
@@ -452,6 +459,84 @@ fn add_row_list_cases(cases: &mut Vec<ParityCase>) {
     }
 }
 
+fn add_icon_badge_text_cases(cases: &mut Vec<ParityCase>) {
+    let variants = [
+        // The two-digit value is 124px at HERO, balancing the 120px sun.
+        ("sun-hero", "sun", "Now", "72", "Feels 74"),
+        // Pins both concentric discs and the surface-coloured cutout.
+        ("unknown-cutout", "unknown", "Unknown", "--", "No data"),
+        // The C comment claims this falls to DISPLAY; the parity gate checks
+        // the shipped selector rather than treating that claim as authority.
+        ("negative-temperature", "sun", "Now", "-12°", "Feels -15°"),
+        // HERO and DISPLAY cannot spell letters, so this must use BODY.
+        ("alphabetic-value", "sun", "Feed", "yes", "READY"),
+        // Matches the existing `icon-badge-text--empty-badge` golden's
+        // intent while staying within this half-task's SUN/UNKNOWN icon scope.
+        ("empty-badge", "sun", "", "65", "Partly cloudy"),
+        ("empty-label", "sun", "Now", "42", ""),
+    ];
+
+    for (slug, icon, badge, value, label) in variants {
+        for (orientation_slug, orientation) in [
+            ("landscape", SimOrientation::Landscape),
+            ("flipped", SimOrientation::LandscapeFlipped),
+        ] {
+            let title = "Weather";
+            cases.push(ParityCase {
+                name: format!("icon-badge-text--{slug}--{orientation_slug}"),
+                template: RenderRequest {
+                    template: SimTemplate::IconBadgeText,
+                    fields: vec![
+                        SimField {
+                            name: "title".to_string(),
+                            value: SimFieldValue::Text(title.to_string()),
+                        },
+                        SimField {
+                            name: "icon".to_string(),
+                            value: SimFieldValue::Text(icon.to_string()),
+                        },
+                        SimField {
+                            name: "badge".to_string(),
+                            value: SimFieldValue::Text(badge.to_string()),
+                        },
+                        SimField {
+                            name: "value".to_string(),
+                            value: SimFieldValue::Text(value.to_string()),
+                        },
+                        SimField {
+                            name: "label".to_string(),
+                            value: SimFieldValue::Text(label.to_string()),
+                        },
+                    ],
+                    utc_offset_minutes: 0,
+                    now_unix_seconds: 0,
+                    orientation,
+                },
+                scene: SceneRenderRequest {
+                    scene: build_icon_badge_text_scene(
+                        &IconBadgeCard {
+                            revision: 1,
+                            title,
+                            icon,
+                            badge,
+                            value,
+                            label,
+                        },
+                        ICON_TILE_BACKGROUND,
+                        &BakedFontMetrics::SHIPPED,
+                    ),
+                    assets: Vec::new(),
+                    utc_offset_minutes: 0,
+                    now_unix_seconds: 0,
+                    timer: None,
+                    fields: Vec::new(),
+                    orientation,
+                },
+            });
+        }
+    }
+}
+
 fn cases() -> Vec<ParityCase> {
     let mut cases = Vec::new();
     for instant in INSTANTS {
@@ -514,6 +599,7 @@ fn cases() -> Vec<ParityCase> {
 
     add_big_number_cases(&mut cases);
     add_row_list_cases(&mut cases);
+    add_icon_badge_text_cases(&mut cases);
     cases
 }
 

@@ -71,6 +71,12 @@ const BIG_NUMBER_INK: u32 = 0x000f_0726;
 const ROW_LIST_HUE: u32 = 0x002f_d9c0;
 /// `deskmate_palette(PROTOCOL_TEMPLATE_ROW_LIST).ink`.
 const ROW_LIST_INK: u32 = 0x0004_211d;
+/// `deskmate_palette(PROTOCOL_TEMPLATE_ICON_BADGE_TEXT).hue`.
+const ICON_BADGE_HUE: u32 = 0x0035_b6f5;
+/// `deskmate_palette(PROTOCOL_TEMPLATE_ICON_BADGE_TEXT).tint`.
+const ICON_BADGE_TINT: u32 = 0x0094_d8fa;
+/// `deskmate_palette(PROTOCOL_TEMPLATE_ICON_BADGE_TEXT).ink`.
+const ICON_BADGE_INK: u32 = 0x0004_1a24;
 
 // ---------------------------------------------------------------------------
 // row_list.c's own geometry. Ported, not re-derived.
@@ -106,6 +112,21 @@ const ROW_COUNT_BOX: i32 = 4 * GRID;
 const ROW_COUNT_X: i32 = SCENE_CANVAS_WIDTH - MARGIN - ROW_COUNT_BOX;
 /// `lv_obj_set_style_border_width(OBJ_COUNT, 2, 0)`.
 const ROW_COUNT_BORDER_WIDTH: i32 = 2;
+
+// ---------------------------------------------------------------------------
+// icon_badge_text.c's own geometry. Ported, not re-derived.
+// ---------------------------------------------------------------------------
+
+/// `ICON_BOX` in both `icon_badge_text.c` and `weather_icon.c`.
+const ICON_BOX: i32 = 120;
+/// `ICON_TILE`.
+const ICON_TILE: i32 = 19 * GRID;
+/// `ICON_INSET`.
+const ICON_INSET: i32 = (ICON_TILE - ICON_BOX) / 2;
+/// `TEXT_LEFT`.
+const ICON_TEXT_LEFT: i32 = MARGIN + ICON_TILE + 2 * GRID;
+/// `TEXT_WIDTH`.
+const ICON_TEXT_WIDTH: i32 = 28 * GRID;
 
 // ---------------------------------------------------------------------------
 // digital_clock.c's own geometry. Ported, not re-derived.
@@ -419,6 +440,23 @@ pub struct BigNumberCard<'a> {
     /// `big_number_label_patch()`'s `value` field.
     pub value: &'a str,
     /// `big_number_label_patch()`'s `label` field.
+    pub label: &'a str,
+}
+
+/// The card-level inputs `icon_badge_text.c` draws from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IconBadgeCard<'a> {
+    /// Echoed as the scene's own revision.
+    pub revision: u32,
+    /// `icon_badge_text_patch()`'s `title` field.
+    pub title: &'a str,
+    /// `icon_badge_text_patch()`'s `icon` field.
+    pub icon: &'a str,
+    /// `icon_badge_text_patch()`'s `badge` field.
+    pub badge: &'a str,
+    /// `icon_badge_text_patch()`'s `value` field.
+    pub value: &'a str,
+    /// `icon_badge_text_patch()`'s `label` field.
     pub label: &'a str,
 }
 
@@ -767,6 +805,228 @@ pub fn build_big_number_label_scene(card: &BigNumberCard<'_>, metrics: &BakedFon
         }),
     ];
 
+    Scene {
+        revision: card.revision,
+        background: COLOR_CANVAS,
+        nodes,
+    }
+}
+
+/// Converts `LV_ALIGN_CENTER` plus an `(x, y)` offset inside a container to
+/// the absolute top-left a scene rectangle needs.
+///
+/// Keep the two halves separate. LVGL computes `parent / 2 - object / 2`,
+/// which differs from `(parent - object) / 2` by one pixel when both sizes are
+/// odd.
+fn centered_rect_origin(
+    container_origin: (i32, i32),
+    container_size: (i32, i32),
+    own_size: (i32, i32),
+    offset: (i32, i32),
+) -> (i32, i32) {
+    (
+        container_origin.0 + container_size.0 / 2 + offset.0 - own_size.0 / 2,
+        container_origin.1 + container_size.1 / 2 + offset.1 - own_size.1 / 2,
+    )
+}
+
+/// `weather_icon.c`'s `disc()` in scene form.
+fn disc(
+    nodes: &mut Vec<SceneNode>,
+    container_origin: (i32, i32),
+    color: u32,
+    diameter: i32,
+    x: i32,
+    y: i32,
+) {
+    let (x, y) = centered_rect_origin(
+        container_origin,
+        (ICON_BOX, ICON_BOX),
+        (diameter, diameter),
+        (x, y),
+    );
+    nodes.push(SceneNode::Rect(SceneRect {
+        x,
+        y,
+        w: diameter,
+        h: diameter,
+        radius: diameter / 2,
+        fill: color,
+        opacity: u8::MAX,
+    }));
+}
+
+/// `weather_icon.c`'s `bar()` in scene form. The first half of Task 4 only
+/// wires SUN and UNKNOWN, which use discs exclusively; the remaining icons
+/// call this helper without changing the coordinate model.
+#[allow(dead_code)]
+fn bar(
+    nodes: &mut Vec<SceneNode>,
+    container_origin: (i32, i32),
+    color: u32,
+    w: i32,
+    h: i32,
+    x: i32,
+    y: i32,
+) {
+    let (x, y) = centered_rect_origin(container_origin, (ICON_BOX, ICON_BOX), (w, h), (x, y));
+    nodes.push(SceneNode::Rect(SceneRect {
+        x,
+        y,
+        w,
+        h,
+        radius: h / 2,
+        fill: color,
+        opacity: u8::MAX,
+    }));
+}
+
+/// `weather_icon.c`'s `draw_sun()`.
+fn draw_sun(
+    nodes: &mut Vec<SceneNode>,
+    container_origin: (i32, i32),
+    color: u32,
+    dx: i32,
+    dy: i32,
+    diameter: i32,
+) {
+    disc(nodes, container_origin, color, diameter, dx, dy);
+}
+
+/// `weather_icon.c`'s UNKNOWN case.
+fn draw_unknown(
+    nodes: &mut Vec<SceneNode>,
+    container_origin: (i32, i32),
+    color: u32,
+    background: u32,
+) {
+    disc(nodes, container_origin, color, 72, 0, 0);
+    disc(nodes, container_origin, background, 52, 0, 0);
+}
+
+/// Draws the subset of `weather_icon_render()` delivered by this half-task.
+/// Each remaining icon can be added as one function plus one match arm.
+fn push_weather_icon_nodes(
+    nodes: &mut Vec<SceneNode>,
+    icon: &str,
+    container_origin: (i32, i32),
+    color: u32,
+    background: u32,
+) {
+    match icon {
+        "sun" => draw_sun(nodes, container_origin, color, 0, 0, 72),
+        // `weather_icon_from_name()` maps an unrecognised name to UNKNOWN;
+        // the deferred known names deliberately have no arms yet.
+        _ => draw_unknown(nodes, container_origin, color, background),
+    }
+}
+
+/// Builds the whole `IconBadgeText` face as a scene, with SUN and UNKNOWN as
+/// the two icon artworks implemented by this half of Task 4.
+///
+/// `background` is the color physically behind the icon artwork. The shipped
+/// call site passes `DESKMATE_COLOR_SURFACE`, because the icon container is a
+/// child of the surface tile. UNKNOWN uses it to punch out the inner disc; it
+/// must not be replaced with the scene's black canvas color.
+pub fn build_icon_badge_text_scene(
+    card: &IconBadgeCard<'_>,
+    background: u32,
+    metrics: &BakedFontMetrics,
+) -> Scene {
+    let value = if card.value.is_empty() {
+        "--"
+    } else {
+        card.value
+    };
+    let value_tier = number_font_tier(value, ICON_TEXT_WIDTH, metrics);
+    let label_tier = if value_tier == SceneFontTier::Body {
+        SceneFontTier::Caption
+    } else {
+        SceneFontTier::Body
+    };
+    let value_line = metrics.tier(value_tier).line_height;
+    let label_line = metrics.tier(label_tier).line_height;
+
+    // `set_value_text()` uses LV_ALIGN_LEFT_MID. Preserve LVGL's independent
+    // parent/object halves instead of simplifying them to one subtraction.
+    let value_top = SCENE_CANVAS_HEIGHT / 2 - value_line / 2 + (-(2 * GRID + label_line) / 2);
+    let label_top = value_top + value_line + 2 * GRID;
+
+    let tile_y = SCENE_CANVAS_HEIGHT / 2 - ICON_TILE / 2;
+    let icon_origin = (MARGIN + ICON_INSET, tile_y + ICON_INSET);
+    let mut nodes = Vec::with_capacity(7);
+
+    nodes.push(SceneNode::Label(SceneLabel {
+        x: MARGIN,
+        y: 2 * GRID,
+        horizontal_anchor: SceneLabelAnchor::Left,
+        font: SceneFont::Baked(SceneFontTier::Caption),
+        value: SceneValue::Literal(card.title.to_string()),
+        ink: ICON_BADGE_INK,
+        fill: ICON_BADGE_HUE,
+        fill_opacity: u8::MAX,
+        radius: RADIUS_CHIP,
+        pad_hor: 2 * GRID,
+        pad_ver: (CHIP_HEIGHT - metrics.tier(SceneFontTier::Caption).line_height) / 2,
+        letter_space: 1,
+        hide_when_empty: true,
+    }));
+    nodes.push(SceneNode::Label(SceneLabel {
+        x: SCENE_CANVAS_WIDTH - MARGIN,
+        y: 2 * GRID,
+        horizontal_anchor: SceneLabelAnchor::Right,
+        font: SceneFont::Baked(SceneFontTier::Caption),
+        value: SceneValue::Literal(card.badge.to_string()),
+        ink: ICON_BADGE_INK,
+        fill: ICON_BADGE_HUE,
+        fill_opacity: u8::MAX,
+        radius: RADIUS_CHIP,
+        pad_hor: 2 * GRID,
+        pad_ver: (CHIP_HEIGHT - metrics.tier(SceneFontTier::Caption).line_height) / 2,
+        letter_space: 1,
+        hide_when_empty: true,
+    }));
+    nodes.push(SceneNode::Rect(SceneRect {
+        x: MARGIN,
+        y: tile_y,
+        w: ICON_TILE,
+        h: ICON_TILE,
+        radius: RADIUS_MODULE,
+        fill: COLOR_SURFACE,
+        opacity: u8::MAX,
+    }));
+    push_weather_icon_nodes(
+        &mut nodes,
+        card.icon,
+        icon_origin,
+        ICON_BADGE_HUE,
+        background,
+    );
+    nodes.push(SceneNode::Text(SceneText {
+        x: ICON_TEXT_LEFT,
+        baseline_y: value_top + metrics.baseline_offset(value_tier),
+        w: ICON_TEXT_WIDTH,
+        align: SceneAlign::Left,
+        font: SceneFont::Baked(value_tier),
+        color: COLOR_PRIMARY,
+        value: SceneValue::Literal(value.to_string()),
+        ellipsize: true,
+    }));
+    // Unlike BigNumberLabel, IconBadgeText's secondary label is a plain
+    // fixed-width LVGL label: no surface fill, padding, radius, or tracking.
+    nodes.push(SceneNode::Text(SceneText {
+        x: ICON_TEXT_LEFT,
+        baseline_y: label_top + metrics.baseline_offset(label_tier),
+        w: ICON_TEXT_WIDTH,
+        align: SceneAlign::Left,
+        font: SceneFont::Baked(label_tier),
+        color: ICON_BADGE_TINT,
+        value: SceneValue::Literal(card.label.to_string()),
+        ellipsize: true,
+    }));
+
+    // `OBJ_STATE` is cleared by `template_view.c` in these OK-state parity
+    // fixtures, so it has no visible scene node.
     Scene {
         revision: card.revision,
         background: COLOR_CANVAS,

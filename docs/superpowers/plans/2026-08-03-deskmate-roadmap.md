@@ -35,6 +35,9 @@ breadth.
 | V3 | Planned (narrowed by V2's design §10) | Server host | Accounts, OAuth-held integration credentials (Google Calendar and similar), config storage, and multi-tenancy — behind the device-facing contract V2 freezes. Should require no firmware change, because V2 delivers the contract, identity, provisioning, transport and update mechanism | own brainstorm at V2 exit |
 | V4 | Planned | Plugin platform | HTML plugin contract, headless-Chromium rendering, image cards, asset cache, billing (paid tier) | own brainstorm at V3 exit |
 
+Stage 2b of the scene renderer (the five remaining templates as scenes) is planned in
+`docs/superpowers/plans/2026-08-26-deskmate-scene-templates.md`, written at stage 2a's exit.
+
 First-widget order and why:
 
 1. **Digital clock** — zero data deps; doubles as the spec's standalone

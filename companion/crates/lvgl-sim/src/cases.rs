@@ -619,8 +619,8 @@ pub fn asset_font_cases() -> Vec<(String, AssetFontCase)> {
 
 use protocol::{
     SCENE_CANVAS_WIDTH, Scene, SceneAlign, SceneArc, SceneFont, SceneFontTier, SceneGlyph,
-    SceneImage, SceneLabel, SceneLine, SceneNode, SceneRect, SceneRotRect, SceneScale, SceneText,
-    SceneValue,
+    SceneImage, SceneLabel, SceneLabelAnchor, SceneLine, SceneNode, SceneRect, SceneRotRect,
+    SceneScale, SceneText, SceneValue,
 };
 
 use crate::scene::{SceneAsset, SceneRenderRequest, SceneTimer};
@@ -1201,8 +1201,12 @@ fn scene_scale_nodes() -> Vec<SceneNode> {
 fn scene_label_nodes() -> Vec<SceneNode> {
     vec![
         SceneNode::Label(SceneLabel {
-            x: 32,
+            // Same x as the left-anchored row below: this pill must straddle
+            // the guide while that one begins there. Ignoring the anchor
+            // therefore changes pixels rather than merely weakening intent.
+            x: 224,
             y: 48,
+            horizontal_anchor: SceneLabelAnchor::Center,
             font: SceneFont::Baked(SceneFontTier::Caption),
             value: literal("WEATHER AV"),
             ink: 0x0004_1a24,
@@ -1215,8 +1219,24 @@ fn scene_label_nodes() -> Vec<SceneNode> {
             hide_when_empty: true,
         }),
         SceneNode::Label(SceneLabel {
+            x: 224,
+            y: 96,
+            horizontal_anchor: SceneLabelAnchor::Left,
+            font: SceneFont::Baked(SceneFontTier::Caption),
+            value: literal("LEFT EDGE"),
+            ink: 0x0004_1a24,
+            fill: 0x0035_b6f5,
+            fill_opacity: u8::MAX,
+            radius: 12,
+            pad_hor: 16,
+            pad_ver: 3,
+            letter_space: 1,
+            hide_when_empty: true,
+        }),
+        SceneNode::Label(SceneLabel {
             x: 32,
             y: 136,
+            horizontal_anchor: SceneLabelAnchor::Left,
             font: SceneFont::Baked(SceneFontTier::Caption),
             value: literal("TRANSPARENT EYEBROW"),
             ink: TERTIARY,
@@ -1231,6 +1251,7 @@ fn scene_label_nodes() -> Vec<SceneNode> {
         SceneNode::Label(SceneLabel {
             x: 32,
             y: 216,
+            horizontal_anchor: SceneLabelAnchor::Left,
             font: SceneFont::Baked(SceneFontTier::Body),
             value: binding("field.status"),
             ink: 0x000f_0726,
@@ -1247,6 +1268,7 @@ fn scene_label_nodes() -> Vec<SceneNode> {
         SceneNode::Label(SceneLabel {
             x: 320,
             y: 304,
+            horizontal_anchor: SceneLabelAnchor::Left,
             font: SceneFont::Baked(SceneFontTier::Caption),
             value: literal(""),
             ink: PRIMARY,

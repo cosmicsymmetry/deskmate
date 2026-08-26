@@ -83,6 +83,16 @@ pub enum SceneAlign {
     Right = 3,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[repr(u8)]
+pub enum SceneLabelAnchor {
+    /// The wire default, preserving the original meaning of `SceneLabel::x`.
+    #[default]
+    Left = 0,
+    Center = 1,
+    Right = 2,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SceneValue {
     Literal(String),
@@ -201,8 +211,11 @@ pub struct SceneScale {
 /// against a vendored LVGL. Same reasoning as `SCENE_NODE_SCALE`.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SceneLabel {
+    /// The left edge, horizontal centre, or right edge of the finished box,
+    /// according to `horizontal_anchor`.
     pub x: i32,
     pub y: i32,
+    pub horizontal_anchor: SceneLabelAnchor,
     pub font: SceneFont,
     pub value: SceneValue,
     pub ink: u32,
@@ -345,7 +358,15 @@ fn baseline_within_canvas(baseline_y: i32) -> bool {
 }
 
 fn label_within_canvas(label: &SceneLabel) -> bool {
-    (0..SCENE_CANVAS_WIDTH).contains(&label.x)
+    let x_within_canvas = match label.horizontal_anchor {
+        SceneLabelAnchor::Left | SceneLabelAnchor::Center => {
+            (0..SCENE_CANVAS_WIDTH).contains(&label.x)
+        }
+        // Box edges follow the fixed rectangles' half-open convention: 448
+        // is the right edge of a box whose last pixel is x=447.
+        SceneLabelAnchor::Right => (1..=SCENE_CANVAS_WIDTH).contains(&label.x),
+    };
+    x_within_canvas
         && (0..SCENE_CANVAS_HEIGHT).contains(&label.y)
         && (0..=SCENE_CANVAS_HEIGHT).contains(&label.radius)
         && (0..=SCENE_CANVAS_WIDTH).contains(&label.pad_hor)
@@ -728,7 +749,8 @@ fn encode_node_payload(encoder: &mut Encoder, node: &SceneNode) {
                     + usize::from(label.pad_hor != 0)
                     + usize::from(label.pad_ver != 0)
                     + usize::from(label.letter_space != 0)
-                    + usize::from(label.hide_when_empty),
+                    + usize::from(label.hide_when_empty)
+                    + usize::from(label.horizontal_anchor != SceneLabelAnchor::Left),
             );
             for (key, value) in [(0, label.x), (1, label.y)] {
                 encoder.unsigned(key);
@@ -764,6 +786,10 @@ fn encode_node_payload(encoder: &mut Encoder, node: &SceneNode) {
             if label.hide_when_empty {
                 encoder.unsigned(11);
                 encoder.boolean(true);
+            }
+            if label.horizontal_anchor != SceneLabelAnchor::Left {
+                encoder.unsigned(12);
+                encoder.unsigned(label.horizontal_anchor as u64);
             }
         }
         SceneNode::RotRect(rect) => {
@@ -977,6 +1003,7 @@ fn decode_node_payload(decoder: &mut Decoder<'_>, kind: u32) -> Result<SceneNode
     let mut opacity = u8::MAX;
     let mut fill_opacity = 0u8;
     let mut align = SceneAlign::Left;
+    let mut label_anchor = SceneLabelAnchor::Left;
     let mut font = None;
     let mut value = None;
     let mut digest = None;
@@ -1049,7 +1076,7 @@ fn decode_node_payload(decoder: &mut Decoder<'_>, kind: u32) -> Result<SceneNode
             (7, 5) => colors[0] = read_u32(decoder, "scene scale color")?,
             // LABEL {0: x, 1: y, 2: font, 3: value, 4: ink, 5: fill,
             //        6: fill_opacity, 7: radius, 8: pad_hor, 9: pad_ver,
-            //        10: letter_space, 11: hide_when_empty}
+            //        10: letter_space, 11: hide_when_empty, 12: horizontal_anchor}
             (8, 0..=1 | 7..=10) => {
                 ints[slot] = read_i32(decoder, "scene label field")?;
             }
@@ -1062,6 +1089,14 @@ fn decode_node_payload(decoder: &mut Decoder<'_>, kind: u32) -> Result<SceneNode
                     .map_err(|_| MessageError::InvalidValue("scene label opacity"))?;
             }
             (8, 11) => flags[0] = decoder.boolean()?,
+            (8, 12) => {
+                label_anchor = match read_u32(decoder, "scene label anchor")? {
+                    0 => SceneLabelAnchor::Left,
+                    1 => SceneLabelAnchor::Center,
+                    2 => SceneLabelAnchor::Right,
+                    _ => return Err(MessageError::InvalidValue("scene label anchor")),
+                };
+            }
             // ROT_RECT {0: x, 1: y, 2: w, 3: h, 4: radius, 5: fill,
             //           6: pivot_x, 7: pivot_y, 8: rotation, 9: binding}
             (9, 0..=4 | 6..=8) => {
@@ -1181,6 +1216,7 @@ fn decode_node_payload(decoder: &mut Decoder<'_>, kind: u32) -> Result<SceneNode
             Ok(SceneNode::Label(SceneLabel {
                 x: ints[0],
                 y: ints[1],
+                horizontal_anchor: label_anchor,
                 font: font.ok_or(MessageError::MissingField(2))?,
                 value: value.ok_or(MessageError::MissingField(3))?,
                 ink: colors[0],
@@ -1342,6 +1378,32 @@ mod tests {
             })],
         };
         assert!(encode_scene_payload(&scene).is_err());
+    }
+
+    #[test]
+    fn an_unknown_label_anchor_is_rejected_by_the_decoder() {
+        let bytes = scene_with_node_array(1, |encoder| {
+            encoder.map(2);
+            encoder.unsigned(0);
+            encoder.unsigned(8); // LABEL
+            encoder.unsigned(1);
+            encoder.map(5);
+            encoder.unsigned(0);
+            encoder.signed(224);
+            encoder.unsigned(1);
+            encoder.signed(16);
+            encoder.unsigned(2);
+            encode_font(encoder, &SceneFont::Baked(SceneFontTier::Caption));
+            encoder.unsigned(3);
+            encode_value(encoder, &SceneValue::Literal("LABEL".into()));
+            encoder.unsigned(12);
+            encoder.unsigned(3);
+        });
+        let mut decoder = Decoder::new(&bytes);
+        assert_eq!(
+            decode_scene(&mut decoder),
+            Err(MessageError::InvalidValue("scene label anchor"))
+        );
     }
 
     /// Writes `{0: revision, 1: background, 2: <array header>}` and then

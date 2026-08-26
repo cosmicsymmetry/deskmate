@@ -32,7 +32,7 @@ pub use message::{
 pub use scene::{
     MAX_SCENE_BINDING_LEN, MAX_SCENE_GLYPH_NAME_LEN, MAX_SCENE_LINE_POINTS, MAX_SCENE_NODES,
     MAX_SCENE_SCALE_TICKS, MAX_SCENE_TEXT_LEN, SCENE_CANVAS_HEIGHT, SCENE_CANVAS_WIDTH, Scene,
-    SceneAlign, SceneArc, SceneFont, SceneFontTier, SceneGlyph, SceneImage, SceneLabel, SceneLine,
-    SceneNode, SceneRect, SceneRotRect, SceneScale, SceneText, SceneValue, binding_is_valid,
-    encode_scene_payload, validate_scene,
+    SceneAlign, SceneArc, SceneFont, SceneFontTier, SceneGlyph, SceneImage, SceneLabel,
+    SceneLabelAnchor, SceneLine, SceneNode, SceneRect, SceneRotRect, SceneScale, SceneText,
+    SceneValue, binding_is_valid, encode_scene_payload, validate_scene,
 };

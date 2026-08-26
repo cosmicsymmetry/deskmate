@@ -72,6 +72,12 @@ typedef enum {
     SCENE_ALIGN_RIGHT = 3,
 } scene_align_t;
 
+typedef enum {
+    SCENE_LABEL_ANCHOR_LEFT = 0,
+    SCENE_LABEL_ANCHOR_CENTER = 1,
+    SCENE_LABEL_ANCHOR_RIGHT = 2,
+} scene_label_anchor_t;
+
 typedef struct { int32_t x, y, w, h, radius; uint32_t fill; uint8_t opacity; }
     scene_rect_t;
 /* `start_deg`/`end_deg` are absolute canvas angles in LVGL's convention: 0
@@ -167,8 +173,11 @@ typedef struct { int32_t x, y, box; uint32_t total_tick_count;
 /* A content-sized lv_label carrying the complete style needed to reproduce
  * deskmate_chip(), deskmate_eyebrow(), and BigNumberLabel's pill. The device
  * deliberately owns text measurement: the rendered box depends on glyph
- * advances, 4.4-format kern pairs, and letter_space. */
-typedef struct { int32_t x, y; scene_font_ref_t font; scene_value_t value;
+ * advances, 4.4-format kern pairs, and letter_space. x is the left edge,
+ * horizontal centre, or right edge of the finished box according to
+ * horizontal_anchor; y is always the top edge. */
+typedef struct { int32_t x, y; scene_label_anchor_t horizontal_anchor;
+                 scene_font_ref_t font; scene_value_t value;
                  uint32_t ink, fill; uint8_t fill_opacity; int32_t radius;
                  int32_t pad_hor, pad_ver, letter_space; bool hide_when_empty; }
     scene_label_t;

@@ -8,10 +8,10 @@ use protocol::{
     FieldValue, Frame, HeartbeatAck, InterruptPolicy, MAX_CONFIG_SCREENS, MAX_CONFIG_WIDGETS,
     MAX_DEVICE_TOKEN_LEN, MAX_PAYLOAD_SIZE, MAX_PROTOCOL_VERSION, MAX_WIRE_FRAME, Message,
     NetworkConfig, OtaState, PushData, PushScene, Scene, SceneAlign, SceneArc, SceneFont,
-    SceneFontTier, SceneGlyph, SceneImage, SceneLabel, SceneLine, SceneNode, SceneRect,
-    SceneRotRect, SceneScale, SceneText, SceneValue, ScreenConfig, SizeClass, StatusResponse,
-    TYPE_ASSET_BEGIN, TYPE_PUSH_SCENE, TapAction, TemplateKind, Tier, TimeSync, TriggerInterrupt,
-    WidgetConfig, WifiState, encode_message,
+    SceneFontTier, SceneGlyph, SceneImage, SceneLabel, SceneLabelAnchor, SceneLine, SceneNode,
+    SceneRect, SceneRotRect, SceneScale, SceneText, SceneValue, ScreenConfig, SizeClass,
+    StatusResponse, TYPE_ASSET_BEGIN, TYPE_PUSH_SCENE, TapAction, TemplateKind, Tier, TimeSync,
+    TriggerInterrupt, WidgetConfig, WifiState, encode_message,
 };
 
 /// A 32-byte digest with distinct, non-zero, ascending bytes starting at
@@ -124,6 +124,7 @@ fn rich_scene() -> Scene {
             SceneNode::Label(SceneLabel {
                 x: 24,
                 y: 16,
+                horizontal_anchor: SceneLabelAnchor::Left,
                 font: SceneFont::Baked(SceneFontTier::Caption),
                 value: SceneValue::Literal("WEATHER".into()),
                 ink: 0x0004_1A24,

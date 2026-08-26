@@ -98,8 +98,24 @@ static bool scale_within_canvas(const scene_scale_t *scale)
  * LVGL sees them. */
 static bool label_within_canvas(const scene_label_t *label)
 {
-    if (label->x < 0 || label->x >= SCENE_CANVAS_WIDTH ||
-        label->y < 0 || label->y >= SCENE_CANVAS_HEIGHT) {
+    if (label->y < 0 || label->y >= SCENE_CANVAS_HEIGHT) {
+        return false;
+    }
+    switch (label->horizontal_anchor) {
+    case SCENE_LABEL_ANCHOR_LEFT:
+    case SCENE_LABEL_ANCHOR_CENTER:
+        if (label->x < 0 || label->x >= SCENE_CANVAS_WIDTH) {
+            return false;
+        }
+        break;
+    case SCENE_LABEL_ANCHOR_RIGHT:
+        /* Box edges use the same half-open convention as fixed rectangles:
+         * a right edge of SCENE_CANVAS_WIDTH lands on the last pixel. */
+        if (label->x <= 0 || label->x > SCENE_CANVAS_WIDTH) {
+            return false;
+        }
+        break;
+    default:
         return false;
     }
     if (label->radius < 0 || label->radius > SCENE_CANVAS_HEIGHT ||

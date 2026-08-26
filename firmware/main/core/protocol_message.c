@@ -2433,8 +2433,8 @@ static protocol_message_result_t encode_asset_release_payload(
  * core/scene_decode.c). The defaults are: RECT radius 0, fill 0, opacity
  * 255; ARC color 0, rounded false, end_binding ""; LINE color 0; TEXT align
  * LEFT, color 0, ellipsize false; IMAGE recolor false, color 0; GLYPH color
- * 0; SCALE major_tick_color 0; LABEL colours/style fields 0 and
- * hide_when_empty false; ROT_RECT style/transform fields 0 and
+ * 0; SCALE major_tick_color 0; LABEL colours/style fields 0,
+ * hide_when_empty false, horizontal_anchor LEFT; ROT_RECT style/transform fields 0 and
  * rotation_binding ""; the value map's literal and binding "".
  * ------------------------------------------------------------------ */
 
@@ -2715,7 +2715,8 @@ static protocol_message_result_t encode_scene_label(CborEncoder *parent,
                      (label->pad_hor != 0 ? 1U : 0U) +
                      (label->pad_ver != 0 ? 1U : 0U) +
                      (label->letter_space != 0 ? 1U : 0U) +
-                     (label->hide_when_empty ? 1U : 0U);
+                     (label->hide_when_empty ? 1U : 0U) +
+                     (label->horizontal_anchor != SCENE_LABEL_ANCHOR_LEFT ? 1U : 0U);
     protocol_message_result_t result = begin_map(parent, &map, entries);
     if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 0U);
     if (result == PROTOCOL_MESSAGE_OK) result = encode_int(&map, label->x);
@@ -2765,6 +2766,11 @@ static protocol_message_result_t encode_scene_label(CborEncoder *parent,
     if (result == PROTOCOL_MESSAGE_OK && label->hide_when_empty) {
         result = encode_uint(&map, 11U);
         if (result == PROTOCOL_MESSAGE_OK) result = encode_bool(&map, true);
+    }
+    if (result == PROTOCOL_MESSAGE_OK &&
+        label->horizontal_anchor != SCENE_LABEL_ANCHOR_LEFT) {
+        result = encode_pair_uint(&map, 12U,
+                                  (uint64_t)label->horizontal_anchor);
     }
     if (result == PROTOCOL_MESSAGE_OK) result = end_map(parent, &map);
     return result;

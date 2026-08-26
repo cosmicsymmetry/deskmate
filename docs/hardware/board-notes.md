@@ -3594,3 +3594,15 @@ Task 10 of the previous plan explains +16 of that. The remaining ~64 bytes
 accumulated between those commits and are **not** attributable to the scene
 nodes. A fresh total compared against a figure captured at a different commit is
 not evidence about a recent change — only a before/after on the same tree is.
+
+### Horizontal-anchor follow-up before the owed download — 2026-08-26
+
+Before the unchecked Task 1b Step 9 was run, `Label` gained optional horizontal
+anchoring so BigNumberLabel's content-sized pill can be centred by LVGL rather
+than measured by the host. No board check was performed here; this is intended
+to ride the same not-yet-tested image and the hardware item remains owed.
+
+The release-config same-tree comparison is still byte-flat in all four internal
+memory figures: `.bss` **102,624 → 102,624**, `.data` **23,128 → 23,128**, IRAM
+**16,384 → 16,384**, and DIRAM `.text` **93,635 → 93,635**. Flash code and total
+image size each grew by 144 bytes; `deskmate.bin` moved `0x1878f0 → 0x187980`.

@@ -551,6 +551,17 @@ pub struct SceneLabel {
       DRAM available to the heap rather than about `.bss` specifically.
       `firmware/main/core/protocol_message.c` was missing from this task's file list; it
       needed encoder arms so the firmware could re-encode the shared fixture.
+
+      **Immediate pre-Step-9 follow-up, 2026-08-26:** `SceneLabel` now carries optional
+      key 12, `horizontal_anchor` (`Left`/`Center`/`Right`), because BigNumberLabel's pill
+      is centred on its content-sized value and the host cannot derive the pill's left
+      edge without measuring it. Omission remains `Left`, and the unchanged v1 fixture
+      corpus proves the old meaning survives. `scene_view.c` positions the finished label
+      with LVGL's persistent TOP_LEFT/TOP_MID/TOP_RIGHT alignment, so LVGL owns the
+      odd-width arithmetic and repositions a bound label when its text width changes. The
+      same-tree release build remains flat: `.bss` 102,624, `.data` 23,128, IRAM 16,384,
+      and DIRAM `.text` 93,635. Step 9 has not run; this follow-up is intended to ride that
+      same image.
 - [ ] **Step 9 (owner, hardware): one OTA download on the board**, exactly as the original
       Task 6 Step 9 specified — publish, move `firmware/version.txt` to match, power-cycle.
       **This is the whole hardware cost of stage 2b.**

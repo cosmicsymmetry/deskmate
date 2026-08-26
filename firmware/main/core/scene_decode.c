@@ -50,9 +50,11 @@
  *          is a renderer constant, not a wire field -- see scene_scale_t.
  * LABEL    {0: x, 1: y, 2: <font>, 3: <value>, 4: ink, 5: fill,
  *           6: fill_opacity, 7: radius, 8: pad_hor, 9: pad_ver,
- *           10: letter_space, 11: hide_when_empty (bool)}
+ *           10: letter_space, 11: hide_when_empty (bool),
+ *           12: horizontal_anchor}
  *          required 0-3; colours/style integers default 0,
- *          hide_when_empty defaults false.
+ *          hide_when_empty defaults false, horizontal_anchor defaults
+ *          SCENE_LABEL_ANCHOR_LEFT (zero).
  * ROT_RECT {0: x, 1: y, 2: w, 3: h, 4: radius, 5: fill, 6: pivot_x,
  *           7: pivot_y, 8: rotation, 9: rotation_binding (text)}
  *          required 0-3; style/transform integers default 0 and an empty
@@ -831,12 +833,20 @@ static scene_model_result_t decode_label(CborValue *value,
         case 9U: status = read_int32(&fields, &label->pad_ver); break;
         case 10U: status = read_int32(&fields, &label->letter_space); break;
         case 11U: status = read_boolean(&fields, &label->hide_when_empty); break;
+        case 12U: {
+            uint32_t raw = 0U;
+            status = read_uint32(&fields, &raw);
+            if (status == SCENE_MODEL_OK) {
+                label->horizontal_anchor = (scene_label_anchor_t)raw;
+            }
+            break;
+        }
         default: status = skip_value(&fields); break;
         }
         if (status != SCENE_MODEL_OK) {
             return status;
         }
-        if (key <= 11U) {
+        if (key <= 12U) {
             present |= REQUIRED_BIT((uint32_t)key);
         }
     }

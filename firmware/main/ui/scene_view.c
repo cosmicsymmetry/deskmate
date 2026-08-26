@@ -532,7 +532,6 @@ static lv_obj_t *build_label(lv_obj_t *parent, const scene_label_t *node,
     lv_obj_set_style_pad_ver(label, node->pad_ver, 0);
     lv_obj_set_style_text_letter_space(label, node->letter_space, 0);
     lv_label_set_text(label, "");
-    lv_obj_set_pos(label, node->x, node->y);
 
     char buffer[SCENE_VIEW_TEXT_CAPACITY];
     const char *initial = node->value.literal;
@@ -547,6 +546,28 @@ static lv_obj_t *build_label(lv_obj_t *parent, const scene_label_t *node,
         }
     }
     apply_label_text(label, initial, node->hide_when_empty);
+    /* The align style stays attached to the object, so LVGL recalculates the
+     * position whenever a bound value changes the content-sized width. Its
+     * own layout path performs parent_width / 2 - object_width / 2 for MID
+     * and parent_width - object_width for RIGHT. The renderer never measures
+     * or subtracts the label width, including for odd widths. */
+    switch (node->horizontal_anchor) {
+    case SCENE_LABEL_ANCHOR_LEFT:
+        lv_obj_align(label, LV_ALIGN_TOP_LEFT, node->x, node->y);
+        break;
+    case SCENE_LABEL_ANCHOR_CENTER:
+        lv_obj_align(label, LV_ALIGN_TOP_MID,
+                     node->x - SCENE_CANVAS_WIDTH / 2, node->y);
+        break;
+    case SCENE_LABEL_ANCHOR_RIGHT:
+        lv_obj_align(label, LV_ALIGN_TOP_RIGHT,
+                     node->x - SCENE_CANVAS_WIDTH, node->y);
+        break;
+    default:
+        /* scene_model_validate() rejects this before rendering. */
+        lv_obj_delete(label);
+        return NULL;
+    }
     return label;
 }
 

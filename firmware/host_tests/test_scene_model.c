@@ -314,6 +314,7 @@ static scene_t label_scene(void)
     scene.nodes[0].kind = SCENE_NODE_LABEL;
     scene.nodes[0].value.label.x = 16;
     scene.nodes[0].value.label.y = 16;
+    scene.nodes[0].value.label.horizontal_anchor = SCENE_LABEL_ANCHOR_LEFT;
     scene.nodes[0].value.label.font.kind = SCENE_FONT_BAKED;
     scene.nodes[0].value.label.font.baked = SCENE_FONT_CAPTION;
     scene.nodes[0].value.label.value.kind = SCENE_VALUE_LITERAL;
@@ -331,6 +332,35 @@ static void test_a_label_within_bounds_validates(void)
 {
     scene_t scene = label_scene();
     assert(scene_model_validate(&scene) == SCENE_MODEL_OK);
+}
+
+static void test_center_and_right_label_anchors_validate(void)
+{
+    scene_t scene = label_scene();
+
+    scene.nodes[0].value.label.horizontal_anchor =
+        SCENE_LABEL_ANCHOR_CENTER;
+    assert(scene_model_validate(&scene) == SCENE_MODEL_OK);
+
+    scene.nodes[0].value.label.horizontal_anchor = SCENE_LABEL_ANCHOR_RIGHT;
+    scene.nodes[0].value.label.x = SCENE_CANVAS_WIDTH;
+    assert(scene_model_validate(&scene) == SCENE_MODEL_OK);
+}
+
+static void test_a_right_label_anchor_past_the_canvas_edge_is_rejected(void)
+{
+    scene_t scene = label_scene();
+    scene.nodes[0].value.label.horizontal_anchor = SCENE_LABEL_ANCHOR_RIGHT;
+    scene.nodes[0].value.label.x = SCENE_CANVAS_WIDTH + 1;
+    assert(scene_model_validate(&scene) == SCENE_MODEL_ERR_GEOMETRY);
+}
+
+static void test_an_unknown_label_anchor_is_rejected(void)
+{
+    scene_t scene = label_scene();
+    scene.nodes[0].value.label.horizontal_anchor =
+        (scene_label_anchor_t)3;
+    assert(scene_model_validate(&scene) == SCENE_MODEL_ERR_GEOMETRY);
 }
 
 static void test_a_label_anchor_past_canvas_width_is_rejected(void)
@@ -498,6 +528,9 @@ int main(void)
     test_a_scale_with_major_tick_every_past_total_is_rejected();
     test_a_scale_geometry_field_at_int32_max_does_not_wrap();
     test_a_label_within_bounds_validates();
+    test_center_and_right_label_anchors_validate();
+    test_a_right_label_anchor_past_the_canvas_edge_is_rejected();
+    test_an_unknown_label_anchor_is_rejected();
     test_a_label_anchor_past_canvas_width_is_rejected();
     test_a_label_anchor_past_canvas_height_is_rejected();
     test_a_label_with_an_unknown_font_is_rejected();

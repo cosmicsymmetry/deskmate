@@ -488,6 +488,7 @@ static void test_every_node_kind_decodes(void)
     assert(label->pad_ver == 3);
     assert(label->letter_space == 1);
     assert(label->hide_when_empty);
+    assert(label->horizontal_anchor == SCENE_LABEL_ANCHOR_LEFT);
 
     const scene_rot_rect_t *rot_rect = &scene->nodes[8].value.rot_rect;
     assert(rot_rect->x == 222);
@@ -519,6 +520,77 @@ static void put_minimal_label_node(builder_t *b, int64_t x, int64_t y)
     put_baked_font(b, SCENE_FONT_CAPTION);
     put_uint(b, 3U);
     put_literal_value(b, "LABEL");
+}
+
+static void put_label_node_with_anchor(builder_t *b, uint64_t anchor)
+{
+    put_map(b, 2U);
+    put_uint(b, 0U);
+    put_uint(b, SCENE_NODE_LABEL);
+    put_uint(b, 1U);
+    put_map(b, 5U);
+    put_uint(b, 0U);
+    put_int(b, 224);
+    put_uint(b, 1U);
+    put_int(b, 16);
+    put_uint(b, 2U);
+    put_baked_font(b, SCENE_FONT_CAPTION);
+    put_uint(b, 3U);
+    put_literal_value(b, "LABEL");
+    put_uint(b, 12U);
+    put_uint(b, anchor);
+}
+
+static void test_an_omitted_label_anchor_defaults_to_left(void)
+{
+    builder_t b;
+    scene_t *scene = new_scene();
+
+    begin_scene(&b, 1U, 0U, 1U);
+    put_minimal_label_node(&b, 24, 16);
+
+    assert(scene_decode(b.bytes, b.length, scene) == SCENE_MODEL_OK);
+    assert(scene->nodes[0].value.label.horizontal_anchor ==
+           SCENE_LABEL_ANCHOR_LEFT);
+
+    free(scene);
+}
+
+static void test_center_and_right_label_anchors_decode(void)
+{
+    builder_t b;
+    scene_t *scene = new_scene();
+
+    begin_scene(&b, 1U, 0U, 1U);
+    put_label_node_with_anchor(&b, SCENE_LABEL_ANCHOR_CENTER);
+
+    assert(scene_decode(b.bytes, b.length, scene) == SCENE_MODEL_OK);
+    assert(scene->nodes[0].value.label.horizontal_anchor ==
+           SCENE_LABEL_ANCHOR_CENTER);
+
+    begin_scene(&b, 1U, 0U, 1U);
+    put_label_node_with_anchor(&b, SCENE_LABEL_ANCHOR_RIGHT);
+
+    assert(scene_decode(b.bytes, b.length, scene) == SCENE_MODEL_OK);
+    assert(scene->nodes[0].value.label.horizontal_anchor ==
+           SCENE_LABEL_ANCHOR_RIGHT);
+
+    free(scene);
+}
+
+static void test_an_unknown_label_anchor_is_rejected_by_the_decoder(void)
+{
+    builder_t b;
+    scene_t *scene = new_scene();
+
+    begin_scene(&b, 1U, 0U, 1U);
+    put_label_node_with_anchor(&b, 3U);
+
+    assert(scene_decode(b.bytes, b.length, scene) ==
+           SCENE_MODEL_ERR_GEOMETRY);
+    assert(scene->node_count == 0U);
+
+    free(scene);
 }
 
 static void put_rot_rect_node(builder_t *b, int64_t rotation,
@@ -1445,6 +1517,9 @@ int main(void)
     test_a_valid_text_scene_roundtrips();
     test_every_node_kind_decodes();
     test_a_label_anchor_outside_the_canvas_is_rejected();
+    test_an_omitted_label_anchor_defaults_to_left();
+    test_center_and_right_label_anchors_decode();
+    test_an_unknown_label_anchor_is_rejected_by_the_decoder();
     test_a_rotated_rect_rotation_outside_one_turn_is_rejected();
     test_a_rotated_rect_pivot_outside_its_rect_is_rejected();
     test_an_unknown_rotated_rect_binding_is_rejected();

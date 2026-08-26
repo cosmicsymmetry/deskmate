@@ -201,6 +201,20 @@ fn push_scene_fixtures_carry_what_they_are_meant_to() {
     // Every node kind, once: an all-minimal fixture would pass even if the
     // two encoders disagreed about the kinds it left out.
     assert_eq!(push.scene.nodes.len(), 10);
+    let label = push
+        .scene
+        .nodes
+        .iter()
+        .find_map(|node| match node {
+            protocol::SceneNode::Label(label) => Some(label),
+            _ => None,
+        })
+        .expect("the rich fixture carries a label");
+    assert_eq!(
+        label.horizontal_anchor,
+        protocol::SceneLabelAnchor::Left,
+        "the pre-anchor fixture must keep decoding an omitted key as Left"
+    );
     let kinds: Vec<std::mem::Discriminant<protocol::SceneNode>> = push
         .scene
         .nodes

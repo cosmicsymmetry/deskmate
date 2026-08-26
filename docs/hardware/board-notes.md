@@ -3637,3 +3637,61 @@ Two things this run confirms beyond the download itself:
    `DESKMATE_FIRMWARE_VERSION` to that string, restart the server. Then power
    cycle — the device checks once at boot and twice a day, cannot be asked, and a
    USB unplug is link loss rather than power loss because the board has a battery.
+
+## The server was pinning a CPU core, and had been for days — fixed 2026-08-26
+
+Reported by the owner. The deployed server was at **100% of one core**, memory flat
+at 6-11 MB across every instance, so a spin rather than a leak. systemd's
+per-instance accounting shows how long it had been going on:
+
+| Instance started | Wall | CPU | Duty |
+| --- | --- | --- | --- |
+| Aug 24 07:59 | 21h07m | 20h08m41s | **95%** |
+| Aug 25 05:06 | 13h40m | 11h20m11s | 83% |
+| Aug 25 18:46 | 13h13m | 10h28m34s | 79% |
+| Aug 26 10:37 | 7h26m | 5h49m47s | 78% |
+
+**This entry corrects an earlier one.** The 2026-08-25 note recorded
+"`Consumed 46min 24.911s CPU time` across roughly two days with no device attached
+for most of it" and treated it as an aside. That was 46 minutes over **2h24m** —
+a 32% duty cycle, not a rounding error. The observation that should have caught
+this filed it as trivia. When a note quotes a cumulative CPU figure, quote the
+wall time beside it or the number means nothing.
+
+### Root cause
+
+`run_scheduled_work` returned early when `!state.connected`, **above** the calls to
+`Scheduler::status_due()` and `time_sync_due()` — and those calls are what advance
+the deadlines, through `take_deadline`'s side effect. So while the device was away,
+both deadlines stayed permanently in the past. `wait_duration()` takes `.min()`
+across every deadline and calls `saturating_duration_since(now)`, which returns
+**zero** for a past instant, so `command_receiver.recv_timeout(0)` returned
+instantly, forever. The paused early-return had the same shape, and provider
+deadlines could sit in the past while a previous job was in flight.
+
+Fixed in `e06d6ab`: a deadline is consumed whenever a tick examines it, before any
+gate decides whether the I/O happens. `wait_duration` was deliberately **not**
+clamped to a minimum sleep — that would mask a past-due deadline instead of
+resolving it, and hide the next bug of this shape.
+
+The naive fix regresses something worth keeping: `next_status` sitting in the past
+is also what makes a status fire promptly on reconnect, and this device drops its
+link on idle timeout routinely. The deadlines are re-armed at the connect
+transition instead, so a reconnect still refreshes promptly — which a dropped link
+needs, since the device may have rebooted and its clock drifted while away.
+
+### Why it looked intermittent
+
+**A server that has never seen a device does not spin.** Runtimes are per-device
+and long-lived, so with no device attached there is no worker loop at all. The
+spin needs a runtime that exists but has no live socket — created on connect, then
+stranded on disconnect. A fresh restart therefore always looks healthy, and
+degrades only once a device has connected and gone away.
+
+### Verification status: NOT yet proven on the deployment
+
+The fix is deployed and the server sits at 0.0% — but **that proves nothing on its
+own**, because the device has been offline since 13:50 and no runtime has been
+created in this instance. The honest check is a full cycle: let the device
+connect, let the link drop, and confirm CPU stays flat afterwards. Until that is
+observed, this is fixed in test and unproven in the field.

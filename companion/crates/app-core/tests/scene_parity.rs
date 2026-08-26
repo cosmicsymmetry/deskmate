@@ -71,6 +71,12 @@ struct ParityCase {
     name: String,
     template: RenderRequest,
     scene: SceneRenderRequest,
+    /// Set when the scene model provably cannot reproduce this case yet. The
+    /// gate then requires the two halves to STILL differ, so closing the gap
+    /// fails this test and forces the marker to be removed along with it. An
+    /// unexplained skip would rot into invisible missing coverage; an enforced
+    /// one cannot.
+    known_gap: Option<&'static str>,
 }
 
 impl ParityCase {
@@ -303,6 +309,7 @@ fn add_big_number_cases(cases: &mut Vec<ParityCase>) {
             }))
             .collect();
             cases.push(ParityCase {
+                known_gap: None,
                 name: format!("big-number-label--{slug}--{orientation_slug}"),
                 template: RenderRequest {
                     template: SimTemplate::BigNumberLabel,
@@ -437,6 +444,7 @@ fn add_row_list_cases(cases: &mut Vec<ParityCase>) {
             ("flipped", SimOrientation::LandscapeFlipped),
         ] {
             cases.push(ParityCase {
+                known_gap: None,
                 name: format!("row-list--{slug}--{orientation_slug}"),
                 template: RenderRequest {
                     template: SimTemplate::RowList,
@@ -465,13 +473,21 @@ fn add_icon_badge_text_cases(cases: &mut Vec<ParityCase>) {
         ("sun-hero", "sun", "Now", "72", "Feels 74"),
         // Pins both concentric discs and the surface-coloured cutout.
         ("unknown-cutout", "unknown", "Unknown", "--", "No data"),
+        ("moon", "moon", "Night", "58", "Clear"),
+        ("cloud", "cloud", "Now", "64", "Cloudy"),
+        ("cloud-sun", "cloud-sun", "Now", "70", "Partly cloudy"),
+        ("cloud-moon", "cloud-moon", "Night", "55", "Partly cloudy"),
+        ("rain", "rain", "Now", "61", "Rain"),
+        ("drizzle", "drizzle", "Now", "62", "Drizzle"),
+        ("snow", "snow", "Now", "28", "Snow"),
+        ("storm", "storm", "Now", "66", "Storm"),
+        ("fog", "fog", "Now", "59", "Fog"),
         // The C comment claims this falls to DISPLAY; the parity gate checks
         // the shipped selector rather than treating that claim as authority.
         ("negative-temperature", "sun", "Now", "-12°", "Feels -15°"),
         // HERO and DISPLAY cannot spell letters, so this must use BODY.
         ("alphabetic-value", "sun", "Feed", "yes", "READY"),
-        // Matches the existing `icon-badge-text--empty-badge` golden's
-        // intent while staying within this half-task's SUN/UNKNOWN icon scope.
+        // Matches the existing `icon-badge-text--empty-badge` golden's intent.
         ("empty-badge", "sun", "", "65", "Partly cloudy"),
         ("empty-label", "sun", "Now", "42", ""),
     ];
@@ -482,7 +498,20 @@ fn add_icon_badge_text_cases(cases: &mut Vec<ParityCase>) {
             ("flipped", SimOrientation::LandscapeFlipped),
         ] {
             let title = "Weather";
+            // STORM's bolt is `bar(color, 10, 40, 0, 42)`: centred at y = 102 in
+            // the 120px icon box, so it spans y 82..=121 and LVGL clips the last
+            // two rows against the container. Scene nodes are absolute on the
+            // canvas and have no parent clip, so those rows draw. It is not
+            // fixable on the host: `bar()` sets `radius = h / 2`, which LVGL
+            // clamps to `min(w, h) / 2` = 5, so the clip cuts THROUGH the bottom
+            // rounded cap -- a shorter pill would draw a whole cap at the new
+            // height, which is a different shape. Closing this needs a clip
+            // region in the scene model, which is a firmware change.
+            let known_gap = (slug == "storm").then_some(
+                "the icon container clips its children; the scene model has no clip region",
+            );
             cases.push(ParityCase {
+                known_gap,
                 name: format!("icon-badge-text--{slug}--{orientation_slug}"),
                 template: RenderRequest {
                     template: SimTemplate::IconBadgeText,
@@ -551,6 +580,7 @@ fn cases() -> Vec<ParityCase> {
                     "no-seconds"
                 };
                 cases.push(ParityCase {
+                    known_gap: None,
                     name: format!(
                         "digital-clock--{}--{seconds_slug}--{orientation_slug}",
                         instant.slug
@@ -712,6 +742,17 @@ fn the_host_built_scenes_are_byte_identical_to_their_c_templates() {
             .render_scene(&case.scene)
             .unwrap_or_else(|error| panic!("{}: scene render failed: {error}", case.name));
         compared += 1;
+
+        if let Some(reason) = case.known_gap {
+            assert!(
+                diff(&template, &scene).is_some(),
+                "{}: marked a known gap ({reason}), but the halves are now identical -- \
+                 the gap is closed, so delete the `known_gap` marker and let this case \
+                 be gated like every other",
+                case.name,
+            );
+            continue;
+        }
 
         if let Some(difference) = diff(&template, &scene) {
             let samples = difference

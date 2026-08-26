@@ -856,10 +856,7 @@ fn disc(
     }));
 }
 
-/// `weather_icon.c`'s `bar()` in scene form. The first half of Task 4 only
-/// wires SUN and UNKNOWN, which use discs exclusively; the remaining icons
-/// call this helper without changing the coordinate model.
-#[allow(dead_code)]
+/// `weather_icon.c`'s `bar()` in scene form.
 fn bar(
     nodes: &mut Vec<SceneNode>,
     container_origin: (i32, i32),
@@ -893,6 +890,92 @@ fn draw_sun(
     disc(nodes, container_origin, color, diameter, dx, dy);
 }
 
+/// `weather_icon.c`'s `draw_moon()`.
+fn draw_moon(
+    nodes: &mut Vec<SceneNode>,
+    container_origin: (i32, i32),
+    color: u32,
+    background: u32,
+    dx: i32,
+    dy: i32,
+) {
+    disc(nodes, container_origin, color, 56, dx, dy);
+    disc(nodes, container_origin, background, 48, dx + 16, dy - 8);
+}
+
+/// `weather_icon.c`'s `draw_cloud()`.
+fn draw_cloud(nodes: &mut Vec<SceneNode>, container_origin: (i32, i32), color: u32, dy: i32) {
+    disc(nodes, container_origin, color, 44, -18, dy);
+    disc(nodes, container_origin, color, 56, 4, dy - 8);
+    disc(nodes, container_origin, color, 40, 26, dy + 2);
+    bar(nodes, container_origin, color, 88, 26, 2, dy + 12);
+}
+
+/// `weather_icon.c`'s `CLOUD_SUN` case.
+fn draw_cloud_sun(nodes: &mut Vec<SceneNode>, container_origin: (i32, i32), color: u32) {
+    draw_sun(nodes, container_origin, color, -26, -30, 44);
+    draw_cloud(nodes, container_origin, color, 6);
+}
+
+/// `weather_icon.c`'s `CLOUD_MOON` case.
+fn draw_cloud_moon(
+    nodes: &mut Vec<SceneNode>,
+    container_origin: (i32, i32),
+    color: u32,
+    background: u32,
+) {
+    draw_moon(nodes, container_origin, color, background, -26, -30);
+    draw_cloud(nodes, container_origin, color, 6);
+}
+
+/// `weather_icon.c`'s `draw_drops()`.
+fn draw_drops(
+    nodes: &mut Vec<SceneNode>,
+    container_origin: (i32, i32),
+    color: u32,
+    count: usize,
+    length: i32,
+) {
+    for x in [-24, 0, 24].into_iter().take(count) {
+        bar(nodes, container_origin, color, 6, length, x, 40);
+    }
+}
+
+/// `weather_icon.c`'s RAIN case.
+fn draw_rain(nodes: &mut Vec<SceneNode>, container_origin: (i32, i32), color: u32) {
+    draw_cloud(nodes, container_origin, color, -12);
+    draw_drops(nodes, container_origin, color, 3, 22);
+}
+
+/// `weather_icon.c`'s DRIZZLE case.
+fn draw_drizzle(nodes: &mut Vec<SceneNode>, container_origin: (i32, i32), color: u32) {
+    draw_cloud(nodes, container_origin, color, -12);
+    draw_drops(nodes, container_origin, color, 2, 12);
+}
+
+/// `weather_icon.c`'s SNOW case.
+fn draw_snow(nodes: &mut Vec<SceneNode>, container_origin: (i32, i32), color: u32) {
+    draw_cloud(nodes, container_origin, color, -12);
+    disc(nodes, container_origin, color, 10, -24, 42);
+    disc(nodes, container_origin, color, 10, 0, 46);
+    disc(nodes, container_origin, color, 10, 24, 42);
+}
+
+/// `weather_icon.c`'s STORM case.
+fn draw_storm(nodes: &mut Vec<SceneNode>, container_origin: (i32, i32), color: u32) {
+    draw_cloud(nodes, container_origin, color, -12);
+    // This extends two pixels below the 120px icon container. The C parent
+    // clips those pixels; flat scene nodes currently have no clip region.
+    bar(nodes, container_origin, color, 10, 40, 0, 42);
+}
+
+/// `weather_icon.c`'s FOG case.
+fn draw_fog(nodes: &mut Vec<SceneNode>, container_origin: (i32, i32), color: u32) {
+    draw_cloud(nodes, container_origin, color, -16);
+    bar(nodes, container_origin, color, 84, 8, -4, 30);
+    bar(nodes, container_origin, color, 68, 8, 6, 46);
+}
+
 /// `weather_icon.c`'s UNKNOWN case.
 fn draw_unknown(
     nodes: &mut Vec<SceneNode>,
@@ -904,8 +987,7 @@ fn draw_unknown(
     disc(nodes, container_origin, background, 52, 0, 0);
 }
 
-/// Draws the subset of `weather_icon_render()` delivered by this half-task.
-/// Each remaining icon can be added as one function plus one match arm.
+/// Draws `weather_icon_render()`'s artworks in their original creation order.
 fn push_weather_icon_nodes(
     nodes: &mut Vec<SceneNode>,
     icon: &str,
@@ -915,19 +997,26 @@ fn push_weather_icon_nodes(
 ) {
     match icon {
         "sun" => draw_sun(nodes, container_origin, color, 0, 0, 72),
-        // `weather_icon_from_name()` maps an unrecognised name to UNKNOWN;
-        // the deferred known names deliberately have no arms yet.
+        "moon" => draw_moon(nodes, container_origin, color, background, 0, 0),
+        "cloud" => draw_cloud(nodes, container_origin, color, 0),
+        "cloud-sun" => draw_cloud_sun(nodes, container_origin, color),
+        "cloud-moon" => draw_cloud_moon(nodes, container_origin, color, background),
+        "rain" => draw_rain(nodes, container_origin, color),
+        "drizzle" => draw_drizzle(nodes, container_origin, color),
+        "snow" => draw_snow(nodes, container_origin, color),
+        "storm" => draw_storm(nodes, container_origin, color),
+        "fog" => draw_fog(nodes, container_origin, color),
+        // `weather_icon_from_name()` maps an unrecognised name to UNKNOWN.
         _ => draw_unknown(nodes, container_origin, color, background),
     }
 }
 
-/// Builds the whole `IconBadgeText` face as a scene, with SUN and UNKNOWN as
-/// the two icon artworks implemented by this half of Task 4.
+/// Builds the whole `IconBadgeText` face as a scene.
 ///
 /// `background` is the color physically behind the icon artwork. The shipped
 /// call site passes `DESKMATE_COLOR_SURFACE`, because the icon container is a
-/// child of the surface tile. UNKNOWN uses it to punch out the inner disc; it
-/// must not be replaced with the scene's black canvas color.
+/// child of the surface tile. MOON and UNKNOWN use it to punch out an inner
+/// disc; it must not be replaced with the scene's black canvas color.
 pub fn build_icon_badge_text_scene(
     card: &IconBadgeCard<'_>,
     background: u32,
@@ -954,7 +1043,7 @@ pub fn build_icon_badge_text_scene(
 
     let tile_y = SCENE_CANVAS_HEIGHT / 2 - ICON_TILE / 2;
     let icon_origin = (MARGIN + ICON_INSET, tile_y + ICON_INSET);
-    let mut nodes = Vec::with_capacity(7);
+    let mut nodes = Vec::with_capacity(11);
 
     nodes.push(SceneNode::Label(SceneLabel {
         x: MARGIN,

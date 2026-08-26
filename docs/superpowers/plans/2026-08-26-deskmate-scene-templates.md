@@ -113,7 +113,7 @@ Today the gate hard-codes `SimTemplate::DigitalClock` in `template_request()` an
 `show_seconds` axis are baked into one test. Five more templates cannot be added without
 copying it five times.
 
-- [ ] **Step 1: Write the failing test.** Add a `cases()` function returning a
+- [x] **Step 1: Write the failing test.** Add a `cases()` function returning a
       `Vec<ParityCase>` and a test that walks it. Shape it so a case owns both halves of
       the comparison, because that is the property that must not drift:
 
@@ -138,12 +138,12 @@ impl ParityCase {
       Seed `cases()` with exactly the `DigitalClock` comparisons the gate makes today, so
       this task is a pure refactor with no change in coverage.
 
-- [ ] **Step 2: Run it and confirm the count is unchanged.**
+- [x] **Step 2: Run it and confirm the count is unchanged.**
       Run: `cargo test -p app-core --test scene_parity`
       Expected: the same 28 comparisons pass. If the number moved, the refactor changed
       coverage and is wrong.
 
-- [ ] **Step 3: Keep the four guard tests, and make them table-aware.**
+- [x] **Step 3: Keep the four guard tests, and make them table-aware.**
       `the_instant_table_covers_what_it_claims_to`,
       `neither_half_of_the_gate_renders_a_blank_canvas`, `hiding_the_seconds_changes_both_halves`
       and `neither_half_draws_anything_in_the_state_footer_strip` exist because a gate that
@@ -165,11 +165,19 @@ fn the_table_covers_every_template_this_stage_claims() {
       `EXPECTED_TEMPLATES` starts as `[DigitalClock]` and each later task extends it. That
       makes "did you actually wire it in" a build failure rather than a review question.
 
-- [ ] **Step 4: Gates and commit.**
+- [x] **Step 4: Gates and commit.**
       Run: `cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace`
       Commit: `refactor: make the scene parity gate table-driven`
 
 ---
+
+**Delivered 2026-08-26** (`c9f0e0d`). Two corrections to this task as written:
+
+- The `BTreeSet<SimTemplate>` snippet above does not compile -- `SimTemplate` has no `Ord`.
+  The test keys on the derived debug name instead.
+- **The footer-strip invariant is not global.** It stays `DigitalClock`-specific because
+  `RowList` and `AnalogClock` legitimately draw below y=316. Do not "finish" the
+  generalisation later; it would assert something false about those two.
 
 ### Task 2: `BigNumberLabel`
 

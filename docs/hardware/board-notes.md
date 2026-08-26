@@ -3565,3 +3565,32 @@ Flash grew, as expected for decoder/renderer code: image-size accounting moved
 No OTA download or panel observation was performed here; the plan assigns that
 single power-cycle/download check to the owner, and unchanged static figures do
 not waive it.
+
+### DIRAM `.text` checked too, and it is flat — 2026-08-26
+
+Following up the entry above, because `.bss` is not the whole hazard.
+`idf.py size` splits DIRAM into three components, and **DIRAM `.text` — code
+resident in internal RAM — is carved from the same 341,760-byte pool as `.bss`**,
+so it reduces the runtime heap in exactly the way static data does. `3f2aa03` was
+about internal DRAM available to the heap, not about `.bss` specifically.
+
+Measured on the same tree, before and after Task 1b:
+
+- DIRAM `.text`: **93,635 → 93,635 bytes** (delta 0), total DIRAM 219,387 both times.
+
+`deskmate.map` attributes every byte of the new code to flash-mapped text
+(`0x420…`), with **zero** DIRAM/IRAM text from `protocol_message.c.obj`,
+`scene_decode.c.obj`, `scene_view.c.obj` and `scene_model.c.obj`:
+`rotation_for_time` at `0x42012124`, the inlined label and rotated-rect builders
+inside `build_nodes` at `0x420121c4`, the encoder arms inside
+`protocol_message_encode` at `0x42019a48`, the decoder arms inside
+`scene_decode_map` at `0x4201c1a0`, and `scene_model_parse_rotation_binding` at
+`0x4201d624`. No new function reached internal RAM through `IRAM_ATTR`, through
+inlining from an IRAM-resident caller, or through a linker-fragment rule.
+
+**A stale figure caused a false alarm here, which is worth not repeating.**
+`CLAUDE.md` recorded total DIRAM as 219,307 at `5699f1d`; it now reads 219,387.
+Task 10 of the previous plan explains +16 of that. The remaining ~64 bytes
+accumulated between those commits and are **not** attributable to the scene
+nodes. A fresh total compared against a figure captured at a different commit is
+not evidence about a recent change — only a before/after on the same tree is.

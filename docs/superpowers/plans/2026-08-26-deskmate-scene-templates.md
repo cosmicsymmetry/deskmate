@@ -543,9 +543,14 @@ pub struct SceneLabel {
 - [x] **Step 7: Build, record `.bss`/`.data`/IRAM deltas, and treat any movement as the
       standing hazard it is.** Two node kinds is the largest single firmware addition in
       this stage; it is also the only one.
-- [ ] **Step 8: Gates and commit.** `feat: add the styled-label and rotated-rect scene nodes`
-      All gates passed on 2026-08-26; left unchecked because the owner explicitly
-      directed this implementation not to commit.
+- [x] **Step 8: Gates and commit.** `feat: add the styled-label and rotated-rect scene nodes`
+      **Delivered 2026-08-26** (`300d91f`). Every internal-RAM figure is flat, confirmed by
+      a before/after on the same tree: `.bss` 102,624, `.data` 23,128, IRAM 16,384, and
+      **DIRAM `.text` 93,635**, all with a delta of 0. That last one is not optional to
+      check — it is carved from the same pool as `.bss`, and `3f2aa03` was about internal
+      DRAM available to the heap rather than about `.bss` specifically.
+      `firmware/main/core/protocol_message.c` was missing from this task's file list; it
+      needed encoder arms so the firmware could re-encode the shared fixture.
 - [ ] **Step 9 (owner, hardware): one OTA download on the board**, exactly as the original
       Task 6 Step 9 specified — publish, move `firmware/version.txt` to match, power-cycle.
       **This is the whole hardware cost of stage 2b.**

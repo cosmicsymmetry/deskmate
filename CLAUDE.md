@@ -192,7 +192,10 @@ of letting code and documentation diverge.
     Also ruled out: the custom HTTP event handler (refuted from IDF sources *and* by
     removing it and still failing), the image, the server, the tunnel, the network.
   - **This is layout, not capacity, and it is a standing hazard.** `idf.py size` reports
-    **122 KB of static DIRAM headroom** (219307/341760) and **IRAM 100% full**, so 105
+    **122 KB of static DIRAM headroom** (219307/341760 as of `5699f1d`; it reads
+    219387 as of `300d91f`, and the ~80-byte difference predates the scene nodes —
+    do not read a fresh total as evidence about a recent change without a
+    before/after on the SAME tree) and **IRAM 100% full**, so 105
     bytes cannot be exhausting a budget; shifting `.bss` moves the runtime heap and
     something on the TLS/AES path — which `0ad1a51` showed needs DMA-capable *internal*
     RAM — stops finding what it needs. Same class as V1's boot crash-loop, which was

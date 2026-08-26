@@ -38,7 +38,10 @@
 //! state the scene models by omitting the node. See
 //! [`build_digital_clock_scene`]'s own doc comment.
 
-use app_core::{BakedFontMetrics, ClockCard, build_digital_clock_scene};
+use app_core::scene_build::{
+    BakedFontMetrics, BigNumberCard, ClockCard, build_big_number_label_scene,
+    build_digital_clock_scene,
+};
 use chrono::{NaiveDate, NaiveDateTime};
 use lvgl_sim::scene::SceneRenderRequest;
 use lvgl_sim::{
@@ -47,7 +50,11 @@ use lvgl_sim::{
 };
 use std::collections::BTreeSet;
 
-const EXPECTED_TEMPLATES: [SimTemplate; 1] = [SimTemplate::DigitalClock];
+const EXPECTED_TEMPLATES: [SimTemplate; 2] =
+    [SimTemplate::DigitalClock, SimTemplate::BigNumberLabel];
+
+/// `big_number_label.c`'s `CONTENT_WIDTH`.
+const BIG_NUMBER_CONTENT_WIDTH: i32 = 448 - 2 * 24;
 
 struct ParityCase {
     /// `template--variant--orientation`, used for the PNG dump path on failure.
@@ -210,8 +217,114 @@ const INSTANTS: &[Instant] = &[
     },
 ];
 
+/// Returns the repeated-zero strings immediately on either side of one
+/// numeric tier's width boundary. The boundary is derived from the shipped
+/// metrics so a font change cannot leave a once-useful hard-coded fixture
+/// silently exercising the middle of a tier.
+fn numeric_tier_boundary(tier: protocol::SceneFontTier) -> (String, String) {
+    let metrics = &BakedFontMetrics::SHIPPED;
+    let zero_width = metrics
+        .measure(tier, "0")
+        .expect("the numeric tiers carry zero");
+    let fitting_zeroes = usize::try_from(BIG_NUMBER_CONTENT_WIDTH / zero_width)
+        .expect("the content width and advances are positive");
+    let fits = "0".repeat(fitting_zeroes);
+    let misses = "0".repeat(fitting_zeroes + 1);
+    assert!(
+        metrics
+            .measure(tier, &fits)
+            .is_some_and(|width| width <= BIG_NUMBER_CONTENT_WIDTH)
+    );
+    assert!(
+        metrics
+            .measure(tier, &misses)
+            .is_some_and(|width| width > BIG_NUMBER_CONTENT_WIDTH)
+    );
+    (fits, misses)
+}
+
+fn add_big_number_cases(cases: &mut Vec<ParityCase>) {
+    let (hero_fits, hero_misses) = numeric_tier_boundary(protocol::SceneFontTier::Hero);
+    let (display_fits, display_misses) = numeric_tier_boundary(protocol::SceneFontTier::Display);
+    let long_value = display_misses.repeat(2);
+    let variants = [
+        ("short", "7".to_string(), "Stats", "ITEMS", true),
+        ("hero-just-fits", hero_fits, "Stats", "ITEMS", true),
+        ("hero-just-misses", hero_misses, "Stats", "ITEMS", true),
+        ("display-just-fits", display_fits, "Stats", "ITEMS", true),
+        (
+            "display-just-misses",
+            display_misses,
+            "Stats",
+            "ITEMS",
+            true,
+        ),
+        ("lowest-tier-long", long_value, "Stats", "ITEMS", true),
+        ("non-numeric", "yes".to_string(), "Feed", "READY", true),
+        ("empty-label", "42".to_string(), "Stats", "", true),
+        ("empty-title", "42".to_string(), "", "ITEMS", true),
+        (
+            "missing-value-default",
+            String::new(),
+            "Stats",
+            "ITEMS",
+            false,
+        ),
+    ];
+    for (slug, value, title, label, send_value) in variants {
+        for (orientation_slug, orientation) in [
+            ("landscape", SimOrientation::Landscape),
+            ("flipped", SimOrientation::LandscapeFlipped),
+        ] {
+            let fields = [
+                SimField {
+                    name: "title".to_string(),
+                    value: SimFieldValue::Text(title.to_string()),
+                },
+                SimField {
+                    name: "label".to_string(),
+                    value: SimFieldValue::Text(label.to_string()),
+                },
+            ]
+            .into_iter()
+            .chain(send_value.then(|| SimField {
+                name: "value".to_string(),
+                value: SimFieldValue::Text(value.clone()),
+            }))
+            .collect();
+            cases.push(ParityCase {
+                name: format!("big-number-label--{slug}--{orientation_slug}"),
+                template: RenderRequest {
+                    template: SimTemplate::BigNumberLabel,
+                    fields,
+                    utc_offset_minutes: 0,
+                    now_unix_seconds: 0,
+                    orientation,
+                },
+                scene: SceneRenderRequest {
+                    scene: build_big_number_label_scene(
+                        &BigNumberCard {
+                            revision: 1,
+                            title,
+                            value: &value,
+                            label,
+                        },
+                        &BakedFontMetrics::SHIPPED,
+                    ),
+                    assets: Vec::new(),
+                    utc_offset_minutes: 0,
+                    now_unix_seconds: 0,
+                    timer: None,
+                    fields: Vec::new(),
+                    orientation,
+                },
+            });
+        }
+    }
+}
+
 fn cases() -> Vec<ParityCase> {
-    let mut cases = Vec::with_capacity(INSTANTS.len() * 4);
+    let mut cases = Vec::new();
     for instant in INSTANTS {
         for show_seconds in [true, false] {
             for (orientation_slug, orientation) in [
@@ -269,6 +382,8 @@ fn cases() -> Vec<ParityCase> {
             }
         }
     }
+
+    add_big_number_cases(&mut cases);
     cases
 }
 

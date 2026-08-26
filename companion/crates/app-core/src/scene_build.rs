@@ -30,8 +30,9 @@
 
 use chrono::{Datelike, NaiveDateTime, Timelike};
 use protocol::{
-    SCENE_CANVAS_WIDTH, Scene, SceneAlign, SceneFont, SceneFontTier, SceneLine, SceneNode,
-    SceneRect, SceneScale, SceneText, SceneValue,
+    SCENE_CANVAS_HEIGHT, SCENE_CANVAS_WIDTH, Scene, SceneAlign, SceneFont, SceneFontTier,
+    SceneLabel, SceneLabelAnchor, SceneLine, SceneNode, SceneRect, SceneScale, SceneText,
+    SceneValue,
 };
 
 // ---------------------------------------------------------------------------
@@ -44,6 +45,10 @@ const GRID: i32 = 8;
 const MARGIN: i32 = 3 * GRID;
 /// `DESKMATE_RADIUS_MODULE`.
 const RADIUS_MODULE: i32 = 3 * GRID;
+/// `DESKMATE_RADIUS_CHIP`.
+const RADIUS_CHIP: i32 = 2 * GRID;
+/// `DESKMATE_CHIP_HEIGHT`.
+const CHIP_HEIGHT: i32 = 4 * GRID;
 
 /// `DESKMATE_COLOR_CANVAS`.
 const COLOR_CANVAS: u32 = 0x0000_0000;
@@ -54,6 +59,12 @@ const COLOR_SURFACE: u32 = 0x001a_1a1f;
 /// `deskmate_palette(PROTOCOL_TEMPLATE_DIGITAL_CLOCK).hue`. Both clock faces
 /// share one identity, so this is also the analog clock's hue.
 const CLOCK_HUE: u32 = 0x00ff_8f2e;
+/// `deskmate_palette(PROTOCOL_TEMPLATE_BIG_NUMBER_LABEL).hue`.
+const BIG_NUMBER_HUE: u32 = 0x008b_6cff;
+/// `deskmate_palette(PROTOCOL_TEMPLATE_BIG_NUMBER_LABEL).tint`.
+const BIG_NUMBER_TINT: u32 = 0x00c0_b0ff;
+/// `deskmate_palette(PROTOCOL_TEMPLATE_BIG_NUMBER_LABEL).ink`.
+const BIG_NUMBER_INK: u32 = 0x000f_0726;
 
 // ---------------------------------------------------------------------------
 // digital_clock.c's own geometry. Ported, not re-derived.
@@ -357,6 +368,19 @@ pub struct ClockCard {
     pub local_now: NaiveDateTime,
 }
 
+/// The card-level inputs `big_number_label.c` draws from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BigNumberCard<'a> {
+    /// Echoed as the scene's own revision.
+    pub revision: u32,
+    /// `big_number_label_patch()`'s `title` field.
+    pub title: &'a str,
+    /// `big_number_label_patch()`'s `value` field.
+    pub value: &'a str,
+    /// `big_number_label_patch()`'s `label` field.
+    pub label: &'a str,
+}
+
 /// `timefmt.c`'s `DOW`, which `digital_clock_tick()` indexes with
 /// `(tm_wday + 6) % 7` — i.e. Monday-based.
 const WEEKDAYS: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
@@ -587,6 +611,91 @@ pub fn build_digital_clock_scene(card: &ClockCard, metrics: &BakedFontMetrics) -
         HAND_MINUTE_WIDTH,
         CLOCK_HUE,
     )));
+
+    Scene {
+        revision: card.revision,
+        background: COLOR_CANVAS,
+        nodes,
+    }
+}
+
+/// Builds the whole `BigNumberLabel` face as a scene.
+///
+/// The node order is `big_number_label.c`'s creation order: the title chip,
+/// the value, then the label pill. `OBJ_STATE` is empty in the OK state and
+/// therefore has no node.
+pub fn build_big_number_label_scene(card: &BigNumberCard<'_>, metrics: &BakedFontMetrics) -> Scene {
+    /// `big_number_label.c`'s `CONTENT_WIDTH`.
+    const CONTENT_WIDTH: i32 = SCENE_CANVAS_WIDTH - 2 * MARGIN;
+
+    let value = if card.value.is_empty() {
+        "--"
+    } else {
+        card.value
+    };
+    let value_tier = number_font_tier(value, CONTENT_WIDTH, metrics);
+    let label_tier = if value_tier == SceneFontTier::Body {
+        SceneFontTier::Caption
+    } else {
+        SceneFontTier::Body
+    };
+    let value_line = metrics.tier(value_tier).line_height;
+    let label_line = metrics.tier(label_tier).line_height;
+
+    // `set_value_text()` centres the value, then moves it up by half the
+    // label gap and rendered label height (including its vertical padding).
+    // LVGL halves the parent and object independently; that is one pixel
+    // lower than `(parent - object) / 2` for Display's odd 43px line height.
+    let value_top =
+        SCENE_CANVAS_HEIGHT / 2 - value_line / 2 + (-(2 * GRID + label_line + GRID) / 2);
+    let value_baseline = value_top + metrics.baseline_offset(value_tier);
+    let label_top = value_top + value_line + 2 * GRID;
+
+    let nodes = vec![
+        // `deskmate_chip()` at `(DESKMATE_MARGIN, 2 * DESKMATE_GRID)`.
+        SceneNode::Label(SceneLabel {
+            x: MARGIN,
+            y: 2 * GRID,
+            horizontal_anchor: SceneLabelAnchor::Left,
+            font: SceneFont::Baked(SceneFontTier::Caption),
+            value: SceneValue::Literal(card.title.to_string()),
+            ink: BIG_NUMBER_INK,
+            fill: BIG_NUMBER_HUE,
+            fill_opacity: u8::MAX,
+            radius: RADIUS_CHIP,
+            pad_hor: 2 * GRID,
+            pad_ver: (CHIP_HEIGHT - metrics.tier(SceneFontTier::Caption).line_height) / 2,
+            letter_space: 1,
+            hide_when_empty: true,
+        }),
+        SceneNode::Text(SceneText {
+            x: MARGIN,
+            baseline_y: value_baseline,
+            w: CONTENT_WIDTH,
+            align: SceneAlign::Center,
+            font: SceneFont::Baked(value_tier),
+            color: COLOR_PRIMARY,
+            value: SceneValue::Literal(value.to_string()),
+            ellipsize: true,
+        }),
+        // Hand-built in `big_number_label.c`, not a `deskmate_chip()`: it has
+        // zero letter spacing and fixed `DESKMATE_GRID / 2` vertical padding.
+        SceneNode::Label(SceneLabel {
+            x: SCENE_CANVAS_WIDTH / 2,
+            y: label_top,
+            horizontal_anchor: SceneLabelAnchor::Center,
+            font: SceneFont::Baked(label_tier),
+            value: SceneValue::Literal(card.label.to_string()),
+            ink: BIG_NUMBER_TINT,
+            fill: COLOR_SURFACE,
+            fill_opacity: u8::MAX,
+            radius: RADIUS_CHIP,
+            pad_hor: 2 * GRID,
+            pad_ver: GRID / 2,
+            letter_space: 0,
+            hide_when_empty: true,
+        }),
+    ];
 
     Scene {
         revision: card.revision,

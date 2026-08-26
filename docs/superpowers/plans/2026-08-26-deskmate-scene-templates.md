@@ -171,7 +171,7 @@ fn the_table_covers_every_template_this_stage_claims() {
 
 ---
 
-**Delivered 2026-08-26** (`c9f0e0d`). Two corrections to this task as written:
+**Delivered 2026-08-26** (`8833849`). Two corrections to this task as written:
 
 - The `BTreeSet<SimTemplate>` snippet above does not compile -- `SimTemplate` has no `Ord`.
   The test keys on the derived debug name instead.

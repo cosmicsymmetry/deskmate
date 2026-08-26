@@ -92,6 +92,40 @@ static bool scale_within_canvas(const scene_scale_t *scale)
     return rect_within_canvas(scale->x, scale->y, scale->box, scale->box);
 }
 
+/* A label is content-sized by LVGL, so core cannot know its right/bottom edge
+ * without doing exactly the font arithmetic this node exists to keep off the
+ * host. The anchor itself and every style extent are still bounded before
+ * LVGL sees them. */
+static bool label_within_canvas(const scene_label_t *label)
+{
+    if (label->x < 0 || label->x >= SCENE_CANVAS_WIDTH ||
+        label->y < 0 || label->y >= SCENE_CANVAS_HEIGHT) {
+        return false;
+    }
+    if (label->radius < 0 || label->radius > SCENE_CANVAS_HEIGHT ||
+        label->pad_hor < 0 || label->pad_hor > SCENE_CANVAS_WIDTH ||
+        label->pad_ver < 0 || label->pad_ver > SCENE_CANVAS_HEIGHT ||
+        label->letter_space < 0 ||
+        label->letter_space > SCENE_CANVAS_WIDTH) {
+        return false;
+    }
+    return true;
+}
+
+static bool rot_rect_within_canvas(const scene_rot_rect_t *rect)
+{
+    if (!rect_within_canvas(rect->x, rect->y, rect->w, rect->h)) {
+        return false;
+    }
+    if (rect->pivot_x < 0 || rect->pivot_x > rect->w ||
+        rect->pivot_y < 0 || rect->pivot_y > rect->h) {
+        return false;
+    }
+    /* One signed turn covers every distinct transform while bounding the
+     * value handed to LVGL. Both endpoints are legal and equivalent to 0. */
+    return rect->rotation >= -3600 && rect->rotation <= 3600;
+}
+
 /* Bounds only -- see scene_scale_t's field comment in scene_model.h for the
  * full justification. total_tick_count in [2, SCENE_SCALE_MAX_TOTAL_TICKS]
  * (0/1 draws nothing, same reasoning as line_within_canvas rejecting a line
@@ -144,6 +178,31 @@ static bool glyph_within_canvas(const scene_glyph_t *glyph)
 static bool nul_terminated(const char *buf, size_t buf_size)
 {
     return memchr(buf, '\0', buf_size) != NULL;
+}
+
+bool scene_model_parse_rotation_binding(const char *text,
+                                        scene_rotation_binding_t *out)
+{
+    if (text == NULL || out == NULL) {
+        return false;
+    }
+    if (text[0] == '\0') {
+        *out = SCENE_ROTATION_BINDING_NONE;
+        return true;
+    }
+    if (strcmp(text, "time:hour") == 0) {
+        *out = SCENE_ROTATION_BINDING_HOUR;
+        return true;
+    }
+    if (strcmp(text, "time:minute") == 0) {
+        *out = SCENE_ROTATION_BINDING_MINUTE;
+        return true;
+    }
+    if (strcmp(text, "time:second") == 0) {
+        *out = SCENE_ROTATION_BINDING_SECOND;
+        return true;
+    }
+    return false;
 }
 
 /* The origin, in [0, 360). Normalised here because
@@ -295,6 +354,42 @@ scene_model_result_t scene_model_validate(const scene_t *scene)
                 return SCENE_MODEL_ERR_GEOMETRY;
             }
             break;
+
+        case SCENE_NODE_LABEL: {
+            const scene_label_t *label = &node->value.label;
+            scene_model_result_t font_result;
+
+            if (!label_within_canvas(label)) {
+                return SCENE_MODEL_ERR_GEOMETRY;
+            }
+            if (!nul_terminated(label->value.literal,
+                                sizeof label->value.literal) ||
+                !nul_terminated(label->value.binding,
+                                sizeof label->value.binding)) {
+                return SCENE_MODEL_ERR_TEXT;
+            }
+            font_result = validate_font(&label->font);
+            if (font_result != SCENE_MODEL_OK) {
+                return font_result;
+            }
+            break;
+        }
+
+        case SCENE_NODE_ROT_RECT: {
+            const scene_rot_rect_t *rect = &node->value.rot_rect;
+            scene_rotation_binding_t binding;
+
+            if (!rot_rect_within_canvas(rect)) {
+                return SCENE_MODEL_ERR_GEOMETRY;
+            }
+            if (!nul_terminated(rect->rotation_binding,
+                                sizeof rect->rotation_binding) ||
+                !scene_model_parse_rotation_binding(rect->rotation_binding,
+                                                    &binding)) {
+                return SCENE_MODEL_ERR_TEXT;
+            }
+            break;
+        }
 
         default:
             return SCENE_MODEL_ERR_NODE_KIND;

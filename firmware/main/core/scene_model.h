@@ -26,6 +26,8 @@ typedef enum {
     SCENE_NODE_IMAGE = 5,
     SCENE_NODE_GLYPH = 6,
     SCENE_NODE_SCALE = 7,
+    SCENE_NODE_LABEL = 8,
+    SCENE_NODE_ROT_RECT = 9,
 } scene_node_kind_t;
 
 /* The four faces baked by tools/genfonts.sh. Kept as a tier rather than a
@@ -162,6 +164,36 @@ typedef struct { int32_t x, y, box; uint32_t total_tick_count;
                  uint32_t major_tick_every; uint32_t major_tick_color; }
     scene_scale_t;
 
+/* A content-sized lv_label carrying the complete style needed to reproduce
+ * deskmate_chip(), deskmate_eyebrow(), and BigNumberLabel's pill. The device
+ * deliberately owns text measurement: the rendered box depends on glyph
+ * advances, 4.4-format kern pairs, and letter_space. */
+typedef struct { int32_t x, y; scene_font_ref_t font; scene_value_t value;
+                 uint32_t ink, fill; uint8_t fill_opacity; int32_t radius;
+                 int32_t pad_hor, pad_ver, letter_space; bool hide_when_empty; }
+    scene_label_t;
+
+/* A rectangle rotated through LVGL's object transform, not drawn as a line.
+ * rotation is in tenths of a degree, exactly as
+ * lv_obj_set_style_transform_rotation() accepts it. A non-empty binding is
+ * one of time:hour, time:minute, or time:second. */
+typedef struct { int32_t x, y, w, h, radius; uint32_t fill;
+                 int32_t pivot_x, pivot_y, rotation;
+                 char rotation_binding[SCENE_MAX_BINDING + 1U]; }
+    scene_rot_rect_t;
+
+typedef enum {
+    SCENE_ROTATION_BINDING_NONE = 0,
+    SCENE_ROTATION_BINDING_HOUR = 1,
+    SCENE_ROTATION_BINDING_MINUTE = 2,
+    SCENE_ROTATION_BINDING_SECOND = 3,
+} scene_rotation_binding_t;
+
+/* Parses the deliberately closed rotation-binding vocabulary. Empty is the
+ * legal fixed-angle form and returns SCENE_ROTATION_BINDING_NONE. */
+bool scene_model_parse_rotation_binding(const char *text,
+                                        scene_rotation_binding_t *out);
+
 typedef struct {
     scene_node_kind_t kind;
     union {
@@ -172,6 +204,8 @@ typedef struct {
         scene_image_t image;
         scene_glyph_t glyph;
         scene_scale_t scale;
+        scene_label_t label;
+        scene_rot_rect_t rot_rect;
     } value;
 } scene_node_t;
 

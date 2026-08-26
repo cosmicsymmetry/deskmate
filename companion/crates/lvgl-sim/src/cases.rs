@@ -619,7 +619,8 @@ pub fn asset_font_cases() -> Vec<(String, AssetFontCase)> {
 
 use protocol::{
     SCENE_CANVAS_WIDTH, Scene, SceneAlign, SceneArc, SceneFont, SceneFontTier, SceneGlyph,
-    SceneImage, SceneLine, SceneNode, SceneRect, SceneScale, SceneText, SceneValue,
+    SceneImage, SceneLabel, SceneLine, SceneNode, SceneRect, SceneRotRect, SceneScale, SceneText,
+    SceneValue,
 };
 
 use crate::scene::{SceneAsset, SceneRenderRequest, SceneTimer};
@@ -1194,6 +1195,146 @@ fn scene_scale_nodes() -> Vec<SceneNode> {
     ]
 }
 
+/// `label`: the opaque content-sized chip, the same node with transparent
+/// fill as an eyebrow, a bound pill, and an empty chip that must disappear
+/// whole instead of leaving its padding as a coloured blob.
+fn scene_label_nodes() -> Vec<SceneNode> {
+    vec![
+        SceneNode::Label(SceneLabel {
+            x: 32,
+            y: 48,
+            font: SceneFont::Baked(SceneFontTier::Caption),
+            value: literal("WEATHER AV"),
+            ink: 0x0004_1a24,
+            fill: 0x0035_b6f5,
+            fill_opacity: u8::MAX,
+            radius: 12,
+            pad_hor: 16,
+            pad_ver: 3,
+            letter_space: 1,
+            hide_when_empty: true,
+        }),
+        SceneNode::Label(SceneLabel {
+            x: 32,
+            y: 136,
+            font: SceneFont::Baked(SceneFontTier::Caption),
+            value: literal("TRANSPARENT EYEBROW"),
+            ink: TERTIARY,
+            fill: PINK,
+            fill_opacity: 0,
+            radius: 0,
+            pad_hor: 0,
+            pad_ver: 0,
+            letter_space: 2,
+            hide_when_empty: false,
+        }),
+        SceneNode::Label(SceneLabel {
+            x: 32,
+            y: 216,
+            font: SceneFont::Baked(SceneFontTier::Body),
+            value: binding("field.status"),
+            ink: 0x000f_0726,
+            fill: 0x008b_6cff,
+            fill_opacity: u8::MAX,
+            radius: 18,
+            pad_hor: 16,
+            pad_ver: 4,
+            letter_space: 0,
+            hide_when_empty: true,
+        }),
+        // A broken implementation draws this as a pink padded blob. The
+        // correct one contributes no pixels at all.
+        SceneNode::Label(SceneLabel {
+            x: 320,
+            y: 304,
+            font: SceneFont::Baked(SceneFontTier::Caption),
+            value: literal(""),
+            ink: PRIMARY,
+            fill: PINK,
+            fill_opacity: u8::MAX,
+            radius: 12,
+            pad_hor: 24,
+            pad_ver: 4,
+            letter_space: 1,
+            hide_when_empty: true,
+        }),
+    ]
+}
+
+/// `rot_rect`: three pivoted clock hands at separate centres so the hour,
+/// minute and second bindings are each visible even when two angles happen
+/// to coincide at the pinned instant. A fourth fixed-angle hand proves the
+/// empty-binding path uses the node's `rotation` unchanged.
+fn scene_rot_rect_nodes() -> Vec<SceneNode> {
+    let hand = |cx: i32, fill: u32, rotation_binding: &str| {
+        SceneNode::RotRect(SceneRotRect {
+            x: cx - 3,
+            y: 64,
+            w: 6,
+            h: 104,
+            radius: 3,
+            fill,
+            pivot_x: 3,
+            pivot_y: 104,
+            rotation: 0,
+            rotation_binding: rotation_binding.to_string(),
+        })
+    };
+    vec![
+        hand(96, PRIMARY, "time:hour"),
+        hand(224, ACCENT, "time:minute"),
+        hand(352, BLUE, "time:second"),
+        SceneNode::RotRect(SceneRotRect {
+            x: 221,
+            y: 232,
+            w: 6,
+            h: 88,
+            radius: 3,
+            fill: GREEN,
+            pivot_x: 3,
+            pivot_y: 88,
+            rotation: -450,
+            rotation_binding: String::new(),
+        }),
+        SceneNode::Rect(SceneRect {
+            x: 90,
+            y: 162,
+            w: 12,
+            h: 12,
+            radius: 6,
+            fill: PRIMARY,
+            opacity: u8::MAX,
+        }),
+        SceneNode::Rect(SceneRect {
+            x: 218,
+            y: 162,
+            w: 12,
+            h: 12,
+            radius: 6,
+            fill: ACCENT,
+            opacity: u8::MAX,
+        }),
+        SceneNode::Rect(SceneRect {
+            x: 346,
+            y: 162,
+            w: 12,
+            h: 12,
+            radius: 6,
+            fill: BLUE,
+            opacity: u8::MAX,
+        }),
+        SceneNode::Rect(SceneRect {
+            x: 218,
+            y: 314,
+            w: 12,
+            h: 12,
+            radius: 6,
+            fill: GREEN,
+            opacity: u8::MAX,
+        }),
+    ]
+}
+
 /// One case per `scene_node_kind_t`, each at both mount orientations, pinned
 /// by `tests/scene.rs` against `tests/golden/scene/`.
 ///
@@ -1243,5 +1384,21 @@ pub fn scene_cases() -> Vec<(String, SceneRenderRequest)> {
         &[],
     );
     scene_case(&mut cases, "scale", &scene_scale_nodes(), &[], None, &[]);
+    scene_case(
+        &mut cases,
+        "label",
+        &scene_label_nodes(),
+        &[],
+        None,
+        &[("status".to_string(), "READY".to_string())],
+    );
+    scene_case(
+        &mut cases,
+        "rot-rect",
+        &scene_rot_rect_nodes(),
+        &[],
+        None,
+        &[],
+    );
     cases
 }

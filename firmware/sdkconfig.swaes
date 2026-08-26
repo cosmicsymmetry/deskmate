@@ -1,0 +1,10 @@
+# Diagnostic overlay, layered on sdkconfig.diag.
+#
+# Hypothesis under test: with CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC the TLS buffers
+# live in PSRAM, and the hardware AES accelerator cannot DMA from PSRAM, so
+# every record needs an internal-RAM bounce buffer. Under internal-RAM pressure
+# that allocation fails -- `esp-aes: Failed to allocate memory` -- and kills an
+# OTA download mid-transfer, intermittently.
+#
+# Software AES needs no DMA and no internal bounce buffer at all.
+CONFIG_MBEDTLS_HARDWARE_AES=n

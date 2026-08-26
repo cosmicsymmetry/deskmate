@@ -1,0 +1,10 @@
+# Diagnostic overlay: send ESP_LOG output to the native USB Serial/JTAG channel
+# as a SECONDARY console, so a host with only the USB cable can read it.
+#
+# Secondary, not primary: main.c does ESP_ERROR_CHECK(usb_link_init()), which
+# installs the USB Serial/JTAG driver, so a primary console on the same
+# peripheral would panic the board at boot.
+#
+# This deliberately puts log bytes into the machine-protocol stream, which the
+# shipping build must never do. Diagnostic builds only; never publish one.
+CONFIG_ESP_CONSOLE_SECONDARY_USB_SERIAL_JTAG=y

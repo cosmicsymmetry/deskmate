@@ -271,15 +271,15 @@ static void test_a_valid_text_scene_roundtrips(void)
     free(scene);
 }
 
-/* Every node kind decodes, including SCALE -- the seventh kind, added
- * because digital_clock.c's dial is an lv_scale widget. A decoder that
- * handled six would pass every other test in this file. */
+/* Every node kind decodes, including LABEL and ROT_RECT. Keeping all kinds
+ * in one payload means a decoder that forgets either new dispatch arm cannot
+ * pass by exercising only the older seven. */
 static void test_every_node_kind_decodes(void)
 {
     builder_t b;
     scene_t *scene = new_scene();
 
-    begin_scene(&b, 1U, 0U, 7U);
+    begin_scene(&b, 1U, 0U, 9U);
 
     put_rect_node(&b, 4, 8, 100, 50);
 
@@ -386,8 +386,64 @@ static void test_every_node_kind_decodes(void)
     put_uint(&b, 5U);
     put_uint(&b, UINT32_C(0x0000FF00));
 
+    put_map(&b, 2U); /* LABEL */
+    put_uint(&b, 0U);
+    put_uint(&b, SCENE_NODE_LABEL);
+    put_uint(&b, 1U);
+    put_map(&b, 12U);
+    put_uint(&b, 0U);
+    put_int(&b, 24);
+    put_uint(&b, 1U);
+    put_int(&b, 16);
+    put_uint(&b, 2U);
+    put_baked_font(&b, SCENE_FONT_CAPTION);
+    put_uint(&b, 3U);
+    put_literal_value(&b, "WEATHER");
+    put_uint(&b, 4U);
+    put_uint(&b, UINT32_C(0x00041A24));
+    put_uint(&b, 5U);
+    put_uint(&b, UINT32_C(0x0035B6F5));
+    put_uint(&b, 6U);
+    put_uint(&b, UINT8_MAX);
+    put_uint(&b, 7U);
+    put_int(&b, 12);
+    put_uint(&b, 8U);
+    put_int(&b, 16);
+    put_uint(&b, 9U);
+    put_int(&b, 3);
+    put_uint(&b, 10U);
+    put_int(&b, 1);
+    put_uint(&b, 11U);
+    put_bool(&b, true);
+
+    put_map(&b, 2U); /* ROT_RECT */
+    put_uint(&b, 0U);
+    put_uint(&b, SCENE_NODE_ROT_RECT);
+    put_uint(&b, 1U);
+    put_map(&b, 10U);
+    put_uint(&b, 0U);
+    put_int(&b, 222);
+    put_uint(&b, 1U);
+    put_int(&b, 80);
+    put_uint(&b, 2U);
+    put_int(&b, 4);
+    put_uint(&b, 3U);
+    put_int(&b, 144);
+    put_uint(&b, 4U);
+    put_int(&b, 2);
+    put_uint(&b, 5U);
+    put_uint(&b, UINT32_C(0x00FFFFFF));
+    put_uint(&b, 6U);
+    put_int(&b, 2);
+    put_uint(&b, 7U);
+    put_int(&b, 144);
+    put_uint(&b, 8U);
+    put_int(&b, 900);
+    put_uint(&b, 9U);
+    put_text(&b, "time:minute");
+
     assert(scene_decode(b.bytes, b.length, scene) == SCENE_MODEL_OK);
-    assert(scene->node_count == 7U);
+    assert(scene->node_count == 9U);
     assert(scene->nodes[0].kind == SCENE_NODE_RECT);
     assert(scene->nodes[1].kind == SCENE_NODE_ARC);
     assert(scene->nodes[2].kind == SCENE_NODE_LINE);
@@ -395,6 +451,8 @@ static void test_every_node_kind_decodes(void)
     assert(scene->nodes[4].kind == SCENE_NODE_IMAGE);
     assert(scene->nodes[5].kind == SCENE_NODE_GLYPH);
     assert(scene->nodes[6].kind == SCENE_NODE_SCALE);
+    assert(scene->nodes[7].kind == SCENE_NODE_LABEL);
+    assert(scene->nodes[8].kind == SCENE_NODE_ROT_RECT);
 
     assert(scene->nodes[1].value.arc.start_deg == 270);
     assert(scene->nodes[1].value.arc.end_deg == 630);
@@ -415,6 +473,142 @@ static void test_every_node_kind_decodes(void)
     assert(scene->nodes[6].value.scale.total_tick_count == 60U);
     assert(scene->nodes[6].value.scale.major_tick_every == 5U);
     assert(scene->nodes[6].value.scale.major_tick_color == UINT32_C(0x0000FF00));
+
+    const scene_label_t *label = &scene->nodes[7].value.label;
+    assert(label->x == 24);
+    assert(label->y == 16);
+    assert(label->font.kind == SCENE_FONT_BAKED);
+    assert(label->font.baked == SCENE_FONT_CAPTION);
+    assert(strcmp(label->value.literal, "WEATHER") == 0);
+    assert(label->ink == UINT32_C(0x00041A24));
+    assert(label->fill == UINT32_C(0x0035B6F5));
+    assert(label->fill_opacity == UINT8_MAX);
+    assert(label->radius == 12);
+    assert(label->pad_hor == 16);
+    assert(label->pad_ver == 3);
+    assert(label->letter_space == 1);
+    assert(label->hide_when_empty);
+
+    const scene_rot_rect_t *rot_rect = &scene->nodes[8].value.rot_rect;
+    assert(rot_rect->x == 222);
+    assert(rot_rect->y == 80);
+    assert(rot_rect->w == 4);
+    assert(rot_rect->h == 144);
+    assert(rot_rect->radius == 2);
+    assert(rot_rect->fill == UINT32_C(0x00FFFFFF));
+    assert(rot_rect->pivot_x == 2);
+    assert(rot_rect->pivot_y == 144);
+    assert(rot_rect->rotation == 900);
+    assert(strcmp(rot_rect->rotation_binding, "time:minute") == 0);
+
+    free(scene);
+}
+
+static void put_minimal_label_node(builder_t *b, int64_t x, int64_t y)
+{
+    put_map(b, 2U);
+    put_uint(b, 0U);
+    put_uint(b, SCENE_NODE_LABEL);
+    put_uint(b, 1U);
+    put_map(b, 4U);
+    put_uint(b, 0U);
+    put_int(b, x);
+    put_uint(b, 1U);
+    put_int(b, y);
+    put_uint(b, 2U);
+    put_baked_font(b, SCENE_FONT_CAPTION);
+    put_uint(b, 3U);
+    put_literal_value(b, "LABEL");
+}
+
+static void put_rot_rect_node(builder_t *b, int64_t rotation,
+                              int64_t pivot_x, int64_t pivot_y,
+                              const char *rotation_binding)
+{
+    put_map(b, 2U);
+    put_uint(b, 0U);
+    put_uint(b, SCENE_NODE_ROT_RECT);
+    put_uint(b, 1U);
+    put_map(b, rotation_binding[0] == '\0' ? 9U : 10U);
+    put_uint(b, 0U);
+    put_int(b, 100);
+    put_uint(b, 1U);
+    put_int(b, 100);
+    put_uint(b, 2U);
+    put_int(b, 6);
+    put_uint(b, 3U);
+    put_int(b, 104);
+    put_uint(b, 4U);
+    put_int(b, 3);
+    put_uint(b, 5U);
+    put_uint(b, UINT32_C(0x00FFFFFF));
+    put_uint(b, 6U);
+    put_int(b, pivot_x);
+    put_uint(b, 7U);
+    put_int(b, pivot_y);
+    put_uint(b, 8U);
+    put_int(b, rotation);
+    if (rotation_binding[0] != '\0') {
+        put_uint(b, 9U);
+        put_text(b, rotation_binding);
+    }
+}
+
+static void test_a_label_anchor_outside_the_canvas_is_rejected(void)
+{
+    builder_t b;
+    scene_t *scene = new_scene();
+
+    begin_scene(&b, 1U, 0U, 1U);
+    put_minimal_label_node(&b, SCENE_CANVAS_WIDTH, 10);
+
+    assert(scene_decode(b.bytes, b.length, scene) ==
+           SCENE_MODEL_ERR_GEOMETRY);
+    assert(scene->node_count == 0U);
+
+    free(scene);
+}
+
+static void test_a_rotated_rect_rotation_outside_one_turn_is_rejected(void)
+{
+    builder_t b;
+    scene_t *scene = new_scene();
+
+    begin_scene(&b, 1U, 0U, 1U);
+    put_rot_rect_node(&b, 3601, 3, 104, "");
+
+    assert(scene_decode(b.bytes, b.length, scene) ==
+           SCENE_MODEL_ERR_GEOMETRY);
+    assert(scene->node_count == 0U);
+
+    free(scene);
+}
+
+static void test_a_rotated_rect_pivot_outside_its_rect_is_rejected(void)
+{
+    builder_t b;
+    scene_t *scene = new_scene();
+
+    begin_scene(&b, 1U, 0U, 1U);
+    put_rot_rect_node(&b, 0, 7, 104, "");
+
+    assert(scene_decode(b.bytes, b.length, scene) ==
+           SCENE_MODEL_ERR_GEOMETRY);
+    assert(scene->node_count == 0U);
+
+    free(scene);
+}
+
+static void test_an_unknown_rotated_rect_binding_is_rejected(void)
+{
+    builder_t b;
+    scene_t *scene = new_scene();
+
+    begin_scene(&b, 1U, 0U, 1U);
+    put_rot_rect_node(&b, 0, 3, 104, "time:fortnight");
+
+    assert(scene_decode(b.bytes, b.length, scene) == SCENE_MODEL_ERR_TEXT);
+    assert(scene->node_count == 0U);
 
     free(scene);
 }
@@ -1250,6 +1444,10 @@ int main(void)
 {
     test_a_valid_text_scene_roundtrips();
     test_every_node_kind_decodes();
+    test_a_label_anchor_outside_the_canvas_is_rejected();
+    test_a_rotated_rect_rotation_outside_one_turn_is_rejected();
+    test_a_rotated_rect_pivot_outside_its_rect_is_rejected();
+    test_an_unknown_rotated_rect_binding_is_rejected();
     test_more_nodes_than_the_cap_is_rejected();
     test_a_node_with_an_unknown_kind_is_rejected();
     test_an_unknown_integer_key_is_skipped_not_rejected();

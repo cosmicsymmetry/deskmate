@@ -527,23 +527,25 @@ pub struct SceneLabel {
 }
 ```
 
-- [ ] **Step 1: Write the failing decoder tests for BOTH nodes** in
+- [x] **Step 1: Write the failing decoder tests for BOTH nodes** in
       `firmware/host_tests/test_scene_decode.c` and `test_scene_model.c`, including the
       bounds cases, and run `make -C firmware/host_tests sanitize` — two existing decoder
       bounds have no other proof, because `scene_model_validate()` reports an
       out-of-bounds write with the same error code the plain test asserts.
-- [ ] **Step 2: Run both suites to confirm failure.**
-- [ ] **Step 3: Implement both nodes.** In `scene_view.c`, `SceneLabel` must make the same
+- [x] **Step 2: Run both suites to confirm failure.**
+- [x] **Step 3: Implement both nodes.** In `scene_view.c`, `SceneLabel` must make the same
       style calls `deskmate_chip()` makes, in the same order, rather than approximating
       them — that is the entire point of the node. `SceneRotRect` is as the original Task 6
       specified.
-- [ ] **Step 4: Fixtures for both, in both languages' corpora.**
-- [ ] **Step 5: Update `docs/protocol/v1.md`** — the node table and the scene map.
-- [ ] **Step 6: Simulator cases for both node kinds at both orientations.**
-- [ ] **Step 7: Build, record `.bss`/`.data`/IRAM deltas, and treat any movement as the
+- [x] **Step 4: Fixtures for both, in both languages' corpora.**
+- [x] **Step 5: Update `docs/protocol/v1.md`** — the node table and the scene map.
+- [x] **Step 6: Simulator cases for both node kinds at both orientations.**
+- [x] **Step 7: Build, record `.bss`/`.data`/IRAM deltas, and treat any movement as the
       standing hazard it is.** Two node kinds is the largest single firmware addition in
       this stage; it is also the only one.
 - [ ] **Step 8: Gates and commit.** `feat: add the styled-label and rotated-rect scene nodes`
+      All gates passed on 2026-08-26; left unchecked because the owner explicitly
+      directed this implementation not to commit.
 - [ ] **Step 9 (owner, hardware): one OTA download on the board**, exactly as the original
       Task 6 Step 9 specified — publish, move `firmware/version.txt` to match, power-cycle.
       **This is the whole hardware cost of stage 2b.**

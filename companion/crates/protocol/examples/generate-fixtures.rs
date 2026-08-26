@@ -8,10 +8,10 @@ use protocol::{
     FieldValue, Frame, HeartbeatAck, InterruptPolicy, MAX_CONFIG_SCREENS, MAX_CONFIG_WIDGETS,
     MAX_DEVICE_TOKEN_LEN, MAX_PAYLOAD_SIZE, MAX_PROTOCOL_VERSION, MAX_WIRE_FRAME, Message,
     NetworkConfig, OtaState, PushData, PushScene, Scene, SceneAlign, SceneArc, SceneFont,
-    SceneFontTier, SceneGlyph, SceneImage, SceneLine, SceneNode, SceneRect, SceneScale, SceneText,
-    SceneValue, ScreenConfig, SizeClass, StatusResponse, TYPE_ASSET_BEGIN, TYPE_PUSH_SCENE,
-    TapAction, TemplateKind, Tier, TimeSync, TriggerInterrupt, WidgetConfig, WifiState,
-    encode_message,
+    SceneFontTier, SceneGlyph, SceneImage, SceneLabel, SceneLine, SceneNode, SceneRect,
+    SceneRotRect, SceneScale, SceneText, SceneValue, ScreenConfig, SizeClass, StatusResponse,
+    TYPE_ASSET_BEGIN, TYPE_PUSH_SCENE, TapAction, TemplateKind, Tier, TimeSync, TriggerInterrupt,
+    WidgetConfig, WifiState, encode_message,
 };
 
 /// A 32-byte digest with distinct, non-zero, ascending bytes starting at
@@ -28,7 +28,7 @@ fn digest_pattern(start: u8) -> [u8; 32] {
 
 /// A scene reaching every corner of the format at once.
 ///
-/// All seven node kinds; a text node bound to a clock and another carrying a
+/// All nine node kinds; a text node bound to a clock and another carrying a
 /// literal with its optional align/colour/ellipsize set; an arc with an
 /// `end_binding` and a full-turn sweep spelled the way the renderer reads one
 /// (270 -> 630, not start == end); coordinates past 255 so the multi-byte CBOR
@@ -41,6 +41,7 @@ fn digest_pattern(start: u8) -> [u8; 32] {
 /// that one is the omitted-optional-keys case, this one is the present-keys
 /// case, and only the pair covers the canonical emission rule in both
 /// directions.
+#[allow(clippy::too_many_lines)]
 fn rich_scene() -> Scene {
     Scene {
         revision: 4_294_967_295,
@@ -119,6 +120,32 @@ fn rich_scene() -> Scene {
                 total_tick_count: 361,
                 major_tick_every: 30,
                 major_tick_color: 0x00BF_5AF2,
+            }),
+            SceneNode::Label(SceneLabel {
+                x: 24,
+                y: 16,
+                font: SceneFont::Baked(SceneFontTier::Caption),
+                value: SceneValue::Literal("WEATHER".into()),
+                ink: 0x0004_1A24,
+                fill: 0x0035_B6F5,
+                fill_opacity: u8::MAX,
+                radius: 12,
+                pad_hor: 16,
+                pad_ver: 3,
+                letter_space: 1,
+                hide_when_empty: true,
+            }),
+            SceneNode::RotRect(SceneRotRect {
+                x: 222,
+                y: 80,
+                w: 4,
+                h: 144,
+                radius: 2,
+                fill: 0x00F2_F2F7,
+                pivot_x: 2,
+                pivot_y: 144,
+                rotation: 900,
+                rotation_binding: "time:minute".into(),
             }),
         ],
     }

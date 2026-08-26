@@ -308,6 +308,126 @@ static void test_a_scale_geometry_field_at_int32_max_does_not_wrap(void)
     assert(scene_model_validate(&scene) == SCENE_MODEL_ERR_GEOMETRY);
 }
 
+static scene_t label_scene(void)
+{
+    scene_t scene = minimal_scene();
+    scene.nodes[0].kind = SCENE_NODE_LABEL;
+    scene.nodes[0].value.label.x = 16;
+    scene.nodes[0].value.label.y = 16;
+    scene.nodes[0].value.label.font.kind = SCENE_FONT_BAKED;
+    scene.nodes[0].value.label.font.baked = SCENE_FONT_CAPTION;
+    scene.nodes[0].value.label.value.kind = SCENE_VALUE_LITERAL;
+    strcpy(scene.nodes[0].value.label.value.literal, "WEATHER");
+    scene.nodes[0].value.label.fill_opacity = UINT8_MAX;
+    scene.nodes[0].value.label.radius = 12;
+    scene.nodes[0].value.label.pad_hor = 16;
+    scene.nodes[0].value.label.pad_ver = 3;
+    scene.nodes[0].value.label.letter_space = 1;
+    scene.nodes[0].value.label.hide_when_empty = true;
+    return scene;
+}
+
+static void test_a_label_within_bounds_validates(void)
+{
+    scene_t scene = label_scene();
+    assert(scene_model_validate(&scene) == SCENE_MODEL_OK);
+}
+
+static void test_a_label_anchor_past_canvas_width_is_rejected(void)
+{
+    scene_t scene = label_scene();
+    scene.nodes[0].value.label.x = SCENE_CANVAS_WIDTH;
+    assert(scene_model_validate(&scene) == SCENE_MODEL_ERR_GEOMETRY);
+}
+
+static void test_a_label_anchor_past_canvas_height_is_rejected(void)
+{
+    scene_t scene = label_scene();
+    scene.nodes[0].value.label.y = SCENE_CANVAS_HEIGHT;
+    assert(scene_model_validate(&scene) == SCENE_MODEL_ERR_GEOMETRY);
+}
+
+static void test_a_label_with_an_unknown_font_is_rejected(void)
+{
+    scene_t scene = label_scene();
+    scene.nodes[0].value.label.font.baked = (scene_font_tier_t)99;
+    assert(scene_model_validate(&scene) == SCENE_MODEL_ERR_FONT);
+}
+
+static void test_a_label_with_an_unterminated_value_is_rejected(void)
+{
+    scene_t scene = label_scene();
+    memset(scene.nodes[0].value.label.value.literal, 'x',
+           sizeof scene.nodes[0].value.label.value.literal);
+    assert(scene_model_validate(&scene) == SCENE_MODEL_ERR_TEXT);
+}
+
+static scene_t rotated_rect_scene(void)
+{
+    scene_t scene = minimal_scene();
+    scene.nodes[0].kind = SCENE_NODE_ROT_RECT;
+    scene.nodes[0].value.rot_rect.x = 221;
+    scene.nodes[0].value.rot_rect.y = 80;
+    scene.nodes[0].value.rot_rect.w = 6;
+    scene.nodes[0].value.rot_rect.h = 104;
+    scene.nodes[0].value.rot_rect.radius = 3;
+    scene.nodes[0].value.rot_rect.pivot_x = 3;
+    scene.nodes[0].value.rot_rect.pivot_y = 104;
+    scene.nodes[0].value.rot_rect.rotation = 900;
+    return scene;
+}
+
+static void test_a_rotated_rect_within_bounds_validates(void)
+{
+    scene_t scene = rotated_rect_scene();
+    assert(scene_model_validate(&scene) == SCENE_MODEL_OK);
+}
+
+static void test_a_rotated_rect_past_canvas_bounds_is_rejected(void)
+{
+    scene_t scene = rotated_rect_scene();
+    scene.nodes[0].value.rot_rect.x = SCENE_CANVAS_WIDTH;
+    assert(scene_model_validate(&scene) == SCENE_MODEL_ERR_GEOMETRY);
+}
+
+static void test_a_rotated_rect_rotation_past_one_turn_is_rejected(void)
+{
+    scene_t scene = rotated_rect_scene();
+    scene.nodes[0].value.rot_rect.rotation = 3601;
+    assert(scene_model_validate(&scene) == SCENE_MODEL_ERR_GEOMETRY);
+}
+
+static void test_a_rotated_rect_negative_one_turn_validates(void)
+{
+    scene_t scene = rotated_rect_scene();
+    scene.nodes[0].value.rot_rect.rotation = -3600;
+    assert(scene_model_validate(&scene) == SCENE_MODEL_OK);
+}
+
+static void test_a_rotated_rect_pivot_past_width_is_rejected(void)
+{
+    scene_t scene = rotated_rect_scene();
+    scene.nodes[0].value.rot_rect.pivot_x =
+        scene.nodes[0].value.rot_rect.w + 1;
+    assert(scene_model_validate(&scene) == SCENE_MODEL_ERR_GEOMETRY);
+}
+
+static void test_a_rotated_rect_pivot_past_height_is_rejected(void)
+{
+    scene_t scene = rotated_rect_scene();
+    scene.nodes[0].value.rot_rect.pivot_y =
+        scene.nodes[0].value.rot_rect.h + 1;
+    assert(scene_model_validate(&scene) == SCENE_MODEL_ERR_GEOMETRY);
+}
+
+static void test_a_rotated_rect_with_unterminated_binding_is_rejected(void)
+{
+    scene_t scene = rotated_rect_scene();
+    memset(scene.nodes[0].value.rot_rect.rotation_binding, 'x',
+           sizeof scene.nodes[0].value.rot_rect.rotation_binding);
+    assert(scene_model_validate(&scene) == SCENE_MODEL_ERR_TEXT);
+}
+
 static void test_arc_span_of_a_full_turn_is_360(void)
 {
     assert(scene_model_arc_span(270, 630) == 360);
@@ -377,6 +497,18 @@ int main(void)
     test_a_scale_with_major_tick_every_zero_is_rejected();
     test_a_scale_with_major_tick_every_past_total_is_rejected();
     test_a_scale_geometry_field_at_int32_max_does_not_wrap();
+    test_a_label_within_bounds_validates();
+    test_a_label_anchor_past_canvas_width_is_rejected();
+    test_a_label_anchor_past_canvas_height_is_rejected();
+    test_a_label_with_an_unknown_font_is_rejected();
+    test_a_label_with_an_unterminated_value_is_rejected();
+    test_a_rotated_rect_within_bounds_validates();
+    test_a_rotated_rect_past_canvas_bounds_is_rejected();
+    test_a_rotated_rect_rotation_past_one_turn_is_rejected();
+    test_a_rotated_rect_negative_one_turn_validates();
+    test_a_rotated_rect_pivot_past_width_is_rejected();
+    test_a_rotated_rect_pivot_past_height_is_rejected();
+    test_a_rotated_rect_with_unterminated_binding_is_rejected();
     test_arc_span_of_a_full_turn_is_360();
     test_arc_span_of_a_partial_sweep();
     test_arc_span_of_a_negative_raw_difference();

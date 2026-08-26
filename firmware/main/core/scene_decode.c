@@ -48,6 +48,15 @@
  *           5: major_tick_color}
  *          required 0-4; major_tick_color defaults 0. The rest of the dial
  *          is a renderer constant, not a wire field -- see scene_scale_t.
+ * LABEL    {0: x, 1: y, 2: <font>, 3: <value>, 4: ink, 5: fill,
+ *           6: fill_opacity, 7: radius, 8: pad_hor, 9: pad_ver,
+ *           10: letter_space, 11: hide_when_empty (bool)}
+ *          required 0-3; colours/style integers default 0,
+ *          hide_when_empty defaults false.
+ * ROT_RECT {0: x, 1: y, 2: w, 3: h, 4: radius, 5: fill, 6: pivot_x,
+ *           7: pivot_y, 8: rotation, 9: rotation_binding (text)}
+ *          required 0-3; style/transform integers default 0 and an empty
+ *          rotation_binding means the fixed rotation field is used.
  *
  * font     {0: kind, 1: baked (tier), 2: digest (32 bytes), 3: pixel_size}
  *          required 0, plus 2 when the kind is SCENE_FONT_ASSET. The tier
@@ -790,6 +799,102 @@ static scene_model_result_t decode_scale(CborValue *value,
     return cbor_result(cbor_value_leave_container(value, &fields));
 }
 
+static scene_model_result_t decode_label(CborValue *value,
+                                         scene_label_t *label)
+{
+    CborValue fields;
+    size_t count = 0U;
+    scene_model_result_t status = enter_map(value, &fields, &count);
+    if (status != SCENE_MODEL_OK) {
+        return status;
+    }
+
+    uint32_t present = 0U;
+    uint64_t previous = 0U;
+    bool has_previous = false;
+    for (size_t i = 0U; i < count; ++i) {
+        uint64_t key = 0U;
+        status = read_key(&fields, &key, &previous, &has_previous);
+        if (status != SCENE_MODEL_OK) {
+            return status;
+        }
+        switch (key) {
+        case 0U: status = read_int32(&fields, &label->x); break;
+        case 1U: status = read_int32(&fields, &label->y); break;
+        case 2U: status = decode_font(&fields, &label->font); break;
+        case 3U: status = decode_value(&fields, &label->value); break;
+        case 4U: status = read_uint32(&fields, &label->ink); break;
+        case 5U: status = read_uint32(&fields, &label->fill); break;
+        case 6U: status = read_uint8(&fields, &label->fill_opacity); break;
+        case 7U: status = read_int32(&fields, &label->radius); break;
+        case 8U: status = read_int32(&fields, &label->pad_hor); break;
+        case 9U: status = read_int32(&fields, &label->pad_ver); break;
+        case 10U: status = read_int32(&fields, &label->letter_space); break;
+        case 11U: status = read_boolean(&fields, &label->hide_when_empty); break;
+        default: status = skip_value(&fields); break;
+        }
+        if (status != SCENE_MODEL_OK) {
+            return status;
+        }
+        if (key <= 11U) {
+            present |= REQUIRED_BIT((uint32_t)key);
+        }
+    }
+    if ((present & UINT32_C(0x0f)) != UINT32_C(0x0f)) {
+        return SCENE_MODEL_ERR_ARGUMENT;
+    }
+    return cbor_result(cbor_value_leave_container(value, &fields));
+}
+
+static scene_model_result_t decode_rot_rect(CborValue *value,
+                                            scene_rot_rect_t *rect)
+{
+    CborValue fields;
+    size_t count = 0U;
+    scene_model_result_t status = enter_map(value, &fields, &count);
+    if (status != SCENE_MODEL_OK) {
+        return status;
+    }
+
+    uint32_t present = 0U;
+    uint64_t previous = 0U;
+    bool has_previous = false;
+    for (size_t i = 0U; i < count; ++i) {
+        uint64_t key = 0U;
+        status = read_key(&fields, &key, &previous, &has_previous);
+        if (status != SCENE_MODEL_OK) {
+            return status;
+        }
+        switch (key) {
+        case 0U: status = read_int32(&fields, &rect->x); break;
+        case 1U: status = read_int32(&fields, &rect->y); break;
+        case 2U: status = read_int32(&fields, &rect->w); break;
+        case 3U: status = read_int32(&fields, &rect->h); break;
+        case 4U: status = read_int32(&fields, &rect->radius); break;
+        case 5U: status = read_uint32(&fields, &rect->fill); break;
+        case 6U: status = read_int32(&fields, &rect->pivot_x); break;
+        case 7U: status = read_int32(&fields, &rect->pivot_y); break;
+        case 8U: status = read_int32(&fields, &rect->rotation); break;
+        case 9U:
+            status = read_text(&fields, rect->rotation_binding,
+                               sizeof rect->rotation_binding,
+                               SCENE_MAX_BINDING);
+            break;
+        default: status = skip_value(&fields); break;
+        }
+        if (status != SCENE_MODEL_OK) {
+            return status;
+        }
+        if (key <= 9U) {
+            present |= REQUIRED_BIT((uint32_t)key);
+        }
+    }
+    if ((present & UINT32_C(0x0f)) != UINT32_C(0x0f)) {
+        return SCENE_MODEL_ERR_ARGUMENT;
+    }
+    return cbor_result(cbor_value_leave_container(value, &fields));
+}
+
 static scene_model_result_t decode_node_payload(CborValue *value,
                                                  scene_node_t *node)
 {
@@ -801,6 +906,9 @@ static scene_model_result_t decode_node_payload(CborValue *value,
     case SCENE_NODE_IMAGE: return decode_image(value, &node->value.image);
     case SCENE_NODE_GLYPH: return decode_glyph(value, &node->value.glyph);
     case SCENE_NODE_SCALE: return decode_scale(value, &node->value.scale);
+    case SCENE_NODE_LABEL: return decode_label(value, &node->value.label);
+    case SCENE_NODE_ROT_RECT:
+        return decode_rot_rect(value, &node->value.rot_rect);
     default:               return SCENE_MODEL_ERR_NODE_KIND;
     }
 }

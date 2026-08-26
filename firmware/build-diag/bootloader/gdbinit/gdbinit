@@ -1,0 +1,2 @@
+source /Users/rodion/dev/deskmate/firmware/build-diag/bootloader/gdbinit/symbols
+source /Users/rodion/dev/deskmate/firmware/build-diag/bootloader/gdbinit/connect

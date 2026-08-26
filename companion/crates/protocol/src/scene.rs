@@ -192,6 +192,57 @@ pub struct SceneScale {
     pub major_tick_color: u32,
 }
 
+/// A text label that draws its own background: `deskmate_chip()`,
+/// `deskmate_eyebrow()`, and `BigNumberLabel`'s pill are all this shape. The
+/// node carries the STYLE and the device sizes the box, because the box is
+/// `text_width + 2 * pad_hor` and text width depends on per-glyph advances,
+/// kern pairs in 4.4 format and `letter_space` -- LVGL's own arithmetic,
+/// which the host would otherwise have to reimplement and keep correct
+/// against a vendored LVGL. Same reasoning as `SCENE_NODE_SCALE`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SceneLabel {
+    pub x: i32,
+    pub y: i32,
+    pub font: SceneFont,
+    pub value: SceneValue,
+    pub ink: u32,
+    pub fill: u32,
+    /// `LV_OPA_TRANSP` fill makes this an eyebrow rather than a chip, so one
+    /// node covers both without a kind flag.
+    pub fill_opacity: u8,
+    pub radius: i32,
+    pub pad_hor: i32,
+    pub pad_ver: i32,
+    pub letter_space: i32,
+    /// `deskmate_chip_set_text()` HIDES a chip given an empty string rather
+    /// than drawing a collapsed blob, and `icon-badge-text--empty-badge`
+    /// pins that. The device must do the same, or that golden breaks.
+    pub hide_when_empty: bool,
+}
+
+/// A rectangle rotated about a pivot, which is how every clock hand is drawn:
+/// `make_hand()` in `analog_clock.c` sets `transform_pivot_x/y` and
+/// `set_hand_angle()` sets `transform_rotation`. A `Line` node cannot stand in
+/// for this -- LVGL draws lines through a different path than the transform
+/// matrix, so the anti-aliased edges differ and the gate is byte-exact.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SceneRotRect {
+    pub x: i32,
+    pub y: i32,
+    pub w: i32,
+    pub h: i32,
+    pub radius: i32,
+    pub fill: u32,
+    pub pivot_x: i32,
+    pub pivot_y: i32,
+    /// Tenths of a degree, matching `lv_obj_set_style_transform_rotation`
+    /// exactly rather than converting at the boundary.
+    pub rotation: i32,
+    /// Empty means a fixed angle. `time:hour`, `time:minute`, `time:second`
+    /// drive the three hands, so a scene ticks without a re-push.
+    pub rotation_binding: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SceneNode {
     Rect(SceneRect),
@@ -201,6 +252,8 @@ pub enum SceneNode {
     Image(SceneImage),
     Glyph(SceneGlyph),
     Scale(SceneScale),
+    Label(SceneLabel),
+    RotRect(SceneRotRect),
 }
 
 impl SceneNode {
@@ -213,6 +266,8 @@ impl SceneNode {
             Self::Image(_) => 5,
             Self::Glyph(_) => 6,
             Self::Scale(_) => 7,
+            Self::Label(_) => 8,
+            Self::RotRect(_) => 9,
         }
     }
 }
@@ -289,6 +344,19 @@ fn baseline_within_canvas(baseline_y: i32) -> bool {
     (0..=SCENE_CANVAS_HEIGHT).contains(&baseline_y)
 }
 
+fn label_within_canvas(label: &SceneLabel) -> bool {
+    (0..SCENE_CANVAS_WIDTH).contains(&label.x)
+        && (0..SCENE_CANVAS_HEIGHT).contains(&label.y)
+        && (0..=SCENE_CANVAS_HEIGHT).contains(&label.radius)
+        && (0..=SCENE_CANVAS_WIDTH).contains(&label.pad_hor)
+        && (0..=SCENE_CANVAS_HEIGHT).contains(&label.pad_ver)
+        && (0..=SCENE_CANVAS_WIDTH).contains(&label.letter_space)
+}
+
+fn rotation_binding_is_valid(binding: &str) -> bool {
+    binding.is_empty() || matches!(binding, "time:hour" | "time:minute" | "time:second")
+}
+
 fn validate_font(font: &SceneFont) -> Result<(), MessageError> {
     match font {
         SceneFont::Baked(_) => Ok(()),
@@ -320,6 +388,7 @@ fn validate_value(value: &SceneValue) -> Result<(), MessageError> {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn validate_node(node: &SceneNode) -> Result<(), MessageError> {
     match node {
         SceneNode::Rect(rect) => {
@@ -407,6 +476,27 @@ fn validate_node(node: &SceneNode) -> Result<(), MessageError> {
             }
             if scale.major_tick_every < 1 || scale.major_tick_every > scale.total_tick_count {
                 return Err(MessageError::InvalidValue("scene scale major tick"));
+            }
+        }
+        SceneNode::Label(label) => {
+            if !label_within_canvas(label) {
+                return Err(MessageError::InvalidValue("scene label geometry"));
+            }
+            validate_font(&label.font)?;
+            validate_value(&label.value)?;
+        }
+        SceneNode::RotRect(rect) => {
+            if !rect_within_canvas(rect.x, rect.y, rect.w, rect.h)
+                || rect.pivot_x < 0
+                || rect.pivot_x > rect.w
+                || rect.pivot_y < 0
+                || rect.pivot_y > rect.h
+                || !(-3600..=3600).contains(&rect.rotation)
+            {
+                return Err(MessageError::InvalidValue("scene rotated rect geometry"));
+            }
+            if !rotation_binding_is_valid(&rect.rotation_binding) {
+                return Err(MessageError::InvalidValue("scene rotated rect binding"));
             }
         }
     }
@@ -629,6 +719,85 @@ fn encode_node_payload(encoder: &mut Encoder, node: &SceneNode) {
                 encoder.unsigned(u64::from(scale.major_tick_color));
             }
         }
+        SceneNode::Label(label) => {
+            encoder.map(
+                4 + usize::from(label.ink != 0)
+                    + usize::from(label.fill != 0)
+                    + usize::from(label.fill_opacity != 0)
+                    + usize::from(label.radius != 0)
+                    + usize::from(label.pad_hor != 0)
+                    + usize::from(label.pad_ver != 0)
+                    + usize::from(label.letter_space != 0)
+                    + usize::from(label.hide_when_empty),
+            );
+            for (key, value) in [(0, label.x), (1, label.y)] {
+                encoder.unsigned(key);
+                encoder.signed(i64::from(value));
+            }
+            encoder.unsigned(2);
+            encode_font(encoder, &label.font);
+            encoder.unsigned(3);
+            encode_value(encoder, &label.value);
+            if label.ink != 0 {
+                encoder.unsigned(4);
+                encoder.unsigned(u64::from(label.ink));
+            }
+            if label.fill != 0 {
+                encoder.unsigned(5);
+                encoder.unsigned(u64::from(label.fill));
+            }
+            if label.fill_opacity != 0 {
+                encoder.unsigned(6);
+                encoder.unsigned(u64::from(label.fill_opacity));
+            }
+            for (key, value) in [
+                (7, label.radius),
+                (8, label.pad_hor),
+                (9, label.pad_ver),
+                (10, label.letter_space),
+            ] {
+                if value != 0 {
+                    encoder.unsigned(key);
+                    encoder.signed(i64::from(value));
+                }
+            }
+            if label.hide_when_empty {
+                encoder.unsigned(11);
+                encoder.boolean(true);
+            }
+        }
+        SceneNode::RotRect(rect) => {
+            encoder.map(
+                4 + usize::from(rect.radius != 0)
+                    + usize::from(rect.fill != 0)
+                    + usize::from(rect.pivot_x != 0)
+                    + usize::from(rect.pivot_y != 0)
+                    + usize::from(rect.rotation != 0)
+                    + usize::from(!rect.rotation_binding.is_empty()),
+            );
+            for (key, value) in [(0, rect.x), (1, rect.y), (2, rect.w), (3, rect.h)] {
+                encoder.unsigned(key);
+                encoder.signed(i64::from(value));
+            }
+            if rect.radius != 0 {
+                encoder.unsigned(4);
+                encoder.signed(i64::from(rect.radius));
+            }
+            if rect.fill != 0 {
+                encoder.unsigned(5);
+                encoder.unsigned(u64::from(rect.fill));
+            }
+            for (key, value) in [(6, rect.pivot_x), (7, rect.pivot_y), (8, rect.rotation)] {
+                if value != 0 {
+                    encoder.unsigned(key);
+                    encoder.signed(i64::from(value));
+                }
+            }
+            if !rect.rotation_binding.is_empty() {
+                encoder.unsigned(9);
+                encoder.text(&rect.rotation_binding);
+            }
+        }
     }
 }
 
@@ -802,10 +971,11 @@ fn decode_node_payload(decoder: &mut Decoder<'_>, kind: u32) -> Result<SceneNode
     let mut present = 0u32;
     // One flat set of slots for every node kind, so this mirrors the C
     // switch-per-key shape rather than building a parallel struct per kind.
-    let mut ints = [0i32; 6];
+    let mut ints = [0i32; 11];
     let mut colors = [0u32; 2];
     let mut flags = [false; 2];
     let mut opacity = u8::MAX;
+    let mut fill_opacity = 0u8;
     let mut align = SceneAlign::Left;
     let mut font = None;
     let mut value = None;
@@ -877,6 +1047,34 @@ fn decode_node_payload(decoder: &mut Decoder<'_>, kind: u32) -> Result<SceneNode
             (7, 3) => ticks[0] = read_u32(decoder, "scene scale tick count")?,
             (7, 4) => ticks[1] = read_u32(decoder, "scene scale major tick")?,
             (7, 5) => colors[0] = read_u32(decoder, "scene scale color")?,
+            // LABEL {0: x, 1: y, 2: font, 3: value, 4: ink, 5: fill,
+            //        6: fill_opacity, 7: radius, 8: pad_hor, 9: pad_ver,
+            //        10: letter_space, 11: hide_when_empty}
+            (8, 0..=1 | 7..=10) => {
+                ints[slot] = read_i32(decoder, "scene label field")?;
+            }
+            (8, 2) => font = Some(decode_font(decoder)?),
+            (8, 3) => value = Some(decode_value(decoder)?),
+            (8, 4) => colors[0] = read_u32(decoder, "scene label ink")?,
+            (8, 5) => colors[1] = read_u32(decoder, "scene label fill")?,
+            (8, 6) => {
+                fill_opacity = u8::try_from(decoder.unsigned()?)
+                    .map_err(|_| MessageError::InvalidValue("scene label opacity"))?;
+            }
+            (8, 11) => flags[0] = decoder.boolean()?,
+            // ROT_RECT {0: x, 1: y, 2: w, 3: h, 4: radius, 5: fill,
+            //           6: pivot_x, 7: pivot_y, 8: rotation, 9: binding}
+            (9, 0..=4 | 6..=8) => {
+                ints[slot] = read_i32(decoder, "scene rotated rect field")?;
+            }
+            (9, 5) => colors[0] = read_u32(decoder, "scene rotated rect fill")?,
+            (9, 9) => {
+                text = read_bounded_text(
+                    decoder,
+                    MAX_SCENE_BINDING_LEN,
+                    "scene rotated rect binding",
+                )?;
+            }
             _ => decoder.skip()?,
         }
     }
@@ -976,6 +1174,38 @@ fn decode_node_payload(decoder: &mut Decoder<'_>, kind: u32) -> Result<SceneNode
                 total_tick_count: ticks[0],
                 major_tick_every: ticks[1],
                 major_tick_color: colors[0],
+            }))
+        }
+        8 => {
+            require(0x0f)?;
+            Ok(SceneNode::Label(SceneLabel {
+                x: ints[0],
+                y: ints[1],
+                font: font.ok_or(MessageError::MissingField(2))?,
+                value: value.ok_or(MessageError::MissingField(3))?,
+                ink: colors[0],
+                fill: colors[1],
+                fill_opacity,
+                radius: ints[7],
+                pad_hor: ints[8],
+                pad_ver: ints[9],
+                letter_space: ints[10],
+                hide_when_empty: flags[0],
+            }))
+        }
+        9 => {
+            require(0x0f)?;
+            Ok(SceneNode::RotRect(SceneRotRect {
+                x: ints[0],
+                y: ints[1],
+                w: ints[2],
+                h: ints[3],
+                radius: ints[4],
+                fill: colors[0],
+                pivot_x: ints[6],
+                pivot_y: ints[7],
+                rotation: ints[8],
+                rotation_binding: text,
             }))
         }
         _ => Err(MessageError::InvalidValue("scene node kind")),

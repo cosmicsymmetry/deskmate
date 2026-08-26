@@ -2433,7 +2433,9 @@ static protocol_message_result_t encode_asset_release_payload(
  * core/scene_decode.c). The defaults are: RECT radius 0, fill 0, opacity
  * 255; ARC color 0, rounded false, end_binding ""; LINE color 0; TEXT align
  * LEFT, color 0, ellipsize false; IMAGE recolor false, color 0; GLYPH color
- * 0; SCALE major_tick_color 0; the value map's literal and binding "".
+ * 0; SCALE major_tick_color 0; LABEL colours/style fields 0 and
+ * hide_when_empty false; ROT_RECT style/transform fields 0 and
+ * rotation_binding ""; the value map's literal and binding "".
  * ------------------------------------------------------------------ */
 
 static size_t scene_rect_entries(const scene_rect_t *rect)
@@ -2702,6 +2704,130 @@ static protocol_message_result_t encode_scene_scale(CborEncoder *parent,
     return result;
 }
 
+static protocol_message_result_t encode_scene_label(CborEncoder *parent,
+                                                     const scene_label_t *label)
+{
+    CborEncoder map;
+    size_t entries = 4U + (label->ink != 0U ? 1U : 0U) +
+                     (label->fill != 0U ? 1U : 0U) +
+                     (label->fill_opacity != 0U ? 1U : 0U) +
+                     (label->radius != 0 ? 1U : 0U) +
+                     (label->pad_hor != 0 ? 1U : 0U) +
+                     (label->pad_ver != 0 ? 1U : 0U) +
+                     (label->letter_space != 0 ? 1U : 0U) +
+                     (label->hide_when_empty ? 1U : 0U);
+    protocol_message_result_t result = begin_map(parent, &map, entries);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 0U);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_int(&map, label->x);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 1U);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_int(&map, label->y);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 2U);
+    if (result == PROTOCOL_MESSAGE_OK) {
+        result = encode_scene_font(&map, &label->font);
+    }
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 3U);
+    if (result == PROTOCOL_MESSAGE_OK) {
+        result = encode_scene_value(&map, &label->value);
+    }
+    if (result == PROTOCOL_MESSAGE_OK && label->ink != 0U) {
+        result = encode_pair_uint(&map, 4U, label->ink);
+    }
+    if (result == PROTOCOL_MESSAGE_OK && label->fill != 0U) {
+        result = encode_pair_uint(&map, 5U, label->fill);
+    }
+    if (result == PROTOCOL_MESSAGE_OK && label->fill_opacity != 0U) {
+        result = encode_pair_uint(&map, 6U, label->fill_opacity);
+    }
+    if (result == PROTOCOL_MESSAGE_OK && label->radius != 0) {
+        result = encode_uint(&map, 7U);
+        if (result == PROTOCOL_MESSAGE_OK) {
+            result = encode_int(&map, label->radius);
+        }
+    }
+    if (result == PROTOCOL_MESSAGE_OK && label->pad_hor != 0) {
+        result = encode_uint(&map, 8U);
+        if (result == PROTOCOL_MESSAGE_OK) {
+            result = encode_int(&map, label->pad_hor);
+        }
+    }
+    if (result == PROTOCOL_MESSAGE_OK && label->pad_ver != 0) {
+        result = encode_uint(&map, 9U);
+        if (result == PROTOCOL_MESSAGE_OK) {
+            result = encode_int(&map, label->pad_ver);
+        }
+    }
+    if (result == PROTOCOL_MESSAGE_OK && label->letter_space != 0) {
+        result = encode_uint(&map, 10U);
+        if (result == PROTOCOL_MESSAGE_OK) {
+            result = encode_int(&map, label->letter_space);
+        }
+    }
+    if (result == PROTOCOL_MESSAGE_OK && label->hide_when_empty) {
+        result = encode_uint(&map, 11U);
+        if (result == PROTOCOL_MESSAGE_OK) result = encode_bool(&map, true);
+    }
+    if (result == PROTOCOL_MESSAGE_OK) result = end_map(parent, &map);
+    return result;
+}
+
+static protocol_message_result_t encode_scene_rot_rect(
+    CborEncoder *parent,
+    const scene_rot_rect_t *rect)
+{
+    CborEncoder map;
+    size_t entries = 4U + (rect->radius != 0 ? 1U : 0U) +
+                     (rect->fill != 0U ? 1U : 0U) +
+                     (rect->pivot_x != 0 ? 1U : 0U) +
+                     (rect->pivot_y != 0 ? 1U : 0U) +
+                     (rect->rotation != 0 ? 1U : 0U) +
+                     (rect->rotation_binding[0] != '\0' ? 1U : 0U);
+    protocol_message_result_t result = begin_map(parent, &map, entries);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 0U);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_int(&map, rect->x);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 1U);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_int(&map, rect->y);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 2U);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_int(&map, rect->w);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 3U);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_int(&map, rect->h);
+    if (result == PROTOCOL_MESSAGE_OK && rect->radius != 0) {
+        result = encode_uint(&map, 4U);
+        if (result == PROTOCOL_MESSAGE_OK) {
+            result = encode_int(&map, rect->radius);
+        }
+    }
+    if (result == PROTOCOL_MESSAGE_OK && rect->fill != 0U) {
+        result = encode_pair_uint(&map, 5U, rect->fill);
+    }
+    if (result == PROTOCOL_MESSAGE_OK && rect->pivot_x != 0) {
+        result = encode_uint(&map, 6U);
+        if (result == PROTOCOL_MESSAGE_OK) {
+            result = encode_int(&map, rect->pivot_x);
+        }
+    }
+    if (result == PROTOCOL_MESSAGE_OK && rect->pivot_y != 0) {
+        result = encode_uint(&map, 7U);
+        if (result == PROTOCOL_MESSAGE_OK) {
+            result = encode_int(&map, rect->pivot_y);
+        }
+    }
+    if (result == PROTOCOL_MESSAGE_OK && rect->rotation != 0) {
+        result = encode_uint(&map, 8U);
+        if (result == PROTOCOL_MESSAGE_OK) {
+            result = encode_int(&map, rect->rotation);
+        }
+    }
+    if (result == PROTOCOL_MESSAGE_OK &&
+        rect->rotation_binding[0] != '\0') {
+        result = encode_uint(&map, 9U);
+        if (result == PROTOCOL_MESSAGE_OK) {
+            result = encode_text(&map, rect->rotation_binding);
+        }
+    }
+    if (result == PROTOCOL_MESSAGE_OK) result = end_map(parent, &map);
+    return result;
+}
+
 static protocol_message_result_t encode_scene_node(CborEncoder *parent,
                                                     const scene_node_t *node)
 {
@@ -2733,6 +2859,12 @@ static protocol_message_result_t encode_scene_node(CborEncoder *parent,
             break;
         case SCENE_NODE_SCALE:
             result = encode_scene_scale(&map, &node->value.scale);
+            break;
+        case SCENE_NODE_LABEL:
+            result = encode_scene_label(&map, &node->value.label);
+            break;
+        case SCENE_NODE_ROT_RECT:
+            result = encode_scene_rot_rect(&map, &node->value.rot_rect);
             break;
         default:
             /* Unreachable: validate_message() ran scene_model_validate()

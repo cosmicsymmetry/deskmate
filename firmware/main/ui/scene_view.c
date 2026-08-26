@@ -1,6 +1,7 @@
 #include "ui/scene_view.h"
 
 #include <string.h>
+#include <time.h>
 
 #include "lvgl.h"
 #include "ui/fonts/deskmate_fonts.h"
@@ -15,7 +16,9 @@
  * text alignment on TEXT nodes, a legal font reference on TEXT nodes,
  * 2..SCENE_MAX_LINE_POINTS line points, and -- for SCALE --
  * 2..SCENE_SCALE_MAX_TOTAL_TICKS total ticks with major_tick_every in
- * [1, total_tick_count]. None of that is checked again here. Redundant
+ * [1, total_tick_count], LABEL anchors/style extents are bounded with legal
+ * fonts and terminated values, and ROT_RECT geometry/pivot/rotation/binding
+ * are legal. None of that is checked again here. Redundant
  * defensive validation has concealed four defects on this plan already; the
  * model is the one place those bounds live.
  *
@@ -54,6 +57,8 @@ typedef struct {
      * entry here -- it lives on the object as its rotation. */
     int32_t arc_span_deg;
     uint8_t kind; /* scene_node_kind_t */
+    uint8_t rotation_binding; /* scene_rotation_binding_t, ROT_RECT only */
+    bool hide_when_empty;     /* LABEL only */
 } scene_bound_node_t;
 
 /* Per-scene state. Allocated from the LVGL heap and owned by the screen --
@@ -285,6 +290,53 @@ static void apply_arc_binding(const scene_bound_node_t *bound,
         (lv_value_precise_t)(bound->arc_span_deg * percent / 100));
 }
 
+/* Exactly deskmate_chip_set_text()'s visible-state transition. In
+ * particular, empty text hides a chip instead of leaving its padding and
+ * background behind as a coloured blob. */
+static void apply_label_text(lv_obj_t *label, const char *text,
+                             bool hide_when_empty)
+{
+    if (hide_when_empty && (text == NULL || text[0] == '\0')) {
+        lv_obj_add_flag(label, LV_OBJ_FLAG_HIDDEN);
+        lv_label_set_text(label, "");
+        return;
+    }
+    lv_label_set_text(label, text != NULL ? text : "");
+    lv_obj_remove_flag(label, LV_OBJ_FLAG_HIDDEN);
+}
+
+/* The same integer angle formulas analog_clock_tick() hands to
+ * set_hand_angle(), with the final *10 kept because a scene rotation is
+ * already in LVGL's tenths-of-a-degree unit. */
+static int32_t rotation_for_time(scene_rotation_binding_t binding,
+                                 const scene_binding_context_t *context,
+                                 int32_t fallback)
+{
+    if (binding == SCENE_ROTATION_BINDING_NONE || context == NULL) {
+        return fallback;
+    }
+    int64_t local_seconds =
+        context->unix_seconds +
+        (int64_t)context->utc_offset_minutes * INT64_C(60);
+    time_t local_time = (time_t)local_seconds;
+    struct tm now;
+    if (gmtime_r(&local_time, &now) == NULL) {
+        return fallback;
+    }
+    switch (binding) {
+    case SCENE_ROTATION_BINDING_HOUR:
+        return (((now.tm_hour % 12) * 30) + (now.tm_min / 2)) * 10;
+    case SCENE_ROTATION_BINDING_MINUTE:
+        return now.tm_min * 60;
+    case SCENE_ROTATION_BINDING_SECOND:
+        return now.tm_sec * 60;
+    case SCENE_ROTATION_BINDING_NONE:
+    default:
+        break;
+    }
+    return fallback;
+}
+
 /* ------------------------------------------------------------- builders */
 
 /* `rect` -- the same object template_style.c's deskmate_module() builds: a
@@ -440,6 +492,97 @@ static lv_obj_t *build_text(lv_obj_t *parent, const scene_text_t *text,
     lv_label_set_text(label, initial);
     lv_obj_set_pos(label, text->x, baseline_box_top(text->baseline_y, font));
     return label;
+}
+
+/* `label` -- deskmate_chip()'s content-sized lv_label, call for call and in
+ * the same order. The node supplies the values but does not change the
+ * construction: LVGL still owns glyph advances, 4.4 kerning and
+ * letter_space, so its content width is the chip width by construction.
+ * A transparent fill is the eyebrow form; no separate kind or host-side
+ * size calculation is involved. */
+static lv_obj_t *build_label(lv_obj_t *parent, const scene_label_t *node,
+                             const scene_binding_context_t *context,
+                             scene_binding_t *out_binding,
+                             bool *out_is_bound)
+{
+    lv_font_t *acquired = NULL;
+    const lv_font_t *font = resolve_font(&node->font, &acquired);
+    if (font == NULL) {
+        return NULL;
+    }
+
+    lv_obj_t *label = lv_label_create(parent);
+    if (label == NULL) {
+        if (acquired != NULL) {
+            font_registry_release(acquired);
+        }
+        return NULL;
+    }
+    if (acquired != NULL) {
+        lv_obj_add_event_cb(label, release_font_cb, LV_EVENT_DELETE, acquired);
+    }
+
+    /* Keep this sequence identical to template_style.c:deskmate_chip(). */
+    lv_obj_set_style_text_font(label, font, 0);
+    lv_obj_set_style_text_color(label, lv_color_hex(node->ink), 0);
+    lv_obj_set_style_bg_color(label, lv_color_hex(node->fill), 0);
+    lv_obj_set_style_bg_opa(label, (lv_opa_t)node->fill_opacity, 0);
+    lv_obj_set_style_radius(label, node->radius, 0);
+    lv_obj_set_style_pad_hor(label, node->pad_hor, 0);
+    lv_obj_set_style_pad_ver(label, node->pad_ver, 0);
+    lv_obj_set_style_text_letter_space(label, node->letter_space, 0);
+    lv_label_set_text(label, "");
+    lv_obj_set_pos(label, node->x, node->y);
+
+    char buffer[SCENE_VIEW_TEXT_CAPACITY];
+    const char *initial = node->value.literal;
+    *out_is_bound = false;
+    if (value_is_bound(&node->value)) {
+        initial = "";
+        if (scene_binding_parse(node->value.binding, out_binding) ==
+            SCENE_BINDING_OK) {
+            *out_is_bound = true;
+            evaluate_binding(out_binding, context, buffer, sizeof buffer);
+            initial = buffer;
+        }
+    }
+    apply_label_text(label, initial, node->hide_when_empty);
+    return label;
+}
+
+/* `rot_rect` -- make_hand() followed by set_hand_angle(), with position
+ * supplied directly by the scene instead of the template's align call. The
+ * object-transform path is essential: lv_line anti-aliases through a
+ * different renderer and cannot reproduce a hand byte-for-byte. */
+static lv_obj_t *build_rot_rect(lv_obj_t *parent,
+                                const scene_rot_rect_t *rect,
+                                const scene_binding_context_t *context,
+                                scene_rotation_binding_t *out_binding,
+                                bool *out_is_bound)
+{
+    lv_obj_t *object = lv_obj_create(parent);
+    if (object == NULL) {
+        return NULL;
+    }
+
+    /* Keep this sequence identical to analog_clock.c:make_hand(). */
+    lv_obj_remove_style_all(object);
+    lv_obj_remove_flag(object,
+                       LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_size(object, rect->w, rect->h);
+    lv_obj_set_style_radius(object, rect->radius, 0);
+    lv_obj_set_style_bg_color(object, lv_color_hex(rect->fill), 0);
+    lv_obj_set_style_bg_opa(object, LV_OPA_COVER, 0);
+    lv_obj_set_style_transform_pivot_x(object, rect->pivot_x, 0);
+    lv_obj_set_style_transform_pivot_y(object, rect->pivot_y, 0);
+
+    lv_obj_set_pos(object, rect->x, rect->y);
+    *out_is_bound = scene_model_parse_rotation_binding(
+        rect->rotation_binding, out_binding) &&
+        *out_binding != SCENE_ROTATION_BINDING_NONE;
+    lv_obj_set_style_transform_rotation(
+        object, rotation_for_time(*out_binding, context, rect->rotation), 0);
+    return object;
 }
 
 /* Releases an image node's asset mapping and descriptor together, once the
@@ -701,8 +844,14 @@ static uint32_t count_bound_nodes(const scene_t *scene)
         if (node->kind == SCENE_NODE_TEXT &&
             value_is_bound(&node->value.text.value)) {
             ++count;
+        } else if (node->kind == SCENE_NODE_LABEL &&
+                   value_is_bound(&node->value.label.value)) {
+            ++count;
         } else if (node->kind == SCENE_NODE_ARC &&
                    node->value.arc.end_binding[0] != '\0') {
+            ++count;
+        } else if (node->kind == SCENE_NODE_ROT_RECT &&
+                   node->value.rot_rect.rotation_binding[0] != '\0') {
             ++count;
         }
     }
@@ -785,6 +934,39 @@ static bool build_nodes(lv_obj_t *parent, const scene_t *scene,
         case SCENE_NODE_SCALE:
             object = build_scale(parent, &node->value.scale);
             break;
+
+        case SCENE_NODE_LABEL: {
+            scene_binding_t binding;
+            bool is_bound = false;
+
+            object = build_label(parent, &node->value.label, context,
+                                 &binding, &is_bound);
+            if (object != NULL && is_bound) {
+                scene_bound_node_t *bound =
+                    &state->bound[state->bound_count++];
+                bound->object = object;
+                bound->kind = (uint8_t)SCENE_NODE_LABEL;
+                bound->binding = binding;
+                bound->hide_when_empty = node->value.label.hide_when_empty;
+            }
+            break;
+        }
+
+        case SCENE_NODE_ROT_RECT: {
+            scene_rotation_binding_t binding = SCENE_ROTATION_BINDING_NONE;
+            bool is_bound = false;
+
+            object = build_rot_rect(parent, &node->value.rot_rect, context,
+                                    &binding, &is_bound);
+            if (object != NULL && is_bound) {
+                scene_bound_node_t *bound =
+                    &state->bound[state->bound_count++];
+                bound->object = object;
+                bound->kind = (uint8_t)SCENE_NODE_ROT_RECT;
+                bound->rotation_binding = (uint8_t)binding;
+            }
+            break;
+        }
 
         default:
             break;
@@ -879,9 +1061,20 @@ void scene_view_refresh_bindings(const scene_binding_context_t *context)
     }
     for (uint32_t i = 0U; i < s_state->bound_count; i++) {
         const scene_bound_node_t *bound = &s_state->bound[i];
+        if (bound->kind == (uint8_t)SCENE_NODE_ROT_RECT) {
+            lv_obj_set_style_transform_rotation(
+                bound->object,
+                rotation_for_time(
+                    (scene_rotation_binding_t)bound->rotation_binding,
+                    context, 0),
+                0);
+            continue;
+        }
         evaluate_binding(&bound->binding, context, buffer, sizeof buffer);
         if (bound->kind == (uint8_t)SCENE_NODE_ARC) {
             apply_arc_binding(bound, buffer);
+        } else if (bound->kind == (uint8_t)SCENE_NODE_LABEL) {
+            apply_label_text(bound->object, buffer, bound->hide_when_empty);
         } else {
             lv_label_set_text(bound->object, buffer);
         }

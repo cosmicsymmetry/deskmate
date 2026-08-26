@@ -200,7 +200,7 @@ fn push_scene_fixtures_carry_what_they_are_meant_to() {
     assert_eq!(push.revision, 12);
     // Every node kind, once: an all-minimal fixture would pass even if the
     // two encoders disagreed about the kinds it left out.
-    assert_eq!(push.scene.nodes.len(), 8);
+    assert_eq!(push.scene.nodes.len(), 10);
     let kinds: Vec<std::mem::Discriminant<protocol::SceneNode>> = push
         .scene
         .nodes
@@ -215,6 +215,8 @@ fn push_scene_fixtures_carry_what_they_are_meant_to() {
         protocol::SceneNode::Image(protocol::SceneImage::default()),
         protocol::SceneNode::Glyph(protocol::SceneGlyph::default()),
         protocol::SceneNode::Scale(protocol::SceneScale::default()),
+        protocol::SceneNode::Label(protocol::SceneLabel::default()),
+        protocol::SceneNode::RotRect(protocol::SceneRotRect::default()),
     ] {
         assert!(
             kinds.contains(&std::mem::discriminant(&probe)),

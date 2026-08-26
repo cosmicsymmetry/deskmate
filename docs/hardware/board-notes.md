@@ -3549,3 +3549,19 @@ the timeout alone.
 
 Note the device rebooted between the two sessions (uptime 2 h 08 m → 1 h 00 m), so the
 2026-08-26 counters are fresh rather than cumulative.
+
+## Scene Label + RotRect software layout — hardware check owed 2026-08-26
+
+Task 1b added scene kinds 8 (`Label`) and 9 (`RotRect`) without adding any
+file-scope storage. The release-config `idf.py build`/`idf.py size` comparison is
+byte-flat in every memory-layout figure that has mattered to the OTA hazard:
+
+- `.bss`: **102,624 → 102,624 bytes** (delta 0)
+- `.data`: **23,128 → 23,128 bytes** (delta 0)
+- IRAM: **16,384/16,384 → 16,384/16,384 bytes**, 0 remaining (delta 0)
+
+Flash grew, as expected for decoder/renderer code: image-size accounting moved
+1,599,259 → 1,603,703 bytes, while `deskmate.bin` moved 0x186790 → 0x1878f0.
+No OTA download or panel observation was performed here; the plan assigns that
+single power-cycle/download check to the owner, and unchanged static figures do
+not waive it.

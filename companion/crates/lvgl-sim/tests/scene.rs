@@ -67,7 +67,7 @@ fn scene_goldens_match() {
 }
 
 /// Every `scene_node_kind_t` is covered. Written as an explicit roll-call
-/// rather than a count so that adding an eighth node kind to the model fails
+/// rather than a count so that adding another node kind to the model fails
 /// here, loudly, instead of leaving the new kind with no golden at all.
 #[test]
 fn every_node_kind_has_a_case() {
@@ -75,7 +75,9 @@ fn every_node_kind_has_a_case() {
         .into_iter()
         .map(|(name, _)| name)
         .collect();
-    for kind in ["rect", "arc", "line", "text", "image", "glyph", "scale"] {
+    for kind in [
+        "rect", "arc", "line", "text", "image", "glyph", "scale", "label", "rot-rect",
+    ] {
         for orientation in ["landscape", "flipped"] {
             let expected = format!("scene-{kind}--{orientation}");
             assert!(
@@ -85,7 +87,7 @@ fn every_node_kind_has_a_case() {
             );
         }
     }
-    assert_eq!(names.len(), 14, "7 node kinds x 2 orientations");
+    assert_eq!(names.len(), 18, "9 node kinds x 2 orientations");
 }
 
 /// The 270° mount is a 180° rotation of the logical canvas, so every case's

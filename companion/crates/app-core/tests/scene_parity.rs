@@ -2,12 +2,12 @@
 //!
 //! The whole argument for the scene renderer is that a display list pushed from
 //! the host can reproduce a hand-written C template *exactly*. This test is that
-//! claim, executed: for each pinned instant it renders the shipped
-//! `DigitalClock` C face through `template_view_show()` and
-//! [`build_digital_clock_scene`]'s scene through `scene_decode()` +
+//! claim, executed: every row in [`cases`] renders one shipped C face through
+//! `template_view_show()` and its host-built scene through `scene_decode()` +
 //! `ui/scene_view.c`, in the same LVGL simulator, and asserts the two 448x368
-//! RGB565 framebuffers are **byte-identical** — at both mount orientations, with
-//! the seconds shown and hidden.
+//! RGB565 framebuffers are **byte-identical**. The initial table carries the
+//! existing `DigitalClock` matrix: every pinned instant at both mount
+//! orientations, with the seconds shown and hidden.
 //!
 //! There is deliberately no tolerance. A fuzzy pixel gate would prove nothing:
 //! "close enough" is the failure mode the scene renderer exists to rule out.
@@ -45,6 +45,25 @@ use lvgl_sim::{
     LOGICAL_HEIGHT, LOGICAL_WIDTH, RenderRequest, SimField, SimFieldValue, SimOrientation,
     SimTemplate, Simulator,
 };
+use std::collections::BTreeSet;
+
+const EXPECTED_TEMPLATES: [SimTemplate; 1] = [SimTemplate::DigitalClock];
+
+struct ParityCase {
+    /// `template--variant--orientation`, used for the PNG dump path on failure.
+    name: String,
+    template: RenderRequest,
+    scene: SceneRenderRequest,
+}
+
+impl ParityCase {
+    /// The template this case compares. Read from `self.template.template`
+    /// rather than parsed back out of `name`, so a mislabelled case cannot
+    /// satisfy the coverage test below while comparing something else.
+    fn template_kind(&self) -> SimTemplate {
+        self.template.template
+    }
+}
 
 /// One instant the gate is run at: the local wall-clock time both halves are
 /// drawn for, and the mount offset that produces it.
@@ -191,56 +210,66 @@ const INSTANTS: &[Instant] = &[
     },
 ];
 
-fn template_request(
-    instant: &Instant,
-    show_seconds: bool,
-    orientation: SimOrientation,
-) -> RenderRequest {
-    RenderRequest {
-        template: SimTemplate::DigitalClock,
-        fields: vec![
-            // `title` is a schema and wire field that no clock face draws
-            // (see digital_clock_patch's comment), carried here because the
-            // host always sends it.
-            SimField {
-                name: "title".to_string(),
-                value: SimFieldValue::Text("Desk".to_string()),
-            },
-            SimField {
-                name: "show_seconds".to_string(),
-                value: SimFieldValue::Boolean(show_seconds),
-            },
-        ],
-        utc_offset_minutes: instant.utc_offset_minutes,
-        now_unix_seconds: instant.now_unix_seconds(),
-        orientation,
+fn cases() -> Vec<ParityCase> {
+    let mut cases = Vec::with_capacity(INSTANTS.len() * 4);
+    for instant in INSTANTS {
+        for show_seconds in [true, false] {
+            for (orientation_slug, orientation) in [
+                ("landscape", SimOrientation::Landscape),
+                ("flipped", SimOrientation::LandscapeFlipped),
+            ] {
+                let seconds_slug = if show_seconds {
+                    "seconds"
+                } else {
+                    "no-seconds"
+                };
+                cases.push(ParityCase {
+                    name: format!(
+                        "digital-clock--{}--{seconds_slug}--{orientation_slug}",
+                        instant.slug
+                    ),
+                    template: RenderRequest {
+                        template: SimTemplate::DigitalClock,
+                        fields: vec![
+                            // `title` is a schema and wire field that no clock face draws
+                            // (see digital_clock_patch's comment), carried here because the
+                            // host always sends it.
+                            SimField {
+                                name: "title".to_string(),
+                                value: SimFieldValue::Text("Desk".to_string()),
+                            },
+                            SimField {
+                                name: "show_seconds".to_string(),
+                                value: SimFieldValue::Boolean(show_seconds),
+                            },
+                        ],
+                        utc_offset_minutes: instant.utc_offset_minutes,
+                        now_unix_seconds: instant.now_unix_seconds(),
+                        orientation,
+                    },
+                    scene: SceneRenderRequest {
+                        scene: build_digital_clock_scene(
+                            &ClockCard {
+                                revision: 1,
+                                show_seconds,
+                                local_now: instant.local_now(),
+                            },
+                            &BakedFontMetrics::SHIPPED,
+                        ),
+                        assets: Vec::new(),
+                        utc_offset_minutes: instant.utc_offset_minutes,
+                        now_unix_seconds: instant.now_unix_seconds(),
+                        // The digital clock has no timer binding; a context with no running
+                        // timer is what the device would carry for this face.
+                        timer: None,
+                        fields: Vec::new(),
+                        orientation,
+                    },
+                });
+            }
+        }
     }
-}
-
-fn scene_request(
-    instant: &Instant,
-    show_seconds: bool,
-    orientation: SimOrientation,
-) -> SceneRenderRequest {
-    let scene = build_digital_clock_scene(
-        &ClockCard {
-            revision: 1,
-            show_seconds,
-            local_now: instant.local_now(),
-        },
-        &BakedFontMetrics::SHIPPED,
-    );
-    SceneRenderRequest {
-        scene,
-        assets: Vec::new(),
-        utc_offset_minutes: instant.utc_offset_minutes,
-        now_unix_seconds: instant.now_unix_seconds(),
-        // The digital clock has no timer binding; a context with no running
-        // timer is what the device would carry for this face.
-        timer: None,
-        fields: Vec::new(),
-        orientation,
-    }
+    cases
 }
 
 /// Where two frames differ, in enough detail to localise the failure without a
@@ -335,72 +364,74 @@ fn write_png(path: &std::path::Path, pixels: &[u16]) -> std::io::Result<()> {
         .map_err(|error| std::io::Error::other(error.to_string()))
 }
 
-/// **The gate.** Every instant in [`INSTANTS`] × seconds shown and hidden ×
-/// both mount orientations, each rendered twice and compared byte for byte.
+/// **The gate.** Every row in [`cases`], rendered twice and compared byte for
+/// byte.
 #[test]
-fn the_host_built_scene_is_byte_identical_to_the_c_digital_clock() {
+fn the_host_built_scenes_are_byte_identical_to_their_c_templates() {
     let mut sim = Simulator::new().expect("simulator");
     let mut failures = Vec::new();
     let mut compared = 0_usize;
+    let cases = cases();
 
-    for instant in INSTANTS {
-        for show_seconds in [true, false] {
-            for (orientation_slug, orientation) in [
-                ("landscape", SimOrientation::Landscape),
-                ("flipped", SimOrientation::LandscapeFlipped),
-            ] {
-                let seconds_slug = if show_seconds {
-                    "seconds"
-                } else {
-                    "no-seconds"
-                };
-                let name = format!(
-                    "digital-clock--{}--{seconds_slug}--{orientation_slug}",
-                    instant.slug
-                );
+    for case in &cases {
+        let template = sim
+            .render(&case.template)
+            .unwrap_or_else(|error| panic!("{}: C template render failed: {error}", case.name));
+        let scene = sim
+            .render_scene(&case.scene)
+            .unwrap_or_else(|error| panic!("{}: scene render failed: {error}", case.name));
+        compared += 1;
 
-                let template = sim
-                    .render(&template_request(instant, show_seconds, orientation))
-                    .unwrap_or_else(|error| panic!("{name}: C template render failed: {error}"));
-                let scene = sim
-                    .render_scene(&scene_request(instant, show_seconds, orientation))
-                    .unwrap_or_else(|error| panic!("{name}: scene render failed: {error}"));
-                compared += 1;
-
-                if let Some(difference) = diff(&template, &scene) {
-                    let samples = difference
-                        .samples
-                        .iter()
-                        .map(|(x, y, left, right)| format!("({x},{y}) {left:#06x}/{right:#06x}"))
-                        .collect::<Vec<_>>()
-                        .join(" ");
-                    failures.push(format!(
-                        "{name}: {} of {} pixels differ, bounding box \
-                         x {}..={} y {}..={}\n  samples (template/scene): {samples}\n{}",
-                        difference.count,
-                        template.len(),
-                        difference.min_x,
-                        difference.max_x,
-                        difference.min_y,
-                        difference.max_y,
-                        dump(&name, &template, &scene),
-                    ));
-                }
-            }
+        if let Some(difference) = diff(&template, &scene) {
+            let samples = difference
+                .samples
+                .iter()
+                .map(|(x, y, left, right)| format!("({x},{y}) {left:#06x}/{right:#06x}"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            failures.push(format!(
+                "{}: {} of {} pixels differ, bounding box \
+                 x {}..={} y {}..={}\n  samples (template/scene): {samples}\n{}",
+                case.name,
+                difference.count,
+                template.len(),
+                difference.min_x,
+                difference.max_x,
+                difference.min_y,
+                difference.max_y,
+                dump(&case.name, &template, &scene),
+            ));
         }
     }
 
     assert_eq!(
         compared,
-        INSTANTS.len() * 4,
-        "every instant is compared with the seconds shown and hidden, at both \
-         mount orientations"
+        cases.len(),
+        "every case in the table must be compared"
     );
     assert!(
         failures.is_empty(),
-        "the host-built scene is not byte-identical to the C DigitalClock:\n{}",
+        "a host-built scene is not byte-identical to its C template:\n{}",
         failures.join("\n")
     );
+}
+
+fn show_seconds(case: &ParityCase) -> Option<bool> {
+    case.template
+        .fields
+        .iter()
+        .find(|field| field.name == "show_seconds")
+        .map(|field| match &field.value {
+            SimFieldValue::Boolean(show_seconds) => *show_seconds,
+            _ => panic!("{}: show_seconds must be a boolean", case.name),
+        })
+}
+
+fn same_render_context(left: &ParityCase, right: &ParityCase) -> bool {
+    left.template_kind() == right.template_kind()
+        && left.template.utc_offset_minutes == right.template.utc_offset_minutes
+        && left.template.now_unix_seconds == right.template.now_unix_seconds
+        && left.template.orientation == right.template.orientation
 }
 
 /// The instant table's whole job is to separate a real agreement from a
@@ -411,6 +442,49 @@ fn the_host_built_scene_is_byte_identical_to_the_c_digital_clock() {
 fn the_instant_table_covers_what_it_claims_to() {
     use chrono::{Datelike, Timelike};
 
+    let cases = cases();
+    let digital_clock_cases = cases
+        .iter()
+        .filter(|case| case.template_kind() == SimTemplate::DigitalClock)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        digital_clock_cases.len(),
+        INSTANTS.len() * 4,
+        "every DigitalClock instant must have seconds shown and hidden at both orientations"
+    );
+
+    for instant in INSTANTS {
+        let matching = digital_clock_cases
+            .iter()
+            .filter(|case| {
+                case.template.utc_offset_minutes == instant.utc_offset_minutes
+                    && case.template.now_unix_seconds == instant.now_unix_seconds()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            matching.len(),
+            4,
+            "{} must appear on all four DigitalClock axes",
+            instant.slug
+        );
+        for orientation in [SimOrientation::Landscape, SimOrientation::LandscapeFlipped] {
+            for expected_show_seconds in [true, false] {
+                assert_eq!(
+                    matching
+                        .iter()
+                        .filter(|case| {
+                            case.template.orientation == orientation
+                                && show_seconds(case) == Some(expected_show_seconds)
+                        })
+                        .count(),
+                    1,
+                    "{} must have exactly one {orientation:?}/show_seconds={expected_show_seconds} row",
+                    instant.slug
+                );
+            }
+        }
+    }
+
     let mut weekdays = std::collections::BTreeSet::new();
     let mut months = std::collections::BTreeSet::new();
     let mut offsets = std::collections::BTreeSet::new();
@@ -418,11 +492,15 @@ fn the_instant_table_covers_what_it_claims_to() {
     let mut single_digit_day = false;
     let mut two_digit_day = false;
 
-    for instant in INSTANTS {
-        let now = instant.local_now();
+    for case in digital_clock_cases {
+        let local_unix_seconds =
+            case.template.now_unix_seconds + i64::from(case.template.utc_offset_minutes) * 60;
+        let now = chrono::DateTime::from_timestamp(local_unix_seconds, 0)
+            .expect("a representable DigitalClock instant")
+            .naive_utc();
         weekdays.insert(now.weekday().num_days_from_monday());
         months.insert(now.month());
-        offsets.insert(instant.utc_offset_minutes);
+        offsets.insert(case.template.utc_offset_minutes);
         hours_mod_12.insert(now.hour() % 12);
         single_digit_day |= now.day() < 10;
         two_digit_day |= now.day() >= 10;
@@ -458,19 +536,21 @@ fn the_instant_table_covers_what_it_claims_to() {
 #[test]
 fn neither_half_of_the_gate_renders_a_blank_canvas() {
     let mut sim = Simulator::new().expect("simulator");
-    let instant = &INSTANTS[0];
-    let template = sim
-        .render(&template_request(instant, true, SimOrientation::Landscape))
-        .expect("C template render");
-    let scene = sim
-        .render_scene(&scene_request(instant, true, SimOrientation::Landscape))
-        .expect("scene render");
-    for (which, pixels) in [("template", &template), ("scene", &scene)] {
-        let background = pixels[0];
-        assert!(
-            pixels.iter().any(|pixel| *pixel != background),
-            "{which} rendered a uniform canvas, so the parity gate would be vacuous"
-        );
+    for case in cases() {
+        let template = sim
+            .render(&case.template)
+            .unwrap_or_else(|error| panic!("{}: C template render failed: {error}", case.name));
+        let scene = sim
+            .render_scene(&case.scene)
+            .unwrap_or_else(|error| panic!("{}: scene render failed: {error}", case.name));
+        for (which, pixels) in [("template", &template), ("scene", &scene)] {
+            let background = pixels[0];
+            assert!(
+                pixels.iter().any(|pixel| *pixel != background),
+                "{}: {which} rendered a uniform canvas, so the parity gate would be vacuous",
+                case.name
+            );
+        }
     }
 }
 
@@ -497,22 +577,62 @@ fn neither_half_of_the_gate_renders_a_blank_canvas() {
 #[test]
 fn hiding_the_seconds_changes_both_halves() {
     let mut sim = Simulator::new().expect("simulator");
-    let instant = &INSTANTS[0];
-    let with = sim
-        .render(&template_request(instant, true, SimOrientation::Landscape))
-        .expect("C template with seconds");
-    let without = sim
-        .render(&template_request(instant, false, SimOrientation::Landscape))
-        .expect("C template without seconds");
-    assert_ne!(with, without, "show_seconds did not change the C face");
+    let cases = cases();
+    let with_seconds = cases
+        .iter()
+        .filter(|case| show_seconds(case) == Some(true))
+        .collect::<Vec<_>>();
+    let without_seconds_count = cases
+        .iter()
+        .filter(|case| show_seconds(case) == Some(false))
+        .count();
+    assert_eq!(
+        with_seconds.len(),
+        without_seconds_count,
+        "every show_seconds=true row must have a false partner"
+    );
+    assert!(
+        !with_seconds.is_empty(),
+        "the table must exercise a show_seconds axis"
+    );
 
-    let with = sim
-        .render_scene(&scene_request(instant, true, SimOrientation::Landscape))
-        .expect("scene with seconds");
-    let without = sim
-        .render_scene(&scene_request(instant, false, SimOrientation::Landscape))
-        .expect("scene without seconds");
-    assert_ne!(with, without, "show_seconds did not change the scene");
+    for with in with_seconds {
+        let partners = cases
+            .iter()
+            .filter(|case| show_seconds(case) == Some(false) && same_render_context(with, case))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            partners.len(),
+            1,
+            "{} must have exactly one show_seconds=false partner",
+            with.name
+        );
+        let without = partners[0];
+
+        let template_with = sim
+            .render(&with.template)
+            .unwrap_or_else(|error| panic!("{}: C template render failed: {error}", with.name));
+        let template_without = sim
+            .render(&without.template)
+            .unwrap_or_else(|error| panic!("{}: C template render failed: {error}", without.name));
+        assert_ne!(
+            template_with, template_without,
+            "{}: show_seconds did not change the C face",
+            with.name
+        );
+
+        let scene_with = sim
+            .render_scene(&with.scene)
+            .unwrap_or_else(|error| panic!("{}: scene render failed: {error}", with.name));
+        let scene_without = sim
+            .render_scene(&without.scene)
+            .unwrap_or_else(|error| panic!("{}: scene render failed: {error}", without.name));
+        assert_ne!(
+            scene_with, scene_without,
+            "{}: show_seconds did not change the scene",
+            with.name
+        );
+    }
 }
 
 /// The single most expensive way to get this gate wrong is to drive the C side
@@ -522,8 +642,10 @@ fn hiding_the_seconds_changes_both_halves() {
 /// entirely, so the mistake would surface as an unexplained band of differing
 /// pixels rather than as a fixture error.
 ///
-/// This pins the hazard directly instead of leaving it to a comment. The face's
-/// lowest drawn element is the two modules, which end at
+/// This pins the hazard directly instead of leaving it to a comment. This
+/// particular blank-strip invariant is specific to `DigitalClock`: later
+/// templates may legitimately use this region. The face's lowest drawn element
+/// is the two modules, which end at
 /// `MODULE_Y + MODULE_H = 176 + 136 = 312`; the state footer would sit at
 /// `LV_ALIGN_BOTTOM_MID` minus `2 * DESKMATE_GRID`, i.e. inside the strip below
 /// it. So every pixel from y=316 down must be the canvas colour, on both sides.
@@ -535,26 +657,56 @@ fn neither_half_draws_anything_in_the_state_footer_strip() {
     const CANVAS: u16 = 0x0000;
 
     let mut sim = Simulator::new().expect("simulator");
-    let instant = &INSTANTS[0];
-    let template = sim
-        .render(&template_request(instant, true, SimOrientation::Landscape))
-        .expect("C template render");
-    let scene = sim
-        .render_scene(&scene_request(instant, true, SimOrientation::Landscape))
-        .expect("scene render");
+    let digital_clock_cases = cases()
+        .into_iter()
+        .filter(|case| case.template_kind() == SimTemplate::DigitalClock)
+        .collect::<Vec<_>>();
+    assert!(
+        !digital_clock_cases.is_empty(),
+        "the table must contain a DigitalClock footer-strip case"
+    );
 
-    for (which, pixels) in [("C template", &template), ("scene", &scene)] {
-        let start = (FOOTER_TOP * LOGICAL_WIDTH) as usize;
-        let lit = pixels[start..]
-            .iter()
-            .filter(|pixel| **pixel != CANVAS)
-            .count();
-        assert_eq!(
-            lit, 0,
-            "{which} drew {lit} lit pixels below y={FOOTER_TOP}. For the C \
-             template that means the fixture bypassed template_view.c's \
-             update_data_state() and is rendering LV_LABEL_DEFAULT_TEXT; for \
-             the scene it means a node moved into the footer strip"
-        );
+    for case in digital_clock_cases {
+        let template = sim
+            .render(&case.template)
+            .unwrap_or_else(|error| panic!("{}: C template render failed: {error}", case.name));
+        let scene = sim
+            .render_scene(&case.scene)
+            .unwrap_or_else(|error| panic!("{}: scene render failed: {error}", case.name));
+
+        for (which, pixels) in [("C template", &template), ("scene", &scene)] {
+            let start = (FOOTER_TOP * LOGICAL_WIDTH) as usize;
+            let lit = pixels[start..]
+                .iter()
+                .filter(|pixel| **pixel != CANVAS)
+                .count();
+            assert_eq!(
+                lit, 0,
+                "{}: {which} drew {lit} lit pixels below y={FOOTER_TOP}. For the C \
+                 template that means the fixture bypassed template_view.c's \
+                 update_data_state() and is rendering LV_LABEL_DEFAULT_TEXT; for \
+                 the scene it means a node moved into the footer strip",
+                case.name
+            );
+        }
     }
+}
+
+/// Every template this stage claims to reproduce must actually appear in the
+/// table. Without this, deleting a task's rows leaves a green gate that proves
+/// nothing about that template.
+#[test]
+fn the_table_covers_every_template_this_stage_claims() {
+    // `SimTemplate` deliberately has equality but no ordering trait, so use
+    // its stable debug name as the ordered set key while keeping the source of
+    // truth in `template_kind()` and `EXPECTED_TEMPLATES`.
+    let covered: BTreeSet<_> = cases()
+        .iter()
+        .map(|case| format!("{:?}", case.template_kind()))
+        .collect();
+    let expected: BTreeSet<_> = EXPECTED_TEMPLATES
+        .iter()
+        .map(|template| format!("{template:?}"))
+        .collect();
+    assert_eq!(covered, expected);
 }

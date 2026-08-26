@@ -285,7 +285,26 @@ of letting code and documentation diverge.
     not a defect in code the two share. Its `text` node case cannot run at all: it binds
     `field.status`, and device `PushData` retains only fields some built-in template
     registers, none of which registers `status`.
-  - **Nothing has drawn on hardware.** Also unproven: `timer.remaining`/`timer.pct` have no pixel
+  - **The renderer has drawn on the panel (2026-08-25/26), and stage 2a's exit criteria are
+    all met.** The server pushed a scene over the tunnel on the release image and the panel
+    showed a ticking seconds field with no artifacts -- conclusive, because the saved config
+    has `show_seconds: false`, so the C template cannot draw seconds. **Not** confirmed: the
+    date line, and 90 degrees. Task 11's byte-exact half is **deferred, not owed** (see the
+    plan for the three reasons); the harness is written and runnable.
+  - **That check found a host-side defect no test here could see** (`95ed9eb`): `SocketPeer`
+    took the pending waiter *before* comparing request ids, so one late reply failed the
+    NEXT request, whose late reply failed the one after -- a cascade ending only when
+    traffic stopped. The same shape was latent in `DeviceClient` and `DeviceSession`, i.e.
+    over the cable too. **Decode first, correlate second**: screening on the request id
+    before decoding lets an undecodable frame skip the check that closes the link, which
+    `hostile_device.rs` catches. After the fix: 20/20 pushes at 5 s, `dropped_responses` 0.
+  - **Sharp edge, deliberately unfixed:** the device gives `esp_websocket_client_send_bin`
+    `PROTOCOL_WRITE_TIMEOUT_MS` = **200 ms** to deliver a reply the host waits **2000 ms**
+    for, so a transient stall destroys a reply the host would still accept. No evidence it
+    bites at realistic cadence. If it ever needs fixing, add a per-transport write budget
+    beside `link_transport_t`'s `link_timeout_ms` and leave USB at 200 ms -- and budget for
+    the OTA re-verification any firmware change requires.
+  - Still unproven: `timer.remaining`/`timer.pct` have no pixel
     coverage; only `DigitalClock` is reproduced, so `deskmate_number_font()`'s tier step-down is
     never exercised and `BakedFontMetrics::measure()` is checked at exactly one string width;
     the date box's truncation is unexercised; and the asset-GC teardown has **no automated

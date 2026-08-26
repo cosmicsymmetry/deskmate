@@ -3525,3 +3525,27 @@ template view back over a pushed scene — so a scene must be re-asserted inside
 window, or the playlist paused (`preferences.paused` gates the device send, though
 rotation still advances locally). `card_id` need not name a configured card:
 `dispatch_push_scene` uses it only to scope `field.`/`timer.` binding lookups.
+
+### Reliability after the correlation fix — 2026-08-26
+
+Re-measured with the fixed server deployed (`6a51dc2`), same device, same link, same
+scene: **20 of 20 pushes accepted at 5 s intervals, `dropped_responses` 0.** Compare
+the pre-fix runs: 7 of 19 at 3 s, and 4 of 9 at 20 s. The host-side cascade was the
+entire failure.
+
+**The 200 ms write budget is therefore an unproven suspect, and is deliberately NOT being
+changed.** It remains a genuine asymmetry worth knowing about: `net_link_write_frame`
+gives `esp_websocket_client_send_bin` `PROTOCOL_WRITE_TIMEOUT_MS` = 200 ms
+(`protocol_task.c:53`) to deliver a reply the host will wait a full 2000 ms for, so any
+transient TLS stall or websocket-client lock contention destroys a reply the host would
+still have accepted. The clean fix, if it is ever needed, is a per-transport write budget
+beside `link_transport_t`'s existing `link_timeout_ms`, leaving USB at 200 ms. It is not
+being made now because a firmware change costs an OTA-download re-verification, which on
+this board needs a physical power cycle (the device checks twice a day, cannot be asked,
+and the battery means a USB unplug is not a power loss) — and there is currently no
+evidence the timeout ever bites at realistic cadence. The 11 drops seen on 2026-08-25
+occurred during a 3 s burst that was also mid-cascade, so they cannot be attributed to
+the timeout alone.
+
+Note the device rebooted between the two sessions (uptime 2 h 08 m → 1 h 00 m), so the
+2026-08-26 counters are fresh rather than cumulative.

@@ -1231,12 +1231,35 @@ Minimal, per the owner's standing direction that hardware checks are kept small:
       and marked itself valid. Recorded as transient rather than the `.bss` hazard,
       because that hazard is deterministic -- see `docs/hardware/board-notes.md`,
       "Scene renderer OTA + boot -- verified 2026-08-25".
-- [ ] **The scene on the panel, over the shipping path** (see the Task 11a amendment
-      above, which splits this line in two and states what each half proves). Needs Task
-      10b: the 2026-08-25 session found that no host can send a `PushScene` at all.
-- [ ] **Byte-exact parity on the panel, both orientations.** Needs Task 11a's harness.
-- [ ] Record both in `docs/hardware/board-notes.md`, stating plainly what was observed and
-      what was not.
+- [x] **The scene on the panel, over the shipping path.** **PASSED 2026-08-25/26.** The
+      server pushed `build_digital_clock_scene`'s scene to `dev-0005` over
+      `deskmate.rodi.one`, on the release image in networked tier, and the panel drew a
+      **ticking seconds field** with no artifacts. Conclusive because the saved config
+      carries `show_seconds: false`, so the shipped C template cannot draw seconds --
+      decode, validate, interpret and LVGL all ran on the device against real baked fonts.
+      Not confirmed: the date line, and 90 degrees. See `docs/hardware/board-notes.md`.
+- [~] **Byte-exact parity on the panel, both orientations.** **DEFERRED, not owed.** The
+      harness is written and runnable (Task 11a). It is not being run at stage 2a exit, on
+      three grounds: it costs a device identity plus two flashes; its evidence is narrower
+      than this plan first claimed, since `lvgl-sim` compiles the same firmware C *and*
+      links the same baked fonts, leaving it sensitive only to target codegen, ESP-IDF's
+      LVGL configuration and memory behaviour; and it cannot speak to the physical
+      270-degree transform at all, because the 0x7E capture is pre-flush. The claim it
+      would strengthen -- that the interpreter reproduces the C template -- is already
+      carried by the byte-identical host parity gate plus the panel observation above.
+      Run it when a defect makes target-specific rendering a live suspicion.
+- [x] Record both in `docs/hardware/board-notes.md`, stating plainly what was observed and
+      what was not. Done: "Scene renderer OTA + boot" and "The scene renderer draws on the
+      panel", both 2026-08-25.
+
+**The panel check found a real defect, which is the whole reason it exists.** Pushing
+scenes exposed a host-side request-correlation cascade -- `SocketPeer` took the pending
+waiter before comparing request ids, so one late reply failed the *next* request, whose
+late reply failed the one after it, indefinitely. Fixed in `95ed9eb`, and the same shape
+was latent in the two serial paths the Mac app uses. Re-measured after the fix: **20 of 20
+scene pushes accepted at 5 s intervals with `dropped_responses` at 0.** No test in this
+repository could have found it; it needed a real device that is occasionally slow to
+answer.
 
 ### Running Task 11 (added 2026-08-25, when both halves became runnable)
 

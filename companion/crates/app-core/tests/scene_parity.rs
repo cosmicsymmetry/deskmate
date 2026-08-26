@@ -39,8 +39,8 @@
 //! [`build_digital_clock_scene`]'s own doc comment.
 
 use app_core::scene_build::{
-    BakedFontMetrics, BigNumberCard, ClockCard, build_big_number_label_scene,
-    build_digital_clock_scene,
+    BakedFontMetrics, BigNumberCard, ClockCard, RowListCard, build_big_number_label_scene,
+    build_digital_clock_scene, build_row_list_scene,
 };
 use chrono::{NaiveDate, NaiveDateTime};
 use lvgl_sim::scene::SceneRenderRequest;
@@ -50,8 +50,11 @@ use lvgl_sim::{
 };
 use std::collections::BTreeSet;
 
-const EXPECTED_TEMPLATES: [SimTemplate; 2] =
-    [SimTemplate::DigitalClock, SimTemplate::BigNumberLabel];
+const EXPECTED_TEMPLATES: [SimTemplate; 3] = [
+    SimTemplate::DigitalClock,
+    SimTemplate::BigNumberLabel,
+    SimTemplate::RowList,
+];
 
 /// `big_number_label.c`'s `CONTENT_WIDTH`.
 const BIG_NUMBER_CONTENT_WIDTH: i32 = 448 - 2 * 24;
@@ -323,6 +326,132 @@ fn add_big_number_cases(cases: &mut Vec<ParityCase>) {
     }
 }
 
+type RowListRows<'a> = [(&'a str, &'a str); 5];
+
+fn row_list_fields(rows: RowListRows<'_>) -> Vec<SimField> {
+    [SimField {
+        name: "title".to_string(),
+        value: SimFieldValue::Text("Calendar".to_string()),
+    }]
+    .into_iter()
+    .chain(rows.iter().enumerate().flat_map(|(index, (title, time))| {
+        [
+            (!title.is_empty()).then(|| SimField {
+                name: format!("row{index}_title"),
+                value: SimFieldValue::Text((*title).to_string()),
+            }),
+            (!time.is_empty()).then(|| SimField {
+                name: format!("row{index}_time"),
+                value: SimFieldValue::Text((*time).to_string()),
+            }),
+        ]
+        .into_iter()
+        .flatten()
+    }))
+    .collect()
+}
+
+fn row_list_card(rows: RowListRows<'_>) -> RowListCard<'_> {
+    RowListCard {
+        revision: 1,
+        title: "Calendar",
+        row0_title: rows[0].0,
+        row0_time: rows[0].1,
+        row1_title: rows[1].0,
+        row1_time: rows[1].1,
+        row2_title: rows[2].0,
+        row2_time: rows[2].1,
+        row3_title: rows[3].0,
+        row3_time: rows[3].1,
+        row4_title: rows[4].0,
+        row4_time: rows[4].1,
+    }
+}
+
+fn add_row_list_cases(cases: &mut Vec<ParityCase>) {
+    const EMPTY_ROWS: RowListRows<'static> = [("", ""); 5];
+    const FIVE_ROWS: RowListRows<'static> = [
+        ("Standup", "09:00"),
+        ("Design Review", "10:30"),
+        ("Lunch with Sam", "12:00"),
+        ("1:1 with Manager", "14:00"),
+        ("Sprint Planning", "16:00"),
+    ];
+    const ONE_ROW: RowListRows<'static> =
+        [("Standup", "09:00"), ("", ""), ("", ""), ("", ""), ("", "")];
+
+    // Selected empirically against the shipped BODY face after the builder
+    // exists; BakedFontMetrics deliberately has no kerning-aware BODY-width
+    // table, so pretending to calculate this boundary on the host would be
+    // dishonest. The next string adds exactly one glyph.
+    const ELLIPSIS_EXACT_FIT: &str = "WWWWWWWWW";
+    const ELLIPSIS_ONE_PAST: &str = "WWWWWWWWWW";
+    const EXACT_FIT_ROWS: RowListRows<'static> = [
+        (ELLIPSIS_EXACT_FIT, "09:00"),
+        ("", ""),
+        ("", ""),
+        ("", ""),
+        ("", ""),
+    ];
+    const ONE_PAST_ROWS: RowListRows<'static> = [
+        (ELLIPSIS_ONE_PAST, "09:00"),
+        ("", ""),
+        ("", ""),
+        ("", ""),
+        ("", ""),
+    ];
+
+    let hardware_excluded_title: String = "Boundary-".chars().cycle().take(128).collect();
+    let hardware_excluded_rows: RowListRows<'_> = [
+        (&hardware_excluded_title, "09:00"),
+        ("", ""),
+        ("", ""),
+        ("", ""),
+        ("", ""),
+    ];
+
+    let variants = [
+        ("five-rows", FIVE_ROWS),
+        ("fewer-than-five", ONE_ROW),
+        ("empty", EMPTY_ROWS),
+        // This simulator parity case intentionally pins row0_title at 128
+        // characters, above that field's 96-byte registry maximum. Hardware
+        // rejects the push, which is why framebuffer_diff excludes it; the
+        // simulator has no such ceiling, so this gate must retain the
+        // coverage.
+        ("truncation-boundary", hardware_excluded_rows),
+        ("ellipsis-exact-fit", EXACT_FIT_ROWS),
+        ("truncation-one-past", ONE_PAST_ROWS),
+    ];
+
+    for (slug, rows) in variants {
+        for (orientation_slug, orientation) in [
+            ("landscape", SimOrientation::Landscape),
+            ("flipped", SimOrientation::LandscapeFlipped),
+        ] {
+            cases.push(ParityCase {
+                name: format!("row-list--{slug}--{orientation_slug}"),
+                template: RenderRequest {
+                    template: SimTemplate::RowList,
+                    fields: row_list_fields(rows),
+                    utc_offset_minutes: 0,
+                    now_unix_seconds: 0,
+                    orientation,
+                },
+                scene: SceneRenderRequest {
+                    scene: build_row_list_scene(&row_list_card(rows), &BakedFontMetrics::SHIPPED),
+                    assets: Vec::new(),
+                    utc_offset_minutes: 0,
+                    now_unix_seconds: 0,
+                    timer: None,
+                    fields: Vec::new(),
+                    orientation,
+                },
+            });
+        }
+    }
+}
+
 fn cases() -> Vec<ParityCase> {
     let mut cases = Vec::new();
     for instant in INSTANTS {
@@ -384,6 +513,7 @@ fn cases() -> Vec<ParityCase> {
     }
 
     add_big_number_cases(&mut cases);
+    add_row_list_cases(&mut cases);
     cases
 }
 

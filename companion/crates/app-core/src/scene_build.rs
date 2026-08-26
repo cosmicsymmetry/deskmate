@@ -30,7 +30,7 @@
 
 use chrono::{Datelike, NaiveDateTime, Timelike};
 use protocol::{
-    SCENE_CANVAS_HEIGHT, SCENE_CANVAS_WIDTH, Scene, SceneAlign, SceneFont, SceneFontTier,
+    SCENE_CANVAS_HEIGHT, SCENE_CANVAS_WIDTH, Scene, SceneAlign, SceneArc, SceneFont, SceneFontTier,
     SceneLabel, SceneLabelAnchor, SceneLine, SceneNode, SceneRect, SceneScale, SceneText,
     SceneValue,
 };
@@ -54,6 +54,8 @@ const CHIP_HEIGHT: i32 = 4 * GRID;
 const COLOR_CANVAS: u32 = 0x0000_0000;
 /// `DESKMATE_COLOR_PRIMARY`.
 const COLOR_PRIMARY: u32 = 0x00f5_f5f7;
+/// `DESKMATE_COLOR_TERTIARY`.
+const COLOR_TERTIARY: u32 = 0x005c_5c66;
 /// `DESKMATE_COLOR_SURFACE`.
 const COLOR_SURFACE: u32 = 0x001a_1a1f;
 /// `deskmate_palette(PROTOCOL_TEMPLATE_DIGITAL_CLOCK).hue`. Both clock faces
@@ -65,6 +67,45 @@ const BIG_NUMBER_HUE: u32 = 0x008b_6cff;
 const BIG_NUMBER_TINT: u32 = 0x00c0_b0ff;
 /// `deskmate_palette(PROTOCOL_TEMPLATE_BIG_NUMBER_LABEL).ink`.
 const BIG_NUMBER_INK: u32 = 0x000f_0726;
+/// `deskmate_palette(PROTOCOL_TEMPLATE_ROW_LIST).hue`.
+const ROW_LIST_HUE: u32 = 0x002f_d9c0;
+/// `deskmate_palette(PROTOCOL_TEMPLATE_ROW_LIST).ink`.
+const ROW_LIST_INK: u32 = 0x0004_211d;
+
+// ---------------------------------------------------------------------------
+// row_list.c's own geometry. Ported, not re-derived.
+// ---------------------------------------------------------------------------
+
+/// `ROW_FIRST_Y`.
+const ROW_FIRST_Y: i32 = 7 * GRID;
+/// `ROW_PITCH`.
+const ROW_PITCH: i32 = 7 * GRID;
+/// `ROW_HEIGHT`.
+const ROW_HEIGHT: i32 = 6 * GRID;
+/// `ROW_X`.
+const ROW_X: i32 = MARGIN;
+/// `ROW_WIDTH`.
+const ROW_WIDTH: i32 = SCENE_CANVAS_WIDTH - 2 * MARGIN;
+/// `BAR_X`.
+const ROW_BAR_X: i32 = GRID;
+/// `BAR_WIDTH`.
+const ROW_BAR_WIDTH: i32 = 4;
+/// `BAR_HEIGHT`.
+const ROW_BAR_HEIGHT: i32 = 4 * GRID;
+/// `TIME_X`.
+const ROW_TIME_X: i32 = 3 * GRID;
+/// `TIME_WIDTH`.
+const ROW_TIME_WIDTH: i32 = 11 * GRID;
+/// `TITLE_X`.
+const ROW_TITLE_X: i32 = 16 * GRID;
+/// `TITLE_WIDTH`.
+const ROW_TITLE_WIDTH: i32 = ROW_WIDTH - ROW_TITLE_X - 2 * GRID;
+/// `COUNT_BOX`.
+const ROW_COUNT_BOX: i32 = 4 * GRID;
+/// `COUNT_X`.
+const ROW_COUNT_X: i32 = SCENE_CANVAS_WIDTH - MARGIN - ROW_COUNT_BOX;
+/// `lv_obj_set_style_border_width(OBJ_COUNT, 2, 0)`.
+const ROW_COUNT_BORDER_WIDTH: i32 = 2;
 
 // ---------------------------------------------------------------------------
 // digital_clock.c's own geometry. Ported, not re-derived.
@@ -379,6 +420,35 @@ pub struct BigNumberCard<'a> {
     pub value: &'a str,
     /// `big_number_label_patch()`'s `label` field.
     pub label: &'a str,
+}
+
+/// The card-level inputs `row_list.c` draws from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RowListCard<'a> {
+    /// Echoed as the scene's own revision.
+    pub revision: u32,
+    /// `row_list_patch()`'s `title` field.
+    pub title: &'a str,
+    /// `row_list_patch()`'s `row0_title` field.
+    pub row0_title: &'a str,
+    /// `row_list_patch()`'s `row0_time` field.
+    pub row0_time: &'a str,
+    /// `row_list_patch()`'s `row1_title` field.
+    pub row1_title: &'a str,
+    /// `row_list_patch()`'s `row1_time` field.
+    pub row1_time: &'a str,
+    /// `row_list_patch()`'s `row2_title` field.
+    pub row2_title: &'a str,
+    /// `row_list_patch()`'s `row2_time` field.
+    pub row2_time: &'a str,
+    /// `row_list_patch()`'s `row3_title` field.
+    pub row3_title: &'a str,
+    /// `row_list_patch()`'s `row3_time` field.
+    pub row3_time: &'a str,
+    /// `row_list_patch()`'s `row4_title` field.
+    pub row4_title: &'a str,
+    /// `row_list_patch()`'s `row4_time` field.
+    pub row4_time: &'a str,
 }
 
 /// `timefmt.c`'s `DOW`, which `digital_clock_tick()` indexes with
@@ -696,6 +766,170 @@ pub fn build_big_number_label_scene(card: &BigNumberCard<'_>, metrics: &BakedFon
             hide_when_empty: true,
         }),
     ];
+
+    Scene {
+        revision: card.revision,
+        background: COLOR_CANVAS,
+        nodes,
+    }
+}
+
+/// Converts a row child's coordinates from its module-local frame to the
+/// scene's absolute canvas frame. `row_list.c` parents the bar and two labels
+/// to the row module; scene nodes are all siblings at the canvas origin.
+fn row_child_origin(row_y: i32, local_x: i32, local_y: i32) -> (i32, i32) {
+    (ROW_X + local_x, row_y + local_y)
+}
+
+fn push_row_nodes(
+    nodes: &mut Vec<SceneNode>,
+    row: usize,
+    title: &str,
+    time: &str,
+    metrics: &BakedFontMetrics,
+) {
+    if title.is_empty() {
+        return;
+    }
+
+    let row = i32::try_from(row).expect("the row-list has exactly five rows");
+    let row_y = ROW_FIRST_Y + row * ROW_PITCH;
+    nodes.push(SceneNode::Rect(SceneRect {
+        x: ROW_X,
+        y: row_y,
+        w: ROW_WIDTH,
+        h: ROW_HEIGHT,
+        // `row_list_create()` overrides `deskmate_module()`'s radius.
+        radius: 2 * GRID,
+        fill: COLOR_SURFACE,
+        opacity: u8::MAX,
+    }));
+
+    let (bar_x, bar_y) = row_child_origin(row_y, ROW_BAR_X, (ROW_HEIGHT - ROW_BAR_HEIGHT) / 2);
+    nodes.push(SceneNode::Rect(SceneRect {
+        x: bar_x,
+        y: bar_y,
+        w: ROW_BAR_WIDTH,
+        h: ROW_BAR_HEIGHT,
+        radius: ROW_BAR_WIDTH / 2,
+        fill: ROW_LIST_HUE,
+        opacity: u8::MAX,
+    }));
+
+    let text_y = (ROW_HEIGHT - metrics.tier(SceneFontTier::Body).line_height) / 2;
+    let (time_x, text_top) = row_child_origin(row_y, ROW_TIME_X, text_y);
+    nodes.push(SceneNode::Text(SceneText {
+        x: time_x,
+        baseline_y: text_top + metrics.baseline_offset(SceneFontTier::Body),
+        w: ROW_TIME_WIDTH,
+        align: SceneAlign::Left,
+        font: SceneFont::Baked(SceneFontTier::Body),
+        color: ROW_LIST_HUE,
+        value: SceneValue::Literal(time.to_string()),
+        ellipsize: true,
+    }));
+
+    let (title_x, _) = row_child_origin(row_y, ROW_TITLE_X, text_y);
+    nodes.push(SceneNode::Text(SceneText {
+        x: title_x,
+        baseline_y: text_top + metrics.baseline_offset(SceneFontTier::Body),
+        w: ROW_TITLE_WIDTH,
+        align: SceneAlign::Left,
+        font: SceneFont::Baked(SceneFontTier::Body),
+        color: COLOR_PRIMARY,
+        value: SceneValue::Literal(title.to_string()),
+        ellipsize: true,
+    }));
+}
+
+/// Builds the whole `RowList` face as a scene.
+///
+/// The count border is deliberately represented by a nominal full-turn arc:
+/// the C draws a 2px circular `lv_obj` border, while the existing scene model
+/// has no border field. The parity gate is the authority on whether LVGL's arc
+/// and border drawing paths produce the same pixels; the radius and width here
+/// are the C object's unadjusted `COUNT_BOX / 2` and border width, not tuned.
+pub fn build_row_list_scene(card: &RowListCard<'_>, metrics: &BakedFontMetrics) -> Scene {
+    let rows = [
+        (card.row0_title, card.row0_time),
+        (card.row1_title, card.row1_time),
+        (card.row2_title, card.row2_time),
+        (card.row3_title, card.row3_time),
+        (card.row4_title, card.row4_time),
+    ];
+    let shown = rows.iter().filter(|(title, _)| !title.is_empty()).count();
+    let mut nodes = Vec::with_capacity(23);
+
+    nodes.push(SceneNode::Label(SceneLabel {
+        x: MARGIN,
+        y: 2 * GRID,
+        horizontal_anchor: SceneLabelAnchor::Left,
+        font: SceneFont::Baked(SceneFontTier::Caption),
+        value: SceneValue::Literal(card.title.to_string()),
+        ink: ROW_LIST_INK,
+        fill: ROW_LIST_HUE,
+        fill_opacity: u8::MAX,
+        radius: RADIUS_CHIP,
+        pad_hor: 2 * GRID,
+        pad_ver: (CHIP_HEIGHT - metrics.tier(SceneFontTier::Caption).line_height) / 2,
+        letter_space: 1,
+        hide_when_empty: true,
+    }));
+
+    if shown > 0 {
+        nodes.push(SceneNode::Arc(SceneArc {
+            cx: ROW_COUNT_X + ROW_COUNT_BOX / 2,
+            cy: 2 * GRID + ROW_COUNT_BOX / 2,
+            r: ROW_COUNT_BOX / 2,
+            start_deg: 270,
+            end_deg: 630,
+            width: ROW_COUNT_BORDER_WIDTH,
+            color: ROW_LIST_HUE,
+            rounded: false,
+            end_binding: String::new(),
+        }));
+
+        let count_pad_top = (ROW_COUNT_BOX - metrics.tier(SceneFontTier::Caption).line_height) / 2;
+        nodes.push(SceneNode::Text(SceneText {
+            x: ROW_COUNT_X,
+            baseline_y: 2 * GRID
+                + ROW_COUNT_BORDER_WIDTH
+                + count_pad_top
+                + metrics.baseline_offset(SceneFontTier::Caption),
+            w: ROW_COUNT_BOX,
+            align: SceneAlign::Center,
+            font: SceneFont::Baked(SceneFontTier::Caption),
+            color: ROW_LIST_HUE,
+            value: SceneValue::Literal(shown.to_string()),
+            ellipsize: false,
+        }));
+
+        for (row, (title, time)) in rows.into_iter().enumerate() {
+            push_row_nodes(&mut nodes, row, title, time, metrics);
+        }
+    } else {
+        nodes.push(SceneNode::Rect(SceneRect {
+            x: ROW_X,
+            y: ROW_FIRST_Y,
+            w: ROW_WIDTH,
+            h: ROW_HEIGHT,
+            radius: 2 * GRID,
+            fill: COLOR_SURFACE,
+            opacity: u8::MAX,
+        }));
+        let text_y = (ROW_HEIGHT - metrics.tier(SceneFontTier::Body).line_height) / 2;
+        let (text_x, text_top) = row_child_origin(ROW_FIRST_Y, ROW_TIME_X, text_y);
+        nodes.push(SceneNode::Text(SceneText {
+            x: text_x,
+            baseline_y: text_top + metrics.baseline_offset(SceneFontTier::Body),
+            w: ROW_WIDTH - 2 * ROW_TIME_X,
+            align: SceneAlign::Left,
+            font: SceneFont::Baked(SceneFontTier::Body),
+            color: COLOR_TERTIARY,
+            value: SceneValue::Literal("Nothing to show".to_string()),
+            ellipsize: true,
+        }));
+    }
 
     Scene {
         revision: card.revision,

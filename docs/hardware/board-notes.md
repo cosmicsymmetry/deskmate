@@ -3456,3 +3456,72 @@ and **the server cannot push a scene** — no file under
 `companion/crates/server/src/` references `PushScene`, `Scene` or
 `encode_scene_payload`, and `build_digital_clock_scene`'s only caller is the
 parity test. The device can receive and render one; nothing sends one yet.
+
+## The scene renderer draws on the panel — verified 2026-08-25
+
+**First time a host-built scene has ever rendered on the physical display.** The
+server pushed `build_digital_clock_scene`'s `DigitalClock` scene to `dev-0005`
+over `deskmate.rodi.one` via the new `POST /v1/devices/{id}/scene`, on
+`v2.0.0-scene1` in networked tier — the release image, over the shipping path,
+with no flash and no tier change.
+
+**Observed: a ticking seconds field, and no visual artifacts.** That is
+conclusive on its own. The saved config carries `show_seconds: false` (confirmed
+in the server's snapshot for the clock card), so the shipped C `digital_clock`
+template cannot draw seconds. Seconds on the panel can only have come from the
+pushed scene, which means `scene_decode()` → `scene_model_validate()` →
+`scene_view.c` → LVGL all ran correctly on the device against real baked fonts.
+
+### Not verified — do not describe these as observed
+
+- **The date line was not confirmed.** The scene pinned `local_now` to
+  `2019-07-04`, so a correct render reads `Thu, Jul 4`; the observer did not
+  report the date either way. The date is the host-computed static, so confirming
+  it would have pinned `BakedFontMetrics::measure()` and the date box on hardware.
+- **Only 270 degrees was exercised.** The device's saved rotation is 270. 90 was
+  never pushed, so nothing here speaks to the other mount.
+- **No pixel claim of any kind.** This was an eyeball observation over a webcam-less
+  session. Byte-exact interpreter parity is Task 11a's harness, which is written
+  and still unrun.
+
+### The defect this found: a late reply fails the NEXT request
+
+Pushing every 3 s produced 7 acks and then 12 straight failures; pushing every
+20 s produced this:
+
+```
+07:37:27 rev 100: HTTP 200
+07:38:09 rev 102: HTTP 502 -- response request ID mismatch (expected 472, received 471)
+07:38:32 rev 103: HTTP 502 -- response request ID mismatch (expected 485, received 478)
+07:39:16 rev 105: HTTP 502 -- device request timed out
+```
+
+Root-caused to `SocketPeer`'s read loop taking the pending waiter **before**
+comparing request ids, so a late reply to an abandoned request failed whichever
+request was in flight — self-sustaining until traffic stopped. The drift from one
+behind to seven behind is the cascade widening. Fixed in `95ed9eb`; the same
+shape was latent in `DeviceClient` and `DeviceSession`, i.e. over the cable too.
+
+**The device was never at fault.** `malformed_frames: 0`, `overflow_frames: 0`,
+`ui_queue_high_water: 2`, no reboot across 2 h of uptime, and full recovery every
+time traffic stopped. Two device-side facts are worth carrying forward anyway:
+
+1. `dropped_responses` reached 11, and it increments only when
+   `protocol_message_encode` fails or `write_frame` misses
+   **`PROTOCOL_WRITE_TIMEOUT_MS`, which is 200 ms** (`protocol_task.c:53`). An Ack
+   is far too small to fail encoding, so the device genuinely could not write
+   those replies inside 200 ms. Whether that is marginal RF (RSSI -77 here) or
+   internal-DRAM pressure on the TLS/AES path is **undetermined** — see below.
+   The correlation fix stops the cascade; it does not make the device faster.
+2. **The missing internal-DRAM number blocked this diagnosis, for the second time
+   in 24 hours.** The 2026-08-25 OTA entry already recorded that nothing reports
+   free internal DRAM and that it is "precisely the number that would separate
+   this failure class from RF without bisecting builds". `free_heap` reads ~8.3 MB
+   of PSRAM and says nothing. Adding it to `StatusResponse` is additive and cheap.
+
+Operational notes for the next session: the active playlist rotates every **50 s**
+(`default_dwell_seconds`), and each tick sends `ActivateScreen`, which puts a
+template view back over a pushed scene — so a scene must be re-asserted inside that
+window, or the playlist paused (`preferences.paused` gates the device send, though
+rotation still advances locally). `card_id` need not name a configured card:
+`dispatch_push_scene` uses it only to scope `field.`/`timer.` binding lookups.

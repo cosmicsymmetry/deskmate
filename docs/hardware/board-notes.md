@@ -3606,3 +3606,34 @@ The release-config same-tree comparison is still byte-flat in all four internal
 memory figures: `.bss` **102,624 → 102,624**, `.data` **23,128 → 23,128**, IRAM
 **16,384 → 16,384**, and DIRAM `.text` **93,635 → 93,635**. Flash code and total
 image size each grew by 144 bytes; `deskmate.bin` moved `0x1878f0 → 0x187980`.
+
+## Stage 2b OTA check — PASSED 2026-08-26
+
+`v2.0.0-scene2`, the image carrying scene node kinds 8 (`Label`) and 9
+(`RotRect`) plus the label's horizontal anchor, downloaded and installed on
+`dev-0005` over `deskmate.rodi.one` on the first attempt. Observed immediately
+after: `firmware_version: v2.0.0-scene2`, `uptime_ms: 110116`, `ota_state: idle`,
+`last_ota_error: null`, link connected. It survived the rollback window on the
+new slot, the same evidence standard the 2026-08-25 entry used.
+
+**This is the whole hardware cost of stage 2b.** Every remaining task in
+`docs/superpowers/plans/2026-08-26-deskmate-scene-templates.md` is host-only.
+
+Two things this run confirms beyond the download itself:
+
+1. **Flat internal RAM predicted a clean OTA, for the first time deliberately.**
+   `.bss` 102,624, DIRAM `.text` 93,635, `.data` 23,128 and IRAM 16,384 were all
+   byte-flat across the change, verified before and after on the same tree. The
+   two failures this repository has paid for — the V1 boot crash-loop and
+   `3f2aa03` — were both internal-DRAM layout shifts. Holding all four figures
+   flat and then seeing a first-attempt download is the first time that
+   relationship has been used as a prediction rather than read backwards from a
+   failure. It is one data point, not a law: keep running the check.
+2. **A power cycle alone proves nothing if nothing is published.** An earlier
+   cycle the same day found no update, because `DESKMATE_FIRMWARE_VERSION` still
+   named the version the device was already running. The device checked, matched,
+   and correctly did nothing. Publishing is three steps and all three are
+   required: put `<version>.bin` in `$DESKMATE_FIRMWARE_DIR`, set
+   `DESKMATE_FIRMWARE_VERSION` to that string, restart the server. Then power
+   cycle — the device checks once at boot and twice a day, cannot be asked, and a
+   USB unplug is link loss rather than power loss because the board has a battery.

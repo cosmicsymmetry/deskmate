@@ -562,9 +562,14 @@ pub struct SceneLabel {
       same-tree release build remains flat: `.bss` 102,624, `.data` 23,128, IRAM 16,384,
       and DIRAM `.text` 93,635. Step 9 has not run; this follow-up is intended to ride that
       same image.
-- [ ] **Step 9 (owner, hardware): one OTA download on the board**, exactly as the original
-      Task 6 Step 9 specified — publish, move `firmware/version.txt` to match, power-cycle.
-      **This is the whole hardware cost of stage 2b.**
+- [x] **Step 9 (owner, hardware): one OTA download on the board.** **PASSED 2026-08-26**
+      on `v2.0.0-scene2`, first attempt, over `deskmate.rodi.one`: downloaded, installed,
+      rebooted onto the new slot and survived the rollback window
+      (`last_ota_error: null`, `ota_state: idle`). **The whole hardware cost of stage 2b is
+      now spent; every remaining task is host-only.** Recorded in
+      `docs/hardware/board-notes.md`. Note an earlier power cycle that day proved nothing
+      because nothing was published — publishing is three steps, and the catalog offering
+      the version the device already runs is indistinguishable from no update.
 
 ### What this changes about the template tasks
 

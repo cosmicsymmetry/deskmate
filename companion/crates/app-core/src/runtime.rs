@@ -1363,12 +1363,18 @@ fn process_command(
             let _ = reply.send(result);
         }
         RuntimeCommand::SetPaused { paused, reply } => {
+            let was_paused = state.config.preferences.paused;
             state.config.preferences.paused = paused;
             state.runtime = if paused {
                 RuntimeState::Paused
             } else {
                 RuntimeState::Running
             };
+            if was_paused && !paused {
+                let now = Instant::now();
+                scheduler.schedule_time_sync_now(now);
+                scheduler.schedule_skipped_providers_now(now);
+            }
             let result = if !paused && state.connected {
                 synchronize_pending(state, scheduler, device, Instant::now())
             } else {
@@ -1468,6 +1474,11 @@ fn attempt_connect(
         Ok(connection) => {
             state.connected = true;
             state.ever_connected = true;
+            // Scheduled ticks are consumed even while disconnected so they cannot
+            // pin the worker loop. Re-arm them at the transition that makes their
+            // I/O possible, preserving the prompt refresh after every reconnect.
+            scheduler.schedule_status_now(now);
+            scheduler.schedule_time_sync_now(now);
             update_device_status(state, &connection.port_name, &connection.status, device);
             state.runtime = if state.config.preferences.paused {
                 RuntimeState::Paused
@@ -1546,7 +1557,9 @@ fn run_scheduled_work(
             refresh_calendar_alert(state, scheduler, &card_id, lead_minutes, now, now_unix_ms);
         }
     }
-    if !state.config.preferences.paused {
+    if state.config.preferences.paused {
+        scheduler.skip_due_providers(now);
+    } else {
         submit_due_providers(
             state,
             scheduler,
@@ -1556,10 +1569,15 @@ fn run_scheduled_work(
             options.provider_queue_retry,
         );
     }
+    // A deadline in `wait_duration` must be consumed whenever this tick examines
+    // it, even if connectivity or pause gates the actual I/O below. Otherwise a
+    // skipped deadline remains in the past and `recv_timeout` spins on zero forever.
+    let status_due = scheduler.status_due(now);
+    let time_sync_due = scheduler.time_sync_due(now);
     if !state.connected {
         return;
     }
-    if scheduler.status_due(now) {
+    if status_due {
         match device.status() {
             Ok(status) => {
                 let port = state.device.port_name.clone().unwrap_or_default();
@@ -1574,9 +1592,7 @@ fn run_scheduled_work(
     if state.config.preferences.paused {
         return;
     }
-    if scheduler.time_sync_due(now)
-        && let Err(error) = send_time_sync(state, device)
-    {
+    if time_sync_due && let Err(error) = send_time_sync(state, device) {
         state.runtime = RuntimeState::Error {
             message: error.to_string(),
         };
@@ -1596,7 +1612,7 @@ fn submit_due_providers(
     now: Instant,
     retry: Duration,
 ) {
-    for widget_id in scheduler.due_providers(now) {
+    for widget_id in scheduler.take_due_providers(now) {
         if state
             .providers
             .get(&widget_id)
@@ -1616,7 +1632,6 @@ fn submit_due_providers(
                 diagnostics
                     .provider_jobs_started
                     .fetch_add(1, Ordering::Relaxed);
-                scheduler.provider_started(&widget_id, now);
             }
             Err(ProviderSubmitError::Full) => {
                 diagnostics
@@ -2896,6 +2911,241 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct ScheduledWorkDevice {
+        status_calls: usize,
+        time_sync_calls: usize,
+    }
+
+    impl RuntimeDevice for ScheduledWorkDevice {
+        fn connect(&mut self) -> Result<DeviceConnection, DeviceError> {
+            Ok(DeviceConnection {
+                port_name: "scheduled-work".into(),
+                status: scheduled_work_status(),
+            })
+        }
+
+        fn status(&mut self) -> Result<StatusResponse, DeviceError> {
+            self.status_calls += 1;
+            Ok(scheduled_work_status())
+        }
+
+        fn provision(&mut self, _config: &NetworkConfig) -> Result<(), DeviceError> {
+            Ok(())
+        }
+
+        fn factory_reset(&mut self) -> Result<(), DeviceError> {
+            Ok(())
+        }
+
+        fn time_sync(&mut self, _sync: TimeSync) -> Result<(), DeviceError> {
+            self.time_sync_calls += 1;
+            Ok(())
+        }
+
+        fn apply_layout(
+            &mut self,
+            _rotation: u16,
+            _widgets: Vec<WidgetConfig>,
+            _screens: Vec<ScreenConfig>,
+        ) -> Result<(), DeviceError> {
+            Ok(())
+        }
+
+        fn push_fields(
+            &mut self,
+            _widget_id: String,
+            _fields: Vec<Field>,
+        ) -> Result<(), DeviceError> {
+            Ok(())
+        }
+
+        fn activate_screen(&mut self, _screen_id: String) -> Result<(), DeviceError> {
+            Ok(())
+        }
+
+        fn push_scene(&mut self, _push: PushScene) -> Result<(), DeviceError> {
+            Ok(())
+        }
+
+        fn trigger_interrupt(&mut self, _interrupt: TriggerInterrupt) -> Result<(), DeviceError> {
+            Ok(())
+        }
+
+        fn send_asset_begin(&mut self, _begin: AssetBegin) -> Result<Ack, DeviceError> {
+            Ok(Ack {
+                acknowledged_type: protocol::TYPE_ASSET_BEGIN,
+                revision: None,
+                already_present: Some(false),
+            })
+        }
+
+        fn send_asset_chunk(&mut self, _chunk: AssetChunk) -> Result<(), DeviceError> {
+            Ok(())
+        }
+
+        fn send_asset_commit(&mut self, _commit: AssetCommit) -> Result<(), DeviceError> {
+            Ok(())
+        }
+
+        fn send_asset_release(&mut self, _release: AssetRelease) -> Result<(), DeviceError> {
+            Ok(())
+        }
+
+        fn try_recv_event(&mut self) -> Option<ReceivedEvent> {
+            None
+        }
+
+        fn diagnostics(&self) -> SessionDiagnostics {
+            SessionDiagnostics::default()
+        }
+    }
+
+    fn scheduled_work_status() -> StatusResponse {
+        StatusResponse {
+            protocol_version: protocol::PROTOCOL_VERSION,
+            max_protocol_version: protocol::MAX_PROTOCOL_VERSION,
+            capabilities: protocol::CURRENT_CAPABILITIES,
+            firmware_version: "scheduled-work-test".into(),
+            uptime_ms: 1,
+            free_heap: 100_000,
+            display_width: 368,
+            display_height: 448,
+            brightness: 200,
+            rotation: 90,
+            online: true,
+            latest_revision: 0,
+            valid_frames: 0,
+            malformed_frames: 0,
+            crc_errors: 0,
+            overflow_frames: 0,
+            dropped_responses: 0,
+            rx_dropped_bytes: 0,
+            dropped_events: 0,
+            event_queue_high_water: 0,
+            dropped_ui_commands: 0,
+            ui_queue_high_water: 0,
+            config_revision: 0,
+            latest_interrupt_token: 0,
+            tier: protocol::Tier::Local,
+            wifi_state: protocol::WifiState::Down,
+            wifi_rssi: 0,
+            ip: String::new(),
+            ota_state: protocol::OtaState::Idle,
+            last_network_error: None,
+            last_ota_error: None,
+        }
+    }
+
+    fn scheduled_work_provider() -> ProviderWorker {
+        ProviderWorker::new(
+            Box::new(ImmediateRefresher {
+                completed: mpsc::channel().0,
+            }),
+            1,
+        )
+    }
+
+    #[test]
+    fn disconnected_scheduled_work_leaves_a_real_wait() {
+        let now = Instant::now();
+        let mut scheduler = fresh_scheduler(now);
+        let mut state = WorkerState::new(AppConfig::default(), now, &mut scheduler);
+        let mut device = ScheduledWorkDevice::default();
+        let provider = scheduled_work_provider();
+
+        run_scheduled_work(
+            &mut state,
+            &mut scheduler,
+            &mut device,
+            &provider,
+            &RuntimeDiagnosticCounters::default(),
+            now,
+            &RuntimeOptions::default(),
+        );
+
+        assert!(
+            scheduler.wait_duration(now, Duration::from_hours(1)) > Duration::ZERO,
+            "a disconnected worker must block instead of spinning on a skipped deadline"
+        );
+    }
+
+    #[test]
+    fn paused_scheduled_work_leaves_a_real_wait() {
+        let now = Instant::now();
+        let mut config = rotation_config(
+            vec![alert_calendar_card("calendar", CardAlert::None)],
+            CarouselAdvance::Manual,
+            &[("calendar", None)],
+        );
+        config.preferences.paused = true;
+        let mut scheduler = fresh_scheduler(now);
+        let mut state = WorkerState::new(config, now, &mut scheduler);
+        state.connected = true;
+        let mut device = ScheduledWorkDevice::default();
+        let provider = scheduled_work_provider();
+
+        run_scheduled_work(
+            &mut state,
+            &mut scheduler,
+            &mut device,
+            &provider,
+            &RuntimeDiagnosticCounters::default(),
+            now,
+            &RuntimeOptions::default(),
+        );
+
+        assert!(
+            scheduler.wait_duration(now, Duration::from_hours(1)) > Duration::ZERO,
+            "a paused worker must block instead of spinning on skipped sync or provider deadlines"
+        );
+    }
+
+    #[test]
+    fn reconnect_runs_status_and_time_sync_promptly_after_skipped_work() {
+        let disconnected_at = Instant::now();
+        let mut scheduler = fresh_scheduler(disconnected_at);
+        let mut state = WorkerState::new(AppConfig::default(), disconnected_at, &mut scheduler);
+        state.needs_full_sync = false;
+        let mut device = ScheduledWorkDevice::default();
+        let provider = scheduled_work_provider();
+        let options = RuntimeOptions::default();
+
+        run_scheduled_work(
+            &mut state,
+            &mut scheduler,
+            &mut device,
+            &provider,
+            &RuntimeDiagnosticCounters::default(),
+            disconnected_at,
+            &options,
+        );
+
+        let reconnected_at = disconnected_at + Duration::from_secs(1);
+        attempt_connect(
+            &mut state,
+            &mut scheduler,
+            &mut device,
+            reconnected_at,
+            &options,
+        );
+        run_scheduled_work(
+            &mut state,
+            &mut scheduler,
+            &mut device,
+            &provider,
+            &RuntimeDiagnosticCounters::default(),
+            reconnected_at,
+            &options,
+        );
+
+        assert_eq!(device.status_calls, 1, "status must be prompt on reconnect");
+        assert_eq!(
+            device.time_sync_calls, 1,
+            "time sync must be prompt on reconnect"
+        );
+    }
+
     fn navigation_event(screen_id: &str) -> ReceivedEvent {
         ReceivedEvent {
             event: protocol::DeviceEvent {
@@ -3780,8 +4030,7 @@ mod tests {
         assert!(scheduler.pomodoro_due(now));
         assert!(scheduler.status_due(now));
         assert!(scheduler.time_sync_due(now));
-        assert_eq!(scheduler.due_providers(now), ["upnext"]);
-        scheduler.provider_started("upnext", now);
+        assert_eq!(scheduler.take_due_providers(now), ["upnext"]);
 
         state.latest_fields.insert(
             "upnext".into(),

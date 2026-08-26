@@ -119,8 +119,9 @@ pub async fn drive_until_scene(socket: &mut DeviceSocket) -> protocol::PushScene
 }
 
 /// Drives a runtime's first connection through full synchronization and the
-/// initial scheduled status/time-sync work. Do not use this for reattachment:
-/// a retained scheduler does not restart those periodic deadlines.
+/// initial scheduled status/time-sync work. Use [`reattach_runtime`] for a
+/// reconnect: it replays a retained runtime rather than bootstrapping one,
+/// though both now finish the same periodic schedule.
 pub async fn bootstrap_runtime(socket: &mut DeviceSocket) {
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
@@ -152,8 +153,15 @@ pub async fn bootstrap_runtime(socket: &mut DeviceSocket) {
 }
 
 /// Drives a retained runtime's reconnect replay. Replay restores the cached
-/// device model through `ActivateScreen`, but deliberately does not restart
-/// app-core's initial periodic schedule.
+/// device model through `ActivateScreen`, and is then followed by the same
+/// status and time sync a first connection performs.
+///
+/// That last part changed when the runtime worker's busy-loop was fixed. The
+/// status and time-sync deadlines are now consumed on every tick so they cannot
+/// sit in the past and spin `recv_timeout` on a zero wait, and they are re-armed
+/// at the connect transition instead. A reconnect therefore refreshes promptly,
+/// which is the behaviour a dropped link needs: the device may have rebooted and
+/// its clock may have drifted while it was away.
 pub async fn reattach_runtime(socket: &mut DeviceSocket) {
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
@@ -166,6 +174,7 @@ pub async fn reattach_runtime(socket: &mut DeviceSocket) {
                     let complete = matches!(message, Message::ActivateScreen(_));
                     reply(socket, frame.request_id, &message).await;
                     if complete {
+                        finish_initial_schedule(socket).await;
                         flush_socket(socket).await;
                         return;
                     }

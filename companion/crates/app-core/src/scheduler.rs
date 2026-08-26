@@ -33,6 +33,7 @@ pub(crate) struct Scheduler {
 struct ProviderDeadline {
     interval: Option<Duration>,
     next: Option<Instant>,
+    skipped_while_paused: bool,
 }
 
 struct RotationDeadline {
@@ -74,6 +75,7 @@ impl Scheduler {
                     ProviderDeadline {
                         interval,
                         next: Some(now),
+                        skipped_while_paused: false,
                     },
                 )
             })
@@ -88,17 +90,29 @@ impl Scheduler {
         true
     }
 
-    pub(crate) fn due_providers(&self, now: Instant) -> Vec<String> {
-        self.providers
-            .iter()
-            .filter(|(_, deadline)| deadline.next.is_some_and(|next| now >= next))
-            .map(|(widget_id, _)| widget_id.clone())
-            .collect()
+    /// Returns due provider jobs and advances each deadline before the caller
+    /// decides whether that job can be submitted. A long-running in-flight job
+    /// must not leave its next deadline in the past and pin the runtime loop.
+    pub(crate) fn take_due_providers(&mut self, now: Instant) -> Vec<String> {
+        let mut due = Vec::new();
+        for (widget_id, deadline) in &mut self.providers {
+            if deadline.next.is_some_and(|next| now >= next) {
+                deadline.next = deadline.interval.map(|interval| now + interval);
+                deadline.skipped_while_paused = false;
+                due.push(widget_id.clone());
+            }
+        }
+        due
     }
 
-    pub(crate) fn provider_started(&mut self, widget_id: &str, now: Instant) {
-        if let Some(deadline) = self.providers.get_mut(widget_id) {
-            deadline.next = deadline.interval.map(|interval| now + interval);
+    /// Advances provider deadlines whose work is gated by pause, remembering
+    /// only those skipped jobs so resume can run them promptly.
+    pub(crate) fn skip_due_providers(&mut self, now: Instant) {
+        for deadline in self.providers.values_mut() {
+            if deadline.next.is_some_and(|next| now >= next) {
+                deadline.next = deadline.interval.map(|interval| now + interval);
+                deadline.skipped_while_paused = true;
+            }
         }
     }
 
@@ -118,6 +132,24 @@ impl Scheduler {
 
     pub(crate) fn time_sync_due(&mut self, now: Instant) -> bool {
         take_deadline(&mut self.next_time_sync, self.time_sync_interval, now)
+    }
+
+    pub(crate) fn schedule_status_now(&mut self, now: Instant) {
+        self.next_status = now;
+    }
+
+    pub(crate) fn schedule_time_sync_now(&mut self, now: Instant) {
+        self.next_time_sync = now;
+    }
+
+    /// Re-arms only work that actually became due while paused; manual providers
+    /// that were never requested remain disarmed.
+    pub(crate) fn schedule_skipped_providers_now(&mut self, now: Instant) {
+        for deadline in self.providers.values_mut() {
+            if deadline.skipped_while_paused {
+                deadline.next = Some(now);
+            }
+        }
     }
 
     /// Dwell is per-card, so the caller re-arms with a (possibly different)
@@ -250,13 +282,13 @@ mod tests {
             ],
             now,
         );
-        assert_eq!(scheduler.due_providers(now), ["home", "manual", "work"]);
-        scheduler.provider_started("work", now);
-        scheduler.provider_started("home", now);
-        scheduler.provider_started("manual", now);
-        assert!(scheduler.due_providers(now).is_empty());
+        assert_eq!(
+            scheduler.take_due_providers(now),
+            ["home", "manual", "work"]
+        );
+        assert!(scheduler.take_due_providers(now).is_empty());
         assert!(scheduler.schedule_provider_now("manual", now));
-        assert_eq!(scheduler.due_providers(now), ["manual"]);
+        assert_eq!(scheduler.take_due_providers(now), ["manual"]);
     }
 
     #[test]

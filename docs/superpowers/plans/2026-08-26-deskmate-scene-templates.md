@@ -8,9 +8,14 @@ replace hand-written templates.
 
 **Architecture:** Stage 2a built the chain and proved it on `DigitalClock`. This stage adds
 one builder per template in `app-core`'s `scene_build.rs` and one entry per template in a
-table-driven parity gate. **Four of the five are host-only** — no wire change, no firmware
-change, no board time. `AnalogClock` is the exception and is sequenced last, because its
-hands are rotated rectangles that no current node can express.
+table-driven parity gate.
+
+> **Read the amendment at the end of this file before executing anything.** It was added
+> before execution began and it **supersedes the task order below**: two new node kinds are
+> needed, not one, and they are folded into a single firmware task that runs **second**
+> rather than last. Every "Task 6 only" note below therefore means "Task 1b". The stage's
+> hardware cost is unchanged — one OTA download, one power cycle — and with 1b landed, all
+> five template builders are host-only.
 
 **Tech Stack:** Rust (`app-core`, `protocol`, `lvgl-sim`), ESP-IDF 5.x/C with LVGL 9 for
 Task 6 only.

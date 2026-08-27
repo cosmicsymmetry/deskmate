@@ -346,20 +346,12 @@ static void fill_timer_bindings(const protocol_context_t *context,
         duration->value.integer <= 0) {
         return;
     }
-    int64_t total_ms = duration->value.integer * INT64_C(1000);
-    int64_t remaining_ms = remaining->value.integer * INT64_C(1000);
-    if (running->value.boolean) {
-        remaining_ms -= (int64_t)(uptime_ms() - context->scene_timer_anchor_ms);
-    }
-    if (remaining_ms < 0) {
-        remaining_ms = 0;
-    } else if (remaining_ms > total_ms) {
-        remaining_ms = total_ms;
-    }
+    scene_timer_snapshot_t snapshot = scene_timer_snapshot(
+        duration->value.integer, remaining->value.integer,
+        running->value.boolean, context->scene_timer_anchor_ms, uptime_ms());
     binding->timer_active = true;
-    binding->timer_remaining_ms = (uint32_t)remaining_ms;
-    binding->timer_pct =
-        (uint8_t)(((total_ms - remaining_ms) * INT64_C(100)) / total_ms);
+    binding->timer_remaining_ms = snapshot.remaining_ms;
+    binding->timer_remaining_pct = snapshot.remaining_pct;
 }
 
 static void fill_scene_binding_context(protocol_context_t *context,

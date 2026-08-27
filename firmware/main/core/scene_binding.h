@@ -32,14 +32,25 @@ typedef struct {
 } scene_binding_t;
 
 typedef struct {
+    uint32_t remaining_ms;
+    uint8_t remaining_pct;
+} scene_timer_snapshot_t;
+
+typedef struct {
     int64_t unix_seconds;
     int16_t utc_offset_minutes;
     bool timer_active;
     uint32_t timer_remaining_ms;
-    uint8_t timer_pct;
+    uint8_t timer_remaining_pct;
     scene_field_fn field;
     void *field_ctx;
 } scene_binding_context_t;
+
+scene_timer_snapshot_t scene_timer_snapshot(int64_t duration_seconds,
+                                            int64_t remaining_seconds,
+                                            bool running,
+                                            uint64_t anchor_ms,
+                                            uint64_t now_ms);
 
 scene_binding_result_t scene_binding_parse(const char *text,
                                            scene_binding_t *out);

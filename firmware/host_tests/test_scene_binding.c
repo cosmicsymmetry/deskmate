@@ -1,6 +1,7 @@
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 #include "core/scene_binding.h"
 
@@ -114,7 +115,7 @@ static void test_timer_pct(void)
 
     scene_binding_context_t active = fixed_context();
     active.timer_active = true;
-    active.timer_pct = 42U;
+    active.timer_remaining_pct = 42U;
     assert(scene_binding_evaluate(&binding, &active, out, sizeof out) ==
            SCENE_BINDING_OK);
     assert(strcmp(out, "42") == 0);
@@ -126,6 +127,78 @@ static void test_timer_pct(void)
     assert(scene_binding_evaluate(&binding, &inactive, out, sizeof out) ==
            SCENE_BINDING_OK);
     assert(strcmp(out, "--") == 0);
+}
+
+static void timer_pct_is_remaining_not_elapsed(void)
+{
+    /* 1500s duration, 900s remaining: progress_ring.c draws 60% of a ring. */
+    scene_timer_snapshot_t s = scene_timer_snapshot(1500, 900, false, 0, 0);
+    assert(s.remaining_pct == 60);
+    /* The inverted producer returned 40 here, and the parity gate was at zero
+     * pixels the whole time, because the gate injects this value. */
+}
+
+static void a_finished_timer_reads_zero_percent(void)
+{
+    scene_timer_snapshot_t s = scene_timer_snapshot(1500, 0, false, 0, 0);
+    assert(s.remaining_pct == 0);
+}
+
+static void a_never_started_timer_reads_one_hundred(void)
+{
+    scene_timer_snapshot_t s = scene_timer_snapshot(1500, 1500, false, 0, 0);
+    assert(s.remaining_pct == 100);
+}
+
+static void timer_remaining_ceils_like_format_clock(void)
+{
+    char out[16];
+    scene_binding_t b;
+    assert(scene_binding_parse("timer.remaining:mm:ss", &b) == SCENE_BINDING_OK);
+    scene_binding_context_t ctx = {0};
+    ctx.timer_active = true;
+    /* 1ms into the 90th second: progress_ring.c still shows 00:90 -> 01:30.
+     * The floor showed 01:29 almost immediately. */
+    ctx.timer_remaining_ms = 89001U;
+    assert(scene_binding_evaluate(&b, &ctx, out, sizeof out) == SCENE_BINDING_OK);
+    assert(strcmp(out, "01:30") == 0);
+}
+
+static void timer_mm_is_total_minutes_not_a_clock_minute(void)
+{
+    char out[16];
+    scene_binding_t b;
+    assert(scene_binding_parse("timer.remaining:mm:ss", &b) == SCENE_BINDING_OK);
+    scene_binding_context_t ctx = {0};
+    ctx.timer_active = true;
+    ctx.timer_remaining_ms = 3600U * 1000U;      /* one hour */
+    assert(scene_binding_evaluate(&b, &ctx, out, sizeof out) == SCENE_BINDING_OK);
+    assert(strcmp(out, "60:00") == 0);           /* was "00:00" */
+
+    ctx.timer_remaining_ms = 86400U * 1000U;     /* the registry ceiling */
+    assert(scene_binding_evaluate(&b, &ctx, out, sizeof out) == SCENE_BINDING_OK);
+    assert(strcmp(out, "1440:00") == 0);
+}
+
+static void a_wall_clock_minute_still_wraps(void)
+{
+    /* The split must not change time:. 13:05 stays 13:05. */
+    char out[16];
+    scene_binding_t b;
+    assert(scene_binding_parse("time:HH:mm", &b) == SCENE_BINDING_OK);
+    scene_binding_context_t ctx = {0};
+    ctx.unix_seconds = 1787000700;  /* verify against gmtime_r in the test */
+    ctx.utc_offset_minutes = 0;
+    assert(scene_binding_evaluate(&b, &ctx, out, sizeof out) == SCENE_BINDING_OK);
+    /* assert the exact HH:mm this instant produces; compute it in the test
+     * with gmtime_r rather than hardcoding a guess. */
+    time_t instant = (time_t)ctx.unix_seconds;
+    struct tm expected_tm;
+    assert(gmtime_r(&instant, &expected_tm) != NULL);
+    char expected[16];
+    snprintf(expected, sizeof expected, "%02d:%02d", expected_tm.tm_hour,
+             expected_tm.tm_min);
+    assert(strcmp(out, expected) == 0);
 }
 
 static void test_zero_capacity_never_writes(void)
@@ -168,6 +241,12 @@ int main(void)
     test_evaluate_never_overruns_a_short_buffer();
     test_an_active_timer_renders_its_remaining_time();
     test_timer_pct();
+    timer_pct_is_remaining_not_elapsed();
+    a_finished_timer_reads_zero_percent();
+    a_never_started_timer_reads_one_hundred();
+    timer_remaining_ceils_like_format_clock();
+    timer_mm_is_total_minutes_not_a_clock_minute();
+    a_wall_clock_minute_still_wraps();
     test_zero_capacity_never_writes();
     test_field_name_length_boundary();
     return 0;

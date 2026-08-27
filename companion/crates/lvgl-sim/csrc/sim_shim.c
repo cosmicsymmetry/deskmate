@@ -561,7 +561,7 @@ sim_scene_result_t sim_render_scene(const uint8_t *payload, size_t payload_lengt
         .utc_offset_minutes = utc_offset_minutes,
         .timer_active = timer_active,
         .timer_remaining_ms = timer_remaining_ms,
-        .timer_pct = timer_pct,
+        .timer_remaining_pct = timer_pct,
         .field = sim_scene_field_lookup,
         .field_ctx = &table,
     };

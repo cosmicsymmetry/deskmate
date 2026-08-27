@@ -25,8 +25,10 @@ the format, the wire, the interpreter, the bindings, and **one** template — `D
 three tiers, a rect module, a scale dial, two line hands, a live binding) and is a complete,
 gated, shippable slice.
 
-**Stage 2b** re-expresses the remaining five templates and retires the C ones. Its plan is
-written at this plan's exit, per the repo's working agreement.
+**Stage 2b** re-expresses the remaining five templates; stage 3 retires the C ones. Its
+plan is written at this plan's exit, per the repo's working agreement. The completed pixel
+result and the live-correctness decisions stage 3 must make are recorded in the
+[template parity and readiness ledger](../../scene/template-parity-ledger.md).
 
 ## Two decisions that shape everything below
 

@@ -3,6 +3,8 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "core/scene_binding.h"
+
 enum {
     OBJ_ARC,
     OBJ_REMAINING,
@@ -39,13 +41,14 @@ enum {
 static int64_t current_remaining_ms(const template_widget_view_t *view,
                                     uint32_t now_ms)
 {
-    if (!view->progress_running) {
-        return view->progress_remaining_ms;
-    }
-    uint32_t elapsed = now_ms - view->progress_anchor_ms;
-    return (int64_t)elapsed >= view->progress_remaining_ms
-               ? 0
-               : view->progress_remaining_ms - elapsed;
+    scene_timer_snapshot_t snapshot = {
+        .total_ms = (uint32_t)(view->progress_duration_seconds *
+                               INT64_C(1000)),
+        .remaining_ms = (uint32_t)view->progress_remaining_ms,
+        .anchor_ms = view->progress_anchor_ms,
+        .running = view->progress_running,
+    };
+    return scene_timer_snapshot_at(snapshot, now_ms).remaining_ms;
 }
 
 /* The registry bounds duration_seconds and remaining_seconds to 86400, but
@@ -304,23 +307,31 @@ void progress_ring_local_action(template_widget_view_t *view,
     if (view == NULL || view->root == NULL) {
         return;
     }
+    scene_timer_local_action_t local_action;
     if (action == PROTOCOL_EVENT_ACTION_START_PAUSE) {
-        uint32_t now = lv_tick_get();
-        if (view->progress_running) {
-            view->progress_remaining_ms = current_remaining_ms(view, now);
-        } else {
-            view->progress_anchor_ms = now;
-        }
-        set_running_color(view, !view->progress_running);
+        local_action = SCENE_TIMER_LOCAL_ACTION_START_PAUSE;
     } else if (action == PROTOCOL_EVENT_ACTION_RESET &&
                view->progress_duration_seconds > 0) {
-        view->progress_remaining_ms =
-            view->progress_duration_seconds * INT64_C(1000);
-        view->progress_displayed_seconds = -1;
-        view->progress_anchor_ms = lv_tick_get();
-        render_remaining(view, view->progress_remaining_ms);
-        set_running_color(view, false);
+        local_action = SCENE_TIMER_LOCAL_ACTION_RESET;
+    } else {
+        return;
     }
+    scene_timer_snapshot_t snapshot = {
+        .total_ms = (uint32_t)(view->progress_duration_seconds *
+                               INT64_C(1000)),
+        .remaining_ms = (uint32_t)view->progress_remaining_ms,
+        .anchor_ms = view->progress_anchor_ms,
+        .running = view->progress_running,
+    };
+    scene_timer_apply_local_action(&snapshot, local_action, lv_tick_get());
+    view->progress_remaining_ms = snapshot.remaining_ms;
+    view->progress_anchor_ms = snapshot.anchor_ms;
+
+    if (local_action == SCENE_TIMER_LOCAL_ACTION_RESET) {
+        view->progress_displayed_seconds = -1;
+        render_remaining(view, view->progress_remaining_ms);
+    }
+    set_running_color(view, snapshot.running);
 }
 
 void progress_ring_tick(template_widget_view_t *view)

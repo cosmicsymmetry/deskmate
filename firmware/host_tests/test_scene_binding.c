@@ -175,6 +175,33 @@ static void a_running_timer_subtracts_elapsed_time(void)
     assert(s.remaining_pct == 33);
 }
 
+static void local_timer_actions_move_a_paused_snapshot(void)
+{
+    scene_timer_snapshot_t snapshot =
+        scene_timer_snapshot(1500, 900, false, 0U, 1000U);
+
+    scene_timer_apply_local_action(
+        &snapshot, SCENE_TIMER_LOCAL_ACTION_START_PAUSE, 10000U);
+    assert(snapshot.running);
+    assert(snapshot.anchor_ms == 10000U);
+    assert(snapshot.remaining_ms == 900000U);
+
+    scene_timer_apply_local_action(
+        &snapshot, SCENE_TIMER_LOCAL_ACTION_START_PAUSE, 410000U);
+    assert(!snapshot.running);
+    assert(snapshot.remaining_ms == 500000U);
+    assert(snapshot.remaining_pct == 33U);
+    assert(snapshot.remaining_permille == 333U);
+
+    scene_timer_apply_local_action(
+        &snapshot, SCENE_TIMER_LOCAL_ACTION_RESET, 500000U);
+    assert(!snapshot.running);
+    assert(snapshot.anchor_ms == 500000U);
+    assert(snapshot.remaining_ms == snapshot.total_ms);
+    assert(snapshot.remaining_pct == 100U);
+    assert(snapshot.remaining_permille == 1000U);
+}
+
 static void a_non_positive_duration_returns_an_empty_snapshot(void)
 {
     scene_timer_snapshot_t s = scene_timer_snapshot(0, 900, true, 0, 1000);
@@ -497,6 +524,7 @@ int main(void)
     a_finished_timer_reads_zero_percent();
     a_never_started_timer_reads_one_hundred();
     a_running_timer_subtracts_elapsed_time();
+    local_timer_actions_move_a_paused_snapshot();
     a_non_positive_duration_returns_an_empty_snapshot();
     timer_pct_truncates_instead_of_rounding();
     timer_snapshot_bounds_inputs_before_millisecond_arithmetic();

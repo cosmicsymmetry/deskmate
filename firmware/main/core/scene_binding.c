@@ -19,6 +19,21 @@
 #define CLOCK_DIAL_ROTATION 270
 #define CLOCK_TRIGO_SHIFT 15
 
+static void update_timer_ratios(scene_timer_snapshot_t *snapshot)
+{
+    if (snapshot->total_ms == 0U) {
+        snapshot->remaining_pct = 0U;
+        snapshot->remaining_permille = 0U;
+        return;
+    }
+    snapshot->remaining_pct = (uint8_t)(
+        ((uint64_t)snapshot->remaining_ms * UINT64_C(100)) /
+        snapshot->total_ms);
+    snapshot->remaining_permille = (uint16_t)(
+        ((uint64_t)snapshot->remaining_ms * UINT64_C(1000)) /
+        snapshot->total_ms);
+}
+
 /* Keep this producer and lvgl-sim's fill_scene_timer_context() on the same
  * invariant: total is clamped to 86400s, remaining is clamped to total, and
  * both remaining ratios truncate after multiplying. The shim must duplicate
@@ -57,11 +72,47 @@ scene_timer_snapshot_t scene_timer_snapshot(int64_t duration_seconds,
     }
     snapshot.remaining_ms = (uint32_t)remaining_ms;
     snapshot.total_ms = (uint32_t)total_ms;
-    snapshot.remaining_pct =
-        (uint8_t)((remaining_ms * INT64_C(100)) / total_ms);
-    snapshot.remaining_permille =
-        (uint16_t)((remaining_ms * INT64_C(1000)) / total_ms);
+    snapshot.anchor_ms = (uint32_t)now_ms;
+    snapshot.running = running;
+    update_timer_ratios(&snapshot);
     return snapshot;
+}
+
+scene_timer_snapshot_t scene_timer_snapshot_at(
+    scene_timer_snapshot_t snapshot, uint32_t now_ms)
+{
+    if (snapshot.running) {
+        uint32_t elapsed_ms = now_ms - snapshot.anchor_ms;
+        snapshot.remaining_ms = elapsed_ms >= snapshot.remaining_ms
+            ? 0U
+            : snapshot.remaining_ms - elapsed_ms;
+    }
+    snapshot.anchor_ms = now_ms;
+    update_timer_ratios(&snapshot);
+    return snapshot;
+}
+
+void scene_timer_apply_local_action(scene_timer_snapshot_t *snapshot,
+                                    scene_timer_local_action_t action,
+                                    uint32_t now_ms)
+{
+    if (snapshot == NULL) {
+        return;
+    }
+    if (action == SCENE_TIMER_LOCAL_ACTION_START_PAUSE) {
+        if (snapshot->running) {
+            *snapshot = scene_timer_snapshot_at(*snapshot, now_ms);
+        } else {
+            snapshot->anchor_ms = now_ms;
+        }
+        snapshot->running = !snapshot->running;
+    } else if (action == SCENE_TIMER_LOCAL_ACTION_RESET &&
+               snapshot->total_ms > 0U) {
+        snapshot->remaining_ms = snapshot->total_ms;
+        snapshot->anchor_ms = now_ms;
+        snapshot->running = false;
+    }
+    update_timer_ratios(snapshot);
 }
 
 /* A format argument is a whitelist, never a printf format string handed to

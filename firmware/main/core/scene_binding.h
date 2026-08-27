@@ -41,7 +41,14 @@ typedef struct {
     uint32_t remaining_ms;
     uint8_t remaining_pct;
     uint16_t remaining_permille;
+    uint32_t anchor_ms;
+    bool running;
 } scene_timer_snapshot_t;
+
+typedef enum {
+    SCENE_TIMER_LOCAL_ACTION_START_PAUSE = 1,
+    SCENE_TIMER_LOCAL_ACTION_RESET = 2,
+} scene_timer_local_action_t;
 
 typedef struct {
     int64_t unix_seconds;
@@ -68,6 +75,19 @@ scene_timer_snapshot_t scene_timer_snapshot(int64_t duration_seconds,
                                             bool running,
                                             uint64_t anchor_ms,
                                             uint64_t now_ms);
+
+/* Advances an already-normalized millisecond snapshot to `now_ms`. The
+ * uint32 subtraction is deliberate: LVGL's tick counter wraps, while a
+ * timer is bounded to one day and therefore cannot span a full wrap. */
+scene_timer_snapshot_t scene_timer_snapshot_at(
+    scene_timer_snapshot_t snapshot, uint32_t now_ms);
+
+/* Applies the same optimistic transition the ProgressRing uses. The host's
+ * next full snapshot remains authoritative; this helper owns arithmetic,
+ * not reconciliation policy. */
+void scene_timer_apply_local_action(scene_timer_snapshot_t *snapshot,
+                                    scene_timer_local_action_t action,
+                                    uint32_t now_ms);
 
 scene_binding_result_t scene_binding_parse(const char *text,
                                            scene_binding_t *out);

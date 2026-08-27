@@ -77,6 +77,8 @@ typedef struct {
  * module adds are the three pointers below. */
 typedef struct {
     lv_obj_t *screen;
+    scene_binding_context_t binding;
+    scene_timer_snapshot_t timer;
     uint32_t bound_count;
     scene_bound_node_t bound[]; /* exactly bound_count entries */
 } scene_view_state_t;
@@ -1239,7 +1241,19 @@ bool scene_view_show(const scene_t *scene,
     lv_obj_set_height(content, LV_PCT(100));
     lv_obj_align(content, LV_ALIGN_CENTER, 0, 0);
 
-    if (!build_nodes(content, scene, context, state)) {
+    if (context != NULL) {
+        state->binding = *context;
+        state->timer.total_ms = context->timer_total_ms;
+        state->timer.remaining_ms = context->timer_remaining_ms;
+        state->timer.remaining_pct = context->timer_remaining_pct;
+        state->timer.remaining_permille =
+            context->timer_remaining_permille;
+        state->timer.anchor_ms = lv_tick_get();
+        state->timer.running = context->timer_running;
+    }
+
+    if (!build_nodes(content, scene,
+                     context != NULL ? &state->binding : NULL, state)) {
         /* Deleting the screen sends LV_EVENT_DELETE down the whole tree,
          * which is what releases every face acquired so far. */
         lv_obj_delete(screen);
@@ -1257,7 +1271,18 @@ bool scene_view_show(const scene_t *scene,
     return true;
 }
 
-void scene_view_refresh_bindings(const scene_binding_context_t *context)
+static bool binding_reads_timer(scene_binding_kind_t kind)
+{
+    return kind == SCENE_BINDING_TIMER_REMAINING ||
+           kind == SCENE_BINDING_TIMER_PCT ||
+           kind == SCENE_BINDING_TIMER_ELAPSED ||
+           kind == SCENE_BINDING_TIMER_TOTAL ||
+           kind == SCENE_BINDING_TIMER_STATUS ||
+           kind == SCENE_BINDING_TIMER_PERMILLE;
+}
+
+static void refresh_bound_nodes(const scene_binding_context_t *context,
+                                bool timer_only)
 {
     char buffer[SCENE_VIEW_TEXT_CAPACITY];
 
@@ -1266,6 +1291,11 @@ void scene_view_refresh_bindings(const scene_binding_context_t *context)
     }
     for (uint32_t i = 0U; i < s_state->bound_count; i++) {
         const scene_bound_node_t *bound = &s_state->bound[i];
+        bool timer_binding = bound->has_binding &&
+            binding_reads_timer(bound->binding.kind);
+        if (timer_only && !bound->has_running_color && !timer_binding) {
+            continue;
+        }
         if (bound->kind == (uint8_t)SCENE_NODE_LINE) {
             set_bound_line_points(
                 bound->object, bound->line_points,
@@ -1286,6 +1316,9 @@ void scene_view_refresh_bindings(const scene_binding_context_t *context)
         if (bound->has_running_color) {
             apply_running_color(bound, context);
         }
+        if (timer_only && !timer_binding) {
+            continue;
+        }
         if (!bound->has_binding) {
             continue;
         }
@@ -1298,6 +1331,78 @@ void scene_view_refresh_bindings(const scene_binding_context_t *context)
             lv_label_set_text(bound->object, buffer);
         }
     }
+}
+
+static void apply_timer_snapshot(scene_view_state_t *state,
+                                 scene_timer_snapshot_t snapshot)
+{
+    state->binding.timer_running = snapshot.running;
+    state->binding.timer_total_ms = snapshot.total_ms;
+    state->binding.timer_remaining_ms = snapshot.remaining_ms;
+    state->binding.timer_remaining_pct = snapshot.remaining_pct;
+    state->binding.timer_remaining_permille = snapshot.remaining_permille;
+}
+
+void scene_view_refresh_bindings(const scene_binding_context_t *context)
+{
+    if (s_state == NULL || context == NULL) {
+        return;
+    }
+    /* This is the authoritative path. PushData reaches it after the widget
+     * model has accepted the complete host snapshot, so every timer field is
+     * replaced unconditionally -- including `running` after an optimistic
+     * tap the host declined. No local/pending merge exists. */
+    s_state->binding = *context;
+    s_state->timer.total_ms = context->timer_total_ms;
+    s_state->timer.remaining_ms = context->timer_remaining_ms;
+    s_state->timer.remaining_pct = context->timer_remaining_pct;
+    s_state->timer.remaining_permille = context->timer_remaining_permille;
+    s_state->timer.anchor_ms = lv_tick_get();
+    s_state->timer.running = context->timer_running;
+    refresh_bound_nodes(&s_state->binding, false);
+}
+
+void scene_view_tick_bindings(const scene_binding_context_t *context)
+{
+    if (s_state == NULL || context == NULL) {
+        return;
+    }
+    /* The protocol task still owns wall time and provider lookup. Its timer
+     * values are deliberately not copied on a tick: they came from the last
+     * host snapshot and would erase an offline optimistic action four times
+     * a second. */
+    s_state->binding.unix_seconds = context->unix_seconds;
+    s_state->binding.utc_offset_minutes = context->utc_offset_minutes;
+    s_state->binding.field = context->field;
+    s_state->binding.field_ctx = context->field_ctx;
+    scene_timer_snapshot_t current = scene_timer_snapshot_at(
+        s_state->timer, lv_tick_get());
+    apply_timer_snapshot(s_state, current);
+    refresh_bound_nodes(&s_state->binding, false);
+}
+
+void scene_view_apply_local_action(protocol_event_action_t action)
+{
+    if (s_state == NULL || lv_screen_active() != s_state->screen ||
+        !s_state->binding.timer_active) {
+        return;
+    }
+    scene_timer_local_action_t local_action;
+    if (action == PROTOCOL_EVENT_ACTION_START_PAUSE) {
+        local_action = SCENE_TIMER_LOCAL_ACTION_START_PAUSE;
+    } else if (action == PROTOCOL_EVENT_ACTION_RESET) {
+        local_action = SCENE_TIMER_LOCAL_ACTION_RESET;
+    } else {
+        return;
+    }
+    uint32_t now_ms = lv_tick_get();
+    scene_timer_apply_local_action(&s_state->timer, local_action, now_ms);
+    apply_timer_snapshot(s_state, scene_timer_snapshot_at(s_state->timer,
+                                                          now_ms));
+    /* This callback runs in the LVGL task, not the protocol task. Restricting
+     * the repaint to timer/running-colour nodes avoids invoking a `field.*`
+     * lookup into the protocol-owned widget model from the wrong task. */
+    refresh_bound_nodes(&s_state->binding, true);
 }
 
 bool scene_view_destroy(void)

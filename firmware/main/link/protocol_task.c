@@ -40,6 +40,7 @@
 #include "link/usb_link.h"
 #include "link/wifi_station.h"
 #include "ui/clock_screen.h"
+#include "ui/carousel.h"
 #include "ui/font_registry.h"
 #include "ui/ota_screen.h"
 #include "ui/scene_view.h"
@@ -350,7 +351,7 @@ static void fill_timer_bindings(const protocol_context_t *context,
         duration->value.integer, remaining->value.integer,
         running->value.boolean, context->scene_timer_anchor_ms, uptime_ms());
     binding->timer_active = true;
-    binding->timer_running = running->value.boolean;
+    binding->timer_running = snapshot.running;
     binding->timer_total_ms = snapshot.total_ms;
     binding->timer_remaining_ms = snapshot.remaining_ms;
     binding->timer_remaining_pct = snapshot.remaining_pct;
@@ -380,6 +381,52 @@ typedef enum {
      * scene is wrong", which it is not. */
     SHOW_SCENE_BUSY,
 } show_scene_result_t;
+
+/* Binds taps to a scene only when that scene names the card that currently
+ * owns the panel. PushScene deliberately accepts an arbitrary card id for
+ * diagnostic scenes; borrowing the active card's action for one of those
+ * would send a valid-looking event for the wrong widget. Runs with the LVGL
+ * lock held by show_scene(). */
+static void bind_scene_carousel(protocol_context_t *context)
+{
+    const interrupt_slot_t *interrupt = interrupt_state_active(
+        &context->interrupts);
+    const protocol_apply_config_t *config = widget_model_config(
+        &context->model);
+    const protocol_screen_config_t *screen = widget_model_active_screen(
+        &context->model);
+    const char *widget_id = interrupt != NULL
+        ? interrupt->widget_id
+        : (screen != NULL ? screen->widget_id : NULL);
+    const protocol_widget_config_t *widget = find_widget(config, widget_id);
+    if (config == NULL || widget == NULL || widget_id == NULL ||
+        strcmp(widget_id, context->scene_card_id) != 0) {
+        carousel_unbind();
+        return;
+    }
+
+    carousel_binding_t binding = {
+        .tap_action = widget->tap_action,
+        .interrupt = interrupt != NULL,
+        .interrupt_token = interrupt != NULL ? interrupt->token : 0U,
+    };
+    strcpy(binding.widget_id, widget_id);
+    if (interrupt != NULL) {
+        strcpy(binding.screen_id, context->interrupts.saved_screen_id);
+    } else {
+        size_t index = active_screen_index(&context->model);
+        size_t previous = index == 0U ? config->screen_count - 1U : index - 1U;
+        size_t next = (index + 1U) % config->screen_count;
+        strcpy(binding.screen_id, screen->screen_id);
+        strcpy(binding.previous_screen_id,
+               config->screens[previous].screen_id);
+        strcpy(binding.previous_widget_id,
+               config->screens[previous].widget_id);
+        strcpy(binding.next_screen_id, config->screens[next].screen_id);
+        strcpy(binding.next_widget_id, config->screens[next].widget_id);
+    }
+    (void)carousel_bind(scene_view_screen(), &binding);
+}
 
 /* Builds `scene` onto the panel.
  *
@@ -415,8 +462,12 @@ static show_scene_result_t show_scene(protocol_context_t *context,
     // ui_runtime's queue consumer drops SHOW_* commands for that reason and
     // this path does not go through that queue, so it makes the same check.
     if (!ota_screen_active_in_lvgl()) {
-        result = scene_view_show(scene, &binding) ? SHOW_SCENE_OK
-                                                  : SHOW_SCENE_REFUSED;
+        if (scene_view_show(scene, &binding)) {
+            bind_scene_carousel(context);
+            result = SHOW_SCENE_OK;
+        } else {
+            result = SHOW_SCENE_REFUSED;
+        }
     }
     lvgl_port_unlock();
     return result;
@@ -457,23 +508,29 @@ static bool scene_reads_asset_bytes(const scene_t *scene)
 }
 
 /* Re-evaluates the live scene's bindings in place, and returns whether a
- * scene is still on the panel. The clock tick and a PushData field update
- * both come through here and neither rebuilds the scene -- that is the whole
- * reason ui/scene_view.c keeps a node -> object table.
+ * scene is still on the panel. Both forms avoid a rebuild, but their timer
+ * ownership differs deliberately: an ordinary tick preserves the scene's
+ * optimistic timer snapshot, while an authoritative PushData refresh
+ * replaces it whole.
  *
  * The return value is what keeps context->scene_live honest without a second
  * mechanism: this function already holds the lock the authority must be read
  * under, so it reads it while it is there. A scene retired by a screen change
  * this task never observed (a queued view command, a link-loss clock restore)
  * costs exactly one no-op refresh before the hint self-corrects. */
-static bool refresh_scene_bindings(protocol_context_t *context)
+static bool refresh_scene_bindings(protocol_context_t *context,
+                                   bool authoritative)
 {
     scene_binding_context_t binding;
     fill_scene_binding_context(context, &binding);
     if (!lvgl_port_lock(0U)) {
         return context->scene_live;
     }
-    scene_view_refresh_bindings(&binding);
+    if (authoritative) {
+        scene_view_refresh_bindings(&binding);
+    } else {
+        scene_view_tick_bindings(&binding);
+    }
     bool still_live = scene_view_screen() != NULL;
     lvgl_port_unlock();
     return still_live;
@@ -695,7 +752,7 @@ static void dispatch_push_data(protocol_context_t *context,
     if (context->scene_live &&
         strcmp(context->scene_card_id, push->widget_id) == 0) {
         context->scene_timer_anchor_ms = uptime_ms();
-        context->scene_live = refresh_scene_bindings(context);
+        context->scene_live = refresh_scene_bindings(context, true);
     }
     transmit_ack(context, request_id, PROTOCOL_TYPE_PUSH_DATA, true,
                  context->link.latest_revision);
@@ -1721,7 +1778,7 @@ static void protocol_task(void *argument)
         if (context->scene_live &&
             uptime_ms() - context->scene_tick_ms >= PROTOCOL_SCENE_TICK_MS) {
             context->scene_tick_ms = uptime_ms();
-            context->scene_live = refresh_scene_bindings(context);
+            context->scene_live = refresh_scene_bindings(context, false);
         }
         refresh_ota_snapshots(context);
     }

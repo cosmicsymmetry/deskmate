@@ -3,6 +3,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "core/protocol_message.h"
 #include "core/scene_binding.h"
 #include "core/scene_model.h"
 #include "lvgl.h"
@@ -46,11 +47,19 @@ void scene_view_set_asset_resolver(asset_resolver_fn resolver,
 bool scene_view_show(const scene_t *scene,
                      const scene_binding_context_t *context);
 
-/* Re-evaluates every binding-valued node against `context` and updates those
- * objects in place. This is the scene model's replacement for
- * template_view_patch(): a clock tick and a PushData field update both come
- * through here, and neither rebuilds the screen. */
+/* Re-evaluates every binding-valued node against an authoritative `context`
+ * and updates those objects in place. PushData comes through here and never
+ * rebuilds the screen; ordinary ticks use the preserving path below. */
 void scene_view_refresh_bindings(const scene_binding_context_t *context);
+
+/* Refreshes wall-clock/field bindings while preserving the scene's local
+ * timer snapshot. The protocol task uses this for its 250 ms tick; PushData
+ * uses scene_view_refresh_bindings() above and replaces the timer snapshot. */
+void scene_view_tick_bindings(const scene_binding_context_t *context);
+
+/* Applies optimistic timer feedback from an LVGL tap callback and repaints
+ * through the same bound-node refresh path. */
+void scene_view_apply_local_action(protocol_event_action_t action);
 
 /* Destroys the scene's screen, which is also what drops its hold on every
  * asset font it acquired. Returns false -- without destroying anything -- if

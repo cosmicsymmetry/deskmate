@@ -155,14 +155,16 @@ sim_scene_result_t sim_render_scene(const uint8_t *payload,
  * advances both by elapsed_ms, and captures their final frames. The scene is
  * refreshed in place; its payload is decoded and shown exactly once. When
  * toggle_running is true, both sides apply one start/pause transition at the
- * end of the interval. */
+ * end of the interval. When authoritative_reconcile is also true, both sides
+ * then apply the original host snapshot again. */
 sim_scene_result_t sim_render_scene_temporal_pair(
     const uint8_t *payload, size_t payload_length,
     int template_kind, const sim_field_t *template_fields,
     size_t template_field_count, int16_t utc_offset_minutes,
     int64_t now_unix_seconds, bool timer_active, uint32_t timer_total_ms,
     uint32_t timer_remaining_ms, bool timer_running, uint32_t elapsed_ms,
-    bool toggle_running, const sim_scene_field_t *scene_fields,
+    bool toggle_running, bool authoritative_reconcile,
+    const sim_scene_field_t *scene_fields,
     size_t scene_field_count, bool orientation_flipped,
     uint16_t *out_template_pixels, uint16_t *out_initial_scene_pixels,
     uint16_t *out_scene_pixels);

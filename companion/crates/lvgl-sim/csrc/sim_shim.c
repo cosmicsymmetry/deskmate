@@ -624,14 +624,16 @@ sim_scene_result_t sim_render_scene_temporal_pair(
     size_t template_field_count, int16_t utc_offset_minutes,
     int64_t now_unix_seconds, bool timer_active, uint32_t timer_total_ms,
     uint32_t timer_remaining_ms, bool timer_running, uint32_t elapsed_ms,
-    bool toggle_running, const sim_scene_field_t *scene_fields,
+    bool toggle_running, bool authoritative_reconcile,
+    const sim_scene_field_t *scene_fields,
     size_t scene_field_count, bool orientation_flipped,
     uint16_t *out_template_pixels, uint16_t *out_initial_scene_pixels,
     uint16_t *out_scene_pixels)
 {
     if (payload == NULL || payload_length == 0U ||
         out_template_pixels == NULL || out_initial_scene_pixels == NULL ||
-        out_scene_pixels == NULL) {
+        out_scene_pixels == NULL ||
+        (authoritative_reconcile && !toggle_running)) {
         return SIM_SCENE_ERR_ARGUMENT;
     }
     if (!sim_init() || !ensure_asset_store() || !ensure_font_registry()) {
@@ -670,6 +672,12 @@ sim_scene_result_t sim_render_scene_temporal_pair(
         /* This setter synchronously calls the template tick callback. */
         template_view_set_utc_offset_minutes(utc_offset_minutes);
     }
+    if (authoritative_reconcile &&
+        !template_view_patch((protocol_template_kind_t)template_kind,
+                             &template_state, UINT16_MAX)) {
+        clock_source_clear_override();
+        return SIM_SCENE_ERR_SHOW;
+    }
     lv_refr_now(s_display);
     copy_frame_out(orientation_flipped, out_template_pixels);
     clock_source_clear_override();
@@ -692,21 +700,17 @@ sim_scene_result_t sim_render_scene_temporal_pair(
     lv_refr_now(s_display);
     copy_frame_out(orientation_flipped, out_initial_scene_pixels);
 
+    s_fake_tick += elapsed_ms;
     context.unix_seconds =
         now_unix_seconds + (int64_t)(elapsed_ms / 1000U);
-    if (context.timer_active && context.timer_running) {
-        context.timer_remaining_ms = elapsed_ms >= context.timer_remaining_ms
-            ? 0U
-            : context.timer_remaining_ms - elapsed_ms;
+    if (toggle_running) {
+        scene_view_apply_local_action(PROTOCOL_EVENT_ACTION_START_PAUSE);
+    } else {
+        scene_view_tick_bindings(&context);
     }
-    if (toggle_running && context.timer_active) {
-        context.timer_running = !context.timer_running;
+    if (authoritative_reconcile) {
+        scene_view_refresh_bindings(&context);
     }
-    fill_scene_timer_context(&context, context.timer_active,
-                             context.timer_total_ms,
-                             context.timer_remaining_ms,
-                             context.timer_running);
-    scene_view_refresh_bindings(&context);
     lv_refr_now(s_display);
     copy_frame_out(orientation_flipped, out_scene_pixels);
     return SIM_SCENE_OK;

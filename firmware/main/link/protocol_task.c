@@ -39,8 +39,8 @@
 #include "link/ota.h"
 #include "link/usb_link.h"
 #include "link/wifi_station.h"
-#include "ui/clock_screen.h"
 #include "ui/carousel.h"
+#include "ui/clock_screen.h"
 #include "ui/font_registry.h"
 #include "ui/ota_screen.h"
 #include "ui/scene_view.h"
@@ -214,56 +214,91 @@ static size_t active_screen_index(const widget_model_t *model)
     return (size_t)(screen - config->screens);
 }
 
-static bool show_carousel_screen(protocol_context_t *context)
+static bool fill_carousel_binding(protocol_context_t *context,
+                                  carousel_binding_t *binding)
 {
     const protocol_apply_config_t *config = widget_model_config(&context->model);
-    const protocol_screen_config_t *screen =
-        widget_model_active_screen(&context->model);
-    if (config == NULL || screen == NULL || config->screen_count == 0U) {
+    const interrupt_slot_t *interrupt = interrupt_state_active(
+        &context->interrupts);
+    const protocol_screen_config_t *screen = widget_model_active_screen(
+        &context->model);
+    const char *widget_id = interrupt != NULL
+        ? interrupt->widget_id
+        : (screen != NULL ? screen->widget_id : NULL);
+    const protocol_widget_config_t *widget = find_widget(config, widget_id);
+    if (config == NULL || widget == NULL || widget_id == NULL) {
         return false;
     }
-    const protocol_widget_config_t *widget = find_widget(config,
-                                                          screen->widget_id);
-    const template_field_state_t *fields = widget_model_widget_fields(
-        &context->model, screen->widget_id);
-    if (widget == NULL || fields == NULL) {
+
+    memset(binding, 0, sizeof(*binding));
+    strcpy(binding->widget_id, widget_id);
+    binding->tap_action = widget->tap_action;
+    binding->interrupt = interrupt != NULL;
+    if (interrupt != NULL) {
+        strcpy(binding->screen_id, context->interrupts.saved_screen_id);
+        binding->interrupt_token = interrupt->token;
+        return true;
+    }
+    if (screen == NULL || config->screen_count == 0U) {
         return false;
     }
+
     size_t index = active_screen_index(&context->model);
     size_t previous = index == 0U ? config->screen_count - 1U : index - 1U;
     size_t next = (index + 1U) % config->screen_count;
+    strcpy(binding->screen_id, screen->screen_id);
+    strcpy(binding->previous_screen_id, config->screens[previous].screen_id);
+    strcpy(binding->previous_widget_id, config->screens[previous].widget_id);
+    strcpy(binding->next_screen_id, config->screens[next].screen_id);
+    strcpy(binding->next_widget_id, config->screens[next].widget_id);
+    return true;
+}
+
+static bool show_carousel_screen(protocol_context_t *context)
+{
+    carousel_binding_t binding;
+    if (!fill_carousel_binding(context, &binding) || binding.interrupt) {
+        return false;
+    }
+    const protocol_apply_config_t *config = widget_model_config(&context->model);
+    const protocol_widget_config_t *widget = find_widget(config,
+                                                          binding.widget_id);
+    const template_field_state_t *fields = widget_model_widget_fields(
+        &context->model, binding.widget_id);
+    if (widget == NULL || fields == NULL) {
+        return false;
+    }
     ui_view_context_t *view = &context->view_context;
     memset(view, 0, sizeof(*view));
-    strcpy(view->screen_id, screen->screen_id);
-    strcpy(view->previous_screen_id, config->screens[previous].screen_id);
-    strcpy(view->previous_widget_id, config->screens[previous].widget_id);
-    strcpy(view->next_screen_id, config->screens[next].screen_id);
-    strcpy(view->next_widget_id, config->screens[next].widget_id);
-    view->tap_action = widget->tap_action;
+    strcpy(view->screen_id, binding.screen_id);
+    strcpy(view->previous_screen_id, binding.previous_screen_id);
+    strcpy(view->previous_widget_id, binding.previous_widget_id);
+    strcpy(view->next_screen_id, binding.next_screen_id);
+    strcpy(view->next_widget_id, binding.next_widget_id);
+    view->tap_action = binding.tap_action;
     return ui_runtime_show_view(widget->widget_id, widget->template_kind,
                                 widget->size_class, fields, view);
 }
 
 static bool show_active_interrupt(protocol_context_t *context)
 {
-    const interrupt_slot_t *active = interrupt_state_active(
-        &context->interrupts);
-    const protocol_apply_config_t *config = widget_model_config(&context->model);
-    if (active == NULL || config == NULL) {
+    carousel_binding_t binding;
+    if (!fill_carousel_binding(context, &binding) || !binding.interrupt) {
         return false;
     }
+    const protocol_apply_config_t *config = widget_model_config(&context->model);
     const protocol_widget_config_t *widget = find_widget(config,
-                                                          active->widget_id);
+                                                          binding.widget_id);
     const template_field_state_t *fields = widget_model_widget_fields(
-        &context->model, active->widget_id);
+        &context->model, binding.widget_id);
     if (widget == NULL || fields == NULL) {
         return false;
     }
     ui_view_context_t *view = &context->view_context;
     memset(view, 0, sizeof(*view));
-    strcpy(view->screen_id, context->interrupts.saved_screen_id);
+    strcpy(view->screen_id, binding.screen_id);
     view->interrupt = true;
-    view->interrupt_token = active->token;
+    view->interrupt_token = binding.interrupt_token;
     return ui_runtime_show_view(widget->widget_id, widget->template_kind,
                                 PROTOCOL_SIZE_FULL, fields, view);
 }
@@ -389,41 +424,11 @@ typedef enum {
  * lock held by show_scene(). */
 static void bind_scene_carousel(protocol_context_t *context)
 {
-    const interrupt_slot_t *interrupt = interrupt_state_active(
-        &context->interrupts);
-    const protocol_apply_config_t *config = widget_model_config(
-        &context->model);
-    const protocol_screen_config_t *screen = widget_model_active_screen(
-        &context->model);
-    const char *widget_id = interrupt != NULL
-        ? interrupt->widget_id
-        : (screen != NULL ? screen->widget_id : NULL);
-    const protocol_widget_config_t *widget = find_widget(config, widget_id);
-    if (config == NULL || widget == NULL || widget_id == NULL ||
-        strcmp(widget_id, context->scene_card_id) != 0) {
+    carousel_binding_t binding;
+    if (!fill_carousel_binding(context, &binding) ||
+        strcmp(binding.widget_id, context->scene_card_id) != 0) {
         carousel_unbind();
         return;
-    }
-
-    carousel_binding_t binding = {
-        .tap_action = widget->tap_action,
-        .interrupt = interrupt != NULL,
-        .interrupt_token = interrupt != NULL ? interrupt->token : 0U,
-    };
-    strcpy(binding.widget_id, widget_id);
-    if (interrupt != NULL) {
-        strcpy(binding.screen_id, context->interrupts.saved_screen_id);
-    } else {
-        size_t index = active_screen_index(&context->model);
-        size_t previous = index == 0U ? config->screen_count - 1U : index - 1U;
-        size_t next = (index + 1U) % config->screen_count;
-        strcpy(binding.screen_id, screen->screen_id);
-        strcpy(binding.previous_screen_id,
-               config->screens[previous].screen_id);
-        strcpy(binding.previous_widget_id,
-               config->screens[previous].widget_id);
-        strcpy(binding.next_screen_id, config->screens[next].screen_id);
-        strcpy(binding.next_widget_id, config->screens[next].widget_id);
     }
     (void)carousel_bind(scene_view_screen(), &binding);
 }

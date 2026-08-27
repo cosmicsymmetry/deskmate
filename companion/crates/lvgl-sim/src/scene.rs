@@ -202,9 +202,10 @@ pub struct SceneRenderRequest {
 
 /// One temporal parity run. Both sides are built at the initial instant and
 /// advance their wall clock and optional timer through the same interval.
-/// `toggle_running` applies one local
-/// start/pause transition at the end; the scene is refreshed in place and is
-/// never decoded or pushed a second time.
+/// `toggle_running` applies one local start/pause transition at the end. When
+/// `authoritative_reconcile` is also set, the original host snapshot is then
+/// applied again. The scene is refreshed in place and is never decoded or
+/// pushed a second time.
 pub struct SceneTemporalPairRequest<'a> {
     pub template: &'a RenderRequest,
     pub scene: &'a SceneRenderRequest,
@@ -212,6 +213,7 @@ pub struct SceneTemporalPairRequest<'a> {
     /// the same milliseconds.
     pub elapsed_ms: u32,
     pub toggle_running: bool,
+    pub authoritative_reconcile: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -336,6 +338,7 @@ unsafe extern "C" {
         timer_running: bool,
         elapsed_ms: u32,
         toggle_running: bool,
+        authoritative_reconcile: bool,
         scene_fields: *const RawSceneField,
         scene_field_count: usize,
         orientation_flipped: bool,
@@ -440,7 +443,7 @@ impl Simulator {
 
     /// Renders a C template and its scene at one instant, advances both, and
     /// returns their final frames. The C shim decodes and shows the scene once,
-    /// then calls `scene_view_refresh_bindings()` for the advanced context.
+    /// then drives the real scene tick/local-action/reconciliation entry point.
     ///
     /// # Errors
     ///
@@ -491,6 +494,7 @@ impl Simulator {
                 timer.running,
                 request.elapsed_ms,
                 request.toggle_running,
+                request.authoritative_reconcile,
                 scene_fields.as_ptr(),
                 scene_fields.len(),
                 matches!(request.scene.orientation, SimOrientation::LandscapeFlipped),

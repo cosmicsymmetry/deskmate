@@ -223,7 +223,8 @@ void template_view_set_utc_offset_minutes(int16_t offset_minutes)
 
 void template_view_apply_local_action(protocol_event_action_t action)
 {
-    if (s_view.template_kind == PROTOCOL_TEMPLATE_PROGRESS_RING) {
+    if (s_view.screen != NULL && lv_screen_active() == s_view.screen &&
+        s_view.template_kind == PROTOCOL_TEMPLATE_PROGRESS_RING) {
         progress_ring_local_action(&s_view.widget, action);
     }
 }

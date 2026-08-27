@@ -1,4 +1,5 @@
 #include <assert.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
@@ -194,12 +195,34 @@ static void local_timer_actions_move_a_paused_snapshot(void)
     assert(snapshot.remaining_permille == 333U);
 
     scene_timer_apply_local_action(
+        &snapshot, SCENE_TIMER_LOCAL_ACTION_START_PAUSE, 450000U);
+    assert(snapshot.running);
+    assert(snapshot.anchor_ms == 450000U);
+
+    scene_timer_apply_local_action(
         &snapshot, SCENE_TIMER_LOCAL_ACTION_RESET, 500000U);
     assert(!snapshot.running);
     assert(snapshot.anchor_ms == 500000U);
     assert(snapshot.remaining_ms == snapshot.total_ms);
     assert(snapshot.remaining_pct == 100U);
     assert(snapshot.remaining_permille == 1000U);
+}
+
+static void a_running_timer_survives_the_tick_counter_wrapping(void)
+{
+    scene_timer_snapshot_t snapshot = {
+        .total_ms = 1000U,
+        .remaining_ms = 1000U,
+        .anchor_ms = UINT32_MAX - 99U,
+        .running = true,
+    };
+
+    snapshot = scene_timer_snapshot_at(snapshot, 100U);
+    assert(snapshot.running);
+    assert(snapshot.anchor_ms == 100U);
+    assert(snapshot.remaining_ms == 800U);
+    assert(snapshot.remaining_pct == 80U);
+    assert(snapshot.remaining_permille == 800U);
 }
 
 static void a_non_positive_duration_returns_an_empty_snapshot(void)
@@ -525,6 +548,7 @@ int main(void)
     a_never_started_timer_reads_one_hundred();
     a_running_timer_subtracts_elapsed_time();
     local_timer_actions_move_a_paused_snapshot();
+    a_running_timer_survives_the_tick_counter_wrapping();
     a_non_positive_duration_returns_an_empty_snapshot();
     timer_pct_truncates_instead_of_rounding();
     timer_snapshot_bounds_inputs_before_millisecond_arithmetic();

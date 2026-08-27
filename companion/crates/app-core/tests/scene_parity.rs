@@ -692,6 +692,7 @@ fn assert_progress_ring_temporal_parity(
     running: bool,
     elapsed_ms: u32,
     toggle_running: bool,
+    authoritative_reconcile: bool,
 ) -> SceneTemporalPair {
     let label = "Pomodoro";
     let template = RenderRequest {
@@ -745,6 +746,7 @@ fn assert_progress_ring_temporal_parity(
             scene: &scene,
             elapsed_ms,
             toggle_running,
+            authoritative_reconcile,
         })
         .expect("temporal render");
     let differing: Vec<_> = frames
@@ -781,6 +783,7 @@ fn a_running_progress_scene_advances_across_a_second_without_a_repush() {
         true,
         ELAPSED_MS,
         false,
+        false,
     );
     assert_ne!(
         frames.scene, frames.initial_scene,
@@ -790,7 +793,7 @@ fn a_running_progress_scene_advances_across_a_second_without_a_repush() {
 
 #[test]
 fn a_progress_scene_reaching_zero_changes_status_to_done_without_a_repush() {
-    let frames = assert_progress_ring_temporal_parity(1_500, 1, true, 1_000, false);
+    let frames = assert_progress_ring_temporal_parity(1_500, 1, true, 1_000, false, false);
     assert_ne!(
         frames.scene, frames.initial_scene,
         "reaching zero must replace Running with Done"
@@ -799,7 +802,7 @@ fn a_progress_scene_reaching_zero_changes_status_to_done_without_a_repush() {
 
 #[test]
 fn pausing_a_progress_scene_repaints_indicator_and_status_without_a_repush() {
-    let frames = assert_progress_ring_temporal_parity(1_500, 900, true, 0, true);
+    let frames = assert_progress_ring_temporal_parity(1_500, 900, true, 0, true, false);
     assert_ne!(
         frames.scene, frames.initial_scene,
         "pausing must repaint both running-color nodes"
@@ -808,10 +811,19 @@ fn pausing_a_progress_scene_repaints_indicator_and_status_without_a_repush() {
 
 #[test]
 fn resuming_a_progress_scene_applies_indicator_and_status_running_colors_without_a_repush() {
-    let frames = assert_progress_ring_temporal_parity(1_500, 900, false, 0, true);
+    let frames = assert_progress_ring_temporal_parity(1_500, 900, false, 0, true, false);
     assert_ne!(
         frames.scene, frames.initial_scene,
         "resuming must apply both running-color variants"
+    );
+}
+
+#[test]
+fn an_authoritative_snapshot_overwrites_an_optimistic_scene_transition() {
+    let frames = assert_progress_ring_temporal_parity(1_500, 900, false, 0, true, true);
+    assert_eq!(
+        frames.scene, frames.initial_scene,
+        "the host's paused snapshot must replace the optimistic running state"
     );
 }
 
@@ -860,6 +872,7 @@ fn assert_digital_clock_temporal_parity(
             scene: &scene,
             elapsed_ms,
             toggle_running: false,
+            authoritative_reconcile: false,
         })
         .expect("temporal DigitalClock render");
     assert!(

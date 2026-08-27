@@ -1367,14 +1367,15 @@ void scene_view_tick_bindings(const scene_binding_context_t *context)
     if (s_state == NULL || context == NULL) {
         return;
     }
-    /* The protocol task still owns wall time and provider lookup. Its timer
-     * values are deliberately not copied on a tick: they came from the last
-     * host snapshot and would erase an offline optimistic action four times
-     * a second. */
+    /* The protocol task still owns wall time, provider lookup, and whether a
+     * timer snapshot exists. Its timer values are deliberately not copied on
+     * a tick: they came from the last host snapshot and would erase an offline
+     * optimistic action four times a second. */
     s_state->binding.unix_seconds = context->unix_seconds;
     s_state->binding.utc_offset_minutes = context->utc_offset_minutes;
     s_state->binding.field = context->field;
     s_state->binding.field_ctx = context->field_ctx;
+    s_state->binding.timer_active = context->timer_active;
     scene_timer_snapshot_t current = scene_timer_snapshot_at(
         s_state->timer, lv_tick_get());
     apply_timer_snapshot(s_state, current);

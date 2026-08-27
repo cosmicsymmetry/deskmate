@@ -3695,3 +3695,69 @@ own**, because the device has been offline since 13:50 and no runtime has been
 created in this instance. The honest check is a full cycle: let the device
 connect, let the link drop, and confirm CPU stays flat afterwards. Until that is
 observed, this is fixed in test and unproven in the field.
+
+## Stage 2b's four firmware needs published as `v2.0.0-scene3` — 2026-08-27, DOWNLOAD NOT YET OBSERVED
+
+**This entry records a publish, not a result.** The OTA download has not been seen on
+the board. Do not read it as verification.
+
+One image carries all four firmware needs stage 2b surfaced, because it was never
+published between them:
+
+| Need | Wire | Unblocks |
+| --- | --- | --- |
+| `SceneArc.opacity` | key 9, omission = `LV_OPA_COVER` | all 8 `ProgressRing` parity rows |
+| external rot-rect pivot | no new key; a relaxed, axis-wise canvas bound | all 8 `AnalogClock` rows |
+| `SceneRect.clip` | key 7 | STORM's 14 clipped pixels |
+| `SceneRotRect.clip` | key 10 | `AnalogClock`'s 8 tick-edge pixels |
+
+Protocol stays v1 and additive, `PROTOCOL_CURRENT_CAPABILITIES` stays 491, schema stays v5.
+
+**Internal RAM is byte-flat across all of it**, on a same-tree before/after taken at
+`09404ca` and re-measured after each firmware commit — `.bss` **102,624 → 102,624**,
+DIRAM `.text` **93,635 → 93,635**, `.data` **23,128 → 23,128**, IRAM
+**16,384/16,384 → 16,384/16,384 with 0 remaining**, DIRAM total **219,387 → 219,387**.
+Only flash `.text` moved, **1,140,180 → 1,141,824**, and that is off-chip. Flat internal
+figures have predicted a clean download exactly once (2026-08-26), which is one data
+point and not a law — hence this check.
+
+### What was published, and verified
+
+`deskmate.bin` 1,605,600 bytes, md5 `4aa60a714d841a7e504cfcf16ee04cf7`, published as
+`v2.0.0-scene3`. All three required steps were done and each was checked rather than
+assumed:
+
+1. The image is in `/var/lib/deskmate/firmware/v2.0.0-scene3.bin`, owned by
+   `deskmate-server`, and `md5sum` on the VM matches the local build.
+2. `DESKMATE_FIRMWARE_VERSION` in `/etc/deskmate/server.env` reads `v2.0.0-scene3`.
+   `firmware/version.txt` was moved to match in `26e4246` — required, because the catalog
+   offers its version in **either** direction, so a device left on a different string is
+   offered a change within the minute.
+3. `deskmate-server.service` was restarted and is active.
+
+Then end-to-end through the public tunnel, not just on the VM:
+`GET https://deskmate.rodi.one/v1/firmware/v2.0.0-scene3.bin` returned **200**,
+1,605,600 bytes in 0.9 s, md5 `4aa60a714d841a7e504cfcf16ee04cf7` — byte-identical to the
+local build. So the image a device would fetch is provably the image that was built.
+
+**Reaching the VM needs Tailscale (`100.93.166.123`), not the `~/.ssh/config` host**,
+whose pinned LAN address `192.168.8.20` times out from any other network. That cost a
+round trip here and will again.
+
+`GET /v1/devices/dev-0005` immediately after the restart: `connected: false`,
+`snapshot: null`. The retained runtime does not survive a server restart, so this says
+nothing about the board's health — only that the link is down, which is expected while
+the board is off or asleep.
+
+### What is owed
+
+A power cycle. The device checks once at boot and twice a day, cannot be asked, and the
+board has a battery, so **a USB unplug is link loss, not power loss**. On the next boot it
+should download `v2.0.0-scene3`, install, reboot onto the new slot and survive the rollback
+window. The evidence standard is the one the 2026-08-25 and 2026-08-26 entries used:
+`firmware_version: v2.0.0-scene3`, `ota_state: idle`, `last_ota_error: null`, link
+connected, observed after the reboot.
+
+Note that the server binary at `/usr/local/bin/deskmate-server` was **not** rebuilt. It did
+not need to be: nothing in stage 2b changed the server, and the OTA check exercises the
+firmware catalog and the device's updater, neither of which moved.

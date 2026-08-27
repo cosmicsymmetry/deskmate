@@ -32,10 +32,12 @@
  *           10: running_color}
  *          required 0-5; color defaults 0, rounded false, end_binding "",
  *          opacity 255, running_color absent.
- * LINE     {0: [x, ...], 1: [y, ...], 2: width, 3: color}
- *          required 0-2; color defaults 0. The two arrays must be the same
- *          length, at most SCENE_MAX_LINE_POINTS; that length is
- *          point_count.
+ * LINE     {0: [x, ...], 1: [y, ...], 2: width, 3: color,
+ *           4: pivot_x, 5: pivot_y, 6: length, 7: angle_binding}
+ *          Fixed form requires 0-2. Bound form requires 2 and 4-7. The forms
+ *          are mutually exclusive; color defaults 0. Fixed arrays must be
+ *          the same length, at most SCENE_MAX_LINE_POINTS; that length is
+ *          point_count. Bound point_count is zero.
  * TEXT     {0: x, 1: baseline_y, 2: w, 3: align, 4: <font>, 5: color,
  *           6: <value>, 7: ellipsize (bool), 8: running_color}
  *          required 0, 1, 2, 4, 6; align defaults SCENE_ALIGN_LEFT (NOT
@@ -527,25 +529,45 @@ static scene_model_result_t decode_line(CborValue *value, scene_line_t *line)
         case 1U: status = read_point_array(&fields, line->ys, &y_count); break;
         case 2U: status = read_int32(&fields, &line->width); break;
         case 3U: status = read_uint32(&fields, &line->color); break;
+        case 4U: status = read_int32(&fields, &line->pivot_x); break;
+        case 5U: status = read_int32(&fields, &line->pivot_y); break;
+        case 6U: status = read_int32(&fields, &line->length); break;
+        case 7U:
+            status = read_text(&fields, line->angle_binding,
+                               sizeof line->angle_binding,
+                               SCENE_MAX_BINDING);
+            break;
         default: status = skip_value(&fields); break;
         }
         if (status != SCENE_MODEL_OK) {
             return status;
         }
-        if (key <= 3U) {
+        if (key <= 7U) {
             present |= REQUIRED_BIT((uint32_t)key);
         }
     }
-    if ((present & UINT32_C(0x07)) != UINT32_C(0x07)) {
+    bool has_points = (present & UINT32_C(0x03)) != 0U;
+    bool has_bound_geometry = (present & UINT32_C(0xf0)) != 0U;
+    if (has_points && has_bound_geometry) {
+        return SCENE_MODEL_ERR_GEOMETRY;
+    }
+    if (has_points && (present & UINT32_C(0x07)) != UINT32_C(0x07)) {
+        return SCENE_MODEL_ERR_ARGUMENT;
+    }
+    if (has_bound_geometry &&
+        (present & UINT32_C(0xf4)) != UINT32_C(0xf4)) {
+        return SCENE_MODEL_ERR_ARGUMENT;
+    }
+    if (!has_points && !has_bound_geometry) {
         return SCENE_MODEL_ERR_ARGUMENT;
     }
     /* Two arrays of different lengths describe no polyline at all; taking
      * the shorter would silently drop a point the host meant to draw. The
      * lower bound of 2 belongs to scene_model_validate(). */
-    if (x_count != y_count) {
+    if (has_points && x_count != y_count) {
         return SCENE_MODEL_ERR_GEOMETRY;
     }
-    line->point_count = x_count;
+    line->point_count = has_points ? x_count : 0U;
     return cbor_result(cbor_value_leave_container(value, &fields));
 }
 

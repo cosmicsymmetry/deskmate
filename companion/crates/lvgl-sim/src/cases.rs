@@ -736,6 +736,7 @@ fn baseline_rule(y: i32) -> SceneNode {
         ys: vec![y, y],
         width: 1,
         color: BLUE,
+        ..SceneLine::default()
     })
 }
 
@@ -918,24 +919,28 @@ fn scene_line_nodes() -> Vec<SceneNode> {
             ys: vec![80, 80],
             width: 24,
             color: ACCENT,
+            ..SceneLine::default()
         }),
         SceneNode::Line(SceneLine {
             xs: vec![32, 416],
             ys: vec![136, 176],
             width: 2,
             color: BLUE,
+            ..SceneLine::default()
         }),
         SceneNode::Line(SceneLine {
             xs: vec![32, 112, 192, 272, 352, 416],
             ys: vec![296, 216, 296, 216, 296, 256],
             width: 6,
             color: GREEN,
+            ..SceneLine::default()
         }),
         SceneNode::Line(SceneLine {
             xs: vec![16, 80, 144, 208, 272, 336, 400, 432],
             ys: vec![352, 336, 352, 336, 352, 336, 352, 344],
             width: 4,
             color: PRIMARY,
+            ..SceneLine::default()
         }),
     ]
 }
@@ -1203,6 +1208,7 @@ fn scene_scale_nodes() -> Vec<SceneNode> {
             ys: vec![cy, cy],
             width: 6,
             color: PRIMARY,
+            ..SceneLine::default()
         }),
         // Minute hand, 42 long, pointing at twelve — straight at the major
         // tick the scale's rotation of 270 puts there.
@@ -1211,6 +1217,7 @@ fn scene_scale_nodes() -> Vec<SceneNode> {
             ys: vec![cy, cy - 42],
             width: 4,
             color: ACCENT,
+            ..SceneLine::default()
         }),
         SceneNode::Scale(SceneScale {
             x: 24,

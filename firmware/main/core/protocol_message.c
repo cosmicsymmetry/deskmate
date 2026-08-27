@@ -2561,18 +2561,44 @@ static protocol_message_result_t encode_scene_line(CborEncoder *parent,
                                                     const scene_line_t *line)
 {
     CborEncoder map;
+    bool bound = line->angle_binding[0] != '\0';
     protocol_message_result_t result =
-        begin_map(parent, &map, 3U + (line->color != 0U ? 1U : 0U));
-    if (result == PROTOCOL_MESSAGE_OK) {
+        begin_map(parent, &map,
+                  (bound ? 5U : 3U) + (line->color != 0U ? 1U : 0U));
+    if (result == PROTOCOL_MESSAGE_OK && !bound) {
         result = encode_scene_points(&map, 0U, line->xs, line->point_count);
     }
-    if (result == PROTOCOL_MESSAGE_OK) {
+    if (result == PROTOCOL_MESSAGE_OK && !bound) {
         result = encode_scene_points(&map, 1U, line->ys, line->point_count);
     }
     if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 2U);
     if (result == PROTOCOL_MESSAGE_OK) result = encode_int(&map, line->width);
     if (result == PROTOCOL_MESSAGE_OK && line->color != 0U) {
         result = encode_pair_uint(&map, 3U, line->color);
+    }
+    if (result == PROTOCOL_MESSAGE_OK && bound) {
+        result = encode_uint(&map, 4U);
+    }
+    if (result == PROTOCOL_MESSAGE_OK && bound) {
+        result = encode_int(&map, line->pivot_x);
+    }
+    if (result == PROTOCOL_MESSAGE_OK && bound) {
+        result = encode_uint(&map, 5U);
+    }
+    if (result == PROTOCOL_MESSAGE_OK && bound) {
+        result = encode_int(&map, line->pivot_y);
+    }
+    if (result == PROTOCOL_MESSAGE_OK && bound) {
+        result = encode_uint(&map, 6U);
+    }
+    if (result == PROTOCOL_MESSAGE_OK && bound) {
+        result = encode_int(&map, line->length);
+    }
+    if (result == PROTOCOL_MESSAGE_OK && bound) {
+        result = encode_uint(&map, 7U);
+    }
+    if (result == PROTOCOL_MESSAGE_OK && bound) {
+        result = encode_text(&map, line->angle_binding);
     }
     if (result == PROTOCOL_MESSAGE_OK) result = end_map(parent, &map);
     return result;

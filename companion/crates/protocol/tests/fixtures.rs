@@ -228,20 +228,8 @@ fn assert_running_colors_are_pinned(nodes: &[protocol::SceneNode]) {
     assert_eq!(text.running_color, Some(0x00FF_9F0A));
 }
 
-#[test]
-fn push_scene_fixtures_carry_what_they_are_meant_to() {
-    let frame = decode_wire_frame(&fixture("push_scene.bin")).unwrap();
-    let protocol::Message::PushScene(push) = decode_message(&frame).unwrap() else {
-        panic!("push_scene.bin should be a PushScene");
-    };
-    assert_eq!(push.card_id, "clock");
-    assert_eq!(push.revision, 12);
-    // Every node kind, once: an all-minimal fixture would pass even if the
-    // two encoders disagreed about the kinds it left out.
-    assert_eq!(push.scene.nodes.len(), 10);
-    let rect = push
-        .scene
-        .nodes
+fn assert_rich_rect_is_pinned(nodes: &[protocol::SceneNode]) {
+    let rect = nodes
         .iter()
         .find_map(|node| match node {
             protocol::SceneNode::Rect(rect) => Some(rect),
@@ -258,9 +246,10 @@ fn push_scene_fixtures_carry_what_they_are_meant_to() {
             h: 336,
         })
     );
-    let arc = push
-        .scene
-        .nodes
+}
+
+fn assert_rich_arc_is_pinned(nodes: &[protocol::SceneNode]) {
+    let arc = nodes
         .iter()
         .find_map(|node| match node {
             protocol::SceneNode::Arc(arc) => Some(arc),
@@ -268,11 +257,38 @@ fn push_scene_fixtures_carry_what_they_are_meant_to() {
         })
         .expect("the rich fixture carries an arc");
     assert_eq!(arc.opacity, 0x33);
-    assert_rot_rect_clip_is_pinned(&push.scene.nodes);
-    assert_running_colors_are_pinned(&push.scene.nodes);
-    let label = push
-        .scene
-        .nodes
+}
+
+fn assert_bound_line_is_pinned(nodes: &[protocol::SceneNode]) {
+    let line = nodes
+        .iter()
+        .find_map(|node| match node {
+            protocol::SceneNode::Line(line) if !line.angle_binding.is_empty() => Some(line),
+            _ => None,
+        })
+        .expect("the rich fixture carries a bound line");
+    assert!(line.xs.is_empty());
+    assert!(line.ys.is_empty());
+    assert_eq!(line.pivot_x, 224);
+    assert_eq!(line.pivot_y, 184);
+    assert_eq!(line.length, 80);
+    assert_eq!(line.angle_binding, "time:angle:hour");
+}
+
+fn assert_date_binding_is_pinned(nodes: &[protocol::SceneNode]) {
+    assert!(nodes.iter().any(|node| {
+        matches!(
+            node,
+            protocol::SceneNode::Text(protocol::SceneText {
+                value: protocol::SceneValue::Binding(binding),
+                ..
+            }) if binding == "date"
+        )
+    }));
+}
+
+fn assert_label_anchor_default_is_pinned(nodes: &[protocol::SceneNode]) {
+    let label = nodes
         .iter()
         .find_map(|node| match node {
             protocol::SceneNode::Label(label) => Some(label),
@@ -284,12 +300,11 @@ fn push_scene_fixtures_carry_what_they_are_meant_to() {
         protocol::SceneLabelAnchor::Left,
         "the pre-anchor fixture must keep decoding an omitted key as Left"
     );
-    let kinds: Vec<std::mem::Discriminant<protocol::SceneNode>> = push
-        .scene
-        .nodes
-        .iter()
-        .map(std::mem::discriminant)
-        .collect();
+}
+
+fn assert_every_node_kind_is_pinned(nodes: &[protocol::SceneNode]) {
+    let kinds: Vec<std::mem::Discriminant<protocol::SceneNode>> =
+        nodes.iter().map(std::mem::discriminant).collect();
     for probe in [
         protocol::SceneNode::Rect(protocol::SceneRect::default()),
         protocol::SceneNode::Arc(protocol::SceneArc::default()),
@@ -306,7 +321,9 @@ fn push_scene_fixtures_carry_what_they_are_meant_to() {
             "the rich fixture must cover every node kind"
         );
     }
+}
 
+fn assert_minimal_scene_defaults_are_pinned() {
     // The minimal fixture is the other half of the canonical emission rule:
     // every optional key at its default, so the file proves both encoders
     // omit them rather than spelling them out.
@@ -332,4 +349,27 @@ fn push_scene_fixtures_carry_what_they_are_meant_to() {
             ..protocol::SceneRect::default()
         }
     );
+}
+
+#[test]
+fn push_scene_fixtures_carry_what_they_are_meant_to() {
+    let frame = decode_wire_frame(&fixture("push_scene.bin")).unwrap();
+    let protocol::Message::PushScene(push) = decode_message(&frame).unwrap() else {
+        panic!("push_scene.bin should be a PushScene");
+    };
+    assert_eq!(push.card_id, "clock");
+    assert_eq!(push.revision, 12);
+    // Every node kind, plus both Line forms and both Text value forms: an
+    // all-minimal fixture would pass even if the encoders disagreed about the
+    // kinds or additive fields it left out.
+    assert_eq!(push.scene.nodes.len(), 11);
+    assert_rich_rect_is_pinned(&push.scene.nodes);
+    assert_rich_arc_is_pinned(&push.scene.nodes);
+    assert_rot_rect_clip_is_pinned(&push.scene.nodes);
+    assert_running_colors_are_pinned(&push.scene.nodes);
+    assert_bound_line_is_pinned(&push.scene.nodes);
+    assert_date_binding_is_pinned(&push.scene.nodes);
+    assert_label_anchor_default_is_pinned(&push.scene.nodes);
+    assert_every_node_kind_is_pinned(&push.scene.nodes);
+    assert_minimal_scene_defaults_are_pinned();
 }

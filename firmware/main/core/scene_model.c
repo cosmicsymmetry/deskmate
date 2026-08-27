@@ -49,7 +49,7 @@ static bool arc_within_canvas(const scene_arc_t *arc)
     return true;
 }
 
-static bool line_within_canvas(const scene_line_t *line)
+static bool fixed_line_within_canvas(const scene_line_t *line)
 {
     if (line->point_count < 2U || line->point_count > SCENE_MAX_LINE_POINTS) {
         return false;
@@ -64,6 +64,27 @@ static bool line_within_canvas(const scene_line_t *line)
         if (line->ys[i] < 0 || line->ys[i] > SCENE_CANVAS_HEIGHT) {
             return false;
         }
+    }
+    return true;
+}
+
+static bool bound_line_within_canvas(const scene_line_t *line)
+{
+    if (line->point_count != 0U || line->width < 0 || line->length < 0) {
+        return false;
+    }
+    if (line->pivot_x < 0 || line->pivot_x > SCENE_CANVAS_WIDTH ||
+        line->pivot_y < 0 || line->pivot_y > SCENE_CANVAS_HEIGHT) {
+        return false;
+    }
+    /* The binding can eventually point in every direction. Bounding the
+     * whole radius, rather than only today's endpoint, keeps every refresh
+     * inside the same canvas contract as a fixed line. */
+    if (line->length > line->pivot_x ||
+        line->length > SCENE_CANVAS_WIDTH - line->pivot_x ||
+        line->length > line->pivot_y ||
+        line->length > SCENE_CANVAS_HEIGHT - line->pivot_y) {
+        return false;
     }
     return true;
 }
@@ -232,6 +253,27 @@ bool scene_model_parse_rotation_binding(const char *text,
     return false;
 }
 
+bool scene_model_parse_angle_binding(const char *text,
+                                     scene_angle_binding_t *out)
+{
+    if (text == NULL || out == NULL) {
+        return false;
+    }
+    if (text[0] == '\0') {
+        *out = SCENE_ANGLE_BINDING_NONE;
+        return true;
+    }
+    if (strcmp(text, "time:angle:hour") == 0) {
+        *out = SCENE_ANGLE_BINDING_HOUR;
+        return true;
+    }
+    if (strcmp(text, "time:angle:minute") == 0) {
+        *out = SCENE_ANGLE_BINDING_MINUTE;
+        return true;
+    }
+    return false;
+}
+
 /* The origin, in [0, 360). Normalised here because
  * lv_arc_set_rotation() reduces with a `while` loop (lv_arc.c:271-272), which
  * an untrusted wire value near INT32_MAX would spin through ~6 million
@@ -329,11 +371,23 @@ scene_model_result_t scene_model_validate(const scene_t *scene)
             }
             break;
 
-        case SCENE_NODE_LINE:
-            if (!line_within_canvas(&node->value.line)) {
+        case SCENE_NODE_LINE: {
+            const scene_line_t *line = &node->value.line;
+            scene_angle_binding_t binding;
+            if (!nul_terminated(line->angle_binding,
+                                sizeof line->angle_binding) ||
+                !scene_model_parse_angle_binding(line->angle_binding,
+                                                 &binding)) {
+                return SCENE_MODEL_ERR_TEXT;
+            }
+            bool geometry_ok = binding == SCENE_ANGLE_BINDING_NONE
+                ? fixed_line_within_canvas(line)
+                : bound_line_within_canvas(line);
+            if (!geometry_ok) {
                 return SCENE_MODEL_ERR_GEOMETRY;
             }
             break;
+        }
 
         case SCENE_NODE_TEXT: {
             const scene_text_t *text = &node->value.text;

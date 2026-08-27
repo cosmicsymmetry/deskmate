@@ -60,9 +60,14 @@ typedef struct {
     uint32_t running_color;
     uint8_t kind; /* scene_node_kind_t */
     uint8_t rotation_binding; /* scene_rotation_binding_t, ROT_RECT only */
+    uint8_t angle_binding; /* scene_angle_binding_t, LINE only */
     bool has_binding;
     bool has_running_color;
     bool hide_when_empty;     /* LABEL only */
+    lv_point_precise_t *line_points;
+    int32_t line_pivot_x;
+    int32_t line_pivot_y;
+    int32_t line_length;
 } scene_bound_node_t;
 
 /* Per-scene state. Allocated from the LVGL heap and owned by the screen --
@@ -482,16 +487,56 @@ static void free_points_cb(lv_event_t *event)
  * are too. Points are absolute canvas coordinates and the object sits at the
  * canvas origin, so lv_line's LV_SIZE_CONTENT self-size (max x, max y from
  * its origin) always encloses them. */
-static lv_obj_t *build_line(lv_obj_t *parent, const scene_line_t *line)
+static int32_t scene_trigo_cos(int32_t angle)
 {
+    return lv_trigo_cos((int16_t)angle);
+}
+
+static int32_t scene_trigo_sin(int32_t angle)
+{
+    return lv_trigo_sin((int16_t)angle);
+}
+
+static void set_bound_line_points(lv_obj_t *object,
+                                  lv_point_precise_t points[2],
+                                  scene_angle_binding_t binding,
+                                  const scene_binding_context_t *context,
+                                  int32_t pivot_x, int32_t pivot_y,
+                                  int32_t length)
+{
+    scene_line_endpoint_t endpoint = { .x = pivot_x, .y = pivot_y };
+    (void)scene_binding_line_endpoint(
+        binding, context, pivot_x, pivot_y, length, scene_trigo_cos,
+        scene_trigo_sin, &endpoint);
+    points[0].x = (lv_value_precise_t)pivot_x;
+    points[0].y = (lv_value_precise_t)pivot_y;
+    points[1].x = (lv_value_precise_t)endpoint.x;
+    points[1].y = (lv_value_precise_t)endpoint.y;
+    lv_line_set_points(object, points, 2U);
+}
+
+static lv_obj_t *build_line(lv_obj_t *parent, const scene_line_t *line,
+                            const scene_binding_context_t *context,
+                            scene_angle_binding_t *out_binding,
+                            lv_point_precise_t **out_points,
+                            bool *out_is_bound)
+{
+    *out_binding = SCENE_ANGLE_BINDING_NONE;
+    *out_points = NULL;
+    *out_is_bound = scene_model_parse_angle_binding(line->angle_binding,
+                                                     out_binding) &&
+        *out_binding != SCENE_ANGLE_BINDING_NONE;
+    uint32_t point_count = *out_is_bound ? 2U : line->point_count;
     lv_point_precise_t *points =
-        lv_malloc(sizeof(lv_point_precise_t) * line->point_count);
+        lv_malloc(sizeof(lv_point_precise_t) * point_count);
     if (points == NULL) {
         return NULL;
     }
-    for (uint32_t i = 0U; i < line->point_count; i++) {
-        points[i].x = (lv_value_precise_t)line->xs[i];
-        points[i].y = (lv_value_precise_t)line->ys[i];
+    if (!*out_is_bound) {
+        for (uint32_t i = 0U; i < line->point_count; i++) {
+            points[i].x = (lv_value_precise_t)line->xs[i];
+            points[i].y = (lv_value_precise_t)line->ys[i];
+        }
     }
 
     lv_obj_t *object = lv_line_create(parent);
@@ -503,7 +548,13 @@ static lv_obj_t *build_line(lv_obj_t *parent, const scene_line_t *line)
     lv_obj_set_style_line_color(object, lv_color_hex(line->color), 0);
     lv_obj_set_style_line_width(object, clamp_line_width(line->width), 0);
     lv_obj_set_style_line_rounded(object, true, 0);
-    lv_line_set_points(object, points, line->point_count);
+    if (*out_is_bound) {
+        set_bound_line_points(object, points, *out_binding, context,
+                              line->pivot_x, line->pivot_y, line->length);
+        *out_points = points;
+    } else {
+        lv_line_set_points(object, points, line->point_count);
+    }
     lv_obj_set_pos(object, 0, 0);
     return object;
 }
@@ -973,6 +1024,9 @@ static uint32_t count_bound_nodes(const scene_t *scene)
         } else if (node->kind == SCENE_NODE_ROT_RECT &&
                    node->value.rot_rect.rotation_binding[0] != '\0') {
             ++count;
+        } else if (node->kind == SCENE_NODE_LINE &&
+                   node->value.line.angle_binding[0] != '\0') {
+            ++count;
         }
     }
     return count;
@@ -1027,9 +1081,26 @@ static bool build_nodes(lv_obj_t *parent, const scene_t *scene,
             break;
         }
 
-        case SCENE_NODE_LINE:
-            object = build_line(parent, &node->value.line);
+        case SCENE_NODE_LINE: {
+            scene_angle_binding_t binding = SCENE_ANGLE_BINDING_NONE;
+            lv_point_precise_t *points = NULL;
+            bool is_bound = false;
+
+            object = build_line(parent, &node->value.line, context, &binding,
+                                &points, &is_bound);
+            if (object != NULL && is_bound) {
+                scene_bound_node_t *bound =
+                    &state->bound[state->bound_count++];
+                bound->object = object;
+                bound->kind = (uint8_t)SCENE_NODE_LINE;
+                bound->angle_binding = (uint8_t)binding;
+                bound->line_points = points;
+                bound->line_pivot_x = node->value.line.pivot_x;
+                bound->line_pivot_y = node->value.line.pivot_y;
+                bound->line_length = node->value.line.length;
+            }
             break;
+        }
 
         case SCENE_NODE_TEXT: {
             scene_binding_t binding;
@@ -1195,6 +1266,14 @@ void scene_view_refresh_bindings(const scene_binding_context_t *context)
     }
     for (uint32_t i = 0U; i < s_state->bound_count; i++) {
         const scene_bound_node_t *bound = &s_state->bound[i];
+        if (bound->kind == (uint8_t)SCENE_NODE_LINE) {
+            set_bound_line_points(
+                bound->object, bound->line_points,
+                (scene_angle_binding_t)bound->angle_binding, context,
+                bound->line_pivot_x, bound->line_pivot_y,
+                bound->line_length);
+            continue;
+        }
         if (bound->kind == (uint8_t)SCENE_NODE_ROT_RECT) {
             lv_obj_set_style_transform_rotation(
                 bound->object,

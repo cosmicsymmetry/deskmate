@@ -118,9 +118,24 @@ typedef struct { int32_t cx, cy, r, start_deg, end_deg, width;
  * comment above for the angle convention these implement. */
 int32_t scene_model_arc_origin(int32_t degrees);
 int32_t scene_model_arc_span(int32_t start_deg, int32_t end_deg);
+
+typedef enum {
+    SCENE_ANGLE_BINDING_NONE = 0,
+    SCENE_ANGLE_BINDING_HOUR = 1,
+    SCENE_ANGLE_BINDING_MINUTE = 2,
+} scene_angle_binding_t;
+
+/* A line is either a fixed polyline (`point_count` in 2..MAX and an empty
+ * angle_binding) or one live clock hand (`point_count == 0`, a canvas-bounded
+ * pivot/length, and time:angle:hour or time:angle:minute). */
 typedef struct { int32_t xs[SCENE_MAX_LINE_POINTS], ys[SCENE_MAX_LINE_POINTS];
-                 uint32_t point_count; int32_t width; uint32_t color; }
+                 uint32_t point_count; int32_t width; uint32_t color;
+                 int32_t pivot_x, pivot_y, length;
+                 char angle_binding[SCENE_MAX_BINDING + 1U]; }
     scene_line_t;
+
+bool scene_model_parse_angle_binding(const char *text,
+                                     scene_angle_binding_t *out);
 /* `baseline_y` is the type's baseline, not the box top. The shipped templates
  * position by baseline (see digital_clock.c's baseline_offset()), so a
  * box-anchored node could not reproduce their pixels. */

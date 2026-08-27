@@ -10,12 +10,9 @@
 //! # What the host decides, and what the device still decides
 //!
 //! The host does all layout. It does **not** do all evaluation: the reading and
-//! the seconds are `time:` bindings the device re-renders on its own tick, so a
-//! scene pushed once keeps telling the time. The dial's hands and the date
-//! module are not bindable — a `SCENE_NODE_SCALE` carries no needle and there is
-//! no date binding — so those two are drawn for [`ClockCard::local_now`] and go
-//! stale until the host pushes again. A host that wants a live dial pushes once
-//! a minute.
+//! the seconds, date, and dial hands are bindings the device re-renders on its
+//! own tick, so a scene pushed once keeps the whole face current through minute
+//! boundaries and local midnight.
 //!
 //! # Three coordinate systems, and the one translation that matters
 //!
@@ -25,10 +22,10 @@
 //! children of the `lv_scale`**, which positions them from its own box centre.
 //! A scene has no nesting — every node is a sibling under one full-canvas
 //! container at the canvas origin — so this module resolves each chain to
-//! absolute canvas coordinates. `hand_points()` is where that matters most; see
+//! absolute canvas coordinates. `hand_line()` is where that matters most; see
 //! its comment.
 
-use chrono::{Datelike, NaiveDateTime, Timelike};
+use chrono::{NaiveDateTime, Timelike};
 use protocol::{
     SCENE_CANVAS_HEIGHT, SCENE_CANVAS_WIDTH, Scene, SceneAlign, SceneArc, SceneClipRect, SceneFont,
     SceneFontTier, SceneLabel, SceneLabelAnchor, SceneLine, SceneNode, SceneRect, SceneRotRect,
@@ -220,8 +217,6 @@ const DIAL_X: i32 = 33 * GRID;
 const DIAL_W: i32 = 20 * GRID;
 /// `DIAL_BOX`.
 const DIAL_BOX: i32 = 14 * GRID;
-/// `DIAL_RANGE` — a 12-hour dial in minutes, so one scale positions both hands.
-const DIAL_RANGE: i32 = 720;
 /// `HAND_HOUR_LEN`.
 const HAND_HOUR_LEN: i32 = 28;
 /// `HAND_MINUTE_LEN`.
@@ -235,12 +230,6 @@ const HAND_MINUTE_WIDTH: i32 = 4;
 const DIAL_TOTAL_TICKS: u32 = 13;
 /// `lv_scale_set_major_tick_every(OBJ_DIAL, 3)`.
 const DIAL_MAJOR_TICK_EVERY: u32 = 3;
-/// `lv_scale_set_angle_range(OBJ_DIAL, 360)`. Fixed in `scene_view.c` too, as
-/// `SCENE_SCALE_ANGLE_RANGE`, so it is not a wire field.
-const DIAL_ANGLE_RANGE: i32 = 360;
-/// `lv_scale_set_rotation(OBJ_DIAL, 270)` — twelve o'clock. Fixed in
-/// `scene_view.c` as `SCENE_SCALE_ROTATION`.
-const DIAL_ROTATION: i32 = 270;
 /// The gap `digital_clock.c:203` puts between the hero and the seconds.
 const SECONDS_GAP: i32 = 2 * GRID;
 
@@ -248,6 +237,9 @@ const SECONDS_GAP: i32 = 2 * GRID;
 const TIME_BINDING: &str = "time:HH:mm";
 /// The superior figure, on the hero's baseline.
 const SECONDS_BINDING: &str = "time:ss";
+const DATE_BINDING: &str = "date";
+const HOUR_ANGLE_BINDING: &str = "time:angle:hour";
+const MINUTE_ANGLE_BINDING: &str = "time:angle:minute";
 
 // ---------------------------------------------------------------------------
 // Baked font metrics.
@@ -441,6 +433,7 @@ pub fn number_font_tier(text: &str, max_width: i32, metrics: &BakedFontMetrics) 
 /// `lv_math.c`'s `sin0_90_table`, transcribed. The hands' endpoints are
 /// whatever `lv_scale_set_line_needle_value()` computes, and it computes them
 /// from this table, so a floating-point sine would land a pixel elsewhere.
+#[cfg(test)]
 const SIN_0_90: [i32; 91] = [
     0, 572, 1144, 1715, 2286, 2856, 3425, 3993, 4560, 5126, 5690, 6252, 6813, 7371, 7927, 8481,
     9032, 9580, 10126, 10668, 11207, 11743, 12275, 12803, 13328, 13848, 14365, 14876, 15384, 15886,
@@ -451,11 +444,9 @@ const SIN_0_90: [i32; 91] = [
     32449, 32524, 32588, 32643, 32688, 32723, 32748, 32763, 32768,
 ];
 
-/// `LV_TRIGO_SHIFT`.
-const TRIGO_SHIFT: u32 = 15;
-
 /// `lv_trigo_sin()`. The C normalises with `while` loops; `rem_euclid` is the
 /// same map for every input.
+#[cfg(test)]
 fn trigo_sin(angle: i32) -> i32 {
     let normalised = angle.rem_euclid(360);
     let index = match normalised {
@@ -481,6 +472,7 @@ fn trigo_sin(angle: i32) -> i32 {
 }
 
 /// `lv_trigo_cos()`.
+#[cfg(test)]
 fn trigo_cos(angle: i32) -> i32 {
     trigo_sin(angle + 90)
 }
@@ -498,9 +490,9 @@ pub struct ClockCard {
     /// in the C and drops the node here; both draw the same pixels, and
     /// neither moves anything else, because the hero is left-anchored.
     pub show_seconds: bool,
-    /// The local wall-clock instant the dial's hands and the date module are
-    /// drawn for. The reading itself is a device-side `time:` binding, so it
-    /// ticks between pushes; the hands and the date do not.
+    /// The local wall-clock instant used only to measure the fixed-width hero
+    /// reading while constructing the scene. Every visible time/date value is
+    /// a device-side binding and continues changing between pushes.
     pub local_now: NaiveDateTime,
 }
 
@@ -589,83 +581,34 @@ pub struct RowListCard<'a> {
     pub row4_time: &'a str,
 }
 
-/// `timefmt.c`'s `DOW`, which `digital_clock_tick()` indexes with
-/// `(tm_wday + 6) % 7` — i.e. Monday-based.
-const WEEKDAYS: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
-/// `timefmt.c`'s `MON`.
-const MONTHS: [&str; 12] = [
-    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-];
-
-/// `timefmt_date()`: `"%s, %s %d"`, with an unpadded day.
-fn date_text(now: NaiveDateTime) -> String {
-    let weekday = WEEKDAYS[usize::try_from(now.weekday().num_days_from_monday())
-        .expect("chrono returns 0..=6 days from Monday")];
-    let month = MONTHS[usize::try_from(now.month0()).expect("chrono returns a month0 of 0..=11")];
-    format!("{weekday}, {month} {}", now.day())
-}
-
 /// `timefmt_hhmm()`: `"%02d:%02d"`. The host renders it only to *measure* it —
 /// the node carries a binding, so the device renders the reading itself.
 fn time_text(now: NaiveDateTime) -> String {
     format!("{:02}:{:02}", now.hour(), now.minute())
 }
 
-/// One clock hand: its two endpoints in absolute canvas coordinates, plus
-/// the stroke `digital_clock.c` gives it.
+/// One live clock hand in absolute canvas coordinates, plus the stroke
+/// `digital_clock.c` gives it.
 ///
-/// **This is the translation the C does not have to do.** In
-/// `digital_clock.c:132` the hands are `lv_line` children of the `lv_scale`,
-/// and `lv_scale_set_line_needle_value()` writes their points in the *scale's*
-/// frame — `(box/2, box/2)` for the pivot — after aligning the line to the
-/// scale's top-left. A scene `LINE` node is in absolute canvas coordinates
-/// with its object at the canvas origin (`scene_view.c`'s `build_line()` ends
-/// with `lv_obj_set_pos(object, 0, 0)`), and `scene_scale_t`'s own header says
-/// "whatever emits their endpoints must derive that centre itself". So the
-/// scale's top-left is added to every point.
-///
-/// The rest is `lv_scale_set_line_needle_value()` line for line: the needle
-/// length is clamped to half the box, the value is mapped onto the angle range
-/// with C's truncating division, and the offsets are fixed-point sine and
-/// cosine of `rotation + angle`, arithmetic-shifted down by `LV_TRIGO_SHIFT`.
-fn hand_line(origin: (i32, i32), length: i32, value: i32, width: i32, color: u32) -> SceneLine {
-    // The clamp is a faithful port, but note the parity precondition it hides:
-    // at actual_length == half_box the C hand touches the scale's own box edge,
-    // and the C hand is a *child of the scale*, so LVGL clips its rounded cap
-    // to that 112px box -- while this scene's hand is a child of the
-    // full-canvas container and is not clipped. The two agree only while
-    // `length + width / 2 < half_box`. DigitalClock is comfortably inside it
-    // (42 + 2 = 44 < 56); a future face reusing this helper may not be.
-    let half_box = DIAL_BOX / 2;
-    let actual_length = if length >= half_box {
-        half_box
-    } else if length >= 0 {
-        length
-    } else if length + half_box < 0 {
-        0
-    } else {
-        half_box + length
-    };
-
-    // scale->range_min is 0 and scale->range_max is DIAL_RANGE.
-    let angle = if value < 0 {
-        0
-    } else if value > DIAL_RANGE {
-        DIAL_ANGLE_RANGE
-    } else {
-        DIAL_ANGLE_RANGE * value / DIAL_RANGE
-    };
-
-    let offset_x = (actual_length * trigo_cos(DIAL_ROTATION + angle)) >> TRIGO_SHIFT;
-    let offset_y = (actual_length * trigo_sin(DIAL_ROTATION + angle)) >> TRIGO_SHIFT;
-
-    let pivot_x = origin.0 + half_box;
-    let pivot_y = origin.1 + half_box;
+/// The pivot is translated out of the scale's local frame here. The endpoint
+/// is deliberately not: the device recomputes it with LVGL's own trig table on
+/// every binding refresh.
+fn hand_line(
+    pivot: (i32, i32),
+    length: i32,
+    angle_binding: &str,
+    width: i32,
+    color: u32,
+) -> SceneLine {
     SceneLine {
-        xs: vec![pivot_x, pivot_x + offset_x],
-        ys: vec![pivot_y, pivot_y + offset_y],
+        xs: Vec::new(),
+        ys: Vec::new(),
         width,
         color,
+        pivot_x: pivot.0,
+        pivot_y: pivot.1,
+        length,
+        angle_binding: angle_binding.to_string(),
     }
 }
 
@@ -771,9 +714,7 @@ pub fn build_digital_clock_scene(card: &ClockCard, metrics: &BakedFontMetrics) -
         font: SceneFont::Baked(SceneFontTier::Body),
         color: COLOR_PRIMARY,
         running_color: None,
-        // No binding renders a date, so the host formats it. It goes stale at
-        // local midnight until the next push.
-        value: SceneValue::Literal(date_text(card.local_now)),
+        value: SceneValue::Binding(DATE_BINDING.to_string()),
         // deskmate_label_box() uses LV_LABEL_LONG_DOT.
         ellipsize: true,
     }));
@@ -806,21 +747,18 @@ pub fn build_digital_clock_scene(card: &ClockCard, metrics: &BakedFontMetrics) -
 
     // --- the two hands. digital_clock.c:132-142, driven by :207-213.
     //
-    // A 12-hour dial in minutes, so one scale positions both: the hour hand at
-    // h*60+m and the minute hand at m*12.
-    let hour = i32::try_from(card.local_now.hour()).expect("chrono returns an hour of 0..=23");
-    let minute = i32::try_from(card.local_now.minute()).expect("chrono returns a minute of 0..=59");
+    let dial_pivot = (dial_origin.0 + DIAL_BOX / 2, dial_origin.1 + DIAL_BOX / 2);
     nodes.push(SceneNode::Line(hand_line(
-        dial_origin,
+        dial_pivot,
         HAND_HOUR_LEN,
-        (hour % 12) * 60 + minute,
+        HOUR_ANGLE_BINDING,
         HAND_HOUR_WIDTH,
         COLOR_PRIMARY,
     )));
     nodes.push(SceneNode::Line(hand_line(
-        dial_origin,
+        dial_pivot,
         HAND_MINUTE_LEN,
-        minute * 12,
+        MINUTE_ANGLE_BINDING,
         HAND_MINUTE_WIDTH,
         CLOCK_HUE,
     )));
@@ -2085,9 +2023,7 @@ mod tests {
         assert_eq!(0x00f5_f5f7, date.color);
         // deskmate_label_box uses LV_LABEL_LONG_DOT.
         assert!(date.ellipsize);
-        // timefmt_date renders "%s, %s %d" with a Monday-based weekday table.
-        // 2026-08-12 is a Wednesday.
-        assert_eq!(SceneValue::Literal("Wed, Aug 12".to_string()), date.value);
+        assert_eq!(SceneValue::Binding("date".to_string()), date.value);
     }
 
     #[test]
@@ -2106,49 +2042,47 @@ mod tests {
     }
 
     #[test]
-    fn the_hands_are_translated_out_of_the_scales_local_frame() {
+    fn the_hands_are_bound_at_the_scales_canvas_space_pivot() {
         let scene = scene_at(10, 9, true);
         // lv_scale_set_line_needle_value writes points in the scale's own
         // frame: (box/2, box/2) and (box/2 + dx, box/2 + dy), with the line
         // aligned to the scale's top-left. The scale's top-left is (288, 188),
         // so the canvas-space centre is (288 + 56, 188 + 56) = (344, 244).
         //
-        // Hour hand: value = (10 % 12) * 60 + 9 = 609, angle = 360 * 609 / 720
-        // = 304 (truncating), so the trig angle is 270 + 304 = 574.
-        //   dx = (28 * lv_trigo_cos(574)) >> 15 = -24
-        //   dy = (28 * lv_trigo_sin(574)) >> 15 = -16
         let hour = line(&scene, 6);
-        assert_eq!(vec![344, 344 - 24], hour.xs);
-        assert_eq!(vec![244, 244 - 16], hour.ys);
+        assert!(hour.xs.is_empty());
+        assert!(hour.ys.is_empty());
+        assert_eq!(344, hour.pivot_x);
+        assert_eq!(244, hour.pivot_y);
+        assert_eq!(28, hour.length);
+        assert_eq!("time:angle:hour", hour.angle_binding);
         assert_eq!(6, hour.width);
         assert_eq!(0x00f5_f5f7, hour.color);
 
-        // Minute hand: value = 9 * 12 = 108, angle = 54, trig angle 324.
-        //   dx = (42 * lv_trigo_cos(324)) >> 15 = 33
-        //   dy = (42 * lv_trigo_sin(324)) >> 15 = -25
         let minute = line(&scene, 7);
-        assert_eq!(vec![344, 344 + 33], minute.xs);
-        assert_eq!(vec![244, 244 - 25], minute.ys);
+        assert!(minute.xs.is_empty());
+        assert!(minute.ys.is_empty());
+        assert_eq!(344, minute.pivot_x);
+        assert_eq!(244, minute.pivot_y);
+        assert_eq!(42, minute.length);
+        assert_eq!("time:angle:minute", minute.angle_binding);
         assert_eq!(4, minute.width);
         assert_eq!(0x00ff_8f2e, minute.color);
     }
 
     #[test]
-    fn midnight_points_both_hands_straight_up() {
+    fn hand_bindings_do_not_depend_on_the_push_instant() {
         let scene = scene_at(0, 0, true);
-        // Both values are 0, so the angle is 0 and the trig angle is the
-        // scale's rotation, 270 -- twelve o'clock.
-        assert_eq!(vec![244, 244 - 28], line(&scene, 6).ys);
-        assert_eq!(vec![344, 344], line(&scene, 6).xs);
-        assert_eq!(vec![244, 244 - 42], line(&scene, 7).ys);
-        assert_eq!(vec![344, 344], line(&scene, 7).xs);
+        assert_eq!("time:angle:hour", line(&scene, 6).angle_binding);
+        assert_eq!("time:angle:minute", line(&scene, 7).angle_binding);
     }
 
     #[test]
-    fn a_quarter_past_three_points_the_minute_hand_at_three_oclock() {
-        let scene = scene_at(3, 15, true);
-        assert_eq!(vec![344, 344 + 42], line(&scene, 7).xs);
-        assert_eq!(vec![244, 244], line(&scene, 7).ys);
+    fn changing_the_push_instant_does_not_change_the_hands() {
+        let midnight = scene_at(0, 0, true);
+        let quarter_past = scene_at(3, 15, true);
+        assert_eq!(line(&midnight, 6), line(&quarter_past, 6));
+        assert_eq!(line(&midnight, 7), line(&quarter_past, 7));
     }
 
     #[test]
@@ -2243,6 +2177,8 @@ mod tests {
         // The C normalises with while-loops, so out-of-turn angles wrap.
         assert_eq!(trigo_sin(30), trigo_sin(390));
         assert_eq!(trigo_sin(330), trigo_sin(-30));
+        assert_eq!(32768, trigo_cos(0));
+        assert_eq!(0, trigo_cos(90));
     }
 
     /// `lv_math.c`'s table is `round(sin(d) * 32768)` at every whole degree, so
@@ -2315,8 +2251,8 @@ mod tests {
             .payload;
         assert!(payload.len() <= MAX_PAYLOAD_SIZE);
         // Pinned so a node added here shows up as a budget change rather than
-        // as a surprise at 2034. 283 of 2034 is 14% of one envelope, which is
+        // as a surprise at 2034. 304 of 2034 is 15% of one envelope, which is
         // the headroom that lets the plan refuse a second chunk protocol.
-        assert_eq!(283, payload.len(), "encoded PushScene payload");
+        assert_eq!(304, payload.len(), "encoded PushScene payload");
     }
 }

@@ -201,12 +201,15 @@ pub struct SceneRenderRequest {
 }
 
 /// One temporal parity run. Both sides are built at the initial instant and
-/// advance through the same interval. `toggle_running` applies one local
+/// advance their wall clock and optional timer through the same interval.
+/// `toggle_running` applies one local
 /// start/pause transition at the end; the scene is refreshed in place and is
 /// never decoded or pushed a second time.
 pub struct SceneTemporalPairRequest<'a> {
     pub template: &'a RenderRequest,
     pub scene: &'a SceneRenderRequest,
+    /// Advances the wall clock on both sides; a running timer also consumes
+    /// the same milliseconds.
     pub elapsed_ms: u32,
     pub toggle_running: bool,
 }

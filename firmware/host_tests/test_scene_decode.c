@@ -1539,6 +1539,95 @@ static void test_mismatched_line_point_arrays_are_rejected(void)
     free(scene);
 }
 
+static void put_bound_line_node(builder_t *b, int32_t pivot_x,
+                                int32_t pivot_y, int32_t length,
+                                const char *angle_binding)
+{
+    put_map(b, 2U);
+    put_uint(b, 0U);
+    put_uint(b, SCENE_NODE_LINE);
+    put_uint(b, 1U);
+    put_map(b, 5U);
+    put_uint(b, 2U);
+    put_int(b, 4);
+    put_uint(b, 4U);
+    put_int(b, pivot_x);
+    put_uint(b, 5U);
+    put_int(b, pivot_y);
+    put_uint(b, 6U);
+    put_int(b, length);
+    put_uint(b, 7U);
+    put_text(b, angle_binding);
+}
+
+static void test_a_bound_line_decodes(void)
+{
+    builder_t b;
+    scene_t *scene = new_scene();
+
+    begin_scene(&b, 1U, 0U, 1U);
+    put_bound_line_node(&b, 344, 244, 42, "time:angle:minute");
+
+    assert(scene_decode(b.bytes, b.length, scene) == SCENE_MODEL_OK);
+    const scene_line_t *line = &scene->nodes[0].value.line;
+    assert(line->point_count == 0U);
+    assert(line->pivot_x == 344);
+    assert(line->pivot_y == 244);
+    assert(line->length == 42);
+    assert(strcmp(line->angle_binding, "time:angle:minute") == 0);
+
+    free(scene);
+}
+
+static void test_a_bound_line_with_an_off_canvas_pivot_is_rejected(void)
+{
+    builder_t b;
+    scene_t *scene = new_scene();
+
+    begin_scene(&b, 1U, 0U, 1U);
+    put_bound_line_node(&b, SCENE_CANVAS_WIDTH + 1, 244, 42,
+                        "time:angle:minute");
+
+    assert(scene_decode(b.bytes, b.length, scene) ==
+           SCENE_MODEL_ERR_GEOMETRY);
+    free(scene);
+}
+
+static void test_explicit_points_and_an_angle_binding_are_rejected(void)
+{
+    builder_t b;
+    scene_t *scene = new_scene();
+
+    begin_scene(&b, 1U, 0U, 1U);
+    put_map(&b, 2U);
+    put_uint(&b, 0U);
+    put_uint(&b, SCENE_NODE_LINE);
+    put_uint(&b, 1U);
+    put_map(&b, 7U);
+    put_uint(&b, 0U);
+    put_array(&b, 2U);
+    put_int(&b, 344);
+    put_int(&b, 344);
+    put_uint(&b, 1U);
+    put_array(&b, 2U);
+    put_int(&b, 244);
+    put_int(&b, 202);
+    put_uint(&b, 2U);
+    put_int(&b, 4);
+    put_uint(&b, 4U);
+    put_int(&b, 344);
+    put_uint(&b, 5U);
+    put_int(&b, 244);
+    put_uint(&b, 6U);
+    put_int(&b, 42);
+    put_uint(&b, 7U);
+    put_text(&b, "time:angle:minute");
+
+    assert(scene_decode(b.bytes, b.length, scene) ==
+           SCENE_MODEL_ERR_GEOMETRY);
+    free(scene);
+}
+
 /* A TEXT node with no value map is not a text node. Without this the map
  * would decode to value.kind 0 and an empty literal, which the model
  * accepts -- a blank string drawn where the host meant words. */
@@ -1859,6 +1948,9 @@ int main(void)
     test_more_line_points_than_the_cap_is_rejected();
     test_a_line_point_array_far_past_the_cap_is_rejected();
     test_mismatched_line_point_arrays_are_rejected();
+    test_a_bound_line_decodes();
+    test_a_bound_line_with_an_off_canvas_pivot_is_rejected();
+    test_explicit_points_and_an_angle_binding_are_rejected();
     test_a_text_node_without_a_value_is_rejected();
     test_a_text_node_without_a_font_is_rejected();
     test_a_font_without_a_kind_is_rejected();

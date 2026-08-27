@@ -80,6 +80,16 @@ fn rich_scene() -> Scene {
                 ys: vec![184, 120, 96],
                 width: 6,
                 color: 0x0032_D74B,
+                ..SceneLine::default()
+            }),
+            SceneNode::Line(SceneLine {
+                width: 4,
+                color: 0x0064_D2FF,
+                pivot_x: 224,
+                pivot_y: 184,
+                length: 80,
+                angle_binding: "time:angle:hour".into(),
+                ..SceneLine::default()
             }),
             SceneNode::Text(SceneText {
                 x: 16,
@@ -89,7 +99,7 @@ fn rich_scene() -> Scene {
                 font: SceneFont::Baked(SceneFontTier::Hero),
                 color: 0x00F2_F2F7,
                 running_color: Some(0x00FF_9F0A),
-                value: SceneValue::Binding("time:HH:mm".into()),
+                value: SceneValue::Binding("date".into()),
                 ellipsize: false,
             }),
             SceneNode::Text(SceneText {

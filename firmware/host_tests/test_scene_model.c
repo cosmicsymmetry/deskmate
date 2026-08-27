@@ -270,6 +270,60 @@ static void test_a_line_with_a_non_first_point_outside_canvas_is_rejected(void)
     assert(scene_model_validate(&scene) == SCENE_MODEL_ERR_GEOMETRY);
 }
 
+static scene_t bound_line_scene(void)
+{
+    scene_t scene = minimal_scene();
+    scene.nodes[0].kind = SCENE_NODE_LINE;
+    scene.nodes[0].value.line.pivot_x = 344;
+    scene.nodes[0].value.line.pivot_y = 244;
+    scene.nodes[0].value.line.length = 42;
+    scene.nodes[0].value.line.width = 4;
+    strcpy(scene.nodes[0].value.line.angle_binding, "time:angle:minute");
+    return scene;
+}
+
+static void test_a_bound_line_with_canvas_bounded_geometry_validates(void)
+{
+    scene_t scene = bound_line_scene();
+    assert(scene_model_validate(&scene) == SCENE_MODEL_OK);
+}
+
+static void test_a_bound_line_pivot_past_the_canvas_is_rejected(void)
+{
+    scene_t scene = bound_line_scene();
+    scene.nodes[0].value.line.pivot_x = SCENE_CANVAS_WIDTH + 1;
+    assert(scene_model_validate(&scene) == SCENE_MODEL_ERR_GEOMETRY);
+
+    scene = bound_line_scene();
+    scene.nodes[0].value.line.pivot_y = SCENE_CANVAS_HEIGHT + 1;
+    assert(scene_model_validate(&scene) == SCENE_MODEL_ERR_GEOMETRY);
+}
+
+static void test_a_bound_line_length_past_the_canvas_is_rejected(void)
+{
+    scene_t scene = bound_line_scene();
+    scene.nodes[0].value.line.length = SCENE_CANVAS_HEIGHT + 1;
+    assert(scene_model_validate(&scene) == SCENE_MODEL_ERR_GEOMETRY);
+}
+
+static void test_a_line_with_points_and_an_angle_binding_is_rejected(void)
+{
+    scene_t scene = bound_line_scene();
+    scene.nodes[0].value.line.point_count = 2U;
+    scene.nodes[0].value.line.xs[0] = 344;
+    scene.nodes[0].value.line.xs[1] = 344;
+    scene.nodes[0].value.line.ys[0] = 244;
+    scene.nodes[0].value.line.ys[1] = 202;
+    assert(scene_model_validate(&scene) == SCENE_MODEL_ERR_GEOMETRY);
+}
+
+static void test_an_unknown_line_angle_binding_is_rejected(void)
+{
+    scene_t scene = bound_line_scene();
+    strcpy(scene.nodes[0].value.line.angle_binding, "time:angle:day");
+    assert(scene_model_validate(&scene) == SCENE_MODEL_ERR_TEXT);
+}
+
 static void test_a_huge_coordinate_does_not_wrap_the_bounds_check(void)
 {
     /* If the check were written as `x + w > LIMIT` instead of
@@ -597,6 +651,11 @@ int main(void)
     test_a_glyph_with_an_unterminated_name_is_rejected();
     test_a_line_with_populated_points_validates();
     test_a_line_with_a_non_first_point_outside_canvas_is_rejected();
+    test_a_bound_line_with_canvas_bounded_geometry_validates();
+    test_a_bound_line_pivot_past_the_canvas_is_rejected();
+    test_a_bound_line_length_past_the_canvas_is_rejected();
+    test_a_line_with_points_and_an_angle_binding_is_rejected();
+    test_an_unknown_line_angle_binding_is_rejected();
     test_a_huge_coordinate_does_not_wrap_the_bounds_check();
     test_a_scale_within_bounds_validates();
     test_a_scale_extending_past_canvas_width_is_rejected();

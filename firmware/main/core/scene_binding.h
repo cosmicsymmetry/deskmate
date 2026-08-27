@@ -15,6 +15,7 @@ typedef enum {
     SCENE_BINDING_TIMER_TOTAL = 6,
     SCENE_BINDING_TIMER_STATUS = 7,
     SCENE_BINDING_TIMER_PERMILLE = 8,
+    SCENE_BINDING_DATE = 9,
 } scene_binding_kind_t;
 
 typedef enum {
@@ -55,6 +56,13 @@ typedef struct {
     void *field_ctx;
 } scene_binding_context_t;
 
+typedef int32_t (*scene_trigo_fn)(int32_t degrees);
+
+typedef struct {
+    int32_t x;
+    int32_t y;
+} scene_line_endpoint_t;
+
 scene_timer_snapshot_t scene_timer_snapshot(int64_t duration_seconds,
                                             int64_t remaining_seconds,
                                             bool running,
@@ -66,3 +74,13 @@ scene_binding_result_t scene_binding_parse(const char *text,
 scene_binding_result_t scene_binding_evaluate(
     const scene_binding_t *binding, const scene_binding_context_t *context,
     char *out, size_t out_capacity);
+
+/* Computes a clock hand's live endpoint. The caller supplies the trig
+ * functions so core stays free of LVGL; scene_view.c passes LVGL's own table
+ * functions, while the host test passes its pinned port. */
+bool scene_binding_line_endpoint(scene_angle_binding_t binding,
+                                 const scene_binding_context_t *context,
+                                 int32_t pivot_x, int32_t pivot_y,
+                                 int32_t length, scene_trigo_fn trigo_cos,
+                                 scene_trigo_fn trigo_sin,
+                                 scene_line_endpoint_t *out);

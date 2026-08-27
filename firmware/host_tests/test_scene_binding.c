@@ -4,6 +4,7 @@
 #include <time.h>
 
 #include "core/scene_binding.h"
+#include "core/timefmt.h"
 
 static const char *field_stub(void *ctx, const char *name)
 {
@@ -93,6 +94,8 @@ static void test_unknown_bindings_are_rejected_at_parse(void)
     assert(scene_binding_parse("timer.permilleXYZ", &binding) ==
            SCENE_BINDING_ERR_UNKNOWN);
     assert(scene_binding_parse("timer.statusXYZ", &binding) ==
+           SCENE_BINDING_ERR_UNKNOWN);
+    assert(scene_binding_parse("dateXYZ", &binding) ==
            SCENE_BINDING_ERR_UNKNOWN);
 }
 
@@ -365,6 +368,89 @@ static void a_wall_clock_minute_still_wraps(void)
     assert(strcmp(out, expected) == 0);
 }
 
+static void the_date_binding_matches_timefmt_date(void)
+{
+    char out[32];
+    char expected[32];
+    scene_binding_t b;
+    assert(scene_binding_parse("date", &b) == SCENE_BINDING_OK);
+    scene_binding_context_t ctx = {0};
+    ctx.unix_seconds = 1787000700;
+    ctx.utc_offset_minutes = 240;   /* the board sits at UTC+4 */
+    assert(scene_binding_evaluate(&b, &ctx, out, sizeof out) == SCENE_BINDING_OK);
+    /* Compare against timefmt_date() itself, never against a hardcoded
+     * string: the point is that the two cannot drift. */
+    struct tm tm_local;
+    time_t local = (time_t)ctx.unix_seconds + ctx.utc_offset_minutes * 60;
+    gmtime_r(&local, &tm_local);
+    timefmt_date(expected, tm_local.tm_year + 1900, tm_local.tm_mon + 1,
+                 tm_local.tm_mday, (tm_local.tm_wday + 6) % 7);
+    assert(strcmp(out, expected) == 0);
+}
+
+static void the_date_binding_crosses_local_midnight_with_the_offset(void)
+{
+    /* 2026-08-27T20:00:00Z is 2026-08-28T00:00:00 at UTC+4: an
+     * instant that is one day earlier in UTC than locally. */
+    char out[32];
+    char expected[32];
+    scene_binding_t b;
+    assert(scene_binding_parse("date", &b) == SCENE_BINDING_OK);
+    scene_binding_context_t ctx = {0};
+    ctx.unix_seconds = INT64_C(1787860800);
+    ctx.utc_offset_minutes = 240;
+    assert(scene_binding_evaluate(&b, &ctx, out, sizeof out) == SCENE_BINDING_OK);
+
+    time_t local = (time_t)ctx.unix_seconds + ctx.utc_offset_minutes * 60;
+    struct tm tm_local;
+    assert(gmtime_r(&local, &tm_local) != NULL);
+    timefmt_date(expected, tm_local.tm_year + 1900, tm_local.tm_mon + 1,
+                 tm_local.tm_mday, (tm_local.tm_wday + 6) % 7);
+    assert(strcmp(out, expected) == 0);
+
+    time_t utc = (time_t)ctx.unix_seconds;
+    struct tm tm_utc;
+    assert(gmtime_r(&utc, &tm_utc) != NULL);
+    timefmt_date(expected, tm_utc.tm_year + 1900, tm_utc.tm_mon + 1,
+                 tm_utc.tm_mday, (tm_utc.tm_wday + 6) % 7);
+    assert(strcmp(out, expected) != 0);
+}
+
+static int32_t host_trigo_sin(int32_t angle)
+{
+    int32_t normalised = angle % 360;
+    if (normalised < 0) {
+        normalised += 360;
+    }
+    switch (normalised) {
+    case 0: return 0;
+    case 90: return 32768;
+    case 180: return 0;
+    case 270: return -32768;
+    default: assert(false); return 0;
+    }
+}
+
+static int32_t host_trigo_cos(int32_t angle)
+{
+    return host_trigo_sin(angle + 90);
+}
+
+static void an_angle_binding_gives_lvgls_own_hand_geometry(void)
+{
+    /* Quarter past three: the minute hand points at three o'clock. Assert the
+     * computed endpoint equals the host port's, which is pinned against
+     * LVGL's table. */
+    scene_binding_context_t ctx = {0};
+    ctx.unix_seconds = INT64_C(1787800500);
+    scene_line_endpoint_t endpoint;
+    assert(scene_binding_line_endpoint(
+        SCENE_ANGLE_BINDING_MINUTE, &ctx, 344, 244, 42,
+        host_trigo_cos, host_trigo_sin, &endpoint));
+    assert(endpoint.x == 386);
+    assert(endpoint.y == 244);
+}
+
 static void test_zero_capacity_never_writes(void)
 {
     scene_binding_t binding;
@@ -422,6 +508,9 @@ int main(void)
     an_inactive_timer_renders_the_placeholder();
     timer_permille_preserves_a_non_whole_percent();
     a_wall_clock_minute_still_wraps();
+    the_date_binding_matches_timefmt_date();
+    the_date_binding_crosses_local_midnight_with_the_offset();
+    an_angle_binding_gives_lvgls_own_hand_geometry();
     test_zero_capacity_never_writes();
     test_field_name_length_boundary();
     return 0;

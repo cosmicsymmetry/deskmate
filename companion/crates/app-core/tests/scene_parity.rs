@@ -123,10 +123,10 @@ impl Instant {
     /// scene's reading and seconds are `time:` bindings the *device* evaluates
     /// from `unix_seconds + utc_offset_minutes * 60`, exactly as
     /// `digital_clock_tick()` evaluates `clock_source_now() +
-    /// utc_offset_minutes * 60`; the dial's hands and the date are
-    /// host-computed statics baked in from [`ClockCard::local_now`]. Deriving
-    /// one from the other means the hands and the digits agree *within* a frame
-    /// as well as *between* the two frames.
+    /// utc_offset_minutes * 60`. The date and dial hands are device bindings
+    /// over that same context now, while [`ClockCard::local_now`] remains only
+    /// the builder's fixed-width measurement input. Deriving it here still
+    /// keeps every input pinned to one instant.
     fn now_unix_seconds(&self) -> i64 {
         self.local_now().and_utc().timestamp() - i64::from(self.utc_offset_minutes) * 60
     }
@@ -812,6 +812,106 @@ fn resuming_a_progress_scene_applies_indicator_and_status_running_colors_without
     assert_ne!(
         frames.scene, frames.initial_scene,
         "resuming must apply both running-color variants"
+    );
+}
+
+fn assert_digital_clock_temporal_parity(
+    local_start: NaiveDateTime,
+    utc_offset_minutes: i16,
+    elapsed_ms: u32,
+) -> SceneTemporalPair {
+    let now_unix_seconds = local_start.and_utc().timestamp() - i64::from(utc_offset_minutes) * 60;
+    let template = RenderRequest {
+        template: SimTemplate::DigitalClock,
+        fields: vec![
+            SimField {
+                name: "title".to_string(),
+                value: SimFieldValue::Text("Desk".to_string()),
+            },
+            SimField {
+                name: "show_seconds".to_string(),
+                value: SimFieldValue::Boolean(false),
+            },
+        ],
+        utc_offset_minutes,
+        now_unix_seconds,
+        orientation: SimOrientation::Landscape,
+    };
+    let scene = SceneRenderRequest {
+        scene: build_digital_clock_scene(
+            &ClockCard {
+                revision: 1,
+                show_seconds: false,
+                local_now: local_start,
+            },
+            &BakedFontMetrics::SHIPPED,
+        ),
+        assets: Vec::new(),
+        utc_offset_minutes,
+        now_unix_seconds,
+        timer: None,
+        fields: Vec::new(),
+        orientation: SimOrientation::Landscape,
+    };
+    let mut simulator = Simulator::new().expect("simulator");
+    let frames = simulator
+        .render_scene_temporal_pair(&SceneTemporalPairRequest {
+            template: &template,
+            scene: &scene,
+            elapsed_ms,
+            toggle_running: false,
+        })
+        .expect("temporal DigitalClock render");
+    assert!(
+        diff(&frames.template, &frames.scene).is_none(),
+        "the advanced DigitalClock scene must remain byte-identical to its C template"
+    );
+    frames
+}
+
+fn region_changed(
+    before: &[u16],
+    after: &[u16],
+    x_start: u32,
+    y_start: u32,
+    x_end: u32,
+    y_end: u32,
+) -> bool {
+    (y_start..y_end).any(|y| {
+        (x_start..x_end).any(|x| {
+            let index = usize::try_from(y * LOGICAL_WIDTH + x).expect("canvas index");
+            before[index] != after[index]
+        })
+    })
+}
+
+#[test]
+fn a_digital_clock_crosses_a_minute_without_a_repush() {
+    let start = NaiveDate::from_ymd_opt(2026, 8, 27)
+        .unwrap()
+        .and_hms_opt(3, 14, 59)
+        .unwrap();
+    let frames = assert_digital_clock_temporal_parity(start, 240, 1_000);
+    assert!(
+        region_changed(&frames.initial_scene, &frames.scene, 24, 64, 304, 168),
+        "the HH:mm reading must change across the minute"
+    );
+    assert!(
+        region_changed(&frames.initial_scene, &frames.scene, 264, 176, 424, 312),
+        "the bound minute hand must step across the minute"
+    );
+}
+
+#[test]
+fn a_digital_clock_crosses_local_midnight_at_utc_plus_four_without_a_repush() {
+    let start = NaiveDate::from_ymd_opt(2026, 8, 27)
+        .unwrap()
+        .and_hms_opt(23, 59, 59)
+        .unwrap();
+    let frames = assert_digital_clock_temporal_parity(start, 240, 1_000);
+    assert!(
+        region_changed(&frames.initial_scene, &frames.scene, 48, 220, 224, 292),
+        "the date line must change at local midnight, not UTC midnight"
     );
 }
 

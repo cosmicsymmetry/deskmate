@@ -13,8 +13,11 @@
 #define TIMER_PCT_TOKEN "timer.pct"
 #define TIMER_PERMILLE_TOKEN "timer.permille"
 #define TIMER_STATUS_TOKEN "timer.status"
+#define DATE_TOKEN "date"
 #define FIELD_PREFIX "field."
 #define TIMER_SECONDS_MAX INT64_C(86400)
+#define CLOCK_DIAL_ROTATION 270
+#define CLOCK_TRIGO_SHIFT 15
 
 /* Keep this producer and lvgl-sim's fill_scene_timer_context() on the same
  * invariant: total is clamped to 86400s, remaining is clamped to total, and
@@ -152,6 +155,12 @@ scene_binding_result_t scene_binding_parse(const char *text,
 
     if (strcmp(text, TIMER_STATUS_TOKEN) == 0) {
         out->kind = SCENE_BINDING_TIMER_STATUS;
+        out->argument[0] = '\0';
+        return SCENE_BINDING_OK;
+    }
+
+    if (strcmp(text, DATE_TOKEN) == 0) {
+        out->kind = SCENE_BINDING_DATE;
         out->argument[0] = '\0';
         return SCENE_BINDING_OK;
     }
@@ -369,6 +378,16 @@ static uint32_t timer_seconds_ceiled(uint32_t milliseconds)
     return seconds;
 }
 
+static bool local_time(const scene_binding_context_t *context,
+                       struct tm *tm_local)
+{
+    int64_t local_seconds =
+        context->unix_seconds +
+        (int64_t)context->utc_offset_minutes * INT64_C(60);
+    time_t value = (time_t)local_seconds;
+    return gmtime_r(&value, tm_local) != NULL;
+}
+
 scene_binding_result_t scene_binding_evaluate(
     const scene_binding_t *binding, const scene_binding_context_t *context,
     char *out, size_t out_capacity)
@@ -379,17 +398,23 @@ scene_binding_result_t scene_binding_evaluate(
 
     switch (binding->kind) {
     case SCENE_BINDING_TIME: {
-        int64_t local_seconds =
-            context->unix_seconds +
-            (int64_t)context->utc_offset_minutes * INT64_C(60);
-        time_t local_time = (time_t)local_seconds;
         struct tm tm_local;
-        if (gmtime_r(&local_time, &tm_local) == NULL) {
+        if (!local_time(context, &tm_local)) {
             return write_placeholder(out, out_capacity, binding->argument);
         }
         return render_wall_clock_tokens(binding->argument, tm_local.tm_hour,
                                         tm_local.tm_min, tm_local.tm_sec, out,
                                         out_capacity);
+    }
+    case SCENE_BINDING_DATE: {
+        struct tm tm_local;
+        if (!local_time(context, &tm_local)) {
+            return write_placeholder(out, out_capacity, binding->argument);
+        }
+        char date[32];
+        timefmt_date(date, tm_local.tm_year + 1900, tm_local.tm_mon + 1,
+                     tm_local.tm_mday, (tm_local.tm_wday + 6) % 7);
+        return write_bounded(out, out_capacity, date);
     }
     case SCENE_BINDING_TIMER_REMAINING: {
         if (!context->timer_active) {
@@ -467,4 +492,42 @@ scene_binding_result_t scene_binding_evaluate(
     default:
         return SCENE_BINDING_ERR_ARGUMENT;
     }
+}
+
+bool scene_binding_line_endpoint(scene_angle_binding_t binding,
+                                 const scene_binding_context_t *context,
+                                 int32_t pivot_x, int32_t pivot_y,
+                                 int32_t length, scene_trigo_fn trigo_cos,
+                                 scene_trigo_fn trigo_sin,
+                                 scene_line_endpoint_t *out)
+{
+    if (context == NULL || trigo_cos == NULL || trigo_sin == NULL ||
+        out == NULL || length < 0) {
+        return false;
+    }
+
+    struct tm tm_local;
+    if (!local_time(context, &tm_local)) {
+        return false;
+    }
+
+    int32_t angle;
+    switch (binding) {
+    case SCENE_ANGLE_BINDING_HOUR:
+        angle = (tm_local.tm_hour % 12) * 30 + tm_local.tm_min / 2;
+        break;
+    case SCENE_ANGLE_BINDING_MINUTE:
+        angle = tm_local.tm_min * 6;
+        break;
+    case SCENE_ANGLE_BINDING_NONE:
+    default:
+        return false;
+    }
+
+    int32_t trigo_angle = CLOCK_DIAL_ROTATION + angle;
+    out->x = pivot_x +
+        ((length * trigo_cos(trigo_angle)) >> CLOCK_TRIGO_SHIFT);
+    out->y = pivot_y +
+        ((length * trigo_sin(trigo_angle)) >> CLOCK_TRIGO_SHIFT);
+    return true;
 }

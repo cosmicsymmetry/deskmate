@@ -187,11 +187,20 @@ impl Default for SceneArc {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SceneLine {
-    /// Both arrays must be the same length, in `2..=MAX_SCENE_LINE_POINTS`.
+    /// Fixed form only: both arrays must be the same length, in
+    /// `2..=MAX_SCENE_LINE_POINTS`.
     pub xs: Vec<i32>,
     pub ys: Vec<i32>,
     pub width: i32,
     pub color: u32,
+    /// Bound form only: the absolute canvas pivot.
+    pub pivot_x: i32,
+    pub pivot_y: i32,
+    /// Bound form only: the hand length. The whole radius must fit on-canvas.
+    pub length: i32,
+    /// Empty selects the fixed form. Bound form accepts only
+    /// `time:angle:hour` and `time:angle:minute` and cannot carry points.
+    pub angle_binding: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -369,7 +378,10 @@ pub fn binding_is_valid(text: &str) -> bool {
         return false;
     }
     // Exact-match scalar tokens cannot accept a trailing suffix.
-    if matches!(text, "timer.pct" | "timer.permille" | "timer.status") {
+    if matches!(
+        text,
+        "date" | "timer.pct" | "timer.permille" | "timer.status"
+    ) {
         return true;
     }
     if let Some(argument) = text
@@ -430,6 +442,10 @@ fn label_within_canvas(label: &SceneLabel) -> bool {
 
 fn rotation_binding_is_valid(binding: &str) -> bool {
     binding.is_empty() || matches!(binding, "time:hour" | "time:minute" | "time:second")
+}
+
+fn angle_binding_is_valid(binding: &str) -> bool {
+    matches!(binding, "time:angle:hour" | "time:angle:minute")
 }
 
 fn validate_font(font: &SceneFont) -> Result<(), MessageError> {
@@ -494,23 +510,43 @@ fn validate_node(node: &SceneNode) -> Result<(), MessageError> {
             }
         }
         SceneNode::Line(line) => {
-            if line.xs.len() != line.ys.len() {
-                return Err(MessageError::InvalidValue("scene line point arrays"));
-            }
-            if line.xs.len() < 2 || line.xs.len() > MAX_SCENE_LINE_POINTS {
-                return Err(MessageError::InvalidValue("scene line point count"));
-            }
-            if line.width < 0
-                || line
-                    .xs
-                    .iter()
-                    .any(|x| !(0..=SCENE_CANVAS_WIDTH).contains(x))
-                || line
-                    .ys
-                    .iter()
-                    .any(|y| !(0..=SCENE_CANVAS_HEIGHT).contains(y))
-            {
-                return Err(MessageError::InvalidValue("scene line geometry"));
+            if line.angle_binding.is_empty() {
+                if line.xs.len() != line.ys.len() {
+                    return Err(MessageError::InvalidValue("scene line point arrays"));
+                }
+                if line.xs.len() < 2 || line.xs.len() > MAX_SCENE_LINE_POINTS {
+                    return Err(MessageError::InvalidValue("scene line point count"));
+                }
+                if line.width < 0
+                    || line
+                        .xs
+                        .iter()
+                        .any(|x| !(0..=SCENE_CANVAS_WIDTH).contains(x))
+                    || line
+                        .ys
+                        .iter()
+                        .any(|y| !(0..=SCENE_CANVAS_HEIGHT).contains(y))
+                {
+                    return Err(MessageError::InvalidValue("scene line geometry"));
+                }
+            } else {
+                if !line.xs.is_empty() || !line.ys.is_empty() {
+                    return Err(MessageError::InvalidValue("scene line geometry sources"));
+                }
+                if !angle_binding_is_valid(&line.angle_binding) {
+                    return Err(MessageError::InvalidValue("scene line angle binding"));
+                }
+                if line.width < 0
+                    || line.length < 0
+                    || !(0..=SCENE_CANVAS_WIDTH).contains(&line.pivot_x)
+                    || !(0..=SCENE_CANVAS_HEIGHT).contains(&line.pivot_y)
+                    || line.length > line.pivot_x
+                    || line.length > SCENE_CANVAS_WIDTH - line.pivot_x
+                    || line.length > line.pivot_y
+                    || line.length > SCENE_CANVAS_HEIGHT - line.pivot_y
+                {
+                    return Err(MessageError::InvalidValue("scene line geometry"));
+                }
             }
         }
         SceneNode::Text(text) => {
@@ -745,14 +781,29 @@ fn encode_node_payload(encoder: &mut Encoder, node: &SceneNode) {
             }
         }
         SceneNode::Line(line) => {
-            encoder.map(3 + usize::from(line.color != 0));
-            encode_points(encoder, 0, &line.xs);
-            encode_points(encoder, 1, &line.ys);
+            let bound = !line.angle_binding.is_empty();
+            encoder.map(if bound {
+                5 + usize::from(line.color != 0)
+            } else {
+                3 + usize::from(line.color != 0)
+            });
+            if !bound {
+                encode_points(encoder, 0, &line.xs);
+                encode_points(encoder, 1, &line.ys);
+            }
             encoder.unsigned(2);
             encoder.signed(i64::from(line.width));
             if line.color != 0 {
                 encoder.unsigned(3);
                 encoder.unsigned(u64::from(line.color));
+            }
+            if bound {
+                for (key, value) in [(4, line.pivot_x), (5, line.pivot_y), (6, line.length)] {
+                    encoder.unsigned(key);
+                    encoder.signed(i64::from(value));
+                }
+                encoder.unsigned(7);
+                encoder.text(&line.angle_binding);
             }
         }
         SceneNode::Text(text) => {
@@ -1176,11 +1227,16 @@ fn decode_node_payload(decoder: &mut Decoder<'_>, kind: u32) -> Result<SceneNode
             (2, 10) => {
                 running_color = Some(read_u32(decoder, "scene arc running color")?);
             }
-            // LINE {0: [x...], 1: [y...], 2: width, 3: color}
+            // LINE {0: [x...], 1: [y...], 2: width, 3: color,
+            //       4: pivot_x, 5: pivot_y, 6: length, 7: angle_binding}
             (3, 0) => xs = decode_points(decoder)?,
             (3, 1) => ys = decode_points(decoder)?,
             (3, 2) => ints[0] = read_i32(decoder, "scene line width")?,
             (3, 3) => colors[0] = read_u32(decoder, "scene line color")?,
+            (3, 4..=6) => ints[slot] = read_i32(decoder, "scene line geometry")?,
+            (3, 7) => {
+                text = read_bounded_text(decoder, MAX_SCENE_BINDING_LEN, "scene line binding")?;
+            }
             // TEXT {0: x, 1: baseline_y, 2: w, 3: align, 4: font, 5: color,
             //       6: value, 7: ellipsize, 8: running_color}
             (4, 0..=2) => ints[slot] = read_i32(decoder, "scene text field")?,
@@ -1299,16 +1355,31 @@ fn decode_node_payload(decoder: &mut Decoder<'_>, kind: u32) -> Result<SceneNode
             }))
         }
         3 => {
-            require(0x07)?;
-            // Two arrays of different lengths describe no polyline at all.
-            if xs.len() != ys.len() {
-                return Err(MessageError::InvalidValue("scene line point arrays"));
+            let has_points = present & 0x03 != 0;
+            let has_bound_geometry = present & 0xf0 != 0;
+            if has_points && has_bound_geometry {
+                return Err(MessageError::InvalidValue("scene line geometry sources"));
+            }
+            if has_points {
+                require(0x07)?;
+                // Two arrays of different lengths describe no polyline at all.
+                if xs.len() != ys.len() {
+                    return Err(MessageError::InvalidValue("scene line point arrays"));
+                }
+            } else if has_bound_geometry {
+                require(0xf4)?;
+            } else {
+                require(0x07)?;
             }
             Ok(SceneNode::Line(SceneLine {
                 xs,
                 ys,
                 width: ints[0],
                 color: colors[0],
+                pivot_x: ints[4],
+                pivot_y: ints[5],
+                length: ints[6],
+                angle_binding: text,
             }))
         }
         4 => {
@@ -1461,6 +1532,8 @@ mod tests {
         assert!(binding_is_valid("timer.pct"));
         assert!(binding_is_valid("timer.permille"));
         assert!(binding_is_valid("timer.status"));
+        assert!(binding_is_valid("date"));
+        assert!(!binding_is_valid("dateXYZ"));
         assert!(!binding_is_valid("timer.pctXYZ"));
         assert!(!binding_is_valid("timer.permilleXYZ"));
         assert!(!binding_is_valid("timer.statusXYZ"));
@@ -1521,6 +1594,15 @@ mod tests {
                     running_color: None,
                     value: SceneValue::Binding("time:HH:mm".to_string()),
                     ellipsize: false,
+                }),
+                SceneNode::Line(SceneLine {
+                    width: 4,
+                    color: 0x00ff_8f2e,
+                    pivot_x: 344,
+                    pivot_y: 244,
+                    length: 42,
+                    angle_binding: "time:angle:minute".to_string(),
+                    ..SceneLine::default()
                 }),
             ],
         };
@@ -1734,6 +1816,24 @@ mod tests {
             ..SceneArc::default()
         };
         assert!(validate_node(&SceneNode::Arc(arc)).is_ok());
+    }
+
+    #[test]
+    fn a_line_cannot_carry_points_and_an_angle_binding() {
+        let line = SceneLine {
+            xs: vec![344, 344],
+            ys: vec![244, 202],
+            width: 4,
+            pivot_x: 344,
+            pivot_y: 244,
+            length: 42,
+            angle_binding: "time:angle:minute".to_string(),
+            ..SceneLine::default()
+        };
+        assert_eq!(
+            validate_node(&SceneNode::Line(line)),
+            Err(MessageError::InvalidValue("scene line geometry sources"))
+        );
     }
 
     #[test]

@@ -1462,6 +1462,8 @@ mod tests {
         assert!(binding_is_valid("timer.permille"));
         assert!(binding_is_valid("timer.status"));
         assert!(!binding_is_valid("timer.pctXYZ"));
+        assert!(!binding_is_valid("timer.permilleXYZ"));
+        assert!(!binding_is_valid("timer.statusXYZ"));
         assert!(binding_is_valid("time:HH:mm"));
         assert!(binding_is_valid("timer.remaining:mm:ss"));
         assert!(binding_is_valid("timer.elapsed:mm:ss"));

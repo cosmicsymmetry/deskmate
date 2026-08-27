@@ -520,6 +520,11 @@ static sim_scene_result_t map_decode_result(scene_model_result_t result)
 
 #define SIM_TIMER_MS_MAX (UINT32_C(86400) * UINT32_C(1000))
 
+/* This is the millisecond-input counterpart of scene_timer_snapshot(). Keep
+ * their invariant joint and explicit: total clamps to 86400s, remaining
+ * clamps to total, and percent/per-mille truncate after multiplying. The
+ * duplicate exists because temporal parity needs sub-second remaining values
+ * that scene_timer_snapshot()'s seconds-in API cannot express. */
 static void fill_scene_timer_context(scene_binding_context_t *context,
                                      bool timer_active,
                                      uint32_t timer_total_ms,

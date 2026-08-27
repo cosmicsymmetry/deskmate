@@ -230,7 +230,7 @@ supporting `1440:00` at the 86,400-second bound. A one-hour timer renders `00:00
 > which is how they came to disagree. Split the formatter rather than adding a flag, and
 > put the reason in a comment at the split.
 
-- [ ] **Step 1: Write the failing producer tests.** These must run
+- [x] **Step 1: Write the failing producer tests.** These must run
       `fill_timer_bindings()`'s arithmetic, not the formatter, because that is the hole the
       parity gate leaves. Extract the computation into a pure `core/` function so it is
       host-testable without ESP-IDF — `protocol_task.c` is under `link/` and cannot be
@@ -259,7 +259,7 @@ static void a_never_started_timer_reads_one_hundred(void)
 }
 ```
 
-- [ ] **Step 2: Write the failing formatter tests.**
+- [x] **Step 2: Write the failing formatter tests.**
 
 ```c
 static void timer_remaining_ceils_like_format_clock(void)
@@ -307,21 +307,21 @@ static void a_wall_clock_minute_still_wraps(void)
 }
 ```
 
-- [ ] **Step 3: Run both suites to confirm failure.**
+- [x] **Step 3: Run both suites to confirm failure.**
       Run: `make -C firmware/host_tests clean test && make -C firmware/host_tests sanitize`
       Expected: the five new tests fail; everything else passes.
 
-- [ ] **Step 4: Implement.** Extract `scene_timer_snapshot()` into `core/`, fix the
+- [x] **Step 4: Implement.** Extract `scene_timer_snapshot()` into `core/`, fix the
       percentage to remaining, rename the field to `timer_remaining_pct`, split the
       countdown formatter from the wall-clock formatter, and apply the ceiling.
 
-- [ ] **Step 5: Run to green, including ASan.**
+- [x] **Step 5: Run to green, including ASan.**
 
-- [ ] **Step 6: Update `docs/protocol/v1.md`** — state that `timer.pct` is **remaining**
+- [x] **Step 6: Update `docs/protocol/v1.md`** — state that `timer.pct` is **remaining**
       percent, and that `mm` is total minutes in a `timer.*` argument and a clock minute in
       a `time:` argument. Both sentences exist because their absence caused a defect.
 
-- [ ] **Step 7: Commit.** `fix: make the timer bindings mean what progress_ring.c means`
+- [x] **Step 7: Commit.** `fix: make the timer bindings mean what progress_ring.c means`
 
 ---
 
@@ -346,7 +346,7 @@ static void a_wall_clock_minute_still_wraps(void)
   present at all" — so a paused timer is `active` and not `running`. Do not conflate them;
   `timer.status` distinguishes `Ready`/`Paused` using exactly that difference.
 
-- [ ] **Step 1: Write the failing binding tests.**
+- [x] **Step 1: Write the failing binding tests.**
 
 ```c
 static void timer_elapsed_is_duration_minus_remaining(void)
@@ -382,14 +382,14 @@ static void an_inactive_timer_renders_the_placeholder(void)
 }
 ```
 
-- [ ] **Step 2: Write the failing decoder/model tests** for `running_color` on both node
+- [x] **Step 2: Write the failing decoder/model tests** for `running_color` on both node
       kinds, including the rejecting bound, and run them **under ASan** —
       `scene_model_validate()` reports an out-of-bounds write with the same error code the
       plain test asserts, so ASan is the only proof.
 
-- [ ] **Step 3: Run both suites to confirm failure.**
+- [x] **Step 3: Run both suites to confirm failure.**
 
-- [ ] **Step 4: Implement.** `running_color` is an **optional colour**, absent meaning "no
+- [x] **Step 4: Implement.** `running_color` is an **optional colour**, absent meaning "no
       running variant", so every existing scene keeps its meaning and
       `push_scene_min.bin` stays byte-identical. In `scene_view.c` it selects between
       `color` and `running_color` on `context->timer_running` at build **and** at each
@@ -401,13 +401,13 @@ static void an_inactive_timer_renders_the_placeholder(void)
 > binding result, which is a general evaluator wearing a disguise. One optional colour
 > field per affected node is smaller, is validated as a colour, and cannot grow.
 
-- [ ] **Step 5: Fixtures in both corpora**, plus `protocol_message.c`'s encoder arms —
+- [x] **Step 5: Fixtures in both corpora**, plus `protocol_message.c`'s encoder arms —
       Task 1b of stage 2b found that file missing from its task list and it will be missing
       again. Confirm `push_scene_min.bin` is unchanged, hash included.
 
-- [ ] **Step 6: Update `docs/protocol/v1.md`** — the binding table and both node tables.
+- [x] **Step 6: Update `docs/protocol/v1.md`** — the binding table and both node tables.
 
-- [ ] **Step 7: Swap `build_progress_ring_scene`'s literals for the new bindings.**
+- [x] **Step 7: Swap `build_progress_ring_scene`'s literals for the new bindings.**
       Without this the stage ships bindings nothing uses: the parity gate would never
       evaluate one and Gate A would have nothing to observe. TOTAL becomes
       `timer.total:mm:ss`, ELAPSED becomes `timer.elapsed:mm:ss`, STATUS becomes
@@ -418,7 +418,7 @@ static void an_inactive_timer_renders_the_placeholder(void)
       at the pinned instant must produce exactly the literal it replaced; if a row moves,
       the binding disagrees with the C and that is the defect this task exists to prevent.
 
-- [ ] **Step 8: Prove it temporally, which the byte gate cannot.**
+- [x] **Step 8: Prove it temporally, which the byte gate cannot.**
       Build a tick-advancing harness in `companion/crates/lvgl-sim/src/scene.rs` that
       renders a scene, advances the simulated clock and timer, and re-renders **without a
       re-push** — the C side advancing through the same interval. Then assert the two
@@ -432,7 +432,7 @@ static void an_inactive_timer_renders_the_placeholder(void)
       The ledger says to replace it with a test proving the two advance together — that is
       Step 8, so the replacement must exist before the deletion.
 
-- [ ] **Step 9: Gates and commit.**
+- [x] **Step 9: Gates and commit.**
       Run: `make -C firmware/host_tests clean test && make -C firmware/host_tests sanitize`
       then from `companion/`: `cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace`
       Commit: `feat: give a scene the timer facts progress_ring.c computes`

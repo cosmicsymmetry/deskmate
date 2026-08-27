@@ -544,19 +544,20 @@ pub struct IconBadgeCard<'a> {
     pub label: &'a str,
 }
 
-/// The card-level inputs `progress_ring.c` draws from.
+/// The host-known inputs needed to build the static `ProgressRing` scene.
+/// Remaining time and running state deliberately are not carried here: the
+/// device supplies them through the scene binding context, so putting them on
+/// this struct would imply that changing them changes the built scene.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProgressRingCard<'a> {
     /// Echoed as the scene's own revision.
     pub revision: u32,
     /// `progress_ring_patch()`'s `label` field.
     pub label: &'a str,
-    /// `progress_ring_patch()`'s `duration_seconds` field.
+    /// Selects the C template's duration-zero initial state. For a positive
+    /// duration, TOTAL, ELAPSED, STATUS, and the countdown are live bindings;
+    /// for a non-positive duration the C patch leaves their constructed text.
     pub duration_seconds: i64,
-    /// `progress_ring_patch()`'s `remaining_seconds` field.
-    pub remaining_seconds: i64,
-    /// `progress_ring_patch()`'s `running` field.
-    pub running: bool,
 }
 
 /// The card-level inputs `row_list.c` draws from.
@@ -1637,6 +1638,14 @@ fn push_progress_module(
     }));
 }
 
+fn progress_timer_value(timer_active: bool, binding: &str, inactive: &str) -> SceneValue {
+    if timer_active {
+        SceneValue::Binding(binding.to_string())
+    } else {
+        SceneValue::Literal(inactive.to_string())
+    }
+}
+
 /// Builds the whole `ProgressRing` face as a scene.
 ///
 /// The track and indicator are two scene arcs because one `SceneArc` is one
@@ -1645,6 +1654,7 @@ fn push_progress_module(
 /// indicator and countdown remain live through `timer.permille` and
 /// `timer.remaining:mm:ss`.
 pub fn build_progress_ring_scene(card: &ProgressRingCard<'_>, metrics: &BakedFontMetrics) -> Scene {
+    let timer_active = card.duration_seconds >= 1;
     let mut nodes = Vec::with_capacity(13);
     for (color, running_color, opacity, rounded, end_binding) in [
         (
@@ -1699,7 +1709,7 @@ pub fn build_progress_ring_scene(card: &ProgressRingCard<'_>, metrics: &BakedFon
         font: SceneFont::Baked(SceneFontTier::Display),
         color: COLOR_PRIMARY,
         running_color: None,
-        value: SceneValue::Binding("timer.remaining:mm:ss".to_string()),
+        value: progress_timer_value(timer_active, "timer.remaining:mm:ss", "00:00"),
         ellipsize: true,
     }));
 
@@ -1707,7 +1717,7 @@ pub fn build_progress_ring_scene(card: &ProgressRingCard<'_>, metrics: &BakedFon
         &mut nodes,
         PROGRESS_CHIP_FIRST_Y,
         "TOTAL",
-        SceneValue::Binding("timer.total:mm:ss".to_string()),
+        progress_timer_value(timer_active, "timer.total:mm:ss", ""),
         COLOR_PRIMARY,
         None,
         metrics,
@@ -1716,7 +1726,7 @@ pub fn build_progress_ring_scene(card: &ProgressRingCard<'_>, metrics: &BakedFon
         &mut nodes,
         PROGRESS_CHIP_FIRST_Y + PROGRESS_CHIP_H + PROGRESS_CHIP_GAP,
         "ELAPSED",
-        SceneValue::Binding("timer.elapsed:mm:ss".to_string()),
+        progress_timer_value(timer_active, "timer.elapsed:mm:ss", ""),
         PROGRESS_RING_TINT,
         None,
         metrics,
@@ -1725,7 +1735,7 @@ pub fn build_progress_ring_scene(card: &ProgressRingCard<'_>, metrics: &BakedFon
         &mut nodes,
         PROGRESS_CHIP_FIRST_Y + 2 * (PROGRESS_CHIP_H + PROGRESS_CHIP_GAP),
         "STATUS",
-        SceneValue::Binding("timer.status".to_string()),
+        progress_timer_value(timer_active, "timer.status", ""),
         COLOR_PRIMARY,
         Some(PROGRESS_RING_HUE),
         metrics,
@@ -2259,8 +2269,6 @@ mod tests {
                 revision: 1,
                 label: "Pomodoro",
                 duration_seconds: 1_500,
-                remaining_seconds: 900,
-                running: false,
             },
             &BakedFontMetrics::SHIPPED,
         );

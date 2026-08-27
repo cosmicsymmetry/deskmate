@@ -16,6 +16,11 @@
 #define FIELD_PREFIX "field."
 #define TIMER_SECONDS_MAX INT64_C(86400)
 
+/* Keep this producer and lvgl-sim's fill_scene_timer_context() on the same
+ * invariant: total is clamped to 86400s, remaining is clamped to total, and
+ * both remaining ratios truncate after multiplying. The shim must duplicate
+ * that arithmetic because temporal parity advances sub-second millisecond
+ * values that this public seconds-in producer cannot represent. */
 scene_timer_snapshot_t scene_timer_snapshot(int64_t duration_seconds,
                                             int64_t remaining_seconds,
                                             bool running,
@@ -427,8 +432,8 @@ scene_binding_result_t scene_binding_evaluate(
         if (context->timer_running) {
             return write_bounded(out, out_capacity, "Running");
         }
-        if (context->timer_total_ms > 0U &&
-            context->timer_remaining_ms >= context->timer_total_ms) {
+        if (timer_seconds_ceiled(context->timer_remaining_ms) >=
+            timer_seconds_ceiled(context->timer_total_ms)) {
             return write_bounded(out, out_capacity, "Ready");
         }
         return write_bounded(out, out_capacity, "Paused");

@@ -1012,6 +1012,7 @@ static bool build_nodes(lv_obj_t *parent, const scene_t *scene,
             bound->color = arc->color;
             bound->running_color = arc->running_color;
             bound->has_running_color = arc->has_running_color;
+            bound->has_binding = false;
             bound->arc_span_deg =
                 scene_model_arc_span(arc->start_deg, arc->end_deg);
             if (arc->end_binding[0] != '\0' &&
@@ -1046,6 +1047,7 @@ static bool build_nodes(lv_obj_t *parent, const scene_t *scene,
                 bound->running_color = node->value.text.running_color;
                 bound->has_running_color =
                     node->value.text.has_running_color;
+                bound->has_binding = false;
                 if (is_bound) {
                     bound->binding = binding;
                     bound->has_binding = true;

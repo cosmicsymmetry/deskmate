@@ -610,8 +610,6 @@ fn add_progress_ring_cases(cases: &mut Vec<ParityCase>) {
                             revision: 1,
                             label,
                             duration_seconds: DURATION_SECONDS,
-                            remaining_seconds,
-                            running,
                         },
                         &BakedFontMetrics::SHIPPED,
                     ),
@@ -630,6 +628,61 @@ fn add_progress_ring_cases(cases: &mut Vec<ParityCase>) {
                 },
             });
         }
+    }
+
+    add_zero_duration_progress_ring_cases(cases);
+}
+
+fn add_zero_duration_progress_ring_cases(cases: &mut Vec<ParityCase>) {
+    for (orientation_slug, orientation) in [
+        ("landscape", SimOrientation::Landscape),
+        ("flipped", SimOrientation::LandscapeFlipped),
+    ] {
+        let label = "Pomodoro";
+        cases.push(ParityCase {
+            known_gap: None,
+            name: format!("progress-ring--zero-duration--{orientation_slug}"),
+            template: RenderRequest {
+                template: SimTemplate::ProgressRing,
+                fields: vec![
+                    SimField {
+                        name: "label".to_string(),
+                        value: SimFieldValue::Text(label.to_string()),
+                    },
+                    SimField {
+                        name: "duration_seconds".to_string(),
+                        value: SimFieldValue::Integer(0),
+                    },
+                    SimField {
+                        name: "remaining_seconds".to_string(),
+                        value: SimFieldValue::Integer(0),
+                    },
+                    SimField {
+                        name: "running".to_string(),
+                        value: SimFieldValue::Boolean(false),
+                    },
+                ],
+                utc_offset_minutes: 0,
+                now_unix_seconds: 0,
+                orientation,
+            },
+            scene: SceneRenderRequest {
+                scene: build_progress_ring_scene(
+                    &ProgressRingCard {
+                        revision: 1,
+                        label,
+                        duration_seconds: 0,
+                    },
+                    &BakedFontMetrics::SHIPPED,
+                ),
+                assets: Vec::new(),
+                utc_offset_minutes: 0,
+                now_unix_seconds: 0,
+                timer: None,
+                fields: Vec::new(),
+                orientation,
+            },
+        });
     }
 }
 
@@ -671,8 +724,6 @@ fn assert_progress_ring_temporal_parity(
                 revision: 1,
                 label,
                 duration_seconds,
-                remaining_seconds,
-                running,
             },
             &BakedFontMetrics::SHIPPED,
         ),
@@ -752,6 +803,15 @@ fn pausing_a_progress_scene_repaints_indicator_and_status_without_a_repush() {
     assert_ne!(
         frames.scene, frames.initial_scene,
         "pausing must repaint both running-color nodes"
+    );
+}
+
+#[test]
+fn resuming_a_progress_scene_applies_indicator_and_status_running_colors_without_a_repush() {
+    let frames = assert_progress_ring_temporal_parity(1_500, 900, false, 0, true);
+    assert_ne!(
+        frames.scene, frames.initial_scene,
+        "resuming must apply both running-color variants"
     );
 }
 

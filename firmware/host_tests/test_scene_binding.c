@@ -59,13 +59,21 @@ static void test_an_inactive_timer_renders_the_placeholder(void)
 {
     scene_binding_t binding;
     char out[SCENE_MAX_TEXT_BYTES + 1U];
-    assert(scene_binding_parse("timer.remaining:mm:ss", &binding) ==
-           SCENE_BINDING_OK);
     scene_binding_context_t ctx = fixed_context();
     ctx.timer_active = false;
-    assert(scene_binding_evaluate(&binding, &ctx, out, sizeof out) ==
-           SCENE_BINDING_OK);
-    assert(strcmp(out, "--:--") == 0);
+    const char *clock_bindings[] = {
+        "timer.remaining:mm:ss",
+        "timer.elapsed:mm:ss",
+        "timer.total:mm:ss",
+    };
+    for (size_t i = 0U;
+         i < sizeof clock_bindings / sizeof clock_bindings[0]; ++i) {
+        assert(scene_binding_parse(clock_bindings[i], &binding) ==
+               SCENE_BINDING_OK);
+        assert(scene_binding_evaluate(&binding, &ctx, out, sizeof out) ==
+               SCENE_BINDING_OK);
+        assert(strcmp(out, "--:--") == 0);
+    }
 }
 
 static void test_unknown_bindings_are_rejected_at_parse(void)
@@ -80,6 +88,12 @@ static void test_unknown_bindings_are_rejected_at_parse(void)
            SCENE_BINDING_ERR_FORMAT);
     assert(scene_binding_parse("field.", &binding) ==
            SCENE_BINDING_ERR_FORMAT);
+    assert(scene_binding_parse("timer.pctXYZ", &binding) ==
+           SCENE_BINDING_ERR_UNKNOWN);
+    assert(scene_binding_parse("timer.permilleXYZ", &binding) ==
+           SCENE_BINDING_ERR_UNKNOWN);
+    assert(scene_binding_parse("timer.statusXYZ", &binding) ==
+           SCENE_BINDING_ERR_UNKNOWN);
 }
 
 static void test_evaluate_never_overruns_a_short_buffer(void)
@@ -254,15 +268,34 @@ static void timer_elapsed_is_duration_minus_remaining(void)
     assert(strcmp(out, "10:00") == 0);
 }
 
+static void timer_total_formats_the_bounded_duration(void)
+{
+    char out[16];
+    scene_binding_t binding;
+    assert(scene_binding_parse("timer.total:mm:ss", &binding) ==
+           SCENE_BINDING_OK);
+    scene_binding_context_t ctx = {0};
+    ctx.timer_active = true;
+    ctx.timer_total_ms = 1500U * 1000U;
+    assert(scene_binding_evaluate(&binding, &ctx, out, sizeof out) ==
+           SCENE_BINDING_OK);
+    assert(strcmp(out, "25:00") == 0);
+}
+
 static void timer_status_picks_the_same_word_as_status_word(void)
 {
     /* The four cases progress_ring.c's status_word() distinguishes. */
-    const struct { int64_t total, remaining; bool running; const char *word; } cases[] = {
-        { 1500, 0,    false, "Done"    },
-        { 1500, 0,    true,  "Done"    },  /* remaining <= 0 wins over running */
-        { 1500, 900,  true,  "Running" },
-        { 1500, 1500, false, "Ready"   },
-        { 1500, 900,  false, "Paused"  },
+    const struct {
+        uint32_t total_ms, remaining_ms;
+        bool running;
+        const char *word;
+    } cases[] = {
+        { 1500000U,       0U, false, "Done"    },
+        { 1500000U,       0U, true,  "Done"    }, /* zero wins over running */
+        { 1500000U,  900000U, true,  "Running" },
+        { 1500000U, 1500000U, false, "Ready"   },
+        { 1500000U, 1499500U, false, "Ready"   }, /* both ceil to 1500s */
+        { 1500000U,  900000U, false, "Paused"  },
     };
     for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
         char out[16];
@@ -271,8 +304,8 @@ static void timer_status_picks_the_same_word_as_status_word(void)
                SCENE_BINDING_OK);
         scene_binding_context_t ctx = {0};
         ctx.timer_active = true;
-        ctx.timer_total_ms = (uint32_t)(cases[i].total * 1000);
-        ctx.timer_remaining_ms = (uint32_t)(cases[i].remaining * 1000);
+        ctx.timer_total_ms = cases[i].total_ms;
+        ctx.timer_remaining_ms = cases[i].remaining_ms;
         ctx.timer_running = cases[i].running;
         assert(scene_binding_evaluate(&binding, &ctx, out, sizeof out) ==
                SCENE_BINDING_OK);
@@ -384,6 +417,7 @@ int main(void)
     timer_remaining_clamps_like_format_clock();
     timer_remaining_rejects_an_hours_token();
     timer_elapsed_is_duration_minus_remaining();
+    timer_total_formats_the_bounded_duration();
     timer_status_picks_the_same_word_as_status_word();
     an_inactive_timer_renders_the_placeholder();
     timer_permille_preserves_a_non_whole_percent();

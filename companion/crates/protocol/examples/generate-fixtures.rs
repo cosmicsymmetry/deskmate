@@ -28,7 +28,7 @@ fn digest_pattern(start: u8) -> [u8; 32] {
 
 /// A scene reaching every corner of the format at once.
 ///
-/// All nine node kinds; a text node bound to a clock and another carrying a
+/// All nine node kinds; text nodes carrying both wall-clock bindings plus a
 /// literal with its optional align/colour/ellipsize set; an arc with an
 /// `end_binding` and a full-turn sweep spelled the way the renderer reads one
 /// (270 -> 630, not start == end); coordinates past 255 so the multi-byte CBOR
@@ -99,6 +99,17 @@ fn rich_scene() -> Scene {
                 font: SceneFont::Baked(SceneFontTier::Hero),
                 color: 0x00F2_F2F7,
                 running_color: Some(0x00FF_9F0A),
+                value: SceneValue::Binding("time:HH:mm".into()),
+                ellipsize: false,
+            }),
+            SceneNode::Text(SceneText {
+                x: 16,
+                baseline_y: 260,
+                w: 416,
+                align: SceneAlign::Right,
+                font: SceneFont::Baked(SceneFontTier::Body),
+                color: 0x00F2_F2F7,
+                running_color: None,
                 value: SceneValue::Binding("date".into()),
                 ellipsize: false,
             }),

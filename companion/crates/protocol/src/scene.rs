@@ -1198,9 +1198,9 @@ fn decode_node_payload(decoder: &mut Decoder<'_>, kind: u32) -> Result<SceneNode
         if key < 32 {
             present |= 1 << key;
         }
-        // Only the arms whose key pattern is 0..=5 index `ints` with this,
-        // so it cannot saturate; the fallback keeps the conversion total
-        // rather than panicking on a 32-bit target.
+        // Every arm that indexes `ints` constrains its key to 0..=10, exactly
+        // the array's slots. The fallback keeps conversion of an unknown,
+        // wider key total before the match skips it on a 32-bit target.
         let slot = usize::try_from(key).unwrap_or(usize::MAX);
         match (kind, key) {
             // RECT {0: x, 1: y, 2: w, 3: h, 4: radius, 5: fill, 6: opacity,
@@ -1832,6 +1832,40 @@ mod tests {
         };
         assert_eq!(
             validate_node(&SceneNode::Line(line)),
+            Err(MessageError::InvalidValue("scene line geometry sources"))
+        );
+    }
+
+    #[test]
+    fn the_decoder_rejects_even_empty_point_keys_mixed_with_bound_geometry() {
+        // Empty arrays leave no point-count evidence for validate_node(): if
+        // decode_node_payload's key-presence guard is removed, this becomes a
+        // valid bound line and the decode succeeds. This pins the decoder's
+        // ambiguity rejection independently of model validation.
+        let bytes = scene_with_node_array(1, |encoder| {
+            encoder.map(2);
+            encoder.unsigned(0);
+            encoder.unsigned(3); // LINE
+            encoder.unsigned(1);
+            encoder.map(7);
+            encoder.unsigned(0);
+            encoder.array(0);
+            encoder.unsigned(1);
+            encoder.array(0);
+            encoder.unsigned(2);
+            encoder.signed(4);
+            encoder.unsigned(4);
+            encoder.signed(344);
+            encoder.unsigned(5);
+            encoder.signed(244);
+            encoder.unsigned(6);
+            encoder.signed(42);
+            encoder.unsigned(7);
+            encoder.text("time:angle:minute");
+        });
+        let mut decoder = Decoder::new(&bytes);
+        assert_eq!(
+            decode_scene(&mut decoder),
             Err(MessageError::InvalidValue("scene line geometry sources"))
         );
     }

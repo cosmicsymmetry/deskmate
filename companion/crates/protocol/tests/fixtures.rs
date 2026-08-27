@@ -287,6 +287,18 @@ fn assert_date_binding_is_pinned(nodes: &[protocol::SceneNode]) {
     }));
 }
 
+fn assert_time_binding_is_pinned(nodes: &[protocol::SceneNode]) {
+    assert!(nodes.iter().any(|node| {
+        matches!(
+            node,
+            protocol::SceneNode::Text(protocol::SceneText {
+                value: protocol::SceneValue::Binding(binding),
+                ..
+            }) if binding == "time:HH:mm"
+        )
+    }));
+}
+
 fn assert_label_anchor_default_is_pinned(nodes: &[protocol::SceneNode]) {
     let label = nodes
         .iter()
@@ -359,15 +371,17 @@ fn push_scene_fixtures_carry_what_they_are_meant_to() {
     };
     assert_eq!(push.card_id, "clock");
     assert_eq!(push.revision, 12);
-    // Every node kind, plus both Line forms and both Text value forms: an
+    // Every node kind, both Line forms, both Text value forms, and both live
+    // wall-clock text bindings: an
     // all-minimal fixture would pass even if the encoders disagreed about the
     // kinds or additive fields it left out.
-    assert_eq!(push.scene.nodes.len(), 11);
+    assert_eq!(push.scene.nodes.len(), 12);
     assert_rich_rect_is_pinned(&push.scene.nodes);
     assert_rich_arc_is_pinned(&push.scene.nodes);
     assert_rot_rect_clip_is_pinned(&push.scene.nodes);
     assert_running_colors_are_pinned(&push.scene.nodes);
     assert_bound_line_is_pinned(&push.scene.nodes);
+    assert_time_binding_is_pinned(&push.scene.nodes);
     assert_date_binding_is_pinned(&push.scene.nodes);
     assert_label_anchor_default_is_pinned(&push.scene.nodes);
     assert_every_node_kind_is_pinned(&push.scene.nodes);

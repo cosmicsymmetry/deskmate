@@ -1628,6 +1628,40 @@ static void test_explicit_points_and_an_angle_binding_are_rejected(void)
     free(scene);
 }
 
+static void test_empty_point_keys_and_bound_geometry_are_rejected_by_decoder(void)
+{
+    builder_t b;
+    scene_t *scene = new_scene();
+
+    /* Empty arrays leave point_count zero, so scene_model_validate() sees an
+     * otherwise-valid bound line. Removing decode_line()'s key-presence guard
+     * therefore makes this decode succeed instead of returning GEOMETRY. */
+    begin_scene(&b, 1U, 0U, 1U);
+    put_map(&b, 2U);
+    put_uint(&b, 0U);
+    put_uint(&b, SCENE_NODE_LINE);
+    put_uint(&b, 1U);
+    put_map(&b, 7U);
+    put_uint(&b, 0U);
+    put_array(&b, 0U);
+    put_uint(&b, 1U);
+    put_array(&b, 0U);
+    put_uint(&b, 2U);
+    put_int(&b, 4);
+    put_uint(&b, 4U);
+    put_int(&b, 344);
+    put_uint(&b, 5U);
+    put_int(&b, 244);
+    put_uint(&b, 6U);
+    put_int(&b, 42);
+    put_uint(&b, 7U);
+    put_text(&b, "time:angle:minute");
+
+    assert(scene_decode(b.bytes, b.length, scene) ==
+           SCENE_MODEL_ERR_GEOMETRY);
+    free(scene);
+}
+
 /* A TEXT node with no value map is not a text node. Without this the map
  * would decode to value.kind 0 and an empty literal, which the model
  * accepts -- a blank string drawn where the host meant words. */
@@ -1951,6 +1985,7 @@ int main(void)
     test_a_bound_line_decodes();
     test_a_bound_line_with_an_off_canvas_pivot_is_rejected();
     test_explicit_points_and_an_angle_binding_are_rejected();
+    test_empty_point_keys_and_bound_geometry_are_rejected_by_decoder();
     test_a_text_node_without_a_value_is_rejected();
     test_a_text_node_without_a_font_is_rejected();
     test_a_font_without_a_kind_is_rejected();

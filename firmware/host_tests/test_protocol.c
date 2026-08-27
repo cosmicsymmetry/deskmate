@@ -182,13 +182,14 @@ static void test_scene_fixtures_pin_new_fields_and_omitted_defaults(void)
     protocol_message_t message;
     assert(protocol_message_decode(&frame, &message) == PROTOCOL_MESSAGE_OK);
     const scene_t *scene = &message.value.push_scene.scene;
-    assert(scene->node_count == 11U);
+    assert(scene->node_count == 12U);
     const scene_rect_t *rect = &scene->nodes[0].value.rect;
     const scene_arc_t *arc = &scene->nodes[1].value.arc;
     const scene_line_t *bound_line = &scene->nodes[3].value.line;
     const scene_text_t *running_text = &scene->nodes[4].value.text;
+    const scene_text_t *date_text = &scene->nodes[5].value.text;
     const scene_rot_rect_t *rot_rect =
-        &scene->nodes[10].value.rot_rect;
+        &scene->nodes[11].value.rot_rect;
     assert(scene->nodes[0].kind == SCENE_NODE_RECT);
     assert(rect->opacity == 0xc8U);
     assert(rect->has_clip);
@@ -209,8 +210,10 @@ static void test_scene_fixtures_pin_new_fields_and_omitted_defaults(void)
     assert(scene->nodes[4].kind == SCENE_NODE_TEXT);
     assert(running_text->has_running_color);
     assert(running_text->running_color == UINT32_C(0x00FF9F0A));
-    assert(strcmp(running_text->value.binding, "date") == 0);
-    assert(scene->nodes[10].kind == SCENE_NODE_ROT_RECT);
+    assert(strcmp(running_text->value.binding, "time:HH:mm") == 0);
+    assert(scene->nodes[5].kind == SCENE_NODE_TEXT);
+    assert(strcmp(date_text->value.binding, "date") == 0);
+    assert(scene->nodes[11].kind == SCENE_NODE_ROT_RECT);
     assert(rot_rect->has_clip);
     assert(rot_rect->clip.x == 64);
     assert(rot_rect->clip.y == 24);

@@ -897,8 +897,8 @@ fn a_digital_clock_crosses_a_minute_without_a_repush() {
         "the HH:mm reading must change across the minute"
     );
     assert!(
-        region_changed(&frames.initial_scene, &frames.scene, 264, 176, 424, 312),
-        "the bound minute hand must step across the minute"
+        region_changed(&frames.initial_scene, &frames.scene, 376, 232, 393, 253),
+        "the bound minute hand's outer swept area must change across the minute"
     );
 }
 

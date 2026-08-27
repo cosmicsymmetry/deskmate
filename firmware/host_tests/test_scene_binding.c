@@ -436,11 +436,13 @@ static int32_t host_trigo_cos(int32_t angle)
     return host_trigo_sin(angle + 90);
 }
 
-static void an_angle_binding_gives_lvgls_own_hand_geometry(void)
+static void a_cardinal_angle_binding_gives_expected_hand_geometry(void)
 {
-    /* Quarter past three: the minute hand points at three o'clock. Assert the
-     * computed endpoint equals the host port's, which is pinned against
-     * LVGL's table. */
+    /* Quarter past three: the minute hand points at three o'clock. This core
+     * suite deliberately injects a four-cardinal stub so it can isolate the
+     * angle formula and fixed-point endpoint arithmetic without linking LVGL.
+     * The seven-instant pixel parity matrix supplies the non-cardinal proof
+     * against the real lv_trigo table used by both production render paths. */
     scene_binding_context_t ctx = {0};
     ctx.unix_seconds = INT64_C(1787800500);
     scene_line_endpoint_t endpoint;
@@ -510,7 +512,7 @@ int main(void)
     a_wall_clock_minute_still_wraps();
     the_date_binding_matches_timefmt_date();
     the_date_binding_crosses_local_midnight_with_the_offset();
-    an_angle_binding_gives_lvgls_own_hand_geometry();
+    a_cardinal_angle_binding_gives_expected_hand_geometry();
     test_zero_capacity_never_writes();
     test_field_name_length_boundary();
     return 0;

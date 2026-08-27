@@ -427,57 +427,6 @@ pub fn number_font_tier(text: &str, max_width: i32, metrics: &BakedFontMetrics) 
 }
 
 // ---------------------------------------------------------------------------
-// LVGL's fixed-point trigonometry, for the hands.
-// ---------------------------------------------------------------------------
-
-/// `lv_math.c`'s `sin0_90_table`, transcribed. The hands' endpoints are
-/// whatever `lv_scale_set_line_needle_value()` computes, and it computes them
-/// from this table, so a floating-point sine would land a pixel elsewhere.
-#[cfg(test)]
-const SIN_0_90: [i32; 91] = [
-    0, 572, 1144, 1715, 2286, 2856, 3425, 3993, 4560, 5126, 5690, 6252, 6813, 7371, 7927, 8481,
-    9032, 9580, 10126, 10668, 11207, 11743, 12275, 12803, 13328, 13848, 14365, 14876, 15384, 15886,
-    16384, 16877, 17364, 17847, 18324, 18795, 19261, 19720, 20174, 20622, 21063, 21498, 21926,
-    22348, 22763, 23170, 23571, 23965, 24351, 24730, 25102, 25466, 25822, 26170, 26510, 26842,
-    27166, 27482, 27789, 28088, 28378, 28660, 28932, 29197, 29452, 29698, 29935, 30163, 30382,
-    30592, 30792, 30983, 31164, 31336, 31499, 31651, 31795, 31928, 32052, 32166, 32270, 32365,
-    32449, 32524, 32588, 32643, 32688, 32723, 32748, 32763, 32768,
-];
-
-/// `lv_trigo_sin()`. The C normalises with `while` loops; `rem_euclid` is the
-/// same map for every input.
-#[cfg(test)]
-fn trigo_sin(angle: i32) -> i32 {
-    let normalised = angle.rem_euclid(360);
-    let index = match normalised {
-        0..90 => normalised,
-        90..180 => 180 - normalised,
-        180..270 => normalised - 180,
-        _ => 360 - normalised,
-    };
-    let magnitude = SIN_0_90[usize::try_from(index).expect("the index is in 0..=90")];
-    let signed = if normalised >= 180 {
-        -magnitude
-    } else {
-        magnitude
-    };
-    // The C saturates +-32767 to +-32768. No entry in the table is 32767, so
-    // this is inert today; it is kept because the table is transcribed and a
-    // regenerated one could reach it.
-    match signed {
-        32767 => 32768,
-        -32767 => -32768,
-        other => other,
-    }
-}
-
-/// `lv_trigo_cos()`.
-#[cfg(test)]
-fn trigo_cos(angle: i32) -> i32 {
-    trigo_sin(angle + 90)
-}
-
-// ---------------------------------------------------------------------------
 // The builder.
 // ---------------------------------------------------------------------------
 
@@ -593,6 +542,12 @@ fn time_text(now: NaiveDateTime) -> String {
 /// The pivot is translated out of the scale's local frame here. The endpoint
 /// is deliberately not: the device recomputes it with LVGL's own trig table on
 /// every binding refresh.
+///
+/// This helper reproduces a needle that the C face parents under its 112px
+/// `lv_scale`. LVGL clamps that needle's length to half the scale box and the
+/// parent clips its stroke; a scene line has neither behaviour. Byte parity
+/// therefore requires `length + width / 2 < DIAL_BOX / 2`. Keep that
+/// precondition if another scale-owned C needle is moved to this binding form.
 fn hand_line(
     pivot: (i32, i32),
     length: i32,
@@ -600,6 +555,7 @@ fn hand_line(
     width: i32,
     color: u32,
 ) -> SceneLine {
+    debug_assert!(length + width / 2 < DIAL_BOX / 2);
     SceneLine {
         xs: Vec::new(),
         ys: Vec::new(),
@@ -2157,45 +2113,6 @@ mod tests {
             SceneFontTier::Hero,
             number_font_tier("00:00", 448 - 2 * 24, &BakedFontMetrics::SHIPPED)
         );
-    }
-
-    #[test]
-    fn the_trig_port_reproduces_lvgls_table() {
-        assert_eq!(0, trigo_sin(0));
-        assert_eq!(16384, trigo_sin(30));
-        assert_eq!(32768, trigo_sin(90));
-        assert_eq!(0, trigo_sin(180));
-        assert_eq!(-32768, trigo_sin(270));
-        assert_eq!(-16384, trigo_sin(330));
-        // Odd angles too: the round ones alone would not catch a transcription
-        // slip in the middle of the table.
-        assert_eq!(572, trigo_sin(1));
-        assert_eq!(22763, trigo_sin(44));
-        assert_eq!(32763, trigo_sin(89));
-        assert_eq!(32763, trigo_sin(91));
-        assert_eq!(-32763, trigo_sin(269));
-        // The C normalises with while-loops, so out-of-turn angles wrap.
-        assert_eq!(trigo_sin(30), trigo_sin(390));
-        assert_eq!(trigo_sin(330), trigo_sin(-30));
-        assert_eq!(32768, trigo_cos(0));
-        assert_eq!(0, trigo_cos(90));
-    }
-
-    /// `lv_math.c`'s table is `round(sin(d) * 32768)` at every whole degree, so
-    /// the whole transcription can be checked without pasting it twice. A
-    /// float sine is *not* what the builder may use at runtime -- the device
-    /// reads the table, and only the table is guaranteed to round the way the
-    /// device rounds -- but it is a fine oracle for the transcription.
-    #[test]
-    fn the_transcribed_sine_table_has_no_typo() {
-        for (degrees, &entry) in SIN_0_90.iter().enumerate() {
-            let degrees = u16::try_from(degrees).expect("the table is 91 entries long");
-            let expected = (f64::from(degrees).to_radians().sin() * 32768.0).round();
-            assert!(
-                (expected - f64::from(entry)).abs() < f64::EPSILON,
-                "sin0_90_table[{degrees}] is {entry}, want {expected}"
-            );
-        }
     }
 
     #[test]

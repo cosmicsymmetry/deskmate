@@ -10,6 +10,7 @@
 #define TIMER_REMAINING_PREFIX "timer.remaining:"
 #define TIMER_PCT_TOKEN "timer.pct"
 #define FIELD_PREFIX "field."
+#define TIMER_SECONDS_MAX INT64_C(86400)
 
 scene_timer_snapshot_t scene_timer_snapshot(int64_t duration_seconds,
                                             int64_t remaining_seconds,
@@ -20,6 +21,14 @@ scene_timer_snapshot_t scene_timer_snapshot(int64_t duration_seconds,
     scene_timer_snapshot_t snapshot = {0};
     if (duration_seconds <= 0) {
         return snapshot;
+    }
+    if (duration_seconds > TIMER_SECONDS_MAX) {
+        duration_seconds = TIMER_SECONDS_MAX;
+    }
+    if (remaining_seconds < 0) {
+        remaining_seconds = 0;
+    } else if (remaining_seconds > duration_seconds) {
+        remaining_seconds = duration_seconds;
     }
     int64_t total_ms = duration_seconds * INT64_C(1000);
     int64_t remaining_ms = remaining_seconds * INT64_C(1000);
@@ -40,14 +49,29 @@ scene_timer_snapshot_t scene_timer_snapshot(int64_t duration_seconds,
     return snapshot;
 }
 
-/* A `time:`/`timer.remaining:` format argument is a whitelist of these
- * characters, never a printf format string handed to a printf-family
- * function -- host bytes must never reach one of those. */
+/* A format argument is a whitelist, never a printf format string handed to
+ * a printf-family function -- host bytes must never reach one of those.
+ * Wall clocks admit hours; countdowns deliberately do not, because their
+ * `mm` token is already the total-minute count. */
 static bool is_time_format_char(char c)
 {
     switch (c) {
     case 'H':
     case 'h':
+    case 'M':
+    case 'm':
+    case 'S':
+    case 's':
+    case ':':
+        return true;
+    default:
+        return false;
+    }
+}
+
+static bool is_timer_format_char(char c)
+{
+    switch (c) {
     case 'M':
     case 'm':
     case 'S':
@@ -81,7 +105,10 @@ static scene_binding_result_t parse_time_like(const char *argument,
         return SCENE_BINDING_ERR_FORMAT;
     }
     for (const char *p = argument; *p != '\0'; p++) {
-        if (!is_time_format_char(*p)) {
+        bool valid = kind == SCENE_BINDING_TIMER_REMAINING
+            ? is_timer_format_char(*p)
+            : is_time_format_char(*p);
+        if (!valid) {
             return SCENE_BINDING_ERR_FORMAT;
         }
     }
@@ -243,9 +270,6 @@ static scene_binding_result_t render_wall_clock_tokens(
 static uint32_t timer_token_value(char c, uint32_t total_seconds)
 {
     switch (c) {
-    case 'H':
-    case 'h':
-        return total_seconds / 3600U;
     case 'M':
     case 'm':
         return total_seconds / 60U;
@@ -327,6 +351,9 @@ scene_binding_result_t scene_binding_evaluate(
         uint32_t total_seconds =
             (uint32_t)(((uint64_t)context->timer_remaining_ms + 999U) /
                        1000U);
+        if (total_seconds > (uint32_t)TIMER_SECONDS_MAX) {
+            total_seconds = (uint32_t)TIMER_SECONDS_MAX;
+        }
         return render_timer_tokens(binding->argument, total_seconds, out,
                                    out_capacity);
     }

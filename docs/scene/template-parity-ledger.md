@@ -23,8 +23,8 @@ The closed binding set is not an expression language:
 | `time:HH:mm` | `DigitalClock` | Formats the device wall clock plus its current UTC offset into the hero reading. |
 | `time:ss` | `DigitalClock`, when seconds are shown | Formats seconds from the same device clock. |
 | `time:hour`, `time:minute`, `time:second` | `AnalogClock` | Rotation-only bindings. They recompute the three hand rotations from the device clock in the same whole-degree steps as `analog_clock_tick()`. The second-hand node is absent when `show_seconds` is false. |
-| `timer.remaining:mm:ss` | `ProgressRing` | Formats the locally counted-down `remaining_ms` from the matching progress card's latest `PushData` snapshot. This is intended to keep advancing while the link is down. Rounding and total-minute mismatches are recorded below. |
-| `timer.pct` | `ProgressRing` | Scales the indicator arc's declared sweep. The parity fixture supplies remaining percentage, but the device currently derives elapsed percentage; this is a blocking mismatch recorded below. |
+| `timer.remaining:mm:ss` | `ProgressRing` | Formats the locally counted-down `remaining_ms` from the matching progress card's latest `PushData` snapshot. This is intended to keep advancing while the link is down. Its ceiling and total-minute behavior were fixed in Task 1 (`20304d9`) to match the C face. |
+| `timer.pct` | `ProgressRing` | Scales the indicator arc's declared sweep. Task 1 (`20304d9`) fixed the device producer to derive remaining percentage, matching the parity fixture and C face. |
 | `field.*` | **None of the six** | Resolves a field from the matching card's widget-model state. It is refreshed on `PushData`, but is not autonomous: without a host update there is no new value to evaluate. |
 
 `time:*` reads `time(NULL)` plus the device's stored UTC offset. Timer bindings read the
@@ -41,7 +41,7 @@ source live on the device.
 | `BigNumberLabel` | Title, value (including the `--` fallback), label, chosen value/label font tiers, and layout derived from those tiers. | None. | It remains the last known card value. A provider or card-data change requires a rebuild because the value can cross a font-tier boundary and move both value and label; substituting `field.*` only for the text would be incorrect. | **Ready with event-driven scene pushes** for new host data. There is no device-local value that should advance by itself. |
 | `IconBadgeText` | Title, badge, value, label, selected icon geometry, chosen font tiers, and tier-dependent vertical layout. | None. | It remains the last known provider result. Icon changes can replace the node list, and value changes can change tier and layout, so a text-only field refresh is insufficient. | **Ready with event-driven scene pushes** for new host data. There is no autonomous gap. |
 | `RowList` | Title; count; every row title/time; which row modules exist; and the empty-state module. | None. | It remains the last known list. A data update can add/remove rows, change the count, or switch the entire empty-state branch, so it requires a rebuilt scene. | **Ready with event-driven scene pushes** for new host data. There is no autonomous gap. |
-| `ProgressRing` | Label; TOTAL, ELAPSED, and STATUS text; indicator and STATUS colours selected from `running`; empty-chip values when duration is zero. | `timer.remaining:mm:ss` for the large countdown; `timer.pct` for the indicator sweep. | ELAPSED is wrong after one second. STATUS cannot change among Ready/Running/Paused/Done. A start/pause transition leaves the indicator and status colour wrong. TOTAL remains correct only while duration is unchanged. Local tap feedback reaches only the C template. In addition, the two existing timer bindings do not yet reproduce the C face over time; see below. | **Blocked.** Pixel parity at the push instant is not live correctness. |
+| `ProgressRing` | Label; TOTAL, ELAPSED, and STATUS text; indicator and STATUS colours selected from `running`; empty-chip values when duration is zero. | `timer.remaining:mm:ss` for the large countdown; `timer.pct` for the indicator sweep. | ELAPSED is wrong after one second. STATUS cannot change among Ready/Running/Paused/Done. A start/pause transition leaves the indicator and status colour wrong. TOTAL remains correct only while duration is unchanged. Local tap feedback reaches only the C template. | **Blocked on the literal chips, state-dependent colours, and local tap ownership.** The three original timer-binding defects were fixed in Task 1 (`20304d9`); Task 2 closes the remaining literal-chip vocabulary gap. |
 
 ### The shared data-state footer is absent
 
@@ -81,29 +81,34 @@ uses the same integer clock arithmetic as the C face. `AnalogClock` proves the d
 clock can drive hands correctly; it does not prove that a transformed rectangle can
 replace `DigitalClock`'s line pixels.
 
-### ProgressRing: existing binding defects first
+### ProgressRing: existing binding defects fixed in Task 1
 
-Before adding vocabulary, stage 3 must fix and test three mismatches in the bindings already
-named by the builder:
+Task 1 (`20304d9`) fixed and tested three mismatches in the bindings already named by
+the builder. The history remains here because it explains why injected parity inputs
+could not prove producer semantics:
 
 1. `progress_ring.c` draws **remaining** percentage. The parity request also supplies
    `remaining_seconds * 100 / duration_seconds`. On the device,
-   `fill_timer_bindings()` currently sets `timer_pct` to
+   `fill_timer_bindings()` set `timer_pct` to
    `(total_ms - remaining_ms) * 100 / total_ms`, which is **elapsed** percentage. A native
-   scene therefore grows where the C ring shrinks; the two percentages agree only at the
-   halfway point (apart from integer-rounding coincidences).
+   scene therefore grew where the C ring shrank; the two percentages agreed only at the
+   halfway point (apart from integer-rounding coincidences). **Fixed:** the producer now
+   computes remaining percentage and its C fields name that meaning explicitly.
 2. `progress_ring.c` displays `(remaining_ms + 999) / 1000`, a ceiling that holds the
-   current second until it has fully elapsed. `timer.remaining:mm:ss` currently formats
-   `remaining_ms / 1000`, a floor, so it can show the next second almost immediately.
+   current second until it has fully elapsed. `timer.remaining:mm:ss` formatted
+   `remaining_ms / 1000`, a floor, so it could show the next second almost immediately.
+   **Fixed:** the binding applies the same ceiling as the C face.
 3. `progress_ring.c` formats total minutes and supports `1440:00` at the 86,400-second
    bound. The generic binding formatter treats `mm` as the minute component of an
-   hours/minutes/seconds clock, modulo 60. At one hour it renders `00:00` instead of
-   `60:00`.
+   hours/minutes/seconds clock, modulo 60. At one hour it rendered `00:00` instead of
+   `60:00`. **Fixed:** wall-clock and countdown formatters are separate, countdown `mm`
+   means total minutes, and the countdown is clamped to the same ceiling as the C face.
 
 The simulator-to-simulator gate injects a pinned timer context and does not run the
 device's `fill_timer_bindings()` clock-forward path. Its zero-pixel result is therefore
-compatible with all three defects. These need temporal unit/integration tests before any
-C retirement.
+compatible with all three historical defects. Task 1 added direct producer and formatter
+tests, including a running clock-forward snapshot, so those semantics no longer rely on
+the injected parity gate.
 
 There is also a state-ownership gap. On a tap, `carousel.c` sends the event and calls
 `template_view_apply_local_action()` for optimistic start/pause/reset feedback. That path

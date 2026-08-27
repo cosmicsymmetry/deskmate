@@ -574,8 +574,14 @@ that workspace exists:
 ```sh
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
+cargo test --workspace --all-targets
+cargo test --workspace --doc
 ```
+
+Both test invocations are required: `--all-targets` adds example and integration
+targets but removes doctests, so neither invocation alone covers the workspace.
+Keep them as separate lines so a failure names the missing coverage directly; do
+not simplify them back to one command. The workspace currently has no bench targets.
 
 Hardware-facing changes also require the on-device checks named in the active plan and
 an entry in `docs/hardware/board-notes.md` with the observed result.

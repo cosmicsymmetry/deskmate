@@ -150,6 +150,36 @@ static void a_never_started_timer_reads_one_hundred(void)
     assert(s.remaining_pct == 100);
 }
 
+static void a_running_timer_subtracts_elapsed_time(void)
+{
+    scene_timer_snapshot_t s =
+        scene_timer_snapshot(1500, 900, true, 1000, 401000);
+    assert(s.remaining_ms == 500000U);
+    assert(s.remaining_pct == 33);
+}
+
+static void a_non_positive_duration_returns_an_empty_snapshot(void)
+{
+    scene_timer_snapshot_t s = scene_timer_snapshot(0, 900, true, 0, 1000);
+    assert(s.remaining_ms == 0U);
+    assert(s.remaining_pct == 0);
+}
+
+static void timer_pct_truncates_instead_of_rounding(void)
+{
+    scene_timer_snapshot_t s = scene_timer_snapshot(1500, 901, false, 0, 0);
+    assert(s.remaining_ms == 901000U);
+    assert(s.remaining_pct == 60);
+}
+
+static void timer_snapshot_bounds_inputs_before_millisecond_arithmetic(void)
+{
+    scene_timer_snapshot_t s =
+        scene_timer_snapshot(INT64_MAX, INT64_MAX, false, 0, 0);
+    assert(s.remaining_ms == 86400U * 1000U);
+    assert(s.remaining_pct == 100);
+}
+
 static void timer_remaining_ceils_like_format_clock(void)
 {
     char out[16];
@@ -180,18 +210,44 @@ static void timer_mm_is_total_minutes_not_a_clock_minute(void)
     assert(strcmp(out, "1440:00") == 0);
 }
 
+static void timer_remaining_clamps_like_format_clock(void)
+{
+    char out[16];
+    scene_binding_t b;
+    assert(scene_binding_parse("timer.remaining:mm:ss", &b) == SCENE_BINDING_OK);
+    scene_binding_context_t ctx = {0};
+    ctx.timer_active = true;
+
+    ctx.timer_remaining_ms = 86400U * 1000U;
+    assert(scene_binding_evaluate(&b, &ctx, out, sizeof out) == SCENE_BINDING_OK);
+    assert(strcmp(out, "1440:00") == 0);
+
+    ctx.timer_remaining_ms = 90000U * 1000U;
+    assert(scene_binding_evaluate(&b, &ctx, out, sizeof out) == SCENE_BINDING_OK);
+    assert(strcmp(out, "1440:00") == 0);
+}
+
+static void timer_remaining_rejects_an_hours_token(void)
+{
+    scene_binding_t b;
+    assert(scene_binding_parse("timer.remaining:HH:mm:ss", &b) ==
+           SCENE_BINDING_ERR_FORMAT);
+    assert(scene_binding_parse("timer.remaining:hh:mm:ss", &b) ==
+           SCENE_BINDING_ERR_FORMAT);
+    assert(scene_binding_parse("time:HH:mm:ss", &b) == SCENE_BINDING_OK);
+}
+
 static void a_wall_clock_minute_still_wraps(void)
 {
-    /* The split must not change time:. 13:05 stays 13:05. */
+    /* The formatter split must not change time:; this instant is 21:05 UTC. */
     char out[16];
     scene_binding_t b;
     assert(scene_binding_parse("time:HH:mm", &b) == SCENE_BINDING_OK);
     scene_binding_context_t ctx = {0};
-    ctx.unix_seconds = 1787000700;  /* verify against gmtime_r in the test */
+    ctx.unix_seconds = 1787000700;
     ctx.utc_offset_minutes = 0;
     assert(scene_binding_evaluate(&b, &ctx, out, sizeof out) == SCENE_BINDING_OK);
-    /* assert the exact HH:mm this instant produces; compute it in the test
-     * with gmtime_r rather than hardcoding a guess. */
+    /* Derive the expected clock fields independently from the pinned epoch. */
     time_t instant = (time_t)ctx.unix_seconds;
     struct tm expected_tm;
     assert(gmtime_r(&instant, &expected_tm) != NULL);
@@ -244,8 +300,14 @@ int main(void)
     timer_pct_is_remaining_not_elapsed();
     a_finished_timer_reads_zero_percent();
     a_never_started_timer_reads_one_hundred();
+    a_running_timer_subtracts_elapsed_time();
+    a_non_positive_duration_returns_an_empty_snapshot();
+    timer_pct_truncates_instead_of_rounding();
+    timer_snapshot_bounds_inputs_before_millisecond_arithmetic();
     timer_remaining_ceils_like_format_clock();
     timer_mm_is_total_minutes_not_a_clock_minute();
+    timer_remaining_clamps_like_format_clock();
+    timer_remaining_rejects_an_hours_token();
     a_wall_clock_minute_still_wraps();
     test_zero_capacity_never_writes();
     test_field_name_length_boundary();

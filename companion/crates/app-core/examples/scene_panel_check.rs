@@ -245,8 +245,9 @@ fn asset_exclusion(assets: &[SceneAsset]) -> Option<String> {
 fn timer_fields(timer: SceneTimer) -> Vec<Field> {
     // The asset-free arc case reads timer.pct but not timer.remaining. A
     // stopped 100-second ProgressRing snapshot represents every integer
-    // percentage exactly and cannot move during push-to-capture latency.
-    let remaining = 100_i64 - i64::from(timer.pct);
+    // remaining percentage exactly and cannot move during push-to-capture
+    // latency, so the device producer and simulator receive the same value.
+    let remaining = i64::from(timer.pct);
     vec![
         Field {
             key: "duration_seconds".into(),
@@ -804,6 +805,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn panel_timer_fields_preserve_remaining_percentage_semantics() {
+        let fields = timer_fields(SceneTimer {
+            remaining_ms: 60_000,
+            pct: 60,
+        });
+        assert!(matches!(
+            fields.get(1),
+            Some(Field {
+                key,
+                value: FieldValue::Integer(60),
+            }) if key == "remaining_seconds"
+        ));
+    }
+
+    #[test]
     fn case_table_has_the_parity_matrix_and_only_explicit_scene_exclusions() {
         let checks = all_cases();
         assert_eq!(
@@ -816,21 +832,50 @@ mod tests {
 
         let excluded = checks
             .iter()
-            .filter(|case| case.exclusion.is_some())
-            .map(|case| case.name.as_str())
+            .filter_map(|case| {
+                case.exclusion
+                    .as_deref()
+                    .map(|reason| (case.name.as_str(), reason))
+            })
             .collect::<Vec<_>>();
         assert_eq!(
             excluded,
             [
-                "scene-text--landscape",
-                "scene-text--flipped",
-                "scene-image--landscape",
-                "scene-image--flipped",
-                "scene-glyph--landscape",
-                "scene-glyph--flipped",
+                (
+                    "scene-text--landscape",
+                    "field.status cannot be supplied to hardware: PushData retains only fields registered by a built-in template, and no template registers status",
+                ),
+                (
+                    "scene-text--flipped",
+                    "field.status cannot be supplied to hardware: PushData retains only fields registered by a built-in template, and no template registers status",
+                ),
+                (
+                    "scene-image--landscape",
+                    "the scene requires a registered RGB565 image asset; asset transfer is out of scope",
+                ),
+                (
+                    "scene-image--flipped",
+                    "the scene requires a registered RGB565 image asset; asset transfer is out of scope",
+                ),
+                (
+                    "scene-glyph--landscape",
+                    "the scene requires a registered runtime font asset; asset transfer is out of scope",
+                ),
+                (
+                    "scene-glyph--flipped",
+                    "the scene requires a registered runtime font asset; asset transfer is out of scope",
+                ),
+                (
+                    "scene-label--landscape",
+                    "field.status cannot be supplied to hardware: PushData retains only fields registered by a built-in template, and no template registers status",
+                ),
+                (
+                    "scene-label--flipped",
+                    "field.status cannot be supplied to hardware: PushData retains only fields registered by a built-in template, and no template registers status",
+                ),
             ]
         );
-        assert_eq!(checks.len(), 42);
-        assert_eq!(checks.len() - excluded.len(), 36);
+        assert_eq!(checks.len(), 46);
+        assert_eq!(checks.len() - excluded.len(), 38);
     }
 }

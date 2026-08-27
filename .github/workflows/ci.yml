@@ -39,9 +39,12 @@ jobs:
       - name: rust clippy
         working-directory: companion
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - name: rust tests
+      - name: rust tests (all targets)
         working-directory: companion
-        run: cargo test --workspace --locked
+        run: cargo test --workspace --all-targets --locked
+      - name: rust doctests
+        working-directory: companion
+        run: cargo test --workspace --doc --locked
       - name: frontend install
         working-directory: companion/apps/deskmate
         run: bun install --frozen-lockfile

@@ -348,6 +348,14 @@ fn time_format_is_valid(argument: &str) -> bool {
             .all(|c| matches!(c, 'H' | 'h' | 'M' | 'm' | 'S' | 's' | ':'))
 }
 
+fn timer_format_is_valid(argument: &str) -> bool {
+    !argument.is_empty()
+        && argument.len() <= MAX_SCENE_BINDING_LEN
+        && argument
+            .chars()
+            .all(|c| matches!(c, 'M' | 'm' | 'S' | 's' | ':'))
+}
+
 #[must_use]
 pub fn binding_is_valid(text: &str) -> bool {
     if text.len() > MAX_SCENE_BINDING_LEN {
@@ -359,7 +367,7 @@ pub fn binding_is_valid(text: &str) -> bool {
         return true;
     }
     if let Some(argument) = text.strip_prefix("timer.remaining:") {
-        return time_format_is_valid(argument);
+        return timer_format_is_valid(argument);
     }
     if let Some(argument) = text.strip_prefix("time:") {
         return time_format_is_valid(argument);
@@ -1425,6 +1433,8 @@ mod tests {
         assert!(!binding_is_valid("timer.pctXYZ"));
         assert!(binding_is_valid("time:HH:mm"));
         assert!(binding_is_valid("timer.remaining:mm:ss"));
+        assert!(!binding_is_valid("timer.remaining:HH:mm:ss"));
+        assert!(!binding_is_valid("timer.remaining:hh:mm:ss"));
         assert!(binding_is_valid("field.temp"));
         assert!(!binding_is_valid("time:"));
         assert!(!binding_is_valid("time:%s"));

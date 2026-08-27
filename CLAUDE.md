@@ -323,6 +323,50 @@ of letting code and documentation diverge.
     the out-of-bounds write is then rejected by `scene_model_validate()` with the same error
     code the test asserts.
 
+- **Stage 2b (scene templates) is software-complete and owes ONE hardware check.** Plan
+  `docs/superpowers/plans/2026-08-26-deskmate-scene-templates.md`. **All six C templates are
+  now reproduced by host-built scenes and are byte-identical at both orientations: 106
+  parity rows, 0 differing pixels, no tolerance.** Protocol stays v1 and additive,
+  `PROTOCOL_CURRENT_CAPABILITIES` stays **491**, config schema stays v5.
+  - Four firmware needs were found across the stage and **all four ride one unpublished
+    image**, so the cost is one OTA download and one power cycle rather than four:
+    `SceneArc.opacity` (key 9), an axis-wise canvas-bounded **external** rot-rect pivot,
+    `SceneRect.clip` (key 7) and `SceneRotRect.clip` (key 10). Deferring each one as it was
+    found, rather than fixing it in place, is what made that possible.
+  - **The pivot bound was a specification error worth not repeating.** Task 1b pinned "a
+    pivot outside the rect is rejected" into both validators — a rule true of every object
+    it modelled (the hands, where `pivot_y = length = h`) and false of the one it did not
+    (the twelve ticks, which rotate an 8px object about `pivot_y = 160`). Every unit test
+    agreed with the wrong rule because every one tested a hand.
+  - **LVGL clips children to their parent and a scene's display list is FLAT** — every node
+    is a direct child of the screen — so any C template relying on a container to clip needs
+    that expressed per node. Two of the nine node kinds draw geometry that can overflow
+    their C parent, and the same gate found both. The device realises a clip by parenting
+    the node under a styleless wrapper, matching the C **by construction** rather than
+    reproducing LVGL's mask arithmetic on the host.
+  - **The byte-exact gate has a SECOND blindness, distinct from the documented one.** The
+    known one is shared code: both halves run the same possibly-wrong C. The new one is
+    **injected binding inputs** — the parity request supplies a pinned `SceneTimer` rather
+    than deriving it, so the device's own producer never runs. **A gate that supplies a
+    binding's input can prove how a value is drawn and never what it means.** Three device
+    -path defects live in exactly that hole and are recorded, not fixed (see the ledger).
+  - **`docs/scene/template-parity-ledger.md` is what stage 3 is planned from.** Its
+    conclusions contradict the plan's expectations in three places: **`DigitalClock` is
+    blocked from retirement too**, not only `ProgressRing` (its date and both small-dial
+    hand endpoints are literals); **no builder uses `field.*` at all**; and `timer.pct` is
+    **elapsed** percent on the device while the C arc and the parity fixture both use
+    **remaining**, so a native ring would grow where the C ring shrinks. Also:
+    `timer.remaining:mm:ss` floors where the C ceils, and treats `mm` as a clock minute
+    modulo 60 where `format_clock()` prints total minutes to `1440:00`.
+  - **Retiring a C template also retires its offline behaviour.** A tap runs
+    `template_view_apply_local_action()` for optimistic start/pause feedback on the C view;
+    a scene has no equivalent and waits for the host's `PushData`. No builder emits the
+    shared stale/error footer either, because all 106 rows exercise the OK state.
+  - The `known_gap` marker in `scene_parity.rs` is retained although nothing uses it. It
+    asserts a marked case **still differs**, so closing a gap fails the test and forces the
+    marker's deletion — an unexplained skip rots into invisible missing coverage, an
+    enforced one cannot. It made three gaps visible during this stage.
+
 - **Two plan amendments were added during execution and are marked as such in the plan.**
   Task 9b (persistent device identities) was added by explicit owner direction; Task 10a
   (the app-core boundary) was added because Task 10's implementer correctly refused to

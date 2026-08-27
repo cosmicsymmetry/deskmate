@@ -513,18 +513,55 @@ the same pixels" — this stage answers that — but "can the scene keep drawing
 pixels without the host re-pushing it". Those are different, and Task 5 proves at least one
 template fails the second.
 
-- [ ] **Step 1: Write the ledger.** One row per template: which values are literals, which
+- [x] **Step 1: Write the ledger.** One row per template: which values are literals, which
       are bindings, and what goes stale if the host never pushes again. Derive the rows
       from the builders as written, not from this plan's expectations.
-- [ ] **Step 2: State the options for each gap**, with the cost of each. For `ProgressRing`
+- [x] **Step 2: State the options for each gap**, with the cost of each. For `ProgressRing`
       that is: add `timer.elapsed` / `timer.total` bindings and a way to select a status
       word (wire + firmware change, and another OTA check), or have the host re-push on
       every state transition (no wire change, but a push per second for a running timer,
       which §3 of the spec rejects for exactly this reason — 1,440 pushes a day that one
       network hiccup still renders wrong).
-- [ ] **Step 3: Recommend one, and say why.** A ledger that lists options without a
+- [x] **Step 3: Recommend one, and say why.** A ledger that lists options without a
       recommendation defers the decision to whoever reads it under time pressure.
-- [ ] **Step 4: Commit.** `docs: record what each scene template still cannot do live`
+- [x] **Step 4: Commit.** **Delivered 2026-08-27** (`8a2a18f`) as
+      `docs/scene/template-parity-ledger.md`, linked from the renderer plan. Written from
+      the builders as they are rather than from this plan's expectations, which is what
+      turned up three things the plan did not anticipate.
+
+      **`DigitalClock` is blocked too, not only `ProgressRing`.** Its date and both
+      small-dial hand endpoints are literals computed from the pushed instant, so the face
+      is wrong at the next minute and after local midnight even though its hero reading is
+      live. This plan assumed one blocked template; there are two.
+
+      **No builder uses `field.*` at all** — verified, zero occurrences. The only bindings
+      any of the six emit are `time:*` and the two timer ones.
+
+      **Three defects on the DEVICE path that this stage's gate cannot see**, all in
+      bindings `ProgressRing` already names: `fill_timer_bindings()` sets `timer_pct` to
+      **elapsed** percent while the C arc and the parity fixture both use **remaining**, so
+      a native ring would grow where the C ring shrinks; `timer.remaining:mm:ss` floors
+      where the C label ceils; and that formatter treats `mm` as a clock minute modulo 60
+      while `format_clock()` prints total minutes to `1440:00`, so a one-hour timer reads
+      `00:00`.
+
+      **Why a byte-exact gate is compatible with all three, and it is worth understanding:**
+      the parity request **injects** a pinned `SceneTimer` rather than deriving it, so the
+      device's clock-forward producer never runs. This is a **second** kind of blindness,
+      distinct from the documented one about shared code — there both halves run the same
+      possibly-wrong code, here both halves are right and the disagreement lives in a
+      producer neither half executes. **A gate that supplies a binding's input can prove
+      how a value is drawn and never what it means.**
+
+      They are recorded rather than fixed, deliberately: stage 3 needs an additive firmware
+      change for the live bindings regardless, so these ride it and get decided alongside
+      the vocabulary they belong to. Fixing `timer.pct` now would mean choosing its
+      semantics without the rest of that design in view.
+
+      Also recorded: the stale/error footer no builder emits (all 106 rows exercise the OK
+      state); the tap path, where `template_view_apply_local_action()` gives the C view
+      optimistic start/pause feedback a scene has no equivalent for — so retiring the C
+      template would retire its offline behaviour too; and the standing limits.
 
 ---
 
@@ -539,8 +576,35 @@ template fails the second.
 5. An OTA download completes on the board on a build carrying Task 6's node.
 6. The ledger exists and names every value that would go stale.
 
+### Status at 2026-08-27
+
+| # | Criterion | State |
+| --- | --- | --- |
+| 1 | fmt / clippy / `cargo test --workspace` | **met** — 430 passed, 0 failed |
+| 2 | firmware host tests and `sanitize` | **met** |
+| 3 | `idf.py build` clean with memory deltas recorded | **met** — all five internal-RAM figures delta 0 |
+| 4 | **all six templates byte-identical at both orientations** | **met** — 106 rows, 0 differing pixels, no `known_gap` marker left |
+| 5 | an OTA download completes on the board | **OWED** — the image is built but not published; this is the only remaining item |
+| 6 | the ledger exists and names every value that would go stale | **met** — `docs/scene/template-parity-ledger.md` |
+
+Criterion 3's figures are a **same-tree** before/after, which is the only form that means
+anything here: `.bss` 102,624, DIRAM `.text` 93,635, `.data` 23,128, IRAM 16,384/16,384
+with 0 remaining, DIRAM total 219,387 — every one unchanged across both firmware commits.
+Only flash `.text` moved, 1,140,180 → 1,141,824. **That is not a substitute for criterion
+5**: this repository has twice lost days to memory-layout shifts with every test green, and
+flat figures have predicted a clean download exactly once.
+
+Criterion 5 costs **one** OTA download and one power cycle for **four** firmware needs,
+because the image was never published between them. Publishing is three steps and all
+three are required: put `<version>.bin` in `$DESKMATE_FIRMWARE_DIR`, set
+`DESKMATE_FIRMWARE_VERSION` to that string, restart the server. A power cycle alone proves
+nothing if nothing is published, and a USB unplug is link loss rather than power loss
+because the board has a battery.
+
 Stage 3 — retiring the C templates, the plugin manifest, and curated plugins — is planned at
-this plan's exit, from the ledger.
+this plan's exit, from the ledger. Note the ledger's own conclusion: **two** templates are
+blocked from retirement, not one, and three device-path binding defects must be fixed
+before either can go.
 
 ---
 

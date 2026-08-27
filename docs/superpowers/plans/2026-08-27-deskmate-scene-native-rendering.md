@@ -407,15 +407,52 @@ static void an_inactive_timer_renders_the_placeholder(void)
 
 - [ ] **Step 6: Update `docs/protocol/v1.md`** — the binding table and both node tables.
 
-- [ ] **Step 7: Gates and commit.**
+- [ ] **Step 7: Swap `build_progress_ring_scene`'s literals for the new bindings.**
+      Without this the stage ships bindings nothing uses: the parity gate would never
+      evaluate one and Gate A would have nothing to observe. TOTAL becomes
+      `timer.total:mm:ss`, ELAPSED becomes `timer.elapsed:mm:ss`, STATUS becomes
+      `timer.status`, and the indicator arc and STATUS text carry `running_color`. The
+      comment naming these as the live-update gap goes away with them — delete it rather
+      than leaving a comment that describes a fixed defect.
+      **The existing 8 parity rows must still pass byte-identically.** A binding evaluated
+      at the pinned instant must produce exactly the literal it replaced; if a row moves,
+      the binding disagrees with the C and that is the defect this task exists to prevent.
+
+- [ ] **Step 8: Prove it temporally, which the byte gate cannot.**
+      Build a tick-advancing harness in `companion/crates/lvgl-sim/src/scene.rs` that
+      renders a scene, advances the simulated clock and timer, and re-renders **without a
+      re-push** — the C side advancing through the same interval. Then assert the two
+      still agree. This is the whole point of the stage and no existing test can express
+      it: every one of the 106 rows renders a single instant.
+      Cover at minimum: a running timer crossing a second boundary (ELAPSED advances), a
+      timer reaching zero (STATUS becomes `Done`), and a start/pause transition (the
+      indicator and STATUS colour follow `running`).
+      **Then delete `progress_ring_scene_status_text_does_not_advance_with_time`.** It
+      pins the gap this task closes; leaving it green would mean the gap is still open.
+      The ledger says to replace it with a test proving the two advance together — that is
+      Step 8, so the replacement must exist before the deletion.
+
+- [ ] **Step 9: Gates and commit.**
       Run: `make -C firmware/host_tests clean test && make -C firmware/host_tests sanitize`
+      then from `companion/`: `cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace`
       Commit: `feat: give a scene the timer facts progress_ring.c computes`
 
 ---
 
 ### Task 3: `DigitalClock`'s live vocabulary
 
-**Files:** as Task 2, plus `firmware/main/core/timefmt.c` **read, not modified**.
+**Files:**
+- Modify: `firmware/main/core/scene_binding.h`, `firmware/main/core/scene_binding.c`
+- Modify: `firmware/main/core/scene_model.h`, `firmware/main/core/scene_model.c`,
+  `firmware/main/core/scene_decode.c`, `firmware/main/ui/scene_view.c`
+- Modify: `companion/crates/protocol/src/scene.rs`
+- Modify: `companion/crates/app-core/src/scene_build.rs`,
+  `companion/crates/app-core/tests/scene_parity.rs`, `companion/crates/lvgl-sim/src/scene.rs`
+- Modify: `firmware/host_tests/test_scene_binding.c`, `test_scene_decode.c`, `test_scene_model.c`
+- Modify: `companion/crates/protocol/tests/fixtures.rs`, `firmware/main/core/protocol_message.c`
+- Modify: `docs/protocol/v1.md`
+- **Read, not modified:** `firmware/main/core/timefmt.c` — the `date` binding calls
+  `timefmt_date()`, which is the point; do not reimplement its format.
 
 **Interfaces:**
 - Produces: the `date` binding, and `SceneLine`'s optional
@@ -486,7 +523,24 @@ static void an_angle_binding_gives_lvgls_own_hand_geometry(void)
 
 - [ ] **Step 6: Update `docs/protocol/v1.md`.**
 
-- [ ] **Step 7: Gates and commit.** `feat: let a scene draw the date and the dial live`
+- [ ] **Step 7: Swap `build_digital_clock_scene`'s literals for the new bindings.**
+      The date text node becomes `SceneValue::Binding("date")`, and both dial hands become
+      bound `SceneLine`s carrying pivot, length and `time:angle:hour` / `time:angle:minute`.
+      **All 28 existing `DigitalClock` parity rows must still pass byte-identically** at
+      every one of the 7 instants — the bindings evaluated at a pinned instant must equal
+      the literals they replace, and 7 instants across both `show_seconds` settings is a
+      strong check that the device's trig and `timefmt_date()` agree with the host port.
+
+- [ ] **Step 8: Prove it temporally**, reusing Task 2 Step 8's harness. Cover a minute
+      boundary (the minute hand steps and the reading changes) and **local midnight with a
+      non-zero UTC offset** (the date line changes). Local midnight is the case a literal
+      gets wrong for up to a day, and the board sits at UTC+4, so a UTC-only test would
+      pass while the shipped face was wrong.
+
+- [ ] **Step 9: Gates and commit.**
+      Run: `make -C firmware/host_tests clean test && make -C firmware/host_tests sanitize`
+      then from `companion/`: `cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace`
+      Commit: `feat: let a scene draw the date and the dial live`
 
 ---
 
@@ -610,7 +664,9 @@ drawn on the panel.
 
 **Files:**
 - Modify: `companion/crates/server/src/runtime.rs`, `companion/crates/server/src/runtime_device.rs`
-- Modify: `companion/crates/app-core/src/` (the shared runtime seam)
+- Modify: `companion/crates/app-core/src/state.rs` (`DeviceCapability`, already carries
+  `SceneRender` as of `05500ef`) and the `RuntimeDevice` seam the server and the Mac app
+  share — `push_scene` already exists on it (`runtime_device.rs:677`)
 - Test: `companion/crates/server/tests/`
 
 **Interfaces:**
@@ -737,12 +793,15 @@ alike, and this repository has twice spent days on the former with every test gr
 5. **A test proves each new binding's producer**, not only its formatter. The three timer
    defects existed because the gate injects binding inputs; a stage that adds five
    bindings and does not close that hole will simply add more.
-6. Gate A observed: the clock crossing a minute boundary with a live date and dial, the
+6. **Every binding added is actually emitted by a builder**, and a temporal test proves the
+   scene and the C advance together without a re-push. A binding no builder emits is dead
+   wire surface that the byte-exact gate will happily report green forever.
+7. Gate A observed: the clock crossing a minute boundary with a live date and dial, the
    timer advancing with a changing status word and colour, and a tap moving the timer with
    the link down — at both orientations.
-7. Gate B observed: OTA download completes with the C templates removed, nothing visibly
+8. Gate B observed: OTA download completes with the C templates removed, nothing visibly
    changed, and the standalone clock still appears on host loss.
-8. `docs/protocol/v1.md` documents every new binding, including the two sentences whose
+9. `docs/protocol/v1.md` documents every new binding, including the two sentences whose
    absence caused Task 1's defects.
 
 Stage 3b — the plugin manifest and curated plugins — is planned at this plan's exit.

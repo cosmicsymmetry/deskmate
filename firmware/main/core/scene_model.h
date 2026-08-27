@@ -78,7 +78,12 @@ typedef enum {
     SCENE_LABEL_ANCHOR_RIGHT = 2,
 } scene_label_anchor_t;
 
-typedef struct { int32_t x, y, w, h, radius; uint32_t fill; uint8_t opacity; }
+typedef struct { int32_t x, y, w, h; } scene_clip_rect_t;
+/* `clip` is an optional absolute canvas rectangle. The renderer reparents
+ * this rectangle under a styleless wrapper at that box, so LVGL clips it by
+ * the same parent-child path the built-in icon container uses. */
+typedef struct { int32_t x, y, w, h, radius; uint32_t fill; uint8_t opacity;
+                 bool has_clip; scene_clip_rect_t clip; }
     scene_rect_t;
 /* `start_deg`/`end_deg` are absolute canvas angles in LVGL's convention: 0
  * degrees is 3 o'clock and they increase CLOCKWISE. `start_deg` is the
@@ -101,7 +106,8 @@ typedef struct { int32_t x, y, w, h, radius; uint32_t fill; uint8_t opacity; }
  * from `start_deg` through `end_deg - start_deg` times the bound percentage,
  * so the declared pair is the 100% geometry. */
 typedef struct { int32_t cx, cy, r, start_deg, end_deg, width; uint32_t color;
-                 bool rounded; char end_binding[SCENE_MAX_BINDING + 1U]; }
+                 uint8_t opacity; bool rounded;
+                 char end_binding[SCENE_MAX_BINDING + 1U]; }
     scene_arc_t;
 
 /* The origin and sweep an ARC node is drawn with -- pure integer math, used

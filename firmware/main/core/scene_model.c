@@ -133,8 +133,14 @@ static bool rot_rect_within_canvas(const scene_rot_rect_t *rect)
     if (!rect_within_canvas(rect->x, rect->y, rect->w, rect->h)) {
         return false;
     }
-    if (rect->pivot_x < 0 || rect->pivot_x > rect->w ||
-        rect->pivot_y < 0 || rect->pivot_y > rect->h) {
+    /* A transform pivot is in the object's local frame but may sit outside
+     * the object: analog_clock.c rotates an 8px tick around y=160. Keep the
+     * untrusted value canvas-bounded on each axis. Since the object itself is
+     * also canvas-bounded, every corner-to-pivot delta remains canvas-scale
+     * before LVGL's rotation matrix mixes the axes; arbitrary int32 values
+     * can never reach that arithmetic. */
+    if (rect->pivot_x < 0 || rect->pivot_x > SCENE_CANVAS_WIDTH ||
+        rect->pivot_y < 0 || rect->pivot_y > SCENE_CANVAS_HEIGHT) {
         return false;
     }
     /* One signed turn covers every distinct transform while bounding the
@@ -298,7 +304,12 @@ scene_model_result_t scene_model_validate(const scene_t *scene)
         switch (node->kind) {
         case SCENE_NODE_RECT:
             if (!rect_within_canvas(node->value.rect.x, node->value.rect.y,
-                                     node->value.rect.w, node->value.rect.h)) {
+                                     node->value.rect.w, node->value.rect.h) ||
+                (node->value.rect.has_clip &&
+                 !rect_within_canvas(node->value.rect.clip.x,
+                                     node->value.rect.clip.y,
+                                     node->value.rect.clip.w,
+                                     node->value.rect.clip.h))) {
                 return SCENE_MODEL_ERR_GEOMETRY;
             }
             break;

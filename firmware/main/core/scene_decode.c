@@ -22,12 +22,15 @@
  *          both required. Key 0 precedes key 1 by the increasing-key rule,
  *          so the kind is always known before its payload is read.
  *
- * RECT     {0: x, 1: y, 2: w, 3: h, 4: radius, 5: fill, 6: opacity}
+ * RECT     {0: x, 1: y, 2: w, 3: h, 4: radius, 5: fill, 6: opacity,
+ *           7: clip ({0: x, 1: y, 2: w, 3: h})}
  *          required 0-3; radius defaults 0, fill 0, opacity 255 (an
- *          omitted opacity means opaque -- 0 would draw nothing).
+ *          omitted opacity means opaque -- 0 would draw nothing), clip
+ *          defaults absent.
  * ARC      {0: cx, 1: cy, 2: r, 3: start_deg, 4: end_deg, 5: width,
- *           6: color, 7: rounded (bool), 8: end_binding (text)}
- *          required 0-5; color defaults 0, rounded false, end_binding "".
+ *           6: color, 7: rounded (bool), 8: end_binding (text), 9: opacity}
+ *          required 0-5; color defaults 0, rounded false, end_binding "",
+ *          opacity 255.
  * LINE     {0: [x, ...], 1: [y, ...], 2: width, 3: color}
  *          required 0-2; color defaults 0. The two arrays must be the same
  *          length, at most SCENE_MAX_LINE_POINTS; that length is
@@ -308,6 +311,45 @@ static scene_model_result_t skip_value(CborValue *value)
  * Node payloads.
  * ------------------------------------------------------------------ */
 
+static scene_model_result_t decode_clip_rect(CborValue *value,
+                                              scene_clip_rect_t *clip)
+{
+    CborValue fields;
+    size_t count = 0U;
+    scene_model_result_t status = enter_map(value, &fields, &count);
+    if (status != SCENE_MODEL_OK) {
+        return status;
+    }
+
+    uint32_t present = 0U;
+    uint64_t previous = 0U;
+    bool has_previous = false;
+    for (size_t i = 0U; i < count; ++i) {
+        uint64_t key = 0U;
+        status = read_key(&fields, &key, &previous, &has_previous);
+        if (status != SCENE_MODEL_OK) {
+            return status;
+        }
+        switch (key) {
+        case 0U: status = read_int32(&fields, &clip->x); break;
+        case 1U: status = read_int32(&fields, &clip->y); break;
+        case 2U: status = read_int32(&fields, &clip->w); break;
+        case 3U: status = read_int32(&fields, &clip->h); break;
+        default: status = skip_value(&fields); break;
+        }
+        if (status != SCENE_MODEL_OK) {
+            return status;
+        }
+        if (key <= 3U) {
+            present |= REQUIRED_BIT((uint32_t)key);
+        }
+    }
+    if ((present & UINT32_C(0x0f)) != UINT32_C(0x0f)) {
+        return SCENE_MODEL_ERR_ARGUMENT;
+    }
+    return cbor_result(cbor_value_leave_container(value, &fields));
+}
+
 static scene_model_result_t decode_rect(CborValue *value, scene_rect_t *rect)
 {
     CborValue fields;
@@ -318,6 +360,7 @@ static scene_model_result_t decode_rect(CborValue *value, scene_rect_t *rect)
     }
 
     rect->opacity = UINT8_MAX;
+    rect->has_clip = false;
 
     uint32_t present = 0U;
     uint64_t previous = 0U;
@@ -336,12 +379,18 @@ static scene_model_result_t decode_rect(CborValue *value, scene_rect_t *rect)
         case 4U: status = read_int32(&fields, &rect->radius); break;
         case 5U: status = read_uint32(&fields, &rect->fill); break;
         case 6U: status = read_uint8(&fields, &rect->opacity); break;
+        case 7U:
+            status = decode_clip_rect(&fields, &rect->clip);
+            if (status == SCENE_MODEL_OK) {
+                rect->has_clip = true;
+            }
+            break;
         default: status = skip_value(&fields); break;
         }
         if (status != SCENE_MODEL_OK) {
             return status;
         }
-        if (key <= 6U) {
+        if (key <= 7U) {
             present |= REQUIRED_BIT((uint32_t)key);
         }
     }
@@ -359,6 +408,8 @@ static scene_model_result_t decode_arc(CborValue *value, scene_arc_t *arc)
     if (status != SCENE_MODEL_OK) {
         return status;
     }
+
+    arc->opacity = UINT8_MAX;
 
     uint32_t present = 0U;
     uint64_t previous = 0U;
@@ -382,12 +433,13 @@ static scene_model_result_t decode_arc(CborValue *value, scene_arc_t *arc)
             status = read_text(&fields, arc->end_binding,
                                sizeof arc->end_binding, SCENE_MAX_BINDING);
             break;
+        case 9U: status = read_uint8(&fields, &arc->opacity); break;
         default: status = skip_value(&fields); break;
         }
         if (status != SCENE_MODEL_OK) {
             return status;
         }
-        if (key <= 8U) {
+        if (key <= 9U) {
             present |= REQUIRED_BIT((uint32_t)key);
         }
     }

@@ -749,6 +749,7 @@ pub fn build_digital_clock_scene(card: &ClockCard, metrics: &BakedFontMetrics) -
         radius: RADIUS_MODULE,
         fill: COLOR_SURFACE,
         opacity: u8::MAX,
+        clip: None,
     }));
     // The date is the module's whole content -- no eyebrow names it -- so the
     // value centres in the surface.
@@ -781,6 +782,7 @@ pub fn build_digital_clock_scene(card: &ClockCard, metrics: &BakedFontMetrics) -
         radius: RADIUS_MODULE,
         fill: COLOR_SURFACE,
         opacity: u8::MAX,
+        clip: None,
     }));
     let dial_origin = (
         DIAL_X + (DIAL_W - DIAL_BOX) / 2,
@@ -951,6 +953,7 @@ fn disc(
         radius: diameter / 2,
         fill: color,
         opacity: u8::MAX,
+        clip: None,
     }));
 }
 
@@ -973,6 +976,7 @@ fn bar(
         radius: h / 2,
         fill: color,
         opacity: u8::MAX,
+        clip: None,
     }));
 }
 
@@ -1181,6 +1185,7 @@ pub fn build_icon_badge_text_scene(
         radius: RADIUS_MODULE,
         fill: COLOR_SURFACE,
         opacity: u8::MAX,
+        clip: None,
     }));
     push_weather_icon_nodes(
         &mut nodes,
@@ -1250,6 +1255,7 @@ fn push_row_nodes(
         radius: 2 * GRID,
         fill: COLOR_SURFACE,
         opacity: u8::MAX,
+        clip: None,
     }));
 
     let (bar_x, bar_y) = row_child_origin(row_y, ROW_BAR_X, (ROW_HEIGHT - ROW_BAR_HEIGHT) / 2);
@@ -1261,6 +1267,7 @@ fn push_row_nodes(
         radius: ROW_BAR_WIDTH / 2,
         fill: ROW_LIST_HUE,
         opacity: u8::MAX,
+        clip: None,
     }));
 
     let text_y = (ROW_HEIGHT - metrics.tier(SceneFontTier::Body).line_height) / 2;
@@ -1332,6 +1339,7 @@ pub fn build_row_list_scene(card: &RowListCard<'_>, metrics: &BakedFontMetrics) 
             end_deg: 630,
             width: ROW_COUNT_BORDER_WIDTH,
             color: ROW_LIST_HUE,
+            opacity: u8::MAX,
             rounded: false,
             end_binding: String::new(),
         }));
@@ -1363,6 +1371,7 @@ pub fn build_row_list_scene(card: &RowListCard<'_>, metrics: &BakedFontMetrics) 
             radius: 2 * GRID,
             fill: COLOR_SURFACE,
             opacity: u8::MAX,
+            clip: None,
         }));
         let text_y = (ROW_HEIGHT - metrics.tier(SceneFontTier::Body).line_height) / 2;
         let (text_x, text_top) = row_child_origin(ROW_FIRST_Y, ROW_TIME_X, text_y);
@@ -1432,6 +1441,7 @@ pub fn build_analog_clock_scene(card: &AnalogClockCard, _metrics: &BakedFontMetr
         end_deg: 360,
         width: ANALOG_CHAPTER_RING_WIDTH,
         color: COLOR_SURFACE,
+        opacity: u8::MAX,
         rounded: false,
         end_binding: String::new(),
     }));
@@ -1476,6 +1486,7 @@ pub fn build_analog_clock_scene(card: &AnalogClockCard, _metrics: &BakedFontMetr
         radius: ANALOG_HUB_DIAMETER / 2,
         fill: CLOCK_HUE,
         opacity: u8::MAX,
+        clip: None,
     }));
 
     // `OBJ_STATE` is empty in the OK-state parity fixtures, so it has no
@@ -1527,6 +1538,7 @@ fn push_progress_module(
         radius: RADIUS_MODULE,
         fill: COLOR_SURFACE,
         opacity: u8::MAX,
+        clip: None,
     }));
 
     let eyebrow_line = metrics.tier(SceneFontTier::Caption).line_height;
@@ -1602,6 +1614,7 @@ pub fn build_progress_ring_scene(card: &ProgressRingCard<'_>, metrics: &BakedFon
             end_deg: 630,
             width: PROGRESS_RING_WIDTH,
             color,
+            opacity: u8::MAX,
             rounded,
             end_binding,
         }));

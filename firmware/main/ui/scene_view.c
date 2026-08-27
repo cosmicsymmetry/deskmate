@@ -345,14 +345,43 @@ static int32_t rotation_for_time(scene_rotation_binding_t binding,
  * border, padding and scrollbars. */
 static lv_obj_t *build_rect(lv_obj_t *parent, const scene_rect_t *rect)
 {
-    lv_obj_t *object = lv_obj_create(parent);
+    lv_obj_t *wrapper = NULL;
+    lv_obj_t *object_parent = parent;
+    int32_t object_x = rect->x;
+    int32_t object_y = rect->y;
+
+    if (rect->has_clip) {
+        wrapper = lv_obj_create(parent);
+        if (wrapper == NULL) {
+            return NULL;
+        }
+        /* remove_style_all() removes the theme and every local style, so the
+         * wrapper has zero border and padding: its content origin is its box
+         * origin. LVGL clips children against a parent's coords unless
+         * OVERFLOW_VISIBLE is set, reproducing the built-in icon container's
+         * clipping path without host-side geometry arithmetic. */
+        lv_obj_remove_style_all(wrapper);
+        lv_obj_remove_flag(wrapper,
+                           LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE |
+                               LV_OBJ_FLAG_OVERFLOW_VISIBLE);
+        lv_obj_set_size(wrapper, rect->clip.w, rect->clip.h);
+        lv_obj_set_pos(wrapper, rect->clip.x, rect->clip.y);
+        object_parent = wrapper;
+        object_x = rect->x - rect->clip.x;
+        object_y = rect->y - rect->clip.y;
+    }
+
+    lv_obj_t *object = lv_obj_create(object_parent);
     if (object == NULL) {
+        if (wrapper != NULL) {
+            lv_obj_delete(wrapper);
+        }
         return NULL;
     }
     lv_obj_remove_style_all(object);
     lv_obj_remove_flag(object, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_size(object, rect->w, rect->h);
-    lv_obj_set_pos(object, rect->x, rect->y);
+    lv_obj_set_pos(object, object_x, object_y);
     lv_obj_set_style_bg_color(object, lv_color_hex(rect->fill), 0);
     lv_obj_set_style_bg_opa(object, (lv_opa_t)rect->opacity, 0);
     lv_obj_set_style_radius(object, rect->radius < 0 ? 0 : rect->radius, 0);
@@ -386,6 +415,8 @@ static lv_obj_t *build_arc(lv_obj_t *parent, const scene_arc_t *arc)
     lv_obj_set_style_arc_opa(object, LV_OPA_TRANSP, LV_PART_MAIN);
     lv_obj_set_style_arc_color(object, lv_color_hex(arc->color),
                                LV_PART_INDICATOR);
+    lv_obj_set_style_arc_opa(object, (lv_opa_t)arc->opacity,
+                             LV_PART_INDICATOR);
     lv_obj_set_style_arc_width(object, clamp_arc_width(arc->width, arc->r),
                                LV_PART_INDICATOR);
     lv_obj_set_style_arc_rounded(object, arc->rounded, LV_PART_INDICATOR);

@@ -618,9 +618,9 @@ pub fn asset_font_cases() -> Vec<(String, AssetFontCase)> {
 // ---------------------------------------------------------------------------
 
 use protocol::{
-    SCENE_CANVAS_WIDTH, Scene, SceneAlign, SceneArc, SceneFont, SceneFontTier, SceneGlyph,
-    SceneImage, SceneLabel, SceneLabelAnchor, SceneLine, SceneNode, SceneRect, SceneRotRect,
-    SceneScale, SceneText, SceneValue,
+    SCENE_CANVAS_WIDTH, Scene, SceneAlign, SceneArc, SceneClipRect, SceneFont, SceneFontTier,
+    SceneGlyph, SceneImage, SceneLabel, SceneLabelAnchor, SceneLine, SceneNode, SceneRect,
+    SceneRotRect, SceneScale, SceneText, SceneValue,
 };
 
 use crate::scene::{SceneAsset, SceneRenderRequest, SceneTimer};
@@ -770,9 +770,10 @@ fn scene_case(
 }
 
 /// `rect`: corner radius at three settings (square, rounded, a full circle
-/// where the radius reaches half the side) plus a translucent overlap, which
-/// is the only thing that shows `opacity` is wired to `bg_opa` rather than
-/// ignored.
+/// where the radius reaches half the side) plus a translucent overlap cropped
+/// by an absolute clip rectangle. The latter shows both that `opacity` reaches
+/// `bg_opa` and that clipping is performed by a parent rather than by changing
+/// the rectangle geometry.
 fn scene_rect_nodes() -> Vec<SceneNode> {
     vec![
         SceneNode::Rect(SceneRect {
@@ -783,6 +784,7 @@ fn scene_rect_nodes() -> Vec<SceneNode> {
             radius: 0,
             fill: BLUE,
             opacity: 255,
+            clip: None,
         }),
         SceneNode::Rect(SceneRect {
             x: 168,
@@ -792,6 +794,7 @@ fn scene_rect_nodes() -> Vec<SceneNode> {
             radius: 24,
             fill: ACCENT,
             opacity: 255,
+            clip: None,
         }),
         SceneNode::Rect(SceneRect {
             x: 304,
@@ -803,6 +806,7 @@ fn scene_rect_nodes() -> Vec<SceneNode> {
             radius: 56,
             fill: GREEN,
             opacity: 255,
+            clip: None,
         }),
         SceneNode::Rect(SceneRect {
             x: 32,
@@ -812,6 +816,7 @@ fn scene_rect_nodes() -> Vec<SceneNode> {
             radius: 28,
             fill: PRIMARY,
             opacity: 255,
+            clip: None,
         }),
         SceneNode::Rect(SceneRect {
             x: 96,
@@ -823,6 +828,12 @@ fn scene_rect_nodes() -> Vec<SceneNode> {
             // Overlaps the pill above at just under half opacity, so the
             // blend against two different backgrounds is visible in one node.
             opacity: 120,
+            clip: Some(SceneClipRect {
+                x: 160,
+                y: 252,
+                w: 128,
+                h: 56,
+            }),
         }),
     ]
 }
@@ -843,6 +854,7 @@ fn scene_arc_nodes() -> Vec<SceneNode> {
             end_deg: 630,
             width: 18,
             color: TERTIARY,
+            opacity: 0x33,
             rounded: false,
             end_binding: String::new(),
         }),
@@ -857,6 +869,7 @@ fn scene_arc_nodes() -> Vec<SceneNode> {
             end_deg: 630,
             width: 18,
             color: ACCENT,
+            opacity: u8::MAX,
             rounded: true,
             end_binding: "timer.pct".to_string(),
         }),
@@ -870,6 +883,7 @@ fn scene_arc_nodes() -> Vec<SceneNode> {
             end_deg: 90,
             width: 12,
             color: BLUE,
+            opacity: u8::MAX,
             rounded: false,
             end_binding: String::new(),
         }),
@@ -883,6 +897,7 @@ fn scene_arc_nodes() -> Vec<SceneNode> {
             end_deg: 30,
             width: 10,
             color: GREEN,
+            opacity: u8::MAX,
             rounded: false,
             end_binding: String::new(),
         }),
@@ -1326,6 +1341,7 @@ fn scene_rot_rect_nodes() -> Vec<SceneNode> {
             radius: 6,
             fill: PRIMARY,
             opacity: u8::MAX,
+            clip: None,
         }),
         SceneNode::Rect(SceneRect {
             x: 218,
@@ -1335,6 +1351,7 @@ fn scene_rot_rect_nodes() -> Vec<SceneNode> {
             radius: 6,
             fill: ACCENT,
             opacity: u8::MAX,
+            clip: None,
         }),
         SceneNode::Rect(SceneRect {
             x: 346,
@@ -1344,6 +1361,7 @@ fn scene_rot_rect_nodes() -> Vec<SceneNode> {
             radius: 6,
             fill: BLUE,
             opacity: u8::MAX,
+            clip: None,
         }),
         SceneNode::Rect(SceneRect {
             x: 218,
@@ -1353,6 +1371,7 @@ fn scene_rot_rect_nodes() -> Vec<SceneNode> {
             radius: 6,
             fill: GREEN,
             opacity: u8::MAX,
+            clip: None,
         }),
     ]
 }

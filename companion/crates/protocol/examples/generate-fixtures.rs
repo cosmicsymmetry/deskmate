@@ -7,9 +7,9 @@ use protocol::{
     CURRENT_CAPABILITIES, DeviceEvent, ErrorCode, ErrorResponse, EventAction, EventKind, Field,
     FieldValue, Frame, HeartbeatAck, InterruptPolicy, MAX_CONFIG_SCREENS, MAX_CONFIG_WIDGETS,
     MAX_DEVICE_TOKEN_LEN, MAX_PAYLOAD_SIZE, MAX_PROTOCOL_VERSION, MAX_WIRE_FRAME, Message,
-    NetworkConfig, OtaState, PushData, PushScene, Scene, SceneAlign, SceneArc, SceneFont,
-    SceneFontTier, SceneGlyph, SceneImage, SceneLabel, SceneLabelAnchor, SceneLine, SceneNode,
-    SceneRect, SceneRotRect, SceneScale, SceneText, SceneValue, ScreenConfig, SizeClass,
+    NetworkConfig, OtaState, PushData, PushScene, Scene, SceneAlign, SceneArc, SceneClipRect,
+    SceneFont, SceneFontTier, SceneGlyph, SceneImage, SceneLabel, SceneLabelAnchor, SceneLine,
+    SceneNode, SceneRect, SceneRotRect, SceneScale, SceneText, SceneValue, ScreenConfig, SizeClass,
     StatusResponse, TYPE_ASSET_BEGIN, TYPE_PUSH_SCENE, TapAction, TemplateKind, Tier, TimeSync,
     TriggerInterrupt, WidgetConfig, WifiState, encode_message,
 };
@@ -55,6 +55,12 @@ fn rich_scene() -> Scene {
                 radius: 24,
                 fill: 0x0018_1A1F,
                 opacity: 0xC8,
+                clip: Some(SceneClipRect {
+                    x: 16,
+                    y: 16,
+                    w: 416,
+                    h: 336,
+                }),
             }),
             SceneNode::Arc(SceneArc {
                 cx: 224,
@@ -64,6 +70,7 @@ fn rich_scene() -> Scene {
                 end_deg: 630,
                 width: 12,
                 color: 0x00FF_9F0A,
+                opacity: 0x33,
                 rounded: true,
                 end_binding: "timer.pct".into(),
             }),

@@ -201,6 +201,35 @@ fn push_scene_fixtures_carry_what_they_are_meant_to() {
     // Every node kind, once: an all-minimal fixture would pass even if the
     // two encoders disagreed about the kinds it left out.
     assert_eq!(push.scene.nodes.len(), 10);
+    let rect = push
+        .scene
+        .nodes
+        .iter()
+        .find_map(|node| match node {
+            protocol::SceneNode::Rect(rect) => Some(rect),
+            _ => None,
+        })
+        .expect("the rich fixture carries a rect");
+    assert_eq!(rect.opacity, 0xC8);
+    assert_eq!(
+        rect.clip,
+        Some(protocol::SceneClipRect {
+            x: 16,
+            y: 16,
+            w: 416,
+            h: 336,
+        })
+    );
+    let arc = push
+        .scene
+        .nodes
+        .iter()
+        .find_map(|node| match node {
+            protocol::SceneNode::Arc(arc) => Some(arc),
+            _ => None,
+        })
+        .expect("the rich fixture carries an arc");
+    assert_eq!(arc.opacity, 0x33);
     let label = push
         .scene
         .nodes
@@ -252,6 +281,7 @@ fn push_scene_fixtures_carry_what_they_are_meant_to() {
     // An omitted opacity means opaque, which is the one default that is not
     // the zero value.
     assert_eq!(rect.opacity, u8::MAX);
+    assert_eq!(rect.clip, None);
     assert_eq!(
         *rect,
         protocol::SceneRect {

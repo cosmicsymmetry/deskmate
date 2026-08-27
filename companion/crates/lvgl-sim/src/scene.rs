@@ -414,6 +414,7 @@ mod tests {
                 radius: 16,
                 fill: 0x00ff_8f2e,
                 opacity: 255,
+                clip: None,
             })],
         };
         let first = sim.render_scene(&request(scene.clone())).expect("render");
@@ -490,6 +491,7 @@ mod tests {
                 radius: 0,
                 fill: 0x0000_ff00,
                 opacity: 255,
+                clip: None,
             })],
         };
         let mut req = request(scene);

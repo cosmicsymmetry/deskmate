@@ -105,6 +105,14 @@ impl Default for SceneValue {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SceneClipRect {
+    pub x: i32,
+    pub y: i32,
+    pub w: i32,
+    pub h: i32,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SceneRect {
     pub x: i32,
@@ -114,6 +122,9 @@ pub struct SceneRect {
     pub radius: i32,
     pub fill: u32,
     pub opacity: u8,
+    /// Absolute canvas clip. The renderer realizes this as a styleless parent
+    /// so LVGL performs the same child clipping as template containers.
+    pub clip: Option<SceneClipRect>,
 }
 
 impl Default for SceneRect {
@@ -127,11 +138,12 @@ impl Default for SceneRect {
             fill: 0,
             // An omitted opacity means opaque; 0 would draw nothing.
             opacity: u8::MAX,
+            clip: None,
         }
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SceneArc {
     pub cx: i32,
     pub cy: i32,
@@ -143,9 +155,29 @@ pub struct SceneArc {
     pub end_deg: i32,
     pub width: i32,
     pub color: u32,
+    /// Applied by LVGL before the arc's anti-aliasing mask. Omission is
+    /// opaque, preserving every scene encoded before this field existed.
+    pub opacity: u8,
     pub rounded: bool,
     /// Scales the declared sweep rather than replacing it. Empty means none.
     pub end_binding: String,
+}
+
+impl Default for SceneArc {
+    fn default() -> Self {
+        Self {
+            cx: 0,
+            cy: 0,
+            r: 0,
+            start_deg: 0,
+            end_deg: 0,
+            width: 0,
+            color: 0,
+            opacity: u8::MAX,
+            rounded: false,
+            end_binding: String::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -413,7 +445,11 @@ fn validate_value(value: &SceneValue) -> Result<(), MessageError> {
 fn validate_node(node: &SceneNode) -> Result<(), MessageError> {
     match node {
         SceneNode::Rect(rect) => {
-            if !rect_within_canvas(rect.x, rect.y, rect.w, rect.h) {
+            if !rect_within_canvas(rect.x, rect.y, rect.w, rect.h)
+                || rect
+                    .clip
+                    .is_some_and(|clip| !rect_within_canvas(clip.x, clip.y, clip.w, clip.h))
+            {
                 return Err(MessageError::InvalidValue("scene rect geometry"));
             }
         }
@@ -507,11 +543,16 @@ fn validate_node(node: &SceneNode) -> Result<(), MessageError> {
             validate_value(&label.value)?;
         }
         SceneNode::RotRect(rect) => {
+            // A pivot is local to the object but may sit outside it:
+            // AnalogClock's 8px ticks rotate around y=160. Axis-specific
+            // canvas bounds keep every corner-to-pivot delta canvas-scale
+            // before LVGL's matrix mixes the axes, rather than admitting an
+            // arbitrary untrusted i32 into the transform path.
             if !rect_within_canvas(rect.x, rect.y, rect.w, rect.h)
                 || rect.pivot_x < 0
-                || rect.pivot_x > rect.w
+                || rect.pivot_x > SCENE_CANVAS_WIDTH
                 || rect.pivot_y < 0
-                || rect.pivot_y > rect.h
+                || rect.pivot_y > SCENE_CANVAS_HEIGHT
                 || !(-3600..=3600).contains(&rect.rotation)
             {
                 return Err(MessageError::InvalidValue("scene rotated rect geometry"));
@@ -595,6 +636,14 @@ fn encode_points(encoder: &mut Encoder, key: u64, points: &[i32]) {
     }
 }
 
+fn encode_clip_rect(encoder: &mut Encoder, clip: SceneClipRect) {
+    encoder.map(4);
+    for (key, value) in [(0, clip.x), (1, clip.y), (2, clip.w), (3, clip.h)] {
+        encoder.unsigned(key);
+        encoder.signed(i64::from(value));
+    }
+}
+
 /// One arm per node kind, each a flat run of key/value pairs. Splitting it
 /// per kind would scatter the canonical emission rule across seven functions
 /// that must stay in step; keeping it in one place is what makes the rule
@@ -606,7 +655,8 @@ fn encode_node_payload(encoder: &mut Encoder, node: &SceneNode) {
             encoder.map(
                 4 + usize::from(rect.radius != 0)
                     + usize::from(rect.fill != 0)
-                    + usize::from(rect.opacity != u8::MAX),
+                    + usize::from(rect.opacity != u8::MAX)
+                    + usize::from(rect.clip.is_some()),
             );
             for (key, value) in [(0, rect.x), (1, rect.y), (2, rect.w), (3, rect.h)] {
                 encoder.unsigned(key);
@@ -624,12 +674,17 @@ fn encode_node_payload(encoder: &mut Encoder, node: &SceneNode) {
                 encoder.unsigned(6);
                 encoder.unsigned(u64::from(rect.opacity));
             }
+            if let Some(clip) = rect.clip {
+                encoder.unsigned(7);
+                encode_clip_rect(encoder, clip);
+            }
         }
         SceneNode::Arc(arc) => {
             encoder.map(
                 6 + usize::from(arc.color != 0)
                     + usize::from(arc.rounded)
-                    + usize::from(!arc.end_binding.is_empty()),
+                    + usize::from(!arc.end_binding.is_empty())
+                    + usize::from(arc.opacity != u8::MAX),
             );
             for (key, value) in [
                 (0, arc.cx),
@@ -653,6 +708,10 @@ fn encode_node_payload(encoder: &mut Encoder, node: &SceneNode) {
             if !arc.end_binding.is_empty() {
                 encoder.unsigned(8);
                 encoder.text(&arc.end_binding);
+            }
+            if arc.opacity != u8::MAX {
+                encoder.unsigned(9);
+                encoder.unsigned(u64::from(arc.opacity));
             }
         }
         SceneNode::Line(line) => {
@@ -981,6 +1040,35 @@ fn decode_points(decoder: &mut Decoder<'_>) -> Result<Vec<i32>, MessageError> {
     Ok(points)
 }
 
+fn decode_clip_rect(decoder: &mut Decoder<'_>) -> Result<SceneClipRect, MessageError> {
+    let len = decoder.map_len()?;
+    let mut previous = None;
+    let mut present = 0u8;
+    let mut values = [0i32; 4];
+    for _ in 0..len {
+        let key = next_key(decoder, &mut previous)?;
+        match key {
+            0..=3 => {
+                let slot = usize::try_from(key).expect("clip keys 0..=3 fit usize");
+                present |= 1 << slot;
+                values[slot] = read_i32(decoder, "scene clip rectangle field")?;
+            }
+            _ => decoder.skip()?,
+        }
+    }
+    if present != 0x0f {
+        return Err(MessageError::MissingField(u64::from(
+            (!present & 0x0f).trailing_zeros(),
+        )));
+    }
+    Ok(SceneClipRect {
+        x: values[0],
+        y: values[1],
+        w: values[2],
+        h: values[3],
+    })
+}
+
 /// Arms are keyed by `(node kind, wire key)` so this file's decoder reads in
 /// the same order as the wire-shape table at the top of
 /// `firmware/main/core/scene_decode.c`, one line per key per kind.
@@ -1011,6 +1099,7 @@ fn decode_node_payload(decoder: &mut Decoder<'_>, kind: u32) -> Result<SceneNode
     let mut xs = Vec::new();
     let mut ys = Vec::new();
     let mut ticks = [0u32; 2];
+    let mut clip = None;
 
     for _ in 0..len {
         let key = next_key(decoder, &mut previous)?;
@@ -1022,20 +1111,26 @@ fn decode_node_payload(decoder: &mut Decoder<'_>, kind: u32) -> Result<SceneNode
         // rather than panicking on a 32-bit target.
         let slot = usize::try_from(key).unwrap_or(usize::MAX);
         match (kind, key) {
-            // RECT {0: x, 1: y, 2: w, 3: h, 4: radius, 5: fill, 6: opacity}
+            // RECT {0: x, 1: y, 2: w, 3: h, 4: radius, 5: fill, 6: opacity,
+            //       7: {0: clip_x, 1: clip_y, 2: clip_w, 3: clip_h}}
             (1, 0..=4) => ints[slot] = read_i32(decoder, "scene rect field")?,
             (1, 5) => colors[0] = read_u32(decoder, "scene rect fill")?,
             (1, 6) => {
                 opacity = u8::try_from(decoder.unsigned()?)
                     .map_err(|_| MessageError::InvalidValue("scene rect opacity"))?;
             }
+            (1, 7) => clip = Some(decode_clip_rect(decoder)?),
             // ARC {0: cx, 1: cy, 2: r, 3: start, 4: end, 5: width, 6: color,
-            //      7: rounded, 8: end_binding}
+            //      7: rounded, 8: end_binding, 9: opacity}
             (2, 0..=5) => ints[slot] = read_i32(decoder, "scene arc field")?,
             (2, 6) => colors[0] = read_u32(decoder, "scene arc color")?,
             (2, 7) => flags[0] = decoder.boolean()?, // rounded
             (2, 8) => {
                 text = read_bounded_text(decoder, MAX_SCENE_BINDING_LEN, "scene binding")?;
+            }
+            (2, 9) => {
+                opacity = u8::try_from(decoder.unsigned()?)
+                    .map_err(|_| MessageError::InvalidValue("scene arc opacity"))?;
             }
             // LINE {0: [x...], 1: [y...], 2: width, 3: color}
             (3, 0) => xs = decode_points(decoder)?,
@@ -1135,6 +1230,7 @@ fn decode_node_payload(decoder: &mut Decoder<'_>, kind: u32) -> Result<SceneNode
                 radius: ints[4],
                 fill: colors[0],
                 opacity,
+                clip,
             }))
         }
         2 => {
@@ -1147,6 +1243,7 @@ fn decode_node_payload(decoder: &mut Decoder<'_>, kind: u32) -> Result<SceneNode
                 end_deg: ints[4],
                 width: ints[5],
                 color: colors[0],
+                opacity,
                 rounded: flags[0],
                 end_binding: text,
             }))
@@ -1345,6 +1442,12 @@ mod tests {
                     radius: 4,
                     fill: 0x00ff_8f2e,
                     opacity: 200,
+                    clip: Some(SceneClipRect {
+                        x: 10,
+                        y: 18,
+                        w: 24,
+                        h: 18,
+                    }),
                 }),
                 SceneNode::Text(SceneText {
                     x: 0,
@@ -1374,6 +1477,28 @@ mod tests {
                 y: 0,
                 w: 8,
                 h: 8,
+                ..SceneRect::default()
+            })],
+        };
+        assert!(encode_scene_payload(&scene).is_err());
+    }
+
+    #[test]
+    fn encode_scene_payload_refuses_an_off_canvas_clip_rectangle() {
+        let scene = Scene {
+            revision: 1,
+            background: 0,
+            nodes: vec![SceneNode::Rect(SceneRect {
+                x: 0,
+                y: 0,
+                w: 8,
+                h: 8,
+                clip: Some(SceneClipRect {
+                    x: SCENE_CANVAS_WIDTH,
+                    y: 0,
+                    w: 8,
+                    h: 8,
+                }),
                 ..SceneRect::default()
             })],
         };
@@ -1501,5 +1626,32 @@ mod tests {
             ..SceneArc::default()
         };
         assert!(validate_node(&SceneNode::Arc(arc)).is_ok());
+    }
+
+    #[test]
+    fn a_rotated_rect_pivot_may_be_external_but_remains_canvas_bounded() {
+        let mut rect = SceneRotRect {
+            x: 222,
+            y: 24,
+            w: 4,
+            h: 8,
+            pivot_x: 2,
+            pivot_y: 160,
+            ..SceneRotRect::default()
+        };
+        assert!(validate_node(&SceneNode::RotRect(rect.clone())).is_ok());
+
+        rect.pivot_y = SCENE_CANVAS_HEIGHT + 1;
+        assert_eq!(
+            validate_node(&SceneNode::RotRect(rect.clone())),
+            Err(MessageError::InvalidValue("scene rotated rect geometry"))
+        );
+
+        rect.pivot_y = 160;
+        rect.pivot_x = SCENE_CANVAS_WIDTH + 1;
+        assert_eq!(
+            validate_node(&SceneNode::RotRect(rect)),
+            Err(MessageError::InvalidValue("scene rotated rect geometry"))
+        );
     }
 }

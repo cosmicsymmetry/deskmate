@@ -170,6 +170,42 @@ static void test_valid_fixtures(void)
     assert_valid_fixture("ack_scene.bin", PROTOCOL_TYPE_ACK, 24U);
 }
 
+static void test_scene_fixtures_pin_new_fields_and_omitted_defaults(void)
+{
+    size_t length = 0U;
+    uint8_t *fixture = read_fixture("push_scene.bin", &length);
+    protocol_frame_t frame;
+    assert(protocol_frame_decode(fixture, length, &frame) ==
+           PROTOCOL_FRAME_OK);
+    free(fixture);
+
+    protocol_message_t message;
+    assert(protocol_message_decode(&frame, &message) == PROTOCOL_MESSAGE_OK);
+    const scene_t *scene = &message.value.push_scene.scene;
+    assert(scene->node_count == 10U);
+    const scene_rect_t *rect = &scene->nodes[0].value.rect;
+    const scene_arc_t *arc = &scene->nodes[1].value.arc;
+    assert(scene->nodes[0].kind == SCENE_NODE_RECT);
+    assert(rect->opacity == 0xc8U);
+    assert(rect->has_clip);
+    assert(rect->clip.x == 16);
+    assert(rect->clip.y == 16);
+    assert(rect->clip.w == 416);
+    assert(rect->clip.h == 336);
+    assert(scene->nodes[1].kind == SCENE_NODE_ARC);
+    assert(arc->opacity == 0x33U);
+
+    fixture = read_fixture("push_scene_min.bin", &length);
+    assert(protocol_frame_decode(fixture, length, &frame) ==
+           PROTOCOL_FRAME_OK);
+    free(fixture);
+    assert(protocol_message_decode(&frame, &message) == PROTOCOL_MESSAGE_OK);
+    assert(message.value.push_scene.scene.node_count == 1U);
+    rect = &message.value.push_scene.scene.nodes[0].value.rect;
+    assert(rect->opacity == UINT8_MAX);
+    assert(!rect->has_clip);
+}
+
 static void test_status_capability_handshake_and_legacy_defaults(void)
 {
     size_t length = 0U;
@@ -1451,6 +1487,7 @@ int main(void)
     test_crc();
     test_status_request_accepts_reserved_ota_trigger_id();
     test_valid_fixtures();
+    test_scene_fixtures_pin_new_fields_and_omitted_defaults();
     test_status_capability_handshake_and_legacy_defaults();
     test_status_last_ota_error_round_trip_and_legacy_default();
     test_status_asset_store_stats_round_trip_and_legacy_default();

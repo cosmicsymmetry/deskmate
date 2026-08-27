@@ -120,6 +120,8 @@ static const uint8_t k_digest[ASSET_DIGEST_BYTES] = {
     0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f, 0x20,
 };
 
+static scene_t *new_scene(void);
+
 static void begin_scene(builder_t *b, uint64_t revision, uint64_t background,
                         size_t node_count)
 {
@@ -149,6 +151,137 @@ static void put_rect_node(builder_t *b, int64_t x, int64_t y, int64_t w,
     put_int(b, w);
     put_uint(b, 3U);
     put_int(b, h);
+}
+
+static void put_rect_node_with_clip(builder_t *b, int64_t clip_x,
+                                    int64_t clip_y, int64_t clip_w,
+                                    int64_t clip_h)
+{
+    put_map(b, 2U);
+    put_uint(b, 0U);
+    put_uint(b, SCENE_NODE_RECT);
+    put_uint(b, 1U);
+    put_map(b, 5U);
+    put_uint(b, 0U);
+    put_int(b, 80);
+    put_uint(b, 1U);
+    put_int(b, 80);
+    put_uint(b, 2U);
+    put_int(b, 10);
+    put_uint(b, 3U);
+    put_int(b, 40);
+    put_uint(b, 7U);
+    put_map(b, 4U);
+    put_uint(b, 0U);
+    put_int(b, clip_x);
+    put_uint(b, 1U);
+    put_int(b, clip_y);
+    put_uint(b, 2U);
+    put_int(b, clip_w);
+    put_uint(b, 3U);
+    put_int(b, clip_h);
+}
+
+static void test_a_rect_clip_decodes(void)
+{
+    builder_t b;
+    scene_t *scene = new_scene();
+
+    begin_scene(&b, 1U, 0U, 1U);
+    put_rect_node_with_clip(&b, 64, 64, 120, 120);
+
+    assert(scene_decode(b.bytes, b.length, scene) == SCENE_MODEL_OK);
+    assert(scene->nodes[0].value.rect.has_clip);
+    assert(scene->nodes[0].value.rect.clip.x == 64);
+    assert(scene->nodes[0].value.rect.clip.y == 64);
+    assert(scene->nodes[0].value.rect.clip.w == 120);
+    assert(scene->nodes[0].value.rect.clip.h == 120);
+
+    free(scene);
+}
+
+static void test_a_rect_clip_past_the_canvas_is_rejected(void)
+{
+    builder_t b;
+    scene_t *scene = new_scene();
+
+    begin_scene(&b, 1U, 0U, 1U);
+    put_rect_node_with_clip(&b, SCENE_CANVAS_WIDTH, 64, 120, 120);
+
+    assert(scene_decode(b.bytes, b.length, scene) ==
+           SCENE_MODEL_ERR_GEOMETRY);
+    assert(scene->node_count == 0U);
+
+    free(scene);
+}
+
+static void put_arc_node_with_opacity(builder_t *b, bool include_opacity,
+                                      uint64_t opacity)
+{
+    put_map(b, 2U);
+    put_uint(b, 0U);
+    put_uint(b, SCENE_NODE_ARC);
+    put_uint(b, 1U);
+    put_map(b, include_opacity ? 7U : 6U);
+    put_uint(b, 0U);
+    put_int(b, 224);
+    put_uint(b, 1U);
+    put_int(b, 184);
+    put_uint(b, 2U);
+    put_int(b, 100);
+    put_uint(b, 3U);
+    put_int(b, 270);
+    put_uint(b, 4U);
+    put_int(b, 630);
+    put_uint(b, 5U);
+    put_int(b, 12);
+    if (include_opacity) {
+        put_uint(b, 9U);
+        put_uint(b, opacity);
+    }
+}
+
+static void test_an_explicit_arc_opacity_decodes(void)
+{
+    builder_t b;
+    scene_t *scene = new_scene();
+
+    begin_scene(&b, 1U, 0U, 1U);
+    put_arc_node_with_opacity(&b, true, 51U);
+
+    assert(scene_decode(b.bytes, b.length, scene) == SCENE_MODEL_OK);
+    assert(scene->nodes[0].value.arc.opacity == 51U);
+
+    free(scene);
+}
+
+static void test_an_omitted_arc_opacity_defaults_to_cover(void)
+{
+    builder_t b;
+    scene_t *scene = new_scene();
+
+    begin_scene(&b, 1U, 0U, 1U);
+    put_arc_node_with_opacity(&b, false, 0U);
+
+    assert(scene_decode(b.bytes, b.length, scene) == SCENE_MODEL_OK);
+    assert(scene->nodes[0].value.arc.opacity == UINT8_MAX);
+
+    free(scene);
+}
+
+static void test_an_arc_opacity_outside_uint8_is_rejected(void)
+{
+    builder_t b;
+    scene_t *scene = new_scene();
+
+    begin_scene(&b, 1U, 0U, 1U);
+    put_arc_node_with_opacity(&b, true, 256U);
+
+    assert(scene_decode(b.bytes, b.length, scene) ==
+           SCENE_MODEL_ERR_GEOMETRY);
+    assert(scene->node_count == 0U);
+
+    free(scene);
 }
 
 static void put_baked_font(builder_t *b, uint64_t tier)
@@ -656,13 +789,27 @@ static void test_a_rotated_rect_rotation_outside_one_turn_is_rejected(void)
     free(scene);
 }
 
-static void test_a_rotated_rect_pivot_outside_its_rect_is_rejected(void)
+static void test_an_external_rotated_rect_pivot_decodes(void)
 {
     builder_t b;
     scene_t *scene = new_scene();
 
     begin_scene(&b, 1U, 0U, 1U);
-    put_rot_rect_node(&b, 0, 7, 104, "");
+    put_rot_rect_node(&b, 0, 3, 160, "");
+
+    assert(scene_decode(b.bytes, b.length, scene) == SCENE_MODEL_OK);
+    assert(scene->nodes[0].value.rot_rect.pivot_y == 160);
+
+    free(scene);
+}
+
+static void test_a_rotated_rect_pivot_past_the_canvas_is_rejected(void)
+{
+    builder_t b;
+    scene_t *scene = new_scene();
+
+    begin_scene(&b, 1U, 0U, 1U);
+    put_rot_rect_node(&b, 0, 3, SCENE_CANVAS_HEIGHT + 1, "");
 
     assert(scene_decode(b.bytes, b.length, scene) ==
            SCENE_MODEL_ERR_GEOMETRY);
@@ -1515,13 +1662,19 @@ static void test_null_arguments_are_rejected(void)
 int main(void)
 {
     test_a_valid_text_scene_roundtrips();
+    test_a_rect_clip_decodes();
+    test_a_rect_clip_past_the_canvas_is_rejected();
+    test_an_explicit_arc_opacity_decodes();
+    test_an_omitted_arc_opacity_defaults_to_cover();
+    test_an_arc_opacity_outside_uint8_is_rejected();
     test_every_node_kind_decodes();
     test_a_label_anchor_outside_the_canvas_is_rejected();
     test_an_omitted_label_anchor_defaults_to_left();
     test_center_and_right_label_anchors_decode();
     test_an_unknown_label_anchor_is_rejected_by_the_decoder();
     test_a_rotated_rect_rotation_outside_one_turn_is_rejected();
-    test_a_rotated_rect_pivot_outside_its_rect_is_rejected();
+    test_an_external_rotated_rect_pivot_decodes();
+    test_a_rotated_rect_pivot_past_the_canvas_is_rejected();
     test_an_unknown_rotated_rect_binding_is_rejected();
     test_more_nodes_than_the_cap_is_rejected();
     test_a_node_with_an_unknown_kind_is_rejected();

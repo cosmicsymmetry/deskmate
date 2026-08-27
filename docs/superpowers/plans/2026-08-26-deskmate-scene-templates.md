@@ -336,7 +336,7 @@ and the elapsed/total chips are computed per tick from `current_remaining_ms()`.
 carries literals or bindings — it has no conditionals and no arithmetic. So a host-built
 scene can be *pixel-correct at the instant it is built* while going stale a second later.
 
-- [ ] **Step 1: Write the failing rows**, at both orientations: paused mid-countdown, a
+- [x] **Step 1: Write the failing rows**, at both orientations: paused mid-countdown, a
       running ring at zero, a full ring, and a ring at the arc-indicator hue. Mirror
       `framebuffer_diff`'s case split exactly, and for the same reason recorded there:
       `running-mid-countdown` cannot be compared deterministically because
@@ -345,16 +345,46 @@ scene can be *pixel-correct at the instant it is built* while going stale a seco
       1000` ceiling flips a second whenever push-to-capture latency crosses 1000 ms. **Do
       not flip that case to `running: false` and do not merge the split cases** — the
       existing note says why. Add `ProgressRing` to `EXPECTED_TEMPLATES`.
-- [ ] **Step 2: Run to confirm failure.**
-- [ ] **Step 3: Implement the builder**, with the ring as an arc carrying `end_binding`,
+- [x] **Step 2: Run to confirm failure.**
+- [x] **Step 3: Implement the builder**, with the ring as an arc carrying `end_binding`,
       and the status/elapsed/total values as **literals**, with a comment naming them as
       the live-update gap and pointing at Task 7.
-- [ ] **Step 4: Prove the gap rather than asserting it.** Add a host test that builds the
+- [x] **Step 4: Prove the gap rather than asserting it.** Add a host test that builds the
       scene at t and again at t+90s with the same card state, and asserts the status and
       chip text nodes are byte-identical across the two. That is the defect, pinned: a
       shipping card would show a stale word. Name it
       `progress_ring_scene_status_text_does_not_advance_with_time`.
-- [ ] **Step 5: Gates and commit.** `feat: build ProgressRing as a scene, and pin its stale-text gap`
+- [x] **Step 5: Gates and commit.** **Delivered 2026-08-27** (`b714964`), as
+      `feat: build ProgressRing as a scene, and pin its two live-update gaps`. 8 rows,
+      four variants at both orientations, **all marked `known_gap`** — this is the only
+      template that cannot reach byte parity, and for a single missing field rather than
+      anything about the face.
+
+      **The arc track needs per-arc opacity, and that is arithmetic, not tuning.** The C
+      draws the track at `LV_OPA_20`, and LVGL multiplies the anti-alias mask by that
+      opacity *before* the RGB565 blend: `blend(bg, hue, mask * opa)`. A scene arc offers
+      only `blend(bg, C, mask)` for a premixed `C`. The two agree exactly where
+      `mask == 255` and nowhere else, so `0x281008` — the correct quantisation of 20% hue
+      over black, which the fully covered pixels force — lands every solid pixel and misses
+      every edge. Measured: **275** differing pixels paused mid-countdown, **592** with the
+      track exposed, **64** on `never-started`, where the dim track still contributes
+      beneath the full indicator's edge. Closing it is one optional `opacity: u8` key on
+      `SceneArc`, omitted meaning `LV_OPA_COVER`; `SceneRect` already carries exactly that
+      field. See the bundled firmware task below.
+
+      Step 4's test was reshaped before commit: as first written it was
+      `assert_eq!(f(x), f(x))`, which is tautological given the builder takes no time
+      input. It now proves a **divergence** — a running timer with 90 s left still reads
+      `Running` / `00:00` ninety seconds later where `refresh_modules()` would read `Done` /
+      `01:30`, computed through the very helpers the builder used so the expectation cannot
+      drift from the C on its own. `TOTAL` is asserted *equal*, being the one chip honestly
+      constant. **A test that pins a gap has to show the two sides disagreeing, not merely
+      that one side is a pure function.**
+
+      `running-mid-countdown` is excluded, but **not** for the reason `framebuffer_diff`
+      excludes it: the simulator's fixed tick makes it deterministic here, and matching it
+      would require the shipping builder to know the simulator's private 840 ms anchor
+      offset. Builder-must-not-know-the-tick, not flakiness.
 
 ---
 
@@ -407,38 +437,62 @@ with. A host that sends an unknown node to an older device gets the scene refuse
 which `docs/protocol/v1.md` already specifies. Adding a bit per node kind does not scale
 and is not what bit 8 was defined to mean.
 
-- [ ] **Step 1: Write the failing decoder tests first**, in
+- [x] **Step 1: Write the failing decoder tests first**, in
       `firmware/host_tests/test_scene_decode.c` and `test_scene_model.c`: a well-formed
       rotated rect decodes; an out-of-range rotation is rejected; a pivot outside the rect
       is rejected. **Bounds must be tested under ASan** — `make -C firmware/host_tests
       sanitize` is the only proof two of the existing decoder bounds have, because
       `scene_model_validate()` reports an out-of-bounds write with the same error code the
       plain test asserts.
-- [ ] **Step 2: Run both suites to confirm failure.**
+- [x] **Step 2: Run both suites to confirm failure.**
       Run: `make -C firmware/host_tests clean test && make -C firmware/host_tests sanitize`
-- [ ] **Step 3: Implement the node** across `scene.rs`, `scene_decode.c`, `scene_model.c`
+- [x] **Step 3: Implement the node** across `scene.rs`, `scene_decode.c`, `scene_model.c`
       and `scene_view.c`. In `scene_view.c` it is an `lv_obj` with the same style calls
       `make_hand()` uses — matching by construction, not by re-deriving the transform.
-- [ ] **Step 4: Add fixtures to the shared corpus.** `companion/crates/protocol/tests/fixtures.rs`
+- [x] **Step 4: Add fixtures to the shared corpus.** `companion/crates/protocol/tests/fixtures.rs`
       and its firmware counterpart must both carry a rotated-rect scene, or the two
       languages' encoders can drift with every test green.
-- [ ] **Step 5: Update `docs/protocol/v1.md`** — the node table and the scene map section.
-- [ ] **Step 6: Add the simulator case and the parity rows.** One `scene_cases()` entry for
+- [x] **Step 5: Update `docs/protocol/v1.md`** — the node table and the scene map section.
+- [x] **Step 6: Add the simulator case and the parity rows.** One `scene_cases()` entry for
       the node kind at both orientations, then `AnalogClock` rows covering
       `show_seconds` true and false. The false case is worth its own row: it is the M4
       defect that stayed open until V1 acceptance closed it. Add `AnalogClock` to
       `EXPECTED_TEMPLATES`.
-- [ ] **Step 7: Build the firmware and record the memory delta.**
+- [x] **Step 7: Build the firmware and record the memory delta.**
       Run: `. "$HOME/esp/esp-idf/export.sh" && idf.py -C firmware build`
       Record `.bss`, `.data` and IRAM before and after in the commit message and in
       `docs/hardware/board-notes.md`. **Assume any addition to firmware statics can break
       OTA downloads with every test green** — this repo has lost days to it twice, most
       recently to ~105 bytes of `.bss`.
-- [ ] **Step 8: Gates and commit.**
+- [x] **Step 8: Gates and commit.**
       Run: `make -C firmware/host_tests clean test && make -C firmware/host_tests sanitize && cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace`
       Commit: `feat: add the rotated-rect scene node and build AnalogClock as a scene`
+      **Delivered 2026-08-27** (`09404ca`) as `feat: build AnalogClock as a scene, and
+      find the pivot rule Task 1b got wrong`. Steps 1-5 and 7-8 of this task as originally
+      written were superseded by the amendment, which folded the rotated-rect node into
+      Task 1b; what remained was host-only builder work and it contains no firmware.
+      8 rows — two instants, `show_seconds` true and false, both orientations.
 
-- [ ] **Step 9 (owner, hardware): one OTA download on the board.** Required, not optional,
+      The chapter ring, both hands, the second hand and the hub are byte-identical. The
+      ring reproduces cleanly as a **solid opaque** `SceneArc` because its `LV_PART_MAIN`
+      opacity is `COVER`, unlike the `LV_OPA_20` track that blocked Task 5 — checked rather
+      than assumed, since both faces draw a "ring" and only one is expressible.
+      `show_seconds` false drops the `time:second` node **and nothing else**, with a
+      structural test asserting every remaining node is byte-identical to the
+      seconds-visible scene.
+
+      **The twelve chapter ticks are not emitted, and the reason is a specification error
+      in Task 1b.** That task pinned "a pivot outside the rect is rejected" into both
+      validators (`scene_model.c:136` and its Rust mirror) — a rule derived entirely from
+      the **hands**, where `make_hand()` sets `pivot_y = length = h` so the bound holds
+      trivially. The plan never modelled the **ticks**, whose pivot is `FACE_RADIUS`: 160
+      on an 8px object, twenty times its own height. Every unit test agreed with the wrong
+      rule because every one of them tested a hand. All 8 rows are `known_gap` at **440**
+      differing pixels each, every one inside an omitted tick. Emitting them anyway was not
+      an option: the device's own validator would refuse the scene whole, so the gate would
+      have been comparing against a scene that cannot ship.
+
+- [x] **Step 9 (owner, hardware): one OTA download on the board.** Required, not optional,
       and it is the whole hardware cost of this stage. Publish the build, move
       `firmware/version.txt` to match — a flashed build is reverted within a minute
       otherwise, because the catalog pins the fleet and offers its version in either
@@ -617,3 +671,61 @@ one node whose pixels match by construction, so no template task needs text meas
 `BakedFontMetrics::measure()` stays what it is — a numeric-tier measurement used for
 `number_font_tier()`'s step-down decision, which is a *tier choice*, not a box size, and is
 correct without kerning because the digits-only faces have none.
+
+---
+
+## AMENDMENT 2 (added during execution, 2026-08-27): one more image, carrying three needs
+
+Executing Tasks 4, 5 and 6 surfaced **three** firmware needs that no amount of host work
+can substitute for. They are folded into a single task, for the same reason Amendment 1
+folded two node kinds into one: **two node kinds landing in one image need one
+verification, not two**, and the stage's hardware budget is one OTA download.
+
+This was planned for. Task 4 declined to fix STORM at the time and said so explicitly —
+"deferred deliberately: Tasks 5 and 6 may surface other firmware needs, and one more image
+can carry all of them". Both later tasks did surface one.
+
+| # | Need | Unblocks | Found by |
+| --- | --- | --- | --- |
+| 1 | `SceneArc` gains optional `opacity: u8`, omission = `LV_OPA_COVER` | all 8 `ProgressRing` rows | Task 5 |
+| 2 | The rotated-rect pivot bound admits a **bounded external** pivot | all 8 `AnalogClock` rows | Task 6 |
+| 3 | A clip region on `SceneRect`, closing STORM's 14 clipped pixels | 2 `IconBadgeText` rows | Task 4 |
+
+Needs 1 and 2 are worth far more than need 3 — between them they are two entire templates
+against fourteen pixels on one icon — so they are implemented **first and fully green**
+before need 3 is attempted. If need 3 turns out to require restructuring the flat display
+list rather than an optional clip rect, it is re-planned rather than forced: fourteen
+pixels do not justify reshaping the model.
+
+**Need 2 is a specification error, and worth naming as one.** Task 1b's "a pivot outside
+the rect is rejected" was true of every object it modelled and false of the one it did not.
+The lesson is not "validate less" — the wire is untrusted and the bound must remain a bound
+— but that a rule inferred from one example of a shape should be tested against the others
+before it is pinned into two validators and a fixture corpus.
+
+**Constraints unchanged.** Protocol stays v1, additive only.
+`PROTOCOL_CURRENT_CAPABILITIES` stays **491** — no new capability bit, because bit 8
+already means "this device renders scenes" and `docs/protocol/v1.md` already specifies that
+an unknown node gets the scene refused whole. A bit per node kind does not scale. The
+config schema stays v5. `make -C firmware/host_tests sanitize` is mandatory for every new
+bound.
+
+**The standing OTA hazard applies with full force.** ~105 bytes of static internal DRAM once
+broke OTA downloads outright with every test green, bisected on the board to a variable and
+its lock rather than to any logic. Nothing may be added to file-scope state; `scene_view.c`
+already allocates per-scene node state from the LVGL heap for exactly this reason. The
+same-tree release baseline to compare against, taken at `09404ca`:
+
+```
+DIRAM total  219387    .bss  102624    DIRAM .text  93635    .data  23128    IRAM  16384/16384 (0 remaining)
+```
+
+### After the image lands
+
+The host-side gaps close in a follow-up, not in the firmware commit, so the firmware change
+stays reviewable on its own: emit the twelve ticks, send the track as the real hue at
+`LV_OPA_20`, clip STORM's bolt, and **delete the `known_gap` markers**. The gate asserts a
+marked case still differs, so it will fail until they are removed — which is the mechanism
+working as designed.
+
+Then Task 7's ledger, then one OTA download on the board.

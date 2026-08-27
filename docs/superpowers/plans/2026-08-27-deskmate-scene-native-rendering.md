@@ -474,7 +474,7 @@ carries a pivot, a length and an angle binding, and the device computes the endp
 **LVGL's own trig table** — the same `(length * trigo_cos(rot + angle)) >> TRIGO_SHIFT`
 the host port uses, which `the_trig_port_reproduces_lvgls_table` already pins.
 
-- [ ] **Step 1: Write the failing binding tests.**
+- [x] **Step 1: Write the failing binding tests.**
 
 ```c
 static void the_date_binding_matches_timefmt_date(void)
@@ -510,20 +510,20 @@ static void an_angle_binding_gives_lvgls_own_hand_geometry(void)
 }
 ```
 
-- [ ] **Step 2: Write the failing decoder/model tests.** A bound line's `length` must be
+- [x] **Step 2: Write the failing decoder/model tests.** A bound line's `length` must be
       canvas-bounded and its pivot on-canvas; a line carrying **both** an explicit
       `xs`/`ys` and an `angle_binding` is **rejected**, because two sources for one
       geometry is ambiguity the device should not resolve silently. Run under ASan.
 
-- [ ] **Step 3: Run both suites to confirm failure.**
+- [x] **Step 3: Run both suites to confirm failure.**
 
-- [ ] **Step 4: Implement**, re-evaluating bound lines on the 250 ms refresh.
+- [x] **Step 4: Implement**, re-evaluating bound lines on the 250 ms refresh.
 
-- [ ] **Step 5: Fixtures in both corpora; `push_scene_min.bin` unchanged.**
+- [x] **Step 5: Fixtures in both corpora; `push_scene_min.bin` unchanged.**
 
-- [ ] **Step 6: Update `docs/protocol/v1.md`.**
+- [x] **Step 6: Update `docs/protocol/v1.md`.**
 
-- [ ] **Step 7: Swap `build_digital_clock_scene`'s literals for the new bindings.**
+- [x] **Step 7: Swap `build_digital_clock_scene`'s literals for the new bindings.**
       The date text node becomes `SceneValue::Binding("date")`, and both dial hands become
       bound `SceneLine`s carrying pivot, length and `time:angle:hour` / `time:angle:minute`.
       **All 28 existing `DigitalClock` parity rows must still pass byte-identically** at
@@ -531,13 +531,13 @@ static void an_angle_binding_gives_lvgls_own_hand_geometry(void)
       the literals they replace, and 7 instants across both `show_seconds` settings is a
       strong check that the device's trig and `timefmt_date()` agree with the host port.
 
-- [ ] **Step 8: Prove it temporally**, reusing Task 2 Step 8's harness. Cover a minute
+- [x] **Step 8: Prove it temporally**, reusing Task 2 Step 8's harness. Cover a minute
       boundary (the minute hand steps and the reading changes) and **local midnight with a
       non-zero UTC offset** (the date line changes). Local midnight is the case a literal
       gets wrong for up to a day, and the board sits at UTC+4, so a UTC-only test would
       pass while the shipped face was wrong.
 
-- [ ] **Step 9: Gates and commit.**
+- [x] **Step 9: Gates and commit.**
       Run: `make -C firmware/host_tests clean test && make -C firmware/host_tests sanitize`
       then from `companion/`: `cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace`
       Commit: `feat: let a scene draw the date and the dial live`
@@ -564,21 +564,21 @@ standalone rule, not a nicety. Board notes already record a related UX finding f
 2026-08-15: a sticky unreconciled optimistic red flash on tapping a completed pomodoro.
 Read it before designing the reconciliation, so this does not reintroduce it.
 
-- [ ] **Step 1: Write the failing test** for the local transition applied to the timer
+- [x] **Step 1: Write the failing test** for the local transition applied to the timer
       snapshot: start from paused with 900 s left, apply START_PAUSE, assert the snapshot
       is running and anchored to now; apply it again, assert it is paused at the elapsed
       remainder; apply RESET, assert it is back at duration and not running. This is the
       same arithmetic `progress_ring_local_action()` does, so extract and share it rather
       than writing a second copy.
 
-- [ ] **Step 2: Run to confirm failure.**
+- [x] **Step 2: Run to confirm failure.**
 
-- [ ] **Step 3: Implement**, routing the local action into the scene binding context and
+- [x] **Step 3: Implement**, routing the local action into the scene binding context and
       refreshing the bound nodes. **The host's `PushData` remains authoritative**: a later
       snapshot overwrites the local one. The optimistic value is a prediction, not a
       second source of truth.
 
-- [ ] **Step 4: Gates and commit.** `feat: let a tap move a scene's timer while the link is down`
+- [x] **Step 4: Gates and commit.** `feat: let a tap move a scene's timer while the link is down`
 
 ---
 
@@ -605,15 +605,15 @@ is applied.
 > `"Text"`. A harness that does not drive the C through `template_view`'s state-update
 > path renders the word "Text" bottom-centre and costs a long pixel hunt.
 
-- [ ] **Step 1: Write the failing parity rows** — for each of the six templates, one stale
+- [x] **Step 1: Write the failing parity rows** — for each of the six templates, one stale
       row and one error row, at both orientations. That is 24 new rows on top of 106.
-- [ ] **Step 2: Run to confirm failure.**
-- [ ] **Step 3: Implement the footer** in a single shared helper, since all six use the
+- [x] **Step 2: Run to confirm failure.**
+- [x] **Step 3: Implement the footer** in a single shared helper, since all six use the
       same `template_view.c` logic. Six copies is how the two near-identical-but-not pill
       pairs happened in stage 2b.
-- [ ] **Step 4: Run to green**, and dump-and-look at one pair — a footer that reproduces
+- [x] **Step 4: Run to green**, and dump-and-look at one pair — a footer that reproduces
       the wrong thing consistently is still wrong and the gate cannot tell you.
-- [ ] **Step 5: Gates and commit.** `feat: give every scene the state footer its C template draws`
+- [x] **Step 5: Gates and commit.** `feat: give every scene the state footer its C template draws`
 
 ---
 
@@ -789,7 +789,10 @@ alike, and this repository has twice spent days on the former with every test gr
 3. `idf.py -C firmware build` clean, with same-tree memory deltas recorded for **both**
    images.
 4. All six templates remain byte-identical to their (now non-shipping) C originals at both
-   orientations, **and** the stale and error states are covered — 130 rows.
+   orientations, **and** the stale and error states are covered — **132 rows**.
+   (This plan said 130, from a 106-row baseline. Task 2 added two rows for the
+   zero-duration `ProgressRing` state, which the C renders as empty chips rather than
+   `--`, so the real baseline is 108 and 108 + 24 = 132. No coverage was dropped.)
 5. **A test proves each new binding's producer**, not only its formatter. The three timer
    defects existed because the gate injects binding inputs; a stage that adds five
    bindings and does not close that hole will simply add more.

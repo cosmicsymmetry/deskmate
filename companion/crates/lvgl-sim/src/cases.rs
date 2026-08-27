@@ -46,6 +46,46 @@ fn integer(name: &str, value: i64) -> SimField {
     }
 }
 
+/// One host-owned data state used by the scene/C-template parity gate.
+///
+/// These fixtures live beside the simulator's other template field fixtures
+/// because their C half must be expressed as real `stale`/`error` fields and
+/// rendered through `template_view_show()`. They are intentionally not added
+/// to [`golden_cases`]: the byte-exact scene parity gate owns this 24-row
+/// matrix, while the existing row-list goldens already pin the C footer's
+/// standalone appearance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StateFooterFixture {
+    pub slug: &'static str,
+    pub stale: bool,
+    pub error: Option<&'static str>,
+}
+
+impl StateFooterFixture {
+    /// The real template fields that make `template_view.c` apply this state.
+    pub fn fields(self) -> Vec<SimField> {
+        if let Some(error) = self.error {
+            vec![text("error", error)]
+        } else {
+            vec![boolean("stale", self.stale)]
+        }
+    }
+}
+
+/// The two non-OK shared-footer states, in the parity table's stable order.
+pub const STATE_FOOTER_FIXTURES: [StateFooterFixture; 2] = [
+    StateFooterFixture {
+        slug: "stale",
+        stale: true,
+        error: None,
+    },
+    StateFooterFixture {
+        slug: "error",
+        stale: false,
+        error: Some("Sync failed"),
+    },
+];
+
 fn orientations() -> [(&'static str, SimOrientation); 2] {
     [
         ("landscape", SimOrientation::Landscape),

@@ -55,6 +55,10 @@ const COLOR_PRIMARY: u32 = 0x00f5_f5f7;
 const COLOR_TERTIARY: u32 = 0x005c_5c66;
 /// `DESKMATE_COLOR_SURFACE`.
 const COLOR_SURFACE: u32 = 0x001a_1a1f;
+/// `DESKMATE_COLOR_STALE`, reserved for the shared state footer.
+const COLOR_STALE: u32 = 0x00f2_c94c;
+/// `DESKMATE_COLOR_ERROR`, reserved for the shared state footer.
+const COLOR_ERROR: u32 = 0x00ff_6b6b;
 /// LVGL's `LV_OPA_20` constant.
 const OPACITY_20_PERCENT: u8 = 51;
 /// `deskmate_palette(PROTOCOL_TEMPLATE_DIGITAL_CLOCK).hue`. Both clock faces
@@ -530,6 +534,92 @@ pub struct RowListCard<'a> {
     pub row4_time: &'a str,
 }
 
+/// The host-owned data state shared by all six scene builders.
+///
+/// This deliberately is not a scene binding. The host learns that provider
+/// state changed, rebuilds the scene, and pushes it just as it does for a new
+/// provider result. A non-empty error wins over stale exactly as it does in
+/// `template_view.c::update_data_state()`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SceneDataState<'a> {
+    /// Whether the last-good provider value has aged past its freshness bound.
+    pub stale: bool,
+    /// The host-visible provider/configuration error, when one exists.
+    pub error: Option<&'a str>,
+}
+
+impl SceneDataState<'static> {
+    /// The OK state all compatibility builder entry points retain.
+    pub const OK: Self = Self {
+        stale: false,
+        error: None,
+    };
+}
+
+/// Applies the shared C-template data-state footer to a freshly built scene.
+///
+/// Existing builder entry points continue to mean the OK state so their
+/// callers remain source-compatible. A host that owns a stale/error fact
+/// passes that builder result through this function before pushing it. All six
+/// builders and this stateful path converge on [`push_state_footer`], keeping
+/// the shared C implementation shared on the host too.
+pub fn with_scene_data_state(
+    mut scene: Scene,
+    state: SceneDataState<'_>,
+    metrics: &BakedFontMetrics,
+) -> Scene {
+    push_state_footer(&mut scene.nodes, state, metrics);
+    scene
+}
+
+/// `template_view.c::update_data_state()`, ported once for every builder.
+fn push_state_footer(
+    nodes: &mut Vec<SceneNode>,
+    state: SceneDataState<'_>,
+    metrics: &BakedFontMetrics,
+) {
+    let (text, color) = match state.error.filter(|error| !error.is_empty()) {
+        Some(error) => (error, COLOR_ERROR),
+        None if state.stale => ("Stale", COLOR_STALE),
+        None => return,
+    };
+    let caption = metrics.tier(SceneFontTier::Caption);
+    nodes.push(SceneNode::Text(SceneText {
+        // A content-sized C label aligned with BOTTOM_MID computes
+        // `parent_w / 2 - label_w / 2`; a full-width text box computes
+        // `(parent_w - text_w) / 2`. Those differ by one pixel when the text
+        // width is odd, so use the 1..448 box that preserves LVGL's separate
+        // integer halves.
+        x: 1,
+        // The C label is aligned BOTTOM_MID at y=-2*GRID. Its line box is
+        // content-height, so the baseline is canvas_bottom - offset -
+        // font.base_line; the line height cancels out.
+        baseline_y: SCENE_CANVAS_HEIGHT - 2 * GRID - caption.base_line,
+        w: SCENE_CANVAS_WIDTH - 1,
+        align: SceneAlign::Center,
+        font: SceneFont::Baked(SceneFontTier::Caption),
+        color,
+        running_color: None,
+        value: SceneValue::Literal(text.to_string()),
+        ellipsize: false,
+    }));
+}
+
+fn finish_scene(
+    revision: u32,
+    background: u32,
+    mut nodes: Vec<SceneNode>,
+    state: SceneDataState<'_>,
+    metrics: &BakedFontMetrics,
+) -> Scene {
+    push_state_footer(&mut nodes, state, metrics);
+    Scene {
+        revision,
+        background,
+        nodes,
+    }
+}
+
 /// `timefmt_hhmm()`: `"%02d:%02d"`. The host renders it only to *measure* it —
 /// the node carries a binding, so the device renders the reading itself.
 fn time_text(now: NaiveDateTime) -> String {
@@ -574,11 +664,13 @@ fn hand_line(
 /// the reading, the seconds, the date module and its label, the dial module,
 /// the dial, then the two hands over it.
 ///
-/// # `OBJ_STATE` has no node, and what that demands of a parity fixture
+/// # `OBJ_STATE` in the OK state, and what that demands of a parity fixture
 ///
 /// `OBJ_STATE` (`digital_clock.c:144-147`) is the shared state footer. In the
 /// OK state `template_view.c:99` sets it to the empty string, which draws
-/// nothing, so the scene omits it.
+/// nothing, so this compatibility entry point omits it. Stale/error callers
+/// pass the result through [`with_scene_data_state`], which appends the shared
+/// footer node without duplicating the six face builders.
 ///
 /// **A fixture comparing this scene against the C face must drive the C side
 /// through the state-update path** — `template_view.c`'s `update_data_state()`,
@@ -719,11 +811,13 @@ pub fn build_digital_clock_scene(card: &ClockCard, metrics: &BakedFontMetrics) -
         CLOCK_HUE,
     )));
 
-    Scene {
-        revision: card.revision,
-        background: COLOR_CANVAS,
+    finish_scene(
+        card.revision,
+        COLOR_CANVAS,
         nodes,
-    }
+        SceneDataState::OK,
+        metrics,
+    )
 }
 
 /// Builds the whole `BigNumberLabel` face as a scene.
@@ -805,11 +899,13 @@ pub fn build_big_number_label_scene(card: &BigNumberCard<'_>, metrics: &BakedFon
         }),
     ];
 
-    Scene {
-        revision: card.revision,
-        background: COLOR_CANVAS,
+    finish_scene(
+        card.revision,
+        COLOR_CANVAS,
         nodes,
-    }
+        SceneDataState::OK,
+        metrics,
+    )
 }
 
 /// Converts `LV_ALIGN_CENTER` plus an `(x, y)` offset inside a container to
@@ -1150,11 +1246,13 @@ pub fn build_icon_badge_text_scene(
 
     // `OBJ_STATE` is cleared by `template_view.c` in these OK-state parity
     // fixtures, so it has no visible scene node.
-    Scene {
-        revision: card.revision,
-        background: COLOR_CANVAS,
+    finish_scene(
+        card.revision,
+        COLOR_CANVAS,
         nodes,
-    }
+        SceneDataState::OK,
+        metrics,
+    )
 }
 
 /// Converts a row child's coordinates from its module-local frame to the
@@ -1323,11 +1421,13 @@ pub fn build_row_list_scene(card: &RowListCard<'_>, metrics: &BakedFontMetrics) 
         }));
     }
 
-    Scene {
-        revision: card.revision,
-        background: COLOR_CANVAS,
+    finish_scene(
+        card.revision,
+        COLOR_CANVAS,
         nodes,
-    }
+        SceneDataState::OK,
+        metrics,
+    )
 }
 
 /// Converts the centre of a child in `OBJ_FACE`'s local coordinate frame to
@@ -1408,7 +1508,7 @@ fn analog_tick(index: i32) -> SceneNode {
 /// All three hands use device-side rotation bindings, so the scene keeps time
 /// without a host push. `show_seconds = false` drops the second-hand node,
 /// matching `LV_OBJ_FLAG_HIDDEN` without moving anything else.
-pub fn build_analog_clock_scene(card: &AnalogClockCard, _metrics: &BakedFontMetrics) -> Scene {
+pub fn build_analog_clock_scene(card: &AnalogClockCard, metrics: &BakedFontMetrics) -> Scene {
     let mut nodes = Vec::with_capacity(17);
 
     nodes.push(SceneNode::Arc(SceneArc {
@@ -1468,11 +1568,13 @@ pub fn build_analog_clock_scene(card: &AnalogClockCard, _metrics: &BakedFontMetr
 
     // `OBJ_STATE` is empty in the OK-state parity fixtures, so it has no
     // visible scene node.
-    Scene {
-        revision: card.revision,
-        background: COLOR_CANVAS,
+    finish_scene(
+        card.revision,
+        COLOR_CANVAS,
         nodes,
-    }
+        SceneDataState::OK,
+        metrics,
+    )
 }
 
 /// Adds one of `progress_ring.c`'s three fixed module stacks. The caption is
@@ -1635,11 +1737,13 @@ pub fn build_progress_ring_scene(card: &ProgressRingCard<'_>, metrics: &BakedFon
         metrics,
     );
 
-    Scene {
-        revision: card.revision,
-        background: COLOR_CANVAS,
+    finish_scene(
+        card.revision,
+        COLOR_CANVAS,
         nodes,
-    }
+        SceneDataState::OK,
+        metrics,
+    )
 }
 
 #[cfg(test)]
@@ -1893,6 +1997,44 @@ mod tests {
         assert_eq!(7, scene.revision);
         // DESKMATE_COLOR_CANVAS.
         assert_eq!(0x0000_0000, scene.background);
+    }
+
+    #[test]
+    fn the_shared_footer_prioritises_error_and_treats_an_empty_error_as_absent() {
+        let ok = scene_at(10, 9, true);
+        let stale = with_scene_data_state(
+            ok.clone(),
+            SceneDataState {
+                stale: true,
+                error: Some(""),
+            },
+            &BakedFontMetrics::SHIPPED,
+        );
+        let error = with_scene_data_state(
+            ok.clone(),
+            SceneDataState {
+                stale: true,
+                error: Some("Sync failed"),
+            },
+            &BakedFontMetrics::SHIPPED,
+        );
+
+        assert_eq!(stale.nodes.len(), ok.nodes.len() + 1);
+        let stale_footer = text(&stale, stale.nodes.len() - 1);
+        assert_eq!(SceneValue::Literal("Stale".to_string()), stale_footer.value);
+        assert_eq!(COLOR_STALE, stale_footer.color);
+        assert_eq!(1, stale_footer.x);
+        assert_eq!(SCENE_CANVAS_WIDTH - 1, stale_footer.w);
+        assert_eq!(348, stale_footer.baseline_y);
+        assert_eq!(SceneAlign::Center, stale_footer.align);
+        assert_eq!(SceneFont::Baked(SceneFontTier::Caption), stale_footer.font);
+
+        let error_footer = text(&error, error.nodes.len() - 1);
+        assert_eq!(
+            SceneValue::Literal("Sync failed".to_string()),
+            error_footer.value
+        );
+        assert_eq!(COLOR_ERROR, error_footer.color);
     }
 
     #[test]

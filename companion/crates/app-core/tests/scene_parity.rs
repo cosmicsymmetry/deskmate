@@ -40,10 +40,12 @@
 
 use app_core::scene_build::{
     AnalogClockCard, BakedFontMetrics, BigNumberCard, ClockCard, IconBadgeCard, ProgressRingCard,
-    RowListCard, build_analog_clock_scene, build_big_number_label_scene, build_digital_clock_scene,
-    build_icon_badge_text_scene, build_progress_ring_scene, build_row_list_scene,
+    RowListCard, SceneDataState, build_analog_clock_scene, build_big_number_label_scene,
+    build_digital_clock_scene, build_icon_badge_text_scene, build_progress_ring_scene,
+    build_row_list_scene, with_scene_data_state,
 };
 use chrono::{NaiveDate, NaiveDateTime};
+use lvgl_sim::cases::STATE_FOOTER_FIXTURES;
 use lvgl_sim::scene::{
     SceneRenderRequest, SceneTemporalPair, SceneTemporalPairRequest, SceneTimer,
 };
@@ -991,6 +993,56 @@ fn add_analog_clock_cases(cases: &mut Vec<ParityCase>) {
     }
 }
 
+fn add_state_footer_cases(cases: &mut Vec<ParityCase>) {
+    let templates = [
+        ("digital-clock", SimTemplate::DigitalClock),
+        ("big-number-label", SimTemplate::BigNumberLabel),
+        ("row-list", SimTemplate::RowList),
+        ("icon-badge-text", SimTemplate::IconBadgeText),
+        ("progress-ring", SimTemplate::ProgressRing),
+        ("analog-clock", SimTemplate::AnalogClock),
+    ];
+
+    let mut footer_cases = Vec::with_capacity(24);
+    for (template_slug, template_kind) in templates {
+        for (orientation_slug, orientation) in [
+            ("landscape", SimOrientation::Landscape),
+            ("flipped", SimOrientation::LandscapeFlipped),
+        ] {
+            let base = cases
+                .iter()
+                .find(|case| {
+                    case.template_kind() == template_kind
+                        && case.template.orientation == orientation
+                })
+                .unwrap_or_else(|| {
+                    panic!("{template_slug} must have a {orientation_slug} parity row")
+                });
+
+            for state in STATE_FOOTER_FIXTURES {
+                let mut template = base.template.clone();
+                template.fields.extend(state.fields());
+                let mut scene = base.scene.clone();
+                scene.scene = with_scene_data_state(
+                    scene.scene,
+                    SceneDataState {
+                        stale: state.stale,
+                        error: state.error,
+                    },
+                    &BakedFontMetrics::SHIPPED,
+                );
+                footer_cases.push(ParityCase {
+                    name: format!("{template_slug}--state-{}--{orientation_slug}", state.slug),
+                    template,
+                    scene,
+                    known_gap: None,
+                });
+            }
+        }
+    }
+    cases.extend(footer_cases);
+}
+
 fn cases() -> Vec<ParityCase> {
     let mut cases = Vec::new();
     for instant in INSTANTS {
@@ -1057,7 +1109,17 @@ fn cases() -> Vec<ParityCase> {
     add_icon_badge_text_cases(&mut cases);
     add_progress_ring_cases(&mut cases);
     add_analog_clock_cases(&mut cases);
+    add_state_footer_cases(&mut cases);
     cases
+}
+
+#[test]
+fn the_parity_table_has_108_existing_plus_24_state_rows() {
+    // The plan froze its 106-row baseline before Task 2 added two necessary
+    // zero-duration ProgressRing rows. Keep that coverage: Task 5 adds its
+    // promised 24 rows to the actual baseline rather than deleting two rows
+    // merely to recover the stale total of 130.
+    assert_eq!(cases().len(), 132);
 }
 
 /// Where two frames differ, in enough detail to localise the failure without a
@@ -1226,6 +1288,14 @@ fn show_seconds(case: &ParityCase) -> Option<bool> {
         })
 }
 
+fn has_visible_data_state(case: &ParityCase) -> bool {
+    case.template.fields.iter().any(|field| match &field.value {
+        SimFieldValue::Boolean(value) => field.name == "stale" && *value,
+        SimFieldValue::Text(value) => field.name == "error" && !value.is_empty(),
+        SimFieldValue::Integer(_) => false,
+    })
+}
+
 fn same_render_context(left: &ParityCase, right: &ParityCase) -> bool {
     left.template_kind() == right.template_kind()
         && left.template.utc_offset_minutes == right.template.utc_offset_minutes
@@ -1244,7 +1314,9 @@ fn the_instant_table_covers_what_it_claims_to() {
     let cases = cases();
     let digital_clock_cases = cases
         .iter()
-        .filter(|case| case.template_kind() == SimTemplate::DigitalClock)
+        .filter(|case| {
+            case.template_kind() == SimTemplate::DigitalClock && !has_visible_data_state(case)
+        })
         .collect::<Vec<_>>();
     assert_eq!(
         digital_clock_cases.len(),
@@ -1379,11 +1451,11 @@ fn hiding_the_seconds_changes_both_halves() {
     let cases = cases();
     let with_seconds = cases
         .iter()
-        .filter(|case| show_seconds(case) == Some(true))
+        .filter(|case| !has_visible_data_state(case) && show_seconds(case) == Some(true))
         .collect::<Vec<_>>();
     let without_seconds_count = cases
         .iter()
-        .filter(|case| show_seconds(case) == Some(false))
+        .filter(|case| !has_visible_data_state(case) && show_seconds(case) == Some(false))
         .count();
     assert_eq!(
         with_seconds.len(),
@@ -1398,7 +1470,11 @@ fn hiding_the_seconds_changes_both_halves() {
     for with in with_seconds {
         let partners = cases
             .iter()
-            .filter(|case| show_seconds(case) == Some(false) && same_render_context(with, case))
+            .filter(|case| {
+                !has_visible_data_state(case)
+                    && show_seconds(case) == Some(false)
+                    && same_render_context(with, case)
+            })
             .collect::<Vec<_>>();
         assert_eq!(
             partners.len(),
@@ -1437,9 +1513,9 @@ fn hiding_the_seconds_changes_both_halves() {
 /// The single most expensive way to get this gate wrong is to drive the C side
 /// without `template_view.c`'s state update, which leaves `OBJ_STATE` holding
 /// `LV_LABEL_DEFAULT_TEXT` — the literal word `"Text"`, bottom-centre, in a
-/// region *neither* source file appears to draw. The scene omits that node
-/// entirely, so the mistake would surface as an unexplained band of differing
-/// pixels rather than as a fixture error.
+/// region *neither* source file appears to draw. In an OK row the scene omits
+/// that node entirely, so the mistake would surface as an unexplained band of
+/// differing pixels rather than as a fixture error.
 ///
 /// This pins the hazard directly instead of leaving it to a comment. This
 /// particular blank-strip invariant is specific to `DigitalClock`: later
@@ -1447,9 +1523,11 @@ fn hiding_the_seconds_changes_both_halves() {
 /// is the two modules, which end at
 /// `MODULE_Y + MODULE_H = 176 + 136 = 312`; the state footer would sit at
 /// `LV_ALIGN_BOTTOM_MID` minus `2 * DESKMATE_GRID`, i.e. inside the strip below
-/// it. So every pixel from y=316 down must be the canvas colour, on both sides.
+/// it. The strip must be blank for OK rows and non-blank for the explicit
+/// stale/error rows. The flipped framebuffer reverses the finished canvas, so
+/// the same strip is at the top in that orientation.
 #[test]
-fn neither_half_draws_anything_in_the_state_footer_strip() {
+fn the_state_footer_strip_is_blank_only_for_ok_rows() {
     /// `MODULE_Y + MODULE_H`, plus a few rows of slack.
     const FOOTER_TOP: u32 = 316;
     /// `DESKMATE_COLOR_CANVAS` (0x000000) in RGB565.
@@ -1466,6 +1544,7 @@ fn neither_half_draws_anything_in_the_state_footer_strip() {
     );
 
     for case in digital_clock_cases {
+        let footer_expected = has_visible_data_state(&case);
         let template = sim
             .render(&case.template)
             .unwrap_or_else(|error| panic!("{}: C template render failed: {error}", case.name));
@@ -1474,19 +1553,33 @@ fn neither_half_draws_anything_in_the_state_footer_strip() {
             .unwrap_or_else(|error| panic!("{}: scene render failed: {error}", case.name));
 
         for (which, pixels) in [("C template", &template), ("scene", &scene)] {
-            let start = (FOOTER_TOP * LOGICAL_WIDTH) as usize;
-            let lit = pixels[start..]
-                .iter()
+            let y_range = match case.template.orientation {
+                SimOrientation::Landscape => FOOTER_TOP..LOGICAL_HEIGHT,
+                SimOrientation::LandscapeFlipped => 0..(LOGICAL_HEIGHT - FOOTER_TOP),
+            };
+            let lit = y_range
+                .flat_map(|y| {
+                    let start = (y * LOGICAL_WIDTH) as usize;
+                    pixels[start..start + LOGICAL_WIDTH as usize].iter()
+                })
                 .filter(|pixel| **pixel != CANVAS)
                 .count();
-            assert_eq!(
-                lit, 0,
-                "{}: {which} drew {lit} lit pixels below y={FOOTER_TOP}. For the C \
-                 template that means the fixture bypassed template_view.c's \
-                 update_data_state() and is rendering LV_LABEL_DEFAULT_TEXT; for \
-                 the scene it means a node moved into the footer strip",
-                case.name
-            );
+            if footer_expected {
+                assert!(
+                    lit > 0,
+                    "{}: {which} did not draw its requested state footer",
+                    case.name
+                );
+            } else {
+                assert_eq!(
+                    lit, 0,
+                    "{}: {which} drew {lit} unexpected footer-strip pixels. For the C \
+                     template that means the fixture bypassed template_view.c's \
+                     update_data_state() and is rendering LV_LABEL_DEFAULT_TEXT; for \
+                     the scene it means an OK-state node moved into the footer strip",
+                    case.name
+                );
+            }
         }
     }
 }

@@ -39,23 +39,24 @@
 //! [`build_digital_clock_scene`]'s own doc comment.
 
 use app_core::scene_build::{
-    BakedFontMetrics, BigNumberCard, ClockCard, IconBadgeCard, RowListCard,
+    BakedFontMetrics, BigNumberCard, ClockCard, IconBadgeCard, ProgressRingCard, RowListCard,
     build_big_number_label_scene, build_digital_clock_scene, build_icon_badge_text_scene,
-    build_row_list_scene,
+    build_progress_ring_scene, build_row_list_scene,
 };
 use chrono::{NaiveDate, NaiveDateTime};
-use lvgl_sim::scene::SceneRenderRequest;
+use lvgl_sim::scene::{SceneRenderRequest, SceneTimer};
 use lvgl_sim::{
     LOGICAL_HEIGHT, LOGICAL_WIDTH, RenderRequest, SimField, SimFieldValue, SimOrientation,
     SimTemplate, Simulator,
 };
 use std::collections::BTreeSet;
 
-const EXPECTED_TEMPLATES: [SimTemplate; 4] = [
+const EXPECTED_TEMPLATES: [SimTemplate; 5] = [
     SimTemplate::DigitalClock,
     SimTemplate::BigNumberLabel,
     SimTemplate::RowList,
     SimTemplate::IconBadgeText,
+    SimTemplate::ProgressRing,
 ];
 
 /// `big_number_label.c`'s `CONTENT_WIDTH`.
@@ -566,6 +567,103 @@ fn add_icon_badge_text_cases(cases: &mut Vec<ParityCase>) {
     }
 }
 
+fn add_progress_ring_cases(cases: &mut Vec<ParityCase>) {
+    const DURATION_SECONDS: i64 = 1_500;
+    let variants = [
+        (
+            "paused-mid-countdown",
+            900,
+            false,
+            "SceneArc has no per-arc opacity; the track edge differs by 275 pixels",
+        ),
+        (
+            "running-at-zero",
+            0,
+            true,
+            "SceneArc has no per-arc opacity; the exposed track edge differs by 592 pixels",
+        ),
+        (
+            "finished",
+            0,
+            false,
+            "SceneArc has no per-arc opacity; the exposed track edge differs by 592 pixels",
+        ),
+        (
+            "never-started",
+            DURATION_SECONDS,
+            false,
+            "SceneArc has no per-arc opacity; 64 composited edge pixels differ under the full indicator",
+        ),
+    ];
+
+    // `running-mid-countdown` is deliberately excluded. The simulator's fixed
+    // tick makes its C face deterministic, but matching it would require the
+    // shipping builder to know the simulator's private 840 ms anchor offset.
+    // This is builder-must-not-know-the-tick, not a flakiness exclusion.
+    for (slug, remaining_seconds, running, known_gap) in variants {
+        for (orientation_slug, orientation) in [
+            ("landscape", SimOrientation::Landscape),
+            ("flipped", SimOrientation::LandscapeFlipped),
+        ] {
+            let label = "Pomodoro";
+            cases.push(ParityCase {
+                // Both orientations have the same count: flipping reverses
+                // the finished framebuffer and cannot change the number of
+                // differing pixels.
+                known_gap: Some(known_gap),
+                name: format!("progress-ring--{slug}--{orientation_slug}"),
+                template: RenderRequest {
+                    template: SimTemplate::ProgressRing,
+                    fields: vec![
+                        SimField {
+                            name: "label".to_string(),
+                            value: SimFieldValue::Text(label.to_string()),
+                        },
+                        SimField {
+                            name: "duration_seconds".to_string(),
+                            value: SimFieldValue::Integer(DURATION_SECONDS),
+                        },
+                        SimField {
+                            name: "remaining_seconds".to_string(),
+                            value: SimFieldValue::Integer(remaining_seconds),
+                        },
+                        SimField {
+                            name: "running".to_string(),
+                            value: SimFieldValue::Boolean(running),
+                        },
+                    ],
+                    utc_offset_minutes: 0,
+                    now_unix_seconds: 0,
+                    orientation,
+                },
+                scene: SceneRenderRequest {
+                    scene: build_progress_ring_scene(
+                        &ProgressRingCard {
+                            revision: 1,
+                            label,
+                            duration_seconds: DURATION_SECONDS,
+                            remaining_seconds,
+                            running,
+                        },
+                        &BakedFontMetrics::SHIPPED,
+                    ),
+                    assets: Vec::new(),
+                    utc_offset_minutes: 0,
+                    now_unix_seconds: 0,
+                    timer: Some(SceneTimer {
+                        remaining_ms: u32::try_from(remaining_seconds * 1_000)
+                            .expect("the fixture is inside u32"),
+                        pct: u8::try_from(remaining_seconds * 100 / DURATION_SECONDS)
+                            .expect("the fixture percentage is in 0..=100"),
+                    }),
+                    fields: Vec::new(),
+                    orientation,
+                },
+            });
+        }
+    }
+}
+
 fn cases() -> Vec<ParityCase> {
     let mut cases = Vec::new();
     for instant in INSTANTS {
@@ -630,6 +728,7 @@ fn cases() -> Vec<ParityCase> {
     add_big_number_cases(&mut cases);
     add_row_list_cases(&mut cases);
     add_icon_badge_text_cases(&mut cases);
+    add_progress_ring_cases(&mut cases);
     cases
 }
 

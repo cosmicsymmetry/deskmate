@@ -709,7 +709,8 @@ export const ipcContractFixtures = {
     "host-tap-actions",
     "asset-transfer",
     "firmware-update",
-    "networking"
+    "networking",
+    "scene-render"
   ],
   "runtime_states": [
     {

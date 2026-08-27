@@ -144,9 +144,22 @@ pub enum DeviceCapability {
     AssetTransfer,
     FirmwareUpdate,
     Networking,
+    SceneRender,
 }
 
 impl DeviceCapability {
+    const ALL: [Self; 9] = [
+        Self::CoreWidgets,
+        Self::ConfigRotation,
+        Self::DashboardLayouts,
+        Self::ExtendedTemplates,
+        Self::HostTapActions,
+        Self::AssetTransfer,
+        Self::FirmwareUpdate,
+        Self::Networking,
+        Self::SceneRender,
+    ];
+
     pub const fn bit(self) -> u64 {
         match self {
             Self::CoreWidgets => protocol::CAPABILITY_CORE_WIDGETS,
@@ -157,6 +170,7 @@ impl DeviceCapability {
             Self::AssetTransfer => protocol::CAPABILITY_ASSET_TRANSFER,
             Self::FirmwareUpdate => protocol::CAPABILITY_FIRMWARE_UPDATE,
             Self::Networking => protocol::CAPABILITY_NETWORKING,
+            Self::SceneRender => protocol::CAPABILITY_SCENE_RENDER,
         }
     }
 
@@ -173,34 +187,56 @@ impl DeviceCapability {
             Self::AssetTransfer => "icon and font asset transfer",
             Self::FirmwareUpdate => "firmware update",
             Self::Networking => "networking",
+            Self::SceneRender => "declarative scene rendering",
         }
     }
 
     pub fn from_bits(bits: u64) -> Vec<Self> {
-        const ALL: [DeviceCapability; 8] = [
-            DeviceCapability::CoreWidgets,
-            DeviceCapability::ConfigRotation,
-            DeviceCapability::DashboardLayouts,
-            DeviceCapability::ExtendedTemplates,
-            DeviceCapability::HostTapActions,
-            DeviceCapability::AssetTransfer,
-            DeviceCapability::FirmwareUpdate,
-            DeviceCapability::Networking,
-        ];
-        ALL.into_iter()
+        Self::ALL
+            .into_iter()
             .filter(|capability| bits & capability.bit() != 0)
             .collect()
     }
 
     pub const fn known_bits() -> u64 {
-        protocol::CAPABILITY_CORE_WIDGETS
-            | protocol::CAPABILITY_CONFIG_ROTATION
-            | protocol::CAPABILITY_DASHBOARD_LAYOUTS
-            | protocol::CAPABILITY_EXTENDED_TEMPLATES
-            | protocol::CAPABILITY_HOST_TAP_ACTIONS
-            | protocol::CAPABILITY_ASSET_TRANSFER
-            | protocol::CAPABILITY_FIRMWARE_UPDATE
-            | protocol::CAPABILITY_NETWORKING
+        let mut bits = 0;
+        let mut index = 0;
+        while index < Self::ALL.len() {
+            bits |= Self::ALL[index].bit();
+            index += 1;
+        }
+        bits
+    }
+}
+
+#[cfg(test)]
+mod device_capability_tests {
+    use super::DeviceCapability;
+
+    #[test]
+    fn every_current_firmware_capability_has_a_host_name() {
+        let unnamed_bits = protocol::CURRENT_CAPABILITIES & !DeviceCapability::known_bits();
+
+        assert_eq!(
+            unnamed_bits, 0,
+            "current firmware advertises capability bits the host cannot name: {unnamed_bits:#018x}"
+        );
+    }
+
+    #[test]
+    fn scene_render_capability_has_a_person_facing_name_and_round_trips() {
+        assert_eq!(
+            DeviceCapability::SceneRender.bit(),
+            protocol::CAPABILITY_SCENE_RENDER
+        );
+        assert_eq!(
+            DeviceCapability::SceneRender.label(),
+            "declarative scene rendering"
+        );
+        assert_eq!(
+            DeviceCapability::from_bits(protocol::CAPABILITY_SCENE_RENDER),
+            vec![DeviceCapability::SceneRender]
+        );
     }
 }
 

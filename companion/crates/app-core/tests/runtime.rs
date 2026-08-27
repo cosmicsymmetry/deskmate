@@ -695,12 +695,11 @@ fn wait_for(timeout: Duration, predicate: impl Fn() -> bool) {
 }
 
 #[test]
-fn v2_status_and_networking_capability_survive_into_the_device_snapshot() {
+fn v2_status_and_current_capabilities_survive_into_the_device_snapshot() {
     let control = MockDeviceControl::default();
     let unknown_bit = 1_u64 << 63;
     let mut device_status = status(42);
-    device_status.capabilities =
-        protocol::CAPABILITY_CORE_WIDGETS | protocol::CAPABILITY_NETWORKING | unknown_bit;
+    device_status.capabilities = protocol::CURRENT_CAPABILITIES | unknown_bit;
     device_status.tier = protocol::Tier::Networked;
     device_status.wifi_state = protocol::WifiState::Failed;
     device_status.wifi_rssi = -58;
@@ -729,8 +728,22 @@ fn v2_status_and_networking_capability_survive_into_the_device_snapshot() {
             .capabilities
             .contains(&DeviceCapability::Networking)
     );
+    assert!(
+        snapshot
+            .device
+            .capabilities
+            .contains(&DeviceCapability::SceneRender)
+    );
     assert_eq!(snapshot.device.unknown_capability_bits, unknown_bit);
     let json = serde_json::to_value(&snapshot.device).unwrap();
+    assert!(
+        json["capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|capability| capability.as_str() == Some("scene-render"))
+    );
+    assert_eq!(json["unknown_capability_bits"], "0x8000000000000000");
     assert_eq!(json["tier"], "networked");
     assert_eq!(json["wifi_state"], "failed");
     assert_eq!(json["wifi_rssi"], -58);

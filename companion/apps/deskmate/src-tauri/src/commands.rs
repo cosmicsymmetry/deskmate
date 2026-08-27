@@ -2708,6 +2708,7 @@ mod tests {
                 DeviceCapability::AssetTransfer,
                 DeviceCapability::FirmwareUpdate,
                 DeviceCapability::Networking,
+                DeviceCapability::SceneRender,
             ],
             runtime_states,
             connection_states,

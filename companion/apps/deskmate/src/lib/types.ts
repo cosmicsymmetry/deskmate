@@ -128,10 +128,7 @@ export type CalendarSource = { kind: "file"; value: string } | { kind: "url"; va
 export interface AssetSettings {
   id: string;
   source: { kind: "file"; value: string };
-  kind:
-    | { kind: "font" }
-    | { kind: "icon-font"; glyphs: IconGlyphMapping[] }
-    | { kind: "image" };
+  kind: { kind: "font" } | { kind: "icon-font"; glyphs: IconGlyphMapping[] } | { kind: "image" };
   maximum_bytes: number;
 }
 
@@ -281,7 +278,8 @@ export type DeviceCapability =
   | "host-tap-actions"
   | "asset-transfer"
   | "firmware-update"
-  | "networking";
+  | "networking"
+  | "scene-render";
 
 export interface DeviceCounters {
   host_reconnects: number;

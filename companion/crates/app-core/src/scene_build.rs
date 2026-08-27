@@ -569,6 +569,19 @@ pub fn with_scene_data_state(
     metrics: &BakedFontMetrics,
 ) -> Scene {
     push_state_footer(&mut scene.nodes, state, metrics);
+    // A five-row RowList is the binding node-count case: its 23 face nodes
+    // plus this footer land exactly at protocol::MAX_SCENE_NODES. Validate
+    // through the protocol's canonical bounds so adding one more RowList node
+    // fails here with the real reason instead of surfacing later as an opaque
+    // decoder refusal only when that card becomes stale or errored.
+    #[cfg(debug_assertions)]
+    {
+        let validation = protocol::validate_scene(&scene);
+        debug_assert!(
+            validation.is_ok(),
+            "scene became invalid after adding the shared data-state footer: {validation:?}"
+        );
+    }
     scene
 }
 
@@ -2035,6 +2048,39 @@ mod tests {
             error_footer.value
         );
         assert_eq!(COLOR_ERROR, error_footer.color);
+    }
+
+    #[test]
+    fn a_five_row_list_with_the_footer_is_exactly_at_the_wire_node_ceiling() {
+        let scene = build_row_list_scene(
+            &RowListCard {
+                revision: 7,
+                title: "Calendar",
+                row0_title: "Standup",
+                row0_time: "09:00",
+                row1_title: "Design review",
+                row1_time: "10:30",
+                row2_title: "Lunch",
+                row2_time: "12:00",
+                row3_title: "One-to-one",
+                row3_time: "14:00",
+                row4_title: "Planning",
+                row4_time: "16:00",
+            },
+            &BakedFontMetrics::SHIPPED,
+        );
+        let stateful = with_scene_data_state(
+            scene,
+            SceneDataState {
+                stale: true,
+                error: None,
+            },
+            &BakedFontMetrics::SHIPPED,
+        );
+
+        assert_eq!(protocol::MAX_SCENE_NODES, stateful.nodes.len());
+        protocol::validate_scene(&stateful)
+            .expect("the maximal RowList plus its shared footer must remain pushable");
     }
 
     #[test]

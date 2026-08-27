@@ -64,11 +64,10 @@ pub struct StateFooterFixture {
 impl StateFooterFixture {
     /// The real template fields that make `template_view.c` apply this state.
     pub fn fields(self) -> Vec<SimField> {
-        if let Some(error) = self.error {
-            vec![text("error", error)]
-        } else {
-            vec![boolean("stale", self.stale)]
-        }
+        vec![
+            boolean("stale", self.stale),
+            text("error", self.error.unwrap_or("")),
+        ]
     }
 }
 
@@ -81,7 +80,10 @@ pub const STATE_FOOTER_FIXTURES: [StateFooterFixture; 2] = [
     },
     StateFooterFixture {
         slug: "error",
-        stale: false,
+        // Deliberately true as well: every error parity row proves that the
+        // C `template_view.c` path and the scene helper both give a non-empty
+        // error precedence over stale.
+        stale: true,
         error: Some("Sync failed"),
     },
 ];

@@ -323,16 +323,23 @@ of letting code and documentation diverge.
     the out-of-bounds write is then rejected by `scene_model_validate()` with the same error
     code the test asserts.
 
-- **Stage 2b (scene templates) is software-complete and owes ONE hardware check.** Plan
+- **Stage 2b (scene templates) is COMPLETE; all six exit criteria are met.** Plan
   `docs/superpowers/plans/2026-08-26-deskmate-scene-templates.md`. **All six C templates are
   now reproduced by host-built scenes and are byte-identical at both orientations: 106
   parity rows, 0 differing pixels, no tolerance.** Protocol stays v1 and additive,
   `PROTOCOL_CURRENT_CAPABILITIES` stays **491**, config schema stays v5.
-  - Four firmware needs were found across the stage and **all four ride one unpublished
-    image**, so the cost is one OTA download and one power cycle rather than four:
-    `SceneArc.opacity` (key 9), an axis-wise canvas-bounded **external** rot-rect pivot,
-    `SceneRect.clip` (key 7) and `SceneRotRect.clip` (key 10). Deferring each one as it was
-    found, rather than fixing it in place, is what made that possible.
+  - Four firmware needs were found across the stage and **all four rode one image**, so the
+    cost was one OTA download and one power cycle rather than four: `SceneArc.opacity`
+    (key 9), an axis-wise canvas-bounded **external** rot-rect pivot, `SceneRect.clip`
+    (key 7) and `SceneRotRect.clip` (key 10). Deferring each one as it was found, rather
+    than fixing it in place, is what made that possible. **The OTA check PASSED
+    2026-08-27** on `v2.0.0-scene3` — recorded in `docs/hardware/board-notes.md`. Flat
+    internal RAM has now predicted a clean download twice; that is two data points, not a
+    law, and the check stays.
+  - **But the renderer's four new capabilities have never drawn on hardware.** The check
+    was a download; no scene was pushed. Arc opacity, an external pivot and either clip are
+    proven only by a **simulator-to-simulator** gate, and real 270° geometry is provable
+    only by looking at the panel. Do not describe them as hardware-verified.
   - **The pivot bound was a specification error worth not repeating.** Task 1b pinned "a
     pivot outside the rect is rejected" into both validators — a rule true of every object
     it modelled (the hands, where `pivot_y = length = h`) and false of the one it did not

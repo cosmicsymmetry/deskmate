@@ -584,7 +584,7 @@ template fails the second.
 | 2 | firmware host tests and `sanitize` | **met** |
 | 3 | `idf.py build` clean with memory deltas recorded | **met** — all five internal-RAM figures delta 0 |
 | 4 | **all six templates byte-identical at both orientations** | **met** — 106 rows, 0 differing pixels, no `known_gap` marker left |
-| 5 | an OTA download completes on the board | **OWED** — the image is built but not published; this is the only remaining item |
+| 5 | an OTA download completes on the board | **met** — `v2.0.0-scene3` downloaded, installed and rebooted on `dev-0005`, 2026-08-27 |
 | 6 | the ledger exists and names every value that would go stale | **met** — `docs/scene/template-parity-ledger.md` |
 
 Criterion 3's figures are a **same-tree** before/after, which is the only form that means
@@ -594,12 +594,18 @@ Only flash `.text` moved, 1,140,180 → 1,141,824. **That is not a substitute fo
 5**: this repository has twice lost days to memory-layout shifts with every test green, and
 flat figures have predicted a clean download exactly once.
 
-Criterion 5 costs **one** OTA download and one power cycle for **four** firmware needs,
-because the image was never published between them. Publishing is three steps and all
-three are required: put `<version>.bin` in `$DESKMATE_FIRMWARE_DIR`, set
-`DESKMATE_FIRMWARE_VERSION` to that string, restart the server. A power cycle alone proves
-nothing if nothing is published, and a USB unplug is link loss rather than power loss
-because the board has a battery.
+Criterion 5 cost **one** OTA download and one power cycle for **four** firmware needs,
+because the image was never published between them. Observed 2026-08-27:
+`firmware_version: v2.0.0-scene3`, `ota_state: idle`, `last_ota_error: null`, link
+connected, every frame/queue counter clean, and no artifacts on the panel. Recorded in
+`docs/hardware/board-notes.md`.
+
+**All six exit criteria are met and stage 2b is complete.**
+
+What that check does *not* prove is worth stating, because the stage's headline result
+invites over-reading: no scene was pushed, so arc opacity, an external pivot and either
+clip have **never drawn on hardware**. The gate proving them is simulator-to-simulator, and
+real 270° geometry is only ever provable by looking at the panel. Stage 3 owes that.
 
 Stage 3 — retiring the C templates, the plugin manifest, and curated plugins — is planned at
 this plan's exit, from the ledger. Note the ledger's own conclusion: **two** templates are

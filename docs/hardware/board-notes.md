@@ -3696,10 +3696,10 @@ created in this instance. The honest check is a full cycle: let the device
 connect, let the link drop, and confirm CPU stays flat afterwards. Until that is
 observed, this is fixed in test and unproven in the field.
 
-## Stage 2b's four firmware needs published as `v2.0.0-scene3` — 2026-08-27, DOWNLOAD NOT YET OBSERVED
+## Stage 2b OTA check — PASSED 2026-08-27, `v2.0.0-scene3`
 
-**This entry records a publish, not a result.** The OTA download has not been seen on
-the board. Do not read it as verification.
+One image carrying **four** firmware needs downloaded, installed and rebooted on `dev-0005`
+over `deskmate.rodi.one`. Owner-reported: the panel showed no artifacts.
 
 One image carries all four firmware needs stage 2b surfaced, because it was never
 published between them:
@@ -3749,15 +3749,66 @@ round trip here and will again.
 nothing about the board's health — only that the link is down, which is expected while
 the board is off or asleep.
 
-### What is owed
+### The result
 
-A power cycle. The device checks once at boot and twice a day, cannot be asked, and the
-board has a battery, so **a USB unplug is link loss, not power loss**. On the next boot it
-should download `v2.0.0-scene3`, install, reboot onto the new slot and survive the rollback
-window. The evidence standard is the one the 2026-08-25 and 2026-08-26 entries used:
-`firmware_version: v2.0.0-scene3`, `ota_state: idle`, `last_ota_error: null`, link
-connected, observed after the reboot.
+Owner power-cycled; the device downloaded and installed. `GET /v1/devices/dev-0005`
+immediately after, quoted rather than paraphrased:
 
-Note that the server binary at `/usr/local/bin/deskmate-server` was **not** rebuilt. It did
-not need to be: nothing in stage 2b changed the server, and the OTA check exercises the
-firmware catalog and the device's updater, neither of which moved.
+```
+firmware_version   v2.0.0-scene3      ota_state          idle
+last_ota_error     null               last_network_error null
+connected          true               wifi_state         connected
+uptime_ms          69670              wifi_rssi          -76 dBm
+rotation           270                tier               networked
+free_heap          8299971            protocol_version   1
+```
+
+Every counter clean: `crc_errors` 0, `malformed_frames` 0, `overflow_frames` 0,
+`dropped_events` 0, `dropped_responses` 0, `dropped_ui_commands` 0, `rx_dropped_bytes` 0,
+`valid_frames` 43, `event_queue_high_water` 1, `ui_queue_high_water` 1. `host_reconnects`
+is 1, which is the server restart during publishing, not a link fault.
+
+**This is the whole hardware cost of stage 2b, and it bought four firmware needs**:
+`SceneArc.opacity`, the external rot-rect pivot, `SceneRect.clip` and `SceneRotRect.clip`.
+Deferring each one as it was found rather than fixing it in place is what collapsed four
+verifications into one.
+
+**Flat internal RAM has now predicted a clean download twice** (2026-08-26, 2026-08-27).
+That is two data points, not a law — the failure mode it guards against is *deterministic*,
+so a pass says the layout did not move somewhere fatal, not that it never can. Keep running
+the check.
+
+Note `free_heap` reads ~8 MB. That is PSRAM and is **not** a TLS health signal on this
+board.
+
+**What this does NOT prove.** The download and the absence of artifacts, nothing more. No
+scene was pushed, so the four new node capabilities were not exercised on the panel — arc
+opacity, an external pivot, and either clip have never drawn on hardware. The parity gate
+that proves them is simulator-to-simulator, and real 270° geometry is only ever provable by
+looking at the panel. Stage 3 owes that observation.
+
+### Two things learned while publishing
+
+**The server binary was deliberately not rebuilt**, and did not need to be: nothing in
+stage 2b changed the server, and the check exercises the firmware catalog and the device's
+updater, neither of which moved. `POST /v1/devices/{id}/scene` is present in the deployed
+binary — confirmed by probing it against controls (422 on the scene route, 405 on a
+known-present route, 404 on a bogus one).
+
+**A `strings`-based conclusion about that binary was wrong, and the controls caught it.**
+`strings` is not installed on the VM, so `strings … | grep -c` returned 0 for every pattern
+including ones certain to be present. A zero from a tool that is not there looks exactly
+like a zero from a tool that ran. Calibrate a negative against a positive control before
+believing it.
+
+### A defect this check surfaced, unrelated to the OTA
+
+The same query reports `unknown_capability_bits: 0x0000000000000100` — bit 8,
+`CAPABILITY_SCENE_RENDER` — and lists only six named capabilities. The device correctly
+advertises 491; **the host cannot name bit 8**. This is not stale deployment:
+`companion/crates/protocol` defines and exports `CAPABILITY_SCENE_RENDER`, but
+`app-core`'s `DeviceCapability` enum has eight variants and never learned it, so `bit()`,
+`label()`, `from_bits()` and `known_bits()` all omit it. A freshly built server reports the
+same. The consequence is exactly what that enum exists to prevent — its own doc comment
+says a raw bitmask "tells the user nothing about what to change or which firmware to
+install", and every scene-capable device now trips that path.

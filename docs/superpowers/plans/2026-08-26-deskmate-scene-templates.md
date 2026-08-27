@@ -198,22 +198,30 @@ already exists on the host and is **never exercised by the stage 2a gate**, whic
 exactly one string width. Cover the step-down boundary directly: a value that just fits at
 `Hero`, one that just misses it, and one that misses `Display` too.
 
-- [ ] **Step 1: Write the failing rows.** Add cases to `cases()` covering, at both
+- [x] **Step 1: Write the failing rows.** Add cases to `cases()` covering, at both
       orientations: a short value (`"7"`), a value at the step-down boundary in both
       directions, a value long enough to reach the lowest tier, and a value with a
       non-digit that forces `text_is_numeric()` false. Add `BigNumberLabel` to
       `EXPECTED_TEMPLATES`.
-- [ ] **Step 2: Run and watch it fail** with the builder missing.
+- [x] **Step 2: Run and watch it fail** with the builder missing.
       Run: `cargo test -p app-core --test scene_parity`
-- [ ] **Step 3: Implement `build_big_number_label_scene`** following
+- [x] **Step 3: Implement `build_big_number_label_scene`** following
       `build_digital_clock_scene`'s shape: read the constants from `big_number_label.c`
       rather than re-deriving them, anchor text by baseline, and choose the tier through
       the existing `number_font_tier()`.
-- [ ] **Step 4: Run to green, then dump-and-look once.** A passing byte comparison is the
+- [x] **Step 4: Run to green, then dump-and-look once.** A passing byte comparison is the
       gate, but open one PNG pair anyway the first time a template lands — a builder that
       reproduces the wrong thing consistently is still wrong, and the gate cannot tell you
       that.
-- [ ] **Step 5: Gates and commit.** `feat: build BigNumberLabel as a scene`
+- [x] **Step 5: Gates and commit.** `feat: build BigNumberLabel as a scene`
+      **Delivered 2026-08-26** (`dbf8ec2`). 20 parity rows, 10 variants at both
+      orientations, byte-identical. Boundary strings are derived from
+      `BakedFontMetrics::SHIPPED` rather than hardcoded, so a font change cannot quietly
+      stop a "just fits" case from testing the boundary. Two findings: the title chip and
+      the value pill look identical in the C and are not (the title is a real
+      `deskmate_chip()` with `letter_space` 1; the value pill is hand-built with
+      `letter_space` 0 and `pad_ver = GRID/2`), and LVGL centres as `parent/2 - object/2`,
+      which differs by a pixel at Display's odd 43px line.
 
 ---
 
@@ -231,20 +239,28 @@ behaviour is width-constrained text: `SceneText` carries `w`, `align` and `ellip
 `ellipsize` must map onto whatever `row_list.c` sets — read it, do not assume
 `LV_LABEL_LONG_DOT`.
 
-- [ ] **Step 1: Write the failing rows**, at both orientations: a full five rows, fewer
+- [x] **Step 1: Write the failing rows**, at both orientations: a full five rows, fewer
       than five rows, an empty list, a title exactly at the truncation boundary, and one
       past it. Add `RowList` to `EXPECTED_TEMPLATES`.
-- [ ] **Step 2: Run to confirm failure.**
-- [ ] **Step 3: Implement the builder.** The `.` that `LV_LABEL_LONG_DOT` appends comes
+- [x] **Step 2: Run to confirm failure.**
+- [x] **Step 3: Implement the builder.** The `.` that `LV_LABEL_LONG_DOT` appends comes
       from the `Body` tier, the only baked face carrying letters — `BakedFontMetrics`
       documents this, and `measure()` must be used rather than an estimate.
-- [ ] **Step 4: Note the boundary case's status.** `row-list--truncation-boundary` is
+- [x] **Step 4: Note the boundary case's status.** `row-list--truncation-boundary` is
       already excluded from the *hardware* framebuffer diff because it pins a field above
       that field's registry maximum, so a device rejects the push. That exclusion is about
       hardware; the simulator has no such ceiling, so this gate **can** and must cover it.
       Say so in a comment where the case is defined, or someone will "fix" the
       inconsistency by deleting the coverage.
-- [ ] **Step 5: Gates and commit.** `feat: build RowList as a scene`
+- [x] **Step 5: Gates and commit.** `feat: build RowList as a scene`
+      **Delivered 2026-08-26** (`8721a51`). 12 comparisons over six cases at both
+      orientations, byte-identical. The count ring settled an open question: `OBJ_COUNT` is
+      an `lv_label` with a 2px circular border and no scene node has a border field, so it
+      is drawn as a nominal full-turn `SceneArc` — and **LVGL's arc path and its border
+      path agree byte for byte** at the C object's unadjusted radius and border width, with
+      nothing tuned to make that true. The first run differed only inside the digit's
+      bounding box, which localised the real cause: **a bordered `lv_obj` insets its
+      content origin by the border width**, so text sits 2px in.
 
 ---
 
@@ -261,17 +277,40 @@ Note the `background` parameter: `draw_moon()` cuts its crescent with a disc fil
 **card background colour**. `weather_icon.c` says outright not to hardcode it back to
 black. Passing it in is what keeps that true when a card's background changes.
 
-- [ ] **Step 1: Write the failing rows** covering **all 11 icons plus the unknown-ring
+- [x] **Step 1: Write the failing rows** covering **all 11 icons plus the unknown-ring
       fallback**, at both orientations. That is the coverage the M4 hardware session used
       and it is the right bar here: each icon is a distinct arrangement of discs and bars,
       so one icon passing says nothing about the next. Add `IconBadgeText` to
       `EXPECTED_TEMPLATES`.
-- [ ] **Step 2: Run to confirm failure.**
-- [ ] **Step 3: Implement the builder**, translating `disc()` to a `SceneRect` with
+- [x] **Step 2: Run to confirm failure.**
+- [x] **Step 3: Implement the builder**, translating `disc()` to a `SceneRect` with
       `radius` half the diameter and `bar()` to one with `radius = h/2`. `disc()` and
       `bar()` align with `LV_ALIGN_CENTER` plus an offset, while scene nodes are absolute:
       convert once, in one helper, rather than at each of the ~40 call sites.
-- [ ] **Step 4: Gates and commit.** `feat: build IconBadgeText as a scene`
+- [x] **Step 4: Gates and commit.** Split in two after a single-shot attempt at all
+      twelve icons ran over an hour and produced nothing. `3e6061b` landed the face
+      scaffolding plus SUN and UNKNOWN — chosen rather than taken in order, because SUN is
+      a single disc (so a failure is unambiguously in the coordinate conversion) and
+      UNKNOWN is the only icon in that half exercising the background-coloured cutout.
+      `2115107` landed the remaining artworks. Note `weather_icon.c` defines **11** distinct
+      artworks, not 12: ten named icons plus UNKNOWN, which unrecognised names reuse. Draw
+      order is load-bearing and was preserved — six of the nine overlap. Also: this face's
+      `OBJ_LABEL` is a plain fixed-width label with no fill, **not** the pill it resembles
+      in `BigNumberLabel`, which is the third near-identical-but-not pair found in this
+      stage.
+
+      **KNOWN GAP, enforced not hidden: `STORM` cannot be reproduced.** Its bolt is
+      `bar(color, 10, 40, 0, 42)`, centred at y=102 in the 120px icon box, so it spans
+      y 82..=121 and LVGL clips the last two rows against the container. Scene nodes are
+      absolute on the canvas with no parent clip, so those rows draw — 14 pixels in a
+      two-row band, at both orientations. It is not fixable on the host: `bar()` sets
+      `radius = h/2`, which LVGL clamps to `min(w,h)/2 = 5`, so the clip cuts **through**
+      the bottom rounded cap and a shorter pill would draw a whole cap at the new height,
+      which is a different shape. `ParityCase` gained a `known_gap` marker and the gate
+      asserts a marked case **still differs**, so closing the gap fails the test and forces
+      the marker to be deleted with it. Closing it needs a clip region in the scene model —
+      a firmware change, and therefore another OTA power cycle. **Deferred deliberately so
+      that one further image can carry every firmware need Tasks 5 and 6 surface.**
 
 ---
 

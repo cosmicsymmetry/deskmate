@@ -59,9 +59,11 @@
  *          hide_when_empty defaults false, horizontal_anchor defaults
  *          SCENE_LABEL_ANCHOR_LEFT (zero).
  * ROT_RECT {0: x, 1: y, 2: w, 3: h, 4: radius, 5: fill, 6: pivot_x,
- *           7: pivot_y, 8: rotation, 9: rotation_binding (text)}
+ *           7: pivot_y, 8: rotation, 9: rotation_binding (text),
+ *           10: clip ({0: x, 1: y, 2: w, 3: h})}
  *          required 0-3; style/transform integers default 0 and an empty
- *          rotation_binding means the fixed rotation field is used.
+ *          rotation_binding means the fixed rotation field is used; clip
+ *          defaults absent.
  *
  * font     {0: kind, 1: baked (tier), 2: digest (32 bytes), 3: pixel_size}
  *          required 0, plus 2 when the kind is SCENE_FONT_ASSET. The tier
@@ -918,6 +920,8 @@ static scene_model_result_t decode_rot_rect(CborValue *value,
         return status;
     }
 
+    rect->has_clip = false;
+
     uint32_t present = 0U;
     uint64_t previous = 0U;
     bool has_previous = false;
@@ -942,12 +946,18 @@ static scene_model_result_t decode_rot_rect(CborValue *value,
                                sizeof rect->rotation_binding,
                                SCENE_MAX_BINDING);
             break;
+        case 10U:
+            status = decode_clip_rect(&fields, &rect->clip);
+            if (status == SCENE_MODEL_OK) {
+                rect->has_clip = true;
+            }
+            break;
         default: status = skip_value(&fields); break;
         }
         if (status != SCENE_MODEL_OK) {
             return status;
         }
-        if (key <= 9U) {
+        if (key <= 10U) {
             present |= REQUIRED_BIT((uint32_t)key);
         }
     }

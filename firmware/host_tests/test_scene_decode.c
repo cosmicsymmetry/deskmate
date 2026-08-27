@@ -759,6 +759,75 @@ static void put_rot_rect_node(builder_t *b, int64_t rotation,
     }
 }
 
+static void put_rot_rect_node_with_clip(builder_t *b, int64_t clip_x,
+                                        int64_t clip_y, int64_t clip_w,
+                                        int64_t clip_h)
+{
+    put_map(b, 2U);
+    put_uint(b, 0U);
+    put_uint(b, SCENE_NODE_ROT_RECT);
+    put_uint(b, 1U);
+    put_map(b, 8U);
+    put_uint(b, 0U);
+    put_int(b, 223);
+    put_uint(b, 1U);
+    put_int(b, 24);
+    put_uint(b, 2U);
+    put_int(b, 3);
+    put_uint(b, 3U);
+    put_int(b, 8);
+    put_uint(b, 6U);
+    put_int(b, 1);
+    put_uint(b, 7U);
+    put_int(b, 160);
+    put_uint(b, 8U);
+    put_int(b, 300);
+    put_uint(b, 10U);
+    put_map(b, 4U);
+    put_uint(b, 0U);
+    put_int(b, clip_x);
+    put_uint(b, 1U);
+    put_int(b, clip_y);
+    put_uint(b, 2U);
+    put_int(b, clip_w);
+    put_uint(b, 3U);
+    put_int(b, clip_h);
+}
+
+static void test_a_rotated_rect_clip_decodes(void)
+{
+    builder_t b;
+    scene_t *scene = new_scene();
+
+    begin_scene(&b, 1U, 0U, 1U);
+    put_rot_rect_node_with_clip(&b, 64, 24, 320, 320);
+
+    assert(scene_decode(b.bytes, b.length, scene) == SCENE_MODEL_OK);
+    const scene_rot_rect_t *rect = &scene->nodes[0].value.rot_rect;
+    assert(rect->has_clip);
+    assert(rect->clip.x == 64);
+    assert(rect->clip.y == 24);
+    assert(rect->clip.w == 320);
+    assert(rect->clip.h == 320);
+
+    free(scene);
+}
+
+static void test_a_rotated_rect_clip_past_the_canvas_is_rejected(void)
+{
+    builder_t b;
+    scene_t *scene = new_scene();
+
+    begin_scene(&b, 1U, 0U, 1U);
+    put_rot_rect_node_with_clip(&b, SCENE_CANVAS_WIDTH, 24, 320, 320);
+
+    assert(scene_decode(b.bytes, b.length, scene) ==
+           SCENE_MODEL_ERR_GEOMETRY);
+    assert(scene->node_count == 0U);
+
+    free(scene);
+}
+
 static void test_a_label_anchor_outside_the_canvas_is_rejected(void)
 {
     builder_t b;
@@ -799,6 +868,7 @@ static void test_an_external_rotated_rect_pivot_decodes(void)
 
     assert(scene_decode(b.bytes, b.length, scene) == SCENE_MODEL_OK);
     assert(scene->nodes[0].value.rot_rect.pivot_y == 160);
+    assert(!scene->nodes[0].value.rot_rect.has_clip);
 
     free(scene);
 }
@@ -1674,6 +1744,8 @@ int main(void)
     test_an_unknown_label_anchor_is_rejected_by_the_decoder();
     test_a_rotated_rect_rotation_outside_one_turn_is_rejected();
     test_an_external_rotated_rect_pivot_decodes();
+    test_a_rotated_rect_clip_decodes();
+    test_a_rotated_rect_clip_past_the_canvas_is_rejected();
     test_a_rotated_rect_pivot_past_the_canvas_is_rejected();
     test_an_unknown_rotated_rect_binding_is_rejected();
     test_more_nodes_than_the_cap_is_rejected();

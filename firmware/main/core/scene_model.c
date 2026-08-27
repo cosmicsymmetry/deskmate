@@ -133,6 +133,11 @@ static bool rot_rect_within_canvas(const scene_rot_rect_t *rect)
     if (!rect_within_canvas(rect->x, rect->y, rect->w, rect->h)) {
         return false;
     }
+    if (rect->has_clip &&
+        !rect_within_canvas(rect->clip.x, rect->clip.y,
+                            rect->clip.w, rect->clip.h)) {
+        return false;
+    }
     /* A transform pivot is in the object's local frame but may sit outside
      * the object: analog_clock.c rotates an 8px tick around y=160. Keep the
      * untrusted value canvas-bounded on each axis. Since the object itself is

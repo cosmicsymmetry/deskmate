@@ -154,6 +154,12 @@ fn rich_scene() -> Scene {
                 pivot_y: 144,
                 rotation: 900,
                 rotation_binding: "time:minute".into(),
+                clip: Some(SceneClipRect {
+                    x: 64,
+                    y: 24,
+                    w: 320,
+                    h: 320,
+                }),
             }),
         ],
     }

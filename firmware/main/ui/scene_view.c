@@ -339,6 +339,26 @@ static int32_t rotation_for_time(scene_rotation_binding_t binding,
 
 /* ------------------------------------------------------------- builders */
 
+/* A scene display list is flat, but LVGL clips a template child to its
+ * parent. RECT and ROT_RECT use this same styleless wrapper whenever that
+ * parent relationship is part of the pixels being reproduced. Removing all
+ * styles makes the wrapper's content box exactly the declared clip box. */
+static lv_obj_t *build_clip_wrapper(lv_obj_t *parent,
+                                    const scene_clip_rect_t *clip)
+{
+    lv_obj_t *wrapper = lv_obj_create(parent);
+    if (wrapper == NULL) {
+        return NULL;
+    }
+    lv_obj_remove_style_all(wrapper);
+    lv_obj_remove_flag(wrapper,
+                       LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE |
+                           LV_OBJ_FLAG_OVERFLOW_VISIBLE);
+    lv_obj_set_size(wrapper, clip->w, clip->h);
+    lv_obj_set_pos(wrapper, clip->x, clip->y);
+    return wrapper;
+}
+
 /* `rect` -- the same object template_style.c's deskmate_module() builds: a
  * styleless lv_obj that neither scrolls nor takes clicks, carrying only a
  * fill and a corner radius. remove_style_all() is what strips the theme's
@@ -351,21 +371,10 @@ static lv_obj_t *build_rect(lv_obj_t *parent, const scene_rect_t *rect)
     int32_t object_y = rect->y;
 
     if (rect->has_clip) {
-        wrapper = lv_obj_create(parent);
+        wrapper = build_clip_wrapper(parent, &rect->clip);
         if (wrapper == NULL) {
             return NULL;
         }
-        /* remove_style_all() removes the theme and every local style, so the
-         * wrapper has zero border and padding: its content origin is its box
-         * origin. LVGL clips children against a parent's coords unless
-         * OVERFLOW_VISIBLE is set, reproducing the built-in icon container's
-         * clipping path without host-side geometry arithmetic. */
-        lv_obj_remove_style_all(wrapper);
-        lv_obj_remove_flag(wrapper,
-                           LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE |
-                               LV_OBJ_FLAG_OVERFLOW_VISIBLE);
-        lv_obj_set_size(wrapper, rect->clip.w, rect->clip.h);
-        lv_obj_set_pos(wrapper, rect->clip.x, rect->clip.y);
         object_parent = wrapper;
         object_x = rect->x - rect->clip.x;
         object_y = rect->y - rect->clip.y;
@@ -612,8 +621,26 @@ static lv_obj_t *build_rot_rect(lv_obj_t *parent,
                                 scene_rotation_binding_t *out_binding,
                                 bool *out_is_bound)
 {
-    lv_obj_t *object = lv_obj_create(parent);
+    lv_obj_t *wrapper = NULL;
+    lv_obj_t *object_parent = parent;
+    int32_t object_x = rect->x;
+    int32_t object_y = rect->y;
+
+    if (rect->has_clip) {
+        wrapper = build_clip_wrapper(parent, &rect->clip);
+        if (wrapper == NULL) {
+            return NULL;
+        }
+        object_parent = wrapper;
+        object_x = rect->x - rect->clip.x;
+        object_y = rect->y - rect->clip.y;
+    }
+
+    lv_obj_t *object = lv_obj_create(object_parent);
     if (object == NULL) {
+        if (wrapper != NULL) {
+            lv_obj_delete(wrapper);
+        }
         return NULL;
     }
 
@@ -628,7 +655,7 @@ static lv_obj_t *build_rot_rect(lv_obj_t *parent,
     lv_obj_set_style_transform_pivot_x(object, rect->pivot_x, 0);
     lv_obj_set_style_transform_pivot_y(object, rect->pivot_y, 0);
 
-    lv_obj_set_pos(object, rect->x, rect->y);
+    lv_obj_set_pos(object, object_x, object_y);
     *out_is_bound = scene_model_parse_rotation_binding(
         rect->rotation_binding, out_binding) &&
         *out_binding != SCENE_ROTATION_BINDING_NONE;

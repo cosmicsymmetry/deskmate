@@ -464,6 +464,28 @@ static void test_a_rotated_rect_external_pivot_for_an_analog_tick_validates(void
     assert(scene_model_validate(&scene) == SCENE_MODEL_OK);
 }
 
+static void test_a_rotated_rect_with_a_canvas_bounded_clip_validates(void)
+{
+    scene_t scene = rotated_rect_scene();
+    scene.nodes[0].value.rot_rect.has_clip = true;
+    scene.nodes[0].value.rot_rect.clip.x = 64;
+    scene.nodes[0].value.rot_rect.clip.y = 24;
+    scene.nodes[0].value.rot_rect.clip.w = 320;
+    scene.nodes[0].value.rot_rect.clip.h = 320;
+    assert(scene_model_validate(&scene) == SCENE_MODEL_OK);
+}
+
+static void test_a_rotated_rect_clip_past_the_canvas_is_rejected(void)
+{
+    scene_t scene = rotated_rect_scene();
+    scene.nodes[0].value.rot_rect.has_clip = true;
+    scene.nodes[0].value.rot_rect.clip.x = SCENE_CANVAS_WIDTH;
+    scene.nodes[0].value.rot_rect.clip.y = 24;
+    scene.nodes[0].value.rot_rect.clip.w = 320;
+    scene.nodes[0].value.rot_rect.clip.h = 320;
+    assert(scene_model_validate(&scene) == SCENE_MODEL_ERR_GEOMETRY);
+}
+
 static void test_a_rotated_rect_pivot_past_canvas_width_is_rejected(void)
 {
     scene_t scene = rotated_rect_scene();
@@ -570,6 +592,8 @@ int main(void)
     test_a_rotated_rect_rotation_past_one_turn_is_rejected();
     test_a_rotated_rect_negative_one_turn_validates();
     test_a_rotated_rect_external_pivot_for_an_analog_tick_validates();
+    test_a_rotated_rect_with_a_canvas_bounded_clip_validates();
+    test_a_rotated_rect_clip_past_the_canvas_is_rejected();
     test_a_rotated_rect_pivot_past_canvas_width_is_rejected();
     test_a_rotated_rect_pivot_past_canvas_height_is_rejected();
     test_a_rotated_rect_with_unterminated_binding_is_rejected();

@@ -1301,7 +1301,9 @@ fn scene_label_nodes() -> Vec<SceneNode> {
 /// `rot_rect`: three pivoted clock hands at separate centres so the hour,
 /// minute and second bindings are each visible even when two angles happen
 /// to coincide at the pinned instant. A fourth fixed-angle hand proves the
-/// empty-binding path uses the node's `rotation` unchanged.
+/// empty-binding path uses the node's `rotation` unchanged. Its clip starts
+/// partway along the transformed diagonal, cutting through both anti-aliased
+/// edges rather than merely bounding the unrotated object.
 fn scene_rot_rect_nodes() -> Vec<SceneNode> {
     let hand = |cx: i32, fill: u32, rotation_binding: &str| {
         SceneNode::RotRect(SceneRotRect {
@@ -1315,6 +1317,7 @@ fn scene_rot_rect_nodes() -> Vec<SceneNode> {
             pivot_y: 104,
             rotation: 0,
             rotation_binding: rotation_binding.to_string(),
+            clip: None,
         })
     };
     vec![
@@ -1332,6 +1335,12 @@ fn scene_rot_rect_nodes() -> Vec<SceneNode> {
             pivot_y: 88,
             rotation: -450,
             rotation_binding: String::new(),
+            clip: Some(SceneClipRect {
+                x: 180,
+                y: 240,
+                w: 68,
+                h: 80,
+            }),
         }),
         SceneNode::Rect(SceneRect {
             x: 90,

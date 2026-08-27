@@ -79,9 +79,10 @@ typedef enum {
 } scene_label_anchor_t;
 
 typedef struct { int32_t x, y, w, h; } scene_clip_rect_t;
-/* `clip` is an optional absolute canvas rectangle. The renderer reparents
- * this rectangle under a styleless wrapper at that box, so LVGL clips it by
- * the same parent-child path the built-in icon container uses. */
+/* `clip` is an optional absolute canvas rectangle shared by RECT and
+ * ROT_RECT. LVGL clips children to their parent while a scene display list is
+ * flat, so the renderer reparents either node under a styleless wrapper at
+ * this box when its C template relies on container clipping. */
 typedef struct { int32_t x, y, w, h, radius; uint32_t fill; uint8_t opacity;
                  bool has_clip; scene_clip_rect_t clip; }
     scene_rect_t;
@@ -194,7 +195,8 @@ typedef struct { int32_t x, y; scene_label_anchor_t horizontal_anchor;
  * one of time:hour, time:minute, or time:second. */
 typedef struct { int32_t x, y, w, h, radius; uint32_t fill;
                  int32_t pivot_x, pivot_y, rotation;
-                 char rotation_binding[SCENE_MAX_BINDING + 1U]; }
+                 char rotation_binding[SCENE_MAX_BINDING + 1U];
+                 bool has_clip; scene_clip_rect_t clip; }
     scene_rot_rect_t;
 
 typedef enum {

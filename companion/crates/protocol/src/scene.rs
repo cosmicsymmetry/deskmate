@@ -270,6 +270,8 @@ pub struct SceneLabel {
 /// `set_hand_angle()` sets `transform_rotation`. A `Line` node cannot stand in
 /// for this -- LVGL draws lines through a different path than the transform
 /// matrix, so the anti-aliased edges differ and the gate is byte-exact.
+/// A clip is needed when the C object is a child of a clipping coordinate
+/// frame: scene nodes are otherwise direct children of the screen.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SceneRotRect {
     pub x: i32,
@@ -286,6 +288,8 @@ pub struct SceneRotRect {
     /// Empty means a fixed angle. `time:hour`, `time:minute`, `time:second`
     /// drive the three hands, so a scene ticks without a re-push.
     pub rotation_binding: String,
+    /// Absolute canvas clip, encoded through the same sub-map as `SceneRect`.
+    pub clip: Option<SceneClipRect>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -549,6 +553,9 @@ fn validate_node(node: &SceneNode) -> Result<(), MessageError> {
             // before LVGL's matrix mixes the axes, rather than admitting an
             // arbitrary untrusted i32 into the transform path.
             if !rect_within_canvas(rect.x, rect.y, rect.w, rect.h)
+                || rect
+                    .clip
+                    .is_some_and(|clip| !rect_within_canvas(clip.x, clip.y, clip.w, clip.h))
                 || rect.pivot_x < 0
                 || rect.pivot_x > SCENE_CANVAS_WIDTH
                 || rect.pivot_y < 0
@@ -858,7 +865,8 @@ fn encode_node_payload(encoder: &mut Encoder, node: &SceneNode) {
                     + usize::from(rect.pivot_x != 0)
                     + usize::from(rect.pivot_y != 0)
                     + usize::from(rect.rotation != 0)
-                    + usize::from(!rect.rotation_binding.is_empty()),
+                    + usize::from(!rect.rotation_binding.is_empty())
+                    + usize::from(rect.clip.is_some()),
             );
             for (key, value) in [(0, rect.x), (1, rect.y), (2, rect.w), (3, rect.h)] {
                 encoder.unsigned(key);
@@ -881,6 +889,10 @@ fn encode_node_payload(encoder: &mut Encoder, node: &SceneNode) {
             if !rect.rotation_binding.is_empty() {
                 encoder.unsigned(9);
                 encoder.text(&rect.rotation_binding);
+            }
+            if let Some(clip) = rect.clip {
+                encoder.unsigned(10);
+                encode_clip_rect(encoder, clip);
             }
         }
     }
@@ -1193,7 +1205,8 @@ fn decode_node_payload(decoder: &mut Decoder<'_>, kind: u32) -> Result<SceneNode
                 };
             }
             // ROT_RECT {0: x, 1: y, 2: w, 3: h, 4: radius, 5: fill,
-            //           6: pivot_x, 7: pivot_y, 8: rotation, 9: binding}
+            //           6: pivot_x, 7: pivot_y, 8: rotation, 9: binding,
+            //           10: {0: clip_x, 1: clip_y, 2: clip_w, 3: clip_h}}
             (9, 0..=4 | 6..=8) => {
                 ints[slot] = read_i32(decoder, "scene rotated rect field")?;
             }
@@ -1205,6 +1218,7 @@ fn decode_node_payload(decoder: &mut Decoder<'_>, kind: u32) -> Result<SceneNode
                     "scene rotated rect binding",
                 )?;
             }
+            (9, 10) => clip = Some(decode_clip_rect(decoder)?),
             _ => decoder.skip()?,
         }
     }
@@ -1339,6 +1353,7 @@ fn decode_node_payload(decoder: &mut Decoder<'_>, kind: u32) -> Result<SceneNode
                 pivot_y: ints[7],
                 rotation: ints[8],
                 rotation_binding: text,
+                clip,
             }))
         }
         _ => Err(MessageError::InvalidValue("scene node kind")),
@@ -1637,6 +1652,12 @@ mod tests {
             h: 8,
             pivot_x: 2,
             pivot_y: 160,
+            clip: Some(SceneClipRect {
+                x: 64,
+                y: 24,
+                w: 320,
+                h: 320,
+            }),
             ..SceneRotRect::default()
         };
         assert!(validate_node(&SceneNode::RotRect(rect.clone())).is_ok());
@@ -1649,6 +1670,18 @@ mod tests {
 
         rect.pivot_y = 160;
         rect.pivot_x = SCENE_CANVAS_WIDTH + 1;
+        assert_eq!(
+            validate_node(&SceneNode::RotRect(rect.clone())),
+            Err(MessageError::InvalidValue("scene rotated rect geometry"))
+        );
+
+        rect.pivot_x = 2;
+        rect.clip = Some(SceneClipRect {
+            x: SCENE_CANVAS_WIDTH,
+            y: 24,
+            w: 320,
+            h: 320,
+        });
         assert_eq!(
             validate_node(&SceneNode::RotRect(rect)),
             Err(MessageError::InvalidValue("scene rotated rect geometry"))

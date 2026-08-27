@@ -2434,8 +2434,9 @@ static protocol_message_result_t encode_asset_release_payload(
  * 255, clip absent; ARC color 0, rounded false, end_binding "", opacity 255; LINE color 0; TEXT align
  * LEFT, color 0, ellipsize false; IMAGE recolor false, color 0; GLYPH color
  * 0; SCALE major_tick_color 0; LABEL colours/style fields 0,
- * hide_when_empty false, horizontal_anchor LEFT; ROT_RECT style/transform fields 0 and
- * rotation_binding ""; the value map's literal and binding "".
+ * hide_when_empty false, horizontal_anchor LEFT; ROT_RECT style/transform
+ * fields 0, rotation_binding "", and clip absent; the value map's literal
+ * and binding "".
  * ------------------------------------------------------------------ */
 
 static size_t scene_rect_entries(const scene_rect_t *rect)
@@ -2815,7 +2816,8 @@ static protocol_message_result_t encode_scene_rot_rect(
                      (rect->pivot_x != 0 ? 1U : 0U) +
                      (rect->pivot_y != 0 ? 1U : 0U) +
                      (rect->rotation != 0 ? 1U : 0U) +
-                     (rect->rotation_binding[0] != '\0' ? 1U : 0U);
+                     (rect->rotation_binding[0] != '\0' ? 1U : 0U) +
+                     (rect->has_clip ? 1U : 0U);
     protocol_message_result_t result = begin_map(parent, &map, entries);
     if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 0U);
     if (result == PROTOCOL_MESSAGE_OK) result = encode_int(&map, rect->x);
@@ -2857,6 +2859,12 @@ static protocol_message_result_t encode_scene_rot_rect(
         result = encode_uint(&map, 9U);
         if (result == PROTOCOL_MESSAGE_OK) {
             result = encode_text(&map, rect->rotation_binding);
+        }
+    }
+    if (result == PROTOCOL_MESSAGE_OK && rect->has_clip) {
+        result = encode_uint(&map, 10U);
+        if (result == PROTOCOL_MESSAGE_OK) {
+            result = encode_scene_clip_rect(&map, &rect->clip);
         }
     }
     if (result == PROTOCOL_MESSAGE_OK) result = end_map(parent, &map);

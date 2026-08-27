@@ -190,6 +190,25 @@ fn current_capabilities_advertise_implemented_features() {
     assert_eq!(protocol::CURRENT_CAPABILITIES, 491);
 }
 
+fn assert_rot_rect_clip_is_pinned(nodes: &[protocol::SceneNode]) {
+    let rot_rect = nodes
+        .iter()
+        .find_map(|node| match node {
+            protocol::SceneNode::RotRect(rect) => Some(rect),
+            _ => None,
+        })
+        .expect("the rich fixture carries a rotated rect");
+    assert_eq!(
+        rot_rect.clip,
+        Some(protocol::SceneClipRect {
+            x: 64,
+            y: 24,
+            w: 320,
+            h: 320,
+        })
+    );
+}
+
 #[test]
 fn push_scene_fixtures_carry_what_they_are_meant_to() {
     let frame = decode_wire_frame(&fixture("push_scene.bin")).unwrap();
@@ -230,6 +249,7 @@ fn push_scene_fixtures_carry_what_they_are_meant_to() {
         })
         .expect("the rich fixture carries an arc");
     assert_eq!(arc.opacity, 0x33);
+    assert_rot_rect_clip_is_pinned(&push.scene.nodes);
     let label = push
         .scene
         .nodes

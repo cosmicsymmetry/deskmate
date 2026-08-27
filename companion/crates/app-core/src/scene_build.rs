@@ -30,9 +30,9 @@
 
 use chrono::{Datelike, NaiveDateTime, Timelike};
 use protocol::{
-    SCENE_CANVAS_HEIGHT, SCENE_CANVAS_WIDTH, Scene, SceneAlign, SceneArc, SceneFont, SceneFontTier,
-    SceneLabel, SceneLabelAnchor, SceneLine, SceneNode, SceneRect, SceneRotRect, SceneScale,
-    SceneText, SceneValue,
+    SCENE_CANVAS_HEIGHT, SCENE_CANVAS_WIDTH, Scene, SceneAlign, SceneArc, SceneClipRect, SceneFont,
+    SceneFontTier, SceneLabel, SceneLabelAnchor, SceneLine, SceneNode, SceneRect, SceneRotRect,
+    SceneScale, SceneText, SceneValue,
 };
 
 // ---------------------------------------------------------------------------
@@ -58,6 +58,8 @@ const COLOR_PRIMARY: u32 = 0x00f5_f5f7;
 const COLOR_TERTIARY: u32 = 0x005c_5c66;
 /// `DESKMATE_COLOR_SURFACE`.
 const COLOR_SURFACE: u32 = 0x001a_1a1f;
+/// LVGL's `LV_OPA_20` constant.
+const OPACITY_20_PERCENT: u8 = 51;
 /// `deskmate_palette(PROTOCOL_TEMPLATE_DIGITAL_CLOCK).hue`. Both clock faces
 /// share one identity, so this is also the analog clock's hue.
 const CLOCK_HUE: u32 = 0x00ff_8f2e;
@@ -81,13 +83,6 @@ const ICON_BADGE_INK: u32 = 0x0004_1a24;
 const PROGRESS_RING_HUE: u32 = 0x00ff_5a3d;
 /// `deskmate_palette(PROTOCOL_TEMPLATE_PROGRESS_RING).tint`.
 const PROGRESS_RING_TINT: u32 = 0x00ff_9a85;
-/// The RGB565 quantisation produced when LVGL draws `PROGRESS_RING_HUE` at
-/// `LV_OPA_20` over the black canvas. It matches every fully covered track
-/// pixel. It cannot match the anti-aliased annulus edge: the C composes
-/// `mask * LV_OPA_20`, while an opaque scene arc composes the mask alone. A
-/// fully exposed track therefore differs at 592 pixels until `SceneArc`
-/// carries per-arc opacity.
-const PROGRESS_RING_TRACK: u32 = 0x0028_1008;
 /// `DESKMATE_COLOR_SECONDARY`.
 const COLOR_SECONDARY: u32 = 0x009a_9aa5;
 
@@ -101,6 +96,14 @@ const ANALOG_FACE_DIAMETER: i32 = SCENE_CANVAS_HEIGHT - 2 * MARGIN;
 const ANALOG_FACE_RADIUS: i32 = ANALOG_FACE_DIAMETER / 2;
 /// `CHAPTER_RING_WIDTH`.
 const ANALOG_CHAPTER_RING_WIDTH: i32 = 4 * GRID;
+/// `TICK_MAJOR_LEN`.
+const ANALOG_TICK_MAJOR_LENGTH: i32 = 2 * GRID;
+/// `TICK_MINOR_LEN`.
+const ANALOG_TICK_MINOR_LENGTH: i32 = GRID;
+/// `TICK_MAJOR_WIDTH`.
+const ANALOG_TICK_MAJOR_WIDTH: i32 = 4;
+/// `TICK_MINOR_WIDTH`.
+const ANALOG_TICK_MINOR_WIDTH: i32 = 3;
 /// `HAND_HOUR_LEN`.
 const ANALOG_HOUR_LENGTH: i32 = 13 * GRID;
 /// `HAND_MINUTE_LEN`.
@@ -967,6 +970,20 @@ fn bar(
     x: i32,
     y: i32,
 ) {
+    bar_with_clip(nodes, container_origin, color, w, h, x, y, None);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn bar_with_clip(
+    nodes: &mut Vec<SceneNode>,
+    container_origin: (i32, i32),
+    color: u32,
+    w: i32,
+    h: i32,
+    x: i32,
+    y: i32,
+    clip: Option<SceneClipRect>,
+) {
     let (x, y) = centered_rect_origin(container_origin, (ICON_BOX, ICON_BOX), (w, h), (x, y));
     nodes.push(SceneNode::Rect(SceneRect {
         x,
@@ -976,7 +993,7 @@ fn bar(
         radius: h / 2,
         fill: color,
         opacity: u8::MAX,
-        clip: None,
+        clip,
     }));
 }
 
@@ -1066,9 +1083,24 @@ fn draw_snow(nodes: &mut Vec<SceneNode>, container_origin: (i32, i32), color: u3
 /// `weather_icon.c`'s STORM case.
 fn draw_storm(nodes: &mut Vec<SceneNode>, container_origin: (i32, i32), color: u32) {
     draw_cloud(nodes, container_origin, color, -12);
-    // This extends two pixels below the 120px icon container. The C parent
-    // clips those pixels; flat scene nodes currently have no clip region.
-    bar(nodes, container_origin, color, 10, 40, 0, 42);
+    // This extends two pixels below the 120px icon container. Preserve the
+    // original 10x40 pill and let the same parent-shaped clip cut through its
+    // bottom rounded cap; shortening it would change LVGL's clamped radius.
+    bar_with_clip(
+        nodes,
+        container_origin,
+        color,
+        10,
+        40,
+        0,
+        42,
+        Some(SceneClipRect {
+            x: container_origin.0,
+            y: container_origin.1,
+            w: ICON_BOX,
+            h: ICON_BOX,
+        }),
+    );
 }
 
 /// `weather_icon.c`'s FOG case.
@@ -1422,6 +1454,48 @@ fn analog_hand(length: i32, width: i32, color: u32, binding: &str) -> SceneNode 
         pivot_y: length,
         rotation: 0,
         rotation_binding: binding.to_string(),
+        clip: None,
+    })
+}
+
+fn analog_tick(index: i32) -> SceneNode {
+    let major = index % 3 == 0;
+    let (w, h) = if major {
+        (ANALOG_TICK_MAJOR_WIDTH, ANALOG_TICK_MAJOR_LENGTH)
+    } else {
+        (ANALOG_TICK_MINOR_WIDTH, ANALOG_TICK_MINOR_LENGTH)
+    };
+    // LV_ALIGN_TOP_MID uses independent parent/object halves. Expressing the
+    // local centre as h/2 lands the top edge at the face origin while keeping
+    // the odd 3px minor width on LVGL's exact x coordinate.
+    let (x, y) = analog_face_child_origin(w, h, h / 2);
+    SceneNode::RotRect(SceneRotRect {
+        x,
+        y,
+        w,
+        h,
+        radius: 0,
+        fill: if index == 0 {
+            CLOCK_HUE
+        } else if major {
+            COLOR_SECONDARY
+        } else {
+            COLOR_TERTIARY
+        },
+        pivot_x: w / 2,
+        pivot_y: ANALOG_FACE_RADIUS,
+        rotation: index * 300,
+        rotation_binding: String::new(),
+        // The C ticks are children of OBJ_FACE, so all twelve inherit its
+        // clipping box. A scene display list is flat; carry that parent clip
+        // explicitly so the four cardinal rotations cannot expose a pixel
+        // just outside the 320px face.
+        clip: Some(SceneClipRect {
+            x: SCENE_CANVAS_WIDTH / 2 - ANALOG_FACE_DIAMETER / 2,
+            y: SCENE_CANVAS_HEIGHT / 2 - ANALOG_FACE_DIAMETER / 2,
+            w: ANALOG_FACE_DIAMETER,
+            h: ANALOG_FACE_DIAMETER,
+        }),
     })
 }
 
@@ -1431,7 +1505,7 @@ fn analog_hand(length: i32, width: i32, color: u32, binding: &str) -> SceneNode 
 /// without a host push. `show_seconds = false` drops the second-hand node,
 /// matching `LV_OBJ_FLAG_HIDDEN` without moving anything else.
 pub fn build_analog_clock_scene(card: &AnalogClockCard, _metrics: &BakedFontMetrics) -> Scene {
-    let mut nodes = Vec::with_capacity(5);
+    let mut nodes = Vec::with_capacity(17);
 
     nodes.push(SceneNode::Arc(SceneArc {
         cx: SCENE_CANVAS_WIDTH / 2,
@@ -1446,12 +1520,10 @@ pub fn build_analog_clock_scene(card: &AnalogClockCard, _metrics: &BakedFontMetr
         end_binding: String::new(),
     }));
 
-    // Known firmware gap: analog_clock.c rotates each 8/16px tick around an
-    // external `pivot_y = FACE_RADIUS` (160). SceneRotRect already carries and
-    // renders that value, but both scene validators currently require
-    // `pivot_y <= h`, so a valid scene cannot emit the twelve chapter ticks.
-    // Task 7 must retain this omission until those validators admit a bounded
-    // external pivot; the parity rows enforce the resulting pixel gap.
+    // The twelve ticks are aligned at the face's top-middle, then rotated
+    // around its centre by their external local pivot. Their rotations are
+    // fixed; only the three hands below use live time bindings.
+    nodes.extend((0..12).map(analog_tick));
 
     nodes.push(analog_hand(
         ANALOG_HOUR_LENGTH,
@@ -1577,12 +1649,11 @@ fn push_progress_module(
 
 /// Builds the whole `ProgressRing` face as a scene.
 ///
-/// The track and indicator are two scene arcs because `SceneArc` is one
-/// opaque stroke while the C `lv_arc` draws both parts. The indicator and
-/// countdown remain live through `timer.pct` and `timer.remaining:mm:ss`.
-/// The track's solid colour is the exact fully-covered RGB565 result, but its
-/// anti-aliased edge remains a recorded parity gap until the arc node exposes
-/// the opacity LVGL applies before its mask blend.
+/// The track and indicator are two scene arcs because one `SceneArc` is one
+/// stroke while the C `lv_arc` draws both parts. The track carries the palette
+/// hue at `LV_OPA_20`, preserving LVGL's opacity-before-mask blend, while the
+/// indicator and countdown remain live through `timer.pct` and
+/// `timer.remaining:mm:ss`.
 pub fn build_progress_ring_scene(card: &ProgressRingCard<'_>, metrics: &BakedFontMetrics) -> Scene {
     // Mirror progress_ring_patch()'s defensive bounds even though the field
     // registry already applies them on device. Preview and simulator callers
@@ -1594,14 +1665,15 @@ pub fn build_progress_ring_scene(card: &ProgressRingCard<'_>, metrics: &BakedFon
         .min(duration_seconds);
 
     let mut nodes = Vec::with_capacity(13);
-    for (color, rounded, end_binding) in [
-        (PROGRESS_RING_TRACK, false, String::new()),
+    for (color, opacity, rounded, end_binding) in [
+        (PROGRESS_RING_HUE, OPACITY_20_PERCENT, false, String::new()),
         (
             if card.running {
                 PROGRESS_RING_HUE
             } else {
                 COLOR_TERTIARY
             },
+            u8::MAX,
             true,
             "timer.pct".to_string(),
         ),
@@ -1614,7 +1686,7 @@ pub fn build_progress_ring_scene(card: &ProgressRingCard<'_>, metrics: &BakedFon
             end_deg: 630,
             width: PROGRESS_RING_WIDTH,
             color,
-            opacity: u8::MAX,
+            opacity,
             rounded,
             end_binding,
         }));

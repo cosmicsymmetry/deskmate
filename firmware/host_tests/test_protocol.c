@@ -185,6 +185,8 @@ static void test_scene_fixtures_pin_new_fields_and_omitted_defaults(void)
     assert(scene->node_count == 10U);
     const scene_rect_t *rect = &scene->nodes[0].value.rect;
     const scene_arc_t *arc = &scene->nodes[1].value.arc;
+    const scene_rot_rect_t *rot_rect =
+        &scene->nodes[9].value.rot_rect;
     assert(scene->nodes[0].kind == SCENE_NODE_RECT);
     assert(rect->opacity == 0xc8U);
     assert(rect->has_clip);
@@ -194,6 +196,12 @@ static void test_scene_fixtures_pin_new_fields_and_omitted_defaults(void)
     assert(rect->clip.h == 336);
     assert(scene->nodes[1].kind == SCENE_NODE_ARC);
     assert(arc->opacity == 0x33U);
+    assert(scene->nodes[9].kind == SCENE_NODE_ROT_RECT);
+    assert(rot_rect->has_clip);
+    assert(rot_rect->clip.x == 64);
+    assert(rot_rect->clip.y == 24);
+    assert(rot_rect->clip.w == 320);
+    assert(rot_rect->clip.h == 320);
 
     fixture = read_fixture("push_scene_min.bin", &length);
     assert(protocol_frame_decode(fixture, length, &frame) ==

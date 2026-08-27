@@ -500,20 +500,8 @@ fn add_icon_badge_text_cases(cases: &mut Vec<ParityCase>) {
             ("flipped", SimOrientation::LandscapeFlipped),
         ] {
             let title = "Weather";
-            // STORM's bolt is `bar(color, 10, 40, 0, 42)`: centred at y = 102 in
-            // the 120px icon box, so it spans y 82..=121 and LVGL clips the last
-            // two rows against the container. Scene nodes are absolute on the
-            // canvas and have no parent clip, so those rows draw. It is not
-            // fixable on the host: `bar()` sets `radius = h / 2`, which LVGL
-            // clamps to `min(w, h) / 2` = 5, so the clip cuts THROUGH the bottom
-            // rounded cap -- a shorter pill would draw a whole cap at the new
-            // height, which is a different shape. Closing this needs a clip
-            // region in the scene model, which is a firmware change.
-            let known_gap = (slug == "storm").then_some(
-                "the icon container clips its children; the scene model has no clip region",
-            );
             cases.push(ParityCase {
-                known_gap,
+                known_gap: None,
                 name: format!("icon-badge-text--{slug}--{orientation_slug}"),
                 template: RenderRequest {
                     template: SimTemplate::IconBadgeText,
@@ -571,47 +559,24 @@ fn add_icon_badge_text_cases(cases: &mut Vec<ParityCase>) {
 fn add_progress_ring_cases(cases: &mut Vec<ParityCase>) {
     const DURATION_SECONDS: i64 = 1_500;
     let variants = [
-        (
-            "paused-mid-countdown",
-            900,
-            false,
-            "SceneArc has no per-arc opacity; the track edge differs by 275 pixels",
-        ),
-        (
-            "running-at-zero",
-            0,
-            true,
-            "SceneArc has no per-arc opacity; the exposed track edge differs by 592 pixels",
-        ),
-        (
-            "finished",
-            0,
-            false,
-            "SceneArc has no per-arc opacity; the exposed track edge differs by 592 pixels",
-        ),
-        (
-            "never-started",
-            DURATION_SECONDS,
-            false,
-            "SceneArc has no per-arc opacity; 64 composited edge pixels differ under the full indicator",
-        ),
+        ("paused-mid-countdown", 900, false),
+        ("running-at-zero", 0, true),
+        ("finished", 0, false),
+        ("never-started", DURATION_SECONDS, false),
     ];
 
     // `running-mid-countdown` is deliberately excluded. The simulator's fixed
     // tick makes its C face deterministic, but matching it would require the
     // shipping builder to know the simulator's private 840 ms anchor offset.
     // This is builder-must-not-know-the-tick, not a flakiness exclusion.
-    for (slug, remaining_seconds, running, known_gap) in variants {
+    for (slug, remaining_seconds, running) in variants {
         for (orientation_slug, orientation) in [
             ("landscape", SimOrientation::Landscape),
             ("flipped", SimOrientation::LandscapeFlipped),
         ] {
             let label = "Pomodoro";
             cases.push(ParityCase {
-                // Both orientations have the same count: flipping reverses
-                // the finished framebuffer and cannot change the number of
-                // differing pixels.
-                known_gap: Some(known_gap),
+                known_gap: None,
                 name: format!("progress-ring--{slug}--{orientation_slug}"),
                 template: RenderRequest {
                     template: SimTemplate::ProgressRing,
@@ -684,13 +649,7 @@ fn add_analog_clock_cases(cases: &mut Vec<ParityCase>) {
                     "no-seconds"
                 };
                 cases.push(ParityCase {
-                    // Every instant, visibility state and orientation has the
-                    // same 440-pixel difference: the valid scene omits the
-                    // twelve static ticks whose external pivot the current
-                    // SceneRotRect validators reject.
-                    known_gap: Some(
-                        "SceneRotRect rejects the ticks' external pivot_y=160; the omitted ticks differ by 440 pixels",
-                    ),
+                    known_gap: None,
                     name: format!(
                         "analog-clock--{}--{seconds_slug}--{orientation_slug}",
                         instant.slug

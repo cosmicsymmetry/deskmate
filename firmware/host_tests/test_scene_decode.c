@@ -404,6 +404,90 @@ static void test_a_valid_text_scene_roundtrips(void)
     free(scene);
 }
 
+static void test_running_color_decodes_on_arc_and_text(void)
+{
+    builder_t b;
+    scene_t *scene = new_scene();
+
+    begin_scene(&b, 1U, 0U, 2U);
+    put_map(&b, 2U);
+    put_uint(&b, 0U);
+    put_uint(&b, SCENE_NODE_ARC);
+    put_uint(&b, 1U);
+    put_map(&b, 7U);
+    for (uint64_t key = 0U; key <= 5U; ++key) {
+        put_uint(&b, key);
+        put_int(&b, key == 0U || key == 1U ? 100 : key == 2U ? 50 : 0);
+    }
+    put_uint(&b, 10U);
+    put_uint(&b, UINT32_C(0x00FF9F0A));
+
+    put_map(&b, 2U);
+    put_uint(&b, 0U);
+    put_uint(&b, SCENE_NODE_TEXT);
+    put_uint(&b, 1U);
+    put_map(&b, 6U);
+    put_uint(&b, 0U);
+    put_int(&b, 10);
+    put_uint(&b, 1U);
+    put_int(&b, 100);
+    put_uint(&b, 2U);
+    put_int(&b, 100);
+    put_uint(&b, 4U);
+    put_baked_font(&b, SCENE_FONT_BODY);
+    put_uint(&b, 6U);
+    put_literal_value(&b, "Paused");
+    put_uint(&b, 8U);
+    put_uint(&b, UINT32_C(0x00FF9F0A));
+
+    assert(scene_decode(b.bytes, b.length, scene) == SCENE_MODEL_OK);
+    assert(scene->nodes[0].value.arc.has_running_color);
+    assert(scene->nodes[0].value.arc.running_color == UINT32_C(0x00FF9F0A));
+    assert(scene->nodes[1].value.text.has_running_color);
+    assert(scene->nodes[1].value.text.running_color == UINT32_C(0x00FF9F0A));
+    free(scene);
+}
+
+static void test_running_color_outside_uint32_is_rejected_on_both_nodes(void)
+{
+    for (uint32_t kind = SCENE_NODE_ARC; kind <= SCENE_NODE_TEXT;
+         kind += SCENE_NODE_TEXT - SCENE_NODE_ARC) {
+        builder_t b;
+        scene_t *scene = new_scene();
+        begin_scene(&b, 1U, 0U, 1U);
+        put_map(&b, 2U);
+        put_uint(&b, 0U);
+        put_uint(&b, kind);
+        put_uint(&b, 1U);
+        if (kind == SCENE_NODE_ARC) {
+            put_map(&b, 7U);
+            for (uint64_t key = 0U; key <= 5U; ++key) {
+                put_uint(&b, key);
+                put_int(&b, key == 0U || key == 1U ? 100 :
+                            key == 2U ? 50 : 0);
+            }
+            put_uint(&b, 10U);
+        } else {
+            put_map(&b, 6U);
+            put_uint(&b, 0U);
+            put_int(&b, 10);
+            put_uint(&b, 1U);
+            put_int(&b, 100);
+            put_uint(&b, 2U);
+            put_int(&b, 100);
+            put_uint(&b, 4U);
+            put_baked_font(&b, SCENE_FONT_BODY);
+            put_uint(&b, 6U);
+            put_literal_value(&b, "Paused");
+            put_uint(&b, 8U);
+        }
+        put_uint(&b, (uint64_t)UINT32_MAX + 1U);
+        assert(scene_decode(b.bytes, b.length, scene) ==
+               SCENE_MODEL_ERR_GEOMETRY);
+        free(scene);
+    }
+}
+
 /* Every node kind decodes, including LABEL and ROT_RECT. Keeping all kinds
  * in one payload means a decoder that forgets either new dispatch arm cannot
  * pass by exercising only the older seven. */
@@ -591,6 +675,8 @@ static void test_every_node_kind_decodes(void)
     assert(scene->nodes[1].value.arc.end_deg == 630);
     assert(scene->nodes[1].value.arc.rounded);
     assert(strcmp(scene->nodes[1].value.arc.end_binding, "timer.pct") == 0);
+    assert(!scene->nodes[1].value.arc.has_running_color);
+    assert(!scene->nodes[3].value.text.has_running_color);
 
     assert(scene->nodes[2].value.line.point_count == 3U);
     assert(scene->nodes[2].value.line.xs[2] == 20);
@@ -1732,6 +1818,8 @@ static void test_null_arguments_are_rejected(void)
 int main(void)
 {
     test_a_valid_text_scene_roundtrips();
+    test_running_color_decodes_on_arc_and_text();
+    test_running_color_outside_uint32_is_rejected_on_both_nodes();
     test_a_rect_clip_decodes();
     test_a_rect_clip_past_the_canvas_is_rejected();
     test_an_explicit_arc_opacity_decodes();

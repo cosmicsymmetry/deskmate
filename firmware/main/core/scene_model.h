@@ -103,11 +103,12 @@ typedef struct { int32_t x, y, w, h, radius; uint32_t fill; uint8_t opacity;
  * start_deg + 359` to dodge the question instead leaves a gap that is
  * plainly visible at a gauge's stroke width.
  *
- * `end_binding` scales that sweep rather than replacing it: the arc is drawn
- * from `start_deg` through `end_deg - start_deg` times the bound percentage,
- * so the declared pair is the 100% geometry. */
-typedef struct { int32_t cx, cy, r, start_deg, end_deg, width; uint32_t color;
-                 uint8_t opacity; bool rounded;
+ * `end_binding` scales that sweep rather than replacing it. Percent-valued
+ * bindings use 100 as full scale and `timer.permille` uses 1000, preserving
+ * the C progress ring's sub-percent geometry. */
+typedef struct { int32_t cx, cy, r, start_deg, end_deg, width;
+                 uint32_t color, running_color;
+                 uint8_t opacity; bool rounded, has_running_color;
                  char end_binding[SCENE_MAX_BINDING + 1U]; }
     scene_arc_t;
 
@@ -124,8 +125,8 @@ typedef struct { int32_t xs[SCENE_MAX_LINE_POINTS], ys[SCENE_MAX_LINE_POINTS];
  * position by baseline (see digital_clock.c's baseline_offset()), so a
  * box-anchored node could not reproduce their pixels. */
 typedef struct { int32_t x, baseline_y, w; scene_align_t align;
-                 scene_font_ref_t font; uint32_t color; scene_value_t value;
-                 bool ellipsize; }
+                 scene_font_ref_t font; uint32_t color, running_color;
+                 scene_value_t value; bool ellipsize, has_running_color; }
     scene_text_t;
 typedef struct { int32_t x, y, w, h; uint8_t digest[ASSET_DIGEST_BYTES];
                  bool recolor; uint32_t color; }

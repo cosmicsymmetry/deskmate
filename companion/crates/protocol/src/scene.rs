@@ -155,11 +155,15 @@ pub struct SceneArc {
     pub end_deg: i32,
     pub width: i32,
     pub color: u32,
+    /// Used instead of `color` while the active timer is running. Omission
+    /// preserves the static colour used by scenes encoded before this key.
+    pub running_color: Option<u32>,
     /// Applied by LVGL before the arc's anti-aliasing mask. Omission is
     /// opaque, preserving every scene encoded before this field existed.
     pub opacity: u8,
     pub rounded: bool,
-    /// Scales the declared sweep rather than replacing it. Empty means none.
+    /// Scales the declared sweep rather than replacing it. Percent bindings
+    /// use 100 as full scale and `timer.permille` uses 1000. Empty means none.
     pub end_binding: String,
 }
 
@@ -173,6 +177,7 @@ impl Default for SceneArc {
             end_deg: 0,
             width: 0,
             color: 0,
+            running_color: None,
             opacity: u8::MAX,
             rounded: false,
             end_binding: String::new(),
@@ -198,6 +203,8 @@ pub struct SceneText {
     pub align: SceneAlign,
     pub font: SceneFont,
     pub color: u32,
+    /// Used instead of `color` while the active timer is running.
+    pub running_color: Option<u32>,
     pub value: SceneValue,
     pub ellipsize: bool,
 }
@@ -361,12 +368,15 @@ pub fn binding_is_valid(text: &str) -> bool {
     if text.len() > MAX_SCENE_BINDING_LEN {
         return false;
     }
-    // `timer.pct` is an exact-match token checked before the `timer.remaining:`
-    // prefix they share a stem with, so "timer.pctXYZ" cannot match it.
-    if text == "timer.pct" {
+    // Exact-match scalar tokens cannot accept a trailing suffix.
+    if matches!(text, "timer.pct" | "timer.permille" | "timer.status") {
         return true;
     }
-    if let Some(argument) = text.strip_prefix("timer.remaining:") {
+    if let Some(argument) = text
+        .strip_prefix("timer.remaining:")
+        .or_else(|| text.strip_prefix("timer.elapsed:"))
+        .or_else(|| text.strip_prefix("timer.total:"))
+    {
         return timer_format_is_valid(argument);
     }
     if let Some(argument) = text.strip_prefix("time:") {
@@ -699,7 +709,8 @@ fn encode_node_payload(encoder: &mut Encoder, node: &SceneNode) {
                 6 + usize::from(arc.color != 0)
                     + usize::from(arc.rounded)
                     + usize::from(!arc.end_binding.is_empty())
-                    + usize::from(arc.opacity != u8::MAX),
+                    + usize::from(arc.opacity != u8::MAX)
+                    + usize::from(arc.running_color.is_some()),
             );
             for (key, value) in [
                 (0, arc.cx),
@@ -728,6 +739,10 @@ fn encode_node_payload(encoder: &mut Encoder, node: &SceneNode) {
                 encoder.unsigned(9);
                 encoder.unsigned(u64::from(arc.opacity));
             }
+            if let Some(running_color) = arc.running_color {
+                encoder.unsigned(10);
+                encoder.unsigned(u64::from(running_color));
+            }
         }
         SceneNode::Line(line) => {
             encoder.map(3 + usize::from(line.color != 0));
@@ -744,7 +759,8 @@ fn encode_node_payload(encoder: &mut Encoder, node: &SceneNode) {
             encoder.map(
                 5 + usize::from(text.align != SceneAlign::Left)
                     + usize::from(text.color != 0)
-                    + usize::from(text.ellipsize),
+                    + usize::from(text.ellipsize)
+                    + usize::from(text.running_color.is_some()),
             );
             for (key, value) in [(0, text.x), (1, text.baseline_y), (2, text.w)] {
                 encoder.unsigned(key);
@@ -765,6 +781,10 @@ fn encode_node_payload(encoder: &mut Encoder, node: &SceneNode) {
             if text.ellipsize {
                 encoder.unsigned(7);
                 encoder.boolean(true);
+            }
+            if let Some(running_color) = text.running_color {
+                encoder.unsigned(8);
+                encoder.unsigned(u64::from(running_color));
             }
         }
         SceneNode::Image(image) => {
@@ -1120,6 +1140,7 @@ fn decode_node_payload(decoder: &mut Decoder<'_>, kind: u32) -> Result<SceneNode
     let mut ys = Vec::new();
     let mut ticks = [0u32; 2];
     let mut clip = None;
+    let mut running_color = None;
 
     for _ in 0..len {
         let key = next_key(decoder, &mut previous)?;
@@ -1141,7 +1162,7 @@ fn decode_node_payload(decoder: &mut Decoder<'_>, kind: u32) -> Result<SceneNode
             }
             (1, 7) => clip = Some(decode_clip_rect(decoder)?),
             // ARC {0: cx, 1: cy, 2: r, 3: start, 4: end, 5: width, 6: color,
-            //      7: rounded, 8: end_binding, 9: opacity}
+            //      7: rounded, 8: end_binding, 9: opacity, 10: running_color}
             (2, 0..=5) => ints[slot] = read_i32(decoder, "scene arc field")?,
             (2, 6) => colors[0] = read_u32(decoder, "scene arc color")?,
             (2, 7) => flags[0] = decoder.boolean()?, // rounded
@@ -1152,13 +1173,16 @@ fn decode_node_payload(decoder: &mut Decoder<'_>, kind: u32) -> Result<SceneNode
                 opacity = u8::try_from(decoder.unsigned()?)
                     .map_err(|_| MessageError::InvalidValue("scene arc opacity"))?;
             }
+            (2, 10) => {
+                running_color = Some(read_u32(decoder, "scene arc running color")?);
+            }
             // LINE {0: [x...], 1: [y...], 2: width, 3: color}
             (3, 0) => xs = decode_points(decoder)?,
             (3, 1) => ys = decode_points(decoder)?,
             (3, 2) => ints[0] = read_i32(decoder, "scene line width")?,
             (3, 3) => colors[0] = read_u32(decoder, "scene line color")?,
             // TEXT {0: x, 1: baseline_y, 2: w, 3: align, 4: font, 5: color,
-            //       6: value, 7: ellipsize}
+            //       6: value, 7: ellipsize, 8: running_color}
             (4, 0..=2) => ints[slot] = read_i32(decoder, "scene text field")?,
             (4, 3) => {
                 align = match read_u32(decoder, "scene text align")? {
@@ -1172,6 +1196,9 @@ fn decode_node_payload(decoder: &mut Decoder<'_>, kind: u32) -> Result<SceneNode
             (4, 5) => colors[0] = read_u32(decoder, "scene text color")?,
             (4, 6) => value = Some(decode_value(decoder)?),
             (4, 7) => flags[0] = decoder.boolean()?, // ellipsize
+            (4, 8) => {
+                running_color = Some(read_u32(decoder, "scene text running color")?);
+            }
             // IMAGE {0: x, 1: y, 2: w, 3: h, 4: digest, 5: recolor, 6: color}
             (5, 0..=3) => ints[slot] = read_i32(decoder, "scene image field")?,
             (5, 4) => digest = Some(read_digest(decoder)?),
@@ -1265,6 +1292,7 @@ fn decode_node_payload(decoder: &mut Decoder<'_>, kind: u32) -> Result<SceneNode
                 end_deg: ints[4],
                 width: ints[5],
                 color: colors[0],
+                running_color,
                 opacity,
                 rounded: flags[0],
                 end_binding: text,
@@ -1292,6 +1320,7 @@ fn decode_node_payload(decoder: &mut Decoder<'_>, kind: u32) -> Result<SceneNode
                 align,
                 font: font.ok_or(MessageError::MissingField(4))?,
                 color: colors[0],
+                running_color,
                 value: value.ok_or(MessageError::MissingField(6))?,
                 ellipsize: flags[0],
             }))
@@ -1430,11 +1459,17 @@ mod tests {
     #[test]
     fn binding_grammar_matches_the_device() {
         assert!(binding_is_valid("timer.pct"));
+        assert!(binding_is_valid("timer.permille"));
+        assert!(binding_is_valid("timer.status"));
         assert!(!binding_is_valid("timer.pctXYZ"));
         assert!(binding_is_valid("time:HH:mm"));
         assert!(binding_is_valid("timer.remaining:mm:ss"));
+        assert!(binding_is_valid("timer.elapsed:mm:ss"));
+        assert!(binding_is_valid("timer.total:mm:ss"));
         assert!(!binding_is_valid("timer.remaining:HH:mm:ss"));
         assert!(!binding_is_valid("timer.remaining:hh:mm:ss"));
+        assert!(!binding_is_valid("timer.elapsed:HH:mm:ss"));
+        assert!(!binding_is_valid("timer.total:hh:mm:ss"));
         assert!(binding_is_valid("field.temp"));
         assert!(!binding_is_valid("time:"));
         assert!(!binding_is_valid("time:%s"));
@@ -1481,6 +1516,7 @@ mod tests {
                     align: SceneAlign::Center,
                     font: SceneFont::Baked(SceneFontTier::Hero),
                     color: 0x00f5_f5f7,
+                    running_color: None,
                     value: SceneValue::Binding("time:HH:mm".to_string()),
                     ellipsize: false,
                 }),
@@ -1553,6 +1589,51 @@ mod tests {
         assert_eq!(
             decode_scene(&mut decoder),
             Err(MessageError::InvalidValue("scene label anchor"))
+        );
+    }
+
+    #[test]
+    fn running_color_outside_u32_is_rejected_on_arc_and_text() {
+        let arc = scene_with_node_array(1, |encoder| {
+            encoder.map(2);
+            encoder.unsigned(0);
+            encoder.unsigned(2); // ARC
+            encoder.unsigned(1);
+            encoder.map(7);
+            for (key, value) in [(0, 100), (1, 100), (2, 50), (3, 0), (4, 360), (5, 8)] {
+                encoder.unsigned(key);
+                encoder.signed(value);
+            }
+            encoder.unsigned(10);
+            encoder.unsigned(u64::from(u32::MAX) + 1);
+        });
+        let mut decoder = Decoder::new(&arc);
+        assert_eq!(
+            decode_scene(&mut decoder),
+            Err(MessageError::InvalidValue("scene arc running color"))
+        );
+
+        let text = scene_with_node_array(1, |encoder| {
+            encoder.map(2);
+            encoder.unsigned(0);
+            encoder.unsigned(4); // TEXT
+            encoder.unsigned(1);
+            encoder.map(6);
+            for (key, value) in [(0, 10), (1, 100), (2, 100)] {
+                encoder.unsigned(key);
+                encoder.signed(value);
+            }
+            encoder.unsigned(4);
+            encode_font(encoder, &SceneFont::Baked(SceneFontTier::Body));
+            encoder.unsigned(6);
+            encode_value(encoder, &SceneValue::Literal("Paused".into()));
+            encoder.unsigned(8);
+            encoder.unsigned(u64::from(u32::MAX) + 1);
+        });
+        let mut decoder = Decoder::new(&text);
+        assert_eq!(
+            decode_scene(&mut decoder),
+            Err(MessageError::InvalidValue("scene text running color"))
         );
     }
 

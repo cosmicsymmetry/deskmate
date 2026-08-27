@@ -11,6 +11,10 @@ typedef enum {
     SCENE_BINDING_TIMER_REMAINING = 2,
     SCENE_BINDING_TIMER_PCT = 3,
     SCENE_BINDING_FIELD = 4,
+    SCENE_BINDING_TIMER_ELAPSED = 5,
+    SCENE_BINDING_TIMER_TOTAL = 6,
+    SCENE_BINDING_TIMER_STATUS = 7,
+    SCENE_BINDING_TIMER_PERMILLE = 8,
 } scene_binding_kind_t;
 
 typedef enum {
@@ -32,16 +36,21 @@ typedef struct {
 } scene_binding_t;
 
 typedef struct {
+    uint32_t total_ms;
     uint32_t remaining_ms;
     uint8_t remaining_pct;
+    uint16_t remaining_permille;
 } scene_timer_snapshot_t;
 
 typedef struct {
     int64_t unix_seconds;
     int16_t utc_offset_minutes;
     bool timer_active;
+    bool timer_running;
+    uint32_t timer_total_ms;
     uint32_t timer_remaining_ms;
     uint8_t timer_remaining_pct;
+    uint16_t timer_remaining_permille;
     scene_field_fn field;
     void *field_ctx;
 } scene_binding_context_t;

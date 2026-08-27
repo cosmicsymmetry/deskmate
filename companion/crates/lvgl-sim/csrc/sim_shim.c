@@ -518,10 +518,48 @@ static sim_scene_result_t map_decode_result(scene_model_result_t result)
     }
 }
 
+#define SIM_TIMER_MS_MAX (UINT32_C(86400) * UINT32_C(1000))
+
+static void fill_scene_timer_context(scene_binding_context_t *context,
+                                     bool timer_active,
+                                     uint32_t timer_total_ms,
+                                     uint32_t timer_remaining_ms,
+                                     bool timer_running)
+{
+    context->timer_active = false;
+    context->timer_running = false;
+    context->timer_total_ms = 0U;
+    context->timer_remaining_ms = 0U;
+    context->timer_remaining_pct = 0U;
+    context->timer_remaining_permille = 0U;
+    if (!timer_active || timer_total_ms == 0U) {
+        return;
+    }
+    if (timer_total_ms > SIM_TIMER_MS_MAX) {
+        timer_total_ms = SIM_TIMER_MS_MAX;
+    }
+    if (timer_remaining_ms > timer_total_ms) {
+        timer_remaining_ms = timer_total_ms;
+    }
+    context->timer_active = true;
+    context->timer_running = timer_running;
+    context->timer_total_ms = timer_total_ms;
+    context->timer_remaining_ms = timer_remaining_ms;
+    context->timer_remaining_pct = timer_total_ms == 0U
+        ? 0U
+        : (uint8_t)(((uint64_t)timer_remaining_ms * 100U) /
+                    timer_total_ms);
+    context->timer_remaining_permille = timer_total_ms == 0U
+        ? 0U
+        : (uint16_t)(((uint64_t)timer_remaining_ms * 1000U) /
+                     timer_total_ms);
+}
+
 sim_scene_result_t sim_render_scene(const uint8_t *payload, size_t payload_length,
                                     int16_t utc_offset_minutes, int64_t now_unix_seconds,
-                                    bool timer_active, uint32_t timer_remaining_ms,
-                                    uint8_t timer_pct, const sim_scene_field_t *fields,
+                                    bool timer_active, uint32_t timer_total_ms,
+                                    uint32_t timer_remaining_ms, bool timer_running,
+                                    const sim_scene_field_t *fields,
                                     size_t field_count, bool orientation_flipped,
                                     uint16_t *out_pixels)
 {
@@ -559,12 +597,11 @@ sim_scene_result_t sim_render_scene(const uint8_t *payload, size_t payload_lengt
     scene_binding_context_t context = {
         .unix_seconds = now_unix_seconds,
         .utc_offset_minutes = utc_offset_minutes,
-        .timer_active = timer_active,
-        .timer_remaining_ms = timer_remaining_ms,
-        .timer_remaining_pct = timer_pct,
         .field = sim_scene_field_lookup,
         .field_ctx = &table,
     };
+    fill_scene_timer_context(&context, timer_active, timer_total_ms,
+                             timer_remaining_ms, timer_running);
     /* Every binding is evaluated inside this call, so `context` and the
      * table it points at only have to outlive it. */
     if (!scene_view_show(&s_scene, &context)) {
@@ -573,5 +610,99 @@ sim_scene_result_t sim_render_scene(const uint8_t *payload, size_t payload_lengt
 
     advance_fake_tick_phase();
     copy_frame_out(orientation_flipped, out_pixels);
+    return SIM_SCENE_OK;
+}
+
+sim_scene_result_t sim_render_scene_temporal_pair(
+    const uint8_t *payload, size_t payload_length,
+    int template_kind, const sim_field_t *template_fields,
+    size_t template_field_count, int16_t utc_offset_minutes,
+    int64_t now_unix_seconds, bool timer_active, uint32_t timer_total_ms,
+    uint32_t timer_remaining_ms, bool timer_running, uint32_t elapsed_ms,
+    bool toggle_running, const sim_scene_field_t *scene_fields,
+    size_t scene_field_count, bool orientation_flipped,
+    uint16_t *out_template_pixels, uint16_t *out_initial_scene_pixels,
+    uint16_t *out_scene_pixels)
+{
+    if (payload == NULL || payload_length == 0U ||
+        out_template_pixels == NULL || out_initial_scene_pixels == NULL ||
+        out_scene_pixels == NULL) {
+        return SIM_SCENE_ERR_ARGUMENT;
+    }
+    if (!sim_init() || !ensure_asset_store() || !ensure_font_registry()) {
+        return SIM_SCENE_ERR_SETUP;
+    }
+    scene_view_set_asset_resolver(sim_asset_resolver, sim_asset_release);
+    scene_model_result_t decode_result =
+        scene_decode(payload, payload_length, &s_scene);
+    if (decode_result != SCENE_MODEL_OK) {
+        return map_decode_result(decode_result);
+    }
+
+    template_field_state_t template_state;
+    if (!build_fields(template_kind, template_fields, template_field_count,
+                      &template_state)) {
+        return SIM_SCENE_ERR_SHOW;
+    }
+    clock_source_set_override(now_unix_seconds);
+    template_view_set_utc_offset_minutes(utc_offset_minutes);
+    if (!template_view_show((protocol_template_kind_t)template_kind,
+                            PROTOCOL_SIZE_FULL, &template_state)) {
+        clock_source_clear_override();
+        return SIM_SCENE_ERR_SHOW;
+    }
+    lv_refr_now(s_display);
+    s_fake_tick += elapsed_ms;
+    clock_source_set_override(now_unix_seconds + (int64_t)(elapsed_ms / 1000U));
+    if (toggle_running) {
+        /* Advance the running face to this instant before applying the local
+         * pause. A real LVGL timer does this throughout the interval; without
+         * the explicit tick a single fake-tick jump would leave the arc at
+         * its initial sweep even though local_action captures the new time. */
+        template_view_set_utc_offset_minutes(utc_offset_minutes);
+        template_view_apply_local_action(PROTOCOL_EVENT_ACTION_START_PAUSE);
+    } else {
+        /* This setter synchronously calls the template tick callback. */
+        template_view_set_utc_offset_minutes(utc_offset_minutes);
+    }
+    lv_refr_now(s_display);
+    copy_frame_out(orientation_flipped, out_template_pixels);
+    clock_source_clear_override();
+
+    sim_scene_field_table_t table = {
+        .fields = scene_fields,
+        .count = scene_fields == NULL ? 0U : scene_field_count,
+    };
+    scene_binding_context_t context = {
+        .unix_seconds = now_unix_seconds,
+        .utc_offset_minutes = utc_offset_minutes,
+        .field = sim_scene_field_lookup,
+        .field_ctx = &table,
+    };
+    fill_scene_timer_context(&context, timer_active, timer_total_ms,
+                             timer_remaining_ms, timer_running);
+    if (!scene_view_show(&s_scene, &context)) {
+        return SIM_SCENE_ERR_SHOW;
+    }
+    lv_refr_now(s_display);
+    copy_frame_out(orientation_flipped, out_initial_scene_pixels);
+
+    context.unix_seconds =
+        now_unix_seconds + (int64_t)(elapsed_ms / 1000U);
+    if (context.timer_active && context.timer_running) {
+        context.timer_remaining_ms = elapsed_ms >= context.timer_remaining_ms
+            ? 0U
+            : context.timer_remaining_ms - elapsed_ms;
+    }
+    if (toggle_running && context.timer_active) {
+        context.timer_running = !context.timer_running;
+    }
+    fill_scene_timer_context(&context, context.timer_active,
+                             context.timer_total_ms,
+                             context.timer_remaining_ms,
+                             context.timer_running);
+    scene_view_refresh_bindings(&context);
+    lv_refr_now(s_display);
+    copy_frame_out(orientation_flipped, out_scene_pixels);
     return SIM_SCENE_OK;
 }

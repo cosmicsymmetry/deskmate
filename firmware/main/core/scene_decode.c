@@ -28,19 +28,20 @@
  *          omitted opacity means opaque -- 0 would draw nothing), clip
  *          defaults absent.
  * ARC      {0: cx, 1: cy, 2: r, 3: start_deg, 4: end_deg, 5: width,
- *           6: color, 7: rounded (bool), 8: end_binding (text), 9: opacity}
+ *           6: color, 7: rounded (bool), 8: end_binding (text), 9: opacity,
+ *           10: running_color}
  *          required 0-5; color defaults 0, rounded false, end_binding "",
- *          opacity 255.
+ *          opacity 255, running_color absent.
  * LINE     {0: [x, ...], 1: [y, ...], 2: width, 3: color}
  *          required 0-2; color defaults 0. The two arrays must be the same
  *          length, at most SCENE_MAX_LINE_POINTS; that length is
  *          point_count.
  * TEXT     {0: x, 1: baseline_y, 2: w, 3: align, 4: <font>, 5: color,
- *           6: <value>, 7: ellipsize (bool)}
+ *           6: <value>, 7: ellipsize (bool), 8: running_color}
  *          required 0, 1, 2, 4, 6; align defaults SCENE_ALIGN_LEFT (NOT
  *          zero -- SCENE_ALIGN_LEFT is 1, so a zero-initialised align is
  *          the invalid value scene_model_validate() rejects), color 0,
- *          ellipsize false.
+ *          ellipsize false, running_color absent.
  * IMAGE    {0: x, 1: y, 2: w, 3: h, 4: digest (32 bytes), 5: recolor
  *           (bool), 6: color}
  *          required 0-4; recolor defaults false, color 0.
@@ -412,6 +413,7 @@ static scene_model_result_t decode_arc(CborValue *value, scene_arc_t *arc)
     }
 
     arc->opacity = UINT8_MAX;
+    arc->has_running_color = false;
 
     uint32_t present = 0U;
     uint64_t previous = 0U;
@@ -436,12 +438,18 @@ static scene_model_result_t decode_arc(CborValue *value, scene_arc_t *arc)
                                sizeof arc->end_binding, SCENE_MAX_BINDING);
             break;
         case 9U: status = read_uint8(&fields, &arc->opacity); break;
+        case 10U:
+            status = read_uint32(&fields, &arc->running_color);
+            if (status == SCENE_MODEL_OK) {
+                arc->has_running_color = true;
+            }
+            break;
         default: status = skip_value(&fields); break;
         }
         if (status != SCENE_MODEL_OK) {
             return status;
         }
-        if (key <= 9U) {
+        if (key <= 10U) {
             present |= REQUIRED_BIT((uint32_t)key);
         }
     }
@@ -685,6 +693,7 @@ static scene_model_result_t decode_text(CborValue *value, scene_text_t *text)
      * node: a text node that omits key 3 would otherwise carry align 0 and
      * be rejected by scene_model_validate() on arrival. */
     text->align = SCENE_ALIGN_LEFT;
+    text->has_running_color = false;
 
     uint32_t present = 0U;
     uint64_t previous = 0U;
@@ -711,12 +720,18 @@ static scene_model_result_t decode_text(CborValue *value, scene_text_t *text)
         case 5U: status = read_uint32(&fields, &text->color); break;
         case 6U: status = decode_value(&fields, &text->value); break;
         case 7U: status = read_boolean(&fields, &text->ellipsize); break;
+        case 8U:
+            status = read_uint32(&fields, &text->running_color);
+            if (status == SCENE_MODEL_OK) {
+                text->has_running_color = true;
+            }
+            break;
         default: status = skip_value(&fields); break;
         }
         if (status != SCENE_MODEL_OK) {
             return status;
         }
-        if (key <= 7U) {
+        if (key <= 8U) {
             present |= REQUIRED_BIT((uint32_t)key);
         }
     }

@@ -185,6 +185,7 @@ static void test_scene_fixtures_pin_new_fields_and_omitted_defaults(void)
     assert(scene->node_count == 10U);
     const scene_rect_t *rect = &scene->nodes[0].value.rect;
     const scene_arc_t *arc = &scene->nodes[1].value.arc;
+    const scene_text_t *running_text = &scene->nodes[3].value.text;
     const scene_rot_rect_t *rot_rect =
         &scene->nodes[9].value.rot_rect;
     assert(scene->nodes[0].kind == SCENE_NODE_RECT);
@@ -196,6 +197,11 @@ static void test_scene_fixtures_pin_new_fields_and_omitted_defaults(void)
     assert(rect->clip.h == 336);
     assert(scene->nodes[1].kind == SCENE_NODE_ARC);
     assert(arc->opacity == 0x33U);
+    assert(arc->has_running_color);
+    assert(arc->running_color == UINT32_C(0x0064D2FF));
+    assert(scene->nodes[3].kind == SCENE_NODE_TEXT);
+    assert(running_text->has_running_color);
+    assert(running_text->running_color == UINT32_C(0x00FF9F0A));
     assert(scene->nodes[9].kind == SCENE_NODE_ROT_RECT);
     assert(rot_rect->has_clip);
     assert(rot_rect->clip.x == 64);

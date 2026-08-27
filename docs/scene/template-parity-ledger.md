@@ -142,10 +142,11 @@ facts the device already owns. Do not add arithmetic or conditionals to `SceneVa
 That preserves standalone timer behavior and keeps untrusted scene input away from a
 general evaluator.
 
-The regression test
-[`progress_ring_scene_status_text_does_not_advance_with_time`](../../companion/crates/app-core/src/scene_build.rs)
-pins the literal-chip divergence after 90 seconds. Stage 3 should keep it until the new
-live form replaces it with a test that proves the scene and C values advance together.
+The temporal parity tests in
+[`scene_parity.rs`](../../companion/crates/app-core/tests/scene_parity.rs) replace the
+former literal-chip divergence regression: they advance the C template and an already
+decoded scene through the same interval, without a scene re-push, and prove that elapsed
+time, completion status, and start/pause colours remain byte-identical.
 
 ### Host-owned data templates
 

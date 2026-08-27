@@ -56,8 +56,12 @@ typedef struct {
      * time because the node it came from is not retained. The origin needs no
      * entry here -- it lives on the object as its rotation. */
     int32_t arc_span_deg;
+    uint32_t color;
+    uint32_t running_color;
     uint8_t kind; /* scene_node_kind_t */
     uint8_t rotation_binding; /* scene_rotation_binding_t, ROT_RECT only */
+    bool has_binding;
+    bool has_running_color;
     bool hide_when_empty;     /* LABEL only */
 } scene_bound_node_t;
 
@@ -255,10 +259,10 @@ static void evaluate_binding(const scene_binding_t *binding,
     }
 }
 
-/* Reads an evaluated `timer.pct` as a percentage. Anything that is not a run
+/* Reads an evaluated arc scalar. Anything that is not a run
  * of digits -- notably the "--" placeholder an inactive timer produces -- is
  * read as 0, which collapses the arc to its start angle. */
-static int32_t parse_percent(const char *text)
+static int32_t parse_arc_scalar(const char *text, int32_t maximum)
 {
     int32_t value = 0;
     if (text[0] == '\0') {
@@ -269,25 +273,51 @@ static int32_t parse_percent(const char *text)
             return 0;
         }
         value = value * 10 + (*cursor - '0');
-        if (value >= 100) {
-            return 100;
+        if (value >= maximum) {
+            return maximum;
         }
     }
     return value;
 }
 
-/* Scales the arc's sweep to the bound percentage. The indicator's start
+/* Scales the arc's sweep to the bound percentage or per-mille value. The indicator's start
  * angle stays at 0 and the object's rotation carries the origin (see
  * scene_model_arc_origin()/scene_model_arc_span()), so only the end angle
  * moves, and it can never exceed the 360 the setter's fold would truncate:
- * span <= 360 and percent <= 100. */
+ * span <= 360 and the scalar is bounded by its binding kind. */
 static void apply_arc_binding(const scene_bound_node_t *bound,
                               const char *evaluated)
 {
-    int32_t percent = parse_percent(evaluated);
+    int32_t scale = bound->binding.kind == SCENE_BINDING_TIMER_PERMILLE
+        ? 1000
+        : 100;
+    int32_t scalar = parse_arc_scalar(evaluated, scale);
     lv_arc_set_end_angle(
         bound->object,
-        (lv_value_precise_t)(bound->arc_span_deg * percent / 100));
+        (lv_value_precise_t)(bound->arc_span_deg * scalar / scale));
+}
+
+static uint32_t selected_running_color(uint32_t color,
+                                       uint32_t running_color,
+                                       bool has_running_color,
+                                       const scene_binding_context_t *context)
+{
+    return has_running_color && context != NULL && context->timer_running
+        ? running_color
+        : color;
+}
+
+static void apply_running_color(const scene_bound_node_t *bound,
+                                const scene_binding_context_t *context)
+{
+    uint32_t color = selected_running_color(
+        bound->color, bound->running_color, bound->has_running_color, context);
+    if (bound->kind == (uint8_t)SCENE_NODE_ARC) {
+        lv_obj_set_style_arc_color(bound->object, lv_color_hex(color),
+                                   LV_PART_INDICATOR);
+    } else {
+        lv_obj_set_style_text_color(bound->object, lv_color_hex(color), 0);
+    }
 }
 
 /* Exactly deskmate_chip_set_text()'s visible-state transition. In
@@ -411,7 +441,8 @@ static lv_obj_t *build_rect(lv_obj_t *parent, const scene_rect_t *rect)
  * origin and the indicator is set to 0..span, which is what lets a full turn
  * survive LVGL's single-subtraction fold; see scene_model_arc_origin() and
  * scene_model_arc_span(). */
-static lv_obj_t *build_arc(lv_obj_t *parent, const scene_arc_t *arc)
+static lv_obj_t *build_arc(lv_obj_t *parent, const scene_arc_t *arc,
+                           const scene_binding_context_t *context)
 {
     lv_obj_t *object = lv_arc_create(parent);
     if (object == NULL) {
@@ -422,8 +453,11 @@ static lv_obj_t *build_arc(lv_obj_t *parent, const scene_arc_t *arc)
     lv_obj_remove_style(object, NULL, LV_PART_KNOB);
     lv_obj_remove_flag(object, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_set_style_arc_opa(object, LV_OPA_TRANSP, LV_PART_MAIN);
-    lv_obj_set_style_arc_color(object, lv_color_hex(arc->color),
-                               LV_PART_INDICATOR);
+    lv_obj_set_style_arc_color(
+        object,
+        lv_color_hex(selected_running_color(
+            arc->color, arc->running_color, arc->has_running_color, context)),
+        LV_PART_INDICATOR);
     lv_obj_set_style_arc_opa(object, (lv_opa_t)arc->opacity,
                              LV_PART_INDICATOR);
     lv_obj_set_style_arc_width(object, clamp_arc_width(arc->width, arc->r),
@@ -508,7 +542,12 @@ static lv_obj_t *build_text(lv_obj_t *parent, const scene_text_t *text,
     }
 
     lv_obj_set_style_text_font(label, font, 0);
-    lv_obj_set_style_text_color(label, lv_color_hex(text->color), 0);
+    lv_obj_set_style_text_color(
+        label,
+        lv_color_hex(selected_running_color(
+            text->color, text->running_color, text->has_running_color,
+            context)),
+        0);
     lv_obj_set_style_text_align(label, align_to_lv(text->align), 0);
     lv_label_set_long_mode(label, text->ellipsize ? LV_LABEL_LONG_MODE_DOTS
                                                   : LV_LABEL_LONG_MODE_CLIP);
@@ -921,13 +960,15 @@ static uint32_t count_bound_nodes(const scene_t *scene)
     for (uint32_t i = 0U; i < scene->node_count; i++) {
         const scene_node_t *node = &scene->nodes[i];
         if (node->kind == SCENE_NODE_TEXT &&
-            value_is_bound(&node->value.text.value)) {
+            (value_is_bound(&node->value.text.value) ||
+             node->value.text.has_running_color)) {
             ++count;
         } else if (node->kind == SCENE_NODE_LABEL &&
                    value_is_bound(&node->value.label.value)) {
             ++count;
         } else if (node->kind == SCENE_NODE_ARC &&
-                   node->value.arc.end_binding[0] != '\0') {
+                   (node->value.arc.end_binding[0] != '\0' ||
+                    node->value.arc.has_running_color)) {
             ++count;
         } else if (node->kind == SCENE_NODE_ROT_RECT &&
                    node->value.rot_rect.rotation_binding[0] != '\0') {
@@ -960,25 +1001,28 @@ static bool build_nodes(lv_obj_t *parent, const scene_t *scene,
             const scene_arc_t *arc = &node->value.arc;
             scene_binding_t binding;
 
-            object = build_arc(parent, arc);
-            if (object == NULL || arc->end_binding[0] == '\0') {
-                break;
-            }
-            /* A binding that will not parse leaves the arc at the static
-             * sweep the scene declared, and is not recorded -- so no later
-             * refresh can move it. */
-            if (scene_binding_parse(arc->end_binding, &binding) !=
-                SCENE_BINDING_OK) {
+            object = build_arc(parent, arc, context);
+            if (object == NULL ||
+                (arc->end_binding[0] == '\0' && !arc->has_running_color)) {
                 break;
             }
             scene_bound_node_t *bound = &state->bound[state->bound_count++];
             bound->object = object;
             bound->kind = (uint8_t)SCENE_NODE_ARC;
-            bound->binding = binding;
+            bound->color = arc->color;
+            bound->running_color = arc->running_color;
+            bound->has_running_color = arc->has_running_color;
             bound->arc_span_deg =
                 scene_model_arc_span(arc->start_deg, arc->end_deg);
-            evaluate_binding(&bound->binding, context, buffer, sizeof buffer);
-            apply_arc_binding(bound, buffer);
+            if (arc->end_binding[0] != '\0' &&
+                scene_binding_parse(arc->end_binding, &binding) ==
+                    SCENE_BINDING_OK) {
+                bound->binding = binding;
+                bound->has_binding = true;
+                evaluate_binding(&bound->binding, context, buffer,
+                                 sizeof buffer);
+                apply_arc_binding(bound, buffer);
+            }
             break;
         }
 
@@ -992,12 +1036,20 @@ static bool build_nodes(lv_obj_t *parent, const scene_t *scene,
 
             object = build_text(parent, &node->value.text, context, &binding,
                                 &is_bound);
-            if (object != NULL && is_bound) {
+            if (object != NULL &&
+                (is_bound || node->value.text.has_running_color)) {
                 scene_bound_node_t *bound =
                     &state->bound[state->bound_count++];
                 bound->object = object;
                 bound->kind = (uint8_t)SCENE_NODE_TEXT;
-                bound->binding = binding;
+                bound->color = node->value.text.color;
+                bound->running_color = node->value.text.running_color;
+                bound->has_running_color =
+                    node->value.text.has_running_color;
+                if (is_bound) {
+                    bound->binding = binding;
+                    bound->has_binding = true;
+                }
             }
             break;
         }
@@ -1026,6 +1078,7 @@ static bool build_nodes(lv_obj_t *parent, const scene_t *scene,
                 bound->object = object;
                 bound->kind = (uint8_t)SCENE_NODE_LABEL;
                 bound->binding = binding;
+                bound->has_binding = true;
                 bound->hide_when_empty = node->value.label.hide_when_empty;
             }
             break;
@@ -1147,6 +1200,12 @@ void scene_view_refresh_bindings(const scene_binding_context_t *context)
                     (scene_rotation_binding_t)bound->rotation_binding,
                     context, 0),
                 0);
+            continue;
+        }
+        if (bound->has_running_color) {
+            apply_running_color(bound, context);
+        }
+        if (!bound->has_binding) {
             continue;
         }
         evaluate_binding(&bound->binding, context, buffer, sizeof buffer);

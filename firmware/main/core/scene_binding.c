@@ -8,7 +8,11 @@
 
 #define TIME_PREFIX "time:"
 #define TIMER_REMAINING_PREFIX "timer.remaining:"
+#define TIMER_ELAPSED_PREFIX "timer.elapsed:"
+#define TIMER_TOTAL_PREFIX "timer.total:"
 #define TIMER_PCT_TOKEN "timer.pct"
+#define TIMER_PERMILLE_TOKEN "timer.permille"
+#define TIMER_STATUS_TOKEN "timer.status"
 #define FIELD_PREFIX "field."
 #define TIMER_SECONDS_MAX INT64_C(86400)
 
@@ -44,8 +48,11 @@ scene_timer_snapshot_t scene_timer_snapshot(int64_t duration_seconds,
         remaining_ms = total_ms;
     }
     snapshot.remaining_ms = (uint32_t)remaining_ms;
+    snapshot.total_ms = (uint32_t)total_ms;
     snapshot.remaining_pct =
         (uint8_t)((remaining_ms * INT64_C(100)) / total_ms);
+    snapshot.remaining_permille =
+        (uint16_t)((remaining_ms * INT64_C(1000)) / total_ms);
     return snapshot;
 }
 
@@ -105,7 +112,9 @@ static scene_binding_result_t parse_time_like(const char *argument,
         return SCENE_BINDING_ERR_FORMAT;
     }
     for (const char *p = argument; *p != '\0'; p++) {
-        bool valid = kind == SCENE_BINDING_TIMER_REMAINING
+        bool valid = kind == SCENE_BINDING_TIMER_REMAINING ||
+                kind == SCENE_BINDING_TIMER_ELAPSED ||
+                kind == SCENE_BINDING_TIMER_TOTAL
             ? is_timer_format_char(*p)
             : is_time_format_char(*p);
         if (!valid) {
@@ -122,11 +131,22 @@ scene_binding_result_t scene_binding_parse(const char *text,
         return SCENE_BINDING_ERR_ARGUMENT;
     }
 
-    /* `timer.pct` is an exact-match token with no argument -- checked
-     * before the `timer.remaining:` prefix (they share a `timer.` stem)
-     * via strcmp, so "timer.pctXYZ" cannot match it. */
+    /* Exact-match timer tokens carry no argument. They are checked via
+     * strcmp, so a token with a trailing suffix cannot match. */
     if (strcmp(text, TIMER_PCT_TOKEN) == 0) {
         out->kind = SCENE_BINDING_TIMER_PCT;
+        out->argument[0] = '\0';
+        return SCENE_BINDING_OK;
+    }
+
+    if (strcmp(text, TIMER_PERMILLE_TOKEN) == 0) {
+        out->kind = SCENE_BINDING_TIMER_PERMILLE;
+        out->argument[0] = '\0';
+        return SCENE_BINDING_OK;
+    }
+
+    if (strcmp(text, TIMER_STATUS_TOKEN) == 0) {
+        out->kind = SCENE_BINDING_TIMER_STATUS;
         out->argument[0] = '\0';
         return SCENE_BINDING_OK;
     }
@@ -135,6 +155,18 @@ scene_binding_result_t scene_binding_parse(const char *text,
                 strlen(TIMER_REMAINING_PREFIX)) == 0) {
         return parse_time_like(text + strlen(TIMER_REMAINING_PREFIX),
                                 SCENE_BINDING_TIMER_REMAINING, out);
+    }
+
+    if (strncmp(text, TIMER_ELAPSED_PREFIX,
+                strlen(TIMER_ELAPSED_PREFIX)) == 0) {
+        return parse_time_like(text + strlen(TIMER_ELAPSED_PREFIX),
+                               SCENE_BINDING_TIMER_ELAPSED, out);
+    }
+
+    if (strncmp(text, TIMER_TOTAL_PREFIX,
+                strlen(TIMER_TOTAL_PREFIX)) == 0) {
+        return parse_time_like(text + strlen(TIMER_TOTAL_PREFIX),
+                               SCENE_BINDING_TIMER_TOTAL, out);
     }
 
     if (strncmp(text, TIME_PREFIX, strlen(TIME_PREFIX)) == 0) {
@@ -322,6 +354,16 @@ static scene_binding_result_t render_timer_tokens(const char *format,
     return write_bounded(out, out_capacity, buf);
 }
 
+static uint32_t timer_seconds_ceiled(uint32_t milliseconds)
+{
+    uint32_t seconds =
+        (uint32_t)(((uint64_t)milliseconds + 999U) / 1000U);
+    if (seconds > (uint32_t)TIMER_SECONDS_MAX) {
+        seconds = (uint32_t)TIMER_SECONDS_MAX;
+    }
+    return seconds;
+}
+
 scene_binding_result_t scene_binding_evaluate(
     const scene_binding_t *binding, const scene_binding_context_t *context,
     char *out, size_t out_capacity)
@@ -349,14 +391,47 @@ scene_binding_result_t scene_binding_evaluate(
             return write_placeholder(out, out_capacity, binding->argument);
         }
         uint32_t total_seconds =
-            (uint32_t)(((uint64_t)context->timer_remaining_ms + 999U) /
-                       1000U);
-        if (total_seconds > (uint32_t)TIMER_SECONDS_MAX) {
-            total_seconds = (uint32_t)TIMER_SECONDS_MAX;
-        }
+            timer_seconds_ceiled(context->timer_remaining_ms);
         return render_timer_tokens(binding->argument, total_seconds, out,
                                    out_capacity);
     }
+    case SCENE_BINDING_TIMER_ELAPSED: {
+        if (!context->timer_active) {
+            return write_placeholder(out, out_capacity, binding->argument);
+        }
+        uint32_t total_seconds =
+            timer_seconds_ceiled(context->timer_total_ms);
+        uint32_t remaining_seconds =
+            timer_seconds_ceiled(context->timer_remaining_ms);
+        uint32_t elapsed_seconds = remaining_seconds >= total_seconds
+            ? 0U
+            : total_seconds - remaining_seconds;
+        return render_timer_tokens(binding->argument, elapsed_seconds, out,
+                                   out_capacity);
+    }
+    case SCENE_BINDING_TIMER_TOTAL: {
+        if (!context->timer_active) {
+            return write_placeholder(out, out_capacity, binding->argument);
+        }
+        return render_timer_tokens(
+            binding->argument, timer_seconds_ceiled(context->timer_total_ms),
+            out, out_capacity);
+    }
+    case SCENE_BINDING_TIMER_STATUS:
+        if (!context->timer_active) {
+            return write_placeholder(out, out_capacity, binding->argument);
+        }
+        if (context->timer_remaining_ms == 0U) {
+            return write_bounded(out, out_capacity, "Done");
+        }
+        if (context->timer_running) {
+            return write_bounded(out, out_capacity, "Running");
+        }
+        if (context->timer_total_ms > 0U &&
+            context->timer_remaining_ms >= context->timer_total_ms) {
+            return write_bounded(out, out_capacity, "Ready");
+        }
+        return write_bounded(out, out_capacity, "Paused");
     case SCENE_BINDING_TIMER_PCT: {
         if (!context->timer_active) {
             return write_placeholder(out, out_capacity, binding->argument);
@@ -364,6 +439,15 @@ scene_binding_result_t scene_binding_evaluate(
         char piece[4];
         snprintf(piece, sizeof piece, "%u",
                  (unsigned)context->timer_remaining_pct);
+        return write_bounded(out, out_capacity, piece);
+    }
+    case SCENE_BINDING_TIMER_PERMILLE: {
+        if (!context->timer_active) {
+            return write_placeholder(out, out_capacity, binding->argument);
+        }
+        char piece[6];
+        snprintf(piece, sizeof piece, "%u",
+                 (unsigned)context->timer_remaining_permille);
         return write_bounded(out, out_capacity, piece);
     }
     case SCENE_BINDING_FIELD: {

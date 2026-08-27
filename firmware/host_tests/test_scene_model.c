@@ -150,6 +150,31 @@ static void test_an_arc_with_unterminated_end_binding_is_rejected(void)
     assert(scene_model_validate(&scene) == SCENE_MODEL_ERR_TEXT);
 }
 
+static void test_an_arc_with_a_running_color_validates(void)
+{
+    scene_t scene = minimal_scene();
+    scene.nodes[0].kind = SCENE_NODE_ARC;
+    scene.nodes[0].value.arc.cx = 100;
+    scene.nodes[0].value.arc.cy = 100;
+    scene.nodes[0].value.arc.r = 50;
+    scene.nodes[0].value.arc.has_running_color = true;
+    scene.nodes[0].value.arc.running_color = UINT32_C(0x00FF9F0A);
+    assert(scene_model_validate(&scene) == SCENE_MODEL_OK);
+}
+
+static void test_text_with_a_running_color_validates(void)
+{
+    scene_t scene = minimal_scene();
+    scene.nodes[0].kind = SCENE_NODE_TEXT;
+    scene.nodes[0].value.text.w = 100;
+    scene.nodes[0].value.text.align = SCENE_ALIGN_LEFT;
+    scene.nodes[0].value.text.font.kind = SCENE_FONT_BAKED;
+    scene.nodes[0].value.text.font.baked = SCENE_FONT_BODY;
+    scene.nodes[0].value.text.has_running_color = true;
+    scene.nodes[0].value.text.running_color = UINT32_C(0x00FF9F0A);
+    assert(scene_model_validate(&scene) == SCENE_MODEL_OK);
+}
+
 static void test_an_image_within_bounds_validates(void)
 {
     scene_t scene = minimal_scene();
@@ -562,6 +587,8 @@ int main(void)
     test_an_arc_extending_left_of_canvas_is_rejected();
     test_an_arc_extending_right_of_canvas_is_rejected();
     test_an_arc_with_unterminated_end_binding_is_rejected();
+    test_an_arc_with_a_running_color_validates();
+    test_text_with_a_running_color_validates();
     test_an_image_within_bounds_validates();
     test_an_image_extending_past_canvas_width_is_rejected();
     test_a_glyph_within_bounds_validates();

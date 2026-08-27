@@ -350,8 +350,11 @@ static void fill_timer_bindings(const protocol_context_t *context,
         duration->value.integer, remaining->value.integer,
         running->value.boolean, context->scene_timer_anchor_ms, uptime_ms());
     binding->timer_active = true;
+    binding->timer_running = running->value.boolean;
+    binding->timer_total_ms = snapshot.total_ms;
     binding->timer_remaining_ms = snapshot.remaining_ms;
     binding->timer_remaining_pct = snapshot.remaining_pct;
+    binding->timer_remaining_permille = snapshot.remaining_permille;
 }
 
 static void fill_scene_binding_context(protocol_context_t *context,

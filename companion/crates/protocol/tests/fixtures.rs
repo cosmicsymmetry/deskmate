@@ -209,6 +209,25 @@ fn assert_rot_rect_clip_is_pinned(nodes: &[protocol::SceneNode]) {
     );
 }
 
+fn assert_running_colors_are_pinned(nodes: &[protocol::SceneNode]) {
+    let arc = nodes
+        .iter()
+        .find_map(|node| match node {
+            protocol::SceneNode::Arc(arc) => Some(arc),
+            _ => None,
+        })
+        .expect("the rich fixture carries an arc");
+    assert_eq!(arc.running_color, Some(0x0064_D2FF));
+    let text = nodes
+        .iter()
+        .find_map(|node| match node {
+            protocol::SceneNode::Text(text) if text.running_color.is_some() => Some(text),
+            _ => None,
+        })
+        .expect("the rich fixture carries a text running color");
+    assert_eq!(text.running_color, Some(0x00FF_9F0A));
+}
+
 #[test]
 fn push_scene_fixtures_carry_what_they_are_meant_to() {
     let frame = decode_wire_frame(&fixture("push_scene.bin")).unwrap();
@@ -250,6 +269,7 @@ fn push_scene_fixtures_carry_what_they_are_meant_to() {
         .expect("the rich fixture carries an arc");
     assert_eq!(arc.opacity, 0x33);
     assert_rot_rect_clip_is_pinned(&push.scene.nodes);
+    assert_running_colors_are_pinned(&push.scene.nodes);
     let label = push
         .scene
         .nodes

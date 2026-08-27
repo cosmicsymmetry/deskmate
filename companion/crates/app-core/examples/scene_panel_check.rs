@@ -247,11 +247,12 @@ fn timer_fields(timer: SceneTimer) -> Vec<Field> {
     // stopped 100-second ProgressRing snapshot represents every integer
     // remaining percentage exactly and cannot move during push-to-capture
     // latency, so the device producer and simulator receive the same value.
-    let remaining = i64::from(timer.pct);
+    let duration = i64::from(timer.total_ms / 1_000);
+    let remaining = i64::from(timer.remaining_ms / 1_000);
     vec![
         Field {
             key: "duration_seconds".into(),
-            value: FieldValue::Integer(100),
+            value: FieldValue::Integer(duration),
         },
         Field {
             key: "remaining_seconds".into(),
@@ -259,7 +260,7 @@ fn timer_fields(timer: SceneTimer) -> Vec<Field> {
         },
         Field {
             key: "running".into(),
-            value: FieldValue::Boolean(false),
+            value: FieldValue::Boolean(timer.running),
         },
     ]
 }
@@ -807,8 +808,9 @@ mod tests {
     #[test]
     fn panel_timer_fields_preserve_remaining_percentage_semantics() {
         let fields = timer_fields(SceneTimer {
+            total_ms: 100_000,
             remaining_ms: 60_000,
-            pct: 60,
+            running: false,
         });
         assert!(matches!(
             fields.get(1),

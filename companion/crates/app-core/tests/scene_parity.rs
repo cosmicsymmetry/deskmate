@@ -44,7 +44,9 @@ use app_core::scene_build::{
     build_icon_badge_text_scene, build_progress_ring_scene, build_row_list_scene,
 };
 use chrono::{NaiveDate, NaiveDateTime};
-use lvgl_sim::scene::{SceneRenderRequest, SceneTimer};
+use lvgl_sim::scene::{
+    SceneRenderRequest, SceneTemporalPair, SceneTemporalPairRequest, SceneTimer,
+};
 use lvgl_sim::{
     LOGICAL_HEIGHT, LOGICAL_WIDTH, RenderRequest, SimField, SimFieldValue, SimOrientation,
     SimTemplate, Simulator,
@@ -617,10 +619,11 @@ fn add_progress_ring_cases(cases: &mut Vec<ParityCase>) {
                     utc_offset_minutes: 0,
                     now_unix_seconds: 0,
                     timer: Some(SceneTimer {
+                        total_ms: u32::try_from(DURATION_SECONDS * 1_000)
+                            .expect("the fixture is inside u32"),
                         remaining_ms: u32::try_from(remaining_seconds * 1_000)
                             .expect("the fixture is inside u32"),
-                        pct: u8::try_from(remaining_seconds * 100 / DURATION_SECONDS)
-                            .expect("the fixture percentage is in 0..=100"),
+                        running,
                     }),
                     fields: Vec::new(),
                     orientation,
@@ -628,6 +631,128 @@ fn add_progress_ring_cases(cases: &mut Vec<ParityCase>) {
             });
         }
     }
+}
+
+fn assert_progress_ring_temporal_parity(
+    duration_seconds: i64,
+    remaining_seconds: i64,
+    running: bool,
+    elapsed_ms: u32,
+    toggle_running: bool,
+) -> SceneTemporalPair {
+    let label = "Pomodoro";
+    let template = RenderRequest {
+        template: SimTemplate::ProgressRing,
+        fields: vec![
+            SimField {
+                name: "label".to_string(),
+                value: SimFieldValue::Text(label.to_string()),
+            },
+            SimField {
+                name: "duration_seconds".to_string(),
+                value: SimFieldValue::Integer(duration_seconds),
+            },
+            SimField {
+                name: "remaining_seconds".to_string(),
+                value: SimFieldValue::Integer(remaining_seconds),
+            },
+            SimField {
+                name: "running".to_string(),
+                value: SimFieldValue::Boolean(running),
+            },
+        ],
+        utc_offset_minutes: 0,
+        now_unix_seconds: 0,
+        orientation: SimOrientation::Landscape,
+    };
+    let scene = SceneRenderRequest {
+        scene: build_progress_ring_scene(
+            &ProgressRingCard {
+                revision: 1,
+                label,
+                duration_seconds,
+                remaining_seconds,
+                running,
+            },
+            &BakedFontMetrics::SHIPPED,
+        ),
+        assets: Vec::new(),
+        utc_offset_minutes: 0,
+        now_unix_seconds: 0,
+        timer: Some(SceneTimer {
+            total_ms: u32::try_from(duration_seconds * 1_000).expect("bounded duration"),
+            remaining_ms: u32::try_from(remaining_seconds * 1_000).expect("bounded remaining"),
+            running,
+        }),
+        fields: Vec::new(),
+        orientation: SimOrientation::Landscape,
+    };
+    let mut simulator = Simulator::new().expect("simulator");
+    let frames = simulator
+        .render_scene_temporal_pair(&SceneTemporalPairRequest {
+            template: &template,
+            scene: &scene,
+            elapsed_ms,
+            toggle_running,
+        })
+        .expect("temporal render");
+    let differing: Vec<_> = frames
+        .scene
+        .iter()
+        .zip(&frames.template)
+        .enumerate()
+        .filter_map(|(index, (scene, template))| {
+            (scene != template).then_some((index, *scene, *template))
+        })
+        .take(20)
+        .collect();
+    assert!(
+        differing.is_empty(),
+        "temporal frames differ; first pixels: {differing:?}"
+    );
+    frames
+}
+
+#[test]
+fn a_running_progress_scene_advances_across_a_second_without_a_repush() {
+    const DURATION_SECONDS: i64 = 1_500;
+    const REMAINING_SECONDS: i64 = 900;
+    const ELAPSED_MS: u32 = 1_100;
+    let final_remaining_ms = REMAINING_SECONDS * 1_000 - i64::from(ELAPSED_MS);
+    assert_ne!(
+        final_remaining_ms * 100 % (DURATION_SECONDS * 1_000),
+        0,
+        "the arc coverage must not land on a whole percent"
+    );
+    let frames = assert_progress_ring_temporal_parity(
+        DURATION_SECONDS,
+        REMAINING_SECONDS,
+        true,
+        ELAPSED_MS,
+        false,
+    );
+    assert_ne!(
+        frames.scene, frames.initial_scene,
+        "the countdown and ELAPSED text must advance"
+    );
+}
+
+#[test]
+fn a_progress_scene_reaching_zero_changes_status_to_done_without_a_repush() {
+    let frames = assert_progress_ring_temporal_parity(1_500, 1, true, 1_000, false);
+    assert_ne!(
+        frames.scene, frames.initial_scene,
+        "reaching zero must replace Running with Done"
+    );
+}
+
+#[test]
+fn pausing_a_progress_scene_repaints_indicator_and_status_without_a_repush() {
+    let frames = assert_progress_ring_temporal_parity(1_500, 900, true, 0, true);
+    assert_ne!(
+        frames.scene, frames.initial_scene,
+        "pausing must repaint both running-color nodes"
+    );
 }
 
 fn add_analog_clock_cases(cases: &mut Vec<ParityCase>) {

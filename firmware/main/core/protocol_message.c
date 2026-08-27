@@ -2431,8 +2431,9 @@ static protocol_message_result_t encode_asset_release_payload(
  * have supplied. That is not tidiness -- it is what keeps a 24-node scene
  * inside the 2034-byte payload (see the wire-shape comment at the top of
  * core/scene_decode.c). The defaults are: RECT radius 0, fill 0, opacity
- * 255, clip absent; ARC color 0, rounded false, end_binding "", opacity 255; LINE color 0; TEXT align
- * LEFT, color 0, ellipsize false; IMAGE recolor false, color 0; GLYPH color
+ * 255, clip absent; ARC color 0, rounded false, end_binding "", opacity 255,
+ * running_color absent; LINE color 0; TEXT align LEFT, color 0,
+ * ellipsize false, running_color absent; IMAGE recolor false, color 0; GLYPH color
  * 0; SCALE major_tick_color 0; LABEL colours/style fields 0,
  * hide_when_empty false, horizontal_anchor LEFT; ROT_RECT style/transform
  * fields 0, rotation_binding "", and clip absent; the value map's literal
@@ -2505,7 +2506,8 @@ static protocol_message_result_t encode_scene_arc(CborEncoder *parent,
     size_t entries = 6U + (arc->color != 0U ? 1U : 0U) +
                      (arc->rounded ? 1U : 0U) +
                      (arc->end_binding[0] != '\0' ? 1U : 0U) +
-                     (arc->opacity != UINT8_MAX ? 1U : 0U);
+                     (arc->opacity != UINT8_MAX ? 1U : 0U) +
+                     (arc->has_running_color ? 1U : 0U);
     protocol_message_result_t result = begin_map(parent, &map, entries);
     if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 0U);
     if (result == PROTOCOL_MESSAGE_OK) result = encode_int(&map, arc->cx);
@@ -2532,6 +2534,9 @@ static protocol_message_result_t encode_scene_arc(CborEncoder *parent,
     }
     if (result == PROTOCOL_MESSAGE_OK && arc->opacity != UINT8_MAX) {
         result = encode_pair_uint(&map, 9U, arc->opacity);
+    }
+    if (result == PROTOCOL_MESSAGE_OK && arc->has_running_color) {
+        result = encode_pair_uint(&map, 10U, arc->running_color);
     }
     if (result == PROTOCOL_MESSAGE_OK) result = end_map(parent, &map);
     return result;
@@ -2628,7 +2633,8 @@ static protocol_message_result_t encode_scene_text(CborEncoder *parent,
     CborEncoder map;
     size_t entries = 5U + (text->align != SCENE_ALIGN_LEFT ? 1U : 0U) +
                      (text->color != 0U ? 1U : 0U) +
-                     (text->ellipsize ? 1U : 0U);
+                     (text->ellipsize ? 1U : 0U) +
+                     (text->has_running_color ? 1U : 0U);
     protocol_message_result_t result = begin_map(parent, &map, entries);
     if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 0U);
     if (result == PROTOCOL_MESSAGE_OK) result = encode_int(&map, text->x);
@@ -2649,6 +2655,9 @@ static protocol_message_result_t encode_scene_text(CborEncoder *parent,
     if (result == PROTOCOL_MESSAGE_OK && text->ellipsize) {
         result = encode_uint(&map, 7U);
         if (result == PROTOCOL_MESSAGE_OK) result = encode_bool(&map, true);
+    }
+    if (result == PROTOCOL_MESSAGE_OK && text->has_running_color) {
+        result = encode_pair_uint(&map, 8U, text->running_color);
     }
     if (result == PROTOCOL_MESSAGE_OK) result = end_map(parent, &map);
     return result;

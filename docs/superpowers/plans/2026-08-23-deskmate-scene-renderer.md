@@ -30,6 +30,14 @@ plan is written at this plan's exit, per the repo's working agreement. The compl
 result and the live-correctness decisions stage 3 must make are recorded in the
 [template parity and readiness ledger](../../scene/template-parity-ledger.md).
 
+Both successors now exist. **Stage 2b is complete** — all six templates byte-identical at
+both orientations, 106 rows, zero differing pixels
+([plan](2026-08-26-deskmate-scene-templates.md)). **Stage 3 was split** on what the ledger
+found: retiring the C templates needs a full plan of its own, because *two* faces are
+blocked rather than one and three device-path binding defects sit underneath them. That is
+[stage 3a, scene-native rendering](2026-08-27-deskmate-scene-native-rendering.md); the
+plugin manifest and curated plugins become stage 3b, planned at 3a's exit.
+
 ## Two decisions that shape everything below
 
 **1. Text nodes are baseline-anchored.** `digital_clock.c:44` positions type by

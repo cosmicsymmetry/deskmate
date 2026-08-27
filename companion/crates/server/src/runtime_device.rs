@@ -1229,6 +1229,53 @@ mod tests {
         );
     }
 
+    #[test]
+    fn scene_capability_is_refreshed_from_each_websocket_attachment() {
+        let (mut device, connector) = super::WebSocketRuntimeDevice::channel("dev-1".into());
+        let mut legacy = sample_status();
+        legacy.capabilities &= !protocol::CAPABILITY_SCENE_RENDER;
+
+        let first_actor = spawn_test_actor_with_status(connector.attach(), legacy.clone());
+        device.connect().expect("legacy connect");
+        let push = protocol::PushScene {
+            card_id: "clock".into(),
+            revision: 7,
+            scene: protocol::Scene {
+                revision: 7,
+                background: 0,
+                nodes: Vec::new(),
+            },
+        };
+        assert!(matches!(
+            device.push_scene(push.clone()),
+            Err(DeviceError::MissingCapabilities { .. })
+        ));
+
+        let second_actor = spawn_test_actor(connector.attach());
+        device.connect().expect("scene-capable reconnect");
+        device
+            .push_scene(push.clone())
+            .expect("fresh bit 8 enables scenes");
+
+        let third_actor = spawn_test_actor_with_status(connector.attach(), legacy);
+        device.connect().expect("legacy reconnect");
+        assert!(matches!(
+            device.push_scene(push.clone()),
+            Err(DeviceError::MissingCapabilities { .. })
+        ));
+        connector.detach();
+
+        let first = first_actor.join().expect("first actor joins");
+        let second = second_actor.join().expect("second actor joins");
+        let third = third_actor.join().expect("third actor joins");
+        assert_eq!(first, vec![Message::StatusRequest]);
+        assert_eq!(
+            second,
+            vec![Message::StatusRequest, Message::PushScene(push)]
+        );
+        assert_eq!(third, vec![Message::StatusRequest]);
+    }
+
     fn spawn_test_actor(peer: super::SocketPeer) -> std::thread::JoinHandle<Vec<Message>> {
         spawn_test_actor_with_status(peer, sample_status())
     }

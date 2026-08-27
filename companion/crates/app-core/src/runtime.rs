@@ -13,8 +13,8 @@ use engine::interrupts::InterruptArbiter;
 use engine::pomodoro::{Pomodoro, PomodoroState as EnginePomodoroState};
 use protocol::{
     Ack, ActivateScreen, AssetBegin, AssetChunk, AssetCommit, AssetRelease, EventAction, EventKind,
-    Field, FieldValue, NetworkConfig, PushScene, ScreenConfig, StatusResponse, TimeSync,
-    TriggerInterrupt, WidgetConfig,
+    Field, FieldValue, Message, NetworkConfig, PushScene, ScreenConfig, StatusResponse, TimeSync,
+    TriggerInterrupt, WidgetConfig, validate_message,
 };
 use providers::Provider;
 use providers::http::SystemHttpClient;
@@ -26,10 +26,15 @@ use providers::weather::{WeatherOptions, WeatherProvider, WeatherUnits as Provid
 use crate::commands::{CommandReply, PomodoroAction, RuntimeCommand, RuntimeError};
 use crate::scheduler::Scheduler;
 use crate::{
-    AlertHold, AppConfig, AppSnapshot, CalendarSource, CardAlert, CardDataSnapshot, CardError,
-    CardSettings, ConnectionState, DeviceCounters, DeviceSnapshot, DeviceTier, JsonFieldMapping,
-    PersistenceState, PomodoroSnapshot, PomodoroState, ProviderSnapshot, ProviderState,
-    RuntimeDiagnostics, RuntimeState, WeatherUnits,
+    AlertHold, AnalogClockCard, AppConfig, AppSnapshot, BakedFontMetrics, BigNumberCard,
+    CalendarSource, CardAlert, CardDataSnapshot, CardError, CardErrorKind, CardSettings, ClockCard,
+    ConnectionState, DeviceCapability, DeviceCounters, DeviceSnapshot, DeviceTier, DisplayTemplate,
+    IconBadgeCard, JsonFieldMapping, PersistenceState, PomodoroSnapshot, PomodoroState,
+    ProgressRingCard, ProviderSnapshot, ProviderState, RowListCard, RuntimeDiagnostics,
+    RuntimeState, SHIPPED_SCENE_SURFACE_COLOR, SceneDataState, WeatherUnits,
+    build_analog_clock_scene, build_big_number_label_scene, build_digital_clock_scene,
+    build_icon_badge_text_scene, build_progress_ring_scene, build_row_list_scene,
+    with_scene_data_state,
 };
 
 pub const DEFAULT_RUNTIME_COMMAND_CAPACITY: usize = 16;
@@ -873,11 +878,10 @@ struct WorkerState {
     persistence: PersistenceState,
     latest_fields: BTreeMap<String, Vec<Field>>,
     dirty_widgets: BTreeSet<String>,
-    /// Card ID -> why the device refused that card's last push. Cleared for a card as
-    /// soon as one of its pushes is accepted, and wholesale when the config is
-    /// replaced (the refused payload came from the configuration being replaced).
-    /// See `push_dirty_widgets`.
-    push_rejections: BTreeMap<String, String>,
+    /// Card ID -> the typed refusal for that card's last data or scene push.
+    /// Cleared by a later accepted push of the same kind, and wholesale when the
+    /// config is replaced (the refused payload belonged to the old revision).
+    push_rejections: BTreeMap<String, CardError>,
     pomodoros: BTreeMap<String, Pomodoro>,
     pomodoro_snapshots: BTreeMap<String, PomodoroSnapshot>,
     providers: BTreeMap<String, ProviderRuntimeState>,
@@ -888,6 +892,9 @@ struct WorkerState {
     armed_event_alerts: BTreeMap<String, i64>,
     active_screen: Option<String>,
     active_screen_dirty: bool,
+    /// The active card needs rebuilding as a scene because a host-owned fact
+    /// changed. Consumed once by `push_active_scene`; scheduled ticks never set it.
+    active_scene_dirty: bool,
     active_rotation_index: usize,
     connected: bool,
     ever_connected: bool,
@@ -897,6 +904,7 @@ struct WorkerState {
     /// WebSocket runtime legitimately drives devices that report that tier.
     ownership_refused: bool,
     generation: u64,
+    next_scene_revision: u32,
     next_connect: Instant,
     last_published: Option<AppSnapshot>,
 }
@@ -918,12 +926,14 @@ impl WorkerState {
             armed_event_alerts: BTreeMap::new(),
             active_screen: None,
             active_screen_dirty: false,
+            active_scene_dirty: false,
             active_rotation_index: 0,
             connected: false,
             ever_connected: false,
             needs_full_sync: true,
             ownership_refused: false,
             generation: 0,
+            next_scene_revision: 0,
             next_connect: now,
             last_published: None,
         };
@@ -1023,6 +1033,7 @@ impl WorkerState {
         };
         self.device.active_screen_id.clone_from(&self.active_screen);
         self.active_screen_dirty = self.active_screen.is_some();
+        self.active_scene_dirty = self.active_screen.is_some();
         self.rearm_rotation_for_active_screen(scheduler, now);
         self.needs_full_sync = true;
         self.runtime = if self.config.preferences.paused {
@@ -1171,14 +1182,7 @@ impl WorkerState {
                 .iter()
                 .map(|(card_id, fields)| CardDataSnapshot::from_protocol(card_id, fields))
                 .collect(),
-            card_errors: self
-                .push_rejections
-                .iter()
-                .map(|(card_id, message)| CardError {
-                    card_id: card_id.clone(),
-                    message: message.clone(),
-                })
-                .collect(),
+            card_errors: self.push_rejections.values().cloned().collect(),
             persistence: self.persistence.clone(),
             diagnostics: diagnostics.snapshot(),
         }
@@ -1240,6 +1244,7 @@ fn advance_rotation(state: &mut WorkerState, scheduler: &mut Scheduler, now: Ins
             .active_screen_id
             .clone_from(&state.active_screen);
         state.active_screen_dirty = true;
+        state.active_scene_dirty = true;
         scheduler.set_rotation(
             current_dwell(&state.config, state.active_rotation_index),
             now,
@@ -1315,6 +1320,13 @@ fn run_runtime(
             diagnostics,
             now,
         );
+        // Ownership synchronization is complete at this point. Publish that
+        // fact before attempting the best-effort render update: a scene is the
+        // face drawn by an already-owned device, not a prerequisite for Online.
+        state.publish_if_changed(publisher, diagnostics);
+        if state.connected && !state.config.preferences.paused {
+            push_active_scene(&mut state, device.as_mut());
+        }
         run_scheduled_work(
             &mut state,
             &mut scheduler,
@@ -1450,6 +1462,7 @@ fn activate_screen_command(
     state.active_screen = Some(screen_id.clone());
     state.device.active_screen_id = Some(screen_id);
     state.active_screen_dirty = true;
+    state.active_scene_dirty = true;
     // An explicit activation is a manual override, same as a physical
     // swipe: restart the dwell from the card just landed on instead of
     // advancing early from wherever rotation last left off.
@@ -1795,6 +1808,11 @@ fn apply_provider_result(
     let widget_id = result.widget_id;
     state.latest_fields.insert(widget_id.clone(), result.fields);
     state.dirty_widgets.insert(widget_id.clone());
+    if state.active_screen.as_deref() == Some(widget_id.as_str()) {
+        // Provider completion is a host fact, including a stale/error-only
+        // transition. Rebuild once now; do not infer a refresh cadence here.
+        state.active_scene_dirty = true;
+    }
 
     if let CardAlert::BeforeEvent { lead_minutes, .. } = card_alert(&state.config, &widget_id) {
         let now_unix_ms = Utc::now().timestamp_millis();
@@ -2108,6 +2126,9 @@ fn drain_device_events(
                     // The gesture already changed the physical display. Remember it for
                     // future replay without issuing a redundant activation now.
                     state.active_screen_dirty = false;
+                    // The gesture selected the device model already, but the new
+                    // card still needs its host-built scene laid over that model.
+                    state.active_scene_dirty = true;
                     // A manual swipe restarts the dwell from the card just landed on,
                     // rather than letting a soon-to-expire deadline advance early.
                     // With a single in-rotation card this still re-arms unconditionally
@@ -2197,6 +2218,10 @@ fn synchronize_full(
     push_dirty_widgets(state, device)?;
     state.active_screen_dirty = state.active_screen.is_some();
     send_screen(state, device)?;
+    // `RuntimeCommand::ApplyConfig` waits for this full ownership/model sync
+    // before replying. Leave the scene dirty for the worker's separate render
+    // phase: activation is the device-model transaction boundary, while drawing
+    // the new face is the event-driven consequence of that completed apply.
     flush_interrupts(state, scheduler, device, now)?;
     state.needs_full_sync = false;
     Ok(())
@@ -2248,7 +2273,13 @@ fn push_dirty_widgets(
         match device.push_fields(widget_id.clone(), fields) {
             Ok(()) => {
                 state.dirty_widgets.remove(&widget_id);
-                state.push_rejections.remove(&widget_id);
+                if state
+                    .push_rejections
+                    .get(&widget_id)
+                    .is_some_and(|error| error.kind == CardErrorKind::DataRefused)
+                {
+                    state.push_rejections.remove(&widget_id);
+                }
             }
             Err(error) if is_wrong_tier(&error) => {
                 mark_ownership_refused(state);
@@ -2258,17 +2289,267 @@ fn push_dirty_widgets(
             Err(DeviceError::Rejected(error)) => {
                 state.dirty_widgets.remove(&widget_id);
                 state.push_rejections.insert(
-                    widget_id,
-                    format!(
-                        "the display refused this card's data ({:?}): {}",
-                        error.code, error.diagnostic
-                    ),
+                    widget_id.clone(),
+                    CardError {
+                        kind: CardErrorKind::DataRefused,
+                        card_id: widget_id,
+                        message: format!(
+                            "the display refused this card's data ({:?}): {}",
+                            error.code, error.diagnostic
+                        ),
+                    },
                 );
             }
             Err(error) => return Err(device_runtime_error(&error)),
         }
     }
     Ok(())
+}
+
+fn field_text<'a>(fields: &'a [Field], key: &str) -> &'a str {
+    fields
+        .iter()
+        .find_map(|field| match (&*field.key, &field.value) {
+            (candidate, FieldValue::Text(value)) if candidate == key => Some(value.as_str()),
+            _ => None,
+        })
+        .unwrap_or("")
+}
+
+fn field_integer(fields: &[Field], key: &str) -> i64 {
+    fields
+        .iter()
+        .find_map(|field| match (&*field.key, &field.value) {
+            (candidate, FieldValue::Integer(value)) if candidate == key => Some(*value),
+            _ => None,
+        })
+        .unwrap_or(0)
+}
+
+fn field_boolean(fields: &[Field], key: &str) -> bool {
+    fields
+        .iter()
+        .find_map(|field| match (&*field.key, &field.value) {
+            (candidate, FieldValue::Boolean(value)) if candidate == key => Some(*value),
+            _ => None,
+        })
+        .unwrap_or(false)
+}
+
+fn build_card_scene(
+    config: &AppConfig,
+    card_id: &str,
+    fields: &[Field],
+    revision: u32,
+) -> Result<PushScene, String> {
+    let card = config
+        .cards
+        .iter()
+        .find(|card| card.id() == card_id)
+        .ok_or_else(|| format!("card {card_id:?} is not present in the active configuration"))?;
+    let metrics = &BakedFontMetrics::SHIPPED;
+    let scene = match card.template() {
+        DisplayTemplate::DigitalClock => {
+            let timezone: Tz = config
+                .preferences
+                .timezone
+                .parse()
+                .map_err(|_| "the configured timezone is not recognized".to_owned())?;
+            build_digital_clock_scene(
+                &ClockCard {
+                    revision,
+                    show_seconds: field_boolean(fields, "show_seconds"),
+                    local_now: Utc::now().with_timezone(&timezone).naive_local(),
+                },
+                metrics,
+            )
+        }
+        DisplayTemplate::AnalogClock => build_analog_clock_scene(
+            &AnalogClockCard {
+                revision,
+                show_seconds: field_boolean(fields, "show_seconds"),
+            },
+            metrics,
+        ),
+        DisplayTemplate::ProgressRing => build_progress_ring_scene(
+            &ProgressRingCard {
+                revision,
+                label: field_text(fields, "label"),
+                duration_seconds: field_integer(fields, "duration_seconds"),
+            },
+            metrics,
+        ),
+        DisplayTemplate::RowList => build_row_list_scene(
+            &RowListCard {
+                revision,
+                title: field_text(fields, "title"),
+                row0_title: field_text(fields, "row0_title"),
+                row0_time: field_text(fields, "row0_time"),
+                row1_title: field_text(fields, "row1_title"),
+                row1_time: field_text(fields, "row1_time"),
+                row2_title: field_text(fields, "row2_title"),
+                row2_time: field_text(fields, "row2_time"),
+                row3_title: field_text(fields, "row3_title"),
+                row3_time: field_text(fields, "row3_time"),
+                row4_title: field_text(fields, "row4_title"),
+                row4_time: field_text(fields, "row4_time"),
+            },
+            metrics,
+        ),
+        DisplayTemplate::BigNumberLabel => build_big_number_label_scene(
+            &BigNumberCard {
+                revision,
+                title: field_text(fields, "title"),
+                value: field_text(fields, "value"),
+                label: field_text(fields, "label"),
+            },
+            metrics,
+        ),
+        DisplayTemplate::IconBadgeText { .. } => build_icon_badge_text_scene(
+            &IconBadgeCard {
+                revision,
+                title: field_text(fields, "title"),
+                icon: field_text(fields, "icon"),
+                badge: field_text(fields, "badge"),
+                value: field_text(fields, "value"),
+                label: field_text(fields, "label"),
+            },
+            SHIPPED_SCENE_SURFACE_COLOR,
+            metrics,
+        ),
+    };
+    let error = field_text(fields, "error");
+    let scene = with_scene_data_state(
+        scene,
+        SceneDataState {
+            stale: field_boolean(fields, "stale"),
+            error: (!error.is_empty()).then_some(error),
+        },
+        metrics,
+    );
+    let push = PushScene {
+        card_id: card_id.to_owned(),
+        revision,
+        scene,
+    };
+    validate_message(&Message::PushScene(push.clone()))
+        .map_err(|error| format!("the host-built scene is invalid: {error}"))?;
+    Ok(push)
+}
+
+fn record_scene_refusal(state: &mut WorkerState, card_id: String, message: String) {
+    state.push_rejections.insert(
+        card_id.clone(),
+        CardError {
+            kind: CardErrorKind::SceneRefused,
+            card_id,
+            message,
+        },
+    );
+}
+
+/// Rebuilds the active card only after a host-owned event marks it dirty.
+///
+/// The worker calls this in its render phase after publishing ownership state.
+/// The dirty bit is consumed before any request and no clock, pomodoro, status, or
+/// provider deadline sets it. Device-side bindings keep clock/timer facts moving
+/// between these event-driven pushes.
+fn push_active_scene(state: &mut WorkerState, device: &mut dyn RuntimeDevice) {
+    if ownership_was_refused(state) || !state.active_scene_dirty {
+        return;
+    }
+    let Some(card_id) = state.active_screen.clone() else {
+        state.active_scene_dirty = false;
+        return;
+    };
+    if !state
+        .device
+        .capabilities
+        .contains(&DeviceCapability::SceneRender)
+    {
+        state.active_scene_dirty = false;
+        if state
+            .push_rejections
+            .get(&card_id)
+            .is_some_and(|error| error.kind == CardErrorKind::SceneRefused)
+        {
+            state.push_rejections.remove(&card_id);
+        }
+        return;
+    }
+
+    let Some(revision) = state.next_scene_revision.checked_add(1) else {
+        state.active_scene_dirty = false;
+        record_scene_refusal(
+            state,
+            card_id,
+            "this card cannot be rendered because the scene revision counter is exhausted".into(),
+        );
+        return;
+    };
+    state.next_scene_revision = revision;
+    let fields = state
+        .latest_fields
+        .get(&card_id)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let push = match build_card_scene(&state.config, &card_id, fields, revision) {
+        Ok(push) => push,
+        Err(message) => {
+            state.active_scene_dirty = false;
+            record_scene_refusal(state, card_id, message);
+            return;
+        }
+    };
+
+    // One best-effort attempt per event. This runs outside ownership sync after
+    // the Online snapshot has been published. Any failure belongs to the card's
+    // render state; status/ownership traffic independently decides whether the
+    // connection itself is still usable.
+    state.active_scene_dirty = false;
+    match device.push_scene(push) {
+        Ok(()) => {
+            if state
+                .push_rejections
+                .get(&card_id)
+                .is_some_and(|error| error.kind == CardErrorKind::SceneRefused)
+            {
+                state.push_rejections.remove(&card_id);
+            }
+        }
+        Err(error) if is_wrong_tier(&error) => {
+            mark_ownership_refused(state);
+        }
+        Err(DeviceError::Rejected(error)) => {
+            record_scene_refusal(
+                state,
+                card_id,
+                format!(
+                    "the display refused this card's scene ({:?}): {}",
+                    error.code, error.diagnostic
+                ),
+            );
+        }
+        Err(DeviceError::MissingCapabilities {
+            required,
+            available,
+        }) => {
+            record_scene_refusal(
+                state,
+                card_id,
+                format!(
+                    "the display no longer advertises declarative scene rendering (required {required:#018x}, available {available:#018x}); reconnect to use its legacy widget renderer"
+                ),
+            );
+        }
+        Err(error) => {
+            record_scene_refusal(
+                state,
+                card_id,
+                format!("the display did not accept this card's scene: {error}"),
+            );
+        }
+    }
 }
 
 fn send_screen(
@@ -2427,6 +2708,10 @@ fn mark_disconnected(
     reconnect_interval: Duration,
 ) {
     state.connected = false;
+    // Capabilities belong to the new attachment, not the retained runtime. A
+    // reconnect may follow an OTA in either direction, so force one render-policy
+    // decision from the fresh StatusResponse even when all data is otherwise clean.
+    state.active_scene_dirty = state.active_screen.is_some();
     state.next_connect = now + reconnect_interval;
     state.device.connection = if state.ever_connected {
         ConnectionState::Standalone

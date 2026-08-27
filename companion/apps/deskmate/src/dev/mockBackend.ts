@@ -106,7 +106,11 @@ function applyScenario() {
       break;
     case "carderror":
       snapshot.card_errors = [
-        { card_id: "json-feed", message: "field `hero` exceeds the 32-byte text limit" },
+        {
+          kind: "scene-refused",
+          card_id: "json-feed",
+          message: "the display could not render this card's complete scene",
+        },
       ];
       break;
     default:

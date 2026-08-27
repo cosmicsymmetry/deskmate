@@ -1378,9 +1378,9 @@ mod tests {
 
     use app_core::{
         AlertHold, AppConfig, AppPreferences, AppSnapshot, AssetKind, AssetSource,
-        CURRENT_SCHEMA_VERSION, CalendarSource, CardAlert, CardDataSnapshot, CardError, CardField,
-        CardFieldValue, CardSettings, CarouselAdvance, ConnectionState, DeviceCapability,
-        DeviceCounters, DeviceSnapshot, DisplayOrientation, DisplayTemplate,
+        CURRENT_SCHEMA_VERSION, CalendarSource, CardAlert, CardDataSnapshot, CardError,
+        CardErrorKind, CardField, CardFieldValue, CardSettings, CarouselAdvance, ConnectionState,
+        DeviceCapability, DeviceCounters, DeviceSnapshot, DisplayOrientation, DisplayTemplate,
         FirmwareArtifactMetadata, IconGlyphMapping, PersistenceState, Playlist, PlaylistEntry,
         PomodoroSnapshot, PomodoroState, ProviderSnapshot, ProviderState, RefreshPolicy,
         RuntimeDiagnostics, RuntimeError, RuntimeState, SAVED_SETTINGS_VALIDATION_FAILURE_MESSAGE,
@@ -2490,6 +2490,7 @@ mod tests {
                 }],
                 card_data: card_data.clone(),
                 card_errors: vec![CardError {
+                    kind: CardErrorKind::DataRefused,
                     card_id: "json".into(),
                     message:
                         "the display refused this card's data (InvalidPayload): invalid push data"

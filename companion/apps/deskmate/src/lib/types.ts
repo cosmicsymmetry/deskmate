@@ -207,6 +207,7 @@ export interface AppSnapshot {
 /// identical payload can only fail again, so the runtime drops it and surfaces this
 /// instead of looping.
 export interface CardError {
+  kind: "data-refused" | "scene-refused";
   card_id: string;
   message: string;
 }

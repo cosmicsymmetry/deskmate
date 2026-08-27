@@ -511,6 +511,12 @@ async fn config_written_by_admin_reaches_the_device() {
 
     assert_eq!(applied.widgets.len(), 1);
     assert_eq!(applied.widgets[0].widget_id, "clock-1");
+
+    // The config transaction ends at activation. Scene negotiation is the
+    // event-driven follow-up: it must still happen, but its ACK must not hold
+    // the admin response hostage on a slow or briefly stalled device link.
+    let scene = support::drive_until_scene(&mut socket).await;
+    assert_eq!(scene.card_id, "clock-1");
 }
 
 #[tokio::test]

@@ -185,6 +185,8 @@ export function App() {
     snapshot.pomodoros.find((candidate) => candidate.widget_id === selectedCardId) ?? null;
   const issues = validation.result.issues;
   const cardIssues = selectedCardId ? issuesForCard(issues, draft, selectedCardId) : [];
+  const selectedCardError =
+    snapshot.card_errors.find((error) => error.card_id === selectedCardId) ?? null;
   // Issues no card-, playlist-, or preference-scoped surface below claims — e.g. a
   // `device.capabilities` issue naming a card the connected display can't render.
   // Rendered as its own banner so an unclaimed issue is explained somewhere rather than
@@ -429,8 +431,8 @@ export function App() {
               <div>
                 <strong>
                   {snapshot.card_errors.length === 1
-                    ? "The display refused one card's data"
-                    : `The display refused ${snapshot.card_errors.length} cards' data`}
+                    ? "The display refused one card update"
+                    : `The display refused ${snapshot.card_errors.length} card updates`}
                 </strong>
                 {snapshot.card_errors.map((cardError) => {
                   const card = draft.cards.find((candidate) => candidate.id === cardError.card_id);
@@ -514,6 +516,7 @@ export function App() {
           <CardEditor
             card={selectedWidget}
             issues={cardIssues}
+            cardError={selectedCardError}
             pomodoro={pomodoro}
             provider={selectedProvider}
             timerBusy={busyAction === "timer"}

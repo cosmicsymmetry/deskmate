@@ -1141,6 +1141,13 @@ fieldset legend {
 
 .data-note > span {
   flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.data-note--bad {
+  background: color-mix(in srgb, var(--bad) 10%, var(--tile));
+  color: var(--bad);
 }
 
 .check-field {

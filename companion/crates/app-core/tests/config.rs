@@ -1,6 +1,6 @@
 use app_core::{
     AlertHold, AppConfig, AppSnapshot, AssetKind, AssetSettings, AssetSource, CalendarSource,
-    CardAlert, CardDataSnapshot, CardError, CardField, CardFieldValue, CardSettings,
+    CardAlert, CardDataSnapshot, CardError, CardErrorKind, CardField, CardFieldValue, CardSettings,
     CarouselAdvance, ConnectionState, DeviceCounters, DeviceSnapshot, DisplayTemplate,
     FirmwareArtifactMetadata, JsonFieldMapping, MAX_ASSET_BYTES, MAX_PLAYLIST_ENTRIES,
     MAX_PLAYLIST_NAME_LEN, MAX_PLAYLISTS, MAX_PROVIDER_URL_LEN, MAX_UPDATE_ARTIFACT_BYTES,
@@ -556,6 +556,7 @@ fn runtime_snapshot_uses_tagged_states_for_frontend_contract() {
             }],
         }],
         card_errors: vec![CardError {
+            kind: CardErrorKind::DataRefused,
             card_id: "json-feed".into(),
             message: "the display refused this card's data".into(),
         }],
@@ -574,6 +575,7 @@ fn runtime_snapshot_uses_tagged_states_for_frontend_contract() {
     assert_eq!(json["pomodoros"][0]["state"], "paused");
     assert_eq!(json["card_data"][0]["fields"][0]["value"]["kind"], "text");
     assert_eq!(json["card_errors"][0]["card_id"], "json-feed");
+    assert_eq!(json["card_errors"][0]["kind"], "data-refused");
     assert_eq!(json["persistence"]["kind"], "clean");
     assert_eq!(
         serde_json::from_value::<AppSnapshot>(json).unwrap(),

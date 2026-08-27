@@ -21,6 +21,7 @@ import * as tauriModule from "../src/lib/tauri";
 import type {
   AppConfig,
   AppSnapshot,
+  CardError,
   CardSettings,
   ConfigApplyResult,
   DraftValidation,
@@ -189,11 +190,16 @@ describe("settings accessibility and states", () => {
     expect(html).toContain("background service keeps running");
   });
 
-  function renderCardEditor(card: CardSettings, issues: ValidationIssue[] = []) {
+  function renderCardEditor(
+    card: CardSettings,
+    issues: ValidationIssue[] = [],
+    cardError: CardError | null = null,
+  ) {
     return renderToStaticMarkup(
       <CardEditor
         card={card}
         issues={issues}
+        cardError={cardError}
         pomodoro={null}
         provider={null}
         timerBusy={false}
@@ -1118,6 +1124,7 @@ describe("settings accessibility and states", () => {
       <CardEditor
         card={cards[0]}
         issues={[]}
+        cardError={null}
         pomodoro={null}
         provider={troubled}
         timerBusy={false}
@@ -1132,6 +1139,19 @@ describe("settings accessibility and states", () => {
     );
     expect(editor).toContain("Showing the last good data");
     expect(editor).toContain("Refresh");
+  });
+
+  test("a typed scene refusal is visible in the affected card editor", () => {
+    const editor = renderCardEditor(clockCard("clock-1", "Desk"), [], {
+      kind: "scene-refused",
+      card_id: "clock-1",
+      message: "the display refused this card's scene (InvalidPayload)",
+    });
+
+    expect(editor).toContain("This card could not be rendered.");
+    expect(editor).toContain("Adjust the card and save to try again.");
+    expect(editor).toContain('role="alert"');
+    expect(editor).not.toContain("last working settings");
   });
 
   test("the settings sheet carries the link and ownership facts the header used to", () => {

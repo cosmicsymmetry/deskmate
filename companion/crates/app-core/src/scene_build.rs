@@ -55,6 +55,8 @@ const COLOR_PRIMARY: u32 = 0x00f5_f5f7;
 const COLOR_TERTIARY: u32 = 0x005c_5c66;
 /// `DESKMATE_COLOR_SURFACE`.
 const COLOR_SURFACE: u32 = 0x001a_1a1f;
+/// The surface colour behind built-in icon artwork in the shipped theme.
+pub const SHIPPED_SCENE_SURFACE_COLOR: u32 = COLOR_SURFACE;
 /// `DESKMATE_COLOR_STALE`, reserved for the shared state footer.
 const COLOR_STALE: u32 = 0x00f2_c94c;
 /// `DESKMATE_COLOR_ERROR`, reserved for the shared state footer.

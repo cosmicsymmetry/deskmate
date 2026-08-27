@@ -6,18 +6,19 @@ use std::time::{Duration, Instant};
 
 use app_core::{
     AlertHold, AppConfig, CalendarRefreshRequest, CalendarRefreshResult, CalendarRefresher,
-    CardAlert, CardField, CardFieldValue, CardSettings, CarouselAdvance, ConnectionState,
-    DeviceCapability, DeviceConnection, DeviceOtaState, DeviceTier, DeviceWifiState,
-    DisplayOrientation, DisplayTemplate, NetworkConfig, PersistenceState, Playlist, PlaylistEntry,
-    PomodoroAction, PomodoroState, ProviderRequest, ProvisioningTier, RefreshPolicy, RuntimeDevice,
-    RuntimeError, RuntimeHandle, RuntimeOptions, RuntimeState, WidgetTapAction,
+    CardAlert, CardErrorKind, CardField, CardFieldValue, CardSettings, CarouselAdvance,
+    ConnectionState, DeviceCapability, DeviceConnection, DeviceOtaState, DeviceTier,
+    DeviceWifiState, DisplayOrientation, DisplayTemplate, NetworkConfig, PersistenceState,
+    Playlist, PlaylistEntry, PomodoroAction, PomodoroState, ProviderRequest, ProvisioningTier,
+    RefreshPolicy, RuntimeDevice, RuntimeError, RuntimeHandle, RuntimeOptions, RuntimeState,
+    WidgetTapAction,
 };
 use chrono::Utc;
 use device::{DeviceError, ReceivedEvent, SessionDiagnostics, TransportError};
 use protocol::{
     Ack, AssetBegin, AssetChunk, AssetCommit, AssetRelease, DeviceEvent, ErrorCode, ErrorResponse,
-    EventAction, EventKind, Field, FieldValue, PROTOCOL_VERSION, PushScene, Scene, ScreenConfig,
-    StatusResponse, TimeSync, TriggerInterrupt, WidgetConfig,
+    EventAction, EventKind, Field, FieldValue, PROTOCOL_VERSION, PushScene, Scene, SceneNode,
+    SceneValue, ScreenConfig, StatusResponse, TimeSync, TriggerInterrupt, WidgetConfig,
 };
 
 const FULL_JSON: &str = include_str!("fixtures/full.json");
@@ -77,9 +78,12 @@ struct MockState {
     latest_interrupt_token: u32,
     status_override: Option<StatusResponse>,
     next_push_gate: Option<Arc<PushGate>>,
+    next_scene_gate: Option<Arc<PushGate>>,
     /// Widgets whose pushes the device understands and refuses, exactly as real
     /// firmware does for a field the widget's template does not declare.
     refused_pushes: BTreeSet<String>,
+    /// Cards whose scene the device understands but cannot render exactly.
+    refused_scenes: BTreeSet<String>,
     /// Simulates the tier changing between the last status response and a host sync.
     /// The rejection also changes later status responses to Networked, as hardware
     /// does after accepting provisioning and rebooting into server ownership.
@@ -171,6 +175,12 @@ impl MockDeviceControl {
         gate
     }
 
+    fn block_next_scene(&self) -> Arc<PushGate> {
+        let gate = Arc::new(PushGate::default());
+        self.state.lock().unwrap().next_scene_gate = Some(Arc::clone(&gate));
+        gate
+    }
+
     fn set_latest_interrupt_token(&self, token: u32) {
         self.state.lock().unwrap().latest_interrupt_token = token;
     }
@@ -185,6 +195,14 @@ impl MockDeviceControl {
             .unwrap()
             .refused_pushes
             .insert(widget_id.to_owned());
+    }
+
+    fn refuse_scenes_for(&self, card_id: &str) {
+        self.state
+            .lock()
+            .unwrap()
+            .refused_scenes
+            .insert(card_id.to_owned());
     }
 
     fn reject_time_sync_as_wrong_tier(&self) {
@@ -375,7 +393,20 @@ impl RuntimeDevice for MockDevice {
     }
 
     fn push_scene(&mut self, push: PushScene) -> Result<(), DeviceError> {
-        self.with_connected(|state| state.operations.push(Operation::PushScene(push)))
+        let gate = self.with_connected(|state| state.next_scene_gate.take())?;
+        if let Some(gate) = gate {
+            gate.enter_and_wait();
+        }
+        self.with_connected(|state| {
+            state.operations.push(Operation::PushScene(push.clone()));
+            if state.refused_scenes.contains(&push.card_id) {
+                return Err(DeviceError::Rejected(ErrorResponse {
+                    code: ErrorCode::InvalidPayload,
+                    diagnostic: "scene could not be rendered".into(),
+                }));
+            }
+            Ok(())
+        })?
     }
 
     fn trigger_interrupt(&mut self, interrupt: TriggerInterrupt) -> Result<(), DeviceError> {
@@ -900,6 +931,322 @@ fn push_scene_uses_the_runtime_owned_device_without_reconnecting() {
             .count(),
         1
     );
+    runtime.shutdown().unwrap();
+}
+
+#[test]
+fn scene_capable_device_receives_the_active_card_as_a_scene() {
+    let control = MockDeviceControl::default();
+    let runtime = start_runtime(full_config(), &control, Duration::ZERO);
+
+    wait_for(Duration::from_secs(1), || {
+        control.operations().iter().any(
+            |operation| matches!(operation, Operation::PushScene(push) if push.card_id == "clock"),
+        )
+    });
+
+    let operations = control.operations();
+    let activation = operations
+        .iter()
+        .position(|operation| *operation == Operation::Activate("clock".into()))
+        .expect("the device model is activated before its scene");
+    let scene = operations
+        .iter()
+        .position(
+            |operation| matches!(operation, Operation::PushScene(push) if push.card_id == "clock"),
+        )
+        .expect("scene-capable device receives PushScene");
+    assert!(activation < scene, "the scene must remain the visible face");
+    runtime.shutdown().unwrap();
+}
+
+#[test]
+fn config_apply_replies_before_the_followup_scene_round_trip_finishes() {
+    let control = MockDeviceControl::default();
+    let runtime = start_runtime(full_config(), &control, Duration::ZERO);
+    wait_for(Duration::from_secs(1), || {
+        control
+            .operations()
+            .iter()
+            .any(|operation| matches!(operation, Operation::PushScene(_)))
+    });
+
+    let scene_gate = control.block_next_scene();
+    let mut changed = full_config();
+    let CardSettings::Clock { show_seconds, .. } = &mut changed.cards[0] else {
+        panic!("fixture's first card stopped being a clock");
+    };
+    *show_seconds = false;
+
+    let (reply_sender, reply_receiver) = std::sync::mpsc::sync_channel(1);
+    thread::scope(|scope| {
+        scope.spawn(|| {
+            reply_sender.send(runtime.apply_config(changed)).unwrap();
+        });
+
+        scene_gate.wait_until_entered();
+        let result_before_scene_reply = reply_receiver.recv_timeout(Duration::from_millis(250));
+        scene_gate.open();
+        assert_eq!(
+            result_before_scene_reply
+                .expect("config apply stayed blocked on the follow-up scene request/response"),
+            Ok(())
+        );
+    });
+
+    runtime.shutdown().unwrap();
+}
+
+#[test]
+fn automatic_scene_delivery_does_not_gate_the_online_connection_state() {
+    let control = MockDeviceControl::default();
+    let scene_gate = control.block_next_scene();
+    let runtime = start_runtime(full_config(), &control, Duration::ZERO);
+
+    let snapshot = wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
+        snapshot.device.connection == ConnectionState::Online
+    });
+    assert_eq!(snapshot.device.connection, ConnectionState::Online);
+    scene_gate.wait_until_entered();
+    assert_eq!(
+        runtime.snapshot().unwrap().device.connection,
+        ConnectionState::Online,
+        "a best-effort render request must not turn an owned device back into Connecting"
+    );
+
+    scene_gate.open();
+    runtime.shutdown().unwrap();
+}
+
+#[test]
+fn legacy_device_receives_widget_config_and_never_receives_a_scene() {
+    let control = MockDeviceControl::default();
+    let mut legacy = status(42);
+    legacy.capabilities &= !protocol::CAPABILITY_SCENE_RENDER;
+    control.set_status(legacy);
+    let runtime = start_runtime(full_config(), &control, Duration::ZERO);
+
+    wait_for(Duration::from_secs(1), || {
+        let operations = control.operations();
+        operations.contains(&Operation::ApplyLayout(270))
+            && operations.contains(&Operation::Push("clock".into()))
+            && operations.contains(&Operation::Activate("clock".into()))
+    });
+    thread::sleep(Duration::from_millis(100));
+    assert!(
+        control
+            .operations()
+            .iter()
+            .all(|operation| !matches!(operation, Operation::PushScene(_))),
+        "firmware without bit 8 must stay on the legacy widget path"
+    );
+    runtime.shutdown().unwrap();
+}
+
+#[test]
+fn render_path_is_re_resolved_from_fresh_capabilities_on_every_reconnect() {
+    let control = MockDeviceControl::default();
+    let mut legacy = status(42);
+    legacy.capabilities &= !protocol::CAPABILITY_SCENE_RENDER;
+    control.set_status(legacy.clone());
+    let runtime = start_runtime(full_config(), &control, Duration::ZERO);
+
+    wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
+        snapshot.device.connection == ConnectionState::Online
+    });
+    assert!(
+        control
+            .operations()
+            .iter()
+            .all(|operation| !matches!(operation, Operation::PushScene(_)))
+    );
+
+    control.set_status(status(84));
+    control.force_disconnect(false);
+    wait_for(Duration::from_secs(1), || {
+        control.connection_count() >= 2
+            && control
+                .operations()
+                .iter()
+                .any(|operation| matches!(operation, Operation::PushScene(_)))
+    });
+
+    let scene_count = control
+        .operations()
+        .iter()
+        .filter(|operation| matches!(operation, Operation::PushScene(_)))
+        .count();
+    control.set_status(legacy);
+    control.force_disconnect(false);
+    wait_for(Duration::from_secs(1), || control.connection_count() >= 3);
+    thread::sleep(Duration::from_millis(100));
+    assert_eq!(
+        control
+            .operations()
+            .iter()
+            .filter(|operation| matches!(operation, Operation::PushScene(_)))
+            .count(),
+        scene_count,
+        "a device returning on legacy firmware must switch back to widgets"
+    );
+    runtime.shutdown().unwrap();
+}
+
+#[test]
+fn a_refused_scene_is_card_scoped_visible_and_not_periodically_retried() {
+    let control = MockDeviceControl::default();
+    control.refuse_scenes_for("clock");
+    let runtime = start_runtime(full_config(), &control, Duration::ZERO);
+
+    let snapshot = wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
+        snapshot.card_errors.iter().any(|error| {
+            error.kind == CardErrorKind::SceneRefused
+                && error.card_id == "clock"
+                && error.message.contains("scene")
+        })
+    });
+    assert!(
+        !matches!(snapshot.runtime, RuntimeState::Error { .. }),
+        "one refused scene must not park the whole runtime"
+    );
+    assert_eq!(snapshot.device.connection, ConnectionState::Online);
+    let attempts = control
+        .operations()
+        .iter()
+        .filter(|operation| matches!(operation, Operation::PushScene(_)))
+        .count();
+    thread::sleep(Duration::from_millis(100));
+    assert_eq!(
+        control
+            .operations()
+            .iter()
+            .filter(|operation| matches!(operation, Operation::PushScene(_)))
+            .count(),
+        attempts,
+        "a terminal refusal is retried only after a new host event"
+    );
+    runtime.shutdown().unwrap();
+}
+
+#[test]
+fn scenes_push_on_host_events_and_never_on_clock_or_pomodoro_ticks() {
+    let control = MockDeviceControl::default();
+    let runtime = start_runtime(full_config(), &control, Duration::ZERO);
+    let scene_count = || {
+        control
+            .operations()
+            .iter()
+            .filter(|operation| matches!(operation, Operation::PushScene(_)))
+            .count()
+    };
+
+    wait_for(Duration::from_secs(1), || scene_count() >= 1);
+    let initial = scene_count();
+    thread::sleep(Duration::from_millis(100));
+    assert_eq!(
+        scene_count(),
+        initial,
+        "the live clock must not schedule periodic scene pushes"
+    );
+
+    let mut changed = full_config();
+    let CardSettings::Clock { show_seconds, .. } = &mut changed.cards[0] else {
+        panic!("fixture's first card stopped being a clock");
+    };
+    *show_seconds = false;
+    runtime.apply_config(changed).unwrap();
+    wait_for(Duration::from_secs(1), || scene_count() > initial);
+    let after_config = scene_count();
+
+    runtime.activate_screen("pomodoro").unwrap();
+    wait_for(Duration::from_secs(1), || {
+        control.operations().iter().rev().any(
+            |operation| matches!(operation, Operation::PushScene(push) if push.card_id == "pomodoro"),
+        )
+    });
+    let after_playlist_advance = scene_count();
+    assert!(after_playlist_advance > after_config);
+    thread::sleep(Duration::from_millis(100));
+    assert_eq!(
+        scene_count(),
+        after_playlist_advance,
+        "pomodoro scheduler ticks update bindings through PushData, not scene rebuilds"
+    );
+
+    runtime.activate_screen("calendar").unwrap();
+    wait_for(Duration::from_secs(1), || {
+        control.operations().iter().rev().any(
+            |operation| matches!(operation, Operation::PushScene(push) if push.card_id == "calendar"),
+        )
+    });
+    let before_provider = scene_count();
+    runtime.refresh_provider("calendar").unwrap();
+    wait_for(Duration::from_secs(1), || scene_count() > before_provider);
+    assert!(control.operations().iter().rev().any(
+        |operation| matches!(operation, Operation::PushScene(push) if push.card_id == "calendar"),
+    ));
+    runtime.shutdown().unwrap();
+}
+
+#[test]
+fn stale_error_transition_rebuilds_the_active_scene_with_its_footer() {
+    let control = MockDeviceControl::default();
+    let runtime = RuntimeHandle::start(
+        full_config(),
+        Box::new(MockDevice::new(control.clone())),
+        Box::<LastGoodRefresher>::default(),
+        options(),
+    )
+    .unwrap();
+    wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
+        snapshot
+            .providers
+            .first()
+            .is_some_and(|provider| matches!(provider.state, app_core::ProviderState::Fresh))
+    });
+    runtime.activate_screen("calendar").unwrap();
+    wait_for(Duration::from_secs(1), || {
+        control.operations().iter().any(
+            |operation| matches!(operation, Operation::PushScene(push) if push.card_id == "calendar"),
+        )
+    });
+    let before_stale = control
+        .operations()
+        .iter()
+        .filter(|operation| matches!(operation, Operation::PushScene(_)))
+        .count();
+
+    runtime.refresh_provider("calendar").unwrap();
+    wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
+        snapshot
+            .providers
+            .first()
+            .is_some_and(|provider| matches!(provider.state, app_core::ProviderState::Stale { .. }))
+    });
+    wait_for(Duration::from_secs(1), || {
+        control
+            .operations()
+            .iter()
+            .filter(|operation| matches!(operation, Operation::PushScene(_)))
+            .count()
+            > before_stale
+    });
+    let latest = control
+        .operations()
+        .into_iter()
+        .rev()
+        .find_map(|operation| match operation {
+            Operation::PushScene(push) if push.card_id == "calendar" => Some(push),
+            _ => None,
+        })
+        .expect("stale provider result rebuilt the calendar scene");
+    assert!(latest.scene.nodes.iter().any(|node| {
+        matches!(
+            node,
+            SceneNode::Text(text)
+                if text.value == SceneValue::Literal("offline".into())
+        )
+    }));
     runtime.shutdown().unwrap();
 }
 
@@ -1609,6 +1956,7 @@ fn a_refused_push_is_not_retried_and_does_not_starve_other_cards() {
         !snapshot.card_errors.is_empty()
     });
     assert_eq!(snapshot.card_errors.len(), 1);
+    assert_eq!(snapshot.card_errors[0].kind, CardErrorKind::DataRefused);
     assert_eq!(snapshot.card_errors[0].card_id, "clock");
     assert!(
         snapshot.card_errors[0].message.contains("refused"),

@@ -215,6 +215,7 @@ export const ipcContractFixtures = {
     ],
     "card_errors": [
       {
+        "kind": "data-refused",
         "card_id": "json",
         "message": "the display refused this card's data (InvalidPayload): invalid push data"
       }

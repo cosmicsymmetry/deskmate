@@ -11,6 +11,7 @@ import { Icon } from "./Icon";
 import type {
   AlertHold,
   CardAlert,
+  CardError,
   CardSettings,
   JsonFieldMapping,
   PomodoroSnapshot,
@@ -29,6 +30,8 @@ interface CardEditorProps {
   /// dragging a card in the list safe: there is no stale index here for a
   /// reorder to invalidate.
   issues: ValidationIssue[];
+  /// A typed device refusal for this card's last data or scene update.
+  cardError: CardError | null;
   pomodoro: PomodoroSnapshot | null;
   /// The feed behind this card, when it has one. Only ever rendered when it is in
   /// trouble — see `providerTrouble`.
@@ -108,6 +111,7 @@ function HoldSelector({
 export function CardEditor({
   card,
   issues,
+  cardError,
   pomodoro,
   provider,
   timerBusy,
@@ -151,6 +155,19 @@ export function CardEditor({
           Remove
         </button>
       </div>
+
+      {cardError && (
+        <p className="data-note data-note--bad" role="alert">
+          <span>
+            <strong>
+              {cardError.kind === "scene-refused"
+                ? "This card could not be rendered."
+                : "This card’s data was refused."}
+            </strong>{" "}
+            {cardError.message} Adjust the card and save to try again.
+          </span>
+        </p>
+      )}
 
       {/* The recovery half of the removed data-sources panel, moved to where it is
           actionable: beside the card whose data went bad, not in a list of every

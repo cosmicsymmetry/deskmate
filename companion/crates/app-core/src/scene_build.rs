@@ -31,8 +31,8 @@
 use chrono::{Datelike, NaiveDateTime, Timelike};
 use protocol::{
     SCENE_CANVAS_HEIGHT, SCENE_CANVAS_WIDTH, Scene, SceneAlign, SceneArc, SceneFont, SceneFontTier,
-    SceneLabel, SceneLabelAnchor, SceneLine, SceneNode, SceneRect, SceneScale, SceneText,
-    SceneValue,
+    SceneLabel, SceneLabelAnchor, SceneLine, SceneNode, SceneRect, SceneRotRect, SceneScale,
+    SceneText, SceneValue,
 };
 
 // ---------------------------------------------------------------------------
@@ -90,6 +90,31 @@ const PROGRESS_RING_TINT: u32 = 0x00ff_9a85;
 const PROGRESS_RING_TRACK: u32 = 0x0028_1008;
 /// `DESKMATE_COLOR_SECONDARY`.
 const COLOR_SECONDARY: u32 = 0x009a_9aa5;
+
+// ---------------------------------------------------------------------------
+// analog_clock.c's own geometry. Ported, not re-derived.
+// ---------------------------------------------------------------------------
+
+/// `FACE_DIAMETER`.
+const ANALOG_FACE_DIAMETER: i32 = SCENE_CANVAS_HEIGHT - 2 * MARGIN;
+/// `FACE_RADIUS`.
+const ANALOG_FACE_RADIUS: i32 = ANALOG_FACE_DIAMETER / 2;
+/// `CHAPTER_RING_WIDTH`.
+const ANALOG_CHAPTER_RING_WIDTH: i32 = 4 * GRID;
+/// `HAND_HOUR_LEN`.
+const ANALOG_HOUR_LENGTH: i32 = 13 * GRID;
+/// `HAND_MINUTE_LEN`.
+const ANALOG_MINUTE_LENGTH: i32 = 18 * GRID;
+/// `HAND_SECOND_LEN`.
+const ANALOG_SECOND_LENGTH: i32 = 19 * GRID;
+/// `HAND_HOUR_WIDTH`.
+const ANALOG_HOUR_WIDTH: i32 = 6;
+/// `HAND_MINUTE_WIDTH`.
+const ANALOG_MINUTE_WIDTH: i32 = 4;
+/// `HAND_SECOND_WIDTH`.
+const ANALOG_SECOND_WIDTH: i32 = 2;
+/// `HUB_DIAMETER`.
+const ANALOG_HUB_DIAMETER: i32 = 2 * GRID;
 
 // ---------------------------------------------------------------------------
 // progress_ring.c's own geometry. Ported, not re-derived.
@@ -476,6 +501,16 @@ pub struct ClockCard {
     /// drawn for. The reading itself is a device-side `time:` binding, so it
     /// ticks between pushes; the hands and the date do not.
     pub local_now: NaiveDateTime,
+}
+
+/// The card-level inputs `analog_clock.c` draws from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AnalogClockCard {
+    /// Echoed as the scene's own revision.
+    pub revision: u32,
+    /// `analog_clock_patch()`'s `show_seconds` field. False hides the second
+    /// hand without moving any other part of the face.
+    pub show_seconds: bool,
 }
 
 /// The card-level inputs `big_number_label.c` draws from.
@@ -1350,6 +1385,108 @@ pub fn build_row_list_scene(card: &RowListCard<'_>, metrics: &BakedFontMetrics) 
     }
 }
 
+/// Converts the centre of a child in `OBJ_FACE`'s local coordinate frame to
+/// that child's absolute scene origin. LVGL centres each axis as
+/// `parent / 2 - object / 2`; keeping those divisions independent matters for
+/// odd-width children such as the 3px minor ticks.
+fn analog_face_child_origin(w: i32, h: i32, local_center_y: i32) -> (i32, i32) {
+    (
+        SCENE_CANVAS_WIDTH / 2 - w / 2,
+        SCENE_CANVAS_HEIGHT / 2 - ANALOG_FACE_DIAMETER / 2 + local_center_y - h / 2,
+    )
+}
+
+fn analog_hand(length: i32, width: i32, color: u32, binding: &str) -> SceneNode {
+    // make_hand() aligns the object to FACE centre with a -length/2 offset,
+    // putting its bottom-centre pivot exactly on the hub. `width / 2` is also
+    // the radius after LVGL's min(w, h) / 2 clamp, so the clamp is inert here.
+    let local_center_y = ANALOG_FACE_RADIUS - length / 2;
+    let (x, y) = analog_face_child_origin(width, length, local_center_y);
+    SceneNode::RotRect(SceneRotRect {
+        x,
+        y,
+        w: width,
+        h: length,
+        radius: width / 2,
+        fill: color,
+        pivot_x: width / 2,
+        pivot_y: length,
+        rotation: 0,
+        rotation_binding: binding.to_string(),
+    })
+}
+
+/// Builds the live `AnalogClock` face as a scene.
+///
+/// All three hands use device-side rotation bindings, so the scene keeps time
+/// without a host push. `show_seconds = false` drops the second-hand node,
+/// matching `LV_OBJ_FLAG_HIDDEN` without moving anything else.
+pub fn build_analog_clock_scene(card: &AnalogClockCard, _metrics: &BakedFontMetrics) -> Scene {
+    let mut nodes = Vec::with_capacity(5);
+
+    nodes.push(SceneNode::Arc(SceneArc {
+        cx: SCENE_CANVAS_WIDTH / 2,
+        cy: SCENE_CANVAS_HEIGHT / 2,
+        r: ANALOG_FACE_RADIUS,
+        start_deg: 0,
+        end_deg: 360,
+        width: ANALOG_CHAPTER_RING_WIDTH,
+        color: COLOR_SURFACE,
+        rounded: false,
+        end_binding: String::new(),
+    }));
+
+    // Known firmware gap: analog_clock.c rotates each 8/16px tick around an
+    // external `pivot_y = FACE_RADIUS` (160). SceneRotRect already carries and
+    // renders that value, but both scene validators currently require
+    // `pivot_y <= h`, so a valid scene cannot emit the twelve chapter ticks.
+    // Task 7 must retain this omission until those validators admit a bounded
+    // external pivot; the parity rows enforce the resulting pixel gap.
+
+    nodes.push(analog_hand(
+        ANALOG_HOUR_LENGTH,
+        ANALOG_HOUR_WIDTH,
+        COLOR_PRIMARY,
+        "time:hour",
+    ));
+    nodes.push(analog_hand(
+        ANALOG_MINUTE_LENGTH,
+        ANALOG_MINUTE_WIDTH,
+        COLOR_PRIMARY,
+        "time:minute",
+    ));
+    if card.show_seconds {
+        nodes.push(analog_hand(
+            ANALOG_SECOND_LENGTH,
+            ANALOG_SECOND_WIDTH,
+            CLOCK_HUE,
+            "time:second",
+        ));
+    }
+
+    let (hub_x, hub_y) =
+        analog_face_child_origin(ANALOG_HUB_DIAMETER, ANALOG_HUB_DIAMETER, ANALOG_FACE_RADIUS);
+    nodes.push(SceneNode::Rect(SceneRect {
+        x: hub_x,
+        y: hub_y,
+        w: ANALOG_HUB_DIAMETER,
+        h: ANALOG_HUB_DIAMETER,
+        // The C requests LV_RADIUS_CIRCLE; LVGL clamps it to half the 16px
+        // square before drawing, which is the value represented here.
+        radius: ANALOG_HUB_DIAMETER / 2,
+        fill: CLOCK_HUE,
+        opacity: u8::MAX,
+    }));
+
+    // `OBJ_STATE` is empty in the OK-state parity fixtures, so it has no
+    // visible scene node.
+    Scene {
+        revision: card.revision,
+        background: COLOR_CANVAS,
+        nodes,
+    }
+}
+
 /// `progress_ring.c`'s `format_clock()`, including its `[0, 86400]` clamp and
 /// total-minutes representation rather than an hours field.
 fn format_progress_clock(seconds: i64) -> String {
@@ -1598,6 +1735,32 @@ mod tests {
             SceneNode::Line(l) => l,
             other => panic!("node {index} is {other:?}, not a line node"),
         }
+    }
+
+    #[test]
+    fn hiding_analog_seconds_drops_only_the_second_hand() {
+        let card = AnalogClockCard {
+            revision: 7,
+            show_seconds: true,
+        };
+        let with_seconds = build_analog_clock_scene(&card, &BakedFontMetrics::SHIPPED);
+        let without_seconds = build_analog_clock_scene(
+            &AnalogClockCard {
+                show_seconds: false,
+                ..card
+            },
+            &BakedFontMetrics::SHIPPED,
+        );
+
+        let mut with_second_removed = with_seconds.clone();
+        with_second_removed.nodes.retain(|node| {
+            !matches!(
+                node,
+                SceneNode::RotRect(rect) if rect.rotation_binding == "time:second"
+            )
+        });
+        assert_eq!(without_seconds, with_second_removed);
+        assert_eq!(with_seconds.nodes.len(), without_seconds.nodes.len() + 1);
     }
 
     // ----------------------------------------------- the metrics' provenance

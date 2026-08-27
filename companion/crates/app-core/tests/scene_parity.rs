@@ -39,9 +39,9 @@
 //! [`build_digital_clock_scene`]'s own doc comment.
 
 use app_core::scene_build::{
-    BakedFontMetrics, BigNumberCard, ClockCard, IconBadgeCard, ProgressRingCard, RowListCard,
-    build_big_number_label_scene, build_digital_clock_scene, build_icon_badge_text_scene,
-    build_progress_ring_scene, build_row_list_scene,
+    AnalogClockCard, BakedFontMetrics, BigNumberCard, ClockCard, IconBadgeCard, ProgressRingCard,
+    RowListCard, build_analog_clock_scene, build_big_number_label_scene, build_digital_clock_scene,
+    build_icon_badge_text_scene, build_progress_ring_scene, build_row_list_scene,
 };
 use chrono::{NaiveDate, NaiveDateTime};
 use lvgl_sim::scene::{SceneRenderRequest, SceneTimer};
@@ -51,12 +51,13 @@ use lvgl_sim::{
 };
 use std::collections::BTreeSet;
 
-const EXPECTED_TEMPLATES: [SimTemplate; 5] = [
+const EXPECTED_TEMPLATES: [SimTemplate; 6] = [
     SimTemplate::DigitalClock,
     SimTemplate::BigNumberLabel,
     SimTemplate::RowList,
     SimTemplate::IconBadgeText,
     SimTemplate::ProgressRing,
+    SimTemplate::AnalogClock,
 ];
 
 /// `big_number_label.c`'s `CONTENT_WIDTH`.
@@ -664,6 +665,75 @@ fn add_progress_ring_cases(cases: &mut Vec<ParityCase>) {
     }
 }
 
+fn add_analog_clock_cases(cases: &mut Vec<ParityCase>) {
+    // Both instants keep all three hands visibly separated: 16:09:37 puts
+    // them at 124/54/222 degrees, while 21:33:07 puts them at 286/198/42.
+    // That makes a wrong binding or tenths-of-a-degree conversion obvious.
+    for instant in [&INSTANTS[0], &INSTANTS[6]] {
+        for show_seconds in [true, false] {
+            for (orientation_slug, orientation) in [
+                ("landscape", SimOrientation::Landscape),
+                ("flipped", SimOrientation::LandscapeFlipped),
+            ] {
+                let seconds_slug = if show_seconds {
+                    "seconds"
+                } else {
+                    // This axis earns its own row: an undiagnosed wrong-time
+                    // no-seconds dial remained open from M4 on 2026-08-11
+                    // until V1 acceptance closed it on 2026-08-14.
+                    "no-seconds"
+                };
+                cases.push(ParityCase {
+                    // Every instant, visibility state and orientation has the
+                    // same 440-pixel difference: the valid scene omits the
+                    // twelve static ticks whose external pivot the current
+                    // SceneRotRect validators reject.
+                    known_gap: Some(
+                        "SceneRotRect rejects the ticks' external pivot_y=160; the omitted ticks differ by 440 pixels",
+                    ),
+                    name: format!(
+                        "analog-clock--{}--{seconds_slug}--{orientation_slug}",
+                        instant.slug
+                    ),
+                    template: RenderRequest {
+                        template: SimTemplate::AnalogClock,
+                        fields: vec![
+                            // AnalogClock ignores the library-only title, but
+                            // the host still sends the field on the C path.
+                            SimField {
+                                name: "title".to_string(),
+                                value: SimFieldValue::Text("Desk".to_string()),
+                            },
+                            SimField {
+                                name: "show_seconds".to_string(),
+                                value: SimFieldValue::Boolean(show_seconds),
+                            },
+                        ],
+                        utc_offset_minutes: instant.utc_offset_minutes,
+                        now_unix_seconds: instant.now_unix_seconds(),
+                        orientation,
+                    },
+                    scene: SceneRenderRequest {
+                        scene: build_analog_clock_scene(
+                            &AnalogClockCard {
+                                revision: 1,
+                                show_seconds,
+                            },
+                            &BakedFontMetrics::SHIPPED,
+                        ),
+                        assets: Vec::new(),
+                        utc_offset_minutes: instant.utc_offset_minutes,
+                        now_unix_seconds: instant.now_unix_seconds(),
+                        timer: None,
+                        fields: Vec::new(),
+                        orientation,
+                    },
+                });
+            }
+        }
+    }
+}
+
 fn cases() -> Vec<ParityCase> {
     let mut cases = Vec::new();
     for instant in INSTANTS {
@@ -729,6 +799,7 @@ fn cases() -> Vec<ParityCase> {
     add_row_list_cases(&mut cases);
     add_icon_badge_text_cases(&mut cases);
     add_progress_ring_cases(&mut cases);
+    add_analog_clock_cases(&mut cases);
     cases
 }
 

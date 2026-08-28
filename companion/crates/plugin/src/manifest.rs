@@ -95,6 +95,18 @@ pub const MAX_LINE_POINTS: usize = protocol::MAX_SCENE_LINE_POINTS;
 /// and still cheap insurance.
 pub const MAX_TOML_NESTING_DEPTH: usize = 16;
 
+/// Maximum number of `[[repeats]]` blocks a manifest may declare. The one
+/// repeat form (a node group repeated over a bounded provider array, `item`
+/// substituted for the loop index -- Task 3's `compile` module) is deliberately
+/// scarce: a card face has room for one or two lists, not an arbitrary
+/// number.
+pub const MAX_REPEAT_GROUPS: usize = 2;
+
+/// Maximum byte length of a `[[repeats]]` block's `source` -- a dotted path
+/// into the fetched provider payload naming the array to iterate (e.g.
+/// `"rows"` for `data.rows`).
+pub const MAX_REPEAT_SOURCE_LEN: usize = 64;
+
 const fn default_opacity() -> u8 {
     u8::MAX
 }
@@ -154,6 +166,8 @@ pub enum ManifestError {
     /// The raw source has inline table/array nesting deeper than
     /// [`MAX_TOML_NESTING_DEPTH`], caught before the TOML parser ever runs.
     TooDeeplyNested { limit: usize },
+    /// `repeats` exceeds [`MAX_REPEAT_GROUPS`].
+    TooManyRepeatGroups { limit: usize, actual: usize },
     /// A bounded string field exceeded its limit. Covers `name`, `version`,
     /// an asset's `file`, `source.url`, a glyph's `name`, and a node's
     /// expression-source field (`value` or `glyph`) -- one reason, many
@@ -186,6 +200,30 @@ pub struct PluginManifest {
     #[serde(default)]
     pub assets: Vec<Asset>,
     #[serde(default)]
+    pub nodes: Vec<Node>,
+    /// The one repeat form: a template node group, repeated once per element
+    /// of a fetched provider array (capped at compile time -- see
+    /// `compile::MAX_REPEAT_ITEMS`), with the loop index available to each
+    /// repetition's expressions as the token `item`. Empty for a manifest
+    /// with no list content, which is most of them.
+    #[serde(default)]
+    pub repeats: Vec<Repeat>,
+}
+
+/// One `[[repeats]]` block: `source` names the fetched-data array whose
+/// length drives the repetition count, `nodes` is the template node group
+/// (the same six-kind vocabulary [`Node`] allows everywhere else -- a repeat
+/// is a manifest-level grouping, not a seventh node kind), and `dx`/`dy` is
+/// the per-repetition canvas offset the compiler applies to every templated
+/// node's geometry (row `n` is offset by `n * dx, n * dy`).
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Repeat {
+    pub source: String,
+    #[serde(default)]
+    pub dx: i32,
+    #[serde(default)]
+    pub dy: i32,
     pub nodes: Vec<Node>,
 }
 
@@ -441,6 +479,32 @@ impl PluginManifest {
             asset.validate()?;
         }
 
+        if self.nodes.len() > MAX_NODES {
+            return Err(ManifestError::TooManyNodes {
+                limit: MAX_NODES,
+                actual: self.nodes.len(),
+            });
+        }
+        for node in &self.nodes {
+            node.validate()?;
+        }
+
+        if self.repeats.len() > MAX_REPEAT_GROUPS {
+            return Err(ManifestError::TooManyRepeatGroups {
+                limit: MAX_REPEAT_GROUPS,
+                actual: self.repeats.len(),
+            });
+        }
+        for repeat in &self.repeats {
+            repeat.validate()?;
+        }
+        Ok(())
+    }
+}
+
+impl Repeat {
+    fn validate(&self) -> Result<(), ManifestError> {
+        check_len("repeat.source", &self.source, MAX_REPEAT_SOURCE_LEN)?;
         if self.nodes.len() > MAX_NODES {
             return Err(ManifestError::TooManyNodes {
                 limit: MAX_NODES,
@@ -1098,6 +1162,86 @@ refresh_minutes = 15
                 actual
             } if limit == protocol::MAX_SCENE_GLYPH_NAME_LEN
                 && actual == protocol::MAX_SCENE_GLYPH_NAME_LEN + 1
+        ));
+    }
+
+    #[test]
+    fn a_manifest_with_no_repeats_defaults_to_empty() {
+        let manifest = parse_manifest(CANONICAL_EXAMPLE).expect("canonical example must parse");
+        assert!(manifest.repeats.is_empty());
+    }
+
+    const MINIMAL_REPEAT: &str = r#"
+[[repeats]]
+source = "rows"
+dy = 40
+
+[[repeats.nodes]]
+kind = "text"
+x = 24
+baseline_y = 96
+w = 400
+align = "center"
+font = { tier = "hero" }
+color = 0xFFFFFF
+value = "{{ data.rows[item].label }}"
+
+"#;
+
+    #[test]
+    fn a_manifest_with_one_repeat_group_parses() {
+        let manifest = parse_manifest(&format!("{MINIMAL_HEADER}{MINIMAL_REPEAT}"))
+            .expect("one repeat group must parse");
+        assert_eq!(manifest.repeats.len(), 1);
+        assert_eq!(manifest.repeats[0].source, "rows");
+        assert_eq!(manifest.repeats[0].dy, 40);
+        assert_eq!(manifest.repeats[0].nodes.len(), 1);
+    }
+
+    #[test]
+    fn too_many_repeat_groups_is_rejected_by_name() {
+        let repeats = MINIMAL_REPEAT.repeat(MAX_REPEAT_GROUPS + 1);
+        let err = parse_manifest(&format!("{MINIMAL_HEADER}{repeats}")).unwrap_err();
+        assert!(matches!(
+            err,
+            ManifestError::TooManyRepeatGroups {
+                limit: MAX_REPEAT_GROUPS,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn a_repeat_source_over_the_length_ceiling_is_rejected_by_name() {
+        let long_source = "a".repeat(MAX_REPEAT_SOURCE_LEN + 1);
+        let source = format!(
+            "{MINIMAL_HEADER}\
+             [[repeats]]\nsource = \"{long_source}\"\nnodes = []\n"
+        );
+        let err = parse_manifest(&source).unwrap_err();
+        assert!(matches!(
+            err,
+            ManifestError::StringTooLong {
+                field: "repeat.source",
+                limit: MAX_REPEAT_SOURCE_LEN,
+                actual
+            } if actual == MAX_REPEAT_SOURCE_LEN + 1
+        ));
+    }
+
+    #[test]
+    fn too_many_nodes_in_one_repeat_group_is_rejected_by_name() {
+        let repeat_nodes: String = (0..=MAX_NODES)
+            .map(|_| MINIMAL_TEXT_NODE.replace("[[nodes]]", "[[repeats.nodes]]"))
+            .collect();
+        let source = format!("{MINIMAL_HEADER}[[repeats]]\nsource = \"rows\"\n{repeat_nodes}");
+        let err = parse_manifest(&source).unwrap_err();
+        assert!(matches!(
+            err,
+            ManifestError::TooManyNodes {
+                limit: MAX_NODES,
+                ..
+            }
         ));
     }
 }

@@ -9,14 +9,16 @@
 //! restricted expression language), compile a manifest into a `Scene`, or
 //! resolve assets to content-addressed digests.
 
+mod compile;
 mod expr;
 mod manifest;
 
+pub use compile::{CompileError, MAX_REPEAT_ITEMS, compile_scene};
 pub use expr::{
     EvalContext, EvalValue, Expr, ExprError, FUEL_BUDGET, Fuel, MAX_DEPTH, MAX_OUTPUT_LEN,
     MAX_PATH_SEGMENTS, MAX_ROUND_PLACES, MAX_SOURCE_LEN, build_icon_map,
 };
 pub use manifest::{
-    Align, Asset, Font, FontTier, Glyph, ManifestError, Node, PluginManifest, Source,
-    parse_manifest, parse_manifest_bytes,
+    Align, Asset, Font, FontTier, Glyph, MAX_REPEAT_GROUPS, MAX_REPEAT_SOURCE_LEN, ManifestError,
+    Node, PluginManifest, Point, Repeat, Source, parse_manifest, parse_manifest_bytes,
 };

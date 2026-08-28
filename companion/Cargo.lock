@@ -2765,7 +2765,9 @@ dependencies = [
 name = "plugin"
 version = "0.1.0"
 dependencies = [
+ "app-core",
  "protocol",
+ "providers",
  "serde",
  "serde_json",
  "toml 0.8.2",

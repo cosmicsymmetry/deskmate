@@ -6,7 +6,9 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+app-core = { path = "../app-core" }
 protocol = { path = "../protocol" }
+providers = { path = "../providers" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"

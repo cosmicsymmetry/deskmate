@@ -18,6 +18,7 @@
 //! asset's chunks from zero; only whole committed assets are ever skipped.
 
 use std::fs;
+use std::io::Read;
 use std::sync::Arc;
 
 use app_core::{AssetKind as ConfigAssetKind, AssetSettings, AssetSource, RuntimeDevice};
@@ -41,7 +42,7 @@ pub struct DesiredAsset {
 }
 
 /// A failure to turn one config-declared asset into transferable bytes.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum AssetResolveError {
     #[error("cannot read asset {id:?} from {path:?}: {message}")]
     Io {
@@ -59,6 +60,23 @@ pub enum AssetResolveError {
     },
 }
 
+/// Reads at most `cap + 1` bytes of `path`, never the whole file.
+///
+/// Mirrors `plugin::assets`'s own `read_bounded`: a bare
+/// `fs::metadata().len()` pre-check is TOCTOU-prone (the file can grow
+/// between the stat and the read), and reading the whole file before
+/// checking its length defeats the point of a size cap -- an oversized
+/// asset would be pulled fully into memory just to be rejected. Bounding
+/// the *read itself* via `Read::take` avoids both: the read stops at
+/// `cap + 1` bytes regardless of the file's true on-disk size.
+fn read_bounded(path: &str, cap: u32) -> std::io::Result<Vec<u8>> {
+    let file = fs::File::open(path)?;
+    let mut limited = file.take(u64::from(cap) + 1);
+    let mut bytes = Vec::new();
+    limited.read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
 /// Read every asset's source file, hash it, and pair the digest with the
 /// bytes and wire kind `AssetSync::reconcile` needs. Enforces the same
 /// per-asset budget the config already validated at save time -- a file that
@@ -69,11 +87,12 @@ pub fn resolve_assets(settings: &[AssetSettings]) -> Result<Vec<DesiredAsset>, A
 
 fn resolve_one_asset(setting: &AssetSettings) -> Result<DesiredAsset, AssetResolveError> {
     let AssetSource::File(path) = &setting.source;
-    let bytes = fs::read(path).map_err(|error| AssetResolveError::Io {
-        id: setting.id.clone(),
-        path: path.clone(),
-        message: error.to_string(),
-    })?;
+    let bytes =
+        read_bounded(path, setting.maximum_bytes).map_err(|error| AssetResolveError::Io {
+            id: setting.id.clone(),
+            path: path.clone(),
+            message: error.to_string(),
+        })?;
     if bytes.is_empty() {
         return Err(AssetResolveError::Empty {
             id: setting.id.clone(),
@@ -594,5 +613,43 @@ mod tests {
         let error = resolve_assets(&settings).expect_err("must be rejected");
 
         assert!(matches!(error, AssetResolveError::TooLarge { .. }));
+    }
+
+    /// Proves the read itself is bounded, not just the length check
+    /// afterward: a sparse file claims a size far past `maximum_bytes`
+    /// (here, ~4 GiB) without writing that many real bytes to disk. A
+    /// bounded reader that stops at `maximum_bytes + 1` rejects this
+    /// near-instantly; `fs::read`-the-whole-file-then-check would try to
+    /// materialize gigabytes into memory first. Mirrors
+    /// `plugin::assets`'s identical test for the same TOCTOU-prone
+    /// read-then-check pattern.
+    #[test]
+    fn resolve_assets_rejects_a_sparse_oversized_file_without_reading_it_whole() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("huge.ttf");
+        let file = std::fs::File::create(&path).expect("create");
+        file.set_len(4 * 1024 * 1024 * 1024)
+            .expect("set sparse length");
+        drop(file);
+
+        let settings = vec![AssetSettings {
+            id: "huge".into(),
+            source: AssetSource::File(path.to_string_lossy().into_owned()),
+            kind: ConfigAssetKind::Font,
+            maximum_bytes: 32,
+        }];
+
+        let error = resolve_assets(&settings).expect_err("must be rejected");
+
+        assert_eq!(
+            error,
+            AssetResolveError::TooLarge {
+                id: "huge".into(),
+                actual: 33,
+                maximum: 32,
+            },
+            "a bounded reader must report exactly cap + 1 bytes read, never the file's true \
+             (unread) size"
+        );
     }
 }

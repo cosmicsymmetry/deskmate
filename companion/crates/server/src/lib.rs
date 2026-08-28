@@ -19,6 +19,7 @@ mod auth;
 mod device_link;
 pub mod egress;
 pub mod firmware;
+pub mod plugin_provider;
 pub mod registry;
 pub mod runtime_device;
 mod store;

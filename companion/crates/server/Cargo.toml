@@ -8,7 +8,9 @@ rust-version.workspace = true
 [dependencies]
 app-core = { path = "../app-core" }
 device = { path = "../device" }
+plugin = { path = "../plugin" }
 protocol = { path = "../protocol" }
+providers = { path = "../providers" }
 atomic-write-file = "0.3.0"
 axum = { version = "0.8", features = ["ws"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }

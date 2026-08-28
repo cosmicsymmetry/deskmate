@@ -1277,6 +1277,67 @@ fn scene_transport_failures_retry_without_masquerading_as_card_faults() {
 }
 
 #[test]
+fn no_device_scene_failure_enters_reconnect_without_becoming_a_card_fault() {
+    let control = MockDeviceControl::default();
+    control.fail_next_scene_with(DeviceError::NoDevice);
+    let runtime = start_runtime(full_config(), &control, Duration::ZERO);
+
+    wait_for(Duration::from_secs(1), || control.connection_count() >= 2);
+    let snapshot = wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
+        snapshot.device.connection == ConnectionState::Online
+    });
+    assert!(snapshot.card_errors.is_empty());
+    assert!(
+        control
+            .operations()
+            .iter()
+            .filter(|operation| matches!(operation, Operation::PushScene(_)))
+            .count()
+            >= 2,
+        "the reconnect did not retry the scene event"
+    );
+    runtime.shutdown().unwrap();
+}
+
+#[test]
+fn terminal_scene_session_faults_are_visible_and_never_silently_retried() {
+    for error in [
+        DeviceError::VersionMismatch(2),
+        DeviceError::InvalidRequest,
+        DeviceError::RevisionExhausted,
+    ] {
+        let expected = error.to_string();
+        let control = MockDeviceControl::default();
+        control.fail_next_scene_with(error);
+        let runtime = start_runtime(full_config(), &control, Duration::ZERO);
+
+        let snapshot = wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
+            matches!(
+                &snapshot.runtime,
+                RuntimeState::Error { message } if message.contains(&expected)
+            )
+        });
+        assert!(snapshot.card_errors.is_empty());
+        let attempts = control
+            .operations()
+            .iter()
+            .filter(|operation| matches!(operation, Operation::PushScene(_)))
+            .count();
+        thread::sleep(Duration::from_millis(100));
+        assert_eq!(
+            control
+                .operations()
+                .iter()
+                .filter(|operation| matches!(operation, Operation::PushScene(_)))
+                .count(),
+            attempts,
+            "terminal scene session fault was silently retried"
+        );
+        runtime.shutdown().unwrap();
+    }
+}
+
+#[test]
 fn wrong_tier_scene_recovery_replays_the_model_and_rearms_the_scene() {
     let control = MockDeviceControl::default();
     control.fail_next_scene_with(DeviceError::Rejected(ErrorResponse {

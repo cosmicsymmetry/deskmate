@@ -1327,7 +1327,7 @@ fn run_runtime(
         // face drawn by an already-owned device, not a prerequisite for Online.
         state.publish_if_changed(publisher, diagnostics);
         if state.connected && !state.config.preferences.paused {
-            push_active_scene(&mut state, device.as_mut());
+            push_active_scene(&mut state, device.as_mut(), options.reconnect_interval);
         }
         run_scheduled_work(
             &mut state,
@@ -2451,13 +2451,79 @@ fn record_scene_refusal(state: &mut WorkerState, card_id: String, message: Strin
     );
 }
 
+/// Classifies every device-layer outcome for an automatic scene. This match is
+/// deliberately exhaustive: a future `DeviceError` variant must choose an explicit
+/// retry and visibility policy rather than inheriting silent retry behavior.
+fn handle_automatic_scene_error(
+    state: &mut WorkerState,
+    card_id: String,
+    error: DeviceError,
+    reconnect_interval: Duration,
+) {
+    match error {
+        error if is_wrong_tier(&error) => mark_ownership_refused(state),
+        DeviceError::Rejected(error) if error.code == protocol::ErrorCode::Busy => {
+            // Firmware uses Busy for zero-timeout LVGL lock contention and OTA
+            // takeover. The scene is still valid and no user edit can fix it;
+            // retain the event so the next render phase tries it again.
+            state.active_scene_dirty = true;
+        }
+        DeviceError::Rejected(error) => record_scene_refusal(
+            state,
+            card_id,
+            format!(
+                "the display refused this card's scene ({:?}): {}",
+                error.code, error.diagnostic
+            ),
+        ),
+        DeviceError::MissingCapabilities {
+            required,
+            available,
+        } => record_scene_refusal(
+            state,
+            card_id,
+            format!(
+                "the display no longer advertises declarative scene rendering (required {required:#018x}, available {available:#018x}); reconnect to use its legacy widget renderer"
+            ),
+        ),
+        DeviceError::Timeout
+        | DeviceError::Transport(_)
+        | DeviceError::MalformedResponse(_)
+        | DeviceError::UnexpectedMessage => {
+            // Timeouts, transport failures, and malformed/unexpected responses
+            // describe the link, not the card. Keep the scene pending and let
+            // ordinary status polling decide whether connection state changes.
+            state.active_scene_dirty = true;
+        }
+        error @ DeviceError::NoDevice => {
+            // Unlike a dropped response, NoDevice is already a definitive
+            // connection observation. Enter the normal reconnect path now.
+            mark_disconnected(state, &error, Instant::now(), reconnect_interval);
+        }
+        error @ (DeviceError::VersionMismatch(_)
+        | DeviceError::InvalidRequest
+        | DeviceError::RevisionExhausted) => {
+            // These are terminal host/session faults, not defects in this card's
+            // content and not transient link loss. Make them globally visible and
+            // do not retry the identical request forever.
+            state.runtime = RuntimeState::Error {
+                message: format!("automatic scene delivery failed: {error}"),
+            };
+        }
+    }
+}
+
 /// Rebuilds the active card only after a host-owned event marks it dirty.
 ///
 /// The worker calls this in its render phase after publishing ownership state.
 /// The dirty bit is consumed before any request and no clock, pomodoro, status, or
 /// provider deadline sets it. Device-side bindings keep clock/timer facts moving
 /// between these event-driven pushes.
-fn push_active_scene(state: &mut WorkerState, device: &mut dyn RuntimeDevice) {
+fn push_active_scene(
+    state: &mut WorkerState,
+    device: &mut dyn RuntimeDevice,
+    reconnect_interval: Duration,
+) {
     if ownership_was_refused(state) || state.needs_full_sync || !state.active_scene_dirty {
         return;
     }
@@ -2520,42 +2586,8 @@ fn push_active_scene(state: &mut WorkerState, device: &mut dyn RuntimeDevice) {
                 state.push_rejections.remove(&card_id);
             }
         }
-        Err(error) if is_wrong_tier(&error) => {
-            mark_ownership_refused(state);
-        }
-        Err(DeviceError::Rejected(error)) if error.code == protocol::ErrorCode::Busy => {
-            // Firmware uses Busy for zero-timeout LVGL lock contention and OTA
-            // takeover. The scene is still valid and no user edit can fix it;
-            // retain the event so the next render phase tries it again.
-            state.active_scene_dirty = true;
-        }
-        Err(DeviceError::Rejected(error)) => {
-            record_scene_refusal(
-                state,
-                card_id,
-                format!(
-                    "the display refused this card's scene ({:?}): {}",
-                    error.code, error.diagnostic
-                ),
-            );
-        }
-        Err(DeviceError::MissingCapabilities {
-            required,
-            available,
-        }) => {
-            record_scene_refusal(
-                state,
-                card_id,
-                format!(
-                    "the display no longer advertises declarative scene rendering (required {required:#018x}, available {available:#018x}); reconnect to use its legacy widget renderer"
-                ),
-            );
-        }
-        Err(_) => {
-            // Timeouts, transport failures, and malformed/unexpected responses
-            // describe the link, not the card. Keep the scene pending and let
-            // ordinary status polling decide whether connection state changes.
-            state.active_scene_dirty = true;
+        Err(error) => {
+            handle_automatic_scene_error(state, card_id, error, reconnect_interval);
         }
     }
 }

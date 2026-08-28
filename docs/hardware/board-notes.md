@@ -3942,3 +3942,46 @@ only six named capabilities.
 
 Gate A's panel observations therefore require the **server** to be redeployed first.
 
+
+### Server redeployed so Gate A becomes observable — 2026-08-28
+
+Built from a `git archive HEAD` export in `rust:1.98-bookworm` against the retained
+root-owned `companion/target/`: **20.6 s**. Installed over
+`/usr/local/bin/deskmate-server` with the previous binary kept as
+`deskmate-server.bak-20260828`. The device reconnected 2 s after the restart.
+
+**The bin target is `server`, not `deskmate-server`** — `cargo build -p server --bin
+deskmate-server` fails with "no bin target named". The *installed* file is renamed on the
+way in. Worth recording; it cost a build cycle.
+
+Immediately confirmed live, and this is the first end-to-end proof of the capability fix
+from `05500ef`:
+
+```
+unknown_capability_bits  0x0000000000000000   (was 0x100)
+capabilities             core-widgets, config-rotation, extended-templates,
+                         asset-transfer, firmware-update, networking, scene-render
+```
+
+The device has advertised 491 all along; the host can finally name bit 8. Counters clean
+after the reconnect: `crc_errors` 0, `malformed_frames` 0, `dropped_responses` 0,
+`host_reconnects` 0, `valid_frames` 105.
+
+### What the panel can and cannot settle, which matters for how Gate A is judged
+
+**A scene and its C template are pixel-identical by construction** — that is precisely
+what the 132-row byte-exact gate guarantees — so *looking at the panel cannot distinguish
+which path drew it*. Neither can the admin API: `active_screen_id` is the same either way,
+and `app-core` has no tracing on the scene path (raising `RUST_LOG` to `app_core=debug`
+produced nothing, and was reverted).
+
+So the panel observation is not "is this a scene?". It is **"is what the device draws
+correct, at both orientations, over time"** — the clock crossing a minute with its date and
+both dial hands right, a timer whose STATUS word and indicator colour follow its state, and
+a tap that moves the timer with the link down. Which path produced it is settled by the
+negotiation logic and its tests, not by eyes.
+
+Stage 2a had a decisive visual tell — a ticking seconds field against a saved config with
+`show_seconds: false`, which the C template *cannot* draw. That tell is not available here:
+the automatic path builds the scene from the same card, so both halves agree about seconds
+by design. Do not go looking for it.

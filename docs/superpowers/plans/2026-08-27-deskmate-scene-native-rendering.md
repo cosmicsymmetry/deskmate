@@ -762,11 +762,17 @@ alike, and this repository has twice spent days on the former with every test gr
       connected, and survival of the rollback window. **If the download fails, do not
       retry blindly** — the documented failure mode is *deterministic*, and `3f2aa03` was
       bisected across three builds from an identical base.
-- [ ] **Step 3: Re-observe one card per template at both orientations**, confirming the
-      removal changed nothing visible.
-- [ ] **Step 4: Confirm the standalone clock still appears** on host loss — pull the link
-      and watch. It is the only face left when a scene is absent.
-- [ ] **Step 5: Record in `docs/hardware/board-notes.md`.**
+- [x] **Step 3: Re-observe one card per template at both orientations**, confirming the
+      removal changed nothing visible. All six render correctly at 270 and 90 (a test
+      config added the missing `analog-clock` and `big-number-label` cards). **It did NOT
+      change nothing visible** — see the transition-flash defect in board-notes: the
+      standalone clock now shows for ~220-250 ms at every carousel transition, because
+      `SHOW_CARD_FALLBACK` replaced the local `SHOW_VIEW` render.
+- [x] **Step 4: Confirm the standalone clock still appears** on host loss — pull the link
+      and watch. It is the only face left when a scene is absent. Confirmed: the device
+      retains and locally ticks the last scene for **~39 s** (measured at 60 fps), then
+      loads `clock_screen.c` with its "Connect deskmate app" hint.
+- [x] **Step 5: Record in `docs/hardware/board-notes.md`.**
 
 ---
 
@@ -809,6 +815,13 @@ alike, and this repository has twice spent days on the former with every test gr
    the link down — at both orientations.
 8. Gate B observed: OTA download completes with the C templates removed, nothing visibly
    changed, and the standalone clock still appears on host loss.
+   **Observed 2026-08-28, with one qualification and one item owed.** The download passed
+   on the first attempt (`live1` -> `live2` in 66 s, `ota_state idle`, `last_ota_error
+   null`); all six templates render at both orientations; the standalone clock appears on
+   host loss after a ~39 s retained-scene window. **"Nothing visibly changed" is FALSE:**
+   the standalone clock now flashes for ~220-250 ms at every carousel transition — see
+   board-notes. Still owed: rollback survival across a second boot (the device has not
+   rebooted since installing live2).
 9. `docs/protocol/v1.md` documents every new binding, including the two sentences whose
    absence caused Task 1's defects.
 

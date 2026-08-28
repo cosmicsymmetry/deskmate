@@ -4075,3 +4075,145 @@ statics.
    physically disconnected, absent from both `system_profiler SPUSBDataType` and the
    avfoundation device list, with only its virtual-camera extension loaded publishing a
    "camera off" placeholder.
+
+### Gate B Steps 2-3 and a new defect — 2026-08-28 (continued)
+
+Same session as the OTA entry above, resumed with admin-API access.
+
+**Step 2's remaining fields, now read.** `GET /v1/devices/dev-0005`:
+`firmware_version v2.0.0-live2`, `ota_state idle`, `last_ota_error null`,
+`last_network_error null`, `connected true`, `tier networked`, `rotation 270`,
+`wifi_state connected`, `wifi_rssi -56`, capabilities `core-widgets, config-rotation,
+extended-templates, asset-transfer, firmware-update, networking, scene-render`,
+`unknown_capability_bits 0x0`, and every counter zero — `crc_errors`,
+`malformed_frames`, `dropped_responses`, `dropped_events`, `dropped_ui_commands`,
+`overflow_frames`, `host_reconnects` — over 1,286 valid frames.
+
+**`wifi_rssi -56` deserves recording against the first-attempt download.** Both prior
+downloads on this board that failed and then succeeded on retry sat around -76 to -80 dBm.
+A link 20 dB stronger is a more ordinary explanation for the clean run than anything about
+the 15,496-byte `.bss` shrink. Do not credit the shrink with the smooth download.
+
+**`uptime_ms` 2,415,110 (~40 min) shows no reboot since the install**, so rollback survival
+across a second boot is still unproven, exactly as recorded above.
+
+**Step 3 — one card per template at both orientations — PASSED.** The saved config only
+had cards for four of the six templates, so a test config added `clock-analog`
+(analog-clock) and `weather-big` (big-number-label), put all six in one playlist at a 12 s
+dwell, and — deliberately — set the pomodoro `alert` to `none`, because an until-dismissed
+alert postpones firmware updates indefinitely and a gate session must not strand the device
+that way. All six faces render correctly at **270** and at **90**, the latter inverted in
+camera against the physically fixed board, which is what a real 180-degree UI rotation
+looks like. Session frames `*-six270.jpg` and `*-six90.jpg`.
+
+#### DEFECT: the standalone clock flashes for ~220-250 ms at every carousel transition
+
+Found as an unexplained frame during the 270 sweep, reproduced, then measured. **The link
+is up throughout**; this is not the host-loss fallback.
+
+`show_current_content()` in `protocol_task.c` queues `UI_COMMAND_SHOW_CARD_FALLBACK` when
+the host activates a screen, and `core/ui_command_policy.c` maps that to
+`UI_COMMAND_ACTION_SHOW_STANDALONE_CLOCK`. `dispatch_push_scene` then calls
+`ui_runtime_discard_card_fallbacks()` to pull the pending fallback back off the queue
+before the scene loads — its comment says so in as many words. **That only wins if the
+scene beats the LVGL command timer, and `UI_COMMAND_POLL_MS` is 20 ms.** Across
+Cloudflare -> cloudflared -> Caddy -> WSS, the scene never does.
+
+**This could not happen before stage 3a.** `git show 7d47ab6^:firmware/main/ui/ui_runtime.c`
+carries `UI_COMMAND_SHOW_VIEW`/`UI_COMMAND_PATCH_VIEW`: the device drew the next card
+immediately from its compiled-in C template plus retained field data, with no host round
+trip at all. `SHOW_CARD_FALLBACK` arrived in `35c46d2`. Retiring the C templates converted
+"render the next card locally, now" into "show the standalone clock until the server sends
+a scene".
+
+Measured from `20260828T091832Z-flash.mp4` (45 s, 59.94 fps) with ffmpeg scene detection
+over the panel crop; transitions come in pairs, 12 s apart, matching the dwell:
+
+    7.482 -> 7.699    217 ms
+    19.450 -> 19.679  229 ms
+    43.624 -> 43.874  250 ms
+    31.563            one change only — it entered the DigitalClock card, which resembles
+                      the standalone clock too closely to cross the threshold
+
+Frames at t=7.40/7.58/7.80 show `BigNumberLabel` -> **standalone clock** -> `RowList`. The
+middle face is positively identified as `clock_screen.c`: line 223 hides the "Connect
+deskmate app" hint when `s_online` is true, which is why the flash carries no hint where
+the genuine host-loss fallback did.
+
+Counters stayed clean throughout, so nothing is being rejected — this is a latency race,
+not a decode failure. **Not fixed here:** any firmware change costs an OTA re-verification
+cycle, so the fix is the owner's call.
+
+**The 132-row byte-exact parity gate is structurally blind to this.** It compares one
+rendered scene against one C template. It says nothing about what the panel shows in the
+gap between two of them, which is where this lives. Add it to the list of things that gate
+cannot prove, beside shared code and injected binding inputs.
+
+#### Gate A's folded item 3: the ProgressRing state machine — PASSED (online), offline tap owed
+
+Pomodoro pinned as the sole playlist entry so it stayed on screen; owner tapped. Frames
+`*-tap.jpg` in the session directory, 09:23-09:25Z, at 270 degrees. Observed in order:
+
+    Ready    full lavender ring, STATUS "Ready" white, ELAPSED 00:00
+    Running  ring RED and shrinking, STATUS "Running" RED, 00:59->00:43, ELAPSED 00:01->00:17
+    Paused   ring lavender again at its partial sweep, STATUS "Paused" white, frozen 00:39
+    Running  red again, 00:37->00:09, ELAPSED 00:23->00:51
+    Done     00:00, ELAPSED 01:00, STATUS "Done" white, indicator arc at zero sweep
+
+**This is the first hardware evidence for five of stage 3a's six additions at once:**
+`timer.status`, `timer.elapsed`, `timer.total`, `timer.permille` and `running_color`.
+Note the arc **shrinks** as the timer runs down — the ledger's inverted-percent defect
+(the device using elapsed where the C arc used remaining, which would have made a native
+ring grow) is genuinely fixed on the board, not just in tests.
+
+**The offline tap is NOT observed and remains owed** — but the reason is subtler than
+"no tap arrived", and the distinction is the point. Three attempts were made, dropping the
+link at 09:25:57Z, 09:28:17Z and 09:30:16Z. The owner reports tapping during the third and
+seeing the panel switch to the clock card immediately. **That switch does not require a tap
+to explain it.**
+
+A fourth run settled it: link dropped at 09:34:39Z, 60 s recorded at 60 fps, and the owner
+did not tap at all — scene detection over the whole clip finds nothing but the transition
+itself (three crossfade frames at t=38.87/38.89/38.91, no finger anywhere). **With no tap,
+the panel still left the pomodoro scene for the standalone clock at t=38.9 s.** In the
+third attempt the link dropped at 09:30:16Z, putting that timeout at ~09:30:55, and the
+last still frame was 09:30:56 — so the tap and the timeout coincided to within a couple of
+seconds. The owner's observation was real; the causal reading is what does not survive.
+
+This also sharpens the retained-scene window to **~39 s from link close**, measured at
+60 fps, replacing the ~42-45 s inferred from 3 s-spaced stills earlier in the session.
+That is the budget any future offline-interaction check must work inside, and it is why
+the first three attempts were built wrong.
+
+**Owner reports the offline tap works.** On the final attempt (link dropped 09:37:32Z)
+the owner tapped and the ring started counting — the local action doing exactly what it
+should with no host. Recorded as an **owner observation**, on the same footing as Gate A's.
+One honest caveat, stated once and not laboured: the 60 fps clip covering 09:37:32-09:38:02
+contains no finger and no panel change, so the tap fell outside that window, and the link
+was restored at 09:38:07 — the recording does not independently corroborate it. Treat this
+as owner-observed, not instrument-confirmed.
+
+The local-action path exists and was read — `carousel.c:79` -> `scene_view_apply_local_action`
+-> `scene_timer_apply_local_action` (`core/scene_binding.c:95`), which toggles `running`
+unconditionally so a tap from Ready or Done both produce a visible change — but reading
+the code is not observing the panel.
+
+Two incidental facts worth keeping:
+
+- **The retained-scene window before the standalone fallback is ~45 s.** Measured at
+  09:03:36Z link close -> ~09:04:21Z fallback, and corroborated by attempt 3, where a
+  40 s window did not fall back. That is the budget any future offline-interaction check
+  has to work inside.
+- **Reconnect (server-up to link-established) was 4 s, 47 s and 29 s across the three
+  drops.** Variable, not monotonically widening, so this is **not** evidence for Task 8's
+  widening backoff — recorded so a future session does not mistake one long reconnect for
+  that observation. Outages were 71 s, 91 s and 60 s respectively.
+
+**Device restored to its saved configuration** at the end of the session and verified via
+`GET /v1/devices/dev-0005`: the original five cards (test cards `clock-analog` and
+`weather-big` removed), playlist clock/weather/rss at 50 s dwell, orientation
+`landscape-flipped` / `rotation 270`, and the pomodoro `alert` re-armed to
+`on-timer-finish` with `until-dismissed` hold. Closing state: `v2.0.0-live2`,
+`ota_state idle`, `last_ota_error null`, `wifi_rssi -54`, `uptime_ms` ~63 min with no
+reboot. `dropped_events` moved 0 -> 1 during the deliberate link drops; every other
+counter is still zero.

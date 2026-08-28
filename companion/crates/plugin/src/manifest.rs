@@ -19,6 +19,7 @@
 
 use std::collections::HashSet;
 use std::fmt;
+use std::path::Component;
 
 use serde::Deserialize;
 
@@ -177,6 +178,17 @@ pub enum ManifestError {
         limit: usize,
         actual: usize,
     },
+    /// An asset's `file` is not a single plain filename component --
+    /// anything absolute, anything containing `..`, or anything with more
+    /// than one path component. `file` is documented
+    /// (`docs/plugins/manifest-v1.md`) as "relative to the manifest's own
+    /// directory", meaning exactly one file inside that directory, never a
+    /// path that walks out of it. Rejected here, at parse time, before
+    /// `assets::resolve_assets` ever joins `file` onto a real `base_dir` and
+    /// reads whatever it names -- see that module's own defensive
+    /// containment check for the second, independent layer over the same
+    /// hazard.
+    InvalidAssetPath { file: String },
 }
 
 impl fmt::Display for ManifestError {
@@ -241,8 +253,14 @@ pub enum Asset {
     /// A TTF/OTF blob plus a name-to-codepoint map; `icon(name)` resolves
     /// through this table.
     IconFont { file: String, glyphs: Vec<Glyph> },
-    /// A source image, converted server-side to the device's native image
-    /// format.
+    /// An image asset. Despite the name, this crate does no image decoding
+    /// or RGB565 conversion -- there is no such pipeline anywhere in this
+    /// crate or the server yet. `file` must already be the device-native
+    /// blob (an `lv_image_header_t` followed by raw pixels; see
+    /// `plugins/agenda/manifest.toml`'s doc comment for the exact byte
+    /// layout `badge.rgb565` was hand-built to match). A prior
+    /// revision of this comment called conversion "server-side," which was
+    /// aspirational, not a description of anything implemented.
     Image { file: String },
 }
 
@@ -455,6 +473,37 @@ fn check_len(field: &'static str, value: &str, limit: usize) -> Result<(), Manif
     }
 }
 
+/// Refuses any asset `file` that is not a single plain filename component.
+///
+/// Final whole-stage review finding 1: `assets.rs` used to do a bare
+/// `base_dir.join(file)` with nothing here rejecting `..`, a leading `/`,
+/// or an absolute path -- and `Path::join` with an absolute `file`
+/// **discards `base_dir` entirely**, so an unvalidated manifest could name
+/// any file on the render host (`/etc/shadow`), have it read, hashed, and
+/// shipped to a device as an asset. This is the fix at the layer that
+/// matters most: rejected before anything ever touches the filesystem.
+///
+/// Decided with `std::path::Component`, deliberately not hand-rolled string
+/// matching on `/`/`\\`: `Component` already understands every platform's
+/// notion of a root, a prefix (`C:\`), `.` and `..`, so this cannot miss a
+/// case a manual `contains('/')` check would (a `\\` on a host that treats
+/// it as a separator, a Windows drive prefix, `.` alone). The rule is
+/// simple by construction: exactly one component, and that component must
+/// be [`Component::Normal`] -- anything else (`RootDir`, `Prefix`,
+/// `CurDir`, `ParentDir`, or more than one component at all, e.g.
+/// `"a/b.ttf"`) is refused, matching `docs/plugins/manifest-v1.md`'s own
+/// claim that `file` is "relative to the manifest's own directory": a
+/// single file in that directory, never a path that walks anywhere else.
+fn validate_asset_file_path(file: &str) -> Result<(), ManifestError> {
+    let mut components = std::path::Path::new(file).components();
+    match (components.next(), components.next()) {
+        (Some(Component::Normal(_)), None) => Ok(()),
+        _ => Err(ManifestError::InvalidAssetPath {
+            file: file.to_string(),
+        }),
+    }
+}
+
 impl PluginManifest {
     fn validate(&self) -> Result<(), ManifestError> {
         check_len("name", &self.name, MAX_NAME_LEN)?;
@@ -471,6 +520,7 @@ impl PluginManifest {
         for asset in &self.assets {
             let file = asset.file();
             check_len("asset.file", file, MAX_FILE_NAME_LEN)?;
+            validate_asset_file_path(file)?;
             if !seen_files.insert(file) {
                 return Err(ManifestError::DuplicateAsset {
                     file: file.to_string(),
@@ -791,6 +841,67 @@ glyph = "{{ icon(data.category) }}"
             err,
             ManifestError::DuplicateAsset { file } if file == "same.ttf"
         ));
+    }
+
+    // -- Final whole-stage review finding 1: `[[assets]] file` must not be
+    // able to name anything outside the manifest's own directory. Each case
+    // asserts the specific `InvalidAssetPath` variant, never bare
+    // `is_err()`. --
+
+    #[test]
+    fn an_asset_file_walking_up_a_directory_is_rejected_as_invalid_path() {
+        let source =
+            format!("{MINIMAL_HEADER}[[assets]]\nkind = \"font\"\nfile = \"../../etc/passwd\"\n");
+        let err = parse_manifest(&source).unwrap_err();
+        assert_eq!(
+            err,
+            ManifestError::InvalidAssetPath {
+                file: "../../etc/passwd".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn an_absolute_asset_file_path_is_rejected_as_invalid_path() {
+        let source =
+            format!("{MINIMAL_HEADER}[[assets]]\nkind = \"font\"\nfile = \"/etc/shadow\"\n");
+        let err = parse_manifest(&source).unwrap_err();
+        assert_eq!(
+            err,
+            ManifestError::InvalidAssetPath {
+                file: "/etc/shadow".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn an_asset_file_with_a_subdirectory_component_is_rejected_as_invalid_path() {
+        let source = format!("{MINIMAL_HEADER}[[assets]]\nkind = \"font\"\nfile = \"a/b.ttf\"\n");
+        let err = parse_manifest(&source).unwrap_err();
+        assert_eq!(
+            err,
+            ManifestError::InvalidAssetPath {
+                file: "a/b.ttf".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn an_asset_file_with_a_leading_current_dir_component_is_rejected_as_invalid_path() {
+        let source = format!("{MINIMAL_HEADER}[[assets]]\nkind = \"font\"\nfile = \"./x.ttf\"\n");
+        let err = parse_manifest(&source).unwrap_err();
+        assert_eq!(
+            err,
+            ManifestError::InvalidAssetPath {
+                file: "./x.ttf".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn a_bare_plain_filename_asset_is_still_accepted() {
+        let source = format!("{MINIMAL_HEADER}[[assets]]\nkind = \"font\"\nfile = \"icons.ttf\"\n");
+        parse_manifest(&source).expect("a bare plain filename must still be accepted");
     }
 
     #[test]

@@ -96,7 +96,7 @@ fn the_aqi_manifest_compiles_against_its_real_assets_and_captured_fixture() {
         panic!("node 1 is not Glyph: {:?}", scene.nodes[1]);
     };
     assert_eq!(glyph.name, "M");
-    assert_eq!(glyph.digest, assets.get("assets/icons.ttf").unwrap().digest);
+    assert_eq!(glyph.digest, assets.get("icons.ttf").unwrap().digest);
     // `field.*`: compiles to a device-side binding, not a literal -- this
     // manifest is what gives the mechanism its first pixel coverage.
     assert_eq!(
@@ -142,10 +142,7 @@ fn the_agenda_manifest_compiles_against_its_real_assets_and_captured_fixture() {
     let SceneNode::Image(image) = &scene.nodes[1] else {
         panic!("node 1 is not Image: {:?}", scene.nodes[1]);
     };
-    assert_eq!(
-        image.digest,
-        assets.get("assets/badge.rgb565").unwrap().digest
-    );
+    assert_eq!(image.digest, assets.get("badge.rgb565").unwrap().digest);
 
     // The repeat form, capped at 5 even though the fixture's `events` array
     // holds 6 -- the sixth event's title must never appear anywhere.

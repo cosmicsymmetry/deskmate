@@ -132,6 +132,23 @@ impl AssetSet {
             })
     }
 
+    /// The whole resolved icon-name -> codepoint table, for building an
+    /// `expr::EvalContext` against. `compile::compile_scene_with_assets`
+    /// uses this as the SOLE source of `icon(name)`'s lookup table -- final
+    /// whole-stage review finding 2: `compile.rs` used to rebuild a second,
+    /// separate map straight from the manifest's raw `[[assets]]` list
+    /// (`build_icon_map` over `Asset::IconFont` entries, `.collect()`-ed
+    /// with no duplicate check of its own), which could only ever agree
+    /// with this one by the unenforced discipline of always being called
+    /// with the `AssetSet` `resolve_assets` built for the SAME manifest.
+    /// Reusing this table instead of recomputing it deletes that second
+    /// implementation outright, so there is exactly one table and it is
+    /// always the one [`resolve_assets`] already validated (including its
+    /// own `DuplicateIconName` rejection).
+    pub(crate) fn icon_codepoints(&self) -> &HashMap<String, u32> {
+        &self.icon_codepoints
+    }
+
     /// Every resolved asset, `file` name paired with its [`ResolvedAsset`].
     /// A server-side transfer path uses this to build one desired-asset
     /// entry per manifest asset without re-deriving the manifest's asset
@@ -182,6 +199,19 @@ pub enum AssetError {
     /// [`AssetSet::icon_codepoint`] was asked for a name no `[[assets]]`
     /// icon-font glyph defines.
     UnknownIconName { name: String },
+    /// `base_dir.join(file)` resolved to a path outside `base_dir`.
+    ///
+    /// This is the defensive, second layer over the same hazard
+    /// `manifest::validate_asset_file_path` already rejects at parse time
+    /// (final whole-stage review finding 1): `Path::join` with an absolute
+    /// `file` discards `base_dir` entirely, and a `..` component walks back
+    /// out of it. `manifest.rs` is the primary fix -- rejected before
+    /// anything touches the filesystem -- but this module does not trust
+    /// that every caller went through `parse_manifest`: a `PluginManifest`
+    /// can be constructed directly, with every field `pub`, bypassing
+    /// `validate()` entirely. So this checks again, independently, right
+    /// here, on a security boundary where belt-and-braces is correct.
+    PathEscapesBaseDir { file: String },
 }
 
 impl std::fmt::Display for AssetError {
@@ -225,6 +255,40 @@ fn read_bounded(path: &Path, cap: u32) -> std::io::Result<Vec<u8>> {
     Ok(bytes)
 }
 
+/// Refuses to read `path` (`base_dir.join(file)`) unless it resolves inside
+/// `canonical_base` -- the defensive second layer over the arbitrary-file-
+/// read hazard `manifest::validate_asset_file_path` closes at parse time
+/// (final whole-stage review finding 1). See [`AssetError::PathEscapesBaseDir`]
+/// for why this module does not trust that layer alone.
+///
+/// Uses `fs::canonicalize` rather than a lexical `starts_with`, deliberately:
+/// a lexical check on `base_dir.join(file)` would compare
+/// `"<base_dir>/../secret"` against `"<base_dir>"` component-by-component
+/// and see a matching *prefix* without ever resolving the `..` -- exactly
+/// wrong. Canonicalizing both sides resolves `..`, `.`, and symlinks before
+/// the containment check runs, so `starts_with` is checking the real
+/// filesystem path, not its unresolved spelling. This is why the check runs
+/// after confirming the path exists (canonicalize requires that) rather
+/// than before `read_bounded` opens it -- both fail closed the same way, as
+/// [`AssetError::Io`], when the target file cannot be found at all.
+fn ensure_within_base_dir(
+    canonical_base: &Path,
+    path: &Path,
+    file: &str,
+) -> Result<(), AssetError> {
+    let canonical_path = path.canonicalize().map_err(|error| AssetError::Io {
+        file: file.to_string(),
+        message: error.to_string(),
+    })?;
+    if canonical_path.starts_with(canonical_base) {
+        Ok(())
+    } else {
+        Err(AssetError::PathEscapesBaseDir {
+            file: file.to_string(),
+        })
+    }
+}
+
 /// Reads, content-addresses, and bounds every `[[assets]]` entry in
 /// `manifest`, relative to `base_dir`, and builds the icon-name codepoint
 /// table every `icon-font` entry contributes to.
@@ -239,10 +303,15 @@ pub fn resolve_assets(manifest: &PluginManifest, base_dir: &Path) -> Result<Asse
     let mut resolved = HashMap::with_capacity(manifest.assets.len());
     let mut icon_codepoints = HashMap::new();
     let mut icon_name_owner: HashMap<String, String> = HashMap::new();
+    let canonical_base = base_dir.canonicalize().map_err(|error| AssetError::Io {
+        file: base_dir.display().to_string(),
+        message: error.to_string(),
+    })?;
 
     for asset in &manifest.assets {
         let file = asset_file(asset);
         let path = base_dir.join(file);
+        ensure_within_base_dir(&canonical_base, &path, file)?;
         let bytes = read_bounded(&path, MAX_ASSET_BYTES).map_err(|error| AssetError::Io {
             file: file.to_string(),
             message: error.to_string(),
@@ -542,6 +611,39 @@ mod tests {
         assert!(matches!(error, AssetError::Io { file, .. } if file == "does-not-exist.ttf"));
     }
 
+    // -- Final whole-stage review finding 1: the defensive containment
+    // check in THIS module, independent of `manifest::validate_asset_file_path`.
+    // `PluginManifest` fields are all `pub`, so a caller can build one
+    // directly and skip `validate()` entirely -- this test does exactly
+    // that, proving this layer is load-bearing on its own, not merely
+    // redundant with the parse-time rejection. --
+    #[test]
+    fn a_traversal_path_that_bypassed_manifest_validation_is_still_rejected_here() {
+        let outer = tempfile::tempdir().expect("outer tempdir");
+        fs::write(outer.path().join("secret.ttf"), b"outside base_dir bytes")
+            .expect("write secret file outside base_dir");
+        let base_dir = outer.path().join("plugin");
+        fs::create_dir(&base_dir).expect("create base_dir");
+
+        // Constructed directly -- not through `parse_manifest` -- so
+        // `manifest::PluginManifest::validate`'s own `InvalidAssetPath`
+        // rejection never runs.
+        let manifest = minimal_manifest(vec![Asset::Font {
+            file: "../secret.ttf".to_string(),
+        }]);
+
+        let error = resolve_assets(&manifest, &base_dir).expect_err("must be rejected");
+
+        assert_eq!(
+            error,
+            AssetError::PathEscapesBaseDir {
+                file: "../secret.ttf".to_string()
+            },
+            "resolve_assets must refuse a path that escapes base_dir even when the manifest \
+             layer's own validation was bypassed"
+        );
+    }
+
     #[test]
     fn two_icon_fonts_defining_the_same_glyph_name_is_rejected_as_duplicate() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -576,6 +678,16 @@ mod tests {
         );
     }
 
+    // These two `icon_codepoint` tests exercise `AssetSet`'s own API
+    // directly and deliberately -- they pin the fallible, hard-reject
+    // lookup contract that API is documented to have. They are NOT a stand-in
+    // for compile-pipeline behaviour: `compile::compile_scene_with_assets`
+    // (final whole-stage review finding 2) sources `expr::EvalContext`'s
+    // icon table from `AssetSet::icon_codepoints()` and lets
+    // `expr::call_icon`'s own tested contract (`icon_with_an_unknown_name_is_missing`)
+    // decide an unresolved name is non-fatal at draw time -- see
+    // `compile.rs`'s `an_icon_name_no_registered_glyph_defines_compiles_to_an_empty_glyph_not_a_compile_error`,
+    // which drives the real, production entry point instead of this API.
     #[test]
     fn an_icon_name_no_glyph_defines_is_rejected_as_unknown() {
         let dir = tempfile::tempdir().expect("tempdir");

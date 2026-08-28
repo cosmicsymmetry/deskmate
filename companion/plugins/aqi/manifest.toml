@@ -4,7 +4,7 @@
 # asset) and `field.*` (a device-side binding to a value PushData carries,
 # independent of this scene's own compile-time data).
 #
-# The `[[assets]] kind = "icon-font"` file, `assets/icons.ttf`, is the same
+# The `[[assets]] kind = "icon-font"` file, `icons.ttf`, is the same
 # committed test font `lvgl-sim` already ships as `Inter-subset.ttf`
 # (byte-identical, same SHA-256 digest) -- its subset is digits, colon,
 # space and A-Z, with no real icon artwork. There is no icon library or font
@@ -26,7 +26,7 @@ refresh_minutes = 15
 
 [[assets]]
 kind = "icon-font"
-file = "assets/icons.ttf"
+file = "icons.ttf"
 glyphs = [
   { name = "good", codepoint = 0x47 },                        # 'G'
   { name = "moderate", codepoint = 0x4D },                    # 'M'
@@ -53,7 +53,7 @@ value = "{{ upper(data.current.category) }}"
 kind = "glyph"
 x = 24
 y = 168
-font = { asset = "assets/icons.ttf", pixel_size = 72 }
+font = { asset = "icons.ttf", pixel_size = 72 }
 color = 0xFF8F2E
 glyph = "{{ icon(data.current.category) }}"
 
@@ -112,10 +112,20 @@ value = "PM2.5"
 # device this renders the "--" placeholder until something does; this
 # manifest exists to give the binding a real author and real pixel coverage,
 # not to claim it is live end to end today.
+#
+# baseline_y = 320, not 336: the shared error footer
+# (`app_core::scene_build::push_state_footer`) draws its own caption-tier
+# line box at baseline 348 -- `SCENE_CANVAS_HEIGHT (368) - 2*GRID (16) -
+# caption.base_line (4)` -- whose box spans y=330..352
+# (`baseline_offset(Caption)` is `line_height 22 - base_line 4` = 18, so
+# `box_top = baseline_y - 18`). At 336 this node's own box (318..340)
+# overlapped that by 10px, which `plugin-aqi--error--landscape.png` was
+# blessed with baked in. 320 puts this box at 302..324: 2px clear of the
+# PM2.5 row above (which ends at 300) and 6px clear of the footer below.
 [[nodes]]
 kind = "text"
 x = 24
-baseline_y = 336
+baseline_y = 320
 w = 400
 align = "left"
 font = { tier = "caption" }

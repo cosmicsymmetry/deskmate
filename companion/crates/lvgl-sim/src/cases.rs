@@ -1728,7 +1728,7 @@ fn plugin_payload(raw: &str) -> serde_json::Value {
 }
 
 /// Decodes one of this stage's own hand-built RGB565 image assets --
-/// `companion/plugins/agenda/assets/badge.rgb565` -- back into the
+/// `companion/plugins/agenda/badge.rgb565` -- back into the
 /// `width`/`height`/`pixels` [`SceneAsset::Image`] wants. The file IS the
 /// device-native blob (see the manifest's own doc comment on why): a
 /// 12-byte `lv_image_header_t` (magic 0x19, `LV_COLOR_FORMAT_RGB565` 0x12,
@@ -1811,7 +1811,7 @@ fn compile_plugin_scene(
         .iter()
         .map(|(file, resolved)| match resolved.kind {
             AssetKind::Font | AssetKind::IconFont => {
-                // aqi's `assets/icons.ttf` is byte-identical to the already
+                // aqi's `icons.ttf` is byte-identical to the already
                 // committed, already-`'static` `INTER_SUBSET_TTF` (same
                 // SHA-256 digest -- see `docs/plugins/manifest-v1.md`), so
                 // this reuses that allocation instead of leaking a fresh

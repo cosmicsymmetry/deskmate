@@ -55,10 +55,13 @@ of letting code and documentation diverge.
   replaces per-card `presence` and the global carousel with the card library and named
   playlists, one active, while preserving the wire and firmware. Schema v4 was
   superseded by **v5** on 2026-08-22 (`0c7c467`, "reshape config assets for runtime
-  fonts"); the current frozen contract is `docs/config/v5.md`. A server built before
-  that commit rejects every save with `schema version 5 is not supported; expected 4`,
-  so redeploy the server whenever the schema moves — the app and the server carry
-  independent copies of `CURRENT_SCHEMA_VERSION`. That plan also **FIXED** the
+  fonts"), and v5 was in turn superseded by **v6** (the plugin card kind; see
+  `docs/config/v6.md`, the current frozen contract). A server built before a schema bump
+  rejects every save with a typed "schema version N is not supported; expected M" error,
+  so redeploy the server whenever the schema moves — there is exactly one
+  `CURRENT_SCHEMA_VERSION` (`app-core/src/config.rs`; `server/src/store.rs` consumes it),
+  but the deployed server binary compiles its own copy in, so a schema bump on the app
+  side does nothing for a live deployment until it is redeployed. That plan also **FIXED** the
   validation-mislabeling defect: a validation failure preserves genuine last-good
   state, remains typed, and is never presented as "your last working settings".
   M4 Task 3 (the `AnalogClock`,
@@ -363,8 +366,10 @@ of letting code and documentation diverge.
     rewritten at stage 3a's exit** to record which gaps closed and how. Its original
     conclusions contradicted the plan in three places, and all three were load-bearing:
     **`DigitalClock` was blocked from retirement too**, not only `ProgressRing`; **no
-    builder used `field.*` at all** (still true, and it is now the plugin data path stage
-    3b inherits untested); and `timer.pct` was **elapsed** percent on the device while the
+    builder used `field.*` at all** (true as of stage 3a's exit — it was the plugin data
+    path stage 3b inherited untested; stage 3b's `aqi` plugin has since bound
+    `field.title` and closed that gap, see below); and `timer.pct` was **elapsed** percent
+    on the device while the
     C arc and the parity fixture both used **remaining**, so a native ring would have grown
     where the C ring shrank.
   - **Retiring a C template also retires its offline behaviour** — the reason stage 3a
@@ -413,9 +418,10 @@ of letting code and documentation diverge.
     panel nor the admin API could ever say which path drew a frame. Gate A was therefore
     judged on correctness *over time* — a ticking face that stays right — not on
     identifying the path. Stage 2a's seconds tell does not apply here.
-  - Two lessons that outlive the stage: **`field.*` is the plugin data path and has no
-    builder, therefore no pixel coverage** — stage 3b will be the first thing to exercise
-    it; and the local tap now reaches the scene timer context (`scene_view_apply_local_action`,
+  - Two lessons that outlive the stage: **`field.*` is the plugin data path and, as of
+    stage 3a, had no builder and therefore no pixel coverage** — stage 3b was the first
+    thing to exercise it, and has since (`plugins/aqi/manifest.toml`'s `field.title`
+    binding); and the local tap now reaches the scene timer context (`scene_view_apply_local_action`,
     with the command-to-renderer decision extracted to host-tested `core/ui_command_policy.c`),
     so retiring the C view did not retire its offline behaviour.
 

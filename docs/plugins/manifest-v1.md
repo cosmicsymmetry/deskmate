@@ -28,7 +28,7 @@ refresh_minutes = 15
 
 [[assets]]
 kind = "icon-font"
-file = "assets/icons.ttf"
+file = "icons.ttf"
 glyphs = [ { name = "moderate", codepoint = 0x4D } ]
 
 [[nodes]]
@@ -85,16 +85,25 @@ refresh_minutes = 15
 
 ## `[[assets]]`
 
-Three kinds, each naming a `file` relative to the manifest's own directory:
+Three kinds, each naming a `file` that must be a single plain filename directly inside
+the manifest's own directory -- **not** a path. `file` is validated against
+`std::path::Component`, not hand-rolled string matching: it is refused if it is absolute,
+if any component is `..`, or if it has more than one component at all (so
+`"assets/icons.ttf"` is refused exactly like `"../icons.ttf"` is -- a subdirectory is not
+"relative to the manifest's own directory" any more loosely than a parent-directory walk
+is, and allowing one but not the other would make the rule harder to audit for no
+security benefit). This is deliberately the strictest reading and the reason the two
+curated plugins below keep every asset file flat, beside their `manifest.toml`, rather
+than under an `assets/` subdirectory:
 
 ```toml
 [[assets]]
 kind = "font"
-file = "assets/body.ttf"
+file = "body.ttf"
 
 [[assets]]
 kind = "icon-font"
-file = "assets/icons.ttf"
+file = "icons.ttf"
 glyphs = [
   { name = "moderate", codepoint = 0x4D },
   { name = "hazardous", codepoint = 0x48 },
@@ -102,7 +111,7 @@ glyphs = [
 
 [[assets]]
 kind = "image"
-file = "assets/badge.rgb565"
+file = "badge.rgb565"
 ```
 
 - **`font`** — a plain TTF/OTF, sized per node at render time via `pixel_size`.
@@ -118,7 +127,7 @@ file = "assets/badge.rgb565"
   host-endian RGB565 pixels, exactly as `sim_build_rgb565_image`
   (`companion/crates/lvgl-sim/csrc/sim_shim.c`) builds it and as the device's own asset
   store expects to receive it. `companion/plugins/agenda/manifest.toml`'s own doc comment
-  and `companion/plugins/agenda/assets/badge.rgb565` are the worked example. A real
+  and `companion/plugins/agenda/badge.rgb565` are the worked example. A real
   image-conversion pipeline is future work, not a v1 promise.
 
 Two `[[assets]]` entries may not declare the same `file`. Every `file` is bounded to 128
@@ -129,7 +138,7 @@ addressed: `plugin::resolve_assets` hashes the file's exact bytes with SHA-256 t
 digest a compiled scene's `image`/`glyph` node, or a `font.asset` reference, carries on
 the wire (`SceneImage.digest`, `SceneGlyph.digest`, `SceneFont::Asset.digest`). Two
 manifests that ship byte-identical asset content resolve to the same digest — "ship
-once" — which is why `companion/plugins/aqi/assets/icons.ttf` is deliberately the same
+once" — which is why `companion/plugins/aqi/icons.ttf` is deliberately the same
 committed bytes as `companion/crates/lvgl-sim/assets/Inter-subset.ttf` rather than a
 second, separately-hashed copy of the same font (see the "No real icon artwork" section
 below).
@@ -161,7 +170,7 @@ and `rotrect` exist on the wire but are drawn only by hand-written builder code
 
 ```toml
 font = { tier = "hero" }                              # caption | body | display | hero
-font = { asset = "assets/icons.ttf", pixel_size = 64 }
+font = { asset = "icons.ttf", pixel_size = 64 }
 ```
 
 ## The expression language
@@ -341,7 +350,7 @@ to end — an uploaded font asset, a `glyph` node resolving a name to a codepoin
 it, the device drawing that glyph — with real, already-verified-identical bytes, rather
 than leaving the icon-font path untested for want of artwork, or inventing new binary
 content whose only purpose would be to look like an icon. Swapping in a real icon font
-later is a content change to `companion/plugins/aqi/assets/icons.ttf`, not a shape
+later is a content change to `companion/plugins/aqi/icons.ttf`, not a shape
 change to the manifest or the compiler.
 
 ## Compiling a manifest: `compile_scene` vs. `compile_scene_with_assets`

@@ -8,7 +8,7 @@
 # `[[assets]] kind = "image"` entry that gives `framebuffer_diff`'s
 # RGB565-image exclusion category a real, provisionable asset.
 #
-# `assets/badge.rgb565` is NOT a PNG or any other conventional image
+# `badge.rgb565` is NOT a PNG or any other conventional image
 # container -- there is no image-decoding/RGB565-conversion pipeline in this
 # crate or the server yet (`manifest.rs`'s `Node::Image` doc calls that
 # "converted server-side," aspirationally; nothing implements it), so the
@@ -30,7 +30,7 @@ refresh_minutes = 10
 
 [[assets]]
 kind = "image"
-file = "assets/badge.rgb565"
+file = "badge.rgb565"
 
 [[nodes]]
 kind = "text"
@@ -48,7 +48,7 @@ x = 404
 y = 24
 w = 20
 h = 20
-asset = "assets/badge.rgb565"
+asset = "badge.rgb565"
 
 # The one repeat form: one row per `data.events[N]`, capped at
 # `MAX_REPEAT_ITEMS` (5) however many the fetched array actually holds --

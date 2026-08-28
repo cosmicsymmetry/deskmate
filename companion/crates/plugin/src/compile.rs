@@ -49,11 +49,9 @@ use protocol::{
 
 use app_core::{BakedFontMetrics, SceneDataState, text_is_numeric, with_scene_data_state};
 
-use std::collections::HashMap;
-
 use crate::assets::AssetSet;
-use crate::expr::{EvalContext, Expr, ExprError, FUEL_BUDGET, Fuel, build_icon_map};
-use crate::manifest::{Align, Asset, Font, FontTier, Node, PluginManifest, Point, Repeat};
+use crate::expr::{EvalContext, Expr, ExprError, FUEL_BUDGET, Fuel};
+use crate::manifest::{Align, Font, FontTier, Node, PluginManifest, Point, Repeat};
 
 /// Maximum repetitions the one repeat form expands to, however long the
 /// fetched array actually is. Mirrors `RowListCard`'s five-row precedent
@@ -79,17 +77,14 @@ pub enum CompileError {
     /// A restricted expression (anything outside the binding namespace)
     /// failed to parse or evaluate. Wraps the specific `expr::ExprError`,
     /// which includes `OutputTooLong` for a provider value too large for
-    /// this module's own bound -- not to be confused with `ValueTooLong`
-    /// below, the wire's smaller bound.
+    /// `expr`'s own, larger bound (`expr::MAX_OUTPUT_LEN`, 4096 bytes) --
+    /// that stays a named, fatal error because it can only be reached
+    /// through `truncate(s, n)`, an explicit function an author called with
+    /// too large an `n`, which is an authoring mistake worth surfacing
+    /// rather than papering over. Contrast with a literal value's own,
+    /// smaller wire bound (`protocol::MAX_SCENE_TEXT_LEN`), which this
+    /// module truncates rather than refuses -- see `bound_literal`.
     Expression(ExprError),
-    /// A literal value -- authored or expression-evaluated -- exceeds
-    /// `protocol::MAX_SCENE_TEXT_LEN`, the wire's own bound on one text
-    /// node's literal. Checked here, eagerly, rather than left to
-    /// `validate_scene`'s debug-only assertion, because unlike node
-    /// geometry this depends on untrusted, run-time provider content: a
-    /// release build must not ship an over-length literal just because it
-    /// skipped the assertion.
-    ValueTooLong { limit: usize, actual: usize },
     /// A node named an asset (by `file`) that the manifest's own
     /// `[[assets]]` table never declares, or that `compile_scene`'s empty
     /// default [`AssetSet`] was never given the chance to resolve --
@@ -278,7 +273,7 @@ fn compile_value_source(
     item_index: Option<usize>,
 ) -> Result<SceneValue, CompileError> {
     let Some(inner) = extract_expression(source) else {
-        return bound_literal(source.to_string());
+        return Ok(bound_literal(source));
     };
     let mut trimmed = inner.trim().to_string();
     if let Some(index) = item_index {
@@ -298,17 +293,43 @@ fn compile_value_source(
     // `null`, a type mismatch) as an empty string; nothing here treats that
     // as an error, since a missing plugin data field is an ordinary, expected
     // outcome, not a card fault (that is what the stale/error footer is for).
-    bound_literal(value.to_string())
+    Ok(bound_literal(&value.to_string()))
 }
 
-fn bound_literal(text: String) -> Result<SceneValue, CompileError> {
-    if text.len() > protocol::MAX_SCENE_TEXT_LEN {
-        return Err(CompileError::ValueTooLong {
-            limit: protocol::MAX_SCENE_TEXT_LEN,
-            actual: text.len(),
-        });
+/// Bounds a face node's literal to `protocol::MAX_SCENE_TEXT_LEN` bytes by
+/// truncating at a valid UTF-8 char boundary, rather than refusing to
+/// compile the scene.
+///
+/// This used to be a fatal `CompileError::ValueTooLong`, refusing the
+/// *whole scene* over one field a step this ordinary: an authored heading a
+/// few characters too long, or (found in the final whole-stage review) an
+/// entirely ordinary provider string -- an API title or description just
+/// over 128 bytes -- blanking the card forever, since
+/// `plugin_provider::classify_plugin_failure` rules a `CompileError`
+/// permanent. That is the same class of defect `NonNumericTextForTier` was
+/// fixed as earlier in this stage, and the fix is the same shape: degrade
+/// gracefully instead of refusing. It is deliberately the *display* rule,
+/// not `expr`'s rule -- see `CompileError::Expression`'s doc for why
+/// `expr::MAX_OUTPUT_LEN`/`OutputTooLong` stays a named, fatal error.
+/// Shares its char-boundary walk-back with `bound_footer_text`, the other
+/// place text is trimmed for display rather than refused.
+fn bound_literal(text: &str) -> SceneValue {
+    SceneValue::Literal(truncate_to_scene_text_len(text))
+}
+
+/// Truncates `text` to `protocol::MAX_SCENE_TEXT_LEN` bytes at a valid
+/// UTF-8 char boundary. Shared by [`bound_literal`] (a face node's literal)
+/// and `bound_footer_text` (the shared stale/error footer) -- the one place
+/// this walk-back is written.
+fn truncate_to_scene_text_len(text: &str) -> String {
+    if text.len() <= protocol::MAX_SCENE_TEXT_LEN {
+        return text.to_string();
     }
-    Ok(SceneValue::Literal(text))
+    let mut end = protocol::MAX_SCENE_TEXT_LEN;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text[..end].to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -754,27 +775,6 @@ fn compile_repeat(
 // Entry point.
 // ---------------------------------------------------------------------------
 
-/// Builds the `icon(name)` lookup [`EvalContext::new`] takes by merging
-/// every `[[assets]] kind = "icon-font"` entry's glyph list, via
-/// `expr::build_icon_map`. This reads straight from the manifest's own
-/// already-parsed, already-bounded `Asset::IconFont { glyphs, .. }` list --
-/// it needs no resolved [`AssetSet`], because a glyph *name*-to-*codepoint*
-/// mapping is manifest content, not asset bytes. A manifest that declares no
-/// icon-font asset at all yields an empty map, which is exactly what makes
-/// `icon()` evaluate to `Missing` rather than a compile error.
-fn manifest_icon_map(manifest: &PluginManifest) -> HashMap<String, u32> {
-    let glyphs: Vec<_> = manifest
-        .assets
-        .iter()
-        .filter_map(|asset| match asset {
-            Asset::IconFont { glyphs, .. } => Some(glyphs.iter().cloned()),
-            Asset::Font { .. } | Asset::Image { .. } => None,
-        })
-        .flatten()
-        .collect();
-    build_icon_map(&glyphs)
-}
-
 /// Compiles a manifest and a fetched provider snapshot into a [`Scene`],
 /// against an empty [`AssetSet`] -- so any `image` node, `glyph` node, or
 /// asset-font reference fails with [`CompileError::AssetNotResolved`]. Kept
@@ -814,8 +814,14 @@ pub fn compile_scene_with_assets(
     revision: u32,
     assets: &AssetSet,
 ) -> Result<Scene, CompileError> {
-    let icons = manifest_icon_map(manifest);
-    let ctx = EvalContext::new(&snapshot.value, &icons);
+    // Final whole-stage review finding 2: the `icon(name)` lookup table
+    // comes from `assets` itself -- the same `icon_codepoints()` table
+    // `AssetSet::icon_codepoint` resolves a single name against -- rather
+    // than a second table recomputed from the manifest's raw text. There is
+    // now exactly one place this table is built (`assets::resolve_assets`),
+    // so the two can never disagree about a duplicate name: `resolve_assets`
+    // already rejects one before `assets` can exist to be passed in here.
+    let ctx = EvalContext::new(&snapshot.value, assets.icon_codepoints());
     let mut fuel = Fuel::new(FUEL_BUDGET);
     let mut nodes = Vec::with_capacity(manifest.nodes.len());
 
@@ -883,20 +889,14 @@ pub fn compile_scene_with_assets(
 }
 
 /// Bounds `text` to `protocol::MAX_SCENE_TEXT_LEN` bytes, truncating at a
-/// valid UTF-8 char boundary. Used only for the shared stale/error footer's
+/// valid UTF-8 char boundary. Used for the shared stale/error footer's
 /// text -- `bound_literal` guards every face node's literal the same way,
-/// except by refusal rather than truncation, which is wrong for a footer:
-/// this is a display footer summarizing a fault, not authored content, and
-/// the retired C templates truncated an oversized error the same way.
+/// for the same reason: this is a display footer summarizing a fault, not
+/// authored content, and the retired C templates truncated an oversized
+/// error the same way. Shares its walk-back with `bound_literal` via
+/// [`truncate_to_scene_text_len`].
 fn bound_footer_text(text: &str) -> String {
-    if text.len() <= protocol::MAX_SCENE_TEXT_LEN {
-        return text.to_string();
-    }
-    let mut end = protocol::MAX_SCENE_TEXT_LEN;
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    text[..end].to_string()
+    truncate_to_scene_text_len(text)
 }
 
 // ---------------------------------------------------------------------------
@@ -1119,29 +1119,36 @@ mod tests {
     }
 
     #[test]
-    fn an_expression_output_over_the_wire_bound_is_a_named_value_too_long_error() {
-        let huge = serde_json::Value::String("x".repeat(protocol::MAX_SCENE_TEXT_LEN + 1));
+    fn a_provider_value_over_the_wire_bound_truncates_instead_of_failing_the_scene() {
+        // Final whole-stage review finding 3: an ordinary long API title or
+        // description must not blank the card forever. 129 bytes is exactly
+        // one past `protocol::MAX_SCENE_TEXT_LEN` (128) -- the smallest
+        // input that exercises the bound at all.
+        let long_value = "x".repeat(protocol::MAX_SCENE_TEXT_LEN + 1);
+        assert_eq!(long_value.len(), protocol::MAX_SCENE_TEXT_LEN + 1);
         let snapshot = providers::ProviderSnapshot {
-            value: serde_json::json!({ "big": huge }),
+            value: serde_json::json!({ "big": long_value }),
             refreshed_at: None,
             age: None,
             stale: false,
             error: None,
         };
-        let err = compile_scene(
+        let scene = compile_scene(
             &manifest_with_value("{{ data.big }}"),
             &snapshot,
             &metrics(),
             1,
         )
-        .unwrap_err();
-        assert!(matches!(
-            err,
-            CompileError::ValueTooLong {
-                limit: protocol::MAX_SCENE_TEXT_LEN,
-                ..
-            }
-        ));
+        .expect("a long provider value must truncate, not fail the scene");
+
+        let expected = "x".repeat(protocol::MAX_SCENE_TEXT_LEN);
+        assert_eq!(expected.len(), protocol::MAX_SCENE_TEXT_LEN);
+        assert_eq!(
+            SceneValue::Literal(expected),
+            text_node(&scene, 0).value,
+            "the literal must be truncated to exactly MAX_SCENE_TEXT_LEN bytes at a char \
+             boundary, not refused"
+        );
     }
 
     #[test]
@@ -1898,6 +1905,87 @@ mod tests {
         assert_eq!(glyph.name, "A");
         assert_eq!(glyph.size, 32);
         assert_eq!(glyph.baseline_y, 40);
+    }
+
+    // -- Final whole-stage review finding 2: the production path
+    // (`compile_scene_with_assets`), not `AssetSet::icon_codepoint` called
+    // directly, is what must be exercised here -- that is the entry point
+    // every real caller (`curated_plugins.rs`, `server::plugin_provider`)
+    // actually uses. --
+
+    #[test]
+    fn an_icon_name_no_registered_glyph_defines_compiles_to_an_empty_glyph_not_a_compile_error() {
+        // Documents the stated decision: an unresolvable icon name stays
+        // non-fatal at draw time, the same way any other missing/mismatched
+        // runtime value does elsewhere in this compiler (see
+        // `compile_value_source`'s doc on `Missing`) -- `expr::call_icon`'s
+        // own contract (`icon_with_an_unknown_name_is_missing`) already
+        // decides this at the expression layer, and the production path
+        // must not disagree with it now that both draw from the SAME table
+        // (`AssetSet::icon_codepoints`).
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("icons.ttf"), b"pretend TTF bytes").expect("write fixture");
+        let manifest = icon_font_manifest(vec![glyph_node(
+            "icons.ttf",
+            r#"{{ icon("does-not-exist") }}"#,
+        )]);
+        let assets = resolve_assets(&manifest, dir.path()).expect("resolve");
+
+        let scene = compile_scene_with_assets(&manifest, &snapshot(), &metrics(), 1, &assets)
+            .expect("an unknown icon name must not fail the scene");
+
+        let SceneNode::Glyph(glyph) = &scene.nodes[0] else {
+            panic!("node 0 is not Glyph: {:?}", scene.nodes[0]);
+        };
+        assert_eq!(
+            glyph.name, "",
+            "an unresolved icon name must evaluate to Missing (an empty glyph name), not a \
+             fallback codepoint"
+        );
+    }
+
+    #[test]
+    fn duplicate_icon_names_across_two_icon_fonts_never_reach_compile_because_resolve_assets_rejects_first()
+     {
+        // The other half of finding 2: this proves the two entry points
+        // cannot disagree about a duplicate, because `resolve_assets` --
+        // the one place `AssetSet::icon_codepoints()` is built -- rejects
+        // the manifest before `compile_scene_with_assets` can ever run.
+        // There is no second, independent duplicate check left in
+        // `compile.rs` to potentially disagree with this one.
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("a.ttf"), b"font a bytes").expect("write a");
+        std::fs::write(dir.path().join("b.ttf"), b"font b bytes").expect("write b");
+        let manifest = manifest_with(
+            vec![
+                Asset::IconFont {
+                    file: "a.ttf".to_string(),
+                    glyphs: vec![Glyph {
+                        name: "warn".to_string(),
+                        codepoint: 0x41,
+                    }],
+                },
+                Asset::IconFont {
+                    file: "b.ttf".to_string(),
+                    glyphs: vec![Glyph {
+                        name: "warn".to_string(),
+                        codepoint: 0x42,
+                    }],
+                },
+            ],
+            vec![glyph_node("a.ttf", r#"{{ icon("warn") }}"#)],
+        );
+
+        let error = resolve_assets(&manifest, dir.path()).expect_err("must be rejected");
+
+        assert_eq!(
+            error,
+            crate::assets::AssetError::DuplicateIconName {
+                name: "warn".to_string(),
+                first_asset: "a.ttf".to_string(),
+                second_asset: "b.ttf".to_string(),
+            }
+        );
     }
 
     #[test]

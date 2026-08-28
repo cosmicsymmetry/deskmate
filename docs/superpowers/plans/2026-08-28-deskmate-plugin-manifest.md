@@ -217,7 +217,7 @@ Task 8 and land them in one image, exactly as stage 2b did to turn four needs in
   `parse_manifest(&str) -> Result<PluginManifest, ManifestError>`, and a `ManifestError`
   enum with one variant per rejection reason. Tasks 2, 3, 4 and 7 all consume these.
 
-- [ ] **Step 1: Write the failing bounds tests.** Every limit gets a test that a value one
+- [x] **Step 1: Write the failing bounds tests.** Every limit gets a test that a value one
       past it is rejected with the *named* error, not a generic one.
 
 ```rust
@@ -229,18 +229,18 @@ fn a_manifest_over_the_node_ceiling_is_rejected_by_name() {
 }
 ```
 
-- [ ] **Step 2: Run them and watch them fail** — `cargo test -p plugin`.
-- [ ] **Step 3: Define the bounds as named constants**, each with a one-line comment
+- [x] **Step 2: Run them and watch them fail** — `cargo test -p plugin`.
+- [x] **Step 3: Define the bounds as named constants**, each with a one-line comment
       saying what it protects. `MAX_NODES` must not exceed the wire's own node ceiling;
       **call `protocol::validate_message`'s bound rather than restating it** — the
       protocol is where the wire's limits live, and a second copy drifts.
-- [ ] **Step 4: Implement the parser** with `serde` + `toml`, rejecting unknown fields
+- [x] **Step 4: Implement the parser** with `serde` + `toml`, rejecting unknown fields
       (`#[serde(deny_unknown_fields)]`) so a typo is an error rather than a silent default.
-- [ ] **Step 5: Run the tests and the hostile corpus.** The corpus includes: a 10 MB
+- [x] **Step 5: Run the tests and the hostile corpus.** The corpus includes: a 10 MB
       manifest, deeply nested tables, duplicate asset names, a glyph codepoint in the
       surrogate range, a codepoint above `0x10FFFF`, `refresh_minutes = 0`, a `url` with a
       `file://` scheme, and non-UTF-8 bytes.
-- [ ] **Step 6: Commit.** `feat: parse and bound the plugin manifest`
+- [x] **Step 6: Commit.** `feat: parse and bound the plugin manifest`
 
 ---
 
@@ -260,7 +260,7 @@ watching. The grammar is deliberately small: field access (`data.a.b`), array in
 (`data.rows[0]`), a fixed function set, and `?:` for presence. **No user-defined names, no
 assignment, no loops** — the one repeat form lives in the manifest, not the expression.
 
-- [ ] **Step 1: Write the failing termination test first.** This is the property that
+- [x] **Step 1: Write the failing termination test first.** This is the property that
       matters most and it is cheapest to pin before any evaluation exists.
 
 ```rust
@@ -284,22 +284,22 @@ fn evaluation_always_terminates_within_its_fuel() {
 }
 ```
 
-- [ ] **Step 2: Run it and watch it fail.**
-- [ ] **Step 3: Implement the parser** as a small recursive-descent parser with an explicit
+- [x] **Step 2: Run it and watch it fail.**
+- [x] **Step 3: Implement the parser** as a small recursive-descent parser with an explicit
       depth counter, so depth is refused at parse time and fuel bounds evaluation.
-- [ ] **Step 4: Implement the function set**, and keep it to what the two curated plugins
+- [x] **Step 4: Implement the function set**, and keep it to what the two curated plugins
       genuinely need: `upper`, `lower`, `round(x, places)`, `truncate(s, n)`,
       `default(x, fallback)`, and `icon(name)` which resolves through the manifest's
       icon-font map. Each function is total: it returns `Missing` rather than panicking, and
       it never allocates beyond the output cap.
-- [ ] **Step 5: Test the producer, not the formatter.** Evaluate against the *real* JSON a
+- [x] **Step 5: Test the producer, not the formatter.** Evaluate against the *real* JSON a
       curated plugin's endpoint returns — a fixture file captured once and committed — not
       against a hand-built `Value` that already has the shape the code expects. This is
       finding 3 above; three device defects lived in exactly that gap.
-- [ ] **Step 6: Hostile inputs.** A missing key, a null, an array where an object is
+- [x] **Step 6: Hostile inputs.** A missing key, a null, an array where an object is
       expected, a number where text is expected, a 10 MB string, and a NaN. None may panic;
       each has a named error or evaluates to `Missing`.
-- [ ] **Step 7: Commit.** `feat: add the bounded plugin expression language`
+- [x] **Step 7: Commit.** `feat: add the bounded plugin expression language`
 
 ---
 
@@ -316,7 +316,7 @@ fn evaluation_always_terminates_within_its_fuel() {
 - Produces:
   `compile_scene(&PluginManifest, &ProviderSnapshot, &BakedFontMetrics, revision: u32) -> Result<Scene, CompileError>`.
 
-- [ ] **Step 1: Write the failing binding test.** The load-bearing case is that a value
+- [x] **Step 1: Write the failing binding test.** The load-bearing case is that a value
       expression in the closed set compiles to a *binding*, not a literal — that is what
       keeps a plugin card alive with the link down.
 
@@ -340,22 +340,22 @@ fn an_expression_outside_the_closed_set_is_refused_in_binding_position() {
       degrades an unknown binding to a literal and the card looks right until it stops
       ticking.
 
-- [ ] **Step 2: Run them and watch them fail.**
-- [ ] **Step 3: Implement the compiler.** Reuse `app-core`'s existing node constructors so
+- [x] **Step 2: Run them and watch them fail.**
+- [x] **Step 3: Implement the compiler.** Reuse `app-core`'s existing node constructors so
       there is one representation of a scene node, not two. Text measurement goes through
       `BakedFontMetrics::measure()` for baked tiers; an asset font's measurement is Task 5's
       problem and this task must not guess at it.
-- [ ] **Step 4: Validate before returning.** Call `protocol::validate_scene` on the
+- [x] **Step 4: Validate before returning.** Call `protocol::validate_scene` on the
       compiled scene under `#[cfg(debug_assertions)]`, the same way `with_scene_data_state`
       does. The wire's bounds live in the protocol; do not restate them here.
-- [ ] **Step 5: Implement the one repeat form** — a node group repeated over a bounded
+- [x] **Step 5: Implement the one repeat form** — a node group repeated over a bounded
       array, capped, with the index available as `item`. `RowList`'s shape is what this
       exists for.
-- [ ] **Step 6: Run the tests.** Include a snapshot in every `ProviderSnapshot` state:
+- [x] **Step 6: Run the tests.** Include a snapshot in every `ProviderSnapshot` state:
       fresh, last-good/stale, and error. The stale and error states must reach
       `push_state_footer`'s equivalent — a plugin card that goes stale must say so, the
       same way the six faces do.
-- [ ] **Step 7: Commit.** `feat: compile a plugin manifest into a scene`
+- [x] **Step 7: Commit.** `feat: compile a plugin manifest into a scene`
 
 ---
 
@@ -370,16 +370,16 @@ fn an_expression_outside_the_closed_set_is_refused_in_binding_position() {
   where `AssetSet` maps a manifest asset name to its SHA-256 digest, byte length, and kind,
   and resolves an icon name to a codepoint.
 
-- [ ] **Step 1: Write the failing determinism test.** Content-addressing is only worth
+- [x] **Step 1: Write the failing determinism test.** Content-addressing is only worth
       anything if the same bytes produce the same digest across runs and hosts.
-- [ ] **Step 2: Run it and watch it fail.**
-- [ ] **Step 3: Implement digesting and the name map**, rejecting a name that no glyph
+- [x] **Step 2: Run it and watch it fail.**
+- [x] **Step 3: Implement digesting and the name map**, rejecting a name that no glyph
       defines — §1 says "the server validates the name resolves", and a plugin that ships a
       broken icon name should fail at load, not draw a tofu box on the panel.
-- [ ] **Step 4: Test the boundaries** — a zero-byte file, a file larger than the asset
+- [x] **Step 4: Test the boundaries** — a zero-byte file, a file larger than the asset
       partition's blob region, a duplicate digest across two plugins (which must ship once,
       per §1), and a name colliding across two icon fonts.
-- [ ] **Step 5: Commit.** `feat: content-address plugin assets and resolve icon names`
+- [x] **Step 5: Commit.** `feat: content-address plugin assets and resolve icon names`
 
 ---
 
@@ -399,17 +399,17 @@ measuring two different fonts and reporting agreement.
 **Do this before any font golden exists.** A golden written against an unshimmed simulator
 will pass, and it will mean nothing.
 
-- [ ] **Step 1: Write the failing test** that the shim resolves a digest to bytes and that
+- [x] **Step 1: Write the failing test** that the shim resolves a digest to bytes and that
       an unknown digest is an error rather than a silent fallback to a baked face. A silent
       fallback is the failure mode that makes this whole task pointless.
-- [ ] **Step 2: Run it and watch it fail.**
-- [ ] **Step 3: Implement the shim** reading from the same content-addressed store the
+- [x] **Step 2: Run it and watch it fail.**
+- [x] **Step 3: Implement the shim** reading from the same content-addressed store the
       server pushes from, so there is one set of bytes and no copy to drift.
-- [ ] **Step 4: Prove the obligation is discharged** — render one string at one size
+- [x] **Step 4: Prove the obligation is discharged** — render one string at one size
       through a baked tier and through the same face supplied as an asset, and assert the
       glyph bitmaps agree. `stb_truetype` is deterministic; the obligation is about byte
       provenance, not the rasterizer, so this test is about *which bytes arrived*.
-- [ ] **Step 5: Commit.** `test: resolve asset fonts identically on both hosts`
+- [x] **Step 5: Commit.** `test: resolve asset fonts identically on both hosts`
 
 ---
 
@@ -423,16 +423,16 @@ will pass, and it will mean nothing.
 **Interfaces:**
 - Produces: a `plugin` card kind carrying a plugin id and its per-card settings.
 
-- [ ] **Step 1: Write the failing lossless-migration test** for v5 -> v6 across the full
+- [x] **Step 1: Write the failing lossless-migration test** for v5 -> v6 across the full
       existing fixture corpus, asserting round-trip equality of everything a v5 config could
       express.
-- [ ] **Step 2: Run it and watch it fail.**
-- [ ] **Step 3: Implement the kind and the migration.**
-- [ ] **Step 4: Bump `CURRENT_SCHEMA_VERSION` in both places** — the app and the server
+- [x] **Step 2: Run it and watch it fail.**
+- [x] **Step 3: Implement the kind and the migration.**
+- [x] **Step 4: Bump `CURRENT_SCHEMA_VERSION` in both places** — the app and the server
       carry independent copies, and a stale server rejects every save. Add the redeploy to
       Task 9's checklist rather than discovering it on the board.
-- [ ] **Step 5: Freeze the contract** in `docs/config/v6.md`, written from v5.
-- [ ] **Step 6: Commit.** `feat: add the plugin card kind as schema v6`
+- [x] **Step 5: Freeze the contract** in `docs/config/v6.md`, written from v5.
+- [x] **Step 6: Commit.** `feat: add the plugin card kind as schema v6`
 
 ---
 
@@ -447,7 +447,7 @@ are running in a sandbox that denies that, **say so in your report rather than r
 green** — this has produced three rounds of invisible defects in this project. Name the
 tests you could not run.
 
-- [ ] **Step 1: Write the failing SSRF tests first.** §5's allowlist is the security
+- [x] **Step 1: Write the failing SSRF tests first.** §5's allowlist is the security
       boundary of this entire stage, and the render host is the owner's homelab beside
       unrelated services.
 
@@ -461,19 +461,19 @@ fn the_egress_guard_denies_private_and_metadata_destinations() {
 }
 ```
 
-- [ ] **Step 2: Run them and watch them fail.**
-- [ ] **Step 3: Implement the guard**: deny RFC1918, loopback, link-local and
+- [x] **Step 2: Run them and watch them fail.**
+- [x] **Step 3: Implement the guard**: deny RFC1918, loopback, link-local and
       `169.254.169.254`; **resolve then pin** the address actually connected to, so a DNS
       rebind between check and connect cannot slip past; cap body size, wall-clock, and
       redirect count.
-- [ ] **Step 4: Wire plugins to `providers::Provider`.** §5 is explicit that plugin data
+- [x] **Step 4: Wire plugins to `providers::Provider`.** §5 is explicit that plugin data
       sources implement the existing trait, so `LastGood`, `RefreshPolicy` and categorised
       `ProviderError` apply with no new machinery.
-- [ ] **Step 5: Classify errors correctly, and test the classification.** A transient
+- [x] **Step 5: Classify errors correctly, and test the classification.** A transient
       failure surfaces as `stale` on the card; only a permanent one is a card fault. Stage
       3a shipped the opposite and no test caught it.
-- [ ] **Step 6: Per-plugin caps** on refresh rate, CPU and render wall-clock, per §5.
-- [ ] **Step 7: Commit.** `feat: run curated plugins server-side behind an egress guard`
+- [x] **Step 6: Per-plugin caps** on refresh rate, CPU and render wall-clock, per §5.
+- [x] **Step 7: Commit.** `feat: run curated plugins server-side behind an egress guard`
 
 ---
 
@@ -490,26 +490,31 @@ hero and an icon glyph, so it exercises the icon-font path and `field.*`. **agen
 list with the bounded repeat and a real truncation case, so it exercises the repeat form
 and text measurement at a boundary.
 
-- [ ] **Step 1: Write the two manifests and commit a captured payload fixture for each.**
-- [ ] **Step 2: Add golden cases** to `cases.rs` covering, for each plugin: fresh, stale,
+- [x] **Step 1: Write the two manifests and commit a captured payload fixture for each.**
+- [x] **Step 2: Add golden cases** to `cases.rs` covering, for each plugin: fresh, stale,
       error, an empty/missing-data state, and both orientations.
-- [ ] **Step 3: Add `framebuffer_diff` rows that provision real assets.** This is the
+- [x] **Step 3: Add `framebuffer_diff` rows that provision real assets.** This is the
       first time the device's asset path is exercised by a test. It closes the eight
       synthetic rows currently excluded as unrepresentable — `exclusion_reason()` in
       `framebuffer_diff.rs` gives three reasons for them: an RGB565 image asset, a runtime
       font asset, and a `field.status` binding no built-in template field registry accepts.
-      A plugin provisions the first two and brings its own field registry for the third.
-      Report the actual per-reason counts rather than assuming the split. Update the
+      A plugin provisions the first two; the third stays excluded regardless, because a
+      plugin card is always `TemplateKind::DigitalClock` on the wire (`config.rs`'s
+      `wire_config`) and therefore has no field registry of its own to bind
+      `field.status` against -- see Task 8 Step 4 for the field this stage actually gives
+      coverage to instead. Report the actual per-reason counts rather than assuming the
+      split (the real outcome closed four of the eight rows, not all eight -- see Task
+      8's own report and `CLAUDE.md`). Update the
       inventory assertion, which currently pins `total=76 identical=64 excluded=12`, and
       **state the new numbers in the task report** so a future reader diffing against
       `CLAUDE.md` is not misled the way the 58/54/4 invariant misled this stage.
-- [ ] **Step 4: Bind `field.*` in at least one plugin, deliberately.** It is the one
+- [x] **Step 4: Bind `field.*` in at least one plugin, deliberately.** It is the one
       binding with no builder and therefore no pixel coverage; a plugin is the first thing
       that can give it any.
-- [ ] **Step 5: Freeze the manifest contract** in `docs/plugins/manifest-v1.md`.
-- [ ] **Step 6: Run the full gate set** — fmt, clippy, both test invocations, and the
+- [x] **Step 5: Freeze the manifest contract** in `docs/plugins/manifest-v1.md`.
+- [x] **Step 6: Run the full gate set** — fmt, clippy, both test invocations, and the
       firmware host tests if any firmware source changed.
-- [ ] **Step 7: Commit.** `feat: ship the aqi and agenda curated plugins`
+- [x] **Step 7: Commit.** `feat: ship the aqi and agenda curated plugins`
 
 ---
 
@@ -581,8 +586,15 @@ deltas, and expect to have bundled every firmware need into one image.
    glyph at a non-baked size.
 8. The asset-GC teardown has been exercised on hardware and the result recorded — pass or
    fail.
-9. `framebuffer_diff`'s inventory has moved off 76/64/12, the eight asset exclusions are
-   closed, and the new numbers are stated in both the task report and `CLAUDE.md`.
+9. `framebuffer_diff`'s inventory has moved off 76/64/12 to 92/8/84, and the new numbers
+   are stated in both the task report and `CLAUDE.md`. Of the twelve exclusions that
+   stood before Task 8: four are closed (`scene-image`/`scene-glyph`, both orientations,
+   via Task 8's real asset-transfer provisioning); the remaining eight are unchanged --
+   four are `scene-text`/`scene-label` (both orientations), which bind the synthetic
+   `field.status` name that no registry, built-in or plugin, accepts; the other four are
+   the pre-existing, unrelated `row-list--truncation-boundary` and
+   `progress-ring--running-mid-countdown` pairs. This 92/8/84 split has not been run on
+   hardware -- Task 9 is deferred.
 
 Stage 4 — rasterization fallback and SVG plugins — is planned at this plan's exit.
 

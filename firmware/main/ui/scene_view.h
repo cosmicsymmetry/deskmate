@@ -10,9 +10,8 @@
 #include "ui/font_registry.h"
 
 /* The scene interpreter: the device-side half of the declarative display
- * list. It is the scene model's replacement for ui/template_view.c, and
- * deliberately wears the same show/destroy/active/screen surface so the rest
- * of the UI drives it the same way.
+ * list. It replaced the retired template renderer and keeps the small
+ * show/destroy/active/screen surface the rest of the UI needs.
  *
  * This header and its implementation carry NO ESP-IDF include, so the whole
  * renderer compiles into companion/crates/lvgl-sim. That is not a tidiness

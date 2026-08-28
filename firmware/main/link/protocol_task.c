@@ -54,9 +54,8 @@
 #define PROTOCOL_WRITE_TIMEOUT_MS 200U
 #define PROTOCOL_EVENT_WRITE_TIMEOUT_MS 10U
 #define PROTOCOL_EVENTS_PER_POLL 2U
-// The scene's binding tick, matched to ui/template_view.c's 250 ms so a
-// seconds-resolution `time:` binding lands on the same cadence the C faces
-// redraw at. This task's read timeout is 50 ms, so the loop below sees this
+// The scene's binding tick retains the former template renderer's 250 ms
+// cadence. This task's read timeout is 50 ms, so the loop below sees this
 // deadline with plenty of margin.
 #define PROTOCOL_SCENE_TICK_MS 250U
 
@@ -69,7 +68,6 @@ typedef struct {
     device_event_queue_t events;
     protocol_message_t message;
     protocol_device_event_t event;
-    ui_view_context_t view_context;
     // Owned here, not a static in asset_transfer.c/asset_flash.c: this is
     // the only in-flight asset transfer the device tracks, and it lives for
     // exactly as long as the rest of this task's state (see the PSRAM
@@ -254,60 +252,29 @@ static bool fill_carousel_binding(protocol_context_t *context,
     return true;
 }
 
-static bool show_carousel_screen(protocol_context_t *context)
+static bool show_carousel_fallback(protocol_context_t *context)
 {
     carousel_binding_t binding;
     if (!fill_carousel_binding(context, &binding) || binding.interrupt) {
         return false;
     }
-    const protocol_apply_config_t *config = widget_model_config(&context->model);
-    const protocol_widget_config_t *widget = find_widget(config,
-                                                          binding.widget_id);
-    const template_field_state_t *fields = widget_model_widget_fields(
-        &context->model, binding.widget_id);
-    if (widget == NULL || fields == NULL) {
-        return false;
-    }
-    ui_view_context_t *view = &context->view_context;
-    memset(view, 0, sizeof(*view));
-    strcpy(view->screen_id, binding.screen_id);
-    strcpy(view->previous_screen_id, binding.previous_screen_id);
-    strcpy(view->previous_widget_id, binding.previous_widget_id);
-    strcpy(view->next_screen_id, binding.next_screen_id);
-    strcpy(view->next_widget_id, binding.next_widget_id);
-    view->tap_action = binding.tap_action;
-    return ui_runtime_show_view(widget->widget_id, widget->template_kind,
-                                widget->size_class, fields, view);
+    return ui_runtime_show_card_fallback();
 }
 
-static bool show_active_interrupt(protocol_context_t *context)
+static bool show_interrupt_fallback(protocol_context_t *context)
 {
     carousel_binding_t binding;
     if (!fill_carousel_binding(context, &binding) || !binding.interrupt) {
         return false;
     }
-    const protocol_apply_config_t *config = widget_model_config(&context->model);
-    const protocol_widget_config_t *widget = find_widget(config,
-                                                          binding.widget_id);
-    const template_field_state_t *fields = widget_model_widget_fields(
-        &context->model, binding.widget_id);
-    if (widget == NULL || fields == NULL) {
-        return false;
-    }
-    ui_view_context_t *view = &context->view_context;
-    memset(view, 0, sizeof(*view));
-    strcpy(view->screen_id, binding.screen_id);
-    view->interrupt = true;
-    view->interrupt_token = binding.interrupt_token;
-    return ui_runtime_show_view(widget->widget_id, widget->template_kind,
-                                PROTOCOL_SIZE_FULL, fields, view);
+    return ui_runtime_show_card_fallback();
 }
 
 static bool show_current_content(protocol_context_t *context)
 {
     return interrupt_state_active(&context->interrupts) != NULL
-               ? show_active_interrupt(context)
-               : show_carousel_screen(context);
+               ? show_interrupt_fallback(context)
+               : show_carousel_fallback(context);
 }
 
 // ------------------------------------------------------------------ scenes
@@ -352,9 +319,9 @@ static const char *scene_field_lookup(void *ctx, const char *name)
     return context->scene_field_text;
 }
 
-/* Fills the timer half of the binding context from the same progress-ring
- * snapshot ui/templates/progress_ring.c draws from, counted down locally
- * between pushes exactly as that file's current_remaining_ms() does.
+/* Fills the timer half of the binding context from the same ProgressRing
+ * snapshot the reference oracle draws from, counted down locally between
+ * pushes exactly as its current_remaining_ms() does.
  * Without the local countdown a `timer.remaining:` binding would freeze
  * between host pushes, on a device whose whole reason for evaluating
  * bindings itself is that the face keeps moving when the link does not.
@@ -728,27 +695,6 @@ static void dispatch_push_data(protocol_context_t *context,
         return;
     }
 
-    const interrupt_slot_t *interrupt = interrupt_state_active(
-        &context->interrupts);
-    const protocol_screen_config_t *screen = widget_model_active_screen(
-        &context->model);
-    bool visible = (interrupt != NULL &&
-                    strcmp(interrupt->widget_id, push->widget_id) == 0) ||
-                   (interrupt == NULL && screen != NULL &&
-                    strcmp(screen->widget_id, push->widget_id) == 0);
-    if (visible) {
-        const protocol_apply_config_t *config = widget_model_config(
-            &context->model);
-        const protocol_widget_config_t *widget = find_widget(config,
-                                                              push->widget_id);
-        const template_field_state_t *fields = widget_model_widget_fields(
-            &context->model, push->widget_id);
-        if (widget != NULL && fields != NULL) {
-            (void)ui_runtime_patch_view(widget->widget_id,
-                                        widget->template_kind, fields,
-                                        update.dirty_mask);
-        }
-    }
     // The scene's binding context reads its `field.` values straight out of
     // the widget model updated above, so there is nothing further to copy:
     // re-evaluating the bindings in place is the whole update. Deliberately
@@ -781,8 +727,16 @@ static void dispatch_push_scene(protocol_context_t *context,
     memcpy(context->scene_card_id, push->card_id,
            sizeof(context->scene_card_id));
 
+    /* ApplyConfig/ActivateScreen queue the standalone clock until a scene
+     * arrives. Remove that pending fallback before loading the scene so the
+     * LVGL command timer cannot replace the freshly rendered face afterward.
+     * A refused scene restores the fallback request below. */
+    bool fallback_discarded = ui_runtime_discard_card_fallbacks();
     show_scene_result_t result = show_scene(context, &push->scene);
     if (result != SHOW_SCENE_OK) {
+        if (fallback_discarded) {
+            (void)ui_runtime_show_card_fallback();
+        }
         memcpy(context->scene_card_id, previous_card_id,
                sizeof(context->scene_card_id));
         context->scene_timer_anchor_ms = previous_timer_anchor_ms;
@@ -867,7 +821,7 @@ static void dispatch_apply_config(protocol_context_t *context,
         return;
     }
     interrupt_state_clear(&context->interrupts);
-    if (!show_carousel_screen(context)) {
+    if (!show_carousel_fallback(context)) {
         transmit_error(context, request_id, PROTOCOL_ERROR_INTERNAL,
                        "UI command rejected");
         return;
@@ -888,7 +842,7 @@ static void dispatch_activate_screen(protocol_context_t *context,
     if (interrupt_state_active(&context->interrupts) != NULL) {
         (void)interrupt_state_set_saved_screen(&context->interrupts,
                                                screen_id);
-    } else if (!show_carousel_screen(context)) {
+    } else if (!show_carousel_fallback(context)) {
         transmit_error(context, request_id, PROTOCOL_ERROR_INTERNAL,
                        "UI command rejected");
         return;
@@ -940,7 +894,7 @@ static void dispatch_trigger_interrupt(protocol_context_t *context,
         return;
     }
     if (result == INTERRUPT_TRIGGER_ACTIVATED &&
-        !show_active_interrupt(context)) {
+        !show_interrupt_fallback(context)) {
         transmit_error(context, request_id, PROTOCOL_ERROR_INTERNAL,
                        "UI command rejected");
         return;
@@ -1321,14 +1275,13 @@ static void dispatch_asset_release(protocol_context_t *context,
     //
     // WHAT DECIDES that a scene is up is scene_view_screen(), the renderer's
     // own state, and NOT context->scene_live. The two are allowed to
-    // disagree: a queued view change can fail to land (ui_command_queue_push
-    // can drop, template_view_show can fail), leaving a scene alive that
-    // this task no longer believes in, and show_scene() bypasses that queue
-    // entirely, so a PushScene racing a queued SHOW_VIEW can leave the
-    // opposite. Gating the teardown on the belief would, in the first case,
+    // disagree: a queued fallback can fail to land (ui_command_queue_push can
+    // drop), leaving a scene alive that this task no longer believes in, and
+    // show_scene() bypasses that queue entirely. Gating the teardown on the
+    // belief would, in the first case,
     // skip a teardown a live scene needed and block collection until some
     // later screen change; in the second it would put a stale scene back
-    // over a live template face. Reading the authority under the lock we
+    // over newer content. Reading the authority under the lock we
     // already hold costs nothing and cannot be wrong.
     if (!lvgl_port_lock(0U)) {
         transmit_error(context, request_id, PROTOCOL_ERROR_INTERNAL,
@@ -1681,7 +1634,7 @@ static bool apply_navigation_event(protocol_context_t *context,
     const protocol_screen_config_t *screen = widget_model_active_screen(
         &context->model);
     if (screen == NULL || strcmp(screen->widget_id, event->widget_id) != 0 ||
-        !show_carousel_screen(context)) {
+        !show_carousel_fallback(context)) {
         return false;
     }
     strcpy(event->screen_id, screen->screen_id);
@@ -1706,11 +1659,11 @@ static bool apply_dismissal_event(protocol_context_t *context,
     strcpy(event->screen_id, dismissal.saved_screen_id);
     bool shown = false;
     if (dismissal.promoted_pending) {
-        shown = show_active_interrupt(context);
+        shown = show_interrupt_fallback(context);
     } else if (dismissal.restore_saved_screen &&
                widget_model_activate_screen(&context->model,
                                              dismissal.saved_screen_id)) {
-        shown = show_carousel_screen(context);
+        shown = show_carousel_fallback(context);
     }
     return shown;
 }

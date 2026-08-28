@@ -21,13 +21,13 @@
 //!
 //! # Sequencing and settle time
 //!
-//! `ApplyConfig` and `PushData` enqueue template UI work, while `PushScene`
-//! shows synchronously. Their queue therefore has to drain before the scene is
-//! pushed or a delayed template show can replace it. Time-sync is still last:
-//! it updates the device clock used by `time:` bindings, and the scene binding
-//! tick then redraws them. Both waits use 300 ms: generous against the 20 ms UI
-//! queue poll and 250 ms scene binding tick, while remaining below the one
-//! second that would roll the pinned displayed second.
+//! `ApplyConfig` queues the standalone-card fallback while `PushScene` shows
+//! synchronously and cancels that provisional fallback. This older harness
+//! still lets the queue drain before the scene push. Time-sync is last: it
+//! updates the device clock used by `time:` bindings, and the scene-binding
+//! tick then redraws them. Both waits use 300 ms, generous against the 20 ms UI
+//! queue poll and 250 ms scene tick while remaining below the one second that
+//! would roll the pinned displayed second.
 
 use std::env;
 use std::path::Path;

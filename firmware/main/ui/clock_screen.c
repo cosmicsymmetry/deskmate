@@ -6,12 +6,12 @@
 #include "lvgl.h"
 #include "board/display.h"
 #include "core/timefmt.h"
-#include "templates/template_internal.h"
+#include "design_system.h"
 #include "clock_screen.h"
 
 static const char *TAG = "clock";
 
-// Layout, spec §6.2's complication grammar (see templates/digital_clock.c,
+// Layout, spec §6.2's complication grammar (see the reference oracle's digital clock,
 // this screen's sibling face): a left-anchored hero reading with a single
 // full-width module under it carrying the date. Neither is labelled -- a
 // clock face names itself. This screen's stack is 192px against the card's
@@ -211,7 +211,7 @@ void clock_screen_show_in_lvgl(void)
         DESKMATE_COLOR_PRIMARY, DESKMATE_FONT_BODY);
 
     // Connection hint restyled onto the shared state-footer rail every
-    // face's error/stale label sits on (template_view.c's
+    // former card face's error/stale label sat on (the reference oracle's
     // update_data_state()): same font, same BOTTOM_MID anchor, same
     // -2*DESKMATE_GRID offset. TERTIARY rather than the reserved
     // STALE/ERROR colours, since this is not a data-freshness signal.

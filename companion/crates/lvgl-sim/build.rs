@@ -4,6 +4,21 @@ fn main() {
     let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
     let firmware = manifest.join("../../../firmware");
     let lvgl = firmware.join("managed_components/lvgl__lvgl");
+    let template_oracle_root = manifest.join("reference-oracle");
+    let template_oracle = template_oracle_root.join("ui");
+
+    // The oracle is useful only while it is live reference code and harmful
+    // if it quietly returns to the device image. Keep that boundary enforced
+    // by the same build that consumes it: a parity run must fail if ESP-IDF's
+    // source manifest ever names the retired view or template directory.
+    let firmware_cmake = std::fs::read_to_string(firmware.join("main/CMakeLists.txt"))
+        .expect("read firmware source manifest");
+    for forbidden in ["ui/template_view.c", "ui/templates/"] {
+        assert!(
+            !firmware_cmake.contains(forbidden),
+            "reference-only C template oracle is shipping again: {forbidden}"
+        );
+    }
 
     let mut sources: Vec<PathBuf> = glob::glob(lvgl.join("src/**/*.c").to_str().unwrap())
         .unwrap()
@@ -45,9 +60,9 @@ fn main() {
         "template_style.c",
         "weather_icon.c",
     ] {
-        sources.push(firmware.join("main/ui/templates").join(template));
+        sources.push(template_oracle.join("templates").join(template));
     }
-    sources.push(firmware.join("main/ui/template_view.c"));
+    sources.push(template_oracle.join("template_view.c"));
     // Task 12: free of ESP-IDF includes by design (see its own header
     // comment) specifically so it can compile into this host binary.
     sources.push(firmware.join("main/ui/font_registry.c"));
@@ -80,6 +95,8 @@ fn main() {
         .files(&sources)
         .include(&lvgl) // lvgl.h
         .include(firmware.join("main")) // core/, ui/, templates/
+        .include(&template_oracle_root) // ui/templates/weather_icon.h
+        .include(&template_oracle) // reference-only template oracle headers
         .include(&firmware) // lv_conf.h
         .include(&cbor)
         .define("LV_CONF_INCLUDE_SIMPLE", None)
@@ -93,5 +110,6 @@ fn main() {
         firmware.join("lv_conf.h").display()
     );
     println!("cargo:rerun-if-changed={}", firmware.join("main").display());
+    println!("cargo:rerun-if-changed={}", template_oracle.display());
     println!("cargo:rerun-if-changed={}", manifest.join("csrc").display());
 }

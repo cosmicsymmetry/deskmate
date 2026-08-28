@@ -19,7 +19,7 @@ PROTOCOL_SRCS = ../main/core/protocol_frame.c ../main/core/protocol_message.c \
 
 test: test_timefmt test_protocol test_link_state test_template_fields \
 	test_widget_model test_ui_command_queue test_navigation \
-	test_interrupt_state test_device_event_queue test_weather_icon \
+	test_interrupt_state test_device_event_queue \
 	test_clock_source test_net_config test_net_ring test_reconnect_backoff \
 	test_ota_policy test_asset_store test_asset_transfer test_scene_model \
 	test_scene_binding test_scene_decode test_font_registry
@@ -32,7 +32,6 @@ test: test_timefmt test_protocol test_link_state test_template_fields \
 	./test_navigation
 	./test_interrupt_state
 	./test_device_event_queue
-	./test_weather_icon
 	./test_clock_source
 	./test_net_config
 	./test_net_ring
@@ -63,8 +62,7 @@ test_widget_model: test_widget_model.c ../main/core/widget_model.c \
 	$(PROTOCOL_SRCS)
 	$(CC) $(CFLAGS) -I$(CBOR_DIR) -I../main -o $@ $^
 
-test_ui_command_queue: test_ui_command_queue.c \
-	../main/ui/ui_command_queue.c ../main/core/template_fields.c
+test_ui_command_queue: test_ui_command_queue.c ../main/ui/ui_command_queue.c
 	$(CC) $(CFLAGS) -I../main -o $@ $^
 
 test_navigation: test_navigation.c ../main/core/navigation.c
@@ -77,10 +75,6 @@ test_interrupt_state: test_interrupt_state.c \
 test_device_event_queue: test_device_event_queue.c \
 	../main/core/device_event_queue.c
 	$(CC) $(CFLAGS) -I../main -o $@ $^
-
-test_weather_icon: test_weather_icon.c \
-	../main/ui/templates/weather_icon.c
-	$(CC) $(CFLAGS) -DWEATHER_ICON_HOST_TEST -o $@ $^
 
 test_clock_source: test_clock_source.c ../main/core/clock_source.c
 	$(CC) $(CFLAGS) -o $@ $^
@@ -133,7 +127,6 @@ clean:
 	rm -f test_navigation
 	rm -f test_interrupt_state
 	rm -f test_device_event_queue
-	rm -f test_weather_icon
 	rm -f test_clock_source
 	rm -f test_net_config
 	rm -f test_net_ring
@@ -151,7 +144,6 @@ clean:
 	rm -rf test_navigation.dSYM
 	rm -rf test_interrupt_state.dSYM
 	rm -rf test_device_event_queue.dSYM
-	rm -rf test_weather_icon.dSYM
 	rm -rf test_clock_source.dSYM
 	rm -rf test_net_config.dSYM
 	rm -rf test_net_ring.dSYM

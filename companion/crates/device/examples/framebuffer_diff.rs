@@ -1,9 +1,9 @@
 //! Dev-only physical framebuffer diff (V1 reset design spec §3.2.2/§3.2.3,
-//! Task 10). Pushes every case in `lvgl_sim::cases::golden_cases()` — the
-//! same table the golden-frame PNG suite pins — to a physically connected
-//! device running a `DESKMATE_DEV_DIAG=1` build, requests a 0x7E
-//! framebuffer capture, and byte-compares the reassembled pixels against
-//! `Simulator::render` for the identical case. This only runs against real
+//! Task 10). Pushes every device-representable case in
+//! `lvgl_sim::cases::scene_cases()` to a physically connected device running
+//! a `DESKMATE_DEV_DIAG=1` build, requests a 0x7E framebuffer capture, and
+//! byte-compares the reassembled pixels against `Simulator::render_scene` for
+//! the identical case. This only runs against real
 //! hardware: 0x7E/0x7F are dev-build-only message ids, absent from the
 //! release protocol and from `docs/protocol/v1.md`.
 //!
@@ -29,17 +29,12 @@
 //!
 //! ## Sequencing and settle time
 //!
-//! Each case applies a single-widget config, activates its one screen,
-//! pushes the case's fields, and *finally* time-syncs the device to the
-//! case's pinned instant — time-sync last because `dispatch_time_sync`
-//! (`firmware/main/link/protocol_task.c`) enqueues the redraw the clock
-//! templates need, and every enqueued UI command drains in FIFO order
-//! (`firmware/main/ui/ui_runtime.c`), so time-sync's command is guaranteed
-//! to land after the config/push commands ahead of it. The UI command timer
-//! polls every 20 ms; this waits [`SETTLE`] (well under the 20 ms bound's
-//! nearest order of magnitude, and comfortably under the one full second
-//! that would roll the synced clock's displayed second over) before
-//! requesting the capture.
+//! Each case applies a single-card config, activates its one screen, pushes
+//! any timer snapshot, pushes the scene, and *finally* time-syncs the device
+//! to the case's pinned instant. Time-sync updates the clock context read by
+//! the 250 ms scene-binding tick; [`SETTLE`] gives that tick time to repaint
+//! while staying comfortably under the one full second that would roll the
+//! synced clock's displayed second over.
 
 use std::env;
 use std::process;
@@ -48,16 +43,15 @@ use std::time::Duration;
 
 use device::framebuffer_capture::capture_framebuffer;
 use device::{DeviceClient, Transport, connect};
-use lvgl_sim::{RenderRequest, SimFieldValue, SimOrientation, SimTemplate, Simulator, cases};
+use lvgl_sim::scene::{SceneAsset, SceneRenderRequest, SceneTimer};
+use lvgl_sim::{SimOrientation, Simulator, cases};
 use protocol::{
-    ActivateScreen, ApplyConfig, Field, FieldValue, InterruptPolicy, Message, PushData,
-    ScreenConfig, SizeClass, TYPE_ACTIVATE_SCREEN, TYPE_APPLY_CONFIG, TapAction, TemplateKind,
-    TimeSync, WidgetConfig,
+    ActivateScreen, ApplyConfig, Field, FieldValue, InterruptPolicy, Message, PushData, PushScene,
+    ScreenConfig, SizeClass, TYPE_ACTIVATE_SCREEN, TYPE_APPLY_CONFIG, TYPE_PUSH_SCENE, TapAction,
+    TemplateKind, TimeSync, WidgetConfig,
 };
-/// Gives the UI command queue (20 ms poll) generous margin to drain the
-/// config/push/time-sync commands and redraw before the capture request,
-/// while staying well clear of the 1 s mark that would roll the just-synced
-/// clock's displayed second over.
+/// Gives the 250 ms scene-binding tick margin to redraw before capture while
+/// staying clear of the 1 s mark that rolls a just-synced second over.
 const SETTLE: Duration = Duration::from_millis(300);
 
 fn parse_port() -> Result<Option<String>, String> {
@@ -78,10 +72,10 @@ fn parse_port() -> Result<Option<String>, String> {
     Ok(port)
 }
 
-/// The row-list truncation-boundary case cannot be pushed to real hardware
-/// as written -- see this file's module doc. Returns the reason to log when
-/// a case name matches it.
-fn exclusion_reason(name: &str) -> Option<&'static str> {
+/// Returns the reason a scene case cannot be pushed by this harness. The two
+/// historical template-case exclusions remain explicit so their known flakes
+/// cannot silently return if those composite scene rows join `scene_cases()`.
+fn exclusion_reason(name: &str, request: &SceneRenderRequest) -> Option<&'static str> {
     if name.starts_with("row-list--truncation-boundary--") {
         Some(
             "row0_title is 128 chars (the wire's generic field ceiling), \
@@ -99,27 +93,24 @@ fn exclusion_reason(name: &str) -> Option<&'static str> {
              which do cover the running arc hue; paused-mid-countdown covers \
              the same geometry here, and running-at-zero the running palette",
         )
+    } else if request
+        .assets
+        .iter()
+        .any(|asset| matches!(asset, SceneAsset::Image { .. }))
+    {
+        Some("the scene requires an RGB565 image asset, and this harness does not provision assets")
+    } else if request
+        .assets
+        .iter()
+        .any(|asset| matches!(asset, SceneAsset::Font { .. }))
+    {
+        Some("the scene requires a runtime font asset, and this harness does not provision assets")
+    } else if !request.fields.is_empty() {
+        Some(
+            "the scene binds field.status, which no built-in template field registry accepts in PushData",
+        )
     } else {
         None
-    }
-}
-
-fn template_kind(template: SimTemplate) -> TemplateKind {
-    match template {
-        SimTemplate::DigitalClock => TemplateKind::DigitalClock,
-        SimTemplate::ProgressRing => TemplateKind::ProgressRing,
-        SimTemplate::RowList => TemplateKind::RowList,
-        SimTemplate::AnalogClock => TemplateKind::AnalogClock,
-        SimTemplate::BigNumberLabel => TemplateKind::BigNumberLabel,
-        SimTemplate::IconBadgeText => TemplateKind::IconBadgeText,
-    }
-}
-
-fn field_value(value: &SimFieldValue) -> FieldValue {
-    match value {
-        SimFieldValue::Text(text) => FieldValue::Text(text.clone()),
-        SimFieldValue::Integer(value) => FieldValue::Integer(*value),
-        SimFieldValue::Boolean(value) => FieldValue::Boolean(*value),
     }
 }
 
@@ -188,14 +179,21 @@ fn diff_pixels(expected: &[u16], actual: &[u16]) -> (usize, u32) {
 fn apply_case_config(
     client: &mut DeviceClient<impl Transport>,
     revision: u32,
-    request: &RenderRequest,
+    request: &SceneRenderRequest,
 ) -> Result<(), String> {
     let config = ApplyConfig {
         revision,
         rotation: rotation_degrees(request.orientation),
         widgets: vec![WidgetConfig {
             widget_id: "diff".into(),
-            template: template_kind(request.template),
+            /* ApplyConfig still registers the bounded PushData field schema;
+             * it no longer selects a C renderer. Timer scene cases need the
+             * ProgressRing registry, while asset-free geometry needs no data. */
+            template: if request.timer.is_some() {
+                TemplateKind::ProgressRing
+            } else {
+                TemplateKind::DigitalClock
+            },
             size_class: SizeClass::Full,
             tap_action: TapAction::None,
             interrupt_policy: InterruptPolicy::Disabled,
@@ -233,16 +231,30 @@ fn activate_case_screen(client: &mut DeviceClient<impl Transport>) -> Result<(),
 fn push_case_fields(
     client: &mut DeviceClient<impl Transport>,
     revision: u32,
-    request: &RenderRequest,
+    request: &SceneRenderRequest,
 ) -> Result<(), String> {
-    let fields = request
-        .fields
-        .iter()
-        .map(|field| Field {
-            key: field.name.clone(),
-            value: field_value(&field.value),
-        })
-        .collect();
+    let Some(SceneTimer {
+        total_ms,
+        remaining_ms,
+        running,
+    }) = request.timer
+    else {
+        return Ok(());
+    };
+    let fields = vec![
+        Field {
+            key: "duration_seconds".into(),
+            value: FieldValue::Integer(i64::from(total_ms / 1_000)),
+        },
+        Field {
+            key: "remaining_seconds".into(),
+            value: FieldValue::Integer(i64::from(remaining_ms / 1_000)),
+        },
+        Field {
+            key: "running".into(),
+            value: FieldValue::Boolean(running),
+        },
+    ];
     let ack = client
         .push_data(PushData {
             widget_id: "diff".into(),
@@ -261,7 +273,7 @@ fn push_case_fields(
 
 fn sync_case_time(
     client: &mut DeviceClient<impl Transport>,
-    request: &RenderRequest,
+    request: &SceneRenderRequest,
 ) -> Result<(), String> {
     client
         .time_sync(TimeSync {
@@ -270,6 +282,28 @@ fn sync_case_time(
         })
         .map_err(|error| format!("time sync: {error}"))?;
     Ok(())
+}
+
+fn push_case_scene(
+    client: &mut DeviceClient<impl Transport>,
+    revision: u32,
+    request: &SceneRenderRequest,
+) -> Result<(), String> {
+    match client
+        .request(&Message::PushScene(PushScene {
+            card_id: "diff".into(),
+            revision,
+            scene: request.scene.clone(),
+        }))
+        .map_err(|error| format!("push scene: {error}"))?
+    {
+        Message::Ack(ack)
+            if ack.acknowledged_type == TYPE_PUSH_SCENE && ack.revision == Some(revision) =>
+        {
+            Ok(())
+        }
+        message => Err(format!("unexpected push-scene response: {message:?}")),
+    }
 }
 
 enum CaseOutcome {
@@ -283,13 +317,15 @@ fn run_case<T: Transport>(
     sim: &mut Simulator,
     config_revision: u32,
     data_revision: u32,
+    scene_revision: u32,
     request_id: u32,
-    request: &RenderRequest,
+    request: &SceneRenderRequest,
 ) -> (DeviceClient<T>, Result<CaseOutcome, String>) {
     let setup: Result<(), String> = (|| {
         apply_case_config(&mut client, config_revision, request)?;
         activate_case_screen(&mut client)?;
         push_case_fields(&mut client, data_revision, request)?;
+        push_case_scene(&mut client, scene_revision, request)?;
         // Last: see the module doc for why time-sync is sequenced after the
         // config/push commands rather than before them.
         sync_case_time(&mut client, request)?;
@@ -308,7 +344,7 @@ fn run_case<T: Transport>(
     };
 
     let actual = maybe_flip(bytes_to_pixels(&raw), request.orientation);
-    let expected = match sim.render(request) {
+    let expected = match sim.render_scene(request) {
         Ok(expected) => expected,
         Err(error) => return (client, Err(format!("simulator render failed: {error}"))),
     };
@@ -343,6 +379,7 @@ fn run() -> Result<(), String> {
     let mut client = connected.client;
     let mut config_revision = connected.initial_status.config_revision;
     let mut data_revision = connected.initial_status.latest_revision;
+    let mut scene_revision = connected.initial_status.latest_revision;
     // The 0x7E request ID only needs to be nonzero and distinct from
     // whatever the structured DeviceClient used most recently; the device
     // does not track a cross-request sequence, only per-request
@@ -358,8 +395,8 @@ fn run() -> Result<(), String> {
     let mut errored = 0usize;
     let mut excluded = 0usize;
 
-    for (name, request) in cases::golden_cases() {
-        if let Some(reason) = exclusion_reason(&name) {
+    for (name, request) in cases::scene_cases() {
+        if let Some(reason) = exclusion_reason(&name, &request) {
             println!("{name}: excluded ({reason})");
             excluded += 1;
             continue;
@@ -373,6 +410,10 @@ fn run() -> Result<(), String> {
             Some(revision) => revision,
             None => return Err(format!("{name}: data revision exhausted")),
         };
+        scene_revision = match scene_revision.checked_add(1) {
+            Some(revision) => revision,
+            None => return Err(format!("{name}: scene revision exhausted")),
+        };
         capture_request_id = capture_request_id.wrapping_add(1).max(1);
 
         let (returned_client, result) = run_case(
@@ -380,6 +421,7 @@ fn run() -> Result<(), String> {
             &mut sim,
             config_revision,
             data_revision,
+            scene_revision,
             capture_request_id,
             &request,
         );

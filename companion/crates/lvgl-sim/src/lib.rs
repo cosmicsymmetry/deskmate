@@ -1,10 +1,10 @@
-//! Headless renderer for the firmware's LVGL templates.
+//! Headless renderer for Deskmate's LVGL surfaces.
 //!
-//! This crate links the firmware's own C sources (LVGL, the template
-//! renderers under `firmware/main/ui/templates`, and the hardware-independent
-//! core under `firmware/main/core`) and drives them from Rust so the exact
-//! on-device pixels can be produced on the host for previews and tests. See
-//! `build.rs` for the source list and `csrc/sim_shim.c` for the C-side glue.
+//! This crate links the shipping scene interpreter and hardware-independent
+//! firmware core, plus the retired C templates from its clearly isolated
+//! `reference-oracle/`. Rust can therefore produce exact device pixels and
+//! keep comparing scenes against the live historical oracle. See `build.rs`
+//! for the source list and `csrc/sim_shim.c` for the C-side glue.
 
 use std::ffi::CString;
 use std::fmt;
@@ -12,9 +12,8 @@ use std::os::raw::c_char;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-/// The golden-frame case table shared by this crate's `tests/golden.rs` and
-/// `companion/crates/device/examples/framebuffer_diff.rs` (Task 10). See
-/// `cases.rs`'s module doc for why it lives here instead of under `tests/`.
+/// The reference-template golden cases and the scene cases used by the
+/// physical framebuffer harness. See `cases.rs` for their distinct roles.
 pub mod cases;
 
 /// Task 12: the runtime font asset used by the asset-store parity golden,

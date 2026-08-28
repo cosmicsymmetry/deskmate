@@ -1,13 +1,11 @@
 //! The golden-frame case table: every firmware template x both mount
 //! orientations x a field matrix chosen to exercise each template's
 //! visually distinct states. `tests/golden.rs` renders every case and pins
-//! the output to a committed PNG under `tests/golden/`; the physical
-//! framebuffer diff (Task 10, `companion/crates/device/examples/framebuffer_diff.rs`)
-//! reuses [`golden_cases`] so the same matrix is compared against real
-//! hardware output. Lives under `src/` rather than `tests/` so both
-//! consumers — the in-crate integration test and the other crate's example
-//! — can reach it as `lvgl_sim::cases`; a `tests/` file is only visible to
-//! `cargo test` within this crate.
+//! the output to a committed PNG under `tests/golden/`. These rows now drive
+//! the reference-only C oracle; the physical framebuffer diff drives
+//! [`scene_cases`] because shipping firmware no longer has a template
+//! renderer. This lives under `src/` rather than `tests/` so integration
+//! tests and hardware examples can reach it as `lvgl_sim::cases`.
 //!
 //! Field names below are pulled from the firmware's own registry,
 //! `firmware/main/core/template_fields.c` (`template_fields_registry`) — do
@@ -610,15 +608,9 @@ pub fn golden_cases() -> Vec<(String, RenderRequest)> {
 /// path than every case above — `font_registry_acquire` against a digest
 /// registered in `csrc/sim_shim.c`'s RAM-backed asset store, not
 /// `template_view_show` against a baked `deskmate_font_*` face — so it
-/// cannot be pushed through the device's `TemplateKind`/`PushData` wire
-/// messages the way `golden_cases()` can. That is also why
-/// [`asset_font_cases`] is a separate function, not folded into
-/// [`golden_cases`]: `companion/crates/device/examples/framebuffer_diff.rs`
-/// iterates `golden_cases()` and pushes every entry to physical hardware
-/// over the protocol, and there is no wire message for "register this font
-/// blob under this digest" (that is provisioned by `AssetBegin`/
-/// `AssetChunk`/`AssetCommit`, a whole transfer protocol out of scope for
-/// this simulator-only parity check). Rendered by
+/// requires `AssetBegin`/`AssetChunk`/`AssetCommit` provisioning on a device,
+/// a whole transfer protocol out of scope for this simulator-only parity
+/// check. Rendered by
 /// `Simulator::render_asset_font_png` (`src/assets.rs`) and pinned by
 /// `tests/asset_font.rs` against `tests/golden/asset-font/` — a
 /// subdirectory, not `tests/golden/` directly, so `tests/golden.rs`'s
@@ -633,8 +625,8 @@ pub struct AssetFontCase {
 }
 
 /// `asset-font--72px-digits`: `12:34` at 72px, deliberately none of the
-/// four baked sizes (18/28/56/96 — `firmware/main/ui/templates/
-/// template_internal.h`'s `DESKMATE_FONT_*`), so nothing about this render
+/// four baked sizes (18/28/56/96 — the reference oracle's
+/// `template_internal.h` `DESKMATE_FONT_*`), so nothing about this render
 /// could accidentally be satisfied by a baked face instead of the runtime
 /// one. Both orientations, matching every other case in this file.
 pub fn asset_font_cases() -> Vec<(String, AssetFontCase)> {
@@ -1452,10 +1444,9 @@ fn scene_rot_rect_nodes() -> Vec<SceneNode> {
 ///
 /// A separate table from [`golden_cases`] for the same reason
 /// [`asset_font_cases`] is: these are `SceneRenderRequest`s rendered through
-/// `Simulator::render_scene_png`, not `RenderRequest`s through
-/// `template_view_show`, and there is no `TemplateKind` to push them to
-/// hardware with. Stage 2a's parity gate (Task 9) drives the device with
-/// `PushScene` instead, and lives with the scene it is actually about.
+/// `Simulator::render_scene_png`, not `RenderRequest`s through the reference
+/// template oracle. The physical harness drives these with `PushScene`, the
+/// same message shipping firmware renders.
 pub fn scene_cases() -> Vec<(String, SceneRenderRequest)> {
     let mut cases = Vec::new();
     scene_case(&mut cases, "rect", &scene_rect_nodes(), &[], None, &[]);

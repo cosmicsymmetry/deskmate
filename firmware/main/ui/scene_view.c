@@ -103,7 +103,7 @@ static asset_release_fn s_asset_release;
 /* ---------------------------------------------------------------- fonts */
 
 /* The four baked tiers resolve to the identical lv_font_t objects the C
- * templates use -- ui/templates/template_internal.h's DESKMATE_FONT_CAPTION /
+ * reference oracle uses -- template_internal.h's DESKMATE_FONT_CAPTION /
  * _BODY / _DISPLAY / _HERO are (&deskmate_font_18) / (&deskmate_font_28) /
  * (&deskmate_font_56) / (&deskmate_font_96). That pointer identity is what
  * makes the parity gate winnable, so if those macros are ever repointed this
@@ -944,7 +944,7 @@ static lv_obj_t *build_glyph(lv_obj_t *parent, const scene_glyph_t *glyph)
 #define SCENE_SCALE_MINOR_TICK_LENGTH 6
 #define SCENE_SCALE_MAJOR_TICK_WIDTH  3
 #define SCENE_SCALE_MAJOR_TICK_LENGTH 11
-/* DESKMATE_COLOR_TERTIARY (template_internal.h) -- the minor tick colour
+/* The reference oracle's DESKMATE_COLOR_TERTIARY -- the minor tick colour
  * never varies by widget instance, unlike the major tick's palette.hue, so
  * it stays a constant here rather than becoming a wire field. */
 #define SCENE_SCALE_MINOR_TICK_COLOR 0x5c5c66U

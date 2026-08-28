@@ -3,9 +3,9 @@
 #include <stdio.h>
 
 #include "clock_screen.h"
+#include "design_system.h"
 #include "esp_lvgl_port.h"
 #include "lvgl.h"
-#include "templates/template_internal.h"
 
 #define OTA_TITLE_Y (7 * DESKMATE_GRID)
 #define OTA_MODULE_Y (17 * DESKMATE_GRID)

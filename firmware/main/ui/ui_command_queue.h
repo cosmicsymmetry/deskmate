@@ -5,38 +5,17 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "core/protocol_message.h"
-#include "core/template_fields.h"
-
 #define UI_COMMAND_QUEUE_CAPACITY 4U
 
 typedef enum {
     UI_COMMAND_SHOW_STANDALONE = 0,
-    UI_COMMAND_SHOW_VIEW,
-    UI_COMMAND_PATCH_VIEW,
+    UI_COMMAND_SHOW_CARD_FALLBACK,
     UI_COMMAND_LINK_STATE,
     UI_COMMAND_TIME_OFFSET,
 } ui_command_type_t;
 
 typedef struct {
-    char screen_id[PROTOCOL_MAX_SCREEN_ID_LENGTH + 1U];
-    char previous_screen_id[PROTOCOL_MAX_SCREEN_ID_LENGTH + 1U];
-    char previous_widget_id[PROTOCOL_MAX_WIDGET_ID_LENGTH + 1U];
-    char next_screen_id[PROTOCOL_MAX_SCREEN_ID_LENGTH + 1U];
-    char next_widget_id[PROTOCOL_MAX_WIDGET_ID_LENGTH + 1U];
-    protocol_tap_action_t tap_action;
-    bool interrupt;
-    uint32_t interrupt_token;
-} ui_view_context_t;
-
-typedef struct {
     ui_command_type_t type;
-    char widget_id[PROTOCOL_MAX_WIDGET_ID_LENGTH + 1U];
-    ui_view_context_t view_context;
-    protocol_template_kind_t template_kind;
-    protocol_size_class_t size_class;
-    template_field_state_t fields;
-    uint16_t dirty_mask;
     bool online;
     int16_t utc_offset_minutes;
 } ui_command_t;
@@ -65,6 +44,10 @@ bool ui_command_queue_push(ui_command_queue_t *queue,
 
 bool ui_command_queue_pop(ui_command_queue_t *queue,
                           ui_command_t *command);
+
+/** Remove queued card-fallback work without disturbing a forced standalone
+ * transition. Returns true when at least one fallback was removed. */
+bool ui_command_queue_discard_card_fallbacks(ui_command_queue_t *queue);
 
 uint32_t ui_command_queue_dropped(ui_command_queue_t *queue);
 uint32_t ui_command_queue_coalesced(ui_command_queue_t *queue);

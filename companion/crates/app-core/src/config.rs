@@ -2236,10 +2236,12 @@ fn validate_composition(
                     | DisplayTemplate::IconBadgeText { .. }
                     | DisplayTemplate::RowList
             ),
-            // A plugin card never passes `Some(template)` — see the comment above.
-            ProviderKind::Plugin => {
-                unreachable!("plugin cards pass template: None to validate_composition")
-            }
+            // A plugin card never passes `Some(template)` — see the comment above. This
+            // arm is unreachable by construction today, but the function validates
+            // untrusted config content, so it returns a safe `false` (an
+            // `InvalidComposition` issue) rather than panicking if that ever stops
+            // being true.
+            ProviderKind::Plugin => false,
         };
         if !template_supported {
             issues.push(ValidationIssue::new(

@@ -4527,4 +4527,32 @@ mod tests {
             "hold armed from the card's own AlertHold::Seconds(60)"
         );
     }
+
+    // -- Task 6: the plugin card kind ------------------------------------------
+
+    #[test]
+    fn build_card_scene_refuses_a_plugin_card_typed_and_visibly() {
+        // A plugin card has no `DisplayTemplate` (`card.template()` is `None`), so
+        // `build_card_scene` cannot dispatch to any of the six built-in scene
+        // builders. It must refuse typed and visibly -- via the same `Result<_,
+        // String>` -> `record_scene_refusal` -> `CardErrorKind::SceneRefused` path a
+        // revision-counter exhaustion uses -- rather than compiling nothing, panicking,
+        // or silently drawing some unrelated built-in face.
+        let card = CardSettings::Plugin {
+            id: "aqi".into(),
+            title: "Air quality".into(),
+            plugin_id: "aqi".into(),
+            tap_action: WidgetTapAction::None,
+            refresh: RefreshPolicy::Interval { minutes: 15 },
+            alert: CardAlert::None,
+        };
+        let config = rotation_config(vec![card], CarouselAdvance::Manual, &[("aqi", None)]);
+
+        let error = build_card_scene(&config, "aqi", &[], 1).unwrap_err();
+
+        assert!(
+            error.contains("\"aqi\"") && error.contains("is a plugin card"),
+            "expected a typed refusal naming the plugin card by id, got {error:?}"
+        );
+    }
 }

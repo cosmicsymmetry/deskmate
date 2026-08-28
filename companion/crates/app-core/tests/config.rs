@@ -3,15 +3,15 @@ use app_core::{
     CardAlert, CardDataSnapshot, CardError, CardErrorKind, CardField, CardFieldValue, CardSettings,
     CarouselAdvance, ConnectionState, DeviceCounters, DeviceSnapshot, DisplayTemplate,
     FirmwareArtifactMetadata, JsonFieldMapping, MAX_ASSET_BYTES, MAX_PLAYLIST_ENTRIES,
-    MAX_PLAYLIST_NAME_LEN, MAX_PLAYLISTS, MAX_PROVIDER_URL_LEN, MAX_UPDATE_ARTIFACT_BYTES,
-    PersistenceState, Playlist, PlaylistEntry, PomodoroSnapshot, PomodoroState, ProviderSnapshot,
-    ProviderState, RefreshPolicy, RuntimeDiagnostics, RuntimeState, ValidationCode, WeatherUnits,
-    WidgetTapAction,
+    MAX_PLAYLIST_NAME_LEN, MAX_PLAYLISTS, MAX_PLUGIN_ID_LEN, MAX_PROVIDER_URL_LEN,
+    MAX_UPDATE_ARTIFACT_BYTES, PersistenceState, Playlist, PlaylistEntry, PomodoroSnapshot,
+    PomodoroState, ProviderSnapshot, ProviderState, RefreshPolicy, RuntimeDiagnostics,
+    RuntimeState, ValidationCode, WeatherUnits, WidgetTapAction,
 };
 use protocol::{
     CAPABILITY_ASSET_TRANSFER, CAPABILITY_CONFIG_ROTATION, CAPABILITY_CORE_WIDGETS,
-    CAPABILITY_EXTENDED_TEMPLATES, CAPABILITY_HOST_TAP_ACTIONS, InterruptPolicy, Message,
-    SizeClass, TapAction, TemplateKind, encode_message,
+    CAPABILITY_EXTENDED_TEMPLATES, CAPABILITY_HOST_TAP_ACTIONS, Field, FieldValue, InterruptPolicy,
+    Message, SizeClass, TapAction, TemplateKind, encode_message,
 };
 
 const DEFAULT_JSON: &str = include_str!("fixtures/default.json");
@@ -20,6 +20,7 @@ const INVALID_JSON: &str = include_str!("fixtures/invalid.json");
 const FUTURE_JSON: &str = include_str!("fixtures/future-v7.json");
 const MALFORMED_JSON: &str = include_str!("fixtures/malformed.json");
 const CARD_SURFACE_JSON: &str = include_str!("fixtures/card-surface.json");
+const PLUGIN_CARD_JSON: &str = include_str!("fixtures/plugin-card.json");
 
 #[test]
 fn default_fixture_is_the_canonical_default() {
@@ -963,6 +964,195 @@ fn timer_tap_actions_require_the_progress_ring_template() {
     config.validate().expect("progress-ring timers stay valid");
 }
 
+// -- Task 6: the plugin card kind -------------------------------------------------
+
+fn plugin_card(tap_action: WidgetTapAction, refresh: RefreshPolicy) -> CardSettings {
+    CardSettings::Plugin {
+        id: "aqi".into(),
+        title: "Air quality".into(),
+        plugin_id: "aqi".into(),
+        tap_action,
+        refresh,
+        alert: CardAlert::None,
+    }
+}
+
+#[test]
+fn plugin_card_fixture_deserializes_validates_and_round_trips() {
+    let config: AppConfig = serde_json::from_str(PLUGIN_CARD_JSON).unwrap();
+    config.validate().unwrap();
+    assert_eq!(
+        config.cards[0],
+        CardSettings::Plugin {
+            id: "aqi".into(),
+            title: "Air quality".into(),
+            plugin_id: "aqi".into(),
+            tap_action: WidgetTapAction::None,
+            refresh: RefreshPolicy::Interval { minutes: 15 },
+            alert: CardAlert::None,
+        }
+    );
+
+    let round_trip = serde_json::to_string(&config).unwrap();
+    let decoded: AppConfig = serde_json::from_str(&round_trip).unwrap();
+    assert_eq!(decoded, config);
+}
+
+#[test]
+fn plugin_card_rejects_a_template_field_as_unknown() {
+    // A plugin card deliberately carries no `template`: it renders from its
+    // manifest-compiled scene, not one of the six built-in `DisplayTemplate`s.
+    // `CardSettingsInner`'s `plugin` arm does not list `template` among its allowed
+    // fields, so supplying one must be an unknown-field rejection like any other name
+    // that arm does not list — not silently ignored.
+    let json = r#"{
+        "kind": "plugin",
+        "id": "aqi",
+        "title": "Air quality",
+        "plugin_id": "aqi",
+        "template": { "kind": "digital-clock" },
+        "tap_action": { "kind": "none" },
+        "refresh": { "kind": "interval", "minutes": 15 },
+        "alert": { "kind": "none" }
+    }"#;
+    let error = serde_json::from_str::<CardSettings>(json).unwrap_err();
+    assert!(
+        error.to_string().contains("unknown field: template"),
+        "expected an unknown-field rejection naming `template`, got {error}"
+    );
+}
+
+#[test]
+fn plugin_card_refuses_device_local_refresh_and_pomodoro_only_tap_actions() {
+    // `device-local` is clock/pomodoro's refresh policy; a plugin card is neither
+    // provider, so it is refused the same way calendar/weather/json-feed/rss already
+    // are (`validate_composition`'s `refresh_supported` match).
+    let config = single_card_config(plugin_card(
+        WidgetTapAction::None,
+        RefreshPolicy::DeviceLocal,
+    ));
+    let error = config
+        .validate()
+        .expect_err("device-local refresh must not validate on a plugin card");
+    assert!(
+        error.issues.iter().any(|issue| {
+            issue.path == "cards[0].refresh" && issue.code == ValidationCode::InvalidComposition
+        }),
+        "expected cards[0].refresh InvalidComposition: {:?}",
+        error.issues
+    );
+
+    // `start-pause`/`reset` require a pomodoro provider; a plugin card is never one.
+    // This is the provider-gated tap-action check, which still runs for `Plugin` even
+    // though the template-gated one above it in `validate_composition` is skipped
+    // entirely (a plugin card passes `template: None`).
+    for tap_action in [WidgetTapAction::StartPause, WidgetTapAction::Reset] {
+        let config = single_card_config(plugin_card(
+            tap_action.clone(),
+            RefreshPolicy::Interval { minutes: 15 },
+        ));
+        let error = config.validate().expect_err(&format!(
+            "{tap_action:?} must not validate on a plugin card"
+        ));
+        assert!(
+            error.issues.iter().any(|issue| {
+                issue.path == "cards[0].tap_action"
+                    && issue.code == ValidationCode::InvalidComposition
+            }),
+            "{tap_action:?} must report cards[0].tap_action InvalidComposition: {:?}",
+            error.issues
+        );
+    }
+
+    // The plugin-legal combination validates cleanly.
+    let config = single_card_config(plugin_card(
+        WidgetTapAction::None,
+        RefreshPolicy::Interval { minutes: 15 },
+    ));
+    config
+        .validate()
+        .expect("a plugin card with interval refresh and no tap action must validate");
+}
+
+#[test]
+fn plugin_id_bounds_enforced() {
+    let mut empty = single_card_config(plugin_card(
+        WidgetTapAction::None,
+        RefreshPolicy::Interval { minutes: 15 },
+    ));
+    if let CardSettings::Plugin { plugin_id, .. } = &mut empty.cards[0] {
+        *plugin_id = String::new();
+    }
+    let error = empty
+        .validate()
+        .expect_err("empty plugin_id must not validate");
+    assert!(error.issues.iter().any(|issue| {
+        issue.path == "cards[0].plugin_id" && issue.code == ValidationCode::Empty
+    }));
+
+    let mut at_bound = single_card_config(plugin_card(
+        WidgetTapAction::None,
+        RefreshPolicy::Interval { minutes: 15 },
+    ));
+    if let CardSettings::Plugin { plugin_id, .. } = &mut at_bound.cards[0] {
+        *plugin_id = "x".repeat(MAX_PLUGIN_ID_LEN);
+    }
+    at_bound
+        .validate()
+        .expect("plugin_id at exactly MAX_PLUGIN_ID_LEN must validate");
+
+    let mut one_past = single_card_config(plugin_card(
+        WidgetTapAction::None,
+        RefreshPolicy::Interval { minutes: 15 },
+    ));
+    if let CardSettings::Plugin { plugin_id, .. } = &mut one_past.cards[0] {
+        *plugin_id = "x".repeat(MAX_PLUGIN_ID_LEN + 1);
+    }
+    let error = one_past
+        .validate()
+        .expect_err("plugin_id one byte past MAX_PLUGIN_ID_LEN must not validate");
+    assert!(error.issues.iter().any(|issue| {
+        issue.path == "cards[0].plugin_id" && issue.code == ValidationCode::TooLong
+    }));
+}
+
+#[test]
+fn plugin_card_lowers_to_the_wire_and_pushes_the_three_field_shape() {
+    let config = single_card_config(plugin_card(
+        WidgetTapAction::None,
+        RefreshPolicy::Interval { minutes: 15 },
+    ));
+    let compiled = config.compile(1).unwrap();
+
+    let widget = &compiled.layout.widgets[0];
+    // `TemplateKind::DigitalClock` is the documented inert placeholder
+    // (`wire_config`'s comment): firmware no longer switches on this field for any
+    // card since stage 3a, so it carries no rendering meaning for a plugin card.
+    assert_eq!(widget.template, TemplateKind::DigitalClock);
+    assert_eq!(widget.size_class, SizeClass::Full);
+    assert_eq!(widget.tap_action, TapAction::None);
+    assert_eq!(widget.interrupt_policy, InterruptPolicy::Disabled);
+    assert_eq!(compiled.layout.screens[0].widget_id, "aqi");
+
+    assert_eq!(
+        compiled.initial_pushes[0].fields,
+        vec![
+            Field {
+                key: "title".into(),
+                value: FieldValue::Text("Air quality".into()),
+            },
+            Field {
+                key: "stale".into(),
+                value: FieldValue::Boolean(true),
+            },
+            Field {
+                key: "error".into(),
+                value: FieldValue::Text("Waiting for provider refresh".into()),
+            },
+        ]
+    );
+}
+
 #[test]
 fn compilation_is_deterministic_for_identical_input() {
     let config = AppConfig::default();
@@ -1050,6 +1240,16 @@ fn every_freshly_added_card_kind_validates_and_compiles() {
             template: DisplayTemplate::RowList,
             tap_action: WidgetTapAction::None,
             refresh: RefreshPolicy::Interval { minutes: 30 },
+            alert: CardAlert::None,
+        },
+        // Task 6: the plugin card kind, added after this test was written for the six
+        // built-in provider/template pairings. It carries no `template` at all.
+        CardSettings::Plugin {
+            id: "aqi".into(),
+            title: "Air quality".into(),
+            plugin_id: "aqi".into(),
+            tap_action: WidgetTapAction::None,
+            refresh: RefreshPolicy::Interval { minutes: 15 },
             alert: CardAlert::None,
         },
     ];
@@ -1229,7 +1429,11 @@ fn entry(card_id: &str) -> PlaylistEntry {
 #[test]
 fn default_config_is_v6_with_one_playlist() {
     let config = AppConfig::default();
-    assert_eq!(config.schema_version, app_core::CURRENT_SCHEMA_VERSION);
+    // A literal, not `CURRENT_SCHEMA_VERSION`: this test exists to catch a bump that
+    // forgot to update `AppConfig::default()`, and comparing the constant to itself
+    // could never fail that way. The boundary tests in `tests/store.rs` (`found: 7,
+    // supported: 6`) keep the same literal discipline for the same reason.
+    assert_eq!(config.schema_version, 6);
     assert_eq!(config.playlists.len(), 1);
     assert_eq!(config.active_playlist_id, config.playlists[0].id);
     assert_eq!(config.playlists[0].entries.len(), 1);

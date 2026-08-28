@@ -2152,9 +2152,11 @@ dependencies = [
  "cc",
  "chrono",
  "glob",
+ "plugin",
  "png 0.17.16",
  "protocol",
  "sha2",
+ "tempfile",
 ]
 
 [[package]]

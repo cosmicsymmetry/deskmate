@@ -21,6 +21,13 @@ pub mod cases;
 /// module doc for why the vendored TTF is patched before being subset.
 pub mod assets;
 
+/// Task 5 (stage 3b): the simulator's half of §6's parity obligation --
+/// resolving a plugin asset's digest to the same bytes a server-side
+/// transfer path would push, sourced from `plugin::AssetSet` rather than a
+/// second copy. See its module doc for why an unknown digest is a named
+/// error rather than a silent fallback to a baked face.
+pub mod asset_shim;
+
 /// Task 8: rendering a declarative scene through the firmware's own decoder
 /// and `ui/scene_view.c` interpreter, the device-side half of the plugin
 /// display list. See its module doc for why it goes through the wire format

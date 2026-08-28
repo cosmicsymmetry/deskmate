@@ -10,10 +10,12 @@
 //! yet resolve assets to content-addressed digests -- see `compile.rs`'s
 //! module doc for what a manifest needing one compiles to today.
 
+mod assets;
 mod compile;
 mod expr;
 mod manifest;
 
+pub use assets::{AssetError, AssetSet, MAX_ASSET_BYTES, ResolvedAsset, resolve_assets};
 pub use compile::{CompileError, MAX_REPEAT_ITEMS, compile_scene};
 pub use expr::{
     EvalContext, EvalValue, Expr, ExprError, FUEL_BUDGET, Fuel, MAX_DEPTH, MAX_OUTPUT_LEN,

@@ -1023,9 +1023,14 @@ refresh_minutes = 15
 
     #[test]
     fn a_url_over_the_length_ceiling_is_rejected_by_name() {
-        let long_path = "a".repeat(MAX_URL_LEN);
+        // Built to land at exactly MAX_URL_LEN + 1, not just "well past" the
+        // bound, so this proves the edge rather than the region.
+        let prefix = "https://example.invalid/";
+        let long_path = "a".repeat(MAX_URL_LEN + 1 - prefix.len());
+        let url = format!("{prefix}{long_path}");
+        assert_eq!(url.len(), MAX_URL_LEN + 1);
         let source = format!(
-            "{MINIMAL_HEADER_PREFIX}\nurl = \"https://example.invalid/{long_path}\"\n\
+            "{MINIMAL_HEADER_PREFIX}\nurl = \"{url}\"\n\
              refresh_minutes = 15\n",
             MINIMAL_HEADER_PREFIX =
                 "name = \"aqi\"\nversion = \"1.0.0\"\n\n[source]\nkind = \"json\""
@@ -1035,8 +1040,64 @@ refresh_minutes = 15
             err,
             ManifestError::StringTooLong {
                 field: "source.url",
-                ..
-            }
+                limit: MAX_URL_LEN,
+                actual
+            } if actual == MAX_URL_LEN + 1
+        ));
+    }
+
+    #[test]
+    fn a_version_over_the_length_ceiling_is_rejected_by_name() {
+        let long_version = "a".repeat(MAX_VERSION_LEN + 1);
+        let source = format!(
+            "name = \"aqi\"\nversion = \"{long_version}\"\n\n\
+             [source]\nkind = \"json\"\nurl = \"https://example.invalid/x.json\"\n\
+             refresh_minutes = 15\n"
+        );
+        let err = parse_manifest(&source).unwrap_err();
+        assert!(matches!(
+            err,
+            ManifestError::StringTooLong {
+                field: "version",
+                limit: MAX_VERSION_LEN,
+                actual
+            } if actual == MAX_VERSION_LEN + 1
+        ));
+    }
+
+    #[test]
+    fn an_asset_file_name_over_the_length_ceiling_is_rejected_by_name() {
+        let long_file = "a".repeat(MAX_FILE_NAME_LEN + 1);
+        let source =
+            format!("{MINIMAL_HEADER}[[assets]]\nkind = \"font\"\nfile = \"{long_file}\"\n");
+        let err = parse_manifest(&source).unwrap_err();
+        assert!(matches!(
+            err,
+            ManifestError::StringTooLong {
+                field: "asset.file",
+                limit: MAX_FILE_NAME_LEN,
+                actual
+            } if actual == MAX_FILE_NAME_LEN + 1
+        ));
+    }
+
+    #[test]
+    fn a_glyph_name_over_the_length_ceiling_is_rejected_by_name() {
+        let long_name = "a".repeat(protocol::MAX_SCENE_GLYPH_NAME_LEN + 1);
+        let source = format!(
+            "{MINIMAL_HEADER}\
+             [[assets]]\nkind = \"icon-font\"\nfile = \"icons.ttf\"\n\
+             glyphs = [ {{ name = \"{long_name}\", codepoint = 0xE001 }} ]\n"
+        );
+        let err = parse_manifest(&source).unwrap_err();
+        assert!(matches!(
+            err,
+            ManifestError::StringTooLong {
+                field: "glyph.name",
+                limit,
+                actual
+            } if limit == protocol::MAX_SCENE_GLYPH_NAME_LEN
+                && actual == protocol::MAX_SCENE_GLYPH_NAME_LEN + 1
         ));
     }
 }

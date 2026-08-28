@@ -332,7 +332,11 @@ fn capped_number_font_tier(
     max_width: i32,
     metrics: &BakedFontMetrics,
 ) -> SceneFontTier {
-    if text_is_numeric(text) && metrics.measure(tier, text).is_some_and(|width| width <= max_width) {
+    if text_is_numeric(text)
+        && metrics
+            .measure(tier, text)
+            .is_some_and(|width| width <= max_width)
+    {
         tier
     } else {
         SceneFontTier::Body
@@ -549,14 +553,15 @@ fn compile_node(
             // to `Hero` whenever the text also happened to fit Hero's
             // width. A manifest's tier is an authoring decision, not a
             // hint.
-            let scene_font = if let SceneFont::Baked(tier @ (SceneFontTier::Display | SceneFontTier::Hero)) =
-                scene_font
-                && let SceneValue::Literal(text) = &scene_value
-            {
-                SceneFont::Baked(capped_number_font_tier(tier, text, *w, metrics))
-            } else {
-                scene_font
-            };
+            let scene_font =
+                if let SceneFont::Baked(tier @ (SceneFontTier::Display | SceneFontTier::Hero)) =
+                    scene_font
+                    && let SceneValue::Literal(text) = &scene_value
+                {
+                    SceneFont::Baked(capped_number_font_tier(tier, text, *w, metrics))
+                } else {
+                    scene_font
+                };
             Ok(SceneNode::Text(SceneText {
                 x: *x,
                 baseline_y: *baseline_y,

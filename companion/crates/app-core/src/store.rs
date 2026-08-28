@@ -126,6 +126,7 @@ pub enum ConfigOrigin {
     MigratedV2,
     MigratedV3,
     MigratedV4,
+    MigratedV5,
     LastGood,
 }
 
@@ -955,14 +956,42 @@ fn decode_config(bytes: &[u8]) -> Result<(AppConfig, ConfigOrigin), StoreError> 
             })?,
             ConfigOrigin::Current,
         ),
+        5 => {
+            // v6 adds exactly one thing to the schema: a `plugin` card kind (a new
+            // variant of the already-internally-tagged `kind` enum on `CardSettings`).
+            // No v5 document could contain it, because it did not exist yet, so every
+            // other type is byte-for-byte the same shape and this migration is a
+            // version bump with no data transformation: the current (v6) `AppConfig`
+            // shape parses a v5 document unchanged.
+            let legacy: AppConfig =
+                serde_json::from_str(text).map_err(|error| StoreError::InvalidJson {
+                    message: error.to_string(),
+                })?;
+            if legacy.schema_version != 5 {
+                return Err(StoreError::UnsupportedVersion {
+                    found: legacy.schema_version,
+                    supported: CURRENT_SCHEMA_VERSION,
+                });
+            }
+            (
+                AppConfig {
+                    schema_version: CURRENT_SCHEMA_VERSION,
+                    ..legacy
+                },
+                ConfigOrigin::MigratedV5,
+            )
+        }
         4 => {
             // v4's asset variants (`icon { width, height }`, `font { pixel_size,
             // glyph_ranges }`) encoded the pre-tiny_ttf design where glyphs were
             // baked at a fixed size. `config.rs`'s compile step has always
             // rejected a non-empty `assets` array, so no saved v4 config has ever
             // contained one, which makes this migration a version bump with no
-            // data transformation: the current (v5) `AppConfig` shape parses a
-            // v4 document unchanged because `assets` is always empty.
+            // data transformation: the current `AppConfig` shape parses a v4
+            // document unchanged because `assets` is always empty, and the v5->v6
+            // change (a new card kind no v4 document could contain either) adds
+            // nothing that shape lacks. v4 therefore migrates directly to the
+            // current schema in one step, not chained through v5.
             let legacy: AppConfig =
                 serde_json::from_str(text).map_err(|error| StoreError::InvalidJson {
                     message: error.to_string(),

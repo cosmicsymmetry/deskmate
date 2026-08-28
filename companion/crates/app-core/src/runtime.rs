@@ -1003,7 +1003,8 @@ impl WorkerState {
                 CardSettings::Calendar { id, refresh, .. }
                 | CardSettings::Weather { id, refresh, .. }
                 | CardSettings::JsonFeed { id, refresh, .. }
-                | CardSettings::Rss { id, refresh, .. } => {
+                | CardSettings::Rss { id, refresh, .. }
+                | CardSettings::Plugin { id, refresh, .. } => {
                     let interval = refresh
                         .interval_minutes()
                         .map(|minutes| Duration::from_secs(u64::from(minutes) * 60));
@@ -2352,7 +2353,7 @@ fn build_card_scene(
         .ok_or_else(|| format!("card {card_id:?} is not present in the active configuration"))?;
     let metrics = &BakedFontMetrics::SHIPPED;
     let scene = match card.template() {
-        DisplayTemplate::DigitalClock => {
+        Some(DisplayTemplate::DigitalClock) => {
             let timezone: Tz = config
                 .preferences
                 .timezone
@@ -2367,14 +2368,14 @@ fn build_card_scene(
                 metrics,
             )
         }
-        DisplayTemplate::AnalogClock => build_analog_clock_scene(
+        Some(DisplayTemplate::AnalogClock) => build_analog_clock_scene(
             &AnalogClockCard {
                 revision,
                 show_seconds: field_boolean(fields, "show_seconds"),
             },
             metrics,
         ),
-        DisplayTemplate::ProgressRing => build_progress_ring_scene(
+        Some(DisplayTemplate::ProgressRing) => build_progress_ring_scene(
             &ProgressRingCard {
                 revision,
                 label: field_text(fields, "label"),
@@ -2382,7 +2383,7 @@ fn build_card_scene(
             },
             metrics,
         ),
-        DisplayTemplate::RowList => build_row_list_scene(
+        Some(DisplayTemplate::RowList) => build_row_list_scene(
             &RowListCard {
                 revision,
                 title: field_text(fields, "title"),
@@ -2399,7 +2400,7 @@ fn build_card_scene(
             },
             metrics,
         ),
-        DisplayTemplate::BigNumberLabel => build_big_number_label_scene(
+        Some(DisplayTemplate::BigNumberLabel) => build_big_number_label_scene(
             &BigNumberCard {
                 revision,
                 title: field_text(fields, "title"),
@@ -2408,7 +2409,7 @@ fn build_card_scene(
             },
             metrics,
         ),
-        DisplayTemplate::IconBadgeText { .. } => build_icon_badge_text_scene(
+        Some(DisplayTemplate::IconBadgeText { .. }) => build_icon_badge_text_scene(
             &IconBadgeCard {
                 revision,
                 title: field_text(fields, "title"),
@@ -2420,6 +2421,16 @@ fn build_card_scene(
             SHIPPED_SCENE_SURFACE_COLOR,
             metrics,
         ),
+        // A plugin card has no `DisplayTemplate`: its scene comes from compiling its
+        // manifest against fetched provider data (`plugin::compile_scene`), which is
+        // server-side plugin wiring this schema-only task does not implement. Refuse
+        // through the same typed, per-card mechanism a revision-counter exhaustion
+        // uses below, rather than compiling nothing or panicking.
+        None => {
+            return Err(format!(
+                "card {card_id:?} is a plugin card; plugin scene rendering is not implemented yet"
+            ));
+        }
     };
     let error = field_text(fields, "error");
     let scene = with_scene_data_state(
@@ -2906,7 +2917,8 @@ fn initial_snapshot(config: &AppConfig, diagnostics: RuntimeDiagnostics) -> AppS
             CardSettings::Calendar { id, .. }
             | CardSettings::Weather { id, .. }
             | CardSettings::JsonFeed { id, .. }
-            | CardSettings::Rss { id, .. } => providers.push(ProviderSnapshot {
+            | CardSettings::Rss { id, .. }
+            | CardSettings::Plugin { id, .. } => providers.push(ProviderSnapshot {
                 widget_id: id.clone(),
                 state: ProviderState::Idle,
                 last_success_unix_ms: None,

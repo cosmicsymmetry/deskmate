@@ -10,9 +10,10 @@ use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
 use app_core::{
-    AlertHold, AppConfig, CalendarSource, CardAlert, CardSettings, CarouselAdvance, ConfigOrigin,
-    ConfigStore, DisplayOrientation, DisplayTemplate, LoadOutcome, MAX_CONFIG_FILE_BYTES,
-    RefreshPolicy, SAVED_SETTINGS_VALIDATION_FAILURE_MESSAGE, StoreError, WidgetTapAction,
+    AlertHold, AppConfig, CURRENT_SCHEMA_VERSION, CalendarSource, CardAlert, CardSettings,
+    CarouselAdvance, ConfigOrigin, ConfigStore, DisplayOrientation, DisplayTemplate, LoadOutcome,
+    MAX_CONFIG_FILE_BYTES, RefreshPolicy, SAVED_SETTINGS_VALIDATION_FAILURE_MESSAGE, StoreError,
+    WidgetTapAction,
 };
 
 static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(1);
@@ -131,14 +132,14 @@ fn save_round_trips_and_migration_is_explicit() {
     fs::write(&path, include_bytes!("fixtures/legacy-v0.json")).unwrap();
     let migrated = store.load();
     assert_eq!(migrated.origin(), ConfigOrigin::MigratedV0);
-    assert_eq!(migrated.config().schema_version, 5);
+    assert_eq!(migrated.config().schema_version, CURRENT_SCHEMA_VERSION);
     assert_eq!(migrated.config().preferences.timezone, "Europe/Paris");
     assert!(!migrated.config().preferences.autostart);
 
     fs::write(&path, include_bytes!("fixtures/released-m3-v1.json")).unwrap();
     let migrated = store.load();
     assert_eq!(migrated.origin(), ConfigOrigin::MigratedV1);
-    assert_eq!(migrated.config().schema_version, 5);
+    assert_eq!(migrated.config().schema_version, CURRENT_SCHEMA_VERSION);
     assert_eq!(migrated.config().preferences.timezone, "Asia/Tbilisi");
     assert_eq!(migrated.config().cards.len(), 3);
     assert_eq!(
@@ -248,7 +249,7 @@ fn v3_migrates_to_one_playlist_preserving_rotation_order_and_dwell() {
     assert!(outcome.recovery().is_none());
 
     let config = outcome.config();
-    assert_eq!(config.schema_version, 5);
+    assert_eq!(config.schema_version, CURRENT_SCHEMA_VERSION);
     assert_eq!(config.active_playlist_id, "my-playlist");
     assert_eq!(config.playlists.len(), 1);
     let playlist = &config.playlists[0];
@@ -385,10 +386,11 @@ fn v3_all_alert_only_migrates_to_valid_config() {
 }
 
 #[test]
-fn v4_config_migrates_to_v5_unchanged() {
+fn v4_config_migrates_to_v6_unchanged() {
     // config.rs's compile step has always rejected a non-empty `assets` array, so no
-    // saved v4 config has ever contained one: migration to v5 is a version bump with
-    // no data transformation.
+    // saved v4 config has ever contained one: migration to the current schema is a
+    // version bump with no data transformation (v4 -> v6 directly, not chained
+    // through v5).
     let directory = TestDirectory::new("v4-migration");
     let path = directory.config_path();
     let store = ConfigStore::new(&path);
@@ -399,7 +401,7 @@ fn v4_config_migrates_to_v5_unchanged() {
     assert!(outcome.recovery().is_none());
 
     let config = outcome.config();
-    assert_eq!(config.schema_version, 5);
+    assert_eq!(config.schema_version, CURRENT_SCHEMA_VERSION);
     assert!(config.assets.is_empty());
     assert_eq!(config.preferences.timezone, "Asia/Tbilisi");
     assert_eq!(config.active_playlist_id, "workday");
@@ -409,8 +411,47 @@ fn v4_config_migrates_to_v5_unchanged() {
 }
 
 #[test]
-fn v0_v1_v2_migrate_directly_to_v5() {
-    let directory = TestDirectory::new("legacy-direct-to-v5");
+fn v5_config_migrates_to_v6_unchanged() {
+    // v6 adds exactly one thing to the schema: a `plugin` card kind no v5 document
+    // could ever contain (it did not exist yet). Every other type is byte-for-byte
+    // the same shape, so migration is a version bump with no data transformation --
+    // the same pattern as v4 -> v5 before it.
+    let directory = TestDirectory::new("v5-migration");
+    let path = directory.config_path();
+    let store = ConfigStore::new(&path);
+    fs::write(&path, include_bytes!("fixtures/v5-roundtrip.json")).unwrap();
+
+    let outcome = store.load();
+    assert_eq!(outcome.origin(), ConfigOrigin::MigratedV5);
+    assert!(outcome.recovery().is_none());
+
+    let migrated = outcome.config();
+    assert_eq!(migrated.schema_version, CURRENT_SCHEMA_VERSION);
+
+    // Independently parse the identical source bytes as the current `AppConfig`
+    // shape and bump only the version field by hand. Because v6 does not change
+    // any existing type, this independently-derived value is what a truly lossless
+    // migration must produce; comparing whole sections (not just scalar summaries)
+    // is what proves "everything a v5 config could express" survived, not just the
+    // few fields a hand-picked spot check would have covered.
+    let mut expected: AppConfig =
+        serde_json::from_str(include_str!("fixtures/v5-roundtrip.json")).unwrap();
+    expected.schema_version = CURRENT_SCHEMA_VERSION;
+
+    assert_eq!(migrated.preferences, expected.preferences);
+    assert_eq!(migrated.cards, expected.cards);
+    assert_eq!(migrated.assets, expected.assets);
+    assert_eq!(migrated.playlists, expected.playlists);
+    assert_eq!(migrated.active_playlist_id, expected.active_playlist_id);
+    assert_eq!(migrated.updater, expected.updater);
+    assert_eq!(migrated, &expected);
+
+    assert!(migrated.validate().is_ok());
+}
+
+#[test]
+fn v0_v1_v2_migrate_directly_to_v6() {
+    let directory = TestDirectory::new("legacy-direct-to-v6");
     let path = directory.config_path();
     let store = ConfigStore::new(&path);
 
@@ -435,7 +476,7 @@ fn v0_v1_v2_migrate_directly_to_v5() {
         let outcome = store.load();
         assert_eq!(outcome.origin(), origin);
         assert!(outcome.recovery().is_none());
-        assert_eq!(outcome.config().schema_version, 5);
+        assert_eq!(outcome.config().schema_version, CURRENT_SCHEMA_VERSION);
         assert_eq!(outcome.config().playlists.len(), 1);
         let entry_ids: Vec<&str> = outcome.config().playlists[0]
             .entries
@@ -484,7 +525,7 @@ fn malformed_truncated_and_oversized_files_preserve_bytes_and_last_good() {
     ));
     assert_eq!(fs::metadata(&path).unwrap().len(), oversized.len() as u64);
 
-    let future = include_bytes!("fixtures/future-v6.json");
+    let future = include_bytes!("fixtures/future-v7.json");
     fs::write(&path, future).unwrap();
     let recovered = store.load();
     assert_eq!(recovered.origin(), ConfigOrigin::LastGood);
@@ -492,8 +533,8 @@ fn malformed_truncated_and_oversized_files_preserve_bytes_and_last_good() {
     assert_eq!(
         recovered.recovery(),
         Some(StoreError::UnsupportedVersion {
-            found: 6,
-            supported: 5,
+            found: 7,
+            supported: 6,
         })
     );
     assert_eq!(fs::read(&path).unwrap(), future);
@@ -587,7 +628,7 @@ fn v2_documents_migrate_to_cards_in_screen_order() {
     assert!(outcome.recovery().is_none());
 
     let config = outcome.config();
-    assert_eq!(config.schema_version, 5);
+    assert_eq!(config.schema_version, CURRENT_SCHEMA_VERSION);
 
     // Order follows screens[], not widgets[] (the fixture deliberately lists the
     // pomodoro widget before the clock widget, but the clock screen comes first).
@@ -642,7 +683,7 @@ fn migrated_v2_documents_always_satisfy_the_rotation_rule() {
 }
 
 #[test]
-fn future_v6_is_a_recoverable_error_preserving_bytes() {
+fn future_v7_is_a_recoverable_error_preserving_bytes() {
     let directory = TestDirectory::new("future-version");
     let path = directory.config_path();
     let store = ConfigStore::new(&path);
@@ -651,7 +692,7 @@ fn future_v6_is_a_recoverable_error_preserving_bytes() {
     last_good.preferences.autostart = true;
     store.save(&last_good).unwrap();
 
-    let future = include_bytes!("fixtures/future-v6.json");
+    let future = include_bytes!("fixtures/future-v7.json");
     fs::write(&path, future).unwrap();
 
     let outcome = store.load();
@@ -660,8 +701,8 @@ fn future_v6_is_a_recoverable_error_preserving_bytes() {
     assert!(matches!(
         outcome.recovery(),
         Some(StoreError::UnsupportedVersion {
-            found: 6,
-            supported: 5
+            found: 7,
+            supported: 6
         })
     ));
     // The unreadable source bytes are never rewritten.

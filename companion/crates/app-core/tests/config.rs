@@ -17,7 +17,7 @@ use protocol::{
 const DEFAULT_JSON: &str = include_str!("fixtures/default.json");
 const FULL_JSON: &str = include_str!("fixtures/full.json");
 const INVALID_JSON: &str = include_str!("fixtures/invalid.json");
-const FUTURE_JSON: &str = include_str!("fixtures/future-v6.json");
+const FUTURE_JSON: &str = include_str!("fixtures/future-v7.json");
 const MALFORMED_JSON: &str = include_str!("fixtures/malformed.json");
 const CARD_SURFACE_JSON: &str = include_str!("fixtures/card-surface.json");
 
@@ -354,8 +354,8 @@ fn malformed_and_unknown_json_are_rejected_by_serde() {
     assert!(serde_json::from_str::<AppConfig>(MALFORMED_JSON).is_err());
 
     let with_unknown = DEFAULT_JSON.replace(
-        "\"schema_version\": 5,",
-        "\"schema_version\": 5, \"unexpected\": true,",
+        "\"schema_version\": 6,",
+        "\"schema_version\": 6, \"unexpected\": true,",
     );
     assert!(serde_json::from_str::<AppConfig>(&with_unknown).is_err());
 
@@ -1123,7 +1123,7 @@ fn every_display_template_lowers_to_the_wire() {
     ];
 
     for card in cards {
-        let template = card.template().clone();
+        let template = card.template().cloned();
         let config = single_card_config(card);
         config.compile(1).unwrap_or_else(|error| {
             panic!("{template:?} must lower to the wire, but compile() failed: {error:?}")
@@ -1227,9 +1227,9 @@ fn entry(card_id: &str) -> PlaylistEntry {
 }
 
 #[test]
-fn default_config_is_v5_with_one_playlist() {
+fn default_config_is_v6_with_one_playlist() {
     let config = AppConfig::default();
-    assert_eq!(config.schema_version, 5);
+    assert_eq!(config.schema_version, app_core::CURRENT_SCHEMA_VERSION);
     assert_eq!(config.playlists.len(), 1);
     assert_eq!(config.active_playlist_id, config.playlists[0].id);
     assert_eq!(config.playlists[0].entries.len(), 1);

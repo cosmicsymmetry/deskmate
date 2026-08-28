@@ -1,5 +1,5 @@
 {
-  "schema_version": 6,
+  "schema_version": 5,
   "preferences": {
     "timezone": "Asia/Tbilisi",
     "autostart": true,
@@ -92,6 +92,12 @@
       "source": { "kind": "file", "value": "/tmp/font.ttf" },
       "kind": { "kind": "font" },
       "maximum_bytes": 262144
+    },
+    {
+      "id": "hero-image",
+      "source": { "kind": "file", "value": "/tmp/hero.png" },
+      "kind": { "kind": "image" },
+      "maximum_bytes": 131072
     }
   ],
   "playlists": [

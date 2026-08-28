@@ -59,7 +59,7 @@ pub const MAX_IP_LEN: usize = 15;
 pub const MAX_ASSET_CHUNK_BYTES: usize = 1920;
 pub const MAX_ASSET_DIGESTS: usize = 32;
 pub const ASSET_DIGEST_LEN: usize = 32;
-const MAX_ASSET_TOTAL_LENGTH: u32 = 1_048_576;
+pub const MAX_ASSET_TOTAL_LENGTH: u32 = 1_048_576;
 
 pub const TYPE_STATUS_REQUEST: u8 = 1;
 pub const TYPE_STATUS_RESPONSE: u8 = 2;

@@ -22,48 +22,83 @@
 //! a manifest's asset name, which is only ever meaningful within its own
 //! manifest.
 //!
+//! # The digest and the bytes come from the SAME read
+//!
+//! [`ResolvedAsset`] carries `bytes` alongside `digest`, both produced by
+//! the one [`read_bounded`] read of `base_dir.join(file)` inside [`resolve_assets`]. This
+//! mirrors `server::asset_sync::DesiredAsset`, which carries `bytes:
+//! Arc<[u8]>` for the identical reason: a caller that re-reads the file
+//! later to get transferable bytes risks a digest that no longer matches
+//! what actually gets sent, if the file changed between the two reads (a
+//! plugin update, an editor save, a symlink swap). That would silently
+//! void exact content-addressing -- the one guarantee this module exists
+//! to establish -- and make Task 5's parity obligation ("the simulator
+//! resolves the same digest to the same bytes") unprovable. There is
+//! exactly one read per asset in this module; nothing downstream needs a
+//! second one.
+//!
 //! # What this module does not do
 //!
 //! It does not push bytes over the wire -- that is Task 7's
 //! `server::asset_sync`, whose existing `resolve_assets` for schema-v5
-//! config assets is this module's closest precedent, and whose established
-//! per-asset byte ceiling (`app_core::MAX_ASSET_BYTES`) this module reuses
-//! rather than inventing a second one for bytes destined for the same
-//! physical flash-resident store. It does not rasterize or measure a font
-//! -- that is `lvgl-sim`'s asset shim, Task 5. And it does not scan a
-//! manifest's node expressions for every `icon(...)` call to pre-validate
-//! every name a manifest could ever ask for: [`AssetSet::icon_codepoint`]
-//! rejects an unresolvable name the moment something asks for one (Task
-//! 3/7's compiler), which is early enough to satisfy spec §1's "the server
-//! validates the name resolves" without this module needing its own copy
-//! of the expression grammar.
+//! config assets is this module's closest precedent. It does not
+//! rasterize or measure a font -- that is `lvgl-sim`'s asset shim, Task 5.
+//! And it does not scan a manifest's node expressions for every
+//! `icon(...)` call to pre-validate every name a manifest could ever ask
+//! for: [`AssetSet::icon_codepoint`] rejects an unresolvable name the
+//! moment something asks for one (Task 3/7's compiler), which is early
+//! enough to satisfy spec §1's "the server validates the name resolves"
+//! without this module needing its own copy of the expression grammar.
 
 use std::collections::HashMap;
 use std::fs;
+use std::io::Read as _;
 use std::path::Path;
+use std::sync::Arc;
 
-use protocol::{ASSET_DIGEST_LEN, AssetKind};
+use protocol::{ASSET_DIGEST_LEN, AssetKind, MAX_ASSET_TOTAL_LENGTH};
 use sha2::{Digest, Sha256};
 
 use crate::expr::build_icon_map;
 use crate::manifest::{Asset, PluginManifest};
 
 /// Maximum byte length of one resolved asset file. Imported, not restated:
-/// it *is* `app_core::MAX_ASSET_BYTES`, the per-asset ceiling the
-/// schema-v5 (non-plugin) asset path already enforces for bytes destined
-/// for the same physical asset store, so a plugin asset and a config asset
-/// share one budget rather than drifting apart.
-pub const MAX_ASSET_BYTES: u32 = app_core::MAX_ASSET_BYTES;
+/// it *is* `protocol::MAX_ASSET_TOTAL_LENGTH`, the wire's own ceiling on
+/// `AssetBegin.total_length` -- the bound `validate_asset_begin` actually
+/// enforces for any asset reaching the device. `app_core::MAX_ASSET_BYTES`
+/// (262,144) was considered and rejected: it only bounds a config-authored
+/// budget *field* for schema-v5 assets and is not enforced anywhere in
+/// firmware (`firmware/main/core/asset_store.c` has no fixed per-blob
+/// ceiling of its own), so it is the wrong authority here and would
+/// conservatively reject legal assets up to 1 MiB that a real device
+/// happily accepts.
+pub const MAX_ASSET_BYTES: u32 = MAX_ASSET_TOTAL_LENGTH;
 
-/// One manifest asset, resolved to the digest, byte length, and wire kind
-/// a server-side transfer path needs to stream it (mirroring
-/// `server::asset_sync::DesiredAsset`'s shape, without pulling the bytes
-/// themselves into this crate).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// One manifest asset, resolved to the digest, bytes, and wire kind a
+/// server-side transfer path needs to stream it -- the same shape
+/// `server::asset_sync::DesiredAsset` carries, and for the same reason:
+/// `bytes` and `digest` must come from one read (see this module's doc).
+#[derive(Debug, Clone)]
 pub struct ResolvedAsset {
     pub digest: [u8; ASSET_DIGEST_LEN],
-    pub len: u32,
+    pub bytes: Arc<[u8]>,
     pub kind: AssetKind,
+}
+
+impl ResolvedAsset {
+    /// The resolved byte length, cheaply, without re-deriving it from
+    /// `bytes.len()` at every call site.
+    pub fn len(&self) -> usize {
+        self.bytes.len()
+    }
+
+    /// An asset is never legitimately empty -- see [`AssetError::Empty`],
+    /// which `resolve_assets` already refuses before a `ResolvedAsset` is
+    /// ever constructed. This exists only to satisfy clippy's
+    /// `len_without_is_empty`.
+    pub fn is_empty(&self) -> bool {
+        self.bytes.is_empty()
+    }
 }
 
 /// The result of resolving every `[[assets]]` entry in one manifest: a
@@ -121,7 +156,13 @@ pub enum AssetError {
     /// legitimate: rejected here rather than shipped to fail (or, worse,
     /// succeed vacuously) at the device's font/image loader.
     Empty { file: String },
-    /// An asset file exceeds [`MAX_ASSET_BYTES`].
+    /// An asset file exceeds [`MAX_ASSET_BYTES`]. `actual` is the number of
+    /// bytes this module actually read before refusing, not necessarily
+    /// the file's true on-disk size: the read itself is bounded at
+    /// `MAX_ASSET_BYTES + 1` (see [`read_bounded`]) so an oversized file is
+    /// never pulled fully into memory just to be rejected. `actual` is
+    /// therefore always exactly `MAX_ASSET_BYTES + 1` for any file at or
+    /// past the ceiling.
     TooLarge {
         file: String,
         limit: u32,
@@ -165,14 +206,35 @@ fn wire_kind(asset: &Asset) -> AssetKind {
     }
 }
 
+/// Reads at most `cap + 1` bytes from `path` and returns them.
+///
+/// This is the bound that keeps an oversized file on an untrusted path from
+/// becoming an unbounded allocation: the read stops at `cap + 1` bytes
+/// regardless of the file's real size, so a multi-gigabyte file costs one
+/// `cap`-sized buffer, never a full read into memory. Deliberately not a
+/// `fs::metadata().len()` pre-check followed by a full `fs::read` -- a
+/// stat-then-read is TOCTOU-prone, since the file can grow between the
+/// stat and the read. Reading through a capped `Take` has no such window:
+/// the cap is enforced by the read itself, not by a separate check of a
+/// size that could already be stale by the time it is acted on.
+fn read_bounded(path: &Path, cap: u32) -> std::io::Result<Vec<u8>> {
+    let file = fs::File::open(path)?;
+    let mut limited = file.take(u64::from(cap) + 1);
+    let mut bytes = Vec::new();
+    limited.read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
 /// Reads, content-addresses, and bounds every `[[assets]]` entry in
 /// `manifest`, relative to `base_dir`, and builds the icon-name codepoint
 /// table every `icon-font` entry contributes to.
 ///
 /// Untrusted input: `manifest` may be attacker-controlled TOML (Task 1
 /// bounds its *shape*, not its bytes) and the files it names may be
-/// attacker-controlled bytes. Every length is bounded before it is used;
-/// nothing here panics, hangs, or allocates without a cap in front of it.
+/// attacker-controlled bytes, including their length. Every length is
+/// bounded before it is used -- the read itself is capped, not just the
+/// bytes after a full read -- so nothing here panics, hangs, or allocates
+/// without a bound in front of it.
 pub fn resolve_assets(manifest: &PluginManifest, base_dir: &Path) -> Result<AssetSet, AssetError> {
     let mut resolved = HashMap::with_capacity(manifest.assets.len());
     let mut icon_codepoints = HashMap::new();
@@ -181,7 +243,7 @@ pub fn resolve_assets(manifest: &PluginManifest, base_dir: &Path) -> Result<Asse
     for asset in &manifest.assets {
         let file = asset_file(asset);
         let path = base_dir.join(file);
-        let bytes = fs::read(&path).map_err(|error| AssetError::Io {
+        let bytes = read_bounded(&path, MAX_ASSET_BYTES).map_err(|error| AssetError::Io {
             file: file.to_string(),
             message: error.to_string(),
         })?;
@@ -192,12 +254,7 @@ pub fn resolve_assets(manifest: &PluginManifest, base_dir: &Path) -> Result<Asse
             });
         }
 
-        let len = u32::try_from(bytes.len()).map_err(|_| AssetError::TooLarge {
-            file: file.to_string(),
-            limit: MAX_ASSET_BYTES,
-            actual: bytes.len(),
-        })?;
-        if len > MAX_ASSET_BYTES {
+        if bytes.len() > MAX_ASSET_BYTES as usize {
             return Err(AssetError::TooLarge {
                 file: file.to_string(),
                 limit: MAX_ASSET_BYTES,
@@ -210,7 +267,7 @@ pub fn resolve_assets(manifest: &PluginManifest, base_dir: &Path) -> Result<Asse
             file.to_string(),
             ResolvedAsset {
                 digest,
-                len,
+                bytes: Arc::from(bytes),
                 kind: wire_kind(asset),
             },
         );
@@ -303,7 +360,7 @@ mod tests {
     }
 
     #[test]
-    fn a_font_asset_resolves_by_name_with_its_digest_length_and_kind() {
+    fn a_font_asset_resolves_by_name_with_its_digest_bytes_and_kind() {
         let dir = tempfile::tempdir().expect("tempdir");
         let bytes: &[u8] = b"a small font blob";
         fs::write(dir.path().join("font.ttf"), bytes).expect("write fixture");
@@ -315,9 +372,28 @@ mod tests {
         let asset = resolved.get("font.ttf").expect("resolved");
 
         assert_eq!(asset.kind, AssetKind::Font);
-        assert_eq!(asset.len, u32::try_from(bytes.len()).expect("fits"));
-        let expected_digest: [u8; ASSET_DIGEST_LEN] = Sha256::digest(bytes).into();
-        assert_eq!(asset.digest, expected_digest);
+        assert_eq!(&*asset.bytes, bytes);
+        assert_eq!(asset.len(), bytes.len());
+    }
+
+    #[test]
+    fn the_resolved_bytes_hash_to_the_resolved_digest() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let bytes: &[u8] = b"the digest must describe exactly these bytes, not a re-read";
+        fs::write(dir.path().join("font.ttf"), bytes).expect("write fixture");
+        let manifest = minimal_manifest(vec![Asset::Font {
+            file: "font.ttf".to_string(),
+        }]);
+
+        let resolved = resolve_assets(&manifest, dir.path()).expect("resolve");
+        let asset = resolved.get("font.ttf").expect("resolved");
+
+        let expected_digest: [u8; ASSET_DIGEST_LEN] = Sha256::digest(&asset.bytes).into();
+        assert_eq!(
+            asset.digest, expected_digest,
+            "ResolvedAsset::digest must be the hash of ResolvedAsset::bytes -- the same read, \
+             not two"
+        );
     }
 
     #[test]
@@ -396,8 +472,8 @@ mod tests {
         let resolved = resolve_assets(&manifest, dir.path()).expect("must resolve at the ceiling");
 
         assert_eq!(
-            resolved.get("max.ttf").expect("resolved").len,
-            MAX_ASSET_BYTES
+            resolved.get("max.ttf").expect("resolved").len(),
+            MAX_ASSET_BYTES as usize
         );
     }
 
@@ -419,6 +495,38 @@ mod tests {
                 limit: MAX_ASSET_BYTES,
                 actual: MAX_ASSET_BYTES as usize + 1,
             }
+        );
+    }
+
+    #[test]
+    fn a_file_far_over_the_ceiling_is_rejected_without_reading_it_whole() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("huge.ttf");
+        let file = fs::File::create(&path).expect("create");
+        // A sparse file: `set_len` claims a size far past MAX_ASSET_BYTES
+        // (here, ~4 GiB) without writing that many real bytes to disk. A
+        // bounded reader that stops at MAX_ASSET_BYTES + 1 rejects this
+        // near-instantly; `fs::read`-the-whole-file-then-check would try to
+        // materialize gigabytes into memory first. This is the proof that
+        // the read itself, not just a post-hoc length check, is bounded.
+        file.set_len(u64::from(MAX_ASSET_BYTES) * 4096)
+            .expect("set sparse length");
+        drop(file);
+        let manifest = minimal_manifest(vec![Asset::Font {
+            file: "huge.ttf".to_string(),
+        }]);
+
+        let error = resolve_assets(&manifest, dir.path()).expect_err("must be rejected");
+
+        assert_eq!(
+            error,
+            AssetError::TooLarge {
+                file: "huge.ttf".to_string(),
+                limit: MAX_ASSET_BYTES,
+                actual: MAX_ASSET_BYTES as usize + 1,
+            },
+            "a bounded reader must report exactly cap + 1 bytes read, never the file's true \
+             (unread) size"
         );
     }
 

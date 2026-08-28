@@ -875,6 +875,87 @@ mod tests {
         );
     }
 
+    /// Spawns a loopback server, on its own dedicated-runtime background
+    /// thread exactly like `spawn_status_server`, whose *first* request
+    /// succeeds (200, JSON) and every request after that fails (503,
+    /// HTML). Lets a single `PluginDataProvider` (one fixed URL) actually
+    /// observe a real transition from good data to a real error response.
+    fn spawn_first_ok_then_failing_server() -> std::net::SocketAddr {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Runtime::new().expect("build test server runtime");
+            runtime.block_on(async move {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                    .await
+                    .expect("bind a loopback listener");
+                let addr = listener.local_addr().expect("listener has a local addr");
+                tx.send(addr).expect("send bound addr to the test thread");
+                let requests = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                let router = axum::Router::new().route(
+                    "/data",
+                    axum::routing::get(move || {
+                        let requests = std::sync::Arc::clone(&requests);
+                        async move {
+                            let previous =
+                                requests.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            if previous == 0 {
+                                (
+                                    axum::http::StatusCode::OK,
+                                    [(axum::http::header::CONTENT_TYPE, "application/json")],
+                                    br#"{"aqi": 7}"#.as_slice(),
+                                )
+                            } else {
+                                (
+                                    axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                                    [(axum::http::header::CONTENT_TYPE, "text/html")],
+                                    b"<html><body>down</body></html>".as_slice(),
+                                )
+                            }
+                        }
+                    }),
+                );
+                let _ = axum::serve(listener, router).await;
+            });
+        });
+        rx.recv().expect("receive bound addr from server thread")
+    }
+
+    /// Fix round 2, item 2: both 503 tests above start with no last-good
+    /// value, so they prove the `stale` flag alone -- not the retention
+    /// that makes `stale` meaningful. A card that goes stale but loses its
+    /// value is still a blank card. This seeds a real successful fetch
+    /// (real network round trip, real JSON body), then a real 503 against
+    /// the SAME provider/URL, and asserts the second snapshot is stale
+    /// *and* still carries the value the first, successful fetch produced.
+    #[test]
+    fn a_503_after_a_successful_fetch_keeps_the_last_good_value() {
+        let addr = spawn_first_ok_then_failing_server();
+        let source = Source::Json {
+            url: format!("http://{addr}/data"),
+            refresh_minutes: 15,
+        };
+        let mut provider =
+            PluginDataProvider::new(DirectHttpFetcher::new(), &source).expect("construct provider");
+
+        let first = provider.refresh(Utc::now());
+        assert!(!first.stale, "the first (200) refresh must succeed");
+        assert_eq!(first.value, serde_json::json!({"aqi": 7}));
+        assert_eq!(provider.last_failure_class(), None);
+
+        let second = provider.refresh(Utc::now());
+        assert!(
+            second.stale,
+            "the second (503) refresh must surface as stale"
+        );
+        assert_eq!(
+            second.value,
+            serde_json::json!({"aqi": 7}),
+            "the last-good value from the first successful fetch must be retained \
+             across the 503, not replaced or lost"
+        );
+        assert_eq!(provider.last_failure_class(), Some(FailureClass::Transient));
+    }
+
     // -- Fix round 1, item 5: the documented caller obligation must fail
     // typed, not panic. ---------------------------------------------------
 
@@ -994,7 +1075,32 @@ mod tests {
     }
 
     #[test]
-    fn a_render_wall_clock_timeout_is_transient() {
+    fn a_real_render_wall_clock_overrun_classifies_as_transient() {
+        // Fix round 2, item 3: the original version of this test asserted
+        // the row against a hand-built `PluginFailure::RenderTimedOut`,
+        // with nothing proving that actually exceeding the budget produces
+        // that shape of failure in the first place -- exactly what made
+        // the 5xx row dead code the first time. This drives a REAL overrun
+        // through the real public `within_render_wall_clock_budget` (the
+        // same function Task 8 will call), confirms the resulting error is
+        // genuinely `PluginCapError::RenderWallClockExceeded` with the
+        // real budget and a real over-budget `elapsed`, and only then
+        // classifies it.
+        let outcome: Result<(), PluginCapError> = within_render_wall_clock_budget(|| {
+            std::thread::sleep(MAX_RENDER_WALL_CLOCK + Duration::from_millis(50));
+        });
+
+        match outcome {
+            Err(PluginCapError::RenderWallClockExceeded { limit, elapsed }) => {
+                assert_eq!(limit, MAX_RENDER_WALL_CLOCK);
+                assert!(elapsed > MAX_RENDER_WALL_CLOCK);
+            }
+            other => panic!(
+                "expected a real RenderWallClockExceeded from actually exceeding the \
+                 budget, got {other:?}"
+            ),
+        }
+
         assert_eq!(
             classify_plugin_failure(&PluginFailure::RenderTimedOut),
             FailureClass::Transient,

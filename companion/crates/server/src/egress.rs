@@ -1518,6 +1518,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fetch_returns_the_response_status_for_a_non_2xx_response() {
+        // Fix round 2, item 1: the status capture at the end of
+        // `fetch_inner` (`let status = response.status().as_u16();`) had
+        // no test at THIS level -- `plugin_provider.rs`'s 503 tests drive a
+        // real loopback server too, but through `DirectHttpFetcher`, which
+        // bypasses `egress::fetch` entirely. Hardcoding `let status =
+        // 200u16;` there passed all 165 tests. This drives the real
+        // guarded path (`fetch_with_resolver`, the same production
+        // composition the redirect-chain test above uses) against a server
+        // that answers 503, and asserts the returned status is 503, not
+        // silently 200.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind a loopback listener");
+        let addr = listener.local_addr().expect("listener has a local addr");
+        let router = axum::Router::new().route(
+            "/unavailable",
+            axum::routing::get(|| async {
+                (
+                    axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                    "service unavailable",
+                )
+            }),
+        );
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+        let url = format!("http://unavailable.invalid:{}/unavailable", addr.port());
+
+        let outcome = fetch_with_resolver(&url, &FixedAddrResolver(addr)).await;
+
+        let response = outcome.expect("a non-2xx response must still be a successful fetch");
+        assert_eq!(response.status, 503);
+        assert_eq!(response.body, b"service unavailable".to_vec());
+    }
+
+    #[tokio::test]
     async fn fetch_inner_denies_a_redirect_target_that_resolves_to_a_denied_address() {
         // Distinct from the URL-space-only check above: this drives the
         // REAL fetch_inner loop end to end -- resolver.resolve, the HTTP

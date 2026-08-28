@@ -23,6 +23,11 @@ serde_json = "1"
 thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Egress guard (companion/crates/server/src/egress.rs): outbound plugin data
+# fetches need TLS, hence "rustls" here even though the dev-dependency below
+# (used by loopback-only integration tests) stays TLS-less.
+reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
+url = "2"
 # Backs `FirmwareCatalog::in_memory()`, which is normal library API (used by
 # every integration test binary, not just this crate's own #[cfg(test)]
 # code) -- it must be a real dependency, not a dev-dependency.
@@ -33,6 +38,10 @@ protocol = { path = "../protocol", features = ["test-support"] }
 tokio-tungstenite = "0.24"
 reqwest = { version = "0.13", default-features = false }
 http = "1"
+# egress.rs's timeout-budget tests use tokio's virtual clock
+# (`#[tokio::test(start_paused = true)]`) to prove the cap deterministically
+# without a real 20-second sleep.
+tokio = { version = "1", features = ["test-util"] }
 
 [lints]
 workspace = true

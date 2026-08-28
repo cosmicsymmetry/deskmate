@@ -17,6 +17,7 @@ mod admin;
 pub mod asset_sync;
 mod auth;
 mod device_link;
+pub mod egress;
 pub mod firmware;
 pub mod registry;
 pub mod runtime_device;

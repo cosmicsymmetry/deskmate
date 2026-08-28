@@ -41,7 +41,7 @@ use protocol::{
     SceneText, SceneValue,
 };
 
-use app_core::{BakedFontMetrics, SceneDataState, number_font_tier, with_scene_data_state};
+use app_core::{BakedFontMetrics, SceneDataState, text_is_numeric, with_scene_data_state};
 
 use crate::expr::{EvalContext, Expr, ExprError, FUEL_BUDGET, Fuel};
 use crate::manifest::{Align, Font, FontTier, Node, PluginManifest, Point, Repeat};
@@ -315,6 +315,30 @@ fn resolve_scene_font(font: &Font) -> Result<SceneFont, CompileError> {
     }
 }
 
+/// Steps a Display/Hero literal's *authored* tier down to `Body` when it
+/// cannot render `text` -- never up to a larger tier.
+///
+/// `app_core::number_font_tier` always tries `Hero` before `Display`: it
+/// was written for callers that dynamically pick the biggest tier that
+/// fits (`digital_clock.c` deliberately does *not* call it, precisely
+/// because it pins `Hero` rather than letting it float). A plugin manifest
+/// author, by contrast, names one specific tier -- an authoring decision,
+/// not a hint -- so this only ever tries `tier` itself, falling back to
+/// `Body` (the one baked tier with no digits-only restriction) when `text`
+/// is not numeric or does not fit `max_width` at that tier.
+fn capped_number_font_tier(
+    tier: SceneFontTier,
+    text: &str,
+    max_width: i32,
+    metrics: &BakedFontMetrics,
+) -> SceneFontTier {
+    if text_is_numeric(text) && metrics.measure(tier, text).is_some_and(|width| width <= max_width) {
+        tier
+    } else {
+        SceneFontTier::Body
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Per-repetition geometry offset.
 // ---------------------------------------------------------------------------
@@ -517,15 +541,19 @@ fn compile_node(
             // is not, in fact, digits-only content (a transient provider
             // value like "42.5", "N/A", or "12 km" is entirely realistic)
             // must not fail the whole scene -- a transient data value is
-            // not a permanent card fault. `number_font_tier` is the
-            // firmware's own `deskmate_number_font()` rule, ported: it
-            // steps the tier down to `Body` rather than refusing, which is
-            // reused here rather than re-implemented.
-            let scene_font = if let SceneFont::Baked(SceneFontTier::Display | SceneFontTier::Hero) =
+            // not a permanent card fault. `capped_number_font_tier` steps
+            // the *authored* tier down to `Body` when it cannot render the
+            // text -- never up. `app_core::number_font_tier` cannot be
+            // reused directly here: it always tries `Hero` before
+            // `Display`, which silently promoted an authored `Display` node
+            // to `Hero` whenever the text also happened to fit Hero's
+            // width. A manifest's tier is an authoring decision, not a
+            // hint.
+            let scene_font = if let SceneFont::Baked(tier @ (SceneFontTier::Display | SceneFontTier::Hero)) =
                 scene_font
                 && let SceneValue::Literal(text) = &scene_value
             {
-                SceneFont::Baked(number_font_tier(text, *w, metrics))
+                SceneFont::Baked(capped_number_font_tier(tier, text, *w, metrics))
             } else {
                 scene_font
             };
@@ -1132,7 +1160,7 @@ mod tests {
     // -- Numeric-tier literal step-down (controller ruling: a transient
     // -- non-numeric provider value must not fail the whole scene). --
 
-    fn hero_text_manifest(value: &str) -> PluginManifest {
+    fn tiered_text_manifest(tier: ManifestFontTier, value: &str) -> PluginManifest {
         PluginManifest {
             name: "test".to_string(),
             version: "1.0.0".to_string(),
@@ -1146,15 +1174,17 @@ mod tests {
                 baseline_y: 96,
                 w: 400,
                 align: ManifestAlign::Left,
-                font: ManifestFont::Tier {
-                    tier: ManifestFontTier::Hero,
-                },
+                font: ManifestFont::Tier { tier },
                 color: 0,
                 value: value.to_string(),
                 ellipsize: false,
             }],
             repeats: Vec::new(),
         }
+    }
+
+    fn hero_text_manifest(value: &str) -> PluginManifest {
+        tiered_text_manifest(ManifestFontTier::Hero, value)
     }
 
     #[test]
@@ -1205,6 +1235,39 @@ mod tests {
         let node = text_node(&scene, 0);
         assert_eq!(SceneValue::Literal("42".to_string()), node.value);
         assert_eq!(node.font, SceneFont::Baked(SceneFontTier::Hero));
+    }
+
+    // -- The tier cap (round-2 review fix): the compiler must never promote
+    // -- an authored tier upward, only ever step it down to Body. --
+
+    #[test]
+    fn an_authored_display_tier_with_a_short_numeric_value_stays_display() {
+        // Regression: `app_core::number_font_tier` tries `Hero` before
+        // `Display`, and "5" fits Hero's width too -- calling it directly
+        // silently promoted this node to Hero. This must stay `Display`.
+        let manifest = tiered_text_manifest(ManifestFontTier::Display, "5");
+        let scene = compile_scene(&manifest, &snapshot(), &metrics(), 1).unwrap();
+        let node = text_node(&scene, 0);
+        assert_eq!(node.font, SceneFont::Baked(SceneFontTier::Display));
+        assert_eq!(node.value, SceneValue::Literal("5".to_string()));
+    }
+
+    #[test]
+    fn an_authored_display_tier_with_a_non_numeric_value_steps_down_to_body() {
+        let manifest = tiered_text_manifest(ManifestFontTier::Display, "N/A");
+        let scene = compile_scene(&manifest, &snapshot(), &metrics(), 1).unwrap();
+        let node = text_node(&scene, 0);
+        assert_eq!(node.font, SceneFont::Baked(SceneFontTier::Body));
+        assert_eq!(node.value, SceneValue::Literal("N/A".to_string()));
+    }
+
+    #[test]
+    fn an_authored_hero_tier_with_a_short_numeric_value_stays_hero() {
+        let manifest = tiered_text_manifest(ManifestFontTier::Hero, "5");
+        let scene = compile_scene(&manifest, &snapshot(), &metrics(), 1).unwrap();
+        let node = text_node(&scene, 0);
+        assert_eq!(node.font, SceneFont::Baked(SceneFontTier::Hero));
+        assert_eq!(node.value, SceneValue::Literal("5".to_string()));
     }
 
     // -- The repeat form. --

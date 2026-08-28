@@ -626,12 +626,12 @@ also the first time any of the renderer's node capabilities are seen on hardware
 2b's check was a *download*, and arc opacity, the external pivot and both clips have never
 drawn on the panel.
 
-- [ ] **Step 1: Build and record the memory deltas** on a **same-tree** before/after.
+- [x] **Step 1: Build and record the memory deltas** on a **same-tree** before/after.
       Baseline at the time of writing (commit `05500ef`): `.bss` **102,624**, DIRAM `.text`
       **93,635**, `.data` **23,128**, IRAM **16,384/16,384 with 0 remaining**, DIRAM total
       **219,387**. Re-measure the baseline on the actual tree rather than quoting these —
       a fresh total means nothing without the before/after.
-- [ ] **Step 2: Publish.** Three steps, all required: put `<version>.bin` in
+- [x] **Step 2: Publish.** Three steps, all required: put `<version>.bin` in
       `$DESKMATE_FIRMWARE_DIR` on the VM, set `DESKMATE_FIRMWARE_VERSION` to that string,
       restart `deskmate-server.service`. Move `firmware/version.txt` to match — the catalog
       offers its version in **either** direction, so a device on a different string is
@@ -640,10 +640,10 @@ drawn on the panel.
       out from any other network. Then verify end-to-end: `GET
       https://deskmate.rodi.one/v1/firmware/<version>.bin` returns 200 and an md5 matching
       the local build.
-- [ ] **Step 3: Power-cycle** (owner action). The device checks at boot and twice a day,
+- [x] **Step 3: Power-cycle** (owner action). The device checks at boot and twice a day,
       cannot be asked, and **a USB unplug is link loss, not power loss** — the board has a
       battery.
-- [ ] **Step 4: Observe on the panel, at 90° and 270°.** Use `tools/hwcam/`
+- [x] **Step 4: Observe on the panel, at 90° and 270°.** Use `tools/hwcam/`
       (`docs/hardware/webcam-harness.md`); prefer it for panel observations. Observe, per
       orientation:
       - a `DigitalClock` scene ticking **across a minute boundary**, with the date line and
@@ -654,7 +654,7 @@ drawn on the panel.
       - **a tap with the link down**, showing the timer move anyway (Task 4).
       - an arc drawn at `LV_OPA_20`, an external-pivot tick, and a clipped rect — none has
         ever drawn on hardware.
-- [ ] **Step 5: Record in `docs/hardware/board-notes.md`.** Quote the observed values
+- [x] **Step 5: Record in `docs/hardware/board-notes.md`.** Quote the observed values
       rather than paraphrasing, and state explicitly what was *not* observed. Never
       describe as verified anything not seen on the physical board.
 

@@ -3985,3 +3985,32 @@ Stage 2a had a decisive visual tell — a ticking seconds field against a saved 
 `show_seconds: false`, which the C template *cannot* draw. That tell is not available here:
 the automatic path builds the scene from the same card, so both halves agree about seconds
 by design. Do not go looking for it.
+
+### Gate A panel observation — PASSED, with three items still owed — 2026-08-28
+
+Owner-observed on `v2.0.0-live1` with the redeployed server pushing scenes: **the panel
+renders correctly with no artifacts**, at the board's current **270°**.
+
+That is the substance of Gate A. Combined with the clean OTA install and the negotiation
+logic's own tests, the renderer's live-binding path is now known to draw correctly on real
+hardware — which it never had before. Arc opacity, the external rot-rect pivot and both
+clip forms have now drawn on the panel for the first time.
+
+**Do not read more into it than was said.** Three of Task 6 Step 4's observations were not
+separately confirmed and remain owed:
+
+1. **A minute boundary crossing** — that the date line and both small-dial hands, which
+   were literals before this stage, actually step. A still frame cannot show this, and it
+   is the specific thing the `date` and `time:angle:*` bindings exist to fix.
+2. **90°.** The board sits at 270°. Real 270° geometry is only ever provable by looking,
+   and so is 90°; the simulator's flipped framebuffer is an exact index reversal and proves
+   neither.
+3. **A `ProgressRing` timer advancing** with its STATUS word and indicator colour
+   following state, and **a tap moving the timer with the link down** (Task 4).
+
+**Ruling: these three are folded into Gate B (Task 9) rather than gating Task 8.** Gate B
+needs its own power cycle regardless, so bundling costs nothing, and the risk Gate A exists
+to isolate — a rendering fault being confused with a memory-layout fault — is already
+substantially retired by a clean install and a clean panel. If any of the three then fails,
+the C templates are gone and the diagnosis is harder; that is the accepted cost, and it is
+accepted deliberately rather than by omission.

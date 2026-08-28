@@ -36,9 +36,16 @@
 //!   repeated across many nodes still terminates against one shared
 //!   budget -- not a fresh budget per node.
 //! - **Output size** ([`MAX_OUTPUT_LEN`]) bounds every [`EvalValue::Text`]
-//!   at the moment it is constructed, truncated at a UTF-8 char boundary.
-//!   A provider returning a multi-megabyte string cannot make evaluation
-//!   allocate without a cap in front of it.
+//!   at the moment it is constructed. A value that exceeds it is rejected
+//!   with the named [`ExprError::OutputTooLong`], not silently shortened --
+//!   silent truncation would be indistinguishable from `truncate(s, n)`'s
+//!   own deliberate one, and would misreport an oversized value as
+//!   `Missing` data that "is not there". `truncate(s, n)` itself is the one
+//!   exception: an author who explicitly asked for truncation still gets a
+//!   value, with its own internal byte-safety clamp (not this bound)
+//!   handling a multi-byte character landing exactly on the edge. Either
+//!   way, a provider returning a multi-megabyte string cannot make
+//!   evaluation allocate without a cap in front of it.
 //! - **Path width** ([`MAX_PATH_SEGMENTS`]) bounds the number of
 //!   `.field`/`[index]` steps in one path chain. Depth alone only bounds
 //!   *nested* structure (parens/calls); a long flat `data.a.b.c...` chain
@@ -133,6 +140,14 @@ pub enum ExprError {
     },
     /// A numeric literal or array index did not parse as a number.
     InvalidNumber { at: usize },
+    /// A `Text` value (a string literal, a field read, or `upper`/`lower`'s
+    /// result) would exceed [`MAX_OUTPUT_LEN`] bytes. This is distinct from
+    /// `truncate(s, n)`'s own explicit truncation, which is an author's
+    /// request and stays a value, not an error: this variant fires only
+    /// where truncation was never asked for, so silently shortening the
+    /// value would misreport "the data is not there" (`Missing`) or hide
+    /// that a safety cap -- not the author -- shaped the output.
+    OutputTooLong { limit: usize, actual: usize },
     /// Evaluation exhausted its shared [`Fuel`] budget.
     OutOfFuel,
 }
@@ -684,7 +699,7 @@ fn eval_node(
 ) -> Result<EvalValue, ExprError> {
     fuel.consume(1)?;
     match node {
-        ExprNode::Str(s) => Ok(EvalValue::Text(bound_text(s.clone()))),
+        ExprNode::Str(s) => Ok(EvalValue::Text(bound_text(s.clone())?)),
         ExprNode::Num(n) => Ok(EvalValue::Number(*n)),
         ExprNode::Path(segments) => eval_path(ctx.data, segments, fuel),
         ExprNode::Elvis(lhs, rhs) => {
@@ -722,36 +737,44 @@ fn eval_path(
             None => return Ok(EvalValue::Missing),
         }
     }
-    Ok(json_to_eval_value(current))
+    json_to_eval_value(current)
 }
 
-fn json_to_eval_value(value: &serde_json::Value) -> EvalValue {
+fn json_to_eval_value(value: &serde_json::Value) -> Result<EvalValue, ExprError> {
     match value {
-        serde_json::Value::Bool(b) => EvalValue::Bool(*b),
+        serde_json::Value::Bool(b) => Ok(EvalValue::Bool(*b)),
         serde_json::Value::Number(n) => match n.as_f64() {
-            Some(f) if f.is_finite() => EvalValue::Number(f),
-            _ => EvalValue::Missing,
+            Some(f) if f.is_finite() => Ok(EvalValue::Number(f)),
+            _ => Ok(EvalValue::Missing),
         },
-        serde_json::Value::String(s) => EvalValue::Text(bound_text(s.clone())),
+        serde_json::Value::String(s) => Ok(EvalValue::Text(bound_text(s.clone())?)),
         // `Null` and the two compound kinds all land here: `null` has no
         // scalar EvalValue, and a path that stops on an object or array
         // (without indexing/field-ing further) is not a value this
         // language can express either.
         serde_json::Value::Null | serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
-            EvalValue::Missing
+            Ok(EvalValue::Missing)
         }
     }
 }
 
-fn bound_text(mut s: String) -> String {
+/// Bounds a constructed `Text` value to [`MAX_OUTPUT_LEN`] bytes -- by
+/// rejection, not truncation. A value that reaches here (a string literal,
+/// a field read, or `upper`/`lower`'s result) was never asked to be
+/// shortened, so silently cutting it would be a third, unauthorised
+/// behaviour indistinguishable from `truncate(s, n)`'s deliberate one; see
+/// [`ExprError::OutputTooLong`]. `truncate(s, n)`'s own internal byte-safety
+/// clamp (`truncate_to_byte_cap`, below) is the one place this module still
+/// truncates, because there truncation is exactly what was asked for.
+fn bound_text(s: String) -> Result<String, ExprError> {
     if s.len() > MAX_OUTPUT_LEN {
-        let mut end = MAX_OUTPUT_LEN;
-        while end > 0 && !s.is_char_boundary(end) {
-            end -= 1;
-        }
-        s.truncate(end);
+        Err(ExprError::OutputTooLong {
+            limit: MAX_OUTPUT_LEN,
+            actual: s.len(),
+        })
+    } else {
+        Ok(s)
     }
-    s
 }
 
 fn eval_call(
@@ -763,11 +786,11 @@ fn eval_call(
     match function {
         Function::Upper => {
             let x = eval_node(&args[0], ctx, fuel)?;
-            Ok(call_upper(&x))
+            call_upper(&x)
         }
         Function::Lower => {
             let x = eval_node(&args[0], ctx, fuel)?;
-            Ok(call_lower(&x))
+            call_lower(&x)
         }
         Function::Round => {
             let x = eval_node(&args[0], ctx, fuel)?;
@@ -796,17 +819,17 @@ fn eval_call(
     }
 }
 
-fn call_upper(x: &EvalValue) -> EvalValue {
+fn call_upper(x: &EvalValue) -> Result<EvalValue, ExprError> {
     match x {
-        EvalValue::Text(s) => EvalValue::Text(bound_text(s.to_uppercase())),
-        _ => EvalValue::Missing,
+        EvalValue::Text(s) => Ok(EvalValue::Text(bound_text(s.to_uppercase())?)),
+        _ => Ok(EvalValue::Missing),
     }
 }
 
-fn call_lower(x: &EvalValue) -> EvalValue {
+fn call_lower(x: &EvalValue) -> Result<EvalValue, ExprError> {
     match x {
-        EvalValue::Text(s) => EvalValue::Text(bound_text(s.to_lowercase())),
-        _ => EvalValue::Missing,
+        EvalValue::Text(s) => Ok(EvalValue::Text(bound_text(s.to_lowercase())?)),
+        _ => Ok(EvalValue::Missing),
     }
 }
 
@@ -847,7 +870,26 @@ fn call_truncate(s: &EvalValue, n: &EvalValue) -> EvalValue {
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let max_chars = clamped as usize;
     let truncated: String = text.chars().take(max_chars).collect();
-    EvalValue::Text(bound_text(truncated))
+    EvalValue::Text(truncate_to_byte_cap(truncated))
+}
+
+/// `truncate(s, n)`'s own byte-safety backstop, kept exactly as authorised
+/// by the controller ruling: after clamping to at most `n` *characters*, a
+/// multi-byte character can still push the result past `MAX_OUTPUT_LEN`
+/// *bytes* (e.g. `MAX_OUTPUT_LEN` four-byte emoji). The author already
+/// asked for truncation here, so trimming the last partial character is
+/// the same requested operation, not the unrequested-overflow condition
+/// [`ExprError::OutputTooLong`] exists for -- this is the one place in the
+/// module that still truncates rather than erroring.
+fn truncate_to_byte_cap(mut s: String) -> String {
+    if s.len() > MAX_OUTPUT_LEN {
+        let mut end = MAX_OUTPUT_LEN;
+        while end > 0 && !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        s.truncate(end);
+    }
+    s
 }
 
 fn call_icon(name: &EvalValue, icons: Option<&HashMap<String, u32>>) -> EvalValue {
@@ -1176,19 +1218,84 @@ mod tests {
     }
 
     #[test]
-    fn a_ten_megabyte_string_is_bounded_not_a_panic_or_unbounded_allocation() {
+    fn a_ten_megabyte_string_is_a_named_error_not_a_panic_or_unbounded_allocation() {
+        // Controller ruling (fix round 1): a value this oversized was never
+        // asked to be shortened, so it must not be silently truncated
+        // (indistinguishable from `truncate(s, n)`'s deliberate behaviour)
+        // or reported as `Missing` (which would claim the data isn't
+        // there, when it is -- just too large). A named error is the only
+        // outcome that stays both total (no panic) and honest.
         let huge = "x".repeat(10 * 1024 * 1024);
         let data = serde_json::json!({ "huge": huge });
         let ctx = EvalContext::with_data(&data);
         let mut fuel = Fuel::new(FUEL_BUDGET);
-        let value = Expr::parse("data.huge")
+        let err = Expr::parse("data.huge")
+            .unwrap()
+            .eval(&ctx, &mut fuel)
+            .unwrap_err();
+        match err {
+            ExprError::OutputTooLong { limit, actual } => {
+                assert_eq!(limit, MAX_OUTPUT_LEN);
+                assert_eq!(actual, 10 * 1024 * 1024);
+            }
+            other => panic!("expected OutputTooLong, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn exactly_the_output_ceiling_is_accepted_byte_for_byte() {
+        let exact = "y".repeat(MAX_OUTPUT_LEN);
+        let data = serde_json::json!({ "s": exact.clone() });
+        let ctx = EvalContext::with_data(&data);
+        let mut fuel = Fuel::new(FUEL_BUDGET);
+        let value = Expr::parse("data.s")
             .unwrap()
             .eval(&ctx, &mut fuel)
             .unwrap();
-        match value {
-            EvalValue::Text(s) => assert!(s.len() <= MAX_OUTPUT_LEN),
-            other => panic!("expected bounded Text, got {other:?}"),
+        assert_eq!(value, EvalValue::Text(exact));
+    }
+
+    #[test]
+    fn one_byte_over_the_output_ceiling_is_rejected_by_name() {
+        let one_over = "y".repeat(MAX_OUTPUT_LEN + 1);
+        let data = serde_json::json!({ "s": one_over });
+        let ctx = EvalContext::with_data(&data);
+        let mut fuel = Fuel::new(FUEL_BUDGET);
+        let err = Expr::parse("data.s")
+            .unwrap()
+            .eval(&ctx, &mut fuel)
+            .unwrap_err();
+        match err {
+            ExprError::OutputTooLong { limit, actual } => {
+                assert_eq!(limit, MAX_OUTPUT_LEN);
+                assert_eq!(actual, MAX_OUTPUT_LEN + 1);
+            }
+            other => panic!("expected OutputTooLong, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn truncate_still_shortens_a_normal_field_unaffected_by_the_new_error_path() {
+        // Requirement 4 (fix round 1): confirm truncate(s, n)'s own
+        // deliberate truncation is unaffected by making OutputTooLong an
+        // error elsewhere. This exercises the same clamp-then-truncate
+        // logic `functions_compose` and
+        // `truncate_is_char_boundary_safe_on_multibyte_text` already pin,
+        // with an input comfortably under MAX_OUTPUT_LEN (truncate's
+        // *input* argument is evaluated through the same field-read path
+        // as everything else, so an input already over MAX_OUTPUT_LEN
+        // would itself hit OutputTooLong before truncate() ever ran --
+        // truncate() bounds output smaller than its input, it cannot
+        // rescue an input that was already rejected at the point it was
+        // read; see the fix report's note on `truncate_to_byte_cap`).
+        let data = serde_json::json!({ "s": "hello world this is long" });
+        let ctx = EvalContext::with_data(&data);
+        let mut fuel = Fuel::new(FUEL_BUDGET);
+        let value = Expr::parse("truncate(data.s, 5)")
+            .unwrap()
+            .eval(&ctx, &mut fuel)
+            .unwrap();
+        assert_eq!(value, EvalValue::Text("hello".to_string()));
     }
 
     #[test]

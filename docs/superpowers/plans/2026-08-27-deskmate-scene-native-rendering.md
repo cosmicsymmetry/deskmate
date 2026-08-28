@@ -677,22 +677,22 @@ node types, rasterization — is stage 4. Here the question is binary and unavoi
 Task 8 the firmware has no C templates, so the host **must** send scenes to a
 scene-capable device and must not send them to one without bit 8.
 
-- [ ] **Step 1: Write the failing tests.** A device advertising bit 8 receives
+- [x] **Step 1: Write the failing tests.** A device advertising bit 8 receives
       `PushScene`; a device without it receives the legacy `ApplyConfig` widget path; the
       decision is per `(scene, device)` and re-resolved on reconnect, because a device can
       come back on different firmware after an OTA.
-- [ ] **Step 2: Run to confirm failure.**
-- [ ] **Step 3: Implement**, pushing on **event**, never on a timer: provider result,
+- [x] **Step 2: Run to confirm failure.**
+- [x] **Step 3: Implement**, pushing on **event**, never on a timer: provider result,
       config change, data-state (stale/error) change, and playlist advance. The ledger is
       explicit that `BigNumberLabel`, `IconBadgeText`, `RowList` and `AnalogClock` need
       nothing else — if no new host fact arrives, the last scene stays correct as last-good
       data. **Do not add a periodic push.** §3 rejects the 1,440-per-day clock strategy for
       exactly the reason that applies here.
-- [ ] **Step 4: The refuse path must be typed and visible.** §3: a card that would freeze
+- [x] **Step 4: The refuse path must be typed and visible.** §3: a card that would freeze
       says so in its editor; it does not silently display a stopped clock. The V1 playlists
       plan fixed the validation-mislabeling defect precisely so a failure is never
       presented as something else, and that rule governs here.
-- [ ] **Step 5: Gates and commit.** `feat: send scenes to devices that can draw them`
+- [x] **Step 5: Gates and commit.** `feat: send scenes to devices that can draw them`
 
 ---
 

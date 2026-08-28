@@ -770,11 +770,11 @@ alike, and this repository has twice spent days on the former with every test gr
 **Files:** this plan, `CLAUDE.md`, `docs/scene/template-parity-ledger.md`,
 `docs/superpowers/plans/2026-08-28-deskmate-plugin-manifest.md` (create)
 
-- [ ] **Step 1: Update the ledger** to say which gaps closed and how, rather than leaving
+- [x] **Step 1: Update the ledger** to say which gaps closed and how, rather than leaving
       a document that describes a world that no longer exists.
-- [ ] **Step 2: Update `CLAUDE.md`** — six templates retired, the binding vocabulary as
+- [x] **Step 2: Update `CLAUDE.md`** — six templates retired, the binding vocabulary as
       shipped, and what remains unproven.
-- [ ] **Step 3: Write the stage 3b plan** (plugin manifest and curated plugins) from what
+- [x] **Step 3: Write the stage 3b plan** (plugin manifest and curated plugins) from what
       this stage taught, per the working agreement: write the next plan at the current
       one's exit, using what was learned during implementation.
 - [ ] **Step 4: Commit.** `docs: close stage 3a and plan the plugin manifest`

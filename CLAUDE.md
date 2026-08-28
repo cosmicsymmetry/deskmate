@@ -356,23 +356,68 @@ of letting code and documentation diverge.
     **injected binding inputs** — the parity request supplies a pinned `SceneTimer` rather
     than deriving it, so the device's own producer never runs. **A gate that supplies a
     binding's input can prove how a value is drawn and never what it means.** Three device
-    -path defects live in exactly that hole and are recorded, not fixed (see the ledger).
-  - **`docs/scene/template-parity-ledger.md` is what stage 3 is planned from.** Its
-    conclusions contradict the plan's expectations in three places: **`DigitalClock` is
-    blocked from retirement too**, not only `ProgressRing` (its date and both small-dial
-    hand endpoints are literals); **no builder uses `field.*` at all**; and `timer.pct` is
-    **elapsed** percent on the device while the C arc and the parity fixture both use
-    **remaining**, so a native ring would grow where the C ring shrinks. Also:
-    `timer.remaining:mm:ss` floors where the C ceils, and treats `mm` as a clock minute
-    modulo 60 where `format_clock()` prints total minutes to `1440:00`.
-  - **Retiring a C template also retires its offline behaviour.** A tap runs
-    `template_view_apply_local_action()` for optimistic start/pause feedback on the C view;
-    a scene has no equivalent and waits for the host's `PushData`. No builder emits the
-    shared stale/error footer either, because all 106 rows exercise the OK state.
+    -path defects lived in exactly that hole. **Stage 3a fixed all three and closed the
+    hole at its source:** `SceneTimer` became `{ total_ms, remaining_ms, running }`, so the
+    parity gate derives percentages in C instead of injecting them.
+  - **`docs/scene/template-parity-ledger.md` is what stage 3 was planned from, and it was
+    rewritten at stage 3a's exit** to record which gaps closed and how. Its original
+    conclusions contradicted the plan in three places, and all three were load-bearing:
+    **`DigitalClock` was blocked from retirement too**, not only `ProgressRing`; **no
+    builder used `field.*` at all** (still true, and it is now the plugin data path stage
+    3b inherits untested); and `timer.pct` was **elapsed** percent on the device while the
+    C arc and the parity fixture both used **remaining**, so a native ring would have grown
+    where the C ring shrank.
+  - **Retiring a C template also retires its offline behaviour** — the reason stage 3a
+    has a task for it. A tap ran `template_view_apply_local_action()` for optimistic
+    start/pause feedback on the C view and a scene had no equivalent. No builder emitted
+    the shared stale/error footer either. **Both are closed in stage 3a.**
   - The `known_gap` marker in `scene_parity.rs` is retained although nothing uses it. It
     asserts a marked case **still differs**, so closing a gap fails the test and forces the
     marker's deletion — an unexplained skip rots into invisible missing coverage, an
     enforced one cannot. It made three gaps visible during this stage.
+
+- **Stage 3a (scene-native rendering) is delivered: the six hand-written C templates NO
+  LONGER SHIP.** Plan `docs/superpowers/plans/2026-08-27-deskmate-scene-native-rendering.md`.
+  Every card face on the device is now drawn from a host-pushed scene. The stage is
+  software-complete and **Gate A passed on the panel (2026-08-27)**; **Gate B — the OTA
+  download with the templates removed — is published as `v2.0.0-live2` and NOT YET
+  OBSERVED.** Protocol stays v1 and additive, `PROTOCOL_CURRENT_CAPABILITIES` stays **491**
+  (bit 8 already means "this device renders scenes"; a bit per feature does not scale), and
+  the config schema stays v5.
+  - **The templates were MOVED, not deleted**, to `companion/crates/lvgl-sim/reference-oracle/`
+    — `lvgl-sim` compiles the real firmware C, and that is what makes the parity gate
+    byte-exact rather than a golden comparison. Deleting them would have left the gate
+    reporting green rows while comparing a scene against nothing. `lvgl-sim/build.rs`
+    panics if those files reappear in `firmware/main/CMakeLists.txt` **or** on disk under
+    `firmware/main/ui/`, so the oracle cannot drift back into the image. The move was
+    proven a no-op first: 132 rows before, 132 after, all eleven files 100%-similarity
+    renames, and the whole test tree with zero diff lines.
+  - **The vocabulary is a closed set of nine tokens plus one style selector, and it is a
+    ratchet.** Added this stage: `date`, `time:angle:hour`/`:minute`, `timer.elapsed`,
+    `timer.total`, `timer.status`, `timer.permille`, and `running_color` on `SceneArc`
+    (key 10) and `SceneText` (key 8). `running_color` is a **style selector, not a value
+    binding** — a `SceneValue` resolves to text and cannot express a colour. `timer.status`
+    is a conditional on purpose, added as a named domain fact; two more numeric bindings
+    would not have produced a word. **The arc uses `timer.permille`, not `timer.pct`**:
+    at r=195 one percent is 12.25 px of arc, so percent quantisation is visibly
+    insufficient. If a future face wants a tenth token, the answer is a host-side
+    rebuild-and-push — "anything computed happens on the server".
+  - **The parity matrix is 132 rows** (108 + 24 for the stale and error states), all six
+    faces, both orientations, zero differing pixels, no tolerance.
+  - **Memory SHRANK by 15,496 bytes of `.bss`** (102,624 -> 87,128; DIRAM total 219,387 ->
+    203,891), with DIRAM `.text`, `.data` and IRAM all unchanged and IRAM still exactly
+    full. That is ~140x the ~105 bytes that once broke OTA downloads with every test green
+    — in the other direction. **A shrink moves layout exactly as a growth does**, which is
+    why Gate B is mandatory rather than a formality.
+  - **A scene and its C template were pixel-identical BY CONSTRUCTION**, so neither the
+    panel nor the admin API could ever say which path drew a frame. Gate A was therefore
+    judged on correctness *over time* — a ticking face that stays right — not on
+    identifying the path. Stage 2a's seconds tell does not apply here.
+  - Two lessons that outlive the stage: **`field.*` is the plugin data path and has no
+    builder, therefore no pixel coverage** — stage 3b will be the first thing to exercise
+    it; and the local tap now reaches the scene timer context (`scene_view_apply_local_action`,
+    with the command-to-renderer decision extracted to host-tested `core/ui_command_policy.c`),
+    so retiring the C view did not retire its offline behaviour.
 
 - **Two plan amendments were added during execution and are marked as such in the plan.**
   Task 9b (persistent device identities) was added by explicit owner direction; Task 10a

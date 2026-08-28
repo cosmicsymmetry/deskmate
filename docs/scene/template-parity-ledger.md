@@ -1,198 +1,181 @@
-# Scene template parity and stage 3 readiness
+# Scene template parity, and what stage 3a settled
 
-Date: 2026-08-27
+Date: 2026-08-27. **Updated 2026-08-28 at stage 3a exit.**
 
-This ledger is the input to stage 3, where the six hand-written C templates are retired.
-Stage 2b proved that a host-built scene and its C template draw the same framebuffer at a
-pinned instant. Retirement asks a different question: after that scene has been pushed,
-can the device keep it correct as local time and timer state advance?
+This ledger was written as the input to stage 3, where the six hand-written C templates
+are retired. Stage 2b proved that a host-built scene and its C template draw the same
+framebuffer at a pinned instant. Retirement asked a different question: after that scene
+has been pushed, can the device keep it correct as local time and timer state advance?
 
-The inventory below comes from the six builders in
-[`scene_build.rs`](../../companion/crates/app-core/src/scene_build.rs), as they exist at
-stage 2b exit. A value called a literal is frozen into `PushScene`; only another scene push
-can change it. A binding is re-evaluated in place by the device. Static geometry and style
-are omitted from the inventory unless a changing value selected them at build time.
+**Stage 3a answered it, and the answer was yes for all six.** The document below keeps its
+original derivation — the reasoning is why the vocabulary is the size it is — with each
+gap marked resolved and the evidence that closed it named. What remains open is listed in
+[Stage 3b entry decision](#stage-3b-entry-decision) at the end.
+
+## What stage 3a changed
+
+| Gap this ledger identified | How it closed | Where |
+| --- | --- | --- |
+| Three `ProgressRing` binding defects the byte-exact gate could not see | Producer fixed and tested directly, not through injected inputs | `20304d9`..`abea638` |
+| `ProgressRing`'s TOTAL/ELAPSED/STATUS literals and its running colour | `timer.total`, `timer.elapsed`, `timer.status`, `timer.permille`, and the `running_color` style selector | `abea638`..`d143d51` |
+| `DigitalClock`'s literal date and both small-dial hand endpoints | `date` and `time:angle:hour` / `time:angle:minute` | Task 3 |
+| A tap reaching only the C view, so a scene could not move with the link down | The local action is applied to the scene timer context and its bindings refreshed | Task 4 |
+| The shared stale/error footer missing from every builder | `push_state_footer()`, reached by all six through `finish_scene()` | Task 5 |
+| Retiring the C templates would delete the parity oracle | Templates moved to `companion/crates/lvgl-sim/reference-oracle/`, with a build guard against their return | `7d47ab6` |
+
+The parity matrix grew from 108 rows to **132**: 24 new rows cover the stale and error
+states the original 108 never exercised. All 132 are byte-identical at both orientations
+with no tolerance.
+
+**The gate's second blindness closed at its source.** `SceneTimer` went from
+`{ remaining_ms, pct }` to `{ total_ms, remaining_ms, running }` during Task 2, so
+percentages are now derived in C rather than injected by the test. That change was not
+requested by the plan; it is what makes the timer rows evidence about meaning rather than
+only about drawing.
 
 ## What the shipped bindings actually do
 
 The device refreshes a live scene every 250 ms and immediately after matching `PushData`.
-The closed binding set is not an expression language:
+The closed binding set is not an expression language. This is the complete vocabulary as
+shipped; `docs/protocol/v1.md` is its normative grammar.
 
 | Binding | Used by these builders | Device source and effect |
 | --- | --- | --- |
 | `time:HH:mm` | `DigitalClock` | Formats the device wall clock plus its current UTC offset into the hero reading. |
 | `time:ss` | `DigitalClock`, when seconds are shown | Formats seconds from the same device clock. |
-| `time:hour`, `time:minute`, `time:second` | `AnalogClock` | Rotation-only bindings. They recompute the three hand rotations from the device clock in the same whole-degree steps as `analog_clock_tick()`. The second-hand node is absent when `show_seconds` is false. |
-| `timer.remaining:mm:ss` | `ProgressRing` | Formats the locally counted-down `remaining_ms` from the matching progress card's latest `PushData` snapshot. This is intended to keep advancing while the link is down. Its ceiling and total-minute behavior were fixed in Task 1 (`20304d9`) to match the C face. |
-| `timer.pct` | `ProgressRing` | Scales the indicator arc's declared sweep. Task 1 (`20304d9`) fixed the device producer to derive remaining percentage, matching the parity fixture and C face. |
-| `field.*` | **None of the six** | Resolves a field from the matching card's widget-model state. It is refreshed on `PushData`, but is not autonomous: without a host update there is no new value to evaluate. |
+| `date` | `DigitalClock` | Applies the UTC offset, breaks down local time, and delegates to `timefmt_date()` — the same `Mon, Aug 3` form the C face drew as a literal. |
+| `time:angle:hour`, `time:angle:minute` | `DigitalClock`'s small dial | Rotates the two `SceneLine` hands. `hour = (h % 12) * 30 + m / 2`, `minute = m * 6`, keeping the LVGL line draw path rather than trading it for a rot-rect. |
+| `time:hour`, `time:minute`, `time:second` | `AnalogClock` | Rotation-only bindings recomputing the three hand rotations from the device clock in the same whole-degree steps as `analog_clock_tick()`. The second-hand node is absent when `show_seconds` is false. |
+| `timer.remaining:mm:ss` | `ProgressRing` | Formats the locally counted-down `remaining_ms` from the matching progress card's latest `PushData` snapshot, with the C face's ceiling and total-minute behaviour. Keeps advancing while the link is down. |
+| `timer.elapsed:mm:ss`, `timer.total:mm:ss` | `ProgressRing` | The ELAPSED and TOTAL chips, formerly literals. Elapsed is total minus the *displayed* remaining time, so the two chips cannot disagree by a rounding step. |
+| `timer.status` | `ProgressRing` | `Done`, `Running`, `Ready` or `Paused` — or `--` with no active snapshot. A conditional, added as a named domain fact rather than as a generic one. |
+| `timer.permille` | `ProgressRing` | Scales the indicator arc's declared sweep at 0..1000. **Not `timer.pct`:** at r=195 the circumference is ~1225 px, so one percent is 12.25 px of arc and percent quantisation is visibly insufficient. |
+| `timer.pct` | **None of the six** | Kept as wire surface; the remaining percentage at 0..100. |
+| `field.*` | **None of the six** | Resolves a field from the matching card's widget-model state. Refreshed on `PushData`, but not autonomous: without a host update there is no new value to evaluate. |
+
+`running_color` on `SceneArc` (key 10) and `SceneText` (key 8) is a **style selector, not a
+value binding** — the device swaps between two literal colours on its `timer_running` flag.
+`progress_ring.c` changes the arc indicator *and* the STATUS text colour on that flag, and
+a `SceneValue` resolves to text, so a value binding could not have expressed it.
 
 `time:*` reads `time(NULL)` plus the device's stored UTC offset. Timer bindings read the
 device's mirrored progress snapshot and subtract monotonic uptime while `running` is true.
-`field.*` avoids rebuilding a scene for a simple host field update; it does not make a data
-source live on the device.
 
 ## Template ledger
 
-| Template | Literals and build-time choices | Bindings | What becomes wrong without another scene push | Stage 3 disposition |
-| --- | --- | --- | --- | --- |
-| `DigitalClock` | The formatted date; both small-dial hand endpoints computed from `ClockCard.local_now`; the existence of the seconds node from `show_seconds`. | `time:HH:mm`; optional `time:ss`. | The minute hand is wrong at the next minute, the hour hand advances only in the pushed geometry, and the date is wrong after local midnight. A UTC-offset change also updates the text bindings but not the literal date or dial. | **Blocked.** Text timekeeping is live; the date and dial are not. |
-| `AnalogClock` | Chapter ring, ticks, hub, and whether the second-hand node exists. | `time:hour`, `time:minute`, and optional `time:second`. | No autonomous clock value goes stale. Changing `show_seconds` is a card/config change and correctly requires a new scene. | **Timekeeping-ready.** It still shares the omitted data-state footer described below. |
-| `BigNumberLabel` | Title, value (including the `--` fallback), label, chosen value/label font tiers, and layout derived from those tiers. | None. | It remains the last known card value. A provider or card-data change requires a rebuild because the value can cross a font-tier boundary and move both value and label; substituting `field.*` only for the text would be incorrect. | **Ready with event-driven scene pushes** for new host data. There is no device-local value that should advance by itself. |
-| `IconBadgeText` | Title, badge, value, label, selected icon geometry, chosen font tiers, and tier-dependent vertical layout. | None. | It remains the last known provider result. Icon changes can replace the node list, and value changes can change tier and layout, so a text-only field refresh is insufficient. | **Ready with event-driven scene pushes** for new host data. There is no autonomous gap. |
-| `RowList` | Title; count; every row title/time; which row modules exist; and the empty-state module. | None. | It remains the last known list. A data update can add/remove rows, change the count, or switch the entire empty-state branch, so it requires a rebuilt scene. | **Ready with event-driven scene pushes** for new host data. There is no autonomous gap. |
-| `ProgressRing` | Label; TOTAL, ELAPSED, and STATUS text; indicator and STATUS colours selected from `running`; empty-chip values when duration is zero. | `timer.remaining:mm:ss` for the large countdown; `timer.pct` for the indicator sweep. | ELAPSED is wrong after one second. STATUS cannot change among Ready/Running/Paused/Done. A start/pause transition leaves the indicator and status colour wrong. TOTAL remains correct only while duration is unchanged. Local tap feedback reaches only the C template. | **Blocked on the literal chips, state-dependent colours, and local tap ownership.** The three original timer-binding defects were fixed in Task 1 (`20304d9`); Task 2 closes the remaining literal-chip vocabulary gap. |
+| Template | Literals and build-time choices | Bindings | Stage 3a disposition |
+| --- | --- | --- | --- |
+| `DigitalClock` | The existence of the seconds node from `show_seconds`. | `time:HH:mm`; optional `time:ss`; `date`; `time:angle:hour`; `time:angle:minute`. | **Retired.** The date and both hands are live; nothing goes stale without a re-push except a config change. |
+| `AnalogClock` | Chapter ring, ticks, hub, and whether the second-hand node exists. | `time:hour`, `time:minute`, optional `time:second`. | **Retired.** Changing `show_seconds` is a config change and correctly requires a new scene. |
+| `BigNumberLabel` | Title, value (including the `--` fallback), label, chosen value/label font tiers, and layout derived from those tiers. | None. | **Retired, event-driven.** A value change can cross a font-tier boundary and move both value and label, so a text-only `field.*` refresh would be incorrect; the host rebuilds. |
+| `IconBadgeText` | Title, badge, value, label, selected icon geometry, chosen font tiers, and tier-dependent vertical layout. | None. | **Retired, event-driven.** Icon changes replace the node list and value changes can change tier and layout. |
+| `RowList` | Title; count; every row title/time; which row modules exist; and the empty-state module. | None. | **Retired, event-driven.** A data update can add or remove rows, change the count, or switch the entire empty-state branch. |
+| `ProgressRing` | Label; the empty-chip values when duration is zero. | `timer.remaining:mm:ss`, `timer.elapsed:mm:ss`, `timer.total:mm:ss`, `timer.status`, `timer.permille`; `running_color` on the indicator arc and STATUS. | **Retired.** The chips, the status word, the two colours and the local tap all reach the scene. |
 
-### The shared data-state footer is absent
+### The shared data-state footer — resolved
 
-All six C templates create `OBJ_STATE`. `template_view.c` uses it to show an error in the
-error colour, `Stale` in the stale colour, or nothing in the OK state. Every builder omits
-that node because stage 2b's 106 parity rows intentionally exercise the OK state. A scene
-therefore cannot currently reproduce a later stale/error transition.
+All six C templates create `OBJ_STATE`; `template_view.c` used it to show an error in the
+error colour, `Stale` in the stale colour, or nothing in the OK state. Every builder
+omitted that node, because stage 2b's rows all exercised the OK state.
 
-This is not a reason for a periodic device binding. Stale/error is a new host-owned fact,
-just like a provider result. Stage 3 should rebuild and push the scene when that fact
-changes, adding the footer as an ordinary literal node. The alternative is a semantic
-data-state binding that selects text, colour, and visibility; `field.error` plus
-`field.stale` alone cannot express that conditional. The host-push option adds no idle
-traffic and matches the existing C path, which also changes the footer only when host data
-state is applied.
+`push_state_footer()` now adds it as an ordinary literal node, reached by all six builders
+through the single `finish_scene()` path, and 24 parity rows cover it. It stayed a literal
+deliberately: stale/error is a new host-owned fact like a provider result, so the host
+rebuilds and pushes when it changes. `field.error` plus `field.stale` could not have
+expressed it — the footer selects text, colour *and* visibility together.
 
-## Blocking gaps and choices
+## The blocking gaps, and how they were decided
 
-### DigitalClock: date and dial
+### DigitalClock: date and dial — Option A shipped
 
-**Option A — extend native time bindings.** Add a closed date binding that emits exactly
-the shipped `date_text()` form, and add a live geometry binding for the two `SceneLine`
-hands. The line solution must preserve the LVGL line draw path; replacing the hands with
-`SceneRotRect` would trade away the pixel proof. This is a wire and firmware change and
-requires another OTA/download check and temporal tests around minute, midnight, and UTC
-offset boundaries.
-
-**Option B — push a new scene on every minute boundary.** No wire or firmware change, but
-it means 1,440 pushes per device per day. Section 3 of the
+Two options were on the table. **Option A** extended the native time bindings; **Option B**
+pushed a new scene every minute boundary — 1,440 pushes per device per day, which §3 of the
 [scene-rendering design](../superpowers/specs/2026-08-22-deskmate-plugin-scene-rendering-design.md#3-render-negotiation)
-rejects that clock strategy: one delayed or lost push leaves the face wrong, precisely
-when standalone rendering is supposed to protect it.
+rejects, because one delayed or lost push leaves the face wrong at exactly the moment
+standalone rendering is supposed to protect it.
 
-**Recommendation:** Option A. Use narrow semantic bindings, not a general expression
-engine: one date token and a line-hand rotation/geometry binding whose firmware evaluator
-uses the same integer clock arithmetic as the C face. `AnalogClock` proves the device
-clock can drive hands correctly; it does not prove that a transformed rectangle can
-replace `DigitalClock`'s line pixels.
+Option A shipped: one `date` token emitting exactly the `date_text()` form, and an angle
+binding on the two `SceneLine` hands. The line draw path was preserved rather than swapped
+for a `SceneRotRect`, which would have traded away the pixel proof.
 
-### ProgressRing: existing binding defects fixed in Task 1
+### ProgressRing: the three defects the gate could not see
 
-Task 1 (`20304d9`) fixed and tested three mismatches in the bindings already named by
-the builder. The history remains here because it explains why injected parity inputs
-could not prove producer semantics:
+These are kept in full, because they are the clearest evidence for why an injected-input
+gate proves less than it appears to. All three were present while the byte-exact gate read
+zero differing pixels.
 
-1. `progress_ring.c` draws **remaining** percentage. The parity request also supplies
-   `remaining_seconds * 100 / duration_seconds`. On the device,
-   `fill_timer_bindings()` set `timer_pct` to
-   `(total_ms - remaining_ms) * 100 / total_ms`, which is **elapsed** percentage. A native
-   scene therefore grew where the C ring shrank; the two percentages agreed only at the
-   halfway point (apart from integer-rounding coincidences). **Fixed:** the producer now
-   computes remaining percentage and its C fields name that meaning explicitly.
+1. `progress_ring.c` draws **remaining** percentage, and the parity request supplied
+   `remaining_seconds * 100 / duration_seconds`. On the device, `fill_timer_bindings()`
+   set `timer_pct` to `(total_ms - remaining_ms) * 100 / total_ms` — **elapsed**
+   percentage. A native scene would have grown where the C ring shrank; the two agreed
+   only at the halfway point. **Fixed:** the producer computes remaining percentage and
+   its C fields name that meaning explicitly.
 2. `progress_ring.c` displays `(remaining_ms + 999) / 1000`, a ceiling that holds the
    current second until it has fully elapsed. `timer.remaining:mm:ss` formatted
    `remaining_ms / 1000`, a floor, so it could show the next second almost immediately.
-   **Fixed:** the binding applies the same ceiling as the C face.
+   **Fixed:** the binding applies the same ceiling.
 3. `progress_ring.c` formats total minutes and supports `1440:00` at the 86,400-second
-   bound. The generic binding formatter treats `mm` as the minute component of an
-   hours/minutes/seconds clock, modulo 60. At one hour it rendered `00:00` instead of
-   `60:00`. **Fixed:** wall-clock and countdown formatters are separate, countdown `mm`
-   means total minutes, and the countdown is clamped to the same ceiling as the C face.
+   bound. The generic formatter treated `mm` as the minute component of a clock, modulo
+   60, so at one hour it rendered `00:00` instead of `60:00`. **Fixed:** wall-clock and
+   countdown formatters are separate, countdown `mm` means total minutes, and the
+   countdown is clamped to the same ceiling as the C face.
 
-The simulator-to-simulator gate injects a pinned timer context and does not run the
-device's `fill_timer_bindings()` clock-forward path. Its zero-pixel result is therefore
-compatible with all three historical defects. Task 1 added direct producer and formatter
-tests, including a running clock-forward snapshot, so those semantics no longer rely on
-the injected parity gate.
+**The state-ownership gap is also closed.** On a tap, `carousel.c` sent the event and
+called `template_view_apply_local_action()` for optimistic start/pause/reset feedback —
+a path that updated only the C view. A live scene had no equivalent and read an unchanged
+widget-model snapshot until the host answered with `PushData`, so with the link down the
+scene never reflected the tap. Task 4 routes that local transition into the scene timer
+context and refreshes its bindings, so retiring the C template did not retire its offline
+behaviour.
 
-There is also a state-ownership gap. On a tap, `carousel.c` sends the event and calls
-`template_view_apply_local_action()` for optimistic start/pause/reset feedback. That path
-updates only the C `ProgressRing` view. A live scene has no corresponding local action,
-and its timer context continues to read the unchanged widget-model snapshot until the
-host answers with `PushData`. With the link down, the scene never reflects the tap. Stage
-3 must route that local transition into the scene timer context and refresh its bindings;
-otherwise retiring the C template also retires its offline/optimistic behavior.
-
-After those corrections, the remaining choices are:
-
-**Option A — extend the closed timer vocabulary.** Add direct
-`timer.elapsed:mm:ss` and `timer.total:mm:ss` bindings. Add a semantic `timer.status`
-binding that returns Ready/Running/Paused/Done; the status word is a conditional, so two
-numeric bindings do not solve it. Preserve the C colour transition with a narrow
-timer-running style selector for the indicator arc and STATUS value, rather than adding a
-general conditional/expression form to `SceneValue`. This is an additive wire and firmware
-change. The same firmware work must apply local start/pause/reset to the timer state those
-bindings read. It also needs temporal and disconnected-tap tests plus another OTA/download
-check.
-
-**Option B — rebuild and push the scene for every timer update.** This needs no wire
-change, but ELAPSED makes it a push every second while running: up to 86,400 pushes per
-day, worse than the 1,440-per-day clock strategy §3 already rejects. A network hiccup
-freezes the face. Pushing only on start/pause/reset transitions fixes the words and colours
-but does not fix ELAPSED.
-
-**Recommendation:** Option A, after correcting the existing bindings. Keep the extension
-semantic and small: timer total, elapsed, status, and running-dependent colour are domain
-facts the device already owns. Do not add arithmetic or conditionals to `SceneValue`.
-That preserves standalone timer behavior and keeps untrusted scene input away from a
-general evaluator.
-
-The temporal parity tests in
-[`scene_parity.rs`](../../companion/crates/app-core/tests/scene_parity.rs) replace the
-former literal-chip divergence regression: they advance the C template and an already
-decoded scene through the same interval, without a scene re-push, and prove that elapsed
-time, completion status, and start/pause colours remain byte-identical.
+Option B — rebuilding and pushing on every timer update — was rejected: ELAPSED makes it a
+push every second while running, up to 86,400 per day, worse than the clock strategy §3
+already rejects. Pushing only on transitions would fix the words and colours and still
+leave ELAPSED frozen.
 
 ### Host-owned data templates
 
-For `BigNumberLabel`, `IconBadgeText`, and `RowList`, the alternatives are either a new
-scene when host data changes or a collection of field, conditional-layout, and
-dynamic-node bindings. The latter would recreate a layout engine on the device and still
-could not fetch new provider data without the host. Rebuild and push on each provider,
-config, or data-state change. This is event-driven invalidation, not a periodic rendering
-approximation; if no new host fact arrives, the last scene remains correct as last-good
-data.
-
-`AnalogClock` needs no additional time binding. Re-push it only for configuration or
-data-state changes.
+For `BigNumberLabel`, `IconBadgeText` and `RowList` the alternative to event-driven pushes
+was a collection of field, conditional-layout and dynamic-node bindings — a layout engine
+on the device that still could not fetch provider data without the host. They rebuild and
+push on each provider, config or data-state change. This is event-driven invalidation, not
+a periodic approximation: if no new host fact arrives, the last scene remains correct as
+last-good data. `AnalogClock` needs no additional binding for the same reason.
 
 ## What the evidence proves, and what remains open
 
-- Stage 2b compares the C template and scene through the same host simulator and LVGL.
-  All six templates, 106 rows, and both logical orientations are byte-identical. That is
-  conclusive for the compared inputs and catches different C-template/scene-builder
-  behavior; it is structurally blind to a defect in code or assumptions shared by both
-  halves, and it does not advance a scene through time.
-- The flipped simulator framebuffer is an exact reversal of the landscape framebuffer.
-  Neither that gate nor the device's pre-flush diagnostic capture can prove physical 270°
-  panel geometry. Real 270° geometry remains a panel observation.
-- Stage 2a observed a `DigitalClock` scene with ticking seconds over the shipping path on
-  the panel. It did not prove the literal date, every dial state, all six stage 2b
-  templates, or byte-exact target rendering. The device-vs-simulator harness exists but
-  its byte-exact physical run was deferred.
-- The asset-GC teardown/rebuild sequence has no automated end-to-end test. Stage 3's use
-  of runtime assets must exercise teardown, font-registry reset, compaction, retained
-  scene rebuild, and the `BUSY`/OTA-owner paths before relying on it.
+- The byte-exact gate compares the C template and the scene through the same host
+  simulator and the same LVGL. All six templates, **132 rows**, both logical orientations,
+  zero differing pixels, no tolerance. It is conclusive for the compared inputs and
+  catches divergence between the two implementations. It remains structurally blind to a
+  defect in code or assumptions the two halves **share**.
+- The flipped simulator framebuffer is an exact reversal of the landscape framebuffer, and
+  the device's pre-flush 0x7E capture carries the same reversal. **Neither can prove
+  physical 270° panel geometry** — that is only ever a panel observation.
+- `field.*` and `timer.pct` are wire surface no builder emits. A binding no builder emits
+  is surface the byte-exact gate reports green on forever; both are retained deliberately
+  (`field.*` for plugin-authored scenes in stage 3b) rather than by omission.
+- The asset-GC teardown/rebuild sequence still has **no automated end-to-end test**.
+  Stage 3b's runtime assets must exercise teardown, font-registry reset, compaction,
+  retained scene rebuild, and the `BUSY`/OTA-owner paths before anything relies on it.
 - `number_font_tier()` is used by both numeric templates, but only `BigNumberLabel` has
   rows deliberately straddling the HERO and DISPLAY step-down boundaries.
   `IconBadgeText` proves selected examples, not an independent boundary matrix.
-- The shared stale/error footer is outside the current parity matrix and needs explicit
-  stage 3 cases when it is added to builders.
 
-## Stage 3 entry decision
+## Stage 3b entry decision
 
-Do not retire `DigitalClock` or `ProgressRing` yet. Bundle their narrow live-binding work
-and the three existing timer corrections into one additive firmware image and one hardware
-verification cycle. Retire `AnalogClock`, `BigNumberLabel`, `IconBadgeText`, and `RowList`
-only after the host scene policy rebuilds on provider/config/data-state changes and the
-shared footer has parity coverage.
+The vocabulary is now a **ratchet**: every binding here is a permanent firmware-side
+surface a future device must keep evaluating, and the whole set is nine tokens plus one
+style selector. Stage 3b authors plugins against that set. If a curated plugin wants a
+tenth, the answer is a host-side rebuild-and-push, not a new token — "anything computed
+happens on the server" is §2's rule, and the pressure to add just one more is exactly how
+a closed set becomes an expression language.
 
-The observation that would change this recommendation is a product decision to remove
-the small dial/date from `DigitalClock` or the ELAPSED/STATUS modules and running colour
-from `ProgressRing`. With the shipped faces preserved, periodic scene pushes are not an
-acceptable substitute for native evaluation.
+Two things stage 3b inherits and must not lose:
+
+1. **`field.*` is the plugin data path.** It is the one binding designed for values a
+   plugin supplies, and it is the only member of the vocabulary with no builder and
+   therefore no pixel coverage. A plugin that binds it is exercising an untested arm.
+2. **A gate that supplies a binding's input proves how a value is drawn, never what it
+   means.** Stage 3a's three defects lived in exactly that hole for a whole stage. Any
+   plugin-facing test that pins its own inputs inherits the same blindness.

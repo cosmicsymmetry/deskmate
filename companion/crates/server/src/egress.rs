@@ -26,14 +26,35 @@
 //!
 //! `reqwest::ClientBuilder::resolve` is a documented, first-class reqwest
 //! API for exactly this purpose, and is trusted here to do what it says:
-//! connect to the pinned `SocketAddr` rather than re-resolving. This
+//! connect to the pinned `SocketAddr` rather than re-resolving (this
+//! assumption itself is pinned by a characterization test in this module's
+//! tests: a loopback server, a client built with `.resolve()` alone -- no
+//! `egress_guard` involved -- and an assertion that the `Host` header the
+//! server observed is the pinned name, not the literal address). This
 //! module does not independently verify reqwest's TCP connect behaviour
-//! (e.g. by intercepting the socket), so a defect inside reqwest's
-//! connector itself is outside what this guard can catch. Every redirect
-//! hop is re-validated and re-pinned from scratch (a permitted host can
-//! redirect to `169.254.169.254`), but a single connection is not
-//! continuously re-checked against TOCTOU races faster than one DNS
-//! resolution.
+//! beyond that, so a defect inside reqwest's connector itself is outside
+//! what this guard can catch. Every redirect hop is re-validated and
+//! re-pinned from scratch (a permitted host can redirect to
+//! `169.254.169.254`), but a single connection is not continuously
+//! re-checked against TOCTOU races faster than one DNS resolution.
+//!
+//! Every outbound client also disables reqwest's proxy support
+//! (`.no_proxy()`): `auto_sys_proxy` defaults to true, and the underlying
+//! connector reads `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` from the
+//! environment unconditionally. Left enabled, any of those variables being
+//! set would route the connection through a proxy instead of the pinned
+//! address, silently defeating resolve-then-pin.
+//!
+//! # Allowlist, not a remembered deny list
+//!
+//! [`deny_reason_v4`]/[`deny_reason_v6`] implement "permit only
+//! globally-routable unicast, deny everything else" (spec §5 calls this an
+//! *allowlist*): they enumerate the IANA special-purpose registry
+//! exhaustively and permission is what is left over, not a list of ranges
+//! someone remembered to write down. This module's first version was a
+//! genuine deny list and missed `100.64.0.0/10` (RFC 6598, carrier-grade
+//! NAT) -- which is Tailscale's entire address range, and this deployment's
+//! own render host reaches its neighbours over Tailscale.
 
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -124,17 +145,47 @@ impl fmt::Display for EgressError {
 
 impl std::error::Error for EgressError {}
 
-/// Why an address is on the deny list.
+/// Why an address is not globally-routable unicast, and therefore denied.
+/// Every variant names a distinct IANA special-purpose range so a denial is
+/// always informative, even though the *decision* to deny is a positive
+/// allowlist (see [`deny_reason_v4`]/[`deny_reason_v6`]), not a match against
+/// this enum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DenyReason {
     Loopback,
     LinkLocal,
     CloudMetadata,
     Rfc1918Private,
+    /// `100.64.0.0/10` (RFC 6598) -- shared address space for carrier-grade
+    /// NAT. This is Tailscale's entire range: the render host's own
+    /// tailnet, and every other tailnet reachable from it, lives here.
+    CarrierGradeNat,
     UniqueLocalV6,
+    /// `fec0::/10` -- the deprecated IPv6 site-local range (RFC 3879).
+    SiteLocalV6,
     Unspecified,
     Multicast,
     Broadcast,
+    /// `192.0.0.0/24` (RFC 6890) -- IETF protocol assignments.
+    IetfProtocolAssignment,
+    /// The IPv4 TEST-NET ranges (`192.0.2.0/24`, `198.51.100.0/24`,
+    /// `203.0.113.0/24`, RFC 5737) or the IPv6 documentation range
+    /// (`2001:db8::/32`, RFC 3849).
+    Documentation,
+    /// `198.18.0.0/15` (RFC 2544) -- reserved for network benchmarking.
+    Benchmarking,
+    /// `64:ff9b::/96` (RFC 6052) -- the well-known NAT64 prefix. Its low 32
+    /// bits carry an attacker-chosen embedded address, so it is denied
+    /// outright rather than trusted.
+    Nat64V6,
+    /// `::a.b.c.d` (RFC 4291 §2.5.5.1) -- the deprecated IPv4-compatible
+    /// IPv6 form, distinct from the IPv4-*mapped* form (`::ffff:a.b.c.d`,
+    /// handled separately by unwrapping to the embedded address).
+    Ipv4CompatibleV6,
+    /// Any other IANA-reserved, non-globally-routable IPv4 block (e.g.
+    /// `0.0.0.0/8` beyond the single unspecified address, the deprecated
+    /// 6to4 relay anycast range `192.88.99.0/24`, or `240.0.0.0/4`).
+    Reserved,
 }
 
 impl fmt::Display for DenyReason {
@@ -144,16 +195,41 @@ impl fmt::Display for DenyReason {
             DenyReason::LinkLocal => "link-local",
             DenyReason::CloudMetadata => "cloud metadata endpoint",
             DenyReason::Rfc1918Private => "RFC1918 private",
+            DenyReason::CarrierGradeNat => "carrier-grade NAT (100.64.0.0/10)",
             DenyReason::UniqueLocalV6 => "unique-local IPv6 (fc00::/7)",
+            DenyReason::SiteLocalV6 => "deprecated site-local IPv6 (fec0::/10)",
             DenyReason::Unspecified => "unspecified address",
             DenyReason::Multicast => "multicast",
             DenyReason::Broadcast => "broadcast",
+            DenyReason::IetfProtocolAssignment => "IETF protocol assignment (192.0.0.0/24)",
+            DenyReason::Documentation => "documentation/test-net range",
+            DenyReason::Benchmarking => "benchmarking range (198.18.0.0/15)",
+            DenyReason::Nat64V6 => "NAT64 well-known prefix (64:ff9b::/96)",
+            DenyReason::Ipv4CompatibleV6 => "deprecated IPv4-compatible IPv6",
+            DenyReason::Reserved => "reserved, not globally routable",
         };
         f.write_str(label)
     }
 }
 
-/// Classifies `ip` against the deny list. `None` means `ip` is permitted.
+/// Classifies `ip` against the allowlist. `None` means `ip` is a globally
+/// routable unicast address and is permitted; every `Some` is a positive
+/// finding that `ip` falls inside a specific IANA special-purpose range.
+///
+/// The predicate this implements is **"permit only globally-routable
+/// unicast, deny everything else"** (spec §5 names it an *allowlist*, and a
+/// deny list is a list of what someone remembered -- CGNAT was the range
+/// this module's first version forgot). `deny_reason_v4`/`deny_reason_v6`
+/// enumerate the IANA special-purpose registry exhaustively; permission is
+/// what is left over once every named exclusion has been checked, not a
+/// remembered blocklist of "the bad ones". `Ipv4Addr::is_global()` and
+/// friends would express the same predicate, but they are unstable
+/// (nightly-only); this reimplements the stable subset directly (loopback,
+/// link-local, private, broadcast, multicast) and the rest (CGNAT, IETF
+/// protocol assignment, documentation/TEST-NET, benchmarking, the broader
+/// reserved ranges, and their IPv6 counterparts) by explicit CIDR
+/// arithmetic below, rather than pulling in a crate for a security
+/// boundary that most needs to stay readable in this file.
 ///
 /// IPv4-mapped IPv6 addresses (`::ffff:a.b.c.d`) are unwrapped to their
 /// embedded IPv4 form first, so e.g. `::ffff:127.0.0.1` is denied as
@@ -169,24 +245,93 @@ pub fn deny_reason_for_ip(ip: IpAddr) -> Option<DenyReason> {
     }
 }
 
+/// `true` only for an address this module has positively confirmed is
+/// globally-routable unicast -- i.e. `deny_reason_for_ip` found no
+/// applicable exclusion. Exposed mainly for tests/documentation: `fetch`
+/// and `egress_guard` call `deny_reason_for_ip`/`deny_reason_v4` directly
+/// so the informative `DenyReason` is available on the deny path.
+#[must_use]
+pub fn is_globally_routable(ip: IpAddr) -> bool {
+    deny_reason_for_ip(ip).is_none()
+}
+
+/// The part of the IANA IPv4 special-purpose registry std has no stable
+/// classifier for. Each entry is `(base, prefix_len, reason)`; the first
+/// matching CIDR wins. Checked by [`deny_reason_v4`] only after every
+/// stable `std::net::Ipv4Addr` classifier (loopback, link-local, private,
+/// broadcast, multicast) has already come back negative.
+const EXTRA_SPECIAL_USE_V4: &[(Ipv4Addr, u32, DenyReason)] = &[
+    // 0.0.0.0/8 beyond 0.0.0.0 itself ("this network", RFC 1122 §3.2.1.3).
+    (Ipv4Addr::UNSPECIFIED, 8, DenyReason::Reserved),
+    // Shared address space for carrier-grade NAT (RFC 6598) -- Tailscale's
+    // entire range, and the docker-vm render host's own Tailscale address,
+    // live here.
+    (
+        Ipv4Addr::new(100, 64, 0, 0),
+        10,
+        DenyReason::CarrierGradeNat,
+    ),
+    (
+        Ipv4Addr::new(192, 0, 0, 0),
+        24,
+        DenyReason::IetfProtocolAssignment,
+    ),
+    (Ipv4Addr::new(192, 0, 2, 0), 24, DenyReason::Documentation), // TEST-NET-1
+    // Deprecated 6to4 relay anycast (RFC 7526).
+    (Ipv4Addr::new(192, 88, 99, 0), 24, DenyReason::Reserved),
+    (Ipv4Addr::new(198, 18, 0, 0), 15, DenyReason::Benchmarking),
+    (
+        Ipv4Addr::new(198, 51, 100, 0),
+        24,
+        DenyReason::Documentation,
+    ), // TEST-NET-2
+    (Ipv4Addr::new(203, 0, 113, 0), 24, DenyReason::Documentation), // TEST-NET-3
+    // Class E / "reserved for future use" (includes 255.255.255.255,
+    // already caught above by `is_broadcast`).
+    (Ipv4Addr::new(240, 0, 0, 0), 4, DenyReason::Reserved),
+];
+
 fn deny_reason_v4(ip: Ipv4Addr) -> Option<DenyReason> {
+    // The stable, well-tested std classifiers first.
     if ip == CLOUD_METADATA_ADDR {
-        Some(DenyReason::CloudMetadata)
-    } else if ip.is_loopback() {
-        Some(DenyReason::Loopback)
-    } else if ip.is_link_local() {
-        Some(DenyReason::LinkLocal)
-    } else if ip.is_private() {
-        Some(DenyReason::Rfc1918Private)
-    } else if ip.is_unspecified() {
-        Some(DenyReason::Unspecified)
-    } else if ip.is_broadcast() {
-        Some(DenyReason::Broadcast)
-    } else if ip.is_multicast() {
-        Some(DenyReason::Multicast)
-    } else {
-        None
+        return Some(DenyReason::CloudMetadata);
     }
+    if ip.is_unspecified() {
+        return Some(DenyReason::Unspecified);
+    }
+    if ip.is_loopback() {
+        return Some(DenyReason::Loopback);
+    }
+    if ip.is_link_local() {
+        return Some(DenyReason::LinkLocal);
+    }
+    if ip.is_private() {
+        return Some(DenyReason::Rfc1918Private);
+    }
+    if ip.is_broadcast() {
+        return Some(DenyReason::Broadcast);
+    }
+    if ip.is_multicast() {
+        return Some(DenyReason::Multicast);
+    }
+
+    // The rest of the IANA IPv4 special-purpose registry.
+    EXTRA_SPECIAL_USE_V4
+        .iter()
+        .find(|(base, prefix, _)| v4_in_cidr(ip, *base, *prefix))
+        .map(|(_, _, reason)| *reason)
+}
+
+/// `true` if `ip` falls inside `base/prefix_len`. `prefix_len` is always a
+/// small compile-time constant from the tables above, never
+/// attacker-controlled.
+fn v4_in_cidr(ip: Ipv4Addr, base: Ipv4Addr, prefix_len: u32) -> bool {
+    let mask: u32 = if prefix_len == 0 {
+        0
+    } else {
+        u32::MAX << (32 - prefix_len)
+    };
+    (u32::from(ip) & mask) == (u32::from(base) & mask)
 }
 
 fn deny_reason_v6(ip: Ipv6Addr) -> Option<DenyReason> {
@@ -194,21 +339,62 @@ fn deny_reason_v6(ip: Ipv6Addr) -> Option<DenyReason> {
     const LINK_LOCAL_PREFIX: u16 = 0xfe80;
     const UNIQUE_LOCAL_MASK: u16 = 0xfe00; // fc00::/7
     const UNIQUE_LOCAL_PREFIX: u16 = 0xfc00;
+    const SITE_LOCAL_MASK: u16 = 0xffc0; // fec0::/10, deprecated (RFC 3879)
+    const SITE_LOCAL_PREFIX: u16 = 0xfec0;
 
-    let leading = ip.segments()[0];
     if ip.is_loopback() {
-        Some(DenyReason::Loopback)
-    } else if ip.is_unspecified() {
-        Some(DenyReason::Unspecified)
-    } else if leading & LINK_LOCAL_MASK == LINK_LOCAL_PREFIX {
-        Some(DenyReason::LinkLocal)
-    } else if leading & UNIQUE_LOCAL_MASK == UNIQUE_LOCAL_PREFIX {
-        Some(DenyReason::UniqueLocalV6)
-    } else if ip.is_multicast() {
-        Some(DenyReason::Multicast)
-    } else {
-        None
+        return Some(DenyReason::Loopback);
     }
+    if ip.is_unspecified() {
+        return Some(DenyReason::Unspecified);
+    }
+
+    let segments = ip.segments();
+    let leading = segments[0];
+    if leading & LINK_LOCAL_MASK == LINK_LOCAL_PREFIX {
+        return Some(DenyReason::LinkLocal);
+    }
+    if leading & UNIQUE_LOCAL_MASK == UNIQUE_LOCAL_PREFIX {
+        return Some(DenyReason::UniqueLocalV6);
+    }
+    if leading & SITE_LOCAL_MASK == SITE_LOCAL_PREFIX {
+        return Some(DenyReason::SiteLocalV6);
+    }
+    if ip.is_multicast() {
+        return Some(DenyReason::Multicast);
+    }
+    // 2001:db8::/32 -- documentation (RFC 3849).
+    if segments[0] == 0x2001 && segments[1] == 0x0db8 {
+        return Some(DenyReason::Documentation);
+    }
+    // 64:ff9b::/96 -- the well-known NAT64 prefix (RFC 6052): its low 32
+    // bits carry an embedded address a resolver can be tricked into
+    // synthesizing, so it is denied outright rather than trusted.
+    if segments[0] == 0x0064
+        && segments[1] == 0xff9b
+        && segments[2] == 0
+        && segments[3] == 0
+        && segments[4] == 0
+        && segments[5] == 0
+    {
+        return Some(DenyReason::Nat64V6);
+    }
+    // ::a.b.c.d -- the deprecated IPv4-compatible form (RFC 4291 §2.5.5.1):
+    // top 96 bits zero, distinct from the IPv4-*mapped* ::ffff:a.b.c.d form
+    // (bits 80-95 == 0xffff there, already unwrapped by `deny_reason_for_ip`
+    // before this function ever runs). `::` and `::1` are already handled
+    // above by is_unspecified/is_loopback, so reaching here with the top 96
+    // bits zero means a genuine (deprecated) compatible-form address.
+    if segments[0] == 0
+        && segments[1] == 0
+        && segments[2] == 0
+        && segments[3] == 0
+        && segments[4] == 0
+        && segments[5] == 0
+    {
+        return Some(DenyReason::Ipv4CompatibleV6);
+    }
+    None
 }
 
 /// Synchronous pre-check: parses `url`, rejects any scheme other than
@@ -369,37 +555,110 @@ impl BodyLimiter {
     }
 }
 
+/// What one hop of [`fetch_inner`] needs from DNS resolution: given the
+/// current URL, produce the `(host, SocketAddr)` to pin the connection to.
+///
+/// Production always uses [`RealResolver`] (real DNS via [`resolve_and_pin`],
+/// hence real validation of every resolved address). Tests inject
+/// [`FixedAddrResolver`], which points the *connection* at a loopback
+/// wiremock while leaving `egress_guard` -- which still runs, unmodified, on
+/// every hop inside `fetch_inner` -- to validate the URL exactly as
+/// production does. This is what makes the redirect chain, the body cap and
+/// the total time budget testable end-to-end against a real HTTP server:
+/// the seam is DNS resolution, never the deny-list, so a loopback address is
+/// still correctly refused everywhere the guard itself runs.
+trait HopResolver {
+    async fn resolve(&self, url: &Url) -> Result<(String, SocketAddr), EgressError>;
+}
+
+struct RealResolver;
+
+impl HopResolver for RealResolver {
+    async fn resolve(&self, url: &Url) -> Result<(String, SocketAddr), EgressError> {
+        resolve_and_pin(url).await
+    }
+}
+
 /// Fetches `url` under the egress guard: scheme/deny-list checks, DNS
 /// resolve-then-pin, a capped redirect chain (every hop re-validated and
 /// re-pinned from scratch), a capped response body, and an overall wall-clock
 /// budget. This is the only function in this module that touches the
 /// network.
 pub async fn fetch(url: &str) -> Result<Vec<u8>, EgressError> {
-    match tokio::time::timeout(TOTAL_FETCH_BUDGET, fetch_inner(url)).await {
+    fetch_with_resolver(url, &RealResolver).await
+}
+
+/// The whole of [`fetch`]'s behaviour -- including the total-budget
+/// wrapping -- parameterized over the DNS step *and* the budget itself, so
+/// tests exercise the exact same composition production uses rather than a
+/// parallel reimplementation of it. Production always calls this through
+/// [`fetch_with_resolver`], which fixes `total_budget` at
+/// [`TOTAL_FETCH_BUDGET`]; tests pass a millisecond-scale budget instead so
+/// the over-budget case is proven with a real (not virtual/paused) clock in
+/// milliseconds rather than tens of real seconds. [`REQUEST_TIMEOUT`] is
+/// unaffected either way -- it stays the real per-hop constant, comfortably
+/// larger than any test delay used against it.
+async fn fetch_with_budget(
+    url: &str,
+    resolver: &impl HopResolver,
+    total_budget: Duration,
+) -> Result<Vec<u8>, EgressError> {
+    match tokio::time::timeout(total_budget, fetch_inner(url, resolver)).await {
         Ok(result) => result,
         Err(_elapsed) => Err(EgressError::Timeout),
     }
 }
 
-async fn fetch_inner(url: &str) -> Result<Vec<u8>, EgressError> {
+async fn fetch_with_resolver(
+    url: &str,
+    resolver: &impl HopResolver,
+) -> Result<Vec<u8>, EgressError> {
+    fetch_with_budget(url, resolver, TOTAL_FETCH_BUDGET).await
+}
+
+/// `reqwest::Error`'s `Display` is usually just the outermost frame (e.g.
+/// "error sending request for url (...)"); the actually useful cause lives
+/// in its `source()` chain. Walk it so `EgressError::Request` messages are
+/// diagnosable rather than generic.
+fn describe_reqwest_error(error: &reqwest::Error) -> String {
+    let mut message = error.to_string();
+    let mut source = std::error::Error::source(error);
+    while let Some(inner) = source {
+        message.push_str(": ");
+        message.push_str(&inner.to_string());
+        source = inner.source();
+    }
+    message
+}
+
+async fn fetch_inner(url: &str, resolver: &impl HopResolver) -> Result<Vec<u8>, EgressError> {
     let mut current = egress_guard(url)?;
     let mut redirects = RedirectBudget::new(MAX_REDIRECTS);
 
     loop {
-        let (host, pinned_addr) = resolve_and_pin(&current).await?;
+        let (host, pinned_addr) = resolver.resolve(&current).await?;
 
         let client = reqwest::Client::builder()
             .resolve(&host, pinned_addr)
             .redirect(reqwest::redirect::Policy::none())
             .timeout(REQUEST_TIMEOUT)
+            // DO NOT REMOVE: reqwest's `auto_sys_proxy` defaults to true,
+            // and the underlying hyper-util connector reads
+            // HTTP_PROXY/HTTPS_PROXY/ALL_PROXY from the environment
+            // unconditionally. If any of those were set, the connection
+            // would go to the proxy instead of `pinned_addr`, silently
+            // defeating resolve-then-pin -- the DNS override above would
+            // simply never be consulted. `.no_proxy()` clears any
+            // configured proxy and disables that environment lookup.
+            .no_proxy()
             .build()
-            .map_err(|error| EgressError::Request(error.to_string()))?;
+            .map_err(|error| EgressError::Request(describe_reqwest_error(&error)))?;
 
         let response = client
             .get(current.clone())
             .send()
             .await
-            .map_err(|error| EgressError::Request(error.to_string()))?;
+            .map_err(|error| EgressError::Request(describe_reqwest_error(&error)))?;
 
         if response.status().is_redirection() {
             redirects.consume()?;
@@ -439,7 +698,7 @@ async fn read_capped_body(mut response: reqwest::Response) -> Result<Vec<u8>, Eg
     while let Some(chunk) = response
         .chunk()
         .await
-        .map_err(|error| EgressError::Request(error.to_string()))?
+        .map_err(|error| EgressError::Request(describe_reqwest_error(&error)))?
     {
         limiter.push(chunk.len())?;
         body.extend_from_slice(&chunk);
@@ -646,6 +905,168 @@ mod tests {
         ));
     }
 
+    // --- Fix round 1: the CGNAT gap and the rest of the IANA
+    // special-purpose registry the deny-list version missed. ---
+
+    #[test]
+    fn denies_carrier_grade_nat_the_render_hosts_own_tailscale_address() {
+        // docker-vm's real Tailscale address, named explicitly because this
+        // is not theoretical: it is exactly the "reaches unrelated
+        // neighbours" case the threat model describes.
+        assert!(matches!(
+            egress_guard("http://100.93.166.123/"),
+            Err(EgressError::Denied {
+                reason: DenyReason::CarrierGradeNat,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn denies_carrier_grade_nat_range_boundaries() {
+        for host in ["100.64.0.0", "100.64.0.1", "100.127.255.255"] {
+            let url = format!("http://{host}/");
+            assert!(
+                matches!(
+                    egress_guard(&url),
+                    Err(EgressError::Denied {
+                        reason: DenyReason::CarrierGradeNat,
+                        ..
+                    })
+                ),
+                "{url}"
+            );
+        }
+        // Just outside 100.64.0.0/10 on both sides: must be permitted.
+        for host in ["100.63.255.255", "100.128.0.0"] {
+            let url = format!("http://{host}/");
+            assert!(egress_guard(&url).is_ok(), "{url} should be permitted");
+        }
+    }
+
+    #[test]
+    fn denies_ietf_protocol_assignment_range() {
+        assert!(matches!(
+            egress_guard("http://192.0.0.8/"),
+            Err(EgressError::Denied {
+                reason: DenyReason::IetfProtocolAssignment,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn denies_ipv4_test_net_documentation_ranges() {
+        for host in ["192.0.2.1", "198.51.100.1", "203.0.113.1"] {
+            let url = format!("http://{host}/");
+            assert!(
+                matches!(
+                    egress_guard(&url),
+                    Err(EgressError::Denied {
+                        reason: DenyReason::Documentation,
+                        ..
+                    })
+                ),
+                "{url}"
+            );
+        }
+    }
+
+    #[test]
+    fn denies_benchmarking_range() {
+        for host in ["198.18.0.1", "198.19.255.255"] {
+            let url = format!("http://{host}/");
+            assert!(
+                matches!(
+                    egress_guard(&url),
+                    Err(EgressError::Denied {
+                        reason: DenyReason::Benchmarking,
+                        ..
+                    })
+                ),
+                "{url}"
+            );
+        }
+    }
+
+    #[test]
+    fn denies_reserved_class_e_and_deprecated_6to4_relay() {
+        assert!(matches!(
+            egress_guard("http://240.0.0.1/"),
+            Err(EgressError::Denied {
+                reason: DenyReason::Reserved,
+                ..
+            })
+        ));
+        assert!(matches!(
+            egress_guard("http://250.1.2.3/"),
+            Err(EgressError::Denied {
+                reason: DenyReason::Reserved,
+                ..
+            })
+        ));
+        assert!(matches!(
+            egress_guard("http://192.88.99.1/"),
+            Err(EgressError::Denied {
+                reason: DenyReason::Reserved,
+                ..
+            })
+        ));
+        // 0.0.0.0/8 beyond the single unspecified address.
+        assert!(matches!(
+            egress_guard("http://0.1.2.3/"),
+            Err(EgressError::Denied {
+                reason: DenyReason::Reserved,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn denies_ipv6_site_local_deprecated_range() {
+        assert!(matches!(
+            deny_reason_for_ip("fec0::1".parse().unwrap()),
+            Some(DenyReason::SiteLocalV6)
+        ));
+    }
+
+    #[test]
+    fn denies_ipv6_documentation_range() {
+        assert!(matches!(
+            deny_reason_for_ip("2001:db8::1".parse().unwrap()),
+            Some(DenyReason::Documentation)
+        ));
+    }
+
+    #[test]
+    fn denies_ipv6_nat64_well_known_prefix() {
+        // 64:ff9b::1.2.3.4, an address a NAT64 resolver could synthesize
+        // from an attacker-influenced name.
+        let ip: IpAddr = "64:ff9b::102:304".parse().unwrap();
+        assert!(matches!(deny_reason_for_ip(ip), Some(DenyReason::Nat64V6)));
+    }
+
+    #[test]
+    fn denies_deprecated_ipv4_compatible_ipv6() {
+        // ::0.1.2.3 -- top 96 bits zero, distinct from ::ffff:0.1.2.3
+        // (IPv4-mapped, unwrapped and classified as ordinary IPv4 upstream
+        // of this check) and from :: / ::1 (unspecified / loopback,
+        // checked before this branch runs).
+        let ip: IpAddr = "::0.1.2.3".parse().unwrap();
+        assert!(matches!(
+            deny_reason_for_ip(ip),
+            Some(DenyReason::Ipv4CompatibleV6)
+        ));
+    }
+
+    #[test]
+    fn is_globally_routable_agrees_with_deny_reason_for_ip() {
+        let global: IpAddr = "93.184.216.34".parse().unwrap();
+        let denied: IpAddr = "100.93.166.123".parse().unwrap();
+        assert!(is_globally_routable(global));
+        assert!(!is_globally_routable(denied));
+    }
+
     #[test]
     fn rejects_non_http_schemes() {
         for url in ["ftp://example.com/", "file:///etc/passwd", "gopher://x/"] {
@@ -774,42 +1195,9 @@ mod tests {
         ));
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn total_fetch_budget_rejects_work_that_runs_one_moment_past_it() {
-        let over_budget = tokio::time::sleep(TOTAL_FETCH_BUDGET + Duration::from_millis(1));
-        let outcome = tokio::time::timeout(TOTAL_FETCH_BUDGET, over_budget).await;
-        assert!(outcome.is_err(), "expected the budget to be exceeded");
-        // fetch() maps exactly this Elapsed into EgressError::Timeout.
-        let mapped: Result<(), EgressError> = outcome.map_err(|_elapsed| EgressError::Timeout);
-        assert!(matches!(mapped, Err(EgressError::Timeout)));
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn total_fetch_budget_permits_work_that_finishes_inside_it() {
-        let under_budget = tokio::time::sleep(
-            TOTAL_FETCH_BUDGET
-                .checked_sub(Duration::from_millis(1))
-                .expect("TOTAL_FETCH_BUDGET is well over 1ms"),
-        );
-        let outcome = tokio::time::timeout(TOTAL_FETCH_BUDGET, under_budget).await;
-        assert!(outcome.is_ok());
-    }
-
-    // --- Redirect-target re-validation: proves a redirect Location is run
-    // back through egress_guard, not merely joined and trusted. ---
-
-    #[test]
-    fn a_redirect_target_that_points_at_a_denied_address_is_denied() {
-        let base = Url::parse("https://example.com/start").unwrap();
-        let next = base.join("http://169.254.169.254/secret").unwrap();
-        assert!(matches!(
-            egress_guard(next.as_str()),
-            Err(EgressError::Denied {
-                reason: DenyReason::CloudMetadata,
-                ..
-            })
-        ));
-    }
+    // --- The redirect-target-is-re-validated-in-URL-space check that never
+    // needed a network. Kept: it pins that `Url::join` resolves a relative
+    // Location the way `fetch_inner` needs it to. ---
 
     #[test]
     fn a_relative_redirect_target_resolves_against_its_base() {
@@ -817,5 +1205,237 @@ mod tests {
         let next = base.join("../b/next").unwrap();
         assert_eq!(next.as_str(), "https://example.com/b/next");
         assert!(egress_guard(next.as_str()).is_ok());
+    }
+
+    // --- Fix round 1, item 3: fetch_inner had zero coverage, and the two
+    // tests below reimplemented its logic instead of driving it. A denied
+    // redirect target and an over-budget total time can now be proven
+    // through the actual redirect loop / timeout wrapper against a real
+    // loopback server, via `FixedAddrResolver` -- which swaps out only the
+    // DNS step. `egress_guard` still runs, unmodified, on every hop inside
+    // `fetch_inner`. ---
+
+    /// Always resolves to a caller-supplied loopback address, whatever host
+    /// the URL names. Used only so `fetch_inner`'s redirect chain, body cap
+    /// and timeout wrapper can be driven against a real local HTTP server:
+    /// a loopback address could never pass `egress_guard`/`resolve_and_pin`
+    /// for real, so this is the one deliberate seam, not a weakening of the
+    /// deny list itself (which still runs on every hop's URL exactly as in
+    /// production).
+    struct FixedAddrResolver(SocketAddr);
+
+    impl HopResolver for FixedAddrResolver {
+        // Test-only stand-in for real DNS resolution: it never actually
+        // awaits anything, unlike `RealResolver`, which is why clippy flags
+        // the `async` here as needless on its own.
+        #[allow(clippy::unused_async_trait_impl)]
+        async fn resolve(&self, url: &Url) -> Result<(String, SocketAddr), EgressError> {
+            let host = url.host_str().ok_or(EgressError::MissingHost)?.to_string();
+            Ok((host, self.0))
+        }
+    }
+
+    /// Spawns a loopback server whose `/hop1` -> `/hop2` -> `/hop3` chain
+    /// each sleeps `hop_delay` before redirecting to the next, and `/hop3`
+    /// finally responds 200. Each hop's sleep is kept under
+    /// [`REQUEST_TIMEOUT`] individually so no single hop times out; the
+    /// point is their *sum*, which a caller picks to land on either side of
+    /// [`TOTAL_FETCH_BUDGET`].
+    async fn spawn_delayed_redirect_chain(hop_delay: Duration) -> SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind a loopback listener");
+        let addr = listener.local_addr().expect("listener has a local addr");
+        let router = axum::Router::new()
+            .route(
+                "/hop1",
+                axum::routing::get(move || async move {
+                    tokio::time::sleep(hop_delay).await;
+                    axum::response::Redirect::to("/hop2")
+                }),
+            )
+            .route(
+                "/hop2",
+                axum::routing::get(move || async move {
+                    tokio::time::sleep(hop_delay).await;
+                    axum::response::Redirect::to("/hop3")
+                }),
+            )
+            .route(
+                "/hop3",
+                axum::routing::get(move || async move {
+                    tokio::time::sleep(hop_delay).await;
+                    "done"
+                }),
+            );
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+        addr
+    }
+
+    #[tokio::test]
+    async fn fetch_times_out_when_cumulative_hop_delay_exceeds_the_total_budget() {
+        // Real (not paused/virtual) time throughout: mixing tokio's paused
+        // clock with genuine TCP I/O across two concurrently-running tasks
+        // (this test's client, the spawned axum server) turned out to be
+        // exactly as unreliable as its reputation -- an earlier version of
+        // this test used `#[tokio::test(start_paused = true)]` with 9-second
+        // hop delays and failed non-deterministically with the client's own
+        // per-hop request timeout firing before the paused clock had
+        // advanced the server's sleep, even though the sleep's deadline was
+        // provably sooner. Real, small (millisecond) delays sidestep the
+        // whole class of problem and are just as deterministic.
+        //
+        // `fetch_with_budget` (not `fetch_with_resolver`) lets this pass a
+        // millisecond-scale total budget rather than waiting out the real
+        // TOTAL_FETCH_BUDGET (20s); REQUEST_TIMEOUT stays the real 10s
+        // constant, unaffected, and is not at risk of firing here.
+        let hop_delay = Duration::from_millis(60);
+        let total_budget = Duration::from_millis(100);
+        assert!(hop_delay < REQUEST_TIMEOUT);
+        assert!(hop_delay * 3 > total_budget);
+        let addr = spawn_delayed_redirect_chain(hop_delay).await;
+        let url = format!("http://slow-chain.invalid:{}/hop1", addr.port());
+
+        let outcome = fetch_with_budget(&url, &FixedAddrResolver(addr), total_budget).await;
+
+        assert!(
+            matches!(outcome, Err(EgressError::Timeout)),
+            "expected Timeout, got {outcome:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_succeeds_through_a_redirect_chain_that_stays_under_the_total_budget() {
+        // 3 hops * 5ms is trivially under the real TOTAL_FETCH_BUDGET
+        // (20s), so this drives the exact production composition
+        // (`fetch_with_resolver`, hence `fetch`'s real constant) rather
+        // than a shrunk test-only budget, with no risk of running slow.
+        let hop_delay = Duration::from_millis(5);
+        let addr = spawn_delayed_redirect_chain(hop_delay).await;
+        let url = format!("http://fast-chain.invalid:{}/hop1", addr.port());
+
+        let outcome = fetch_with_resolver(&url, &FixedAddrResolver(addr)).await;
+
+        assert_eq!(outcome.expect("fetch should succeed"), b"done".to_vec());
+    }
+
+    #[tokio::test]
+    async fn fetch_inner_denies_a_redirect_target_that_resolves_to_a_denied_address() {
+        // Distinct from the URL-space-only check above: this drives the
+        // REAL fetch_inner loop end to end -- resolver.resolve, the HTTP
+        // GET, RedirectBudget::consume, Location extraction, Url::join,
+        // and finally egress_guard running again on the joined URL -- via a
+        // server that actually issues the redirect, rather than
+        // hand-constructing the joined URL and calling egress_guard on it
+        // directly. A `fetch_inner` that dropped the re-validation call
+        // would return `Ok` here instead.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind a loopback listener");
+        let addr = listener.local_addr().expect("listener has a local addr");
+        let router = axum::Router::new().route(
+            "/start",
+            axum::routing::get(|| async {
+                axum::response::Redirect::to("http://169.254.169.254/secret")
+            }),
+        );
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+        let url = format!("http://redirect-test.invalid:{}/start", addr.port());
+
+        let outcome = fetch_inner(&url, &FixedAddrResolver(addr)).await;
+
+        assert!(
+            matches!(
+                outcome,
+                Err(EgressError::Denied {
+                    reason: DenyReason::CloudMetadata,
+                    ..
+                })
+            ),
+            "expected the metadata redirect target to be denied, got {outcome:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_inner_enforces_the_response_body_cap_over_a_real_connection() {
+        let cap = usize::try_from(MAX_RESPONSE_BODY_BYTES).expect("cap fits in usize");
+        let oversized = vec![0u8; cap + 1];
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind a loopback listener");
+        let addr = listener.local_addr().expect("listener has a local addr");
+        let router = axum::Router::new().route(
+            "/oversized",
+            axum::routing::get(move || async move { oversized }),
+        );
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+        let url = format!("http://oversized.invalid:{}/oversized", addr.port());
+
+        let outcome = fetch_inner(&url, &FixedAddrResolver(addr)).await;
+
+        assert!(
+            matches!(
+                outcome,
+                Err(EgressError::ResponseTooLarge {
+                    limit: MAX_RESPONSE_BODY_BYTES
+                })
+            ),
+            "expected ResponseTooLarge, got {outcome:?}"
+        );
+    }
+
+    // --- The dependency assumption the module doc flags as unproven:
+    // reqwest's `.resolve()` override both connects to the pinned address
+    // AND preserves the original hostname in the outgoing `Host` header.
+    // This talks to `reqwest::Client` directly -- no `egress_guard`, no
+    // `fetch_inner`, nothing from this module's own deny logic -- so it
+    // pins reqwest's behaviour in isolation from everything this module
+    // built on top of it. ---
+
+    #[tokio::test]
+    async fn reqwest_resolve_override_connects_to_the_pin_and_preserves_the_host_header() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind a loopback listener");
+        let addr = listener.local_addr().expect("listener has a local addr");
+        let router = axum::Router::new().route(
+            "/",
+            axum::routing::get(|headers: axum::http::HeaderMap| async move {
+                headers
+                    .get(axum::http::header::HOST)
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or_default()
+                    .to_string()
+            }),
+        );
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+
+        // example.invalid is IANA-reserved (RFC 2606) and will not resolve
+        // via real DNS -- if `.resolve()` were not actually honoured, this
+        // request would fail outright rather than quietly hitting the
+        // wrong address.
+        let client = reqwest::Client::builder()
+            .resolve("example.invalid", addr)
+            .no_proxy()
+            .build()
+            .expect("build a plain reqwest client");
+        let url = format!("http://example.invalid:{}/", addr.port());
+
+        let response = client
+            .get(&url)
+            .send()
+            .await
+            .expect("the pinned connection should succeed despite the unresolvable name");
+        let observed_host = response.text().await.expect("read response body");
+
+        assert_eq!(observed_host, format!("example.invalid:{}", addr.port()));
     }
 }

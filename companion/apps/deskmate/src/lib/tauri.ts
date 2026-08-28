@@ -30,6 +30,7 @@ const IPC_ERROR_CATEGORIES = new Set<IpcError["category"]>([
   "autostart",
   "window",
   "internal",
+  "unsupported",
 ]);
 
 export class DeskmateCommandError extends Error {

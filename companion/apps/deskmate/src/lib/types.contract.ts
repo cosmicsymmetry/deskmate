@@ -4,7 +4,7 @@ import type { IpcContractFixtures } from "./types";
 export const ipcContractFixtures = {
   "snapshot": {
     "config": {
-      "schema_version": 5,
+      "schema_version": 6,
       "preferences": {
         "timezone": "Asia/Tbilisi",
         "autostart": true,
@@ -244,7 +244,7 @@ export const ipcContractFixtures = {
   },
   "configs": [
     {
-      "schema_version": 5,
+      "schema_version": 6,
       "preferences": {
         "timezone": "Asia/Tbilisi",
         "autostart": true,
@@ -899,6 +899,10 @@ export const ipcContractFixtures = {
     {
       "category": "internal",
       "message": "internal"
+    },
+    {
+      "category": "unsupported",
+      "message": "unsupported"
     }
   ],
   "draft_validation": {

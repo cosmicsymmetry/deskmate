@@ -6,11 +6,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use app_core::{
-    AppConfig, CardField, CardFieldValue, ConfigStore, DisplayOrientation, DisplayTemplate,
-    MAX_CONFIG_FILE_BYTES, MAX_ICS_BYTES, MAX_ICS_SOURCE_LEN, MAX_WIDGET_ID_LEN, NetworkConfig,
-    NetworkSettings, NetworkSettingsStore, NetworkSettingsStoreError, NetworkSettingsUpdate,
-    PomodoroAction, ProvisioningTier, RuntimeError, RuntimeHandle, SaveReceipt, StoreError,
-    ValidationIssue, utc_offset_minutes,
+    AppConfig, CardField, CardFieldValue, CardSettings, ConfigStore, DisplayOrientation,
+    DisplayTemplate, MAX_CONFIG_FILE_BYTES, MAX_ICS_BYTES, MAX_ICS_SOURCE_LEN, MAX_WIDGET_ID_LEN,
+    NetworkConfig, NetworkSettings, NetworkSettingsStore, NetworkSettingsStoreError,
+    NetworkSettingsUpdate, PomodoroAction, ProvisioningTier, RuntimeError, RuntimeHandle,
+    SaveReceipt, StoreError, ValidationIssue, utc_offset_minutes,
 };
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
@@ -194,6 +194,13 @@ pub enum IpcError {
     Internal {
         message: String,
     },
+    /// A typed, visible refusal for input this build genuinely cannot act on yet --
+    /// mirrors runtime.rs's `CardErrorKind::SceneRefused` for the same reason: say so
+    /// explicitly rather than pretending to render something, or miscategorizing the
+    /// refusal as an unexpected internal error.
+    Unsupported {
+        message: String,
+    },
 }
 
 impl std::fmt::Display for IpcError {
@@ -210,7 +217,8 @@ impl std::fmt::Display for IpcError {
             | Self::Provider { message }
             | Self::Autostart { message }
             | Self::Window { message }
-            | Self::Internal { message } => formatter.write_str(message),
+            | Self::Internal { message }
+            | Self::Unsupported { message } => formatter.write_str(message),
         }
     }
 }
@@ -232,6 +240,7 @@ impl IpcError {
             Self::Autostart { .. } => "autostart",
             Self::Window { .. } => "window",
             Self::Internal { .. } => "internal",
+            Self::Unsupported { .. } => "unsupported",
         }
     }
 }
@@ -624,6 +633,9 @@ fn server_error_after_local_save(error: IpcError) -> IpcError {
         IpcError::Internal { message: value } => IpcError::Internal {
             message: message(value),
         },
+        IpcError::Unsupported { message: value } => IpcError::Unsupported {
+            message: message(value),
+        },
     }
 }
 
@@ -790,7 +802,7 @@ pub fn render_card_preview(
         .ok_or_else(|| IpcError::NotFound {
             message: format!("no card with id {card_id:?}"),
         })?;
-    let template = sim_template(card.template());
+    let template = preview_template_for(card, &card_id)?;
 
     let data = snapshot
         .card_data
@@ -832,6 +844,27 @@ pub fn render_card_preview(
 /// (`app-core`'s `config.rs`), except targeting `lvgl_sim::SimTemplate` — the two
 /// enums are exhaustively 1:1, so this can never fail to map a `DisplayTemplate` the
 /// rest of the app accepts; there is no "unknown template" branch to fall back from.
+/// Resolves the preview simulator's `SimTemplate` for one card, or a typed refusal.
+///
+/// A plugin card has no `DisplayTemplate`: it renders from its manifest-compiled
+/// scene, not any of the six built-in templates this preview simulator knows how to
+/// draw. Refuse typed and visibly (mirrors `runtime.rs`'s `SceneRefused` handling for
+/// the same absence) rather than inventing a placeholder template, which would
+/// silently render a plugin card as some unrelated built-in face.
+fn preview_template_for(
+    card: &CardSettings,
+    card_id: &str,
+) -> Result<lvgl_sim::SimTemplate, IpcError> {
+    let Some(template) = card.template() else {
+        return Err(IpcError::Unsupported {
+            message: format!(
+                "card {card_id:?} is a plugin card; preview rendering for plugin cards is not implemented yet"
+            ),
+        });
+    };
+    Ok(sim_template(template))
+}
+
 fn sim_template(template: &DisplayTemplate) -> lvgl_sim::SimTemplate {
     match template {
         DisplayTemplate::DigitalClock => lvgl_sim::SimTemplate::DigitalClock,
@@ -1420,6 +1453,40 @@ mod tests {
                 icon_asset_id: Some("weather-icons".into())
             }),
             lvgl_sim::SimTemplate::IconBadgeText
+        );
+    }
+
+    #[test]
+    fn preview_template_for_resolves_every_built_in_template() {
+        let card = CardSettings::Clock {
+            id: "clock".into(),
+            title: "Desk".into(),
+            show_seconds: true,
+            template: DisplayTemplate::DigitalClock,
+            tap_action: WidgetTapAction::None,
+            refresh: RefreshPolicy::DeviceLocal,
+            alert: CardAlert::None,
+        };
+        assert_eq!(
+            preview_template_for(&card, "clock").unwrap(),
+            lvgl_sim::SimTemplate::DigitalClock
+        );
+    }
+
+    #[test]
+    fn preview_template_for_a_plugin_card_is_a_typed_unsupported_refusal() {
+        let card = CardSettings::Plugin {
+            id: "aqi".into(),
+            title: "Air quality".into(),
+            plugin_id: "aqi".into(),
+            tap_action: WidgetTapAction::None,
+            refresh: RefreshPolicy::Interval { minutes: 15 },
+            alert: CardAlert::None,
+        };
+        let error = preview_template_for(&card, "aqi").unwrap_err();
+        assert!(
+            matches!(error, IpcError::Unsupported { ref message } if message.contains("plugin")),
+            "expected IpcError::Unsupported naming the plugin card, got {error:?}"
         );
     }
 
@@ -2615,6 +2682,9 @@ mod tests {
             },
             IpcError::Internal {
                 message: "internal".into(),
+            },
+            IpcError::Unsupported {
+                message: "unsupported".into(),
             },
         ];
 

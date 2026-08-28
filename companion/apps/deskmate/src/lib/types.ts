@@ -401,7 +401,8 @@ export type IpcError =
   | MessageError<"provider">
   | MessageError<"autostart">
   | MessageError<"window">
-  | MessageError<"internal">;
+  | MessageError<"internal">
+  | MessageError<"unsupported">;
 
 // This fixture shape is generated from Rust serialization in a backend test, then
 // compiled against these declarations. Either side changing makes CI fail.

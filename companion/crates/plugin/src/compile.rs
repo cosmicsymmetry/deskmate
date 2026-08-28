@@ -77,11 +77,17 @@ pub enum CompileError {
     /// A restricted expression (anything outside the binding namespace)
     /// failed to parse or evaluate. Wraps the specific `expr::ExprError`,
     /// which includes `OutputTooLong` for a provider value too large for
-    /// `expr`'s own, larger bound (`expr::MAX_OUTPUT_LEN`, 4096 bytes) --
-    /// that stays a named, fatal error because it can only be reached
-    /// through `truncate(s, n)`, an explicit function an author called with
-    /// too large an `n`, which is an authoring mistake worth surfacing
-    /// rather than papering over. Contrast with a literal value's own,
+    /// `expr`'s own, larger bound (`expr::MAX_OUTPUT_LEN`, 4096 bytes).
+    /// That stays a named, fatal error, and it is reachable two ways: an
+    /// author calling `truncate(s, n)` with too large an `n`, and a plain
+    /// field read of an oversized provider value (`expr::bound_text`).
+    /// **Consequence worth knowing: a provider string over 4096 bytes is a
+    /// PERMANENT card fault**, because `classify_plugin_failure` rules a
+    /// compile failure permanent. That is the deliberate ruling -- 4096 is
+    /// far beyond anything a 448x368 panel can show, so it signals a broken
+    /// source rather than a long title -- but it is the same defect class
+    /// as the 128-byte case below, surviving at a higher threshold.
+    /// Contrast with a literal value's own,
     /// smaller wire bound (`protocol::MAX_SCENE_TEXT_LEN`), which this
     /// module truncates rather than refuses -- see `bound_literal`.
     Expression(ExprError),

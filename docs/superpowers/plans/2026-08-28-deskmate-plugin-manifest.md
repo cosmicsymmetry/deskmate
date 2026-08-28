@@ -63,7 +63,8 @@ one OTA cycle.
 - Config schema moves **v5 -> v6** for the plugin card kind, with **lossless v0..v5
   migration** and compatibility fixtures, exactly as every prior schema move.
   **Redeploy the server whenever the schema moves** — the app and the server carry
-  independent copies of `CURRENT_SCHEMA_VERSION`, and a stale server rejects every save
+  independently COMPILED copies of `CURRENT_SCHEMA_VERSION` (there is one definition, in
+  `app-core`; each built binary bakes in its own), and a stale server rejects every save
   with `schema version 6 is not supported; expected 5`.
 - **The binding vocabulary is closed and this stage adds nothing to it.** If a plugin
   wants a tenth token, the answer is a host-side rebuild-and-push. §2's rule is "anything
@@ -429,7 +430,8 @@ will pass, and it will mean nothing.
 - [x] **Step 2: Run it and watch it fail.**
 - [x] **Step 3: Implement the kind and the migration.**
 - [x] **Step 4: Bump `CURRENT_SCHEMA_VERSION` in both places** — the app and the server
-      carry independent copies, and a stale server rejects every save. Add the redeploy to
+      each bake in their own compiled copy of the single `app-core` definition, so a stale
+      server binary rejects every save. Add the redeploy to
       Task 9's checklist rather than discovering it on the board.
 - [x] **Step 5: Freeze the contract** in `docs/config/v6.md`, written from v5.
 - [x] **Step 6: Commit.** `feat: add the plugin card kind as schema v6`

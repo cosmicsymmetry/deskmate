@@ -487,13 +487,83 @@ of letting code and documentation diverge.
   byte-identical via `framebuffer_diff` at both orientations, fallback and both transition
   directions confirmed by webcam at 90°. Two things are **not** verified: the fallback at
   270°, and the fallback's bottom margin (cropped in the available camera framing).
-- **After C-template retirement, the framebuffer diff expects
-  `total=76 identical=64 differing=0 excluded=12`, and any differing case is a real
-  firmware/simulator disagreement.** The matrix is 18 synthetic scene-node rows plus
-  58 device-pushable rows spanning all six retired faces. Eight synthetic rows are
-  excluded because they require unprovisioned image/font assets or an unregistered
-  `field.status`; the four face-row exclusions below are active again, not vacuous.
-  `row-list--truncation-boundary` contributes two of those four. The other two are
+- **The plugin manifest (plan `docs/superpowers/plans/2026-08-28-deskmate-plugin-manifest.md`,
+  Tasks 1-8) is delivered: a TOML display-list format a card compiles server-side into a
+  scene, frozen as `docs/plugins/manifest-v1.md`.** `companion/crates/plugin` parses and
+  bounds the manifest (`manifest.rs`), evaluates its restricted `{{ ... }}` expression
+  language against fetched provider data (`expr.rs` — field access, six functions,
+  the `?:` operator, a closed device-binding namespace for `time:`/`timer.`/`field.`/
+  `date`), resolves `[[assets]]` to content-addressed digests (`assets.rs`), and compiles
+  a manifest plus a fetched snapshot to a wire `Scene` (`compile.rs`). Schema stays v6
+  (`docs/config/v6.md`'s `plugin` card kind), protocol stays v1 additive, and
+  `PROTOCOL_CURRENT_CAPABILITIES` is untouched. **Task 8 shipped the first two curated
+  plugins** — `companion/plugins/aqi/manifest.toml` (a JSON object source; a numeric
+  hero; the icon-font path; the `field.title` binding) and
+  `companion/plugins/agenda/manifest.toml` (a JSON list; the one repeat form capped at
+  `MAX_REPEAT_ITEMS` = 5 even though its fixture ships 6 events; a real `truncate()`
+  case; an `image` node) — and, doing so, found and closed a real gap: `compile.rs`'s
+  `Node::Image`/`Node::Glyph` arms were unconditionally `CompileError::AssetNotResolved`
+  no matter what `[[assets]]` a manifest declared, because nothing threaded a resolved
+  `AssetSet` into the compiler at all. **`plugin::compile_scene` (no assets, fails closed,
+  every prior caller's entry point) is now a thin wrapper around the new
+  `plugin::compile_scene_with_assets`**, which resolves `image`/`glyph` nodes and asset
+  fonts for real, kind-checked against the manifest's own declared `[[assets]] kind`. Task
+  9 (hardware) is explicitly deferred by the owner; nothing about the plugin faces is
+  hardware-verified.
+  - **`field.*` has no builder anywhere else in this repo and therefore no pixel coverage
+    before this** — the project's own prior notes call it out by name. `aqi` binds
+    `field.title` deliberately to close that gap. Note the reach is narrower than
+    "a plugin's own registry": a plugin card's `WidgetConfig.template` is *always*
+    `TemplateKind::DigitalClock` on the wire (`app-core/src/config.rs`'s `wire_config`, a
+    decision predating this task), so the only field names `field.*` can ever resolve for
+    any plugin card are DigitalClock's four registered fields
+    (`title`/`show_seconds`/`stale`/`error`) — a plugin does not get a registry of its
+    own to bring. This is documented in `docs/plugins/manifest-v1.md` so it is not
+    relearned.
+  - **The arc/line binding gap (`SceneArc.end_binding`/`SceneLine.angle_binding` always
+    compile to `""`, deferred by an earlier task in this stage) does not bite either
+    curated plugin**: `aqi` uses no `arc`/`line` node, and `agenda`'s only non-text
+    geometry is its `image` badge.
+  - No real icon artwork exists or could be produced in this stage (no icon library, no
+    network access); `aqi`'s icon-font asset is the already-committed
+    `crates/lvgl-sim/assets/Inter-subset.ttf` (byte-identical, same digest), with EPA AQI
+    categories mapped to single capital letters. This exercises the real
+    upload-a-font/resolve-a-glyph-by-digest wire path with real bytes rather than leaving
+    it untested; swapping in real artwork later is a content change, not a shape change.
+  - `companion/crates/lvgl-sim/src/cases.rs`'s `plugin_scene_cases()` compiles both
+    plugins through the *real* production path (`parse_manifest` + `resolve_assets` +
+    `compile_scene_with_assets` against the real committed manifests, assets, and
+    fixtures — `companion/crates/plugin/tests/fixtures/aqi_response.json` (reused from an
+    earlier task, not recaptured) and the new `agenda_response.json`) rather than
+    hand-building an equivalent `Scene`, at four data states (fresh, stale, error,
+    empty/missing-data) and both orientations — 16 rows, golden-pinned by
+    `crates/lvgl-sim/tests/plugin_scene.rs` against `tests/golden/plugin-scene/`.
+- **After C-template retirement AND Task 8's curated plugins, the framebuffer diff
+  expects `total=92 excluded=8` (`identical=84` is the expectation for a device that has
+  not yet run this composition — see below), and any differing case on a real run is a
+  real firmware/simulator disagreement.** This was `total=76 identical=64 differing=0
+  excluded=12` before Task 8 (that figure is now history, not current fact — see below
+  for what changed and why). The matrix is now 18 synthetic scene-node rows, 58
+  device-pushable six-face rows, and 16 curated-plugin rows (`plugin_scene_cases()`,
+  above). Of the 8 excluded: 4 are unchanged from before Task 8
+  (`row-list--truncation-boundary` x2, `progress-ring--running-mid-countdown` x2, both
+  still explained below); the other 4 are `scene-text`/`scene-label` (both orientations),
+  which bind the synthetic `field.status` name literally, and remain excluded because no
+  registry — built-in or plugin — accepts a field named `status` (see `field.*`'s note
+  above). **`scene-image` and `scene-glyph` (both orientations, 4 rows) are excluded no
+  longer**: Task 8's `push_case_assets` provisions real assets over the actual
+  `AssetBegin`/`AssetChunk`/`AssetCommit` wire path — the first time this repo's test
+  suite exercises the device's asset-transfer path at all — closing the two asset-shaped
+  reasons `exclusion_reason()` used to name. All 16 curated-plugin rows are included too
+  (`agenda` pushes no fields at all; `aqi` binds only `field.title`, which DigitalClock's
+  registry accepts). **This 92/8/84 split has not been run on hardware** — Task 9 (the
+  hardware gate for this stage) is explicitly deferred by the owner, so `identical=84` is
+  what the software side predicts, not an observed result; the next hardware session must
+  run `framebuffer_diff` fresh rather than trust this number unverified. What follows,
+  through the composition of the pre-Task-8 76/12, is unchanged history and still
+  accurate for those rows: of the 18 synthetic scene-node rows and 58 device-pushable
+  rows spanning all six retired faces, four face-row exclusions were active (below), not
+  vacuous. `row-list--truncation-boundary` contributes two of those four. The other two are
   `progress-ring--running-mid-countdown`, which could not pass deterministically:
   `progress_ring.c`'s `current_remaining_ms` keeps counting a *running* ring down from
   `lv_tick_get()` after its fields are pushed, while the simulator's fake tick is fixed

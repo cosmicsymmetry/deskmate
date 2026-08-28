@@ -1,18 +1,28 @@
 //! Dev-only physical framebuffer diff (V1 reset design spec §3.2.2/§3.2.3,
 //! Task 10). Pushes every device-representable case in the synthetic
-//! `lvgl_sim::cases::scene_cases()` and six-face
-//! `lvgl_sim::cases::face_scene_cases()` matrices to a physically connected
-//! device running a `DESKMATE_DEV_DIAG=1` build, requests a 0x7E framebuffer
-//! capture, and byte-compares the reassembled pixels against `Simulator::render_scene` for
-//! the identical case. This only runs against real
-//! hardware: 0x7E/0x7F are dev-build-only message ids, absent from the
-//! release protocol and from `docs/protocol/v1.md`.
+//! `lvgl_sim::cases::scene_cases()`, six-face `lvgl_sim::cases::face_scene_cases()`,
+//! and (Task 8, plugin-manifest stage) `lvgl_sim::cases::plugin_scene_cases()`
+//! matrices to a physically connected device running a `DESKMATE_DEV_DIAG=1`
+//! build, requests a 0x7E framebuffer capture, and byte-compares the
+//! reassembled pixels against `Simulator::render_scene` for the identical
+//! case. This only runs against real hardware: 0x7E/0x7F are dev-build-only
+//! message ids, absent from the release protocol and from
+//! `docs/protocol/v1.md`.
 //!
 //! Requires a device flashed from `idf.py -C firmware -DDESKMATE_DEV_DIAG=1
 //! build`. Against a plain release build every case fails with a timeout
 //! (the device silently ignores the unrecognized 0x7E message type, exactly
 //! like any other unsupported byte the untrusted-input rules require it to
 //! tolerate).
+//!
+//! ## Real asset provisioning (Task 8, plugin-manifest stage)
+//!
+//! `push_case_assets` provisions every asset a case's scene names, over the
+//! real `AssetBegin`/`AssetChunk`/`AssetCommit` wire path -- the first time
+//! this harness (or any test in this repo) exercises the device's
+//! asset-transfer path rather than excluding any case that needed one. See
+//! `exclusion_reason`'s doc for exactly which of the three historical
+//! exclusion reasons this closes, and which one it does not.
 //!
 //! ## The row-list truncation-boundary exclusion
 //!
@@ -47,9 +57,10 @@ use device::{DeviceClient, Transport, connect};
 use lvgl_sim::scene::{SceneAsset, SceneRenderRequest, SceneTimer};
 use lvgl_sim::{SimOrientation, Simulator, cases};
 use protocol::{
-    ActivateScreen, ApplyConfig, Field, FieldValue, InterruptPolicy, Message, PushData, PushScene,
-    ScreenConfig, SizeClass, TYPE_ACTIVATE_SCREEN, TYPE_APPLY_CONFIG, TYPE_PUSH_SCENE, TapAction,
-    TemplateKind, TimeSync, WidgetConfig,
+    ActivateScreen, ApplyConfig, AssetBegin, AssetChunk, AssetCommit, AssetKind, Field, FieldValue,
+    InterruptPolicy, MAX_ASSET_CHUNK_BYTES, Message, PushData, PushScene, ScreenConfig, SizeClass,
+    TYPE_ACTIVATE_SCREEN, TYPE_APPLY_CONFIG, TYPE_ASSET_BEGIN, TYPE_ASSET_CHUNK, TYPE_ASSET_COMMIT,
+    TYPE_PUSH_SCENE, TapAction, TemplateKind, TimeSync, WidgetConfig,
 };
 /// Gives the 250 ms scene-binding tick margin to redraw before capture while
 /// staying clear of the 1 s mark that rolls a just-synced second over.
@@ -94,21 +105,35 @@ fn exclusion_reason(name: &str, request: &SceneRenderRequest) -> Option<&'static
              which do cover the running arc hue; paused-mid-countdown covers \
              the same geometry here, and running-at-zero the running palette",
         )
-    } else if request
-        .assets
-        .iter()
-        .any(|asset| matches!(asset, SceneAsset::Image { .. }))
-    {
-        Some("the scene requires an RGB565 image asset, and this harness does not provision assets")
-    } else if request
-        .assets
-        .iter()
-        .any(|asset| matches!(asset, SceneAsset::Font { .. }))
-    {
-        Some("the scene requires a runtime font asset, and this harness does not provision assets")
-    } else if !request.fields.is_empty() {
+    } else if request.fields.iter().any(|(field_name, _)| {
+        !matches!(
+            field_name.as_str(),
+            "title" | "show_seconds" | "stale" | "error"
+        )
+    }) {
+        // Task 8 (plugin-manifest stage): `push_case_assets` below now
+        // provisions real RGB565 image and runtime font assets, and
+        // `push_case_fields` now pushes `request.fields` as PushData too --
+        // so the two asset-shaped exclusions this function used to name are
+        // gone. What is left is genuinely un-closable without a firmware
+        // change: `apply_case_config` always selects `TemplateKind::DigitalClock`
+        // for a no-timer case (this crate's own choice, unrelated to Task 8),
+        // whose PushData registry (`s_digital_clock_fields` in
+        // `firmware/main/core/template_fields.c`) is exactly
+        // `title`/`show_seconds`/`stale`/`error`. A schema-v6 plugin card's
+        // `WidgetConfig.template` is *also* always `DigitalClock` on the wire
+        // (`app-core/src/config.rs`'s `wire_config`, an established, deliberate
+        // decision this task did not make and does not reopen) -- so a plugin
+        // does not get a registry of its own to "bring" either. The two
+        // scene-node synthetic cases below (`scene-text`/`scene-label`) bind
+        // `field.status`, a name no registry accepts; the curated `aqi`
+        // plugin instead binds `field.title`, which this registry does
+        // accept, and that is what gives `field.*` its hardware coverage.
         Some(
-            "the scene binds field.status, which no built-in template field registry accepts in PushData",
+            "the scene binds a field.* name outside DigitalClock's PushData registry \
+             (title/show_seconds/stale/error) -- apply_case_config always selects \
+             DigitalClock's template for a no-timer case, so any other field name \
+             is rejected by the device",
         )
     } else {
         None
@@ -229,33 +254,48 @@ fn activate_case_screen(client: &mut DeviceClient<impl Transport>) -> Result<(),
     }
 }
 
+/// Pushes both of the two things a case's `PushData` can carry: a
+/// `ProgressRing` timer snapshot (`request.timer`), and (Task 8,
+/// plugin-manifest stage) `request.fields` -- the `field.*` binding values a
+/// plugin's scene resolves against, e.g. `aqi`'s `field.title`. A case with
+/// neither pushes nothing at all, exactly as before Task 8.
 fn push_case_fields(
     client: &mut DeviceClient<impl Transport>,
     revision: u32,
     request: &SceneRenderRequest,
 ) -> Result<(), String> {
-    let Some(SceneTimer {
+    let mut fields = Vec::new();
+    if let Some(SceneTimer {
         total_ms,
         remaining_ms,
         running,
     }) = request.timer
-    else {
-        return Ok(());
-    };
-    let fields = vec![
-        Field {
+    {
+        fields.push(Field {
             key: "duration_seconds".into(),
             value: FieldValue::Integer(i64::from(total_ms / 1_000)),
-        },
-        Field {
+        });
+        fields.push(Field {
             key: "remaining_seconds".into(),
             value: FieldValue::Integer(i64::from(remaining_ms / 1_000)),
-        },
-        Field {
+        });
+        fields.push(Field {
             key: "running".into(),
             value: FieldValue::Boolean(running),
-        },
-    ];
+        });
+    }
+    // `exclusion_reason` already refused any case whose field name is not
+    // one of DigitalClock's registered fields, so every name reaching here
+    // is one `apply_case_config`'s always-DigitalClock template accepts.
+    for (name, value) in &request.fields {
+        fields.push(Field {
+            key: name.clone(),
+            value: FieldValue::Text(value.clone()),
+        });
+    }
+    if fields.is_empty() {
+        return Ok(());
+    }
     let ack = client
         .push_data(PushData {
             widget_id: "diff".into(),
@@ -268,6 +308,124 @@ fn push_case_fields(
             "push acknowledgement revision mismatch: expected {revision}, received {:?}",
             ack.revision
         ));
+    }
+    Ok(())
+}
+
+/// Rebuilds the raw wire bytes one [`SceneAsset`] resolves to, and the
+/// [`AssetKind`] to declare it under.
+///
+/// `SceneAsset::Font`'s `bytes` are already the exact TTF file content --
+/// see `lvgl_sim::cases::compile_plugin_scene`'s doc for why this harness
+/// always uses `AssetKind::Font` here even for a manifest asset declared
+/// `kind = "icon-font"`: `firmware/main/core/asset_store.c`'s
+/// `asset_kind_is_valid` accepts either for a font-shaped blob, and the
+/// simulator's own `SceneAsset` enum has no separate icon-font variant to
+/// preserve the distinction through in the first place.
+///
+/// `SceneAsset::Image`'s `width`/`height`/`pixels` are the *decoded* form
+/// `lvgl_sim::cases::decode_rgb565_asset` produced from the plugin's
+/// committed `.rgb565` file; this is that decode's exact inverse, so the
+/// re-encoded bytes are byte-identical to the committed file
+/// `plugin::resolve_assets` hashed to get `digest` in the first place.
+fn asset_wire_bytes(asset: &SceneAsset) -> (Vec<u8>, AssetKind) {
+    match asset {
+        SceneAsset::Font { bytes, .. } => ((*bytes).to_vec(), AssetKind::Font),
+        SceneAsset::Image {
+            width,
+            height,
+            pixels,
+            ..
+        } => {
+            // `lv_image_header_t`: magic(8) | cf(8) | flags(16), then
+            // w(16) | h(16), then stride(16) | reserved_2(16), all
+            // little-endian -- see `companion/plugins/agenda/manifest.toml`'s
+            // doc comment and `sim_build_rgb565_image`
+            // (`crates/lvgl-sim/csrc/sim_shim.c`) for the same layout.
+            const MAGIC: u32 = 0x19;
+            const COLOR_FORMAT_RGB565: u32 = 0x12;
+            let stride = width * 2;
+            let word0 = MAGIC | (COLOR_FORMAT_RGB565 << 8);
+            let word1 = (width & 0xFFFF) | ((height & 0xFFFF) << 16);
+            let word2 = stride & 0xFFFF;
+            let mut bytes = Vec::with_capacity(12 + pixels.len() * 2);
+            bytes.extend_from_slice(&word0.to_le_bytes());
+            bytes.extend_from_slice(&word1.to_le_bytes());
+            bytes.extend_from_slice(&word2.to_le_bytes());
+            for pixel in pixels {
+                bytes.extend_from_slice(&pixel.to_le_bytes());
+            }
+            (bytes, AssetKind::Image)
+        }
+    }
+}
+
+/// Provisions every asset `request.scene` names, over the real
+/// `AssetBegin`/`AssetChunk`/`AssetCommit` wire path -- Task 8
+/// (plugin-manifest stage)'s first exercise of the device's asset-transfer
+/// path in this harness. `AssetBegin`'s `already_present` lets a case skip
+/// chunking an asset a previous case already committed under the same
+/// digest, which is common here: the two glyph-bearing `aqi` states below
+/// each name the same `icons.ttf` digest.
+fn push_case_assets(
+    client: &mut DeviceClient<impl Transport>,
+    request: &SceneRenderRequest,
+) -> Result<(), String> {
+    for asset in &request.assets {
+        let digest = match asset {
+            SceneAsset::Font { digest, .. } | SceneAsset::Image { digest, .. } => *digest,
+        };
+        let (bytes, kind) = asset_wire_bytes(asset);
+        let total_length = u32::try_from(bytes.len()).map_err(|_| {
+            format!(
+                "asset {digest:02x?} is {} bytes, over the wire's u32 length limit",
+                bytes.len()
+            )
+        })?;
+
+        let ack = match client
+            .request(&Message::AssetBegin(AssetBegin {
+                digest,
+                kind,
+                total_length,
+                // Stage 1 has no volatile (PSRAM) tier; the device refuses
+                // `volatile: true` outright (see `server::asset_sync`'s
+                // own comment on this).
+                volatile: false,
+            }))
+            .map_err(|error| format!("asset begin {digest:02x?}: {error}"))?
+        {
+            Message::Ack(ack) if ack.acknowledged_type == TYPE_ASSET_BEGIN => ack,
+            message => return Err(format!("unexpected asset-begin response: {message:?}")),
+        };
+        if ack.already_present == Some(true) {
+            continue;
+        }
+
+        let mut offset: u32 = 0;
+        for chunk in bytes.chunks(MAX_ASSET_CHUNK_BYTES) {
+            match client
+                .request(&Message::AssetChunk(AssetChunk {
+                    digest,
+                    offset,
+                    data: chunk.to_vec(),
+                }))
+                .map_err(|error| format!("asset chunk {digest:02x?} at {offset}: {error}"))?
+            {
+                Message::Ack(ack) if ack.acknowledged_type == TYPE_ASSET_CHUNK => {}
+                message => return Err(format!("unexpected asset-chunk response: {message:?}")),
+            }
+            offset += u32::try_from(chunk.len())
+                .expect("chunk length is bounded by MAX_ASSET_CHUNK_BYTES");
+        }
+
+        match client
+            .request(&Message::AssetCommit(AssetCommit { digest }))
+            .map_err(|error| format!("asset commit {digest:02x?}: {error}"))?
+        {
+            Message::Ack(ack) if ack.acknowledged_type == TYPE_ASSET_COMMIT => {}
+            message => return Err(format!("unexpected asset-commit response: {message:?}")),
+        }
     }
     Ok(())
 }
@@ -326,6 +484,9 @@ fn run_case<T: Transport>(
         apply_case_config(&mut client, config_revision, request)?;
         activate_case_screen(&mut client)?;
         push_case_fields(&mut client, data_revision, request)?;
+        // Before the scene that names these assets by digest, so the device
+        // never has to resolve a digest it has not been given bytes for yet.
+        push_case_assets(&mut client, request)?;
         push_case_scene(&mut client, scene_revision, request)?;
         // Last: see the module doc for why time-sync is sequenced after the
         // config/push commands rather than before them.
@@ -399,6 +560,7 @@ fn run() -> Result<(), String> {
     for (name, request) in cases::scene_cases()
         .into_iter()
         .chain(cases::face_scene_cases())
+        .chain(cases::plugin_scene_cases())
     {
         if let Some(reason) = exclusion_reason(&name, &request) {
             println!("{name}: excluded ({reason})");
@@ -471,20 +633,82 @@ fn main() {
 mod tests {
     use super::*;
 
+    /// Task 8 (plugin-manifest stage) added `plugin_scene_cases()` (16 rows:
+    /// two curated plugins x four data states x two orientations) and, in
+    /// the same change, `push_case_assets`/`push_case_fields` closed two of
+    /// `exclusion_reason`'s three pre-Task-8 reasons -- the RGB565-image and
+    /// runtime-font-asset ones -- by actually provisioning them, rather than
+    /// refusing every case that needed one. The third reason (a `field.*`
+    /// name no `TemplateKind::DigitalClock` PushData push can carry) is
+    /// NOT closed: see `exclusion_reason`'s own doc for why a plugin does
+    /// not get a registry of its own to "bring" on the wire. This test
+    /// pins the real, counted-not-assumed per-reason split rather than a
+    /// single total, the way the stage's own 58/54/4 invariant should have
+    /// been pinned before it went stale and misled a whole stage.
     #[test]
-    fn gate_b_inventory_keeps_synthetic_and_all_six_face_rows() {
+    fn gate_b_inventory_is_the_real_counted_split_not_an_assumed_one() {
         let requests: Vec<_> = cases::scene_cases()
             .into_iter()
             .chain(cases::face_scene_cases())
+            .chain(cases::plugin_scene_cases())
             .collect();
+
+        let truncation_boundary = requests
+            .iter()
+            .filter(|(name, _)| name.starts_with("row-list--truncation-boundary--"))
+            .count();
+        let running_mid_countdown = requests
+            .iter()
+            .filter(|(name, _)| name.starts_with("progress-ring--running-mid-countdown--"))
+            .count();
+        let field_registry_mismatch = requests
+            .iter()
+            .filter(|(name, request)| {
+                !name.starts_with("row-list--truncation-boundary--")
+                    && !name.starts_with("progress-ring--running-mid-countdown--")
+                    && exclusion_reason(name, request).is_some()
+            })
+            .count();
         let excluded = requests
             .iter()
             .filter(|(name, request)| exclusion_reason(name, request).is_some())
             .count();
 
-        assert_eq!(requests.len(), 76);
-        assert_eq!(excluded, 12);
-        assert_eq!(requests.len() - excluded, 64);
+        // The counted-not-assumed numbers this task's report must state.
+        assert_eq!(requests.len(), 92, "76 pre-Task-8 rows + 16 plugin rows");
+        assert_eq!(truncation_boundary, 2);
+        assert_eq!(running_mid_countdown, 2);
+        assert_eq!(
+            field_registry_mismatch, 4,
+            "scene-text and scene-label, both orientations -- field.status, which no \
+             registry (built-in or plugin-forced-to-DigitalClock) accepts"
+        );
+        assert_eq!(
+            excluded,
+            truncation_boundary + running_mid_countdown + field_registry_mismatch
+        );
+        assert_eq!(excluded, 8);
+        assert_eq!(requests.len() - excluded, 84);
+
+        // The RGB565-image and runtime-font-asset rows (scene-image,
+        // scene-glyph, both orientations = 4 rows) are no longer excluded.
+        for name in [
+            "scene-image--landscape",
+            "scene-image--flipped",
+            "scene-glyph--landscape",
+            "scene-glyph--flipped",
+        ] {
+            let (_, request) = requests
+                .iter()
+                .find(|(request_name, _)| request_name == name)
+                .unwrap_or_else(|| panic!("missing case {name}"));
+            assert_eq!(
+                exclusion_reason(name, request),
+                None,
+                "{name} must be included now that assets are provisioned"
+            );
+        }
+
         for prefix in [
             "digital-clock--",
             "analog-clock--",
@@ -498,19 +722,22 @@ mod tests {
                 "missing real-face coverage for {prefix}"
             );
         }
-        assert_eq!(
-            requests
-                .iter()
-                .filter(|(name, _)| name.starts_with("row-list--truncation-boundary--"))
-                .count(),
-            2
-        );
-        assert_eq!(
-            requests
-                .iter()
-                .filter(|(name, _)| { name.starts_with("progress-ring--running-mid-countdown--") })
-                .count(),
-            2
-        );
+        for prefix in ["plugin-aqi--", "plugin-agenda--"] {
+            assert_eq!(
+                requests
+                    .iter()
+                    .filter(|(name, _)| name.starts_with(prefix))
+                    .count(),
+                8,
+                "missing curated-plugin coverage for {prefix}"
+            );
+            assert!(
+                requests
+                    .iter()
+                    .filter(|(name, _)| name.starts_with(prefix))
+                    .all(|(name, request)| exclusion_reason(name, request).is_none()),
+                "every {prefix} row must be includable, not excluded"
+            );
+        }
     }
 }

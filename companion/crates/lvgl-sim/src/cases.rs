@@ -1690,3 +1690,242 @@ pub fn scene_cases() -> Vec<(String, SceneRenderRequest)> {
     );
     cases
 }
+
+// ---------------------------------------------------------------------------
+// Task 8 (plugin-manifest stage): the two curated plugins' golden cases.
+//
+// Unlike every case above, these compile through the REAL production path
+// -- `plugin::parse_manifest` + `plugin::resolve_assets` +
+// `plugin::compile_scene_with_assets` against the real, committed
+// `companion/plugins/{aqi,agenda}/manifest.toml` and its real committed
+// assets -- rather than hand-building an equivalent `Scene`. Hand-building
+// one here would risk it silently drifting from what the real compiler
+// actually produces, which is exactly the kind of gap this stage has
+// repeatedly found.
+// ---------------------------------------------------------------------------
+
+use std::path::{Path, PathBuf};
+
+use plugin::{compile_scene_with_assets, parse_manifest, resolve_assets};
+use protocol::AssetKind;
+
+const AQI_FIXTURE: &str = include_str!("../../plugin/tests/fixtures/aqi_response.json");
+const AGENDA_FIXTURE: &str = include_str!("../../plugin/tests/fixtures/agenda_response.json");
+
+/// `companion/plugins/`, resolved from `lvgl-sim`'s own compile-time
+/// `CARGO_MANIFEST_DIR` rather than the process's runtime working
+/// directory -- this must work identically whether `cases::plugin_scene_cases`
+/// is called from `cargo test -p lvgl-sim` or from the `framebuffer_diff`
+/// example in a different crate entirely.
+fn plugins_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plugins")
+}
+
+fn plugin_payload(raw: &str) -> serde_json::Value {
+    let root: serde_json::Value = serde_json::from_str(raw).expect("fixture is valid JSON");
+    assert_eq!(root["status"], "ok");
+    root["payload"].clone()
+}
+
+/// Decodes one of this stage's own hand-built RGB565 image assets --
+/// `companion/plugins/agenda/assets/badge.rgb565` -- back into the
+/// `width`/`height`/`pixels` [`SceneAsset::Image`] wants. The file IS the
+/// device-native blob (see the manifest's own doc comment on why): a
+/// 12-byte `lv_image_header_t` (magic 0x19, `LV_COLOR_FORMAT_RGB565` 0x12,
+/// little-endian bitfields packed exactly as `sim_build_rgb565_image`
+/// builds them) directly followed by raw host-endian RGB565 pixels. This is
+/// the exact inverse of the encoding the badge was authored with, so
+/// `sim_build_rgb565_image` re-wraps these fields into byte-identical
+/// header bytes at registration time.
+fn decode_rgb565_asset(bytes: &[u8]) -> (u32, u32, Vec<u16>) {
+    const HEADER_LEN: usize = 12;
+    assert!(
+        bytes.len() > HEADER_LEN,
+        "RGB565 asset is too short to carry even the 12-byte lv_image_header_t: {} bytes",
+        bytes.len()
+    );
+    let magic = bytes[0];
+    let color_format = bytes[1];
+    assert_eq!(
+        magic, 0x19,
+        "lv_image_header_t magic must be LV_IMAGE_HEADER_MAGIC (0x19)"
+    );
+    assert_eq!(
+        color_format, 0x12,
+        "this decoder only understands LV_COLOR_FORMAT_RGB565 (0x12)"
+    );
+    let width = u32::from(u16::from_le_bytes([bytes[4], bytes[5]]));
+    let height = u32::from(u16::from_le_bytes([bytes[6], bytes[7]]));
+    let stride = u32::from(u16::from_le_bytes([bytes[8], bytes[9]]));
+    assert_eq!(
+        stride,
+        width * 2,
+        "stride must be exactly width * 2 bytes for RGB565"
+    );
+
+    let pixel_bytes = &bytes[HEADER_LEN..];
+    assert_eq!(
+        pixel_bytes.len(),
+        (width * height * 2) as usize,
+        "pixel byte count must match width * height * 2 exactly"
+    );
+    let pixels = pixel_bytes
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| u16::from_le_bytes(*pair))
+        .collect();
+    (width, height, pixels)
+}
+
+/// Compiles `plugin_name`'s real manifest against `data`/`stale`/`error`,
+/// returning the compiled [`Scene`] and the [`SceneAsset`]s a render
+/// request must register for it -- resolved from the plugin's own real,
+/// committed asset files, never hand-typed digests.
+fn compile_plugin_scene(
+    plugin_name: &str,
+    data: serde_json::Value,
+    stale: bool,
+    error: Option<&str>,
+) -> (Scene, Vec<SceneAsset>) {
+    let dir = plugins_dir().join(plugin_name);
+    let source = std::fs::read_to_string(dir.join("manifest.toml"))
+        .unwrap_or_else(|error| panic!("read {plugin_name} manifest.toml: {error}"));
+    let manifest = parse_manifest(&source)
+        .unwrap_or_else(|error| panic!("{plugin_name} manifest must parse: {error:?}"));
+    let assets = resolve_assets(&manifest, &dir)
+        .unwrap_or_else(|error| panic!("{plugin_name} assets must resolve: {error:?}"));
+    let metrics = app_core::BakedFontMetrics::SHIPPED;
+    let snapshot = providers::ProviderSnapshot {
+        value: data,
+        refreshed_at: None,
+        age: None,
+        stale,
+        error: error.map(str::to_string),
+    };
+
+    let scene = compile_scene_with_assets(&manifest, &snapshot, &metrics, 1, &assets)
+        .unwrap_or_else(|error| panic!("{plugin_name} manifest must compile: {error:?}"));
+
+    let scene_assets = assets
+        .iter()
+        .map(|(file, resolved)| match resolved.kind {
+            AssetKind::Font | AssetKind::IconFont => {
+                // aqi's `assets/icons.ttf` is byte-identical to the already
+                // committed, already-`'static` `INTER_SUBSET_TTF` (same
+                // SHA-256 digest -- see `docs/plugins/manifest-v1.md`), so
+                // this reuses that allocation instead of leaking a fresh
+                // one just to satisfy `SceneAsset::Font`'s `'static` bound.
+                assert_eq!(
+                    &*resolved.bytes,
+                    crate::assets::INTER_SUBSET_TTF,
+                    "{plugin_name}'s font asset {file:?} is no longer byte-identical to \
+                     INTER_SUBSET_TTF -- compile_plugin_scene's 'static reuse no longer holds"
+                );
+                SceneAsset::Font {
+                    digest: resolved.digest,
+                    bytes: crate::assets::INTER_SUBSET_TTF,
+                }
+            }
+            AssetKind::Image => {
+                let (width, height, pixels) = decode_rgb565_asset(&resolved.bytes);
+                SceneAsset::Image {
+                    digest: resolved.digest,
+                    width,
+                    height,
+                    pixels,
+                }
+            }
+        })
+        .collect();
+
+    (scene, scene_assets)
+}
+
+/// Appends one plugin's four data states (fresh, stale, error,
+/// empty/missing-data) at both orientations -- 8 rows, name format
+/// `plugin-{plugin_name}--{state_slug}--{orientation_slug}`.
+fn plugin_case(
+    cases: &mut Vec<(String, SceneRenderRequest)>,
+    plugin_name: &str,
+    fixture_payload: serde_json::Value,
+    // `field.*` binding values to resolve against, per state -- see
+    // `plugin_scene_cases`'s doc for why only `aqi`'s fresh/stale/error rows
+    // populate this and its `empty` row deliberately does not.
+    fields_by_state: [&[(&str, &str)]; 4],
+) {
+    let states: [(&str, serde_json::Value, bool, Option<&str>); 4] = [
+        ("fresh", fixture_payload.clone(), false, None),
+        ("stale", fixture_payload.clone(), true, None),
+        (
+            "error",
+            fixture_payload,
+            true,
+            Some("upstream request timed out"),
+        ),
+        // Missing entirely, not merely stale -- every `data.*` path
+        // resolves to `Missing`, and (aqi only) so does `icon()`'s
+        // argument. This is deliberately not "stale with no error": it is
+        // what a provider that has *never* successfully fetched anything
+        // looks like, which is a different, real state.
+        ("empty", serde_json::json!({}), false, None),
+    ];
+
+    for ((state_slug, data, stale, error), fields) in states.into_iter().zip(fields_by_state) {
+        let (scene, assets) = compile_plugin_scene(plugin_name, data, stale, error);
+        let fields: Vec<(String, String)> = fields
+            .iter()
+            .map(|(name, value)| ((*name).to_string(), (*value).to_string()))
+            .collect();
+        for (orientation_slug, orientation) in orientations() {
+            cases.push((
+                format!("plugin-{plugin_name}--{state_slug}--{orientation_slug}"),
+                SceneRenderRequest {
+                    scene: scene.clone(),
+                    assets: assets.clone(),
+                    utc_offset_minutes: SCENE_OFFSET,
+                    now_unix_seconds: SCENE_NOW,
+                    timer: None,
+                    fields: fields.clone(),
+                    orientation,
+                },
+            ));
+        }
+    }
+}
+
+/// The two curated plugins' golden cases: `aqi` (a JSON object source, the
+/// icon-font path, `field.*`) and `agenda` (a JSON source that is a list,
+/// the bounded repeat form, a real truncation case, an image asset). Four
+/// data states each, both orientations -- 16 rows, pinned by `tests/scene.rs`
+/// against `tests/golden/scene/` exactly like [`scene_cases`], and pushed to
+/// real hardware by `framebuffer_diff`, which is what finally exercises the
+/// device's asset-transfer path (`AssetBegin`/`AssetChunk`/`AssetCommit`)
+/// for the first time in this repo's test suite.
+///
+/// `aqi`'s three non-empty states resolve `field.title` against a real
+/// value -- `field.*` has no production pusher yet (nothing calls
+/// `push_data` for a plugin card), so without this every golden would only
+/// ever show the device's "--" placeholder and the binding would still have
+/// no pixel coverage of it actually displaying anything. The `empty` state
+/// deliberately supplies no fields at all, so the matrix also keeps the
+/// placeholder case. `agenda` never binds `field.*`, so its fields are
+/// always empty.
+pub fn plugin_scene_cases() -> Vec<(String, SceneRenderRequest)> {
+    let mut cases = Vec::new();
+    let live_title: &[(&str, &str)] = &[("title", "Downtown Monitoring")];
+    let no_fields: &[(&str, &str)] = &[];
+    plugin_case(
+        &mut cases,
+        "aqi",
+        plugin_payload(AQI_FIXTURE),
+        [live_title, live_title, live_title, no_fields],
+    );
+    plugin_case(
+        &mut cases,
+        "agenda",
+        plugin_payload(AGENDA_FIXTURE),
+        [no_fields, no_fields, no_fields, no_fields],
+    );
+    cases
+}

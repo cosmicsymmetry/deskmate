@@ -28,23 +28,32 @@
 //!   data problem exactly the way the six retired templates did --
 //!   `with_scene_data_state` is reused, not re-implemented.
 //!
-//! # What this module does not do yet
+//! # Assets
 //!
-//! Any node that needs a content-addressed asset digest -- an `image` node,
-//! a `glyph` node, or a `text`/`glyph` node whose font names an asset rather
-//! than a baked tier -- fails with [`CompileError::AssetNotResolved`].
-//! Resolving manifest asset names to digests is Task 4's job; this compiler
-//! does not guess at it.
+//! An `image` node, a `glyph` node, or a `text`/`glyph` node whose font names
+//! an asset rather than a baked tier needs a content-addressed digest to put
+//! on the wire. [`compile_scene`] resolves none of these itself -- it always
+//! compiles against an empty [`AssetSet`], so any manifest that uses one of
+//! these node shapes fails with [`CompileError::AssetNotResolved`] through
+//! that entry point. [`compile_scene_with_assets`] is the real one: it takes
+//! the [`AssetSet`] `assets::resolve_assets` already built for the manifest
+//! and resolves every asset-bearing node against it, kind-checking each
+//! reference (an `image` node naming a `font` asset is refused, not silently
+//! drawn as if it were an image) rather than trusting the manifest author's
+//! `kind` tag to match how a node uses it.
 
 use protocol::{
-    Scene, SceneAlign, SceneArc, SceneFont, SceneFontTier, SceneLine, SceneNode, SceneRect,
-    SceneText, SceneValue,
+    AssetKind, Scene, SceneAlign, SceneArc, SceneFont, SceneFontTier, SceneGlyph, SceneImage,
+    SceneLine, SceneNode, SceneRect, SceneText, SceneValue,
 };
 
 use app_core::{BakedFontMetrics, SceneDataState, text_is_numeric, with_scene_data_state};
 
-use crate::expr::{EvalContext, Expr, ExprError, FUEL_BUDGET, Fuel};
-use crate::manifest::{Align, Font, FontTier, Node, PluginManifest, Point, Repeat};
+use std::collections::HashMap;
+
+use crate::assets::AssetSet;
+use crate::expr::{EvalContext, Expr, ExprError, FUEL_BUDGET, Fuel, build_icon_map};
+use crate::manifest::{Align, Asset, Font, FontTier, Node, PluginManifest, Point, Repeat};
 
 /// Maximum repetitions the one repeat form expands to, however long the
 /// fetched array actually is. Mirrors `RowListCard`'s five-row precedent
@@ -81,10 +90,30 @@ pub enum CompileError {
     /// release build must not ship an over-length literal just because it
     /// skipped the assertion.
     ValueTooLong { limit: usize, actual: usize },
-    /// A node needs a content-addressed asset digest -- an `image` node, a
-    /// `glyph` node, or a `text`/`glyph` node naming an asset font -- which
-    /// Task 4/5 resolve. This compiler does not yet support it.
+    /// A node named an asset (by `file`) that the manifest's own
+    /// `[[assets]]` table never declares, or that `compile_scene`'s empty
+    /// default [`AssetSet`] was never given the chance to resolve --
+    /// `compile_scene_with_assets` is the entry point that can actually
+    /// resolve one.
     AssetNotResolved { asset: String },
+    /// A node named an asset that the manifest's `[[assets]]` table does
+    /// declare, but under a `kind` this node cannot use it as -- an `image`
+    /// node naming a `font`/`icon-font` asset, or a `text`/`glyph` node's
+    /// `font.asset` naming an `image` asset. `expected` is a short label for
+    /// what the node needed (`"image"` or `"font"`).
+    AssetKindMismatch {
+        asset: String,
+        expected: &'static str,
+    },
+    /// A `glyph` node's `glyph` field compiled to a device-side binding
+    /// (`{{ field.foo }}`) rather than a literal. `SceneGlyph::name` is a
+    /// plain `String` on the wire, not a `SceneValue` -- there is no way to
+    /// carry a binding through it, unlike a `text` node's `value`.
+    GlyphBindingNotSupported { text: String },
+    /// A `glyph` node's `font` named a baked tier
+    /// (`Font::Tier { .. }`) rather than an asset. Baked tiers have no icon
+    /// glyphs; a `glyph` node only ever draws from an uploaded icon font.
+    GlyphFontMustBeAsset,
     /// A `[[repeats]]` block's `source` resolved to a JSON value that is
     /// neither an array nor absent/null -- a real author error (the wrong
     /// field name), distinct from "no items yet", which is not an error.
@@ -303,14 +332,39 @@ const fn scene_align(align: Align) -> SceneAlign {
     }
 }
 
-/// Resolves a manifest `Font` to a wire `SceneFont`. Only the baked-tier
-/// variant is supported here -- see the module doc's "What this module does
-/// not do yet".
-fn resolve_scene_font(font: &Font) -> Result<SceneFont, CompileError> {
+/// Resolves a manifest asset `file` name to its digest, refusing both an
+/// undeclared name (`AssetNotResolved`) and a resolved one that is the wrong
+/// `kind` to be used as a font (`AssetKindMismatch`) -- a plain `Font` asset
+/// or an `IconFont` asset both work here, since both name a TTF the device
+/// loads through the same `font_registry_acquire` path; only `Image` is
+/// refused.
+fn resolve_font_asset(
+    assets: &AssetSet,
+    asset: &str,
+) -> Result<[u8; protocol::ASSET_DIGEST_LEN], CompileError> {
+    let resolved = assets
+        .get(asset)
+        .ok_or_else(|| CompileError::AssetNotResolved {
+            asset: asset.to_string(),
+        })?;
+    match resolved.kind {
+        AssetKind::Font | AssetKind::IconFont => Ok(resolved.digest),
+        AssetKind::Image => Err(CompileError::AssetKindMismatch {
+            asset: asset.to_string(),
+            expected: "font",
+        }),
+    }
+}
+
+/// Resolves a manifest `Font` to a wire `SceneFont` against `assets`. The
+/// baked-tier variant needs no resolution at all; `Font::Asset` resolves
+/// through [`resolve_font_asset`].
+fn resolve_scene_font(font: &Font, assets: &AssetSet) -> Result<SceneFont, CompileError> {
     match font {
         Font::Tier { tier } => Ok(SceneFont::Baked(scene_font_tier(*tier))),
-        Font::Asset { asset, .. } => Err(CompileError::AssetNotResolved {
-            asset: asset.clone(),
+        Font::Asset { asset, pixel_size } => Ok(SceneFont::Asset {
+            digest: resolve_font_asset(assets, asset)?,
+            pixel_size: *pixel_size,
         }),
     }
 }
@@ -469,6 +523,7 @@ fn compile_node(
     fuel: &mut Fuel,
     metrics: &BakedFontMetrics,
     item_index: Option<usize>,
+    assets: &AssetSet,
 ) -> Result<SceneNode, CompileError> {
     match node {
         Node::Rect {
@@ -539,7 +594,7 @@ fn compile_node(
             value,
             ellipsize,
         } => {
-            let scene_font = resolve_scene_font(font)?;
+            let scene_font = resolve_scene_font(font, assets)?;
             let scene_value = compile_value_source(value, ctx, fuel, item_index)?;
             // A literal on a digits-only baked tier (`Display`/`Hero`) that
             // is not, in fact, digits-only content (a transient provider
@@ -574,17 +629,66 @@ fn compile_node(
                 ellipsize: *ellipsize,
             }))
         }
-        Node::Image { asset, .. } => Err(CompileError::AssetNotResolved {
-            asset: asset.clone(),
-        }),
-        Node::Glyph { font, .. } => Err(CompileError::AssetNotResolved {
-            asset: match font {
-                Font::Asset { asset, .. } => asset.clone(),
-                Font::Tier { .. } => {
-                    "<glyph node's font must name an asset, not a baked tier>".to_string()
+        Node::Image {
+            x,
+            y,
+            w,
+            h,
+            asset,
+            recolor,
+            color,
+        } => {
+            let resolved = assets
+                .get(asset)
+                .ok_or_else(|| CompileError::AssetNotResolved {
+                    asset: asset.clone(),
+                })?;
+            if resolved.kind != AssetKind::Image {
+                return Err(CompileError::AssetKindMismatch {
+                    asset: asset.clone(),
+                    expected: "image",
+                });
+            }
+            Ok(SceneNode::Image(SceneImage {
+                x: *x,
+                y: *y,
+                w: *w,
+                h: *h,
+                digest: resolved.digest,
+                recolor: *recolor,
+                color: *color,
+            }))
+        }
+        Node::Glyph {
+            x,
+            y,
+            font,
+            color,
+            glyph,
+        } => {
+            let Font::Asset { asset, pixel_size } = font else {
+                return Err(CompileError::GlyphFontMustBeAsset);
+            };
+            let digest = resolve_font_asset(assets, asset)?;
+            // `SceneGlyph::name` is a plain `String`, not a `SceneValue` --
+            // there is no wire shape for a device-side glyph binding, so a
+            // `{{ field.foo }}`-style result is refused rather than
+            // silently downgraded to its binding text.
+            let name = match compile_value_source(glyph, ctx, fuel, item_index)? {
+                SceneValue::Literal(text) => text,
+                SceneValue::Binding(text) => {
+                    return Err(CompileError::GlyphBindingNotSupported { text });
                 }
-            },
-        }),
+            };
+            Ok(SceneNode::Glyph(SceneGlyph {
+                x: *x,
+                baseline_y: *y,
+                size: *pixel_size,
+                digest,
+                name,
+                color: *color,
+            }))
+        }
     }
 }
 
@@ -623,6 +727,7 @@ fn compile_repeat(
     fuel: &mut Fuel,
     metrics: &BakedFontMetrics,
     out: &mut Vec<SceneNode>,
+    assets: &AssetSet,
 ) -> Result<(), CompileError> {
     let available = repeat_array_len(data, &repeat.source)?;
     let count = available.min(MAX_REPEAT_ITEMS);
@@ -632,7 +737,14 @@ fn compile_repeat(
         let dy = repeat.dy.saturating_mul(index_i32);
         for template in &repeat.nodes {
             let offset = offset_node(template.clone(), dx, dy);
-            out.push(compile_node(&offset, ctx, fuel, metrics, Some(index))?);
+            out.push(compile_node(
+                &offset,
+                ctx,
+                fuel,
+                metrics,
+                Some(index),
+                assets,
+            )?);
         }
     }
     Ok(())
@@ -642,13 +754,34 @@ fn compile_repeat(
 // Entry point.
 // ---------------------------------------------------------------------------
 
-/// Compiles a manifest and a fetched provider snapshot into a [`Scene`].
-///
-/// `snapshot.value` is evaluated against unconditionally, whether or not the
-/// snapshot is fresh -- a stale/error snapshot still carries the last-good
-/// value (`providers::LastGood::complete`'s contract), so a plugin card
-/// keeps showing its last-good reading under the shared stale/error footer,
-/// the same way the six retired templates did.
+/// Builds the `icon(name)` lookup [`EvalContext::new`] takes by merging
+/// every `[[assets]] kind = "icon-font"` entry's glyph list, via
+/// `expr::build_icon_map`. This reads straight from the manifest's own
+/// already-parsed, already-bounded `Asset::IconFont { glyphs, .. }` list --
+/// it needs no resolved [`AssetSet`], because a glyph *name*-to-*codepoint*
+/// mapping is manifest content, not asset bytes. A manifest that declares no
+/// icon-font asset at all yields an empty map, which is exactly what makes
+/// `icon()` evaluate to `Missing` rather than a compile error.
+fn manifest_icon_map(manifest: &PluginManifest) -> HashMap<String, u32> {
+    let glyphs: Vec<_> = manifest
+        .assets
+        .iter()
+        .filter_map(|asset| match asset {
+            Asset::IconFont { glyphs, .. } => Some(glyphs.iter().cloned()),
+            Asset::Font { .. } | Asset::Image { .. } => None,
+        })
+        .flatten()
+        .collect();
+    build_icon_map(&glyphs)
+}
+
+/// Compiles a manifest and a fetched provider snapshot into a [`Scene`],
+/// against an empty [`AssetSet`] -- so any `image` node, `glyph` node, or
+/// asset-font reference fails with [`CompileError::AssetNotResolved`]. Kept
+/// as the no-assets entry point every existing caller and test already
+/// depends on; [`compile_scene_with_assets`] is the one that can actually
+/// resolve an asset-bearing manifest, and this function is defined in terms
+/// of it rather than duplicating its body.
 ///
 /// # Errors
 ///
@@ -659,12 +792,35 @@ pub fn compile_scene(
     metrics: &BakedFontMetrics,
     revision: u32,
 ) -> Result<Scene, CompileError> {
-    let ctx = EvalContext::with_data(&snapshot.value);
+    compile_scene_with_assets(manifest, snapshot, metrics, revision, &AssetSet::default())
+}
+
+/// As [`compile_scene`], but resolves `image`/`glyph` nodes and asset-font
+/// references against `assets` -- the [`AssetSet`] `assets::resolve_assets`
+/// built for this same manifest. `snapshot.value` is evaluated against
+/// unconditionally, whether or not the snapshot is fresh -- a stale/error
+/// snapshot still carries the last-good value
+/// (`providers::LastGood::complete`'s contract), so a plugin card keeps
+/// showing its last-good reading under the shared stale/error footer, the
+/// same way the six retired templates did.
+///
+/// # Errors
+///
+/// See [`CompileError`]'s variants.
+pub fn compile_scene_with_assets(
+    manifest: &PluginManifest,
+    snapshot: &providers::ProviderSnapshot<serde_json::Value>,
+    metrics: &BakedFontMetrics,
+    revision: u32,
+    assets: &AssetSet,
+) -> Result<Scene, CompileError> {
+    let icons = manifest_icon_map(manifest);
+    let ctx = EvalContext::new(&snapshot.value, &icons);
     let mut fuel = Fuel::new(FUEL_BUDGET);
     let mut nodes = Vec::with_capacity(manifest.nodes.len());
 
     for node in &manifest.nodes {
-        nodes.push(compile_node(node, &ctx, &mut fuel, metrics, None)?);
+        nodes.push(compile_node(node, &ctx, &mut fuel, metrics, None, assets)?);
     }
 
     for repeat in &manifest.repeats {
@@ -675,6 +831,7 @@ pub fn compile_scene(
             &mut fuel,
             metrics,
             &mut nodes,
+            assets,
         )?;
     }
 
@@ -1596,5 +1753,263 @@ mod tests {
         assert_eq!(*text, "e".repeat(protocol::MAX_SCENE_TEXT_LEN));
         // The whole scene, footer included, still passes the wire's own bounds.
         protocol::validate_scene(&scene).expect("bounded footer must validate");
+    }
+
+    // -- Step 4 (Task 8): asset resolution -- `compile_scene_with_assets`
+    // actually resolving `image`/`glyph` nodes and asset fonts, which
+    // `compile_scene` (against an always-empty `AssetSet`) never exercises. --
+
+    use crate::assets::resolve_assets;
+    use crate::manifest::{Asset, Glyph};
+
+    fn manifest_with(assets: Vec<Asset>, nodes: Vec<Node>) -> PluginManifest {
+        PluginManifest {
+            name: "test".to_string(),
+            version: "1.0.0".to_string(),
+            source: Source::Json {
+                url: "https://example.invalid/x.json".to_string(),
+                refresh_minutes: 15,
+            },
+            assets,
+            nodes,
+            repeats: Vec::new(),
+        }
+    }
+
+    fn image_node(asset: &str) -> Node {
+        Node::Image {
+            x: 10,
+            y: 10,
+            w: 32,
+            h: 32,
+            asset: asset.to_string(),
+            recolor: false,
+            color: 0,
+        }
+    }
+
+    #[test]
+    fn an_image_node_resolves_against_a_real_asset_set() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("badge.bin"), b"pretend RGB565 blob")
+            .expect("write fixture");
+        let manifest = manifest_with(
+            vec![Asset::Image {
+                file: "badge.bin".to_string(),
+            }],
+            vec![image_node("badge.bin")],
+        );
+        let assets = resolve_assets(&manifest, dir.path()).expect("resolve");
+
+        let scene =
+            compile_scene_with_assets(&manifest, &snapshot(), &metrics(), 1, &assets).unwrap();
+
+        let SceneNode::Image(image) = &scene.nodes[0] else {
+            panic!("node 0 is not Image: {:?}", scene.nodes[0]);
+        };
+        assert_eq!(image.digest, assets.get("badge.bin").unwrap().digest);
+        assert_eq!(image.w, 32);
+        assert_eq!(image.h, 32);
+    }
+
+    #[test]
+    fn an_image_node_the_manifest_never_declares_is_asset_not_resolved() {
+        let manifest = manifest_with(Vec::new(), vec![image_node("missing.bin")]);
+        let err =
+            compile_scene_with_assets(&manifest, &snapshot(), &metrics(), 1, &AssetSet::default())
+                .unwrap_err();
+        assert_eq!(
+            err,
+            CompileError::AssetNotResolved {
+                asset: "missing.bin".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn an_image_node_naming_a_font_asset_is_a_kind_mismatch() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("font.ttf"),
+            b"not actually a font, bytes suffice",
+        )
+        .expect("write fixture");
+        let manifest = manifest_with(
+            vec![Asset::Font {
+                file: "font.ttf".to_string(),
+            }],
+            vec![image_node("font.ttf")],
+        );
+        let assets = resolve_assets(&manifest, dir.path()).expect("resolve");
+
+        let err =
+            compile_scene_with_assets(&manifest, &snapshot(), &metrics(), 1, &assets).unwrap_err();
+        assert_eq!(
+            err,
+            CompileError::AssetKindMismatch {
+                asset: "font.ttf".to_string(),
+                expected: "image"
+            }
+        );
+    }
+
+    fn glyph_node(asset: &str, glyph: &str) -> Node {
+        Node::Glyph {
+            x: 10,
+            y: 40,
+            font: Font::Asset {
+                asset: asset.to_string(),
+                pixel_size: 32,
+            },
+            color: 0x00ff_ffff,
+            glyph: glyph.to_string(),
+        }
+    }
+
+    fn icon_font_manifest(nodes: Vec<Node>) -> PluginManifest {
+        manifest_with(
+            vec![Asset::IconFont {
+                file: "icons.ttf".to_string(),
+                glyphs: vec![Glyph {
+                    name: "warn".to_string(),
+                    codepoint: 0x41, // 'A' -- see this test module's asset-resolution
+                                     // note on why a plain letter stands in for real
+                                     // icon artwork.
+                }],
+            }],
+            nodes,
+        )
+    }
+
+    #[test]
+    fn a_glyph_node_resolves_against_a_real_icon_font_asset() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("icons.ttf"), b"pretend TTF bytes").expect("write fixture");
+        let manifest = icon_font_manifest(vec![glyph_node("icons.ttf", r#"{{ icon("warn") }}"#)]);
+        let assets = resolve_assets(&manifest, dir.path()).expect("resolve");
+
+        let scene =
+            compile_scene_with_assets(&manifest, &snapshot(), &metrics(), 1, &assets).unwrap();
+
+        let SceneNode::Glyph(glyph) = &scene.nodes[0] else {
+            panic!("node 0 is not Glyph: {:?}", scene.nodes[0]);
+        };
+        assert_eq!(glyph.digest, assets.get("icons.ttf").unwrap().digest);
+        assert_eq!(glyph.name, "A");
+        assert_eq!(glyph.size, 32);
+        assert_eq!(glyph.baseline_y, 40);
+    }
+
+    #[test]
+    fn a_glyph_node_naming_an_image_asset_is_a_kind_mismatch() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("badge.bin"), b"pretend RGB565 blob")
+            .expect("write fixture");
+        let manifest = manifest_with(
+            vec![Asset::Image {
+                file: "badge.bin".to_string(),
+            }],
+            vec![glyph_node("badge.bin", r#"{{ icon("warn") }}"#)],
+        );
+        let assets = resolve_assets(&manifest, dir.path()).expect("resolve");
+
+        let err =
+            compile_scene_with_assets(&manifest, &snapshot(), &metrics(), 1, &assets).unwrap_err();
+        assert_eq!(
+            err,
+            CompileError::AssetKindMismatch {
+                asset: "badge.bin".to_string(),
+                expected: "font"
+            }
+        );
+    }
+
+    #[test]
+    fn a_glyph_node_with_a_baked_tier_font_is_refused() {
+        let manifest = manifest_with(
+            Vec::new(),
+            vec![Node::Glyph {
+                x: 10,
+                y: 40,
+                font: Font::Tier {
+                    tier: FontTier::Body,
+                },
+                color: 0,
+                glyph: "static".to_string(),
+            }],
+        );
+        let err =
+            compile_scene_with_assets(&manifest, &snapshot(), &metrics(), 1, &AssetSet::default())
+                .unwrap_err();
+        assert_eq!(err, CompileError::GlyphFontMustBeAsset);
+    }
+
+    #[test]
+    fn a_glyph_node_bound_to_a_device_binding_is_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("icons.ttf"), b"pretend TTF bytes").expect("write fixture");
+        let manifest = icon_font_manifest(vec![glyph_node("icons.ttf", "{{ field.icon }}")]);
+        let assets = resolve_assets(&manifest, dir.path()).expect("resolve");
+
+        let err =
+            compile_scene_with_assets(&manifest, &snapshot(), &metrics(), 1, &assets).unwrap_err();
+        assert_eq!(
+            err,
+            CompileError::GlyphBindingNotSupported {
+                text: "field.icon".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn a_text_node_can_use_an_asset_font() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("font.ttf"), b"pretend TTF bytes").expect("write fixture");
+        let manifest = manifest_with(
+            vec![Asset::Font {
+                file: "font.ttf".to_string(),
+            }],
+            vec![Node::Text {
+                x: 24,
+                baseline_y: 96,
+                w: 400,
+                align: ManifestAlign::Left,
+                font: ManifestFont::Asset {
+                    asset: "font.ttf".to_string(),
+                    pixel_size: 24,
+                },
+                color: 0x00ff_ffff,
+                value: "static".to_string(),
+                ellipsize: false,
+            }],
+        );
+        let assets = resolve_assets(&manifest, dir.path()).expect("resolve");
+
+        let scene =
+            compile_scene_with_assets(&manifest, &snapshot(), &metrics(), 1, &assets).unwrap();
+
+        let SceneFont::Asset { digest, pixel_size } = text_node(&scene, 0).font else {
+            panic!(
+                "expected an asset font, got {:?}",
+                text_node(&scene, 0).font
+            );
+        };
+        assert_eq!(digest, assets.get("font.ttf").unwrap().digest);
+        assert_eq!(pixel_size, 24);
+    }
+
+    #[test]
+    fn compile_scene_without_assets_still_refuses_an_image_node_by_name() {
+        // `compile_scene` (not `_with_assets`) is the entry point every
+        // existing caller uses; pin that it still fails closed rather than
+        // silently accepting an asset-bearing manifest it cannot resolve.
+        let manifest = manifest_with(Vec::new(), vec![image_node("badge.bin")]);
+        let err = compile_scene(&manifest, &snapshot(), &metrics(), 1).unwrap_err();
+        assert_eq!(
+            err,
+            CompileError::AssetNotResolved {
+                asset: "badge.bin".to_string()
+            }
+        );
     }
 }

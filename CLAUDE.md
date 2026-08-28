@@ -516,6 +516,32 @@ of letting code and documentation diverge.
   fonts for real, kind-checked against the manifest's own declared `[[assets]] kind`. Task
   9 (hardware) is explicitly deferred by the owner; nothing about the plugin faces is
   hardware-verified.
+  - **THE SERVER HALF IS BUILT BUT NOT WIRED, and this makes Task 9 unexecutable as
+    written.** `server/src/plugin_provider.rs` is `pub mod`'d with **zero production
+    callers**; `PluginDataProvider`, `SystemPluginFetcher`, `classify_plugin_failure`,
+    `within_render_wall_clock_budget`, `egress::fetch`, `plugin::resolve_assets` and
+    `plugin::compile_scene_with_assets` are likewise uncalled outside tests, and
+    `runtime.rs` refuses every plugin card with a typed `SceneRefused`. So Task 9's
+    Steps 2-4 ("provision the two plugins' assets", "observe both plugin cards on the
+    panel") have **no code path to run** — the hardware gate needs the wiring first, and
+    that wiring is a scope decision the owner has not made. One consequence worth
+    knowing: Task 4's byte-provenance guarantee (digest and bytes from one read) is
+    currently unexercised end to end, because nothing builds a `DesiredAsset` from a
+    `ResolvedAsset`.
+  - **A hostile `[[assets]] file` was an arbitrary-file-read and is now closed in two
+    layers.** `manifest.rs`'s `validate_asset_file_path` accepts a single
+    `Component::Normal` and nothing else, and `assets.rs`'s `ensure_within_base_dir`
+    re-checks containment with `fs::canonicalize` — deliberately not a lexical
+    `starts_with`, because a symlink inside the plugin directory resolves before the
+    check and a lexical comparison would miss it. Both layers are independently
+    load-bearing: two of the fourteen attack vectors tested are caught only by the
+    second. Curated plugins therefore keep their assets as plain top-level filenames;
+    do not reintroduce an `assets/` subdirectory.
+  - **A provider string over `expr::MAX_OUTPUT_LEN` (4096 bytes) is a PERMANENT card
+    fault**, because a compile failure classifies permanent. This is deliberate — 4096 is
+    far past what a 448x368 panel can show, so it signals a broken source — but it is the
+    same defect class as the 128-byte case, which is fixed by truncating. Face text at
+    `protocol::MAX_SCENE_TEXT_LEN` truncates; the expression cap errors.
   - **`field.*` has no builder anywhere else in this repo and therefore no pixel coverage
     before this** — the project's own prior notes call it out by name. `aqi` binds
     `field.title` deliberately to close that gap. Note the reach is narrower than

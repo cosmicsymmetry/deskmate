@@ -2,12 +2,13 @@
 //!
 //! A plugin manifest is a TOML document describing a card's face as a
 //! display list: a data source, a set of named assets, and a list of scene
-//! nodes. This crate's first job -- and this module's only job -- is turning
-//! untrusted manifest bytes into a typed, bounded [`manifest::PluginManifest`]
-//! or a named [`manifest::ManifestError`]. It does not parse the `{{ ... }}`
-//! expression syntax inside `value`/`glyph` fields (that is a later task's
-//! restricted expression language), compile a manifest into a `Scene`, or
-//! resolve assets to content-addressed digests.
+//! nodes. This crate turns untrusted manifest bytes into a typed, bounded
+//! [`manifest::PluginManifest`] or a named [`manifest::ManifestError`];
+//! parses and evaluates the `{{ ... }}` restricted expression syntax inside
+//! `value`/`glyph` fields; and compiles a manifest plus a fetched provider
+//! snapshot into a wire `Scene` via [`compile::compile_scene`]. It does not
+//! yet resolve assets to content-addressed digests -- see `compile.rs`'s
+//! module doc for what a manifest needing one compiles to today.
 
 mod compile;
 mod expr;

@@ -41,7 +41,7 @@ use protocol::{
     SceneText, SceneValue,
 };
 
-use app_core::{BakedFontMetrics, SceneDataState, with_scene_data_state};
+use app_core::{BakedFontMetrics, SceneDataState, number_font_tier, with_scene_data_state};
 
 use crate::expr::{EvalContext, Expr, ExprError, FUEL_BUDGET, Fuel};
 use crate::manifest::{Align, Font, FontTier, Node, PluginManifest, Point, Repeat};
@@ -85,13 +85,6 @@ pub enum CompileError {
     /// `glyph` node, or a `text`/`glyph` node naming an asset font -- which
     /// Task 4/5 resolve. This compiler does not yet support it.
     AssetNotResolved { asset: String },
-    /// A literal value lands on a `text` node whose font is a digits-only
-    /// baked tier (`Display`/`Hero`) but contains a character outside that
-    /// tier's subset (`BakedFontMetrics::measure` returning `None` is what
-    /// detects this). Rendering it would draw missing/blank glyphs on
-    /// hardware -- a defect no pixel test of the *binding* path would catch,
-    /// since it is specific to a baked literal's content.
-    NonNumericTextForTier { tier: SceneFontTier, text: String },
     /// A `[[repeats]]` block's `source` resolved to a JSON value that is
     /// neither an array nor absent/null -- a real author error (the wrong
     /// field name), distinct from "no items yet", which is not an error.
@@ -102,6 +95,15 @@ pub enum CompileError {
     /// here because it depends on the repeat cap and node counts together,
     /// which only this compiler has both of.
     TooManyNodes { limit: usize, actual: usize },
+    /// The compiled scene fails `protocol::validate_scene`'s own bounds --
+    /// most likely out-of-canvas node geometry authored directly in the
+    /// manifest, which nothing upstream of this check validates. Checked
+    /// unconditionally, not only in debug builds: unlike app-core's static
+    /// Rust scene builders, plugin geometry arrives from an untrusted TOML
+    /// manifest at *runtime*, so a release server must not compile an
+    /// invalid manifest to `Ok` and let the device reject the whole scene
+    /// with no named host-side error.
+    Invalid(protocol::MessageError),
 }
 
 impl std::fmt::Display for CompileError {
@@ -148,12 +150,15 @@ fn extract_expression(source: &str) -> Option<&str> {
 }
 
 /// Replaces every occurrence of the bare identifier token `item` in `source`
-/// with `index`'s decimal form, leaving everything else -- including a
-/// longer identifier that merely contains "item", such as `items` -- alone.
-/// This is a plain text substitution performed *before* `Expr::parse` ever
-/// sees the source, which is what lets a repeated node write
-/// `data.rows[item].label` using `Expr`'s existing, unmodified `[digit+]`
-/// array-index grammar: by the time it parses, `item` is already `"2"`.
+/// with `index`'s decimal form, leaving everything else alone: a longer
+/// identifier that merely contains "item" (such as `items`), a trailing path
+/// segment named `item` (such as `field.item` or `data.item`, which names a
+/// provider or binding field literally called "item"), and any occurrence
+/// inside a `"..."` string literal (such as `{{ "item" }}`). This is a plain
+/// text substitution performed *before* `Expr::parse` ever sees the source,
+/// which is what lets a repeated node write `data.rows[item].label` using
+/// `Expr`'s existing, unmodified `[digit+]` array-index grammar: by the time
+/// it parses, `item` is already `"2"`.
 fn substitute_item_token(source: &str, index: usize) -> String {
     fn is_ident_byte(b: u8) -> bool {
         b.is_ascii_alphanumeric() || b == b'_'
@@ -162,9 +167,52 @@ fn substitute_item_token(source: &str, index: usize) -> String {
     let mut out = String::with_capacity(source.len());
     let bytes = source.as_bytes();
     let mut i = 0;
+    let mut in_string = false;
     while i < bytes.len() {
+        if in_string {
+            // Mirror `Expr::parse_string`'s escape handling just enough to
+            // find the closing quote without treating an escaped `\"` as
+            // one, and without ever substituting inside literal text.
+            if bytes[i] == b'\\' {
+                out.push('\\');
+                i += 1;
+                if i < bytes.len() {
+                    let ch = source[i..]
+                        .chars()
+                        .next()
+                        .expect("i is a valid char boundary within source");
+                    out.push(ch);
+                    i += ch.len_utf8();
+                }
+                continue;
+            }
+            if bytes[i] == b'"' {
+                in_string = false;
+                out.push('"');
+                i += 1;
+                continue;
+            }
+            let ch = source[i..]
+                .chars()
+                .next()
+                .expect("i is a valid char boundary within source");
+            out.push(ch);
+            i += ch.len_utf8();
+            continue;
+        }
+
+        if bytes[i] == b'"' {
+            in_string = true;
+            out.push('"');
+            i += 1;
+            continue;
+        }
+
         if source[i..].starts_with("item") {
-            let before_ok = i == 0 || !is_ident_byte(bytes[i - 1]);
+            // A preceding `.` means `item` is a trailing path segment (a
+            // provider/binding field literally named "item"), not the
+            // standalone loop-index token -- do not substitute it.
+            let before_ok = i == 0 || (!is_ident_byte(bytes[i - 1]) && bytes[i - 1] != b'.');
             let after = i + 4;
             let after_ok = after >= bytes.len() || !is_ident_byte(bytes[after]);
             if before_ok && after_ok {
@@ -465,16 +513,22 @@ fn compile_node(
         } => {
             let scene_font = resolve_scene_font(font)?;
             let scene_value = compile_value_source(value, ctx, fuel, item_index)?;
-            if let SceneFont::Baked(tier @ (SceneFontTier::Display | SceneFontTier::Hero)) =
+            // A literal on a digits-only baked tier (`Display`/`Hero`) that
+            // is not, in fact, digits-only content (a transient provider
+            // value like "42.5", "N/A", or "12 km" is entirely realistic)
+            // must not fail the whole scene -- a transient data value is
+            // not a permanent card fault. `number_font_tier` is the
+            // firmware's own `deskmate_number_font()` rule, ported: it
+            // steps the tier down to `Body` rather than refusing, which is
+            // reused here rather than re-implemented.
+            let scene_font = if let SceneFont::Baked(SceneFontTier::Display | SceneFontTier::Hero) =
                 scene_font
                 && let SceneValue::Literal(text) = &scene_value
-                && metrics.measure(tier, text).is_none()
             {
-                return Err(CompileError::NonNumericTextForTier {
-                    tier,
-                    text: text.clone(),
-                });
-            }
+                SceneFont::Baked(number_font_tier(text, *w, metrics))
+            } else {
+                scene_font
+            };
             Ok(SceneNode::Text(SceneText {
                 x: *x,
                 baseline_y: *baseline_y,
@@ -608,11 +662,51 @@ pub fn compile_scene(
         background: PLUGIN_CANVAS_BACKGROUND,
         nodes,
     };
+    // Validate the manifest-authored scene -- before the shared footer is
+    // appended, and unconditionally, not only in debug builds. Unlike
+    // app-core's static Rust scene builders (where `with_scene_data_state`'s
+    // debug-only assertion below is sufficient), plugin geometry arrives
+    // from an untrusted TOML manifest at *runtime*: a release build must not
+    // compile an out-of-canvas manifest to `Ok` and let the device reject
+    // the whole scene with no named host-side error. Checking here, before
+    // the footer, rather than after, also avoids a spurious panic: in a
+    // debug build, `with_scene_data_state`'s own assertion would otherwise
+    // fire on the same already-invalid geometry before this function ever
+    // gets to return the named `Err`. The footer itself needs no separate
+    // check -- its geometry is fixed and its text is bounded below, so it
+    // cannot turn an already-valid scene invalid, and the node-count
+    // reservation above already accounts for its one extra node.
+    protocol::validate_scene(&scene).map_err(CompileError::Invalid)?;
+    // Bound the footer's error text the same way `bound_literal` bounds
+    // every face node's literal. `providers::LastGood` truncates to a
+    // tighter 96-byte bound, but `compile_scene` accepts any
+    // `providers::ProviderSnapshot`, so an error that did not pass through
+    // `LastGood` must still be bounded here -- truncation, not refusal, is
+    // correct for a display footer, the same way the retired C templates
+    // truncated an oversized error.
+    let bounded_error = snapshot.error.as_deref().map(bound_footer_text);
     let state = SceneDataState {
         stale: snapshot.stale,
-        error: snapshot.error.as_deref(),
+        error: bounded_error.as_deref(),
     };
     Ok(with_scene_data_state(scene, state, metrics))
+}
+
+/// Bounds `text` to `protocol::MAX_SCENE_TEXT_LEN` bytes, truncating at a
+/// valid UTF-8 char boundary. Used only for the shared stale/error footer's
+/// text -- `bound_literal` guards every face node's literal the same way,
+/// except by refusal rather than truncation, which is wrong for a footer:
+/// this is a display footer summarizing a fault, not authored content, and
+/// the retired C templates truncated an oversized error the same way.
+fn bound_footer_text(text: &str) -> String {
+    if text.len() <= protocol::MAX_SCENE_TEXT_LEN {
+        return text.to_string();
+    }
+    let mut end = protocol::MAX_SCENE_TEXT_LEN;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text[..end].to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -1035,11 +1129,11 @@ mod tests {
         ));
     }
 
-    // -- Numeric-tier literal guard. --
+    // -- Numeric-tier literal step-down (controller ruling: a transient
+    // -- non-numeric provider value must not fail the whole scene). --
 
-    #[test]
-    fn a_non_numeric_literal_on_the_hero_tier_is_refused() {
-        let manifest = PluginManifest {
+    fn hero_text_manifest(value: &str) -> PluginManifest {
+        PluginManifest {
             name: "test".to_string(),
             version: "1.0.0".to_string(),
             source: Source::Json {
@@ -1056,23 +1150,35 @@ mod tests {
                     tier: ManifestFontTier::Hero,
                 },
                 color: 0,
-                value: "Cloudy".to_string(),
+                value: value.to_string(),
                 ellipsize: false,
             }],
             repeats: Vec::new(),
-        };
-        let err = compile_scene(&manifest, &snapshot(), &metrics(), 1).unwrap_err();
-        assert!(matches!(
-            err,
-            CompileError::NonNumericTextForTier {
-                tier: SceneFontTier::Hero,
-                ..
-            }
-        ));
+        }
     }
 
     #[test]
-    fn a_numeric_literal_on_the_hero_tier_is_accepted() {
+    fn a_non_numeric_literal_on_the_hero_tier_compiles_and_steps_down_to_body() {
+        // "42.5" (a decimal reading), "N/A" (a common provider sentinel),
+        // and "12 km" (units) are all realistic transient provider values --
+        // none is digits-only-subset content, so all three must land on
+        // Body rather than fail the scene.
+        for value in ["42.5", "N/A", "12 km"] {
+            let manifest = hero_text_manifest(value);
+            let scene = compile_scene(&manifest, &snapshot(), &metrics(), 1)
+                .unwrap_or_else(|err| panic!("{value:?} must compile, got {err:?}"));
+            let node = text_node(&scene, 0);
+            assert_eq!(
+                node.font,
+                SceneFont::Baked(SceneFontTier::Body),
+                "{value:?} must step down to Body"
+            );
+            assert_eq!(node.value, SceneValue::Literal(value.to_string()));
+        }
+    }
+
+    #[test]
+    fn a_numeric_literal_on_the_hero_tier_is_accepted_and_keeps_the_hero_tier() {
         let manifest = PluginManifest {
             name: "test".to_string(),
             version: "1.0.0".to_string(),
@@ -1096,10 +1202,9 @@ mod tests {
             repeats: Vec::new(),
         };
         let scene = compile_scene(&manifest, &snapshot(), &metrics(), 1).unwrap();
-        assert_eq!(
-            SceneValue::Literal("42".to_string()),
-            text_node(&scene, 0).value
-        );
+        let node = text_node(&scene, 0);
+        assert_eq!(SceneValue::Literal("42".to_string()), node.value);
+        assert_eq!(node.font, SceneFont::Baked(SceneFontTier::Hero));
     }
 
     // -- The repeat form. --
@@ -1315,5 +1420,113 @@ mod tests {
             substitute_item_token("truncate(data.rows[item].label, item)", 7),
             "truncate(data.rows[7].label, 7)"
         );
+    }
+
+    #[test]
+    fn item_substitution_leaves_a_trailing_path_segment_named_item_alone() {
+        // `field.item`/`data.item` name a provider or binding field literally
+        // called "item" -- a real field name, not the loop-index token.
+        assert_eq!(substitute_item_token("field.item", 3), "field.item");
+        assert_eq!(substitute_item_token("data.item", 3), "data.item");
+    }
+
+    #[test]
+    fn item_substitution_does_not_touch_a_string_literal() {
+        assert_eq!(substitute_item_token("\"item\"", 3), "\"item\"");
+        assert_eq!(
+            substitute_item_token("default(\"item\", item)", 5),
+            "default(\"item\", 5)"
+        );
+    }
+
+    #[test]
+    fn item_substitution_still_replaces_a_bare_item_token() {
+        assert_eq!(substitute_item_token("item", 3), "3");
+    }
+
+    // -- The same three cases, through the real compile pipeline
+    // -- (`compile_value_source` with a repeat's `item_index`), so the fix
+    // -- is proven where the corruption actually happened, not only in the
+    // -- string-substitution helper. --
+
+    #[test]
+    fn a_binding_naming_a_field_literally_called_item_survives_repeat_compilation() {
+        let data = serde_json::json!({});
+        let ctx = EvalContext::with_data(&data);
+        let mut fuel = Fuel::new(FUEL_BUDGET);
+        let value = compile_value_source("{{ field.item }}", &ctx, &mut fuel, Some(2)).unwrap();
+        assert_eq!(value, SceneValue::Binding("field.item".to_string()));
+    }
+
+    #[test]
+    fn a_quoted_string_literal_item_survives_repeat_compilation() {
+        let data = serde_json::json!({});
+        let ctx = EvalContext::with_data(&data);
+        let mut fuel = Fuel::new(FUEL_BUDGET);
+        let value = compile_value_source(r#"{{ "item" }}"#, &ctx, &mut fuel, Some(2)).unwrap();
+        assert_eq!(value, SceneValue::Literal("item".to_string()));
+    }
+
+    #[test]
+    fn a_bare_item_token_still_substitutes_through_repeat_compilation() {
+        let data = serde_json::json!({});
+        let ctx = EvalContext::with_data(&data);
+        let mut fuel = Fuel::new(FUEL_BUDGET);
+        let value = compile_value_source("{{ item }}", &ctx, &mut fuel, Some(4)).unwrap();
+        assert_eq!(value, SceneValue::Literal("4".to_string()));
+    }
+
+    // -- Unconditional whole-scene validation (finding 2): out-of-canvas
+    // -- manifest geometry is refused with a named error in a normal test,
+    // -- not only under `#[cfg(debug_assertions)]`. --
+
+    #[test]
+    fn out_of_canvas_node_geometry_is_refused_as_invalid() {
+        let manifest = PluginManifest {
+            name: "test".to_string(),
+            version: "1.0.0".to_string(),
+            source: Source::Json {
+                url: "https://example.invalid/x.json".to_string(),
+                refresh_minutes: 15,
+            },
+            assets: Vec::new(),
+            nodes: vec![Node::Rect {
+                x: 1000,
+                y: 0,
+                w: 10,
+                h: 10,
+                radius: 0,
+                fill: 0,
+                opacity: 255,
+            }],
+            repeats: Vec::new(),
+        };
+        let err = compile_scene(&manifest, &snapshot(), &metrics(), 1).unwrap_err();
+        assert!(
+            matches!(err, CompileError::Invalid(_)),
+            "expected CompileError::Invalid, got {err:?}"
+        );
+    }
+
+    // -- The state footer's error text is bounded (finding 3). --
+
+    #[test]
+    fn an_over_long_provider_error_yields_a_valid_scene_with_a_bounded_footer() {
+        let over_long = "e".repeat(protocol::MAX_SCENE_TEXT_LEN + 40);
+        let scene = compile_scene(
+            &manifest_with_value("static"),
+            &error_snapshot(&over_long),
+            &metrics(),
+            1,
+        )
+        .expect("an over-long provider error must still yield a valid scene");
+        let footer = text_node(&scene, 1);
+        let SceneValue::Literal(text) = &footer.value else {
+            panic!("footer value is not a literal: {:?}", footer.value);
+        };
+        assert_eq!(text.len(), protocol::MAX_SCENE_TEXT_LEN);
+        assert_eq!(*text, "e".repeat(protocol::MAX_SCENE_TEXT_LEN));
+        // The whole scene, footer included, still passes the wire's own bounds.
+        protocol::validate_scene(&scene).expect("bounded footer must validate");
     }
 }

@@ -751,8 +751,13 @@ silently — the 106 rows would still "pass" while proving less and less.
 Separate from Gate A because a memory-layout failure and a rendering failure look nothing
 alike, and this repository has twice spent days on the former with every test green.
 
-- [ ] **Step 1: Build, publish and power-cycle**, exactly as Task 6 Step 2.
-- [ ] **Step 2: Verify the OTA download completes.** This is the check the layout hazard
+- [x] **Step 1: Build, publish and power-cycle**, exactly as Task 6 Step 2.
+      Done in `045f432`; owner power-cycled 2026-08-28 08:27Z.
+- [x] **Step 2: Verify the OTA download completes.** PASSED on the first attempt —
+      `live1` -> `live2` in 66 s, link then continuous for 6.5 min. Evidence is the
+      server journal (this session had no admin token, so `ota_state` and
+      `last_ota_error` were **not** read; rollback-window survival across a second boot
+      is **not** settled). Recorded in `docs/hardware/board-notes.md`. This is the check the layout hazard
       demands: `firmware_version`, `ota_state: idle`, `last_ota_error: null`, link
       connected, and survival of the rollback window. **If the download fails, do not
       retry blindly** — the documented failure mode is *deterministic*, and `3f2aa03` was

@@ -4019,3 +4019,59 @@ to isolate — a rendering fault being confused with a memory-layout fault — i
 substantially retired by a clean install and a clean panel. If any of the three then fails,
 the C templates are gone and the diagnosis is harder; that is the accepted cost, and it is
 accepted deliberately rather than by omission.
+
+### Gate B — the OTA download with the C templates removed — PASSED — 2026-08-28
+
+The check the 15,496-byte `.bss` shrink demanded. Session
+`~/deskmate-hw-sessions/2026-08-28-stage3a-gate-b/`.
+
+Evidence is the server journal on docker-vm, not the admin API: this session had no
+`DESKMATE_ADMIN_TOKEN`. Quoted rather than paraphrased:
+
+    08:27:24Z  INFO server::device_link: device link established device_id=dev-0005
+    08:27:26Z DEBUG server::firmware:    firmware check device_id=dev-0005 current=v2.0.0-live1
+    08:27:27Z  INFO server::device_link: device link closed device_id=dev-0005
+    08:28:33Z  INFO server::device_link: device link established device_id=dev-0005
+    08:28:36Z DEBUG server::firmware:    firmware check device_id=dev-0005 current=v2.0.0-live2
+
+The one-second gap between the `live1` check and the close is `install_update()`
+suspending the link for the download — the `0ad1a51` behaviour, forced by the hardware
+AES accelerator's DMA buffers needing internal RAM, which is why two concurrent TLS
+sessions cannot coexist on this board. Sixty-six seconds later the device is back
+reporting `v2.0.0-live2`.
+
+**It downloaded and installed on the first attempt.** No earlier failed attempt appears
+in the journal after the 07:54:41Z server restart that moved the catalog. Stage 2a's
+equivalent check failed once and succeeded on a retry of the identical image; the
+publish commit (`045f432`) explicitly pre-authorised one retry here. None was needed.
+
+The link established at 08:28:33Z was still open, with no intervening close, at
+08:35:03Z — 6.5 minutes continuous on the new image. Catalog and device now both read
+`v2.0.0-live2`, so no change is offered in either direction.
+
+Published artifact re-verified through the tunnel during the session:
+`GET https://deskmate.rodi.one/v1/firmware/v2.0.0-live2.bin` -> 200, 1,597,168 bytes,
+md5 `47686777a8725924d16b2a6d85c31422`, matching the build recorded in `045f432`.
+
+This is the third consecutive time flat-or-moved internal RAM has predicted a clean
+download (2026-08-26, 2026-08-27, today), and the first time the movement was a *shrink*
+— 15,496 bytes, roughly 140x the ~105 bytes that broke downloads outright in `3f2aa03`,
+in the opposite direction. **Three data points are still not a law.** The hazard is
+movement, not exhaustion, and the check stays mandatory after any change to firmware
+statics.
+
+**Not observed, and not to be described as verified:**
+
+1. `ota_state` and `last_ota_error` from `GET /v1/devices/dev-0005`. The version
+   transition and the sustained link establish that the download completed and the image
+   is running; the two status fields themselves were not read.
+2. **Rollback-window survival across a second boot.** The image is running and has been
+   for minutes, but `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y` acts at the *next* boot.
+   Only another power cycle settles whether `ota_mark_running_image_valid()` ran.
+3. Everything in Task 9 Steps 3-4 — one card per template at both orientations, and the
+   standalone clock on host loss — plus the three items Gate A folded in here (a minute
+   boundary crossing, 90 degrees, and a `ProgressRing` advancing with a tap while the
+   link is down). The panel was not observed in this session: the OBSBOT Meet 2 was
+   physically disconnected, absent from both `system_profiler SPUSBDataType` and the
+   avfoundation device list, with only its virtual-camera extension loaded publishing a
+   "camera off" placeholder.

@@ -3812,3 +3812,88 @@ advertises 491; **the host cannot name bit 8**. This is not stale deployment:
 same. The consequence is exactly what that enum exists to prevent — its own doc comment
 says a raw bitmask "tells the user nothing about what to change or which firmware to
 install", and every scene-capable device now trips that path.
+
+## Stage 3a Gate A — OTA download FAILED on the first attempt, 2026-08-28
+
+`v2.0.0-live1` was published and offered; the board power-cycled and **did not install
+it**. It remains on `v2.0.0-scene3`.
+
+```
+firmware_version  v2.0.0-scene3     ota_state         failed
+last_ota_error    download: ESP_FAIL
+wifi_state        connected         wifi_rssi         -76 dBm
+uptime_ms         45828             tier              networked
+```
+
+Counters otherwise clean: `crc_errors` 0, `malformed_frames` 0, `overflow_frames` 0,
+`rx_dropped_bytes` 0, `valid_frames` 35. `dropped_responses` is **1**, and
+`host_reconnects` 1.
+
+### Where the failure actually is, read from `ota.c` rather than guessed
+
+`last_ota_error` is `download: ESP_FAIL` — stage DOWNLOAD, `esp_err_t` `ESP_FAIL`. Only
+one path produces that combination: `firmware/main/link/ota.c:669`, reached after the
+`esp_https_ota_perform()` loop exits with a non-`ESP_OK`, non-`IN_PROGRESS` result. That
+places the failure **inside the body transfer**, and it means everything before it
+succeeded:
+
+- `esp_https_ota_begin()` returned `ESP_OK` — otherwise the stage would read `begin`.
+  **So TLS was set up.** That is the step the internal-DMA/AES memory hazard breaks
+  (`62e5aea`, `0ad1a51`), and it did not break here.
+- `esp_https_ota_get_status_code()` was **200** — otherwise `set_http_failure` would have
+  recorded an HTTP status instead of an `esp_err_t`.
+- The image size passed the partition bound, and `esp_https_ota_get_img_desc()` both
+  succeeded and **version-matched** — otherwise the stage would read `verify`.
+
+So the device reached the server, was served the right image, read its descriptor, and
+then lost the transfer partway through.
+
+**This is not the documented memory-layout signature.** That failure mode kills
+`mbedtls_ssl_setup()` before any socket work, and would surface as stage `begin`. The
+same-tree measurement supports that reading: `.bss` 102,624, DIRAM `.text` 93,635,
+`.data` 23,128, IRAM 16,384/16,384 and DIRAM total 219,387 are all **byte-flat** against
+the `05500ef` baseline, across all five firmware tasks. Only flash `.text` moved
+(1,141,824 → 1,145,532).
+
+The server log corroborates the sequence and its speed:
+
+```
+05:15:17  device link established
+05:15:21  firmware check  current=v2.0.0-scene3
+05:15:23  device link closed        <- install_update() suspends the WSS link
+05:15:25  device link established   <- resumed on the failure path
+```
+
+Two seconds from link-suspend to link-resume. A 1.6 MB body over this link cannot
+complete in that window, so the transfer died early rather than timing out —
+`ota_policy_download_timed_out` would have recorded `ESP_ERR_TIMEOUT`, not `ESP_FAIL`.
+
+### A methodological note, because it cost two wrong turns
+
+Neither the server journal nor the Caddy container log showed any request for
+`/v1/firmware/v2.0.0-live1.bin`, which looked like strong evidence the device never asked
+for it. **It was not evidence at all**: a control request issued by hand returned HTTP
+200 and *also* produced zero log lines, so that path simply is not logged. This is the
+second time in two days that a cheap negative has been misleading here — the first was
+`strings` not being installed on the VM. Calibrate a negative against a positive control
+before believing it.
+
+### Precedent, and what is owed
+
+There is a direct precedent: the 2026-08-25 stage-2a check failed once and **succeeded on
+a retry of the identical image at the same signal**, and was recorded as transient
+precisely because the layout-shift mode is deterministic. `-76 dBm` is the same weak link
+board-notes already describes as "download daily over a weak link".
+
+So the next step is a **retry of the identical image**, which is decisive either way:
+
+- succeeds → transient, and the reading above holds;
+- fails identically → deterministic, and it must be bisected on the board across builds
+  from an identical base, as `3f2aa03` was, rather than retried further.
+
+The device checks at boot and twice a day and cannot be asked, so a retry means another
+power cycle. Nothing was republished between attempts: the catalog still offers
+`v2.0.0-live1`, md5 `d2a8d5e0b8b5d829b812d65287d18f96`.
+
+**Do not describe stage 3a Gate A as passed.** Nothing has been observed on the panel;
+the renderer's live bindings have still never drawn on hardware.

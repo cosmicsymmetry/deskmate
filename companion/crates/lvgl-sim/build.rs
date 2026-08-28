@@ -19,6 +19,17 @@ fn main() {
             "reference-only C template oracle is shipping again: {forbidden}"
         );
     }
+    for forbidden in [
+        firmware.join("main/ui/template_view.c"),
+        firmware.join("main/ui/template_view.h"),
+        firmware.join("main/ui/templates"),
+    ] {
+        assert!(
+            !forbidden.exists(),
+            "reference-only C template oracle was recreated in the shipping include tree: {}",
+            forbidden.display()
+        );
+    }
 
     let mut sources: Vec<PathBuf> = glob::glob(lvgl.join("src/**/*.c").to_str().unwrap())
         .unwrap()
@@ -94,7 +105,10 @@ fn main() {
     build
         .files(&sources)
         .include(&lvgl) // lvgl.h
-        .include(firmware.join("main")) // core/, ui/, templates/
+        // Shipping core/ui headers precede the oracle include roots. The
+        // filesystem assertions above make that safe: a recreated shipping
+        // template header cannot shadow the frozen oracle silently.
+        .include(firmware.join("main"))
         .include(&template_oracle_root) // ui/templates/weather_icon.h
         .include(&template_oracle) // reference-only template oracle headers
         .include(&firmware) // lv_conf.h

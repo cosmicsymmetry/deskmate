@@ -1860,9 +1860,14 @@ Not fixed here (out of scope).
 > Worth recording that **no running value could have worked**: the label's
 > `(remaining_ms + 999) / 1000` ceiling flips a second every second by construction,
 > whatever the duration, so "choose a steadier remaining_seconds" was never on the table.
-> The expectation from this date is `total=58 identical=54 differing=0 excluded=4`, and a
-> differing case is now a real disagreement rather than something to be recognised and
-> waved through.
+> The expectation on this date, before C-template retirement, was
+> `total=58 identical=54 differing=0 excluded=4`. Task 8's review restored those 58
+> six-face rows as device-pushable scenes alongside 18 synthetic node-kind rows. Gate B's
+> current expectation is therefore `total=76 identical=64 differing=0 excluded=12`:
+> four face-row exclusions (the two orientations of this running case and the row-list
+> truncation boundary) plus eight synthetic asset/field exclusions. Both name-based
+> exclusions are reachable and active again. A differing case is a real disagreement,
+> not something to recognise and wave through.
 
 **PASSED (with a stated limit) — the standalone fallback screen at 90°.** This is the one
 surface the framebuffer diff cannot reach, because it has no golden case, so the webcam

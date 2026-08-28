@@ -1,8 +1,9 @@
 //! Dev-only physical framebuffer diff (V1 reset design spec §3.2.2/§3.2.3,
-//! Task 10). Pushes every device-representable case in
-//! `lvgl_sim::cases::scene_cases()` to a physically connected device running
-//! a `DESKMATE_DEV_DIAG=1` build, requests a 0x7E framebuffer capture, and
-//! byte-compares the reassembled pixels against `Simulator::render_scene` for
+//! Task 10). Pushes every device-representable case in the synthetic
+//! `lvgl_sim::cases::scene_cases()` and six-face
+//! `lvgl_sim::cases::face_scene_cases()` matrices to a physically connected
+//! device running a `DESKMATE_DEV_DIAG=1` build, requests a 0x7E framebuffer
+//! capture, and byte-compares the reassembled pixels against `Simulator::render_scene` for
 //! the identical case. This only runs against real
 //! hardware: 0x7E/0x7F are dev-build-only message ids, absent from the
 //! release protocol and from `docs/protocol/v1.md`.
@@ -73,8 +74,8 @@ fn parse_port() -> Result<Option<String>, String> {
 }
 
 /// Returns the reason a scene case cannot be pushed by this harness. The two
-/// historical template-case exclusions remain explicit so their known flakes
-/// cannot silently return if those composite scene rows join `scene_cases()`.
+/// historical face-row exclusions are reachable through `face_scene_cases()`;
+/// keep them explicit so their known flakes cannot silently return.
 fn exclusion_reason(name: &str, request: &SceneRenderRequest) -> Option<&'static str> {
     if name.starts_with("row-list--truncation-boundary--") {
         Some(
@@ -395,7 +396,10 @@ fn run() -> Result<(), String> {
     let mut errored = 0usize;
     let mut excluded = 0usize;
 
-    for (name, request) in cases::scene_cases() {
+    for (name, request) in cases::scene_cases()
+        .into_iter()
+        .chain(cases::face_scene_cases())
+    {
         if let Some(reason) = exclusion_reason(&name, &request) {
             println!("{name}: excluded ({reason})");
             excluded += 1;
@@ -460,5 +464,53 @@ fn main() {
     if let Err(error) = run() {
         eprintln!("framebuffer diff failed: {error}");
         process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gate_b_inventory_keeps_synthetic_and_all_six_face_rows() {
+        let requests: Vec<_> = cases::scene_cases()
+            .into_iter()
+            .chain(cases::face_scene_cases())
+            .collect();
+        let excluded = requests
+            .iter()
+            .filter(|(name, request)| exclusion_reason(name, request).is_some())
+            .count();
+
+        assert_eq!(requests.len(), 76);
+        assert_eq!(excluded, 12);
+        assert_eq!(requests.len() - excluded, 64);
+        for prefix in [
+            "digital-clock--",
+            "analog-clock--",
+            "progress-ring--",
+            "row-list--",
+            "big-number-label--",
+            "icon-badge-text--",
+        ] {
+            assert!(
+                requests.iter().any(|(name, _)| name.starts_with(prefix)),
+                "missing real-face coverage for {prefix}"
+            );
+        }
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|(name, _)| name.starts_with("row-list--truncation-boundary--"))
+                .count(),
+            2
+        );
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|(name, _)| { name.starts_with("progress-ring--running-mid-countdown--") })
+                .count(),
+            2
+        );
     }
 }

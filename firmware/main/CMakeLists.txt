@@ -14,6 +14,7 @@ idf_component_register(
          "core/scene_decode.c"
          "core/scene_model.c"
          "core/template_fields.c" "core/timefmt.c" "core/widget_model.c"
+         "core/ui_command_policy.c"
          "link/asset_flash.c"
          "link/dev_capture.c" "link/net_link.c" "link/net_store.c"
          "link/ota.c" "link/protocol_task.c" "link/usb_link.c"

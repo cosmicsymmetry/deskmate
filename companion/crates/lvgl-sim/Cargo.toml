@@ -6,6 +6,8 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+app-core = { path = "../app-core" }
+chrono = { version = "0.4", default-features = false, features = ["std"] }
 png = "0.17"
 # Task 8: the scene model and its CBOR encoder. `render_scene` hands the
 # firmware's own scene_decode() the bytes protocol::encode_scene_payload

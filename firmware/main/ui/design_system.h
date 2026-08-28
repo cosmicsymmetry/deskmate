@@ -6,7 +6,10 @@
 #include "ui/fonts/deskmate_fonts.h"
 
 /* Shared by the standalone clock and OTA takeover. The retired card-template
- * oracle carries its own historical copy under lvgl-sim/reference-oracle. */
+ * oracle carries a frozen sibling in
+ * companion/crates/lvgl-sim/reference-oracle/ui/templates/template_internal.h;
+ * palette or spacing edits here do not update parity coverage for the
+ * standalone clock, so compare that sibling deliberately when changing them. */
 #define DESKMATE_GRID              8
 #define DESKMATE_MARGIN            (3 * DESKMATE_GRID)
 #define DESKMATE_COLOR_CANVAS      lv_color_hex(0x000000)

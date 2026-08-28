@@ -14,7 +14,19 @@ static ui_command_t s_output;
 _Static_assert(sizeof(ui_command_t) <= 8U,
                "shipping UI commands still carry a C-template payload");
 
-static void test_card_without_scene_uses_standalone_clock(void)
+static void test_card_fallback_maps_to_standalone_clock(void)
+{
+    assert(ui_command_action(UI_COMMAND_SHOW_CARD_FALLBACK) ==
+           UI_COMMAND_ACTION_SHOW_STANDALONE_CLOCK);
+    assert(ui_command_action(UI_COMMAND_SHOW_STANDALONE) ==
+           UI_COMMAND_ACTION_SHOW_STANDALONE_CLOCK);
+    assert(ui_command_action(UI_COMMAND_LINK_STATE) ==
+           UI_COMMAND_ACTION_APPLY_LINK_STATE);
+    assert(ui_command_action(UI_COMMAND_TIME_OFFSET) ==
+           UI_COMMAND_ACTION_APPLY_TIME_OFFSET);
+}
+
+static void test_card_fallback_round_trips_through_queue(void)
 {
     ui_command_queue_init(&s_queue);
     memset(&s_command, 0, sizeof(s_command));
@@ -100,7 +112,8 @@ static void test_offline_transition_cannot_be_starved(void)
 
 int main(void)
 {
-    test_card_without_scene_uses_standalone_clock();
+    test_card_fallback_maps_to_standalone_clock();
+    test_card_fallback_round_trips_through_queue();
     test_standalone_fallback_supersedes_older_fallback();
     test_scalar_updates_replace_pending();
     test_scene_cancels_only_the_card_fallback();

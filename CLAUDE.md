@@ -442,9 +442,14 @@ of letting code and documentation diverge.
   byte-identical via `framebuffer_diff` at both orientations, fallback and both transition
   directions confirmed by webcam at 90°. Two things are **not** verified: the fallback at
   270°, and the fallback's bottom margin (cropped in the available camera framing).
-- **The framebuffer diff expects `total=58 identical=54 differing=0 excluded=4`, and any
-  differing case is now a real firmware/simulator disagreement** (fixed 2026-08-21).
-  `progress-ring--running-mid-countdown` could not pass deterministically:
+- **After C-template retirement, the framebuffer diff expects
+  `total=76 identical=64 differing=0 excluded=12`, and any differing case is a real
+  firmware/simulator disagreement.** The matrix is 18 synthetic scene-node rows plus
+  58 device-pushable rows spanning all six retired faces. Eight synthetic rows are
+  excluded because they require unprovisioned image/font assets or an unregistered
+  `field.status`; the four face-row exclusions below are active again, not vacuous.
+  `row-list--truncation-boundary` contributes two of those four. The other two are
+  `progress-ring--running-mid-countdown`, which could not pass deterministically:
   `progress_ring.c`'s `current_remaining_ms` keeps counting a *running* ring down from
   `lv_tick_get()` after its fields are pushed, while the simulator's fake tick is fixed
   (an 840 ms anchor offset, `crates/lvgl-sim/csrc/sim_shim.c`), so the label's

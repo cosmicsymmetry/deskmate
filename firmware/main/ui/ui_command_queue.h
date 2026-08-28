@@ -5,14 +5,9 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define UI_COMMAND_QUEUE_CAPACITY 4U
+#include "core/ui_command_policy.h"
 
-typedef enum {
-    UI_COMMAND_SHOW_STANDALONE = 0,
-    UI_COMMAND_SHOW_CARD_FALLBACK,
-    UI_COMMAND_LINK_STATE,
-    UI_COMMAND_TIME_OFFSET,
-} ui_command_type_t;
+#define UI_COMMAND_QUEUE_CAPACITY 4U
 
 typedef struct {
     ui_command_type_t type;
@@ -37,7 +32,11 @@ void ui_command_queue_init(ui_command_queue_t *queue);
  * offline transition supersede older view work while retaining pending scalar
  * state; patches for the same widget and scalar state commands replace their
  * pending predecessor. A full non-coalescible queue drops the newest command
- * and increments the pressure counter.
+ * and increments the pressure counter. Since template patches were removed,
+ * normal traffic has only four coalescing categories for four slots; a drop
+ * now signals an unexpected command mix rather than ordinary render pressure,
+ * and the high-water metric is correspondingly a coarse compatibility
+ * diagnostic rather than the signal it was for template-bearing traffic.
  */
 bool ui_command_queue_push(ui_command_queue_t *queue,
                            const ui_command_t *command);

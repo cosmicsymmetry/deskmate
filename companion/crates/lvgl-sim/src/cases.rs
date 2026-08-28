@@ -2,10 +2,11 @@
 //! orientations x a field matrix chosen to exercise each template's
 //! visually distinct states. `tests/golden.rs` renders every case and pins
 //! the output to a committed PNG under `tests/golden/`. These rows now drive
-//! the reference-only C oracle; the physical framebuffer diff drives
-//! [`scene_cases`] because shipping firmware no longer has a template
-//! renderer. This lives under `src/` rather than `tests/` so integration
-//! tests and hardware examples can reach it as `lvgl_sim::cases`.
+//! the reference-only C oracle; the physical framebuffer diff drives both
+//! [`scene_cases`] and [`face_scene_cases`] because shipping firmware no
+//! longer has a template renderer. This lives under `src/` rather than
+//! `tests/` so integration tests and hardware examples can reach it as
+//! `lvgl_sim::cases`.
 //!
 //! Field names below are pulled from the firmware's own registry,
 //! `firmware/main/core/template_fields.c` (`template_fields_registry`) — do
@@ -601,6 +602,189 @@ pub fn golden_cases() -> Vec<(String, RenderRequest)> {
     big_number_label_cases(&mut cases);
     icon_badge_text_cases(&mut cases);
     cases
+}
+
+fn field_text<'a>(request: &'a RenderRequest, name: &str, default: &'a str) -> &'a str {
+    request
+        .fields
+        .iter()
+        .find_map(|field| {
+            (field.name == name)
+                .then_some(&field.value)
+                .and_then(|value| {
+                    if let SimFieldValue::Text(value) = value {
+                        Some(value.as_str())
+                    } else {
+                        None
+                    }
+                })
+        })
+        .unwrap_or(default)
+}
+
+fn field_integer(request: &RenderRequest, name: &str, default: i64) -> i64 {
+    request
+        .fields
+        .iter()
+        .find_map(|field| {
+            (field.name == name)
+                .then_some(&field.value)
+                .and_then(|value| {
+                    if let SimFieldValue::Integer(value) = value {
+                        Some(*value)
+                    } else {
+                        None
+                    }
+                })
+        })
+        .unwrap_or(default)
+}
+
+fn field_boolean(request: &RenderRequest, name: &str, default: bool) -> bool {
+    request
+        .fields
+        .iter()
+        .find_map(|field| {
+            (field.name == name)
+                .then_some(&field.value)
+                .and_then(|value| {
+                    if let SimFieldValue::Boolean(value) = value {
+                        Some(*value)
+                    } else {
+                        None
+                    }
+                })
+        })
+        .unwrap_or(default)
+}
+
+/// The six shipping-face rows as device-pushable scenes.
+///
+/// This is the hardware-facing half of the scene parity matrix, promoted next
+/// to [`scene_cases`] so examples do not depend on an integration test's
+/// private `cases()`. The row names deliberately remain identical to
+/// [`golden_cases`]: `framebuffer_diff`'s two historical exclusions are keyed
+/// by those names, and changing the prefix would silently make both branches
+/// unreachable again.
+#[allow(clippy::too_many_lines)] // one explicit adapter arm per retired face
+pub fn face_scene_cases() -> Vec<(String, SceneRenderRequest)> {
+    use app_core::scene_build::{
+        AnalogClockCard, BakedFontMetrics, BigNumberCard, ClockCard, IconBadgeCard,
+        ProgressRingCard, RowListCard, SceneDataState, build_analog_clock_scene,
+        build_big_number_label_scene, build_digital_clock_scene, build_icon_badge_text_scene,
+        build_progress_ring_scene, build_row_list_scene, with_scene_data_state,
+    };
+
+    golden_cases()
+        .into_iter()
+        .map(|(name, request)| {
+            let metrics = &BakedFontMetrics::SHIPPED;
+            let scene = match request.template {
+                SimTemplate::DigitalClock => {
+                    let local_seconds =
+                        request.now_unix_seconds + i64::from(request.utc_offset_minutes) * 60;
+                    let local_now = chrono::DateTime::from_timestamp(local_seconds, 0)
+                        .expect("golden clock instant is representable")
+                        .naive_utc();
+                    build_digital_clock_scene(
+                        &ClockCard {
+                            revision: 1,
+                            show_seconds: field_boolean(&request, "show_seconds", true),
+                            local_now,
+                        },
+                        metrics,
+                    )
+                }
+                SimTemplate::AnalogClock => build_analog_clock_scene(
+                    &AnalogClockCard {
+                        revision: 1,
+                        show_seconds: field_boolean(&request, "show_seconds", true),
+                    },
+                    metrics,
+                ),
+                SimTemplate::ProgressRing => build_progress_ring_scene(
+                    &ProgressRingCard {
+                        revision: 1,
+                        label: field_text(&request, "label", "Pomodoro"),
+                        duration_seconds: field_integer(&request, "duration_seconds", 0),
+                    },
+                    metrics,
+                ),
+                SimTemplate::RowList => build_row_list_scene(
+                    &RowListCard {
+                        revision: 1,
+                        title: field_text(&request, "title", "Calendar"),
+                        row0_title: field_text(&request, "row0_title", ""),
+                        row0_time: field_text(&request, "row0_time", ""),
+                        row1_title: field_text(&request, "row1_title", ""),
+                        row1_time: field_text(&request, "row1_time", ""),
+                        row2_title: field_text(&request, "row2_title", ""),
+                        row2_time: field_text(&request, "row2_time", ""),
+                        row3_title: field_text(&request, "row3_title", ""),
+                        row3_time: field_text(&request, "row3_time", ""),
+                        row4_title: field_text(&request, "row4_title", ""),
+                        row4_time: field_text(&request, "row4_time", ""),
+                    },
+                    metrics,
+                ),
+                SimTemplate::BigNumberLabel => build_big_number_label_scene(
+                    &BigNumberCard {
+                        revision: 1,
+                        title: field_text(&request, "title", ""),
+                        value: field_text(&request, "value", "--"),
+                        label: field_text(&request, "label", ""),
+                    },
+                    metrics,
+                ),
+                SimTemplate::IconBadgeText => build_icon_badge_text_scene(
+                    &IconBadgeCard {
+                        revision: 1,
+                        title: field_text(&request, "title", ""),
+                        icon: field_text(&request, "icon", "unknown"),
+                        badge: field_text(&request, "badge", ""),
+                        value: field_text(&request, "value", "--"),
+                        label: field_text(&request, "label", ""),
+                    },
+                    app_core::scene_build::SHIPPED_SCENE_SURFACE_COLOR,
+                    metrics,
+                ),
+            };
+            let scene = with_scene_data_state(
+                scene,
+                SceneDataState {
+                    stale: field_boolean(&request, "stale", false),
+                    error: match field_text(&request, "error", "") {
+                        "" => None,
+                        error => Some(error),
+                    },
+                },
+                metrics,
+            );
+            let timer = (request.template == SimTemplate::ProgressRing).then(|| {
+                let to_milliseconds = |seconds: i64| {
+                    u32::try_from(seconds * 1_000)
+                        .expect("golden progress-ring fixture is inside u32")
+                };
+                SceneTimer {
+                    total_ms: to_milliseconds(field_integer(&request, "duration_seconds", 0)),
+                    remaining_ms: to_milliseconds(field_integer(&request, "remaining_seconds", 0)),
+                    running: field_boolean(&request, "running", false),
+                }
+            });
+            (
+                name,
+                SceneRenderRequest {
+                    scene,
+                    assets: Vec::new(),
+                    utc_offset_minutes: request.utc_offset_minutes,
+                    now_unix_seconds: request.now_unix_seconds,
+                    timer,
+                    fields: Vec::new(),
+                    orientation: request.orientation,
+                },
+            )
+        })
+        .collect()
 }
 
 /// Task 12: one case rendering a runtime font asset, deliberately not a

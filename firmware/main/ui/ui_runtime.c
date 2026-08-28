@@ -61,9 +61,8 @@ static void consume_command(const ui_command_t *command)
         /* The OTA task owns the panel until it reboots or restores the clock. */
         return;
     }
-    switch (command->type) {
-    case UI_COMMAND_SHOW_STANDALONE:
-    case UI_COMMAND_SHOW_CARD_FALLBACK:
+    switch (ui_command_action(command->type)) {
+    case UI_COMMAND_ACTION_SHOW_STANDALONE_CLOCK:
         carousel_unbind();
         clock_screen_show_in_lvgl();
         /* Loading the clock deletes the scene's screen (auto_del), which is
@@ -73,7 +72,7 @@ static void consume_command(const ui_command_t *command)
          * would leave a built-but-unshown scene alive. */
         (void)scene_view_destroy();
         break;
-    case UI_COMMAND_LINK_STATE: {
+    case UI_COMMAND_ACTION_APPLY_LINK_STATE: {
         /* A scene is host content, so losing the host restores the
          * standalone clock rather than leaving a frozen face up. */
         bool host_content_was_active = scene_view_active();
@@ -85,10 +84,10 @@ static void consume_command(const ui_command_t *command)
         }
         break;
     }
-    case UI_COMMAND_TIME_OFFSET:
+    case UI_COMMAND_ACTION_APPLY_TIME_OFFSET:
         clock_screen_set_utc_offset_minutes(command->utc_offset_minutes);
         break;
-    default:
+    case UI_COMMAND_ACTION_NONE:
         break;
     }
 }

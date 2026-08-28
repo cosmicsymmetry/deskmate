@@ -62,7 +62,8 @@ test_widget_model: test_widget_model.c ../main/core/widget_model.c \
 	$(PROTOCOL_SRCS)
 	$(CC) $(CFLAGS) -I$(CBOR_DIR) -I../main -o $@ $^
 
-test_ui_command_queue: test_ui_command_queue.c ../main/ui/ui_command_queue.c
+test_ui_command_queue: test_ui_command_queue.c ../main/ui/ui_command_queue.c \
+	../main/core/ui_command_policy.c
 	$(CC) $(CFLAGS) -I../main -o $@ $^
 
 test_navigation: test_navigation.c ../main/core/navigation.c

@@ -9,9 +9,7 @@
  * destroys it with lv_tiny_ttf_destroy(), and walks the three glyph calls in
  * font_registry_warm(). Building real LVGL for a host test to exercise that
  * policy would be several orders of magnitude more machinery than the policy
- * itself, so the test provides those four entry points instead -- the same
- * trick ui/templates/weather_icon.c uses with WEATHER_ICON_HOST_TEST, one
- * level up.
+ * itself, so the test provides those four entry points instead.
  *
  * The declarations below are copied from LVGL 9's real headers
  * (managed_components/lvgl__lvgl/src/libs/tiny_ttf/lv_tiny_ttf.h and

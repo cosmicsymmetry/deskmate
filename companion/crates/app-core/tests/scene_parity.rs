@@ -12,19 +12,13 @@
 //! There is deliberately no tolerance. A fuzzy pixel gate would prove nothing:
 //! "close enough" is the failure mode the scene renderer exists to rule out.
 //!
-//! # Why it lives here and not in `lvgl-sim/src/cases.rs`
+//! # Why the expanded parity table stays here
 //!
-//! The brief nominated `cases.rs`, which is where every other golden case lives.
-//! Putting it there would mean `lvgl-sim` naming `app-core`, closing a cycle on
-//! the existing `app-core -> device -> lvgl-sim` chain. Cargo would in fact
-//! tolerate that — `device -> lvgl-sim` is itself a dev-dependency, so the
-//! normal-dependency graph stays acyclic and cycles closed through dev edges are
-//! legal. So this is a judgement, not an impossibility: paying that cost buys
-//! nothing here, because the case table exists so `tests/golden.rs` and
-//! `crates/device/examples/framebuffer_diff.rs` can iterate one matrix, and this
-//! gate needs neither a committed golden nor a hardware push. Both halves are
-//! rendered in-process and compared directly, and `golden_cases()` stays at its
-//! pinned 58-case shape.
+//! `lvgl-sim::cases::face_scene_cases()` now promotes the original 58-row face
+//! matrix for the physical framebuffer harness. This private table remains the
+//! larger 132-row parity proof: it adds builder boundaries, all icon mappings,
+//! temporal cases and shared state-footer rows that would make Gate B needlessly
+//! long. Both halves here are rendered in-process and compared directly.
 //!
 //! # Driving the C side
 //!

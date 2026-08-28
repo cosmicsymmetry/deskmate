@@ -187,6 +187,24 @@ export function App() {
   const cardIssues = selectedCardId ? issuesForCard(issues, draft, selectedCardId) : [];
   const selectedCardError =
     snapshot.card_errors.find((error) => error.card_id === selectedCardId) ?? null;
+  const cardErrorCount = snapshot.card_errors.length;
+  const allCardErrorsAreDataRefusals = snapshot.card_errors.every(
+    (error) => error.kind === "data-refused",
+  );
+  const allCardErrorsAreSceneRefusals = snapshot.card_errors.every(
+    (error) => error.kind === "scene-refused",
+  );
+  const cardErrorHeading = allCardErrorsAreDataRefusals
+    ? cardErrorCount === 1
+      ? "The display refused one card update"
+      : `The display refused ${cardErrorCount} card updates`
+    : allCardErrorsAreSceneRefusals
+      ? cardErrorCount === 1
+        ? "One card could not be rendered"
+        : `${cardErrorCount} cards could not be rendered`
+      : `${cardErrorCount} card updates need attention`;
+  const affectedCards = cardErrorCount === 1 ? "the affected card" : "each affected card";
+  const affectedCardPronoun = cardErrorCount === 1 ? "it" : "them";
   // Issues no card-, playlist-, or preference-scoped surface below claims — e.g. a
   // `device.capabilities` issue naming a card the connected display can't render.
   // Rendered as its own banner so an unclaimed issue is explained somewhere rather than
@@ -423,17 +441,13 @@ export function App() {
             </aside>
           )}
 
-          {/* A push the display understood and refused is card-scoped and actionable:
-              name the card and say what it refused, rather than parking the whole app in
-              an error state over one card's data. */}
+          {/* Card-scoped failures stay actionable without inventing a cause: data
+              refusals name the display, while scene failures remain neutral because
+              scene construction can fail before the display sees anything. */}
           {snapshot.card_errors.length > 0 && (
             <aside className="notice notice--warn" role="status">
               <div>
-                <strong>
-                  {snapshot.card_errors.length === 1
-                    ? "The display refused one card update"
-                    : `The display refused ${snapshot.card_errors.length} card updates`}
-                </strong>
+                <strong>{cardErrorHeading}</strong>
                 {snapshot.card_errors.map((cardError) => {
                   const card = draft.cards.find((candidate) => candidate.id === cardError.card_id);
                   return (
@@ -444,8 +458,8 @@ export function App() {
                   );
                 })}
                 <p>
-                  Everything else kept updating. Adjust the card below and save to send its data
-                  again.
+                  Everything else kept updating. Open {affectedCards} to review the details and save
+                  after correcting {affectedCardPronoun}.
                 </p>
               </div>
             </aside>

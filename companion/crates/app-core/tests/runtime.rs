@@ -79,6 +79,8 @@ struct MockState {
     status_override: Option<StatusResponse>,
     next_push_gate: Option<Arc<PushGate>>,
     next_scene_gate: Option<Arc<PushGate>>,
+    next_apply_layout_error: Option<DeviceError>,
+    scene_errors: VecDeque<DeviceError>,
     /// Widgets whose pushes the device understands and refuses, exactly as real
     /// firmware does for a field the widget's template does not declare.
     refused_pushes: BTreeSet<String>,
@@ -179,6 +181,14 @@ impl MockDeviceControl {
         let gate = Arc::new(PushGate::default());
         self.state.lock().unwrap().next_scene_gate = Some(Arc::clone(&gate));
         gate
+    }
+
+    fn fail_next_apply_layout_with(&self, error: DeviceError) {
+        self.state.lock().unwrap().next_apply_layout_error = Some(error);
+    }
+
+    fn fail_next_scene_with(&self, error: DeviceError) {
+        self.state.lock().unwrap().scene_errors.push_back(error);
     }
 
     fn set_latest_interrupt_token(&self, token: u32) {
@@ -359,6 +369,9 @@ impl RuntimeDevice for MockDevice {
         _widgets: Vec<WidgetConfig>,
         _screens: Vec<ScreenConfig>,
     ) -> Result<(), DeviceError> {
+        if let Some(error) = self.with_connected(|state| state.next_apply_layout_error.take())? {
+            return Err(error);
+        }
         self.with_connected(|state| {
             state.replay.layout = true;
             state.replay.pushes.clear();
@@ -399,6 +412,9 @@ impl RuntimeDevice for MockDevice {
         }
         self.with_connected(|state| {
             state.operations.push(Operation::PushScene(push.clone()));
+            if let Some(error) = state.scene_errors.pop_front() {
+                return Err(error);
+            }
             if state.refused_scenes.contains(&push.card_id) {
                 return Err(DeviceError::Rejected(ErrorResponse {
                     code: ErrorCode::InvalidPayload,
@@ -1019,6 +1035,88 @@ fn automatic_scene_delivery_does_not_gate_the_online_connection_state() {
 }
 
 #[test]
+fn explicit_scene_command_follows_one_automatic_attempt_without_spawning_another() {
+    let control = MockDeviceControl::default();
+    let automatic_gate = control.block_next_scene();
+    let runtime = start_runtime(full_config(), &control, Duration::ZERO);
+    wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
+        snapshot.device.connection == ConnectionState::Online
+    });
+    automatic_gate.wait_until_entered();
+
+    let explicit = PushScene {
+        card_id: "clock".into(),
+        revision: 77,
+        scene: Scene {
+            revision: 77,
+            background: 0,
+            nodes: Vec::new(),
+        },
+    };
+    let (reply_sender, reply_receiver) = std::sync::mpsc::sync_channel(1);
+    thread::scope(|scope| {
+        scope.spawn(|| {
+            reply_sender
+                .send(runtime.push_scene(explicit.clone()))
+                .unwrap();
+        });
+        automatic_gate.open();
+        assert_eq!(
+            reply_receiver
+                .recv_timeout(Duration::from_secs(1))
+                .expect("explicit PushScene remained stuck behind the automatic attempt"),
+            Ok(())
+        );
+    });
+
+    wait_for(Duration::from_secs(1), || {
+        control
+            .operations()
+            .iter()
+            .any(|operation| matches!(operation, Operation::PushScene(push) if push.revision == 77))
+    });
+    thread::sleep(Duration::from_millis(100));
+    assert_eq!(
+        control
+            .operations()
+            .iter()
+            .filter(|operation| matches!(operation, Operation::PushScene(_)))
+            .count(),
+        2,
+        "one automatic event plus one explicit command must produce exactly two scene attempts"
+    );
+    runtime.shutdown().unwrap();
+}
+
+#[test]
+fn failed_full_sync_never_pushes_a_scene_before_activation_succeeds() {
+    let control = MockDeviceControl::default();
+    control.fail_next_apply_layout_with(DeviceError::Timeout);
+    let runtime = start_runtime(full_config(), &control, Duration::ZERO);
+
+    wait_for(Duration::from_secs(1), || {
+        control
+            .operations()
+            .iter()
+            .any(|operation| matches!(operation, Operation::PushScene(_)))
+    });
+    let operations = control.operations();
+    let activation = operations
+        .iter()
+        .position(|operation| *operation == Operation::Activate("clock".into()))
+        .expect("the retried ownership sync never activated the card");
+    let scene = operations
+        .iter()
+        .position(|operation| matches!(operation, Operation::PushScene(_)))
+        .expect("the successful full-sync retry never produced its scene");
+    assert!(
+        activation < scene,
+        "a scene reached the device before its config and activation"
+    );
+    runtime.shutdown().unwrap();
+}
+
+#[test]
 fn legacy_device_receives_widget_config_and_never_receives_a_scene() {
     let control = MockDeviceControl::default();
     let mut legacy = status(42);
@@ -1032,6 +1130,8 @@ fn legacy_device_receives_widget_config_and_never_receives_a_scene() {
             && operations.contains(&Operation::Push("clock".into()))
             && operations.contains(&Operation::Activate("clock".into()))
     });
+    // Soft negative over ten complete 10 ms runtime intervals: unlike the
+    // positive event assertions, absence has no notification to wait on.
     thread::sleep(Duration::from_millis(100));
     assert!(
         control
@@ -1129,6 +1229,85 @@ fn a_refused_scene_is_card_scoped_visible_and_not_periodically_retried() {
 }
 
 #[test]
+fn busy_scene_is_retried_without_becoming_a_card_fault() {
+    let control = MockDeviceControl::default();
+    control.fail_next_scene_with(DeviceError::Rejected(ErrorResponse {
+        code: ErrorCode::Busy,
+        diagnostic: "LVGL is flushing".into(),
+    }));
+    let runtime = start_runtime(full_config(), &control, Duration::ZERO);
+
+    wait_for(Duration::from_secs(1), || {
+        control
+            .operations()
+            .iter()
+            .filter(|operation| matches!(operation, Operation::PushScene(_)))
+            .count()
+            >= 2
+    });
+    assert!(runtime.snapshot().unwrap().card_errors.is_empty());
+    runtime.shutdown().unwrap();
+}
+
+#[test]
+fn scene_transport_failures_retry_without_masquerading_as_card_faults() {
+    for error in [
+        DeviceError::Timeout,
+        DeviceError::Transport(TransportError::Io("temporary stall".into())),
+        DeviceError::MalformedResponse("truncated ACK".into()),
+        DeviceError::UnexpectedMessage,
+    ] {
+        let control = MockDeviceControl::default();
+        control.fail_next_scene_with(error);
+        let runtime = start_runtime(full_config(), &control, Duration::ZERO);
+
+        wait_for(Duration::from_secs(1), || {
+            control
+                .operations()
+                .iter()
+                .filter(|operation| matches!(operation, Operation::PushScene(_)))
+                .count()
+                >= 2
+        });
+        let snapshot = runtime.snapshot().unwrap();
+        assert!(snapshot.card_errors.is_empty());
+        assert_eq!(snapshot.device.connection, ConnectionState::Online);
+        runtime.shutdown().unwrap();
+    }
+}
+
+#[test]
+fn wrong_tier_scene_recovery_replays_the_model_and_rearms_the_scene() {
+    let control = MockDeviceControl::default();
+    control.fail_next_scene_with(DeviceError::Rejected(ErrorResponse {
+        code: ErrorCode::WrongTier,
+        diagnostic: "server owns this device".into(),
+    }));
+    let runtime = start_runtime(full_config(), &control, Duration::ZERO);
+
+    wait_for(Duration::from_secs(1), || {
+        control
+            .operations()
+            .iter()
+            .filter(|operation| matches!(operation, Operation::PushScene(_)))
+            .count()
+            >= 2
+    });
+    let operations = control.operations();
+    let second_scene = operations
+        .iter()
+        .rposition(|operation| matches!(operation, Operation::PushScene(_)))
+        .unwrap();
+    let last_activation = operations
+        .iter()
+        .rposition(|operation| *operation == Operation::Activate("clock".into()))
+        .expect("ownership recovery did not replay the active screen");
+    assert!(last_activation < second_scene);
+    assert!(runtime.snapshot().unwrap().card_errors.is_empty());
+    runtime.shutdown().unwrap();
+}
+
+#[test]
 fn scenes_push_on_host_events_and_never_on_clock_or_pomodoro_ticks() {
     let control = MockDeviceControl::default();
     let runtime = start_runtime(full_config(), &control, Duration::ZERO);
@@ -1166,10 +1345,20 @@ fn scenes_push_on_host_events_and_never_on_clock_or_pomodoro_ticks() {
     });
     let after_playlist_advance = scene_count();
     assert!(after_playlist_advance > after_config);
+    runtime
+        .control_pomodoro("pomodoro", PomodoroAction::Start)
+        .unwrap();
+    wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
+        snapshot
+            .pomodoros
+            .iter()
+            .any(|timer| timer.widget_id == "pomodoro" && timer.state == PomodoroState::Running)
+    });
+    let after_timer_start = scene_count();
     thread::sleep(Duration::from_millis(100));
     assert_eq!(
         scene_count(),
-        after_playlist_advance,
+        after_timer_start,
         "pomodoro scheduler ticks update bindings through PushData, not scene rebuilds"
     );
 

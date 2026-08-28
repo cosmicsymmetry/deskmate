@@ -1111,6 +1111,65 @@ describe("settings accessibility and states", () => {
     }
   });
 
+  test("the global card banner does not blame the display for a host-side scene failure", async () => {
+    snapshotImpl = async () => ({
+      ...(structuredClone(snapshot) as AppSnapshot),
+      card_errors: [
+        {
+          kind: "scene-refused",
+          card_id: "calendar",
+          message: "the configured timezone is not recognized",
+        },
+      ],
+    });
+    previewImpl = async () => ({ png_base64: "cHJldmlldw==", sample: false });
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<App />));
+      await waitFor(() =>
+        expect(container.textContent).toContain("One card could not be rendered"),
+      );
+      expect(container.textContent).toContain("the configured timezone is not recognized");
+      expect(container.textContent).not.toContain("The display refused one card update");
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      snapshotImpl = async () => snapshot;
+    }
+  });
+
+  test("the global card banner names the display only for a typed data refusal", async () => {
+    snapshotImpl = async () => ({
+      ...(structuredClone(snapshot) as AppSnapshot),
+      card_errors: [
+        {
+          kind: "data-refused",
+          card_id: "calendar",
+          message: "the display refused this card's data (InvalidPayload)",
+        },
+      ],
+    });
+    previewImpl = async () => ({ png_base64: "cHJldmlldw==", sample: false });
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<App />));
+      await waitFor(() =>
+        expect(container.textContent).toContain("The display refused one card update"),
+      );
+      expect(container.textContent).not.toContain("One card could not be rendered");
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      snapshotImpl = async () => snapshot;
+    }
+  });
+
   test("a feed in trouble is reported on its own card, not in a list of every feed", () => {
     const troubled = snapshot.providers.find((provider) => provider.state.kind === "stale");
     if (!troubled) {

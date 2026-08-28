@@ -10,9 +10,10 @@ pub struct AppSnapshot {
     pub providers: Vec<ProviderSnapshot>,
     pub pomodoros: Vec<PomodoroSnapshot>,
     pub card_data: Vec<CardDataSnapshot>,
-    /// Cards whose last data or scene push the device understood and refused.
-    /// Retrying an identical payload can only fail again, so the runtime records the
-    /// typed refusal here instead of looping. See `CardError`.
+    /// Cards whose last data push was refused, or whose complete scene could not be
+    /// built or rendered exactly. Retrying an identical payload can only fail again,
+    /// so the runtime records the typed actionable failure here instead of looping.
+    /// See `CardError`.
     pub card_errors: Vec<CardError>,
     pub persistence: PersistenceState,
     pub diagnostics: RuntimeDiagnostics,
@@ -32,7 +33,7 @@ pub struct CardError {
 pub enum CardErrorKind {
     /// The display rejected an otherwise valid `PushData` payload.
     DataRefused,
-    /// The display could not render the complete scene exactly as requested.
+    /// The host could not build, or the display could not render, the complete scene.
     SceneRefused,
 }
 

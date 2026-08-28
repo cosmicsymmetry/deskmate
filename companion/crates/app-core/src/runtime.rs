@@ -878,9 +878,11 @@ struct WorkerState {
     persistence: PersistenceState,
     latest_fields: BTreeMap<String, Vec<Field>>,
     dirty_widgets: BTreeSet<String>,
-    /// Card ID -> the typed refusal for that card's last data or scene push.
-    /// Cleared by a later accepted push of the same kind, and wholesale when the
-    /// config is replaced (the refused payload belonged to the old revision).
+    /// Card ID -> the most recent typed refusal for that card. There is deliberately
+    /// one editor-visible slot per card: if data and scene refusals happen before
+    /// either recovers, the later refusal replaces the earlier one. A later accepted
+    /// push clears the slot only when it is the same kind, and config replacement
+    /// clears every slot because all refused payloads belonged to the old revision.
     push_rejections: BTreeMap<String, CardError>,
     pomodoros: BTreeMap<String, Pomodoro>,
     pomodoro_snapshots: BTreeMap<String, PomodoroSnapshot>,
@@ -2223,6 +2225,7 @@ fn synchronize_full(
     // phase: activation is the device-model transaction boundary, while drawing
     // the new face is the event-driven consequence of that completed apply.
     flush_interrupts(state, scheduler, device, now)?;
+    state.active_scene_dirty = state.active_screen.is_some();
     state.needs_full_sync = false;
     Ok(())
 }
@@ -2455,7 +2458,7 @@ fn record_scene_refusal(state: &mut WorkerState, card_id: String, message: Strin
 /// provider deadline sets it. Device-side bindings keep clock/timer facts moving
 /// between these event-driven pushes.
 fn push_active_scene(state: &mut WorkerState, device: &mut dyn RuntimeDevice) {
-    if ownership_was_refused(state) || !state.active_scene_dirty {
+    if ownership_was_refused(state) || state.needs_full_sync || !state.active_scene_dirty {
         return;
     }
     let Some(card_id) = state.active_screen.clone() else {
@@ -2520,6 +2523,12 @@ fn push_active_scene(state: &mut WorkerState, device: &mut dyn RuntimeDevice) {
         Err(error) if is_wrong_tier(&error) => {
             mark_ownership_refused(state);
         }
+        Err(DeviceError::Rejected(error)) if error.code == protocol::ErrorCode::Busy => {
+            // Firmware uses Busy for zero-timeout LVGL lock contention and OTA
+            // takeover. The scene is still valid and no user edit can fix it;
+            // retain the event so the next render phase tries it again.
+            state.active_scene_dirty = true;
+        }
         Err(DeviceError::Rejected(error)) => {
             record_scene_refusal(
                 state,
@@ -2542,12 +2551,11 @@ fn push_active_scene(state: &mut WorkerState, device: &mut dyn RuntimeDevice) {
                 ),
             );
         }
-        Err(error) => {
-            record_scene_refusal(
-                state,
-                card_id,
-                format!("the display did not accept this card's scene: {error}"),
-            );
+        Err(_) => {
+            // Timeouts, transport failures, and malformed/unexpected responses
+            // describe the link, not the card. Keep the scene pending and let
+            // ordinary status polling decide whether connection state changes.
+            state.active_scene_dirty = true;
         }
     }
 }

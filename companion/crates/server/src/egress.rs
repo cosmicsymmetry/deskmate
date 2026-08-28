@@ -49,12 +49,32 @@
 //!
 //! [`deny_reason_v4`]/[`deny_reason_v6`] implement "permit only
 //! globally-routable unicast, deny everything else" (spec §5 calls this an
-//! *allowlist*): they enumerate the IANA special-purpose registry
-//! exhaustively and permission is what is left over, not a list of ranges
-//! someone remembered to write down. This module's first version was a
-//! genuine deny list and missed `100.64.0.0/10` (RFC 6598, carrier-grade
-//! NAT) -- which is Tailscale's entire address range, and this deployment's
-//! own render host reaches its neighbours over Tailscale.
+//! *allowlist*): permission is what is left over once every named
+//! exclusion has been checked, not a list of ranges someone remembered to
+//! write down. This module's first version was a genuine deny list and
+//! missed `100.64.0.0/10` (RFC 6598, carrier-grade NAT) -- which is
+//! Tailscale's entire address range, and this deployment's own render host
+//! reaches its neighbours over Tailscale.
+//!
+//! **The two families are not equally exhaustive, and that asymmetry is
+//! deliberate rather than an oversight left unstated.** `deny_reason_v4`
+//! was independently audited against nightly `Ipv4Addr::is_global()` and
+//! found to deny a strict superset of what it denies -- i.e. it is checked
+//! exhaustive against the IANA IPv4 Special-Purpose Address Registry.
+//! `deny_reason_v6` checks a substantially wider set than its first version
+//! (loopback, unspecified, link-local, unique-local, the deprecated
+//! site-local range, multicast, the documentation range, the well-known and
+//! local-use NAT64 prefixes, the `2001::/23` IETF protocol assignment block
+//! -- Teredo, benchmarking, `ORCHIDv2` -- 6to4, the discard-only range, the
+//! `SRv6` SID space, and both legacy IPv4-in-IPv6 encodings), but has **not**
+//! been independently audited against the full IANA IPv6 Special-Purpose
+//! Address Registry the way the IPv4 side has, so it should not be trusted
+//! as proven exhaustive. Everything in it embeds or is adjacent to an
+//! attacker-influenced address (most concretely: `2002:a9fe:a9fe::1` is the
+//! 6to4 encoding of the cloud metadata address `169.254.169.254`, and is
+//! denied by name in this module's tests) or is otherwise non-globally-
+//! routable, but a still-undiscovered IPv6 special-purpose range is a live
+//! possibility in a way an undiscovered IPv4 one is not.
 
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -179,9 +199,37 @@ pub enum DenyReason {
     /// outright rather than trusted.
     Nat64V6,
     /// `::a.b.c.d` (RFC 4291 §2.5.5.1) -- the deprecated IPv4-compatible
-    /// IPv6 form, distinct from the IPv4-*mapped* form (`::ffff:a.b.c.d`,
-    /// handled separately by unwrapping to the embedded address).
+    /// IPv6 form: top 64 bits AND bits 64-95 all zero. Distinct from the
+    /// IPv4-*mapped* form (`::ffff:a.b.c.d`, handled separately by
+    /// unwrapping to the embedded address before this classifier runs).
     Ipv4CompatibleV6,
+    /// Top 64 bits zero, but bits 64-95 are *not* also zero (so this is not
+    /// [`Ipv4CompatibleV6`]) -- e.g. the RFC 2765 IPv4-*translated* form
+    /// `::ffff:0:a.b.c.d` (bits 64-79 == `0xffff`, a different bit position
+    /// than the IPv4-mapped form's bits 80-95). Every such address embeds
+    /// an attacker-chosen low-32-bit payload, so the whole `::/64` prefix
+    /// is denied regardless of what occupies bits 64-95.
+    Ipv4TranslatedV6,
+    /// `2001::/23` (RFC 6890, "IETF Protocol Assignments") -- covers
+    /// Teredo (`2001::/32`), benchmarking (`2001:2::/48`), and `ORCHIDv2`
+    /// (`2001:20::/28`) as sub-blocks; denied as one range rather than
+    /// three, since none of it is globally-routable unicast.
+    Ipv6ProtocolAssignment,
+    /// `2002::/16` (RFC 3056) -- 6to4. Every address in this block encodes
+    /// an IPv4 address in its next 32 bits (`2002:AABB:CCDD::/48` <->
+    /// `AA.BB.CC.DD`), attacker-chosen and unchecked by this range alone --
+    /// e.g. `2002:a9fe:a9fe::1` is the 6to4 encoding of the cloud metadata
+    /// address `169.254.169.254`.
+    SixToFourV6,
+    /// `64:ff9b:1::/48` (RFC 8215) -- the *local-use* NAT64 prefix,
+    /// distinct from the well-known prefix ([`Nat64V6`]). Same reasoning:
+    /// its low bits carry an attacker-chosen embedded address.
+    Nat64LocalUseV6,
+    /// `100::/64` (RFC 6666) -- "discard-only" address space.
+    DiscardOnlyV6,
+    /// `5f00::/16` -- the `SRv6` SID space (IANA-registered, not globally
+    /// routable unicast).
+    Srv6V6,
     /// Any other IANA-reserved, non-globally-routable IPv4 block (e.g.
     /// `0.0.0.0/8` beyond the single unspecified address, the deprecated
     /// 6to4 relay anycast range `192.88.99.0/24`, or `240.0.0.0/4`).
@@ -206,6 +254,12 @@ impl fmt::Display for DenyReason {
             DenyReason::Benchmarking => "benchmarking range (198.18.0.0/15)",
             DenyReason::Nat64V6 => "NAT64 well-known prefix (64:ff9b::/96)",
             DenyReason::Ipv4CompatibleV6 => "deprecated IPv4-compatible IPv6",
+            DenyReason::Ipv4TranslatedV6 => "IPv4-translated IPv6 (::ffff:0:0/96)",
+            DenyReason::Ipv6ProtocolAssignment => "IETF protocol assignment (2001::/23)",
+            DenyReason::SixToFourV6 => "6to4 (2002::/16)",
+            DenyReason::Nat64LocalUseV6 => "local-use NAT64 prefix (64:ff9b:1::/48)",
+            DenyReason::DiscardOnlyV6 => "discard-only range (100::/64)",
+            DenyReason::Srv6V6 => "SRv6 SID space (5f00::/16)",
             DenyReason::Reserved => "reserved, not globally routable",
         };
         f.write_str(label)
@@ -219,17 +273,20 @@ impl fmt::Display for DenyReason {
 /// The predicate this implements is **"permit only globally-routable
 /// unicast, deny everything else"** (spec §5 names it an *allowlist*, and a
 /// deny list is a list of what someone remembered -- CGNAT was the range
-/// this module's first version forgot). `deny_reason_v4`/`deny_reason_v6`
-/// enumerate the IANA special-purpose registry exhaustively; permission is
-/// what is left over once every named exclusion has been checked, not a
-/// remembered blocklist of "the bad ones". `Ipv4Addr::is_global()` and
-/// friends would express the same predicate, but they are unstable
-/// (nightly-only); this reimplements the stable subset directly (loopback,
-/// link-local, private, broadcast, multicast) and the rest (CGNAT, IETF
-/// protocol assignment, documentation/TEST-NET, benchmarking, the broader
-/// reserved ranges, and their IPv6 counterparts) by explicit CIDR
-/// arithmetic below, rather than pulling in a crate for a security
-/// boundary that most needs to stay readable in this file.
+/// this module's first version forgot); permission is what is left over
+/// once every named exclusion has been checked, not a remembered blocklist
+/// of "the bad ones". `Ipv4Addr::is_global()` and friends would express the
+/// same predicate, but they are unstable (nightly-only); this reimplements
+/// the stable subset directly (loopback, link-local, private, broadcast,
+/// multicast) and the rest (CGNAT, IETF protocol assignment,
+/// documentation/TEST-NET, benchmarking, the broader reserved ranges, and
+/// their IPv6 counterparts) by explicit CIDR arithmetic below, rather than
+/// pulling in a crate for a security boundary that most needs to stay
+/// readable in this file. **`deny_reason_v4` is checked exhaustive against
+/// the IANA IPv4 registry (see the module doc's "Allowlist" section);
+/// `deny_reason_v6` covers a wide, deliberately-widened set of IPv6
+/// special-purpose ranges but is not independently proven exhaustive the
+/// same way** -- do not read the two functions as equally complete.
 ///
 /// IPv4-mapped IPv6 addresses (`::ffff:a.b.c.d`) are unwrapped to their
 /// embedded IPv4 form first, so e.g. `::ffff:127.0.0.1` is denied as
@@ -379,20 +436,48 @@ fn deny_reason_v6(ip: Ipv6Addr) -> Option<DenyReason> {
     {
         return Some(DenyReason::Nat64V6);
     }
-    // ::a.b.c.d -- the deprecated IPv4-compatible form (RFC 4291 §2.5.5.1):
-    // top 96 bits zero, distinct from the IPv4-*mapped* ::ffff:a.b.c.d form
-    // (bits 80-95 == 0xffff there, already unwrapped by `deny_reason_for_ip`
-    // before this function ever runs). `::` and `::1` are already handled
-    // above by is_unspecified/is_loopback, so reaching here with the top 96
-    // bits zero means a genuine (deprecated) compatible-form address.
-    if segments[0] == 0
-        && segments[1] == 0
-        && segments[2] == 0
-        && segments[3] == 0
-        && segments[4] == 0
-        && segments[5] == 0
-    {
-        return Some(DenyReason::Ipv4CompatibleV6);
+    // 2001::/23 (RFC 6890, "IETF Protocol Assignments"): Teredo
+    // (2001::/32), benchmarking (2001:2::/48), and ORCHIDv2 (2001:20::/28)
+    // all live in this block. Distinct from -- and does not overlap --
+    // the 2001:db8::/32 documentation check above (segments[1] there is
+    // 0x0db8, far outside this /23's segments[1] range of 0x0000-0x01ff).
+    if segments[0] == 0x2001 && (segments[1] & 0xfe00) == 0x0000 {
+        return Some(DenyReason::Ipv6ProtocolAssignment);
+    }
+    // 2002::/16 -- 6to4 (RFC 3056). Every address here encodes an IPv4
+    // address in the next 32 bits, attacker-chosen and unchecked by the
+    // range alone: 2002:a9fe:a9fe::1 is the 6to4 encoding of the cloud
+    // metadata address 169.254.169.254.
+    if segments[0] == 0x2002 {
+        return Some(DenyReason::SixToFourV6);
+    }
+    // 64:ff9b:1::/48 -- the *local-use* NAT64 prefix (RFC 8215), distinct
+    // from the well-known 64:ff9b::/96 prefix checked above.
+    if segments[0] == 0x0064 && segments[1] == 0xff9b && segments[2] == 0x0001 {
+        return Some(DenyReason::Nat64LocalUseV6);
+    }
+    // 100::/64 -- discard-only address space (RFC 6666).
+    if segments[0] == 0x0100 && segments[1] == 0 && segments[2] == 0 && segments[3] == 0 {
+        return Some(DenyReason::DiscardOnlyV6);
+    }
+    // 5f00::/16 -- the SRv6 SID space.
+    if segments[0] == 0x5f00 {
+        return Some(DenyReason::Srv6V6);
+    }
+    // A zero `::/64` prefix, regardless of what sits in bits 64-95: this is
+    // deliberately broader than "top 96 bits zero" so it also catches the
+    // RFC 2765 IPv4-*translated* form `::ffff:0:a.b.c.d` (0xffff sits at
+    // bits 64-79 there, a different position than the IPv4-*mapped* form's
+    // bits 80-95, which `deny_reason_for_ip` has already unwrapped upstream
+    // of this function). `::` and `::1` are already excluded above by
+    // is_unspecified/is_loopback, so every address reaching this check with
+    // a zero `::/64` prefix carries an attacker-chosen low-bits payload one
+    // way or another.
+    if segments[0] == 0 && segments[1] == 0 && segments[2] == 0 && segments[3] == 0 {
+        if segments[4] == 0 && segments[5] == 0 {
+            return Some(DenyReason::Ipv4CompatibleV6);
+        }
+        return Some(DenyReason::Ipv4TranslatedV6);
     }
     None
 }
@@ -1059,6 +1144,97 @@ mod tests {
         ));
     }
 
+    // --- Fix round 2, item 3: IPv6 ranges the review's probe found
+    // permitted, each with its own DenyReason so a future edit that
+    // silently merges two of these back into "reserved" is caught. ---
+
+    #[test]
+    fn denies_ipv6_local_use_nat64_prefix() {
+        // Distinct from the well-known 64:ff9b::/96 prefix (already
+        // covered by `denies_ipv6_nat64_well_known_prefix`): this is the
+        // *local-use* NAT64 prefix, 64:ff9b:1::/48.
+        let ip: IpAddr = "64:ff9b:1::102:304".parse().unwrap();
+        assert!(matches!(
+            deny_reason_for_ip(ip),
+            Some(DenyReason::Nat64LocalUseV6)
+        ));
+    }
+
+    #[test]
+    fn denies_ipv6_teredo_within_the_2001_slash_23_protocol_assignment_block() {
+        let ip: IpAddr = "2001::1".parse().unwrap();
+        assert!(matches!(
+            deny_reason_for_ip(ip),
+            Some(DenyReason::Ipv6ProtocolAssignment)
+        ));
+    }
+
+    #[test]
+    fn denies_ipv6_benchmarking_within_the_2001_slash_23_protocol_assignment_block() {
+        let ip: IpAddr = "2001:2::1".parse().unwrap();
+        assert!(matches!(
+            deny_reason_for_ip(ip),
+            Some(DenyReason::Ipv6ProtocolAssignment)
+        ));
+    }
+
+    #[test]
+    fn denies_ipv6_orchidv2_within_the_2001_slash_23_protocol_assignment_block() {
+        let ip: IpAddr = "2001:20::1".parse().unwrap();
+        assert!(matches!(
+            deny_reason_for_ip(ip),
+            Some(DenyReason::Ipv6ProtocolAssignment)
+        ));
+        // 2001:db8::/32 (documentation) does not overlap this /23 and must
+        // keep its own, more specific reason.
+        assert!(matches!(
+            deny_reason_for_ip("2001:db8::1".parse().unwrap()),
+            Some(DenyReason::Documentation)
+        ));
+    }
+
+    #[test]
+    fn denies_6to4_including_the_metadata_address_own_encoding() {
+        // 2002:a9fe:a9fe::1 is the 6to4 encoding of 169.254.169.254 (the
+        // cloud metadata address this whole module exists partly to deny
+        // directly) -- named explicitly because it is the address that
+        // best explains why a bare "2002::/16 is 6to4" note undersells the
+        // risk of leaving this range permitted.
+        let ip: IpAddr = "2002:a9fe:a9fe::1".parse().unwrap();
+        assert!(matches!(
+            deny_reason_for_ip(ip),
+            Some(DenyReason::SixToFourV6)
+        ));
+    }
+
+    #[test]
+    fn denies_ipv6_discard_only_range() {
+        let ip: IpAddr = "100::1".parse().unwrap();
+        assert!(matches!(
+            deny_reason_for_ip(ip),
+            Some(DenyReason::DiscardOnlyV6)
+        ));
+    }
+
+    #[test]
+    fn denies_ipv6_srv6_sid_space() {
+        let ip: IpAddr = "5f00::1".parse().unwrap();
+        assert!(matches!(deny_reason_for_ip(ip), Some(DenyReason::Srv6V6)));
+    }
+
+    #[test]
+    fn denies_ipv4_translated_form_regardless_of_bits_64_to_95() {
+        // ::ffff:0:7f00:1 -- RFC 2765's IPv4-*translated* form embedding
+        // 127.0.0.1, with 0xffff at bits 64-79 rather than the IPv4-
+        // *mapped* form's bits 80-95. Distinct DenyReason from
+        // Ipv4CompatibleV6 because bits 64-95 are not all zero here.
+        let ip: IpAddr = "::ffff:0:7f00:1".parse().unwrap();
+        assert!(matches!(
+            deny_reason_for_ip(ip),
+            Some(DenyReason::Ipv4TranslatedV6)
+        ));
+    }
+
     #[test]
     fn is_globally_routable_agrees_with_deny_reason_for_ip() {
         let global: IpAddr = "93.184.216.34".parse().unwrap();
@@ -1361,7 +1537,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fetch_inner_denies_a_redirect_chain_that_exceeds_max_redirects() {
+        // Fix round 2, item 1: a mutation that turned `redirects.consume()?`
+        // into `let _ = redirects.consume();` passed every prior test,
+        // because the longest redirect chain any test drove was 3 hops --
+        // well under MAX_REDIRECTS (5). A handler that redirects to itself
+        // forever is what actually exercises the cap: `fetch_inner` must
+        // give up after MAX_REDIRECTS hops, not loop indefinitely.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind a loopback listener");
+        let addr = listener.local_addr().expect("listener has a local addr");
+        let router = axum::Router::new().route(
+            "/loop",
+            axum::routing::get(|| async { axum::response::Redirect::to("/loop") }),
+        );
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+        let url = format!("http://self-redirect.invalid:{}/loop", addr.port());
+
+        let outcome = fetch_inner(&url, &FixedAddrResolver(addr)).await;
+
+        assert!(
+            matches!(outcome, Err(EgressError::TooManyRedirects)),
+            "expected TooManyRedirects, got {outcome:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn fetch_inner_enforces_the_response_body_cap_over_a_real_connection() {
+        // Exercises specifically the `content_length()` precheck in
+        // `read_capped_body`: axum sets a real, honest Content-Length for a
+        // fully-materialized `Vec<u8>` body, and that header alone is
+        // enough to reject this response before a single byte streams in.
         let cap = usize::try_from(MAX_RESPONSE_BODY_BYTES).expect("cap fits in usize");
         let oversized = vec![0u8; cap + 1];
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -1376,6 +1585,52 @@ mod tests {
             let _ = axum::serve(listener, router).await;
         });
         let url = format!("http://oversized.invalid:{}/oversized", addr.port());
+
+        let outcome = fetch_inner(&url, &FixedAddrResolver(addr)).await;
+
+        assert!(
+            matches!(
+                outcome,
+                Err(EgressError::ResponseTooLarge {
+                    limit: MAX_RESPONSE_BODY_BYTES
+                })
+            ),
+            "expected ResponseTooLarge, got {outcome:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_inner_enforces_the_body_cap_against_a_server_that_never_declares_a_length() {
+        // Fix round 2, item 2: the case above alone left the streaming
+        // `limiter.push` check unproven -- a mutation deleting it, alone,
+        // still passed, because the `content_length()` precheck caught
+        // that response before streaming ever started. A hostile server
+        // does not have to be honest: it can simply never send
+        // Content-Length at all (chunked transfer-encoding), which is
+        // exactly what `Body::from_stream` produces here, since axum only
+        // emits Content-Length when it knows the full size upfront. This
+        // is the case that can only be caught by the per-chunk
+        // `limiter.push` call as bytes actually arrive.
+        let cap = usize::try_from(MAX_RESPONSE_BODY_BYTES).expect("cap fits in usize");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind a loopback listener");
+        let addr = listener.local_addr().expect("listener has a local addr");
+        let router = axum::Router::new().route(
+            "/chunked-oversized",
+            axum::routing::get(move || async move {
+                let chunks: Vec<Result<Vec<u8>, std::io::Error>> =
+                    vec![Ok(vec![0u8; cap]), Ok(vec![0u8; 1])];
+                axum::body::Body::from_stream(futures_util::stream::iter(chunks))
+            }),
+        );
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+        let url = format!(
+            "http://chunked-oversized.invalid:{}/chunked-oversized",
+            addr.port()
+        );
 
         let outcome = fetch_inner(&url, &FixedAddrResolver(addr)).await;
 

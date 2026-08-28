@@ -47,7 +47,11 @@
 //!   structurally exceeds the fixed cap will exceed it again on retry).
 //! - **Render wall-clock** is enforced by
 //!   [`within_render_wall_clock_budget`], see its doc for what it can and
-//!   cannot guarantee.
+//!   cannot guarantee. It also has its own row in [`classify_plugin_failure`]
+//!   (fix round 1 found it, alongside a manifest compile failure, falling
+//!   through the table entirely): a render that blew its budget is treated
+//!   as transient, since it reflects host load at that moment rather than
+//!   anything about the manifest.
 //! - **CPU is not enforced here, and cannot honestly be claimed as
 //!   enforced.** `compile_scene` is a plain synchronous function call with
 //!   no subprocess or OS-level resource limit around it; nothing in this
@@ -147,6 +151,50 @@ fn classify_http_status(status: u16) -> FailureClass {
     }
 }
 
+/// Every failure kind the whole plugin pipeline (fetch -> parse -> compile,
+/// the last step wrapped in [`within_render_wall_clock_budget`]) can
+/// produce, named so [`classify_plugin_failure`] can give each one a row.
+/// Fix round 1 found two conditions falling through the table entirely: a
+/// manifest that fails to compile (`plugin::CompileError`, returned
+/// *inside* a `within_render_wall_clock_budget`-wrapped `Ok`, so it never
+/// touched [`classify_provider_error`] at all) and
+/// `PluginCapError::RenderWallClockExceeded` itself (a cap violation, not a
+/// `ProviderError`, so it was never classified either).
+#[derive(Debug)]
+pub enum PluginFailure<'a> {
+    /// A fetch or parse failure -- already covered by
+    /// [`classify_provider_error`]; this variant just lets one function
+    /// classify every failure kind the pipeline can produce.
+    Fetch(&'a ProviderError),
+    /// The manifest failed to compile against the fetched data.
+    Compile(&'a plugin::CompileError),
+    /// The compile finished, but over [`MAX_RENDER_WALL_CLOCK`].
+    RenderTimedOut,
+}
+
+/// The one place this crate decides transient vs permanent for the *whole*
+/// plugin pipeline, not just the fetch layer -- see [`PluginFailure`]'s doc
+/// for the two rows fix round 1 added.
+pub fn classify_plugin_failure(failure: &PluginFailure<'_>) -> FailureClass {
+    match failure {
+        PluginFailure::Fetch(error) => classify_provider_error(error),
+        // `compile_scene` is a deterministic function of (manifest,
+        // snapshot, metrics, revision): given the same fetched data, it
+        // fails to compile the same way every time. Only editing the
+        // manifest or waiting for the data source to return a different
+        // shape can change the outcome -- retrying the identical inputs
+        // cannot, so this is permanent.
+        PluginFailure::Compile(_) => FailureClass::Permanent,
+        // A render that blew its wall-clock budget reflects host load at
+        // that moment (CPU contention, a co-scheduled compile, a noisy
+        // neighbour on the same box) rather than anything about the
+        // manifest itself -- retried later, under less load, it plausibly
+        // finishes in time. Contrast with `PluginFailure::Compile`, which
+        // is deterministic regardless of load.
+        PluginFailure::RenderTimedOut => FailureClass::Transient,
+    }
+}
+
 /// Converts a fetch failure -- the egress guard's own error type -- into
 /// the crate-wide `ProviderError` vocabulary every other provider in this
 /// workspace speaks, so [`classify_provider_error`] is the single
@@ -188,41 +236,85 @@ fn parse_json_payload(bytes: Vec<u8>) -> Result<Value, ProviderError> {
         .map_err(|_| ProviderError::MalformedFeed("JSON syntax is invalid".to_string()))
 }
 
+/// Classifies an HTTP status the egress guard returned (never a 3xx --
+/// `egress::fetch` follows redirects internally and only ever returns the
+/// final, non-redirect response). `None` for 2xx (success, parse the body);
+/// `Some(ProviderError::HttpStatus(status))` otherwise, so
+/// [`classify_provider_error`] makes the transient/permanent call exactly
+/// as it does for every other `ProviderError`.
+///
+/// This function did not exist before fix round 1: `PluginFetcher::fetch`
+/// returned only a body, discarding status, which made `ProviderError::
+/// HttpStatus` unconstructible through the real fetch path -- a 503 with
+/// an HTML body fell into `parse_json_payload` and came out
+/// `MalformedFeed` (permanent, the exact inversion Step 5 exists to
+/// prevent), and a 503 with a JSON error envelope parsed as if it were
+/// real data and was reported as a successful refresh.
+fn provider_error_for_status(status: u16) -> Option<ProviderError> {
+    if (200..300).contains(&status) {
+        None
+    } else {
+        Some(ProviderError::HttpStatus(status))
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Step 4: the `Provider` wiring itself.
 // ---------------------------------------------------------------------------
 
 /// What [`PluginDataProvider`] needs to retrieve one data source's raw
-/// bytes. `Provider::refresh` is synchronous -- every provider in this
+/// response. `Provider::refresh` is synchronous -- every provider in this
 /// workspace is, because app-core's runtime worker calls `refresh` from a
 /// plain OS thread, never from inside a Tokio task -- while `egress::fetch`
 /// is necessarily async (DNS resolution and the HTTP client both are). This
 /// trait is the seam that bridges the two, the same shape as
 /// `providers::http::HttpClient`, and it is what lets tests substitute a
-/// fetcher that touches neither the network nor a runtime.
+/// fetcher that touches neither the network nor a runtime. It returns the
+/// full `egress::FetchResponse` (status *and* body), not just bytes --
+/// fix round 1 found that discarding status here made `ProviderError::
+/// HttpStatus` unreachable through the real fetch path (see
+/// [`provider_error_for_status`]'s doc).
 pub trait PluginFetcher {
-    fn fetch(&self, url: &str) -> Result<Vec<u8>, EgressError>;
+    fn fetch(&self, url: &str) -> Result<egress::FetchResponse, EgressError>;
 }
 
 /// Bridges `Provider::refresh`'s synchronous contract to `egress::fetch`'s
-/// async one via a dedicated, lazily-started single-thread Tokio runtime.
-/// A single-thread runtime is deliberate: [`SystemPluginFetcher::fetch`]
-/// blocks the calling OS thread until the request completes (bounded by
-/// `egress::TOTAL_FETCH_BUDGET`), so nothing here benefits from a second
-/// runtime worker thread, and `current_thread` is cheaper to start than
-/// `multi_thread`.
+/// async one via a dedicated, lazily-started Tokio runtime.
+///
+/// **Why `multi_thread`, not `current_thread`:** fix round 1's first
+/// design used `current_thread`, reasoned about one caller in isolation
+/// ("nothing here benefits from a second worker thread"). That reasoning
+/// breaks across callers: Task 8 ships two curated plugins, and a
+/// `current_thread` runtime drives exactly one `block_on` at a time, so
+/// two providers refreshing around the same moment would serialize, each
+/// able to hold the only worker for up to `egress::TOTAL_FETCH_BUDGET`
+/// (20s) -- a slow or hung plugin would stall every other plugin's refresh
+/// behind it. `multi_thread` with a small, fixed worker count avoids that
+/// without over-provisioning: v1 ships "a curated set, not public
+/// uploads" (spec §5), so the plugin count stays small and bounded, and
+/// four workers comfortably covers it with headroom. Revisit the count if
+/// the curated set grows materially.
 ///
 /// **Caller obligation:** this must never be called from *inside* an
 /// existing Tokio runtime -- `Runtime::block_on` panics if it is. Every
 /// other `Provider::refresh` in this workspace already runs from a plain OS
 /// thread for exactly this reason (app-core's runtime worker), and Task 8
-/// must keep calling this one the same way.
+/// must keep calling this one the same way. Unlike fix round 1,
+/// [`SystemPluginFetcher::fetch`] no longer *trusts* that obligation
+/// silently: it detects the violation and returns a typed error instead of
+/// letting `block_on` panic (see its doc).
 pub struct SystemPluginFetcher;
+
+/// Workers for [`blocking_runtime`]'s dedicated `multi_thread` runtime. See
+/// [`SystemPluginFetcher`]'s doc for why `multi_thread` was chosen over a
+/// single worker, and why four is enough for now.
+const PLUGIN_FETCH_RUNTIME_WORKERS: usize = 4;
 
 fn blocking_runtime() -> &'static tokio::runtime::Runtime {
     static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
     RUNTIME.get_or_init(|| {
-        tokio::runtime::Builder::new_current_thread()
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(PLUGIN_FETCH_RUNTIME_WORKERS)
             .enable_all()
             .build()
             .expect("failed to start the plugin fetch runtime")
@@ -230,7 +322,24 @@ fn blocking_runtime() -> &'static tokio::runtime::Runtime {
 }
 
 impl PluginFetcher for SystemPluginFetcher {
-    fn fetch(&self, url: &str) -> Result<Vec<u8>, EgressError> {
+    fn fetch(&self, url: &str) -> Result<egress::FetchResponse, EgressError> {
+        // Detect the documented caller obligation instead of trusting it:
+        // `Handle::try_current()` succeeds exactly when the calling thread
+        // is already inside a Tokio runtime's context, which is precisely
+        // the condition under which `blocking_runtime().block_on(...)`
+        // would otherwise panic ("Cannot start a runtime from within a
+        // runtime"). Reusing `EgressError::Request` rather than adding a
+        // new `EgressError` variant keeps this fix round's change to
+        // `egress.rs` scoped to `FetchResponse` alone, as directed -- this
+        // condition never originates inside the guard itself, only here,
+        // at the point this seam is invoked from the wrong kind of thread.
+        if tokio::runtime::Handle::try_current().is_ok() {
+            return Err(EgressError::Request(
+                "SystemPluginFetcher::fetch was called from inside an active Tokio runtime; \
+                 Provider::refresh must run on a plain OS thread, never an async task"
+                    .to_string(),
+            ));
+        }
         blocking_runtime().block_on(egress::fetch(url))
     }
 }
@@ -292,7 +401,12 @@ impl<F: PluginFetcher> Provider for PluginDataProvider<F> {
             .fetcher
             .fetch(&self.url)
             .map_err(provider_error_from_egress)
-            .and_then(parse_json_payload);
+            .and_then(
+                |response| match provider_error_for_status(response.status) {
+                    Some(error) => Err(error),
+                    None => parse_json_payload(response.body),
+                },
+            );
         self.last_failure = result.as_ref().err().map(classify_provider_error);
         self.state.complete(now, result)
     }
@@ -478,17 +592,17 @@ mod tests {
     // -- provider_error_from_egress + end-to-end wiring ------------------
 
     struct FakeFetcher {
-        responses: Mutex<Vec<Result<Vec<u8>, EgressError>>>,
+        responses: Mutex<Vec<Result<egress::FetchResponse, EgressError>>>,
     }
 
     impl FakeFetcher {
-        fn once(response: Result<Vec<u8>, EgressError>) -> Self {
+        fn once(response: Result<egress::FetchResponse, EgressError>) -> Self {
             Self {
                 responses: Mutex::new(vec![response]),
             }
         }
 
-        fn sequence(responses: Vec<Result<Vec<u8>, EgressError>>) -> Self {
+        fn sequence(responses: Vec<Result<egress::FetchResponse, EgressError>>) -> Self {
             let mut responses = responses;
             responses.reverse();
             Self {
@@ -498,12 +612,19 @@ mod tests {
     }
 
     impl PluginFetcher for FakeFetcher {
-        fn fetch(&self, _url: &str) -> Result<Vec<u8>, EgressError> {
+        fn fetch(&self, _url: &str) -> Result<egress::FetchResponse, EgressError> {
             self.responses
                 .lock()
                 .expect("fake fetcher lock")
                 .pop()
                 .expect("FakeFetcher exhausted: refresh() called more times than scripted")
+        }
+    }
+
+    fn ok_response(body: &[u8]) -> egress::FetchResponse {
+        egress::FetchResponse {
+            status: 200,
+            body: body.to_vec(),
         }
     }
 
@@ -517,7 +638,7 @@ mod tests {
     #[test]
     fn a_dns_failure_keeps_the_last_good_value_and_marks_stale_not_faulted() {
         let fetcher = FakeFetcher::sequence(vec![
-            Ok(br#"{"aqi": 42}"#.to_vec()),
+            Ok(ok_response(br#"{"aqi": 42}"#)),
             Err(EgressError::ResolutionFailed {
                 host: "example.test".into(),
                 detail: "no such host".into(),
@@ -565,7 +686,7 @@ mod tests {
 
     #[test]
     fn an_unparsable_payload_is_a_permanent_card_fault() {
-        let fetcher = FakeFetcher::once(Ok(b"not json at all".to_vec()));
+        let fetcher = FakeFetcher::once(Ok(ok_response(b"not json at all")));
         let mut provider =
             PluginDataProvider::new(fetcher, &json_source()).expect("construct provider");
 
@@ -590,6 +711,186 @@ mod tests {
         provider.refresh(Utc::now());
 
         assert_eq!(provider.last_failure_class(), Some(FailureClass::Permanent));
+    }
+
+    // -- Fix round 1, item 1: HTTP status must reach the table through the
+    // REAL fetch path, driven by a real HTTP response over a real loopback
+    // connection -- not a hand-built `ProviderError::HttpStatus`, which is
+    // what made the 5xx row dead code the first time. ---------------------
+
+    /// A `PluginFetcher` that performs a genuine HTTP round trip via plain
+    /// `reqwest` against a loopback server, deliberately bypassing
+    /// `egress::fetch`'s SSRF guard (which denies loopback destinations by
+    /// design -- Steps 1-3, proven elsewhere and untouched here; there is
+    /// no way to point the real guarded fetch at a loopback server without
+    /// weakening it, which nothing in this fix round does). What this DOES
+    /// prove: a real `reqwest::Response`'s status and body -- not a
+    /// hand-built enum variant -- flow through `PluginDataProvider::
+    /// refresh`'s real conversion path (`provider_error_for_status`,
+    /// `classify_provider_error`, `LastGood::complete`).
+    struct DirectHttpFetcher {
+        client: reqwest::Client,
+    }
+
+    impl DirectHttpFetcher {
+        fn new() -> Self {
+            Self {
+                client: reqwest::Client::new(),
+            }
+        }
+    }
+
+    impl PluginFetcher for DirectHttpFetcher {
+        fn fetch(&self, url: &str) -> Result<egress::FetchResponse, EgressError> {
+            let url = url.to_string();
+            blocking_runtime().block_on(async move {
+                let response = self
+                    .client
+                    .get(&url)
+                    .send()
+                    .await
+                    .map_err(|error| EgressError::Request(error.to_string()))?;
+                let status = response.status().as_u16();
+                let body = response
+                    .bytes()
+                    .await
+                    .map_err(|error| EgressError::Request(error.to_string()))?
+                    .to_vec();
+                Ok(egress::FetchResponse { status, body })
+            })
+        }
+    }
+
+    /// Spawns a tiny HTTP server, once per call, on a background OS thread
+    /// with its own dedicated Tokio runtime -- separate from
+    /// `blocking_runtime()` -- that always answers `status` with
+    /// `content_type`/`body`. Returns the bound loopback address; the
+    /// server thread is intentionally left running for the life of the
+    /// test process, the same way `egress.rs`'s own loopback test servers
+    /// are never explicitly shut down.
+    fn spawn_status_server(
+        status: u16,
+        content_type: &'static str,
+        body: &'static [u8],
+    ) -> std::net::SocketAddr {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Runtime::new().expect("build test server runtime");
+            runtime.block_on(async move {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                    .await
+                    .expect("bind a loopback listener");
+                let addr = listener.local_addr().expect("listener has a local addr");
+                tx.send(addr).expect("send bound addr to the test thread");
+                let router = axum::Router::new().route(
+                    "/data",
+                    axum::routing::get(move || async move {
+                        (
+                            axum::http::StatusCode::from_u16(status).expect("valid status code"),
+                            [(axum::http::header::CONTENT_TYPE, content_type)],
+                            body,
+                        )
+                    }),
+                );
+                let _ = axum::serve(listener, router).await;
+            });
+        });
+        rx.recv().expect("receive bound addr from server thread")
+    }
+
+    /// Drives `PluginDataProvider::refresh` from a plain OS thread (a
+    /// `#[test]`, never `#[tokio::test]`) exactly the way Task 8's runtime
+    /// worker must, against a REAL loopback server answering 503 with an
+    /// HTML body -- the shape fix round 1's report named explicitly: "a
+    /// 503 with an HTML body -> `MalformedFeed` -> permanent card fault --
+    /// the exact inversion Step 5 exists to prevent." After this fix it
+    /// must not.
+    #[test]
+    fn a_503_with_an_html_body_is_stale_and_transient_not_a_permanent_fault() {
+        let addr = spawn_status_server(
+            503,
+            "text/html",
+            b"<html><body>Service Unavailable</body></html>",
+        );
+        let source = Source::Json {
+            url: format!("http://{addr}/data"),
+            refresh_minutes: 15,
+        };
+        let mut provider =
+            PluginDataProvider::new(DirectHttpFetcher::new(), &source).expect("construct provider");
+
+        let snapshot = provider.refresh(Utc::now());
+
+        assert!(
+            snapshot.stale,
+            "a 503 must surface as stale, not silently succeed or fault"
+        );
+        assert_eq!(
+            provider.last_failure_class(),
+            Some(FailureClass::Transient),
+            "a 503 with an HTML body must classify as transient (retry-worthy), \
+             never as a permanent MalformedFeed card fault -- the exact inversion \
+             fix round 1 found: an HTML body reaching parse_json_payload directly \
+             would have produced a permanent MalformedFeed instead"
+        );
+    }
+
+    /// Same real-server proof, for the other half of fix round 1's report:
+    /// "a 503 with a JSON error envelope, which is very common ->
+    /// `stale=false`, success -- and the error object is handed to
+    /// `compile_scene` as if it were real data." After this fix the status
+    /// is checked before the body is ever parsed, so a JSON-shaped error
+    /// envelope on a 503 must not be treated as real data.
+    #[test]
+    fn a_503_with_a_json_error_envelope_is_never_treated_as_real_data() {
+        let addr = spawn_status_server(
+            503,
+            "application/json",
+            br#"{"error": "upstream unavailable"}"#,
+        );
+        let source = Source::Json {
+            url: format!("http://{addr}/data"),
+            refresh_minutes: 15,
+        };
+        let mut provider =
+            PluginDataProvider::new(DirectHttpFetcher::new(), &source).expect("construct provider");
+
+        let snapshot = provider.refresh(Utc::now());
+
+        assert!(
+            snapshot.stale,
+            "a valid-JSON 503 body must still be refused as an error response"
+        );
+        assert_eq!(
+            snapshot.value,
+            Value::default(),
+            "no last-good value exists yet, so the snapshot's value must stay the \
+             Output::default() LastGood falls back to -- never the JSON error envelope \
+             itself, which would mean the 503 body was accepted as real data"
+        );
+        assert_eq!(
+            provider.last_failure_class(),
+            Some(FailureClass::Transient),
+            "a 503 is retry-worthy regardless of its body's content-type"
+        );
+    }
+
+    // -- Fix round 1, item 5: the documented caller obligation must fail
+    // typed, not panic. ---------------------------------------------------
+
+    #[tokio::test]
+    async fn system_plugin_fetcher_returns_a_typed_error_instead_of_panicking_inside_a_runtime() {
+        // `fetch` is synchronous; calling it directly (no `.await`) from
+        // inside this `#[tokio::test]`'s own async context is exactly the
+        // misuse this test exists to prove no longer panics.
+        let error = SystemPluginFetcher
+            .fetch("https://example.test/data")
+            .expect_err("must be refused, not panic, from inside a Tokio runtime");
+
+        assert!(
+            matches!(error, EgressError::Request(_)),
+            "expected EgressError::Request, got {error:?}"
+        );
     }
 
     // -- Step 6: caps -----------------------------------------------------
@@ -634,15 +935,19 @@ mod tests {
 
     #[test]
     fn a_compile_over_budget_is_rejected_with_the_specific_variant() {
-        let budget = Duration::from_millis(5);
-        let result: Result<(), PluginCapError> = within_wall_clock_budget(budget, || {
-            std::thread::sleep(Duration::from_millis(40));
-        });
+        // Fix round 1, minor: use the named Step 6 constant rather than a
+        // private ad hoc budget, so this test proves the real cap rejects
+        // a real overrun, not just that the parameterized mechanism can be
+        // made to reject an arbitrary one.
+        let result: Result<(), PluginCapError> =
+            within_wall_clock_budget(MAX_RENDER_WALL_CLOCK, || {
+                std::thread::sleep(MAX_RENDER_WALL_CLOCK + Duration::from_millis(50));
+            });
 
         match result {
             Err(PluginCapError::RenderWallClockExceeded { limit, elapsed }) => {
-                assert_eq!(limit, budget);
-                assert!(elapsed > budget);
+                assert_eq!(limit, MAX_RENDER_WALL_CLOCK);
+                assert!(elapsed > MAX_RENDER_WALL_CLOCK);
             }
             other => panic!("expected RenderWallClockExceeded, got {other:?}"),
         }
@@ -650,9 +955,61 @@ mod tests {
 
     #[test]
     fn the_public_render_budget_wraps_the_documented_constant() {
-        // A closure that returns immediately must always pass the real,
-        // documented budget -- this pins `within_render_wall_clock_budget`
-        // to `MAX_RENDER_WALL_CLOCK` rather than some other constant.
-        assert!(within_render_wall_clock_budget(|| ()).is_ok());
+        // Fix round 1, item 2: the old version of this test passed with a
+        // no-op closure under *any* positive budget, which proves nothing
+        // about which constant `within_render_wall_clock_budget` actually
+        // uses -- its comment claimed a pin the test did not provide. This
+        // version sleeps past the real, documented `MAX_RENDER_WALL_CLOCK`
+        // and asserts the returned `limit` is exactly that constant: a
+        // wrapper hardcoded to any other budget would either accept this
+        // (too generous) or report a different `limit` (caught here).
+        let result: Result<(), PluginCapError> = within_render_wall_clock_budget(|| {
+            std::thread::sleep(MAX_RENDER_WALL_CLOCK + Duration::from_millis(50));
+        });
+
+        match result {
+            Err(PluginCapError::RenderWallClockExceeded { limit, .. }) => {
+                assert_eq!(limit, MAX_RENDER_WALL_CLOCK);
+            }
+            other => panic!("expected RenderWallClockExceeded, got {other:?}"),
+        }
+    }
+
+    // -- Fix round 1, item 3: the two conditions that fell through the
+    // table entirely. -----------------------------------------------------
+
+    #[test]
+    fn a_manifest_compile_failure_is_permanent() {
+        let error = plugin::CompileError::TooManyNodes {
+            limit: 1,
+            actual: 2,
+        };
+        assert_eq!(
+            classify_plugin_failure(&PluginFailure::Compile(&error)),
+            FailureClass::Permanent,
+            "a manifest that fails to compile against a given fetched shape keeps \
+             failing until the manifest or the data source changes -- retrying the \
+             identical inputs cannot help"
+        );
+    }
+
+    #[test]
+    fn a_render_wall_clock_timeout_is_transient() {
+        assert_eq!(
+            classify_plugin_failure(&PluginFailure::RenderTimedOut),
+            FailureClass::Transient,
+            "a slow compile reflects host load at that moment, not a property of \
+             the manifest -- unlike a compile failure, it is worth retrying"
+        );
+    }
+
+    #[test]
+    fn classify_plugin_failure_delegates_fetch_failures_to_the_provider_error_table() {
+        let error = ProviderError::InvalidConfiguration("bad url".into());
+        assert_eq!(
+            classify_plugin_failure(&PluginFailure::Fetch(&error)),
+            classify_provider_error(&error),
+            "PluginFailure::Fetch must not duplicate or diverge from the ProviderError table"
+        );
     }
 }

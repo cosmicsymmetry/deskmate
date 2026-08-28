@@ -664,12 +664,28 @@ impl HopResolver for RealResolver {
     }
 }
 
+/// The result of a fetch that ran to completion under the egress guard:
+/// the HTTP status the final (non-redirect) response returned, alongside
+/// its capped body. Added on top of the guard itself (fix round 1 of Task
+/// 7b): [`fetch`] previously returned only `Vec<u8>`, discarding status
+/// entirely, which made a 503 and a 200 indistinguishable to every caller
+/// -- exactly what let a transient server error masquerade as either a
+/// permanent parse failure or, worse, a successful response. Redirect
+/// statuses never reach here: `fetch_inner`'s loop follows them internally
+/// (up to [`MAX_REDIRECTS`]) and only returns once a non-redirect response
+/// is reached.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FetchResponse {
+    pub status: u16,
+    pub body: Vec<u8>,
+}
+
 /// Fetches `url` under the egress guard: scheme/deny-list checks, DNS
 /// resolve-then-pin, a capped redirect chain (every hop re-validated and
 /// re-pinned from scratch), a capped response body, and an overall wall-clock
 /// budget. This is the only function in this module that touches the
 /// network.
-pub async fn fetch(url: &str) -> Result<Vec<u8>, EgressError> {
+pub async fn fetch(url: &str) -> Result<FetchResponse, EgressError> {
     fetch_with_resolver(url, &RealResolver).await
 }
 
@@ -687,7 +703,7 @@ async fn fetch_with_budget(
     url: &str,
     resolver: &impl HopResolver,
     total_budget: Duration,
-) -> Result<Vec<u8>, EgressError> {
+) -> Result<FetchResponse, EgressError> {
     match tokio::time::timeout(total_budget, fetch_inner(url, resolver)).await {
         Ok(result) => result,
         Err(_elapsed) => Err(EgressError::Timeout),
@@ -697,7 +713,7 @@ async fn fetch_with_budget(
 async fn fetch_with_resolver(
     url: &str,
     resolver: &impl HopResolver,
-) -> Result<Vec<u8>, EgressError> {
+) -> Result<FetchResponse, EgressError> {
     fetch_with_budget(url, resolver, TOTAL_FETCH_BUDGET).await
 }
 
@@ -716,7 +732,7 @@ fn describe_reqwest_error(error: &reqwest::Error) -> String {
     message
 }
 
-async fn fetch_inner(url: &str, resolver: &impl HopResolver) -> Result<Vec<u8>, EgressError> {
+async fn fetch_inner(url: &str, resolver: &impl HopResolver) -> Result<FetchResponse, EgressError> {
     let mut current = egress_guard(url)?;
     let mut redirects = RedirectBudget::new(MAX_REDIRECTS);
 
@@ -765,7 +781,9 @@ async fn fetch_inner(url: &str, resolver: &impl HopResolver) -> Result<Vec<u8>, 
             continue;
         }
 
-        return read_capped_body(response).await;
+        let status = response.status().as_u16();
+        let body = read_capped_body(response).await?;
+        return Ok(FetchResponse { status, body });
     }
 }
 
@@ -1494,7 +1512,9 @@ mod tests {
 
         let outcome = fetch_with_resolver(&url, &FixedAddrResolver(addr)).await;
 
-        assert_eq!(outcome.expect("fetch should succeed"), b"done".to_vec());
+        let response = outcome.expect("fetch should succeed");
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, b"done".to_vec());
     }
 
     #[tokio::test]

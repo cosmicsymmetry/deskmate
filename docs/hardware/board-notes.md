@@ -3813,7 +3813,7 @@ same. The consequence is exactly what that enum exists to prevent — its own do
 says a raw bitmask "tells the user nothing about what to change or which firmware to
 install", and every scene-capable device now trips that path.
 
-## Stage 3a Gate A — OTA download FAILED on the first attempt, 2026-08-28
+## Stage 3a Gate A — OTA download failed once, then PASSED on retry, 2026-08-28
 
 `v2.0.0-live1` was published and offered; the board power-cycled and **did not install
 it**. It remains on `v2.0.0-scene3`.
@@ -3897,3 +3897,48 @@ power cycle. Nothing was republished between attempts: the catalog still offers
 
 **Do not describe stage 3a Gate A as passed.** Nothing has been observed on the panel;
 the renderer's live bindings have still never drawn on hardware.
+
+### The retry installed it — the first failure was transient
+
+Second power cycle, **identical image, nothing republished**:
+
+```
+firmware_version  v2.0.0-live1      ota_state         idle
+last_ota_error    null              last_network_error null
+wifi_state        connected         wifi_rssi         -77 dBm  (was -80 at boot)
+uptime_ms         51238             tier              networked
+```
+
+Counters clean: `crc_errors` 0, `malformed_frames` 0, `overflow_frames` 0,
+`dropped_events` 0, `dropped_responses` 0, `rx_dropped_bytes` 0. `host_reconnects` 3
+covers the two failed/retried cycles and the server restart.
+
+It downloaded, installed, rebooted onto the new slot and survived the rollback window —
+the same evidence standard the 2026-08-25 and 2026-08-26 entries used.
+
+**So the reading of the first failure was right**: `esp_https_ota_perform()` lost the body
+partway through on a weak link, and it was not the memory-layout mode. That mode is
+deterministic and would have failed the retry identically at stage `begin`.
+
+**The transient-download tally is now two out of four** on this board — 2026-08-25 and
+2026-08-28 both failed once and installed on a retry of the identical image, both at
+roughly -76 to -80 dBm. That is no longer a curiosity; at this signal a single failed
+download should be **retried before it is investigated**, and only a second identical
+failure justifies a bisect. Diagnosing the first one cost real time here, though the
+`ota.c` stage/error reading is what made the retry decision confident rather than hopeful,
+so it was not wasted.
+
+**Flat internal RAM has now preceded a clean download three times** (2026-08-26,
+2026-08-27, 2026-08-28) — still not a law, and still not a substitute for the check.
+
+### What Gate A still owes
+
+**Nothing has been observed on the panel, and the live bindings have still never drawn.**
+That is not merely unobserved, it is currently *unobservable*: the deployed server binary
+predates every one of Tasks 1-7, so nothing is pushing scenes that use the new bindings.
+It also predates the `SceneRender` capability naming fix, which is why the device — which
+correctly advertises 491 — is still reported with `unknown_capability_bits: 0x100` and
+only six named capabilities.
+
+Gate A's panel observations therefore require the **server** to be redeployed first.
+

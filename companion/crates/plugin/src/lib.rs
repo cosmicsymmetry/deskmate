@@ -9,8 +9,13 @@
 //! restricted expression language), compile a manifest into a `Scene`, or
 //! resolve assets to content-addressed digests.
 
+mod expr;
 mod manifest;
 
+pub use expr::{
+    EvalContext, EvalValue, Expr, ExprError, FUEL_BUDGET, Fuel, MAX_DEPTH, MAX_OUTPUT_LEN,
+    MAX_PATH_SEGMENTS, MAX_ROUND_PLACES, MAX_SOURCE_LEN, build_icon_map,
+};
 pub use manifest::{
     Align, Asset, Font, FontTier, Glyph, ManifestError, Node, PluginManifest, Source,
     parse_manifest, parse_manifest_bytes,

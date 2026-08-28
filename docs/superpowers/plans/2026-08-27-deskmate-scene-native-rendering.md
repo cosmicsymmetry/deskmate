@@ -718,16 +718,16 @@ silently — the 106 rows would still "pass" while proving less and less.
 > only to be compared against, or someone will eventually "fix a bug" in a file no device
 > runs.
 
-- [ ] **Step 1: Move the templates and rewire `lvgl-sim`.** Confirm the 106 + 24 rows
+- [x] **Step 1: Move the templates and rewire `lvgl-sim`.** Confirm the 106 + 24 rows
       still pass **unchanged** — the move must be provably a no-op before anything is
       removed from the firmware. Run the parity suite before and after and diff the counts.
-- [ ] **Step 2: Write the failing test** that the firmware no longer registers any C
+- [x] **Step 2: Write the failing test** that the firmware no longer registers any C
       template and that a card with no scene falls back to the standalone clock rather than
       a blank screen. That fallback is the repo's standalone rule and it is what makes this
       task survivable.
-- [ ] **Step 3: Remove the templates from the ESP-IDF build** and delete the now-dead
+- [x] **Step 3: Remove the templates from the ESP-IDF build** and delete the now-dead
       registry/dispatch paths.
-- [ ] **Step 4: Retarget `framebuffer_diff.rs` to the scene cases.** §6 requires this
+- [x] **Step 4: Retarget `framebuffer_diff.rs` to the scene cases.** §6 requires this
       and it is easy to miss: the device-vs-simulator hardware diff currently drives
       **template** cases, and after this task the device has no templates to drive. Point
       it at `scene_cases()` instead. Carry the two existing exclusions forward with their
@@ -736,11 +736,11 @@ silently — the 106 rows would still "pass" while proving less and less.
       and `row-list--truncation-boundary` (it pins a field above the registry maximum, so
       a device rejects the push). Both reasons still hold; deleting either exclusion
       without deleting its reason is how a flaky case gets re-introduced.
-- [ ] **Step 5: Record the memory delta**, which will be **large and negative** — the
+- [x] **Step 5: Record the memory delta**, which will be **large and negative** — the
       first big *shrink* this project has measured. Treat it with the same suspicion as a
       growth: the hazard is layout movement, and a shrink moves layout just as a growth
       does. `.bss`, DIRAM `.text`, `.data`, IRAM and DIRAM total, same-tree.
-- [ ] **Step 6: Gates and commit.** `feat: stop shipping the hand-written C templates`
+- [x] **Step 6: Gates and commit.** `feat: stop shipping the hand-written C templates`
 
 ---
 

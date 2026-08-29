@@ -52,10 +52,59 @@ const SEND_TIMEOUT: Duration = Duration::from_secs(2);
 /// Provisional: sized by judgment for V2, not measurements. Revisit in V3.
 const PING_INTERVAL: Duration = Duration::from_secs(3);
 
-/// Maximum silence from the peer, including absence of a pong. This mirrors
-/// the protocol's declared link timeout so both ends agree when the link has
-/// died.
-const IDLE_TIMEOUT: Duration = Duration::from_millis(protocol::LINK_TIMEOUT_MS);
+/// The device's own link timeout for the NETWORK transport, mirrored from
+/// `firmware/main/link/net_link.c`'s `NET_LINK_TIMEOUT_MS`. The firmware owns
+/// the value; it is restated here only so [`IDLE_TIMEOUT`]'s relationship to it
+/// is checkable by a test rather than by memory. Note the USB transport is a
+/// different number: `usb_link.c` uses `PROTOCOL_LINK_TIMEOUT_MS` (10 s) and is
+/// symmetric with the host by construction, which is why this asymmetry is
+/// specific to the tunnel.
+const DEVICE_NETWORK_LINK_TIMEOUT_SECS: u64 = 45;
+
+/// The same value as a [`Duration`], for the ordering tests below. Production
+/// code derives [`IDLE_TIMEOUT`] from the seconds constant directly, so this
+/// form has no non-test caller.
+#[cfg(test)]
+const DEVICE_NETWORK_LINK_TIMEOUT: Duration = Duration::from_secs(DEVICE_NETWORK_LINK_TIMEOUT_SECS);
+
+/// How far ahead of the device the server gives up. Wide enough for the device
+/// to notice and re-dial into a free lease (the observed reconnect took ~2 s),
+/// and what makes [`IDLE_TIMEOUT`] ten missed pongs rather than three.
+const IDLE_TIMEOUT_MARGIN_SECS: u64 = 15;
+
+/// Maximum silence from the peer, including absence of a pong.
+///
+/// This must sit strictly BETWEEN a healthy link's silence and
+/// [`DEVICE_NETWORK_LINK_TIMEOUT`], and both bounds are load-bearing:
+///
+/// - Reap too early and the server kills links the device still believes are
+///   up. This previously read `protocol::LINK_TIMEOUT_MS` (10 s), which is
+///   right for USB — where both ends use `PROTOCOL_LINK_TIMEOUT_MS` — but the
+///   networked device waits 45 s, so the two ends did not agree despite the
+///   old comment here claiming they did. Observed on hardware 2026-08-29: the
+///   server logged `device link idle timeout, closing` while the device still
+///   reported `online: true` with `malformed_frames`/`crc_errors` at 0, and the
+///   pair flapped on a ~10 s period (reaped at 10 s, reconnecting in ~2 s).
+/// - Reap too late and it is worse, not better: `device_link::handler` refuses
+///   a reconnect with 409 while the previous lease is held (`claim_link`), so a
+///   value past 45 s would have the device give up, re-dial, and bounce off the
+///   server's own stale lease.
+///
+/// 30 s costs ten consecutive missed pongs before a reap, against the three the
+/// old value allowed, and still frees the lease 15 s before the device stops
+/// believing in the link. `SEND_TIMEOUT < PING_INTERVAL < IDLE_TIMEOUT <
+/// DEVICE_NETWORK_LINK_TIMEOUT` is pinned by a test.
+///
+/// This does NOT address why replies go missing in the first place: the device
+/// gives `esp_websocket_client_send_bin` `PROTOCOL_WRITE_TIMEOUT_MS` (200 ms)
+/// to deliver a reply the host waits 2000 ms for, and that budget is what drove
+/// `dropped_responses` 1 -> 15 in the same session. Fixing that is a firmware
+/// change and buys an OTA re-verification; this constant only stops the server
+/// from amplifying it into a link flap.
+/// Derived from the device's own timeout rather than written as a bare number,
+/// so the ordering this doc argues for is structural and cannot drift back.
+const IDLE_TIMEOUT: Duration =
+    Duration::from_secs(DEVICE_NETWORK_LINK_TIMEOUT_SECS - IDLE_TIMEOUT_MARGIN_SECS);
 
 /// Bounded handoff from the async socket actor to app-core's synchronous event
 /// drain. A full queue drops locally and increments diagnostics rather than
@@ -1110,6 +1159,40 @@ mod tests {
     fn keepalive_deadlines_preserve_progress_and_idle_detection() {
         assert!(super::SEND_TIMEOUT < super::PING_INTERVAL);
         assert!(super::PING_INTERVAL < super::IDLE_TIMEOUT);
+    }
+
+    /// The server must stop believing in a link BEFORE the device does.
+    ///
+    /// If this inverts, a device that gives up at `NET_LINK_TIMEOUT_MS` and
+    /// re-dials arrives while the server still holds the previous lease, and
+    /// `device_link::handler` refuses it with 409 ("owner already live"). The
+    /// gap also has to be wide enough for the reconnect itself; the observed
+    /// reconnect took ~2 s, so a few seconds is not enough margin.
+    #[test]
+    fn the_server_releases_a_dead_link_before_the_device_redials() {
+        assert!(
+            super::IDLE_TIMEOUT < super::DEVICE_NETWORK_LINK_TIMEOUT,
+            "a server idle timeout at or past the device's own link timeout makes \
+             the device re-dial into a held lease and get a 409"
+        );
+        let margin = super::DEVICE_NETWORK_LINK_TIMEOUT
+            .checked_sub(super::IDLE_TIMEOUT)
+            .expect("the assertion above pins the ordering");
+        assert!(
+            margin >= Duration::from_secs(10),
+            "leave the device room to notice and reconnect before it gives up; got {margin:?}"
+        );
+    }
+
+    /// The old value reaped a link after three missed pongs, which is what
+    /// flapped against a device dropping replies under a 200 ms write budget.
+    #[test]
+    fn a_reap_costs_many_consecutive_missed_pongs_not_a_few() {
+        let missed = super::IDLE_TIMEOUT.as_secs_f64() / super::PING_INTERVAL.as_secs_f64();
+        assert!(
+            missed >= 8.0,
+            "a reap must survive a burst of dropped replies; got {missed} missed pongs"
+        );
     }
 
     #[test]

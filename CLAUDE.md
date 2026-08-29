@@ -515,7 +515,18 @@ of letting code and documentation diverge.
   `plugin::compile_scene_with_assets`**, which resolves `image`/`glyph` nodes and asset
   fonts for real, kind-checked against the manifest's own declared `[[assets]] kind`. Task
   9 (hardware) is explicitly deferred by the owner; nothing about the plugin faces is
-  hardware-verified.
+  hardware-verified. **Stage 3b's software side is complete** — the ledger's "Stage 3b
+  exit" section records how its two inherited risks actually resolved, and stage 4 is
+  planned in `docs/superpowers/plans/2026-08-29-deskmate-rasterization.md`, whose single
+  hardware session **pays stage 3b's Task 9 first (Phase A) and refuses to flash stage 4
+  if it fails**. Two things that plan establishes and this file should not contradict:
+  **a new capability bit 9 (`VolatileAssets`, `512`) is genuinely required** — the device
+  advertises bit 5 while `firmware/main/link/protocol_task.c:1027` explicitly refuses
+  `AssetBegin { volatile: true }` as unsupported and `asset_sync.rs:243` hard-codes
+  `volatile: false`, so bit 5 cannot honestly mean "accepts volatile assets" and
+  `PROTOCOL_CURRENT_CAPABILITIES` moves 491 -> 1003; and the **roadmap's V4
+  "headless-Chromium rendering" is retired**, because the scene spec's §5 rules a headless
+  browser out permanently and names `resvg` as the only permitted rasterizer.
   - **The server half is now WIRED (`800c192`), so Task 9 is executable. It is still
     entirely unobserved on hardware.** Until that commit `server/src/plugin_provider.rs`,
     `egress.rs`, `asset_sync.rs` and `plugin::compile_scene_with_assets` all had **zero

@@ -33,10 +33,19 @@ breadth.
 | V1 | All exit items closed (declaring V1 exit awaits explicit user authorization) | Local Deskmate | Custom partition table (OTA slots + asset region), baked typeface, pixel-exact host-LVGL preview harness with golden frames, built-in widget redesign — all delivered and physically accepted 2026-08-14; playlist authoring model (schema v4, `presence` removed) delivered and merged 2026-08-15 (wire unchanged, no on-device delta). The CO5300 even-window check at the 64-line flush strip closed 2026-08-15 (human-observed clean at both orientations). Packaging/hardening delivered: private `cosmicsymmetry/deskmate` remote with the green `ci` workflow (macOS companion gate + DMG artifact; ESP-IDF build + host tests), advisories triaged in `docs/security/advisories.md`, security review in `docs/security/v1-review.md`, and the hands-on install matrix passed (recorded 2026-08-17 in the packaging plan; one defect found and fixed — settings window now auto-opens on first run only, `fc3750b`). V1 tag and V2 brainstorm await explicit user authorization | `2026-08-11-deskmate-v1-preview-typeface-redesign.md`, `2026-08-11-deskmate-v1-playlists.md`, `2026-08-15-deskmate-v1-packaging-hardening.md` |
 | V2 | Design approved 2026-08-18 (plan pending) | Networked device | Device owned over the network instead of a cable: WiFi station, TLS, USB-based provisioning (no SoftAP), bearer-token device identity, tier pairing, WebSocket transport carrying today's frames unchanged, and OTA with rollback. Proven against a single-tenant no-accounts stub server. Headline demo: provision over USB, unplug, quit the Mac app, cards keep updating. Additive within protocol v1 | `docs/superpowers/specs/2026-08-18-deskmate-v2-networked-device-design.md` |
 | V3 | Planned (narrowed by V2's design §10) | Server host | Accounts, OAuth-held integration credentials (Google Calendar and similar), config storage, and multi-tenancy — behind the device-facing contract V2 freezes. Should require no firmware change, because V2 delivers the contract, identity, provisioning, transport and update mechanism | own brainstorm at V2 exit |
-| V4 | Planned | Plugin platform | HTML plugin contract, headless-Chromium rendering, image cards, asset cache, billing (paid tier) | own brainstorm at V3 exit |
+| V4 | Planned; **partly superseded** by the scene-rendering design | Plugin platform | Image cards, asset cache, billing (paid tier), and a plugin contract. **The "HTML plugin contract, headless-Chromium rendering" originally written here is retired**: `docs/superpowers/specs/2026-08-22-deskmate-plugin-scene-rendering-design.md` §5 rules a headless browser out permanently ("it would make the homelab an arbitrary-code-execution host. Deferred indefinitely, not scheduled") and names `resvg` as the only permitted rasterizer. The plugin contract is the declarative manifest frozen in `docs/plugins/manifest-v1.md`, delivered in stage 3b. Public uploads and the sandbox are that spec's stage 5, with their own risk review | own brainstorm at V3 exit; superseding decisions in the scene-rendering spec |
 
-Stage 2b of the scene renderer (the five remaining templates as scenes) is planned in
-`docs/superpowers/plans/2026-08-26-deskmate-scene-templates.md`, written at stage 2a's exit.
+The scene renderer's five stages each get their own plan, written at the previous stage's
+exit (the spec is the architecture for all five, not one implementation plan):
+
+| Stage | Plan | State |
+| --- | --- | --- |
+| 2a | `2026-08-23-deskmate-scene-renderer.md` | Delivered; drew on the panel 2026-08-25/26 |
+| 2b | `2026-08-26-deskmate-scene-templates.md` | Delivered; all six faces byte-identical |
+| 3a | `2026-08-27-deskmate-scene-native-rendering.md` | Delivered; the six C templates no longer ship. Gate B (the OTA download with them removed) is published and **not yet observed** |
+| 3b | `2026-08-28-deskmate-plugin-manifest.md` | Software-complete, including the Task 8b server wiring amendment. Task 9's hardware gate is **deferred and entirely unobserved** |
+| 4 | `2026-08-29-deskmate-rasterization.md` | Planned at 3b's exit. Its hardware session pays 3b's outstanding gate first (Phase A) before flashing anything of its own |
+| 5 | not yet written | Public plugin uploads and the sandbox; separate risk review |
 
 First-widget order and why:
 

@@ -155,6 +155,9 @@ last-good data. `AnalogClock` needs no additional binding for the same reason.
 - `field.*` and `timer.pct` are wire surface no builder emits. A binding no builder emits
   is surface the byte-exact gate reports green on forever; both are retained deliberately
   (`field.*` for plugin-authored scenes in stage 3b) rather than by omission.
+  **Superseded in part at stage 3b's exit** — `field.title` now has both an author and a
+  producer, `timer.pct` has neither but does have synthetic coverage. See "Stage 3b exit"
+  below for what changed and the distinction between coverage and use.
 - The asset-GC teardown/rebuild sequence still has **no automated end-to-end test**.
   Stage 3b's runtime assets must exercise teardown, font-registry reset, compaction,
   retained scene rebuild, and the `BUSY`/OTA-owner paths before anything relies on it.
@@ -179,3 +182,60 @@ Two things stage 3b inherits and must not lose:
 2. **A gate that supplies a binding's input proves how a value is drawn, never what it
    means.** Stage 3a's three defects lived in exactly that hole for a whole stage. Any
    plugin-facing test that pins its own inputs inherits the same blindness.
+
+## Stage 3b exit: how those two inheritances actually held up
+
+Written at stage 3b's exit (2026-08-29). **Both entries above were about the same
+weakness — surface with no producer — and stage 3b resolved them asymmetrically: one
+closed, one only half-closed.**
+
+**`field.*` now has a producer, and it took two separate things to get one.** Authoring a
+binding was not enough. `plugins/aqi/manifest.toml` bound `field.title` in Task 8, which
+bought pixel coverage in the simulator and in `framebuffer_diff` — but on a real device
+the binding still resolved to the `--` placeholder, because *nothing pushed a `title`
+field for a plugin card*; the manifest's own comment says so. The producer arrived only
+with the server wiring (Task 8b, `800c192`), where `ServerProviderRefresher` emits the
+card's `title` as a `Field`. **The lesson generalises: a binding needs an author AND a
+producer, and this ledger's "no builder" phrasing only ever counted the author.** A
+binding can have full pixel coverage and still be dead end to end.
+
+Two limits on that claim, both permanent and worth not relearning:
+
+- **The reach is narrower than "a plugin's own fields".** A plugin card's
+  `WidgetConfig.template` is always `TemplateKind::DigitalClock` on the wire
+  (`app-core/src/config.rs`'s `wire_config`, a decision predating this stage), so the
+  only names `field.*` can EVER resolve for any plugin card are DigitalClock's four
+  registered fields — `title`, `show_seconds`, `stale`, `error`. A plugin does not get a
+  registry of its own. This is why `scene-text`/`scene-label` stay excluded from
+  `framebuffer_diff`: they bind a synthetic `field.status` that no registry accepts.
+- **None of it is hardware-observed.** Task 9 is deferred; `field.title` drawing on the
+  panel from a server-pushed value has never been seen.
+
+**`timer.pct` is unchanged, and its position is subtler than "uncovered".** It has
+synthetic pixel coverage — `lvgl-sim/src/cases.rs`'s scene-arc case binds it, and
+`scene_panel_check.rs` exercises it — so a renderer defect would be caught. What it still
+lacks is a **production builder**: stage 3a moved the real arc to `timer.permille`
+(at r=195 one percent is 12.25 px, so percent quantisation is visibly insufficient), and
+nothing in stage 3b gave `timer.pct` an emitter. So it is wire surface kept alive by a
+test alone. That is the distinction the entry above was reaching for and did not have
+words for: **coverage and use are different questions**, and `timer.pct` has the first
+without the second, where `field.title` before Task 8b had neither.
+
+**The asset path: exercised in software, unexercised on hardware, and it hid a
+destructive bug.** Task 8's `push_case_assets` drove `AssetBegin`/`AssetChunk`/
+`AssetCommit` for the first time, and Task 8b put `AssetSync::reconcile` on a production
+path. That wiring immediately surfaced something no golden or parity row could have:
+**`AssetRelease.digests` is a keep-set, not a delete-list** — `asset_store.c`'s
+compaction marks every committed record absent from it DEAD — so a server with an empty
+plugin registry was instructing the device to wipe every asset it held, on every full
+synchronize. It was caught by `server/tests/hostile_device.rs`, which asserts the
+**exact** request sequence a device sees. **A pixel gate cannot see a wire defect at
+all**; only a sequence assertion could, and only because it was strict rather than
+permissive.
+
+**The asset-GC teardown entry above is NOT discharged.** Teardown, font-registry reset,
+compaction, retained-scene rebuild and the `BUSY`/OTA-owner paths remain without an
+automated end-to-end test and without a simulator seam, and stage 3b's Task 9 — the first
+occasion any of it would run for real — is deferred. Stage 4 makes this materially more
+urgent rather than less: rasterization turns **volatile** assets into the common case,
+and the durable/volatile flag on `AssetBegin` has never once been set to volatile.

@@ -4288,3 +4288,60 @@ USB replug a link event rather than a power event.
 
 **Still owed from this stage:** every panel observation (Steps 3-5), the asset-GC teardown
 (Step 6), and the device-side half of the digest check.
+
+## Stage 3b Task 9, second attempt — plugin faces STILL unobserved; the 200 ms write budget bites for real, 2026-08-29
+
+Camera working this time (physical `OBSBOT Meet 2 StreamCamera` at 3840x2160, after the
+app released it). Same device `dev-0005`, `v2.0.0-live2`, rotation 270, no reboot across
+the whole session (`uptime_ms` reached 19,311,571, ~5.4 h). **No plugin face was seen. The
+gate still does not close**, but the reason is now diagnosed rather than unknown.
+
+**Two faces WERE observed rendering correctly, and both are host-pushed scenes** (stage 3a
+retired every C template, so anything on the panel is the scene renderer):
+
+- The **`RowList`/rss face**: "Headlines" chip, a truncated headline row
+  (`Sat, ...  The Internet Is Ki...`), and the count ring showing `1`. Clean, no artifacts.
+- The **`DigitalClock` card face**: hero `19:42`, a `Sat, Aug 29` date box, and the analog
+  dial complication with orange hands and tick marks. Clean, no artifacts, correct layout.
+
+**Closed, unplanned: the standalone fallback clock at 270 degrees, bottom margin included.**
+While the link was down the panel showed `clock_screen.c`'s fallback — hero time, date box,
+and the dim `Connect deskmate app` hint (`clock_screen.c:221`) — with no title chip and no
+`DATE` eyebrow, matching the clock-title-removal spec. The bottom margin is fully visible
+and uncropped in the frame. **Both items CLAUDE.md listed as unverified from that work (the
+fallback at 270 degrees, and its bottom margin) are now observed.** Note the fallback showed
+`23:43` where the host-driven face showed `19:42`: the fallback renders local UTC+4 while
+the host was pushing UTC, consistent with the board sitting at UTC+4.
+
+**Finding: the deliberately-unfixed 200 ms write budget DOES bite at realistic cadence.**
+CLAUDE.md records `PROTOCOL_WRITE_TIMEOUT_MS` = 200 ms for the device to deliver a reply the
+host waits 2000 ms for, and says "No evidence it bites at realistic cadence." **There is now
+evidence.** Over this session `dropped_responses` climbed **1 -> 15** while
+`malformed_frames`, `crc_errors` and `overflow_frames` all stayed **0** — the link was not
+corrupting anything, the device simply could not write replies inside 200 ms. Host-side this
+appeared as repeated `502 {"kind":"runtime","message":"device: device request timed out"}`
+on `POST /v1/devices/{id}/scene`.
+
+The two timeouts compose into a flap loop: the device drops a reply (200 ms), the server
+sees no activity and reaps at `IDLE_TIMEOUT` 10 s, the device reconnects in ~2 s
+(`19:43:58` closed -> `19:44:00` established), and it repeats. `wifi_rssi` was **-77 dBm**
+here, improved from the -91/-93 earlier, so this is not purely a fringe-signal artifact.
+
+**Why no plugin face could be captured, mechanically.** The pushes were not lost: server
+`diagnostics.commands_processed` reached **7** with `command_queue_full: 0` and
+`card_errors: []`, so the runtime accepted and processed every `PushScene`; only the acks
+timed out. But an operator-pushed scene is transient — on every reconnect the runtime
+replays the active card's own scene, which overwrites it, and with the link flapping on a
+~10 s period the pushed face is wiped before it can be photographed. Rotation compounds it
+(`my-playlist` is timed, 50 s dwell, clock -> weather -> rss).
+
+**Deliberately NOT done: raising the server's `IDLE_TIMEOUT` to stop the flapping.** It
+would very likely have unblocked the capture, but a gate observed on a hand-modified
+timeout is not evidence about the shipping configuration, and this session's whole purpose
+is evidence. The asymmetry recorded in the previous entry (server 10 s vs device
+`NET_LINK_TIMEOUT_MS` 45 s) and the 200 ms write budget are now both supported by
+measurements and want a real decision, not a workaround applied mid-gate.
+
+**Still owed, unchanged:** every plugin-face observation (Steps 3-5), the asset-GC teardown
+(Step 6), and the device-side half of the digest check. Nothing about the plugin faces is
+hardware-verified.

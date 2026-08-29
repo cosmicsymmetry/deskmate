@@ -4217,3 +4217,74 @@ Two incidental facts worth keeping:
 `ota_state idle`, `last_ota_error null`, `wifi_rssi -54`, `uptime_ms` ~63 min with no
 reboot. `dropped_events` moved 0 -> 1 during the deliberate link drops; every other
 counter is still zero.
+
+## Stage 3b Task 9 — PARTIAL, blocked on the panel; a link-timeout asymmetry found, 2026-08-29
+
+Session on `v2.0.0-live2`, device `dev-0005`, networked tier, rotation 270. **The gate did
+NOT close.** No plugin face was ever seen on the panel, because the OBSBOT app held the
+physical camera while publishing a muted "video off" frame on its virtual device, so every
+capture returned that placeholder rather than the board. Nothing below is a panel
+observation, and the visual half of Task 9 Steps 3-5 remains entirely unobserved.
+
+**What did pass, and is real:**
+
+- **The server redeploy and plugin load.** Built from a `git archive HEAD` export in
+  `rust:1.98-bookworm` on docker-vm (49 s warm, `target/` preserved), installed to
+  `/usr/local/bin/deskmate-server`. Startup logged
+  `plugin registry loaded path=/var/lib/deskmate/plugins plugin_count=2 failure_count=0`.
+  `DESKMATE_PLUGINS_DIR` was NOT set and did not need to be: `DEFAULT_PLUGINS_DIR` is
+  already `/var/lib/deskmate/plugins`.
+- **Task 9 Step 2's digest comparison, on the server side.** `GET /v1/plugins` reported
+  digests identical to `sha256sum` run independently on the VM and `shasum -a 256` run on
+  the Mac: `aqi/icons.ttf` = `40bbbac715465adf7ba539f53a0cb16991a2c1f73a4fb57af209d39e0c62b327`
+  (4320 bytes), `agenda/badge.rgb565` =
+  `e19db5d47bbdae46bf80e5a7df400795bce84973817c9f124642bc76bf41d33a` (812 bytes).
+  `icons.ttf` is byte-identical to `crates/lvgl-sim/assets/Inter-subset.ttf`, confirming
+  what CLAUDE.md claims.
+- **A real plugin scene compiled and reached the device.** `POST /v1/devices/dev-0005/scene`
+  with `template: "plugin"`, `plugin_id: "aqi"` and the committed fixture's inner
+  `payload` returned **HTTP 200**; `card_errors` stayed `[]`, `commands_processed` went to
+  1, and the device's `latest_revision` advanced 185 -> 191 with `malformed_frames`,
+  `crc_errors`, `overflow_frames` and `dropped_ui_commands` all still 0. So the registry
+  lookup, manifest compile with real assets, `validate_message`, and delivery to physical
+  hardware all work. **Whether it drew correctly is unknown.**
+
+**Task 9 Step 2 cannot be closed as written, and this is structural.** It asks to confirm
+"the digests the device reports". `StatusResponse` carries no asset inventory — the device
+reports holding a digest only implicitly, through `AssetBegin`'s `already_present` ack.
+Same class as M4's `unknown_field_count` item. The server side is confirmed above; the
+device side needs either a panel observation or a new status field.
+
+**Finding: the server reaps an idle link 4.5x faster than the device notices it is gone.**
+`server/src/runtime_device.rs` sets `IDLE_TIMEOUT = protocol::LINK_TIMEOUT_MS` = **10 s**
+with `PING_INTERVAL` 3 s, while the device's networked transport uses
+`NET_LINK_TIMEOUT_MS` = **45 s** (`firmware/main/link/net_link.c:25`; the USB path uses
+`PROTOCOL_LINK_TIMEOUT_MS` = 10 s, so this asymmetry is specific to the network link).
+Observed consequence, twice: the server logged `device link idle timeout, closing` while
+the device continued to report `online: true`, `wifi_state connected`, and every frame
+counter clean. Timestamps: established 14:30:38, closed 14:51:45; re-established 14:53:36,
+closed 14:53:57 — the second link survived **21 s**. One reconnect gap measured at
+**111 s** (14:51:45 -> 14:53:36). A later reconnect had not completed within 30 s of
+watching, consistent with a widening backoff but **not** an observation of one: a single
+gap does not show widening, and V2 Task 8's backoff item stays open.
+
+Signal was poor throughout and is the most likely proximate cause: `wifi_rssi` read
+**-91 to -93 dBm** early in the session and **-81 dBm** later. Do not read the drops as a
+proven defect in the link code; do read the 10 s / 45 s asymmetry as real and worth
+deciding about, since it means the server can abandon a device that still believes it is
+connected.
+
+Two scene pushes failed on that instability: one `502 {"kind":"runtime","message":"device
+request timed out"}` and one `502 ... "device is disconnected"`. The agenda plugin — the
+one with the `image` node — was therefore **never** successfully pushed, so the image-node
+and `board_lcd_rounder_cb` observations are unattempted, not failed.
+
+The board did not reboot at any point (`uptime_ms` rose monotonically 340,646 ->
+1,997,191, ~33 min) and `free_heap` stayed flat at ~8.30-8.31 MB (PSRAM; not a TLS health
+signal on this board). `dropped_responses` moved 0 -> 1 across the drops; every other
+counter stayed 0. The USB serial port re-enumerated `/dev/cu.usbmodem3101` ->
+`/dev/cu.usbmodem1101` mid-session with no reboot, consistent with the battery making a
+USB replug a link event rather than a power event.
+
+**Still owed from this stage:** every panel observation (Steps 3-5), the asset-GC teardown
+(Step 6), and the device-side half of the digest check.

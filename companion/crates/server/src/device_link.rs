@@ -7,9 +7,11 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use tokio::sync::OwnedSemaphorePermit;
 
-use app_core::{ConfigOrigin, LoadOutcome, RuntimeHandle, RuntimeOptions, SystemCalendarRefresher};
+use app_core::{ConfigOrigin, LoadOutcome, RuntimeHandle, RuntimeOptions};
 
 use crate::auth::AuthenticatedDevice;
+use crate::plugin_host::ServerPluginHost;
+use crate::plugin_refresher::ServerProviderRefresher;
 use crate::registry::DeviceId;
 use crate::runtime_device::WebSocketRuntimeDevice;
 use crate::{LinkLease, ServerState};
@@ -75,12 +77,16 @@ async fn run(
 
         let (device, connector) = WebSocketRuntimeDevice::channel(device_id.clone());
         let peer = connector.attach();
+        let plugins = std::sync::Arc::clone(state.plugins());
         let runtime = tokio::task::spawn_blocking(move || {
-            RuntimeHandle::start(
+            RuntimeHandle::start_with_plugin_host(
                 config,
                 Box::new(device),
-                Box::<SystemCalendarRefresher>::default(),
+                Box::new(ServerProviderRefresher::new(std::sync::Arc::clone(
+                    &plugins,
+                ))),
                 RuntimeOptions::default(),
+                Some(Box::new(ServerPluginHost::new(plugins))),
             )
         })
         .await;

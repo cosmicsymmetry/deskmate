@@ -1,8 +1,8 @@
 //! Admin-token-protected provisioning, configuration, and status routes.
 
 use app_core::{
-    AppConfig, AppSnapshot, BakedFontMetrics, ClockCard, MAX_CONFIG_FILE_BYTES, RuntimeError,
-    SaveReceipt, StoreError, ValidationIssue, build_digital_clock_scene,
+    AppConfig, AppSnapshot, BakedFontMetrics, ClockCard, MAX_CONFIG_FILE_BYTES, PluginHost,
+    RuntimeError, SaveReceipt, StoreError, ValidationIssue, build_digital_clock_scene,
 };
 use axum::Json;
 use axum::Router;
@@ -18,16 +18,119 @@ use serde::{Deserialize, Serialize, Serializer};
 
 use crate::ServerState;
 use crate::auth::bearer_token;
+use crate::plugin_host::ServerPluginHost;
+use crate::plugin_registry::PluginRegistry;
+
+/// Matches the standard provider response ceiling and stays below Axum's
+/// independent 2 MiB default limit for the complete JSON request body.
+const MAX_OPERATOR_PLUGIN_DATA_BYTES: usize = providers::MAX_PROVIDER_RESPONSE_BYTES;
 
 pub(crate) fn routes() -> Router<ServerState> {
     Router::new()
         .route("/v1/devices", post(create_device))
+        .route("/v1/plugins", get(get_plugins))
         .route("/v1/devices/{id}", get(get_device))
         .route(
             "/v1/devices/{id}/config",
             put(put_config).layer(DefaultBodyLimit::max(MAX_CONFIG_FILE_BYTES)),
         )
         .route("/v1/devices/{id}/scene", post(post_scene))
+}
+
+async fn get_plugins(
+    State(state): State<ServerState>,
+    _admin: AdminAuthenticated,
+) -> Json<PluginCatalogResponse> {
+    let plugins = state
+        .plugins()
+        .ids()
+        .filter_map(|id| state.plugins().get(id))
+        .map(|plugin| {
+            let mut assets: Vec<_> = plugin
+                .assets
+                .iter()
+                .map(|(file, asset)| PluginAssetResponse {
+                    file: file.to_string(),
+                    kind: asset_kind_name(asset.kind),
+                    byte_length: asset.bytes.len(),
+                    digest: digest_hex(&asset.digest),
+                })
+                .collect();
+            assets.sort_by(|left, right| left.file.cmp(&right.file));
+            PluginResponse {
+                id: plugin.id.clone(),
+                name: plugin.manifest.name.clone(),
+                version: plugin.manifest.version.clone(),
+                node_count: plugin.manifest.nodes.len()
+                    + plugin
+                        .manifest
+                        .repeats
+                        .iter()
+                        .map(|repeat| repeat.nodes.len())
+                        .sum::<usize>(),
+                assets,
+            }
+        })
+        .collect();
+    let load_failures = state
+        .plugin_load_failures()
+        .iter()
+        .map(|failure| PluginLoadFailureResponse {
+            id: failure.id.clone(),
+            error: failure.error.to_string(),
+        })
+        .collect();
+    Json(PluginCatalogResponse {
+        plugins,
+        load_failures,
+    })
+}
+
+#[derive(Debug, Serialize)]
+struct PluginCatalogResponse {
+    plugins: Vec<PluginResponse>,
+    load_failures: Vec<PluginLoadFailureResponse>,
+}
+
+#[derive(Debug, Serialize)]
+struct PluginResponse {
+    id: String,
+    name: String,
+    version: String,
+    node_count: usize,
+    assets: Vec<PluginAssetResponse>,
+}
+
+#[derive(Debug, Serialize)]
+struct PluginAssetResponse {
+    file: String,
+    kind: &'static str,
+    byte_length: usize,
+    digest: String,
+}
+
+#[derive(Debug, Serialize)]
+struct PluginLoadFailureResponse {
+    id: String,
+    error: String,
+}
+
+fn asset_kind_name(kind: protocol::AssetKind) -> &'static str {
+    match kind {
+        protocol::AssetKind::Font => "font",
+        protocol::AssetKind::IconFont => "icon-font",
+        protocol::AssetKind::Image => "image",
+    }
+}
+
+fn digest_hex(digest: &[u8; protocol::ASSET_DIGEST_LEN]) -> String {
+    use std::fmt::Write as _;
+
+    let mut encoded = String::with_capacity(protocol::ASSET_DIGEST_LEN * 2);
+    for byte in digest {
+        write!(encoded, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    encoded
 }
 
 struct AdminAuthenticated;
@@ -127,10 +230,39 @@ struct PushSceneRequest {
     card_id: String,
     revision: u32,
     template: String,
-    show_seconds: bool,
-    local_now: String,
+    show_seconds: Option<bool>,
+    local_now: Option<String>,
+    plugin_id: Option<String>,
+    #[serde(default)]
+    data: OptionalSceneData,
+    #[serde(default)]
+    stale: bool,
+    error: Option<String>,
 }
 
+#[derive(Default)]
+enum OptionalSceneData {
+    #[default]
+    Missing,
+    Present(serde_json::Value),
+}
+
+impl<'de> Deserialize<'de> for OptionalSceneData {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        serde_json::Value::deserialize(deserializer).map(Self::Present)
+    }
+}
+
+/// Builds and pushes an operator-selected scene through an existing device runtime.
+///
+/// A plugin scene only references content-addressed asset digests; this route deliberately
+/// does not transfer their bytes. The device must already have completed a full synchronize
+/// while the registry was loaded. `PluginHost::desired_assets()` is registry-wide rather than
+/// per-card, and the runtime reconciles it on every full synchronize, so such a device already
+/// holds every curated plugin asset this scene can name.
 async fn post_scene(
     State(state): State<ServerState>,
     _admin: AdminAuthenticated,
@@ -144,33 +276,7 @@ async fn post_scene(
         status: rejection.status(),
         message: rejection.body_text(),
     })?;
-    if request.template != "digital_clock" {
-        return Err(AdminError::InvalidScene {
-            message: format!("unknown scene template {:?}", request.template),
-        });
-    }
-    let local_now = NaiveDateTime::parse_from_str(&request.local_now, "%Y-%m-%dT%H:%M:%S")
-        .map_err(|_| AdminError::InvalidScene {
-            message: "local_now must use YYYY-MM-DDTHH:MM:SS".into(),
-        })?;
-    let scene = build_digital_clock_scene(
-        &ClockCard {
-            revision: request.revision,
-            show_seconds: request.show_seconds,
-            local_now,
-        },
-        &BakedFontMetrics::SHIPPED,
-    );
-    let push = PushScene {
-        card_id: request.card_id,
-        revision: request.revision,
-        scene,
-    };
-    validate_message(&Message::PushScene(push.clone())).map_err(|error| {
-        AdminError::InvalidScene {
-            message: error.to_string(),
-        }
-    })?;
+    let push = build_push_scene(request, state.plugins())?;
     let runtime = state
         .device_link(&device_id)
         .and_then(|link| link.runtime())
@@ -181,6 +287,93 @@ async fn post_scene(
         .map_err(AdminError::from)?;
 
     Ok(StatusCode::OK)
+}
+
+fn build_push_scene(
+    request: PushSceneRequest,
+    plugins: &std::sync::Arc<PluginRegistry>,
+) -> Result<PushScene, AdminError> {
+    let PushSceneRequest {
+        card_id,
+        revision,
+        template,
+        show_seconds,
+        local_now,
+        plugin_id,
+        data,
+        stale,
+        error,
+    } = request;
+    let scene = match template.as_str() {
+        "digital_clock" => {
+            let show_seconds = show_seconds.ok_or_else(|| AdminError::InvalidScene {
+                message: "show_seconds is required for scene template \"digital_clock\"".into(),
+            })?;
+            let local_now = local_now.ok_or_else(|| AdminError::InvalidScene {
+                message: "local_now is required for scene template \"digital_clock\"".into(),
+            })?;
+            let local_now = NaiveDateTime::parse_from_str(&local_now, "%Y-%m-%dT%H:%M:%S")
+                .map_err(|_| AdminError::InvalidScene {
+                    message: "local_now must use YYYY-MM-DDTHH:MM:SS".into(),
+                })?;
+            build_digital_clock_scene(
+                &ClockCard {
+                    revision,
+                    show_seconds,
+                    local_now,
+                },
+                &BakedFontMetrics::SHIPPED,
+            )
+        }
+        "plugin" => {
+            let plugin_id = plugin_id.ok_or_else(|| AdminError::InvalidScene {
+                message: "plugin_id is required for scene template \"plugin\"".into(),
+            })?;
+            let OptionalSceneData::Present(data) = data else {
+                return Err(AdminError::InvalidScene {
+                    message: "data is required for scene template \"plugin\"".into(),
+                });
+            };
+            let data_length = serde_json::to_vec(&data)
+                .map_err(|error| AdminError::InvalidScene {
+                    message: format!("plugin data could not be measured: {error}"),
+                })?
+                .len();
+            if data_length > MAX_OPERATOR_PLUGIN_DATA_BYTES {
+                return Err(AdminError::InvalidScene {
+                    message: format!(
+                        "plugin data is {data_length} bytes; the limit is {MAX_OPERATOR_PLUGIN_DATA_BYTES}"
+                    ),
+                });
+            }
+            let snapshot = providers::ProviderSnapshot {
+                value: data,
+                refreshed_at: None,
+                age: None,
+                stale,
+                error,
+            };
+            ServerPluginHost::new(std::sync::Arc::clone(plugins))
+                .render_scene(&plugin_id, &snapshot, &BakedFontMetrics::SHIPPED, revision)
+                .map_err(|message| AdminError::InvalidScene { message })?
+        }
+        _ => {
+            return Err(AdminError::InvalidScene {
+                message: format!("unknown scene template {template:?}"),
+            });
+        }
+    };
+    let push = PushScene {
+        card_id,
+        revision,
+        scene,
+    };
+    validate_message(&Message::PushScene(push.clone())).map_err(|error| {
+        AdminError::InvalidScene {
+            message: error.to_string(),
+        }
+    })?;
+    Ok(push)
 }
 
 async fn get_device(
@@ -306,7 +499,103 @@ impl Serialize for AdminSnapshot {
 
 #[cfg(test)]
 mod tests {
-    use super::{insert_last_ota_error, insert_observed_age_seconds, observed_age_seconds};
+    use std::path::Path;
+    use std::sync::Arc;
+
+    use axum::body::{Body, to_bytes};
+    use axum::http::{Request, StatusCode};
+    use axum::response::Response;
+    use tower::ServiceExt as _;
+
+    use super::{
+        AdminError, MAX_OPERATOR_PLUGIN_DATA_BYTES, PushSceneRequest, build_push_scene,
+        insert_last_ota_error, insert_observed_age_seconds, observed_age_seconds,
+    };
+
+    const AQI_FIXTURE: &str = include_str!("../../plugin/tests/fixtures/aqi_response.json");
+    const AGENDA_FIXTURE: &str = include_str!("../../plugin/tests/fixtures/agenda_response.json");
+
+    fn curated_plugins_dir() -> std::path::PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plugins")
+    }
+
+    fn curated_registry() -> Arc<crate::plugin_registry::PluginRegistry> {
+        let (registry, failures) =
+            crate::plugin_registry::PluginRegistry::load(&curated_plugins_dir())
+                .expect("load curated plugins");
+        assert!(failures.is_empty(), "unexpected failures: {failures:?}");
+        Arc::new(registry)
+    }
+
+    fn payload_from_envelope(raw: &str) -> serde_json::Value {
+        let root: serde_json::Value = serde_json::from_str(raw).expect("fixture is valid JSON");
+        assert_eq!(root["status"], "ok");
+        root["payload"].clone()
+    }
+
+    fn request(value: serde_json::Value) -> PushSceneRequest {
+        serde_json::from_value(value).expect("valid scene request fixture")
+    }
+
+    fn plugin_request(
+        plugin_id: &str,
+        data: &serde_json::Value,
+        stale: bool,
+        error: Option<&str>,
+    ) -> PushSceneRequest {
+        request(serde_json::json!({
+            "card_id": format!("{plugin_id}-card"),
+            "revision": 17,
+            "template": "plugin",
+            "plugin_id": plugin_id,
+            "data": data,
+            "stale": stale,
+            "error": error,
+        }))
+    }
+
+    fn state_with_curated_plugins() -> (crate::ServerState, String, tempfile::TempDir) {
+        let config_dir = tempfile::tempdir().expect("config tempdir");
+        let state = crate::ServerState::new_with_plugins(
+            "admin-secret".into(),
+            crate::firmware::FirmwareCatalog::in_memory(),
+            config_dir.path().to_path_buf(),
+            curated_registry(),
+            Vec::new(),
+        );
+        let identity = state.registry().mint().expect("mint test device");
+        (state, identity.device_id, config_dir)
+    }
+
+    async fn post_scene_request(
+        state: crate::ServerState,
+        device_id: &str,
+        body: serde_json::Value,
+        authorized: bool,
+    ) -> Response {
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri(format!("/v1/devices/{device_id}/scene"))
+            .header("content-type", "application/json");
+        if authorized {
+            builder = builder.header("authorization", "Bearer admin-secret");
+        }
+        crate::app(state)
+            .oneshot(
+                builder
+                    .body(Body::from(body.to_string()))
+                    .expect("scene request"),
+            )
+            .await
+            .expect("scene response")
+    }
+
+    async fn response_json(response: Response) -> serde_json::Value {
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read response body");
+        serde_json::from_slice(&body).expect("typed JSON response")
+    }
 
     #[test]
     fn observed_age_is_inserted_beside_the_values_it_qualifies() {
@@ -345,6 +634,334 @@ mod tests {
             snapshot["device"]["last_ota_error"],
             "download: ESP_ERR_NO_MEM"
         );
+    }
+
+    #[test]
+    fn aqi_plugin_request_compiles_the_real_unwrapped_fixture_to_a_valid_message() {
+        let registry = curated_registry();
+        let push = build_push_scene(
+            plugin_request("aqi", &payload_from_envelope(AQI_FIXTURE), false, None),
+            &registry,
+        )
+        .expect("compile AQI fixture through the admin path");
+
+        protocol::validate_message(&protocol::Message::PushScene(push))
+            .expect("AQI admin scene must satisfy the wire validator");
+    }
+
+    #[test]
+    fn agenda_plugin_request_compiles_the_real_unwrapped_fixture_to_a_valid_message() {
+        let registry = curated_registry();
+        let push = build_push_scene(
+            plugin_request(
+                "agenda",
+                &payload_from_envelope(AGENDA_FIXTURE),
+                false,
+                None,
+            ),
+            &registry,
+        )
+        .expect("compile agenda fixture through the admin path");
+
+        protocol::validate_message(&protocol::Message::PushScene(push))
+            .expect("agenda admin scene must satisfy the wire validator");
+    }
+
+    #[test]
+    fn explicit_json_null_is_present_plugin_data_not_a_missing_field() {
+        let registry = curated_registry();
+        let push = build_push_scene(
+            plugin_request("aqi", &serde_json::Value::Null, false, None),
+            &registry,
+        )
+        .expect("JSON null is an arbitrary JSON value, not an absent data field");
+
+        protocol::validate_message(&protocol::Message::PushScene(push))
+            .expect("the missing-data AQI face must remain wire-valid");
+    }
+
+    #[test]
+    fn plugin_stale_and_error_state_each_reach_the_compiled_scene() {
+        let registry = curated_registry();
+        let data = payload_from_envelope(AQI_FIXTURE);
+        let clean = build_push_scene(plugin_request("aqi", &data, false, None), &registry)
+            .expect("compile clean scene");
+        let stale = build_push_scene(plugin_request("aqi", &data, true, None), &registry)
+            .expect("compile stale scene");
+        let errored = build_push_scene(
+            plugin_request("aqi", &data, false, Some("operator supplied error")),
+            &registry,
+        )
+        .expect("compile errored scene");
+
+        assert_ne!(stale.scene, clean.scene, "stale state was discarded");
+        assert_ne!(errored.scene, clean.scene, "error state was discarded");
+        let protocol::SceneNode::Text(stale_footer) = stale.scene.nodes.last().unwrap() else {
+            panic!("stale footer is not text");
+        };
+        let protocol::SceneNode::Text(error_footer) = errored.scene.nodes.last().unwrap() else {
+            panic!("error footer is not text");
+        };
+        assert_eq!(
+            stale_footer.value,
+            protocol::SceneValue::Literal("Stale".into())
+        );
+        assert_eq!(
+            error_footer.value,
+            protocol::SceneValue::Literal("operator supplied error".into())
+        );
+    }
+
+    #[test]
+    fn digital_clock_request_still_builds_the_exact_existing_scene() {
+        let registry = curated_registry();
+        let local_now = "2026-08-25T14:37:42";
+        let push = build_push_scene(
+            request(serde_json::json!({
+                "card_id": "clock-1",
+                "revision": 17,
+                "template": "digital_clock",
+                "show_seconds": true,
+                "local_now": local_now,
+            })),
+            &registry,
+        )
+        .expect("build digital clock through the refactored path");
+
+        assert_eq!(push.card_id, "clock-1");
+        assert_eq!(push.revision, 17);
+        assert_eq!(
+            push.scene,
+            app_core::build_digital_clock_scene(
+                &app_core::ClockCard {
+                    revision: 17,
+                    show_seconds: true,
+                    local_now: local_now.parse().expect("valid test instant"),
+                },
+                &app_core::BakedFontMetrics::SHIPPED,
+            )
+        );
+    }
+
+    #[test]
+    fn operator_plugin_data_over_the_cap_is_rejected_even_when_the_manifest_ignores_it() {
+        let registry = curated_registry();
+        let mut data = payload_from_envelope(AQI_FIXTURE);
+        data["unused"] = serde_json::Value::String("x".repeat(MAX_OPERATOR_PLUGIN_DATA_BYTES));
+
+        let error = build_push_scene(plugin_request("aqi", &data, false, None), &registry)
+            .expect_err("oversized operator data must be refused before compilation");
+        let AdminError::InvalidScene { message } = error else {
+            panic!("oversized data returned the wrong error type: {error:?}");
+        };
+        assert!(message.contains("plugin data is"));
+        assert!(message.contains(&MAX_OPERATOR_PLUGIN_DATA_BYTES.to_string()));
+    }
+
+    #[tokio::test]
+    async fn unknown_plugin_id_is_a_typed_bad_request_naming_only_that_id() {
+        let (state, device_id, _config_dir) = state_with_curated_plugins();
+        let response = post_scene_request(
+            state,
+            &device_id,
+            serde_json::json!({
+                "card_id": "missing-card",
+                "revision": 17,
+                "template": "plugin",
+                "plugin_id": "not-installed",
+                "data": {},
+            }),
+            true,
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let error = response_json(response).await;
+        assert_eq!(error["kind"], "invalid-scene");
+        assert_eq!(error["message"], "unknown plugin id \"not-installed\"");
+    }
+
+    #[tokio::test]
+    async fn plugin_compile_failure_is_a_typed_bad_request_with_the_host_message() {
+        let (state, device_id, _config_dir) = state_with_curated_plugins();
+        let mut data = payload_from_envelope(AQI_FIXTURE);
+        data["current"]["category"] = serde_json::Value::String("x".repeat(4097));
+        let response = post_scene_request(
+            state,
+            &device_id,
+            serde_json::json!({
+                "card_id": "aqi-card",
+                "revision": 17,
+                "template": "plugin",
+                "plugin_id": "aqi",
+                "data": data,
+            }),
+            true,
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let error = response_json(response).await;
+        assert_eq!(error["kind"], "invalid-scene");
+        assert!(
+            error["message"]
+                .as_str()
+                .unwrap()
+                .starts_with("permanent plugin render failure for \"aqi\":"),
+            "host classification was lost: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn plugin_template_without_data_is_a_typed_bad_request() {
+        let (state, device_id, _config_dir) = state_with_curated_plugins();
+        let response = post_scene_request(
+            state,
+            &device_id,
+            serde_json::json!({
+                "card_id": "aqi-card",
+                "revision": 17,
+                "template": "plugin",
+                "plugin_id": "aqi",
+            }),
+            true,
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let error = response_json(response).await;
+        assert_eq!(error["kind"], "invalid-scene");
+        assert_eq!(
+            error["message"],
+            "data is required for scene template \"plugin\""
+        );
+    }
+
+    #[tokio::test]
+    async fn plugin_template_without_plugin_id_is_a_typed_bad_request() {
+        let (state, device_id, _config_dir) = state_with_curated_plugins();
+        let response = post_scene_request(
+            state,
+            &device_id,
+            serde_json::json!({
+                "card_id": "plugin-card",
+                "revision": 17,
+                "template": "plugin",
+                "data": {},
+            }),
+            true,
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let error = response_json(response).await;
+        assert_eq!(error["kind"], "invalid-scene");
+        assert_eq!(
+            error["message"],
+            "plugin_id is required for scene template \"plugin\""
+        );
+    }
+
+    #[tokio::test]
+    async fn scene_route_requires_admin_authentication() {
+        let response = post_scene_request(
+            crate::ServerState::in_memory(),
+            "dev-unknown",
+            serde_json::json!({
+                "card_id": "aqi-card",
+                "revision": 17,
+                "template": "plugin",
+                "plugin_id": "aqi",
+                "data": {},
+            }),
+            false,
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn plugin_catalog_digest_matches_resolve_assets_for_the_same_file() {
+        let plugins_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plugins");
+        let (registry, failures) = crate::plugin_registry::PluginRegistry::load(&plugins_dir)
+            .expect("load curated plugins");
+        assert!(failures.is_empty());
+        let manifest_source = std::fs::read_to_string(plugins_dir.join("aqi/manifest.toml"))
+            .expect("read AQI manifest");
+        let manifest = plugin::parse_manifest(&manifest_source).expect("parse AQI manifest");
+        let independently_resolved = plugin::resolve_assets(&manifest, &plugins_dir.join("aqi"))
+            .expect("resolve AQI assets");
+        let expected = super::digest_hex(
+            &independently_resolved
+                .get("icons.ttf")
+                .expect("AQI icon font")
+                .digest,
+        );
+        let config_dir = tempfile::tempdir().expect("config tempdir");
+        let state = crate::ServerState::new_with_plugins(
+            "admin-secret".into(),
+            crate::firmware::FirmwareCatalog::in_memory(),
+            config_dir.path().to_path_buf(),
+            Arc::new(registry),
+            vec![crate::plugin_registry::PluginLoadFailure {
+                id: "broken".into(),
+                error: crate::plugin_registry::PluginLoadError::ManifestRead {
+                    path: plugins_dir.join("broken/manifest.toml"),
+                    message: "fixture failure".into(),
+                },
+            }],
+        );
+
+        let router = crate::app(state);
+        let unauthorized = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/plugins")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("unauthorized route response");
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/plugins")
+                    .header("authorization", "Bearer admin-secret")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("route response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read response body");
+        let body: serde_json::Value = serde_json::from_slice(&body).expect("parse response JSON");
+        let aqi = body["plugins"]
+            .as_array()
+            .expect("plugins array")
+            .iter()
+            .find(|plugin| plugin["id"] == "aqi")
+            .expect("AQI response entry");
+        let icons = aqi["assets"]
+            .as_array()
+            .expect("assets array")
+            .iter()
+            .find(|asset| asset["file"] == "icons.ttf")
+            .expect("AQI icon response entry");
+
+        assert_eq!(icons["digest"], expected);
+        assert_eq!(
+            icons["byte_length"],
+            std::fs::metadata(plugins_dir.join("aqi/icons.ttf"))
+                .unwrap()
+                .len()
+        );
+        assert_eq!(body["load_failures"][0]["id"], "broken");
     }
 }
 

@@ -1,3 +1,4 @@
+pub mod asset_sync;
 pub mod commands;
 pub mod config;
 pub mod network_settings;
@@ -8,6 +9,7 @@ mod secure_file;
 pub mod state;
 pub mod store;
 
+pub use asset_sync::DesiredAsset;
 pub use commands::{PomodoroAction, RuntimeError};
 pub use config::{
     AlertHold, AppConfig, AppPreferences, AssetKind, AssetSettings, AssetSource,
@@ -35,7 +37,7 @@ pub use network_settings::{
 pub use protocol::{NetworkConfig, Tier as ProvisioningTier};
 pub use providers::ics::MAX_ICS_BYTES;
 pub use runtime::{
-    CalendarRefreshRequest, CalendarRefreshResult, CalendarRefresher, DeviceConnection,
+    CalendarRefreshRequest, CalendarRefreshResult, CalendarRefresher, DeviceConnection, PluginHost,
     ProviderRefreshRequest, ProviderRefreshResult, ProviderRefresher, ProviderRequest,
     RuntimeDevice, RuntimeHandle, RuntimeOptions, RuntimeSubscription, SerialRuntimeDevice,
     SystemCalendarRefresher, SystemProviderRefresher,

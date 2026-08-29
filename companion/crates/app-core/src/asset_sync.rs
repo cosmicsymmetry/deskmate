@@ -21,7 +21,7 @@ use std::fs;
 use std::io::Read;
 use std::sync::Arc;
 
-use app_core::{AssetKind as ConfigAssetKind, AssetSettings, AssetSource, RuntimeDevice};
+use crate::{AssetKind as ConfigAssetKind, AssetSettings, AssetSource, RuntimeDevice};
 use device::DeviceError;
 use protocol::{
     ASSET_DIGEST_LEN, AssetBegin, AssetChunk, AssetCommit, AssetKind, AssetRelease,
@@ -305,7 +305,7 @@ impl AssetSync {
 mod tests {
     use std::collections::HashMap;
 
-    use app_core::{
+    use crate::{
         AssetKind as ConfigAssetKind, AssetSettings, AssetSource, DeviceConnection, RuntimeDevice,
     };
     use device::{ReceivedEvent, SessionDiagnostics};

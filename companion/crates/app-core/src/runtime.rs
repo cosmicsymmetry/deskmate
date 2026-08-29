@@ -23,15 +23,16 @@ use providers::json_feed::{JsonFeedOptions, JsonFeedProvider, JsonMapping as Pro
 use providers::rss::{RssOptions, RssProvider};
 use providers::weather::{WeatherOptions, WeatherProvider, WeatherUnits as ProviderWeatherUnits};
 
+use crate::asset_sync::AssetSync;
 use crate::commands::{CommandReply, PomodoroAction, RuntimeCommand, RuntimeError};
 use crate::scheduler::Scheduler;
 use crate::{
     AlertHold, AnalogClockCard, AppConfig, AppSnapshot, BakedFontMetrics, BigNumberCard,
     CalendarSource, CardAlert, CardDataSnapshot, CardError, CardErrorKind, CardSettings, ClockCard,
-    ConnectionState, DeviceCapability, DeviceCounters, DeviceSnapshot, DeviceTier, DisplayTemplate,
-    IconBadgeCard, JsonFieldMapping, PersistenceState, PomodoroSnapshot, PomodoroState,
-    ProgressRingCard, ProviderSnapshot, ProviderState, RowListCard, RuntimeDiagnostics,
-    RuntimeState, SHIPPED_SCENE_SURFACE_COLOR, SceneDataState, WeatherUnits,
+    ConnectionState, DesiredAsset, DeviceCapability, DeviceCounters, DeviceSnapshot, DeviceTier,
+    DisplayTemplate, IconBadgeCard, JsonFieldMapping, PersistenceState, PomodoroSnapshot,
+    PomodoroState, ProgressRingCard, ProviderSnapshot, ProviderState, RowListCard,
+    RuntimeDiagnostics, RuntimeState, SHIPPED_SCENE_SURFACE_COLOR, SceneDataState, WeatherUnits,
     build_analog_clock_scene, build_big_number_label_scene, build_digital_clock_scene,
     build_icon_badge_text_scene, build_progress_ring_scene, build_row_list_scene,
     with_scene_data_state,
@@ -111,6 +112,24 @@ pub trait RuntimeDevice: Send + 'static {
     fn send_asset_release(&mut self, release: AssetRelease) -> Result<(), DeviceError>;
     fn try_recv_event(&mut self) -> Option<ReceivedEvent>;
     fn diagnostics(&self) -> SessionDiagnostics;
+}
+
+/// Host boundary used by the background runtime for plugin-owned assets and
+/// manifest scene compilation.
+pub trait PluginHost: Send + 'static {
+    /// Every asset any loaded plugin needs resident on the device,
+    /// deduplicated by digest. Called during a full synchronize.
+    fn desired_assets(&mut self) -> Vec<DesiredAsset>;
+
+    /// Compiles this plugin's scene against freshly fetched data.
+    /// `revision` is minted by the runtime at push time.
+    fn render_scene(
+        &mut self,
+        plugin_id: &str,
+        snapshot: &providers::ProviderSnapshot<serde_json::Value>,
+        metrics: &BakedFontMetrics,
+        revision: u32,
+    ) -> Result<protocol::Scene, String>;
 }
 
 pub struct SerialRuntimeDevice {
@@ -265,6 +284,10 @@ pub enum ProviderRequest {
         maximum_items: u8,
         refresh_interval: Duration,
     },
+    Plugin {
+        plugin_id: String,
+        refresh_interval: Duration,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -272,6 +295,7 @@ pub struct ProviderRefreshResult {
     pub generation: u64,
     pub widget_id: String,
     pub fields: Vec<Field>,
+    pub value: Option<serde_json::Value>,
     pub refreshed_at: Option<DateTime<Utc>>,
     pub age: Option<Duration>,
     pub stale: bool,
@@ -309,12 +333,27 @@ impl ProviderRefresher for SystemProviderRefresher {
             .get(&request.widget_id)
             .is_none_or(|entry| entry.title != request.title || entry.request != request.provider);
         if needs_replacement {
+            let Some(provider) = system_provider(&request) else {
+                return ProviderRefreshResult {
+                    generation: request.generation,
+                    widget_id: request.widget_id,
+                    fields: Vec::new(),
+                    value: None,
+                    refreshed_at: None,
+                    age: None,
+                    stale: true,
+                    error: Some(format!(
+                        "the system provider refresher does not serve plugin card {:?}",
+                        request.provider
+                    )),
+                };
+            };
             self.providers.insert(
                 request.widget_id.clone(),
                 SystemProviderEntry {
                     title: request.title.clone(),
                     request: request.provider.clone(),
-                    provider: system_provider(&request),
+                    provider,
                 },
             );
         }
@@ -368,6 +407,9 @@ impl ProviderRefresher for SystemProviderRefresher {
             generation: request.generation,
             widget_id: request.widget_id,
             fields,
+            // Built-in providers expose typed values and render through a
+            // DisplayTemplate. Only plugin manifests need the raw JSON value.
+            value: None,
             refreshed_at,
             age,
             stale,
@@ -376,7 +418,7 @@ impl ProviderRefresher for SystemProviderRefresher {
     }
 }
 
-fn system_provider(request: &ProviderRefreshRequest) -> SystemProvider {
+fn system_provider(request: &ProviderRefreshRequest) -> Option<SystemProvider> {
     match &request.provider {
         ProviderRequest::Calendar {
             source,
@@ -387,7 +429,7 @@ fn system_provider(request: &ProviderRefreshRequest) -> SystemProvider {
                 CalendarSource::File(path) => IcsSource::File(PathBuf::from(path)),
                 CalendarSource::Url(url) => IcsSource::Url(url.clone()),
             };
-            SystemProvider::Calendar(IcsProvider::system(
+            Some(SystemProvider::Calendar(IcsProvider::system(
                 source,
                 CalendarOptions {
                     default_timezone: *timezone,
@@ -396,47 +438,52 @@ fn system_provider(request: &ProviderRefreshRequest) -> SystemProvider {
                     title: request.title.clone(),
                     ..CalendarOptions::default()
                 },
-            ))
+            )))
         }
         ProviderRequest::Weather {
             location,
             units,
             refresh_interval,
-        } => SystemProvider::Weather(WeatherProvider::system(WeatherOptions {
-            location: location.clone(),
-            units: match units {
-                WeatherUnits::Metric => ProviderWeatherUnits::Metric,
-                WeatherUnits::Imperial => ProviderWeatherUnits::Imperial,
+        } => Some(SystemProvider::Weather(WeatherProvider::system(
+            WeatherOptions {
+                location: location.clone(),
+                units: match units {
+                    WeatherUnits::Metric => ProviderWeatherUnits::Metric,
+                    WeatherUnits::Imperial => ProviderWeatherUnits::Imperial,
+                },
+                refresh_interval: *refresh_interval,
+                title: request.title.clone(),
             },
-            refresh_interval: *refresh_interval,
-            title: request.title.clone(),
-        })),
+        ))),
         ProviderRequest::JsonFeed {
             url,
             mappings,
             refresh_interval,
-        } => SystemProvider::JsonFeed(JsonFeedProvider::system(JsonFeedOptions {
-            url: url.clone(),
-            mappings: mappings
-                .iter()
-                .map(|mapping| ProviderJsonMapping {
-                    field: mapping.field.clone(),
-                    path: mapping.path.clone(),
-                })
-                .collect(),
-            refresh_interval: *refresh_interval,
-            title: request.title.clone(),
-        })),
+        } => Some(SystemProvider::JsonFeed(JsonFeedProvider::system(
+            JsonFeedOptions {
+                url: url.clone(),
+                mappings: mappings
+                    .iter()
+                    .map(|mapping| ProviderJsonMapping {
+                        field: mapping.field.clone(),
+                        path: mapping.path.clone(),
+                    })
+                    .collect(),
+                refresh_interval: *refresh_interval,
+                title: request.title.clone(),
+            },
+        ))),
         ProviderRequest::Rss {
             url,
             maximum_items,
             refresh_interval,
-        } => SystemProvider::Rss(RssProvider::system(RssOptions {
+        } => Some(SystemProvider::Rss(RssProvider::system(RssOptions {
             url: url.clone(),
             maximum_items: usize::from(*maximum_items),
             refresh_interval: *refresh_interval,
             title: request.title.clone(),
-        })),
+        }))),
+        ProviderRequest::Plugin { .. } => None,
     }
 }
 
@@ -681,6 +728,16 @@ impl RuntimeHandle {
         refresher: Box<dyn CalendarRefresher>,
         options: RuntimeOptions,
     ) -> Result<Self, RuntimeError> {
+        Self::start_with_plugin_host(config, device, refresher, options, None)
+    }
+
+    pub fn start_with_plugin_host(
+        config: AppConfig,
+        device: Box<dyn RuntimeDevice>,
+        refresher: Box<dyn CalendarRefresher>,
+        options: RuntimeOptions,
+        plugin_host: Option<Box<dyn PluginHost>>,
+    ) -> Result<Self, RuntimeError> {
         config
             .compile(1)
             .map_err(|error| RuntimeError::InvalidConfig {
@@ -698,13 +755,17 @@ impl RuntimeHandle {
         let (sender, receiver) = mpsc::sync_channel(options.command_capacity.max(1));
         let worker_publisher = Arc::clone(&publisher);
         let worker_diagnostics = Arc::clone(&diagnostics);
+        let worker_inputs = RuntimeWorkerInputs {
+            config,
+            device,
+            refresher,
+            plugin_host,
+        };
         let worker = thread::Builder::new()
             .name("deskmate-runtime".into())
             .spawn(move || {
                 run_runtime(
-                    config,
-                    device,
-                    refresher,
+                    worker_inputs,
                     &receiver,
                     &worker_publisher,
                     &worker_diagnostics,
@@ -877,6 +938,8 @@ struct WorkerState {
     device: DeviceSnapshot,
     persistence: PersistenceState,
     latest_fields: BTreeMap<String, Vec<Field>>,
+    plugin_snapshots: BTreeMap<String, providers::ProviderSnapshot<serde_json::Value>>,
+    plugin_host: Option<Box<dyn PluginHost>>,
     dirty_widgets: BTreeSet<String>,
     /// Card ID -> the most recent typed refusal for that card. There is deliberately
     /// one editor-visible slot per card: if data and scene refusals happen before
@@ -919,6 +982,8 @@ impl WorkerState {
             device: empty_device(ConnectionState::Connecting),
             persistence: PersistenceState::Clean,
             latest_fields: BTreeMap::new(),
+            plugin_snapshots: BTreeMap::new(),
+            plugin_host: None,
             dirty_widgets: BTreeSet::new(),
             push_rejections: BTreeMap::new(),
             pomodoros: BTreeMap::new(),
@@ -948,6 +1013,7 @@ impl WorkerState {
         let previous_config = self.config.clone();
         let previous_active_screen = self.active_screen.clone();
         let mut previous_fields = std::mem::take(&mut self.latest_fields);
+        let mut previous_plugin_snapshots = std::mem::take(&mut self.plugin_snapshots);
         let mut previous_pomodoros = std::mem::take(&mut self.pomodoros);
         let mut previous_providers = std::mem::take(&mut self.providers);
         self.generation = self.generation.saturating_add(1);
@@ -1019,6 +1085,12 @@ impl WorkerState {
                         &mut previous_fields,
                         &mut previous_providers,
                     );
+                    if matches!(card, CardSettings::Plugin { .. })
+                        && unchanged
+                        && let Some(snapshot) = previous_plugin_snapshots.remove(id)
+                    {
+                        self.plugin_snapshots.insert(id.clone(), snapshot);
+                    }
                 }
                 CardSettings::Clock { .. } => {}
             }
@@ -1257,15 +1329,26 @@ fn advance_rotation(state: &mut WorkerState, scheduler: &mut Scheduler, now: Ins
     }
 }
 
-fn run_runtime(
+struct RuntimeWorkerInputs {
     config: AppConfig,
-    mut device: Box<dyn RuntimeDevice>,
+    device: Box<dyn RuntimeDevice>,
     refresher: Box<dyn CalendarRefresher>,
+    plugin_host: Option<Box<dyn PluginHost>>,
+}
+
+fn run_runtime(
+    inputs: RuntimeWorkerInputs,
     command_receiver: &Receiver<RuntimeCommand>,
     publisher: &SnapshotPublisher,
     diagnostics: &RuntimeDiagnosticCounters,
     options: RuntimeOptions,
 ) {
+    let RuntimeWorkerInputs {
+        config,
+        mut device,
+        refresher,
+        plugin_host,
+    } = inputs;
     let now = Instant::now();
     let mut scheduler = Scheduler::new(
         now,
@@ -1274,6 +1357,7 @@ fn run_runtime(
         options.time_sync_interval,
     );
     let mut state = WorkerState::new(config, now, &mut scheduler);
+    state.plugin_host = plugin_host;
     let provider = ProviderWorker::new(refresher, options.provider_job_capacity);
     state.publish_if_changed(publisher, diagnostics);
 
@@ -1745,6 +1829,23 @@ fn provider_request(state: &WorkerState, widget_id: &str) -> Option<ProviderRefr
             active_provider_ids: active_provider_ids.clone(),
             now: Utc::now(),
         }),
+        CardSettings::Plugin {
+            id,
+            title,
+            plugin_id,
+            refresh,
+            ..
+        } if id == widget_id => Some(ProviderRefreshRequest {
+            generation: state.generation,
+            widget_id: id.clone(),
+            title: title.clone(),
+            provider: ProviderRequest::Plugin {
+                plugin_id: plugin_id.clone(),
+                refresh_interval: refresh_interval(*refresh),
+            },
+            active_provider_ids: active_provider_ids.clone(),
+            now: Utc::now(),
+        }),
         _ => None,
     })
 }
@@ -1808,6 +1909,24 @@ fn apply_provider_result(
         last_success_unix_ms: result.refreshed_at.map(|time| time.timestamp_millis()),
         age_seconds: result.age.map(|age| age.as_secs()),
     };
+    if state
+        .config
+        .cards
+        .iter()
+        .any(|card| matches!(card, CardSettings::Plugin { id, .. } if id == &result.widget_id))
+        && let Some(value) = result.value
+    {
+        state.plugin_snapshots.insert(
+            result.widget_id.clone(),
+            providers::ProviderSnapshot {
+                value,
+                refreshed_at: result.refreshed_at,
+                age: result.age,
+                stale: result.stale,
+                error: result.error.clone(),
+            },
+        );
+    }
     let widget_id = result.widget_id;
     state.latest_fields.insert(widget_id.clone(), result.fields);
     state.dirty_widgets.insert(widget_id.clone());
@@ -2207,6 +2326,31 @@ fn synchronize_full(
         .config
         .compile(1)
         .expect("runtime config remains validated");
+    // Config-declared assets (`CompiledAppConfig.assets` / `AssetSettings`)
+    // remain deliberately unwired. `desired_assets()` currently covers plugin
+    // assets only, and AssetRelease is authoritative over the whole device.
+    // Mixing the two before config assets have an owner would delete them.
+    // An empty desired set is NOT an empty-op reconcile. `AssetRelease`
+    // carries the full keep-set, so the device marks every committed record
+    // whose digest is absent from it DEAD and compacts it away
+    // (`firmware/main/core/asset_store.c`'s `plan_compaction`). An empty list
+    // therefore means "wipe every asset you hold", and a server that simply
+    // has no plugins loaded -- the default when no plugins directory is
+    // configured, which is a valid deployment -- would issue that wipe on
+    // every full synchronize. Skip the pass entirely instead: having nothing
+    // to say is not the same as asking for everything to be dropped.
+    let asset_result = state.plugin_host.as_mut().and_then(|host| {
+        let desired = host.desired_assets();
+        if desired.is_empty() {
+            return None;
+        }
+        Some(AssetSync::reconcile(device, &desired))
+    });
+    match asset_result {
+        Some(Ok(_)) => clear_plugin_asset_sync_refusals(state),
+        Some(Err(error)) => record_plugin_asset_sync_refusals(state, &error.to_string()),
+        None => {}
+    }
     if !sync_device_result(
         state,
         device.apply_layout(
@@ -2229,6 +2373,34 @@ fn synchronize_full(
     state.active_scene_dirty = state.active_screen.is_some();
     state.needs_full_sync = false;
     Ok(())
+}
+
+const PLUGIN_ASSET_SYNC_REFUSAL_PREFIX: &str = "plugin asset reconciliation failed: ";
+
+fn record_plugin_asset_sync_refusals(state: &mut WorkerState, message: &str) {
+    let card_ids: Vec<String> = state
+        .config
+        .cards
+        .iter()
+        .filter_map(|card| match card {
+            CardSettings::Plugin { id, .. } => Some(id.clone()),
+            _ => None,
+        })
+        .collect();
+    for card_id in card_ids {
+        record_scene_refusal(
+            state,
+            card_id,
+            format!("{PLUGIN_ASSET_SYNC_REFUSAL_PREFIX}{message}"),
+        );
+    }
+}
+
+fn clear_plugin_asset_sync_refusals(state: &mut WorkerState) {
+    state.push_rejections.retain(|_, error| {
+        error.kind != CardErrorKind::SceneRefused
+            || !error.message.starts_with(PLUGIN_ASSET_SYNC_REFUSAL_PREFIX)
+    });
 }
 
 fn synchronize_pending(
@@ -2344,6 +2516,8 @@ fn build_card_scene(
     config: &AppConfig,
     card_id: &str,
     fields: &[Field],
+    plugin_snapshot: Option<&providers::ProviderSnapshot<serde_json::Value>>,
+    plugin_host: Option<&mut dyn PluginHost>,
     revision: u32,
 ) -> Result<PushScene, String> {
     let card = config
@@ -2352,6 +2526,53 @@ fn build_card_scene(
         .find(|card| card.id() == card_id)
         .ok_or_else(|| format!("card {card_id:?} is not present in the active configuration"))?;
     let metrics = &BakedFontMetrics::SHIPPED;
+    let scene = if let CardSettings::Plugin { plugin_id, .. } = card {
+        let snapshot = plugin_snapshot.ok_or_else(|| {
+            format!(
+                "card {card_id:?} has no fetched plugin snapshot cached yet; wait for its first refresh"
+            )
+        })?;
+        let host = plugin_host.ok_or_else(|| {
+            format!("card {card_id:?} cannot render because no plugin host is configured")
+        })?;
+        let scene = host
+            .render_scene(plugin_id, snapshot, metrics, revision)
+            .map_err(|error| {
+                format!("plugin {plugin_id:?} could not render card {card_id:?}: {error}")
+            })?;
+        // The plugin compiler already applies `with_scene_data_state`. Do not
+        // stamp it here too, or stale/error footers would be duplicated.
+        scene
+    } else {
+        let scene = build_template_card_scene(config, card, card_id, fields, revision, metrics)?;
+        let error = field_text(fields, "error");
+        with_scene_data_state(
+            scene,
+            SceneDataState {
+                stale: field_boolean(fields, "stale"),
+                error: (!error.is_empty()).then_some(error),
+            },
+            metrics,
+        )
+    };
+    let push = PushScene {
+        card_id: card_id.to_owned(),
+        revision,
+        scene,
+    };
+    validate_message(&Message::PushScene(push.clone()))
+        .map_err(|error| format!("the host-built scene is invalid: {error}"))?;
+    Ok(push)
+}
+
+fn build_template_card_scene(
+    config: &AppConfig,
+    card: &CardSettings,
+    card_id: &str,
+    fields: &[Field],
+    revision: u32,
+    metrics: &BakedFontMetrics,
+) -> Result<protocol::Scene, String> {
     let scene = match card.template() {
         Some(DisplayTemplate::DigitalClock) => {
             let timezone: Tz = config
@@ -2421,34 +2642,13 @@ fn build_card_scene(
             SHIPPED_SCENE_SURFACE_COLOR,
             metrics,
         ),
-        // A plugin card has no `DisplayTemplate`: its scene comes from compiling its
-        // manifest against fetched provider data (`plugin::compile_scene`), which is
-        // server-side plugin wiring this schema-only task does not implement. Refuse
-        // through the same typed, per-card mechanism a revision-counter exhaustion
-        // uses below, rather than compiling nothing or panicking.
         None => {
             return Err(format!(
-                "card {card_id:?} is a plugin card; plugin scene rendering is not implemented yet"
+                "card {card_id:?} has no display template and is not a plugin card"
             ));
         }
     };
-    let error = field_text(fields, "error");
-    let scene = with_scene_data_state(
-        scene,
-        SceneDataState {
-            stale: field_boolean(fields, "stale"),
-            error: (!error.is_empty()).then_some(error),
-        },
-        metrics,
-    );
-    let push = PushScene {
-        card_id: card_id.to_owned(),
-        revision,
-        scene,
-    };
-    validate_message(&Message::PushScene(push.clone()))
-        .map_err(|error| format!("the host-built scene is invalid: {error}"))?;
-    Ok(push)
+    Ok(scene)
 }
 
 fn record_scene_refusal(state: &mut WorkerState, card_id: String, message: String) {
@@ -2573,7 +2773,14 @@ fn push_active_scene(
         .get(&card_id)
         .map(Vec::as_slice)
         .unwrap_or_default();
-    let push = match build_card_scene(&state.config, &card_id, fields, revision) {
+    let push = match build_card_scene(
+        &state.config,
+        &card_id,
+        fields,
+        state.plugin_snapshots.get(&card_id),
+        state.plugin_host.as_deref_mut(),
+        revision,
+    ) {
         Ok(push) => push,
         Err(message) => {
             state.active_scene_dirty = false;
@@ -2988,6 +3195,7 @@ mod tests {
                 generation: request.generation,
                 widget_id: request.widget_id,
                 fields: Vec::new(),
+                value: None,
                 refreshed_at: Some(request.now),
                 age: Some(Duration::ZERO),
                 stale: false,
@@ -3252,6 +3460,12 @@ mod tests {
     struct ScheduledWorkDevice {
         status_calls: usize,
         time_sync_calls: usize,
+        layout_calls: usize,
+        fail_asset_begin: bool,
+        /// Every `AssetRelease` keep-set the device was sent, in order. An
+        /// empty keep-set is a destructive full wipe, not a no-op, so a test
+        /// has to be able to see that none was sent at all.
+        asset_releases: Vec<Vec<[u8; protocol::ASSET_DIGEST_LEN]>>,
     }
 
     impl RuntimeDevice for ScheduledWorkDevice {
@@ -3286,6 +3500,7 @@ mod tests {
             _widgets: Vec<WidgetConfig>,
             _screens: Vec<ScreenConfig>,
         ) -> Result<(), DeviceError> {
+            self.layout_calls += 1;
             Ok(())
         }
 
@@ -3310,6 +3525,9 @@ mod tests {
         }
 
         fn send_asset_begin(&mut self, _begin: AssetBegin) -> Result<Ack, DeviceError> {
+            if self.fail_asset_begin {
+                return Err(DeviceError::Timeout);
+            }
             Ok(Ack {
                 acknowledged_type: protocol::TYPE_ASSET_BEGIN,
                 revision: None,
@@ -3325,7 +3543,8 @@ mod tests {
             Ok(())
         }
 
-        fn send_asset_release(&mut self, _release: AssetRelease) -> Result<(), DeviceError> {
+        fn send_asset_release(&mut self, release: AssetRelease) -> Result<(), DeviceError> {
+            self.asset_releases.push(release.digests);
             Ok(())
         }
 
@@ -4492,6 +4711,7 @@ mod tests {
                 key: "next_start_unix_ms".into(),
                 value: FieldValue::Integer(event_start_unix_ms),
             }],
+            value: None,
             refreshed_at: Some(Utc::now()),
             age: Some(Duration::ZERO),
             stale: false,
@@ -4532,12 +4752,10 @@ mod tests {
 
     #[test]
     fn build_card_scene_refuses_a_plugin_card_typed_and_visibly() {
-        // A plugin card has no `DisplayTemplate` (`card.template()` is `None`), so
-        // `build_card_scene` cannot dispatch to any of the six built-in scene
-        // builders. It must refuse typed and visibly -- via the same `Result<_,
-        // String>` -> `record_scene_refusal` -> `CardErrorKind::SceneRefused` path a
-        // revision-counter exhaustion uses -- rather than compiling nothing, panicking,
-        // or silently drawing some unrelated built-in face.
+        // Until the first fetch lands there is no manifest input to compile. The
+        // runtime must refuse through the existing `Result<_, String>` ->
+        // `record_scene_refusal` -> `CardErrorKind::SceneRefused` path rather than
+        // panicking or drawing an unrelated built-in face.
         let card = CardSettings::Plugin {
             id: "aqi".into(),
             title: "Air quality".into(),
@@ -4548,11 +4766,281 @@ mod tests {
         };
         let config = rotation_config(vec![card], CarouselAdvance::Manual, &[("aqi", None)]);
 
-        let error = build_card_scene(&config, "aqi", &[], 1).unwrap_err();
+        let error = build_card_scene(&config, "aqi", &[], None, None, 1).unwrap_err();
 
         assert!(
-            error.contains("\"aqi\"") && error.contains("is a plugin card"),
+            error.contains("\"aqi\"") && error.contains("no fetched plugin snapshot"),
             "expected a typed refusal naming the plugin card by id, got {error:?}"
+        );
+    }
+
+    #[test]
+    fn plugin_provider_request_preserves_identity_and_refresh_policy() {
+        let card = CardSettings::Plugin {
+            id: "aqi".into(),
+            title: "Air quality".into(),
+            plugin_id: "curated-aqi".into(),
+            tap_action: WidgetTapAction::None,
+            refresh: RefreshPolicy::Interval { minutes: 15 },
+            alert: CardAlert::None,
+        };
+        let config = rotation_config(vec![card], CarouselAdvance::Manual, &[("aqi", None)]);
+        let now = Instant::now();
+        let mut scheduler = fresh_scheduler(now);
+        let state = WorkerState::new(config, now, &mut scheduler);
+
+        let request = super::provider_request(&state, "aqi").expect("plugin provider request");
+
+        assert_eq!(request.widget_id, "aqi");
+        assert_eq!(request.title, "Air quality");
+        assert!(matches!(
+            request.provider,
+            ProviderRequest::Plugin {
+                plugin_id,
+                refresh_interval,
+            } if plugin_id == "curated-aqi" && refresh_interval == Duration::from_mins(15)
+        ));
+    }
+
+    #[test]
+    fn raw_plugin_value_survives_apply_provider_result_into_the_snapshot_cache() {
+        let card = CardSettings::Plugin {
+            id: "aqi".into(),
+            title: "Air quality".into(),
+            plugin_id: "aqi".into(),
+            tap_action: WidgetTapAction::None,
+            refresh: RefreshPolicy::Manual,
+            alert: CardAlert::None,
+        };
+        let config = rotation_config(vec![card], CarouselAdvance::Manual, &[("aqi", None)]);
+        let now = Instant::now();
+        let mut scheduler = fresh_scheduler(now);
+        let mut state = WorkerState::new(config, now, &mut scheduler);
+        let diagnostics = RuntimeDiagnosticCounters::default();
+        let refreshed_at = Utc::now();
+        let generation = state.generation;
+
+        apply_provider_result(
+            &mut state,
+            &mut scheduler,
+            &diagnostics,
+            now,
+            ProviderRefreshResult {
+                generation,
+                widget_id: "aqi".into(),
+                fields: Vec::new(),
+                value: Some(serde_json::json!({"aqi": 73, "category": "moderate"})),
+                refreshed_at: Some(refreshed_at),
+                age: Some(Duration::from_secs(9)),
+                stale: true,
+                error: Some("using last good response".into()),
+            },
+        );
+
+        assert_eq!(
+            state.plugin_snapshots.get("aqi"),
+            Some(&providers::ProviderSnapshot {
+                value: serde_json::json!({"aqi": 73, "category": "moderate"}),
+                refreshed_at: Some(refreshed_at),
+                age: Some(Duration::from_secs(9)),
+                stale: true,
+                error: Some("using last good response".into()),
+            })
+        );
+    }
+
+    #[test]
+    fn plugin_snapshot_is_evicted_when_its_card_leaves_the_config() {
+        let card = CardSettings::Plugin {
+            id: "aqi".into(),
+            title: "Air quality".into(),
+            plugin_id: "aqi".into(),
+            tap_action: WidgetTapAction::None,
+            refresh: RefreshPolicy::Manual,
+            alert: CardAlert::None,
+        };
+        let config = rotation_config(vec![card], CarouselAdvance::Manual, &[("aqi", None)]);
+        let now = Instant::now();
+        let mut scheduler = fresh_scheduler(now);
+        let mut state = WorkerState::new(config, now, &mut scheduler);
+        state.plugin_snapshots.insert(
+            "aqi".into(),
+            providers::ProviderSnapshot {
+                value: serde_json::json!({"aqi": 1}),
+                refreshed_at: Some(Utc::now()),
+                age: Some(Duration::ZERO),
+                stale: false,
+                error: None,
+            },
+        );
+
+        state.replace_config(AppConfig::default(), now, &mut scheduler);
+
+        assert!(!state.plugin_snapshots.contains_key("aqi"));
+    }
+
+    #[test]
+    fn system_provider_refresher_returns_a_typed_plugin_error() {
+        let mut refresher = SystemProviderRefresher::default();
+
+        let result = refresher.refresh(ProviderRefreshRequest {
+            generation: 7,
+            widget_id: "aqi".into(),
+            title: "Air quality".into(),
+            provider: ProviderRequest::Plugin {
+                plugin_id: "aqi".into(),
+                refresh_interval: Duration::from_mins(15),
+            },
+            active_provider_ids: vec!["aqi".into()],
+            now: Utc::now(),
+        });
+
+        assert_eq!(result.generation, 7);
+        assert_eq!(result.widget_id, "aqi");
+        assert!(result.value.is_none());
+        assert!(result.stale);
+        assert!(
+            result
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("does not serve plugin card"))
+        );
+    }
+
+    struct AssetOnlyPluginHost;
+
+    impl PluginHost for AssetOnlyPluginHost {
+        fn desired_assets(&mut self) -> Vec<DesiredAsset> {
+            vec![DesiredAsset {
+                digest: [0x5a; protocol::ASSET_DIGEST_LEN],
+                kind: protocol::AssetKind::Font,
+                bytes: Arc::from(&b"fixture font bytes"[..]),
+            }]
+        }
+
+        fn render_scene(
+            &mut self,
+            _plugin_id: &str,
+            _snapshot: &providers::ProviderSnapshot<serde_json::Value>,
+            _metrics: &BakedFontMetrics,
+            _revision: u32,
+        ) -> Result<protocol::Scene, String> {
+            unreachable!("this test exercises only full synchronization")
+        }
+    }
+
+    #[test]
+    fn asset_sync_failure_is_card_scoped_and_full_sync_continues() {
+        let card = CardSettings::Plugin {
+            id: "aqi".into(),
+            title: "Air quality".into(),
+            plugin_id: "aqi".into(),
+            tap_action: WidgetTapAction::None,
+            refresh: RefreshPolicy::Manual,
+            alert: CardAlert::None,
+        };
+        let config = rotation_config(vec![card], CarouselAdvance::Manual, &[("aqi", None)]);
+        let now = Instant::now();
+        let mut scheduler = fresh_scheduler(now);
+        let mut state = WorkerState::new(config, now, &mut scheduler);
+        state.plugin_host = Some(Box::new(AssetOnlyPluginHost));
+        let mut device = ScheduledWorkDevice {
+            fail_asset_begin: true,
+            ..ScheduledWorkDevice::default()
+        };
+
+        synchronize_full(&mut state, &mut scheduler, &mut device, now).unwrap();
+
+        assert_eq!(device.layout_calls, 1, "layout sync must continue");
+        assert!(!state.needs_full_sync);
+        assert!(state.push_rejections.get("aqi").is_some_and(|error| {
+            error.kind == CardErrorKind::SceneRefused
+                && error.message.contains("plugin asset reconciliation failed")
+        }));
+    }
+
+    struct NoAssetPluginHost;
+
+    impl PluginHost for NoAssetPluginHost {
+        fn desired_assets(&mut self) -> Vec<DesiredAsset> {
+            Vec::new()
+        }
+
+        fn render_scene(
+            &mut self,
+            _plugin_id: &str,
+            _snapshot: &providers::ProviderSnapshot<serde_json::Value>,
+            _metrics: &BakedFontMetrics,
+            _revision: u32,
+        ) -> Result<protocol::Scene, String> {
+            unreachable!("this test exercises only full synchronization")
+        }
+    }
+
+    /// A host with nothing to provision must send no `AssetRelease` at all.
+    ///
+    /// `AssetRelease` carries the full keep-set, so an empty one instructs the
+    /// device to mark every asset it holds DEAD. A server whose plugin
+    /// registry is empty -- the default when no plugins directory is
+    /// configured, which is a supported deployment -- would otherwise wipe the
+    /// device's assets on every full synchronize. Deleting the emptiness guard
+    /// in `synchronize_full` makes this fail.
+    #[test]
+    fn an_empty_desired_asset_set_sends_no_release_rather_than_wiping_the_device() {
+        let card = CardSettings::Plugin {
+            id: "aqi".into(),
+            title: "Air quality".into(),
+            plugin_id: "aqi".into(),
+            tap_action: WidgetTapAction::None,
+            refresh: RefreshPolicy::Manual,
+            alert: CardAlert::None,
+        };
+        let config = rotation_config(vec![card], CarouselAdvance::Manual, &[("aqi", None)]);
+        let now = Instant::now();
+        let mut scheduler = fresh_scheduler(now);
+        let mut state = WorkerState::new(config, now, &mut scheduler);
+        state.plugin_host = Some(Box::new(NoAssetPluginHost));
+        let mut device = ScheduledWorkDevice::default();
+
+        synchronize_full(&mut state, &mut scheduler, &mut device, now).unwrap();
+
+        assert!(
+            device.asset_releases.is_empty(),
+            "an empty keep-set is a full wipe, so no AssetRelease may be sent: {:?}",
+            device.asset_releases
+        );
+        assert_eq!(device.layout_calls, 1, "layout sync still runs");
+        assert!(
+            state.push_rejections.is_empty(),
+            "skipping an empty pass is not a failure"
+        );
+    }
+
+    /// The complement: a host that DOES want assets still sends the keep-set,
+    /// so the guard above cannot be satisfied by never reconciling at all.
+    #[test]
+    fn a_non_empty_desired_asset_set_still_sends_its_keep_set() {
+        let card = CardSettings::Plugin {
+            id: "aqi".into(),
+            title: "Air quality".into(),
+            plugin_id: "aqi".into(),
+            tap_action: WidgetTapAction::None,
+            refresh: RefreshPolicy::Manual,
+            alert: CardAlert::None,
+        };
+        let config = rotation_config(vec![card], CarouselAdvance::Manual, &[("aqi", None)]);
+        let now = Instant::now();
+        let mut scheduler = fresh_scheduler(now);
+        let mut state = WorkerState::new(config, now, &mut scheduler);
+        state.plugin_host = Some(Box::new(AssetOnlyPluginHost));
+        let mut device = ScheduledWorkDevice::default();
+
+        synchronize_full(&mut state, &mut scheduler, &mut device, now).unwrap();
+
+        assert_eq!(
+            device.asset_releases,
+            vec![vec![[0x5a; protocol::ASSET_DIGEST_LEN]]],
+            "the desired digest must be named in the keep-set"
         );
     }
 }

@@ -172,6 +172,19 @@ impl PluginRegistry {
         Ok((registry, failures))
     }
 
+    /// A registry with no plugins, for a deployment that configures none.
+    ///
+    /// This exists so "no plugins" costs no filesystem access. Building it by
+    /// loading an empty temporary directory would make a server whose temp
+    /// directory is unwritable panic at startup over a state that needs no
+    /// disk at all.
+    #[must_use]
+    pub fn empty() -> Self {
+        Self {
+            plugins: BTreeMap::new(),
+        }
+    }
+
     /// Returns a loaded plugin by its directory/manifest id.
     pub fn get(&self, plugin_id: &str) -> Option<&LoadedPlugin> {
         self.plugins.get(plugin_id)

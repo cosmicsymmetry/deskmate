@@ -110,9 +110,7 @@ fn load_plugins(directory: &std::path::Path) -> (PluginRegistry, Vec<PluginLoadF
             path = %directory.display(),
             "plugins directory does not exist; starting with an empty plugin registry"
         );
-        let empty = tempfile::tempdir().expect("failed to create empty plugin registry directory");
-        return PluginRegistry::load(empty.path())
-            .expect("an empty temporary plugin directory must load");
+        return (PluginRegistry::empty(), Vec::new());
     }
 
     let (registry, failures) = PluginRegistry::load(directory).unwrap_or_else(|error| {

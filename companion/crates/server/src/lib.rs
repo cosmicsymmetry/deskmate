@@ -280,11 +280,7 @@ impl ServerState {
 }
 
 fn empty_plugin_registry() -> Arc<PluginRegistry> {
-    let directory = tempfile::tempdir().expect("create empty plugin registry directory");
-    let (registry, failures) =
-        PluginRegistry::load(directory.path()).expect("load empty plugin registry");
-    debug_assert!(failures.is_empty());
-    Arc::new(registry)
+    Arc::new(PluginRegistry::empty())
 }
 
 #[derive(Default)]

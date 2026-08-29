@@ -516,18 +516,81 @@ of letting code and documentation diverge.
   fonts for real, kind-checked against the manifest's own declared `[[assets]] kind`. Task
   9 (hardware) is explicitly deferred by the owner; nothing about the plugin faces is
   hardware-verified.
-  - **THE SERVER HALF IS BUILT BUT NOT WIRED, and this makes Task 9 unexecutable as
-    written.** `server/src/plugin_provider.rs` is `pub mod`'d with **zero production
-    callers**; `PluginDataProvider`, `SystemPluginFetcher`, `classify_plugin_failure`,
-    `within_render_wall_clock_budget`, `egress::fetch`, `plugin::resolve_assets` and
-    `plugin::compile_scene_with_assets` are likewise uncalled outside tests, and
-    `runtime.rs` refuses every plugin card with a typed `SceneRefused`. So Task 9's
-    Steps 2-4 ("provision the two plugins' assets", "observe both plugin cards on the
-    panel") have **no code path to run** — the hardware gate needs the wiring first, and
-    that wiring is a scope decision the owner has not made. One consequence worth
-    knowing: Task 4's byte-provenance guarantee (digest and bytes from one read) is
-    currently unexercised end to end, because nothing builds a `DesiredAsset` from a
-    `ResolvedAsset`.
+  - **The server half is now WIRED (`800c192`), so Task 9 is executable. It is still
+    entirely unobserved on hardware.** Until that commit `server/src/plugin_provider.rs`,
+    `egress.rs`, `asset_sync.rs` and `plugin::compile_scene_with_assets` all had **zero
+    production callers** and `runtime.rs` refused every plugin card, so the hardware gate
+    had no code path to run. The chain is now: a schema-v6 plugin card ->
+    `ProviderRequest::Plugin` (app-core) -> `ServerProviderRefresher` ->
+    `PluginDataProvider` (the egress guard) -> the raw JSON cached as a
+    `ProviderSnapshot<Value>` in `WorkerState` -> `PluginHost::render_scene` ->
+    `ServerPluginHost` -> `compile_scene_with_assets` -> `PushScene`. Four things reached
+    a live path for the first time: the plugin provider, the SSRF guard, the asset
+    transfer, and `field.*`.
+    - **`app-core` -> `plugin` is a dependency CYCLE** (`plugin` depends on `app-core`),
+      so `PluginHost` being a trait object is not a style choice — it is the only
+      possible shape. Do not try to call `plugin::` from `app-core`.
+    - **The runtime used to discard the raw provider payload.**
+      `SystemProviderRefresher` called `provider.fields(&snapshot)` and dropped
+      `snapshot.value` immediately; only flattened `Field` strings crossed the channel.
+      `ProviderRefreshResult` now carries `value: Option<serde_json::Value>` and the
+      worker caches a reconstructed snapshot per card, evicted when the card leaves
+      config. **The compile happens at push time, not refresh time**, because `revision`
+      is minted in `push_active_scene`.
+    - **Injection is via `RuntimeHandle::start_with_plugin_host`; `start` and
+      `start_serial` are unchanged.** The Tauri app injects no host, so a plugin card
+      there degrades to a typed `SceneRefused` naming that specifically — distinct from
+      the "no snapshot cached yet" refusal, which is the normal state before the first
+      fetch lands. Keep those two messages distinguishable.
+    - **`compile_scene_with_assets` applies `with_scene_data_state` ITSELF.** The six
+      template arms of `build_card_scene` apply it after the match; the plugin arm must
+      not, or the stale/error footer is stamped twice.
+    - **`field.*` finally has a producer.** `ServerProviderRefresher` emits the card's
+      `title` as a `Field`, which `plugins/aqi/manifest.toml` binds and whose own comment
+      records that nothing pushed it. Task 4's byte-provenance guarantee is likewise
+      exercised end to end now: `ServerPluginHost::desired_assets` builds
+      `app_core::DesiredAsset` from `plugin::ResolvedAsset` by moving the `Arc<[u8]>`,
+      never re-reading or re-hashing.
+  - **`AssetRelease.digests` is a KEEP-SET, not a delete-list, and that made an empty
+    plugin registry destructive.** `firmware/main/core/asset_store.c`'s compaction marks
+    every committed record whose digest is *absent* from the list DEAD, so
+    `AssetRelease { digests: [] }` means "wipe every asset you hold". The wiring
+    reconciled unconditionally, so a server with an empty registry — **the default when
+    no plugins directory is configured, which is a supported deployment** — issued that
+    wipe on every full synchronize. `synchronize_full` now skips the pass entirely when
+    nothing is desired; deleting that guard fails a test. Two lessons: an empty desired
+    set is never a no-op on this wire, and `server/tests/hostile_device.rs` caught it
+    only because it asserts the **exact** request sequence a device sees.
+  - **Asset reconciliation runs in `synchronize_full` BEFORE `apply_layout`**, so bytes
+    always precede any digest a scene references — the same ordering constraint
+    `framebuffer_diff` obeys by running `push_case_assets` before `push_case_scene`.
+    `desired_assets()` is **registry-wide, not per-card**, so any device that connects
+    while the registry is loaded receives every curated plugin's assets.
+    Config-declared assets (`CompiledAppConfig.assets` / `AssetSettings`) remain
+    deliberately unwired: `AssetRelease` is authoritative over the whole device, so
+    mixing the two before config assets have an owner would delete them.
+  - **Both curated plugins point at `https://example.invalid/` and can never be
+    fetched.** No amount of wiring changes that, so Task 9's Steps 3-5 could only ever
+    have observed error faces. Rather than making a hardware gate depend on a third
+    party's uptime, `POST /v1/devices/{id}/scene` accepts `template: "plugin"` with an
+    operator-supplied `plugin_id` + `data`, compiled through the **same**
+    `ServerPluginHost` (there is no second compile path to drift), and
+    `GET /v1/plugins` exposes each plugin's asset digests in hex for Step 2's
+    comparison. That is what makes the gate runnable with the real committed fixtures.
+  - **The fixtures carry an envelope the manifests do not bind, and this is NOT to be
+    "fixed" by editing either one.** `crates/plugin/tests/fixtures/*.json` are
+    `{"status":"ok","payload":{...}}` while the manifests address the inner shape
+    (`data.current.aqi`); the tests unwrap via `payload_from_envelope`, and production's
+    `parse_json_payload` returns the **raw** body. `crates/plugin/tests/aqi_fixture.rs:23-26`
+    records that the wrapper is deliberate and that envelope validation is "a provider
+    concern (a later task)". Rewriting the manifests to `data.payload.*` would bake a
+    test-capture artifact into shipped content; flattening the fixture would destroy the
+    hostile shape (four levels of nesting, nulls in three positions, a numeric-looking
+    string, unread siblings) it exists for. There is no universal `{status,payload}`
+    convention to hardcode either. **The correct fix, when a manifest first points at a
+    real endpoint, is a declarative per-plugin `[source] root = "payload"` key** — which
+    changes the frozen `docs/plugins/manifest-v1.md` contract and must be specified, not
+    slipped in.
   - **A hostile `[[assets]] file` was an arbitrary-file-read and is now closed in two
     layers.** `manifest.rs`'s `validate_asset_file_path` accepts a single
     `Component::Normal` and nothing else, and `assets.rs`'s `ensure_within_base_dir`

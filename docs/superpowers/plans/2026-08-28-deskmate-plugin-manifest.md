@@ -520,6 +520,82 @@ and text measurement at a boundary.
 
 ---
 
+### Task 8b: Wire the server half — AMENDMENT, added during execution
+
+**Added 2026-08-29. Delivered in `800c192`.** Not in the original plan.
+
+Tasks 1-8 built every piece of the pipeline and connected none of them. At Task 8's exit
+`server/src/plugin_provider.rs`, `egress.rs`, `asset_sync.rs` and
+`plugin::compile_scene_with_assets` all had **zero production callers**, and
+`app-core`'s `build_card_scene` refused every plugin card with a typed "not implemented
+yet". **Task 9 as written was therefore unexecutable** — its Steps 2-4 ("provision the
+two plugins' assets", "observe both plugin cards on the panel") had no code path to run.
+This task closes that, and it is host-only: no firmware source changes, so no OTA
+re-verification is implied.
+
+- [x] **Step 1: The seam.** `plugin` depends on `app-core`, so `app-core -> plugin` is a
+      cycle and a trait object is the only possible shape. `app_core::PluginHost`
+      (`desired_assets` + `render_scene`), injected via a new
+      `RuntimeHandle::start_with_plugin_host`. `start`/`start_serial` unchanged, so the
+      Tauri app is untouched and its plugin cards degrade to a typed `SceneRefused`.
+- [x] **Step 2: Stop discarding the raw payload.** `ProviderRefreshResult` gains
+      `value: Option<serde_json::Value>`; the worker caches a reconstructed
+      `ProviderSnapshot<Value>` per card and evicts it when the card leaves config. The
+      compile runs at push time, not refresh time, because `revision` is minted in
+      `push_active_scene`.
+- [x] **Step 3: The registry** — `server/src/plugin_registry.rs` loads
+      `companion/plugins/<id>/` through `parse_manifest` + `resolve_assets`. A broken
+      plugin is a per-plugin failure; exceeding `MAX_ASSET_DIGESTS` fails the whole load,
+      because a catalog that cannot fit one device is unreconcilable whichever plugin you
+      drop. Identifiers are validated before any filesystem access.
+- [x] **Step 4: The host and the refresher** — `ServerPluginHost` (registry +
+      `compile_scene_with_assets` inside `within_render_wall_clock_budget`, preserving
+      `classify_plugin_failure`'s transient/permanent split) and
+      `ServerProviderRefresher` (wraps the system refresher, adds the plugin arm, caches
+      a `PluginDataProvider` per widget). Both injected at `device_link.rs`.
+- [x] **Step 5: `field.*` gets a producer.** The refresher emits the card's `title` as a
+      `Field`. `plugins/aqi/manifest.toml` binds it and its own comment records that
+      nothing pushed it; that is now false, deliberately.
+- [x] **Step 6: Asset reconciliation** in `synchronize_full`, before `apply_layout`, so
+      bytes precede any digest a scene references.
+- [x] **Step 7: Fix the wipe defect the wiring introduced.** See the finding below.
+- [x] **Step 8: Make Task 9 runnable** — `POST /v1/devices/{id}/scene` accepts
+      `template: "plugin"`; `GET /v1/plugins` exposes asset digests in hex.
+- [x] **Step 9: Full gate set** — fmt, clippy `-D warnings`, `--workspace --all-targets`
+      and `--workspace --doc` all pass (777 tests, 50 suites). Firmware host tests
+      unchanged and passing; no firmware source touched.
+
+**Finding: `AssetRelease.digests` is a keep-set, and an empty registry was destructive.**
+`firmware/main/core/asset_store.c`'s compaction marks every committed record whose digest
+is *absent* from the list DEAD, so `AssetRelease { digests: [] }` means "wipe every asset
+you hold". The first cut reconciled unconditionally, so a server with an empty plugin
+registry — the default when no plugins directory is configured, which is a supported
+deployment — issued that wipe on every full synchronize. `synchronize_full` now skips the
+pass when nothing is desired; deleting the guard fails a test. It was caught by
+`server/tests/hostile_device.rs`, which asserts the **exact** request sequence a device
+sees; a looser assertion would have passed a destructive frame.
+
+**Finding: both curated plugins point at `https://example.invalid/`.** Nothing can be
+fetched from them, so Task 9's Steps 3-5 could only ever have observed error faces. This
+was not anticipated by the plan. Rather than pointing the manifests at live third-party
+endpoints — which makes a hardware gate depend on someone else's uptime and cannot be
+verified from here — Step 8's admin route lets an operator drive both real manifests with
+their real committed fixtures through the same `ServerPluginHost`.
+
+**Finding: the fixtures' envelope does not match what production delivers, and neither
+side should be "fixed".** The fixtures are `{"status":"ok","payload":{...}}`; the
+manifests bind the inner shape; the tests unwrap; production's `parse_json_payload`
+returns the raw body. `crates/plugin/tests/aqi_fixture.rs:23-26` records that the wrapper
+is deliberate and that envelope validation is "a provider concern (a later task)".
+Rewriting the manifests to `data.payload.*` would bake a test-capture artifact into
+shipped content; flattening the fixture would destroy the hostile shape it exists for;
+and there is no universal `{status,payload}` convention to hardcode. **The correct fix,
+when a manifest first points at a real endpoint, is a declarative per-plugin
+`[source] root = "payload"` key** — a change to the frozen `docs/plugins/manifest-v1.md`
+contract, to be specified rather than slipped in. Carried into stage 4.
+
+---
+
 ### Task 9: GATE — the asset path on the physical board
 
 **Files:** `docs/hardware/board-notes.md`
@@ -529,10 +605,22 @@ genuinely unchanged, this is an **asset gate**, not a layout gate, and there is 
 build. If any firmware source changed, add the OTA download check and the same-tree memory
 deltas, and expect to have bundled every firmware need into one image.
 
+**Amended 2026-08-29, after Task 8b.** This gate was unexecutable as originally written;
+the wiring it needs now exists. Two things changed about how to run it: set
+`DESKMATE_PLUGINS_DIR` when deploying (an unset or missing directory starts the server
+with an empty registry, which is valid but refuses every plugin card), and drive the
+faces through `POST /v1/devices/{id}/scene` with `template: "plugin"` rather than waiting
+for a fetch — **both curated manifests point at `example.invalid` and can never populate
+themselves.** Supply the committed fixtures' inner `payload`, not the whole envelope.
+
 - [ ] **Step 1: Redeploy the server** from a `git archive HEAD` export — the schema moved
-      to v6, and a server built before it rejects every save.
+      to v6, and a server built before it rejects every save. Set `DESKMATE_PLUGINS_DIR`
+      and confirm at startup that both plugins loaded with no `PluginLoadFailure`.
 - [ ] **Step 2: Provision the two plugins' assets** and confirm the digests the device
-      reports match the ones the server computed.
+      reports match the ones the server computed. `GET /v1/plugins` prints the server's
+      digests in hex. Note assets are provisioned **registry-wide on full synchronize**,
+      not per card, so a connected device should already hold both plugins' assets before
+      any plugin card is activated.
 - [ ] **Step 3: Observe both plugin cards on the panel at both orientations.** Real 270°
       geometry is provable only by looking at the panel — no host gate and no `0x7E`
       capture can substitute, because both carry the same `flipped(A) == flipped(B)`
@@ -598,7 +686,17 @@ deltas, and expect to have bundled every firmware need into one image.
    `progress-ring--running-mid-countdown` pairs. This 92/8/84 split has not been run on
    hardware -- Task 9 is deferred.
 
-Stage 4 — rasterization fallback and SVG plugins — is planned at this plan's exit.
+10. **(Added 2026-08-29, Task 8b.)** A plugin card renders through a single wired path
+    from config to `PushScene`, with no production caller left uncalled: the plugin
+    provider, the egress guard, the asset transfer and `field.*` are all on a live path.
+    An empty plugin registry sends **no** `AssetRelease` — proved by a test that fails if
+    the guard is deleted, because an empty keep-set is a device-wide asset wipe. There is
+    exactly **one** scene-compile path (`ServerPluginHost`); the admin route reuses it
+    rather than adding a second.
+
+Stage 4 — rasterization fallback and SVG plugins — is planned at this plan's exit, and
+inherits one specified-but-unbuilt item: the declarative `[source] root` key that
+reconciles a provider envelope with what a manifest binds (Task 8b's third finding).
 
 ---
 

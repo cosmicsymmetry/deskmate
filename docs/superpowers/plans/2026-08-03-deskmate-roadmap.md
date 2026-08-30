@@ -43,8 +43,8 @@ exit (the spec is the architecture for all five, not one implementation plan):
 | 2a | `2026-08-23-deskmate-scene-renderer.md` | Delivered; drew on the panel 2026-08-25/26 |
 | 2b | `2026-08-26-deskmate-scene-templates.md` | Delivered; all six faces byte-identical |
 | 3a | `2026-08-27-deskmate-scene-native-rendering.md` | Delivered; the six C templates no longer ship. Gate B (the OTA download with them removed) is published and **not yet observed** |
-| 3b | `2026-08-28-deskmate-plugin-manifest.md` | Software-complete, including the Task 8b server wiring amendment. Task 9's hardware gate is **deferred and entirely unobserved** |
-| 4 | `2026-08-29-deskmate-rasterization.md` | Planned at 3b's exit. Its hardware session pays 3b's outstanding gate first (Phase A) before flashing anything of its own |
+| 3b | `2026-08-28-deskmate-plugin-manifest.md` | **Task 9 PASSED on the board 2026-08-30** — both plugin faces at 270° and 90°, a runtime glyph at 72 px, the image node clean, and `field.*` drawing a real value for the first time. Only Step 6 (asset-GC teardown) is still owed |
+| 4 | `2026-08-29-deskmate-rasterization.md` | Planned at 3b's exit. Its Task 7 Phase A was written to pay 3b's whole hardware gate first; that debt is now down to Step 6 alone, so Phase A shrinks accordingly |
 | 5 | not yet written | Public plugin uploads and the sandbox; separate risk review |
 
 First-widget order and why:

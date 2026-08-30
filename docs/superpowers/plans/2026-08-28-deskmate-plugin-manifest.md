@@ -613,23 +613,46 @@ faces through `POST /v1/devices/{id}/scene` with `template: "plugin"` rather tha
 for a fetch — **both curated manifests point at `example.invalid` and can never populate
 themselves.** Supply the committed fixtures' inner `payload`, not the whole envelope.
 
-- [ ] **Step 1: Redeploy the server** from a `git archive HEAD` export — the schema moved
+**OUTCOME (2026-08-30): PASSED, Steps 1-5 and 7. Step 6 was not run and stays open.**
+Full evidence in `docs/hardware/board-notes.md` under "Stage 3b Task 9 — PASSED
+2026-08-30". Both plugin faces drew at 270° **and** 90°, the aqi glyph rendered from the
+uploaded `icons.ttf` at pixel_size 72, the agenda image node drew at both orientations with
+no artifacts, and `{{ field.title }}` rendered a real value ("Headlines") — the first time
+`field.*` has drawn anything in this project.
+
+Three things this gate cost that the plan did not anticipate, all recorded in board-notes:
+
+1. **Two earlier attempts failed, and not on the plugin code.** A flapping link
+   (server reaping at 10 s against the device's 45 s) made every push time out. Fixed
+   host-side in `0b9075f`; measured 0 idle timeouts in 15 minutes afterwards, and pushes
+   went 0/3 -> 3/3 acked.
+2. **Step 2 is not fully closable as written.** It asks for "the digests the device
+   reports", but `StatusResponse` has no asset inventory — a device reports a digest only
+   implicitly through `AssetBegin`'s `already_present`. The server side was confirmed
+   against independent `sha256sum`; the device side is confirmed transitively, because the
+   glyph could not have resolved without those exact bytes.
+3. **The operator route's caller-supplied `revision` is a footgun.** `link_state.c` keeps
+   one `latest_revision` shared by `PushScene` and `PushData`, so pushing at 910-932 left
+   the runtime's own counter below it and stalled every card with
+   `data-refused (StaleRevision)`. It does not self-heal; `ApplyConfig` cleared it.
+
+- [x] **Step 1: Redeploy the server** from a `git archive HEAD` export — the schema moved
       to v6, and a server built before it rejects every save. Set `DESKMATE_PLUGINS_DIR`
       and confirm at startup that both plugins loaded with no `PluginLoadFailure`.
-- [ ] **Step 2: Provision the two plugins' assets** and confirm the digests the device
+- [x] **Step 2: Provision the two plugins' assets** and confirm the digests the device
       reports match the ones the server computed. `GET /v1/plugins` prints the server's
       digests in hex. Note assets are provisioned **registry-wide on full synchronize**,
       not per card, so a connected device should already hold both plugins' assets before
       any plugin card is activated.
-- [ ] **Step 3: Observe both plugin cards on the panel at both orientations.** Real 270°
+- [x] **Step 3: Observe both plugin cards on the panel at both orientations.** Real 270°
       geometry is provable only by looking at the panel — no host gate and no `0x7E`
       capture can substitute, because both carry the same `flipped(A) == flipped(B)`
       blindness.
-- [ ] **Step 4: Observe a glyph at a size no baked tier provides**, which is the whole
+- [x] **Step 4: Observe a glyph at a size no baked tier provides**, which is the whole
       point of a runtime font. Watch for the first-render hitch §9 predicts; §6's
       glyph-cache-miss timing gate at 96 px **becomes owed here**, because this is the
       first stage where a font is a runtime asset.
-- [ ] **Step 5: Observe `board_lcd_rounder_cb` at both orientations with an image node
+- [x] **Step 5: Observe `board_lcd_rounder_cb` at both orientations with an image node
       present.** This is the second of §6's two gates that stage 3a explicitly deferred,
       and this stage is where it comes due.
 - [ ] **Step 6: Exercise the asset-GC teardown** — release, compact, rebuild the retained
@@ -637,7 +660,7 @@ themselves.** Supply the committed fixtures' inner `payload`, not the whole enve
       files with no simulator seam and has **no automated test**; this is its first real
       exercise, and the four on-device observations specified at the end of the scene
       renderer plan's Task 10 apply here.
-- [ ] **Step 7: Record every observation in `docs/hardware/board-notes.md`**, including
+- [x] **Step 7: Record every observation in `docs/hardware/board-notes.md`**, including
       anything that did **not** pass. Never record an observation that was not made.
 
 ---
@@ -647,12 +670,19 @@ themselves.** Supply the committed fixtures' inner `payload`, not the whole enve
 **Files:** this plan, `CLAUDE.md`, `docs/scene/template-parity-ledger.md`,
 `docs/superpowers/plans/<date>-deskmate-rasterization.md` (create)
 
-- [ ] **Step 1: Update `CLAUDE.md`** — the manifest contract, the schema at v6, what the
-      hardware session did and did not observe.
-- [ ] **Step 2: Update the ledger's "Stage 3b entry decision"** to say whether `field.*`
-      and the asset path held up, since that section named both as inherited risks.
-- [ ] **Step 3: Write the stage 4 plan** (rasterization fallback and SVG plugins) from
+- [x] **Step 1: Update `CLAUDE.md`** — the manifest contract, the schema at v6, what the
+      hardware session did and did not observe. Done for the software side and the two
+      failed attempts; **needs a final pass** now that the gate has passed.
+- [x] **Step 2: Update the ledger's "Stage 3b entry decision"** to say whether `field.*`
+      and the asset path held up, since that section named both as inherited risks. Done
+      as a "Stage 3b exit" section. Its `field.*` entry said the binding had an author and
+      a producer but had never been *observed*; that is now false in the best way — see
+      board-notes 2026-08-30.
+- [x] **Step 3: Write the stage 4 plan** (rasterization fallback and SVG plugins) from
       what this stage taught, per the working agreement.
+      `docs/superpowers/plans/2026-08-29-deskmate-rasterization.md`. Note its Task 7
+      Phase A was written to pay this stage's Task 9 first; that debt is now **mostly
+      settled**, leaving only Step 6 (asset-GC teardown), so Phase A shrinks accordingly.
 - [ ] **Step 4: Commit.** `docs: close stage 3b and plan rasterization`
 
 ---
@@ -673,9 +703,14 @@ themselves.** Supply the committed fixtures' inner `payload`, not the whole enve
 6. Schema v6 migrates v0..v5 losslessly, with fixtures, and both copies of
    `CURRENT_SCHEMA_VERSION` moved.
 7. Both curated plugins render at both orientations on the physical panel, with a runtime
-   glyph at a non-baked size.
+   glyph at a non-baked size. **MET 2026-08-30** — both faces at 270° and 90°, the aqi
+   glyph from the uploaded `icons.ttf` at pixel_size 72, and the agenda image node at both
+   orientations with no artifacts. `{{ field.title }}` also drew a real value, which is the
+   first pixel `field.*` has ever produced in this project.
 8. The asset-GC teardown has been exercised on hardware and the result recorded — pass or
-   fail.
+   fail. **NOT MET.** Task 9 Step 6 was not run. This is the single open item in the
+   stage, and it is the one with no automated test and no simulator seam. Stage 4's Task 7
+   Phase A inherits it.
 9. `framebuffer_diff`'s inventory has moved off 76/64/12 to 92/8/84, and the new numbers
    are stated in both the task report and `CLAUDE.md`. Of the twelve exclusions that
    stood before Task 8: four are closed (`scene-image`/`scene-glyph`, both orientations,
@@ -683,8 +718,10 @@ themselves.** Supply the committed fixtures' inner `payload`, not the whole enve
    four are `scene-text`/`scene-label` (both orientations), which bind the synthetic
    `field.status` name that no registry, built-in or plugin, accepts; the other four are
    the pre-existing, unrelated `row-list--truncation-boundary` and
-   `progress-ring--running-mid-countdown` pairs. This 92/8/84 split has not been run on
-   hardware -- Task 9 is deferred.
+   `progress-ring--running-mid-countdown` pairs. **This 92/8/84 split has still not been
+   run on hardware.** Task 9 passed by observing the faces directly rather than by running
+   `framebuffer_diff`, so `identical=84` remains a software prediction. A future hardware
+   session must run it fresh rather than trust the number.
 
 10. **(Added 2026-08-29, Task 8b.)** A plugin card renders through a single wired path
     from config to `PushScene`, with no production caller left uncalled: the plugin

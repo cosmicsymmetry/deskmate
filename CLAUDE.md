@@ -513,9 +513,29 @@ of letting code and documentation diverge.
   `AssetSet` into the compiler at all. **`plugin::compile_scene` (no assets, fails closed,
   every prior caller's entry point) is now a thin wrapper around the new
   `plugin::compile_scene_with_assets`**, which resolves `image`/`glyph` nodes and asset
-  fonts for real, kind-checked against the manifest's own declared `[[assets]] kind`. Task
-  9 (hardware) is explicitly deferred by the owner; nothing about the plugin faces is
-  hardware-verified. **Stage 3b's software side is complete** — the ledger's "Stage 3b
+  fonts for real, kind-checked against the manifest's own declared `[[assets]] kind`.
+  **Task 9 PASSED on the board 2026-08-30 (Steps 1-5 and 7); only Step 6, the asset-GC
+  teardown, is still owed.** Both curated plugin faces drew at **270° and 90°**: the aqi
+  glyph rendered from the uploaded `icons.ttf` at **pixel_size 72**, a size no baked tier
+  provides, and the agenda **image node** drew at both orientations with no artifacts,
+  which closes §6's `board_lcd_rounder_cb` gate that stage 3a deferred. **`field.*` drew a
+  real value for the first time in this project** — `{{ field.title }}` rendered
+  "Headlines", the title of the card the scene was pushed to. Real 90° geometry is now
+  observed rather than inferred, which is the one claim no host gate can make. Evidence is
+  in `docs/hardware/board-notes.md` under "Stage 3b Task 9 — PASSED 2026-08-30". Two
+  caveats: **the 92/8/84 `framebuffer_diff` split was NOT run** — the gate was judged by
+  looking at the panel, so that number is still only a software prediction — and §6's 96 px
+  glyph-cache-miss timing was not measured.
+  - **The operator scene route's caller-supplied `revision` is a footgun worth knowing.**
+    `firmware/main/core/link_state.c` keeps ONE `latest_revision` that both `PushScene` and
+    `PushData` are checked against, and `POST /v1/devices/{id}/scene` accepts any revision.
+    Pushing scenes at 910-932 left the runtime's own `next_scene_revision` (~243) below it
+    and every card went `data-refused (StaleRevision)`. **It does not self-heal**:
+    `next_scene_revision` starts at 0 and only increments, and the status-based adoption in
+    `runtime.rs` is deliberately for the *interrupt token* only. Restarting the server makes
+    it worse (`WorkerState::new` resets the counter to 0). `ApplyConfig` cleared it; a power
+    cycle would too (`link_state_init` memsets). Push revisions just above the runtime's
+    current counter, not arbitrary large ones. **Stage 3b's software side is complete** — the ledger's "Stage 3b
   exit" section records how its two inherited risks actually resolved, and stage 4 is
   planned in `docs/superpowers/plans/2026-08-29-deskmate-rasterization.md`, whose single
   hardware session **pays stage 3b's Task 9 first (Phase A) and refuses to flash stage 4

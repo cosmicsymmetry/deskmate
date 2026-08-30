@@ -7,8 +7,10 @@
 //! reconcile with one device and therefore fails the load as a whole.
 
 use std::collections::BTreeMap;
-use std::fs;
+use std::fs::{self, File};
+use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use app_core::MAX_PLUGIN_ID_LEN;
 use plugin::{
@@ -32,6 +34,8 @@ pub struct LoadedPlugin {
     pub id: String,
     pub manifest: PluginManifest,
     pub assets: AssetSet,
+    /// Registry-owned SVG bytes, loaded and validated once at startup.
+    pub svg_source: Option<Arc<str>>,
 }
 
 /// One plugin directory that could not be loaded.
@@ -61,6 +65,18 @@ pub enum PluginLoadError {
     },
     #[error("plugin assets could not be resolved: {0}")]
     Assets(#[source] AssetError),
+    #[error("SVG template {path:?} resolves outside plugin directory {base_dir:?}")]
+    TemplateOutsideDirectory { path: PathBuf, base_dir: PathBuf },
+    #[error("cannot read SVG template {path:?}: {message}")]
+    TemplateRead { path: PathBuf, message: String },
+    #[error("SVG template {path:?} is {actual} bytes; the limit is {limit}")]
+    TemplateTooLarge {
+        path: PathBuf,
+        limit: usize,
+        actual: usize,
+    },
+    #[error("SVG template {path:?} is not valid UTF-8")]
+    TemplateInvalidUtf8 { path: PathBuf },
 }
 
 /// Why a would-be plugin id is unsafe to use as a filesystem component.
@@ -290,13 +306,68 @@ fn load_plugin(base_dir: &Path, plugin_id: &str) -> Result<LoadedPlugin, PluginL
             });
         }
         let assets = resolve_assets(&manifest, &plugin_dir).map_err(PluginLoadError::Assets)?;
+        let svg_source = manifest
+            .svg_template_file()
+            .map(|file| {
+                let path = ensure_within_plugin_dir(&plugin_dir, file)?;
+                read_bounded_svg(&path, PluginManifest::MAX_SVG_SOURCE_BYTES)
+            })
+            .transpose()?;
 
         Ok(LoadedPlugin {
             id: validated_id.to_string(),
             manifest,
             assets,
+            svg_source,
         })
     })
+}
+
+fn ensure_within_plugin_dir(base_dir: &Path, file: &str) -> Result<PathBuf, PluginLoadError> {
+    let canonical_base =
+        fs::canonicalize(base_dir).map_err(|error| PluginLoadError::TemplateRead {
+            path: base_dir.to_path_buf(),
+            message: error.to_string(),
+        })?;
+    let joined = base_dir.join(file);
+    let canonical_path =
+        fs::canonicalize(&joined).map_err(|error| PluginLoadError::TemplateRead {
+            path: joined.clone(),
+            message: error.to_string(),
+        })?;
+    if !canonical_path.starts_with(&canonical_base) {
+        return Err(PluginLoadError::TemplateOutsideDirectory {
+            path: canonical_path,
+            base_dir: canonical_base,
+        });
+    }
+    Ok(canonical_path)
+}
+
+fn read_bounded_svg(path: &Path, limit: usize) -> Result<Arc<str>, PluginLoadError> {
+    let file = File::open(path).map_err(|error| PluginLoadError::TemplateRead {
+        path: path.to_path_buf(),
+        message: error.to_string(),
+    })?;
+    let take_limit = u64::try_from(limit).unwrap_or(u64::MAX).saturating_add(1);
+    let mut bytes = Vec::with_capacity(limit.min(8 * 1024));
+    file.take(take_limit)
+        .read_to_end(&mut bytes)
+        .map_err(|error| PluginLoadError::TemplateRead {
+            path: path.to_path_buf(),
+            message: error.to_string(),
+        })?;
+    if bytes.len() > limit {
+        return Err(PluginLoadError::TemplateTooLarge {
+            path: path.to_path_buf(),
+            limit,
+            actual: bytes.len(),
+        });
+    }
+    let source = String::from_utf8(bytes).map_err(|_| PluginLoadError::TemplateInvalidUtf8 {
+        path: path.to_path_buf(),
+    })?;
+    Ok(Arc::from(source))
 }
 
 #[cfg(test)]
@@ -348,15 +419,39 @@ mod tests {
         fs::write(plugin_dir.join("manifest.toml"), manifest).expect("write manifest");
     }
 
+    fn write_svg_plugin(base_dir: &Path, plugin_id: &str, file: &str, bytes: &[u8]) -> PathBuf {
+        let plugin_dir = base_dir.join(plugin_id);
+        fs::create_dir(&plugin_dir).expect("create SVG plugin directory");
+        let manifest = format!(
+            "manifest_version = 2\n\
+             name = \"{plugin_id}\"\n\
+             version = \"1.0.0\"\n\n\
+             [source]\n\
+             kind = \"json\"\n\
+             url = \"https://example.invalid/{plugin_id}.json\"\n\
+             refresh_minutes = 15\n\n\
+             [template]\n\
+             kind = \"svg\"\n\
+             file = \"{file}\"\n"
+        );
+        fs::write(plugin_dir.join("manifest.toml"), manifest).expect("write SVG manifest");
+        let svg_path = plugin_dir.join(file);
+        fs::write(&svg_path, bytes).expect("write SVG template");
+        svg_path
+    }
+
     #[test]
     fn real_curated_plugins_load_with_their_real_assets() {
         let (registry, failures) =
             PluginRegistry::load(&curated_plugins_dir()).expect("load curated plugins");
 
         assert!(failures.is_empty(), "unexpected failures: {failures:?}");
-        assert_eq!(registry.len(), 2);
+        assert_eq!(registry.len(), 3);
         assert!(!registry.is_empty());
-        assert_eq!(registry.ids().collect::<Vec<_>>(), ["agenda", "aqi"]);
+        assert_eq!(
+            registry.ids().collect::<Vec<_>>(),
+            ["agenda", "aqi", "svg-aqi"]
+        );
         assert!(
             registry
                 .get("aqi")
@@ -373,6 +468,114 @@ mod tests {
                 .get("badge.rgb565")
                 .is_some()
         );
+        let svg = registry.get("svg-aqi").expect("SVG plugin loaded");
+        let retained = svg.svg_source.as_ref().expect("SVG source retained");
+        assert!(retained.contains("{{ data.current.aqi }}"));
+        let cloned = svg.clone();
+        assert!(
+            Arc::ptr_eq(
+                retained,
+                cloned
+                    .svg_source
+                    .as_ref()
+                    .expect("clone retains SVG source")
+            ),
+            "cloning a loaded plugin must retain the registry's one Arc allocation"
+        );
+    }
+
+    #[test]
+    fn svg_source_one_byte_over_its_cap_is_a_named_per_plugin_failure() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_svg_plugin(
+            temp.path(),
+            "oversized",
+            "face.svg",
+            &vec![b'x'; PluginManifest::MAX_SVG_SOURCE_BYTES + 1],
+        );
+
+        let (registry, failures) = PluginRegistry::load(temp.path()).expect("load registry");
+
+        assert!(registry.is_empty());
+        assert!(matches!(
+            failures.as_slice(),
+            [PluginLoadFailure {
+                error: PluginLoadError::TemplateTooLarge {
+                    limit: PluginManifest::MAX_SVG_SOURCE_BYTES,
+                    actual,
+                    ..
+                },
+                ..
+            }] if *actual == PluginManifest::MAX_SVG_SOURCE_BYTES + 1
+        ));
+    }
+
+    #[test]
+    fn expanded_svg_one_byte_over_its_cap_is_rejected_by_the_shared_bounded_reader() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("expanded.svg");
+        fs::write(
+            &path,
+            vec![b'x'; PluginManifest::MAX_EXPANDED_SVG_BYTES + 1],
+        )
+        .expect("write expanded SVG fixture");
+
+        assert!(matches!(
+            read_bounded_svg(&path, PluginManifest::MAX_EXPANDED_SVG_BYTES),
+            Err(PluginLoadError::TemplateTooLarge {
+                limit: PluginManifest::MAX_EXPANDED_SVG_BYTES,
+                actual,
+                ..
+            }) if actual == PluginManifest::MAX_EXPANDED_SVG_BYTES + 1
+        ));
+    }
+
+    #[test]
+    fn invalid_utf8_svg_is_a_named_per_plugin_failure() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_svg_plugin(temp.path(), "bad-utf8", "face.svg", &[0xff, 0xfe]);
+
+        let (registry, failures) = PluginRegistry::load(temp.path()).expect("load registry");
+
+        assert!(registry.is_empty());
+        assert!(matches!(
+            failures.as_slice(),
+            [PluginLoadFailure {
+                error: PluginLoadError::TemplateInvalidUtf8 { .. },
+                ..
+            }]
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn svg_symlink_escaping_the_plugin_directory_is_caught_by_canonical_containment() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let outside = tempfile::NamedTempFile::new().expect("outside SVG file");
+        fs::write(outside.path(), b"<svg/>").expect("write outside SVG");
+        let plugin_dir = temp.path().join("escape");
+        fs::create_dir(&plugin_dir).expect("create escaping plugin");
+        fs::write(
+            plugin_dir.join("manifest.toml"),
+            "manifest_version=2\nname=\"escape\"\nversion=\"1.0.0\"\n\
+             [source]\nkind=\"json\"\nurl=\"https://example.invalid/x\"\nrefresh_minutes=15\n\
+             [template]\nkind=\"svg\"\nfile=\"face.svg\"\n",
+        )
+        .expect("write escaping manifest");
+        symlink(outside.path(), plugin_dir.join("face.svg")).expect("create escaping symlink");
+
+        let (registry, failures) = PluginRegistry::load(temp.path()).expect("load registry");
+
+        assert!(registry.is_empty());
+        assert!(matches!(
+            failures.as_slice(),
+            [PluginLoadFailure {
+                error: PluginLoadError::TemplateOutsideDirectory { .. },
+                ..
+            }]
+        ));
     }
 
     #[test]

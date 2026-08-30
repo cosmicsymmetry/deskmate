@@ -38,16 +38,21 @@ use lvgl_sim::asset_shim::AssetShim;
 use lvgl_sim::assets::{INTER_SUBSET_SHA256, INTER_SUBSET_TTF};
 use lvgl_sim::cases::AssetFontCase;
 use lvgl_sim::{SimOrientation, Simulator};
-use plugin::{Asset, PluginManifest, Source, resolve_assets};
+use plugin::{Asset, ManifestVersion, PluginManifest, Source, Template, resolve_assets};
 
 fn minimal_manifest(assets: Vec<Asset>) -> PluginManifest {
+    // v1-shaped: this gate predates manifest v2 and exercises the v1
+    // `[[assets]]` path, so it pins the v1 contract values explicitly.
     PluginManifest {
+        manifest_version: ManifestVersion::V1,
         name: "parity-check".to_string(),
         version: "1.0.0".to_string(),
         source: Source::Json {
             url: "https://example.invalid/x.json".to_string(),
             refresh_minutes: 15,
+            root: None,
         },
+        template: Template::Scene,
         assets,
         nodes: Vec::new(),
         repeats: Vec::new(),

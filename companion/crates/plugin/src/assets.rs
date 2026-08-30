@@ -367,19 +367,22 @@ mod tests {
     use std::fs;
 
     use super::*;
-    use crate::manifest::{Glyph, Source};
+    use crate::manifest::{Glyph, ManifestVersion, Source, Template};
 
     fn minimal_manifest(assets: Vec<Asset>) -> PluginManifest {
         PluginManifest {
+            manifest_version: ManifestVersion::V1,
             name: "test".to_string(),
             version: "1.0.0".to_string(),
             source: Source::Json {
                 url: "https://example.invalid/x.json".to_string(),
                 refresh_minutes: 15,
+                root: None,
             },
             assets,
             nodes: Vec::new(),
             repeats: Vec::new(),
+            template: Template::Scene,
         }
     }
 

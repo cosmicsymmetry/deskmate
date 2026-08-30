@@ -352,6 +352,7 @@ impl PluginFetcher for SystemPluginFetcher {
 pub struct PluginDataProvider<F: PluginFetcher = SystemPluginFetcher> {
     fetcher: F,
     url: String,
+    root: Option<String>,
     refresh_interval: Duration,
     state: LastGood<Value>,
     last_failure: Option<FailureClass>,
@@ -369,11 +370,13 @@ impl<F: PluginFetcher> PluginDataProvider<F> {
         let Source::Json {
             url,
             refresh_minutes,
+            root,
         } = source;
         let refresh_interval = refresh_interval_from_minutes(*refresh_minutes)?;
         Ok(Self {
             fetcher,
             url: url.clone(),
+            root: root.clone(),
             refresh_interval,
             state: LastGood::default(),
             last_failure: None,
@@ -404,11 +407,68 @@ impl<F: PluginFetcher> Provider for PluginDataProvider<F> {
             .and_then(
                 |response| match provider_error_for_status(response.status) {
                     Some(error) => Err(error),
-                    None => parse_json_payload(response.body),
+                    None => parse_json_payload(response.body)
+                        .and_then(|value| select_source_root(value, self.root.as_deref())),
                 },
             );
         self.last_failure = result.as_ref().err().map(classify_provider_error);
         self.state.complete(now, result)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+enum SourceRootError {
+    #[error("source root {root:?} is missing segment {segment:?}")]
+    Missing { root: String, segment: String },
+    #[error("source root {root:?} reaches a scalar before segment {segment:?}")]
+    ScalarIntermediate { root: String, segment: String },
+    #[error("source root {root:?} is null")]
+    Null { root: String },
+    #[error("source root {root:?} must select an object or array")]
+    NotContainer { root: String },
+}
+
+fn select_source_root(value: Value, root: Option<&str>) -> Result<Value, ProviderError> {
+    let Some(root) = root else {
+        return Ok(value);
+    };
+    let mut selected = value;
+    for segment in root.split('.') {
+        selected = match selected {
+            Value::Object(mut object) => object.remove(segment).ok_or_else(|| {
+                ProviderError::MalformedFeed(
+                    SourceRootError::Missing {
+                        root: root.to_string(),
+                        segment: segment.to_string(),
+                    }
+                    .to_string(),
+                )
+            })?,
+            _ => {
+                return Err(ProviderError::MalformedFeed(
+                    SourceRootError::ScalarIntermediate {
+                        root: root.to_string(),
+                        segment: segment.to_string(),
+                    }
+                    .to_string(),
+                ));
+            }
+        };
+    }
+    match selected {
+        Value::Null => Err(ProviderError::MalformedFeed(
+            SourceRootError::Null {
+                root: root.to_string(),
+            }
+            .to_string(),
+        )),
+        value @ (Value::Object(_) | Value::Array(_)) => Ok(value),
+        _ => Err(ProviderError::MalformedFeed(
+            SourceRootError::NotContainer {
+                root: root.to_string(),
+            }
+            .to_string(),
+        )),
     }
 }
 
@@ -632,7 +692,145 @@ mod tests {
         Source::Json {
             url: "https://example.test/aqi.json".to_string(),
             refresh_minutes: 15,
+            root: None,
         }
+    }
+
+    fn rooted_v2_source() -> Source {
+        let manifest = plugin::parse_manifest(
+            r#"
+manifest_version = 2
+name = "rooted-aqi"
+version = "1.0.0"
+
+[source]
+kind = "json"
+url = "https://example.test/aqi.json"
+refresh_minutes = 15
+root = "payload"
+
+[template]
+kind = "scene"
+"#,
+        )
+        .expect("rooted v2 manifest parses");
+        manifest.source
+    }
+
+    fn nested_rooted_v2_source() -> Source {
+        let manifest = plugin::parse_manifest(
+            r#"
+manifest_version = 2
+name = "nested-root"
+version = "1.0.0"
+
+[source]
+kind = "json"
+url = "https://example.test/aqi.json"
+refresh_minutes = 15
+root = "payload.current"
+
+[template]
+kind = "scene"
+"#,
+        )
+        .expect("nested-root v2 manifest parses");
+        manifest.source
+    }
+
+    #[test]
+    fn declared_root_selects_the_real_raw_aqi_fixture_before_last_good_updates() {
+        const RAW_AQI_FIXTURE: &[u8] = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../plugin/tests/fixtures/aqi_response.json"
+        ));
+
+        let expected_envelope: Value =
+            serde_json::from_slice(RAW_AQI_FIXTURE).expect("fixture is valid JSON");
+        let expected_inner = expected_envelope["payload"].clone();
+        let fetcher = FakeFetcher::sequence(vec![
+            Ok(ok_response(RAW_AQI_FIXTURE)),
+            Ok(ok_response(br#"{"status":"ok"}"#)),
+            Ok(ok_response(br#"{"status":"ok","payload":null}"#)),
+            Ok(ok_response(br#"{"status":"ok","payload":"wrong"}"#)),
+        ]);
+        let mut provider = PluginDataProvider::new(fetcher, &rooted_v2_source())
+            .expect("construct rooted provider");
+
+        let first = provider.refresh(Utc::now());
+        assert!(!first.stale);
+        assert_eq!(first.value, expected_inner);
+        assert_eq!(provider.last_failure_class(), None);
+
+        for expected_reason in ["missing", "null", "object or array"] {
+            let failed = provider.refresh(Utc::now());
+            assert!(failed.stale, "a bad declared root must be stale");
+            assert_eq!(
+                failed.value, expected_inner,
+                "a bad declared root must retain the previous inner last-good value"
+            );
+            assert_eq!(
+                provider.last_failure_class(),
+                Some(FailureClass::Permanent),
+                "the identical response shape cannot recover on retry"
+            );
+            assert!(
+                failed.error.as_deref().is_some_and(|message| {
+                    message.contains("source root") && message.contains(expected_reason)
+                }),
+                "root failure must be named, got {:?}",
+                failed.error
+            );
+        }
+    }
+
+    #[test]
+    fn absent_root_preserves_the_real_raw_envelope_without_a_payload_fallback() {
+        const RAW_AQI_FIXTURE: &[u8] = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../plugin/tests/fixtures/aqi_response.json"
+        ));
+        let expected: Value =
+            serde_json::from_slice(RAW_AQI_FIXTURE).expect("fixture is valid JSON");
+        let mut provider = PluginDataProvider::new(
+            FakeFetcher::once(Ok(ok_response(RAW_AQI_FIXTURE))),
+            &json_source(),
+        )
+        .expect("construct unrooted provider");
+
+        let snapshot = provider.refresh(Utc::now());
+
+        assert_eq!(snapshot.value, expected);
+        assert_eq!(snapshot.value["status"], "ok");
+        assert!(snapshot.value.get("payload").is_some());
+        assert!(!snapshot.stale);
+    }
+
+    #[test]
+    fn scalar_at_an_intermediate_root_is_named_permanent_and_keeps_inner_last_good() {
+        let fetcher = FakeFetcher::sequence(vec![
+            Ok(ok_response(br#"{"payload":{"current":{"aqi":42}}}"#)),
+            Ok(ok_response(br#"{"payload":"wrong"}"#)),
+        ]);
+        let mut provider = PluginDataProvider::new(fetcher, &nested_rooted_v2_source())
+            .expect("construct nested-root provider");
+
+        let first = provider.refresh(Utc::now());
+        assert_eq!(first.value, serde_json::json!({"aqi": 42}));
+        assert!(!first.stale);
+
+        let failed = provider.refresh(Utc::now());
+        assert!(failed.stale);
+        assert_eq!(failed.value, first.value);
+        assert_eq!(provider.last_failure_class(), Some(FailureClass::Permanent));
+        assert!(
+            failed
+                .error
+                .as_deref()
+                .is_some_and(|message| message.contains("reaches a scalar before segment")),
+            "intermediate scalar failure must be named: {:?}",
+            failed.error
+        );
     }
 
     #[test]
@@ -815,6 +1013,7 @@ mod tests {
         let source = Source::Json {
             url: format!("http://{addr}/data"),
             refresh_minutes: 15,
+            root: None,
         };
         let mut provider =
             PluginDataProvider::new(DirectHttpFetcher::new(), &source).expect("construct provider");
@@ -851,6 +1050,7 @@ mod tests {
         let source = Source::Json {
             url: format!("http://{addr}/data"),
             refresh_minutes: 15,
+            root: None,
         };
         let mut provider =
             PluginDataProvider::new(DirectHttpFetcher::new(), &source).expect("construct provider");
@@ -933,6 +1133,7 @@ mod tests {
         let source = Source::Json {
             url: format!("http://{addr}/data"),
             refresh_minutes: 15,
+            root: None,
         };
         let mut provider =
             PluginDataProvider::new(DirectHttpFetcher::new(), &source).expect("construct provider");

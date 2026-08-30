@@ -23,6 +23,7 @@ pub mod plugin_host;
 pub mod plugin_provider;
 pub mod plugin_refresher;
 pub mod plugin_registry;
+pub mod rasterizer;
 pub mod registry;
 pub mod runtime_device;
 mod store;

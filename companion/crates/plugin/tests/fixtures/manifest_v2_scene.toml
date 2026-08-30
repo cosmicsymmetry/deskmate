@@ -1,0 +1,12 @@
+manifest_version = 2
+name = "v2-scene"
+version = "1.0.0"
+
+[source]
+kind = "json"
+url = "https://example.invalid/data.json"
+refresh_minutes = 15
+root = "payload"
+
+[template]
+kind = "scene"

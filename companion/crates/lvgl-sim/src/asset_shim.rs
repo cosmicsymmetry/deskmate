@@ -108,18 +108,24 @@ impl AssetShim {
 mod tests {
     use std::fs;
 
-    use plugin::{Asset, PluginManifest, Source, resolve_assets};
+    use plugin::{Asset, ManifestVersion, PluginManifest, Source, Template, resolve_assets};
 
     use super::*;
 
+    /// A v1-shaped manifest: this shim predates manifest v2 and its assets
+    /// are the v1 `[[assets]]` form, so it pins the v1 contract values
+    /// explicitly rather than tracking whatever v2 adds later.
     fn minimal_manifest(assets: Vec<Asset>) -> PluginManifest {
         PluginManifest {
+            manifest_version: ManifestVersion::V1,
             name: "test".to_string(),
             version: "1.0.0".to_string(),
             source: Source::Json {
                 url: "https://example.invalid/x.json".to_string(),
                 refresh_minutes: 15,
+                root: None,
             },
+            template: Template::Scene,
             assets,
             nodes: Vec::new(),
             repeats: Vec::new(),

@@ -26,6 +26,7 @@ pub use expr::{
 };
 pub use manifest::{
     Align, Asset, Font, FontTier, Glyph, MAX_REFRESH_MINUTES, MAX_REPEAT_GROUPS,
-    MAX_REPEAT_SOURCE_LEN, MIN_REFRESH_MINUTES, ManifestError, Node, PluginManifest, Point, Repeat,
-    Source, parse_manifest, parse_manifest_bytes,
+    MAX_REPEAT_SOURCE_LEN, MAX_SOURCE_ROOT_LEN, MIN_REFRESH_MINUTES, ManifestError,
+    ManifestVersion, Node, PluginManifest, Point, Repeat, Source, Template, parse_manifest,
+    parse_manifest_bytes,
 };

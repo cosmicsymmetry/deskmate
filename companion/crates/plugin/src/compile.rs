@@ -51,7 +51,7 @@ use app_core::{BakedFontMetrics, SceneDataState, text_is_numeric, with_scene_dat
 
 use crate::assets::AssetSet;
 use crate::expr::{EvalContext, Expr, ExprError, FUEL_BUDGET, Fuel};
-use crate::manifest::{Align, Font, FontTier, Node, PluginManifest, Point, Repeat};
+use crate::manifest::{Align, Font, FontTier, Node, PluginManifest, Point, Repeat, Template};
 
 /// Maximum repetitions the one repeat form expands to, however long the
 /// fetched array actually is. Mirrors `RowListCard`'s five-row precedent
@@ -134,6 +134,15 @@ pub enum CompileError {
     /// invalid manifest to `Ok` and let the device reject the whole scene
     /// with no named host-side error.
     Invalid(protocol::MessageError),
+    /// A binding token is valid vocabulary, but not in this numeric/angle
+    /// position (for example `timer.status` on an arc end).
+    InvalidBindingPosition { field: &'static str, text: String },
+    /// A line did not provide exactly one complete geometry form. Parsed
+    /// manifests catch this earlier; this keeps direct typed callers total.
+    InvalidLineGeometry,
+    /// SVG templates are retained for the server raster path and cannot be
+    /// compiled into a native display-list scene.
+    TemplateNotScene,
 }
 
 impl std::fmt::Display for CompileError {
@@ -302,6 +311,49 @@ fn compile_value_source(
     Ok(bound_literal(&value.to_string()))
 }
 
+fn compile_position_binding(
+    source: &str,
+    field: &'static str,
+    allowed: impl FnOnce(&str) -> bool,
+) -> Result<String, CompileError> {
+    let Some(inner) = extract_expression(source) else {
+        return Err(CompileError::InvalidBindingPosition {
+            field,
+            text: source.to_string(),
+        });
+    };
+    let binding = inner.trim();
+    if allowed(binding) {
+        return Ok(binding.to_string());
+    }
+    if looks_like_binding_namespace(binding) && !protocol::binding_is_valid(binding) {
+        return Err(CompileError::UnknownBinding {
+            text: binding.to_string(),
+        });
+    }
+    Err(CompileError::InvalidBindingPosition {
+        field,
+        text: binding.to_string(),
+    })
+}
+
+fn compile_arc_end_binding(source: Option<&str>) -> Result<String, CompileError> {
+    source.map_or_else(
+        || Ok(String::new()),
+        |source| {
+            compile_position_binding(source, "arc.end_binding", |binding| {
+                matches!(binding, "timer.pct" | "timer.permille")
+            })
+        },
+    )
+}
+
+fn compile_line_angle_binding(source: &str) -> Result<String, CompileError> {
+    compile_position_binding(source, "line.angle_binding", |binding| {
+        matches!(binding, "time:angle:hour" | "time:angle:minute")
+    })
+}
+
 /// Bounds a face node's literal to `protocol::MAX_SCENE_TEXT_LEN` bytes by
 /// truncating at a valid UTF-8 char boundary, rather than refusing to
 /// compile the scene.
@@ -462,6 +514,7 @@ fn offset_node(node: Node, dx: i32, dy: i32) -> Node {
             width,
             color,
             caps,
+            end_binding,
         } => Node::Arc {
             cx: cx + dx,
             cy: cy + dy,
@@ -471,9 +524,14 @@ fn offset_node(node: Node, dx: i32, dy: i32) -> Node {
             width,
             color,
             caps,
+            end_binding,
         },
         Node::Line {
             points,
+            pivot_x,
+            pivot_y,
+            length,
+            angle_binding,
             width,
             color,
         } => Node::Line {
@@ -484,6 +542,10 @@ fn offset_node(node: Node, dx: i32, dy: i32) -> Node {
                     y: p.y + dy,
                 })
                 .collect(),
+            pivot_x: pivot_x.map(|value| value + dx),
+            pivot_y: pivot_y.map(|value| value + dy),
+            length,
+            angle_binding,
             width,
             color,
         },
@@ -580,6 +642,7 @@ fn compile_node(
             width,
             color,
             caps,
+            end_binding,
         } => Ok(SceneNode::Arc(SceneArc {
             cx: *cx,
             cy: *cy,
@@ -591,24 +654,46 @@ fn compile_node(
             running_color: None,
             opacity: u8::MAX,
             rounded: *caps,
-            end_binding: String::new(),
+            end_binding: compile_arc_end_binding(end_binding.as_deref())?,
         })),
         Node::Line {
             points,
+            pivot_x,
+            pivot_y,
+            length,
+            angle_binding,
             width,
             color,
         } => {
-            let xs = points.iter().map(|p| p.x).collect();
-            let ys = points.iter().map(|p| p.y).collect();
+            let (xs, ys, pivot_x, pivot_y, length, angle_binding) =
+                match (points.is_empty(), pivot_x, pivot_y, length, angle_binding) {
+                    (false, None, None, None, None) => (
+                        points.iter().map(|p| p.x).collect(),
+                        points.iter().map(|p| p.y).collect(),
+                        0,
+                        0,
+                        0,
+                        String::new(),
+                    ),
+                    (true, Some(pivot_x), Some(pivot_y), Some(length), Some(binding)) => (
+                        Vec::new(),
+                        Vec::new(),
+                        *pivot_x,
+                        *pivot_y,
+                        *length,
+                        compile_line_angle_binding(binding)?,
+                    ),
+                    _ => return Err(CompileError::InvalidLineGeometry),
+                };
             Ok(SceneNode::Line(SceneLine {
                 xs,
                 ys,
                 width: *width,
                 color: *color,
-                pivot_x: 0,
-                pivot_y: 0,
-                length: 0,
-                angle_binding: String::new(),
+                pivot_x,
+                pivot_y,
+                length,
+                angle_binding,
             }))
         }
         Node::Text {
@@ -820,6 +905,9 @@ pub fn compile_scene_with_assets(
     revision: u32,
     assets: &AssetSet,
 ) -> Result<Scene, CompileError> {
+    if !matches!(manifest.template, Template::Scene) {
+        return Err(CompileError::TemplateNotScene);
+    }
     // Final whole-stage review finding 2: the `icon(name)` lookup table
     // comes from `assets` itself -- the same `icon_codepoints()` table
     // `AssetSet::icon_codepoint` resolves a single name against -- rather
@@ -913,7 +1001,8 @@ fn bound_footer_text(text: &str) -> String {
 mod tests {
     use super::*;
     use crate::manifest::{
-        Align as ManifestAlign, Font as ManifestFont, FontTier as ManifestFontTier, Source,
+        Align as ManifestAlign, Font as ManifestFont, FontTier as ManifestFontTier,
+        ManifestVersion, Source, Template,
     };
 
     fn metrics() -> BakedFontMetrics {
@@ -947,11 +1036,14 @@ mod tests {
 
     fn text_node_manifest(value: &str) -> PluginManifest {
         PluginManifest {
+            manifest_version: ManifestVersion::V1,
+            template: Template::Scene,
             name: "test".to_string(),
             version: "1.0.0".to_string(),
             source: Source::Json {
                 url: "https://example.invalid/x.json".to_string(),
                 refresh_minutes: 15,
+                root: None,
             },
             assets: Vec::new(),
             nodes: vec![Node::Text {
@@ -1246,11 +1338,14 @@ mod tests {
     #[test]
     fn an_image_node_is_refused_as_asset_not_resolved() {
         let manifest = PluginManifest {
+            manifest_version: ManifestVersion::V1,
+            template: Template::Scene,
             name: "test".to_string(),
             version: "1.0.0".to_string(),
             source: Source::Json {
                 url: "https://example.invalid/x.json".to_string(),
                 refresh_minutes: 15,
+                root: None,
             },
             assets: Vec::new(),
             nodes: vec![Node::Image {
@@ -1274,11 +1369,14 @@ mod tests {
     #[test]
     fn a_glyph_node_is_refused_as_asset_not_resolved() {
         let manifest = PluginManifest {
+            manifest_version: ManifestVersion::V1,
+            template: Template::Scene,
             name: "test".to_string(),
             version: "1.0.0".to_string(),
             source: Source::Json {
                 url: "https://example.invalid/x.json".to_string(),
                 refresh_minutes: 15,
+                root: None,
             },
             assets: Vec::new(),
             nodes: vec![Node::Glyph {
@@ -1303,11 +1401,14 @@ mod tests {
     #[test]
     fn a_text_node_naming_an_asset_font_is_refused_as_asset_not_resolved() {
         let manifest = PluginManifest {
+            manifest_version: ManifestVersion::V1,
+            template: Template::Scene,
             name: "test".to_string(),
             version: "1.0.0".to_string(),
             source: Source::Json {
                 url: "https://example.invalid/x.json".to_string(),
                 refresh_minutes: 15,
+                root: None,
             },
             assets: Vec::new(),
             nodes: vec![Node::Text {
@@ -1337,11 +1438,14 @@ mod tests {
 
     fn tiered_text_manifest(tier: ManifestFontTier, value: &str) -> PluginManifest {
         PluginManifest {
+            manifest_version: ManifestVersion::V1,
+            template: Template::Scene,
             name: "test".to_string(),
             version: "1.0.0".to_string(),
             source: Source::Json {
                 url: "https://example.invalid/x.json".to_string(),
                 refresh_minutes: 15,
+                root: None,
             },
             assets: Vec::new(),
             nodes: vec![Node::Text {
@@ -1385,11 +1489,14 @@ mod tests {
     #[test]
     fn a_numeric_literal_on_the_hero_tier_is_accepted_and_keeps_the_hero_tier() {
         let manifest = PluginManifest {
+            manifest_version: ManifestVersion::V1,
+            template: Template::Scene,
             name: "test".to_string(),
             version: "1.0.0".to_string(),
             source: Source::Json {
                 url: "https://example.invalid/x.json".to_string(),
                 refresh_minutes: 15,
+                root: None,
             },
             assets: Vec::new(),
             nodes: vec![Node::Text {
@@ -1455,11 +1562,14 @@ mod tests {
         providers::ProviderSnapshot<serde_json::Value>,
     ) {
         let manifest = PluginManifest {
+            manifest_version: ManifestVersion::V1,
+            template: Template::Scene,
             name: "test".to_string(),
             version: "1.0.0".to_string(),
             source: Source::Json {
                 url: "https://example.invalid/x.json".to_string(),
                 refresh_minutes: 15,
+                root: None,
             },
             assets: Vec::new(),
             nodes: Vec::new(),
@@ -1538,11 +1648,14 @@ mod tests {
     #[test]
     fn a_missing_repeat_source_expands_to_zero_rows_not_an_error() {
         let manifest = PluginManifest {
+            manifest_version: ManifestVersion::V1,
+            template: Template::Scene,
             name: "test".to_string(),
             version: "1.0.0".to_string(),
             source: Source::Json {
                 url: "https://example.invalid/x.json".to_string(),
                 refresh_minutes: 15,
+                root: None,
             },
             assets: Vec::new(),
             nodes: Vec::new(),
@@ -1600,11 +1713,14 @@ mod tests {
             })
             .collect();
         let manifest = PluginManifest {
+            manifest_version: ManifestVersion::V1,
+            template: Template::Scene,
             name: "test".to_string(),
             version: "1.0.0".to_string(),
             source: Source::Json {
                 url: "https://example.invalid/x.json".to_string(),
                 refresh_minutes: 15,
+                root: None,
             },
             assets: Vec::new(),
             nodes,
@@ -1628,11 +1744,14 @@ mod tests {
             })
             .collect();
         let manifest = PluginManifest {
+            manifest_version: ManifestVersion::V1,
+            template: Template::Scene,
             name: "test".to_string(),
             version: "1.0.0".to_string(),
             source: Source::Json {
                 url: "https://example.invalid/x.json".to_string(),
                 refresh_minutes: 15,
+                root: None,
             },
             assets: Vec::new(),
             nodes,
@@ -1721,11 +1840,14 @@ mod tests {
     #[test]
     fn out_of_canvas_node_geometry_is_refused_as_invalid() {
         let manifest = PluginManifest {
+            manifest_version: ManifestVersion::V1,
+            template: Template::Scene,
             name: "test".to_string(),
             version: "1.0.0".to_string(),
             source: Source::Json {
                 url: "https://example.invalid/x.json".to_string(),
                 refresh_minutes: 15,
+                root: None,
             },
             assets: Vec::new(),
             nodes: vec![Node::Rect {
@@ -1777,11 +1899,14 @@ mod tests {
 
     fn manifest_with(assets: Vec<Asset>, nodes: Vec<Node>) -> PluginManifest {
         PluginManifest {
+            manifest_version: ManifestVersion::V1,
+            template: Template::Scene,
             name: "test".to_string(),
             version: "1.0.0".to_string(),
             source: Source::Json {
                 url: "https://example.invalid/x.json".to_string(),
                 refresh_minutes: 15,
+                root: None,
             },
             assets,
             nodes,

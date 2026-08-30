@@ -108,6 +108,18 @@ pub const MAX_REPEAT_GROUPS: usize = 2;
 /// `"rows"` for `data.rows`).
 pub const MAX_REPEAT_SOURCE_LEN: usize = 64;
 
+/// Maximum byte length of `[source].root`; this bounds storage and the
+/// provider's dotted-path scan before any fetched value is traversed.
+pub const MAX_SOURCE_ROOT_LEN: usize = 256;
+
+/// Maximum bytes retained for one SVG template source; the registry holds
+/// every curated SVG for the process lifetime, and XML parsing scales with it.
+pub const MAX_SVG_SOURCE_BYTES: usize = 256 * 1024;
+
+/// Maximum bytes permitted after SVG expression expansion; substituted
+/// provider strings may grow the XML before the later `usvg` parse.
+pub const MAX_EXPANDED_SVG_BYTES: usize = 512 * 1024;
+
 const fn default_opacity() -> u8 {
     u8::MAX
 }
@@ -189,6 +201,26 @@ pub enum ManifestError {
     /// containment check for the second, independent layer over the same
     /// hazard.
     InvalidAssetPath { file: String },
+    /// `manifest_version` was present with a value other than exactly `2`.
+    UnsupportedManifestVersion { value: u32 },
+    /// A v1 manifest used a field introduced only by manifest v2.
+    V2FieldInV1 { field: &'static str },
+    /// An explicit v2 manifest omitted its required `[template]` union.
+    MissingV2Template,
+    /// A source root has an empty dotted path segment.
+    InvalidSourceRoot { root: String },
+    /// A source root exceeds the expression language's shared path width.
+    TooManySourceRootSegments { limit: usize, actual: usize },
+    /// An SVG template file is not one plain filename component.
+    InvalidTemplatePath { file: String },
+    /// An SVG template supplied display-list nodes/repeats that it may not carry.
+    SvgTemplateHasSceneContent,
+    /// A line supplied both fixed points and bound pivot geometry.
+    AmbiguousLineGeometry,
+    /// A line supplied neither fixed points nor bound pivot geometry.
+    MissingLineGeometry,
+    /// A bound line omitted one or more of `pivot_x`/`pivot_y`/`length`/binding.
+    IncompleteBoundLineGeometry,
 }
 
 impl fmt::Display for ManifestError {
@@ -203,23 +235,77 @@ impl std::error::Error for ManifestError {}
 // The manifest shape.
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PluginManifest {
+    pub manifest_version: ManifestVersion,
     pub name: String,
     pub version: String,
     pub source: Source,
-    #[serde(default)]
     pub assets: Vec<Asset>,
-    #[serde(default)]
     pub nodes: Vec<Node>,
     /// The one repeat form: a template node group, repeated once per element
     /// of a fetched provider array (capped at compile time -- see
     /// `compile::MAX_REPEAT_ITEMS`), with the loop index available to each
     /// repetition's expressions as the token `item`. Empty for a manifest
     /// with no list content, which is most of them.
-    #[serde(default)]
     pub repeats: Vec<Repeat>,
+    pub template: Template,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManifestVersion {
+    V1,
+    V2,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Template {
+    Scene,
+    Svg { file: String },
+}
+
+impl<'de> Deserialize<'de> for Template {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Repr {
+            kind: String,
+            #[serde(default)]
+            file: Option<String>,
+        }
+
+        let repr = Repr::deserialize(deserializer)?;
+        match (repr.kind.as_str(), repr.file) {
+            ("scene", None) => Ok(Self::Scene),
+            ("scene", Some(_)) => Err(serde::de::Error::custom(
+                "template.kind = \"scene\" forbids file",
+            )),
+            ("svg", Some(file)) => Ok(Self::Svg { file }),
+            ("svg", None) => Err(serde::de::Error::missing_field("file")),
+            (kind, _) => Err(serde::de::Error::unknown_variant(kind, &["scene", "svg"])),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawPluginManifest {
+    #[serde(default)]
+    manifest_version: Option<u32>,
+    name: String,
+    version: String,
+    source: Source,
+    #[serde(default)]
+    assets: Vec<Asset>,
+    #[serde(default)]
+    nodes: Vec<Node>,
+    #[serde(default)]
+    repeats: Vec<Repeat>,
+    #[serde(default)]
+    template: Option<Template>,
 }
 
 /// One `[[repeats]]` block: `source` names the fetched-data array whose
@@ -242,7 +328,12 @@ pub struct Repeat {
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum Source {
-    Json { url: String, refresh_minutes: u32 },
+    Json {
+        url: String,
+        refresh_minutes: u32,
+        #[serde(default)]
+        root: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -348,9 +439,20 @@ pub enum Node {
         color: u32,
         #[serde(default)]
         caps: bool,
+        #[serde(default)]
+        end_binding: Option<String>,
     },
     Line {
+        #[serde(default)]
         points: Vec<Point>,
+        #[serde(default)]
+        pivot_x: Option<i32>,
+        #[serde(default)]
+        pivot_y: Option<i32>,
+        #[serde(default)]
+        length: Option<i32>,
+        #[serde(default)]
+        angle_binding: Option<String>,
         width: i32,
         color: u32,
     },
@@ -495,20 +597,80 @@ fn check_len(field: &'static str, value: &str, limit: usize) -> Result<(), Manif
 /// claim that `file` is "relative to the manifest's own directory": a
 /// single file in that directory, never a path that walks anywhere else.
 fn validate_asset_file_path(file: &str) -> Result<(), ManifestError> {
-    let mut components = std::path::Path::new(file).components();
-    match (components.next(), components.next()) {
-        (Some(Component::Normal(_)), None) => Ok(()),
-        _ => Err(ManifestError::InvalidAssetPath {
+    if path_is_single_normal_component(file) {
+        Ok(())
+    } else {
+        Err(ManifestError::InvalidAssetPath {
             file: file.to_string(),
-        }),
+        })
     }
 }
 
+fn validate_template_file_path(file: &str) -> Result<(), ManifestError> {
+    if path_is_single_normal_component(file) {
+        Ok(())
+    } else {
+        Err(ManifestError::InvalidTemplatePath {
+            file: file.to_string(),
+        })
+    }
+}
+
+fn path_is_single_normal_component(file: &str) -> bool {
+    let mut components = std::path::Path::new(file).components();
+    matches!(
+        (components.next(), components.next()),
+        (Some(Component::Normal(_)), None)
+    )
+}
+
 impl PluginManifest {
+    /// Public access to the source cap without exposing this module's private path.
+    pub const MAX_SVG_SOURCE_BYTES: usize = MAX_SVG_SOURCE_BYTES;
+
+    /// Public access to the post-substitution cap without exposing this module's private path.
+    pub const MAX_EXPANDED_SVG_BYTES: usize = MAX_EXPANDED_SVG_BYTES;
+
+    /// Public access to the source-root bound for external contract tests.
+    pub const MAX_SOURCE_ROOT_LEN: usize = MAX_SOURCE_ROOT_LEN;
+
+    /// Public access to the shared filename bound for external contract tests.
+    pub const MAX_FILE_NAME_LEN: usize = MAX_FILE_NAME_LEN;
+
+    pub fn is_manifest_v1(&self) -> bool {
+        self.manifest_version == ManifestVersion::V1
+    }
+
+    pub fn is_manifest_v2(&self) -> bool {
+        self.manifest_version == ManifestVersion::V2
+    }
+
+    pub fn is_scene_template(&self) -> bool {
+        matches!(self.template, Template::Scene)
+    }
+
+    pub fn svg_template_file(&self) -> Option<&str> {
+        match &self.template {
+            Template::Scene => None,
+            Template::Svg { file } => Some(file),
+        }
+    }
+
     fn validate(&self) -> Result<(), ManifestError> {
         check_len("name", &self.name, MAX_NAME_LEN)?;
         check_len("version", &self.version, MAX_VERSION_LEN)?;
         self.source.validate()?;
+
+        match &self.template {
+            Template::Scene => {}
+            Template::Svg { file } => {
+                check_len("template.file", file, MAX_FILE_NAME_LEN)?;
+                validate_template_file_path(file)?;
+                if !self.nodes.is_empty() || !self.repeats.is_empty() {
+                    return Err(ManifestError::SvgTemplateHasSceneContent);
+                }
+            }
+        }
 
         if self.assets.len() > MAX_ASSETS {
             return Err(ManifestError::TooManyAssets {
@@ -574,6 +736,7 @@ impl Source {
             Self::Json {
                 url,
                 refresh_minutes,
+                root,
             } => {
                 check_len("source.url", url, MAX_URL_LEN)?;
                 if !(MIN_REFRESH_MINUTES..=MAX_REFRESH_MINUTES).contains(refresh_minutes) {
@@ -588,6 +751,19 @@ impl Source {
                     return Err(ManifestError::DisallowedUrlScheme {
                         scheme: parsed.scheme().to_string(),
                     });
+                }
+                if let Some(root) = root {
+                    check_len("source.root", root, MAX_SOURCE_ROOT_LEN)?;
+                    if root.split('.').any(str::is_empty) {
+                        return Err(ManifestError::InvalidSourceRoot { root: root.clone() });
+                    }
+                    let segment_count = root.split('.').count();
+                    if segment_count > crate::expr::MAX_PATH_SEGMENTS {
+                        return Err(ManifestError::TooManySourceRootSegments {
+                            limit: crate::expr::MAX_PATH_SEGMENTS,
+                            actual: segment_count,
+                        });
+                    }
                 }
                 Ok(())
             }
@@ -629,18 +805,45 @@ impl Node {
         match self {
             Self::Text { value, .. } => check_len("node.value", value, MAX_EXPR_SOURCE_LEN),
             Self::Glyph { glyph, .. } => check_len("node.glyph", glyph, MAX_EXPR_SOURCE_LEN),
-            Self::Line { points, .. } => {
-                if (MIN_LINE_POINTS..=MAX_LINE_POINTS).contains(&points.len()) {
-                    Ok(())
-                } else {
-                    Err(ManifestError::InvalidPointCount {
-                        min: MIN_LINE_POINTS,
-                        max: MAX_LINE_POINTS,
-                        actual: points.len(),
-                    })
+            Self::Arc { end_binding, .. } => end_binding.as_ref().map_or(Ok(()), |binding| {
+                check_len("node.end_binding", binding, MAX_EXPR_SOURCE_LEN)
+            }),
+            Self::Line {
+                points,
+                pivot_x,
+                pivot_y,
+                length,
+                angle_binding,
+                ..
+            } => {
+                let has_points = !points.is_empty();
+                let bound_count = usize::from(pivot_x.is_some())
+                    + usize::from(pivot_y.is_some())
+                    + usize::from(length.is_some())
+                    + usize::from(angle_binding.is_some());
+                match (has_points, bound_count) {
+                    (true, 0) => {
+                        if (MIN_LINE_POINTS..=MAX_LINE_POINTS).contains(&points.len()) {
+                            Ok(())
+                        } else {
+                            Err(ManifestError::InvalidPointCount {
+                                min: MIN_LINE_POINTS,
+                                max: MAX_LINE_POINTS,
+                                actual: points.len(),
+                            })
+                        }
+                    }
+                    (true, _) => Err(ManifestError::AmbiguousLineGeometry),
+                    (false, 0) => Err(ManifestError::MissingLineGeometry),
+                    (false, 4) => check_len(
+                        "node.angle_binding",
+                        angle_binding.as_deref().expect("count proves presence"),
+                        MAX_EXPR_SOURCE_LEN,
+                    ),
+                    (false, _) => Err(ManifestError::IncompleteBoundLineGeometry),
                 }
             }
-            Self::Rect { .. } | Self::Arc { .. } | Self::Image { .. } => Ok(()),
+            Self::Rect { .. } | Self::Image { .. } => Ok(()),
         }
     }
 }
@@ -665,8 +868,68 @@ pub fn parse_manifest(source: &str) -> Result<PluginManifest, ManifestError> {
         });
     }
     check_nesting_depth(source)?;
-    let manifest: PluginManifest =
+    let raw: RawPluginManifest =
         toml::from_str(source).map_err(|err| ManifestError::Toml(err.to_string()))?;
+    let manifest_version = match raw.manifest_version {
+        None => ManifestVersion::V1,
+        Some(2) => ManifestVersion::V2,
+        Some(value) => return Err(ManifestError::UnsupportedManifestVersion { value }),
+    };
+    if manifest_version == ManifestVersion::V1 {
+        if raw.template.is_some() {
+            return Err(ManifestError::V2FieldInV1 { field: "template" });
+        }
+        if matches!(&raw.source, Source::Json { root: Some(_), .. }) {
+            return Err(ManifestError::V2FieldInV1 {
+                field: "source.root",
+            });
+        }
+        for node in raw
+            .nodes
+            .iter()
+            .chain(raw.repeats.iter().flat_map(|repeat| repeat.nodes.iter()))
+        {
+            match node {
+                Node::Arc {
+                    end_binding: Some(_),
+                    ..
+                } => {
+                    return Err(ManifestError::V2FieldInV1 {
+                        field: "arc.end_binding",
+                    });
+                }
+                Node::Line {
+                    pivot_x,
+                    pivot_y,
+                    length,
+                    angle_binding,
+                    ..
+                } if pivot_x.is_some()
+                    || pivot_y.is_some()
+                    || length.is_some()
+                    || angle_binding.is_some() =>
+                {
+                    return Err(ManifestError::V2FieldInV1 {
+                        field: "line bound geometry",
+                    });
+                }
+                _ => {}
+            }
+        }
+    }
+    if manifest_version == ManifestVersion::V2 && raw.template.is_none() {
+        return Err(ManifestError::MissingV2Template);
+    }
+    let manifest = PluginManifest {
+        manifest_version,
+        name: raw.name,
+        version: raw.version,
+        source: raw.source,
+        assets: raw.assets,
+        nodes: raw.nodes,
+        repeats: raw.repeats,
+        template: raw.template.unwrap_or(Template::Scene),
+    };
     manifest.validate()?;
     Ok(manifest)
 }

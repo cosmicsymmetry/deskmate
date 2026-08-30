@@ -4345,3 +4345,85 @@ measurements and want a real decision, not a workaround applied mid-gate.
 **Still owed, unchanged:** every plugin-face observation (Steps 3-5), the asset-GC teardown
 (Step 6), and the device-side half of the digest check. Nothing about the plugin faces is
 hardware-verified.
+
+## Stage 3b Task 9 — PASSED 2026-08-30: both plugin faces on the panel at both orientations
+
+Device `dev-0005`, `v2.0.0-live2`, networked tier, server at `0b9075f`. **The plugin faces
+drew on the panel.** Steps 1-5 pass; Step 6 (asset-GC teardown) was not run.
+
+**What made it possible.** The 2026-08-29 sessions failed on a link that flapped every
+~10 s. `0b9075f` moved the server's `IDLE_TIMEOUT` off `protocol::LINK_TIMEOUT_MS` (10 s,
+the USB value) to 30 s, derived as `DEVICE_NETWORK_LINK_TIMEOUT_SECS - IDLE_TIMEOUT_MARGIN_SECS`
+so it sits between a healthy link's silence and the device's own 45 s
+(`net_link.c`'s `NET_LINK_TIMEOUT_MS`). Result, measured: **0 idle timeouts in 15 minutes**
+against a prior baseline of links lasting 21-24 s, and operator scene pushes went **0/3 ->
+3/3 acked**. Signal was also better (`wifi_rssi` -67 to -69 vs -93 earlier) and
+`dropped_responses` stayed **0** for the whole session, so the fix is not the only variable
+— but the flapping stopped and stayed stopped.
+
+**Step 2 - digests.** `GET /v1/plugins` matched independent `sha256sum` (VM) and
+`shasum -a 256` (Mac): `aqi/icons.ttf` =
+`40bbbac715465adf7ba539f53a0cb16991a2c1f73a4fb57af209d39e0c62b327` (4320 B),
+`agenda/badge.rgb565` = `e19db5d47bbdae46bf80e5a7df400795bce84973817c9f124642bc76bf41d33a`
+(812 B). The device-side half is confirmed **transitively and unavoidably**: `StatusResponse`
+has no asset inventory (see the 2026-08-29 entry), but the aqi glyph could only resolve if
+the device held those exact bytes under that digest — and it drew.
+
+**Steps 3-4 - the aqi face, both orientations.** Every node rendered as the manifest
+specifies: `MODERATE` (`upper(data.current.category)`), an orange `M` glyph from the
+uploaded `icons.ttf` **at pixel_size 72, a size no baked tier provides** — which is the
+whole point of `SceneFont::Asset` and Step 4's requirement — a `42` hero
+(`data.current.aqi`), `AQI`, `42` + `PM2.5`
+(`default(round(data.current.pollutants.pm25.value, 0), "--")`), and `field.title`.
+No first-render hitch was visible at the capture cadence used; §6's 96 px glyph-cache-miss
+timing gate was **not** measured and is still owed.
+
+**`field.*` drew a real value for the first time in this project.** The aqi face's
+`{{ field.title }}` node rendered **"Headlines"** — the title of the `rss` card the scene
+was pushed to. The binding CLAUDE.md and the parity ledger both recorded as having no
+producer is now live end to end: `ServerProviderRefresher` emits the card's `title` ->
+`PushData` -> device retains it -> `field.title` resolves it at render. Note the reach is
+still what the ledger says: a plugin card's wire template is always `DigitalClock`, so only
+its four registered fields can ever resolve.
+
+**Step 5 - the agenda face and the image node, both orientations.** `2026-08-28`
+(`data.date`), the `badge.rgb565` **image node** as a white square, and exactly **five**
+event rows from a fixture carrying **six** — `MAX_REPEAT_ITEMS` enforced on hardware. The
+long first title truncated to `Standup with the who...` (a real `truncate()`), and the
+event with null time and null title rendered `--:--  (untitled)`. **No artifacts at either
+orientation with an image node present**, which is the `board_lcd_rounder_cb` observation
+§6 deferred out of stage 3a.
+
+**Real 90-degree geometry is now observed, not inferred.** Orientation was flipped by
+`PUT /v1/devices/{id}/config` with `preferences.orientation` `landscape-flipped` ->
+`landscape`, confirmed by the device reporting `rotation: 90`, and both faces were captured
+again. Both appeared correctly inverted in the camera with identical layout and no
+clipping. This is the claim no host gate can make: the parity gate and the `0x7E` capture
+both carry `flipped(A) == flipped(B)` blindness. Orientation was restored to
+`landscape-flipped` afterwards and verified both live and in
+`/var/lib/deskmate/configs/dev-0005.json`.
+
+**Finding: the operator scene route's caller-supplied `revision` shares one counter with
+`PushData`, and a high value stalls the runtime.** `link_state.c:116-120` keeps a single
+`latest_revision` that both `PushScene` and `PushData` are checked against. Pushing scenes
+at revisions 910-932 left the runtime's own `next_scene_revision` (~243) below it, and
+every card went `data-refused (StaleRevision)`. It does not self-heal by design:
+`next_scene_revision` starts at 0 and only increments, and the status-based adoption at
+`runtime.rs:3049` is deliberately for the **interrupt token** only (a 2026-08-20 note
+explains that coupling it to revisions misread 24 lost interrupts). Restarting the server
+makes it worse — `WorkerState::new` sets the counter to 0. What actually cleared it here
+was `ApplyConfig`, which reset the device's baseline: `latest_revision` read **248**
+afterwards and live weather resumed rendering. A device power cycle would also clear it
+(`link_state_init` memsets). **Treat a large operator `revision` as a footgun**; prefer
+values just above the runtime's current counter.
+
+**Also observed again: a request whose work succeeded but whose ack was lost.** The
+orientation-restore `PUT` returned `504 runtime command response timed out` while the
+device had already applied it (`rotation: 270`, and the stored config shows
+`landscape-flipped`). Same 200 ms `PROTOCOL_WRITE_TIMEOUT_MS` shape as 2026-08-29; the
+30 s idle timeout does not address it and was not intended to.
+
+**Not done:** Step 6, the asset-GC teardown (release, compaction, font-registry reset,
+retained-scene rebuild, and the `BUSY`/OTA-owner interaction). It remains without an
+automated test and without a hardware observation. Stage 4 makes it more urgent because
+rasterization turns volatile assets into the common case.

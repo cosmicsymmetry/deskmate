@@ -19,7 +19,10 @@ mod expr;
 mod manifest;
 
 pub use assets::{AssetError, AssetSet, MAX_ASSET_BYTES, ResolvedAsset, resolve_assets};
-pub use compile::{CompileError, MAX_REPEAT_ITEMS, compile_scene, compile_scene_with_assets};
+pub use compile::{
+    CompileError, MAX_REPEAT_ITEMS, compile_scene, compile_scene_with_assets,
+    device_binding_requirements,
+};
 pub use expr::{
     EvalContext, EvalValue, Expr, ExprError, FUEL_BUDGET, Fuel, MAX_DEPTH, MAX_OUTPUT_LEN,
     MAX_PATH_SEGMENTS, MAX_ROUND_PLACES, MAX_SOURCE_LEN, build_icon_map,

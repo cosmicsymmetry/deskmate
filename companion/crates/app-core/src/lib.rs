@@ -2,6 +2,7 @@ pub mod asset_sync;
 pub mod commands;
 pub mod config;
 pub mod network_settings;
+pub mod render_negotiation;
 pub mod runtime;
 pub mod scene_build;
 mod scheduler;
@@ -36,11 +37,16 @@ pub use network_settings::{
 };
 pub use protocol::{NetworkConfig, Tier as ProvisioningTier};
 pub use providers::ics::MAX_ICS_BYTES;
+pub use render_negotiation::{
+    BindingClass, BindingRequirements, DeviceRenderProfile, NativeSource, RenderDecision,
+    RenderRequirements, RequirementsError, SceneNodeKind, analyze_raster_only, analyze_scene,
+    classify_binding, negotiate,
+};
 pub use runtime::{
     CalendarRefreshRequest, CalendarRefreshResult, CalendarRefresher, DeviceConnection, PluginHost,
     ProviderRefreshRequest, ProviderRefreshResult, ProviderRefresher, ProviderRequest,
-    RuntimeDevice, RuntimeHandle, RuntimeOptions, RuntimeSubscription, SerialRuntimeDevice,
-    SystemCalendarRefresher, SystemProviderRefresher,
+    RuntimeDevice, RuntimeHandle, RuntimeOptions, RuntimeSubscription, SceneCandidate,
+    SerialRuntimeDevice, SystemCalendarRefresher, SystemProviderRefresher,
 };
 pub use scene_build::{
     AnalogClockCard, BakedFontMetrics, BigNumberCard, ClockCard, IconBadgeCard, NumericAdvances,

@@ -42,6 +42,8 @@
 //! drawn as if it were an image) rather than trusting the manifest author's
 //! `kind` tag to match how a node uses it.
 
+use std::collections::BTreeSet;
+
 use protocol::{
     AssetKind, Scene, SceneAlign, SceneArc, SceneFont, SceneFontTier, SceneGlyph, SceneImage,
     SceneLine, SceneNode, SceneRect, SceneText, SceneValue,
@@ -179,6 +181,39 @@ fn looks_like_binding_namespace(text: &str) -> bool {
         || text.starts_with("timer.")
         || text.starts_with("time:")
         || text.starts_with("field.")
+}
+
+/// Collects every `{{ ... }}` span in `source` whose trimmed body names the
+/// device-binding namespace, verbatim, deduplicated.
+///
+/// This is stage 4's render-negotiation input for an SVG template: a live
+/// binding in SVG is a **requirement**, never a string `resvg` may freeze
+/// (`docs/plugins/manifest-v2.md`). The namespace decision is
+/// [`looks_like_binding_namespace`] -- the same one scene compilation makes
+/// -- because a second copy in server code is exactly how the two would come
+/// to disagree. The scan is textual on purpose: manifest v2 permits an
+/// expression only as the complete value of an XML text node or attribute,
+/// so a device binding can only ever appear as a whole `{{ ... }}` body, and
+/// a match somewhere the XML evaluator would ignore (a comment, say) only
+/// over-reports a requirement -- which refuses more, and never freezes a
+/// clock. Classification (live versus static) stays with the caller's
+/// negotiation table; this reports the tokens, not the policy.
+#[must_use]
+pub fn device_binding_requirements(source: &str) -> BTreeSet<String> {
+    let mut bindings = BTreeSet::new();
+    let mut rest = source;
+    while let Some(open) = rest.find("{{") {
+        let after_open = &rest[open + 2..];
+        let Some(close) = after_open.find("}}") else {
+            break;
+        };
+        let body = after_open[..close].trim();
+        if looks_like_binding_namespace(body) {
+            bindings.insert(body.to_owned());
+        }
+        rest = &after_open[close + 2..];
+    }
+    bindings
 }
 
 /// Strips a `"{{ ... }}"` wrapper, returning the trimmed inner source.
@@ -1071,6 +1106,43 @@ mod tests {
             SceneNode::Text(text) => text,
             other => panic!("node {index} is not Text: {other:?}"),
         }
+    }
+
+    // -- Stage 4 Task 2: SVG device-binding requirements ----------------------
+
+    #[test]
+    fn svg_device_bindings_are_collected_verbatim_and_deduplicated() {
+        let svg = "<svg><text>{{ time:HH:mm }}</text>
+            <text>{{ field.title }}</text>
+            <text>{{ upper(data.current.category) }}</text>
+            <text>{{time:HH:mm}}</text>
+            <text>{{ data.current.aqi }}</text></svg>";
+
+        let bindings = device_binding_requirements(svg);
+
+        // Plain-data expressions are the compiler's business, not a device
+        // requirement; the two binding spellings dedupe to one token.
+        assert_eq!(
+            bindings,
+            BTreeSet::from(["time:HH:mm".to_owned(), "field.title".to_owned()])
+        );
+    }
+
+    #[test]
+    fn svg_without_device_bindings_reports_none() {
+        assert!(device_binding_requirements("<svg><text>{{ data.x }}</text></svg>").is_empty());
+        assert!(device_binding_requirements("<svg><text>plain</text></svg>").is_empty());
+        // An unterminated opener cannot loop or panic.
+        assert!(device_binding_requirements("<svg>{{ time:HH:mm").is_empty());
+    }
+
+    #[test]
+    fn svg_near_miss_bindings_are_still_reported_for_negotiation_to_refuse() {
+        // `timer.velocity` is inside the namespace but not in the closed set.
+        // The scanner reports it so negotiation can refuse it by name --
+        // filtering it here would silently turn a typo into a static card.
+        let bindings = device_binding_requirements("<svg>{{ timer.velocity }}</svg>");
+        assert_eq!(bindings, BTreeSet::from(["timer.velocity".to_owned()]));
     }
 
     // -- Step 1: the load-bearing binding tests, verbatim from the brief. --

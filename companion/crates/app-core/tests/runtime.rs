@@ -11,7 +11,7 @@ use app_core::{
     DeviceOtaState, DeviceTier, DeviceWifiState, DisplayOrientation, DisplayTemplate,
     NetworkConfig, PersistenceState, Playlist, PlaylistEntry, PluginHost, PomodoroAction,
     PomodoroState, ProviderRequest, ProvisioningTier, RefreshPolicy, RuntimeDevice, RuntimeError,
-    RuntimeHandle, RuntimeOptions, RuntimeState, WidgetTapAction,
+    RuntimeHandle, RuntimeOptions, RuntimeState, SceneCandidate, WidgetTapAction,
 };
 use chrono::Utc;
 use device::{DeviceError, ReceivedEvent, SessionDiagnostics, TransportError};
@@ -712,7 +712,7 @@ impl PluginHost for FakePluginHost {
         snapshot: &providers::ProviderSnapshot<serde_json::Value>,
         _metrics: &BakedFontMetrics,
         revision: u32,
-    ) -> Result<Scene, String> {
+    ) -> Result<SceneCandidate, String> {
         let mut state = self.control.state.lock().unwrap();
         state.renders.push(PluginRenderCall {
             plugin_id: plugin_id.to_owned(),
@@ -727,11 +727,11 @@ impl PluginHost for FakePluginHost {
         } else {
             Vec::new()
         };
-        Ok(Scene {
+        Ok(SceneCandidate::DisplayList(Scene {
             revision,
             background: 0x1234,
             nodes,
-        })
+        }))
     }
 }
 

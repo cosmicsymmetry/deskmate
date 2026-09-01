@@ -353,9 +353,22 @@ fn build_push_scene(
                 stale,
                 error,
             };
-            ServerPluginHost::new(std::sync::Arc::clone(plugins))
+            let candidate = ServerPluginHost::new(std::sync::Arc::clone(plugins))
                 .render_scene(&plugin_id, &snapshot, &BakedFontMetrics::SHIPPED, revision)
-                .map_err(|message| AdminError::InvalidScene { message })?
+                .map_err(|message| AdminError::InvalidScene { message })?;
+            match candidate {
+                app_core::SceneCandidate::DisplayList(scene) => scene,
+                // This route pushes native scenes only. A raster-only (SVG)
+                // plugin goes through negotiation and the Task 5 raster
+                // executor, not an operator PushScene.
+                app_core::SceneCandidate::RasterOnly { .. } => {
+                    return Err(AdminError::InvalidScene {
+                        message: format!(
+                            "plugin {plugin_id:?} is an SVG template with no native scene; this route can only push display-list scenes"
+                        ),
+                    });
+                }
+            }
         }
         _ => {
             return Err(AdminError::InvalidScene {

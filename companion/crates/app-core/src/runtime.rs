@@ -25,14 +25,15 @@ use providers::weather::{WeatherOptions, WeatherProvider, WeatherUnits as Provid
 
 use crate::asset_sync::AssetSync;
 use crate::commands::{CommandReply, PomodoroAction, RuntimeCommand, RuntimeError};
+use crate::render_negotiation;
 use crate::scheduler::Scheduler;
 use crate::{
     AlertHold, AnalogClockCard, AppConfig, AppSnapshot, BakedFontMetrics, BigNumberCard,
     CalendarSource, CardAlert, CardDataSnapshot, CardError, CardErrorKind, CardSettings, ClockCard,
-    ConnectionState, DesiredAsset, DeviceCapability, DeviceCounters, DeviceSnapshot, DeviceTier,
-    DisplayTemplate, IconBadgeCard, JsonFieldMapping, PersistenceState, PomodoroSnapshot,
-    PomodoroState, ProgressRingCard, ProviderSnapshot, ProviderState, RowListCard,
-    RuntimeDiagnostics, RuntimeState, SHIPPED_SCENE_SURFACE_COLOR, SceneDataState, WeatherUnits,
+    ConnectionState, DesiredAsset, DeviceCounters, DeviceSnapshot, DeviceTier, DisplayTemplate,
+    IconBadgeCard, JsonFieldMapping, PersistenceState, PomodoroSnapshot, PomodoroState,
+    ProgressRingCard, ProviderSnapshot, ProviderState, RowListCard, RuntimeDiagnostics,
+    RuntimeState, SHIPPED_SCENE_SURFACE_COLOR, SceneDataState, WeatherUnits,
     build_analog_clock_scene, build_big_number_label_scene, build_digital_clock_scene,
     build_icon_badge_text_scene, build_progress_ring_scene, build_row_list_scene,
     with_scene_data_state,
@@ -114,6 +115,22 @@ pub trait RuntimeDevice: Send + 'static {
     fn diagnostics(&self) -> SessionDiagnostics;
 }
 
+/// What a plugin host can offer the runtime for one card: a display-list
+/// scene the device may render natively, or notice that only rasterization
+/// can draw it. The host states facts; `render_negotiation` decides policy.
+/// A host that decided on its own would be a second copy of spec §3's table
+/// waiting to disagree with the first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SceneCandidate {
+    /// A protocol display-list scene, subject to per-device negotiation.
+    DisplayList(protocol::Scene),
+    /// An SVG template: no device node kind draws SVG, so only a
+    /// server-rendered raster can produce pixels. Carries the device-binding
+    /// tokens the template names, verbatim, for negotiation to classify --
+    /// a live one makes the card refusable, never freezable.
+    RasterOnly { bindings: BTreeSet<String> },
+}
+
 /// Host boundary used by the background runtime for plugin-owned assets and
 /// manifest scene compilation.
 pub trait PluginHost: Send + 'static {
@@ -121,7 +138,7 @@ pub trait PluginHost: Send + 'static {
     /// deduplicated by digest. Called during a full synchronize.
     fn desired_assets(&mut self) -> Vec<DesiredAsset>;
 
-    /// Compiles this plugin's scene against freshly fetched data.
+    /// Produces this plugin's render candidate against freshly fetched data.
     /// `revision` is minted by the runtime at push time.
     fn render_scene(
         &mut self,
@@ -129,7 +146,7 @@ pub trait PluginHost: Send + 'static {
         snapshot: &providers::ProviderSnapshot<serde_json::Value>,
         metrics: &BakedFontMetrics,
         revision: u32,
-    ) -> Result<protocol::Scene, String>;
+    ) -> Result<SceneCandidate, String>;
 }
 
 pub struct SerialRuntimeDevice {
@@ -2512,6 +2529,15 @@ fn field_boolean(fields: &[Field], key: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// One built card candidate, ready for negotiation. `Push` is a validated
+/// display-list push; `RasterOnly` is an SVG card that only a server-rendered
+/// frame can draw, carrying its device-binding tokens for classification.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CardCandidate {
+    Push(PushScene),
+    RasterOnly { bindings: BTreeSet<String> },
+}
+
 fn build_card_scene(
     config: &AppConfig,
     card_id: &str,
@@ -2519,7 +2545,7 @@ fn build_card_scene(
     plugin_snapshot: Option<&providers::ProviderSnapshot<serde_json::Value>>,
     plugin_host: Option<&mut dyn PluginHost>,
     revision: u32,
-) -> Result<PushScene, String> {
+) -> Result<CardCandidate, String> {
     let card = config
         .cards
         .iter()
@@ -2535,14 +2561,22 @@ fn build_card_scene(
         let host = plugin_host.ok_or_else(|| {
             format!("card {card_id:?} cannot render because no plugin host is configured")
         })?;
-        let scene = host
+        let candidate = host
             .render_scene(plugin_id, snapshot, metrics, revision)
             .map_err(|error| {
                 format!("plugin {plugin_id:?} could not render card {card_id:?}: {error}")
             })?;
-        // The plugin compiler already applies `with_scene_data_state`. Do not
-        // stamp it here too, or stale/error footers would be duplicated.
-        scene
+        match candidate {
+            // The plugin compiler already applies `with_scene_data_state`. Do
+            // not stamp it here too, or stale/error footers would be
+            // duplicated.
+            SceneCandidate::DisplayList(scene) => scene,
+            // Nothing to validate or push: negotiation decides whether this
+            // becomes a rasterized frame (Task 5) or a typed refusal.
+            SceneCandidate::RasterOnly { bindings } => {
+                return Ok(CardCandidate::RasterOnly { bindings });
+            }
+        }
     } else {
         let scene = build_template_card_scene(config, card, card_id, fields, revision, metrics)?;
         let error = field_text(fields, "error");
@@ -2562,7 +2596,7 @@ fn build_card_scene(
     };
     validate_message(&Message::PushScene(push.clone()))
         .map_err(|error| format!("the host-built scene is invalid: {error}"))?;
-    Ok(push)
+    Ok(CardCandidate::Push(push))
 }
 
 fn build_template_card_scene(
@@ -2730,6 +2764,47 @@ fn handle_automatic_scene_error(
 /// The dirty bit is consumed before any request and no clock, pomodoro, status, or
 /// provider deadline sets it. Device-side bindings keep clock/timer facts moving
 /// between these event-driven pushes.
+/// Analyzes one built candidate and negotiates it against the connected
+/// device. `Err` is an analysis failure -- a binding outside the closed
+/// vocabulary -- which is a defect in the candidate, not a compatibility
+/// fact; either way the message becomes the card's typed refusal.
+fn negotiate_candidate(
+    state: &mut WorkerState,
+    candidate: &CardCandidate,
+) -> Result<render_negotiation::RenderDecision, String> {
+    let requirements = match candidate {
+        CardCandidate::Push(push) => render_negotiation::analyze_scene(&push.scene),
+        CardCandidate::RasterOnly { bindings } => {
+            render_negotiation::analyze_raster_only(bindings.iter().cloned())
+        }
+    }
+    .map_err(|error| error.to_string())?;
+    let profile = render_negotiation::DeviceRenderProfile {
+        capabilities: state.device.capability_bits(),
+        // The runtime keeps no per-device asset ledger: content addressing at
+        // `AssetBegin` is the inventory protocol, and `synchronize_full`
+        // reconciles the registry-wide desired set before any layout. So
+        // "installable" -- the host holds the bytes -- is the honest claim,
+        // and "confirmed" stays empty rather than guessed.
+        confirmed_assets: BTreeSet::new(),
+        installable_assets: if requirements.asset_digests.is_empty() {
+            BTreeSet::new()
+        } else {
+            state
+                .plugin_host
+                .as_mut()
+                .map(|host| {
+                    host.desired_assets()
+                        .iter()
+                        .map(|asset| asset.digest)
+                        .collect()
+                })
+                .unwrap_or_default()
+        },
+    };
+    Ok(render_negotiation::negotiate(&requirements, &profile))
+}
+
 fn push_active_scene(
     state: &mut WorkerState,
     device: &mut dyn RuntimeDevice,
@@ -2742,21 +2817,6 @@ fn push_active_scene(
         state.active_scene_dirty = false;
         return;
     };
-    if !state
-        .device
-        .capabilities
-        .contains(&DeviceCapability::SceneRender)
-    {
-        state.active_scene_dirty = false;
-        if state
-            .push_rejections
-            .get(&card_id)
-            .is_some_and(|error| error.kind == CardErrorKind::SceneRefused)
-        {
-            state.push_rejections.remove(&card_id);
-        }
-        return;
-    }
 
     let Some(revision) = state.next_scene_revision.checked_add(1) else {
         state.active_scene_dirty = false;
@@ -2773,7 +2833,7 @@ fn push_active_scene(
         .get(&card_id)
         .map(Vec::as_slice)
         .unwrap_or_default();
-    let push = match build_card_scene(
+    let candidate = match build_card_scene(
         &state.config,
         &card_id,
         fields,
@@ -2781,10 +2841,63 @@ fn push_active_scene(
         state.plugin_host.as_deref_mut(),
         revision,
     ) {
-        Ok(push) => push,
+        Ok(candidate) => candidate,
         Err(message) => {
             state.active_scene_dirty = false;
             record_scene_refusal(state, card_id, message);
+            return;
+        }
+    };
+
+    // Spec §3: negotiate this candidate against this device before any push.
+    // The old binary shortcut -- bit 8 present, push; absent, silently do
+    // nothing -- is gone: silence was the exact defect shape the V1
+    // validation-mislabeling fix exists to forbid. Every decision below is
+    // recomputed per (scene, device, revision); nothing is cached.
+    let decision = match negotiate_candidate(state, &candidate) {
+        Ok(decision) => decision,
+        Err(message) => {
+            state.active_scene_dirty = false;
+            record_scene_refusal(state, card_id, message);
+            return;
+        }
+    };
+    let push = match decision {
+        render_negotiation::RenderDecision::Native => match candidate {
+            CardCandidate::Push(push) => push,
+            CardCandidate::RasterOnly { .. } => {
+                // Unreachable by construction (`RasterOnly` sets a
+                // native_source no profile satisfies), but a policy bug here
+                // must surface as a typed card error, not a panic in the
+                // worker thread.
+                state.active_scene_dirty = false;
+                record_scene_refusal(
+                    state,
+                    card_id,
+                    "internal error: a raster-only candidate negotiated a native render".into(),
+                );
+                return;
+            }
+        },
+        render_negotiation::RenderDecision::RefuseLive { reason } => {
+            state.active_scene_dirty = false;
+            record_scene_refusal(state, card_id, reason);
+            return;
+        }
+        render_negotiation::RenderDecision::Rasterize => {
+            // Task 5 replaces this arm with the raster executor (render
+            // server-side, upload one volatile frame, push a one-image-node
+            // scene). Until then the decision cannot execute, and the only
+            // honest interim is a typed, visible refusal -- never the deleted
+            // shortcut's silence.
+            state.active_scene_dirty = false;
+            record_scene_refusal(
+                state,
+                card_id,
+                "this card needs server-side rasterization, which this host does not yet \
+                 perform"
+                    .into(),
+            );
             return;
         }
     };
@@ -3462,6 +3575,10 @@ mod tests {
         time_sync_calls: usize,
         layout_calls: usize,
         fail_asset_begin: bool,
+        /// Every scene the runtime actually pushed, so a negotiation test can
+        /// assert the difference between "refused before the wire" and
+        /// "pushed".
+        scene_pushes: Vec<PushScene>,
         /// Every `AssetRelease` keep-set the device was sent, in order. An
         /// empty keep-set is a destructive full wipe, not a no-op, so a test
         /// has to be able to see that none was sent at all.
@@ -3516,7 +3633,8 @@ mod tests {
             Ok(())
         }
 
-        fn push_scene(&mut self, _push: PushScene) -> Result<(), DeviceError> {
+        fn push_scene(&mut self, push: PushScene) -> Result<(), DeviceError> {
+            self.scene_pushes.push(push);
             Ok(())
         }
 
@@ -4750,6 +4868,119 @@ mod tests {
 
     // -- Task 6: the plugin card kind ------------------------------------------
 
+    // -- Stage 4 Task 2: render negotiation in the push path -------------------
+
+    /// A `WorkerState` posed one step before `push_active_scene`: online-ish,
+    /// synced, one dirty active card, advertising `capabilities`.
+    fn negotiation_state(config: AppConfig, card_id: &str, capabilities: u64) -> WorkerState {
+        let now = Instant::now();
+        let mut scheduler = fresh_scheduler(now);
+        let mut state = WorkerState::new(config, now, &mut scheduler);
+        state.needs_full_sync = false;
+        state.active_screen = Some(card_id.to_owned());
+        state.active_scene_dirty = true;
+        state.device.capabilities = crate::DeviceCapability::from_bits(capabilities);
+        state
+    }
+
+    #[test]
+    fn a_live_card_on_a_device_without_scene_support_is_refused_not_skipped() {
+        // The pre-stage-4 shortcut silently did nothing here. Spec §3 row 2:
+        // a clock's time bindings are live, so rasterizing would freeze it --
+        // the card must say so in its editor instead.
+        let config = rotation_config(
+            vec![rotation_clock_card("clock")],
+            CarouselAdvance::Manual,
+            &[("clock", None)],
+        );
+        let mut state = negotiation_state(
+            config,
+            "clock",
+            protocol::CURRENT_CAPABILITIES & !protocol::CAPABILITY_SCENE_RENDER,
+        );
+        let mut device = ScheduledWorkDevice::default();
+
+        push_active_scene(&mut state, &mut device, Duration::from_secs(1));
+
+        assert!(device.scene_pushes.is_empty(), "nothing may reach the wire");
+        assert!(!state.active_scene_dirty, "the event must be consumed");
+        let error = state
+            .push_rejections
+            .get("clock")
+            .expect("the refusal must be recorded against the card");
+        assert_eq!(error.kind, CardErrorKind::SceneRefused);
+        assert!(
+            error.message.contains("time:") && error.message.contains("firmware"),
+            "the reason names the live binding and the fix: {:?}",
+            error.message
+        );
+    }
+
+    #[test]
+    fn a_native_push_on_a_current_device_clears_a_prior_refusal() {
+        let config = rotation_config(
+            vec![rotation_clock_card("clock")],
+            CarouselAdvance::Manual,
+            &[("clock", None)],
+        );
+        let mut state = negotiation_state(config, "clock", protocol::CURRENT_CAPABILITIES);
+        record_scene_refusal(
+            &mut state,
+            "clock".to_owned(),
+            "stale refusal from a previous, lesser connection".to_owned(),
+        );
+        let mut device = ScheduledWorkDevice::default();
+
+        push_active_scene(&mut state, &mut device, Duration::from_secs(1));
+
+        assert_eq!(device.scene_pushes.len(), 1, "the scene must be pushed");
+        assert!(
+            !state.push_rejections.contains_key("clock"),
+            "an accepted render clears that card's refusal"
+        );
+    }
+
+    #[test]
+    fn a_static_card_on_a_device_without_scene_support_names_the_missing_rasterizer() {
+        // Row 3 decides Rasterize, and until Task 5 wires the executor the
+        // only honest outcome is a typed refusal naming that -- never the
+        // deleted shortcut's silence.
+        let card = CardSettings::JsonFeed {
+            id: "big".into(),
+            title: "Steps".into(),
+            url: "https://example.invalid/steps.json".into(),
+            mappings: vec![JsonFieldMapping {
+                field: "value".into(),
+                path: "steps".into(),
+            }],
+            template: DisplayTemplate::BigNumberLabel,
+            tap_action: WidgetTapAction::None,
+            refresh: RefreshPolicy::Manual,
+            alert: CardAlert::None,
+        };
+        let config = rotation_config(vec![card], CarouselAdvance::Manual, &[("big", None)]);
+        let mut state = negotiation_state(
+            config,
+            "big",
+            protocol::CURRENT_CAPABILITIES & !protocol::CAPABILITY_SCENE_RENDER,
+        );
+        let mut device = ScheduledWorkDevice::default();
+
+        push_active_scene(&mut state, &mut device, Duration::from_secs(1));
+
+        assert!(device.scene_pushes.is_empty());
+        let error = state
+            .push_rejections
+            .get("big")
+            .expect("the interim rasterize outcome must be visible");
+        assert_eq!(error.kind, CardErrorKind::SceneRefused);
+        assert!(
+            error.message.contains("rasterization"),
+            "the message names what is missing: {:?}",
+            error.message
+        );
+    }
+
     #[test]
     fn build_card_scene_refuses_a_plugin_card_typed_and_visibly() {
         // Until the first fetch lands there is no manifest input to compile. The
@@ -4924,7 +5155,7 @@ mod tests {
             _snapshot: &providers::ProviderSnapshot<serde_json::Value>,
             _metrics: &BakedFontMetrics,
             _revision: u32,
-        ) -> Result<protocol::Scene, String> {
+        ) -> Result<SceneCandidate, String> {
             unreachable!("this test exercises only full synchronization")
         }
     }
@@ -4972,7 +5203,7 @@ mod tests {
             _snapshot: &providers::ProviderSnapshot<serde_json::Value>,
             _metrics: &BakedFontMetrics,
             _revision: u32,
-        ) -> Result<protocol::Scene, String> {
+        ) -> Result<SceneCandidate, String> {
             unreachable!("this test exercises only full synchronization")
         }
     }

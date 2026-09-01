@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use app_core::{BakedFontMetrics, DesiredAsset, PluginHost};
+use app_core::{BakedFontMetrics, DesiredAsset, PluginHost, SceneCandidate};
 use providers::ProviderSnapshot;
 
 use crate::plugin_provider::{
@@ -43,11 +43,22 @@ impl PluginHost for ServerPluginHost {
         snapshot: &ProviderSnapshot<serde_json::Value>,
         metrics: &BakedFontMetrics,
         revision: u32,
-    ) -> Result<protocol::Scene, String> {
+    ) -> Result<SceneCandidate, String> {
         let loaded = self
             .registry
             .get(plugin_id)
             .ok_or_else(|| format!("unknown plugin id {plugin_id:?}"))?;
+
+        // An SVG template is a raster-only candidate: the host states which
+        // device-binding tokens the template names and nothing more.
+        // Negotiation classifies them and decides -- this boundary never
+        // applies spec §3's table itself, or there would be two copies of it
+        // free to disagree.
+        if let Some(svg) = &loaded.svg_source {
+            return Ok(SceneCandidate::RasterOnly {
+                bindings: plugin::device_binding_requirements(svg),
+            });
+        }
 
         match within_render_wall_clock_budget(|| {
             plugin::compile_scene_with_assets(
@@ -58,7 +69,7 @@ impl PluginHost for ServerPluginHost {
                 &loaded.assets,
             )
         }) {
-            Ok(Ok(scene)) => Ok(scene),
+            Ok(Ok(scene)) => Ok(SceneCandidate::DisplayList(scene)),
             Ok(Err(error)) => Err(classified_failure_message(
                 plugin_id,
                 &PluginFailure::Compile(&error),
@@ -135,9 +146,12 @@ mod tests {
     #[test]
     fn real_aqi_plugin_compiles_to_a_protocol_valid_scene() {
         let mut host = ServerPluginHost::new(curated_registry());
-        let scene = host
+        let candidate = host
             .render_scene("aqi", &aqi_snapshot(), &BakedFontMetrics::SHIPPED, 41)
             .expect("compile AQI scene");
+        let SceneCandidate::DisplayList(scene) = candidate else {
+            panic!("a display-list plugin must produce a native candidate");
+        };
 
         protocol::validate_message(&Message::PushScene(PushScene {
             card_id: "air-quality".into(),
@@ -151,7 +165,7 @@ mod tests {
     fn production_raw_aqi_envelope_renders_missing_data_instead_of_its_payload() {
         let mut host = ServerPluginHost::new(curated_registry());
 
-        let scene = host
+        let candidate = host
             .render_scene(
                 "aqi",
                 &raw_aqi_envelope_snapshot(),
@@ -159,6 +173,9 @@ mod tests {
                 42,
             )
             .expect("missing expression paths currently degrade to empty text");
+        let SceneCandidate::DisplayList(scene) = candidate else {
+            panic!("a display-list plugin must produce a native candidate");
+        };
 
         let protocol::SceneNode::Text(category) = &scene.nodes[0] else {
             panic!("AQI category node changed kind");
@@ -168,6 +185,25 @@ mod tests {
         };
         assert_eq!(category.value, protocol::SceneValue::Literal(String::new()));
         assert_eq!(hero.value, protocol::SceneValue::Literal(String::new()));
+    }
+
+    #[test]
+    fn an_svg_plugin_is_a_raster_only_candidate_not_a_compile_error() {
+        let mut host = ServerPluginHost::new(curated_registry());
+
+        let candidate = host
+            .render_scene("svg-aqi", &aqi_snapshot(), &BakedFontMetrics::SHIPPED, 43)
+            .expect("an SVG template must produce a candidate, not an error");
+
+        // The curated svg-aqi face binds only provider data (`data.*`), so it
+        // carries no device-binding requirement: negotiation will rasterize
+        // it rather than refuse it.
+        assert_eq!(
+            candidate,
+            SceneCandidate::RasterOnly {
+                bindings: std::collections::BTreeSet::new()
+            }
+        );
     }
 
     #[test]

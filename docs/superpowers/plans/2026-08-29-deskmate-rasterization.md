@@ -340,43 +340,43 @@ new firmware.
 raw committed HTTP fixture prove root selection. Compiler shape tests prove fields reach
 the protocol model. None of those prove pixels; Task 6 owns pixel evidence.
 
-- [ ] **Step 1: Write the failing v1/v2 contract tests.** A v1 manifest containing
+- [x] **Step 1: Write the failing v1/v2 contract tests.** A v1 manifest containing
       `manifest_version`, `[source].root`, `[template]`, `arc.end_binding`, or a bound-line
       field is rejected, while each explicit v2 form parses. Reparse the two existing
       curated v1 manifests and assert their typed values are unchanged.
-- [ ] **Step 2: Write the failing producer test with the real raw AQI fixture.** Feed
+- [x] **Step 2: Write the failing producer test with the real raw AQI fixture.** Feed
       `{"status":"ok","payload":...}` through `PluginDataProvider`, not directly into
       the compiler, and assert the resulting snapshot value is the inner `payload` when
       `root = "payload"`. Then remove/replace/wrong-type `payload`: the failure is named,
       classified permanent for that response shape, and a previous inner value remains
       last-good/stale. This test exists because supplying the compiler its preferred
       shape proves nothing about the provider that produces it.
-- [ ] **Step 3: Run the focused tests and watch them fail.** From `companion/`:
+- [x] **Step 3: Run the focused tests and watch them fail.** From `companion/`:
       `cargo test -p plugin` and the named `server::plugin_provider` tests.
-- [ ] **Step 4: Define and test the bounds.** Reuse the expression path-segment ceiling
+- [x] **Step 4: Define and test the bounds.** Reuse the expression path-segment ceiling
       rather than copying it for `root`; give SVG source and expanded-SVG byte caps named
       constants with one-line memory/parse reasons; validate `template.file` as one normal
       path component and re-check canonical containment after joining, so a symlink cannot
       escape the plugin directory.
-- [ ] **Step 5: Implement versioned parsing and root selection.** `manifest_version` is
+- [x] **Step 5: Implement versioned parsing and root selection.** `manifest_version` is
       absent only for v1 and exactly `2` for v2. Select root after successful JSON parse
       and before `LastGood::complete`. There is no universal envelope fallback.
-- [ ] **Step 6: Implement the v2 template union.** `kind = "scene"` permits nodes/repeats
+- [x] **Step 6: Implement the v2 template union.** `kind = "scene"` permits nodes/repeats
       and forbids `file`; `kind = "svg"` requires one file and forbids nodes/repeats.
       Load SVG once in the registry with a bounded read; do not re-read it per refresh.
-- [ ] **Step 7: Close the arc/line compiler gap.** Write failing tests first for a bound
+- [x] **Step 7: Close the arc/line compiler gap.** Write failing tests first for a bound
       arc and bound line, plus both ambiguous forms (line has both `points` and pivot
       geometry; line has neither). Accept only protocol-valid binding tokens in their
       correct numeric/angle positions. `protocol::validate_scene` remains the final
       authority; do not restate its canvas/binding bounds.
-- [ ] **Step 8: Hostile inputs.** One-past root depth/length, missing root, scalar at an
+- [x] **Step 8: Hostile inputs.** One-past root depth/length, missing root, scalar at an
       intermediate root, absolute/parent/subdirectory/symlink SVG paths, over-cap SVG,
       invalid UTF-8, both line geometries, neither line geometry, and a live-looking typo
       such as `timer.velocity`. Every case is a named error, never panic or silent literal.
-- [ ] **Step 9: Freeze `docs/plugins/manifest-v2.md`.** State explicitly that v1 is still
+- [x] **Step 9: Freeze `docs/plugins/manifest-v2.md`.** State explicitly that v1 is still
       frozen, that `version` is not the contract discriminator, and that SVG live bindings
       are requirements for negotiation rather than strings `resvg` may freeze.
-- [ ] **Step 10: Commit.** `feat: specify manifest v2 and provider roots`
+- [x] **Step 10: Commit.** Landed as `334e99a feat: specify manifest v2 and add the resvg rasterizer core`, which also carries Task 3 Steps 1/4/5 (the two tasks were built in parallel on disjoint files and gated together).
 
 ---
 
@@ -399,32 +399,66 @@ the protocol model. None of those prove pixels; Task 6 owns pixel evidence.
 for named inputs and property tests prove irrelevant revisions/devices do not share cached
 answers. They do not prove that upload or rendering executes; Tasks 3-5 do.
 
-- [ ] **Step 1: Write the failing decision table verbatim from spec §3.** Cover native
+- [x] **Step 1: Write the failing decision table verbatim from spec §3.** Cover native
       success, one unknown/unsupported node, one missing-but-installable asset, one
       missing-and-uninstallable asset, static SVG, live SVG, and a device without scene
       support. Assert the decision, not merely that some error occurred.
-- [ ] **Step 2: Write the failing binding classification tests.** `date`, `time:*`, every
+- [x] **Step 2: Write the failing binding classification tests.** `date`, `time:*`, every
       `timer.*`, bound arc/line geometry, and `running_color` driven by timer state are
       live; `field.*` and literals are not. An unrecognized namespace is an analysis error,
       never “probably static.”
-- [ ] **Step 3: Prove the cache key is `(card/scene, device, revision)`.** The same scene
+- [x] **Step 3: Prove the cache key is `(card/scene, device, revision)`.** The same scene
       is native on a current device and rasterized/refused on an older profile; reconnect
       with changed capability bits recomputes; a new revision with a changed binding set
       recomputes; one device's confirmed digest never makes another device “present.”
-- [ ] **Step 4: Run and watch the tests fail.** `cargo test -p app-core render_negotiation`.
-- [ ] **Step 5: Implement requirement analysis by walking the actual protocol `Scene`.**
+- [x] **Step 4: Run and watch the tests fail.** `cargo test -p app-core render_negotiation`.
+- [x] **Step 5: Implement requirement analysis by walking the actual protocol `Scene`.**
       Collect image/glyph/asset-font digests and every binding-bearing field. Keep node
       support explicit even though bit 8 covers all nine current node kinds. There is no
       new node bit because this stage adds no node kind.
-- [ ] **Step 6: Implement the pure decision and delete the binary shortcut.** The current
+- [x] **Step 6: Implement the pure decision and delete the binary shortcut.** The current
       `push_active_scene` branch that silently returns when `SceneRender` is absent must no
       longer decide policy. Do not add the legacy widget renderer as a fourth implicit row;
       stage 4 follows the approved table.
-- [ ] **Step 7: Use the existing typed visible path.** `RefuseLive` records
+- [x] **Step 7: Use the existing typed visible path.** `RefuseLive` records
       `CardErrorKind::SceneRefused` against exactly that card, preserves the prior display,
       and clears only after that same card has an accepted render. The message says which
       live binding/device support caused the refusal and what upgrade/action fixes it.
-- [ ] **Step 8: Commit.** `feat: negotiate every scene against its device`
+- [x] **Step 8: Commit.** `feat: negotiate every scene against its device`
+
+**Task 2 execution notes (2026-09-01).** Four recorded deviations/decisions:
+
+1. **`crates/plugin` gained one public function outside this task's file list:**
+   `device_binding_requirements(&str) -> BTreeSet<String>` in `compile.rs`, beside the
+   private `looks_like_binding_namespace` it reuses. The alternative was duplicating the
+   device-binding namespace decision in server code, which is exactly how two copies
+   come to disagree (the repo's own icon-table precedent). Task 3's file list already
+   anticipated a shared entry point in this crate.
+2. **`server/src/admin.rs` was adapted, not redesigned:** the operator scene route now
+   destructures `SceneCandidate` and refuses a raster-only (SVG) plugin with a typed
+   message. That route pushes native scenes only; SVG goes through Task 5's executor.
+3. **The `Rasterize` decision's interim behaviour is a typed refusal** naming the
+   missing server-side rasterization, recorded through the same `SceneRefused` path.
+   Task 5 replaces that arm with the real executor. Silence -- the deleted shortcut's
+   behaviour -- was not an option, per the validation-mislabeling precedent.
+4. **The old shortcut's side effect is intentionally gone:** a device without bit 8
+   used to get any stale `SceneRefused` *cleared* and nothing recorded. Under the
+   table, such a device now gets a fresh, accurate decision per push (refuse-live for
+   clock/timer cards, interim rasterize-refusal for static ones), which is the plan's
+   stated intent ("a card that would freeze says so in its editor").
+
+`DeviceRenderProfile` construction at the runtime call site: `capabilities` =
+`DeviceSnapshot::capability_bits()` (unknown bits survive), `confirmed_assets` = empty
+(the runtime keeps no per-device ledger; content addressing at `AssetBegin` is the
+inventory protocol), `installable_assets` = the plugin host's desired-asset digests,
+fetched only when the scene references any digest. Positional bindings
+(`time:hour`/`time:minute`/`time:second`, `time:angle:*`) are classified inside
+`analyze_scene` because `binding_is_valid` correctly rejects them in value position;
+`running_color: Some(_)` on arc/text registers the `running_color` live pseudo-token.
+Verification: 19 table/classification/property tests in `render_negotiation.rs`, 3
+push-path tests in `runtime.rs` (refuse-live recorded with binding+fix named, native
+push clears a prior refusal, static card names the missing rasterizer), an SVG
+raster-only candidate test in `plugin_host.rs`, 3 scanner tests in `compile.rs`.
 
 ---
 
@@ -449,7 +483,7 @@ packing and canvas placement. Structural tests prove translation and security po
 Checked PNGs/hashes are regression artifacts for review, **not a C oracle and not
 parity**. The device displaying the exact payload is a separate Task 6/7 claim.
 
-- [ ] **Step 1: Write the failing canonical-output tests.** A solid red 448x368 SVG yields
+- [x] **Step 1: Write the failing canonical-output tests.** A solid red 448x368 SVG yields
       a 12-byte little-endian header with the exact magic/format/dimensions/stride, exactly
       164,864 pixels and 329,740 total decoded bytes. Probe red, green, blue, black, white,
       and 50%-alpha-over-black pixels so RGB565 channel order and alpha compositing cannot
@@ -464,14 +498,14 @@ parity**. The device displaying the exact payload is a separate Task 6/7 claim.
       attribute expressions against the real rooted fixture, XML-escape `&<>'"`, meter all
       expressions under one fuel budget, and reject partial interpolation. A live binding
       remains a `RenderRequirements` fact and is never replaced with a one-time value.
-- [ ] **Step 4: Write the hostile SVG corpus before adding `resvg`.** Oversized source and
+- [x] **Step 4: Write the hostile SVG corpus before adding `resvg`.** Oversized source and
       expansion, excessive XML depth/node count, script, event attributes, animation,
       `foreignObject`, external/data/file/http image references, external stylesheets,
       CSS `url()`, missing fonts and pathological dimensions all fail by name within the
       render budget. Configure `usvg` with no resource directory, no network callback, and
       a font database containing only the two committed Inter files plus this plugin's
       already-resolved font assets. Never call `load_system_fonts`.
-- [ ] **Step 5: Run and watch them fail.** `cargo test -p server rasterizer`.
+- [x] **Step 5: Run and watch them fail.** `cargo test -p server rasterizer`.
 - [ ] **Step 6: Implement scene -> SVG and SVG-template evaluation, then call `resvg`.**
       There is one render engine. Do not shell out and do not add a browser crate. Load
       the committed fonts with `include_bytes!`; add tests pinning their SHA-256 and

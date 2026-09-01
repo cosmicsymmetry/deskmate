@@ -913,13 +913,13 @@ server/device timestamps and status values. Do not start Phase B if Phase A fail
 **Files:** this plan, `CLAUDE.md`, `docs/hardware/board-notes.md`,
 `docs/superpowers/plans/<date>-deskmate-plugin-upload-risk-review.md` (create)
 
-- [ ] **Step 1: Update `CLAUDE.md`.** Record the negotiation table, manifest v2, bit 9 /
+- [ ] **Step 1 (software half DONE 2026-09-01; physical half open): Update `CLAUDE.md`.** Record the negotiation table, manifest v2, bit 9 /
       capabilities 1003, volatile/RLE result, exact evidence limits, memory deltas, and
       what the physical session did and did not observe.
-- [ ] **Step 2: Mark this plan from actual results.** Fill exact regression/diff counts,
+- [ ] **Step 2 (software counts recorded in each task's execution notes; hardware numbers open): Mark this plan from actual results.** Fill exact regression/diff counts,
       transfer cadence, GC churn, memory and OTA observations. Do not mark Phase B passed
       if inherited Phase A failed or remained unobserved.
-- [ ] **Step 3: Write stage 5 as a risk-review plan, not implementation breadth.** Public
+- [x] **Step 3: Write stage 5 as a risk-review plan, not implementation breadth.** Public
       uploads and sandboxing change the threat model and require explicit owner approval.
       Do not add upload endpoints, billing, arbitrary fonts or user content while merely
       planning the review.

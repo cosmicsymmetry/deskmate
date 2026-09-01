@@ -668,10 +668,14 @@ of letting code and documentation diverge.
     hand-building an equivalent `Scene`, at four data states (fresh, stale, error,
     empty/missing-data) and both orientations — 16 rows, golden-pinned by
     `crates/lvgl-sim/tests/plugin_scene.rs` against `tests/golden/plugin-scene/`.
-- **After C-template retirement AND Task 8's curated plugins, the framebuffer diff
-  expects `total=92 excluded=8` (`identical=84` is the expectation for a device that has
+- **SUPERSEDED NUMBERS (2026-09-01): stage 4's Task 6 evidence rows moved the expected
+  framebuffer diff from 92/8/84 to `total=96 excluded=8 identical=88` — the stage-4
+  bullet below is authoritative; neither composition has run on hardware.** The rest of
+  this bullet is accurate history. After C-template retirement AND Task 8's curated
+  plugins, the framebuffer diff
+  expected `total=92 excluded=8` (`identical=84` is the expectation for a device that has
   not yet run this composition — see below), and any differing case on a real run is a
-  real firmware/simulator disagreement.** This was `total=76 identical=64 differing=0
+  real firmware/simulator disagreement. This was `total=76 identical=64 differing=0
   excluded=12` before Task 8 (that figure is now history, not current fact — see below
   for what changed and why). The matrix is now 18 synthetic scene-node rows, 58
   device-pushable six-face rows, and 16 curated-plugin rows (`plugin_scene_cases()`,
@@ -713,6 +717,85 @@ of letting code and documentation diverge.
   running ring hardware can be compared on, covering the running status colour. Do not
   "simplify" these back into one case, and do not flip `running-mid-countdown` to
   `running: false` — that would delete the running-hue golden.
+- **Stage 4 (rasterization fallback and SVG plugins) is SOFTWARE-COMPLETE and entirely
+  unobserved on hardware.** Plan `docs/superpowers/plans/2026-08-29-deskmate-rasterization.md`
+  (Tasks 1-6 delivered 2026-09-01 with per-task execution notes; Task 6 Step 5 and Task 7,
+  the single hardware session, are open; Task 8's physical-observation half waits on it).
+  What it delivers, and the durable facts:
+  - **Spec §3's render negotiation is live**: `app-core/src/render_negotiation.rs` decides
+    Native / RefuseLive / Rasterize per (scene, device, revision), pure and uncached, from
+    capability bits, explicit node-kind support, per-device confirmed/installable digests,
+    and classified bindings. `date`, `time:*`, `timer.*`, positional hand bindings and a
+    timer-driven `running_color` are LIVE (a raster of one would freeze); `field.*` and
+    literals are static; an unknown namespace is an analysis error, never "probably
+    static". The old bit-8 binary shortcut in `push_active_scene` is deleted — a card
+    that cannot render says so as its typed `SceneRefused`, silence is not an outcome.
+  - **Manifest v2** (`docs/plugins/manifest-v2.md`): discriminator is `manifest_version`
+    (absent = v1, exactly 2 = v2), never the plugin's own `version`; `[source] root`
+    resolves the fixture-envelope question declaratively in the provider (never the
+    compiler); `[template] kind = "svg"` with a bounded registry-owned source; the
+    arc/line binding compiler gap is closed (a `timer.velocity` typo is a named error,
+    not a silent literal). v1 stays frozen; both curated v1 manifests byte-unchanged.
+  - **`resvg` is the only rasterizer**, server-side only, one hardened pipeline for both
+    translated scenes and evaluated SVG templates. Two facts verified from usvg 0.45.1
+    SOURCES: its default string image resolver reads local files even with
+    `resources_dir: None` (the deny-all resolver callbacks are the real barrier), and it
+    parses with `allow_dtd: true` (entity expansion is genuinely reachable, so the DTD
+    rejection is load-bearing). Committed Inter faces are SHA-256-pinned to
+    `tools/fonts/`. Plugin-authored SVG rejects every data URL; only module-generated
+    documents may embed module-generated image data. Output is the canonical 12-byte LE
+    LVGL header + 448x368 RGB565 (329,740 bytes), digest over the DECODED blob.
+  - **Capability bit 9 (`VolatileAssets` = 512) is real in both languages;
+    `CURRENT_CAPABILITIES`/`PROTOCOL_CURRENT_CAPABILITIES` are 1003**, pinned by tests.
+    Volatile frames live in a pure-C two-slot PSRAM store (`core/volatile_asset_store`),
+    displayed + incoming, atomic swap, zero file-scope statics; the resolver checks
+    volatile before flash; never downgraded to flash. The GC teardown decision is the
+    host-tested `volatile_asset_store_release_must_teardown`: durable use still forces
+    the clock flap, a scene reading only the KEPT volatile digest does not.
+  - **RLE565 rides the wire because measurement demanded it**: the curated frame is
+    329,728 -> 10,020 pixel bytes (~161 raw chunk round trips -> ~5 against the 30 s
+    floor); high entropy expands exactly 2x, so raw stays the legal fallback and an
+    expanding RLE begin is refused at the wire. `AssetBegin` keys 4 (`encoding`) and 5
+    (`decoded_length`) are additive under bit 9; firmware decodes via a bounded pure-C
+    streaming decoder (`core/rle565`) that survives arbitrary chunk splits under ASan.
+  - **A wire-emission lesson worth never relearning: `AssetBegin` key 3 (`volatile`) is
+    ALWAYS emitted, false included.** An agent "fixed" it to omit-when-false per the
+    canonical emission rule; every deployed firmware decoder had `REQUIRED_BIT(3)`, so an
+    omitting server would have failed every durable asset sync against the fleet with
+    MISSING_FIELD. The canonical emission rule yields to wire history: only keys no
+    deployed decoder knows may follow omit-default. `asset_begin.bin` is byte-identical
+    to the deployed corpus; new decoders tolerate absence as belt and braces.
+  - **The executor** (`execute_native_push`/`execute_raster_render` in runtime.rs):
+    `PluginHost::rasterize(&RasterRequest) -> RasterFrame` keeps the dependency direction
+    (the Tauri app's hostless runtime refuses, distinguishably); app-core owns the
+    one-image push so revision minting and validation stay on one path; the atomic raster
+    transcript is begin -> chunks -> commit -> push -> `compose_asset_keep_set` release,
+    old frame kept until the new push succeeds, no release from an incomplete pass.
+    `RASTER_MIN_INTERVAL` = 30 s in `scheduler.rs`; invalidations coalesce, newest
+    snapshot wins, native scenes stay event-driven. The operator plugin route renders
+    through this same executor with a runtime-minted revision, which closes the
+    operator-revision footgun on that path (the footgun note above still applies to the
+    raw `digital_clock` diagnostic form). The server registry's durable ceiling is
+    `MAX_DURABLE_REGISTRY_ASSETS = MAX_ASSET_DIGESTS - 1`, reserving the volatile slot.
+  - **Memory: internal RAM stayed byte-flat across BOTH firmware waves** (DIRAM 203,891,
+    `.bss` 87,128, `.data` 23,128, IRAM 16,384/16,384 with 0 remaining; only flash grew,
+    +2,396/+144 then +956), verified before/after on the same tree each time. That is the
+    best possible posture against the OTA layout hazard and still not proof — Task 7's
+    on-board OTA download check remains mandatory.
+  - **Task 6's evidence inventory corrected this file's own stale claims**: timer
+    pixel coverage and BigNumber tier-boundary rows already existed (the ledger's "Task 6
+    pre-change evidence inventory" has the row-by-row counts); what was genuinely missing
+    — a manifest-v2 timer AUTHORING row and a produced date that actually overflows the
+    176 px box — now exists (`plugin-v2-timer--remaining-357-of-1000`, semantic
+    remaining-35% assertion before pixels; `digital-clock--date-overflow`, "Wed, May 13"
+    at 178 px BODY, native LVGL ellipsizes, raster shows the full date as a pinned
+    allowed difference, never "parity"). The expected framebuffer diff is now
+    **96 total / 8 excluded / 88 identical — a software prediction; not run on hardware**.
+  - Still owed on hardware (one session, Task 7): stage 3b Task 9 Step 6 (asset-GC
+    teardown) FIRST, then the stage-4 OTA download, a live raster push with the 30 s
+    floor observed on real timestamps, the refuse-rule on the panel/editor, both
+    orientations, the 20-frame PSRAM/flash-flatness run, and Task 6 Step 5's
+    framebuffer-vs-payload byte comparison.
 - The webcam verification harness (`tools/hwcam/`, usage in
   `docs/hardware/webcam-harness.md`, spec
   `docs/superpowers/specs/2026-08-15-deskmate-webcam-harness-design.md`) was

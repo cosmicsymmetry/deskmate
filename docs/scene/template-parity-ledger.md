@@ -189,6 +189,53 @@ Written at stage 3b's exit (2026-08-29). **Both entries above were about the sam
 weakness — surface with no producer — and stage 3b resolved them asymmetrically: one
 closed, one only half-closed.**
 
+### Task 6 pre-change evidence inventory (2026-09-01)
+
+This is the row-by-row inventory before Task 6 adds evidence. Counts below are render
+rows, so a landscape/flipped pair counts as two; the flipped row is not independent
+geometry evidence.
+
+- **`timer.remaining:mm:ss`: emitted, with producer-shaped inputs.**
+  `companion/crates/lvgl-sim/src/cases.rs::face_scene_cases()` calls
+  `build_progress_ring_scene()` for `progress-ring--running-mid-countdown`,
+  `--paused-mid-countdown`, `--running-at-zero`, `--finished`, and
+  `--never-started`, at both orientations: **10 rows** emit the binding and pass
+  `SceneTimer { total_ms, remaining_ms, running }`, from which C derives display text
+  and ratios. In the larger C-oracle matrix,
+  `companion/crates/app-core/tests/scene_parity.rs::add_progress_ring_cases()` has four
+  active-duration variants at both orientations: **8 rows** emit the binding; its two
+  `zero-duration` rows deliberately emit the literal `00:00`. The five temporal tests
+  using `assert_progress_ring_temporal_parity()` reuse the same producer-shaped input.
+  These overlapping rows prove the shipped ProgressRing builder, not a manifest-v2
+  authoring path.
+- **`timer.pct`: drawn synthetically, never authored by a production builder.**
+  `companion/crates/lvgl-sim/src/cases.rs::scene_arc_nodes()` supplies the binding and
+  `scene_cases()` supplies `SceneTimer { total_ms: 100_000, remaining_ms: 35_000,
+  running: false }`: exactly **2 golden rows**, `scene-arc--landscape` and
+  `scene-arc--flipped`. The same rows are offered to `framebuffer_diff` and the older
+  `scene_panel_check` hardware harnesses. They prove that a supplied remaining 35%
+  value is drawn; they do not give `timer.pct` a manifest author or prove producer
+  meaning.
+- **BigNumber HERO/DISPLAY/BODY boundaries: already present in the C-oracle matrix.**
+  `scene_parity.rs::add_big_number_cases()` derives its strings from
+  `BakedFontMetrics::SHIPPED`. `hero-just-fits` / `hero-just-misses` and
+  `display-just-fits` / `display-just-misses`, each at both orientations, are exactly
+  **8 boundary rows**: HERO->DISPLAY and DISPLAY->BODY. `lowest-tier-long` and
+  `non-numeric`, also at both orientations, add **4 BODY rows** but are not adjacent
+  boundary pairs. The promoted 10-row BigNumber face matrix has selected HERO/BODY
+  examples, not this metrics-derived boundary matrix.
+- **Localized date overflow: zero rows.** `scene_parity.rs` has **28 base DigitalClock
+  rows** (7 local instants x seconds shown/hidden x 2 orientations) and four state-footer
+  rows that duplicate the first instant. They evaluate **7 unique produced date
+  strings**. The widest is `Wed, Aug 12` at **174 BODY-font pixels**, so **0 produced
+  strings exceed** the 176-pixel date content box. The node's `ellipsize: true` flag was
+  therefore structural coverage only, not an exercised truncation.
+
+This resolves the disagreement: CLAUDE.md's older blanket claim of no timer pixel or
+tier-step-down coverage is stale, while the later ledger was right that `timer.pct` had
+synthetic coverage. The narrower missing evidence is a real manifest-v2 timer authoring
+row, plus a produced date that actually exceeds its box.
+
 **`field.*` now has a producer, and it took two separate things to get one.** Authoring a
 binding was not enough. `plugins/aqi/manifest.toml` bound `field.title` in Task 8, which
 bought pixel coverage in the simulator and in `framebuffer_diff` — but on a real device

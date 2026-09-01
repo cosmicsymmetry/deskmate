@@ -202,6 +202,18 @@ fn diff_pixels(expected: &[u16], actual: &[u16]) -> (usize, u32) {
     (differing, max_delta)
 }
 
+/// Selects the device field registry for a scene request. This does not pick
+/// a renderer anymore, but it remains load-bearing for `PushData` validation:
+/// timer producer rows must use `ProgressRing`'s duration/remaining/running
+/// registry, never the plugin card's `DigitalClock`-shaped four-field registry.
+fn case_template(request: &SceneRenderRequest) -> TemplateKind {
+    if request.timer.is_some() {
+        TemplateKind::ProgressRing
+    } else {
+        TemplateKind::DigitalClock
+    }
+}
+
 fn apply_case_config(
     client: &mut DeviceClient<impl Transport>,
     revision: u32,
@@ -215,11 +227,7 @@ fn apply_case_config(
             /* ApplyConfig still registers the bounded PushData field schema;
              * it no longer selects a C renderer. Timer scene cases need the
              * ProgressRing registry, while asset-free geometry needs no data. */
-            template: if request.timer.is_some() {
-                TemplateKind::ProgressRing
-            } else {
-                TemplateKind::DigitalClock
-            },
+            template: case_template(request),
             size_class: SizeClass::Full,
             tap_action: TapAction::None,
             interrupt_policy: InterruptPolicy::Disabled,
@@ -563,6 +571,8 @@ fn run() -> Result<(), String> {
         .into_iter()
         .chain(cases::face_scene_cases())
         .chain(cases::plugin_scene_cases())
+        .chain(cases::timer_producer_scene_cases())
+        .chain(cases::date_truncation_scene_cases())
     {
         if let Some(reason) = exclusion_reason(&name, &request) {
             println!("{name}: excluded ({reason})");
@@ -646,13 +656,17 @@ mod tests {
     /// not get a registry of its own to "bring" on the wire. This test
     /// pins the real, counted-not-assumed per-reason split rather than a
     /// single total, the way the stage's own 58/54/4 invariant should have
-    /// been pinned before it went stale and misled a whole stage.
+    /// been pinned before it went stale and misled a whole stage. Task 6 adds
+    /// four included rows to the prior 92/8/84 inventory: two v2 timer
+    /// producer rows and two native produced-date overflow rows.
     #[test]
     fn gate_b_inventory_is_the_real_counted_split_not_an_assumed_one() {
         let requests: Vec<_> = cases::scene_cases()
             .into_iter()
             .chain(cases::face_scene_cases())
             .chain(cases::plugin_scene_cases())
+            .chain(cases::timer_producer_scene_cases())
+            .chain(cases::date_truncation_scene_cases())
             .collect();
 
         let truncation_boundary = requests
@@ -677,7 +691,11 @@ mod tests {
             .count();
 
         // The counted-not-assumed numbers this task's report must state.
-        assert_eq!(requests.len(), 92, "76 pre-Task-8 rows + 16 plugin rows");
+        assert_eq!(
+            requests.len(),
+            96,
+            "92 pre-Task-6 rows + 2 v2 timer rows + 2 date-overflow rows"
+        );
         assert_eq!(truncation_boundary, 2);
         assert_eq!(running_mid_countdown, 2);
         assert_eq!(
@@ -690,7 +708,7 @@ mod tests {
             truncation_boundary + running_mid_countdown + field_registry_mismatch
         );
         assert_eq!(excluded, 8);
-        assert_eq!(requests.len() - excluded, 84);
+        assert_eq!(requests.len() - excluded, 88);
 
         // The RGB565-image and runtime-font-asset rows (scene-image,
         // scene-glyph, both orientations = 4 rows) are no longer excluded.
@@ -740,6 +758,21 @@ mod tests {
                     .all(|(name, request)| exclusion_reason(name, request).is_none()),
                 "every {prefix} row must be includable, not excluded"
             );
+        }
+
+        for (prefix, expected_template) in [
+            ("plugin-v2-timer--", TemplateKind::ProgressRing),
+            ("digital-clock--date-overflow--", TemplateKind::DigitalClock),
+        ] {
+            let matching = requests
+                .iter()
+                .filter(|(name, _)| name.starts_with(prefix))
+                .collect::<Vec<_>>();
+            assert_eq!(matching.len(), 2, "{prefix} must cover both orientations");
+            assert!(matching.iter().all(|(name, request)| {
+                exclusion_reason(name, request).is_none()
+                    && case_template(request) == expected_template
+            }));
         }
     }
 }

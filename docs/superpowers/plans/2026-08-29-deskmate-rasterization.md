@@ -689,43 +689,71 @@ Verification: both full host targets pass, including `test_rle565: OK (8 tests)`
 device transcripts prove atomic ordering and failure cleanup. The component test proves
 the typed error is shown in the editor. Hardware Task 7 proves real time and transport.
 
-- [ ] **Step 1: Write the failing exact-transcript tests.** Native asset case:
+- [x] **Step 1: Write the failing exact-transcript tests.** Native asset case:
       install/confirm required assets before `PushScene`, no volatile transfer. Raster
       case: volatile `AssetBegin(true)` -> all chunks -> commit -> one-image `PushScene`
       -> `AssetRelease` containing durable + new volatile. Refuse-live case: no asset or
       scene frame at all, one `SceneRefused` on that card.
-- [ ] **Step 2: Write every failure transcript.** Fail begin/chunk/commit/push/release in
+- [x] **Step 2: Write every failure transcript.** Fail begin/chunk/commit/push/release in
       turn. Before a successful new `PushScene`, the old volatile digest stays kept and
       displayed; after a successful push, release may drop the old digest. An incomplete
       pass never sends a keep-set that deletes desired bytes. `Busy` is retried; permanent
       device rejection becomes the same card's `SceneRefused`; link failure remains a link
       failure, not a card fault.
-- [ ] **Step 3: Write the failing fake-clock floor test.** Provider/manual invalidations at
+- [x] **Step 3: Write the failing fake-clock floor test.** Provider/manual invalidations at
       `t=0`, `t=5s`, `t=29.999s`, and `t=30s` produce raster pushes at `t=0` and no earlier
       than `t=30s`; the second frame contains the newest snapshot. A provider interval of
       2 minutes remains 2 minutes, while a test-only 5-second policy becomes 30 seconds.
       Native scenes remain event-driven and are not delayed by a raster-only floor.
-- [ ] **Step 4: Run and watch them fail.** `cargo test -p app-core` focused runtime tests
+- [x] **Step 4: Run and watch them fail.** `cargo test -p app-core` focused runtime tests
       and `cargo test -p server` focused admin/device transcript tests.
-- [ ] **Step 5: Retain per-device inventory honestly.** `AssetBegin.already_present` and a
+- [x] **Step 5: Retain per-device inventory honestly.** `AssetBegin.already_present` and a
       successful commit are the only digest observations; there is no inventory-list
       message. Durable confirmations may be re-checked on reconnect; volatile
       confirmations are connection/boot-epoch scoped and never inferred from flash stats.
-- [ ] **Step 6: Implement scheduling and coalescing.** `RASTER_MIN_INTERVAL = 30s` sits by
+- [x] **Step 6: Implement scheduling and coalescing.** `RASTER_MIN_INTERVAL = 30s` sits by
       its reason. Initial activation is immediate. Provider result, config/data-state
       change, playlist activation and operator injection mark a raster candidate dirty;
       one scheduler deadline wakes it, and repeated events replace the pending snapshot
       rather than queue frames.
-- [ ] **Step 7: Move the operator route onto the same path.** It may still accept committed
+- [x] **Step 7: Move the operator route onto the same path.** It may still accept committed
       fixture data for the hardware gate, but it writes the configured plugin card's
       cached snapshot and asks the runtime to render. There remains one plugin compiler,
       one negotiation table and one rasterizer. Reject a plugin/card mismatch and preserve
       the existing body-size/admin-auth bounds.
-- [ ] **Step 8: Prove the editor wording.** Extend the existing `scene-refused` component
+- [x] **Step 8: Prove the editor wording.** Extend the existing `scene-refused` component
       test with a live SVG/unsupported-device message and assert it appears inside that
       card's editor, not as “stale,” “last working settings,” or a global transport error.
       This is the V1 validation-mislabeling precedent made executable.
-- [ ] **Step 9: Commit.** `feat: deliver negotiated raster frames on a 30 second floor`
+- [x] **Step 9: Commit.** `feat: deliver negotiated raster frames on a 30 second floor`
+
+**Task 5 execution notes (2026-09-01).** The `PluginHost` boundary gained
+`rasterize(&RasterRequest) -> RasterFrame` with app-core-owned request/frame types
+(`DisplayList { scene, fields }` / `PluginSvg { plugin_id, snapshot, fields }`;
+digest + `Arc<[u8]>`), keeping the dependency direction intact; the default trait
+implementation preserves the no-renderer (Tauri) refusal, distinguishable from
+"host present but rasterization failed". **App-core owns the one-image full-bleed
+push** so revision minting, `validate_message` and every `PushScene` stay on one
+runtime path; the server owns bytes only. `push_active_scene` now dispatches to
+`execute_native_push` / `execute_raster_render` (controller extraction), whose
+transcript is begin -> chunks -> commit -> validated one-image push -> keep-set
+release, with the old volatile digest kept until the new push succeeds and no
+release ever sent from an incomplete pass. Durable and connection-scoped volatile
+confirmation ledgers now feed `DeviceRenderProfile.confirmed_assets`; volatile
+confirmations reset on disconnect. `RASTER_MIN_INTERVAL` = 30 s lives in
+`scheduler.rs` beside its round-trip rationale; one deadline coalesces
+invalidations, newest snapshot wins, a 2-minute provider interval stays 2 minutes,
+and native scenes stay event-driven. The operator plugin route injects the
+snapshot into the configured runtime card (typed mismatch rejection), lets the
+runtime mint the revision — closing the documented revision footgun on this path —
+and renders through the same executor; `digital_clock` keeps its direct diagnostic
+form. The component test asserts the refusal wording inside the card's editor
+(`role="alert"`), never "stale"/"last working settings"/transport. Two stale
+frontend fixture pins (schema 5 -> 6) predated this task and were fixed by the
+controller in a separate commit. Verification on the combined tree: fmt, clippy
+-D warnings, 899 workspace tests, doctests, 100 bun tests, all green; the server
+suite's 11 sandbox failures reproduced as loopback-denial only and pass under the
+controller (193/0).
 
 ---
 
@@ -743,24 +771,24 @@ producer, formatter, renderer, transport and panel claims. A test that supplies 
 input proves how that value is drawn and **never what it means**; three device-path defects
 survived a whole stage in that hole.
 
-- [ ] **Step 1: Record the pre-change evidence row by row.** Name which existing case
+- [x] **Step 1: Record the pre-change evidence row by row.** Name which existing case
       emits `timer.remaining`, which synthetic case draws `timer.pct`, which BigNumber
       cases cross HERO/DISPLAY/BODY, and whether any localized date actually overflows the
       date box. Resolve the disagreement noted under carried debt with file/row names and
       counts, not a blanket “covered/uncovered.”
-- [ ] **Step 2: Add the missing producer-to-pixel rows first and watch them fail for the
+- [x] **Step 2: Add the missing producer-to-pixel rows first and watch them fail for the
       intended reason.** A real v2 manifest emits `timer.pct` on an arc and
       `timer.remaining:mm:ss` on text; the provider/runtime produces the timer snapshot,
       rather than the render request injecting final percent/text. Configure the hardware
       row with the field registry that accepts timer inputs, not the plugin card's
       DigitalClock registry. Assert the producer's remaining percentage before comparing
       pixels, so a correctly drawn inverted value cannot pass.
-- [ ] **Step 3: Exercise tier choice on the new raster path.** Use values immediately
+- [x] **Step 3: Exercise tier choice on the new raster path.** Use values immediately
       either side of the metrics-derived HERO and DISPLAY widths and a non-numeric value.
       Assert the translated SVG selects the tier the real builder chose, then inspect the
       regression images. If the existing native rows already prove a boundary, retain and
       cite them rather than cloning them under a new name.
-- [ ] **Step 4: Force real date truncation.** Choose an actual localized date string whose
+- [x] **Step 4: Force real date truncation.** Choose an actual localized date string whose
       measured BODY width exceeds the 176-pixel date content box, derive it through the
       real `date` producer with a non-zero UTC offset, and assert LVGL ellipsizes on the
       native scene. Add a separate raster regression for the same visible constraint;
@@ -770,16 +798,42 @@ survived a whole stage in that hole.
       capture the device's logical framebuffer, and compare it byte-for-byte with the
       RGB565 pixel payload after its 12-byte header. This proves transfer/store/resolver/
       image-node delivery; it does **not** prove that `resvg` drew the right source.
-- [ ] **Step 6: Run the full host gates.** From `companion/`, separately:
+- [x] **Step 6: Run the full host gates.** From `companion/`, separately:
       `cargo fmt --all --check`; `cargo clippy --workspace --all-targets -- -D warnings`;
       `cargo test --workspace --all-targets`; `cargo test --workspace --doc`. From repo
       root: `make -C firmware/host_tests clean test` and
       `make -C firmware/host_tests sanitize`.
-- [ ] **Step 7: Report the evidence honestly.** State exact regression-case and
+- [x] **Step 7: Report the evidence honestly.** State exact regression-case and
       framebuffer-diff inventory counts, every exclusion with its reason, which tests pin
       their own inputs, and which claims remain hardware-only. Do not reuse the 132-row
       byte-exact headline for a raster image.
-- [ ] **Step 8: Commit.** `test: cover negotiated bindings and raster delivery`
+- [x] **Step 8: Commit.** `test: cover negotiated bindings and raster delivery` (Step 5,
+      the on-device raster delivery byte-comparison, is the one open item and moves into
+      Task 7's session where the captured framebuffer exists.)
+
+**Task 6 execution notes (2026-09-01).** The Step 1 inventory is recorded in
+`docs/scene/template-parity-ledger.md` ("Task 6 pre-change evidence inventory") and
+resolved the standing disagreement: the older blanket claims ("timer.remaining/timer.pct
+have no pixel coverage", "tier step-down never exercised", "measure() checked at exactly
+one string width") were stale — `timer.remaining` had 10 producer-shaped lvgl-sim rows
+plus 8 parity rows, `timer.pct` had exactly 2 synthetic rows, and BigNumber had 8
+metrics-derived boundary rows — while the genuinely missing evidence was a manifest-v2
+timer AUTHORING row and a produced date that actually overflows its box (the widest
+produced string was 174 px against the 176 px box, so `ellipsize: true` had never been
+exercised). Both now exist: `plugin-v2-timer--remaining-357-of-1000` (both orientations;
+the semantic assertion pins REMAINING 35% before pixels, so a drawn elapsed-65% inversion
+cannot pass; the hardware row uses the ProgressRing registry because plugin cards ride
+DigitalClock's four fields on the wire) and `digital-clock--date-overflow` ("Wed, May 13"
+at UTC+04:00 measures 178 px BODY, native LVGL renders "Wed, May…", goldens at both
+orientations), plus `raster_svg_uses_the_real_builder_tier_across_both_numeric_boundaries`
+(HERO 372/434 px, DISPLAY 396/432 px, non-numeric -> BODY, asserted against the real
+builder's choice) and a separate raster regression pinning that resvg shows the full
+date — an allowed renderer difference, not parity. The hardware framebuffer_diff
+inventory moves from 92 total / 8 excluded / 84 included to **96 / 8 / 88** — unobserved
+on hardware, a software prediction until Task 7 runs it. Two ledger corrections: the
+quantization rationale cited r=195 where the shipped ProgressRing is r=120 (permille
+still correct), and the plan's Task 6 text said `timer.pct` where the contract is
+`timer.permille`.
 
 ---
 

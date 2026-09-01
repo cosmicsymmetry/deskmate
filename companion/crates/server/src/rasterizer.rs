@@ -1679,6 +1679,91 @@ mod tests {
         }
     }
 
+    /// Matches `scene_parity.rs::numeric_tier_boundary`: these are the
+    /// existing native C-oracle rows named `hero-just-fits`,
+    /// `hero-just-misses`, `display-just-fits`, and
+    /// `display-just-misses`. The raster test consumes the same metrics-derived
+    /// values but proves a different claim: translated SVG preserves the tier
+    /// the real builder selected.
+    fn numeric_tier_boundary(tier: SceneFontTier) -> (String, String) {
+        const CONTENT_WIDTH: i32 = SCENE_CANVAS_WIDTH - 2 * 24;
+        let metrics = &app_core::BakedFontMetrics::SHIPPED;
+        let zero_width = metrics
+            .measure(tier, "0")
+            .expect("numeric tiers carry zero");
+        let fitting_zeroes = usize::try_from(CONTENT_WIDTH / zero_width).unwrap();
+        let fits = "0".repeat(fitting_zeroes);
+        let misses = "0".repeat(fitting_zeroes + 1);
+        assert!(metrics.measure(tier, &fits).unwrap() <= CONTENT_WIDTH);
+        assert!(metrics.measure(tier, &misses).unwrap() > CONTENT_WIDTH);
+        (fits, misses)
+    }
+
+    #[test]
+    fn raster_svg_uses_the_real_builder_tier_across_both_numeric_boundaries() {
+        const CONTENT_WIDTH: i32 = SCENE_CANVAS_WIDTH - 2 * 24;
+        let metrics = &app_core::BakedFontMetrics::SHIPPED;
+        let (hero_fits, hero_misses) = numeric_tier_boundary(SceneFontTier::Hero);
+        let (display_fits, display_misses) = numeric_tier_boundary(SceneFontTier::Display);
+        let values = [
+            ("hero-just-fits", hero_fits),
+            ("hero-just-misses", hero_misses),
+            ("display-just-fits", display_fits),
+            ("display-just-misses", display_misses),
+            ("non-numeric", "ready".to_string()),
+        ];
+
+        for (slug, value) in values {
+            let expected_tier = app_core::number_font_tier(&value, CONTENT_WIDTH, metrics);
+            let scene = app_core::build_big_number_label_scene(
+                &app_core::BigNumberCard {
+                    revision: 1,
+                    title: "Stats",
+                    value: &value,
+                    label: "ITEMS",
+                },
+                metrics,
+            );
+            let builder_font = scene
+                .nodes
+                .iter()
+                .find_map(|node| match node {
+                    SceneNode::Text(text) if text.value == SceneValue::Literal(value.clone()) => {
+                        Some(&text.font)
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{slug}: real builder value node"));
+            assert_eq!(
+                builder_font,
+                &SceneFont::Baked(expected_tier),
+                "{slug}: builder and number_font_tier must agree"
+            );
+
+            let (family, size, weight) = font_properties(builder_font, &RasterAssetMap::new())
+                .expect("baked font properties");
+            let size = size.to_string();
+            let weight = weight.to_string();
+            let svg = scene_to_svg(&scene, &[], &RasterAssetMap::new()).unwrap();
+            let document = Document::parse(&svg).expect("translated SVG is XML");
+            let translated = document
+                .descendants()
+                .find(|node| node.has_tag_name("text") && node.text() == Some(value.as_str()))
+                .unwrap_or_else(|| panic!("{slug}: translated value text"));
+            assert_eq!(translated.attribute("font-family"), Some(family.as_str()));
+            assert_eq!(
+                translated.attribute("font-size"),
+                Some(size.as_str()),
+                "{slug}: SVG must preserve the builder-selected tier"
+            );
+            assert_eq!(
+                translated.attribute("font-weight"),
+                Some(weight.as_str()),
+                "{slug}: SVG must preserve the builder-selected face"
+            );
+        }
+    }
+
     fn rooted_aqi() -> serde_json::Value {
         let envelope: serde_json::Value = serde_json::from_str(include_str!(
             "../../plugin/tests/fixtures/aqi_response.json"
@@ -1860,6 +1945,67 @@ mod tests {
         );
         let frame = rasterize_scene(&scene, &[], &RasterAssetMap::new()).unwrap();
         assert_raster_regression("display-list-fallback", &frame);
+    }
+
+    #[test]
+    fn raster_regression_produced_date_overflow_is_a_separate_visible_constraint() {
+        use chrono::Datelike;
+
+        const NOW_UNIX_SECONDS: i64 = 1_778_661_296;
+        const UTC_OFFSET_MINUTES: i16 = 240;
+        assert_ne!(UTC_OFFSET_MINUTES, 0);
+        let local_seconds = NOW_UNIX_SECONDS + i64::from(UTC_OFFSET_MINUTES) * 60;
+        let local_now = chrono::DateTime::from_timestamp(local_seconds, 0)
+            .expect("date-overflow instant")
+            .naive_utc();
+        let produced_date = format!(
+            "{}, {} {}",
+            local_now.format("%a"),
+            local_now.format("%b"),
+            local_now.day()
+        );
+        let built = app_core::build_digital_clock_scene(
+            &app_core::ClockCard {
+                revision: 1,
+                show_seconds: false,
+                local_now,
+            },
+            &app_core::BakedFontMetrics::SHIPPED,
+        );
+        let date_index = built
+            .nodes
+            .iter()
+            .position(|node| {
+                matches!(
+                    node,
+                    SceneNode::Text(SceneText {
+                        value: SceneValue::Binding(binding),
+                        ..
+                    }) if binding == "date"
+                )
+            })
+            .expect("real DigitalClock builder date node");
+        let mut date_node = built.nodes[date_index].clone();
+        let SceneNode::Text(date_text) = &mut date_node else {
+            unreachable!("date index was selected as text")
+        };
+        assert_eq!(date_text.w, 176);
+        assert!(date_text.ellipsize);
+        date_text.value = SceneValue::Literal(produced_date.clone());
+        let static_date_constraint = Scene {
+            revision: built.revision,
+            background: built.background,
+            // The preceding node is the date module emitted by the same real
+            // builder. This regression intentionally isolates the constraint;
+            // it is not compared with or called parity against native LVGL.
+            nodes: vec![built.nodes[date_index - 1].clone(), date_node],
+        };
+
+        let svg = scene_to_svg(&static_date_constraint, &[], &RasterAssetMap::new()).unwrap();
+        assert!(svg.contains(&xml_escape(&produced_date)));
+        assert!(svg.contains(r#"<clipPath id="clip-1"><rect x="48" y="0" width="176""#));
+        let frame = rasterize_scene(&static_date_constraint, &[], &RasterAssetMap::new()).unwrap();
+        assert_raster_regression("produced-date-overflow", &frame);
     }
 
     #[test]

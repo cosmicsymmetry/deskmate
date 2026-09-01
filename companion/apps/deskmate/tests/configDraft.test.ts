@@ -589,7 +589,7 @@ describe("configuration draft helpers", () => {
 
   test("contract fixtures expose cards, not widgets or screens", () => {
     const config = ipcContractFixtures.snapshot.config;
-    expect(config.schema_version).toBe(5);
+    expect(config.schema_version).toBe(6);
     expect(Array.isArray(config.cards)).toBe(true);
     expect(Array.isArray(config.playlists)).toBe(true);
     expect("widgets" in config).toBe(false);

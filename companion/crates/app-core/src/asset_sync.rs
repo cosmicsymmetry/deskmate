@@ -131,8 +131,9 @@ pub struct AssetSyncReport {
     pub skipped: usize,
     /// Assets actually streamed and committed this pass.
     pub uploaded: usize,
-    /// The full desired digest set, exactly as sent in the closing
-    /// `AssetRelease`.
+    /// The full keep-set exactly as sent in the closing `AssetRelease`:
+    /// desired durable digests plus any active volatile digest the caller
+    /// asked this pass to retain.
     pub released: Vec<[u8; ASSET_DIGEST_LEN]>,
 }
 
@@ -163,6 +164,8 @@ pub enum AssetSyncError {
         digest: [u8; ASSET_DIGEST_LEN],
         kind: AssetKind,
     },
+    #[error("required scene asset {digest:02x?} is not available from this host")]
+    MissingRequiredAsset { digest: [u8; ASSET_DIGEST_LEN] },
     #[error("AssetBegin for {digest:02x?} failed: {source}")]
     Begin {
         digest: [u8; ASSET_DIGEST_LEN],
@@ -341,7 +344,18 @@ impl AssetSync {
         device: &mut dyn RuntimeDevice,
         desired: &[DesiredAsset],
     ) -> Result<AssetSyncReport, AssetSyncError> {
-        Self::reconcile_yielding(device, desired, &mut || {})
+        Self::reconcile_yielding_with_active_volatile(device, desired, None, &mut || {})
+    }
+
+    /// Reconciles durable assets while retaining the volatile digest read by
+    /// the currently displayed scene. This is the only safe full-sync shape
+    /// before its replacement `PushScene` succeeds.
+    pub fn reconcile_with_active_volatile(
+        device: &mut dyn RuntimeDevice,
+        desired: &[DesiredAsset],
+        active_volatile: Option<[u8; ASSET_DIGEST_LEN]>,
+    ) -> Result<AssetSyncReport, AssetSyncError> {
+        Self::reconcile_yielding_with_active_volatile(device, desired, active_volatile, &mut || {})
     }
 
     /// Same as [`Self::reconcile`], but calls `on_chunk_sent` after every
@@ -365,6 +379,15 @@ impl AssetSync {
     pub fn reconcile_yielding(
         device: &mut dyn RuntimeDevice,
         desired: &[DesiredAsset],
+        on_chunk_sent: &mut dyn FnMut(),
+    ) -> Result<AssetSyncReport, AssetSyncError> {
+        Self::reconcile_yielding_with_active_volatile(device, desired, None, on_chunk_sent)
+    }
+
+    fn reconcile_yielding_with_active_volatile(
+        device: &mut dyn RuntimeDevice,
+        desired: &[DesiredAsset],
+        active_volatile: Option<[u8; ASSET_DIGEST_LEN]>,
         on_chunk_sent: &mut dyn FnMut(),
     ) -> Result<AssetSyncReport, AssetSyncError> {
         // `MAX_ASSET_DIGESTS` (32) comfortably covers the config's own
@@ -398,8 +421,9 @@ impl AssetSync {
             }
         }
 
-        let released: Vec<[u8; ASSET_DIGEST_LEN]> =
+        let durable: Vec<[u8; ASSET_DIGEST_LEN]> =
             desired.iter().map(|asset| asset.digest).collect();
+        let released = compose_asset_keep_set(&durable, active_volatile)?;
         device
             .send_asset_release(AssetRelease {
                 digests: released.clone(),

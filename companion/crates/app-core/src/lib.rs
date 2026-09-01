@@ -44,9 +44,9 @@ pub use render_negotiation::{
 };
 pub use runtime::{
     CalendarRefreshRequest, CalendarRefreshResult, CalendarRefresher, DeviceConnection, PluginHost,
-    ProviderRefreshRequest, ProviderRefreshResult, ProviderRefresher, ProviderRequest,
-    RuntimeDevice, RuntimeHandle, RuntimeOptions, RuntimeSubscription, SceneCandidate,
-    SerialRuntimeDevice, SystemCalendarRefresher, SystemProviderRefresher,
+    ProviderRefreshRequest, ProviderRefreshResult, ProviderRefresher, ProviderRequest, RasterFrame,
+    RasterRequest, RuntimeDevice, RuntimeHandle, RuntimeOptions, RuntimeSubscription,
+    SceneCandidate, SerialRuntimeDevice, SystemCalendarRefresher, SystemProviderRefresher,
 };
 pub use scene_build::{
     AnalogClockCard, BakedFontMetrics, BigNumberCard, ClockCard, IconBadgeCard, NumericAdvances,

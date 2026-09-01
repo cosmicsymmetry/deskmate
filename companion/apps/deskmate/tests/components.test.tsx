@@ -1200,17 +1200,25 @@ describe("settings accessibility and states", () => {
     expect(editor).toContain("Refresh");
   });
 
-  test("a typed scene refusal is visible in the affected card editor", () => {
+  test("a live SVG refusal is visible in the affected card editor, not mislabeled globally or stale", () => {
+    const refusal =
+      "this card needs the display to keep time:HH:mm moving between pushes, but the card is an SVG template, which no device draws natively; a server-rendered image of it would freeze, so it is refused instead — update the display’s firmware to show this card";
     const editor = renderCardEditor(clockCard("clock-1", "Desk"), [], {
       kind: "scene-refused",
       card_id: "clock-1",
-      message: "the display refused this card's scene (InvalidPayload)",
+      message: refusal,
     });
 
+    expect(editor).toContain('class="panel editor-panel"');
     expect(editor).toContain("This card could not be rendered.");
+    expect(editor).toContain(refusal);
+    expect(editor).toContain("time:HH:mm");
+    expect(editor).toContain("would freeze");
     expect(editor).toContain("Adjust the card and save to try again.");
     expect(editor).toContain('role="alert"');
+    expect(editor).not.toContain("stale");
     expect(editor).not.toContain("last working settings");
+    expect(editor).not.toContain("Transport error");
   });
 
   test("the settings sheet carries the link and ownership facts the header used to", () => {

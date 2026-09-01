@@ -1,8 +1,8 @@
 //! Admin-token-protected provisioning, configuration, and status routes.
 
 use app_core::{
-    AppConfig, AppSnapshot, BakedFontMetrics, ClockCard, MAX_CONFIG_FILE_BYTES, PluginHost,
-    RuntimeError, SaveReceipt, StoreError, ValidationIssue, build_digital_clock_scene,
+    AppConfig, AppSnapshot, BakedFontMetrics, ClockCard, MAX_CONFIG_FILE_BYTES, RuntimeError,
+    SaveReceipt, StoreError, ValidationIssue, build_digital_clock_scene,
 };
 use axum::Json;
 use axum::Router;
@@ -18,7 +18,6 @@ use serde::{Deserialize, Serialize, Serializer};
 
 use crate::ServerState;
 use crate::auth::bearer_token;
-use crate::plugin_host::ServerPluginHost;
 use crate::plugin_registry::PluginRegistry;
 
 /// Matches the standard provider response ceiling and stays below Axum's
@@ -228,7 +227,7 @@ async fn put_config(
 #[derive(Deserialize)]
 struct PushSceneRequest {
     card_id: String,
-    revision: u32,
+    revision: Option<u32>,
     template: String,
     show_seconds: Option<bool>,
     local_now: Option<String>,
@@ -256,13 +255,19 @@ impl<'de> Deserialize<'de> for OptionalSceneData {
     }
 }
 
+#[derive(Debug)]
+enum OperatorScene {
+    Push(PushScene),
+    Plugin {
+        card_id: String,
+        plugin_id: String,
+        snapshot: providers::ProviderSnapshot<serde_json::Value>,
+    },
+}
+
 /// Builds and pushes an operator-selected scene through an existing device runtime.
-///
-/// A plugin scene only references content-addressed asset digests; this route deliberately
-/// does not transfer their bytes. The device must already have completed a full synchronize
-/// while the registry was loaded. `PluginHost::desired_assets()` is registry-wide rather than
-/// per-card, and the runtime reconciles it on every full synchronize, so such a device already
-/// holds every curated plugin asset this scene can name.
+/// Plugin input is cached in that runtime and rendered by its normal negotiated
+/// executor; only the legacy digital-clock diagnostic keeps the direct `PushScene` form.
 async fn post_scene(
     State(state): State<ServerState>,
     _admin: AdminAuthenticated,
@@ -276,23 +281,44 @@ async fn post_scene(
         status: rejection.status(),
         message: rejection.body_text(),
     })?;
-    let push = build_push_scene(request, state.plugins())?;
+    let scene = build_operator_scene(request, state.plugins())?;
     let runtime = state
         .device_link(&device_id)
         .and_then(|link| link.runtime())
         .ok_or_else(|| AdminError::from(RuntimeError::DeviceDisconnected))?;
-    tokio::task::spawn_blocking(move || runtime.push_scene(push))
-        .await
-        .map_err(|_| AdminError::WorkerFailed)?
-        .map_err(AdminError::from)?;
+    let result = tokio::task::spawn_blocking(move || match scene {
+        OperatorScene::Push(push) => runtime.push_scene(push),
+        OperatorScene::Plugin {
+            card_id,
+            plugin_id,
+            snapshot,
+        } => runtime.inject_plugin_snapshot(card_id, plugin_id, snapshot),
+    })
+    .await
+    .map_err(|_| AdminError::WorkerFailed)?;
+    map_operator_runtime_result(result)?;
 
     Ok(StatusCode::OK)
 }
 
-fn build_push_scene(
+fn map_operator_runtime_result(result: Result<(), RuntimeError>) -> Result<(), AdminError> {
+    if let Err(RuntimeError::Provider { message }) = &result
+        && message.starts_with("operator-plugin-mismatch:")
+    {
+        return Err(AdminError::InvalidScene {
+            message: message
+                .strip_prefix("operator-plugin-mismatch: ")
+                .unwrap_or(message)
+                .to_owned(),
+        });
+    }
+    result.map_err(AdminError::from)
+}
+
+fn build_operator_scene(
     request: PushSceneRequest,
     plugins: &std::sync::Arc<PluginRegistry>,
-) -> Result<PushScene, AdminError> {
+) -> Result<OperatorScene, AdminError> {
     let PushSceneRequest {
         card_id,
         revision,
@@ -304,8 +330,11 @@ fn build_push_scene(
         stale,
         error,
     } = request;
-    let scene = match template.as_str() {
+    match template.as_str() {
         "digital_clock" => {
+            let revision = revision.ok_or_else(|| AdminError::InvalidScene {
+                message: "revision is required for scene template \"digital_clock\"".into(),
+            })?;
             let show_seconds = show_seconds.ok_or_else(|| AdminError::InvalidScene {
                 message: "show_seconds is required for scene template \"digital_clock\"".into(),
             })?;
@@ -316,14 +345,25 @@ fn build_push_scene(
                 .map_err(|_| AdminError::InvalidScene {
                     message: "local_now must use YYYY-MM-DDTHH:MM:SS".into(),
                 })?;
-            build_digital_clock_scene(
+            let scene = build_digital_clock_scene(
                 &ClockCard {
                     revision,
                     show_seconds,
                     local_now,
                 },
                 &BakedFontMetrics::SHIPPED,
-            )
+            );
+            let push = PushScene {
+                card_id,
+                revision,
+                scene,
+            };
+            validate_message(&Message::PushScene(push.clone())).map_err(|error| {
+                AdminError::InvalidScene {
+                    message: error.to_string(),
+                }
+            })?;
+            Ok(OperatorScene::Push(push))
         }
         "plugin" => {
             let plugin_id = plugin_id.ok_or_else(|| AdminError::InvalidScene {
@@ -346,6 +386,11 @@ fn build_push_scene(
                     ),
                 });
             }
+            if plugins.get(&plugin_id).is_none() {
+                return Err(AdminError::InvalidScene {
+                    message: format!("unknown plugin id {plugin_id:?}"),
+                });
+            }
             let snapshot = providers::ProviderSnapshot {
                 value: data,
                 refreshed_at: None,
@@ -353,40 +398,16 @@ fn build_push_scene(
                 stale,
                 error,
             };
-            let candidate = ServerPluginHost::new(std::sync::Arc::clone(plugins))
-                .render_scene(&plugin_id, &snapshot, &BakedFontMetrics::SHIPPED, revision)
-                .map_err(|message| AdminError::InvalidScene { message })?;
-            match candidate {
-                app_core::SceneCandidate::DisplayList(scene) => scene,
-                // This route pushes native scenes only. A raster-only (SVG)
-                // plugin goes through negotiation and the Task 5 raster
-                // executor, not an operator PushScene.
-                app_core::SceneCandidate::RasterOnly { .. } => {
-                    return Err(AdminError::InvalidScene {
-                        message: format!(
-                            "plugin {plugin_id:?} is an SVG template with no native scene; this route can only push display-list scenes"
-                        ),
-                    });
-                }
-            }
+            Ok(OperatorScene::Plugin {
+                card_id,
+                plugin_id,
+                snapshot,
+            })
         }
-        _ => {
-            return Err(AdminError::InvalidScene {
-                message: format!("unknown scene template {template:?}"),
-            });
-        }
-    };
-    let push = PushScene {
-        card_id,
-        revision,
-        scene,
-    };
-    validate_message(&Message::PushScene(push.clone())).map_err(|error| {
-        AdminError::InvalidScene {
-            message: error.to_string(),
-        }
-    })?;
-    Ok(push)
+        _ => Err(AdminError::InvalidScene {
+            message: format!("unknown scene template {template:?}"),
+        }),
+    }
 }
 
 async fn get_device(
@@ -515,14 +536,16 @@ mod tests {
     use std::path::Path;
     use std::sync::Arc;
 
+    use app_core::RuntimeError;
     use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode};
     use axum::response::Response;
     use tower::ServiceExt as _;
 
     use super::{
-        AdminError, MAX_OPERATOR_PLUGIN_DATA_BYTES, PushSceneRequest, build_push_scene,
-        insert_last_ota_error, insert_observed_age_seconds, observed_age_seconds,
+        AdminError, MAX_OPERATOR_PLUGIN_DATA_BYTES, OperatorScene, PushSceneRequest,
+        build_operator_scene, insert_last_ota_error, insert_observed_age_seconds,
+        map_operator_runtime_result, observed_age_seconds,
     };
 
     const AQI_FIXTURE: &str = include_str!("../../plugin/tests/fixtures/aqi_response.json");
@@ -650,22 +673,23 @@ mod tests {
     }
 
     #[test]
-    fn aqi_plugin_request_compiles_the_real_unwrapped_fixture_to_a_valid_message() {
+    fn aqi_plugin_request_queues_the_real_unwrapped_fixture_for_the_runtime() {
         let registry = curated_registry();
-        let push = build_push_scene(
+        let action = build_operator_scene(
             plugin_request("aqi", &payload_from_envelope(AQI_FIXTURE), false, None),
             &registry,
         )
-        .expect("compile AQI fixture through the admin path");
+        .expect("prepare AQI fixture through the admin path");
 
-        protocol::validate_message(&protocol::Message::PushScene(push))
-            .expect("AQI admin scene must satisfy the wire validator");
+        assert!(
+            matches!(action, OperatorScene::Plugin { card_id, plugin_id, snapshot } if card_id == "aqi-card" && plugin_id == "aqi" && snapshot.value == payload_from_envelope(AQI_FIXTURE))
+        );
     }
 
     #[test]
-    fn agenda_plugin_request_compiles_the_real_unwrapped_fixture_to_a_valid_message() {
+    fn agenda_plugin_request_queues_the_real_unwrapped_fixture_for_the_runtime() {
         let registry = curated_registry();
-        let push = build_push_scene(
+        let action = build_operator_scene(
             plugin_request(
                 "agenda",
                 &payload_from_envelope(AGENDA_FIXTURE),
@@ -674,62 +698,69 @@ mod tests {
             ),
             &registry,
         )
-        .expect("compile agenda fixture through the admin path");
+        .expect("prepare agenda fixture through the admin path");
 
-        protocol::validate_message(&protocol::Message::PushScene(push))
-            .expect("agenda admin scene must satisfy the wire validator");
+        assert!(
+            matches!(action, OperatorScene::Plugin { plugin_id, snapshot, .. } if plugin_id == "agenda" && snapshot.value == payload_from_envelope(AGENDA_FIXTURE))
+        );
     }
 
     #[test]
     fn explicit_json_null_is_present_plugin_data_not_a_missing_field() {
         let registry = curated_registry();
-        let push = build_push_scene(
+        let action = build_operator_scene(
             plugin_request("aqi", &serde_json::Value::Null, false, None),
             &registry,
         )
         .expect("JSON null is an arbitrary JSON value, not an absent data field");
 
-        protocol::validate_message(&protocol::Message::PushScene(push))
-            .expect("the missing-data AQI face must remain wire-valid");
+        assert!(
+            matches!(action, OperatorScene::Plugin { snapshot, .. } if snapshot.value.is_null())
+        );
     }
 
     #[test]
-    fn plugin_stale_and_error_state_each_reach_the_compiled_scene() {
+    fn plugin_stale_and_error_state_each_reach_the_runtime_snapshot() {
         let registry = curated_registry();
         let data = payload_from_envelope(AQI_FIXTURE);
-        let clean = build_push_scene(plugin_request("aqi", &data, false, None), &registry)
-            .expect("compile clean scene");
-        let stale = build_push_scene(plugin_request("aqi", &data, true, None), &registry)
-            .expect("compile stale scene");
-        let errored = build_push_scene(
+        let clean = build_operator_scene(plugin_request("aqi", &data, false, None), &registry)
+            .expect("prepare clean snapshot");
+        let stale = build_operator_scene(plugin_request("aqi", &data, true, None), &registry)
+            .expect("prepare stale snapshot");
+        let errored = build_operator_scene(
             plugin_request("aqi", &data, false, Some("operator supplied error")),
             &registry,
         )
-        .expect("compile errored scene");
+        .expect("prepare errored snapshot");
 
-        assert_ne!(stale.scene, clean.scene, "stale state was discarded");
-        assert_ne!(errored.scene, clean.scene, "error state was discarded");
-        let protocol::SceneNode::Text(stale_footer) = stale.scene.nodes.last().unwrap() else {
-            panic!("stale footer is not text");
+        let OperatorScene::Plugin {
+            snapshot: clean, ..
+        } = clean
+        else {
+            panic!()
         };
-        let protocol::SceneNode::Text(error_footer) = errored.scene.nodes.last().unwrap() else {
-            panic!("error footer is not text");
+        let OperatorScene::Plugin {
+            snapshot: stale, ..
+        } = stale
+        else {
+            panic!()
         };
-        assert_eq!(
-            stale_footer.value,
-            protocol::SceneValue::Literal("Stale".into())
-        );
-        assert_eq!(
-            error_footer.value,
-            protocol::SceneValue::Literal("operator supplied error".into())
-        );
+        let OperatorScene::Plugin {
+            snapshot: errored, ..
+        } = errored
+        else {
+            panic!()
+        };
+        assert!(!clean.stale && clean.error.is_none());
+        assert!(stale.stale && stale.error.is_none());
+        assert_eq!(errored.error.as_deref(), Some("operator supplied error"));
     }
 
     #[test]
     fn digital_clock_request_still_builds_the_exact_existing_scene() {
         let registry = curated_registry();
         let local_now = "2026-08-25T14:37:42";
-        let push = build_push_scene(
+        let action = build_operator_scene(
             request(serde_json::json!({
                 "card_id": "clock-1",
                 "revision": 17,
@@ -740,6 +771,9 @@ mod tests {
             &registry,
         )
         .expect("build digital clock through the refactored path");
+        let OperatorScene::Push(push) = action else {
+            panic!("digital clock must remain a direct push")
+        };
 
         assert_eq!(push.card_id, "clock-1");
         assert_eq!(push.revision, 17);
@@ -762,7 +796,7 @@ mod tests {
         let mut data = payload_from_envelope(AQI_FIXTURE);
         data["unused"] = serde_json::Value::String("x".repeat(MAX_OPERATOR_PLUGIN_DATA_BYTES));
 
-        let error = build_push_scene(plugin_request("aqi", &data, false, None), &registry)
+        let error = build_operator_scene(plugin_request("aqi", &data, false, None), &registry)
             .expect_err("oversized operator data must be refused before compilation");
         let AdminError::InvalidScene { message } = error else {
             panic!("oversized data returned the wrong error type: {error:?}");
@@ -794,34 +828,47 @@ mod tests {
         assert_eq!(error["message"], "unknown plugin id \"not-installed\"");
     }
 
-    #[tokio::test]
-    async fn plugin_compile_failure_is_a_typed_bad_request_with_the_host_message() {
-        let (state, device_id, _config_dir) = state_with_curated_plugins();
+    #[test]
+    fn plugin_payload_is_not_compiled_in_the_route_before_the_runtime_executor() {
+        let registry = curated_registry();
         let mut data = payload_from_envelope(AQI_FIXTURE);
         data["current"]["category"] = serde_json::Value::String("x".repeat(4097));
-        let response = post_scene_request(
-            state,
-            &device_id,
-            serde_json::json!({
+        let action = build_operator_scene(plugin_request("aqi", &data, false, None), &registry)
+            .expect("route preparation must defer plugin compilation");
+
+        assert!(
+            matches!(action, OperatorScene::Plugin { plugin_id, snapshot, .. } if plugin_id == "aqi" && snapshot.value == data)
+        );
+    }
+
+    #[test]
+    fn plugin_operator_request_needs_no_caller_revision_because_runtime_mints_it() {
+        let registry = curated_registry();
+        let action = build_operator_scene(
+            request(serde_json::json!({
                 "card_id": "aqi-card",
-                "revision": 17,
                 "template": "plugin",
                 "plugin_id": "aqi",
-                "data": data,
-            }),
-            true,
+                "data": payload_from_envelope(AQI_FIXTURE),
+            })),
+            &registry,
         )
-        .await;
+        .expect("plugin request without the revision footgun");
 
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        let error = response_json(response).await;
-        assert_eq!(error["kind"], "invalid-scene");
         assert!(
-            error["message"]
-                .as_str()
-                .unwrap()
-                .starts_with("permanent plugin render failure for \"aqi\":"),
-            "host classification was lost: {error}"
+            matches!(action, OperatorScene::Plugin { card_id, plugin_id, .. } if card_id == "aqi-card" && plugin_id == "aqi")
+        );
+    }
+
+    #[test]
+    fn runtime_plugin_card_mismatch_maps_to_the_routes_typed_invalid_scene_error() {
+        let error = map_operator_runtime_result(Err(RuntimeError::Provider {
+            message: "operator-plugin-mismatch: card \"air\" is configured for plugin \"aqi\", not \"agenda\"".into(),
+        }))
+        .expect_err("mismatch must remain a typed scene request error");
+
+        assert!(
+            matches!(error, AdminError::InvalidScene { message } if message.contains("configured for plugin") && message.contains("aqi") && message.contains("agenda"))
         );
     }
 

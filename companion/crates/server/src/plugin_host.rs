@@ -2,7 +2,9 @@
 
 use std::sync::Arc;
 
-use app_core::{BakedFontMetrics, DesiredAsset, PluginHost, SceneCandidate};
+use app_core::{
+    BakedFontMetrics, DesiredAsset, PluginHost, RasterFrame, RasterRequest, SceneCandidate,
+};
 use providers::ProviderSnapshot;
 
 use crate::plugin_provider::{
@@ -82,6 +84,40 @@ impl PluginHost for ServerPluginHost {
             )),
         }
     }
+
+    fn rasterize(&mut self, request: &RasterRequest) -> Result<RasterFrame, String> {
+        let frame = match request {
+            RasterRequest::DisplayList { scene, fields } => {
+                let assets = self
+                    .registry
+                    .all_assets()
+                    .into_iter()
+                    .map(|asset| (asset.digest, Arc::clone(&asset.bytes)))
+                    .collect();
+                crate::rasterizer::rasterize_scene(scene, fields, &assets)
+            }
+            RasterRequest::PluginSvg {
+                plugin_id,
+                snapshot,
+                fields,
+            } => {
+                let loaded = self
+                    .registry
+                    .get(plugin_id)
+                    .ok_or_else(|| format!("unknown plugin id {plugin_id:?}"))?;
+                let template = loaded.svg_source.as_deref().ok_or_else(|| {
+                    format!("plugin {plugin_id:?} does not own an SVG raster template")
+                })?;
+                crate::rasterizer::rasterize_svg_template(template, &snapshot.value, fields)
+            }
+        }
+        .map_err(|error| format!("server rasterization failed: {error}"))?;
+
+        Ok(RasterFrame {
+            digest: frame.digest,
+            bytes: Arc::from(frame.bytes),
+        })
+    }
 }
 
 fn classified_failure_message(
@@ -102,6 +138,7 @@ mod tests {
 
     use chrono::Utc;
     use protocol::{Message, PushScene};
+    use sha2::Digest as _;
 
     use super::*;
 
@@ -204,6 +241,25 @@ mod tests {
                 bindings: std::collections::BTreeSet::new()
             }
         );
+    }
+
+    #[test]
+    fn plugin_host_boundary_rasterizes_svg_to_an_app_core_owned_canonical_frame() {
+        let mut host = ServerPluginHost::new(curated_registry());
+
+        let frame = host
+            .rasterize(&RasterRequest::PluginSvg {
+                plugin_id: "svg-aqi".into(),
+                snapshot: aqi_snapshot(),
+                fields: vec![],
+            })
+            .expect("rasterize curated SVG through the app-core boundary");
+
+        assert_eq!(
+            frame.bytes.len(),
+            protocol::VOLATILE_IMAGE_DECODED_LENGTH as usize
+        );
+        assert_eq!(sha2::Sha256::digest(&frame.bytes).as_slice(), frame.digest);
     }
 
     #[test]

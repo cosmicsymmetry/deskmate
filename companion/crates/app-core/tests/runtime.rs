@@ -1186,6 +1186,75 @@ fn plugin_card_pushes_the_host_scene_unmodified_after_raw_data_arrives() {
 }
 
 #[test]
+fn operator_plugin_snapshot_uses_the_same_runtime_compiler_and_runtime_minted_revision() {
+    let control = MockDeviceControl::default();
+    let host = FakePluginHostControl::default();
+    let runtime = start_plugin_runtime(&control, Some(Box::new(host.host())));
+    wait_for(Duration::from_secs(1), || !host.renders().is_empty());
+    let before_revision = host.renders().last().unwrap().revision;
+
+    runtime
+        .inject_plugin_snapshot(
+            "plugin-card",
+            "test-plugin",
+            providers::ProviderSnapshot {
+                value: serde_json::json!({"operator": "newest"}),
+                refreshed_at: None,
+                age: None,
+                stale: false,
+                error: None,
+            },
+        )
+        .unwrap();
+
+    wait_for(Duration::from_secs(1), || {
+        host.renders()
+            .iter()
+            .any(|render| render.snapshot.value == serde_json::json!({"operator": "newest"}))
+    });
+    let render = host
+        .renders()
+        .into_iter()
+        .find(|render| render.snapshot.value == serde_json::json!({"operator": "newest"}))
+        .unwrap();
+    assert!(render.revision > before_revision);
+    assert!(control.operations().iter().any(|operation| {
+        matches!(operation, Operation::PushScene(push) if push.card_id == "plugin-card" && push.revision == render.revision)
+    }));
+    runtime.shutdown().unwrap();
+}
+
+#[test]
+fn operator_plugin_snapshot_rejects_a_configured_card_plugin_mismatch() {
+    let control = MockDeviceControl::default();
+    let host = FakePluginHostControl::default();
+    let runtime = start_plugin_runtime(&control, Some(Box::new(host.host())));
+    wait_for(Duration::from_secs(1), || !host.renders().is_empty());
+    let render_count = host.renders().len();
+
+    let error = runtime
+        .inject_plugin_snapshot(
+            "plugin-card",
+            "different-plugin",
+            providers::ProviderSnapshot {
+                value: serde_json::json!({}),
+                refreshed_at: None,
+                age: None,
+                stale: false,
+                error: None,
+            },
+        )
+        .expect_err("plugin/card mismatch must be typed");
+
+    assert!(
+        matches!(error, RuntimeError::Provider { ref message } if message.contains("operator-plugin-mismatch") && message.contains("test-plugin") && message.contains("different-plugin"))
+    );
+    thread::sleep(Duration::from_millis(50));
+    assert_eq!(host.renders().len(), render_count);
+    runtime.shutdown().unwrap();
+}
+
+#[test]
 fn plugin_assets_are_reconciled_before_the_plugin_scene_is_pushed() {
     let control = MockDeviceControl::default();
     let host = FakePluginHostControl::default();

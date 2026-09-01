@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TryRecvError};
@@ -23,7 +23,7 @@ use providers::json_feed::{JsonFeedOptions, JsonFeedProvider, JsonMapping as Pro
 use providers::rss::{RssOptions, RssProvider};
 use providers::weather::{WeatherOptions, WeatherProvider, WeatherUnits as ProviderWeatherUnits};
 
-use crate::asset_sync::AssetSync;
+use crate::asset_sync::{AssetSync, AssetSyncError};
 use crate::commands::{CommandReply, PomodoroAction, RuntimeCommand, RuntimeError};
 use crate::render_negotiation;
 use crate::scheduler::Scheduler;
@@ -131,6 +131,31 @@ pub enum SceneCandidate {
     RasterOnly { bindings: BTreeSet<String> },
 }
 
+/// App-core-owned input to the server rasterizer. Keeping this value on the
+/// `PluginHost` boundary preserves the dependency direction: app-core owns the
+/// execution policy, while the server alone can call `resvg` and inspect the
+/// curated plugin registry.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RasterRequest {
+    DisplayList {
+        scene: protocol::Scene,
+        fields: Vec<Field>,
+    },
+    PluginSvg {
+        plugin_id: String,
+        snapshot: providers::ProviderSnapshot<serde_json::Value>,
+        fields: Vec<Field>,
+    },
+}
+
+/// Canonical decoded LVGL image bytes returned through the host boundary.
+/// The digest addresses these decoded bytes even when transfer chooses RLE565.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RasterFrame {
+    pub digest: [u8; protocol::ASSET_DIGEST_LEN],
+    pub bytes: Arc<[u8]>,
+}
+
 /// Host boundary used by the background runtime for plugin-owned assets and
 /// manifest scene compilation.
 pub trait PluginHost: Send + 'static {
@@ -147,6 +172,12 @@ pub trait PluginHost: Send + 'static {
         metrics: &BakedFontMetrics,
         revision: u32,
     ) -> Result<SceneCandidate, String>;
+
+    /// Rasterizes one already-negotiated static candidate. Implementations do
+    /// not repeat the negotiation table; they only execute the selected source.
+    fn rasterize(&mut self, _request: &RasterRequest) -> Result<RasterFrame, String> {
+        Err("server-side rasterization is unavailable from this plugin host".into())
+    }
 }
 
 pub struct SerialRuntimeDevice {
@@ -724,6 +755,15 @@ pub struct RuntimeHandle {
     publisher: Arc<SnapshotPublisher>,
     diagnostics: Arc<RuntimeDiagnosticCounters>,
     command_timeout: Duration,
+    operator_injections: Arc<Mutex<VecDeque<OperatorPluginInjection>>>,
+    next_operator_injection: AtomicU64,
+}
+
+struct OperatorPluginInjection {
+    token: u64,
+    card_id: String,
+    plugin_id: String,
+    snapshot: providers::ProviderSnapshot<serde_json::Value>,
 }
 
 impl RuntimeHandle {
@@ -770,6 +810,7 @@ impl RuntimeHandle {
             diagnostics: Arc::clone(&diagnostics),
         });
         let (sender, receiver) = mpsc::sync_channel(options.command_capacity.max(1));
+        let operator_injections = Arc::new(Mutex::new(VecDeque::new()));
         let worker_publisher = Arc::clone(&publisher);
         let worker_diagnostics = Arc::clone(&diagnostics);
         let worker_inputs = RuntimeWorkerInputs {
@@ -777,6 +818,7 @@ impl RuntimeHandle {
             device,
             refresher,
             plugin_host,
+            operator_injections: Arc::clone(&operator_injections),
         };
         let worker = thread::Builder::new()
             .name("deskmate-runtime".into())
@@ -798,6 +840,8 @@ impl RuntimeHandle {
             publisher,
             diagnostics,
             command_timeout: options.command_timeout,
+            operator_injections,
+            next_operator_injection: AtomicU64::new(1),
         })
     }
 
@@ -862,6 +906,38 @@ impl RuntimeHandle {
 
     pub fn push_scene(&self, push: PushScene) -> Result<(), RuntimeError> {
         self.request(|reply| RuntimeCommand::PushScene { push, reply })
+    }
+
+    /// Replaces one configured plugin card's cached snapshot and wakes the
+    /// ordinary active-scene executor. The existing `RefreshProvider` command
+    /// is used only as the bounded worker wake; no provider fetch is scheduled.
+    pub fn inject_plugin_snapshot(
+        &self,
+        card_id: impl Into<String>,
+        plugin_id: impl Into<String>,
+        snapshot: providers::ProviderSnapshot<serde_json::Value>,
+    ) -> Result<(), RuntimeError> {
+        let token = self.next_operator_injection.fetch_add(1, Ordering::Relaxed);
+        let card_id = card_id.into();
+        self.operator_injections
+            .lock()
+            .map_err(|_| RuntimeError::WorkerStopped)?
+            .push_back(OperatorPluginInjection {
+                token,
+                card_id: card_id.clone(),
+                plugin_id: plugin_id.into(),
+                snapshot,
+            });
+        let result = self.request(|reply| RuntimeCommand::RefreshProvider {
+            widget_id: card_id,
+            reply,
+        });
+        if result.is_err()
+            && let Ok(mut pending) = self.operator_injections.lock()
+        {
+            pending.retain(|injection| injection.token != token);
+        }
+        result
     }
 
     /// Provision through the session already owned by the runtime worker. This command never
@@ -957,6 +1033,7 @@ struct WorkerState {
     latest_fields: BTreeMap<String, Vec<Field>>,
     plugin_snapshots: BTreeMap<String, providers::ProviderSnapshot<serde_json::Value>>,
     plugin_host: Option<Box<dyn PluginHost>>,
+    operator_injections: Arc<Mutex<VecDeque<OperatorPluginInjection>>>,
     dirty_widgets: BTreeSet<String>,
     /// Card ID -> the most recent typed refusal for that card. There is deliberately
     /// one editor-visible slot per card: if data and scene refusals happen before
@@ -987,6 +1064,16 @@ struct WorkerState {
     ownership_refused: bool,
     generation: u64,
     next_scene_revision: u32,
+    /// Digests observed through AssetBegin(already-present) or a successful
+    /// commit on this device runtime. Durable bytes may survive reconnects;
+    /// volatile bytes are tracked separately because a reboot loses PSRAM.
+    confirmed_durable_assets: BTreeSet<[u8; protocol::ASSET_DIGEST_LEN]>,
+    confirmed_volatile_assets: BTreeSet<[u8; protocol::ASSET_DIGEST_LEN]>,
+    /// The volatile frame referenced by the last accepted raster `PushScene`.
+    active_volatile_digest: Option<[u8; protocol::ASSET_DIGEST_LEN]>,
+    /// A static raster invalidation waiting on the scheduler's single floor
+    /// deadline. The snapshot itself remains in the ordinary per-card cache.
+    pending_raster_card: Option<String>,
     next_connect: Instant,
     last_published: Option<AppSnapshot>,
 }
@@ -1001,6 +1088,7 @@ impl WorkerState {
             latest_fields: BTreeMap::new(),
             plugin_snapshots: BTreeMap::new(),
             plugin_host: None,
+            operator_injections: Arc::new(Mutex::new(VecDeque::new())),
             dirty_widgets: BTreeSet::new(),
             push_rejections: BTreeMap::new(),
             pomodoros: BTreeMap::new(),
@@ -1018,6 +1106,10 @@ impl WorkerState {
             ownership_refused: false,
             generation: 0,
             next_scene_revision: 0,
+            confirmed_durable_assets: BTreeSet::new(),
+            confirmed_volatile_assets: BTreeSet::new(),
+            active_volatile_digest: None,
+            pending_raster_card: None,
             next_connect: now,
             last_published: None,
         };
@@ -1026,6 +1118,7 @@ impl WorkerState {
         state
     }
 
+    #[allow(clippy::too_many_lines)] // one linear config swap; splitting would scatter its invariants
     fn replace_config(&mut self, config: AppConfig, now: Instant, scheduler: &mut Scheduler) {
         let previous_config = self.config.clone();
         let previous_active_screen = self.active_screen.clone();
@@ -1037,6 +1130,8 @@ impl WorkerState {
         self.config = config;
         self.dirty_widgets.clear();
         self.push_rejections.clear();
+        self.pending_raster_card = None;
+        scheduler.clear_raster_invalidation();
         self.pomodoro_snapshots.clear();
         // Owned, not borrowed: `prune_alert_state_for_live_widgets` needs
         // `&mut self`, which cannot coexist with a set still borrowing from
@@ -1351,6 +1446,7 @@ struct RuntimeWorkerInputs {
     device: Box<dyn RuntimeDevice>,
     refresher: Box<dyn CalendarRefresher>,
     plugin_host: Option<Box<dyn PluginHost>>,
+    operator_injections: Arc<Mutex<VecDeque<OperatorPluginInjection>>>,
 }
 
 fn run_runtime(
@@ -1365,6 +1461,7 @@ fn run_runtime(
         mut device,
         refresher,
         plugin_host,
+        operator_injections,
     } = inputs;
     let now = Instant::now();
     let mut scheduler = Scheduler::new(
@@ -1375,6 +1472,7 @@ fn run_runtime(
     );
     let mut state = WorkerState::new(config, now, &mut scheduler);
     state.plugin_host = plugin_host;
+    state.operator_injections = operator_injections;
     let provider = ProviderWorker::new(refresher, options.provider_job_capacity);
     state.publish_if_changed(publisher, diagnostics);
 
@@ -1429,7 +1527,13 @@ fn run_runtime(
         // face drawn by an already-owned device, not a prerequisite for Online.
         state.publish_if_changed(publisher, diagnostics);
         if state.connected && !state.config.preferences.paused {
-            push_active_scene(&mut state, device.as_mut(), options.reconnect_interval);
+            push_active_scene(
+                &mut state,
+                &mut scheduler,
+                device.as_mut(),
+                now,
+                options.reconnect_interval,
+            );
         }
         run_scheduled_work(
             &mut state,
@@ -1447,6 +1551,7 @@ fn run_runtime(
     publisher.close();
 }
 
+#[allow(clippy::too_many_lines)] // one arm per runtime command
 fn process_command(
     command: RuntimeCommand,
     state: &mut WorkerState,
@@ -1516,7 +1621,19 @@ fn process_command(
             let _ = reply.send(result);
         }
         RuntimeCommand::RefreshProvider { widget_id, reply } => {
-            let result = if let Some(provider) = state.providers.get(&widget_id) {
+            let injection = state
+                .operator_injections
+                .lock()
+                .ok()
+                .and_then(|mut pending| {
+                    let index = pending
+                        .iter()
+                        .position(|injection| injection.card_id == widget_id)?;
+                    pending.remove(index)
+                });
+            let result = if let Some(injection) = injection {
+                apply_operator_plugin_injection(state, scheduler, device, injection)
+            } else if let Some(provider) = state.providers.get(&widget_id) {
                 if !provider.in_flight {
                     scheduler.schedule_provider_now(&widget_id, Instant::now());
                 }
@@ -1551,6 +1668,68 @@ fn process_command(
         }
     }
     false
+}
+
+fn apply_operator_plugin_injection(
+    state: &mut WorkerState,
+    scheduler: &mut Scheduler,
+    device: &mut dyn RuntimeDevice,
+    injection: OperatorPluginInjection,
+) -> Result<(), RuntimeError> {
+    if !state.connected {
+        return Err(RuntimeError::DeviceDisconnected);
+    }
+    let (title, configured_plugin_id) = state
+        .config
+        .cards
+        .iter()
+        .find_map(|card| match card {
+            CardSettings::Plugin {
+                id,
+                title,
+                plugin_id,
+                ..
+            } if id == &injection.card_id => Some((title.clone(), plugin_id.clone())),
+            _ => None,
+        })
+        .ok_or_else(|| RuntimeError::Provider {
+            message: format!(
+                "operator-plugin-mismatch: card {:?} is not a configured plugin card",
+                injection.card_id
+            ),
+        })?;
+    if configured_plugin_id != injection.plugin_id {
+        return Err(RuntimeError::Provider {
+            message: format!(
+                "operator-plugin-mismatch: card {:?} is configured for plugin {:?}, not {:?}",
+                injection.card_id, configured_plugin_id, injection.plugin_id
+            ),
+        });
+    }
+
+    let snapshot_stale = injection.snapshot.stale;
+    let error = injection.snapshot.error.clone().unwrap_or_default();
+    state
+        .plugin_snapshots
+        .insert(injection.card_id.clone(), injection.snapshot);
+    state.latest_fields.insert(
+        injection.card_id.clone(),
+        vec![
+            Field {
+                key: "title".into(),
+                value: FieldValue::Text(title),
+            },
+            Field {
+                key: "stale".into(),
+                value: FieldValue::Boolean(snapshot_stale),
+            },
+            Field {
+                key: "error".into(),
+                value: FieldValue::Text(error),
+            },
+        ],
+    );
+    activate_screen_command(state, scheduler, device, injection.card_id)
 }
 
 fn activate_screen_command(
@@ -2361,11 +2540,22 @@ fn synchronize_full(
         if desired.is_empty() {
             return None;
         }
-        Some(AssetSync::reconcile(device, &desired))
+        let digests: Vec<_> = desired.iter().map(|asset| asset.digest).collect();
+        Some((
+            digests,
+            AssetSync::reconcile_with_active_volatile(
+                device,
+                &desired,
+                state.active_volatile_digest,
+            ),
+        ))
     });
     match asset_result {
-        Some(Ok(_)) => clear_plugin_asset_sync_refusals(state),
-        Some(Err(error)) => record_plugin_asset_sync_refusals(state, &error.to_string()),
+        Some((digests, Ok(_))) => {
+            state.confirmed_durable_assets = digests.into_iter().collect();
+            clear_plugin_asset_sync_refusals(state);
+        }
+        Some((_, Err(error))) => record_plugin_asset_sync_refusals(state, &error.to_string()),
         None => {}
     }
     if !sync_device_result(
@@ -2771,7 +2961,13 @@ fn handle_automatic_scene_error(
 fn negotiate_candidate(
     state: &mut WorkerState,
     candidate: &CardCandidate,
-) -> Result<render_negotiation::RenderDecision, String> {
+) -> Result<
+    (
+        render_negotiation::RenderDecision,
+        render_negotiation::RenderRequirements,
+    ),
+    String,
+> {
     let requirements = match candidate {
         CardCandidate::Push(push) => render_negotiation::analyze_scene(&push.scene),
         CardCandidate::RasterOnly { bindings } => {
@@ -2781,12 +2977,12 @@ fn negotiate_candidate(
     .map_err(|error| error.to_string())?;
     let profile = render_negotiation::DeviceRenderProfile {
         capabilities: state.device.capability_bits(),
-        // The runtime keeps no per-device asset ledger: content addressing at
-        // `AssetBegin` is the inventory protocol, and `synchronize_full`
-        // reconciles the registry-wide desired set before any layout. So
-        // "installable" -- the host holds the bytes -- is the honest claim,
-        // and "confirmed" stays empty rather than guessed.
-        confirmed_assets: BTreeSet::new(),
+        confirmed_assets: state
+            .confirmed_durable_assets
+            .iter()
+            .chain(&state.confirmed_volatile_assets)
+            .copied()
+            .collect(),
         installable_assets: if requirements.asset_digests.is_empty() {
             BTreeSet::new()
         } else {
@@ -2802,12 +2998,17 @@ fn negotiate_candidate(
                 .unwrap_or_default()
         },
     };
-    Ok(render_negotiation::negotiate(&requirements, &profile))
+    Ok((
+        render_negotiation::negotiate(&requirements, &profile),
+        requirements,
+    ))
 }
 
 fn push_active_scene(
     state: &mut WorkerState,
+    scheduler: &mut Scheduler,
     device: &mut dyn RuntimeDevice,
+    now: Instant,
     reconnect_interval: Duration,
 ) {
     if ownership_was_refused(state) || state.needs_full_sync || !state.active_scene_dirty {
@@ -2818,6 +3019,16 @@ fn push_active_scene(
         return;
     };
 
+    if state.pending_raster_card.as_deref() == Some(card_id.as_str()) {
+        if !scheduler.raster_due(now) {
+            return;
+        }
+        state.pending_raster_card = None;
+    } else if state.pending_raster_card.is_some() {
+        state.pending_raster_card = None;
+        scheduler.clear_raster_invalidation();
+    }
+
     let Some(revision) = state.next_scene_revision.checked_add(1) else {
         state.active_scene_dirty = false;
         record_scene_refusal(
@@ -2827,16 +3038,15 @@ fn push_active_scene(
         );
         return;
     };
-    state.next_scene_revision = revision;
     let fields = state
         .latest_fields
         .get(&card_id)
-        .map(Vec::as_slice)
+        .cloned()
         .unwrap_or_default();
     let candidate = match build_card_scene(
         &state.config,
         &card_id,
-        fields,
+        &fields,
         state.plugin_snapshots.get(&card_id),
         state.plugin_host.as_deref_mut(),
         revision,
@@ -2854,71 +3064,356 @@ fn push_active_scene(
     // nothing -- is gone: silence was the exact defect shape the V1
     // validation-mislabeling fix exists to forbid. Every decision below is
     // recomputed per (scene, device, revision); nothing is cached.
-    let decision = match negotiate_candidate(state, &candidate) {
-        Ok(decision) => decision,
+    let (decision, requirements) = match negotiate_candidate(state, &candidate) {
+        Ok(negotiated) => negotiated,
         Err(message) => {
             state.active_scene_dirty = false;
             record_scene_refusal(state, card_id, message);
             return;
         }
     };
-    let push = match decision {
-        render_negotiation::RenderDecision::Native => match candidate {
-            CardCandidate::Push(push) => push,
-            CardCandidate::RasterOnly { .. } => {
-                // Unreachable by construction (`RasterOnly` sets a
-                // native_source no profile satisfies), but a policy bug here
-                // must surface as a typed card error, not a panic in the
-                // worker thread.
-                state.active_scene_dirty = false;
-                record_scene_refusal(
-                    state,
-                    card_id,
-                    "internal error: a raster-only candidate negotiated a native render".into(),
-                );
-                return;
-            }
-        },
+    match decision {
+        render_negotiation::RenderDecision::Native => {
+            scheduler.clear_raster_invalidation();
+            execute_native_push(
+                state,
+                device,
+                card_id,
+                revision,
+                candidate,
+                &requirements,
+                reconnect_interval,
+            );
+        }
         render_negotiation::RenderDecision::RefuseLive { reason } => {
+            scheduler.clear_raster_invalidation();
             state.active_scene_dirty = false;
             record_scene_refusal(state, card_id, reason);
-            return;
         }
         render_negotiation::RenderDecision::Rasterize => {
-            // Task 5 replaces this arm with the raster executor (render
-            // server-side, upload one volatile frame, push a one-image-node
-            // scene). Until then the decision cannot execute, and the only
-            // honest interim is a typed, visible refusal -- never the deleted
-            // shortcut's silence.
+            execute_raster_render(
+                state,
+                scheduler,
+                device,
+                card_id,
+                revision,
+                &candidate,
+                &fields,
+                now,
+                reconnect_interval,
+            );
+        }
+    }
+}
+
+/// The `Native` row's executor: confirm required durable assets, push the
+/// display-list scene, and drop a now-unreferenced volatile frame. Extracted
+/// from `push_active_scene` so the dispatch reads as the spec table.
+fn execute_native_push(
+    state: &mut WorkerState,
+    device: &mut dyn RuntimeDevice,
+    card_id: String,
+    revision: u32,
+    candidate: CardCandidate,
+    requirements: &render_negotiation::RenderRequirements,
+    reconnect_interval: Duration,
+) {
+    let push = match candidate {
+        CardCandidate::Push(push) => push,
+        CardCandidate::RasterOnly { .. } => {
+            // Unreachable by construction (`RasterOnly` sets a
+            // native_source no profile satisfies), but a policy bug here
+            // must surface as a typed card error, not a panic in the
+            // worker thread.
             state.active_scene_dirty = false;
             record_scene_refusal(
                 state,
                 card_id,
-                "this card needs server-side rasterization, which this host does not yet \
-                 perform"
-                    .into(),
+                "internal error: a raster-only candidate negotiated a native render".into(),
             );
             return;
         }
     };
-
-    // One best-effort attempt per event. This runs outside ownership sync after
-    // the Online snapshot has been published. Any failure belongs to the card's
-    // render state; status/ownership traffic independently decides whether the
-    // connection itself is still usable.
+    state.next_scene_revision = revision;
+    if !requirements.asset_digests.is_empty()
+        && let Err(error) =
+            ensure_durable_assets_for_scene(state, device, &requirements.asset_digests)
+    {
+        state.active_scene_dirty = false;
+        handle_automatic_asset_error(state, card_id, error, reconnect_interval);
+        return;
+    }
     state.active_scene_dirty = false;
     match device.push_scene(push) {
         Ok(()) => {
-            if state
-                .push_rejections
-                .get(&card_id)
-                .is_some_and(|error| error.kind == CardErrorKind::SceneRefused)
-            {
-                state.push_rejections.remove(&card_id);
+            clear_scene_refusal(state, &card_id);
+            if state.active_volatile_digest.is_some() {
+                let keep = durable_asset_digests(state);
+                match keep.and_then(|digests| {
+                    device
+                        .send_asset_release(AssetRelease { digests })
+                        .map_err(|source| AssetSyncError::Release { source })
+                }) {
+                    Ok(()) => {
+                        state.active_volatile_digest = None;
+                        state.confirmed_volatile_assets.clear();
+                    }
+                    Err(error) => {
+                        handle_automatic_asset_error(state, card_id, error, reconnect_interval);
+                    }
+                }
             }
         }
         Err(error) => {
             handle_automatic_scene_error(state, card_id, error, reconnect_interval);
+        }
+    }
+}
+
+/// The `Rasterize` row's executor: honour the 30-second floor, render through
+/// the plugin-host boundary, run the atomic volatile transcript
+/// (begin -> chunks -> commit -> one-image push -> keep-set release), and keep
+/// the old frame until the new push succeeds.
+// too_many_arguments: this is `push_active_scene`'s execution context handed
+// through whole; bundling it into a struct would name a thing with no other use.
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+fn execute_raster_render(
+    state: &mut WorkerState,
+    scheduler: &mut Scheduler,
+    device: &mut dyn RuntimeDevice,
+    card_id: String,
+    revision: u32,
+    candidate: &CardCandidate,
+    fields: &[Field],
+    now: Instant,
+    reconnect_interval: Duration,
+) {
+    scheduler.invalidate_raster(now);
+    if !scheduler.raster_due(now) {
+        state.pending_raster_card = Some(card_id);
+        return;
+    }
+    state.next_scene_revision = revision;
+    state.active_scene_dirty = false;
+    let request = match raster_request(state, &card_id, candidate, fields) {
+        Ok(request) => request,
+        Err(message) => {
+            record_scene_refusal(state, card_id, message);
+            return;
+        }
+    };
+    let Some(host) = state.plugin_host.as_deref_mut() else {
+        record_scene_refusal(
+            state,
+            card_id,
+            "this card needs server-side rasterization, which this host does not yet \
+             perform"
+                .into(),
+        );
+        return;
+    };
+    let frame = match host.rasterize(&request) {
+        Ok(frame) => frame,
+        Err(message) => {
+            record_scene_refusal(
+                state,
+                card_id,
+                format!("this host was present, but could not rasterize the card: {message}"),
+            );
+            return;
+        }
+    };
+    let asset = DesiredAsset {
+        digest: frame.digest,
+        kind: protocol::AssetKind::Image,
+        bytes: frame.bytes,
+    };
+    if let Err(error) = AssetSync::transfer_volatile(device, &asset, state.device.capability_bits())
+    {
+        handle_automatic_asset_error(state, card_id, error, reconnect_interval);
+        return;
+    }
+    state.confirmed_volatile_assets.insert(asset.digest);
+    let push = match raster_frame_push(&card_id, revision, asset.digest) {
+        Ok(push) => push,
+        Err(message) => {
+            record_scene_refusal(state, card_id, message);
+            return;
+        }
+    };
+    match device.push_scene(push) {
+        Ok(()) => {
+            state.active_volatile_digest = Some(asset.digest);
+            scheduler.note_raster_pushed(now);
+            clear_scene_refusal(state, &card_id);
+            let release = durable_asset_digests(state).and_then(|durable| {
+                crate::asset_sync::compose_asset_keep_set(&durable, Some(asset.digest))
+            });
+            match release.and_then(|digests| {
+                device
+                    .send_asset_release(AssetRelease { digests })
+                    .map_err(|source| AssetSyncError::Release { source })
+            }) {
+                Ok(()) => {
+                    state
+                        .confirmed_volatile_assets
+                        .retain(|digest| *digest == asset.digest);
+                }
+                Err(error) => {
+                    handle_automatic_asset_error(state, card_id, error, reconnect_interval);
+                }
+            }
+        }
+        Err(error) => {
+            handle_automatic_scene_error(state, card_id, error, reconnect_interval);
+        }
+    }
+}
+
+fn clear_scene_refusal(state: &mut WorkerState, card_id: &str) {
+    if state
+        .push_rejections
+        .get(card_id)
+        .is_some_and(|error| error.kind == CardErrorKind::SceneRefused)
+    {
+        state.push_rejections.remove(card_id);
+    }
+}
+
+fn ensure_durable_assets_for_scene(
+    state: &mut WorkerState,
+    device: &mut dyn RuntimeDevice,
+    required: &BTreeSet<[u8; protocol::ASSET_DIGEST_LEN]>,
+) -> Result<(), AssetSyncError> {
+    if required.iter().all(|digest| {
+        state.confirmed_durable_assets.contains(digest)
+            || state.confirmed_volatile_assets.contains(digest)
+    }) {
+        return Ok(());
+    }
+    let desired = state
+        .plugin_host
+        .as_deref_mut()
+        .map(PluginHost::desired_assets)
+        .unwrap_or_default();
+    if let Some(digest) = required.iter().find(|digest| {
+        !state.confirmed_durable_assets.contains(*digest)
+            && !state.confirmed_volatile_assets.contains(*digest)
+            && !desired.iter().any(|asset| asset.digest == **digest)
+    }) {
+        return Err(AssetSyncError::MissingRequiredAsset { digest: *digest });
+    }
+    let report =
+        AssetSync::reconcile_with_active_volatile(device, &desired, state.active_volatile_digest)?;
+    state.confirmed_durable_assets = report
+        .released
+        .into_iter()
+        .filter(|digest| Some(*digest) != state.active_volatile_digest)
+        .collect();
+    Ok(())
+}
+
+fn durable_asset_digests(
+    state: &mut WorkerState,
+) -> Result<Vec<[u8; protocol::ASSET_DIGEST_LEN]>, AssetSyncError> {
+    let desired = state
+        .plugin_host
+        .as_deref_mut()
+        .map(PluginHost::desired_assets)
+        .unwrap_or_default();
+    crate::asset_sync::compose_asset_keep_set(
+        &desired.iter().map(|asset| asset.digest).collect::<Vec<_>>(),
+        None,
+    )
+}
+
+fn raster_request(
+    state: &WorkerState,
+    card_id: &str,
+    candidate: &CardCandidate,
+    fields: &[Field],
+) -> Result<RasterRequest, String> {
+    match candidate {
+        CardCandidate::Push(push) => Ok(RasterRequest::DisplayList {
+            scene: push.scene.clone(),
+            fields: fields.to_vec(),
+        }),
+        CardCandidate::RasterOnly { .. } => {
+            let plugin_id = state
+                .config
+                .cards
+                .iter()
+                .find_map(|card| match card {
+                    CardSettings::Plugin { id, plugin_id, .. } if id == card_id => {
+                        Some(plugin_id.clone())
+                    }
+                    _ => None,
+                })
+                .ok_or_else(|| format!("raster-only card {card_id:?} is not a plugin card"))?;
+            let snapshot = state
+                .plugin_snapshots
+                .get(card_id)
+                .cloned()
+                .ok_or_else(|| {
+                    format!("card {card_id:?} has no fetched plugin snapshot cached yet")
+                })?;
+            Ok(RasterRequest::PluginSvg {
+                plugin_id,
+                snapshot,
+                fields: fields.to_vec(),
+            })
+        }
+    }
+}
+
+/// App-core is the one production owner of the full-bleed image scene. That
+/// keeps revision minting and protocol validation beside every other runtime
+/// push; the server rasterizer owns bytes only.
+fn raster_frame_push(
+    card_id: &str,
+    revision: u32,
+    digest: [u8; protocol::ASSET_DIGEST_LEN],
+) -> Result<PushScene, String> {
+    let push = PushScene {
+        card_id: card_id.to_owned(),
+        revision,
+        scene: protocol::Scene {
+            revision,
+            background: 0,
+            nodes: vec![protocol::SceneNode::Image(protocol::SceneImage {
+                x: 0,
+                y: 0,
+                w: protocol::SCENE_CANVAS_WIDTH,
+                h: protocol::SCENE_CANVAS_HEIGHT,
+                digest,
+                recolor: false,
+                color: 0,
+            })],
+        },
+    };
+    validate_message(&Message::PushScene(push.clone()))
+        .map_err(|error| format!("the raster frame scene is invalid: {error}"))?;
+    Ok(push)
+}
+
+fn handle_automatic_asset_error(
+    state: &mut WorkerState,
+    card_id: String,
+    error: AssetSyncError,
+    reconnect_interval: Duration,
+) {
+    match error {
+        AssetSyncError::Begin { source, .. }
+        | AssetSyncError::Chunk { source, .. }
+        | AssetSyncError::Commit { source, .. }
+        | AssetSyncError::Release { source } => {
+            handle_automatic_scene_error(state, card_id, source, reconnect_interval);
+        }
+        AssetSyncError::TooManyDesiredAssets { .. }
+        | AssetSyncError::AssetTooLarge { .. }
+        | AssetSyncError::VolatileKind { .. }
+        | AssetSyncError::MissingRequiredAsset { .. } => {
+            record_scene_refusal(state, card_id, error.to_string());
         }
     }
 }
@@ -3079,6 +3574,11 @@ fn mark_disconnected(
     reconnect_interval: Duration,
 ) {
     state.connected = false;
+    // Volatile inventory lives in PSRAM and is therefore a fact about one
+    // attachment/boot epoch only. Keep the active digest as a desired
+    // reference for an atomic reconnect pass, but never claim its bytes are
+    // still confirmed until AssetBegin observes them again.
+    state.confirmed_volatile_assets.clear();
     // Capabilities belong to the new attachment, not the retained runtime. A
     // reconnect may follow an OTA in either direction, so force one render-policy
     // decision from the fresh StatusResponse even when all data is otherwise clean.
@@ -4870,6 +5370,674 @@ mod tests {
 
     // -- Stage 4 Task 2: render negotiation in the push path -------------------
 
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum RenderTranscript {
+        Begin { digest: [u8; 32], volatile: bool },
+        Chunk { digest: [u8; 32], offset: u32 },
+        Commit([u8; 32]),
+        Push(PushScene),
+        Release(Vec<[u8; 32]>),
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum RenderFailurePoint {
+        Begin,
+        Chunk,
+        Commit,
+        Push,
+        Release,
+    }
+
+    #[derive(Default)]
+    struct RenderTranscriptDevice {
+        transcript: Vec<RenderTranscript>,
+        failure: Option<(RenderFailurePoint, DeviceError)>,
+    }
+
+    impl RenderTranscriptDevice {
+        fn failing(point: RenderFailurePoint, error: DeviceError) -> Self {
+            Self {
+                transcript: Vec::new(),
+                failure: Some((point, error)),
+            }
+        }
+
+        fn fail(&mut self, point: RenderFailurePoint) -> Result<(), DeviceError> {
+            if self.failure.as_ref().is_some_and(|(at, _)| *at == point) {
+                return Err(self.failure.take().unwrap().1);
+            }
+            Ok(())
+        }
+    }
+
+    impl RuntimeDevice for RenderTranscriptDevice {
+        fn connect(&mut self) -> Result<DeviceConnection, DeviceError> {
+            unreachable!()
+        }
+        fn status(&mut self) -> Result<StatusResponse, DeviceError> {
+            unreachable!()
+        }
+        fn provision(&mut self, _config: &NetworkConfig) -> Result<(), DeviceError> {
+            unreachable!()
+        }
+        fn factory_reset(&mut self) -> Result<(), DeviceError> {
+            unreachable!()
+        }
+        fn time_sync(&mut self, _sync: TimeSync) -> Result<(), DeviceError> {
+            unreachable!()
+        }
+        fn apply_layout(
+            &mut self,
+            _rotation: u16,
+            _widgets: Vec<WidgetConfig>,
+            _screens: Vec<ScreenConfig>,
+        ) -> Result<(), DeviceError> {
+            unreachable!()
+        }
+        fn push_fields(
+            &mut self,
+            _widget_id: String,
+            _fields: Vec<Field>,
+        ) -> Result<(), DeviceError> {
+            unreachable!()
+        }
+        fn push_scene(&mut self, push: PushScene) -> Result<(), DeviceError> {
+            self.transcript.push(RenderTranscript::Push(push));
+            self.fail(RenderFailurePoint::Push)
+        }
+        fn activate_screen(&mut self, _screen_id: String) -> Result<(), DeviceError> {
+            unreachable!()
+        }
+        fn trigger_interrupt(&mut self, _interrupt: TriggerInterrupt) -> Result<(), DeviceError> {
+            unreachable!()
+        }
+        fn send_asset_begin(&mut self, begin: AssetBegin) -> Result<Ack, DeviceError> {
+            self.transcript.push(RenderTranscript::Begin {
+                digest: begin.digest,
+                volatile: begin.volatile,
+            });
+            self.fail(RenderFailurePoint::Begin)?;
+            Ok(Ack {
+                acknowledged_type: protocol::TYPE_ASSET_BEGIN,
+                revision: None,
+                already_present: Some(false),
+            })
+        }
+        fn send_asset_chunk(&mut self, chunk: AssetChunk) -> Result<(), DeviceError> {
+            self.transcript.push(RenderTranscript::Chunk {
+                digest: chunk.digest,
+                offset: chunk.offset,
+            });
+            self.fail(RenderFailurePoint::Chunk)
+        }
+        fn send_asset_commit(&mut self, commit: AssetCommit) -> Result<(), DeviceError> {
+            self.transcript
+                .push(RenderTranscript::Commit(commit.digest));
+            self.fail(RenderFailurePoint::Commit)
+        }
+        fn send_asset_release(&mut self, release: AssetRelease) -> Result<(), DeviceError> {
+            self.transcript
+                .push(RenderTranscript::Release(release.digests));
+            self.fail(RenderFailurePoint::Release)
+        }
+        fn try_recv_event(&mut self) -> Option<ReceivedEvent> {
+            None
+        }
+        fn diagnostics(&self) -> SessionDiagnostics {
+            SessionDiagnostics::default()
+        }
+    }
+
+    struct ExecutorPluginHost {
+        desired: Vec<DesiredAsset>,
+        candidate: Option<SceneCandidate>,
+        frame: RasterFrame,
+    }
+
+    impl PluginHost for ExecutorPluginHost {
+        fn desired_assets(&mut self) -> Vec<DesiredAsset> {
+            self.desired.clone()
+        }
+
+        fn render_scene(
+            &mut self,
+            _plugin_id: &str,
+            _snapshot: &providers::ProviderSnapshot<serde_json::Value>,
+            _metrics: &BakedFontMetrics,
+            _revision: u32,
+        ) -> Result<SceneCandidate, String> {
+            self.candidate
+                .clone()
+                .ok_or_else(|| "test host has no display-list candidate".into())
+        }
+
+        fn rasterize(&mut self, _request: &RasterRequest) -> Result<RasterFrame, String> {
+            Ok(self.frame.clone())
+        }
+    }
+
+    fn static_raster_card() -> CardSettings {
+        CardSettings::JsonFeed {
+            id: "big".into(),
+            title: "Steps".into(),
+            url: "https://example.invalid/steps.json".into(),
+            mappings: vec![JsonFieldMapping {
+                field: "value".into(),
+                path: "steps".into(),
+            }],
+            template: DisplayTemplate::BigNumberLabel,
+            tap_action: WidgetTapAction::None,
+            refresh: RefreshPolicy::Manual,
+            alert: CardAlert::None,
+        }
+    }
+
+    fn raster_executor_state(now: Instant) -> (WorkerState, Scheduler) {
+        let config = rotation_config(
+            vec![static_raster_card()],
+            CarouselAdvance::Manual,
+            &[("big", None)],
+        );
+        let mut scheduler = fresh_scheduler(now);
+        let mut state = WorkerState::new(config, now, &mut scheduler);
+        state.needs_full_sync = false;
+        state.active_screen = Some("big".into());
+        state.active_scene_dirty = true;
+        state.device.capabilities = crate::DeviceCapability::from_bits(
+            protocol::CURRENT_CAPABILITIES & !protocol::CAPABILITY_SCENE_RENDER,
+        );
+        state.plugin_host = Some(Box::new(ExecutorPluginHost {
+            desired: Vec::new(),
+            candidate: None,
+            frame: RasterFrame {
+                digest: [0x22; 32],
+                bytes: Arc::from(&[0x19, 0x12, 0, 0, 0xc0, 1, 0x70, 1, 0x80, 3, 0, 0, 1, 2][..]),
+            },
+        }));
+        (state, scheduler)
+    }
+
+    #[test]
+    fn native_asset_transcript_confirms_durable_before_push_without_volatile_transfer() {
+        let now = Instant::now();
+        let digest = [0x11; 32];
+        let card = CardSettings::Plugin {
+            id: "asset-card".into(),
+            title: "Asset".into(),
+            plugin_id: "asset-plugin".into(),
+            tap_action: WidgetTapAction::None,
+            refresh: RefreshPolicy::Manual,
+            alert: CardAlert::None,
+        };
+        let config = rotation_config(vec![card], CarouselAdvance::Manual, &[("asset-card", None)]);
+        let mut scheduler = fresh_scheduler(now);
+        let mut state = WorkerState::new(config, now, &mut scheduler);
+        state.needs_full_sync = false;
+        state.active_screen = Some("asset-card".into());
+        state.active_scene_dirty = true;
+        state.device.capabilities =
+            crate::DeviceCapability::from_bits(protocol::CURRENT_CAPABILITIES);
+        state.plugin_snapshots.insert(
+            "asset-card".into(),
+            providers::ProviderSnapshot {
+                value: serde_json::json!({}),
+                refreshed_at: None,
+                age: None,
+                stale: false,
+                error: None,
+            },
+        );
+        state.plugin_host = Some(Box::new(ExecutorPluginHost {
+            desired: vec![DesiredAsset {
+                digest,
+                kind: protocol::AssetKind::Image,
+                bytes: Arc::from(&b"durable-image"[..]),
+            }],
+            candidate: Some(SceneCandidate::DisplayList(protocol::Scene {
+                revision: 1,
+                background: 0,
+                nodes: vec![protocol::SceneNode::Image(protocol::SceneImage {
+                    x: 0,
+                    y: 0,
+                    w: 1,
+                    h: 1,
+                    digest,
+                    recolor: false,
+                    color: 0,
+                })],
+            })),
+            frame: RasterFrame {
+                digest: [0; 32],
+                bytes: Arc::from(&[][..]),
+            },
+        }));
+        let mut device = RenderTranscriptDevice::default();
+
+        push_active_scene(
+            &mut state,
+            &mut scheduler,
+            &mut device,
+            now,
+            Duration::from_secs(1),
+        );
+
+        assert!(
+            matches!(device.transcript[0], RenderTranscript::Begin { digest: seen, volatile: false } if seen == digest)
+        );
+        assert!(
+            matches!(device.transcript[1], RenderTranscript::Chunk { digest: seen, offset: 0 } if seen == digest)
+        );
+        assert_eq!(device.transcript[2], RenderTranscript::Commit(digest));
+        assert_eq!(
+            device.transcript[3],
+            RenderTranscript::Release(vec![digest])
+        );
+        assert!(matches!(device.transcript[4], RenderTranscript::Push(_)));
+        assert!(
+            !device
+                .transcript
+                .iter()
+                .any(|entry| matches!(entry, RenderTranscript::Begin { volatile: true, .. }))
+        );
+        assert_eq!(state.confirmed_durable_assets, BTreeSet::from([digest]));
+    }
+
+    #[test]
+    fn raster_transcript_is_begin_chunks_commit_push_then_release_with_durable_and_new_volatile() {
+        let now = Instant::now();
+        let (mut state, mut scheduler) = raster_executor_state(now);
+        let old = [0x33; 32];
+        let new = [0x22; 32];
+        let durable = [0x44; 32];
+        state.active_volatile_digest = Some(old);
+        state.confirmed_volatile_assets.insert(old);
+        state.plugin_host = Some(Box::new(ExecutorPluginHost {
+            desired: vec![DesiredAsset {
+                digest: durable,
+                kind: protocol::AssetKind::Font,
+                bytes: Arc::from(&b"font"[..]),
+            }],
+            candidate: None,
+            frame: RasterFrame {
+                digest: new,
+                bytes: Arc::from(&[0x19, 0x12, 0, 0, 0xc0, 1, 0x70, 1, 0x80, 3, 0, 0, 1, 2][..]),
+            },
+        }));
+        let mut device = RenderTranscriptDevice::default();
+
+        push_active_scene(
+            &mut state,
+            &mut scheduler,
+            &mut device,
+            now,
+            Duration::from_secs(1),
+        );
+
+        assert!(
+            matches!(device.transcript[0], RenderTranscript::Begin { digest, volatile: true } if digest == new)
+        );
+        assert!(
+            matches!(device.transcript[1], RenderTranscript::Chunk { digest, offset: 0 } if digest == new)
+        );
+        assert_eq!(device.transcript[2], RenderTranscript::Commit(new));
+        let RenderTranscript::Push(push) = &device.transcript[3] else {
+            panic!("fourth request must be PushScene")
+        };
+        assert!(
+            matches!(push.scene.nodes.as_slice(), [protocol::SceneNode::Image(image)] if image.digest == new && image.x == 0 && image.y == 0 && image.w == protocol::SCENE_CANVAS_WIDTH && image.h == protocol::SCENE_CANVAS_HEIGHT)
+        );
+        assert_eq!(
+            device.transcript[4],
+            RenderTranscript::Release(vec![durable, new])
+        );
+        assert!(
+            !device.transcript.iter().any(
+                |entry| matches!(entry, RenderTranscript::Release(keep) if keep.contains(&old))
+            ),
+            "old is retained by sending no release until after PushScene; the successful release may now drop it"
+        );
+    }
+
+    #[test]
+    fn raster_failure_transcripts_never_release_before_successful_push() {
+        for point in [
+            RenderFailurePoint::Begin,
+            RenderFailurePoint::Chunk,
+            RenderFailurePoint::Commit,
+            RenderFailurePoint::Push,
+        ] {
+            let now = Instant::now();
+            let (mut state, mut scheduler) = raster_executor_state(now);
+            let old = [0x33; 32];
+            state.active_volatile_digest = Some(old);
+            let mut device = RenderTranscriptDevice::failing(point, DeviceError::Timeout);
+
+            push_active_scene(
+                &mut state,
+                &mut scheduler,
+                &mut device,
+                now,
+                Duration::from_secs(1),
+            );
+
+            assert!(
+                !device
+                    .transcript
+                    .iter()
+                    .any(|entry| matches!(entry, RenderTranscript::Release(_))),
+                "{point:?} failure sent a destructive keep-set: {:?}",
+                device.transcript
+            );
+            assert_eq!(state.active_volatile_digest, Some(old));
+        }
+
+        let now = Instant::now();
+        let (mut state, mut scheduler) = raster_executor_state(now);
+        let mut device =
+            RenderTranscriptDevice::failing(RenderFailurePoint::Release, DeviceError::Timeout);
+        push_active_scene(
+            &mut state,
+            &mut scheduler,
+            &mut device,
+            now,
+            Duration::from_secs(1),
+        );
+        assert!(
+            matches!(device.transcript.as_slice(), [RenderTranscript::Begin { .. }, RenderTranscript::Chunk { .. }, RenderTranscript::Commit(_), RenderTranscript::Push(_), RenderTranscript::Release(keep)] if keep == &vec![[0x22; 32]])
+        );
+    }
+
+    #[test]
+    fn refuse_live_transcript_has_no_device_frames_and_one_card_refusal() {
+        let now = Instant::now();
+        let config = rotation_config(
+            vec![rotation_clock_card("clock")],
+            CarouselAdvance::Manual,
+            &[("clock", None)],
+        );
+        let mut scheduler = fresh_scheduler(now);
+        let mut state = WorkerState::new(config, now, &mut scheduler);
+        state.needs_full_sync = false;
+        state.active_screen = Some("clock".into());
+        state.active_scene_dirty = true;
+        state.device.capabilities = crate::DeviceCapability::from_bits(
+            protocol::CURRENT_CAPABILITIES & !protocol::CAPABILITY_SCENE_RENDER,
+        );
+        let mut device = RenderTranscriptDevice::default();
+
+        push_active_scene(
+            &mut state,
+            &mut scheduler,
+            &mut device,
+            now,
+            Duration::from_secs(1),
+        );
+
+        assert!(device.transcript.is_empty());
+        assert_eq!(state.push_rejections.len(), 1);
+        assert!(
+            state
+                .push_rejections
+                .get("clock")
+                .is_some_and(|error| error.kind == CardErrorKind::SceneRefused)
+        );
+    }
+
+    #[test]
+    fn raster_busy_retries_permanent_rejection_is_card_scoped_and_link_failure_is_not() {
+        let busy = DeviceError::Rejected(protocol::ErrorResponse {
+            code: protocol::ErrorCode::Busy,
+            diagnostic: "display lock busy".into(),
+        });
+        let now = Instant::now();
+        let (mut state, mut scheduler) = raster_executor_state(now);
+        let mut device = RenderTranscriptDevice::failing(RenderFailurePoint::Push, busy);
+        push_active_scene(
+            &mut state,
+            &mut scheduler,
+            &mut device,
+            now,
+            Duration::from_secs(1),
+        );
+        assert!(
+            state.active_scene_dirty,
+            "Busy must retain the render event"
+        );
+        push_active_scene(
+            &mut state,
+            &mut scheduler,
+            &mut device,
+            now,
+            Duration::from_secs(1),
+        );
+        assert_eq!(
+            device
+                .transcript
+                .iter()
+                .filter(|entry| matches!(entry, RenderTranscript::Push(_)))
+                .count(),
+            2
+        );
+        assert!(!state.push_rejections.contains_key("big"));
+
+        let permanent = DeviceError::Rejected(protocol::ErrorResponse {
+            code: protocol::ErrorCode::InvalidPayload,
+            diagnostic: "volatile image refused".into(),
+        });
+        let (mut state, mut scheduler) = raster_executor_state(now);
+        let mut device = RenderTranscriptDevice::failing(RenderFailurePoint::Commit, permanent);
+        push_active_scene(
+            &mut state,
+            &mut scheduler,
+            &mut device,
+            now,
+            Duration::from_secs(1),
+        );
+        assert!(state.push_rejections.get("big").is_some_and(|error| {
+            error.kind == CardErrorKind::SceneRefused && error.message.contains("InvalidPayload")
+        }));
+
+        let (mut state, mut scheduler) = raster_executor_state(now);
+        let mut device = RenderTranscriptDevice::failing(
+            RenderFailurePoint::Chunk,
+            DeviceError::Transport(device::TransportError::Disconnected),
+        );
+        push_active_scene(
+            &mut state,
+            &mut scheduler,
+            &mut device,
+            now,
+            Duration::from_secs(1),
+        );
+        assert!(
+            state.active_scene_dirty,
+            "link failure remains retryable link work"
+        );
+        assert!(
+            !state.push_rejections.contains_key("big"),
+            "a link failure must not be mislabeled as a card fault"
+        );
+    }
+
+    #[test]
+    fn disconnect_resets_only_connection_scoped_volatile_confirmations() {
+        let now = Instant::now();
+        let (mut state, _) = raster_executor_state(now);
+        let durable = [0x44; 32];
+        let volatile = [0x22; 32];
+        state.confirmed_durable_assets.insert(durable);
+        state.confirmed_volatile_assets.insert(volatile);
+        state.active_volatile_digest = Some(volatile);
+
+        mark_disconnected(
+            &mut state,
+            &DeviceError::Transport(device::TransportError::Disconnected),
+            now,
+            Duration::from_secs(1),
+        );
+
+        assert_eq!(state.confirmed_durable_assets, BTreeSet::from([durable]));
+        assert!(state.confirmed_volatile_assets.is_empty());
+        assert_eq!(
+            state.active_volatile_digest,
+            Some(volatile),
+            "the old digest remains desired until reconnect proves whether PSRAM survived"
+        );
+    }
+
+    struct SnapshotRasterHost {
+        seen_values: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl PluginHost for SnapshotRasterHost {
+        fn desired_assets(&mut self) -> Vec<DesiredAsset> {
+            Vec::new()
+        }
+
+        fn render_scene(
+            &mut self,
+            _plugin_id: &str,
+            _snapshot: &providers::ProviderSnapshot<serde_json::Value>,
+            _metrics: &BakedFontMetrics,
+            _revision: u32,
+        ) -> Result<SceneCandidate, String> {
+            unreachable!()
+        }
+
+        fn rasterize(&mut self, request: &RasterRequest) -> Result<RasterFrame, String> {
+            let RasterRequest::DisplayList { fields, .. } = request else {
+                unreachable!()
+            };
+            let value = fields
+                .iter()
+                .find_map(|field| {
+                    (field.key == "value").then(|| match &field.value {
+                        FieldValue::Text(value) => value.clone(),
+                        value => format!("{value:?}"),
+                    })
+                })
+                .unwrap_or_default();
+            self.seen_values.lock().unwrap().push(value.clone());
+            let marker = value.parse::<u8>().unwrap_or(0);
+            Ok(RasterFrame {
+                digest: [marker; 32],
+                bytes: Arc::from(&[0x19, 0x12, 0, 0, 0xc0, 1, 0x70, 1, 0x80, 3, 0, 0, 1, 2][..]),
+            })
+        }
+    }
+
+    #[test]
+    fn raster_floor_uses_t0_and_t30_and_second_frame_contains_newest_snapshot() {
+        let start = Instant::now();
+        let (mut state, mut scheduler) = raster_executor_state(start);
+        let seen_values = Arc::new(Mutex::new(Vec::new()));
+        state.plugin_host = Some(Box::new(SnapshotRasterHost {
+            seen_values: Arc::clone(&seen_values),
+        }));
+        state.latest_fields.insert(
+            "big".into(),
+            vec![Field {
+                key: "value".into(),
+                value: FieldValue::Text("0".into()),
+            }],
+        );
+        let mut device = RenderTranscriptDevice::default();
+
+        push_active_scene(
+            &mut state,
+            &mut scheduler,
+            &mut device,
+            start,
+            Duration::from_secs(1),
+        );
+        state.latest_fields.insert(
+            "big".into(),
+            vec![Field {
+                key: "value".into(),
+                value: FieldValue::Text("5".into()),
+            }],
+        );
+        state.active_scene_dirty = true;
+        push_active_scene(
+            &mut state,
+            &mut scheduler,
+            &mut device,
+            start + Duration::from_secs(5),
+            Duration::from_secs(1),
+        );
+        state.latest_fields.insert(
+            "big".into(),
+            vec![Field {
+                key: "value".into(),
+                value: FieldValue::Text("30".into()),
+            }],
+        );
+        state.active_scene_dirty = true;
+        push_active_scene(
+            &mut state,
+            &mut scheduler,
+            &mut device,
+            start + Duration::from_millis(29_999),
+            Duration::from_secs(1),
+        );
+        assert_eq!(seen_values.lock().unwrap().as_slice(), ["0"]);
+
+        push_active_scene(
+            &mut state,
+            &mut scheduler,
+            &mut device,
+            start + Duration::from_secs(30),
+            Duration::from_secs(1),
+        );
+
+        assert_eq!(seen_values.lock().unwrap().as_slice(), ["0", "30"]);
+        let pushed_digests: Vec<_> = device
+            .transcript
+            .iter()
+            .filter_map(|entry| match entry {
+                RenderTranscript::Push(push) => match push.scene.nodes.as_slice() {
+                    [protocol::SceneNode::Image(image)] => Some(image.digest),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
+        assert_eq!(pushed_digests, vec![[0; 32], [30; 32]]);
+    }
+
+    #[test]
+    fn native_scene_is_event_driven_even_while_raster_floor_is_pending() {
+        let start = Instant::now();
+        let config = rotation_config(
+            vec![rotation_clock_card("clock")],
+            CarouselAdvance::Manual,
+            &[("clock", None)],
+        );
+        let mut scheduler = fresh_scheduler(start);
+        let mut state = WorkerState::new(config, start, &mut scheduler);
+        scheduler.note_raster_pushed(start);
+        scheduler.invalidate_raster(start + Duration::from_secs(5));
+        state.needs_full_sync = false;
+        state.active_screen = Some("clock".into());
+        state.active_scene_dirty = true;
+        state.device.capabilities =
+            crate::DeviceCapability::from_bits(protocol::CURRENT_CAPABILITIES);
+        let mut device = RenderTranscriptDevice::default();
+
+        push_active_scene(
+            &mut state,
+            &mut scheduler,
+            &mut device,
+            start + Duration::from_secs(5),
+            Duration::from_secs(1),
+        );
+
+        assert!(matches!(
+            device.transcript.as_slice(),
+            [RenderTranscript::Push(_)]
+        ));
+    }
+
     /// A `WorkerState` posed one step before `push_active_scene`: online-ish,
     /// synced, one dirty active card, advertising `capabilities`.
     fn negotiation_state(config: AppConfig, card_id: &str, capabilities: u64) -> WorkerState {
@@ -4900,7 +6068,14 @@ mod tests {
         );
         let mut device = ScheduledWorkDevice::default();
 
-        push_active_scene(&mut state, &mut device, Duration::from_secs(1));
+        let mut scheduler = fresh_scheduler(Instant::now());
+        push_active_scene(
+            &mut state,
+            &mut scheduler,
+            &mut device,
+            Instant::now(),
+            Duration::from_secs(1),
+        );
 
         assert!(device.scene_pushes.is_empty(), "nothing may reach the wire");
         assert!(!state.active_scene_dirty, "the event must be consumed");
@@ -4931,7 +6106,14 @@ mod tests {
         );
         let mut device = ScheduledWorkDevice::default();
 
-        push_active_scene(&mut state, &mut device, Duration::from_secs(1));
+        let mut scheduler = fresh_scheduler(Instant::now());
+        push_active_scene(
+            &mut state,
+            &mut scheduler,
+            &mut device,
+            Instant::now(),
+            Duration::from_secs(1),
+        );
 
         assert_eq!(device.scene_pushes.len(), 1, "the scene must be pushed");
         assert!(
@@ -4966,7 +6148,14 @@ mod tests {
         );
         let mut device = ScheduledWorkDevice::default();
 
-        push_active_scene(&mut state, &mut device, Duration::from_secs(1));
+        let mut scheduler = fresh_scheduler(Instant::now());
+        push_active_scene(
+            &mut state,
+            &mut scheduler,
+            &mut device,
+            Instant::now(),
+            Duration::from_secs(1),
+        );
 
         assert!(device.scene_pushes.is_empty());
         let error = state
@@ -5188,6 +6377,35 @@ mod tests {
             error.kind == CardErrorKind::SceneRefused
                 && error.message.contains("plugin asset reconciliation failed")
         }));
+    }
+
+    #[test]
+    fn full_sync_keep_set_retains_old_volatile_until_its_replacement_scene_succeeds() {
+        let card = CardSettings::Plugin {
+            id: "aqi".into(),
+            title: "Air quality".into(),
+            plugin_id: "aqi".into(),
+            tap_action: WidgetTapAction::None,
+            refresh: RefreshPolicy::Manual,
+            alert: CardAlert::None,
+        };
+        let config = rotation_config(vec![card], CarouselAdvance::Manual, &[("aqi", None)]);
+        let now = Instant::now();
+        let mut scheduler = fresh_scheduler(now);
+        let mut state = WorkerState::new(config, now, &mut scheduler);
+        let durable = [0x5a; protocol::ASSET_DIGEST_LEN];
+        let old_volatile = [0x7b; protocol::ASSET_DIGEST_LEN];
+        state.active_volatile_digest = Some(old_volatile);
+        state.plugin_host = Some(Box::new(AssetOnlyPluginHost));
+        let mut device = ScheduledWorkDevice::default();
+
+        synchronize_full(&mut state, &mut scheduler, &mut device, now).unwrap();
+
+        assert_eq!(
+            device.asset_releases,
+            vec![vec![durable, old_volatile]],
+            "any pre-push keep-set must retain the digest the displayed scene still reads"
+        );
     }
 
     struct NoAssetPluginHost;

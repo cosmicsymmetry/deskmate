@@ -1,6 +1,12 @@
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
+/// A raster is a full-frame transfer: about five RLE chunks for a curated face and
+/// about 161 raw chunks over the protocol's one-outstanding-request link. Spec §3
+/// also rules any sub-30-second raster cadence dishonest for live faces (those are
+/// refused instead of frozen), so static invalidations are coalesced at this floor.
+pub(crate) const RASTER_MIN_INTERVAL: Duration = Duration::from_secs(30);
+
 pub(crate) struct Scheduler {
     pomodoro_interval: Duration,
     status_interval: Duration,
@@ -28,6 +34,8 @@ pub(crate) struct Scheduler {
     /// (a 15-minute refresh interval trivially skips past a 5-minute lead
     /// window entirely).
     event_alert_checks: BTreeMap<String, Instant>,
+    last_raster_push: Option<Instant>,
+    raster_deadline: Option<Instant>,
 }
 
 struct ProviderDeadline {
@@ -59,6 +67,8 @@ impl Scheduler {
             rotation: None,
             alert_hold: None,
             event_alert_checks: BTreeMap::new(),
+            last_raster_push: None,
+            raster_deadline: None,
         }
     }
 
@@ -238,6 +248,40 @@ impl Scheduler {
         self.event_alert_checks.retain(|card_id, _| retain(card_id));
     }
 
+    /// Marks a static raster candidate dirty. The first activation is eligible
+    /// immediately; after a successful push, every invalidation shares the one
+    /// `last_push + floor` deadline, so newer snapshots replace pending work
+    /// without extending it or queueing frames.
+    pub(crate) fn invalidate_raster(&mut self, now: Instant) {
+        let deadline = self
+            .last_raster_push
+            .map_or(now, |last| last + RASTER_MIN_INTERVAL);
+        self.raster_deadline = Some(deadline);
+    }
+
+    pub(crate) fn raster_due(&mut self, now: Instant) -> bool {
+        let Some(deadline) = self.raster_deadline else {
+            return self.last_raster_push.is_none();
+        };
+        if now < deadline {
+            return false;
+        }
+        self.raster_deadline = None;
+        true
+    }
+
+    pub(crate) fn note_raster_pushed(&mut self, now: Instant) {
+        self.last_raster_push = Some(now);
+        self.raster_deadline = None;
+    }
+
+    /// Drops only the pending wake when the active candidate changes to a
+    /// native/refused card. The last successful raster time remains the device's
+    /// cadence floor if a raster card becomes active again.
+    pub(crate) fn clear_raster_invalidation(&mut self) {
+        self.raster_deadline = None;
+    }
+
     pub(crate) fn wait_duration(&self, now: Instant, maximum: Duration) -> Duration {
         let next = self
             .providers
@@ -246,6 +290,7 @@ impl Scheduler {
             .chain(self.rotation.iter().map(|rotation| rotation.next))
             .chain(self.alert_hold.map(|(_, deadline)| deadline))
             .chain(self.event_alert_checks.values().copied())
+            .chain(self.raster_deadline)
             .chain([self.next_pomodoro, self.next_status, self.next_time_sync])
             .min()
             .unwrap_or(now + maximum);
@@ -346,6 +391,53 @@ mod tests {
 
         scheduler.clear_rotation();
         assert!(!scheduler.rotation_due(now + Duration::from_hours(1)));
+    }
+
+    #[test]
+    fn raster_floor_matrix_is_immediate_then_coalesces_until_exactly_thirty_seconds() {
+        let start = Instant::now();
+        let mut scheduler = Scheduler::new(
+            start,
+            Duration::from_hours(1),
+            Duration::from_hours(1),
+            Duration::from_hours(1),
+        );
+
+        assert!(
+            scheduler.raster_due(start),
+            "t=0 initial activation is immediate"
+        );
+        scheduler.note_raster_pushed(start);
+        scheduler.invalidate_raster(start + Duration::from_secs(5));
+        scheduler.invalidate_raster(start + Duration::from_millis(29_999));
+
+        assert!(!scheduler.raster_due(start + Duration::from_secs(5)));
+        assert!(!scheduler.raster_due(start + Duration::from_millis(29_999)));
+        assert!(scheduler.raster_due(start + Duration::from_secs(30)));
+        assert!(!scheduler.raster_due(start + Duration::from_secs(30)));
+    }
+
+    #[test]
+    fn raster_floor_raises_five_seconds_but_does_not_shorten_two_minutes() {
+        let start = Instant::now();
+        let mut scheduler = Scheduler::new(
+            start,
+            Duration::from_hours(1),
+            Duration::from_hours(1),
+            Duration::from_hours(1),
+        );
+        scheduler.note_raster_pushed(start);
+
+        scheduler.invalidate_raster(start + Duration::from_secs(5));
+        assert!(!scheduler.raster_due(start + Duration::from_secs(5)));
+        assert!(scheduler.raster_due(start + Duration::from_secs(30)));
+
+        scheduler.note_raster_pushed(start);
+        scheduler.invalidate_raster(start + Duration::from_mins(2));
+        assert!(
+            scheduler.raster_due(start + Duration::from_mins(2)),
+            "a two-minute provider event stays eligible at two minutes"
+        );
     }
 
     #[test]

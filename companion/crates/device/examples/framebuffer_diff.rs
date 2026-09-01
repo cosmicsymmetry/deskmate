@@ -392,6 +392,8 @@ fn push_case_assets(
                 // `volatile: true` outright (see `server::asset_sync`'s
                 // own comment on this).
                 volatile: false,
+                encoding: protocol::ASSET_ENCODING_RAW,
+                decoded_length: None,
             }))
             .map_err(|error| format!("asset begin {digest:02x?}: {error}"))?
         {

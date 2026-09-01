@@ -5,6 +5,7 @@
 #include <stdint.h>
 
 #include "core/asset_transfer.h"
+#include "core/rle565.h"
 #include "core/scene_model.h"
 
 /* One displayed frame plus one incoming replacement is the minimum bound
@@ -16,6 +17,8 @@
 #define VOLATILE_ASSET_HEADER_BYTES 12U
 #define VOLATILE_ASSET_IMAGE_MAGIC 0x19U
 #define VOLATILE_ASSET_RGB565_FORMAT 0x12U
+#define VOLATILE_ASSET_ENCODING_RAW 0U
+#define VOLATILE_ASSET_ENCODING_RLE565 1U
 #define VOLATILE_ASSET_FRAME_STRIDE ((uint32_t)SCENE_CANVAS_WIDTH * 2U)
 #define VOLATILE_ASSET_PIXEL_BYTES                                      \
     ((uint32_t)SCENE_CANVAS_WIDTH * (uint32_t)SCENE_CANVAS_HEIGHT * 2U)
@@ -58,6 +61,8 @@ typedef struct {
     volatile_asset_store_callbacks_t callbacks;
     volatile_asset_slot_t slots[VOLATILE_ASSET_SLOT_COUNT];
     asset_transfer_t incoming_transfer;
+    rle565_decoder_t rle_decoder;
+    uint8_t incoming_encoding;
     int8_t incoming_index;
 } volatile_asset_store_t;
 
@@ -73,6 +78,7 @@ typedef enum {
     VOLATILE_ASSET_STORE_ERR_DIGEST,
     VOLATILE_ASSET_STORE_ERR_OFFSET,
     VOLATILE_ASSET_STORE_ERR_INCOMPLETE,
+    VOLATILE_ASSET_STORE_ERR_DECODE,
     VOLATILE_ASSET_STORE_ERR_FRAME,
     VOLATILE_ASSET_STORE_ERR_NOT_FOUND,
 } volatile_asset_store_result_t;
@@ -85,6 +91,14 @@ volatile_asset_store_result_t volatile_asset_store_begin(
     volatile_asset_store_t *store,
     const uint8_t digest[ASSET_DIGEST_BYTES], uint8_t kind,
     uint32_t total_length);
+
+/* Extended entry point for the wire decoder. `total_length` is the encoded
+ * wire length; raw callers keep using volatile_asset_store_begin(). For RLE,
+ * `decoded_length` is the allocation size and exact decoder capacity. */
+volatile_asset_store_result_t volatile_asset_store_begin_encoded(
+    volatile_asset_store_t *store,
+    const uint8_t digest[ASSET_DIGEST_BYTES], uint8_t kind,
+    uint32_t total_length, uint8_t encoding, uint32_t decoded_length);
 
 volatile_asset_store_result_t volatile_asset_store_write(
     volatile_asset_store_t *store,
@@ -123,4 +137,3 @@ bool volatile_asset_store_release_must_teardown(
     const volatile_asset_store_t *store,
     const uint8_t *const *used_digests, size_t used_count,
     const uint8_t *const *keep, size_t keep_count);
-

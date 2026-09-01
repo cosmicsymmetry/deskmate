@@ -26,6 +26,7 @@ firmware/host_tests/test_scene_binding
 firmware/host_tests/test_scene_decode
 firmware/host_tests/test_font_registry
 firmware/host_tests/test_volatile_asset_store
+firmware/host_tests/test_rle565
 firmware/host_tests/*.dSYM/
 companion/target/
 companion/apps/deskmate/node_modules/

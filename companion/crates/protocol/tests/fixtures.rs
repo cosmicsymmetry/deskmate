@@ -42,6 +42,7 @@ fn valid_golden_frames_decode() {
         "status_response_networked.bin",
         "status_response_ota_failed.bin",
         "asset_begin.bin",
+        "asset_begin_rle.bin",
         "ack_asset_begin.bin",
         "asset_chunk.bin",
         "asset_commit.bin",

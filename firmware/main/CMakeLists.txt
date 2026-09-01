@@ -2,6 +2,7 @@ idf_component_register(
     SRCS "main.c" "board/board_i2c.c" "board/display.c" "board/touch.c"
          "core/asset_store.c"
          "core/asset_transfer.c"
+         "core/rle565.c"
          "core/volatile_asset_store.c"
          "core/clock_source.c" "core/device_event_queue.c" "core/interrupt_state.c"
          "core/link_state.c" "core/navigation.c"

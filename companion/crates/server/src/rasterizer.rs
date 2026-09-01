@@ -1781,35 +1781,11 @@ mod tests {
         );
     }
 
-    /// Measurement-only u16-run RLE candidate: each run is `(count: u16 LE,
-    /// pixel: u16 LE)`. The 12-byte LVGL header stays raw and is excluded from
-    /// both measurements. The format expands incompressible pixels exactly 2x.
-    fn rle_u16_candidate(pixel_bytes: &[u8]) -> Vec<u8> {
-        assert_eq!(pixel_bytes.len() % 2, 0);
-        let words = pixel_bytes.as_chunks::<2>().0;
-        let mut output = Vec::new();
-        let mut index = 0;
-        while index < words.len() {
-            let value = words[index];
-            let mut count = 1_u16;
-            while index + usize::from(count) < words.len()
-                && words[index + usize::from(count)] == value
-                && count < u16::MAX
-            {
-                count += 1;
-            }
-            output.extend_from_slice(&count.to_le_bytes());
-            output.extend_from_slice(&value);
-            index += usize::from(count);
-        }
-        output
-    }
-
     #[test]
     fn rle_measurement_curated_svg_aqi_raw_329728_candidate_is_10020() {
         let template = include_str!("../../../plugins/svg-aqi/face.svg");
         let frame = rasterize_svg_template(template, &rooted_aqi(), &[]).unwrap();
-        let candidate = rle_u16_candidate(&frame.bytes[12..]);
+        let candidate = protocol::encode_rle565(&frame.bytes[12..]).unwrap();
         assert_eq!((frame.bytes.len() - 12, candidate.len()), (329_728, 10_020));
     }
 
@@ -1821,7 +1797,7 @@ mod tests {
             state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
             pixels.extend_from_slice(&u16::try_from(state & 0xFFFF).unwrap().to_le_bytes());
         }
-        let candidate = rle_u16_candidate(&pixels);
+        let candidate = protocol::encode_rle565(&pixels).unwrap();
         assert_eq!((pixels.len(), candidate.len()), (329_728, 659_456));
     }
 

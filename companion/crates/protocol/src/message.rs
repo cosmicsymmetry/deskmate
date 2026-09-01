@@ -65,6 +65,9 @@ pub const MAX_ASSET_CHUNK_BYTES: usize = 1920;
 pub const MAX_ASSET_DIGESTS: usize = 32;
 pub const ASSET_DIGEST_LEN: usize = 32;
 pub const MAX_ASSET_TOTAL_LENGTH: u32 = 1_048_576;
+pub const ASSET_ENCODING_RAW: u8 = 0;
+pub const ASSET_ENCODING_RLE565: u8 = 1;
+pub const VOLATILE_IMAGE_DECODED_LENGTH: u32 = 329_740;
 
 pub const TYPE_STATUS_REQUEST: u8 = 1;
 pub const TYPE_STATUS_RESPONSE: u8 = 2;
@@ -194,6 +197,8 @@ pub struct AssetBegin {
     pub kind: AssetKind,
     pub total_length: u32,
     pub volatile: bool,
+    pub encoding: u8,
+    pub decoded_length: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -635,6 +640,31 @@ fn validate_network_config(config: &NetworkConfig) -> Result<(), MessageError> {
 fn validate_asset_begin(begin: &AssetBegin) -> Result<(), MessageError> {
     if begin.total_length == 0 || begin.total_length > MAX_ASSET_TOTAL_LENGTH {
         return Err(MessageError::InvalidValue("asset total length"));
+    }
+    match begin.encoding {
+        ASSET_ENCODING_RAW => {
+            if begin.decoded_length.is_some() {
+                return Err(MessageError::InvalidValue("decoded length on raw asset"));
+            }
+        }
+        ASSET_ENCODING_RLE565 => {
+            if !begin.volatile {
+                return Err(MessageError::InvalidValue("encoded durable asset"));
+            }
+            let decoded_length = begin
+                .decoded_length
+                .ok_or(MessageError::InvalidValue("missing decoded length"))?;
+            if decoded_length == 0 || decoded_length > MAX_ASSET_TOTAL_LENGTH {
+                return Err(MessageError::InvalidValue("asset decoded length"));
+            }
+            if begin.kind == AssetKind::Image && decoded_length != VOLATILE_IMAGE_DECODED_LENGTH {
+                return Err(MessageError::InvalidValue("volatile image decoded length"));
+            }
+            if begin.total_length >= decoded_length {
+                return Err(MessageError::InvalidValue("expanding RLE asset"));
+            }
+        }
+        _ => return Err(MessageError::InvalidValue("asset encoding")),
     }
     Ok(())
 }
@@ -1094,15 +1124,32 @@ fn encode_payload(message: &Message) -> Result<Vec<u8>, MessageError> {
         Message::StatusResponse(status) => encode_status_payload(&mut encoder, status),
         Message::NetworkConfig(config) => encode_network_config_payload(&mut encoder, config),
         Message::AssetBegin(begin) => {
-            encoder.map(4);
+            let optional_count = usize::from(begin.encoding != ASSET_ENCODING_RAW)
+                + usize::from(begin.decoded_length.is_some());
+            encoder.map(4 + optional_count);
             encoder.unsigned(0);
             encoder.bytes(&begin.digest);
             encoder.unsigned(1);
             encoder.unsigned(u64::from(begin.kind as u8));
             encoder.unsigned(2);
             encoder.unsigned(u64::from(begin.total_length));
+            // Key 3 is ALWAYS emitted, false included, although this side's
+            // decoder tolerates its absence. Every deployed firmware decoder
+            // requires it (`REQUIRED_BIT(3)` until the encoding keys landed),
+            // so omitting the false case would break durable asset sync
+            // against the fleet the moment the server redeployed. The
+            // canonical emission rule yields to wire history here; keys 4/5
+            // are genuinely optional because no deployed decoder knows them.
             encoder.unsigned(3);
             encoder.boolean(begin.volatile);
+            if begin.encoding != ASSET_ENCODING_RAW {
+                encoder.unsigned(4);
+                encoder.unsigned(u64::from(begin.encoding));
+            }
+            if let Some(decoded_length) = begin.decoded_length {
+                encoder.unsigned(5);
+                encoder.unsigned(u64::from(decoded_length));
+            }
         }
         Message::AssetChunk(chunk) => {
             encoder.map(3);
@@ -1555,12 +1602,16 @@ fn decode_asset_begin(payload: &[u8]) -> Result<AssetBegin, MessageError> {
     let mut kind = None;
     let mut total_length = None;
     let mut volatile = None;
+    let mut encoding = None;
+    let mut decoded_length = None;
     for _ in 0..len {
         match next_numeric_key(&mut decoder, &mut previous)? {
             0 => digest = Some(read_digest(&mut decoder)?),
             1 => kind = Some(asset_kind_from_wire(read_u8(&mut decoder, "asset kind")?)?),
             2 => total_length = Some(read_u32(&mut decoder, "asset total length")?),
             3 => volatile = Some(decoder.boolean()?),
+            4 => encoding = Some(read_u8(&mut decoder, "asset encoding")?),
+            5 => decoded_length = Some(read_u32(&mut decoder, "asset decoded length")?),
             _ => decoder.skip()?,
         }
     }
@@ -1569,7 +1620,9 @@ fn decode_asset_begin(payload: &[u8]) -> Result<AssetBegin, MessageError> {
         digest: digest.ok_or(MessageError::MissingField(0))?,
         kind: kind.ok_or(MessageError::MissingField(1))?,
         total_length: total_length.ok_or(MessageError::MissingField(2))?,
-        volatile: volatile.ok_or(MessageError::MissingField(3))?,
+        volatile: volatile.unwrap_or(false),
+        encoding: encoding.unwrap_or(ASSET_ENCODING_RAW),
+        decoded_length,
     };
     validate_asset_begin(&value)?;
     Ok(value)
@@ -2418,10 +2471,32 @@ mod tests {
             kind: AssetKind::Font,
             total_length: 4096,
             volatile: false,
+            encoding: ASSET_ENCODING_RAW,
+            decoded_length: None,
         });
         let frame = message.encode(7).expect("encode");
         let decoded = Message::decode(&frame).expect("decode");
         assert_eq!(decoded, message);
+        // Four keys: digest, kind, total_length, and volatile. Key 3 is
+        // always emitted -- false included -- because every deployed decoder
+        // requires it; only the encoding keys (4/5) follow the omit-default
+        // rule, and a raw begin therefore carries neither.
+        let wire_frame = crate::decode_wire_frame(&frame).unwrap();
+        assert_eq!(wire_frame.payload[0], 0xa4, "raw begin: 4 keys, no 4/5");
+    }
+
+    #[test]
+    fn rle_asset_begin_roundtrips_with_wire_and_decoded_lengths() {
+        let message = Message::AssetBegin(AssetBegin {
+            digest: [0x6b; 32],
+            kind: AssetKind::Image,
+            total_length: 10_032,
+            volatile: true,
+            encoding: ASSET_ENCODING_RLE565,
+            decoded_length: Some(VOLATILE_IMAGE_DECODED_LENGTH),
+        });
+        let frame = message.encode(8).expect("encode");
+        assert_eq!(Message::decode(&frame).unwrap(), message);
     }
 
     #[test]
@@ -2497,12 +2572,58 @@ mod tests {
             kind: AssetKind::Image,
             total_length: 0,
             volatile: true,
+            encoding: ASSET_ENCODING_RAW,
+            decoded_length: None,
         });
         assert!(too_small.encode(7).is_err());
         if let Message::AssetBegin(begin) = &mut too_small {
             begin.total_length = 1_048_577;
         }
         assert!(too_small.encode(7).is_err());
+    }
+
+    #[test]
+    fn asset_begin_rejects_invalid_encoding_relationships() {
+        let base = AssetBegin {
+            digest: [0x5a; 32],
+            kind: AssetKind::Image,
+            total_length: 10_032,
+            volatile: true,
+            encoding: ASSET_ENCODING_RLE565,
+            decoded_length: Some(VOLATILE_IMAGE_DECODED_LENGTH),
+        };
+        for invalid in [
+            AssetBegin {
+                encoding: 2,
+                ..base
+            },
+            AssetBegin {
+                encoding: ASSET_ENCODING_RAW,
+                ..base
+            },
+            AssetBegin {
+                decoded_length: None,
+                ..base
+            },
+            AssetBegin {
+                volatile: false,
+                ..base
+            },
+            AssetBegin {
+                decoded_length: Some(0),
+                ..base
+            },
+            AssetBegin {
+                decoded_length: Some(MAX_ASSET_TOTAL_LENGTH + 1),
+                ..base
+            },
+            AssetBegin {
+                total_length: VOLATILE_IMAGE_DECODED_LENGTH,
+                ..base
+            },
+        ] {
+            assert!(validate_message(&Message::AssetBegin(invalid)).is_err());
+        }
     }
 
     #[test]

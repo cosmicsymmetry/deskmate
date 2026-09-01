@@ -11,7 +11,7 @@ use protocol::{
     SceneFont, SceneFontTier, SceneGlyph, SceneImage, SceneLabel, SceneLabelAnchor, SceneLine,
     SceneNode, SceneRect, SceneRotRect, SceneScale, SceneText, SceneValue, ScreenConfig, SizeClass,
     StatusResponse, TYPE_ASSET_BEGIN, TYPE_PUSH_SCENE, TapAction, TemplateKind, Tier, TimeSync,
-    TriggerInterrupt, WidgetConfig, WifiState, encode_message,
+    TriggerInterrupt, VOLATILE_IMAGE_DECODED_LENGTH, WidgetConfig, WifiState, encode_message,
 };
 
 /// A 32-byte digest with distinct, non-zero, ascending bytes starting at
@@ -713,6 +713,22 @@ fn fixture_messages() -> Vec<(&'static str, u32, Message)> {
                 kind: AssetKind::Image,
                 total_length: 1_048_576,
                 volatile: true,
+                encoding: protocol::ASSET_ENCODING_RAW,
+                decoded_length: None,
+            }),
+        ),
+        (
+            "asset_begin_rle.bin",
+            33,
+            // The raw 12-byte LVGL header plus the curated frame's 10,020
+            // encoded pixel bytes. Keys 4 and 5 pin the additive RLE form.
+            Message::AssetBegin(AssetBegin {
+                digest: digest_pattern(0x20),
+                kind: AssetKind::Image,
+                total_length: 10_032,
+                volatile: true,
+                encoding: protocol::ASSET_ENCODING_RLE565,
+                decoded_length: Some(VOLATILE_IMAGE_DECODED_LENGTH),
             }),
         ),
         (

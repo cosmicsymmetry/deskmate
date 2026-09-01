@@ -619,6 +619,14 @@ static protocol_message_result_t validate_apply_config(
     return PROTOCOL_MESSAGE_OK;
 }
 
+/* AssetBegin payload keys (additive protocol-v1 table):
+ *   0 digest             required 32-byte bstr
+ *   1 kind               required asset kind
+ *   2 total_length       required WIRE length
+ *   3 volatile           optional; false when absent, emitted only when true
+ *   4 encoding           optional; raw (0) when absent, emitted only non-raw
+ *   5 decoded_length     optional; required iff encoding is non-raw
+ */
 static protocol_message_result_t decode_asset_begin(
     const protocol_frame_t *frame,
     protocol_asset_begin_t *begin)
@@ -667,20 +675,61 @@ static protocol_message_result_t decode_asset_begin(
             }
         } else if (key == 3U) {
             result = read_boolean(&contents, &begin->volatile_tier);
+        } else if (key == 4U) {
+            uint64_t raw = 0U;
+            result = read_unsigned(&contents, &raw);
+            if (result == PROTOCOL_MESSAGE_OK &&
+                raw != PROTOCOL_ASSET_ENCODING_RAW &&
+                raw != PROTOCOL_ASSET_ENCODING_RLE565) {
+                result = PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
+            }
+            if (result == PROTOCOL_MESSAGE_OK) {
+                begin->encoding = (uint8_t)raw;
+            }
+        } else if (key == 5U) {
+            uint64_t raw = 0U;
+            result = read_unsigned(&contents, &raw);
+            if (result == PROTOCOL_MESSAGE_OK &&
+                (raw == 0U || raw > (uint64_t)ASSET_MAX_BYTES)) {
+                result = PROTOCOL_MESSAGE_ERR_TOO_LARGE;
+            }
+            if (result == PROTOCOL_MESSAGE_OK) {
+                begin->decoded_length = (uint32_t)raw;
+                begin->has_decoded_length = true;
+            }
         } else {
             result = skip_value(&contents);
         }
         if (result != PROTOCOL_MESSAGE_OK) {
             return result;
         }
-        if (key <= 3U) {
+        if (key <= 5U) {
             present |= REQUIRED_BIT((uint32_t)key);
         }
     }
     uint32_t required =
-        REQUIRED_BIT(0) | REQUIRED_BIT(1) | REQUIRED_BIT(2) | REQUIRED_BIT(3);
+        REQUIRED_BIT(0) | REQUIRED_BIT(1) | REQUIRED_BIT(2);
     if ((present & required) != required) {
         return PROTOCOL_MESSAGE_ERR_MISSING_FIELD;
+    }
+    if (begin->encoding == PROTOCOL_ASSET_ENCODING_RAW) {
+        if (begin->has_decoded_length) {
+            return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
+        }
+        return PROTOCOL_MESSAGE_OK;
+    }
+    if (!begin->has_decoded_length) {
+        return PROTOCOL_MESSAGE_ERR_MISSING_FIELD;
+    }
+    if (!begin->volatile_tier) {
+        return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
+    }
+    if (begin->kind == ASSET_KIND_IMAGE &&
+        begin->decoded_length != PROTOCOL_VOLATILE_IMAGE_DECODED_LENGTH) {
+        return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
+    }
+    if (begin->total_length >= begin->decoded_length) {
+        return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
     }
     return PROTOCOL_MESSAGE_OK;
 }
@@ -2038,6 +2087,24 @@ static protocol_message_result_t validate_message(
             begin->total_length > (uint32_t)ASSET_MAX_BYTES) {
             return PROTOCOL_MESSAGE_ERR_TOO_LARGE;
         }
+        if (begin->encoding != PROTOCOL_ASSET_ENCODING_RAW &&
+            begin->encoding != PROTOCOL_ASSET_ENCODING_RLE565) {
+            return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
+        }
+        if (begin->encoding == PROTOCOL_ASSET_ENCODING_RAW) {
+            return begin->has_decoded_length
+                       ? PROTOCOL_MESSAGE_ERR_INVALID_VALUE
+                       : PROTOCOL_MESSAGE_OK;
+        }
+        if (!begin->volatile_tier || !begin->has_decoded_length ||
+            begin->decoded_length == 0U ||
+            begin->decoded_length > (uint32_t)ASSET_MAX_BYTES ||
+            (begin->kind == ASSET_KIND_IMAGE &&
+             begin->decoded_length !=
+                 PROTOCOL_VOLATILE_IMAGE_DECODED_LENGTH) ||
+            begin->total_length >= begin->decoded_length) {
+            return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
+        }
         return PROTOCOL_MESSAGE_OK;
     }
     case PROTOCOL_TYPE_ASSET_CHUNK:
@@ -2352,7 +2419,13 @@ static protocol_message_result_t encode_asset_begin_payload(
     const protocol_asset_begin_t *begin)
 {
     CborEncoder map;
-    protocol_message_result_t result = begin_map(root, &map, 4U);
+    /* Key 3 always emitted (see the Rust encoder's comment): deployed
+     * decoders require it, so only keys 4/5 follow the optional rule. */
+    size_t pair_count = 4U +
+                        (begin->encoding != PROTOCOL_ASSET_ENCODING_RAW ? 1U
+                                                                        : 0U) +
+                        (begin->has_decoded_length ? 1U : 0U);
+    protocol_message_result_t result = begin_map(root, &map, pair_count);
     if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 0U);
     if (result == PROTOCOL_MESSAGE_OK) {
         result = encode_bytes(&map, begin->digest, ASSET_DIGEST_BYTES);
@@ -2363,9 +2436,18 @@ static protocol_message_result_t encode_asset_begin_payload(
     if (result == PROTOCOL_MESSAGE_OK) {
         result = encode_pair_uint(&map, 2U, begin->total_length);
     }
-    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 3U);
     if (result == PROTOCOL_MESSAGE_OK) {
-        result = encode_bool(&map, begin->volatile_tier);
+        result = encode_uint(&map, 3U);
+        if (result == PROTOCOL_MESSAGE_OK) {
+            result = encode_bool(&map, begin->volatile_tier);
+        }
+    }
+    if (result == PROTOCOL_MESSAGE_OK &&
+        begin->encoding != PROTOCOL_ASSET_ENCODING_RAW) {
+        result = encode_pair_uint(&map, 4U, begin->encoding);
+    }
+    if (result == PROTOCOL_MESSAGE_OK && begin->has_decoded_length) {
+        result = encode_pair_uint(&map, 5U, begin->decoded_length);
     }
     if (result == PROTOCOL_MESSAGE_OK) result = end_map(root, &map);
     return result;

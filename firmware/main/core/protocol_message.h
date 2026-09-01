@@ -63,6 +63,9 @@
  * header cost roughly 46 bytes; this leaves deliberate margin. */
 #define PROTOCOL_MAX_ASSET_CHUNK_BYTES 1920U
 #define PROTOCOL_MAX_ASSET_DIGESTS 32U
+#define PROTOCOL_ASSET_ENCODING_RAW 0U
+#define PROTOCOL_ASSET_ENCODING_RLE565 1U
+#define PROTOCOL_VOLATILE_IMAGE_DECODED_LENGTH 329740U
 /* Same 32 bytes as a widget id, and for the same reason: a card id is an
  * identifier the host chose, not free text. */
 #define PROTOCOL_MAX_CARD_ID_LENGTH 32U
@@ -185,6 +188,9 @@ typedef struct {
     asset_kind_t kind;
     uint32_t total_length;
     bool volatile_tier;
+    uint8_t encoding;
+    bool has_decoded_length;
+    uint32_t decoded_length;
 } protocol_asset_begin_t;
 
 typedef struct {

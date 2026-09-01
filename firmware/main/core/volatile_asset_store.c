@@ -78,6 +78,8 @@ void volatile_asset_store_abort_incoming(volatile_asset_store_t *store)
         }
     }
     asset_transfer_abort(&store->incoming_transfer);
+    memset(&store->rle_decoder, 0, sizeof store->rle_decoder);
+    store->incoming_encoding = VOLATILE_ASSET_ENCODING_RAW;
     store->incoming_index = -1;
 }
 
@@ -85,6 +87,15 @@ volatile_asset_store_result_t volatile_asset_store_begin(
     volatile_asset_store_t *store,
     const uint8_t digest[ASSET_DIGEST_BYTES], uint8_t kind,
     uint32_t total_length)
+{
+    return volatile_asset_store_begin_encoded(
+        store, digest, kind, total_length, VOLATILE_ASSET_ENCODING_RAW, 0U);
+}
+
+volatile_asset_store_result_t volatile_asset_store_begin_encoded(
+    volatile_asset_store_t *store,
+    const uint8_t digest[ASSET_DIGEST_BYTES], uint8_t kind,
+    uint32_t total_length, uint8_t encoding, uint32_t decoded_length)
 {
     if (store == NULL || digest == NULL || store->callbacks.allocate == NULL ||
         store->callbacks.deallocate == NULL ||
@@ -94,9 +105,21 @@ volatile_asset_store_result_t volatile_asset_store_begin(
     if (kind != ASSET_KIND_IMAGE) {
         return VOLATILE_ASSET_STORE_ERR_KIND;
     }
-    /* Raw only: a volatile asset is exactly one canonical full-panel frame.
-     * No RLE decoder or decoded-size ambiguity exists in this task. */
-    if (total_length != VOLATILE_ASSET_FRAME_BYTES) {
+    uint32_t allocation_length = 0U;
+    if (encoding == VOLATILE_ASSET_ENCODING_RAW) {
+        if (decoded_length != 0U ||
+            total_length != VOLATILE_ASSET_FRAME_BYTES) {
+            return VOLATILE_ASSET_STORE_ERR_LENGTH;
+        }
+        allocation_length = total_length;
+    } else if (encoding == VOLATILE_ASSET_ENCODING_RLE565) {
+        if (decoded_length != VOLATILE_ASSET_FRAME_BYTES ||
+            total_length <= VOLATILE_ASSET_HEADER_BYTES ||
+            total_length >= decoded_length || total_length > ASSET_MAX_BYTES) {
+            return VOLATILE_ASSET_STORE_ERR_LENGTH;
+        }
+        allocation_length = decoded_length;
+    } else {
         return VOLATILE_ASSET_STORE_ERR_LENGTH;
     }
 
@@ -120,7 +143,7 @@ volatile_asset_store_result_t volatile_asset_store_begin(
     }
 
     uint8_t *bytes = store->callbacks.allocate(store->callbacks.ctx,
-                                                total_length);
+                                                allocation_length);
     if (bytes == NULL) {
         return VOLATILE_ASSET_STORE_ERR_ALLOC;
     }
@@ -128,7 +151,7 @@ volatile_asset_store_result_t volatile_asset_store_begin(
     clear_slot(slot);
     memcpy(slot->digest, digest, ASSET_DIGEST_BYTES);
     slot->bytes = bytes;
-    slot->length = total_length;
+    slot->length = allocation_length;
     slot->kind = kind;
     slot->state = VOLATILE_ASSET_SLOT_INCOMING;
     if (asset_transfer_begin(&store->incoming_transfer, digest, kind,
@@ -136,6 +159,15 @@ volatile_asset_store_result_t volatile_asset_store_begin(
         free_slot(store, slot);
         return VOLATILE_ASSET_STORE_ERR_ARGUMENT;
     }
+    if (encoding == VOLATILE_ASSET_ENCODING_RLE565 &&
+        rle565_decoder_init(
+            &store->rle_decoder, bytes + VOLATILE_ASSET_HEADER_BYTES,
+            allocation_length - VOLATILE_ASSET_HEADER_BYTES) != RLE565_OK) {
+        asset_transfer_abort(&store->incoming_transfer);
+        free_slot(store, slot);
+        return VOLATILE_ASSET_STORE_ERR_ARGUMENT;
+    }
+    store->incoming_encoding = encoding;
     store->incoming_index = (int8_t)empty_index;
     return VOLATILE_ASSET_STORE_OK;
 }
@@ -171,7 +203,27 @@ volatile_asset_store_result_t volatile_asset_store_write(
     }
 
     volatile_asset_slot_t *slot = &store->slots[store->incoming_index];
-    memcpy(slot->bytes + offset, data, length);
+    const uint8_t *input = data;
+    if (store->incoming_encoding == VOLATILE_ASSET_ENCODING_RAW) {
+        memcpy(slot->bytes + offset, input, length);
+        return VOLATILE_ASSET_STORE_OK;
+    }
+
+    uint32_t consumed = 0U;
+    if (offset < VOLATILE_ASSET_HEADER_BYTES) {
+        uint32_t header_length = VOLATILE_ASSET_HEADER_BYTES - offset;
+        if (header_length > length) {
+            header_length = length;
+        }
+        memcpy(slot->bytes + offset, input, header_length);
+        consumed = header_length;
+    }
+    if (consumed < length &&
+        rle565_decoder_feed(&store->rle_decoder, input + consumed,
+                            (size_t)(length - consumed)) != RLE565_OK) {
+        volatile_asset_store_abort_incoming(store);
+        return VOLATILE_ASSET_STORE_ERR_DECODE;
+    }
     return VOLATILE_ASSET_STORE_OK;
 }
 
@@ -231,6 +283,14 @@ volatile_asset_store_result_t volatile_asset_store_commit(
     }
 
     volatile_asset_slot_t *slot = &store->slots[store->incoming_index];
+    if (store->incoming_encoding == VOLATILE_ASSET_ENCODING_RLE565 &&
+        rle565_decoder_finish(&store->rle_decoder) != RLE565_OK) {
+        volatile_asset_store_abort_incoming(store);
+        return VOLATILE_ASSET_STORE_ERR_DECODE;
+    }
+    /* The digest addresses the DECODED canonical LVGL blob, exactly what a
+     * scene references and framebuffer_diff compares. Wire encoding never
+     * changes content addressing. */
     if (!store->callbacks.digest_matches(store->callbacks.ctx, slot->bytes,
                                          slot->length, slot->digest)) {
         volatile_asset_store_abort_incoming(store);
@@ -243,6 +303,8 @@ volatile_asset_store_result_t volatile_asset_store_commit(
 
     slot->state = VOLATILE_ASSET_SLOT_COMMITTED;
     asset_transfer_abort(&store->incoming_transfer);
+    memset(&store->rle_decoder, 0, sizeof store->rle_decoder);
+    store->incoming_encoding = VOLATILE_ASSET_ENCODING_RAW;
     store->incoming_index = -1;
     return VOLATILE_ASSET_STORE_OK;
 }
@@ -328,4 +390,3 @@ bool volatile_asset_store_release_must_teardown(
     }
     return false;
 }
-

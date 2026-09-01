@@ -48,6 +48,15 @@
 #include "ui/scene_view.h"
 #include "ui/ui_runtime.h"
 
+_Static_assert(PROTOCOL_ASSET_ENCODING_RAW == VOLATILE_ASSET_ENCODING_RAW,
+               "raw asset encoding mirrors diverged");
+_Static_assert(PROTOCOL_ASSET_ENCODING_RLE565 ==
+                   VOLATILE_ASSET_ENCODING_RLE565,
+               "RLE565 asset encoding mirrors diverged");
+_Static_assert(PROTOCOL_VOLATILE_IMAGE_DECODED_LENGTH ==
+                   VOLATILE_ASSET_FRAME_BYTES,
+               "volatile decoded frame sizes diverged");
+
 #define PROTOCOL_TASK_STACK_SIZE 8192U
 #define PROTOCOL_TASK_PRIORITY 5U
 #define PROTOCOL_TASK_CORE 1
@@ -1041,9 +1050,10 @@ static void dispatch_asset_begin(protocol_context_t *context,
     // abandon_pending_reservation().
     abort_asset_transfers(context);
     if (begin->volatile_tier) {
-        volatile_asset_store_result_t result = volatile_asset_store_begin(
+        volatile_asset_store_result_t result = volatile_asset_store_begin_encoded(
             &context->volatile_assets, begin->digest, (uint8_t)begin->kind,
-            begin->total_length);
+            begin->total_length, begin->encoding,
+            begin->has_decoded_length ? begin->decoded_length : 0U);
         if (result == VOLATILE_ASSET_STORE_ALREADY_PRESENT) {
             transmit_asset_begin_ack(context, request_id, true);
             return;

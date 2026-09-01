@@ -546,6 +546,22 @@ orientation goldens); goldens under `crates/server/tests/raster-regression/` are
 byte-pinned PNGs updated only via `UPDATE_RASTER_GOLDENS=1`, named and messaged
 "raster regression", never "parity".
 
+**RLE wire follow-up (2026-09-01).** The follow-up wave above is delivered.
+`AssetBegin` keys **4** (`encoding`, absent = raw, `1` = RLE565) and **5**
+(`decoded_length`, required iff non-raw) are additive under the existing bit 9. **Key 3
+(`volatile`) is still ALWAYS emitted, false included** -- the implementing agent had
+"fixed" it to omit-when-false per the canonical emission rule, and the controller
+reverted that: every deployed firmware decoder had `REQUIRED_BIT(3)` in its mask, so an
+omitting server would fail every durable AssetBegin against the fleet with
+MISSING_FIELD. The new decoders tolerate absence (belt and braces), the encoders do not
+exercise it, and `asset_begin.bin` is byte-identical to the deployed corpus. Only keys
+4/5 follow the omit-default rule, because no deployed decoder knows them.
+`total_length` remains the wire length, while digest and scene
+references address the decoded canonical blob. `protocol::encode_rle565` preserves the
+measured 10,020/659,456-byte pixel-stream results; app-core prepends the unchanged
+12-byte header, selects RLE only when bit 9 is advertised and the complete encoded blob
+is strictly smaller, and otherwise sends raw.
+
 ---
 
 ### Task 4: Volatile assets in PSRAM, plus the capability that tells the truth
@@ -640,6 +656,18 @@ download check remains mandatory. Deferred to Task 5: executor wiring and exact
 request sequencing. Firmware has no normal protocol-task shutdown seam (infinite
 task); store destruction is tested and used on task-start failure, and disconnect/
 release paths abort incoming buffers.
+
+The RLE follow-up adds `core/rle565.{h,c}` with caller-owned streaming state and the
+`init`/`feed`/`finish` API. `volatile_asset_store_begin_encoded` allocates the promised
+decoded length in PSRAM, copies the 12-byte header raw, streams arbitrary RLE chunk
+boundaries into that allocation, and hashes the decoded bytes at commit; the original
+`volatile_asset_store_begin` remains the raw wrapper. There are still zero new
+file-scope statics, and the controller's same-tree size check confirms it: DIRAM total
+203,891, `.bss` 87,128, `.data` 23,128, IRAM 16,384/16,384 all byte-identical to the
+Task-4 build; flash code +956. The board OTA download check (Task 7) still stands.
+Verification: both full host targets pass, including `test_rle565: OK (8 tests)` and
+`test_volatile_asset_store: OK (21 tests)` under ASan/UBSan; Rust reports protocol
+56 unit + 7 fixture tests, app-core 98 library tests, and server rasterizer 29 tests.
 
 ---
 

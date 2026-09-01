@@ -17,6 +17,7 @@
 //! A dropped connection, or a retry after a local failure, restarts that
 //! asset's chunks from zero; only whole committed assets are ever skipped.
 
+use std::borrow::Cow;
 use std::fs;
 use std::io::Read;
 use std::sync::Arc;
@@ -24,13 +25,18 @@ use std::sync::Arc;
 use crate::{AssetKind as ConfigAssetKind, AssetSettings, AssetSource, RuntimeDevice};
 use device::DeviceError;
 use protocol::{
-    ASSET_DIGEST_LEN, AssetBegin, AssetChunk, AssetCommit, AssetKind, AssetRelease,
-    MAX_ASSET_CHUNK_BYTES, MAX_ASSET_DIGESTS,
+    ASSET_DIGEST_LEN, ASSET_ENCODING_RAW, ASSET_ENCODING_RLE565, AssetBegin, AssetChunk,
+    AssetCommit, AssetKind, AssetRelease, CAPABILITY_VOLATILE_ASSETS, MAX_ASSET_CHUNK_BYTES,
+    MAX_ASSET_DIGESTS, encode_rle565,
 };
 use sha2::{Digest, Sha256};
 
 /// One asset resolved to bytes and ready to stream: the digest both sides
 /// address it by, its wire kind, and the payload itself.
+///
+/// For a raster frame, `bytes` is always the decoded canonical LVGL blob and
+/// `digest` hashes those decoded bytes. Volatile transfer encoding is chosen
+/// inside [`AssetSync`], never by the caller constructing this value.
 ///
 /// [`resolve_assets`] builds these from a compiled config's `AssetSettings`
 /// (reading the referenced file and hashing it); tests build them directly.
@@ -213,12 +219,15 @@ impl AssetSync {
         device: &mut dyn RuntimeDevice,
         asset: &DesiredAsset,
         volatile: bool,
+        wire_bytes: &[u8],
+        encoding: u8,
+        decoded_length: Option<u32>,
         on_chunk_sent: &mut dyn FnMut(),
     ) -> Result<AssetTransferStatus, AssetSyncError> {
         let total_length =
-            u32::try_from(asset.bytes.len()).map_err(|_| AssetSyncError::AssetTooLarge {
+            u32::try_from(wire_bytes.len()).map_err(|_| AssetSyncError::AssetTooLarge {
                 digest: asset.digest,
-                length: asset.bytes.len(),
+                length: wire_bytes.len(),
             })?;
 
         let ack = device
@@ -227,6 +236,8 @@ impl AssetSync {
                 kind: asset.kind,
                 total_length,
                 volatile,
+                encoding,
+                decoded_length,
             })
             .map_err(|source| AssetSyncError::Begin {
                 digest: asset.digest,
@@ -237,7 +248,7 @@ impl AssetSync {
         }
 
         let mut offset: u32 = 0;
-        for chunk in asset.bytes.chunks(MAX_ASSET_CHUNK_BYTES) {
+        for chunk in wire_bytes.chunks(MAX_ASSET_CHUNK_BYTES) {
             let chunk_len = u32::try_from(chunk.len())
                 .expect("Vec::chunks yields pieces bounded by MAX_ASSET_CHUNK_BYTES");
             device
@@ -266,19 +277,22 @@ impl AssetSync {
         Ok(AssetTransferStatus::Uploaded)
     }
 
-    /// Upload one volatile raster without changing device inventory. The
-    /// caller must have negotiated `CAPABILITY_VOLATILE_ASSETS`; Task 5 owns
-    /// the later `PushScene` + composed keep-set ordering.
+    /// Upload one volatile raster without changing device inventory. RLE is
+    /// considered only when `capabilities` advertises bit 9 and is used only
+    /// when it is strictly smaller than raw. Task 5 owns the later
+    /// `PushScene` + composed keep-set ordering.
     pub fn transfer_volatile(
         device: &mut dyn RuntimeDevice,
         asset: &DesiredAsset,
+        capabilities: u64,
     ) -> Result<AssetTransferStatus, AssetSyncError> {
-        Self::transfer_volatile_yielding(device, asset, &mut || {})
+        Self::transfer_volatile_yielding(device, asset, capabilities, &mut || {})
     }
 
     pub fn transfer_volatile_yielding(
         device: &mut dyn RuntimeDevice,
         asset: &DesiredAsset,
+        capabilities: u64,
         on_chunk_sent: &mut dyn FnMut(),
     ) -> Result<AssetTransferStatus, AssetSyncError> {
         if asset.kind != AssetKind::Image {
@@ -287,7 +301,36 @@ impl AssetSync {
                 kind: asset.kind,
             });
         }
-        Self::transfer_one(device, asset, true, on_chunk_sent)
+        let decoded_length =
+            u32::try_from(asset.bytes.len()).map_err(|_| AssetSyncError::AssetTooLarge {
+                digest: asset.digest,
+                length: asset.bytes.len(),
+            })?;
+        let mut encoding = ASSET_ENCODING_RAW;
+        let mut wire: Cow<'_, [u8]> = Cow::Borrowed(asset.bytes.as_ref());
+        let mut encoded_decoded_length = None;
+        if capabilities & CAPABILITY_VOLATILE_ASSETS != 0
+            && asset.bytes.len() >= 12
+            && let Ok(encoded_pixels) = encode_rle565(&asset.bytes[12..])
+        {
+            let mut candidate = Vec::with_capacity(12 + encoded_pixels.len());
+            candidate.extend_from_slice(&asset.bytes[..12]);
+            candidate.extend_from_slice(&encoded_pixels);
+            if candidate.len() < asset.bytes.len() {
+                encoding = ASSET_ENCODING_RLE565;
+                encoded_decoded_length = Some(decoded_length);
+                wire = Cow::Owned(candidate);
+            }
+        }
+        Self::transfer_one(
+            device,
+            asset,
+            true,
+            &wire,
+            encoding,
+            encoded_decoded_length,
+            on_chunk_sent,
+        )
     }
 
     /// Reconcile `device`'s asset store with `desired`: skip anything the
@@ -341,7 +384,15 @@ impl AssetSync {
         let mut uploaded = 0usize;
 
         for asset in desired {
-            match Self::transfer_one(device, asset, false, on_chunk_sent)? {
+            match Self::transfer_one(
+                device,
+                asset,
+                false,
+                &asset.bytes,
+                ASSET_ENCODING_RAW,
+                None,
+                on_chunk_sent,
+            )? {
                 AssetTransferStatus::AlreadyPresent => skipped += 1,
                 AssetTransferStatus::Uploaded => uploaded += 1,
             }
@@ -392,6 +443,31 @@ mod tests {
         }
     }
 
+    fn raster_frame(digest: [u8; ASSET_DIGEST_LEN], high_entropy: bool) -> DesiredAsset {
+        let mut bytes = Vec::with_capacity(protocol::VOLATILE_IMAGE_DECODED_LENGTH as usize);
+        bytes.extend_from_slice(&[0x19, 0x12, 0, 0, 0xc0, 0x01, 0x70, 0x01, 0x80, 0x03, 0, 0]);
+        if high_entropy {
+            let mut state = 0x6d2b_79f5u32;
+            for _ in 0..164_864 {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                bytes.extend_from_slice(&u16::try_from(state & 0xffff).unwrap().to_le_bytes());
+            }
+        } else {
+            for _ in 0..164_864 {
+                bytes.extend_from_slice(&0x1234u16.to_le_bytes());
+            }
+        }
+        assert_eq!(
+            bytes.len(),
+            protocol::VOLATILE_IMAGE_DECODED_LENGTH as usize
+        );
+        DesiredAsset {
+            digest,
+            kind: AssetKind::Image,
+            bytes: Arc::from(bytes),
+        }
+    }
+
     /// A `RuntimeDevice` double that only really implements the asset
     /// methods `AssetSync` calls; everything else is unreachable because
     /// `reconcile` never calls it.
@@ -409,6 +485,7 @@ mod tests {
         committed: std::collections::HashSet<[u8; ASSET_DIGEST_LEN]>,
         last_release: Option<Vec<[u8; ASSET_DIGEST_LEN]>>,
         begins: Vec<AssetBegin>,
+        wire_bytes: HashMap<[u8; ASSET_DIGEST_LEN], Vec<u8>>,
     }
 
     impl FakeDevice {
@@ -455,6 +532,10 @@ mod tests {
 
         fn begins(&self) -> &[AssetBegin] {
             &self.begins
+        }
+
+        fn wire_bytes(&self, digest: &[u8; ASSET_DIGEST_LEN]) -> &[u8] {
+            self.wire_bytes.get(digest).map_or(&[], Vec::as_slice)
         }
     }
 
@@ -507,6 +588,7 @@ mod tests {
             // wire-level resume, so a real device's per-transfer progress
             // resets here too.
             self.current_transfer_chunks = 0;
+            self.wire_bytes.remove(&begin.digest);
             self.begins.push(begin);
             Ok(Ack {
                 acknowledged_type: TYPE_ASSET_BEGIN,
@@ -523,6 +605,9 @@ mod tests {
                 return Err(DeviceError::Timeout);
             }
             *self.chunks_since_recovery.entry(chunk.digest).or_insert(0) += 1;
+            let wire = self.wire_bytes.entry(chunk.digest).or_default();
+            assert_eq!(usize::try_from(chunk.offset).unwrap(), wire.len());
+            wire.extend_from_slice(&chunk.data);
             Ok(())
         }
 
@@ -640,33 +725,82 @@ mod tests {
     }
 
     #[test]
-    fn transfer_volatile_sets_the_tier_and_does_not_release_inventory() {
+    fn transfer_volatile_uses_rle_when_it_is_smaller() {
         let mut device = FakeDevice::new();
-        let mut frame = asset_blob([0xf1; ASSET_DIGEST_LEN], 4096);
-        frame.kind = AssetKind::Image;
+        let frame = raster_frame([0xf1; ASSET_DIGEST_LEN], false);
 
-        let status = AssetSync::transfer_volatile(&mut device, &frame).expect("volatile transfer");
+        let status = AssetSync::transfer_volatile(&mut device, &frame, CAPABILITY_VOLATILE_ASSETS)
+            .expect("volatile transfer");
 
         assert_eq!(status, AssetTransferStatus::Uploaded);
         assert_eq!(device.begins().len(), 1);
-        assert!(device.begins()[0].volatile);
+        let begin = device.begins()[0];
+        assert!(begin.volatile);
+        assert_eq!(begin.encoding, ASSET_ENCODING_RLE565);
+        assert_eq!(
+            begin.decoded_length,
+            Some(protocol::VOLATILE_IMAGE_DECODED_LENGTH)
+        );
+        assert_eq!(begin.total_length, 24);
+        let wire = device.wire_bytes(&frame.digest);
+        assert_eq!(&wire[..12], &frame.bytes[..12]);
+        assert_eq!(
+            protocol::decode_rle565(&wire[12..], frame.bytes.len() - 12).unwrap(),
+            &frame.bytes[12..]
+        );
         assert!(device.committed.contains(&frame.digest));
         assert!(device.last_release().is_none());
     }
 
     #[test]
-    fn transfer_volatile_honors_content_addressed_already_present() {
+    fn transfer_volatile_uses_raw_when_rle_expands() {
+        let mut device = FakeDevice::new();
+        let frame = raster_frame([0xf2; ASSET_DIGEST_LEN], true);
+
+        AssetSync::transfer_volatile(&mut device, &frame, CAPABILITY_VOLATILE_ASSETS)
+            .expect("volatile transfer");
+
+        let begin = device.begins()[0];
+        assert_eq!(begin.encoding, ASSET_ENCODING_RAW);
+        assert_eq!(begin.decoded_length, None);
+        assert_eq!(begin.total_length, protocol::VOLATILE_IMAGE_DECODED_LENGTH);
+        assert_eq!(device.wire_bytes(&frame.digest), frame.bytes.as_ref());
+    }
+
+    #[test]
+    fn transfer_volatile_without_bit_9_keeps_raw_encoding() {
+        let mut device = FakeDevice::new();
+        let frame = raster_frame([0xf3; ASSET_DIGEST_LEN], false);
+
+        AssetSync::transfer_volatile(&mut device, &frame, 0).expect("volatile transfer");
+
+        assert_eq!(device.begins()[0].encoding, ASSET_ENCODING_RAW);
+    }
+
+    #[test]
+    fn transfer_volatile_honors_already_present_for_raw_and_rle() {
         let digest = [0xf2; ASSET_DIGEST_LEN];
-        let mut device = FakeDevice::new().with_already_present(digest);
-        let mut frame = asset_blob(digest, 4096);
-        frame.kind = AssetKind::Image;
+        for (frame, capabilities, encoding) in [
+            (
+                raster_frame(digest, false),
+                CAPABILITY_VOLATILE_ASSETS,
+                ASSET_ENCODING_RLE565,
+            ),
+            (
+                raster_frame(digest, true),
+                CAPABILITY_VOLATILE_ASSETS,
+                ASSET_ENCODING_RAW,
+            ),
+        ] {
+            let mut device = FakeDevice::new().with_already_present(digest);
+            let status = AssetSync::transfer_volatile(&mut device, &frame, capabilities)
+                .expect("already-present volatile transfer");
 
-        let status = AssetSync::transfer_volatile(&mut device, &frame)
-            .expect("already-present volatile transfer");
-
-        assert_eq!(status, AssetTransferStatus::AlreadyPresent);
-        assert_eq!(device.chunks_sent_for(&digest), 0);
-        assert!(device.last_release().is_none());
+            assert_eq!(status, AssetTransferStatus::AlreadyPresent);
+            assert_eq!(device.begins()[0].encoding, encoding);
+            assert_eq!(device.chunks_sent_for(&digest), 0);
+            assert!(device.last_release().is_none());
+        }
     }
 
     #[test]
@@ -675,7 +809,7 @@ mod tests {
         let font = asset_blob([0xf3; ASSET_DIGEST_LEN], 4096);
 
         assert!(matches!(
-            AssetSync::transfer_volatile(&mut device, &font),
+            AssetSync::transfer_volatile(&mut device, &font, CAPABILITY_VOLATILE_ASSETS),
             Err(AssetSyncError::VolatileKind { .. })
         ));
         assert!(device.begins().is_empty());

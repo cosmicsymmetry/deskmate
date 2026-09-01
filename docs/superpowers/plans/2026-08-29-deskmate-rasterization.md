@@ -488,13 +488,13 @@ parity**. The device displaying the exact payload is a separate Task 6/7 claim.
       164,864 pixels and 329,740 total decoded bytes. Probe red, green, blue, black, white,
       and 50%-alpha-over-black pixels so RGB565 channel order and alpha compositing cannot
       be accidentally swapped and still pass a same-colour fixture.
-- [ ] **Step 2: Write the failing scene-translation tests.** Exercise every current scene
+- [x] **Step 2: Write the failing scene-translation tests.** Exercise every current scene
       node, clip, opacity, alignment, baked tier, asset font, glyph, image and non-live
       `field.*` value. Supply fields through the real `latest_fields` producer shape, not a
       pre-substituted scene. Hand a live binding to this layer and assert refusal: the
       rasterizer is defence in depth behind negotiation, not a place a frozen clock can
       sneak through.
-- [ ] **Step 3: Write the failing SVG-expression tests.** Evaluate exact text-node and
+- [x] **Step 3: Write the failing SVG-expression tests.** Evaluate exact text-node and
       attribute expressions against the real rooted fixture, XML-escape `&<>'"`, meter all
       expressions under one fuel budget, and reject partial interpolation. A live binding
       remains a `RenderRequirements` fact and is never replaced with a one-time value.
@@ -506,27 +506,45 @@ parity**. The device displaying the exact payload is a separate Task 6/7 claim.
       a font database containing only the two committed Inter files plus this plugin's
       already-resolved font assets. Never call `load_system_fonts`.
 - [x] **Step 5: Run and watch them fail.** `cargo test -p server rasterizer`.
-- [ ] **Step 6: Implement scene -> SVG and SVG-template evaluation, then call `resvg`.**
+- [x] **Step 6: Implement scene -> SVG and SVG-template evaluation, then call `resvg`.**
       There is one render engine. Do not shell out and do not add a browser crate. Load
       the committed fonts with `include_bytes!`; add tests pinning their SHA-256 and
       byte-equality to the licensed `tools/fonts/` sources so the deployable copies cannot
       drift silently.
-- [ ] **Step 7: Encode RGB565 explicitly.** Composite onto the scene's opaque background,
+- [x] **Step 7: Encode RGB565 explicitly.** Composite onto the scene's opaque background,
       quantize with one documented formula, write every `u16` little-endian, prepend the
       exact 12-byte header shape used by `framebuffer_diff.rs::asset_wire_bytes`, hash the
       decoded blob, and call `protocol::validate_scene` on the one-image-node scene.
-- [ ] **Step 8: Honour spec §4's RLE direction without hiding a wire change.** Measure RLE
+- [x] **Step 8 (measurement half): Honour spec §4's RLE direction without hiding a wire change.** Measure RLE
       on the curated SVG frame and a hostile high-entropy frame. If it wins, add optional
       additive `AssetBegin` encoding/decoded-length keys gated by bit 9, round-trip tests,
       and a bounded pure-C streaming decoder in Task 4; raw remains the legal fallback
       when RLE expands. If the live wire cannot carry this safely within the existing
       frame/PSRAM bounds, record the measured result and amend this plan/spec explicitly
       before shipping raw-only — do not silently claim the spec's `RGB565 -> RLE` pipeline.
-- [ ] **Step 9: Add review images with honest labels.** One display-list fallback and the
+- [x] **Step 9: Add review images with honest labels.** One display-list fallback and the
       curated SVG plugin at fresh/stale/error/missing-data states and both logical
       orientations. The test name and failure text say “raster regression,” never
       “parity.” Dump-and-look at every new image before accepting it.
-- [ ] **Step 10: Commit.** `feat: rasterize scenes and SVG with resvg`
+- [x] **Step 10: Commit.** Landed across `334e99a` (Steps 1/4/5) and the Task-3-remainder commit (Steps 2/3/6/7/8-measurement/9).
+
+**Task 3 execution notes (2026-09-01).** The RLE measurement (Step 8) is decisive and
+recorded here as the plan requires: encoding each RGB565 run as `(u16 count LE, u16
+pixel LE)`, the curated `svg-aqi` frame compresses **329,728 -> 10,020 bytes (96.96%
+smaller)** while a deterministic high-entropy frame expands to exactly **2x (659,456)**.
+Raw must therefore remain the legal fallback, and RLE is worth carrying on the wire:
+at ~2 KiB chunks over one-outstanding-request, a raw frame is ~161 round trips per
+push against a 30-second cadence, an RLE frame ~5. **The wire half (additive
+`AssetBegin` encoding/decoded-length keys gated by bit 9, plus the bounded pure-C
+streaming decoder the original Step 8 assigned to Task 4) is a follow-up wave in this
+stage, not silently dropped.** Other notes: the generated-SVG path may embed
+module-generated data URIs (scene image nodes re-encoded as pixel-path SVG) because it
+is trusted output rendered through the same hardened options -- plugin-authored input
+still rejects every data URL; the rasterizer always draws the logical 448x368 canvas,
+so orientation cannot change its bytes (asserted by a test rather than fabricated
+orientation goldens); goldens under `crates/server/tests/raster-regression/` are
+byte-pinned PNGs updated only via `UPDATE_RASTER_GOLDENS=1`, named and messaged
+"raster regression", never "parity".
 
 ---
 
@@ -551,37 +569,37 @@ parity**. The device displaying the exact payload is a separate Task 6/7 claim.
 ESP-IDF. Exact host request-sequence tests prove tier flags and keep-set ownership. They
 cannot prove PSRAM capability, LVGL pointer lifetime, memory layout, or OTA; Task 7 does.
 
-- [ ] **Step 1: Write the failing capability tests in both languages.** Rust pins
+- [x] **Step 1: Write the failing capability tests in both languages.** Rust pins
       `CAPABILITY_VOLATILE_ASSETS == 512` and `CURRENT_CAPABILITIES == 1003`; firmware pins
       the same bit and numeric `PROTOCOL_CURRENT_CAPABILITIES == 1003`, and asserts an
       advertised bit-9 build admits volatile `AssetBegin`. Run them and see 491 fail.
-- [ ] **Step 2: Write the failing two-slot store tests.** Begin/ordered chunks/commit/find,
+- [x] **Step 2: Write the failing two-slot store tests.** Begin/ordered chunks/commit/find,
       duplicate `AssetBegin` -> already-present, interrupted incoming frame frees only the
       incoming allocation, old active frame survives, a third live allocation is refused,
       and release frees exactly digests absent from the keep-set. Two slots is a named
       bound: one displayed plus one incoming is the minimum atomic swap and prevents
       unbounded 330-KiB PSRAM accumulation.
-- [ ] **Step 3: Hostile frame tests.** Volatile kind other than `Image`, zero/over-limit
+- [x] **Step 3: Hostile frame tests.** Volatile kind other than `Image`, zero/over-limit
       length, wrong digest, duplicate/out-of-order/overlapping chunk, incomplete commit,
       malformed 12-byte header, wrong format/dimensions/stride, decoded-length overflow,
       truncated/expanding RLE if selected, and allocation failure all refuse without
       losing the prior committed frame. Run under ASan.
-- [ ] **Step 4: Implement the pure store and PSRAM adapter.** Allocate with explicit
+- [x] **Step 4: Implement the pure store and PSRAM adapter.** Allocate with explicit
       `MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT`; store no frame bytes or slot arrays at file
       scope. A reboot naturally loses the directory. The asset resolver checks committed
       volatile digests before flash, and returns the same pointer/length/kind contract
       `scene_view` already consumes.
-- [ ] **Step 5: Integrate all transfer exits.** A second begin, bad chunk, disconnect,
+- [x] **Step 5: Integrate all transfer exits.** A second begin, bad chunk, disconnect,
       commit failure, release and shutdown each free the right incoming/committed buffer
       once. Durable transfers keep their current flash path. Never downgrade volatile to
       flash: that would spend partition endurance every 30 seconds.
-- [ ] **Step 6: Make `AssetRelease` own both tiers.** Keep-set = all desired durable plugin
+- [x] **Step 6: Make `AssetRelease` own both tiers.** Keep-set = all desired durable plugin
       digests + the active volatile digest. Reduce the registry's durable ceiling from 32
       to `MAX_ASSET_DIGESTS - 1`, with the one-slot reason beside the constant; otherwise a
       valid 32-durable-asset catalog leaves no legal keep-set for one raster frame. Keep
       the empty-desired guard and add exact-sequence tests for empty registry, durable-only,
       raster-only, and their union.
-- [ ] **Step 7: Preserve the GC teardown safety sequence.** A release that can move/free
+- [x] **Step 7: Preserve the GC teardown safety sequence.** A release that can move/free
       bytes used by the active scene must load the standalone clock -> destroy scene ->
       reset font registry -> collect/compact/free -> rebuild from retained `scene_t`, on
       every exit. A release that removes only the old raster while the active scene reads
@@ -589,11 +607,39 @@ cannot prove PSRAM capability, LVGL pointer lifetime, memory layout, or OTA; Tas
       keep/use predicate; state plainly that the end-to-end sequence spans
       `link/protocol_task.c`, `link/asset_flash.c`, `ui/font_registry.c`, and
       `ui/scene_view.c`, with no automated test or simulator seam across all four.
-- [ ] **Step 8: Run firmware gates.** `make -C firmware/host_tests clean test` and
+- [x] **Step 8: Run firmware gates.** `make -C firmware/host_tests clean test` and
       `make -C firmware/host_tests sanitize`. Build before/after from the same tree and
       record `.bss`, DIRAM `.text`, `.data`, IRAM and DIRAM total. Any IRAM growth or
       unexplained file-scope static growth stops the task before hardware.
-- [ ] **Step 9: Commit.** `feat: hold raster frames as volatile PSRAM assets`
+- [x] **Step 9: Commit.** `feat: hold raster frames as volatile PSRAM assets`
+
+**Task 4 execution notes (2026-09-01).** Capability bit 9 (`VolatileAssets` = 512)
+lands in both languages; `CURRENT_CAPABILITIES`/`PROTOCOL_CURRENT_CAPABILITIES` are
+now **1003**, pinned by tests on both sides plus `protocol/tests/fixtures.rs`. The
+volatile store is pure C11 (`core/volatile_asset_store.{h,c}`) with caller-provided
+allocate/deallocate/SHA-256 callbacks; the PSRAM adapter in `link/protocol_task.c`
+uses `MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT` and mbedTLS SHA-256. The store object
+lives inside the PSRAM-allocated protocol context -- file-scope statics added by the
+new C: **0 bytes**. `scene_reads_asset_bytes()` was replaced by the pure, host-tested
+`volatile_asset_store_release_must_teardown()`: it preserves the old conservatism
+(any durable asset use forces teardown, because flash compaction moves bytes) and
+adds the one safe relaxation (a scene reading only the KEPT volatile digest skips
+the clock flap, because a PSRAM allocation never moves). AssetBegin gains a
+payload-aware second gate (`protocol_asset_begin_request_gate`): bit 5 still gates
+the four message types, bit 9 additionally gates the volatile form. App-core gains
+`AssetSync::transfer_volatile[_yielding]` and `compose_asset_keep_set` (durable +
+active volatile, deduplicated, wire-ceiling-checked); the server registry's durable
+ceiling is now `MAX_DURABLE_REGISTRY_ASSETS = MAX_ASSET_DIGESTS - 1` with an exact
+boundary test, reserving one keep-set slot for the raster frame. **Size check on the
+same tree (before -> after): DIRAM total 203,891 -> 203,891, `.bss` 87,128 -> 87,128,
+`.data` 23,128 -> 23,128, DIRAM `.text` 93,635 -> 93,635, IRAM 16,384/16,384 with 0
+remaining -> unchanged; only flash grew (code +2,396, rodata +144).** Internal RAM
+layout is byte-identical, which is the best achievable posture against the OTA
+layout hazard -- and per the standing rule, still not proof: Task 7's on-board OTA
+download check remains mandatory. Deferred to Task 5: executor wiring and exact
+request sequencing. Firmware has no normal protocol-task shutdown seam (infinite
+task); store destruction is tested and used on task-start failure, and disconnect/
+release paths abort incoming buffers.
 
 ---
 

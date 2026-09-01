@@ -13,6 +13,7 @@
 #include "board/display.h"
 #include "core/asset_store.h"
 #include "core/asset_transfer.h"
+#include "core/volatile_asset_store.h"
 #include "core/device_event_queue.h"
 #include "core/interrupt_state.h"
 #include "core/link_state.h"
@@ -39,6 +40,7 @@
 #include "link/ota.h"
 #include "link/usb_link.h"
 #include "link/wifi_station.h"
+#include "mbedtls/sha256.h"
 #include "ui/carousel.h"
 #include "ui/clock_screen.h"
 #include "ui/font_registry.h"
@@ -83,6 +85,11 @@ typedef struct {
     // this flag is what still remembers it needs reclaiming. See
     // abandon_pending_reservation().
     bool asset_reservation_pending;
+    // Metadata only. This whole context is allocated from PSRAM, and the two
+    // possible 329,740-byte frame buffers come from the explicit PSRAM
+    // callbacks installed at start. No volatile slot or byte buffer lands in
+    // file-scope .bss.
+    volatile_asset_store_t volatile_assets;
     // The scene currently on the panel, retained after scene_view_show()
     // consumed it. It is kept for exactly one caller: the asset-GC teardown
     // in dispatch_asset_release(), which must destroy the renderer's objects
@@ -443,40 +450,6 @@ static show_scene_result_t show_scene(protocol_context_t *context,
     }
     lvgl_port_unlock();
     return result;
-}
-
-/* Whether `scene` reads any byte that compaction can move: an image node's
- * mapped blob, an asset-font text node, or a glyph node. It is answered from
- * the retained model rather than from the font registry because the registry
- * only knows about FACES -- an `image` node holds a bare pointer into mapped
- * flash inside its lv_image_dsc_t (ui/scene_view.c's scene_image_asset_t)
- * and pins nothing the registry can count. font_registry_reset() would
- * happily return 0 with such an image live, and compaction would then move
- * the bytes underneath it.
- *
- * A scene that reads nothing of the sort cannot be invalidated by
- * compaction, so it does not need to be torn down and rebuilt -- which is
- * the difference between a release costing a visible clock-then-scene screen
- * flap and costing nothing. Every scene this stage ships is in that class:
- * the DigitalClock scene is baked fonts and geometry only.
- *
- * Deliberately conservative: anything that is not provably baked counts as
- * an asset reference, because a false negative here would put compaction
- * under a live mapping. */
-static bool scene_reads_asset_bytes(const scene_t *scene)
-{
-    for (uint32_t i = 0U; i < scene->node_count; ++i) {
-        const scene_node_t *node = &scene->nodes[i];
-        if (node->kind == SCENE_NODE_IMAGE ||
-            node->kind == SCENE_NODE_GLYPH) {
-            return true;
-        }
-        if (node->kind == SCENE_NODE_TEXT &&
-            node->value.text.font.kind != SCENE_FONT_BAKED) {
-            return true;
-        }
-    }
-    return false;
 }
 
 /* Re-evaluates the live scene's bindings in place, and returns whether a
@@ -970,13 +943,19 @@ static void dispatch_factory_reset(protocol_context_t *context,
     transmit_ack(context, request_id, PROTOCOL_TYPE_FACTORY_RESET, false, 0U);
 }
 
-// font_registry_init()'s asset_resolver_fn: resolves a committed asset's
-// digest to its mapped, read-only blob bytes. This is the only place
-// core/font_registry.c (no ESP-IDF include, so it cannot call these itself)
-// meets link/asset_flash.c's flash-backed store.
+// font_registry_init()/scene_view's asset_resolver_fn: resolves a committed
+// digest to read-only blob bytes. Volatile PSRAM wins before flash so an
+// atomic replacement can be rendered without ever spending partition
+// endurance. This is the only place the ESP-IDF-free consumers meet either
+// backing store.
 static bool protocol_asset_resolver(const uint8_t *digest, const void **out_ptr,
                                     uint32_t *out_len, uint8_t *out_kind)
 {
+    if (volatile_asset_store_find(&s_context->volatile_assets, digest,
+                                  out_ptr, out_len, out_kind) ==
+        VOLATILE_ASSET_STORE_OK) {
+        return true;
+    }
     asset_record_t record;
     if (asset_store_find(asset_flash_store(), digest, &record, NULL) !=
         ASSET_STORE_OK) {
@@ -988,6 +967,30 @@ static bool protocol_asset_resolver(const uint8_t *digest, const void **out_ptr,
     *out_len = record.length;
     *out_kind = record.kind;
     return true;
+}
+
+static void *volatile_psram_allocate(void *ctx, size_t length)
+{
+    (void)ctx;
+    return heap_caps_malloc(length, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+}
+
+static void volatile_psram_deallocate(void *ctx, void *ptr)
+{
+    (void)ctx;
+    heap_caps_free(ptr);
+}
+
+static bool volatile_sha256_matches(
+    void *ctx, const void *bytes, size_t length,
+    const uint8_t expected[ASSET_DIGEST_BYTES])
+{
+    (void)ctx;
+    uint8_t actual[ASSET_DIGEST_BYTES];
+    if (mbedtls_sha256(bytes, length, actual, 0) != 0) {
+        return false;
+    }
+    return memcmp(actual, expected, sizeof actual) == 0;
 }
 
 // Reclaims a reservation this context abandoned -- whether the in-RAM
@@ -1016,19 +1019,19 @@ static void abandon_pending_reservation(protocol_context_t *context)
     context->asset_reservation_pending = false;
 }
 
+static void abort_asset_transfers(protocol_context_t *context)
+{
+    volatile_asset_store_abort_incoming(&context->volatile_assets);
+    if (context->asset_transfer.active) {
+        asset_transfer_abort(&context->asset_transfer);
+    }
+    abandon_pending_reservation(context);
+}
+
 static void dispatch_asset_begin(protocol_context_t *context,
                                  uint32_t request_id)
 {
     const protocol_asset_begin_t *begin = &context->message.value.asset_begin;
-    // The volatile (PSRAM) tier is for rasterized frames and arrives in a
-    // later stage; storing one to flash instead would burn the partition's
-    // write endurance on a refresh cycle, exactly what that tier exists to
-    // avoid. Refuse explicitly rather than silently downgrading to durable.
-    if (begin->volatile_tier) {
-        transmit_error(context, request_id, PROTOCOL_ERROR_UNSUPPORTED_MESSAGE,
-                       "volatile assets are not supported yet");
-        return;
-    }
     // A second AssetBegin while a transfer is active means the host gave up
     // on the first one; abort it before deciding how to handle this one so
     // a stale in-memory transfer can never straddle two different digests.
@@ -1036,10 +1039,26 @@ static void dispatch_asset_begin(protocol_context_t *context,
     // an earlier AssetChunk failure) is reclaimed the same way regardless of
     // whether the in-RAM transfer is still active -- see
     // abandon_pending_reservation().
-    if (context->asset_transfer.active) {
-        asset_transfer_abort(&context->asset_transfer);
+    abort_asset_transfers(context);
+    if (begin->volatile_tier) {
+        volatile_asset_store_result_t result = volatile_asset_store_begin(
+            &context->volatile_assets, begin->digest, (uint8_t)begin->kind,
+            begin->total_length);
+        if (result == VOLATILE_ASSET_STORE_ALREADY_PRESENT) {
+            transmit_asset_begin_ack(context, request_id, true);
+            return;
+        }
+        if (result != VOLATILE_ASSET_STORE_OK) {
+            transmit_error(context, request_id,
+                           result == VOLATILE_ASSET_STORE_ERR_FULL
+                               ? PROTOCOL_ERROR_BUSY
+                               : PROTOCOL_ERROR_INVALID_PAYLOAD,
+                           "volatile asset reserve failed");
+            return;
+        }
+        transmit_asset_begin_ack(context, request_id, false);
+        return;
     }
-    abandon_pending_reservation(context);
     asset_record_t existing;
     if (asset_store_find(asset_flash_store(), begin->digest, &existing,
                          NULL) == ASSET_STORE_OK) {
@@ -1076,6 +1095,20 @@ static void dispatch_asset_chunk(protocol_context_t *context,
                                  uint32_t request_id)
 {
     const protocol_asset_chunk_t *chunk = &context->message.value.asset_chunk;
+    if (context->volatile_assets.incoming_transfer.active) {
+        volatile_asset_store_result_t result = volatile_asset_store_write(
+            &context->volatile_assets, chunk->digest, chunk->offset,
+            chunk->data, (uint32_t)chunk->data_length);
+        if (result != VOLATILE_ASSET_STORE_OK) {
+            transmit_error(context, request_id,
+                           PROTOCOL_ERROR_INVALID_PAYLOAD,
+                           "volatile asset chunk rejected");
+            return;
+        }
+        transmit_ack(context, request_id, PROTOCOL_TYPE_ASSET_CHUNK, false,
+                     0U);
+        return;
+    }
     asset_transfer_result_t result = asset_transfer_accept_chunk(
         &context->asset_transfer, chunk->digest, chunk->offset,
         (uint32_t)chunk->data_length);
@@ -1109,6 +1142,19 @@ static void dispatch_asset_commit(protocol_context_t *context,
 {
     const protocol_asset_commit_t *commit =
         &context->message.value.asset_commit;
+    if (context->volatile_assets.incoming_transfer.active) {
+        volatile_asset_store_result_t result = volatile_asset_store_commit(
+            &context->volatile_assets, commit->digest);
+        if (result != VOLATILE_ASSET_STORE_OK) {
+            transmit_error(context, request_id,
+                           PROTOCOL_ERROR_INVALID_PAYLOAD,
+                           "volatile asset commit failed");
+            return;
+        }
+        transmit_ack(context, request_id, PROTOCOL_TYPE_ASSET_COMMIT, false,
+                     0U);
+        return;
+    }
     if (!context->asset_transfer.active ||
         memcmp(commit->digest, context->asset_transfer.digest,
               ASSET_DIGEST_BYTES) != 0 ||
@@ -1157,9 +1203,7 @@ static bool collect_released_assets(protocol_context_t *context,
     // design already handles an abort by simply re-sending AssetBegin for a
     // fresh reservation, whereas rejecting the release risks a stuck
     // transfer permanently blocking GC.
-    if (context->asset_transfer.active) {
-        asset_transfer_abort(&context->asset_transfer);
-    }
+    abort_asset_transfers(context);
 
     for (uint32_t index = 0U; index < store->record_capacity; ++index) {
         uint8_t bytes[ASSET_RECORD_BYTES];
@@ -1222,7 +1266,40 @@ static bool collect_released_assets(protocol_context_t *context,
         *diagnostic = "asset compaction failed";
         return false;
     }
+    if (volatile_asset_store_release(&context->volatile_assets, keep_ptrs,
+                                     release->digest_count, NULL) !=
+        VOLATILE_ASSET_STORE_OK) {
+        *error_code = PROTOCOL_ERROR_INTERNAL;
+        *diagnostic = "volatile asset release failed";
+        return false;
+    }
     return true;
+}
+
+static bool scene_release_must_teardown(
+    const protocol_context_t *context,
+    const protocol_asset_release_t *release)
+{
+    const uint8_t *used[SCENE_MAX_NODES];
+    size_t used_count = 0U;
+    for (uint32_t i = 0U; i < context->scene.node_count; ++i) {
+        const scene_node_t *node = &context->scene.nodes[i];
+        if (node->kind == SCENE_NODE_IMAGE) {
+            used[used_count++] = node->value.image.digest;
+        } else if (node->kind == SCENE_NODE_GLYPH) {
+            used[used_count++] = node->value.glyph.digest;
+        } else if (node->kind == SCENE_NODE_TEXT &&
+                   node->value.text.font.kind != SCENE_FONT_BAKED) {
+            used[used_count++] = node->value.text.font.digest;
+        }
+    }
+    const uint8_t *keep[PROTOCOL_MAX_ASSET_DIGESTS];
+    for (size_t i = 0U; i < release->digest_count; ++i) {
+        keep[i] = release->digests[i];
+    }
+    return volatile_asset_store_release_must_teardown(
+        &context->volatile_assets, used, used_count, keep,
+        release->digest_count);
 }
 
 static void dispatch_asset_release(protocol_context_t *context,
@@ -1297,8 +1374,14 @@ static void dispatch_asset_release(protocol_context_t *context,
     //    to collect assets would hide a running update, so leave it alone;
     //    font_registry_reset() then refuses if the scene pins a face and the
     //    host retries, which is the correct outcome.
+    /* The end-to-end safety sequence intentionally spans this file,
+     * link/asset_flash.c, ui/font_registry.c, and ui/scene_view.c. There is
+     * no automated seam across all four. The pure keep/use decision is host
+     * tested in volatile_asset_store; hardware must still prove the actual
+     * clock -> destroy -> reset -> collect -> rebuild sequence. */
     bool torn_down = scene_view_screen() != NULL &&
-                     scene_reads_asset_bytes(&context->scene) &&
+                     scene_release_must_teardown(
+                         context, &context->message.value.asset_release) &&
                      !ota_screen_active_in_lvgl();
     if (torn_down) {
         clock_screen_show_in_lvgl();
@@ -1450,6 +1533,16 @@ static void dispatch_request(protocol_context_t *context,
         transmit_error(context, frame->request_id,
                        PROTOCOL_ERROR_UNSUPPORTED_MESSAGE,
                        "capability not supported by this build");
+        return;
+    }
+    if (context->message.type == PROTOCOL_TYPE_ASSET_BEGIN &&
+        protocol_asset_begin_request_gate(
+            &context->message.value.asset_begin,
+            PROTOCOL_CURRENT_CAPABILITIES) ==
+            PROTOCOL_REQUEST_MISSING_CAPABILITY) {
+        transmit_error(context, frame->request_id,
+                       PROTOCOL_ERROR_UNSUPPORTED_MESSAGE,
+                       "volatile assets unsupported by this build");
         return;
     }
 
@@ -1705,6 +1798,7 @@ static void protocol_task(void *argument)
         if (atomic_exchange_explicit(&s_network_decoder_reset_requested,
                                      false, memory_order_acq_rel)) {
             protocol_decoder_init(&context->decoder);
+            abort_asset_transfers(context);
         }
         if (received != 0U) {
             protocol_decoder_feed(&context->decoder, chunk, received,
@@ -1725,6 +1819,7 @@ static void protocol_task(void *argument)
         // is not safe to let touch ui_runtime's spinlocks directly.
         wifi_station_poll();
         if (link_state_poll(&context->link, uptime_ms())) {
+            abort_asset_transfers(context);
             ui_runtime_set_online(false);
             ESP_LOGI(TAG, "link standalone after timeout");
         }
@@ -1757,6 +1852,19 @@ esp_err_t protocol_task_start(void)
     s_context = heap_caps_calloc(1, sizeof(*s_context), MALLOC_CAP_SPIRAM);
     ESP_RETURN_ON_FALSE(s_context != NULL, ESP_ERR_NO_MEM, TAG,
                         "allocate protocol context from PSRAM");
+    volatile_asset_store_callbacks_t volatile_callbacks = {
+        .allocate = volatile_psram_allocate,
+        .deallocate = volatile_psram_deallocate,
+        .digest_matches = volatile_sha256_matches,
+        .ctx = NULL,
+    };
+    if (volatile_asset_store_init(&s_context->volatile_assets,
+                                  &volatile_callbacks) !=
+        VOLATILE_ASSET_STORE_OK) {
+        heap_caps_free(s_context);
+        s_context = NULL;
+        return ESP_ERR_INVALID_STATE;
+    }
     // The digest -> mapped-bytes lookup that `image` and asset-font scene
     // nodes read through. The same protocol_asset_resolver/asset_flash_unmap
     // pair font_registry_init() gets below, because they are the same
@@ -1838,6 +1946,7 @@ esp_err_t protocol_task_start(void)
         protocol_task, "protocol", PROTOCOL_TASK_STACK_SIZE, s_context,
         PROTOCOL_TASK_PRIORITY, &s_task, PROTOCOL_TASK_CORE);
     if (created != pdPASS) {
+        volatile_asset_store_destroy(&s_context->volatile_assets);
         heap_caps_free(s_context);
         s_context = NULL;
         ESP_LOGE(TAG, "create protocol task failed");

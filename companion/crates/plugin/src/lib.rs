@@ -28,7 +28,7 @@ pub use expr::{
     MAX_PATH_SEGMENTS, MAX_ROUND_PLACES, MAX_SOURCE_LEN, build_icon_map,
 };
 pub use manifest::{
-    Align, Asset, Font, FontTier, Glyph, MAX_REFRESH_MINUTES, MAX_REPEAT_GROUPS,
+    Align, Asset, Font, FontTier, Glyph, MAX_ASSETS, MAX_REFRESH_MINUTES, MAX_REPEAT_GROUPS,
     MAX_REPEAT_SOURCE_LEN, MAX_SOURCE_ROOT_LEN, MIN_REFRESH_MINUTES, ManifestError,
     ManifestVersion, Node, PluginManifest, Point, Repeat, Source, Template, parse_manifest,
     parse_manifest_bytes,

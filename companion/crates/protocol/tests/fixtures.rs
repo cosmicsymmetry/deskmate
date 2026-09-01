@@ -183,11 +183,12 @@ fn current_capabilities_advertise_implemented_features() {
             | protocol::CAPABILITY_ASSET_TRANSFER
             | protocol::CAPABILITY_FIRMWARE_UPDATE
             | protocol::CAPABILITY_NETWORKING
-            | protocol::CAPABILITY_SCENE_RENDER,
-        "implemented asset transfer, firmware update, networking, and scene \
-         rendering features must be advertised"
+            | protocol::CAPABILITY_SCENE_RENDER
+            | protocol::CAPABILITY_VOLATILE_ASSETS,
+        "implemented asset transfer, firmware update, networking, scene \
+         rendering, and volatile-asset features must be advertised"
     );
-    assert_eq!(protocol::CURRENT_CAPABILITIES, 491);
+    assert_eq!(protocol::CURRENT_CAPABILITIES, 1003);
 }
 
 fn assert_rot_rect_clip_is_pinned(nodes: &[protocol::SceneNode]) {

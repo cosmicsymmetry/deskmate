@@ -22,7 +22,7 @@ test: test_timefmt test_protocol test_link_state test_template_fields \
 	test_interrupt_state test_device_event_queue \
 	test_clock_source test_net_config test_net_ring test_reconnect_backoff \
 	test_ota_policy test_asset_store test_asset_transfer test_scene_model \
-	test_scene_binding test_scene_decode test_font_registry
+	test_volatile_asset_store test_scene_binding test_scene_decode test_font_registry
 	./test_timefmt
 	./test_protocol
 	./test_link_state
@@ -39,6 +39,7 @@ test: test_timefmt test_protocol test_link_state test_template_fields \
 	./test_ota_policy
 	./test_asset_store
 	./test_asset_transfer
+	./test_volatile_asset_store
 	./test_scene_model
 	./test_scene_binding
 	./test_scene_decode
@@ -100,6 +101,11 @@ test_asset_transfer: test_asset_transfer.c ../main/core/asset_transfer.c \
 	../main/core/asset_store.c
 	$(CC) $(CFLAGS) -I../main -o $@ $^
 
+test_volatile_asset_store: test_volatile_asset_store.c \
+	../main/core/volatile_asset_store.c ../main/core/asset_transfer.c \
+	../main/core/asset_store.c
+	$(CC) $(CFLAGS) -I../main -o $@ $^
+
 test_scene_model: test_scene_model.c ../main/core/scene_model.c \
 	../main/core/asset_store.c
 	$(CC) $(CFLAGS) -I../main -o $@ $^
@@ -135,6 +141,7 @@ clean:
 	rm -f test_ota_policy
 	rm -f test_asset_store
 	rm -f test_asset_transfer
+	rm -f test_volatile_asset_store
 	rm -f test_scene_model
 	rm -f test_scene_binding
 	rm -f test_scene_decode
@@ -152,6 +159,7 @@ clean:
 	rm -rf test_ota_policy.dSYM
 	rm -rf test_asset_store.dSYM
 	rm -rf test_asset_transfer.dSYM
+	rm -rf test_volatile_asset_store.dSYM
 	rm -rf test_scene_model.dSYM
 	rm -rf test_scene_binding.dSYM
 	rm -rf test_scene_decode.dSYM

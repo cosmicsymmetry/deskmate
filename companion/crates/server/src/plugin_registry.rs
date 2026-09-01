@@ -22,6 +22,14 @@ use protocol::{ASSET_DIGEST_LEN, MAX_ASSET_DIGESTS};
 /// 32 bounds startup filesystem work while leaving 16x headroom over today's curated catalog.
 pub const MAX_PLUGINS: usize = 32;
 
+/// The registry's durable-asset ceiling: one below the wire's
+/// [`MAX_ASSET_DIGESTS`], because stage 4's `AssetRelease` keep-set must
+/// carry every desired durable digest *plus* the one active volatile raster
+/// frame. A registry allowed to fill all 32 slots would leave no legal
+/// keep-set for that frame, and the release would silently have to drop a
+/// desired asset instead.
+pub const MAX_DURABLE_REGISTRY_ASSETS: usize = MAX_ASSET_DIGESTS - 1;
+
 /// Every curated plugin the server can render, loaded once at startup.
 #[derive(Debug)]
 pub struct PluginRegistry {
@@ -178,9 +186,9 @@ impl PluginRegistry {
 
         let registry = Self { plugins };
         let unique_assets = registry.all_assets().len();
-        if unique_assets > MAX_ASSET_DIGESTS {
+        if unique_assets > MAX_DURABLE_REGISTRY_ASSETS {
             return Err(PluginRegistryError::TooManyUniqueAssets {
-                limit: MAX_ASSET_DIGESTS,
+                limit: MAX_DURABLE_REGISTRY_ASSETS,
                 actual: unique_assets,
             });
         }
@@ -825,7 +833,49 @@ mod tests {
     }
 
     #[test]
-    fn more_unique_assets_than_the_wire_digest_limit_is_rejected() {
+    fn exactly_the_durable_ceiling_loads_and_one_more_is_rejected() {
+        // The precise boundary: 31 unique assets is the largest legal
+        // registry, because the wire's 32-digest keep-set must also carry
+        // stage 4's one active volatile raster digest.
+        for (count, expect_ok) in [
+            (MAX_DURABLE_REGISTRY_ASSETS, true),
+            (MAX_DURABLE_REGISTRY_ASSETS + 1, false),
+        ] {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let mut byte = 1u8;
+            let mut remaining = count;
+            let mut plugin_index = 0usize;
+            while remaining > 0 {
+                let batch = remaining.min(plugin::MAX_ASSETS);
+                let mut assets = Vec::new();
+                for asset_index in 0..batch {
+                    assets.push((format!("asset-{asset_index:02}.bin"), vec![byte]));
+                    byte = byte.checked_add(1).expect("test digest seed fits in u8");
+                }
+                write_image_plugin(temp.path(), &format!("plugin-{plugin_index}"), &assets);
+                plugin_index += 1;
+                remaining -= batch;
+            }
+
+            let result = PluginRegistry::load(temp.path());
+            if expect_ok {
+                let (registry, failures) = result.expect("the ceiling itself must load");
+                assert!(failures.is_empty(), "unexpected failures: {failures:?}");
+                assert_eq!(registry.all_assets().len(), MAX_DURABLE_REGISTRY_ASSETS);
+            } else {
+                assert_eq!(
+                    result.expect_err("one past the ceiling must be refused"),
+                    PluginRegistryError::TooManyUniqueAssets {
+                        limit: MAX_DURABLE_REGISTRY_ASSETS,
+                        actual: MAX_DURABLE_REGISTRY_ASSETS + 1,
+                    }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn more_unique_assets_than_the_durable_ceiling_is_rejected() {
         let temp = tempfile::tempdir().expect("tempdir");
         let assets_per_plugin = MAX_ASSET_DIGESTS / 3 + 1;
         let mut byte = 1u8;
@@ -838,14 +888,14 @@ mod tests {
             write_image_plugin(temp.path(), &format!("plugin-{plugin_index}"), &assets);
         }
         let expected = assets_per_plugin * 3;
-        assert!(expected > MAX_ASSET_DIGESTS);
+        assert!(expected > MAX_DURABLE_REGISTRY_ASSETS);
 
         let error = PluginRegistry::load(temp.path()).expect_err("asset union must be bounded");
 
         assert_eq!(
             error,
             PluginRegistryError::TooManyUniqueAssets {
-                limit: MAX_ASSET_DIGESTS,
+                limit: MAX_DURABLE_REGISTRY_ASSETS,
                 actual: expected,
             }
         );

@@ -154,10 +154,11 @@ pub enum DeviceCapability {
     FirmwareUpdate,
     Networking,
     SceneRender,
+    VolatileAssets,
 }
 
 impl DeviceCapability {
-    const ALL: [Self; 9] = [
+    const ALL: [Self; 10] = [
         Self::CoreWidgets,
         Self::ConfigRotation,
         Self::DashboardLayouts,
@@ -167,6 +168,7 @@ impl DeviceCapability {
         Self::FirmwareUpdate,
         Self::Networking,
         Self::SceneRender,
+        Self::VolatileAssets,
     ];
 
     pub const fn bit(self) -> u64 {
@@ -180,6 +182,7 @@ impl DeviceCapability {
             Self::FirmwareUpdate => protocol::CAPABILITY_FIRMWARE_UPDATE,
             Self::Networking => protocol::CAPABILITY_NETWORKING,
             Self::SceneRender => protocol::CAPABILITY_SCENE_RENDER,
+            Self::VolatileAssets => protocol::CAPABILITY_VOLATILE_ASSETS,
         }
     }
 
@@ -197,6 +200,7 @@ impl DeviceCapability {
             Self::FirmwareUpdate => "firmware update",
             Self::Networking => "networking",
             Self::SceneRender => "declarative scene rendering",
+            Self::VolatileAssets => "volatile raster assets",
         }
     }
 
@@ -245,6 +249,22 @@ mod device_capability_tests {
         assert_eq!(
             DeviceCapability::from_bits(protocol::CAPABILITY_SCENE_RENDER),
             vec![DeviceCapability::SceneRender]
+        );
+    }
+
+    #[test]
+    fn volatile_assets_capability_has_a_name_bit_and_serde_contract() {
+        assert_eq!(
+            DeviceCapability::VolatileAssets.bit(),
+            protocol::CAPABILITY_VOLATILE_ASSETS
+        );
+        assert_eq!(
+            DeviceCapability::from_bits(protocol::CAPABILITY_VOLATILE_ASSETS),
+            vec![DeviceCapability::VolatileAssets]
+        );
+        assert_eq!(
+            serde_json::to_string(&DeviceCapability::VolatileAssets).unwrap(),
+            "\"volatile-assets\""
         );
     }
 }

@@ -38,6 +38,10 @@
  * for most of V2 and the constant read 75 instead of 203, so the value
  * below is pinned by a test in both languages. */
 #define PROTOCOL_CAPABILITY_SCENE_RENDER (UINT64_C(1) << 8)
+/* A build advertising this bit accepts `AssetBegin { volatile: true }` and
+ * resolves committed volatile image bytes. Bit 5 cannot carry that promise:
+ * deployed bit-5 builds explicitly reject volatile begins. */
+#define PROTOCOL_CAPABILITY_VOLATILE_ASSETS (UINT64_C(1) << 9)
 #define PROTOCOL_LEGACY_CAPABILITIES PROTOCOL_CAPABILITY_CORE_WIDGETS
 #define PROTOCOL_CURRENT_CAPABILITIES                            \
     (PROTOCOL_CAPABILITY_CORE_WIDGETS |                          \
@@ -46,7 +50,8 @@
      PROTOCOL_CAPABILITY_ASSET_TRANSFER |                        \
      PROTOCOL_CAPABILITY_FIRMWARE_UPDATE |                       \
      PROTOCOL_CAPABILITY_NETWORKING |                            \
-     PROTOCOL_CAPABILITY_SCENE_RENDER)
+     PROTOCOL_CAPABILITY_SCENE_RENDER |                          \
+     PROTOCOL_CAPABILITY_VOLATILE_ASSETS)
 #define PROTOCOL_MAX_SSID_LENGTH 32U
 #define PROTOCOL_MAX_PSK_LENGTH 64U
 #define PROTOCOL_MAX_SERVER_URL_LENGTH 128U
@@ -409,6 +414,13 @@ typedef enum {
  * silently accepting messages its firmware did not compile support for. */
 protocol_request_gate_t protocol_message_request_gate(
     protocol_message_type_t type,
+    uint64_t capabilities);
+
+/* The four asset-transfer message types remain gated by bit 5. This second
+ * payload-aware gate adds bit 9 only for the volatile form of AssetBegin, so
+ * an older bit-5 device never accepts a tier it cannot actually store. */
+protocol_request_gate_t protocol_asset_begin_request_gate(
+    const protocol_asset_begin_t *begin,
     uint64_t capabilities);
 
 protocol_message_result_t protocol_message_decode(

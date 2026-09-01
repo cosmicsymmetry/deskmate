@@ -23,6 +23,10 @@ pub const CAPABILITY_NETWORKING: u64 = 1 << 7;
 /// read 75 instead of 203, so [`CURRENT_CAPABILITIES`] is pinned by a test in
 /// both languages.
 pub const CAPABILITY_SCENE_RENDER: u64 = 1 << 8;
+/// Accepts and resolves `AssetBegin { volatile: true }` image assets. This is
+/// separate from bit 5 because deployed asset-transfer builds reject that
+/// tier explicitly.
+pub const CAPABILITY_VOLATILE_ASSETS: u64 = 1 << 9;
 pub const LEGACY_CAPABILITIES: u64 = CAPABILITY_CORE_WIDGETS;
 pub const CURRENT_CAPABILITIES: u64 = CAPABILITY_CORE_WIDGETS
     | CAPABILITY_CONFIG_ROTATION
@@ -30,7 +34,8 @@ pub const CURRENT_CAPABILITIES: u64 = CAPABILITY_CORE_WIDGETS
     | CAPABILITY_ASSET_TRANSFER
     | CAPABILITY_FIRMWARE_UPDATE
     | CAPABILITY_NETWORKING
-    | CAPABILITY_SCENE_RENDER;
+    | CAPABILITY_SCENE_RENDER
+    | CAPABILITY_VOLATILE_ASSETS;
 pub const LINK_TIMEOUT_MS: u64 = 10_000;
 pub const MAX_WIDGET_ID_LEN: usize = 32;
 pub const MAX_SCREEN_ID_LEN: usize = 32;
@@ -2090,11 +2095,10 @@ mod tests {
         // (capabilities) are still encoded contiguously and in this order
         // because keys are canonical; locate and drop them regardless of
         // what now follows them on the wire. The tail is
-        // CURRENT_CAPABILITIES; adding bit 8 took it from 235 to 491, which
-        // moved it out of CBOR's one-byte form (0x18 0xeb) into its two-byte
-        // one (0x19 0x01 0xeb). It moves again whenever a capability bit is
+        // CURRENT_CAPABILITIES; bit 8 took it from 235 to 491 and bit 9 now
+        // takes it to 1003 (0x03eb). It moves whenever a capability bit is
         // added to the constant.
-        let pattern = [0x15, 0x09, 0x16, 0x01, 0x17, 0x19, 0x01, 0xeb];
+        let pattern = [0x15, 0x09, 0x16, 0x01, 0x17, 0x19, 0x03, 0xeb];
         let offset = payload
             .windows(pattern.len())
             .position(|window| window == pattern)
@@ -2229,13 +2233,16 @@ mod tests {
     }
 
     #[test]
-    fn current_capabilities_is_491() {
+    fn current_capabilities_is_1003() {
         // Bit 7 was defined and never set for most of V2; the constant read 75
         // instead of 203 and a conforming host could not have provisioned the
-        // device. Pin the number so the same omission cannot recur.
-        assert_eq!(CURRENT_CAPABILITIES, 491);
+        // device. Bit 9 must likewise be advertised when the implementation
+        // accepts volatile assets. Pin the number so the omission cannot recur.
+        assert_eq!(CURRENT_CAPABILITIES, 1003);
         assert_eq!(CAPABILITY_SCENE_RENDER, 256);
+        assert_eq!(CAPABILITY_VOLATILE_ASSETS, 512);
         assert_ne!(CURRENT_CAPABILITIES & CAPABILITY_SCENE_RENDER, 0);
+        assert_ne!(CURRENT_CAPABILITIES & CAPABILITY_VOLATILE_ASSETS, 0);
     }
 
     /// Encodes a `PushScene` payload WITHOUT validating it, so the decode

@@ -130,6 +130,12 @@ pub struct AssetSyncReport {
     pub released: Vec<[u8; ASSET_DIGEST_LEN]>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AssetTransferStatus {
+    AlreadyPresent,
+    Uploaded,
+}
+
 /// A failure partway through a [`AssetSync::reconcile`] pass. `reconcile`
 /// stops at the first failure and does **not** send the closing
 /// `AssetRelease` -- an incomplete pass must not tell the device to mark
@@ -145,6 +151,11 @@ pub enum AssetSyncError {
     AssetTooLarge {
         digest: [u8; ASSET_DIGEST_LEN],
         length: usize,
+    },
+    #[error("volatile asset {digest:02x?} must be an image, got {kind:?}")]
+    VolatileKind {
+        digest: [u8; ASSET_DIGEST_LEN],
+        kind: AssetKind,
     },
     #[error("AssetBegin for {digest:02x?} failed: {source}")]
     Begin {
@@ -172,9 +183,113 @@ pub enum AssetSyncError {
     },
 }
 
+/// Compose the one device-wide `AssetRelease` keep-set without sending it.
+/// Runtime/executor ordering is Task 5; this pure helper pins the ownership
+/// rule now: every desired durable digest followed by the active volatile
+/// raster digest, deduplicated and bounded by the wire ceiling.
+pub fn compose_asset_keep_set(
+    durable: &[[u8; ASSET_DIGEST_LEN]],
+    active_volatile: Option<[u8; ASSET_DIGEST_LEN]>,
+) -> Result<Vec<[u8; ASSET_DIGEST_LEN]>, AssetSyncError> {
+    let mut keep = Vec::with_capacity(durable.len() + usize::from(active_volatile.is_some()));
+    for digest in durable.iter().copied().chain(active_volatile) {
+        if !keep.contains(&digest) {
+            keep.push(digest);
+        }
+    }
+    if keep.len() > MAX_ASSET_DIGESTS {
+        return Err(AssetSyncError::TooManyDesiredAssets {
+            desired: keep.len(),
+            maximum: MAX_ASSET_DIGESTS,
+        });
+    }
+    Ok(keep)
+}
+
 pub struct AssetSync;
 
 impl AssetSync {
+    fn transfer_one(
+        device: &mut dyn RuntimeDevice,
+        asset: &DesiredAsset,
+        volatile: bool,
+        on_chunk_sent: &mut dyn FnMut(),
+    ) -> Result<AssetTransferStatus, AssetSyncError> {
+        let total_length =
+            u32::try_from(asset.bytes.len()).map_err(|_| AssetSyncError::AssetTooLarge {
+                digest: asset.digest,
+                length: asset.bytes.len(),
+            })?;
+
+        let ack = device
+            .send_asset_begin(AssetBegin {
+                digest: asset.digest,
+                kind: asset.kind,
+                total_length,
+                volatile,
+            })
+            .map_err(|source| AssetSyncError::Begin {
+                digest: asset.digest,
+                source,
+            })?;
+        if ack.already_present == Some(true) {
+            return Ok(AssetTransferStatus::AlreadyPresent);
+        }
+
+        let mut offset: u32 = 0;
+        for chunk in asset.bytes.chunks(MAX_ASSET_CHUNK_BYTES) {
+            let chunk_len = u32::try_from(chunk.len())
+                .expect("Vec::chunks yields pieces bounded by MAX_ASSET_CHUNK_BYTES");
+            device
+                .send_asset_chunk(AssetChunk {
+                    digest: asset.digest,
+                    offset,
+                    data: chunk.to_vec(),
+                })
+                .map_err(|source| AssetSyncError::Chunk {
+                    digest: asset.digest,
+                    offset,
+                    source,
+                })?;
+            offset += chunk_len;
+            on_chunk_sent();
+        }
+
+        device
+            .send_asset_commit(AssetCommit {
+                digest: asset.digest,
+            })
+            .map_err(|source| AssetSyncError::Commit {
+                digest: asset.digest,
+                source,
+            })?;
+        Ok(AssetTransferStatus::Uploaded)
+    }
+
+    /// Upload one volatile raster without changing device inventory. The
+    /// caller must have negotiated `CAPABILITY_VOLATILE_ASSETS`; Task 5 owns
+    /// the later `PushScene` + composed keep-set ordering.
+    pub fn transfer_volatile(
+        device: &mut dyn RuntimeDevice,
+        asset: &DesiredAsset,
+    ) -> Result<AssetTransferStatus, AssetSyncError> {
+        Self::transfer_volatile_yielding(device, asset, &mut || {})
+    }
+
+    pub fn transfer_volatile_yielding(
+        device: &mut dyn RuntimeDevice,
+        asset: &DesiredAsset,
+        on_chunk_sent: &mut dyn FnMut(),
+    ) -> Result<AssetTransferStatus, AssetSyncError> {
+        if asset.kind != AssetKind::Image {
+            return Err(AssetSyncError::VolatileKind {
+                digest: asset.digest,
+                kind: asset.kind,
+            });
+        }
+        Self::transfer_one(device, asset, true, on_chunk_sent)
+    }
+
     /// Reconcile `device`'s asset store with `desired`: skip anything the
     /// device already has (by digest), upload and commit everything else,
     /// then tell the device the full desired set so it can drop anything
@@ -226,63 +341,10 @@ impl AssetSync {
         let mut uploaded = 0usize;
 
         for asset in desired {
-            let total_length =
-                u32::try_from(asset.bytes.len()).map_err(|_| AssetSyncError::AssetTooLarge {
-                    digest: asset.digest,
-                    length: asset.bytes.len(),
-                })?;
-
-            let ack = device
-                .send_asset_begin(AssetBegin {
-                    digest: asset.digest,
-                    kind: asset.kind,
-                    total_length,
-                    // Stage 1 has no volatile (PSRAM) tier -- the device
-                    // refuses `volatile: true` outright. That tier exists
-                    // for rasterized frames in a later stage.
-                    volatile: false,
-                })
-                .map_err(|source| AssetSyncError::Begin {
-                    digest: asset.digest,
-                    source,
-                })?;
-
-            // Content addressing IS the inventory protocol: `already_present`
-            // is the only signal we act on, and it means "send no chunks",
-            // full stop -- not "send fewer chunks".
-            if ack.already_present == Some(true) {
-                skipped += 1;
-                continue;
+            match Self::transfer_one(device, asset, false, on_chunk_sent)? {
+                AssetTransferStatus::AlreadyPresent => skipped += 1,
+                AssetTransferStatus::Uploaded => uploaded += 1,
             }
-
-            let mut offset: u32 = 0;
-            for chunk in asset.bytes.chunks(MAX_ASSET_CHUNK_BYTES) {
-                let chunk_len = u32::try_from(chunk.len())
-                    .expect("Vec::chunks yields pieces bounded by MAX_ASSET_CHUNK_BYTES");
-                device
-                    .send_asset_chunk(AssetChunk {
-                        digest: asset.digest,
-                        offset,
-                        data: chunk.to_vec(),
-                    })
-                    .map_err(|source| AssetSyncError::Chunk {
-                        digest: asset.digest,
-                        offset,
-                        source,
-                    })?;
-                offset += chunk_len;
-                on_chunk_sent();
-            }
-
-            device
-                .send_asset_commit(AssetCommit {
-                    digest: asset.digest,
-                })
-                .map_err(|source| AssetSyncError::Commit {
-                    digest: asset.digest,
-                    source,
-                })?;
-            uploaded += 1;
         }
 
         let released: Vec<[u8; ASSET_DIGEST_LEN]> =
@@ -346,6 +408,7 @@ mod tests {
         fail_after_chunks: Option<u32>,
         committed: std::collections::HashSet<[u8; ASSET_DIGEST_LEN]>,
         last_release: Option<Vec<[u8; ASSET_DIGEST_LEN]>>,
+        begins: Vec<AssetBegin>,
     }
 
     impl FakeDevice {
@@ -388,6 +451,10 @@ mod tests {
 
         fn last_release(&self) -> Option<Vec<[u8; ASSET_DIGEST_LEN]>> {
             self.last_release.clone()
+        }
+
+        fn begins(&self) -> &[AssetBegin] {
+            &self.begins
         }
     }
 
@@ -440,6 +507,7 @@ mod tests {
             // wire-level resume, so a real device's per-transfer progress
             // resets here too.
             self.current_transfer_chunks = 0;
+            self.begins.push(begin);
             Ok(Ack {
                 acknowledged_type: TYPE_ASSET_BEGIN,
                 revision: None,
@@ -569,6 +637,93 @@ mod tests {
 
         assert!(matches!(error, AssetSyncError::TooManyDesiredAssets { .. }));
         assert!(device.last_release().is_none());
+    }
+
+    #[test]
+    fn transfer_volatile_sets_the_tier_and_does_not_release_inventory() {
+        let mut device = FakeDevice::new();
+        let mut frame = asset_blob([0xf1; ASSET_DIGEST_LEN], 4096);
+        frame.kind = AssetKind::Image;
+
+        let status = AssetSync::transfer_volatile(&mut device, &frame).expect("volatile transfer");
+
+        assert_eq!(status, AssetTransferStatus::Uploaded);
+        assert_eq!(device.begins().len(), 1);
+        assert!(device.begins()[0].volatile);
+        assert!(device.committed.contains(&frame.digest));
+        assert!(device.last_release().is_none());
+    }
+
+    #[test]
+    fn transfer_volatile_honors_content_addressed_already_present() {
+        let digest = [0xf2; ASSET_DIGEST_LEN];
+        let mut device = FakeDevice::new().with_already_present(digest);
+        let mut frame = asset_blob(digest, 4096);
+        frame.kind = AssetKind::Image;
+
+        let status = AssetSync::transfer_volatile(&mut device, &frame)
+            .expect("already-present volatile transfer");
+
+        assert_eq!(status, AssetTransferStatus::AlreadyPresent);
+        assert_eq!(device.chunks_sent_for(&digest), 0);
+        assert!(device.last_release().is_none());
+    }
+
+    #[test]
+    fn transfer_volatile_refuses_a_non_image_asset_before_io() {
+        let mut device = FakeDevice::new();
+        let font = asset_blob([0xf3; ASSET_DIGEST_LEN], 4096);
+
+        assert!(matches!(
+            AssetSync::transfer_volatile(&mut device, &font),
+            Err(AssetSyncError::VolatileKind { .. })
+        ));
+        assert!(device.begins().is_empty());
+    }
+
+    #[test]
+    fn compose_asset_keep_set_covers_empty_durable_raster_and_union_cases() {
+        let durable_a = [0xa1; ASSET_DIGEST_LEN];
+        let durable_b = [0xa2; ASSET_DIGEST_LEN];
+        let raster = [0xb1; ASSET_DIGEST_LEN];
+
+        assert_eq!(
+            compose_asset_keep_set(&[], None).unwrap(),
+            Vec::<[u8; ASSET_DIGEST_LEN]>::new()
+        );
+        assert_eq!(
+            compose_asset_keep_set(&[durable_a, durable_b], None).unwrap(),
+            vec![durable_a, durable_b]
+        );
+        assert_eq!(
+            compose_asset_keep_set(&[], Some(raster)).unwrap(),
+            vec![raster]
+        );
+        assert_eq!(
+            compose_asset_keep_set(&[durable_a, durable_b], Some(raster)).unwrap(),
+            vec![durable_a, durable_b, raster]
+        );
+    }
+
+    #[test]
+    fn compose_asset_keep_set_deduplicates_and_enforces_the_wire_ceiling() {
+        let same = [0xc1; ASSET_DIGEST_LEN];
+        assert_eq!(
+            compose_asset_keep_set(&[same], Some(same)).unwrap(),
+            vec![same]
+        );
+
+        let durable: Vec<[u8; ASSET_DIGEST_LEN]> = (0..MAX_ASSET_DIGESTS)
+            .map(|index| {
+                let mut digest = [0u8; ASSET_DIGEST_LEN];
+                digest[0] = u8::try_from(index).unwrap();
+                digest
+            })
+            .collect();
+        assert!(matches!(
+            compose_asset_keep_set(&durable, Some([0xff; ASSET_DIGEST_LEN])),
+            Err(AssetSyncError::TooManyDesiredAssets { .. })
+        ));
     }
 
     #[test]

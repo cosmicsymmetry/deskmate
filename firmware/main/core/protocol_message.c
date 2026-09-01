@@ -88,6 +88,17 @@ protocol_request_gate_t protocol_message_request_gate(
     return PROTOCOL_REQUEST_DISPATCHABLE;
 }
 
+protocol_request_gate_t protocol_asset_begin_request_gate(
+    const protocol_asset_begin_t *begin,
+    uint64_t capabilities)
+{
+    if (begin != NULL && begin->volatile_tier &&
+        (capabilities & PROTOCOL_CAPABILITY_VOLATILE_ASSETS) == 0U) {
+        return PROTOCOL_REQUEST_MISSING_CAPABILITY;
+    }
+    return PROTOCOL_REQUEST_DISPATCHABLE;
+}
+
 static protocol_message_result_t open_payload_map(
     const uint8_t *payload,
     size_t payload_length,

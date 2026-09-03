@@ -1930,6 +1930,28 @@ pub fn plugin_scene_cases() -> Vec<(String, SceneRenderRequest)> {
     cases
 }
 
+/// The claude-limits curated plugin (the Deskmate twin of the TRMNL
+/// "Claude - Usage" panel), golden-only: deliberately NOT part of
+/// [`plugin_scene_cases`], whose 16-row count is a historical invariant and
+/// whose rows exist to cover plugin MACHINERY on hardware -- this card adds
+/// content, not machinery, so it gets simulator goldens without growing the
+/// hardware matrix. The fixture is the live feed's real payload, captured
+/// 2026-09-02 from the docker-vm producer.
+pub fn claude_limits_scene_cases() -> Vec<(String, SceneRenderRequest)> {
+    let mut cases = Vec::new();
+    let no_fields: &[(&str, &str)] = &[];
+    plugin_case(
+        &mut cases,
+        "claude-limits",
+        serde_json::from_str(CLAUDE_LIMITS_FIXTURE).expect("fixture is valid JSON"),
+        [no_fields, no_fields, no_fields, no_fields],
+    );
+    cases
+}
+
+const CLAUDE_LIMITS_FIXTURE: &str =
+    include_str!("../../plugin/tests/fixtures/claude_limits_response.json");
+
 // ---------------------------------------------------------------------------
 // Stage 4 Task 6: producer-to-pixel and real date-overflow evidence.
 //

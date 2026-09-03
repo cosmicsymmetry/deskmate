@@ -1,0 +1,156 @@
+# claude-limits -- Claude Code subscription limits, the Deskmate twin of the
+# TRMNL "Claude - Usage" panel (~/TRMNL, design 2026-07-08-claude-usage-design.md).
+# Same producer, zero new credentials: CodexBar.app on the Mac does the OAuth
+# fetch and persists history; Syncthing ships it to docker-vm; the existing
+# trmnl-claude-sync timer reduces it to a small JSON payload every ~10 minutes,
+# which is additionally published read-only under a capability path on
+# deskmate.rodi.one for this manifest's [source] to fetch. The egress guard's
+# frozen allowlist (globally-routable unicast only) is WHY the URL is the
+# public hostname rather than the VM-local file that sits a directory away:
+# a plugin source must be a public URL by design, so the feed goes out through
+# Cloudflare and comes back, and any other consumer could read the same URL.
+#
+# Payload contract (produced by ~/TRMNL/claude_usage_sync.py, fixture captured
+# from the live feed): { updated, plan, windows: [ { name, used_pct,
+# resets_at_label, resets_in_label } ] } with windows sorted shortest-first
+# (Session 300m, then Weekly 10080m). The tiles label themselves from
+# windows[].name rather than hardcoding "SESSION"/"WEEKLY", so a reordering
+# or a third window upstream degrades to wrong-position, never wrong-label.
+# resets_at_label is a fixed instant ("Wed 6:09 PM"), chosen over
+# resets_in_label ("3 hours 48 minutes") because an "in N minutes" string is
+# stale the minute after the ~10-minute producer wrote it, while an "at" label
+# is never wrong -- the same reasoning recorded in the TRMNL design.
+name = "claude-limits"
+version = "1.0.0"
+
+[source]
+kind = "json"
+url = "https://deskmate.rodi.one/feeds/119fa3cca44bf0b9bb8c33f6/claude-usage.json"
+refresh_minutes = 10
+
+# Thin divider between the two window tiles.
+[[nodes]]
+kind = "rect"
+x = 223
+y = 96
+w = 2
+h = 176
+radius = 0
+fill = 0x25252B
+
+# Left tile: the shortest window (Session, 5 h).
+[[nodes]]
+kind = "text"
+x = 24
+baseline_y = 56
+w = 188
+align = "left"
+font = { tier = "caption" }
+color = 0x5C5C66
+value = "{{ upper(data.windows[0].name) }}"
+
+[[nodes]]
+kind = "text"
+x = 24
+baseline_y = 200
+w = 188
+align = "center"
+font = { tier = "display" }
+color = 0xF5F5F7
+value = "{{ default(round(data.windows[0].used_pct, 0), \"--\") }}"
+
+[[nodes]]
+kind = "text"
+x = 24
+baseline_y = 232
+w = 188
+align = "center"
+font = { tier = "caption" }
+color = 0x5C5C66
+value = "% USED"
+
+[[nodes]]
+kind = "text"
+x = 24
+baseline_y = 264
+w = 188
+align = "center"
+font = { tier = "caption" }
+color = 0x5C5C66
+value = "RESETS"
+
+[[nodes]]
+kind = "text"
+x = 24
+baseline_y = 292
+w = 188
+align = "center"
+font = { tier = "caption" }
+color = 0xF5F5F7
+value = "{{ data.windows[0].resets_at_label }}"
+
+# Right tile: the next window (Weekly, 7 d).
+[[nodes]]
+kind = "text"
+x = 236
+baseline_y = 56
+w = 188
+align = "left"
+font = { tier = "caption" }
+color = 0x5C5C66
+value = "{{ upper(data.windows[1].name) }}"
+
+[[nodes]]
+kind = "text"
+x = 236
+baseline_y = 200
+w = 188
+align = "center"
+font = { tier = "display" }
+color = 0xF5F5F7
+value = "{{ default(round(data.windows[1].used_pct, 0), \"--\") }}"
+
+[[nodes]]
+kind = "text"
+x = 236
+baseline_y = 232
+w = 188
+align = "center"
+font = { tier = "caption" }
+color = 0x5C5C66
+value = "% USED"
+
+[[nodes]]
+kind = "text"
+x = 236
+baseline_y = 264
+w = 188
+align = "center"
+font = { tier = "caption" }
+color = 0x5C5C66
+value = "RESETS"
+
+[[nodes]]
+kind = "text"
+x = 236
+baseline_y = 292
+w = 188
+align = "center"
+font = { tier = "caption" }
+color = 0xF5F5F7
+value = "{{ data.windows[1].resets_at_label }}"
+
+# Plan badge, centred above the shared footer zone. baseline_y = 320 is the
+# deepest a caption row can sit without touching the stale/error footer's
+# box (y=330..352) -- the arithmetic is worked out in the aqi manifest's
+# field.title comment and holds here unchanged. The Claude accent orange is
+# the one non-monochrome ink on the face, matching the aqi hero's accent.
+[[nodes]]
+kind = "text"
+x = 24
+baseline_y = 320
+w = 400
+align = "center"
+font = { tier = "caption" }
+color = 0xFF8F2E
+value = "{{ data.plan }}"

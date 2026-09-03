@@ -796,6 +796,25 @@ of letting code and documentation diverge.
     floor observed on real timestamps, the refuse-rule on the panel/editor, both
     orientations, the 20-frame PSRAM/flash-flatness run, and Task 6 Step 5's
     framebuffer-vs-payload byte comparison.
+- **A third curated plugin exists: `claude-limits`** (2026-09-03), the Deskmate twin of
+  the owner's TRMNL "Claude - Usage" panel — Session/Weekly subscription usage as two
+  complication tiles. Its data path reuses the TRMNL pipeline end to end with zero new
+  credentials: CodexBar.app on the Mac does the OAuth fetch, Syncthing ships the history
+  to docker-vm, the existing `trmnl-claude-sync` timer (script in
+  `~/TRMNL/deploy/docker-vm/claude_usage_sync.sh`, now also writing
+  `/opt/deskmate-feeds/<token>/claude-usage.json` atomically) produces the payload every
+  ~10 min, and Caddy serves `/opt/deskmate-feeds` read-only under
+  `deskmate.rodi.one/feeds/<capability-token>/` — public because the egress guard's
+  frozen allowlist forbids private addresses, so the server fetches its own feed back
+  through Cloudflare. The manifest is v1 (no envelope, no assets, no live bindings — it
+  negotiates Native). **Golden-only by design**: `claude_limits_scene_cases()` is
+  deliberately NOT part of `plugin_scene_cases()` (whose 16-row count is a historical
+  invariant) and does not join the hardware framebuffer matrix, which stays 96/8/88 —
+  the card is content, not machinery. Deployed live: registry loads
+  `[agenda, aqi, claude-limits]` with no failures, and `dev-0005`'s config carries the
+  card in its library and active playlist (generation 1, no warning); it renders when
+  the board next connects. The TRMNL repo's deployed and Mac copies of the sync script
+  were both updated; committing that repo is the owner's call.
 - The webcam verification harness (`tools/hwcam/`, usage in
   `docs/hardware/webcam-harness.md`, spec
   `docs/superpowers/specs/2026-08-15-deskmate-webcam-harness-design.md`) was

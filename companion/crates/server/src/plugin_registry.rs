@@ -454,11 +454,11 @@ mod tests {
             PluginRegistry::load(&curated_plugins_dir()).expect("load curated plugins");
 
         assert!(failures.is_empty(), "unexpected failures: {failures:?}");
-        assert_eq!(registry.len(), 3);
+        assert_eq!(registry.len(), 4);
         assert!(!registry.is_empty());
         assert_eq!(
             registry.ids().collect::<Vec<_>>(),
-            ["agenda", "aqi", "svg-aqi"]
+            ["agenda", "aqi", "claude-limits", "svg-aqi"]
         );
         assert!(
             registry

@@ -2,19 +2,15 @@
 
 Spec: `docs/superpowers/specs/2026-08-03-deskmate-design.md`
 
-**Current:** V2 is implemented on branch `feat/v2-networked-device` (plan `docs/superpowers/plans/2026-08-18-deskmate-v2-networked-device.md`, design `docs/superpowers/specs/2026-08-18-deskmate-v2-networked-device-design.md`) and the server is deployed and live at `deskmate.rodi.one`; its exit gate is open but not blocked. Work since has been the scene-rendering stages in the table below. M0, M1, M2, and M3 are complete. M4 delivered Tasks 1-4 (contract
-freeze, bounded providers, the card model, extended templates, timed rotation and
-alerts), then was superseded on 2026-08-11 by an explicit user-directed reset:
-`docs/superpowers/specs/2026-08-11-deskmate-v1-reset-design.md`. That spec re-cuts
-the remaining work into four stages — **V1 Local Deskmate** (active: partition
-table, baked typeface, pixel-exact LVGL preview harness, built-in widget redesign,
-playlist authoring model), **V2 Networked device** (WiFi/provisioning/pairing/OTA),
-**V3 Server host**, and **V4 Plugin platform** (server-rendered HTML plugins as the
-paid tier). M4's undelivered tasks are redistributed, not lost — see the spec's §7
-disposition table. M0/M1 are tagged `m0`/`m1`; later milestones are untagged because
-tags require explicit authorization. Because M2 implementation began in the same
-shared worktree before M1's final physical carryover closed, the `m1` checkpoint
-also contains the M2 foundation present at that point.
+**Current:** V1's exit items are closed; declaration and tag still require explicit
+owner authorization. V2 is implemented on `feat/v2-networked-device`, with only the
+shipping-build widening-backoff observation and tap-latency observation owed. Scene
+stages 2a and 2b are delivered. Stages 3a, 3b, and 4 are software-delivered with the
+hardware gates named in the table still open: 3a's template-removal OTA observation,
+3b's asset-GC teardown, and stage 4's hardware session and payload/framebuffer check.
+Stage 5 remains a risk review only; implementation awaits review completion and explicit
+owner approval. M0/M1 are tagged `m0`/`m1`; later milestones remain untagged without
+that authorization.
 
 One plan per milestone; each milestone ends with working, demonstrable
 software. Ordering rationale: retire hardware risk first (from-scratch

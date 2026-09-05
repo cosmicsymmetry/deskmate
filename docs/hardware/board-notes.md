@@ -1389,6 +1389,18 @@ observed on hardware. What was verified, all on host tooling:
 - `idf.py -C firmware build` (plain release build) and
   `idf.py -C firmware -DDESKMATE_DEV_DIAG=1 build` (dev-diag build, separate build
   directory) both compile clean.
+- To keep the generated diagnostic configuration disposable and isolated from a release
+  build, create it inside its own build directory:
+
+  ```sh
+  idf.py -C firmware -B firmware/build-diag \
+    -DSDKCONFIG=build-diag/sdkconfig \
+    -DSDKCONFIG_DEFAULTS='sdkconfig.defaults;sdkconfig.diag' \
+    -DDESKMATE_DEV_DIAG=1 build
+  ```
+
+  `sdkconfig.diag` routes diagnostic logs onto the protocol pipe. Active logging can
+  corrupt COBS frames; this build must never ship and cannot supply acceptance evidence.
 - The plain build's `.elf` contains neither the `dev_capture_handle_request` symbol
   (`nm` found no match) nor the `"dev_capture"` log-tag string (`strings` found no
   match), against a control check (`nm`/`strings` on the same `.elf` confirmed the
@@ -2300,7 +2312,8 @@ and it cannot — they are DMA by definition.
 `install_update()` suspends the WebSocket for the duration of the download and resumes
 it on every failure path (`0ad1a51`). Owner chose this over raising the internal
 reserve (which would take RAM from the pool behind two previous incidents) or
-disabling hardware AES (which would slow every TLS operation).
+disabling hardware AES with `CONFIG_MBEDTLS_HARDWARE_AES=n` (which would slow every TLS
+operation).
 
 Two implementation notes that matter:
 

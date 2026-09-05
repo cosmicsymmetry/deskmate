@@ -49,10 +49,11 @@ without connecting a console.
 
 Three facts a neighbouring "smart display companion" could not truthfully copy:
 
-1. **The preview is not a mock.** `render_card_preview` runs the *device's own*
-   templates and returns exact-pixel PNG frames; a framebuffer diff harness proves
-   the simulator and the firmware agree pixel for pixel. What the app shows is what
-   the panel will show.
+1. **The preview is not a mock.** `render_card_preview` sends host-built scenes through
+   the firmware/LVGL renderer and returns exact-pixel PNG frames; the retired C
+   templates survive only in `lvgl-sim` as the reference oracle, not as templates
+   shipped on the device. A framebuffer diff harness proves the simulator and firmware
+   agree pixel for pixel. What the app shows is what the panel will show.
 2. **Ownership is a single implementation with two tiers.** In `local` tier the Mac
    owns the device over USB; in `networked` tier a single-tenant server owns it
    through the same `RuntimeDevice` seam and the app becomes a configurator. Where
@@ -78,36 +79,39 @@ Three facts a neighbouring "smart display companion" could not truthfully copy:
 
 ## Capabilities and Constraints
 
-**Objects.** Cards (library, max 8) of six kinds: `clock`, `pomodoro`, `calendar`,
-`weather`, `json-feed`, `rss`. Playlists (max 8, max 8 entries each), exactly one
-active. Entries carry an optional per-entry dwell that inherits the playlist default.
-Advance is `manual` or `timed`. Alerts exist on `pomodoro` (on timer finish) and
-`calendar` (before event) only, each with a hold that is host-side bookkeeping and
-never clears the panel.
+**Objects.** The app edits six built-in card kinds (library, max 8): `clock`,
+`pomodoro`, `calendar`, `weather`, `json-feed`, and `rss`. Schema v6 also carries
+server-side `plugin` cards, but the Tauri TypeScript union, hostless runtime, editor,
+and preview UI do not support them; the runtime refuses plugin rendering explicitly.
+Playlists (max 8, max 8 entries each) have exactly one active. Entries carry an
+optional per-entry dwell that inherits the playlist default. Advance is `manual` or
+`timed`. Alerts exist on `pomodoro` (on timer finish) and `calendar` (before event)
+only, each with a hold that is host-side bookkeeping and never clears the panel.
 
-**Surfaces in the current app.** Device header with connection state and a pause
-toggle; up to four recovery banners; a first-run checklist; a network/ownership
-panel; the card library; the playlist editor; the per-card editor; the device
-preview; the loop ribbon (segment width ∝ dwell, with a playhead); provider health;
-app preferences (timezone, mounting orientation, start-at-login); a sticky save bar.
+**Surfaces in the current app.** A `TopBar` wordmark and Settings button;
+`SettingsSheet` as the sole disclosure for device ownership, pairing, link/WiFi/IP/
+update state, timezone, mounting orientation, and start-at-login; first-run and error
+notices; the card library; the playlist and per-card editors; `DevicePreview`;
+`LoopRing` (arc ∝ dwell, with a playhead); card-local stale/provider recovery; and save
+controls in both the work column and settings sheet.
 
 **Hard constraints that outlive any visual direction.**
-- Config schema is **v4** and frozen (`docs/config/v4.md`); wire protocol is **v1**.
+- Config schema is **v6** and frozen (`docs/config/v6.md`); wire protocol is **v1**.
   A redesign of this app must not require a schema or wire change.
 - Canvas is a single clean 448×368 landscape. Orientation is `landscape` or
   `landscape-flipped` only — no portrait, and orientation is owned by this settings
   app, never by a device gesture.
-- Clock faces carry no title chip and no eyebrow on the device. `title` is still a
-  schema field the app owns as the card's **name in the library** ("Name" for clocks,
-  "Heading" elsewhere).
+- Clock faces carry no title chip and no eyebrow on the device. User-visible card
+  identity is card-kind-first (`cardLabel()` returns `cardKindName()`); the owner's
+  `title` is a quiet second line that distinguishes cards of the same kind.
 - Tauri CSP blocks every external host. All fonts, images, and scripts must be local.
 - Secrets (WiFi passphrase, device token, admin token) are **write-only**: accepted
   by IPC, absent from every snapshot and response, and never displayed back.
 - Save is blocked when ownership tier is unknown, when validation fails, or while a
   save is in flight — and the reason must always be legible.
-- Undecided: whether the app ever gains a firmware-update UI beyond the read-only
-  `ota_state` field. An OTA failure currently carries **no reason on the wire**, so
-  the app cannot explain a failed update. Do not invent one.
+- Undecided: whether the app ever gains a firmware-update UI beyond read-only status.
+  Protocol-v1 `last_ota_error` exists on the wire and the server exposes it, but the
+  app does not yet present it as an OTA-failure explanation.
 
 ## Brand Commitments
 
@@ -130,7 +134,8 @@ exclaims, and never blames the user.
   `configDraft.test.ts`, run under Bun.
 - A live deployed server at `deskmate.rodi.one`, and physical hardware on the desk.
 - **Absent, and must not be fabricated:** users other than the author, testimonials,
-  install counts, pricing, any App Store presence, and any OTA failure reason.
+  install counts, pricing, any App Store presence, and an app UI explanation of
+  `last_ota_error`.
 
 ## Product Principles
 

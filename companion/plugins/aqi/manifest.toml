@@ -107,11 +107,10 @@ value = "PM2.5"
 
 # `field.*`: a device-side binding to whatever `PushData` carries for this
 # card's `title` field, independent of this compiled scene -- unlike every
-# other node above, this text can change without a scene recompile. No
-# production path pushes it yet (Task 8's own report says so), so on a real
-# device this renders the "--" placeholder until something does; this
-# manifest exists to give the binding a real author and real pixel coverage,
-# not to claim it is live end to end today.
+# other node above, this text can change without a scene recompile.
+# ServerProviderRefresher emits the real card title in production; the
+# simulator golden and framebuffer-diff fixtures inject their own deterministic
+# title independently so their pixels do not depend on the refresher.
 #
 # baseline_y = 320, not 336: the shared error footer
 # (`app_core::scene_build::push_state_footer`) draws its own caption-tier

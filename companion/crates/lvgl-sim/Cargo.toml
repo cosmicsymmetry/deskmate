@@ -9,10 +9,6 @@ rust-version.workspace = true
 app-core = { path = "../app-core" }
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 png = "0.17"
-# Task 5 (stage 3b): asset_shim.rs builds its digest -> bytes index
-# directly from plugin::AssetSet (Task 4's resolved plugin assets), so
-# there is exactly one place that reads a plugin asset's bytes off disk
-# and hashes them, not a second copy in this crate.
 plugin = { path = "../plugin" }
 # Task 8 (plugin-manifest stage): the curated plugins' golden cases compile
 # the real `companion/plugins/{aqi,agenda}/manifest.toml` against a real
@@ -33,10 +29,6 @@ protocol = { path = "../protocol" }
 # which registers assets under the written-down digest constant, never a
 # hash computed at render time.
 sha2 = "0.10"
-# Task 5: asset_shim.rs's own tests write plugin asset fixtures to a real
-# temp directory, matching plugin::assets's own precedent, rather than
-# faking a filesystem.
-tempfile = "3"
 
 [build-dependencies]
 cc = "1"

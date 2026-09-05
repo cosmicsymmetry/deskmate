@@ -54,10 +54,10 @@ use std::time::Duration;
 
 use device::framebuffer_capture::capture_framebuffer;
 use device::{DeviceClient, Transport, connect};
-use lvgl_sim::scene::{SceneAsset, SceneRenderRequest, SceneTimer};
+use lvgl_sim::scene::{SceneRenderRequest, SceneTimer};
 use lvgl_sim::{SimOrientation, Simulator, cases};
 use protocol::{
-    ActivateScreen, ApplyConfig, AssetBegin, AssetChunk, AssetCommit, AssetKind, Field, FieldValue,
+    ActivateScreen, ApplyConfig, AssetBegin, AssetChunk, AssetCommit, Field, FieldValue,
     InterruptPolicy, MAX_ASSET_CHUNK_BYTES, Message, PushData, PushScene, ScreenConfig, SizeClass,
     TYPE_ACTIVATE_SCREEN, TYPE_APPLY_CONFIG, TYPE_ASSET_BEGIN, TYPE_ASSET_CHUNK, TYPE_ASSET_COMMIT,
     TYPE_PUSH_SCENE, TapAction, TemplateKind, TimeSync, WidgetConfig,
@@ -320,54 +320,6 @@ fn push_case_fields(
     Ok(())
 }
 
-/// Rebuilds the raw wire bytes one [`SceneAsset`] resolves to, and the
-/// [`AssetKind`] to declare it under.
-///
-/// `SceneAsset::Font`'s `bytes` are already the exact TTF file content --
-/// see `lvgl_sim::cases::compile_plugin_scene`'s doc for why this harness
-/// always uses `AssetKind::Font` here even for a manifest asset declared
-/// `kind = "icon-font"`: `firmware/main/core/asset_store.c`'s
-/// `asset_kind_is_valid` accepts either for a font-shaped blob, and the
-/// simulator's own `SceneAsset` enum has no separate icon-font variant to
-/// preserve the distinction through in the first place.
-///
-/// `SceneAsset::Image`'s `width`/`height`/`pixels` are the *decoded* form
-/// `lvgl_sim::cases::decode_rgb565_asset` produced from the plugin's
-/// committed `.rgb565` file; this is that decode's exact inverse, so the
-/// re-encoded bytes are byte-identical to the committed file
-/// `plugin::resolve_assets` hashed to get `digest` in the first place.
-fn asset_wire_bytes(asset: &SceneAsset) -> (Vec<u8>, AssetKind) {
-    match asset {
-        SceneAsset::Font { bytes, .. } => ((*bytes).to_vec(), AssetKind::Font),
-        SceneAsset::Image {
-            width,
-            height,
-            pixels,
-            ..
-        } => {
-            // `lv_image_header_t`: magic(8) | cf(8) | flags(16), then
-            // w(16) | h(16), then stride(16) | reserved_2(16), all
-            // little-endian -- see `companion/plugins/agenda/manifest.toml`'s
-            // doc comment and `sim_build_rgb565_image`
-            // (`crates/lvgl-sim/csrc/sim_shim.c`) for the same layout.
-            const MAGIC: u32 = 0x19;
-            const COLOR_FORMAT_RGB565: u32 = 0x12;
-            let stride = width * 2;
-            let word0 = MAGIC | (COLOR_FORMAT_RGB565 << 8);
-            let word1 = (width & 0xFFFF) | ((height & 0xFFFF) << 16);
-            let word2 = stride & 0xFFFF;
-            let mut bytes = Vec::with_capacity(12 + pixels.len() * 2);
-            bytes.extend_from_slice(&word0.to_le_bytes());
-            bytes.extend_from_slice(&word1.to_le_bytes());
-            bytes.extend_from_slice(&word2.to_le_bytes());
-            for pixel in pixels {
-                bytes.extend_from_slice(&pixel.to_le_bytes());
-            }
-            (bytes, AssetKind::Image)
-        }
-    }
-}
-
 /// Provisions every asset `request.scene` names, over the real
 /// `AssetBegin`/`AssetChunk`/`AssetCommit` wire path -- Task 8
 /// (plugin-manifest stage)'s first exercise of the device's asset-transfer
@@ -380,21 +332,18 @@ fn push_case_assets(
     request: &SceneRenderRequest,
 ) -> Result<(), String> {
     for asset in &request.assets {
-        let digest = match asset {
-            SceneAsset::Font { digest, .. } | SceneAsset::Image { digest, .. } => *digest,
-        };
-        let (bytes, kind) = asset_wire_bytes(asset);
-        let total_length = u32::try_from(bytes.len()).map_err(|_| {
+        let digest = asset.digest;
+        let total_length = u32::try_from(asset.bytes.len()).map_err(|_| {
             format!(
                 "asset {digest:02x?} is {} bytes, over the wire's u32 length limit",
-                bytes.len()
+                asset.bytes.len()
             )
         })?;
 
         let ack = match client
             .request(&Message::AssetBegin(AssetBegin {
                 digest,
-                kind,
+                kind: asset.kind,
                 total_length,
                 // Stage 1 has no volatile (PSRAM) tier; the device refuses
                 // `volatile: true` outright (see `server::asset_sync`'s
@@ -413,7 +362,7 @@ fn push_case_assets(
         }
 
         let mut offset: u32 = 0;
-        for chunk in bytes.chunks(MAX_ASSET_CHUNK_BYTES) {
+        for chunk in asset.bytes.chunks(MAX_ASSET_CHUNK_BYTES) {
             match client
                 .request(&Message::AssetChunk(AssetChunk {
                     digest,

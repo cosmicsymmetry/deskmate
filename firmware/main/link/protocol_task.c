@@ -1334,10 +1334,7 @@ static void dispatch_asset_release(protocol_context_t *context,
     // was already active and clock_screen_show_in_lvgl() early-returns.
     //
     // The rebuild runs on EVERY exit path after the teardown, including the
-    // refusal and each store failure. The other holder of a face is the
-    // DESKMATE_DEV_DIAG asset probe (link/dev_capture.c), which this task
-    // cannot tear down; a release arriving while a probe render is up is
-    // still correctly deferred.
+    // refusal and each store failure.
     //
     // WHAT DECIDES that a scene is up is scene_view_screen(), the renderer's
     // own state, and NOT context->scene_live. The two are allowed to
@@ -1449,23 +1446,6 @@ static void dispatch_request(protocol_context_t *context,
             return;
         }
         dev_capture_handle_request(frame->request_id);
-        return;
-    }
-    // Dev-only asset font render probe (Task 13): 0x7D sits in the same
-    // dev-only range as 0x7E/0x7F, intercepted here for the same reason --
-    // the release message tables in core/protocol_message.c never learn
-    // about it. Payload is exactly the ASSET_DIGEST_BYTES digest of a font
-    // already committed via AssetBegin/AssetChunk/AssetCommit.
-    if (frame->message_type == DEV_ASSET_PROBE_REQUEST_TYPE) {
-        if (frame->version != PROTOCOL_VERSION ||
-            frame->payload_length != ASSET_DIGEST_BYTES) {
-            increment_saturating(&context->malformed_frames);
-            transmit_error(context, frame->request_id,
-                           PROTOCOL_ERROR_INVALID_PAYLOAD,
-                           "invalid asset probe request");
-            return;
-        }
-        dev_capture_handle_asset_probe(frame->payload);
         return;
     }
 #endif

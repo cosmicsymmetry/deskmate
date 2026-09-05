@@ -16,17 +16,9 @@ use std::time::{Duration, Instant};
 /// physical framebuffer harness. See `cases.rs` for their distinct roles.
 pub mod cases;
 
-/// Task 12: the runtime font asset used by the asset-store parity golden,
-/// and the `Simulator::render_asset_font_png` FFI wrapper for it. See its
-/// module doc for why the vendored TTF is patched before being subset.
+/// The runtime font asset used by the 72px asset-backed SceneText golden.
+/// See its module doc for why the vendored TTF is patched before being subset.
 pub mod assets;
-
-/// Task 5 (stage 3b): the simulator's half of §6's parity obligation --
-/// resolving a plugin asset's digest to the same bytes a server-side
-/// transfer path would push, sourced from `plugin::AssetSet` rather than a
-/// second copy. See its module doc for why an unknown digest is a named
-/// error rather than a silent fallback to a baked face.
-pub mod asset_shim;
 
 /// Task 8: rendering a declarative scene through the firmware's own decoder
 /// and `ui/scene_view.c` interpreter, the device-side half of the plugin
@@ -47,6 +39,20 @@ pub enum SimTemplate {
     AnalogClock,
     BigNumberLabel,
     IconBadgeText,
+}
+
+impl SimTemplate {
+    /// The corresponding `protocol_template_kind_t` value used by the C ABI.
+    fn wire_kind(self) -> i32 {
+        match self {
+            Self::DigitalClock => 1,
+            Self::ProgressRing => 2,
+            Self::RowList => 3,
+            Self::AnalogClock => 4,
+            Self::BigNumberLabel => 5,
+            Self::IconBadgeText => 6,
+        }
+    }
 }
 
 /// A field value pinned for one render. Kind mirrors `protocol_field_type_t`.
@@ -259,50 +265,9 @@ impl Simulator {
     /// Renders one template with the given fields at a pinned instant.
     /// Returns 448*368 RGB565 pixels in logical landscape orientation.
     pub fn render(&mut self, request: &RenderRequest) -> Result<Vec<u16>, SimError> {
-        let template_kind = match request.template {
-            SimTemplate::DigitalClock => 1,
-            SimTemplate::ProgressRing => 2,
-            SimTemplate::RowList => 3,
-            SimTemplate::AnalogClock => 4,
-            SimTemplate::BigNumberLabel => 5,
-            SimTemplate::IconBadgeText => 6,
-        };
-
         // Keep CStrings alive across the call: `RawField` below only holds
         // pointers into them.
-        let names: Vec<CString> = request
-            .fields
-            .iter()
-            .map(|field| truncated_cstring(field.name.as_str()))
-            .collect();
-        let texts: Vec<CString> = request
-            .fields
-            .iter()
-            .map(|field| match &field.value {
-                SimFieldValue::Text(text) => truncated_cstring(text.as_str()),
-                SimFieldValue::Integer(_) | SimFieldValue::Boolean(_) => CString::default(),
-            })
-            .collect();
-        let raw: Vec<RawField> = request
-            .fields
-            .iter()
-            .zip(names.iter())
-            .zip(texts.iter())
-            .map(|((field, name), text)| {
-                let (kind, integer, boolean) = match &field.value {
-                    SimFieldValue::Text(_) => (0, 0, false),
-                    SimFieldValue::Integer(value) => (1, *value, false),
-                    SimFieldValue::Boolean(value) => (2, 0, *value),
-                };
-                RawField {
-                    name: name.as_ptr(),
-                    kind,
-                    text: text.as_ptr(),
-                    integer,
-                    boolean,
-                }
-            })
-            .collect();
+        let (_names, _texts, raw) = scene::prepare_template_fields(request);
 
         let mut pixels = vec![0_u16; (LOGICAL_WIDTH * LOGICAL_HEIGHT) as usize];
         // SAFETY: `raw` and the `CString`s backing its pointers are alive for
@@ -311,7 +276,7 @@ impl Simulator {
         // `sim_render` writes (SIM_WIDTH * SIM_HEIGHT in the shim).
         let ok = unsafe {
             sim_render(
-                template_kind,
+                request.template.wire_kind(),
                 raw.as_ptr(),
                 raw.len(),
                 request.utc_offset_minutes,
@@ -336,10 +301,16 @@ impl Simulator {
 }
 
 /// Encodes 448*368 RGB565 pixels (logical landscape, as returned by
-/// [`Simulator::render`]) as an 8-bit RGB PNG. Shared by
-/// [`Simulator::render_png`] and `assets::Simulator::render_asset_font_png`
-/// (Task 12) so the two render paths produce bit-identical PNG encoding.
-pub(crate) fn pixels_to_png(pixels: &[u16]) -> Result<Vec<u8>, SimError> {
+/// [`Simulator::render`]) as an 8-bit RGB PNG.
+///
+/// This is public so hardware/parity diagnostics can write failure frames
+/// with the same bit-identical encoder as the simulator's golden suites.
+///
+/// # Errors
+///
+/// Returns [`SimError::EncodeFailed`] if the PNG header or image data cannot
+/// be encoded.
+pub fn pixels_to_png(pixels: &[u16]) -> Result<Vec<u8>, SimError> {
     let mut rgb = Vec::with_capacity(pixels.len() * 3);
     for pixel in pixels {
         rgb.push((((pixel >> 11) & 0x1f) as u8) << 3); // R5 -> 8

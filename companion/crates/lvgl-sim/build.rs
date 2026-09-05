@@ -39,14 +39,11 @@ fn main() {
         "timefmt.c",
         "clock_source.c",
         "template_fields.c",
-        "protocol_message.c",
-        "protocol_frame.c",
         // Task 12: the runtime asset store, compiled unmodified so the
         // simulator's digest -> bytes lookup uses the identical format and
         // logic the device's link/asset_flash.c backs with real flash
         // I/O -- see csrc/sim_shim.c's RAM-backed asset_flash_io_t.
         "asset_store.c",
-        "asset_transfer.c",
         // Task 8 (stage 2a): the scene model, its CBOR decoder and its
         // binding evaluator, compiled unmodified for the same reason
         // ui/scene_view.c below is -- the stage-2 parity gate compares a

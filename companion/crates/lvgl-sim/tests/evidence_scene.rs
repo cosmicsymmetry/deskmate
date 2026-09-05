@@ -1,7 +1,9 @@
 //! Stage 4 Task 6 evidence rows. These are neither additions to the retired
 //! C-template parity headline nor aliases for the curated-v1 plugin matrix.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
+
+mod common;
 
 use lvgl_sim::{LOGICAL_WIDTH, Simulator, cases};
 use protocol::{SceneNode, SceneValue};
@@ -177,58 +179,19 @@ fn native_date_binding_ellipsizes_the_produced_overflow() {
 
 #[test]
 fn producer_and_date_scene_goldens_match() {
-    let bless = std::env::var_os("BLESS").is_some();
-    let golden_dir =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden/evidence-scene");
-    std::fs::create_dir_all(&golden_dir).expect("golden dir");
-    let mut simulator = Simulator::new().expect("simulator");
-    let mut failures = Vec::new();
-    let mut expected_names = BTreeSet::new();
-
-    for (name, request) in evidence_cases() {
-        expected_names.insert(name.clone());
-        // This semantic assertion deliberately precedes all rendering and
-        // byte comparison: an inverted producer that happened to draw its
-        // supplied value correctly must fail before pixels can pass it.
-        if request.timer.is_some() {
-            assert_timer_producer_meaning(&request);
-        }
-        let png = simulator.render_scene_png(&request).expect(&name);
-        let path = golden_dir.join(format!("{name}.png"));
-        if bless {
-            std::fs::write(&path, &png).expect("write golden");
-            continue;
-        }
-        match std::fs::read(&path) {
-            Ok(expected) if expected == png => {}
-            Ok(_) => failures.push(format!("{name}: pixels differ")),
-            Err(_) => failures.push(format!("{name}: golden missing (run with BLESS=1)")),
-        }
-    }
-
-    for entry in std::fs::read_dir(&golden_dir).expect("read golden dir") {
-        let path = entry.expect("golden entry").path();
-        if path.extension().and_then(|extension| extension.to_str()) != Some("png") {
-            continue;
-        }
-        let stem = path
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .unwrap_or_default();
-        if expected_names.contains(stem) {
-            continue;
-        }
-        if bless {
-            std::fs::remove_file(&path).expect("remove orphan golden");
-        } else {
-            failures.push(format!(
-                "{stem}: orphan golden (run with BLESS=1 to delete)"
-            ));
-        }
-    }
-    assert!(
-        failures.is_empty(),
-        "evidence scene golden mismatches:\n{}",
-        failures.join("\n")
+    common::assert_goldens(
+        "evidence-scene",
+        std::env::var_os("BLESS").is_some(),
+        Some("evidence scene golden mismatches"),
+        "orphan golden (run with BLESS=1 to delete)",
+        evidence_cases(),
+        |_, request| {
+            // This semantic assertion deliberately precedes rendering: an
+            // inverted producer must fail before pixels can pass it.
+            if request.timer.is_some() {
+                assert_timer_producer_meaning(request);
+            }
+        },
+        lvgl_sim::Simulator::render_scene_png,
     );
 }

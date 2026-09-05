@@ -1186,23 +1186,9 @@ fn dump(name: &str, template: &[u16], scene: &[u16]) -> String {
 }
 
 fn write_png(path: &std::path::Path, pixels: &[u16]) -> std::io::Result<()> {
-    let mut rgb = Vec::with_capacity(pixels.len() * 3);
-    for pixel in pixels {
-        rgb.push((((pixel >> 11) & 0x1f) as u8) << 3);
-        rgb.push((((pixel >> 5) & 0x3f) as u8) << 2);
-        rgb.push(((pixel & 0x1f) as u8) << 3);
-    }
-    let file = std::fs::File::create(path)?;
-    let mut encoder =
-        png::Encoder::new(std::io::BufWriter::new(file), LOGICAL_WIDTH, LOGICAL_HEIGHT);
-    encoder.set_color(png::ColorType::Rgb);
-    encoder.set_depth(png::BitDepth::Eight);
-    let mut writer = encoder
-        .write_header()
+    let png = lvgl_sim::pixels_to_png(pixels)
         .map_err(|error| std::io::Error::other(error.to_string()))?;
-    writer
-        .write_image_data(&rgb)
-        .map_err(|error| std::io::Error::other(error.to_string()))
+    std::fs::write(path, png)
 }
 
 /// **The gate.** Every row in [`cases`], rendered twice and compared byte for

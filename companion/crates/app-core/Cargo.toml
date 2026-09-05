@@ -25,9 +25,6 @@ thiserror = "2"
 # crate: `app-core -> device -> lvgl-sim` already, so the gate has to live on
 # this side of that edge.
 lvgl-sim = { path = "../lvgl-sim" }
-# Only so a failing parity gate can dump both frames as PNGs to look at; a
-# differing-pixel count localises nothing on its own.
-png = "0.17"
 tempfile = "3"
 
 [lints]

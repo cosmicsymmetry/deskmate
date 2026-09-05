@@ -33,12 +33,13 @@
 use std::ffi::CString;
 use std::fmt;
 use std::os::raw::c_char;
+use std::sync::Arc;
 
-use protocol::{Scene, encode_scene_payload};
+use protocol::{AssetKind, Scene, encode_scene_payload};
 
 use crate::{
     LOGICAL_HEIGHT, LOGICAL_WIDTH, RenderRequest, SimError, SimFieldValue, SimOrientation,
-    SimTemplate, Simulator, pixels_to_png,
+    Simulator, pixels_to_png,
 };
 
 /// Why `firmware/main/core/scene_decode.c`'s `scene_decode()` refused a
@@ -131,18 +132,6 @@ fn map_sim_scene_result(raw: i32) -> Result<(), SimError> {
     }
 }
 
-/// `ASSET_KIND_FONT` in `firmware/main/core/asset_store.h`.
-const ASSET_KIND_FONT: u8 = 1;
-/// `ASSET_KIND_IMAGE` in `firmware/main/core/asset_store.h`.
-const ASSET_KIND_IMAGE: u8 = 3;
-
-/// Slack over the pixel data for the `lv_image_header_t` the shim prepends.
-/// The real header is 12 bytes; this is deliberately loose because its size is
-/// the C compiler's business and `sim_build_rgb565_image` refuses to write past
-/// the capacity it is given, so an over-allocation costs a few bytes and an
-/// under-allocation would cost a confusing failure.
-const IMAGE_HEADER_SLACK: usize = 64;
-
 /// A running timer, as the device's `scene_binding_context_t` carries one.
 /// `None` on a [`SceneRenderRequest`] means no timer is active, which is what
 /// makes timer clock bindings render `--:--` and scalar/status bindings render
@@ -155,31 +144,25 @@ pub struct SceneTimer {
     pub running: bool,
 }
 
-/// Content a scene names by digest, registered before the scene is decoded.
+/// Canonical content a scene names by digest, registered before decoding.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SceneAsset {
-    /// A TTF, registered as `ASSET_KIND_FONT` and reached through
-    /// `font_registry_acquire` — the path a `glyph` node always takes and an
-    /// asset-font `text` node takes.
-    ///
-    /// `'static` because every font the simulator has is an `include_bytes!`
-    /// (see [`crate::assets::INTER_SUBSET_TTF`]), matching
-    /// [`crate::cases::AssetFontCase`].
-    Font {
-        digest: [u8; 32],
-        bytes: &'static [u8],
-    },
-    /// Host-endian RGB565 pixels, wrapped in the LVGL binary image layout by
-    /// the shim and registered as `ASSET_KIND_IMAGE`. The wrapper is built in C
-    /// because `lv_image_header_t` is a bitfield struct whose byte layout is
-    /// the compiler's to decide.
-    Image {
-        digest: [u8; 32],
-        width: u32,
-        height: u32,
-        /// Exactly `width * height` entries, row-major.
-        pixels: Vec<u16>,
-    },
+pub struct SceneAsset {
+    pub digest: [u8; 32],
+    /// The exact wire kind resolved from the manifest. `AssetKind` is
+    /// `repr(u8)`, matching `asset_kind_t` in the firmware.
+    pub kind: AssetKind,
+    /// The exact bytes hashed by the resolver and transferred to the device.
+    pub bytes: Arc<[u8]>,
+}
+
+impl From<&plugin::ResolvedAsset> for SceneAsset {
+    fn from(asset: &plugin::ResolvedAsset) -> Self {
+        Self {
+            digest: asset.digest,
+            kind: asset.kind,
+            bytes: Arc::clone(&asset.bytes),
+        }
+    }
 }
 
 /// One scene render. Mirrors [`crate::RenderRequest`]'s shape: everything the
@@ -254,7 +237,7 @@ fn prepare_scene_fields(
     (names, values, raw)
 }
 
-fn prepare_template_fields(
+pub(crate) fn prepare_template_fields(
     request: &RenderRequest,
 ) -> (Vec<CString>, Vec<CString>, Vec<crate::RawField>) {
     let names: Vec<CString> = request
@@ -298,14 +281,6 @@ fn prepare_template_fields(
 // rest of the shim's extern "C" surface (see lib.rs's own such block).
 unsafe extern "C" {
     fn sim_asset_register(digest: *const u8, bytes: *const u8, len: u32, kind: u8) -> bool;
-
-    fn sim_build_rgb565_image(
-        width: i32,
-        height: i32,
-        pixels: *const u16,
-        out: *mut u8,
-        out_capacity: usize,
-    ) -> usize;
 
     #[allow(clippy::too_many_arguments)]
     fn sim_render_scene(
@@ -381,24 +356,7 @@ impl Simulator {
 
         // Keep the CStrings alive across the call: RawSceneField only holds
         // pointers into them.
-        let names: Vec<CString> = request
-            .fields
-            .iter()
-            .map(|(name, _)| crate::truncated_cstring(name))
-            .collect();
-        let values: Vec<CString> = request
-            .fields
-            .iter()
-            .map(|(_, value)| crate::truncated_cstring(value))
-            .collect();
-        let raw: Vec<RawSceneField> = names
-            .iter()
-            .zip(values.iter())
-            .map(|(name, value)| RawSceneField {
-                name: name.as_ptr(),
-                value: value.as_ptr(),
-            })
-            .collect();
+        let (_names, _values, raw) = prepare_scene_fields(&request.fields);
 
         let timer = request.timer.unwrap_or(SceneTimer {
             total_ms: 0,
@@ -468,14 +426,6 @@ impl Simulator {
             remaining_ms: 0,
             running: false,
         });
-        let template_kind = match request.template.template {
-            SimTemplate::DigitalClock => 1,
-            SimTemplate::ProgressRing => 2,
-            SimTemplate::RowList => 3,
-            SimTemplate::AnalogClock => 4,
-            SimTemplate::BigNumberLabel => 5,
-            SimTemplate::IconBadgeText => 6,
-        };
         let mut template = vec![0_u16; (LOGICAL_WIDTH * LOGICAL_HEIGHT) as usize];
         let mut initial_scene = vec![0_u16; (LOGICAL_WIDTH * LOGICAL_HEIGHT) as usize];
         let mut scene = vec![0_u16; (LOGICAL_WIDTH * LOGICAL_HEIGHT) as usize];
@@ -483,7 +433,7 @@ impl Simulator {
             sim_render_scene_temporal_pair(
                 payload.as_ptr(),
                 payload.len(),
-                template_kind,
+                request.template.template.wire_kind(),
                 template_fields.as_ptr(),
                 template_fields.len(),
                 request.scene.utc_offset_minutes,
@@ -513,50 +463,17 @@ impl Simulator {
 }
 
 fn register_asset(asset: &SceneAsset) -> Result<(), SimError> {
-    let ok = match asset {
-        SceneAsset::Font { digest, bytes } => {
-            let len = u32::try_from(bytes.len()).map_err(|_| SimError::AssetRegistrationFailed)?;
-            // SAFETY: `digest` is exactly ASSET_DIGEST_BYTES (32) long and
-            // `bytes`/`len` describe a live slice for the duration of the call.
-            unsafe { sim_asset_register(digest.as_ptr(), bytes.as_ptr(), len, ASSET_KIND_FONT) }
-        }
-        SceneAsset::Image {
-            digest,
-            width,
-            height,
-            pixels,
-        } => {
-            let expected = (*width as usize)
-                .checked_mul(*height as usize)
-                .ok_or(SimError::AssetRegistrationFailed)?;
-            if pixels.len() != expected || expected == 0 {
-                return Err(SimError::AssetRegistrationFailed);
-            }
-            let width = i32::try_from(*width).map_err(|_| SimError::AssetRegistrationFailed)?;
-            let height = i32::try_from(*height).map_err(|_| SimError::AssetRegistrationFailed)?;
-
-            let mut blob = vec![0_u8; pixels.len() * 2 + IMAGE_HEADER_SLACK];
-            // SAFETY: `pixels` holds exactly width*height entries (checked
-            // above) and `blob` is at least that many bytes plus header slack;
-            // the shim writes no more than the capacity it is given and
-            // reports how much it wrote.
-            let written = unsafe {
-                sim_build_rgb565_image(
-                    width,
-                    height,
-                    pixels.as_ptr(),
-                    blob.as_mut_ptr(),
-                    blob.len(),
-                )
-            };
-            if written == 0 {
-                return Err(SimError::AssetRegistrationFailed);
-            }
-            blob.truncate(written);
-            let len = u32::try_from(blob.len()).map_err(|_| SimError::AssetRegistrationFailed)?;
-            // SAFETY: as above; `blob` is live for the duration of the call.
-            unsafe { sim_asset_register(digest.as_ptr(), blob.as_ptr(), len, ASSET_KIND_IMAGE) }
-        }
+    let len = u32::try_from(asset.bytes.len()).map_err(|_| SimError::AssetRegistrationFailed)?;
+    // SAFETY: `digest` is exactly ASSET_DIGEST_BYTES (32) long, `bytes`/`len`
+    // describe a live slice for the call, and AssetKind's repr values mirror
+    // firmware/main/core/asset_store.h.
+    let ok = unsafe {
+        sim_asset_register(
+            asset.digest.as_ptr(),
+            asset.bytes.as_ptr(),
+            len,
+            asset.kind as u8,
+        )
     };
     if ok {
         Ok(())

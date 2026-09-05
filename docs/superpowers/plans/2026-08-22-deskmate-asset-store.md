@@ -1840,12 +1840,14 @@ forever; and `firmware/version.txt` pins the version — do not rely on `git des
 inspection. Bisect against Task 1's baseline build, as `3f2aa03` was bisected: the
 cause will be memory layout, and it will not be visible in any test.
 
-- [ ] **Step 3: Push a font and diff the probe**
+- [x] **Step 3: Push a font and verify an asset-backed scene**
 
-Push the Task 12 subset TTF to the board, run the Task 13 probe, and compare against
-the simulator golden with `framebuffer_diff`. Expect the 72 px render to be
-byte-identical. Run at **both** orientations — `board_lcd_rounder_cb` must still be
-correct.
+The temporary Task 13 0x7D probe and its special host renderer were retired after the
+scene renderer made their premise obsolete. The normal path now uploads the Task 12
+subset TTF with `AssetBegin`/`AssetChunk`/`AssetCommit`, renders it from a 72 px
+asset-backed `SceneText`, and captures through the retained 0x7E path. Stage 3b Task 9
+observed that path at both orientations on 2026-08-30; the simulator retains one
+landscape SceneText golden and derives flipped output from the renderer's reversal.
 
 - [ ] **Step 4: Measure the glyph-cache-miss hitch**
 

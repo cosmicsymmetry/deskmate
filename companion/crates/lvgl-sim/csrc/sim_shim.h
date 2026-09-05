@@ -26,22 +26,6 @@ bool sim_render(int template_kind,
                 bool orientation_flipped,
                 uint16_t *out_pixels);
 
-/* Task 12: renders `text` centred on the 448x368 canvas using a runtime
- * font asset, exercising the same digest -> bytes -> lv_font_t path the
- * device's protocol_asset_resolver/font_registry does -- see sim_shim.c's
- * RAM-backed asset store shim. `digest` must be exactly ASSET_DIGEST_BYTES
- * (32) bytes; `ttf_bytes`/`ttf_len` is the font file to register under that
- * digest (registration is idempotent per digest, so re-registering the same
- * bytes under the same digest across calls is harmless). Returns false if
- * registration, font acquisition, or rendering fails. */
-bool sim_render_asset_font(const uint8_t *digest,
-                           const uint8_t *ttf_bytes,
-                           uint32_t ttf_len,
-                           int32_t pixel_size,
-                           const char *text,
-                           bool orientation_flipped,
-                           uint16_t *out_pixels);
-
 /* ---------------------------------------------------------------------
  * Task 8 (stage 2a): scene rendering.
  * ------------------------------------------------------------------ */
@@ -65,21 +49,6 @@ typedef struct {
  * with scene_view_set_asset_resolver(). Both read this one store. */
 bool sim_asset_register(const uint8_t *digest, const uint8_t *bytes,
                         uint32_t len, uint8_t kind);
-
-/* Wraps `width` x `height` host-endian RGB565 `pixels` in the LVGL binary
- * image layout an `image` node expects -- an lv_image_header_t followed by
- * the pixel data, which is what scene_view.c's build_image() reads back.
- *
- * The header is built here rather than in Rust on purpose: it is a
- * bitfield struct whose byte layout is the compiler's business, and a
- * caller that guessed it wrong would produce a blob the renderer silently
- * refuses. Callers own the pixels; this owns only the wrapper.
- *
- * Returns the number of bytes written to `out`, or 0 if `out_capacity` is
- * too small or an argument is invalid. */
-size_t sim_build_rgb565_image(int32_t width, int32_t height,
-                              const uint16_t *pixels, uint8_t *out,
-                              size_t out_capacity);
 
 /* Why sim_render_scene returns a status rather than a bool.
  *

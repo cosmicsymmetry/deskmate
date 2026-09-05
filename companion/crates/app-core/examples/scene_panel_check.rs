@@ -42,9 +42,9 @@ use device::{DeviceClient, DeviceError, Transport, connect};
 use lvgl_sim::scene::{SceneAsset, SceneRenderRequest, SceneTimer};
 use lvgl_sim::{LOGICAL_HEIGHT, LOGICAL_WIDTH, SimOrientation, Simulator, cases};
 use protocol::{
-    ApplyConfig, ErrorCode, Field, FieldValue, InterruptPolicy, Message, PushData, PushScene,
-    ScreenConfig, SizeClass, TYPE_APPLY_CONFIG, TYPE_PUSH_SCENE, TapAction, TemplateKind, Tier,
-    TimeSync, WidgetConfig,
+    ApplyConfig, AssetKind, ErrorCode, Field, FieldValue, InterruptPolicy, Message, PushData,
+    PushScene, ScreenConfig, SizeClass, TYPE_APPLY_CONFIG, TYPE_PUSH_SCENE, TapAction,
+    TemplateKind, Tier, TimeSync, WidgetConfig,
 };
 
 // The capture module cannot import the simulator, so CI compiles this example to pin their dimensions together.
@@ -221,17 +221,14 @@ fn digital_clock_cases() -> Vec<CheckCase> {
 }
 
 fn asset_exclusion(assets: &[SceneAsset]) -> Option<String> {
-    if assets
-        .iter()
-        .any(|asset| matches!(asset, SceneAsset::Image { .. }))
-    {
+    if assets.iter().any(|asset| asset.kind == AssetKind::Image) {
         Some(
             "the scene requires a registered RGB565 image asset; asset transfer is out of scope"
                 .to_string(),
         )
     } else if assets
         .iter()
-        .any(|asset| matches!(asset, SceneAsset::Font { .. }))
+        .any(|asset| matches!(asset.kind, AssetKind::Font | AssetKind::IconFont))
     {
         Some(
             "the scene requires a registered runtime font asset; asset transfer is out of scope"
@@ -529,23 +526,9 @@ fn dump(name: &str, expected: &[u16], device: &[u16]) -> String {
 }
 
 fn write_png(path: &Path, pixels: &[u16]) -> std::io::Result<()> {
-    let mut rgb = Vec::with_capacity(pixels.len() * 3);
-    for pixel in pixels {
-        rgb.push((((pixel >> 11) & 0x1f) as u8) << 3);
-        rgb.push((((pixel >> 5) & 0x3f) as u8) << 2);
-        rgb.push(((pixel & 0x1f) as u8) << 3);
-    }
-    let file = std::fs::File::create(path)?;
-    let mut encoder =
-        png::Encoder::new(std::io::BufWriter::new(file), LOGICAL_WIDTH, LOGICAL_HEIGHT);
-    encoder.set_color(png::ColorType::Rgb);
-    encoder.set_depth(png::BitDepth::Eight);
-    let mut writer = encoder
-        .write_header()
+    let png = lvgl_sim::pixels_to_png(pixels)
         .map_err(|error| std::io::Error::other(error.to_string()))?;
-    writer
-        .write_image_data(&rgb)
-        .map_err(|error| std::io::Error::other(error.to_string()))
+    std::fs::write(path, png)
 }
 
 enum CaseOutcome {

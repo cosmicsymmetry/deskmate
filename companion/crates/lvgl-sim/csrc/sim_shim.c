@@ -22,8 +22,8 @@ static uint32_t s_fake_tick;
 
 static uint32_t sim_tick_cb(void) { return s_fake_tick; }
 
-/* Shared by sim_render and sim_render_asset_font: copies the just-flushed
- * frame out, applying the 180° flip that models the 270° mount. */
+/* Shared by sim_render and sim_render_scene: copies the just-flushed frame
+ * out, applying the 180° flip that models the 270° mount. */
 static void copy_frame_out(bool orientation_flipped, uint16_t *out_pixels)
 {
     if (orientation_flipped) {
@@ -47,7 +47,7 @@ static void sim_flush_cb(lv_display_t *display, const lv_area_t *area,
     lv_display_flush_ready(display);
 }
 
-/* Shared by sim_render, sim_render_asset_font and sim_render_scene: starts
+/* Shared by sim_render and sim_render_scene: starts
  * every render on a 1000ms fake-tick boundary, then advances four ×40ms
  * ticks so LVGL runs its refresh timer.
  *
@@ -352,76 +352,6 @@ static bool ensure_font_registry(void)
     return true;
 }
 
-/* Drops a screen's hold on its registry face when that screen is deleted --
- * the mirror of dev_capture.c's release_probe_font(). */
-static void release_registry_font(lv_event_t *event)
-{
-    font_registry_release((lv_font_t *)lv_event_get_user_data(event));
-}
-
-bool sim_render_asset_font(const uint8_t *digest, const uint8_t *ttf_bytes,
-                           uint32_t ttf_len, int32_t pixel_size, const char *text,
-                           bool orientation_flipped, uint16_t *out_pixels)
-{
-    if (!sim_init() || out_pixels == NULL || digest == NULL || ttf_bytes == NULL ||
-        text == NULL) {
-        return false;
-    }
-    if (!sim_asset_register(digest, ttf_bytes, ttf_len, (uint8_t)ASSET_KIND_FONT)) {
-        return false;
-    }
-    if (!ensure_font_registry()) {
-        return false;
-    }
-
-    lv_font_t *font = font_registry_acquire(digest, pixel_size);
-    if (font == NULL) {
-        return false;
-    }
-    font_registry_warm(font, text);
-
-    /* A bare screen + centred label, deliberately not template_view.c's
-     * card chrome: this golden pins raw font rendering parity, not any
-     * one template's layout. Colours match template_style.c's canvas/
-     * primary-text convention (DESKMATE_COLOR_CANVAS / _PRIMARY) so the
-     * PNG still reads as a plausible Deskmate frame. */
-    lv_obj_t *screen = lv_obj_create(NULL);
-    if (screen == NULL) {
-        font_registry_release(font);
-        return false;
-    }
-    lv_obj_remove_flag(screen, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_style_bg_color(screen, lv_color_hex(0x000000), 0);
-    lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, 0);
-
-    lv_obj_t *label = lv_label_create(screen);
-    lv_obj_remove_style_all(label);
-    lv_obj_set_style_text_font(label, font, 0);
-    lv_obj_set_style_text_color(label, lv_color_hex(0xf5f5f7), 0);
-    lv_label_set_text(label, text);
-    lv_obj_center(label);
-
-    /* Hand this render's acquire to the screen, mirroring the device probe
-     * (firmware/main/link/dev_capture.c). LVGL stores the bare lv_font_t* in
-     * the label's style and takes no reference of its own, so releasing
-     * inline would leave the face unpinned -- and therefore evictable -- for
-     * as long as this screen stays the active one. font_registry.h's
-     * ownership contract calls for the release to happen when the objects
-     * styled with the face are destroyed, which for a screen is its delete
-     * event. The auto_del below is what fires it, on the next render. */
-    lv_obj_add_event_cb(screen, release_registry_font, LV_EVENT_DELETE, font);
-
-    /* auto_del=true deletes whatever screen was previously active (a prior
-     * template render or asset-font render), exactly like
-     * template_view_show's own lv_screen_load_anim call. */
-    lv_screen_load_anim(screen, LV_SCREEN_LOAD_ANIM_NONE, 0U, 0U, true);
-
-    advance_fake_tick_phase();
-
-    copy_frame_out(orientation_flipped, out_pixels);
-    return true;
-}
-
 /* ---------------------------------------------------------------------
  * Task 8 (stage 2a): scene rendering.
  *
@@ -462,34 +392,6 @@ static const char *sim_scene_field_lookup(void *ctx, const char *name)
         }
     }
     return NULL;
-}
-
-size_t sim_build_rgb565_image(int32_t width, int32_t height,
-                              const uint16_t *pixels, uint8_t *out,
-                              size_t out_capacity)
-{
-    if (width <= 0 || height <= 0 || pixels == NULL || out == NULL) {
-        return 0U;
-    }
-    size_t stride = (size_t)width * sizeof(uint16_t);
-    size_t data_bytes = stride * (size_t)height;
-    size_t total = sizeof(lv_image_header_t) + data_bytes;
-    if (out_capacity < total) {
-        return 0U;
-    }
-
-    lv_image_header_t header;
-    lv_memzero(&header, sizeof header);
-    header.magic = LV_IMAGE_HEADER_MAGIC;
-    header.cf = LV_COLOR_FORMAT_RGB565;
-    header.flags = 0U;
-    header.w = (uint32_t)width;
-    header.h = (uint32_t)height;
-    header.stride = (uint32_t)stride;
-
-    memcpy(out, &header, sizeof header);
-    memcpy(out + sizeof header, pixels, data_bytes);
-    return total;
 }
 
 /* Maps scene_decode()'s scene_model_result_t onto the SIM_SCENE_ERR_DECODE_*

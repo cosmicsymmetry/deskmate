@@ -122,9 +122,10 @@ of letting code and documentation diverge.
   the **only** disclosure in the product; protocol mismatch, runtime and command errors
   are notices in the work column; the one useful thing the sources panel said survives as
   a `stale` flag on the affected card tile plus an inline message and Refresh in that
-  card's editor (`lib/providers.ts`). `setPushingPaused` has no everyday control any
-  more, so a config that arrives already paused gets a one-off "Resume sending" notice —
-  keep that escape hatch. `DeviceHeader.tsx` and `ProviderStatus.tsx` are deleted.
+  card's editor (`lib/providers.ts`). Pausing has no everyday control any more — the
+  tray's "Pause pushing" item, which had survived the subtraction by omission, was removed
+  on 2026-09-05 and the IPC is now the no-argument `resume_pushing` — so a config that
+  arrives already paused gets a one-off "Resume sending" notice; keep that escape hatch. `DeviceHeader.tsx` and `ProviderStatus.tsx` are deleted.
   Preferences (timezone, mounting, start-at-login) moved into the sheet too, under a
   "Display" section; because they are draft state, the sheet renders the **same**
   `SaveBar.tsx` the window does (`variant="sheet"`), since a modal that can strand an
@@ -216,7 +217,9 @@ of letting code and documentation diverge.
   - Traps learned on the board, all still true: **a flashed build is reverted within a
     minute** unless `DESKMATE_FIRMWARE_VERSION` is moved to match, because the catalog
     pins the fleet and offers its version in either direction — a downgrade path exists
-    by design. **A tier round-trip costs a device identity**, since returning to
+    by design. Since 2026-09-05 the server **refuses to start without that variable**
+    (it used to default to `1.0.0`, i.e. advertise a downgrade); the deploy env example
+    and runbook name it. **A tier round-trip costs a device identity**, since returning to
     networked needs a plaintext token and only digests are stored. **An
     until-dismissed alert postpones firmware updates indefinitely**, because it keeps
     `interrupt_live` true. `firmware/version.txt` now pins the version explicitly; do
@@ -816,6 +819,22 @@ of letting code and documentation diverge.
   card in its library and active playlist (generation 1, no warning); it renders when
   the board next connects. The TRMNL repo's deployed and Mac copies of the sync script
   were both updated; committing that repo is the owner's call.
+- **A repository-wide simplification cleanup landed on 2026-09-05** (plan
+  `docs/superpowers/plans/2026-09-05-deskmate-simplification-cleanup.md`, from the
+  review of 2026-09-03/04): twelve squash commits removed the accidentally tracked
+  `firmware/build-diag/` tree, dead firmware and host code, and duplicated helpers, and
+  fixed the 22 defects the review found. Facts worth not relearning: the TypeScript
+  IPC contract now carries the schema-v6 `plugin` card and the `volatile-assets`
+  capability, and its Rust fixture derives capabilities from
+  `DeviceCapability::known_bits()` and walks an exhaustive `CardSettings` match (a
+  ts-rs export was tried and rejected: 12.0.1 cannot represent the `serialize_with`
+  contract on `unknown_capability_bits`); `protocol` exports `expected_response_type`,
+  `RequestIdAllocator`, `truncate_utf8_to_bytes` and `digest_hex`, and the plugin crate
+  exports one `classify_expression_source` — do not re-create local copies; PushData's
+  revision authority is `widget_model` alone; the SVG raster path now applies the shared
+  stale/error footer and loads a plugin's declared fonts. **Firmware statics moved
+  (`.bss` 87,128 -> 87,104), so the on-board OTA download check is owed before the new
+  image is trusted, and nothing from the cleanup has been seen on the panel.**
 - The webcam verification harness (`tools/hwcam/`, usage in
   `docs/hardware/webcam-harness.md`, spec
   `docs/superpowers/specs/2026-08-15-deskmate-webcam-harness-design.md`) was

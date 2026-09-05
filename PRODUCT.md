@@ -81,8 +81,9 @@ Three facts a neighbouring "smart display companion" could not truthfully copy:
 
 **Objects.** The app edits six built-in card kinds (library, max 8): `clock`,
 `pomodoro`, `calendar`, `weather`, `json-feed`, and `rss`. Schema v6 also carries
-server-side `plugin` cards, but the Tauri TypeScript union, hostless runtime, editor,
-and preview UI do not support them; the runtime refuses plugin rendering explicitly.
+server-side `plugin` cards: the app shows them (labelled by plugin id, with a tile and a
+name/refresh editor) but cannot add one, and its hostless runtime refuses to render them
+with a typed reason; the server renders them.
 Playlists (max 8, max 8 entries each) have exactly one active. Entries carry an
 optional per-entry dwell that inherits the playlist default. Advance is `manual` or
 `timed`. Alerts exist on `pomodoro` (on timer finish) and `calendar` (before event)

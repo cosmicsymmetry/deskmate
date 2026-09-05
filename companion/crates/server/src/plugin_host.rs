@@ -107,7 +107,27 @@ impl PluginHost for ServerPluginHost {
                 let template = loaded.svg_source.as_deref().ok_or_else(|| {
                     format!("plugin {plugin_id:?} does not own an SVG raster template")
                 })?;
-                crate::rasterizer::rasterize_svg_template(template, &snapshot.value, fields)
+                let font_assets = loaded
+                    .assets
+                    .iter()
+                    .filter(|(_, asset)| {
+                        matches!(
+                            asset.kind,
+                            protocol::AssetKind::Font | protocol::AssetKind::IconFont
+                        )
+                    })
+                    .map(|(_, asset)| (asset.digest, Arc::clone(&asset.bytes)))
+                    .collect();
+                crate::rasterizer::rasterize_plugin_svg(
+                    template,
+                    &snapshot.value,
+                    fields,
+                    &font_assets,
+                    app_core::SceneDataState {
+                        stale: snapshot.stale,
+                        error: snapshot.error.as_deref(),
+                    },
+                )
             }
         }
         .map_err(|error| format!("server rasterization failed: {error}"))?;
@@ -133,6 +153,7 @@ fn classified_failure_message(
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::path::{Path, PathBuf};
 
     use chrono::Utc;
@@ -254,6 +275,151 @@ mod tests {
             protocol::VOLATILE_IMAGE_DECODED_LENGTH as usize
         );
         assert_eq!(sha2::Sha256::digest(&frame.bytes).as_slice(), frame.digest);
+    }
+
+    #[test]
+    fn svg_data_state_goldens_run_through_server_plugin_host_rasterize() {
+        let mut host = ServerPluginHost::new(curated_registry());
+        let mut stale = aqi_snapshot();
+        stale.stale = true;
+        let mut error = aqi_snapshot();
+        error.stale = true;
+        error.error = Some("Fetch failed".into());
+        let mut missing = aqi_snapshot();
+        missing.value = serde_json::json!({});
+
+        for (name, snapshot) in [
+            ("svg-aqi-fresh", aqi_snapshot()),
+            ("svg-aqi-stale", stale),
+            ("svg-aqi-error", error),
+            ("svg-aqi-missing-data", missing),
+        ] {
+            let frame = host
+                .rasterize(&RasterRequest::PluginSvg {
+                    plugin_id: "svg-aqi".into(),
+                    snapshot,
+                    fields: vec![],
+                })
+                .unwrap_or_else(|error| panic!("{name}: {error}"));
+            crate::rasterizer::tests::assert_raster_regression(
+                name,
+                &crate::rasterizer::RasterizedFrame {
+                    digest: frame.digest,
+                    bytes: frame.bytes.to_vec(),
+                },
+            );
+        }
+    }
+
+    fn replace_font_name(bytes: &mut [u8], from: &[u8], to: &[u8]) {
+        assert_eq!(from.len(), to.len());
+        let mut offset = 0;
+        while let Some(index) = bytes[offset..]
+            .windows(from.len())
+            .position(|window| window == from)
+        {
+            let start = offset + index;
+            bytes[start..start + to.len()].copy_from_slice(to);
+            offset = start + to.len();
+        }
+    }
+
+    fn inter_with_family(family: &str) -> Vec<u8> {
+        assert_eq!(family.len(), 5);
+        let mut bytes = include_bytes!("../../../../tools/fonts/Inter-Regular.ttf").to_vec();
+        replace_font_name(&mut bytes, b"Inter", family.as_bytes());
+        let from = [0, b'I', 0, b'n', 0, b't', 0, b'e', 0, b'r'];
+        let mut to = Vec::with_capacity(10);
+        for byte in family.bytes() {
+            to.extend_from_slice(&[0, byte]);
+        }
+        replace_font_name(&mut bytes, &from, &to);
+        bytes
+    }
+
+    fn write_svg_plugin(
+        root: &Path,
+        id: &str,
+        asset_kind: &str,
+        asset_file: &str,
+        asset_bytes: &[u8],
+        family: &str,
+    ) {
+        let directory = root.join(id);
+        fs::create_dir(&directory).unwrap();
+        fs::write(directory.join(asset_file), asset_bytes).unwrap();
+        fs::write(
+            directory.join("face.svg"),
+            format!(
+                r#"<svg xmlns="http://www.w3.org/2000/svg" width="448" height="368"><text x="24" y="100" font-family="{family}" font-size="40">A</text></svg>"#
+            ),
+        )
+        .unwrap();
+        fs::write(
+            directory.join("manifest.toml"),
+            format!(
+                r#"manifest_version = 2
+name = "{id}"
+version = "1.0.0"
+
+[source]
+kind = "json"
+url = "https://example.invalid/data.json"
+refresh_minutes = 15
+
+[[assets]]
+kind = "{asset_kind}"
+file = "{asset_file}"
+
+[template]
+kind = "svg"
+file = "face.svg"
+"#
+            ),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn server_plugin_host_rasterize_loads_declared_fonts_but_not_image_assets() {
+        let temp = tempfile::tempdir().unwrap();
+        write_svg_plugin(
+            temp.path(),
+            "declared-font",
+            "font",
+            "font.ttf",
+            &inter_with_family("Other"),
+            "Other",
+        );
+        write_svg_plugin(
+            temp.path(),
+            "image-not-font",
+            "image",
+            "image.ttf",
+            &inter_with_family("Image"),
+            "Image",
+        );
+        let (registry, failures) = PluginRegistry::load(temp.path()).unwrap();
+        assert!(failures.is_empty(), "unexpected failures: {failures:?}");
+        let mut host = ServerPluginHost::new(Arc::new(registry));
+        let request = |plugin_id: &str| RasterRequest::PluginSvg {
+            plugin_id: plugin_id.into(),
+            snapshot: ProviderSnapshot {
+                value: serde_json::json!({}),
+                refreshed_at: Some(Utc::now()),
+                age: Some(std::time::Duration::ZERO),
+                stale: false,
+                error: None,
+            },
+            fields: vec![],
+        };
+
+        host.rasterize(&request("declared-font"))
+            .expect("the declared font's embedded family must reach resvg");
+        let error = host
+            .rasterize(&request("image-not-font"))
+            .expect_err("an image asset must not expand the font allowlist");
+        assert!(error.contains("font family") && error.contains("Image"));
     }
 
     #[test]

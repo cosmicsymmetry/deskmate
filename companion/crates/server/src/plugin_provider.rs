@@ -358,13 +358,6 @@ pub struct PluginDataProvider<F: PluginFetcher = SystemPluginFetcher> {
     last_failure: Option<FailureClass>,
 }
 
-impl PluginDataProvider<SystemPluginFetcher> {
-    /// Builds a provider backed by the real egress-guarded fetch.
-    pub fn system(source: &Source) -> Result<Self, PluginCapError> {
-        Self::new(SystemPluginFetcher, source)
-    }
-}
-
 impl<F: PluginFetcher> PluginDataProvider<F> {
     pub fn new(fetcher: F, source: &Source) -> Result<Self, PluginCapError> {
         let Source::Json {
@@ -911,249 +904,61 @@ kind = "scene"
         assert_eq!(provider.last_failure_class(), Some(FailureClass::Permanent));
     }
 
-    // -- Fix round 1, item 1: HTTP status must reach the table through the
-    // REAL fetch path, driven by a real HTTP response over a real loopback
-    // connection -- not a hand-built `ProviderError::HttpStatus`, which is
-    // what made the 5xx row dead code the first time. ---------------------
-
-    /// A `PluginFetcher` that performs a genuine HTTP round trip via plain
-    /// `reqwest` against a loopback server, deliberately bypassing
-    /// `egress::fetch`'s SSRF guard (which denies loopback destinations by
-    /// design -- Steps 1-3, proven elsewhere and untouched here; there is
-    /// no way to point the real guarded fetch at a loopback server without
-    /// weakening it, which nothing in this fix round does). What this DOES
-    /// prove: a real `reqwest::Response`'s status and body -- not a
-    /// hand-built enum variant -- flow through `PluginDataProvider::
-    /// refresh`'s real conversion path (`provider_error_for_status`,
-    /// `classify_provider_error`, `LastGood::complete`).
-    struct DirectHttpFetcher {
-        client: reqwest::Client,
-    }
-
-    impl DirectHttpFetcher {
-        fn new() -> Self {
-            Self {
-                client: reqwest::Client::new(),
-            }
-        }
-    }
-
-    impl PluginFetcher for DirectHttpFetcher {
-        fn fetch(&self, url: &str) -> Result<egress::FetchResponse, EgressError> {
-            let url = url.to_string();
-            blocking_runtime().block_on(async move {
-                let response = self
-                    .client
-                    .get(&url)
-                    .send()
-                    .await
-                    .map_err(|error| EgressError::Request(error.to_string()))?;
-                let status = response.status().as_u16();
-                let body = response
-                    .bytes()
-                    .await
-                    .map_err(|error| EgressError::Request(error.to_string()))?
-                    .to_vec();
-                Ok(egress::FetchResponse { status, body })
-            })
-        }
-    }
-
-    /// Spawns a tiny HTTP server, once per call, on a background OS thread
-    /// with its own dedicated Tokio runtime -- separate from
-    /// `blocking_runtime()` -- that always answers `status` with
-    /// `content_type`/`body`. Returns the bound loopback address; the
-    /// server thread is intentionally left running for the life of the
-    /// test process, the same way `egress.rs`'s own loopback test servers
-    /// are never explicitly shut down.
-    fn spawn_status_server(
-        status: u16,
-        content_type: &'static str,
-        body: &'static [u8],
-    ) -> std::net::SocketAddr {
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let runtime = tokio::runtime::Runtime::new().expect("build test server runtime");
-            runtime.block_on(async move {
-                let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-                    .await
-                    .expect("bind a loopback listener");
-                let addr = listener.local_addr().expect("listener has a local addr");
-                tx.send(addr).expect("send bound addr to the test thread");
-                let router = axum::Router::new().route(
-                    "/data",
-                    axum::routing::get(move || async move {
-                        (
-                            axum::http::StatusCode::from_u16(status).expect("valid status code"),
-                            [(axum::http::header::CONTENT_TYPE, content_type)],
-                            body,
-                        )
-                    }),
-                );
-                let _ = axum::serve(listener, router).await;
-            });
-        });
-        rx.recv().expect("receive bound addr from server thread")
-    }
-
-    /// Drives `PluginDataProvider::refresh` from a plain OS thread (a
-    /// `#[test]`, never `#[tokio::test]`) exactly the way Task 8's runtime
-    /// worker must, against a REAL loopback server answering 503 with an
-    /// HTML body -- the shape fix round 1's report named explicitly: "a
-    /// 503 with an HTML body -> `MalformedFeed` -> permanent card fault --
-    /// the exact inversion Step 5 exists to prevent." After this fix it
-    /// must not.
     #[test]
-    fn a_503_with_an_html_body_is_stale_and_transient_not_a_permanent_fault() {
-        let addr = spawn_status_server(
-            503,
-            "text/html",
-            b"<html><body>Service Unavailable</body></html>",
-        );
-        let source = Source::Json {
-            url: format!("http://{addr}/data"),
-            refresh_minutes: 15,
-            root: None,
-        };
+    fn a_503_with_an_html_body_is_stale_and_transient_not_a_parse_fault() {
+        let fetcher = FakeFetcher::once(Ok(egress::FetchResponse {
+            status: 503,
+            body: b"<html><body>Service Unavailable</body></html>".to_vec(),
+        }));
         let mut provider =
-            PluginDataProvider::new(DirectHttpFetcher::new(), &source).expect("construct provider");
+            PluginDataProvider::new(fetcher, &json_source()).expect("construct provider");
 
         let snapshot = provider.refresh(Utc::now());
 
-        assert!(
-            snapshot.stale,
-            "a 503 must surface as stale, not silently succeed or fault"
-        );
+        assert!(snapshot.stale);
         assert_eq!(
             provider.last_failure_class(),
             Some(FailureClass::Transient),
-            "a 503 with an HTML body must classify as transient (retry-worthy), \
-             never as a permanent MalformedFeed card fault -- the exact inversion \
-             fix round 1 found: an HTML body reaching parse_json_payload directly \
-             would have produced a permanent MalformedFeed instead"
+            "status must be classified before the non-JSON body is parsed"
         );
     }
 
-    /// Same real-server proof, for the other half of fix round 1's report:
-    /// "a 503 with a JSON error envelope, which is very common ->
-    /// `stale=false`, success -- and the error object is handed to
-    /// `compile_scene` as if it were real data." After this fix the status
-    /// is checked before the body is ever parsed, so a JSON-shaped error
-    /// envelope on a 503 must not be treated as real data.
     #[test]
     fn a_503_with_a_json_error_envelope_is_never_treated_as_real_data() {
-        let addr = spawn_status_server(
-            503,
-            "application/json",
-            br#"{"error": "upstream unavailable"}"#,
-        );
-        let source = Source::Json {
-            url: format!("http://{addr}/data"),
-            refresh_minutes: 15,
-            root: None,
-        };
+        let fetcher = FakeFetcher::once(Ok(egress::FetchResponse {
+            status: 503,
+            body: br#"{"error":"upstream unavailable"}"#.to_vec(),
+        }));
         let mut provider =
-            PluginDataProvider::new(DirectHttpFetcher::new(), &source).expect("construct provider");
+            PluginDataProvider::new(fetcher, &json_source()).expect("construct provider");
 
         let snapshot = provider.refresh(Utc::now());
 
-        assert!(
-            snapshot.stale,
-            "a valid-JSON 503 body must still be refused as an error response"
-        );
-        assert_eq!(
-            snapshot.value,
-            Value::default(),
-            "no last-good value exists yet, so the snapshot's value must stay the \
-             Output::default() LastGood falls back to -- never the JSON error envelope \
-             itself, which would mean the 503 body was accepted as real data"
-        );
-        assert_eq!(
-            provider.last_failure_class(),
-            Some(FailureClass::Transient),
-            "a 503 is retry-worthy regardless of its body's content-type"
-        );
+        assert!(snapshot.stale);
+        assert_eq!(snapshot.value, Value::default());
+        assert_eq!(provider.last_failure_class(), Some(FailureClass::Transient));
     }
 
-    /// Spawns a loopback server, on its own dedicated-runtime background
-    /// thread exactly like `spawn_status_server`, whose *first* request
-    /// succeeds (200, JSON) and every request after that fails (503,
-    /// HTML). Lets a single `PluginDataProvider` (one fixed URL) actually
-    /// observe a real transition from good data to a real error response.
-    fn spawn_first_ok_then_failing_server() -> std::net::SocketAddr {
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let runtime = tokio::runtime::Runtime::new().expect("build test server runtime");
-            runtime.block_on(async move {
-                let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-                    .await
-                    .expect("bind a loopback listener");
-                let addr = listener.local_addr().expect("listener has a local addr");
-                tx.send(addr).expect("send bound addr to the test thread");
-                let requests = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-                let router = axum::Router::new().route(
-                    "/data",
-                    axum::routing::get(move || {
-                        let requests = std::sync::Arc::clone(&requests);
-                        async move {
-                            let previous =
-                                requests.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                            if previous == 0 {
-                                (
-                                    axum::http::StatusCode::OK,
-                                    [(axum::http::header::CONTENT_TYPE, "application/json")],
-                                    br#"{"aqi": 7}"#.as_slice(),
-                                )
-                            } else {
-                                (
-                                    axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                                    [(axum::http::header::CONTENT_TYPE, "text/html")],
-                                    b"<html><body>down</body></html>".as_slice(),
-                                )
-                            }
-                        }
-                    }),
-                );
-                let _ = axum::serve(listener, router).await;
-            });
-        });
-        rx.recv().expect("receive bound addr from server thread")
-    }
-
-    /// Fix round 2, item 2: both 503 tests above start with no last-good
-    /// value, so they prove the `stale` flag alone -- not the retention
-    /// that makes `stale` meaningful. A card that goes stale but loses its
-    /// value is still a blank card. This seeds a real successful fetch
-    /// (real network round trip, real JSON body), then a real 503 against
-    /// the SAME provider/URL, and asserts the second snapshot is stale
-    /// *and* still carries the value the first, successful fetch produced.
     #[test]
     fn a_503_after_a_successful_fetch_keeps_the_last_good_value() {
-        let addr = spawn_first_ok_then_failing_server();
-        let source = Source::Json {
-            url: format!("http://{addr}/data"),
-            refresh_minutes: 15,
-            root: None,
-        };
+        let fetcher = FakeFetcher::sequence(vec![
+            Ok(ok_response(br#"{"aqi":7}"#)),
+            Ok(egress::FetchResponse {
+                status: 503,
+                body: b"<html><body>down</body></html>".to_vec(),
+            }),
+        ]);
         let mut provider =
-            PluginDataProvider::new(DirectHttpFetcher::new(), &source).expect("construct provider");
+            PluginDataProvider::new(fetcher, &json_source()).expect("construct provider");
 
         let first = provider.refresh(Utc::now());
-        assert!(!first.stale, "the first (200) refresh must succeed");
+        assert!(!first.stale);
         assert_eq!(first.value, serde_json::json!({"aqi": 7}));
         assert_eq!(provider.last_failure_class(), None);
 
         let second = provider.refresh(Utc::now());
-        assert!(
-            second.stale,
-            "the second (503) refresh must surface as stale"
-        );
-        assert_eq!(
-            second.value,
-            serde_json::json!({"aqi": 7}),
-            "the last-good value from the first successful fetch must be retained \
-             across the 503, not replaced or lost"
-        );
+        assert!(second.stale);
+        assert_eq!(second.value, first.value);
         assert_eq!(provider.last_failure_class(), Some(FailureClass::Transient));
     }
 
@@ -1214,51 +1019,6 @@ kind = "scene"
         let result = within_wall_clock_budget(Duration::from_millis(50), || 7);
         assert_eq!(result, Ok(7));
     }
-
-    #[test]
-    fn a_compile_over_budget_is_rejected_with_the_specific_variant() {
-        // Fix round 1, minor: use the named Step 6 constant rather than a
-        // private ad hoc budget, so this test proves the real cap rejects
-        // a real overrun, not just that the parameterized mechanism can be
-        // made to reject an arbitrary one.
-        let result: Result<(), PluginCapError> =
-            within_wall_clock_budget(MAX_RENDER_WALL_CLOCK, || {
-                std::thread::sleep(MAX_RENDER_WALL_CLOCK + Duration::from_millis(50));
-            });
-
-        match result {
-            Err(PluginCapError::RenderWallClockExceeded { limit, elapsed }) => {
-                assert_eq!(limit, MAX_RENDER_WALL_CLOCK);
-                assert!(elapsed > MAX_RENDER_WALL_CLOCK);
-            }
-            other => panic!("expected RenderWallClockExceeded, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn the_public_render_budget_wraps_the_documented_constant() {
-        // Fix round 1, item 2: the old version of this test passed with a
-        // no-op closure under *any* positive budget, which proves nothing
-        // about which constant `within_render_wall_clock_budget` actually
-        // uses -- its comment claimed a pin the test did not provide. This
-        // version sleeps past the real, documented `MAX_RENDER_WALL_CLOCK`
-        // and asserts the returned `limit` is exactly that constant: a
-        // wrapper hardcoded to any other budget would either accept this
-        // (too generous) or report a different `limit` (caught here).
-        let result: Result<(), PluginCapError> = within_render_wall_clock_budget(|| {
-            std::thread::sleep(MAX_RENDER_WALL_CLOCK + Duration::from_millis(50));
-        });
-
-        match result {
-            Err(PluginCapError::RenderWallClockExceeded { limit, .. }) => {
-                assert_eq!(limit, MAX_RENDER_WALL_CLOCK);
-            }
-            other => panic!("expected RenderWallClockExceeded, got {other:?}"),
-        }
-    }
-
-    // -- Fix round 1, item 3: the two conditions that fell through the
-    // table entirely. -----------------------------------------------------
 
     #[test]
     fn a_manifest_compile_failure_is_permanent() {

@@ -53,7 +53,7 @@ async fn get_plugins(
                     file: file.to_string(),
                     kind: asset_kind_name(asset.kind),
                     byte_length: asset.bytes.len(),
-                    digest: digest_hex(&asset.digest),
+                    digest: protocol::digest_hex(&asset.digest),
                 })
                 .collect();
             assets.sort_by(|left, right| left.file.cmp(&right.file));
@@ -121,16 +121,6 @@ fn asset_kind_name(kind: protocol::AssetKind) -> &'static str {
         protocol::AssetKind::IconFont => "icon-font",
         protocol::AssetKind::Image => "image",
     }
-}
-
-fn digest_hex(digest: &[u8; protocol::ASSET_DIGEST_LEN]) -> String {
-    use std::fmt::Write as _;
-
-    let mut encoded = String::with_capacity(protocol::ASSET_DIGEST_LEN * 2);
-    for byte in digest {
-        write!(encoded, "{byte:02x}").expect("writing to a String cannot fail");
-    }
-    encoded
 }
 
 struct AdminAuthenticated;
@@ -953,7 +943,7 @@ mod tests {
         let manifest = plugin::parse_manifest(&manifest_source).expect("parse AQI manifest");
         let independently_resolved = plugin::resolve_assets(&manifest, &plugins_dir.join("aqi"))
             .expect("resolve AQI assets");
-        let expected = super::digest_hex(
+        let expected = protocol::digest_hex(
             &independently_resolved
                 .get("icons.ttf")
                 .expect("AQI icon font")

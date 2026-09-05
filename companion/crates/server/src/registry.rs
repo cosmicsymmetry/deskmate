@@ -433,7 +433,7 @@ fn save_store(
         .chain(std::iter::once(new_record))
         .map(|record| PersistedDevice {
             device_id: record.device_id.clone(),
-            token_sha256: digest_hex(&record.digest),
+            token_sha256: protocol::digest_hex(&record.digest),
         })
         .collect();
     let persisted = PersistedRegistry {
@@ -489,16 +489,6 @@ fn parse_device_sequence(device_id: &str) -> Result<u64, RegistryError> {
 
 fn token_digest(token: &str) -> [u8; 32] {
     Sha256::digest(token.as_bytes()).into()
-}
-
-fn digest_hex(digest: &[u8; 32]) -> String {
-    digest
-        .iter()
-        .fold(String::with_capacity(64), |mut hex, byte| {
-            use std::fmt::Write;
-            write!(hex, "{byte:02x}").expect("writing to a String cannot fail");
-            hex
-        })
 }
 
 fn decode_digest(hex: &str) -> Result<[u8; 32], RegistryError> {
@@ -569,13 +559,7 @@ fn invalid_store(message: impl Into<String>) -> RegistryError {
 fn random_token() -> String {
     let mut bytes = [0u8; 32];
     rand::rng().fill_bytes(&mut bytes);
-    bytes
-        .iter()
-        .fold(String::with_capacity(64), |mut hex, byte| {
-            use std::fmt::Write;
-            write!(hex, "{byte:02x}").expect("writing to a String cannot fail");
-            hex
-        })
+    protocol::digest_hex(&bytes)
 }
 
 /// Compares two byte strings without short-circuiting on the first mismatch,

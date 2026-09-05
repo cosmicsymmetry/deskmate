@@ -19,8 +19,8 @@ use futures_util::stream::SplitSink;
 use futures_util::{SinkExt, StreamExt};
 use protocol::{
     Ack, ActivateScreen, ApplyConfig, AssetBegin, AssetChunk, AssetCommit, AssetRelease, ErrorCode,
-    ErrorResponse, Field, Message, NetworkConfig, PushData, PushScene, ScreenConfig,
-    StatusResponse, TimeSync, TriggerInterrupt, WidgetConfig,
+    ErrorResponse, Field, Message, NetworkConfig, PushData, PushScene, RequestIdAllocator,
+    ScreenConfig, StatusResponse, TimeSync, TriggerInterrupt, WidgetConfig,
 };
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::time::{Instant, MissedTickBehavior, interval, timeout};
@@ -296,7 +296,7 @@ pub(crate) struct SocketConnector {
     event_sender: SyncSender<ReceivedEvent>,
     diagnostics: Arc<DiagnosticCounters>,
     replay: Arc<Mutex<ReplayState>>,
-    latest_status: Arc<Mutex<Option<StatusResponse>>>,
+    last_ota_error: Arc<Mutex<Option<String>>>,
 }
 
 impl SocketConnector {
@@ -315,7 +315,7 @@ impl SocketConnector {
             diagnostics: Arc::clone(&self.diagnostics),
             transport: Arc::clone(&self.transport),
             generation,
-            next_request_id: 1,
+            request_ids: RequestIdAllocator::new(),
         }
     }
 
@@ -324,11 +324,10 @@ impl SocketConnector {
     }
 
     pub(crate) fn last_ota_error(&self) -> Option<String> {
-        self.latest_status
+        self.last_ota_error
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .as_ref()
-            .and_then(|status| status.last_ota_error.clone())
+            .clone()
     }
 }
 
@@ -339,7 +338,7 @@ pub struct WebSocketRuntimeDevice {
     events: Receiver<ReceivedEvent>,
     diagnostics: Arc<DiagnosticCounters>,
     replay: Arc<Mutex<ReplayState>>,
-    latest_status: Arc<Mutex<Option<StatusResponse>>>,
+    last_ota_error: Arc<Mutex<Option<String>>>,
     connected_generation: Option<u64>,
     ever_connected: bool,
     latest_data_revision: u32,
@@ -354,7 +353,7 @@ pub(crate) struct SocketPeer {
     diagnostics: Arc<DiagnosticCounters>,
     transport: Arc<TransportSlot>,
     generation: u64,
-    next_request_id: u32,
+    request_ids: RequestIdAllocator,
 }
 
 impl WebSocketRuntimeDevice {
@@ -363,13 +362,13 @@ impl WebSocketRuntimeDevice {
         let diagnostics = Arc::new(DiagnosticCounters::default());
         let transport = Arc::new(TransportSlot::default());
         let replay = Arc::new(Mutex::new(ReplayState::default()));
-        let latest_status = Arc::new(Mutex::new(None));
+        let last_ota_error = Arc::new(Mutex::new(None));
         let connector = SocketConnector {
             transport: Arc::clone(&transport),
             event_sender,
             diagnostics: Arc::clone(&diagnostics),
             replay: Arc::clone(&replay),
-            latest_status: Arc::clone(&latest_status),
+            last_ota_error: Arc::clone(&last_ota_error),
         };
         (
             Self {
@@ -378,7 +377,7 @@ impl WebSocketRuntimeDevice {
                 events: event_receiver,
                 diagnostics,
                 replay,
-                latest_status,
+                last_ota_error,
                 connected_generation: None,
                 ever_connected: false,
                 latest_data_revision: 0,
@@ -421,11 +420,11 @@ impl WebSocketRuntimeDevice {
         self.request_on_generation(None, message)
     }
 
-    fn remember_status(&self, status: &StatusResponse) {
-        *self
-            .latest_status
+    fn remember_last_ota_error(&self, status: &StatusResponse) {
+        self.last_ota_error
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(status.clone());
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone_from(&status.last_ota_error);
     }
 
     fn connected_request(&self, message: Message) -> Result<Message, DeviceError> {
@@ -618,7 +617,7 @@ impl RuntimeDevice for WebSocketRuntimeDevice {
         let Message::StatusResponse(status) = response else {
             return Err(DeviceError::UnexpectedMessage);
         };
-        self.remember_status(&status);
+        self.remember_last_ota_error(&status);
         self.latest_data_revision = status.latest_revision;
         self.latest_config_revision = status.config_revision;
         self.capabilities = status.capabilities;
@@ -644,7 +643,7 @@ impl RuntimeDevice for WebSocketRuntimeDevice {
     fn status(&mut self) -> Result<StatusResponse, DeviceError> {
         match self.connected_request(Message::StatusRequest)? {
             Message::StatusResponse(status) => {
-                self.remember_status(&status);
+                self.remember_last_ota_error(&status);
                 self.capabilities = status.capabilities;
                 Ok(status)
             }
@@ -851,11 +850,13 @@ impl SocketPeer {
                     let Some(command) = command else {
                         break;
                     };
-                    let Some(expected_type) = expected_response_type(&command.message) else {
+                    let Some(expected_type) =
+                        protocol::expected_response_type(command.message.type_id())
+                    else {
                         let _ = command.response.send(Err(DeviceError::InvalidRequest));
                         continue;
                     };
-                    let request_id = self.allocate_request_id();
+                    let request_id = self.request_ids.allocate();
                     let wire = match protocol::encode_message(request_id, &command.message) {
                         Ok(wire) => wire,
                         Err(error) => {
@@ -988,38 +989,6 @@ impl SocketPeer {
             .fetch_add(1, Ordering::Relaxed);
         tracing::warn!(device_id, error, "device link frame decode failed");
     }
-
-    fn allocate_request_id(&mut self) -> u32 {
-        if self.next_request_id == 0 {
-            self.next_request_id = 1;
-        }
-        let request_id = self.next_request_id;
-        self.next_request_id = self.next_request_id.wrapping_add(1);
-        if self.next_request_id == 0 {
-            self.next_request_id = 1;
-        }
-        request_id
-    }
-}
-
-fn expected_response_type(message: &Message) -> Option<u8> {
-    match message {
-        Message::StatusRequest => Some(protocol::TYPE_STATUS_RESPONSE),
-        Message::TimeSync(_)
-        | Message::PushData(_)
-        | Message::ApplyConfig(_)
-        | Message::ActivateScreen(_)
-        | Message::TriggerInterrupt(_)
-        | Message::NetworkConfig(_)
-        | Message::FactoryReset
-        | Message::AssetBegin(_)
-        | Message::AssetChunk(_)
-        | Message::AssetCommit(_)
-        | Message::AssetRelease(_)
-        | Message::PushScene(_) => Some(protocol::TYPE_ACK),
-        Message::Heartbeat => Some(protocol::TYPE_HEARTBEAT_ACK),
-        _ => None,
-    }
 }
 
 fn pending_deadline(pending: Option<&PendingRequest>) -> Instant {
@@ -1099,17 +1068,18 @@ mod tests {
     }
 
     #[test]
-    fn request_ids_are_nonzero_and_wrap_to_one() {
-        let (_device, connector) = super::WebSocketRuntimeDevice::channel("dev-1".into());
-        let mut peer = connector.attach();
-        peer.next_request_id = 0;
-        assert_eq!(peer.allocate_request_id(), 1);
-        assert_eq!(peer.next_request_id, 2);
+    fn remembering_a_later_status_clears_an_older_ota_error() {
+        let (device, connector) = super::WebSocketRuntimeDevice::channel("dev-1".into());
+        let mut failed = sample_status();
+        failed.last_ota_error = Some("download: ESP_FAIL".into());
+        device.remember_last_ota_error(&failed);
+        assert_eq!(
+            connector.last_ota_error().as_deref(),
+            Some("download: ESP_FAIL")
+        );
 
-        peer.next_request_id = u32::MAX;
-        assert_eq!(peer.allocate_request_id(), u32::MAX);
-        assert_eq!(peer.next_request_id, 1);
-        assert_eq!(peer.allocate_request_id(), 1);
+        device.remember_last_ota_error(&sample_status());
+        assert_eq!(connector.last_ota_error(), None);
     }
 
     #[test]

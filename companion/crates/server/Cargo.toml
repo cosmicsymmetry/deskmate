@@ -13,6 +13,7 @@ protocol = { path = "../protocol" }
 providers = { path = "../providers" }
 atomic-write-file = "0.3.0"
 axum = { version = "0.8", features = ["ws"] }
+base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "net", "fs", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["io"] }
@@ -32,9 +33,8 @@ serde_json = "1"
 thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-# Egress guard (companion/crates/server/src/egress.rs): outbound plugin data
-# fetches need TLS, hence "rustls" here even though the dev-dependency below
-# (used by loopback-only integration tests) stays TLS-less.
+# Shared by production egress and HTTP-facing tests; outbound plugin data
+# fetches need TLS, hence the rustls feature.
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 url = "2"
 # Backs `FirmwareCatalog::in_memory()`, which is normal library API (used by
@@ -45,12 +45,7 @@ tempfile = "3"
 [dev-dependencies]
 protocol = { path = "../protocol", features = ["test-support"] }
 tokio-tungstenite = "0.24"
-reqwest = { version = "0.13", default-features = false }
 http = "1"
-# egress.rs's timeout-budget tests use tokio's virtual clock
-# (`#[tokio::test(start_paused = true)]`) to prove the cap deterministically
-# without a real 20-second sleep.
-tokio = { version = "1", features = ["test-util"] }
 
 [lints]
 workspace = true

@@ -481,25 +481,10 @@ fn compile_line_angle_binding(source: &str) -> Result<String, CompileError> {
 /// gracefully instead of refusing. It is deliberately the *display* rule,
 /// not `expr`'s rule -- see `CompileError::Expression`'s doc for why
 /// `expr::MAX_OUTPUT_LEN`/`OutputTooLong` stays a named, fatal error.
-/// Shares its char-boundary walk-back with `bound_footer_text`, the other
-/// place text is trimmed for display rather than refused.
 fn bound_literal(text: &str) -> SceneValue {
-    SceneValue::Literal(truncate_to_scene_text_len(text))
-}
-
-/// Truncates `text` to `protocol::MAX_SCENE_TEXT_LEN` bytes at a valid
-/// UTF-8 char boundary. Shared by [`bound_literal`] (a face node's literal)
-/// and `bound_footer_text` (the shared stale/error footer) -- the one place
-/// this walk-back is written.
-fn truncate_to_scene_text_len(text: &str) -> String {
-    if text.len() <= protocol::MAX_SCENE_TEXT_LEN {
-        return text.to_string();
-    }
-    let mut end = protocol::MAX_SCENE_TEXT_LEN;
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    text[..end].to_string()
+    SceneValue::Literal(
+        protocol::truncate_utf8_to_bytes(text, protocol::MAX_SCENE_TEXT_LEN).to_owned(),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -984,10 +969,10 @@ pub fn compile_scene_with_assets(
 /// text -- `bound_literal` guards every face node's literal the same way,
 /// for the same reason: this is a display footer summarizing a fault, not
 /// authored content, and the retired C templates truncated an oversized
-/// error the same way. Shares its walk-back with `bound_literal` via
-/// [`truncate_to_scene_text_len`].
+/// error the same way. The byte-safe boundary walk is shared through
+/// [`protocol::truncate_utf8_to_bytes`].
 fn bound_footer_text(text: &str) -> String {
-    truncate_to_scene_text_len(text)
+    protocol::truncate_utf8_to_bytes(text, protocol::MAX_SCENE_TEXT_LEN).to_owned()
 }
 
 // ---------------------------------------------------------------------------

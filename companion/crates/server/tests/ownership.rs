@@ -12,12 +12,15 @@ mod support;
 /// Mirrors `tests/device_link.rs`'s helper; kept separate so the two files
 /// can diverge without one silently changing the other's fixture.
 async fn spawn() -> (String, server::registry::DeviceIdentity, String) {
-    spawn_state(ServerState::in_memory()).await
+    spawn_state(ServerState::in_memory(), support::IN_MEMORY_ADMIN_TOKEN).await
 }
 
-async fn spawn_state(state: ServerState) -> (String, server::registry::DeviceIdentity, String) {
+async fn spawn_state(
+    state: ServerState,
+    admin_token: &str,
+) -> (String, server::registry::DeviceIdentity, String) {
     let identity = state.registry().mint().expect("mint identity");
-    let admin_token = state.admin_token().to_string();
+    let admin_token = admin_token.to_string();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -913,6 +916,8 @@ async fn wait_for_pomodoro(
 
 #[tokio::test]
 async fn config_is_written_under_the_explicit_config_directory() {
+    const ADMIN_TOKEN: &str = "explicit-config-admin-token";
+
     // Catches deriving config storage from the firmware path: production's
     // systemd sandbox only makes /var/lib/deskmate writable, so a firmware
     // override must not redirect config writes outside the configured root.
@@ -920,12 +925,8 @@ async fn config_is_written_under_the_explicit_config_directory() {
     let config_root = temp.path().join("explicit-configs");
     let firmware = server::firmware::FirmwareCatalog::in_memory();
     let former_derived_root = firmware.directory().parent().unwrap().join("configs");
-    let state = ServerState::new(
-        "explicit-config-admin-token".to_string(),
-        firmware,
-        config_root.clone(),
-    );
-    let (host, identity, admin_token) = spawn_state(state).await;
+    let state = ServerState::new(ADMIN_TOKEN.to_string(), firmware, config_root.clone());
+    let (host, identity, admin_token) = spawn_state(state, ADMIN_TOKEN).await;
     let config = std::fs::read_to_string(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/tests/fixtures/one-clock-card.json"
@@ -1161,18 +1162,20 @@ async fn admin_status_reports_live_state_without_device_secrets() {
 
 #[tokio::test]
 async fn admin_status_reports_defaults_used_after_stored_config_validation_failure() {
+    const ADMIN_TOKEN: &str = "fallback-admin-token";
+
     // Catches calling a fresh process's factory defaults "last-good" and
     // catches omitting fallback state from the only admin status endpoint.
     let temp = tempfile::tempdir().expect("config test temp dir");
     let config_root = temp.path().join("configs");
     std::fs::create_dir_all(&config_root).expect("create config root");
     let state = ServerState::new(
-        "fallback-admin-token".to_string(),
+        ADMIN_TOKEN.to_string(),
         server::firmware::FirmwareCatalog::in_memory(),
         config_root.clone(),
     );
     let identity = state.registry().mint().expect("mint identity");
-    let admin_token = state.admin_token().to_string();
+    let admin_token = ADMIN_TOKEN.to_string();
     let mut invalid: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(concat!(
             env!("CARGO_MANIFEST_DIR"),

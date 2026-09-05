@@ -24,7 +24,6 @@ const DEFAULT_BIND_ADDRESS: &str = "127.0.0.1:8443";
 const DEFAULT_FIRMWARE_DIR: &str = "/var/lib/deskmate/firmware";
 const DEFAULT_CONFIG_DIR: &str = "/var/lib/deskmate/configs";
 const DEFAULT_PLUGINS_DIR: &str = "/var/lib/deskmate/plugins";
-const DEFAULT_FIRMWARE_VERSION: &str = "1.0.0";
 
 #[tokio::main]
 async fn main() {
@@ -59,8 +58,7 @@ async fn main() {
          unspecified under launchd/systemd",
         plugins_dir.display()
     );
-    let firmware_version = std::env::var("DESKMATE_FIRMWARE_VERSION")
-        .unwrap_or_else(|_| DEFAULT_FIRMWARE_VERSION.to_string());
+    let firmware_version = required_firmware_version(std::env::var("DESKMATE_FIRMWARE_VERSION"));
     let admin_token = std::env::var("DESKMATE_ADMIN_TOKEN")
         .expect("DESKMATE_ADMIN_TOKEN must be set -- see deploy/README.md");
     let (plugins, plugin_load_failures) = load_plugins(&plugins_dir);
@@ -91,6 +89,13 @@ async fn main() {
     tokio::task::spawn_blocking(move || shutdown_state.shutdown())
         .await
         .expect("device runtime shutdown worker panicked");
+}
+
+fn required_firmware_version(value: Result<String, std::env::VarError>) -> String {
+    value.expect(
+        "DESKMATE_FIRMWARE_VERSION must be set to the published image's exact \
+         firmware/version.txt value -- see deploy/README.md",
+    )
 }
 
 fn load_plugins(directory: &std::path::Path) -> (PluginRegistry, Vec<PluginLoadFailure>) {
@@ -175,4 +180,23 @@ async fn shutdown_signal() {
     }
 
     tracing::info!("shutdown signal received, draining connections");
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn missing_firmware_version_names_the_authoritative_file_and_runbook() {
+        let panic = std::panic::catch_unwind(|| {
+            super::required_firmware_version(Err(std::env::VarError::NotPresent));
+        })
+        .expect_err("a missing firmware version must stop startup");
+        let message = panic
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| panic.downcast_ref::<&str>().copied())
+            .expect("startup panic carries text");
+        assert!(message.contains("DESKMATE_FIRMWARE_VERSION"));
+        assert!(message.contains("firmware/version.txt"));
+        assert!(message.contains("deploy/README.md"));
+    }
 }

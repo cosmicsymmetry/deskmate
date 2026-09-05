@@ -23,7 +23,7 @@ pub mod plugin_host;
 pub mod plugin_provider;
 pub mod plugin_refresher;
 pub mod plugin_registry;
-pub mod rasterizer;
+mod rasterizer;
 pub mod registry;
 pub mod runtime_device;
 mod store;
@@ -189,20 +189,13 @@ impl ServerState {
         &self.inner.registry
     }
 
-    #[must_use]
-    pub fn admin_token(&self) -> &str {
-        &self.inner.admin_token
-    }
-
     /// Compares `presented` against the admin token in constant time. This
-    /// is the *only* sanctioned way to check the admin token -- callers
-    /// (Task 9's Mac-facing routes) must not compare `admin_token()` with
-    /// `==` themselves, which would quietly undo this crate's
+    /// is the *only* sanctioned way to check the admin token, preserving the
     /// constant-time-comparison guarantee for the one secret that protects
     /// every write.
     #[must_use]
     pub fn verify_admin_token(&self, presented: &str) -> bool {
-        registry::constant_time_eq(self.admin_token().as_bytes(), presented.as_bytes())
+        registry::constant_time_eq(self.inner.admin_token.as_bytes(), presented.as_bytes())
     }
 
     #[must_use]

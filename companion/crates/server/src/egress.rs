@@ -109,61 +109,40 @@ pub const MAX_RESPONSE_BODY_BYTES: u64 = 2 * 1024 * 1024;
 
 /// Why a fetch was refused. Every variant is meant to be safe to log and to
 /// surface to an operator; none carry response bodies or secrets.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum EgressError {
     /// The URL could not be parsed at all.
+    #[error("invalid url: {0}")]
     InvalidUrl(String),
     /// The URL's scheme was not `http` or `https`.
+    #[error("unsupported scheme: {0}")]
     UnsupportedScheme(String),
     /// The URL had no host component.
+    #[error("url has no host")]
     MissingHost,
     /// `host` (or one of the addresses it resolved to) is on the deny list.
+    #[error("egress denied to {host}: {reason}")]
     Denied { host: String, reason: DenyReason },
     /// DNS resolution for `host` failed or timed out.
+    #[error("dns resolution failed for {host}: {detail}")]
     ResolutionFailed { host: String, detail: String },
     /// Too many redirect hops.
+    #[error("too many redirects (limit {})", MAX_REDIRECTS)]
     TooManyRedirects,
     /// The response body exceeded [`MAX_RESPONSE_BODY_BYTES`].
+    #[error("response exceeded {limit}-byte cap")]
     ResponseTooLarge { limit: u64 },
     /// The fetch did not complete inside [`TOTAL_FETCH_BUDGET`].
+    #[error("fetch exceeded {:?} time budget", TOTAL_FETCH_BUDGET)]
     Timeout,
     /// A redirect response had a missing or unusable `Location` header.
+    #[error("bad redirect: {0}")]
     BadRedirect(String),
     /// The underlying HTTP client reported an error (connect failure,
     /// protocol error, etc.).
+    #[error("request failed: {0}")]
     Request(String),
 }
-
-impl fmt::Display for EgressError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            EgressError::InvalidUrl(detail) => write!(f, "invalid url: {detail}"),
-            EgressError::UnsupportedScheme(scheme) => {
-                write!(f, "unsupported scheme: {scheme}")
-            }
-            EgressError::MissingHost => write!(f, "url has no host"),
-            EgressError::Denied { host, reason } => {
-                write!(f, "egress denied to {host}: {reason}")
-            }
-            EgressError::ResolutionFailed { host, detail } => {
-                write!(f, "dns resolution failed for {host}: {detail}")
-            }
-            EgressError::TooManyRedirects => {
-                write!(f, "too many redirects (limit {MAX_REDIRECTS})")
-            }
-            EgressError::ResponseTooLarge { limit } => {
-                write!(f, "response exceeded {limit}-byte cap")
-            }
-            EgressError::Timeout => {
-                write!(f, "fetch exceeded {TOTAL_FETCH_BUDGET:?} time budget")
-            }
-            EgressError::BadRedirect(detail) => write!(f, "bad redirect: {detail}"),
-            EgressError::Request(detail) => write!(f, "request failed: {detail}"),
-        }
-    }
-}
-
-impl std::error::Error for EgressError {}
 
 /// Why an address is not globally-routable unicast, and therefore denied.
 /// Every variant names a distinct IANA special-purpose range so a denial is
@@ -392,10 +371,6 @@ fn v4_in_cidr(ip: Ipv4Addr, base: Ipv4Addr, prefix_len: u32) -> bool {
 }
 
 fn deny_reason_v6(ip: Ipv6Addr) -> Option<DenyReason> {
-    const LINK_LOCAL_MASK: u16 = 0xffc0; // fe80::/10
-    const LINK_LOCAL_PREFIX: u16 = 0xfe80;
-    const UNIQUE_LOCAL_MASK: u16 = 0xfe00; // fc00::/7
-    const UNIQUE_LOCAL_PREFIX: u16 = 0xfc00;
     const SITE_LOCAL_MASK: u16 = 0xffc0; // fec0::/10, deprecated (RFC 3879)
     const SITE_LOCAL_PREFIX: u16 = 0xfec0;
 
@@ -408,10 +383,10 @@ fn deny_reason_v6(ip: Ipv6Addr) -> Option<DenyReason> {
 
     let segments = ip.segments();
     let leading = segments[0];
-    if leading & LINK_LOCAL_MASK == LINK_LOCAL_PREFIX {
+    if ip.is_unicast_link_local() {
         return Some(DenyReason::LinkLocal);
     }
-    if leading & UNIQUE_LOCAL_MASK == UNIQUE_LOCAL_PREFIX {
+    if ip.is_unique_local() {
         return Some(DenyReason::UniqueLocalV6);
     }
     if leading & SITE_LOCAL_MASK == SITE_LOCAL_PREFIX {
@@ -813,452 +788,148 @@ async fn read_capped_body(mut response: reqwest::Response) -> Result<Vec<u8>, Eg
 mod tests {
     use super::*;
 
-    // --- Step 1: the literal test from the task, verbatim. ---
+    enum AddressCase {
+        Url(&'static str),
+        Ip(&'static str),
+    }
 
     #[test]
-    fn the_egress_guard_denies_private_and_metadata_destinations() {
-        for url in [
-            "http://127.0.0.1/",
-            "http://10.0.0.1/",
-            "http://169.254.169.254/",
-            "http://[::1]/",
-            "http://192.168.8.20/",
-        ] {
-            assert!(
-                matches!(egress_guard(url), Err(EgressError::Denied { .. })),
-                "{url}"
-            );
+    #[allow(clippy::too_many_lines)] // one audit-friendly labelled row per denied range
+    fn every_special_purpose_range_is_classified_by_name() {
+        use AddressCase::{Ip, Url};
+
+        macro_rules! denied {
+            ($label:literal, $input:expr, $reason:ident) => {
+                ($label, $input, Some(DenyReason::$reason))
+            };
         }
-    }
+        let cases = [
+            denied!("RFC1918 10/8", Url("http://10.1.2.3/"), Rfc1918Private),
+            denied!(
+                "RFC1918 172 start",
+                Url("http://172.16.0.1/"),
+                Rfc1918Private
+            ),
+            denied!(
+                "RFC1918 172 end",
+                Url("http://172.31.255.255/"),
+                Rfc1918Private
+            ),
+            ("outside RFC1918 172", Url("http://172.32.0.1/"), None),
+            denied!("RFC1918 192", Url("http://192.168.0.1/"), Rfc1918Private),
+            denied!("IPv4 loopback", Url("http://127.0.0.5/"), Loopback),
+            denied!("IPv6 loopback", Url("http://[::1]/"), Loopback),
+            denied!("IPv4 link-local", Url("http://169.254.1.1/"), LinkLocal),
+            denied!("IPv6 link-local", Url("http://[fe80::1]/"), LinkLocal),
+            denied!(
+                "cloud metadata",
+                Url("http://169.254.169.254/latest/meta-data/"),
+                CloudMetadata
+            ),
+            denied!("IPv6 ULA start", Url("http://[fc00::1]/"), UniqueLocalV6),
+            denied!(
+                "IPv6 ULA fd",
+                Url("http://[fd12:3456:789a::1]/"),
+                UniqueLocalV6
+            ),
+            denied!(
+                "mapped loopback",
+                Url("http://[::ffff:127.0.0.1]/"),
+                Loopback
+            ),
+            denied!(
+                "mapped private",
+                Url("http://[::ffff:10.0.0.1]/"),
+                Rfc1918Private
+            ),
+            denied!(
+                "mapped metadata",
+                Url("http://[::ffff:169.254.169.254]/"),
+                CloudMetadata
+            ),
+            denied!("IPv4 unspecified", Url("http://0.0.0.0/"), Unspecified),
+            denied!("IPv4 broadcast", Url("http://255.255.255.255/"), Broadcast),
+            denied!("IPv4 multicast", Url("http://224.0.0.1/"), Multicast),
+            // docker-vm's real Tailscale address: the threat model's
+            // concrete "reaches unrelated neighbours" case.
+            denied!(
+                "Tailscale CGNAT",
+                Url("http://100.93.166.123/"),
+                CarrierGradeNat
+            ),
+            denied!("CGNAT start", Url("http://100.64.0.0/"), CarrierGradeNat),
+            denied!("CGNAT first", Url("http://100.64.0.1/"), CarrierGradeNat),
+            denied!("CGNAT end", Url("http://100.127.255.255/"), CarrierGradeNat),
+            ("before CGNAT", Url("http://100.63.255.255/"), None),
+            ("after CGNAT", Url("http://100.128.0.0/"), None),
+            denied!(
+                "IETF assignment",
+                Url("http://192.0.0.8/"),
+                IetfProtocolAssignment
+            ),
+            denied!("TEST-NET-1", Url("http://192.0.2.1/"), Documentation),
+            denied!("TEST-NET-2", Url("http://198.51.100.1/"), Documentation),
+            denied!("TEST-NET-3", Url("http://203.0.113.1/"), Documentation),
+            denied!("benchmark start", Url("http://198.18.0.1/"), Benchmarking),
+            denied!("benchmark end", Url("http://198.19.255.255/"), Benchmarking),
+            denied!("class E", Url("http://240.0.0.1/"), Reserved),
+            denied!("class E high", Url("http://250.1.2.3/"), Reserved),
+            denied!("6to4 relay", Url("http://192.88.99.1/"), Reserved),
+            denied!("0/8 reserved", Url("http://0.1.2.3/"), Reserved),
+            denied!("IPv6 site-local", Ip("fec0::1"), SiteLocalV6),
+            denied!("IPv6 documentation", Ip("2001:db8::1"), Documentation),
+            denied!("NAT64 well-known", Ip("64:ff9b::102:304"), Nat64V6),
+            denied!("IPv4-compatible IPv6", Ip("::0.1.2.3"), Ipv4CompatibleV6),
+            denied!("NAT64 local-use", Ip("64:ff9b:1::102:304"), Nat64LocalUseV6),
+            denied!("Teredo assignment", Ip("2001::1"), Ipv6ProtocolAssignment),
+            denied!(
+                "IPv6 benchmark assignment",
+                Ip("2001:2::1"),
+                Ipv6ProtocolAssignment
+            ),
+            denied!(
+                "ORCHIDv2 assignment",
+                Ip("2001:20::1"),
+                Ipv6ProtocolAssignment
+            ),
+            // 6to4 encoding of 169.254.169.254, the cloud metadata address.
+            denied!(
+                "6to4 metadata encoding",
+                Ip("2002:a9fe:a9fe::1"),
+                SixToFourV6
+            ),
+            denied!("IPv6 discard-only", Ip("100::1"), DiscardOnlyV6),
+            denied!("SRv6 SID space", Ip("5f00::1"), Srv6V6),
+            denied!(
+                "IPv4-translated IPv6",
+                Ip("::ffff:0:7f00:1"),
+                Ipv4TranslatedV6
+            ),
+            ("globally routable IPv4", Ip("93.184.216.34"), None),
+        ];
 
-    // --- Broadened: one assertion per denied class, each naming its own
-    // reason so a future edit that silently swaps in the wrong reason (or
-    // stops denying a class while still denying a sibling) fails loudly. ---
-
-    #[test]
-    fn denies_rfc1918_10_block() {
-        assert!(matches!(
-            egress_guard("http://10.1.2.3/"),
-            Err(EgressError::Denied {
-                reason: DenyReason::Rfc1918Private,
-                ..
-            })
-        ));
-    }
-
-    #[test]
-    fn denies_rfc1918_172_16_block() {
-        for host in ["172.16.0.1", "172.31.255.255"] {
-            let url = format!("http://{host}/");
-            assert!(
-                matches!(
-                    egress_guard(&url),
-                    Err(EgressError::Denied {
-                        reason: DenyReason::Rfc1918Private,
-                        ..
-                    })
-                ),
-                "{url}"
-            );
+        for (label, input, expected) in cases {
+            let (raw, actual) = match input {
+                Url(url) => {
+                    let reason = match egress_guard(url) {
+                        Ok(_) => None,
+                        Err(EgressError::Denied { reason, .. }) => Some(reason),
+                        Err(error) => panic!("{label}: unexpected error for {url}: {error}"),
+                    };
+                    (url, reason)
+                }
+                Ip(raw) => {
+                    let ip: IpAddr = raw.parse().expect("table IP must parse");
+                    assert_eq!(
+                        is_globally_routable(ip),
+                        expected.is_none(),
+                        "{label}: {raw}"
+                    );
+                    (raw, deny_reason_for_ip(ip))
+                }
+            };
+            assert_eq!(actual, expected, "{label}: {raw}");
         }
-        // 172.32.0.0 is outside 172.16/12 and must NOT be denied as private.
-        assert!(!matches!(
-            egress_guard("http://172.32.0.1/"),
-            Err(EgressError::Denied {
-                reason: DenyReason::Rfc1918Private,
-                ..
-            })
-        ));
-    }
-
-    #[test]
-    fn denies_rfc1918_192_168_block() {
-        assert!(matches!(
-            egress_guard("http://192.168.0.1/"),
-            Err(EgressError::Denied {
-                reason: DenyReason::Rfc1918Private,
-                ..
-            })
-        ));
-    }
-
-    #[test]
-    fn denies_ipv4_loopback() {
-        assert!(matches!(
-            egress_guard("http://127.0.0.5/"),
-            Err(EgressError::Denied {
-                reason: DenyReason::Loopback,
-                ..
-            })
-        ));
-    }
-
-    #[test]
-    fn denies_ipv6_loopback() {
-        assert!(matches!(
-            egress_guard("http://[::1]/"),
-            Err(EgressError::Denied {
-                reason: DenyReason::Loopback,
-                ..
-            })
-        ));
-    }
-
-    #[test]
-    fn denies_ipv4_link_local() {
-        assert!(matches!(
-            egress_guard("http://169.254.1.1/"),
-            Err(EgressError::Denied {
-                reason: DenyReason::LinkLocal,
-                ..
-            })
-        ));
-    }
-
-    #[test]
-    fn denies_ipv6_link_local() {
-        assert!(matches!(
-            egress_guard("http://[fe80::1]/"),
-            Err(EgressError::Denied {
-                reason: DenyReason::LinkLocal,
-                ..
-            })
-        ));
-    }
-
-    #[test]
-    fn denies_cloud_metadata_address_by_name() {
-        assert!(matches!(
-            egress_guard("http://169.254.169.254/latest/meta-data/"),
-            Err(EgressError::Denied {
-                reason: DenyReason::CloudMetadata,
-                ..
-            })
-        ));
-    }
-
-    #[test]
-    fn denies_ipv6_unique_local() {
-        assert!(matches!(
-            egress_guard("http://[fc00::1]/"),
-            Err(EgressError::Denied {
-                reason: DenyReason::UniqueLocalV6,
-                ..
-            })
-        ));
-        assert!(matches!(
-            egress_guard("http://[fd12:3456:789a::1]/"),
-            Err(EgressError::Denied {
-                reason: DenyReason::UniqueLocalV6,
-                ..
-            })
-        ));
-    }
-
-    #[test]
-    fn denies_ipv4_mapped_ipv6_forms() {
-        // ::ffff:127.0.0.1 -> loopback once unwrapped.
-        assert!(matches!(
-            egress_guard("http://[::ffff:127.0.0.1]/"),
-            Err(EgressError::Denied {
-                reason: DenyReason::Loopback,
-                ..
-            })
-        ));
-        // ::ffff:10.0.0.1 -> RFC1918 once unwrapped.
-        assert!(matches!(
-            egress_guard("http://[::ffff:10.0.0.1]/"),
-            Err(EgressError::Denied {
-                reason: DenyReason::Rfc1918Private,
-                ..
-            })
-        ));
-        // ::ffff:169.254.169.254 -> cloud metadata once unwrapped.
-        assert!(matches!(
-            egress_guard("http://[::ffff:169.254.169.254]/"),
-            Err(EgressError::Denied {
-                reason: DenyReason::CloudMetadata,
-                ..
-            })
-        ));
-    }
-
-    #[test]
-    fn denies_unspecified_and_broadcast_and_multicast() {
-        assert!(matches!(
-            egress_guard("http://0.0.0.0/"),
-            Err(EgressError::Denied {
-                reason: DenyReason::Unspecified,
-                ..
-            })
-        ));
-        assert!(matches!(
-            egress_guard("http://255.255.255.255/"),
-            Err(EgressError::Denied {
-                reason: DenyReason::Broadcast,
-                ..
-            })
-        ));
-        assert!(matches!(
-            egress_guard("http://224.0.0.1/"),
-            Err(EgressError::Denied {
-                reason: DenyReason::Multicast,
-                ..
-            })
-        ));
-    }
-
-    // --- Fix round 1: the CGNAT gap and the rest of the IANA
-    // special-purpose registry the deny-list version missed. ---
-
-    #[test]
-    fn denies_carrier_grade_nat_the_render_hosts_own_tailscale_address() {
-        // docker-vm's real Tailscale address, named explicitly because this
-        // is not theoretical: it is exactly the "reaches unrelated
-        // neighbours" case the threat model describes.
-        assert!(matches!(
-            egress_guard("http://100.93.166.123/"),
-            Err(EgressError::Denied {
-                reason: DenyReason::CarrierGradeNat,
-                ..
-            })
-        ));
-    }
-
-    #[test]
-    fn denies_carrier_grade_nat_range_boundaries() {
-        for host in ["100.64.0.0", "100.64.0.1", "100.127.255.255"] {
-            let url = format!("http://{host}/");
-            assert!(
-                matches!(
-                    egress_guard(&url),
-                    Err(EgressError::Denied {
-                        reason: DenyReason::CarrierGradeNat,
-                        ..
-                    })
-                ),
-                "{url}"
-            );
-        }
-        // Just outside 100.64.0.0/10 on both sides: must be permitted.
-        for host in ["100.63.255.255", "100.128.0.0"] {
-            let url = format!("http://{host}/");
-            assert!(egress_guard(&url).is_ok(), "{url} should be permitted");
-        }
-    }
-
-    #[test]
-    fn denies_ietf_protocol_assignment_range() {
-        assert!(matches!(
-            egress_guard("http://192.0.0.8/"),
-            Err(EgressError::Denied {
-                reason: DenyReason::IetfProtocolAssignment,
-                ..
-            })
-        ));
-    }
-
-    #[test]
-    fn denies_ipv4_test_net_documentation_ranges() {
-        for host in ["192.0.2.1", "198.51.100.1", "203.0.113.1"] {
-            let url = format!("http://{host}/");
-            assert!(
-                matches!(
-                    egress_guard(&url),
-                    Err(EgressError::Denied {
-                        reason: DenyReason::Documentation,
-                        ..
-                    })
-                ),
-                "{url}"
-            );
-        }
-    }
-
-    #[test]
-    fn denies_benchmarking_range() {
-        for host in ["198.18.0.1", "198.19.255.255"] {
-            let url = format!("http://{host}/");
-            assert!(
-                matches!(
-                    egress_guard(&url),
-                    Err(EgressError::Denied {
-                        reason: DenyReason::Benchmarking,
-                        ..
-                    })
-                ),
-                "{url}"
-            );
-        }
-    }
-
-    #[test]
-    fn denies_reserved_class_e_and_deprecated_6to4_relay() {
-        assert!(matches!(
-            egress_guard("http://240.0.0.1/"),
-            Err(EgressError::Denied {
-                reason: DenyReason::Reserved,
-                ..
-            })
-        ));
-        assert!(matches!(
-            egress_guard("http://250.1.2.3/"),
-            Err(EgressError::Denied {
-                reason: DenyReason::Reserved,
-                ..
-            })
-        ));
-        assert!(matches!(
-            egress_guard("http://192.88.99.1/"),
-            Err(EgressError::Denied {
-                reason: DenyReason::Reserved,
-                ..
-            })
-        ));
-        // 0.0.0.0/8 beyond the single unspecified address.
-        assert!(matches!(
-            egress_guard("http://0.1.2.3/"),
-            Err(EgressError::Denied {
-                reason: DenyReason::Reserved,
-                ..
-            })
-        ));
-    }
-
-    #[test]
-    fn denies_ipv6_site_local_deprecated_range() {
-        assert!(matches!(
-            deny_reason_for_ip("fec0::1".parse().unwrap()),
-            Some(DenyReason::SiteLocalV6)
-        ));
-    }
-
-    #[test]
-    fn denies_ipv6_documentation_range() {
-        assert!(matches!(
-            deny_reason_for_ip("2001:db8::1".parse().unwrap()),
-            Some(DenyReason::Documentation)
-        ));
-    }
-
-    #[test]
-    fn denies_ipv6_nat64_well_known_prefix() {
-        // 64:ff9b::1.2.3.4, an address a NAT64 resolver could synthesize
-        // from an attacker-influenced name.
-        let ip: IpAddr = "64:ff9b::102:304".parse().unwrap();
-        assert!(matches!(deny_reason_for_ip(ip), Some(DenyReason::Nat64V6)));
-    }
-
-    #[test]
-    fn denies_deprecated_ipv4_compatible_ipv6() {
-        // ::0.1.2.3 -- top 96 bits zero, distinct from ::ffff:0.1.2.3
-        // (IPv4-mapped, unwrapped and classified as ordinary IPv4 upstream
-        // of this check) and from :: / ::1 (unspecified / loopback,
-        // checked before this branch runs).
-        let ip: IpAddr = "::0.1.2.3".parse().unwrap();
-        assert!(matches!(
-            deny_reason_for_ip(ip),
-            Some(DenyReason::Ipv4CompatibleV6)
-        ));
-    }
-
-    // --- Fix round 2, item 3: IPv6 ranges the review's probe found
-    // permitted, each with its own DenyReason so a future edit that
-    // silently merges two of these back into "reserved" is caught. ---
-
-    #[test]
-    fn denies_ipv6_local_use_nat64_prefix() {
-        // Distinct from the well-known 64:ff9b::/96 prefix (already
-        // covered by `denies_ipv6_nat64_well_known_prefix`): this is the
-        // *local-use* NAT64 prefix, 64:ff9b:1::/48.
-        let ip: IpAddr = "64:ff9b:1::102:304".parse().unwrap();
-        assert!(matches!(
-            deny_reason_for_ip(ip),
-            Some(DenyReason::Nat64LocalUseV6)
-        ));
-    }
-
-    #[test]
-    fn denies_ipv6_teredo_within_the_2001_slash_23_protocol_assignment_block() {
-        let ip: IpAddr = "2001::1".parse().unwrap();
-        assert!(matches!(
-            deny_reason_for_ip(ip),
-            Some(DenyReason::Ipv6ProtocolAssignment)
-        ));
-    }
-
-    #[test]
-    fn denies_ipv6_benchmarking_within_the_2001_slash_23_protocol_assignment_block() {
-        let ip: IpAddr = "2001:2::1".parse().unwrap();
-        assert!(matches!(
-            deny_reason_for_ip(ip),
-            Some(DenyReason::Ipv6ProtocolAssignment)
-        ));
-    }
-
-    #[test]
-    fn denies_ipv6_orchidv2_within_the_2001_slash_23_protocol_assignment_block() {
-        let ip: IpAddr = "2001:20::1".parse().unwrap();
-        assert!(matches!(
-            deny_reason_for_ip(ip),
-            Some(DenyReason::Ipv6ProtocolAssignment)
-        ));
-        // 2001:db8::/32 (documentation) does not overlap this /23 and must
-        // keep its own, more specific reason.
-        assert!(matches!(
-            deny_reason_for_ip("2001:db8::1".parse().unwrap()),
-            Some(DenyReason::Documentation)
-        ));
-    }
-
-    #[test]
-    fn denies_6to4_including_the_metadata_address_own_encoding() {
-        // 2002:a9fe:a9fe::1 is the 6to4 encoding of 169.254.169.254 (the
-        // cloud metadata address this whole module exists partly to deny
-        // directly) -- named explicitly because it is the address that
-        // best explains why a bare "2002::/16 is 6to4" note undersells the
-        // risk of leaving this range permitted.
-        let ip: IpAddr = "2002:a9fe:a9fe::1".parse().unwrap();
-        assert!(matches!(
-            deny_reason_for_ip(ip),
-            Some(DenyReason::SixToFourV6)
-        ));
-    }
-
-    #[test]
-    fn denies_ipv6_discard_only_range() {
-        let ip: IpAddr = "100::1".parse().unwrap();
-        assert!(matches!(
-            deny_reason_for_ip(ip),
-            Some(DenyReason::DiscardOnlyV6)
-        ));
-    }
-
-    #[test]
-    fn denies_ipv6_srv6_sid_space() {
-        let ip: IpAddr = "5f00::1".parse().unwrap();
-        assert!(matches!(deny_reason_for_ip(ip), Some(DenyReason::Srv6V6)));
-    }
-
-    #[test]
-    fn denies_ipv4_translated_form_regardless_of_bits_64_to_95() {
-        // ::ffff:0:7f00:1 -- RFC 2765's IPv4-*translated* form embedding
-        // 127.0.0.1, with 0xffff at bits 64-79 rather than the IPv4-
-        // *mapped* form's bits 80-95. Distinct DenyReason from
-        // Ipv4CompatibleV6 because bits 64-95 are not all zero here.
-        let ip: IpAddr = "::ffff:0:7f00:1".parse().unwrap();
-        assert!(matches!(
-            deny_reason_for_ip(ip),
-            Some(DenyReason::Ipv4TranslatedV6)
-        ));
-    }
-
-    #[test]
-    fn is_globally_routable_agrees_with_deny_reason_for_ip() {
-        let global: IpAddr = "93.184.216.34".parse().unwrap();
-        let denied: IpAddr = "100.93.166.123".parse().unwrap();
-        assert!(is_globally_routable(global));
-        assert!(!is_globally_routable(denied));
     }
 
     #[test]
@@ -1285,11 +956,6 @@ mod tests {
         // that is exactly what resolve-then-pin (resolve_and_pin,
         // select_pinned_address) exists to check once resolution has run.
         assert!(egress_guard("https://example.com/data.json").is_ok());
-    }
-
-    #[test]
-    fn permits_a_globally_routable_literal_ip() {
-        assert!(egress_guard("http://93.184.216.34/").is_ok());
     }
 
     // --- select_pinned_address: the core of resolve-then-pin. Proves the
@@ -1521,11 +1187,10 @@ mod tests {
     async fn fetch_returns_the_response_status_for_a_non_2xx_response() {
         // Fix round 2, item 1: the status capture at the end of
         // `fetch_inner` (`let status = response.status().as_u16();`) had
-        // no test at THIS level -- `plugin_provider.rs`'s 503 tests drive a
-        // real loopback server too, but through `DirectHttpFetcher`, which
-        // bypasses `egress::fetch` entirely. Hardcoding `let status =
-        // 200u16;` there passed all 165 tests. This drives the real
-        // guarded path (`fetch_with_resolver`, the same production
+        // no test at THIS level -- `plugin_provider.rs` uses deterministic
+        // fake response sequences to prove status-before-parse and last-good
+        // behavior. This drives the real guarded path (`fetch_with_resolver`,
+        // the same production
         // composition the redirect-chain test above uses) against a server
         // that answers 503, and asserts the returned status is 503, not
         // silently 200.

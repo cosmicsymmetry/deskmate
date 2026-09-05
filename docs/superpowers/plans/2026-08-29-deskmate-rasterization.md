@@ -473,8 +473,9 @@ raster-only candidate test in `plugin_host.rs`, 3 scanner tests in `compile.rs`.
 - Test: rasterizer unit/property tests and server integration tests
 
 **Interfaces:**
-- Produces `RasterizedFrame { digest, bytes, width, height }`, where `bytes` is the decoded
-  device-native LVGL image blob and `digest = SHA-256(bytes)`.
+- Produces `RasterizedFrame { digest, bytes }`, where `bytes` is the decoded device-native
+  LVGL image blob, `digest = SHA-256(bytes)`, and the fixed dimensions are implied by the
+  protocol canvas constants and canonical LVGL image header.
 - Accepts either a protocol `Scene` plus resolved non-live field inputs/assets, or one
   registry-owned v2 SVG template plus its provider snapshot.
 

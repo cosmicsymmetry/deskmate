@@ -83,11 +83,6 @@ impl FirmwareCatalog {
         &self.directory
     }
 
-    #[must_use]
-    pub fn current_version(&self) -> &str {
-        &self.current_version
-    }
-
     /// Compares `requested` against the newest available version.
     #[must_use]
     pub fn check(&self, requested: &str) -> FirmwareCheck {

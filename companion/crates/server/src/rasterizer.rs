@@ -3,14 +3,15 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as _;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
+use base64::Engine as _;
 use resvg::tiny_skia::{Color, Pixmap, Transform};
 use roxmltree::{Document, Node, NodeId};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use plugin::{EvalContext, EvalValue, Expr, ExprError, FUEL_BUDGET, Fuel};
+use plugin::{EvalContext, EvalValue, Expr, ExprError, ExpressionSource, FUEL_BUDGET, Fuel};
 use protocol::{
     Field, FieldValue, SCENE_CANVAS_HEIGHT, SCENE_CANVAS_WIDTH, Scene, SceneAlign, SceneFont,
     SceneFontTier, SceneLabelAnchor, SceneNode, SceneValue,
@@ -23,10 +24,8 @@ const INTER_REGULAR: &[u8] = include_bytes!("../../../../tools/fonts/Inter-Regul
 const INTER_SEMIBOLD: &[u8] = include_bytes!("../../../../tools/fonts/Inter-SemiBold.ttf");
 const ALLOWED_FONT_FAMILY: &str = "Inter";
 
-/// SVG source is capped before XML parsing so one plugin cannot consume server memory.
-pub const MAX_SVG_SOURCE_BYTES: usize = 256 * 1024;
-/// Expression output may grow a registry-bounded template, but remains separately capped.
-pub const MAX_EXPANDED_SVG_BYTES: usize = 512 * 1024;
+pub use crate::plugin_provider::MAX_RENDER_WALL_CLOCK;
+pub use plugin::{MAX_EXPANDED_SVG_BYTES, MAX_SVG_SOURCE_BYTES};
 /// XML nesting is capped to keep all tree walks and renderer recursion shallow.
 pub const MAX_XML_DEPTH: usize = 64;
 /// Element count is capped before renderer allocation to bound document complexity.
@@ -35,24 +34,19 @@ pub const MAX_XML_ELEMENT_NODES: usize = 4_096;
 pub const MAX_EXPANDED_SVG_NODES: usize = 8_192;
 /// Root dimensions are bounded even though output is normalized to the fixed device canvas.
 pub const MAX_SVG_DIMENSION: u32 = 4_096;
-/// Matches the provider's render deadline so validation and raster work share one budget.
-pub const MAX_RENDER_WALL_CLOCK: Duration = Duration::from_millis(250);
-
 /// The decoded image bytes that can be uploaded directly as an LVGL image asset.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RasterizedFrame {
+pub(crate) struct RasterizedFrame {
     pub digest: [u8; 32],
     pub bytes: Vec<u8>,
-    pub width: u32,
-    pub height: u32,
 }
 
 /// Content-addressed bytes available while translating asset-bearing scene nodes.
-pub type RasterAssetMap = HashMap<[u8; 32], Arc<[u8]>>;
+pub(crate) type RasterAssetMap = HashMap<[u8; 32], Arc<[u8]>>;
 
 /// A named, fail-closed reason an SVG was not rasterized.
 #[derive(Debug, Error, PartialEq, Eq)]
-pub enum RasterizeError {
+pub(crate) enum RasterizeError {
     #[error("SVG source exceeds the {max_bytes}-byte limit")]
     SourceTooLarge { max_bytes: usize },
     #[error("SVG source is not valid UTF-8")]
@@ -118,23 +112,38 @@ pub enum RasterizeError {
 }
 
 /// Rasterizes one SVG source string onto the fixed, true-black device canvas.
-pub fn rasterize_svg(svg: &str) -> Result<RasterizedFrame, RasterizeError> {
+#[cfg(test)]
+fn rasterize_svg(svg: &str) -> Result<RasterizedFrame, RasterizeError> {
     rasterize_svg_bytes(svg.as_bytes())
 }
 
+#[cfg(test)]
 fn rasterize_svg_bytes(bytes: &[u8]) -> Result<RasterizedFrame, RasterizeError> {
-    render_svg_bytes(bytes, MAX_SVG_SOURCE_BYTES, false, &RasterAssetMap::new())
+    let deadline = RenderDeadline::start();
+    render_svg_bytes(
+        bytes,
+        MAX_SVG_SOURCE_BYTES,
+        false,
+        &RasterAssetMap::new(),
+        &deadline,
+    )
 }
 
 /// Evaluates a registry-owned SVG template against its already-rooted provider value.
-///
-/// Every expression in the document shares one [`Fuel`] budget. `field.*` reads the
-/// same `protocol::Field` producer shape used by app-core; live device bindings are
-/// refused rather than frozen into a one-time value.
-pub fn evaluate_svg_template(
+#[cfg(test)]
+fn evaluate_svg_template(
     template: &str,
     rooted_data: &serde_json::Value,
     fields: &[Field],
+) -> Result<String, RasterizeError> {
+    evaluate_svg_template_with_deadline(template, rooted_data, fields, &RenderDeadline::start())
+}
+
+fn evaluate_svg_template_with_deadline(
+    template: &str,
+    rooted_data: &serde_json::Value,
+    fields: &[Field],
+    deadline: &RenderDeadline,
 ) -> Result<String, RasterizeError> {
     if template.len() > MAX_SVG_SOURCE_BYTES {
         return Err(RasterizeError::SourceTooLarge {
@@ -142,25 +151,33 @@ pub fn evaluate_svg_template(
         });
     }
     let document = Document::parse(template).map_err(|_| RasterizeError::MalformedXml)?;
+    deadline.check()?;
     let context = EvalContext::with_data(rooted_data);
     let mut fuel = Fuel::new(FUEL_BUDGET);
     let mut replacements = Vec::new();
 
     for node in document.descendants() {
+        deadline.check()?;
         if node.is_text() {
             let range = node.range();
             let raw = &template[range.clone()];
             if contains_mustache(raw) {
-                replacements.push((range, evaluate_xml_value(raw, &context, fields, &mut fuel)?));
+                replacements.push((
+                    range,
+                    evaluate_xml_value(raw, &context, fields, &mut fuel, deadline)?,
+                ));
             }
         }
         if node.is_element() {
             for attribute in node.attributes() {
+                deadline.check()?;
                 let range = attribute.range_value();
                 let raw = &template[range.clone()];
                 if contains_mustache(raw) {
-                    replacements
-                        .push((range, evaluate_xml_value(raw, &context, fields, &mut fuel)?));
+                    replacements.push((
+                        range,
+                        evaluate_xml_value(raw, &context, fields, &mut fuel, deadline)?,
+                    ));
                 }
             }
         }
@@ -169,6 +186,7 @@ pub fn evaluate_svg_template(
     replacements.sort_by_key(|(range, _)| range.start);
     let mut expanded = template.to_owned();
     for (range, replacement) in replacements.into_iter().rev() {
+        deadline.check()?;
         expanded.replace_range(range, &replacement);
     }
     if expanded.len() > MAX_EXPANDED_SVG_BYTES {
@@ -181,17 +199,38 @@ pub fn evaluate_svg_template(
 
 /// Evaluates and rasterizes one registry-owned SVG template through the same renderer
 /// and output encoder used for translated scenes.
-pub fn rasterize_svg_template(
+pub(crate) fn rasterize_plugin_svg(
     template: &str,
     rooted_data: &serde_json::Value,
     fields: &[Field],
+    assets: &RasterAssetMap,
+    state: app_core::SceneDataState<'_>,
 ) -> Result<RasterizedFrame, RasterizeError> {
-    let evaluated = evaluate_svg_template(template, rooted_data, fields)?;
+    let deadline = RenderDeadline::start();
+    let mut evaluated =
+        evaluate_svg_template_with_deadline(template, rooted_data, fields, &deadline)?;
+    append_data_state_footer(&mut evaluated, state, assets, &deadline)?;
     render_svg_bytes(
         evaluated.as_bytes(),
         MAX_EXPANDED_SVG_BYTES,
         false,
+        assets,
+        &deadline,
+    )
+}
+
+#[cfg(test)]
+fn rasterize_svg_template(
+    template: &str,
+    rooted_data: &serde_json::Value,
+    fields: &[Field],
+) -> Result<RasterizedFrame, RasterizeError> {
+    rasterize_plugin_svg(
+        template,
+        rooted_data,
+        fields,
         &RasterAssetMap::new(),
+        app_core::SceneDataState::OK,
     )
 }
 
@@ -202,14 +241,25 @@ pub fn rasterize_svg_template(
 /// [`rasterize_svg`] and [`rasterize_svg_template`] paths continue to reject every data
 /// URL from plugin-authored input.
 #[allow(clippy::too_many_lines)] // one arm per scene node kind
-pub fn scene_to_svg(
+pub(crate) fn scene_to_svg(
     scene: &Scene,
     fields: &[Field],
     assets: &RasterAssetMap,
+    deadline: &RenderDeadline,
 ) -> Result<String, RasterizeError> {
     protocol::validate_scene(scene)
         .map_err(|error| RasterizeError::InvalidScene(error.to_string()))?;
-    reject_live_scene(scene)?;
+    deadline.check()?;
+    let requirements = app_core::analyze_scene(scene).map_err(|error| match error {
+        app_core::RequirementsError::UnknownBinding { binding } => {
+            RasterizeError::UnknownBinding { binding }
+        }
+    })?;
+    if let Some(binding) = requirements.bindings.live.first() {
+        return Err(RasterizeError::LiveBinding {
+            binding: binding.clone(),
+        });
+    }
 
     let mut svg = format!(
         r#"<svg xmlns="http://www.w3.org/2000/svg" width="{}" height="{}" viewBox="0 0 {} {}"><rect width="{}" height="{}" fill="{}"/>"#,
@@ -225,6 +275,7 @@ pub fn scene_to_svg(
     let mut body = String::new();
 
     for (index, node) in scene.nodes.iter().enumerate() {
+        deadline.check()?;
         match node {
             SceneNode::Rect(rect) => {
                 let clip = clip_attribute(rect.clip, index, &mut definitions);
@@ -300,14 +351,14 @@ pub fn scene_to_svg(
                     )
                     .unwrap();
                 } else {
-                    let embedded = rgb565_asset_svg(bytes, &image.digest)?;
-                    write!(body, r#"<image x="{}" y="{}" width="{}" height="{}" preserveAspectRatio="none" href="data:image/svg+xml;base64,{}"/>"#, image.x, image.y, image.w, image.h, base64(&embedded)).unwrap();
+                    let embedded = rgb565_asset_svg(bytes, &image.digest, deadline)?;
+                    write!(body, r#"<image x="{}" y="{}" width="{}" height="{}" preserveAspectRatio="none" href="data:image/svg+xml;base64,{}"/>"#, image.x, image.y, image.w, image.h, base64(&embedded, deadline)?).unwrap();
                 }
             }
             SceneNode::Glyph(glyph) => {
                 let bytes = asset_bytes(assets, &glyph.digest)?;
                 let family = font_family(bytes).ok_or_else(|| RasterizeError::MissingFont {
-                    family: digest_hex(&glyph.digest),
+                    family: protocol::digest_hex(&glyph.digest),
                 })?;
                 let value = glyph_text(&glyph.name);
                 write!(
@@ -327,6 +378,7 @@ pub fn scene_to_svg(
                 let center_y = f64::from(scale.y) + f64::from(scale.box_size) / 2.0;
                 let outer = f64::from(scale.box_size) / 2.0;
                 for tick in 0..scale.total_tick_count {
+                    deadline.check()?;
                     let major = tick % scale.major_tick_every == 0;
                     let inner = outer - if major { 10.0 } else { 5.0 };
                     let angle =
@@ -374,31 +426,66 @@ pub fn scene_to_svg(
     Ok(svg)
 }
 
+fn append_data_state_footer(
+    svg: &mut String,
+    state: app_core::SceneDataState<'_>,
+    assets: &RasterAssetMap,
+    deadline: &RenderDeadline,
+) -> Result<(), RasterizeError> {
+    let bounded_error = state
+        .error
+        .map(|error| protocol::truncate_utf8_to_bytes(error, protocol::MAX_SCENE_TEXT_LEN));
+    let footer_scene = app_core::with_scene_data_state(
+        Scene {
+            revision: 0,
+            background: 0,
+            nodes: Vec::new(),
+        },
+        app_core::SceneDataState {
+            stale: state.stale,
+            error: bounded_error,
+        },
+        &app_core::BakedFontMetrics::SHIPPED,
+    );
+    let Some(SceneNode::Text(text)) = footer_scene.nodes.first() else {
+        return Ok(());
+    };
+    deadline.check()?;
+    let value = scene_value(&text.value, &[])?;
+    let (family, size, weight) = font_properties(&text.font, assets)?;
+    let (x, anchor) = aligned_x(text.x, text.w, text.align);
+    let footer = format!(
+        r#"<text x="{x}" y="{}" text-anchor="{anchor}" font-family="{}" font-size="{size}" font-weight="{weight}" fill="{}">{}</text>"#,
+        text.baseline_y,
+        xml_escape(&family),
+        color(text.color),
+        xml_escape(&value),
+    );
+    let closing = svg.rfind("</svg>").ok_or(RasterizeError::MalformedXml)?;
+    svg.insert_str(closing, &footer);
+    if svg.len() > MAX_EXPANDED_SVG_BYTES {
+        return Err(RasterizeError::ExpandedSourceTooLarge {
+            max_bytes: MAX_EXPANDED_SVG_BYTES,
+        });
+    }
+    Ok(())
+}
+
 /// Rasterizes a static protocol scene through the sole resvg pipeline.
-pub fn rasterize_scene(
+pub(crate) fn rasterize_scene(
     scene: &Scene,
     fields: &[Field],
     assets: &RasterAssetMap,
 ) -> Result<RasterizedFrame, RasterizeError> {
-    let svg = scene_to_svg(scene, fields, assets)?;
-    render_svg_bytes(svg.as_bytes(), MAX_EXPANDED_SVG_BYTES, true, assets)
-}
-
-/// Builds the validated full-bleed image scene used to display one raster frame.
-pub fn rasterized_frame_scene(frame: &RasterizedFrame, revision: u32) -> Scene {
-    Scene {
-        revision,
-        background: 0,
-        nodes: vec![SceneNode::Image(protocol::SceneImage {
-            x: 0,
-            y: 0,
-            w: SCENE_CANVAS_WIDTH,
-            h: SCENE_CANVAS_HEIGHT,
-            digest: frame.digest,
-            recolor: false,
-            color: 0,
-        })],
-    }
+    let deadline = RenderDeadline::start();
+    let svg = scene_to_svg(scene, fields, assets, &deadline)?;
+    render_svg_bytes(
+        svg.as_bytes(),
+        MAX_EXPANDED_SVG_BYTES,
+        true,
+        assets,
+        &deadline,
+    )
 }
 
 fn render_svg_bytes(
@@ -406,26 +493,26 @@ fn render_svg_bytes(
     source_limit: usize,
     generated: bool,
     assets: &RasterAssetMap,
+    deadline: &RenderDeadline,
 ) -> Result<RasterizedFrame, RasterizeError> {
-    let deadline = RenderDeadline::start();
     if bytes.len() > source_limit {
         return Err(RasterizeError::SourceTooLarge {
             max_bytes: source_limit,
         });
     }
     let svg = std::str::from_utf8(bytes).map_err(|_| RasterizeError::InvalidUtf8)?;
-    let allowed_fonts = allowed_font_families(assets);
-    preflight(svg, generated, &allowed_fonts)?;
+    let allowed_fonts = allowed_font_families(assets, deadline)?;
+    preflight(svg, generated, &allowed_fonts, deadline)?;
     deadline.check()?;
 
-    let options = renderer_options(generated, assets);
+    let options = renderer_options(generated, assets, deadline)?;
 
     let tree = resvg::usvg::Tree::from_str(svg, &options)
         .map_err(|error| RasterizeError::SvgParse(error.to_string()))?;
     deadline.check()?;
 
-    let width = canvas_width();
-    let height = canvas_height();
+    let width = u32::try_from(SCENE_CANVAS_WIDTH).expect("protocol canvas width is positive");
+    let height = u32::try_from(SCENE_CANVAS_HEIGHT).expect("protocol canvas height is positive");
     let mut pixmap = Pixmap::new(width, height).ok_or(RasterizeError::CanvasAllocation)?;
     // DESIGN.md defines the display stage as true black in both schemes. Filling first
     // makes transparent SVG pixels and partial alpha composite against the panel ground,
@@ -441,18 +528,17 @@ fn render_svg_bytes(
     resvg::render(&tree, transform, &mut pixmap.as_mut());
     deadline.check()?;
 
-    let bytes = encode_rgb565(width, height, &pixmap);
+    let bytes = encode_rgb565(width, height, &pixmap, deadline)?;
     deadline.check()?;
     let digest = Sha256::digest(&bytes).into();
-    Ok(RasterizedFrame {
-        digest,
-        bytes,
-        width,
-        height,
-    })
+    Ok(RasterizedFrame { digest, bytes })
 }
 
-fn renderer_options(generated: bool, assets: &RasterAssetMap) -> resvg::usvg::Options<'static> {
+fn renderer_options(
+    generated: bool,
+    assets: &RasterAssetMap,
+    deadline: &RenderDeadline,
+) -> Result<resvg::usvg::Options<'static>, RasterizeError> {
     // usvg's default string resolver reads relative/absolute filesystem paths even
     // when `resources_dir` is None, while its data resolver expands embedded images.
     // Replace both callbacks with deny-all functions; preflight's named errors remain
@@ -478,14 +564,17 @@ fn renderer_options(generated: bool, assets: &RasterAssetMap) -> resvg::usvg::Op
     // never call `load_system_fonts`, which would grant ambient host filesystem access.
     // usvg's default FontResolver queries only this supplied database.
     options.fontdb_mut().load_font_data(INTER_REGULAR.to_vec());
+    deadline.check()?;
     options.fontdb_mut().load_font_data(INTER_SEMIBOLD.to_vec());
+    deadline.check()?;
     for bytes in assets.values() {
         options.fontdb_mut().load_font_data(bytes.to_vec());
+        deadline.check()?;
     }
-    options
+    Ok(options)
 }
 
-struct RenderDeadline(Instant);
+pub(crate) struct RenderDeadline(Instant);
 
 impl RenderDeadline {
     fn start() -> Self {
@@ -502,20 +591,14 @@ impl RenderDeadline {
     }
 }
 
-fn canvas_width() -> u32 {
-    u32::try_from(SCENE_CANVAS_WIDTH).expect("protocol canvas width is positive")
-}
-
-fn canvas_height() -> u32 {
-    u32::try_from(SCENE_CANVAS_HEIGHT).expect("protocol canvas height is positive")
-}
-
-fn preflight<'a>(
-    svg: &'a str,
+fn preflight(
+    svg: &str,
     generated: bool,
     allowed_fonts: &HashSet<String>,
-) -> Result<Document<'a>, RasterizeError> {
+    deadline: &RenderDeadline,
+) -> Result<(), RasterizeError> {
     let lowercase = svg.to_ascii_lowercase();
+    deadline.check()?;
     if lowercase.contains("<!doctype") || lowercase.contains("<!entity") {
         return Err(RasterizeError::EntityExpansionForbidden);
     }
@@ -530,6 +613,7 @@ fn preflight<'a>(
     }
 
     let document = Document::parse(svg).map_err(|_| RasterizeError::MalformedXml)?;
+    deadline.check()?;
     let root = document.root_element();
     if root.tag_name().name() != "svg" {
         return Err(RasterizeError::MalformedXml);
@@ -539,6 +623,7 @@ fn preflight<'a>(
     let mut element_count = 0_usize;
     let mut ids = HashMap::new();
     for node in document.descendants().filter(Node::is_element) {
+        deadline.check()?;
         element_count += 1;
         if element_count > MAX_XML_ELEMENT_NODES {
             return Err(RasterizeError::TooManyNodes {
@@ -556,8 +641,8 @@ fn preflight<'a>(
         }
         validate_element(node, generated, allowed_fonts)?;
     }
-    validate_use_expansion(&document, &ids)?;
-    Ok(document)
+    validate_use_expansion(&document, &ids, deadline)?;
+    Ok(())
 }
 
 fn validate_dimensions(root: Node<'_, '_>) -> Result<(), RasterizeError> {
@@ -675,14 +760,18 @@ fn validate_font_family(
     Err(RasterizeError::MissingFont { family })
 }
 
-fn allowed_font_families(assets: &RasterAssetMap) -> HashSet<String> {
+fn allowed_font_families(
+    assets: &RasterAssetMap,
+    deadline: &RenderDeadline,
+) -> Result<HashSet<String>, RasterizeError> {
     let mut families = HashSet::from([ALLOWED_FONT_FAMILY.to_owned()]);
     for bytes in assets.values() {
         if let Some(family) = font_family(bytes) {
             families.insert(family);
         }
+        deadline.check()?;
     }
-    families
+    Ok(families)
 }
 
 fn font_family(bytes: &[u8]) -> Option<String> {
@@ -704,36 +793,39 @@ fn evaluate_xml_value(
     context: &EvalContext<'_>,
     fields: &[Field],
     fuel: &mut Fuel,
+    deadline: &RenderDeadline,
 ) -> Result<String, RasterizeError> {
-    let trimmed = value.trim();
-    let Some(body) = trimmed
-        .strip_prefix("{{")
-        .and_then(|rest| rest.strip_suffix("}}"))
-    else {
-        return Err(RasterizeError::PartialInterpolation {
-            value: value.to_owned(),
-        });
+    let body = match plugin::classify_expression_source(value) {
+        ExpressionSource::Expression(body) => body,
+        ExpressionSource::Literal(_) | ExpressionSource::MalformedPartial => {
+            return Err(RasterizeError::PartialInterpolation {
+                value: value.to_owned(),
+            });
+        }
     };
-    if body.contains("{{") || body.contains("}}") {
-        return Err(RasterizeError::PartialInterpolation {
-            value: value.to_owned(),
-        });
-    }
-    let body = body.trim();
-    let evaluated = if is_live_binding(body) {
-        return Err(RasterizeError::LiveBinding {
-            binding: body.to_owned(),
-        });
-    } else if body.starts_with("field.") {
-        field_value(body, fields)?
+
+    let evaluated = if plugin::device_binding_requirements(value).contains(body) {
+        match app_core::classify_binding(body) {
+            Ok(app_core::BindingClass::Live) => {
+                return Err(RasterizeError::LiveBinding {
+                    binding: body.to_owned(),
+                });
+            }
+            Ok(app_core::BindingClass::Static) => field_value(body, fields)?,
+            Err(app_core::RequirementsError::UnknownBinding { binding }) => {
+                return Err(RasterizeError::UnknownBinding { binding });
+            }
+        }
     } else {
         let expression = Expr::parse(body).map_err(expression_error)?;
-        match expression.eval(context, fuel).map_err(expression_error)? {
+        let evaluated = expression.eval(context, fuel).map_err(expression_error)?;
+        deadline.check()?;
+        match evaluated {
             EvalValue::Missing => String::new(),
             value => value.to_string(),
         }
     };
-    Ok(xml_escape(&evaluated))
+    xml_escape_with_deadline(&evaluated, deadline)
 }
 
 fn expression_error(error: ExprError) -> RasterizeError {
@@ -745,63 +837,6 @@ fn expression_error(error: ExprError) -> RasterizeError {
     }
 }
 
-fn reject_live_scene(scene: &Scene) -> Result<(), RasterizeError> {
-    for node in &scene.nodes {
-        match node {
-            SceneNode::Arc(arc) => {
-                if arc.running_color.is_some() {
-                    return live("running_color");
-                }
-                if !arc.end_binding.is_empty() {
-                    return live(&arc.end_binding);
-                }
-            }
-            SceneNode::Line(line) if !line.angle_binding.is_empty() => {
-                return live(&line.angle_binding);
-            }
-            SceneNode::Text(text) => {
-                if text.running_color.is_some() {
-                    return live("running_color");
-                }
-                reject_scene_value(&text.value)?;
-            }
-            SceneNode::Label(label) => reject_scene_value(&label.value)?,
-            SceneNode::RotRect(rect) if !rect.rotation_binding.is_empty() => {
-                return live(&rect.rotation_binding);
-            }
-            _ => {}
-        }
-    }
-    Ok(())
-}
-
-fn reject_scene_value(value: &SceneValue) -> Result<(), RasterizeError> {
-    if let SceneValue::Binding(binding) = value
-        && !binding.starts_with("field.")
-    {
-        if is_live_binding(binding) {
-            return live(binding);
-        }
-        return Err(RasterizeError::UnknownBinding {
-            binding: binding.clone(),
-        });
-    }
-    Ok(())
-}
-
-fn live<T>(binding: &str) -> Result<T, RasterizeError> {
-    Err(RasterizeError::LiveBinding {
-        binding: binding.to_owned(),
-    })
-}
-
-fn is_live_binding(binding: &str) -> bool {
-    binding == "date"
-        || binding.starts_with("time:")
-        || binding.starts_with("timer.")
-        || binding == "running_color"
-}
-
 fn scene_value(value: &SceneValue, fields: &[Field]) -> Result<String, RasterizeError> {
     match value {
         SceneValue::Literal(value) => Ok(value.clone()),
@@ -810,14 +845,20 @@ fn scene_value(value: &SceneValue, fields: &[Field]) -> Result<String, Rasterize
 }
 
 fn field_value(binding: &str, fields: &[Field]) -> Result<String, RasterizeError> {
-    let Some(key) = binding.strip_prefix("field.") else {
-        if is_live_binding(binding) {
-            return live(binding);
+    match app_core::classify_binding(binding) {
+        Ok(app_core::BindingClass::Live) => {
+            return Err(RasterizeError::LiveBinding {
+                binding: binding.to_owned(),
+            });
         }
-        return Err(RasterizeError::UnknownBinding {
-            binding: binding.to_owned(),
-        });
-    };
+        Ok(app_core::BindingClass::Static) => {}
+        Err(app_core::RequirementsError::UnknownBinding { binding }) => {
+            return Err(RasterizeError::UnknownBinding { binding });
+        }
+    }
+    let key = binding
+        .strip_prefix("field.")
+        .expect("app-core classifies only field.* as static");
     let field = fields
         .iter()
         .find(|field| field.key == key)
@@ -854,13 +895,25 @@ fn xml_escape(value: &str) -> String {
     escaped
 }
 
-fn digest_hex(digest: &[u8; 32]) -> String {
-    digest
-        .iter()
-        .fold(String::with_capacity(64), |mut out, byte| {
-            write!(out, "{byte:02x}").unwrap();
-            out
-        })
+fn xml_escape_with_deadline(
+    value: &str,
+    deadline: &RenderDeadline,
+) -> Result<String, RasterizeError> {
+    let mut escaped = String::with_capacity(value.len());
+    for (index, character) in value.chars().enumerate() {
+        if index % 1_024 == 0 {
+            deadline.check()?;
+        }
+        match character {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '\'' => escaped.push_str("&apos;"),
+            '"' => escaped.push_str("&quot;"),
+            _ => escaped.push(character),
+        }
+    }
+    Ok(escaped)
 }
 
 fn asset_bytes<'a>(
@@ -871,7 +924,7 @@ fn asset_bytes<'a>(
         .get(digest)
         .map(AsRef::as_ref)
         .ok_or_else(|| RasterizeError::MissingAsset {
-            digest: digest_hex(digest),
+            digest: protocol::digest_hex(digest),
         })
 }
 
@@ -887,7 +940,7 @@ fn font_properties(
         SceneFont::Asset { digest, pixel_size } => {
             let bytes = asset_bytes(assets, digest)?;
             let family = font_family(bytes).ok_or_else(|| RasterizeError::MissingFont {
-                family: digest_hex(digest),
+                family: protocol::digest_hex(digest),
             })?;
             Ok((family, *pixel_size, 400))
         }
@@ -949,9 +1002,13 @@ fn glyph_text(name: &str) -> String {
     name.to_owned()
 }
 
-fn rgb565_asset_svg(bytes: &[u8], digest: &[u8; 32]) -> Result<Vec<u8>, RasterizeError> {
+fn rgb565_asset_svg(
+    bytes: &[u8],
+    digest: &[u8; 32],
+    deadline: &RenderDeadline,
+) -> Result<Vec<u8>, RasterizeError> {
     let invalid = || RasterizeError::InvalidImageAsset {
-        digest: digest_hex(digest),
+        digest: protocol::digest_hex(digest),
     };
     if bytes.len() < LVGL_IMAGE_HEADER_BYTES || bytes[0] != 0x19 || bytes[1] != 0x12 {
         return Err(invalid());
@@ -968,6 +1025,9 @@ fn rgb565_asset_svg(bytes: &[u8], digest: &[u8; 32]) -> Result<Vec<u8>, Rasteriz
     }
     let mut paths: BTreeMap<u16, String> = BTreeMap::new();
     for (index, pair) in pixels.as_chunks::<2>().0.iter().enumerate() {
+        if index % 1_024 == 0 {
+            deadline.check()?;
+        }
         let pixel = u16::from_le_bytes(*pair);
         let index = u32::try_from(index).map_err(|_| invalid())?;
         let x = index % width;
@@ -978,6 +1038,7 @@ fn rgb565_asset_svg(bytes: &[u8], digest: &[u8; 32]) -> Result<Vec<u8>, Rasteriz
         r#"<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}" shape-rendering="crispEdges">"#
     );
     for (pixel, path) in paths {
+        deadline.check()?;
         let red = u8::try_from((pixel >> 11) & 0x1f).unwrap();
         let green = u8::try_from((pixel >> 5) & 0x3f).unwrap();
         let blue = u8::try_from(pixel & 0x1f).unwrap();
@@ -994,32 +1055,19 @@ fn rgb565_asset_svg(bytes: &[u8], digest: &[u8; 32]) -> Result<Vec<u8>, Rasteriz
     Ok(svg.into_bytes())
 }
 
-fn base64(bytes: &[u8]) -> String {
-    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+fn base64(bytes: &[u8], deadline: &RenderDeadline) -> Result<String, RasterizeError> {
     let mut output = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for chunk in bytes.chunks(3) {
-        let a = chunk[0];
-        let b = chunk.get(1).copied().unwrap_or(0);
-        let c = chunk.get(2).copied().unwrap_or(0);
-        output.push(char::from(TABLE[usize::from(a >> 2)]));
-        output.push(char::from(TABLE[usize::from(((a & 0x03) << 4) | (b >> 4))]));
-        output.push(if chunk.len() > 1 {
-            char::from(TABLE[usize::from(((b & 0x0f) << 2) | (c >> 6))])
-        } else {
-            '='
-        });
-        output.push(if chunk.len() > 2 {
-            char::from(TABLE[usize::from(c & 0x3f)])
-        } else {
-            '='
-        });
+    for chunk in bytes.chunks(3 * 1_024) {
+        base64::engine::general_purpose::STANDARD.encode_string(chunk, &mut output);
+        deadline.check()?;
     }
-    output
+    Ok(output)
 }
 
 fn validate_use_expansion(
     document: &Document<'_>,
     ids: &HashMap<&str, Node<'_, '_>>,
+    deadline: &RenderDeadline,
 ) -> Result<(), RasterizeError> {
     let mut expanded = 0_usize;
     let mut memo = HashMap::new();
@@ -1027,10 +1075,11 @@ fn validate_use_expansion(
         .descendants()
         .filter(|node| node.is_element() && node.tag_name().name() == "use")
     {
+        deadline.check()?;
         let Some(target) = local_reference_target(use_node, ids) else {
             continue;
         };
-        let cost = expanded_subtree_cost(target, ids, &mut memo, &mut HashSet::new())?;
+        let cost = expanded_subtree_cost(target, ids, &mut memo, &mut HashSet::new(), deadline)?;
         expanded = expanded.saturating_add(cost);
         if expanded > MAX_EXPANDED_SVG_NODES {
             return Err(RasterizeError::ExpansionTooLarge {
@@ -1057,7 +1106,9 @@ fn expanded_subtree_cost<'a, 'input>(
     ids: &HashMap<&'input str, Node<'a, 'input>>,
     memo: &mut HashMap<NodeId, usize>,
     visiting: &mut HashSet<NodeId>,
+    deadline: &RenderDeadline,
 ) -> Result<usize, RasterizeError> {
+    deadline.check()?;
     if let Some(cost) = memo.get(&node.id()) {
         return Ok(*cost);
     }
@@ -1068,11 +1119,14 @@ fn expanded_subtree_cost<'a, 'input>(
     }
     let mut cost = 1_usize;
     for child in node.children().filter(Node::is_element) {
-        cost = cost.saturating_add(expanded_subtree_cost(child, ids, memo, visiting)?);
+        deadline.check()?;
+        cost = cost.saturating_add(expanded_subtree_cost(child, ids, memo, visiting, deadline)?);
         if child.tag_name().name() == "use"
             && let Some(target) = local_reference_target(child, ids)
         {
-            cost = cost.saturating_add(expanded_subtree_cost(target, ids, memo, visiting)?);
+            cost = cost.saturating_add(expanded_subtree_cost(
+                target, ids, memo, visiting, deadline,
+            )?);
         }
         if cost > MAX_EXPANDED_SVG_NODES {
             break;
@@ -1083,7 +1137,12 @@ fn expanded_subtree_cost<'a, 'input>(
     Ok(cost)
 }
 
-fn encode_rgb565(width: u32, height: u32, pixmap: &Pixmap) -> Vec<u8> {
+fn encode_rgb565(
+    width: u32,
+    height: u32,
+    pixmap: &Pixmap,
+    deadline: &RenderDeadline,
+) -> Result<Vec<u8>, RasterizeError> {
     let pixel_count = usize::try_from(width * height).expect("fixed canvas fits usize");
     let mut bytes = Vec::with_capacity(LVGL_IMAGE_HEADER_BYTES + pixel_count * 2);
     let stride = width * 2;
@@ -1093,12 +1152,15 @@ fn encode_rgb565(width: u32, height: u32, pixmap: &Pixmap) -> Vec<u8> {
     bytes.extend_from_slice(&word0.to_le_bytes());
     bytes.extend_from_slice(&word1.to_le_bytes());
     bytes.extend_from_slice(&word2.to_le_bytes());
-    for pixel in pixmap.pixels() {
+    for (index, pixel) in pixmap.pixels().iter().enumerate() {
+        if index % 4_096 == 0 {
+            deadline.check()?;
+        }
         bytes.extend_from_slice(
             &pack_rgb565(pixel.red(), pixel.green(), pixel.blue()).to_le_bytes(),
         );
     }
-    bytes
+    Ok(bytes)
 }
 
 fn pack_rgb565(red: u8, green: u8, blue: u8) -> u16 {
@@ -1111,9 +1173,9 @@ fn pack_rgb565(red: u8, green: u8, blue: u8) -> u16 {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::sync::Arc;
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
 
     use protocol::{
         Field, FieldValue, SCENE_CANVAS_HEIGHT, SCENE_CANVAS_WIDTH, Scene, SceneAlign, SceneArc,
@@ -1159,8 +1221,6 @@ mod tests {
 
         assert_eq!(width * height, 164_864);
         assert_eq!(12 + usize::try_from(width * height * 2).unwrap(), 329_740);
-        assert_eq!(frame.width, width);
-        assert_eq!(frame.height, height);
         assert_eq!(frame.bytes.len(), 329_740);
         assert_eq!(
             &frame.bytes[..12],
@@ -1358,8 +1418,32 @@ mod tests {
     }
 
     #[test]
+    fn hostile_template_time_spent_before_renderer_is_inside_the_single_deadline() {
+        let hostile = format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="448" height="368">{}</svg>"#,
+            "<g/>".repeat(MAX_XML_ELEMENT_NODES)
+        );
+        let past = Instant::now()
+            .checked_sub(MAX_RENDER_WALL_CLOCK + Duration::from_millis(1))
+            .expect("the monotonic clock is far enough past its origin");
+
+        assert_eq!(
+            evaluate_svg_template_with_deadline(
+                &hostile,
+                &serde_json::Value::Null,
+                &[],
+                &RenderDeadline(past),
+            ),
+            Err(RasterizeError::RenderDeadlineExceeded {
+                millis: MAX_RENDER_WALL_CLOCK.as_millis()
+            })
+        );
+    }
+
+    #[test]
     fn usvg_options_have_no_ambient_image_or_font_authority() {
-        let options = renderer_options(false, &RasterAssetMap::new());
+        let options =
+            renderer_options(false, &RasterAssetMap::new(), &RenderDeadline::start()).unwrap();
         assert!(options.resources_dir.is_none());
         assert!(options.style_sheet.is_none());
         assert!((options.image_href_resolver.resolve_string)("/etc/passwd", &options).is_none());
@@ -1522,7 +1606,7 @@ mod tests {
             ],
         };
 
-        let svg = scene_to_svg(&scene, &fields, &assets).unwrap();
+        let svg = scene_to_svg(&scene, &fields, &assets, &RenderDeadline::start()).unwrap();
 
         for marker in [
             "<rect",
@@ -1547,8 +1631,13 @@ mod tests {
             svg.matches("<line").count() >= 13,
             "scale ticks were not translated"
         );
-        rasterize_scene(&scene, &fields, &assets)
+        let frame = rasterize_scene(&scene, &fields, &assets)
             .expect("every translated node renders through resvg");
+        assert_eq!(
+            pixel(&frame, 224, 14),
+            0xf800,
+            "the nested data URI must decode and render its red source pixel"
+        );
     }
 
     #[test]
@@ -1574,7 +1663,12 @@ mod tests {
                 })],
             };
             assert_eq!(
-                scene_to_svg(&scene, &[], &RasterAssetMap::new()),
+                scene_to_svg(
+                    &scene,
+                    &[],
+                    &RasterAssetMap::new(),
+                    &RenderDeadline::start(),
+                ),
                 Err(RasterizeError::LiveBinding {
                     binding: binding.into()
                 })
@@ -1596,7 +1690,12 @@ mod tests {
             })],
         };
         assert_eq!(
-            scene_to_svg(&scene, &[], &RasterAssetMap::new()),
+            scene_to_svg(
+                &scene,
+                &[],
+                &RasterAssetMap::new(),
+                &RenderDeadline::start(),
+            ),
             Err(RasterizeError::LiveBinding {
                 binding: "running_color".into()
             })
@@ -1659,7 +1758,13 @@ mod tests {
             ],
         };
 
-        let svg = scene_to_svg(&scene, &fields, &RasterAssetMap::new()).unwrap();
+        let svg = scene_to_svg(
+            &scene,
+            &fields,
+            &RasterAssetMap::new(),
+            &RenderDeadline::start(),
+        )
+        .unwrap();
 
         for marker in [
             r#"font-size="18" font-weight="400""#,
@@ -1744,7 +1849,13 @@ mod tests {
                 .expect("baked font properties");
             let size = size.to_string();
             let weight = weight.to_string();
-            let svg = scene_to_svg(&scene, &[], &RasterAssetMap::new()).unwrap();
+            let svg = scene_to_svg(
+                &scene,
+                &[],
+                &RasterAssetMap::new(),
+                &RenderDeadline::start(),
+            )
+            .unwrap();
             let document = Document::parse(&svg).expect("translated SVG is XML");
             let translated = document
                 .descendants()
@@ -1820,6 +1931,70 @@ mod tests {
                 binding: "time:HH:mm".into()
             })
         );
+        let near_miss = r#"<svg xmlns="http://www.w3.org/2000/svg" width="448" height="368"><text>{{ timer.velocity }}</text></svg>"#;
+        assert_eq!(
+            evaluate_svg_template(near_miss, &rooted_aqi(), &[]),
+            Err(RasterizeError::UnknownBinding {
+                binding: "timer.velocity".into()
+            })
+        );
+    }
+
+    #[test]
+    fn expanded_svg_one_byte_over_its_cap_is_rejected_after_substitution() {
+        let prefix = r#"<svg xmlns="http://www.w3.org/2000/svg" width="448" height="368">"#;
+        let suffix = "</svg>";
+        let text_markup_len = "<text></text>".len();
+        let full_expressions = 127;
+        let tail_len = MAX_EXPANDED_SVG_BYTES + 1
+            - prefix.len()
+            - suffix.len()
+            - (full_expressions + 1) * text_markup_len
+            - full_expressions * 4_096;
+        let source = format!(
+            "{prefix}{}<text>{{{{ data.tail }}}}</text>{suffix}",
+            "<text>{{ data.large }}</text>".repeat(full_expressions)
+        );
+        assert!(source.len() <= MAX_SVG_SOURCE_BYTES);
+        let data = serde_json::json!({
+            "large": "x".repeat(4_096),
+            "tail": "x".repeat(tail_len),
+        });
+
+        assert_eq!(
+            evaluate_svg_template(&source, &data, &[]),
+            Err(RasterizeError::ExpandedSourceTooLarge {
+                max_bytes: MAX_EXPANDED_SVG_BYTES
+            })
+        );
+    }
+
+    #[test]
+    fn svg_footer_uses_shared_error_precedence_colour_and_utf8_byte_bound() {
+        let mut svg =
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="448" height="368"></svg>"#.to_owned();
+        let error = "é".repeat(protocol::MAX_SCENE_TEXT_LEN);
+        append_data_state_footer(
+            &mut svg,
+            app_core::SceneDataState {
+                stale: true,
+                error: Some(&error),
+            },
+            &RasterAssetMap::new(),
+            &RenderDeadline::start(),
+        )
+        .unwrap();
+
+        let document = Document::parse(&svg).unwrap();
+        let footer = document
+            .descendants()
+            .find(|node| node.has_tag_name("text"))
+            .expect("shared rule must add an error footer");
+        let text = footer.text().unwrap();
+        assert_eq!(text.len(), protocol::MAX_SCENE_TEXT_LEN);
+        assert!(text.is_char_boundary(text.len()));
+        assert_eq!(footer.attribute("fill"), Some("#ff6b6b"));
+        assert_ne!(text, "Stale", "a non-empty error must win over stale");
     }
 
     #[test]
@@ -1837,32 +2012,12 @@ mod tests {
         assert_eq!(INTER_REGULAR, regular);
         assert_eq!(INTER_SEMIBOLD, semibold);
         assert_eq!(
-            digest_hex(&Sha256::digest(INTER_REGULAR).into()),
+            protocol::digest_hex(&Sha256::digest(INTER_REGULAR).into()),
             "40d692fce188e4471e2b3cba937be967878f631ad3ebbbdcd587687c7ebe0c82"
         );
         assert_eq!(
-            digest_hex(&Sha256::digest(INTER_SEMIBOLD).into()),
+            protocol::digest_hex(&Sha256::digest(INTER_SEMIBOLD).into()),
             "78a843fade9d4612a5567302fb595b56976eb5fcebf4fea5a5912d638bafcde3"
-        );
-    }
-
-    #[test]
-    fn rasterized_frame_scene_is_one_valid_full_bleed_image_node() {
-        let frame = rasterize_svg(r##"<svg xmlns="http://www.w3.org/2000/svg" width="448" height="368"><rect width="448" height="368" fill="#123456"/></svg>"##).unwrap();
-        let scene = rasterized_frame_scene(&frame, 77);
-        protocol::validate_scene(&scene).unwrap();
-        assert_eq!(scene.revision, 77);
-        assert_eq!(
-            scene.nodes,
-            vec![SceneNode::Image(SceneImage {
-                x: 0,
-                y: 0,
-                w: 448,
-                h: 368,
-                digest: frame.digest,
-                recolor: false,
-                color: 0
-            })]
         );
     }
 
@@ -1886,8 +2041,10 @@ mod tests {
         assert_eq!((pixels.len(), candidate.len()), (329_728, 659_456));
     }
 
-    fn frame_png(frame: &RasterizedFrame) -> Vec<u8> {
-        let mut rgba = Vec::with_capacity(usize::try_from(frame.width * frame.height * 4).unwrap());
+    pub(crate) fn frame_png(frame: &RasterizedFrame) -> Vec<u8> {
+        let width = u32::try_from(SCENE_CANVAS_WIDTH).unwrap();
+        let height = u32::try_from(SCENE_CANVAS_HEIGHT).unwrap();
+        let mut rgba = Vec::with_capacity(usize::try_from(width * height * 4).unwrap());
         for pair in frame.bytes[12..].as_chunks::<2>().0 {
             let pixel = u16::from_le_bytes(*pair);
             let red = u8::try_from((pixel >> 11) & 0x1f).unwrap();
@@ -1900,21 +2057,14 @@ mod tests {
                 255,
             ]);
         }
-        let size = resvg::tiny_skia::IntSize::from_wh(frame.width, frame.height).unwrap();
+        let size = resvg::tiny_skia::IntSize::from_wh(width, height).unwrap();
         resvg::tiny_skia::Pixmap::from_vec(rgba, size)
             .unwrap()
             .encode_png()
             .unwrap()
     }
 
-    fn svg_with_state(template: &str, label: Option<(&str, &str)>) -> String {
-        let Some((text, color)) = label else {
-            return template.to_owned();
-        };
-        template.replace("</svg>", &format!(r#"<text x="224" y="344" text-anchor="middle" fill="{color}" font-size="18">{}</text></svg>"#, xml_escape(text)))
-    }
-
-    fn assert_raster_regression(name: &str, frame: &RasterizedFrame) {
+    pub(crate) fn assert_raster_regression(name: &str, frame: &RasterizedFrame) {
         let directory =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/raster-regression");
         let path = directory.join(format!("{name}.png"));
@@ -2001,35 +2151,17 @@ mod tests {
             nodes: vec![built.nodes[date_index - 1].clone(), date_node],
         };
 
-        let svg = scene_to_svg(&static_date_constraint, &[], &RasterAssetMap::new()).unwrap();
+        let svg = scene_to_svg(
+            &static_date_constraint,
+            &[],
+            &RasterAssetMap::new(),
+            &RenderDeadline::start(),
+        )
+        .unwrap();
         assert!(svg.contains(&xml_escape(&produced_date)));
         assert!(svg.contains(r#"<clipPath id="clip-1"><rect x="48" y="0" width="176""#));
         let frame = rasterize_scene(&static_date_constraint, &[], &RasterAssetMap::new()).unwrap();
         assert_raster_regression("produced-date-overflow", &frame);
-    }
-
-    #[test]
-    fn raster_regression_svg_aqi_fresh_stale_error_and_missing_data() {
-        let template = include_str!("../../../plugins/svg-aqi/face.svg");
-        let cases = [
-            ("svg-aqi-fresh", rooted_aqi(), None),
-            ("svg-aqi-stale", rooted_aqi(), Some(("Stale", "#f2c94c"))),
-            (
-                "svg-aqi-error",
-                rooted_aqi(),
-                Some(("Fetch failed", "#ff5c5c")),
-            ),
-            (
-                "svg-aqi-missing-data",
-                serde_json::json!({}),
-                Some(("No data", "#5c5c66")),
-            ),
-        ];
-        for (name, data, state) in cases {
-            let source = svg_with_state(template, state);
-            let frame = rasterize_svg_template(&source, &data, &[]).unwrap();
-            assert_raster_regression(name, &frame);
-        }
     }
 
     #[test]

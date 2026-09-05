@@ -9,6 +9,8 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 pub type DeviceSocket =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
+pub const IN_MEMORY_ADMIN_TOKEN: &str = "in-memory-admin-token";
+
 pub async fn drive_until_config(socket: &mut DeviceSocket, widget_id: &str) -> ApplyConfig {
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         let mut target_config = None;

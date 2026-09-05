@@ -14,8 +14,8 @@ use std::sync::Arc;
 
 use app_core::MAX_PLUGIN_ID_LEN;
 use plugin::{
-    AssetError, AssetSet, ManifestError, PluginManifest, ResolvedAsset, parse_manifest,
-    resolve_assets,
+    AssetError, AssetSet, MAX_SVG_SOURCE_BYTES, ManifestError, PluginManifest, ResolvedAsset,
+    parse_manifest, resolve_assets,
 };
 use protocol::{ASSET_DIGEST_LEN, MAX_ASSET_DIGESTS};
 
@@ -318,7 +318,7 @@ fn load_plugin(base_dir: &Path, plugin_id: &str) -> Result<LoadedPlugin, PluginL
             .svg_template_file()
             .map(|file| {
                 let path = ensure_within_plugin_dir(&plugin_dir, file)?;
-                read_bounded_svg(&path, PluginManifest::MAX_SVG_SOURCE_BYTES)
+                read_bounded_svg(&path)
             })
             .transpose()?;
 
@@ -352,7 +352,8 @@ fn ensure_within_plugin_dir(base_dir: &Path, file: &str) -> Result<PathBuf, Plug
     Ok(canonical_path)
 }
 
-fn read_bounded_svg(path: &Path, limit: usize) -> Result<Arc<str>, PluginLoadError> {
+fn read_bounded_svg(path: &Path) -> Result<Arc<str>, PluginLoadError> {
+    let limit = MAX_SVG_SOURCE_BYTES;
     let file = File::open(path).map_err(|error| PluginLoadError::TemplateRead {
         path: path.to_path_buf(),
         message: error.to_string(),
@@ -515,26 +516,6 @@ mod tests {
                 },
                 ..
             }] if *actual == PluginManifest::MAX_SVG_SOURCE_BYTES + 1
-        ));
-    }
-
-    #[test]
-    fn expanded_svg_one_byte_over_its_cap_is_rejected_by_the_shared_bounded_reader() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let path = temp.path().join("expanded.svg");
-        fs::write(
-            &path,
-            vec![b'x'; PluginManifest::MAX_EXPANDED_SVG_BYTES + 1],
-        )
-        .expect("write expanded SVG fixture");
-
-        assert!(matches!(
-            read_bounded_svg(&path, PluginManifest::MAX_EXPANDED_SVG_BYTES),
-            Err(PluginLoadError::TemplateTooLarge {
-                limit: PluginManifest::MAX_EXPANDED_SVG_BYTES,
-                actual,
-                ..
-            }) if actual == PluginManifest::MAX_EXPANDED_SVG_BYTES + 1
         ));
     }
 

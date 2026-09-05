@@ -31,8 +31,14 @@ directory for the exact keys and comments.
 ```sh
 sudo install -d -m 0755 /etc/deskmate
 sudo install -m 0600 deskmate-server.env.example /etc/deskmate/server.env
-sudo $EDITOR /etc/deskmate/server.env   # set DESKMATE_ADMIN_TOKEN for real
+sudo $EDITOR /etc/deskmate/server.env   # set token and published firmware version
 ```
+
+`DESKMATE_FIRMWARE_VERSION` is required. Copy the exact value from
+`firmware/version.txt` that corresponds to the image published in
+`DESKMATE_FIRMWARE_DIR`; a mismatch can make the bidirectional catalog offer a
+downgrade. The supplied systemd unit and launchd job already source this environment
+file, so no second unit-local value should be added.
 
 **`DESKMATE_ADMIN_TOKEN` is the whole V2 auth story for the Mac-facing
 surface** -- the explicit stand-in for V3's accounts (spec §5.2). Generate it

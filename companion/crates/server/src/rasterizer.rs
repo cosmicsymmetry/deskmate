@@ -230,7 +230,10 @@ fn rasterize_svg_template(
         rooted_data,
         fields,
         &RasterAssetMap::new(),
-        app_core::SceneDataState::OK,
+        app_core::SceneDataState {
+            stale: false,
+            error: None,
+        },
     )
 }
 

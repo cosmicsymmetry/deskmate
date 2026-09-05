@@ -4553,3 +4553,52 @@ intermediate 88 was coalesced away and never shown. Floor timing was exact.
 Config note: these observations used a temporary manual single-card playlist `svg-test`
 with added plugin cards `svg-aqi-card`/`svg-live-clock-card`; dev-0005's original config
 is saved and is restored at the end of the session.
+
+### Phase B continued — B7 both orientations, B10 churn, restore (2026-09-06)
+
+**B7 — raster at BOTH orientations: PASSED.** The same `svg-aqi` raster
+("GOOD / ⬤ / 42 / AQI") drew correctly at 270° (`landscape-flipped`, upright to the
+camera) and at 90° (`landscape`, 180°-inverted to the camera because the board sits
+optimally for 270°). The full scene renders under both software rotations; the physical
+transform and rounder handle the volatile RGB565 frame. Capturing a single still needed
+the 30 s floor to be clear and a push-then-capture within a few seconds, because
+`svg-aqi`'s unfetchable `example.invalid` source repeatedly clobbers operator data with
+an error snapshot (see the B9 caveat).
+
+**B10 — volatile churn: core PASSED.** 20 raster revisions pushed via the operator route
+at ~31 s intervals (AQI 39→210), all HTTP 200. `free_heap` stayed flat at **7,981,503**
+(±20 bytes; two transient dips to ~7,979,900 caught a sample mid-swap with the incoming
+slot briefly allocated) across the whole ~10-minute run — **PSRAM did not trend down**, so
+old volatile frames are freed as new ones display; no leak. Uptime ran continuously
+(no reboot), `valid_frames` 456→1196, 0 malformed/crc/overflow/dropped-ui-commands. The
+final raster drew with no tearing/artifact. When the svg cards were later removed from
+config, `free_heap` returned to 8,317,395 — the held volatile frame was released on
+teardown, a bonus confirmation of release-on-card-removal.
+- **Limits:** the device exposes no flash asset-used-byte counter, so "decoded frames
+  never touch the flash counter" is inferred from `free_heap` being PSRAM and no durable
+  `AssetRelease` growth, not read directly. And "no standalone-clock flash on an ordinary
+  old→new swap" could not be isolated, because the `example.invalid` provider clobbers to
+  the clock between the 31 s-spaced pushes regardless of the swap.
+
+**Restore.** dev-0005's original production config was PUT back (generation 4): rotation
+270°, original cards (`claude-limits, clock, pomodoro, rss, weather`), no card errors.
+The device remains on the shipping image **v2.0.0-raster1** in networked tier with its
+dev-0005 identity — never left networked tier, so no re-provision was needed.
+
+**Still owed on hardware (Phase B remainder), each needing its own setup:**
+- **B11 / Task 6 Step 5 — the on-target `framebuffer_diff` byte comparison** (expected
+  96/8/88). Needs a `DESKMATE_DEV_DIAG=1` flash and a local-tier round-trip (networked
+  tier refuses `PushScene` over the cable), which takes the device off the shipping image
+  temporarily; the diag image is built (`firmware/build-diag`, sha
+  `f815edf07cef7981698304d964f468ed7cde6296d7a1783c4f32843f16fb1dbc`). Deliberately not
+  run at the tail of this session to avoid a fatigued mis-restore; the plaintext token in
+  `pass` means it restores to the same dev-0005 identity.
+- **The BUSY/OTA-owner variant** (carried from stage 3b Task 9 Step 6 / Phase A): observe
+  a raster release while an OTA owns the panel. Needs a pending OTA in flight (i.e. a
+  freshly published newer version) concurrent with a push; `ota_state` stayed `idle`
+  through churn, so it was not observed.
+
+**Phase B verdict: the shipping stage-4 image passed every gate that does not require the
+diag build** — OTA download/install/rollback survival, capabilities 1003, native and
+raster at both orientations, the typed refuse rule, the 30 s floor, and 20-revision
+volatile churn with flat PSRAM. Stage 4 is confirmed working on the physical board.

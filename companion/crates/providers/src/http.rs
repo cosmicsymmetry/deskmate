@@ -1,5 +1,3 @@
-use std::time::Duration;
-
 use crate::{
     MAX_PROVIDER_REDIRECTS, MAX_PROVIDER_RESPONSE_BYTES, PROVIDER_REQUEST_TIMEOUT, ProviderError,
 };
@@ -8,46 +6,19 @@ pub trait HttpClient {
     fn get_text(&mut self, url: &str) -> Result<String, ProviderError>;
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct HttpPolicy {
-    pub timeout: Duration,
-    pub maximum_redirects: u8,
-    pub maximum_response_bytes: usize,
-}
-
-impl Default for HttpPolicy {
-    fn default() -> Self {
-        Self {
-            timeout: PROVIDER_REQUEST_TIMEOUT,
-            maximum_redirects: MAX_PROVIDER_REDIRECTS,
-            maximum_response_bytes: MAX_PROVIDER_RESPONSE_BYTES,
-        }
-    }
-}
-
 pub struct SystemHttpClient {
     agent: ureq::Agent,
-    maximum_response_bytes: usize,
 }
 
 impl Default for SystemHttpClient {
     fn default() -> Self {
-        Self::with_policy(HttpPolicy::default())
-    }
-}
-
-impl SystemHttpClient {
-    pub fn with_policy(policy: HttpPolicy) -> Self {
         let agent = ureq::Agent::config_builder()
-            .timeout_global(Some(policy.timeout))
-            .max_redirects(u32::from(policy.maximum_redirects))
+            .timeout_global(Some(PROVIDER_REQUEST_TIMEOUT))
+            .max_redirects(u32::from(MAX_PROVIDER_REDIRECTS))
             .max_redirects_will_error(true)
             .build()
             .into();
-        Self {
-            agent,
-            maximum_response_bytes: policy.maximum_response_bytes,
-        }
+        Self { agent }
     }
 }
 
@@ -58,11 +29,11 @@ impl HttpClient for SystemHttpClient {
         response
             .body_mut()
             .with_config()
-            .limit(u64::try_from(self.maximum_response_bytes.saturating_add(1)).unwrap_or(u64::MAX))
+            .limit(u64::try_from(MAX_PROVIDER_RESPONSE_BYTES.saturating_add(1)).unwrap_or(u64::MAX))
             .lossy_utf8(false)
             .read_to_string()
             .map_err(classify_ureq_error)
-            .and_then(|body| bound_body(body, self.maximum_response_bytes))
+            .and_then(|body| bound_body(body, MAX_PROVIDER_RESPONSE_BYTES))
     }
 }
 
@@ -125,8 +96,9 @@ mod tests {
             classify_ureq_error(ureq::Error::StatusCode(503)),
             ProviderError::HttpStatus(503)
         );
-        assert_eq!(HttpPolicy::default().timeout, Duration::from_secs(10));
-        assert_eq!(HttpPolicy::default().maximum_redirects, 3);
+        assert_eq!(PROVIDER_REQUEST_TIMEOUT.as_secs(), 10);
+        assert_eq!(MAX_PROVIDER_REDIRECTS, 3);
+        assert_eq!(MAX_PROVIDER_RESPONSE_BYTES, 1_048_576);
     }
 
     #[test]

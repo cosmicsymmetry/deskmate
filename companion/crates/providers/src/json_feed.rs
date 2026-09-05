@@ -2,11 +2,11 @@ use std::collections::HashSet;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use protocol::{Field, FieldValue, MAX_FIELD_COUNT, MAX_FIELD_TEXT_LEN};
+use protocol::{Field, FieldValue, MAX_FIELD_COUNT, MAX_FIELD_TEXT_LEN, truncate_utf8_to_bytes};
 use serde_json::Value;
 
 use crate::http::{HttpClient, SystemHttpClient};
-use crate::{LastGood, Provider, ProviderError, ProviderSnapshot, RefreshPolicy, truncate_utf8};
+use crate::{LastGood, Provider, ProviderError, ProviderSnapshot, RefreshPolicy, text_field};
 
 pub const MAX_JSON_MAPPINGS: usize = 16;
 pub const MAX_JSON_PATH_SEGMENTS: usize = 16;
@@ -42,7 +42,7 @@ impl JsonFeed {
         // user's choice; a mapping naming no declared field is counted as unknown by
         // the device and ignored, never rejected.
         let mut fields = Vec::with_capacity(MAX_FIELD_COUNT);
-        fields.push(text_field("title", truncate_utf8(title, 64)));
+        fields.push(text_field("title", truncate_utf8_to_bytes(title, 64)));
         fields.extend(
             self.fields
                 .iter()
@@ -56,7 +56,7 @@ impl JsonFeed {
         });
         fields.push(text_field(
             "error",
-            error.map_or_else(String::new, |value| truncate_utf8(value, 96)),
+            error.map_or("", |value| truncate_utf8_to_bytes(value, 96)),
         ));
         fields
     }
@@ -172,10 +172,9 @@ fn scalar_field_value(key: &str, value: &Value) -> Result<FieldValue, ProviderEr
             ));
         }
     };
-    Ok(FieldValue::Text(truncate_utf8(
-        &text,
-        declared_text_capacity(key),
-    )))
+    Ok(FieldValue::Text(
+        truncate_utf8_to_bytes(&text, declared_text_capacity(key)).to_owned(),
+    ))
 }
 
 /// The text capacity the firmware's field registry declares for `key`
@@ -263,13 +262,6 @@ fn parse_path(raw: &str) -> Result<Vec<PathSegment>, ProviderError> {
 
 fn invalid_path() -> ProviderError {
     ProviderError::InvalidConfiguration("JSON path must use bounded $.field[0] traversal".into())
-}
-
-fn text_field(key: impl Into<String>, value: String) -> Field {
-    Field {
-        key: key.into(),
-        value: FieldValue::Text(value),
-    }
 }
 
 #[cfg(test)]
@@ -418,25 +410,6 @@ mod tests {
             long_value.fields[0].value,
             FieldValue::Text("1234567890123456".into())
         );
-    }
-
-    /// Multi-byte text must clip on a character boundary, not mid-codepoint, or the
-    /// firmware's bounded-length check sees a malformed UTF-8 tail.
-    #[test]
-    fn truncation_respects_character_boundaries() {
-        let feed = parse_json_feed(
-            r#"{"t":"°°°°°°°°°°"}"#,
-            &[JsonMapping {
-                field: "value".into(),
-                path: "$.t".into(),
-            }],
-        )
-        .unwrap();
-        let FieldValue::Text(text) = &feed.fields[0].value else {
-            panic!("mapped scalars are always text");
-        };
-        assert_eq!(text, "°°°°°°°°");
-        assert_eq!(text.len(), 16);
     }
 
     fn mapping(field: &str, path: &str) -> JsonMapping {

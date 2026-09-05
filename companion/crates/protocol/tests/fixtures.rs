@@ -176,6 +176,8 @@ fn extended_template_kinds_round_trip() {
 
 #[test]
 fn current_capabilities_advertise_implemented_features() {
+    assert_eq!(protocol::CAPABILITY_SCENE_RENDER, 256);
+    assert_eq!(protocol::CAPABILITY_VOLATILE_ASSETS, 512);
     assert_eq!(
         protocol::CURRENT_CAPABILITIES,
         protocol::CAPABILITY_CORE_WIDGETS

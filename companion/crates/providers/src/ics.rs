@@ -9,10 +9,10 @@ use chrono::{
     TimeZone, Utc, Weekday,
 };
 use chrono_tz::Tz;
-use protocol::{Field, FieldValue};
+use protocol::{Field, FieldValue, truncate_utf8_to_bytes};
 
 use crate::http::{HttpClient, SystemHttpClient};
-use crate::{LastGood, Provider, ProviderError, ProviderSnapshot, RefreshPolicy};
+use crate::{LastGood, Provider, ProviderError, ProviderSnapshot, RefreshPolicy, text_field};
 
 pub const MAX_ICS_BYTES: usize = 1_048_576;
 pub const MAX_ICS_EVENTS: usize = 4_096;
@@ -110,7 +110,7 @@ impl IcsCalendar {
         error: Option<&str>,
     ) -> Vec<Field> {
         let mut fields = Vec::with_capacity(14);
-        fields.push(text_field("title", truncate_utf8(title, 64)));
+        fields.push(text_field("title", truncate_utf8_to_bytes(title, 64)));
         // Machine-readable next-event start, in contrast to the localised,
         // date-dropping `row0_time` display text below. Callers that need to act
         // on the event start (e.g. a "before event" alert trigger) must read this
@@ -159,7 +159,10 @@ impl IcsCalendar {
                     } else {
                         local_start.format("%a %H:%M").to_string()
                     };
-                    (truncate_utf8(&event.title, 96), truncate_utf8(&time, 32))
+                    (
+                        truncate_utf8_to_bytes(&event.title, 96).to_owned(),
+                        truncate_utf8_to_bytes(&time, 32).to_owned(),
+                    )
                 },
             );
             fields.push(text_field(format!("row{row}_title"), row_title));
@@ -171,7 +174,7 @@ impl IcsCalendar {
         });
         fields.push(text_field(
             "error",
-            error.map_or_else(String::new, |message| truncate_utf8(message, 96)),
+            error.map_or("", |message| truncate_utf8_to_bytes(message, 96)),
         ));
         fields
     }
@@ -941,7 +944,7 @@ fn expand_event(
         if is_upcoming && start <= horizon {
             output.push(CalendarEvent {
                 uid: event.uid.clone(),
-                title: truncate_utf8(&event.title, 96),
+                title: truncate_utf8_to_bytes(&event.title, 96).to_owned(),
                 start,
                 end,
                 all_day: event.start.all_day,
@@ -1203,24 +1206,6 @@ fn unescape_text(value: &str) -> String {
         }
     }
     output
-}
-
-fn truncate_utf8(value: &str, maximum_bytes: usize) -> String {
-    if value.len() <= maximum_bytes {
-        return value.to_owned();
-    }
-    let mut end = maximum_bytes;
-    while !value.is_char_boundary(end) {
-        end -= 1;
-    }
-    value[..end].to_owned()
-}
-
-fn text_field(key: impl Into<String>, value: String) -> Field {
-    Field {
-        key: key.into(),
-        value: FieldValue::Text(value),
-    }
 }
 
 #[cfg(test)]

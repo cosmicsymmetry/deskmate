@@ -5,6 +5,9 @@ mod rle;
 mod scene;
 #[cfg(feature = "test-support")]
 pub mod test_support;
+mod util;
+
+pub const PROTOCOL_VERSION: u8 = 1;
 
 pub use frame::{
     Deframer, Frame, FrameError, MAX_DECODED_FRAME, MAX_PAYLOAD_SIZE, MAX_WIRE_FRAME, crc32c,
@@ -23,14 +26,14 @@ pub use message::{
     MAX_DIAGNOSTIC_LEN, MAX_FIELD_COUNT, MAX_FIELD_KEY_LEN, MAX_FIELD_TEXT_LEN,
     MAX_FIRMWARE_VERSION_LEN, MAX_INTERRUPT_REASON_LEN, MAX_IP_LEN, MAX_PROTOCOL_VERSION,
     MAX_PSK_LEN, MAX_SCREEN_ID_LEN, MAX_SERVER_URL_LEN, MAX_SSID_LEN, MAX_WIDGET_ID_LEN, Message,
-    MessageError, NetworkConfig, OtaState, PROTOCOL_VERSION, PushData, PushScene, ScreenConfig,
-    SizeClass, StatusResponse, TYPE_ACK, TYPE_ACTIVATE_SCREEN, TYPE_APPLY_CONFIG, TYPE_ASSET_BEGIN,
+    MessageError, NetworkConfig, OtaState, PushData, PushScene, ScreenConfig, SizeClass,
+    StatusResponse, TYPE_ACK, TYPE_ACTIVATE_SCREEN, TYPE_APPLY_CONFIG, TYPE_ASSET_BEGIN,
     TYPE_ASSET_CHUNK, TYPE_ASSET_COMMIT, TYPE_ASSET_RELEASE, TYPE_DEVICE_EVENT, TYPE_ERROR,
     TYPE_FACTORY_RESET, TYPE_HEARTBEAT, TYPE_HEARTBEAT_ACK, TYPE_NETWORK_CONFIG, TYPE_PUSH_DATA,
     TYPE_PUSH_SCENE, TYPE_STATUS_REQUEST, TYPE_STATUS_RESPONSE, TYPE_TIME_SYNC,
     TYPE_TRIGGER_INTERRUPT, TapAction, TemplateKind, Tier, TimeSync, TriggerInterrupt,
     VOLATILE_IMAGE_DECODED_LENGTH, WidgetConfig, WifiState, decode_message, encode_message,
-    template_kind_from_wire, validate_message,
+    expected_response_type, template_kind_from_wire, validate_message,
 };
 pub use rle::{Rle565Error, decode_rle565, encode_rle565};
 pub use scene::{
@@ -40,3 +43,4 @@ pub use scene::{
     SceneLabel, SceneLabelAnchor, SceneLine, SceneNode, SceneRect, SceneRotRect, SceneScale,
     SceneText, SceneValue, binding_is_valid, encode_scene_payload, validate_scene,
 };
+pub use util::{RequestIdAllocator, digest_hex, truncate_utf8_to_bytes};

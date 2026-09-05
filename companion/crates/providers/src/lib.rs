@@ -8,6 +8,7 @@ use std::fmt;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
+use protocol::{Field, FieldValue, truncate_utf8_to_bytes};
 
 pub const MAX_PROVIDER_RESPONSE_BYTES: usize = 1_048_576;
 pub const MAX_PROVIDER_REDIRECTS: u8 = 3;
@@ -79,7 +80,7 @@ impl<T: Clone + Default> LastGood<T> {
                     refreshed_at: self.refreshed_at,
                     age,
                     stale: true,
-                    error: Some(truncate_utf8(&error.to_string(), 96)),
+                    error: Some(truncate_utf8_to_bytes(&error.to_string(), 96).to_owned()),
                 }
             }
         }
@@ -148,13 +149,9 @@ impl fmt::Display for ProviderError {
 
 impl std::error::Error for ProviderError {}
 
-pub(crate) fn truncate_utf8(value: &str, maximum_bytes: usize) -> String {
-    if value.len() <= maximum_bytes {
-        return value.to_owned();
+pub(crate) fn text_field(key: impl Into<String>, value: impl Into<String>) -> Field {
+    Field {
+        key: key.into(),
+        value: FieldValue::Text(value.into()),
     }
-    let mut end = maximum_bytes;
-    while !value.is_char_boundary(end) {
-        end -= 1;
-    }
-    value[..end].to_owned()
 }

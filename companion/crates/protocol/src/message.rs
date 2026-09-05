@@ -2,11 +2,11 @@
 
 use core::fmt;
 
+use crate::PROTOCOL_VERSION;
 use crate::cbor::{CborError, Decoder, Encoder, deterministic_key_before};
 use crate::frame::{Frame, FrameError, MAX_PAYLOAD_SIZE, encode_frame};
 use crate::scene::{Scene, decode_scene, encode_scene, validate_scene};
 
-pub const PROTOCOL_VERSION: u8 = 1;
 pub const MAX_PROTOCOL_VERSION: u8 = 1;
 pub const CAPABILITY_CORE_WIDGETS: u64 = 1 << 0;
 pub const CAPABILITY_CONFIG_ROTATION: u64 = 1 << 1;
@@ -138,7 +138,6 @@ pub enum EventKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum EventAction {
-    None = 0,
     StartPause = 1,
     Reset = 2,
     NavigatePrevious = 3,
@@ -615,13 +614,35 @@ fn event_kind(value: u8) -> Result<EventKind, MessageError> {
 
 fn event_action(value: u8) -> Result<EventAction, MessageError> {
     match value {
-        0 => Ok(EventAction::None),
         1 => Ok(EventAction::StartPause),
         2 => Ok(EventAction::Reset),
         3 => Ok(EventAction::NavigatePrevious),
         4 => Ok(EventAction::NavigateNext),
         5 => Ok(EventAction::DismissInterrupt),
         _ => Err(MessageError::InvalidValue("event action")),
+    }
+}
+
+/// Returns the sole valid response type for a host request type.
+///
+/// Response-only, unsolicited, and unknown type IDs return `None`.
+pub const fn expected_response_type(request_type: u8) -> Option<u8> {
+    match request_type {
+        TYPE_STATUS_REQUEST => Some(TYPE_STATUS_RESPONSE),
+        TYPE_TIME_SYNC
+        | TYPE_PUSH_DATA
+        | TYPE_APPLY_CONFIG
+        | TYPE_ACTIVATE_SCREEN
+        | TYPE_TRIGGER_INTERRUPT
+        | TYPE_NETWORK_CONFIG
+        | TYPE_FACTORY_RESET
+        | TYPE_ASSET_BEGIN
+        | TYPE_ASSET_CHUNK
+        | TYPE_ASSET_COMMIT
+        | TYPE_ASSET_RELEASE
+        | TYPE_PUSH_SCENE => Some(TYPE_ACK),
+        TYPE_HEARTBEAT => Some(TYPE_HEARTBEAT_ACK),
+        _ => None,
     }
 }
 
@@ -835,21 +856,7 @@ pub fn validate_message(message: &Message) -> Result<(), MessageError> {
                 TYPE_PUSH_DATA | TYPE_APPLY_CONFIG | TYPE_PUSH_SCENE
             );
             let already_present_required = ack.acknowledged_type == TYPE_ASSET_BEGIN;
-            if !matches!(
-                ack.acknowledged_type,
-                TYPE_TIME_SYNC
-                    | TYPE_PUSH_DATA
-                    | TYPE_APPLY_CONFIG
-                    | TYPE_ACTIVATE_SCREEN
-                    | TYPE_TRIGGER_INTERRUPT
-                    | TYPE_NETWORK_CONFIG
-                    | TYPE_FACTORY_RESET
-                    | TYPE_ASSET_BEGIN
-                    | TYPE_ASSET_CHUNK
-                    | TYPE_ASSET_COMMIT
-                    | TYPE_ASSET_RELEASE
-                    | TYPE_PUSH_SCENE
-            ) {
+            if expected_response_type(ack.acknowledged_type) != Some(TYPE_ACK) {
                 return Err(MessageError::InvalidValue("acknowledged type"));
             }
             if revision_required != ack.revision.is_some() {
@@ -2044,6 +2051,67 @@ mod tests {
     }
 
     #[test]
+    fn event_action_zero_is_reserved_and_invalid() {
+        let mut encoder = Encoder::new();
+        encoder.map(5);
+        encoder.unsigned(0);
+        encoder.unsigned(1);
+        encoder.unsigned(1);
+        encoder.unsigned(EventKind::Tap as u64);
+        encoder.unsigned(2);
+        encoder.text("timer");
+        encoder.unsigned(3);
+        encoder.text("focus");
+        encoder.unsigned(4);
+        encoder.unsigned(0);
+        let frame = Frame::new(TYPE_DEVICE_EVENT, 0, encoder.into_bytes());
+
+        assert_eq!(
+            decode_message(&frame),
+            Err(MessageError::InvalidValue("event action"))
+        );
+    }
+
+    #[test]
+    fn expected_response_table_covers_every_request_type() {
+        assert_eq!(
+            expected_response_type(TYPE_STATUS_REQUEST),
+            Some(TYPE_STATUS_RESPONSE)
+        );
+        assert_eq!(
+            expected_response_type(TYPE_HEARTBEAT),
+            Some(TYPE_HEARTBEAT_ACK)
+        );
+        for request_type in [
+            TYPE_TIME_SYNC,
+            TYPE_PUSH_DATA,
+            TYPE_APPLY_CONFIG,
+            TYPE_ACTIVATE_SCREEN,
+            TYPE_TRIGGER_INTERRUPT,
+            TYPE_NETWORK_CONFIG,
+            TYPE_FACTORY_RESET,
+            TYPE_ASSET_BEGIN,
+            TYPE_ASSET_CHUNK,
+            TYPE_ASSET_COMMIT,
+            TYPE_ASSET_RELEASE,
+            TYPE_PUSH_SCENE,
+        ] {
+            assert_eq!(expected_response_type(request_type), Some(TYPE_ACK));
+        }
+        for response_or_unsolicited_type in [
+            TYPE_STATUS_RESPONSE,
+            TYPE_ACK,
+            TYPE_HEARTBEAT_ACK,
+            TYPE_ERROR,
+            TYPE_DEVICE_EVENT,
+            0,
+            u8::MAX,
+        ] {
+            assert_eq!(expected_response_type(response_or_unsolicited_type), None);
+        }
+    }
+
+    #[test]
     fn network_config_round_trips() {
         let message = Message::NetworkConfig(NetworkConfig {
             ssid: "home-network".into(),
@@ -2283,19 +2351,6 @@ mod tests {
             decode_message(&frame),
             Err(MessageError::UnsupportedType(99))
         );
-    }
-
-    #[test]
-    fn current_capabilities_is_1003() {
-        // Bit 7 was defined and never set for most of V2; the constant read 75
-        // instead of 203 and a conforming host could not have provisioned the
-        // device. Bit 9 must likewise be advertised when the implementation
-        // accepts volatile assets. Pin the number so the omission cannot recur.
-        assert_eq!(CURRENT_CAPABILITIES, 1003);
-        assert_eq!(CAPABILITY_SCENE_RENDER, 256);
-        assert_eq!(CAPABILITY_VOLATILE_ASSETS, 512);
-        assert_ne!(CURRENT_CAPABILITIES & CAPABILITY_SCENE_RENDER, 0);
-        assert_ne!(CURRENT_CAPABILITIES & CAPABILITY_VOLATILE_ASSETS, 0);
     }
 
     /// Encodes a `PushScene` payload WITHOUT validating it, so the decode

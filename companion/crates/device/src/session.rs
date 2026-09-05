@@ -7,16 +7,17 @@ use std::time::{Duration, Instant};
 use protocol::{
     Ack, ActivateScreen, ApplyConfig, AssetBegin, AssetChunk, AssetCommit, AssetRelease,
     CAPABILITY_CONFIG_ROTATION, CAPABILITY_CORE_WIDGETS, Deframer, DeviceEvent, EventAction,
-    EventKind, Field, HeartbeatAck, Message, NetworkConfig, PushData, PushScene, ScreenConfig,
-    StatusResponse, TYPE_ACTIVATE_SCREEN, TYPE_APPLY_CONFIG, TYPE_ASSET_BEGIN, TYPE_ASSET_CHUNK,
-    TYPE_ASSET_COMMIT, TYPE_ASSET_RELEASE, TYPE_FACTORY_RESET, TYPE_NETWORK_CONFIG, TYPE_PUSH_DATA,
-    TYPE_PUSH_SCENE, TYPE_TIME_SYNC, TYPE_TRIGGER_INTERRUPT, TimeSync, TriggerInterrupt,
-    WidgetConfig, decode_message, encode_message,
+    EventKind, Field, HeartbeatAck, Message, NetworkConfig, PushData, PushScene,
+    RequestIdAllocator, ScreenConfig, StatusResponse, TYPE_ACTIVATE_SCREEN, TYPE_APPLY_CONFIG,
+    TYPE_ASSET_BEGIN, TYPE_ASSET_CHUNK, TYPE_ASSET_COMMIT, TYPE_ASSET_RELEASE, TYPE_FACTORY_RESET,
+    TYPE_NETWORK_CONFIG, TYPE_PUSH_DATA, TYPE_PUSH_SCENE, TYPE_TIME_SYNC, TYPE_TRIGGER_INTERRUPT,
+    TimeSync, TriggerInterrupt, WidgetConfig, decode_message, encode_message,
+    expected_response_type,
 };
 
 use crate::{
-    ConnectedDevice, DeviceClient, DeviceError, SerialTransport, Transport, TransportError,
-    connect, message_error,
+    ConnectedDevice, DeviceError, SerialTransport, Transport, TransportError, connect,
+    message_error,
 };
 
 pub const DEFAULT_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(3);
@@ -137,7 +138,7 @@ impl<T: Transport + Send + 'static> DeviceSession<T> {
         let connection = SessionConnection {
             transport,
             deframer: Deframer::new(),
-            next_request_id: 1,
+            request_ids: RequestIdAllocator::new(),
             request_timeout: options.request_timeout,
             keepalive_interval: options.keepalive_interval,
             last_request_finished: Instant::now(),
@@ -502,7 +503,7 @@ pub fn connect_session(explicit_port: Option<&str>) -> Result<ConnectedSession, 
 struct SessionConnection<T> {
     transport: T,
     deframer: Deframer,
-    next_request_id: u32,
+    request_ids: RequestIdAllocator,
     request_timeout: Duration,
     keepalive_interval: Duration,
     last_request_finished: Instant,
@@ -517,15 +518,6 @@ struct SessionConnection<T> {
 }
 
 impl<T: Transport> SessionConnection<T> {
-    fn allocate_request_id(&mut self) -> u32 {
-        let request_id = self.next_request_id;
-        self.next_request_id = self.next_request_id.wrapping_add(1);
-        if self.next_request_id == 0 {
-            self.next_request_id = 1;
-        }
-        request_id
-    }
-
     fn keepalive_due(&self) -> bool {
         self.last_request_finished.elapsed() >= self.keepalive_interval
     }
@@ -547,8 +539,8 @@ impl<T: Transport> SessionConnection<T> {
 
     fn transact(&mut self, request: &Message) -> Result<Message, DeviceError> {
         let expected_type =
-            DeviceClient::<T>::expected_response(request).ok_or(DeviceError::InvalidRequest)?;
-        let request_id = self.allocate_request_id();
+            expected_response_type(request.type_id()).ok_or(DeviceError::InvalidRequest)?;
+        let request_id = self.request_ids.allocate();
         let wire = encode_message(request_id, request).map_err(message_error)?;
         let deadline = Instant::now() + self.request_timeout;
         self.write_all(&wire, deadline)?;

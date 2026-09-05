@@ -4,8 +4,8 @@ use std::time::{Duration, Instant};
 
 use protocol::{
     Ack, Deframer, ErrorResponse, FrameError, HeartbeatAck, Message, MessageError, PushData,
-    StatusResponse, TYPE_ACK, TYPE_HEARTBEAT_ACK, TYPE_PUSH_DATA, TYPE_STATUS_RESPONSE,
-    TYPE_TIME_SYNC, TimeSync, decode_message, encode_message,
+    RequestIdAllocator, StatusResponse, TYPE_PUSH_DATA, TYPE_TIME_SYNC, TimeSync, decode_message,
+    encode_message, expected_response_type,
 };
 
 pub mod framebuffer_capture;
@@ -106,7 +106,7 @@ fn message_error(error: MessageError) -> DeviceError {
 pub struct DeviceClient<T> {
     transport: T,
     deframer: Deframer,
-    next_request_id: u32,
+    request_ids: RequestIdAllocator,
     timeout: Duration,
 }
 
@@ -115,7 +115,7 @@ impl<T: Transport> DeviceClient<T> {
         Self {
             transport,
             deframer: Deframer::new(),
-            next_request_id: 1,
+            request_ids: RequestIdAllocator::new(),
             timeout: DEFAULT_REQUEST_TIMEOUT,
         }
     }
@@ -131,38 +131,10 @@ impl<T: Transport> DeviceClient<T> {
         self.transport
     }
 
-    fn allocate_request_id(&mut self) -> u32 {
-        let request_id = self.next_request_id;
-        self.next_request_id = self.next_request_id.wrapping_add(1);
-        if self.next_request_id == 0 {
-            self.next_request_id = 1;
-        }
-        request_id
-    }
-
-    pub(crate) fn expected_response(request: &Message) -> Option<u8> {
-        match request {
-            Message::StatusRequest => Some(TYPE_STATUS_RESPONSE),
-            Message::TimeSync(_)
-            | Message::PushData(_)
-            | Message::ApplyConfig(_)
-            | Message::ActivateScreen(_)
-            | Message::TriggerInterrupt(_)
-            | Message::NetworkConfig(_)
-            | Message::FactoryReset
-            | Message::AssetBegin(_)
-            | Message::AssetChunk(_)
-            | Message::AssetCommit(_)
-            | Message::AssetRelease(_)
-            | Message::PushScene(_) => Some(TYPE_ACK),
-            Message::Heartbeat => Some(TYPE_HEARTBEAT_ACK),
-            _ => None,
-        }
-    }
-
     pub fn request(&mut self, request: &Message) -> Result<Message, DeviceError> {
-        let expected_type = Self::expected_response(request).ok_or(DeviceError::InvalidRequest)?;
-        let request_id = self.allocate_request_id();
+        let expected_type =
+            expected_response_type(request.type_id()).ok_or(DeviceError::InvalidRequest)?;
+        let request_id = self.request_ids.allocate();
         let wire = encode_message(request_id, request).map_err(message_error)?;
         let deadline = Instant::now() + self.timeout;
         let mut written = 0;

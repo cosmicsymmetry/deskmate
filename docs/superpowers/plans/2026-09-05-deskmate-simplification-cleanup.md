@@ -110,7 +110,19 @@ Batches landed, one squash commit each, in merge order:
 | `8fc534b` | app-core runtime | workspace check, app-core 262, server lib 193 |
 | `2867b68` | plugin crate | (see below) |
 | `29e4524` | protocol / device / engine / providers | workspace check |
-| `b2994e4` | app-core scene / asset sync | workspace check, app-core tests |
+| `b2994e4` | app-core scene / asset sync | workspace check, app-core 257 tests |
+| `332c9b6` | Tauri shell / IPC contract | workspace check, unit suites, TS check + 100 tests |
+| `465e037` | lvgl-sim | host tests, sanitize, `idf.py build` + size (image unchanged) |
+| `5a572e1` | server | (full gates below) |
+| `f40958a` | integration fix: `SceneDataState::OK` was removed by the scene batch after the server batch branched | full gates below |
+
+**Final gates on `f40958a`, all green:** `cargo fmt --all --check`; `cargo clippy
+--workspace --all-targets -- -D warnings`; `cargo test --workspace --all-targets` (859
+tests, 0 failed, including the loopback-bound server tests the sandbox had denied the
+workers); `cargo test --workspace --doc`; `bun run check`, `format:check`, `lint`, `bun
+test` (100 tests); `make -C firmware/host_tests clean test` and `sanitize`; `idf.py -C
+firmware build` and `size` (the table above; the final image is byte-identical to the
+post-core build, so the simulator batch's firmware edits were dev-diag-only as claimed).
 
 Firmware size after the two firmware batches, same tree, same toolchain:
 
@@ -124,6 +136,14 @@ Firmware size after the two firmware batches, same tree, same toolchain:
 downloads before, so the on-board download check is owed, not optional.
 
 Items skipped on evidence, with the reason the worker recorded:
+
+- Server registry on `app_core::secure_file` (the shared-secure-file-I/O item):
+  `secure_file` and every function it would need are `pub(crate)` in app-core, so the
+  adoption needs an app-core API decision first. Left in place; the registry keeps its
+  own bounded read / 0600 atomic write.
+- The ts-rs generated IPC contract: ts-rs 12.0.1 cannot represent the
+  `serialize_with`/`deserialize_with` contract on `DeviceSnapshot.unknown_capability_bits`,
+  so the hand-built contract stays, hardened as described in `332c9b6`.
 
 - `ConfigStore::path` (and the two accessors bundled with it): a server test calls it
   (`server/src/lib.rs`, `in_memory_config_root_is_independent_from_firmware_storage`).
@@ -146,6 +166,11 @@ Decisions taken during execution (owner may reverse):
   host-testable without adding production surface, so it has no host test; it is on the
   panel list above.
 
+Two process notes. The Codex workers could not `git commit` (the sandbox cannot write
+the worktree's `.git/worktrees/<name>/index.lock`) or run `idf.py` (`psutil`
+`sysctl` PermissionError), so the controller committed every branch and ran every
+ESP-IDF build; three workers were killed mid-run when the harness stopped its background
+tasks and were resumed by Codex session id with their worktree edits intact.
 A note on one interrupted check: the `cargo check` run after the plugin merge failed with
 an arity error in `lvgl-sim` because the scene batch was merged into the working tree
 while that check was mid-build; the checks that ran after it on the same tree pass, and

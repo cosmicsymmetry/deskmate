@@ -20,7 +20,7 @@ gap marked resolved and the evidence that closed it named. What remains open is 
 | `ProgressRing`'s TOTAL/ELAPSED/STATUS literals and its running colour | `timer.total`, `timer.elapsed`, `timer.status`, `timer.permille`, and the `running_color` style selector | `abea638`..`d143d51` |
 | `DigitalClock`'s literal date and both small-dial hand endpoints | `date` and `time:angle:hour` / `time:angle:minute` | Task 3 |
 | A tap reaching only the C view, so a scene could not move with the link down | The local action is applied to the scene timer context and its bindings refreshed | Task 4 |
-| The shared stale/error footer missing from every builder | `push_state_footer()`, reached by all six through `finish_scene()` | Task 5 |
+| The shared stale/error footer missing from every builder | `push_state_footer()`, applied to all six by `with_scene_data_state()` for stale/error scenes | Task 5 |
 | Retiring the C templates would delete the parity oracle | Templates moved to `companion/crates/lvgl-sim/reference-oracle/`, with a build guard against their return | `7d47ab6` |
 
 The parity matrix grew from 108 rows to **132**: 24 new rows cover the stale and error
@@ -78,11 +78,13 @@ All six C templates create `OBJ_STATE`; `template_view.c` used it to show an err
 error colour, `Stale` in the stale colour, or nothing in the OK state. Every builder
 omitted that node, because stage 2b's rows all exercised the OK state.
 
-`push_state_footer()` now adds it as an ordinary literal node, reached by all six builders
-through the single `finish_scene()` path, and 24 parity rows cover it. It stayed a literal
-deliberately: stale/error is a new host-owned fact like a provider result, so the host
-rebuilds and pushes when it changes. `field.error` plus `field.stale` could not have
-expressed it — the footer selects text, colour *and* visibility together.
+`push_state_footer()` now adds it as an ordinary literal node through the shared
+`with_scene_data_state()` path, and 24 parity rows cover every builder in stale/error
+states. The six builder entry points emit the OK state directly and do not add a no-op
+footer. It stayed a literal deliberately: stale/error is a new host-owned fact like a
+provider result, so the host rebuilds and pushes when it changes. `field.error` plus
+`field.stale` could not have expressed it — the footer selects text, colour *and*
+visibility together.
 
 ## The blocking gaps, and how they were decided
 
@@ -270,7 +272,7 @@ without the second, where `field.title` before Task 8b had neither.
 
 **The asset path: exercised in software, unexercised on hardware, and it hid a
 destructive bug.** Task 8's `push_case_assets` drove `AssetBegin`/`AssetChunk`/
-`AssetCommit` for the first time, and Task 8b put `AssetSync::reconcile` on a production
+`AssetCommit` for the first time, and Task 8b put durable reconciliation on a production
 path. That wiring immediately surfaced something no golden or parity row could have:
 **`AssetRelease.digests` is a keep-set, not a delete-list** — `asset_store.c`'s
 compaction marks every committed record absent from it DEAD — so a server with an empty

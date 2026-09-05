@@ -140,13 +140,10 @@ pub enum BindingClass {
     Static,
 }
 
-/// The bindings a candidate requires, split by [`BindingClass`].
+/// The live bindings a candidate requires.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BindingRequirements {
     pub live: BTreeSet<String>,
-    /// `field.*` and nothing else today. Kept as the full token so a refusal
-    /// or a rasterizer can name exactly what it resolved.
-    pub resolvable: BTreeSet<String>,
 }
 
 /// Everything negotiation needs to know about one render candidate.
@@ -328,10 +325,9 @@ fn classify_into(
     binding: &str,
     bindings: &mut BindingRequirements,
 ) -> Result<(), RequirementsError> {
-    match classify_binding(binding)? {
-        BindingClass::Live => bindings.live.insert(binding.to_owned()),
-        BindingClass::Static => bindings.resolvable.insert(binding.to_owned()),
-    };
+    if classify_binding(binding)? == BindingClass::Live {
+        bindings.live.insert(binding.to_owned());
+    }
     Ok(())
 }
 
@@ -651,7 +647,6 @@ mod tests {
         })]))
         .unwrap();
         assert!(requirements.bindings.live.is_empty());
-        assert!(requirements.bindings.resolvable.is_empty());
     }
 
     #[test]

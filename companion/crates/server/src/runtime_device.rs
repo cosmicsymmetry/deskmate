@@ -759,7 +759,7 @@ impl RuntimeDevice for WebSocketRuntimeDevice {
     /// the server owning the device over the tunnel is the entire point of
     /// networked tier, so this is a plain request/reply exactly like
     /// `push_fields`. Not part of reconnect replay (`remember_success`) --
-    /// `AssetSync::reconcile` re-derives its own state from `already_present`
+    /// `AssetSync` re-derives its own state from `already_present`
     /// on every pass rather than trusting a stale replay log.
     fn send_asset_begin(&mut self, begin: AssetBegin) -> Result<Ack, DeviceError> {
         let response = self.connected_request(Message::AssetBegin(begin))?;

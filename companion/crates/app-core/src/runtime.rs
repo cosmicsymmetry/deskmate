@@ -2760,13 +2760,10 @@ fn build_template_card_scene(
                 metrics,
             )
         }
-        Some(DisplayTemplate::AnalogClock) => build_analog_clock_scene(
-            &AnalogClockCard {
-                revision,
-                show_seconds: field_boolean(fields, "show_seconds"),
-            },
-            metrics,
-        ),
+        Some(DisplayTemplate::AnalogClock) => build_analog_clock_scene(&AnalogClockCard {
+            revision,
+            show_seconds: field_boolean(fields, "show_seconds"),
+        }),
         Some(DisplayTemplate::ProgressRing) => build_progress_ring_scene(
             &ProgressRingCard {
                 revision,
@@ -3244,10 +3241,9 @@ fn ensure_durable_assets_for_scene(
     }) {
         return Err(AssetSyncError::MissingRequiredAsset { digest: *digest });
     }
-    let report =
+    let keep_set =
         AssetSync::reconcile_with_active_volatile(device, &desired, state.active_volatile_digest)?;
-    state.confirmed_durable_assets = report
-        .released
+    state.confirmed_durable_assets = keep_set
         .into_iter()
         .filter(|digest| Some(*digest) != state.active_volatile_digest)
         .collect();

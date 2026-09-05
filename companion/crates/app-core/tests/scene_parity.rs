@@ -967,13 +967,10 @@ fn add_analog_clock_cases(cases: &mut Vec<ParityCase>) {
                         orientation,
                     },
                     scene: SceneRenderRequest {
-                        scene: build_analog_clock_scene(
-                            &AnalogClockCard {
-                                revision: 1,
-                                show_seconds,
-                            },
-                            &BakedFontMetrics::SHIPPED,
-                        ),
+                        scene: build_analog_clock_scene(&AnalogClockCard {
+                            revision: 1,
+                            show_seconds,
+                        }),
                         assets: Vec::new(),
                         utc_offset_minutes: instant.utc_offset_minutes,
                         now_unix_seconds: instant.now_unix_seconds(),

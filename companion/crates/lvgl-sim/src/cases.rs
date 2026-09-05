@@ -695,13 +695,10 @@ pub fn face_scene_cases() -> Vec<(String, SceneRenderRequest)> {
                         metrics,
                     )
                 }
-                SimTemplate::AnalogClock => build_analog_clock_scene(
-                    &AnalogClockCard {
-                        revision: 1,
-                        show_seconds: field_boolean(&request, "show_seconds", true),
-                    },
-                    metrics,
-                ),
+                SimTemplate::AnalogClock => build_analog_clock_scene(&AnalogClockCard {
+                    revision: 1,
+                    show_seconds: field_boolean(&request, "show_seconds", true),
+                }),
                 SimTemplate::ProgressRing => build_progress_ring_scene(
                     &ProgressRingCard {
                         revision: 1,

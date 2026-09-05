@@ -1,11 +1,12 @@
-//! `digital_clock.c`'s layout, moved to the host as a scene.
+//! Host-side scene builders for Deskmate's six built-in card faces.
 //!
-//! Stage 2a's parity gate renders the shipped `DigitalClock` C template and the
-//! scene this module emits through the same simulator and asserts the two
-//! framebuffers are **byte-identical**. Every constant here is therefore a
-//! *port* of `firmware/main/ui/templates/digital_clock.c`, not a re-derivation:
-//! read that file before changing a number here, and change the number there
-//! first if the layout is genuinely meant to move.
+//! The builders cover `DigitalClock`, `AnalogClock`, `BigNumberLabel`,
+//! `IconBadgeText`, `RowList`, and `ProgressRing`. The byte-exact parity gate
+//! renders them beside the retired C templates in
+//! `companion/crates/lvgl-sim/reference-oracle/ui/templates/`.
+//! `DigitalClock`'s numeric and coordinate provenance is the `digital_clock.c`
+//! file in that directory; the other five builders use their correspondingly
+//! named sibling templates. These oracle files do not ship in firmware.
 //!
 //! # What the host decides, and what the device still decides
 //!
@@ -14,12 +15,13 @@
 //! own tick, so a scene pushed once keeps the whole face current through minute
 //! boundaries and local midnight.
 //!
-//! # Three coordinate systems, and the one translation that matters
+//! # `DigitalClock`'s three coordinate systems
 //!
-//! `digital_clock.c` nests its objects: the hero and the modules sit on a
-//! full-canvas, style-stripped root; the date label sits inside the date
-//! module; the dial sits inside the dial module; and **the two hands are
-//! children of the `lv_scale`**, which positions them from its own box centre.
+//! The `DigitalClock` oracle's `digital_clock.c` nests its objects: the hero and
+//! the modules sit on a full-canvas, style-stripped root; the date label sits
+//! inside the date module; the dial sits inside the dial module; and **the two
+//! hands are children of the `lv_scale`**, which positions them from its own
+//! box centre.
 //! A scene has no nesting — every node is a sibling under one full-canvas
 //! container at the canvas origin — so this module resolves each chain to
 //! absolute canvas coordinates. `hand_line()` is where that matters most; see
@@ -550,21 +552,11 @@ pub struct SceneDataState<'a> {
     pub error: Option<&'a str>,
 }
 
-impl SceneDataState<'static> {
-    /// The OK state all compatibility builder entry points retain.
-    pub const OK: Self = Self {
-        stale: false,
-        error: None,
-    };
-}
-
 /// Applies the shared C-template data-state footer to a freshly built scene.
 ///
-/// Existing builder entry points continue to mean the OK state so their
-/// callers remain source-compatible. A host that owns a stale/error fact
-/// passes that builder result through this function before pushing it. All six
-/// builders and this stateful path converge on [`push_state_footer`], keeping
-/// the shared C implementation shared on the host too.
+/// The six builders emit the OK state directly, with no footer node. A host
+/// that owns a stale/error fact passes the builder result through this
+/// function before pushing it, keeping the stateful footer path shared.
 pub fn with_scene_data_state(
     mut scene: Scene,
     state: SceneDataState<'_>,
@@ -620,17 +612,10 @@ fn push_state_footer(
     }));
 }
 
-fn finish_scene(
-    revision: u32,
-    background: u32,
-    mut nodes: Vec<SceneNode>,
-    state: SceneDataState<'_>,
-    metrics: &BakedFontMetrics,
-) -> Scene {
-    push_state_footer(&mut nodes, state, metrics);
+fn finish_scene(revision: u32, nodes: Vec<SceneNode>) -> Scene {
     Scene {
         revision,
-        background,
+        background: COLOR_CANVAS,
         nodes,
     }
 }
@@ -826,13 +811,7 @@ pub fn build_digital_clock_scene(card: &ClockCard, metrics: &BakedFontMetrics) -
         CLOCK_HUE,
     )));
 
-    finish_scene(
-        card.revision,
-        COLOR_CANVAS,
-        nodes,
-        SceneDataState::OK,
-        metrics,
-    )
+    finish_scene(card.revision, nodes)
 }
 
 /// Builds the whole `BigNumberLabel` face as a scene.
@@ -914,13 +893,7 @@ pub fn build_big_number_label_scene(card: &BigNumberCard<'_>, metrics: &BakedFon
         }),
     ];
 
-    finish_scene(
-        card.revision,
-        COLOR_CANVAS,
-        nodes,
-        SceneDataState::OK,
-        metrics,
-    )
+    finish_scene(card.revision, nodes)
 }
 
 /// Converts `LV_ALIGN_CENTER` plus an `(x, y)` offset inside a container to
@@ -1261,13 +1234,7 @@ pub fn build_icon_badge_text_scene(
 
     // `OBJ_STATE` is cleared by `template_view.c` in these OK-state parity
     // fixtures, so it has no visible scene node.
-    finish_scene(
-        card.revision,
-        COLOR_CANVAS,
-        nodes,
-        SceneDataState::OK,
-        metrics,
-    )
+    finish_scene(card.revision, nodes)
 }
 
 /// Converts a row child's coordinates from its module-local frame to the
@@ -1436,13 +1403,7 @@ pub fn build_row_list_scene(card: &RowListCard<'_>, metrics: &BakedFontMetrics) 
         }));
     }
 
-    finish_scene(
-        card.revision,
-        COLOR_CANVAS,
-        nodes,
-        SceneDataState::OK,
-        metrics,
-    )
+    finish_scene(card.revision, nodes)
 }
 
 /// Converts the centre of a child in `OBJ_FACE`'s local coordinate frame to
@@ -1523,7 +1484,7 @@ fn analog_tick(index: i32) -> SceneNode {
 /// All three hands use device-side rotation bindings, so the scene keeps time
 /// without a host push. `show_seconds = false` drops the second-hand node,
 /// matching `LV_OBJ_FLAG_HIDDEN` without moving anything else.
-pub fn build_analog_clock_scene(card: &AnalogClockCard, metrics: &BakedFontMetrics) -> Scene {
+pub fn build_analog_clock_scene(card: &AnalogClockCard) -> Scene {
     let mut nodes = Vec::with_capacity(17);
 
     nodes.push(SceneNode::Arc(SceneArc {
@@ -1583,13 +1544,7 @@ pub fn build_analog_clock_scene(card: &AnalogClockCard, metrics: &BakedFontMetri
 
     // `OBJ_STATE` is empty in the OK-state parity fixtures, so it has no
     // visible scene node.
-    finish_scene(
-        card.revision,
-        COLOR_CANVAS,
-        nodes,
-        SceneDataState::OK,
-        metrics,
-    )
+    finish_scene(card.revision, nodes)
 }
 
 /// Adds one of `progress_ring.c`'s three fixed module stacks. The caption is
@@ -1752,13 +1707,7 @@ pub fn build_progress_ring_scene(card: &ProgressRingCard<'_>, metrics: &BakedFon
         metrics,
     );
 
-    finish_scene(
-        card.revision,
-        COLOR_CANVAS,
-        nodes,
-        SceneDataState::OK,
-        metrics,
-    )
+    finish_scene(card.revision, nodes)
 }
 
 #[cfg(test)]
@@ -1825,14 +1774,11 @@ mod tests {
             revision: 7,
             show_seconds: true,
         };
-        let with_seconds = build_analog_clock_scene(&card, &BakedFontMetrics::SHIPPED);
-        let without_seconds = build_analog_clock_scene(
-            &AnalogClockCard {
-                show_seconds: false,
-                ..card
-            },
-            &BakedFontMetrics::SHIPPED,
-        );
+        let with_seconds = build_analog_clock_scene(&card);
+        let without_seconds = build_analog_clock_scene(&AnalogClockCard {
+            show_seconds: false,
+            ..card
+        });
 
         let mut with_second_removed = with_seconds.clone();
         with_second_removed.nodes.retain(|node| {
@@ -2214,13 +2160,6 @@ mod tests {
         assert_eq!("time:angle:minute", minute.angle_binding);
         assert_eq!(4, minute.width);
         assert_eq!(0x00ff_8f2e, minute.color);
-    }
-
-    #[test]
-    fn hand_bindings_do_not_depend_on_the_push_instant() {
-        let scene = scene_at(0, 0, true);
-        assert_eq!("time:angle:hour", line(&scene, 6).angle_binding);
-        assert_eq!("time:angle:minute", line(&scene, 7).angle_binding);
     }
 
     #[test]

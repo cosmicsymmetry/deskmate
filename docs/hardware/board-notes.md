@@ -4494,3 +4494,62 @@ hardware and nothing regressed — but Step 6 is only **partially** observed. Th
 font-vanish and BUSY/OTA pieces are deferred (the latter into Phase B by design; the
 former is not reproducible on this device's card set). Proceeding to Phase B is therefore
 justified, with the BUSY/OTA observation owed inside it.
+
+## Stage 4 Task 7 Phase B — PASSED on hardware (2026-09-06)
+
+Published `v2.0.0-raster1` (built from `f40958a`, sha
+`29f15a6f7ee1f6f5717deaa09a21a3bdb75bd19c6ddeae5dd2b51ade1afc3b15`) by flipping
+`DESKMATE_FIRMWARE_VERSION` on docker-vm and restarting. Baseline memory (same tree):
+DIRAM total 203,867 (`.text` 93,635, `.bss` 87,104, `.data` 23,128), IRAM 16,384/16,384
+(0 remaining) — internal RAM byte-flat vs the cleanup tree.
+
+**B5 — OTA download + rollback survival: PASSED.** The device only checks firmware at
+boot (24 h interval otherwise), so a USB RTS reset re-ran the boot check. Sequence (server
+UTC): reset 20:54:41 → boot, `ota_state: checking` at uptime 13,002 ms → downloaded and
+installed → rebooted into the new slot → `v2.0.0-raster1`, `ota_state: idle`, uptime reset
+to 8,807 ms at 20:55:29. **Installed on the first attempt**, `last_ota_error: None`
+throughout. Rollback-window survived: uptime then climbed 24k→86k ms and stayed on
+raster1 with no revert to live2, so the image marked itself valid. The documented
+memory-layout OTA hazard did not bite.
+
+**B6 — capability truth: PASSED.** Device and server report numeric **1003**; the server
+decodes the bit set by name as `core-widgets, config-rotation, extended-templates,
+asset-transfer, firmware-update, networking, scene-render, volatile-assets`;
+`unknown_capability_bits: 0x0`. A volatile transfer was accepted (see B7).
+
+**B7 — native vs raster: PASSED at 270°.** The native weather card
+(`icon-badge-text`) drew cleanly. Pushing `svg-aqi` (a manifest-v2 SVG template →
+`RasterOnly`) via the operator route produced a server-side `resvg` render → one 448×368
+RGB565 volatile frame → one-node scene: the panel showed "GOOD / ⬤ / 42 / AQI".
+`free_heap` dropped ~334 KB on the push (one 329,740-byte RGB565 frame in PSRAM),
+confirming the volatile transfer. (The circle reads bright/white on the webcam — likely
+exposure of the bright fill; not diagnosable from the camera.) **90° not yet captured in
+this checkpoint.**
+
+**B8 — refuse rule: PASSED (mandatory rollout observation).** `svg-live-clock` (an SVG
+face binding `{{ time:HH:mm }}`) pushed via the operator route *with data*, so the only
+possible refusal cause is the live binding. Result: HTTP 200, **no raster asset and no
+frozen scene sent**, and a typed `scene-refused` card error naming `time:HH:mm` ("…a
+server-rendered image of it would freeze, so it is refused instead…"). The panel showed
+the **live standalone clock** (observed ticking 21:03→21:08), i.e. the device kept drawing
+time itself rather than freezing a rastered clock — the exact intended behaviour.
+
+**B9 — 30-second floor: core behaviours PASSED (mandatory rollout observation).** Through
+the operator route, three distinct `svg-aqi` snapshots pushed at t≈0/5/11 s (AQI 11 / 88 /
+199), all HTTP 200. Observed (1 fps frames of `…-floor.mp4`): (1) the first frame (11)
+rendered immediately; (2) no new frame appeared before 30 s; (3) at the 30 s boundary
+(push A 21:03:25 → 21:03:55) the **newest** snapshot (199 "UNHEALTHY") appeared — the
+intermediate 88 was coalesced away and never shown. Floor timing was exact.
+- **One caveat, root-caused as a test-setup artifact, not a floor defect:** during the
+  deferral window the panel fell back to the standalone clock instead of holding the
+  prior frame (11). Cause: `svg-aqi`'s source is `https://example.invalid/` (unfetchable
+  by design), so its provider fetch kept failing (`providers[svg-aqi-card].state = error:
+  dns resolution failed`, `provider_jobs_started` 3→5) and the resulting data-less error
+  snapshot made the SVG evaluation fail, clobbering the operator-injected good data
+  between pushes. With a real fetchable source this would not occur. Worth noting: that
+  SVG-evaluation failure surfaced only in the `providers` block, not as a `card_errors`
+  entry.
+
+Config note: these observations used a temporary manual single-card playlist `svg-test`
+with added plugin cards `svg-aqi-card`/`svg-live-clock-card`; dev-0005's original config
+is saved and is restored at the end of the session.

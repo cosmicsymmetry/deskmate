@@ -93,5 +93,60 @@ side is trusted, and they are the same two CLAUDE.md always names:
 
 ## Execution notes
 
-(filled in as batches land; exact verification results, skipped items and why, and the
-firmware size lines)
+Baseline on the untouched tree (`6a4b4a2`): host tests and sanitizer pass; `idf.py size`
+DIRAM 203,891 (`.bss` 87,128, `.data` 23,128), IRAM 16,384/16,384 with 0 remaining, image
+1,600,551 bytes.
+
+Batches landed, one squash commit each, in merge order:
+
+| Commit | Batch | Gates run on the merged tree |
+| --- | --- | --- |
+| `59fea2e` | repo hygiene (controller) | tree inspection only |
+| `580e2a8` | stale documents | link check |
+| `6dbcb71` | firmware link/UI | host tests, sanitize, `idf.py build` + size |
+| `6a387fa` | frontend | `bun run check`, format, lint, 97 tests |
+| `f0cd919` | app-core config/store | workspace check, app-core 262 tests, TS check + tests |
+| `3e1979c` | firmware core | host tests, sanitize, `idf.py build` + size |
+| `8fc534b` | app-core runtime | workspace check, app-core 262, server lib 193 |
+| `2867b68` | plugin crate | (see below) |
+| `29e4524` | protocol / device / engine / providers | workspace check |
+| `b2994e4` | app-core scene / asset sync | workspace check, app-core tests |
+
+Firmware size after the two firmware batches, same tree, same toolchain:
+
+| Point | DIRAM | `.bss` | `.data` | IRAM | image bytes |
+| --- | --- | --- | --- | --- | --- |
+| baseline | 203,891 | 87,128 | 23,128 | 16,384 (0 left) | 1,600,551 |
+| after link/UI batch | 203,875 | 87,112 | 23,128 | 16,384 (0 left) | 1,600,183 |
+| after core batch | 203,867 | 87,104 | 23,128 | 16,384 (0 left) | 1,599,379 |
+
+`.bss` moved by 24 bytes in total. That is the class of shift that has broken OTA
+downloads before, so the on-board download check is owed, not optional.
+
+Items skipped on evidence, with the reason the worker recorded:
+
+- `ConfigStore::path` (and the two accessors bundled with it): a server test calls it
+  (`server/src/lib.rs`, `in_memory_config_root_is_independent_from_firmware_storage`).
+- The two optional `scene_build.rs` taste items were not attempted.
+- Historical plan files that name removed symbols (`link_state_accept_push`,
+  `asset_transfer_resume_offset`, `wifi_station_time_synced`, `AssetSyncReport`, the old
+  `build_analog_clock_scene` signature) were left as history; CLAUDE.md and board-notes
+  carry a dated annotation where the reference read as current fact.
+
+Decisions taken during execution (owner may reverse):
+
+- docs/config v4-v6: the v3 fallback playlist is synthesized in authored array order, as
+  the code and its test do; the three documents were amended and dated rather than the
+  code changed.
+- The tray "Pause pushing" item is removed (wave 2), because CLAUDE.md records the pause
+  control as removed and says `setPushingPaused` has no everyday control any more; the
+  one-off "Resume sending" notice stays.
+- The standalone clock's per-second full-canvas invalidate is now conditional on the
+  online hint changing. That decision is inside a static LVGL timer path and is not
+  host-testable without adding production surface, so it has no host test; it is on the
+  panel list above.
+
+A note on one interrupted check: the `cargo check` run after the plugin merge failed with
+an arity error in `lvgl-sim` because the scene batch was merged into the working tree
+while that check was mid-build; the checks that ran after it on the same tree pass, and
+the final full gates below are the ones that count.

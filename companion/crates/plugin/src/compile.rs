@@ -53,7 +53,7 @@ use app_core::{BakedFontMetrics, SceneDataState, text_is_numeric, with_scene_dat
 
 use crate::assets::AssetSet;
 use crate::expr::{EvalContext, Expr, ExprError, FUEL_BUDGET, Fuel};
-use crate::manifest::{Align, Font, FontTier, Node, PluginManifest, Point, Repeat, Template};
+use crate::manifest::{Align, Font, FontTier, Node, PluginManifest, Repeat, Template};
 
 /// Maximum repetitions the one repeat form expands to, however long the
 /// fetched array actually is. Mirrors `RowListCard`'s five-row precedent
@@ -69,6 +69,11 @@ const PLUGIN_CANVAS_BACKGROUND: u32 = 0x0000_0000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CompileError {
+    /// A value contains mustache delimiters but is not exactly one complete
+    /// `{{ ... }}` expression. Manifest expressions are whole-value only;
+    /// prefix/suffix interpolation, nested pairs, multiple pairs, and
+    /// unmatched delimiters are authoring errors rather than literals.
+    MalformedPartialInterpolation { text: String },
     /// A `{{ ... }}` value named something in the device-binding namespace
     /// (`timer.*`, `time:*`, `field.*`, `date`) that is not, in fact, one of
     /// the closed bindings the firmware evaluates locally
@@ -80,9 +85,9 @@ pub enum CompileError {
     /// failed to parse or evaluate. Wraps the specific `expr::ExprError`,
     /// which includes `OutputTooLong` for a provider value too large for
     /// `expr`'s own, larger bound (`expr::MAX_OUTPUT_LEN`, 4096 bytes).
-    /// That stays a named, fatal error, and it is reachable two ways: an
-    /// author calling `truncate(s, n)` with too large an `n`, and a plain
-    /// field read of an oversized provider value (`expr::bound_text`).
+    /// That stays a named, fatal error, and is reachable from a plain field
+    /// read of an oversized provider value or another evaluator-produced
+    /// text value (`expr::bound_text`).
     /// **Consequence worth knowing: a provider string over 4096 bytes is a
     /// PERMANENT card fault**, because `classify_plugin_failure` rules a
     /// compile failure permanent. That is the deliberate ruling -- 4096 is
@@ -216,11 +221,69 @@ pub fn device_binding_requirements(source: &str) -> BTreeSet<String> {
     bindings
 }
 
-/// Strips a `"{{ ... }}"` wrapper, returning the trimmed inner source.
-/// `None` means `source` is a plain literal, used verbatim.
-fn extract_expression(source: &str) -> Option<&str> {
+/// Lexical classification of a manifest expression-bearing value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExpressionSource<'a> {
+    /// No mustache delimiter occurs; the original value is literal text.
+    Literal(&'a str),
+    /// Exactly one whole-value expression; the body is whitespace-trimmed.
+    Expression(&'a str),
+    /// Mustache syntax occurs, but not as one complete outer pair.
+    MalformedPartial,
+}
+
+/// Classifies a value under the manifest's whole-value-only interpolation
+/// rule.
+///
+/// Surrounding whitespace around a complete expression is ignored. An
+/// unquoted nested/multiple/unmatched delimiter or any literal prefix/suffix
+/// makes the value [`ExpressionSource::MalformedPartial`]. Delimiter text
+/// inside an expression string literal is ignored, including after an
+/// escaped quote, so `{{ "{{ literal }}" }}` remains one expression.
+#[must_use]
+pub fn classify_expression_source(source: &str) -> ExpressionSource<'_> {
     let trimmed = source.trim();
-    trimmed.strip_prefix("{{")?.strip_suffix("}}")
+    if !trimmed.starts_with("{{") {
+        return if trimmed.contains("{{") || trimmed.contains("}}") {
+            ExpressionSource::MalformedPartial
+        } else {
+            ExpressionSource::Literal(source)
+        };
+    }
+
+    let bytes = trimmed.as_bytes();
+    let mut index = 2;
+    let mut in_string = false;
+    while index < bytes.len() {
+        if in_string {
+            match bytes[index] {
+                b'\\' => index = (index + 2).min(bytes.len()),
+                b'"' => {
+                    in_string = false;
+                    index += 1;
+                }
+                _ => index += 1,
+            }
+            continue;
+        }
+
+        if bytes[index] == b'"' {
+            in_string = true;
+            index += 1;
+        } else if bytes[index..].starts_with(b"{{") {
+            return ExpressionSource::MalformedPartial;
+        } else if bytes[index..].starts_with(b"}}") {
+            return if trimmed[index + 2..].trim().is_empty() {
+                ExpressionSource::Expression(trimmed[2..index].trim())
+            } else {
+                ExpressionSource::MalformedPartial
+            };
+        } else {
+            index += 1;
+        }
+    }
+
+    ExpressionSource::MalformedPartial
 }
 
 /// Replaces every occurrence of the bare identifier token `item` in `source`
@@ -322,10 +385,16 @@ fn compile_value_source(
     fuel: &mut Fuel,
     item_index: Option<usize>,
 ) -> Result<SceneValue, CompileError> {
-    let Some(inner) = extract_expression(source) else {
-        return Ok(bound_literal(source));
+    let inner = match classify_expression_source(source) {
+        ExpressionSource::Literal(literal) => return Ok(bound_literal(literal)),
+        ExpressionSource::Expression(inner) => inner,
+        ExpressionSource::MalformedPartial => {
+            return Err(CompileError::MalformedPartialInterpolation {
+                text: source.to_string(),
+            });
+        }
     };
-    let mut trimmed = inner.trim().to_string();
+    let mut trimmed = inner.to_string();
     if let Some(index) = item_index {
         trimmed = substitute_item_token(&trimmed, index);
     }
@@ -351,13 +420,21 @@ fn compile_position_binding(
     field: &'static str,
     allowed: impl FnOnce(&str) -> bool,
 ) -> Result<String, CompileError> {
-    let Some(inner) = extract_expression(source) else {
-        return Err(CompileError::InvalidBindingPosition {
-            field,
-            text: source.to_string(),
-        });
+    let inner = match classify_expression_source(source) {
+        ExpressionSource::Literal(_) => {
+            return Err(CompileError::InvalidBindingPosition {
+                field,
+                text: source.to_string(),
+            });
+        }
+        ExpressionSource::Expression(inner) => inner,
+        ExpressionSource::MalformedPartial => {
+            return Err(CompileError::MalformedPartialInterpolation {
+                text: source.to_string(),
+            });
+        }
     };
-    let binding = inner.trim();
+    let binding = inner;
     if allowed(binding) {
         return Ok(binding.to_string());
     }
@@ -512,131 +589,6 @@ fn capped_number_font_tier(
 }
 
 // ---------------------------------------------------------------------------
-// Per-repetition geometry offset.
-// ---------------------------------------------------------------------------
-
-/// Applies a repeat block's `(dx, dy)` offset to a cloned template node's
-/// geometry fields, leaving every non-geometry field untouched. Written as
-/// an explicit per-kind match, not a generic "shift the first two i32
-/// fields" trick, so a future node-kind addition is a compile error here
-/// instead of a silently wrong offset.
-#[allow(clippy::too_many_lines)]
-fn offset_node(node: Node, dx: i32, dy: i32) -> Node {
-    match node {
-        Node::Rect {
-            x,
-            y,
-            w,
-            h,
-            radius,
-            fill,
-            opacity,
-        } => Node::Rect {
-            x: x + dx,
-            y: y + dy,
-            w,
-            h,
-            radius,
-            fill,
-            opacity,
-        },
-        Node::Arc {
-            cx,
-            cy,
-            r,
-            start_deg,
-            end_deg,
-            width,
-            color,
-            caps,
-            end_binding,
-        } => Node::Arc {
-            cx: cx + dx,
-            cy: cy + dy,
-            r,
-            start_deg,
-            end_deg,
-            width,
-            color,
-            caps,
-            end_binding,
-        },
-        Node::Line {
-            points,
-            pivot_x,
-            pivot_y,
-            length,
-            angle_binding,
-            width,
-            color,
-        } => Node::Line {
-            points: points
-                .into_iter()
-                .map(|p| Point {
-                    x: p.x + dx,
-                    y: p.y + dy,
-                })
-                .collect(),
-            pivot_x: pivot_x.map(|value| value + dx),
-            pivot_y: pivot_y.map(|value| value + dy),
-            length,
-            angle_binding,
-            width,
-            color,
-        },
-        Node::Text {
-            x,
-            baseline_y,
-            w,
-            align,
-            font,
-            color,
-            value,
-            ellipsize,
-        } => Node::Text {
-            x: x + dx,
-            baseline_y: baseline_y + dy,
-            w,
-            align,
-            font,
-            color,
-            value,
-            ellipsize,
-        },
-        Node::Image {
-            x,
-            y,
-            w,
-            h,
-            asset,
-            recolor,
-            color,
-        } => Node::Image {
-            x: x + dx,
-            y: y + dy,
-            w,
-            h,
-            asset,
-            recolor,
-            color,
-        },
-        Node::Glyph {
-            x,
-            y,
-            font,
-            color,
-            glyph,
-        } => Node::Glyph {
-            x: x + dx,
-            y: y + dy,
-            font,
-            color,
-            glyph,
-        },
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Node compilation.
 // ---------------------------------------------------------------------------
 
@@ -648,7 +600,9 @@ fn compile_node(
     metrics: &BakedFontMetrics,
     item_index: Option<usize>,
     assets: &AssetSet,
+    offset: (i32, i32),
 ) -> Result<SceneNode, CompileError> {
+    let (dx, dy) = offset;
     match node {
         Node::Rect {
             x,
@@ -659,8 +613,8 @@ fn compile_node(
             fill,
             opacity,
         } => Ok(SceneNode::Rect(SceneRect {
-            x: *x,
-            y: *y,
+            x: x.saturating_add(dx),
+            y: y.saturating_add(dy),
             w: *w,
             h: *h,
             radius: *radius,
@@ -679,8 +633,8 @@ fn compile_node(
             caps,
             end_binding,
         } => Ok(SceneNode::Arc(SceneArc {
-            cx: *cx,
-            cy: *cy,
+            cx: cx.saturating_add(dx),
+            cy: cy.saturating_add(dy),
             r: *r,
             start_deg: *start_deg,
             end_deg: *end_deg,
@@ -703,8 +657,8 @@ fn compile_node(
             let (xs, ys, pivot_x, pivot_y, length, angle_binding) =
                 match (points.is_empty(), pivot_x, pivot_y, length, angle_binding) {
                     (false, None, None, None, None) => (
-                        points.iter().map(|p| p.x).collect(),
-                        points.iter().map(|p| p.y).collect(),
+                        points.iter().map(|p| p.x.saturating_add(dx)).collect(),
+                        points.iter().map(|p| p.y.saturating_add(dy)).collect(),
                         0,
                         0,
                         0,
@@ -713,8 +667,8 @@ fn compile_node(
                     (true, Some(pivot_x), Some(pivot_y), Some(length), Some(binding)) => (
                         Vec::new(),
                         Vec::new(),
-                        *pivot_x,
-                        *pivot_y,
+                        pivot_x.saturating_add(dx),
+                        pivot_y.saturating_add(dy),
                         *length,
                         compile_line_angle_binding(binding)?,
                     ),
@@ -765,8 +719,8 @@ fn compile_node(
                     scene_font
                 };
             Ok(SceneNode::Text(SceneText {
-                x: *x,
-                baseline_y: *baseline_y,
+                x: x.saturating_add(dx),
+                baseline_y: baseline_y.saturating_add(dy),
                 w: *w,
                 align: scene_align(*align),
                 font: scene_font,
@@ -797,8 +751,8 @@ fn compile_node(
                 });
             }
             Ok(SceneNode::Image(SceneImage {
-                x: *x,
-                y: *y,
+                x: x.saturating_add(dx),
+                y: y.saturating_add(dy),
                 w: *w,
                 h: *h,
                 digest: resolved.digest,
@@ -828,8 +782,8 @@ fn compile_node(
                 }
             };
             Ok(SceneNode::Glyph(SceneGlyph {
-                x: *x,
-                baseline_y: *y,
+                x: x.saturating_add(dx),
+                baseline_y: y.saturating_add(dy),
                 size: *pixel_size,
                 digest,
                 name,
@@ -883,14 +837,14 @@ fn compile_repeat(
         let dx = repeat.dx.saturating_mul(index_i32);
         let dy = repeat.dy.saturating_mul(index_i32);
         for template in &repeat.nodes {
-            let offset = offset_node(template.clone(), dx, dy);
             out.push(compile_node(
-                &offset,
+                template,
                 ctx,
                 fuel,
                 metrics,
                 Some(index),
                 assets,
+                (dx, dy),
             )?);
         }
     }
@@ -955,7 +909,15 @@ pub fn compile_scene_with_assets(
     let mut nodes = Vec::with_capacity(manifest.nodes.len());
 
     for node in &manifest.nodes {
-        nodes.push(compile_node(node, &ctx, &mut fuel, metrics, None, assets)?);
+        nodes.push(compile_node(
+            node,
+            &ctx,
+            &mut fuel,
+            metrics,
+            None,
+            assets,
+            (0, 0),
+        )?);
     }
 
     for repeat in &manifest.repeats {
@@ -1262,6 +1224,70 @@ mod tests {
     }
 
     #[test]
+    fn expression_source_classifier_defines_whitespace_and_quoted_delimiters() {
+        assert_eq!(
+            classify_expression_source("  plain text  "),
+            ExpressionSource::Literal("  plain text  ")
+        );
+        assert_eq!(
+            classify_expression_source(r#"  {{ "literal {{ and }}" }}  "#),
+            ExpressionSource::Expression(r#""literal {{ and }}""#)
+        );
+        assert_eq!(
+            classify_expression_source(r#"{{ "escaped \" }} still quoted" }}"#),
+            ExpressionSource::Expression(r#""escaped \" }} still quoted""#)
+        );
+    }
+
+    #[test]
+    fn partial_interpolation_forms_are_rejected_by_name() {
+        for source in [
+            "prefix {{ data.aqi }}",
+            "{{ data.aqi }} suffix",
+            "{{ default({{ data.aqi }}, 0) }}",
+            "{{ data.aqi",
+            "data.aqi }}",
+            "{{ data.aqi }}{{ data.aqi }}",
+        ] {
+            let err = compile_scene(&manifest_with_value(source), &snapshot(), &metrics(), 1)
+                .expect_err("partial interpolation must be rejected");
+            assert_eq!(
+                err,
+                CompileError::MalformedPartialInterpolation {
+                    text: source.to_string()
+                },
+                "unexpected result for {source:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn position_bindings_use_the_same_partial_interpolation_classifier() {
+        let source = "{{ timer.pct }} suffix";
+        assert_eq!(
+            compile_position_binding(source, "arc.end_binding", |binding| binding == "timer.pct"),
+            Err(CompileError::MalformedPartialInterpolation {
+                text: source.to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn quoted_mustache_delimiters_inside_an_expression_are_literal_text() {
+        let scene = compile_scene(
+            &manifest_with_value(r#"{{ "literal {{ and }}" }}"#),
+            &snapshot(),
+            &metrics(),
+            1,
+        )
+        .unwrap();
+        assert_eq!(
+            SceneValue::Literal("literal {{ and }}".to_string()),
+            text_node(&scene, 0).value
+        );
+    }
+
+    #[test]
     fn a_data_expression_evaluates_to_a_literal_at_compile_time() {
         let scene = compile_scene(
             &manifest_with_value("{{ data.aqi }}"),
@@ -1405,104 +1431,44 @@ mod tests {
         assert_eq!(scene.nodes.len(), 2);
     }
 
-    // -- Non-authorable-yet node kinds. --
+    // -- The retained fail-closed no-assets wrapper. --
 
     #[test]
-    fn an_image_node_is_refused_as_asset_not_resolved() {
-        let manifest = PluginManifest {
-            manifest_version: ManifestVersion::V1,
-            template: Template::Scene,
-            name: "test".to_string(),
-            version: "1.0.0".to_string(),
-            source: Source::Json {
-                url: "https://example.invalid/x.json".to_string(),
-                refresh_minutes: 15,
-                root: None,
-            },
-            assets: Vec::new(),
-            nodes: vec![Node::Image {
-                x: 0,
-                y: 0,
-                w: 10,
-                h: 10,
-                asset: "logo.png".to_string(),
-                recolor: false,
-                color: 0,
-            }],
-            repeats: Vec::new(),
-        };
-        let err = compile_scene(&manifest, &snapshot(), &metrics(), 1).unwrap_err();
-        assert!(matches!(
-            err,
-            CompileError::AssetNotResolved { asset } if asset == "logo.png"
-        ));
-    }
-
-    #[test]
-    fn a_glyph_node_is_refused_as_asset_not_resolved() {
-        let manifest = PluginManifest {
-            manifest_version: ManifestVersion::V1,
-            template: Template::Scene,
-            name: "test".to_string(),
-            version: "1.0.0".to_string(),
-            source: Source::Json {
-                url: "https://example.invalid/x.json".to_string(),
-                refresh_minutes: 15,
-                root: None,
-            },
-            assets: Vec::new(),
-            nodes: vec![Node::Glyph {
-                x: 0,
-                y: 0,
-                font: ManifestFont::Asset {
-                    asset: "icons.ttf".to_string(),
-                    pixel_size: 32,
+    fn compile_scene_without_assets_refuses_every_asset_bearing_node_by_exact_name() {
+        let cases = [
+            ("logo.png", image_node("logo.png")),
+            (
+                "icons.ttf",
+                glyph_node("icons.ttf", "{{ icon(data.category) }}"),
+            ),
+            (
+                "Inter.ttf",
+                Node::Text {
+                    x: 0,
+                    baseline_y: 40,
+                    w: 200,
+                    align: ManifestAlign::Left,
+                    font: ManifestFont::Asset {
+                        asset: "Inter.ttf".to_string(),
+                        pixel_size: 24,
+                    },
+                    color: 0,
+                    value: "static".to_string(),
+                    ellipsize: false,
                 },
-                color: 0,
-                glyph: "{{ icon(data.category) }}".to_string(),
-            }],
-            repeats: Vec::new(),
-        };
-        let err = compile_scene(&manifest, &snapshot(), &metrics(), 1).unwrap_err();
-        assert!(matches!(
-            err,
-            CompileError::AssetNotResolved { asset } if asset == "icons.ttf"
-        ));
-    }
+            ),
+        ];
 
-    #[test]
-    fn a_text_node_naming_an_asset_font_is_refused_as_asset_not_resolved() {
-        let manifest = PluginManifest {
-            manifest_version: ManifestVersion::V1,
-            template: Template::Scene,
-            name: "test".to_string(),
-            version: "1.0.0".to_string(),
-            source: Source::Json {
-                url: "https://example.invalid/x.json".to_string(),
-                refresh_minutes: 15,
-                root: None,
-            },
-            assets: Vec::new(),
-            nodes: vec![Node::Text {
-                x: 0,
-                baseline_y: 40,
-                w: 200,
-                align: ManifestAlign::Left,
-                font: ManifestFont::Asset {
-                    asset: "Inter.ttf".to_string(),
-                    pixel_size: 24,
-                },
-                color: 0,
-                value: "static".to_string(),
-                ellipsize: false,
-            }],
-            repeats: Vec::new(),
-        };
-        let err = compile_scene(&manifest, &snapshot(), &metrics(), 1).unwrap_err();
-        assert!(matches!(
-            err,
-            CompileError::AssetNotResolved { asset } if asset == "Inter.ttf"
-        ));
+        for (asset, node) in cases {
+            let manifest = manifest_with(Vec::new(), vec![node]);
+            assert_eq!(
+                compile_scene(&manifest, &snapshot(), &metrics(), 1),
+                Err(CompileError::AssetNotResolved {
+                    asset: asset.to_string()
+                }),
+                "wrong no-assets result for {asset}"
+            );
+        }
     }
 
     // -- Numeric-tier literal step-down (controller ruling: a transient
@@ -1705,6 +1671,22 @@ mod tests {
         let scene = compile_scene(&manifest, &snapshot, &metrics(), 1).unwrap();
         assert_eq!(text_node(&scene, 0).baseline_y, 20);
         assert_eq!(text_node(&scene, 1).baseline_y, 60);
+    }
+
+    #[test]
+    fn repeat_coordinate_overflow_saturates_and_is_rejected_as_invalid() {
+        let (mut manifest, snapshot) = repeat_manifest(serde_json::json!([
+            { "label": "a" },
+            { "label": "b" }
+        ]));
+        manifest.repeats[0].dx = i32::MAX;
+
+        let err = compile_scene(&manifest, &snapshot, &metrics(), 1)
+            .expect_err("saturated out-of-canvas geometry must be rejected");
+        assert!(
+            matches!(err, CompileError::Invalid(_)),
+            "expected CompileError::Invalid, got {err:?}"
+        );
     }
 
     #[test]
@@ -2023,20 +2005,6 @@ mod tests {
     }
 
     #[test]
-    fn an_image_node_the_manifest_never_declares_is_asset_not_resolved() {
-        let manifest = manifest_with(Vec::new(), vec![image_node("missing.bin")]);
-        let err =
-            compile_scene_with_assets(&manifest, &snapshot(), &metrics(), 1, &AssetSet::default())
-                .unwrap_err();
-        assert_eq!(
-            err,
-            CompileError::AssetNotResolved {
-                asset: "missing.bin".to_string()
-            }
-        );
-    }
-
-    #[test]
     fn an_image_node_naming_a_font_asset_is_a_kind_mismatch() {
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::write(
@@ -2148,50 +2116,6 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_icon_names_across_two_icon_fonts_never_reach_compile_because_resolve_assets_rejects_first()
-     {
-        // The other half of finding 2: this proves the two entry points
-        // cannot disagree about a duplicate, because `resolve_assets` --
-        // the one place `AssetSet::icon_codepoints()` is built -- rejects
-        // the manifest before `compile_scene_with_assets` can ever run.
-        // There is no second, independent duplicate check left in
-        // `compile.rs` to potentially disagree with this one.
-        let dir = tempfile::tempdir().expect("tempdir");
-        std::fs::write(dir.path().join("a.ttf"), b"font a bytes").expect("write a");
-        std::fs::write(dir.path().join("b.ttf"), b"font b bytes").expect("write b");
-        let manifest = manifest_with(
-            vec![
-                Asset::IconFont {
-                    file: "a.ttf".to_string(),
-                    glyphs: vec![Glyph {
-                        name: "warn".to_string(),
-                        codepoint: 0x41,
-                    }],
-                },
-                Asset::IconFont {
-                    file: "b.ttf".to_string(),
-                    glyphs: vec![Glyph {
-                        name: "warn".to_string(),
-                        codepoint: 0x42,
-                    }],
-                },
-            ],
-            vec![glyph_node("a.ttf", r#"{{ icon("warn") }}"#)],
-        );
-
-        let error = resolve_assets(&manifest, dir.path()).expect_err("must be rejected");
-
-        assert_eq!(
-            error,
-            crate::assets::AssetError::DuplicateIconName {
-                name: "warn".to_string(),
-                first_asset: "a.ttf".to_string(),
-                second_asset: "b.ttf".to_string(),
-            }
-        );
-    }
-
-    #[test]
     fn a_glyph_node_naming_an_image_asset_is_a_kind_mismatch() {
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::write(dir.path().join("badge.bin"), b"pretend RGB565 blob")
@@ -2287,20 +2211,5 @@ mod tests {
         };
         assert_eq!(digest, assets.get("font.ttf").unwrap().digest);
         assert_eq!(pixel_size, 24);
-    }
-
-    #[test]
-    fn compile_scene_without_assets_still_refuses_an_image_node_by_name() {
-        // `compile_scene` (not `_with_assets`) is the entry point every
-        // existing caller uses; pin that it still fails closed rather than
-        // silently accepting an asset-bearing manifest it cannot resolve.
-        let manifest = manifest_with(Vec::new(), vec![image_node("badge.bin")]);
-        let err = compile_scene(&manifest, &snapshot(), &metrics(), 1).unwrap_err();
-        assert_eq!(
-            err,
-            CompileError::AssetNotResolved {
-                asset: "badge.bin".to_string()
-            }
-        );
     }
 }

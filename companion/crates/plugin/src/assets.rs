@@ -85,22 +85,6 @@ pub struct ResolvedAsset {
     pub kind: AssetKind,
 }
 
-impl ResolvedAsset {
-    /// The resolved byte length, cheaply, without re-deriving it from
-    /// `bytes.len()` at every call site.
-    pub fn len(&self) -> usize {
-        self.bytes.len()
-    }
-
-    /// An asset is never legitimately empty -- see [`AssetError::Empty`],
-    /// which `resolve_assets` already refuses before a `ResolvedAsset` is
-    /// ever constructed. This exists only to satisfy clippy's
-    /// `len_without_is_empty`.
-    pub fn is_empty(&self) -> bool {
-        self.bytes.is_empty()
-    }
-}
-
 /// The result of resolving every `[[assets]]` entry in one manifest: a
 /// lookup from a manifest asset's `file` name to its [`ResolvedAsset`], and
 /// the flat icon-name -> codepoint table every `icon-font` asset in the
@@ -445,7 +429,7 @@ mod tests {
 
         assert_eq!(asset.kind, AssetKind::Font);
         assert_eq!(&*asset.bytes, bytes);
-        assert_eq!(asset.len(), bytes.len());
+        assert_eq!(asset.bytes.len(), bytes.len());
     }
 
     #[test]
@@ -544,7 +528,7 @@ mod tests {
         let resolved = resolve_assets(&manifest, dir.path()).expect("must resolve at the ceiling");
 
         assert_eq!(
-            resolved.get("max.ttf").expect("resolved").len(),
+            resolved.get("max.ttf").expect("resolved").bytes.len(),
             MAX_ASSET_BYTES as usize
         );
     }

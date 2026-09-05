@@ -40,12 +40,11 @@
 //!   with the named [`ExprError::OutputTooLong`], not silently shortened --
 //!   silent truncation would be indistinguishable from `truncate(s, n)`'s
 //!   own deliberate one, and would misreport an oversized value as
-//!   `Missing` data that "is not there". `truncate(s, n)` itself is the one
-//!   exception: an author who explicitly asked for truncation still gets a
-//!   value, with its own internal byte-safety clamp (not this bound)
-//!   handling a multi-byte character landing exactly on the edge. Either
-//!   way, a provider returning a multi-megabyte string cannot make
-//!   evaluation allocate without a cap in front of it.
+//!   `Missing` data that "is not there". `truncate(s, n)` counts characters,
+//!   but its input has already passed this byte bound, so its character
+//!   prefix cannot exceed the source's byte length. Provider JSON already
+//!   owns its strings; the evaluator checks their borrowed length before
+//!   making its additional clone.
 //! - **Path width** ([`MAX_PATH_SEGMENTS`]) bounds the number of
 //!   `.field`/`[index]` steps in one path chain. Depth alone only bounds
 //!   *nested* structure (parens/calls); a long flat `data.a.b.c...` chain
@@ -93,10 +92,9 @@ pub const MAX_PATH_SEGMENTS: usize = 16;
 /// evaluation, comfortably covering a full manifest many times over.
 pub const FUEL_BUDGET: u32 = 10_000;
 
-/// Maximum byte length of any [`EvalValue::Text`], enforced at
-/// construction by truncating at a UTF-8 char boundary. This is what keeps
-/// a provider's 10 MB string from becoming a 10 MB allocation anywhere in
-/// this module.
+/// Maximum byte length of any [`EvalValue::Text`], enforced at construction
+/// by rejection. For provider strings, the borrowed length is checked before
+/// the evaluator makes its own clone.
 pub const MAX_OUTPUT_LEN: usize = 4096;
 
 /// Maximum decimal places `round(x, places)` accepts. Above this, `10^places`
@@ -633,16 +631,6 @@ impl Parser {
                 Some(c) => s.push(c),
                 None => return Err(ExprError::UnterminatedString),
             }
-            if s.len() > MAX_SOURCE_LEN {
-                // Cannot happen with well-formed input (the whole source is
-                // already bounded to MAX_SOURCE_LEN), but a literal cannot
-                // outgrow its source, so this is unreachable defence, not a
-                // real limit -- keeps the loop provably bounded regardless.
-                return Err(ExprError::TooLong {
-                    limit: MAX_SOURCE_LEN,
-                    actual: s.len(),
-                });
-            }
         }
     }
 }
@@ -747,7 +735,10 @@ fn json_to_eval_value(value: &serde_json::Value) -> Result<EvalValue, ExprError>
             Some(f) if f.is_finite() => Ok(EvalValue::Number(f)),
             _ => Ok(EvalValue::Missing),
         },
-        serde_json::Value::String(s) => Ok(EvalValue::Text(bound_text(s.clone())?)),
+        serde_json::Value::String(s) => {
+            check_text_len(s)?;
+            Ok(EvalValue::Text(s.clone()))
+        }
         // `Null` and the two compound kinds all land here: `null` has no
         // scalar EvalValue, and a path that stops on an object or array
         // (without indexing/field-ing further) is not a value this
@@ -758,23 +749,25 @@ fn json_to_eval_value(value: &serde_json::Value) -> Result<EvalValue, ExprError>
     }
 }
 
-/// Bounds a constructed `Text` value to [`MAX_OUTPUT_LEN`] bytes -- by
-/// rejection, not truncation. A value that reaches here (a string literal,
-/// a field read, or `upper`/`lower`'s result) was never asked to be
-/// shortened, so silently cutting it would be a third, unauthorised
-/// behaviour indistinguishable from `truncate(s, n)`'s deliberate one; see
-/// [`ExprError::OutputTooLong`]. `truncate(s, n)`'s own internal byte-safety
-/// clamp (`truncate_to_byte_cap`, below) is the one place this module still
-/// truncates, because there truncation is exactly what was asked for.
-fn bound_text(s: String) -> Result<String, ExprError> {
+/// Checks a borrowed string before the evaluator makes an owned copy.
+fn check_text_len(s: &str) -> Result<(), ExprError> {
     if s.len() > MAX_OUTPUT_LEN {
         Err(ExprError::OutputTooLong {
             limit: MAX_OUTPUT_LEN,
             actual: s.len(),
         })
     } else {
-        Ok(s)
+        Ok(())
     }
+}
+
+/// Bounds evaluator-constructed `Text` to [`MAX_OUTPUT_LEN`] bytes by
+/// rejection, never truncation. Provider strings use [`check_text_len`]
+/// before cloning; this owned-value path covers literals and function
+/// results.
+fn bound_text(s: String) -> Result<String, ExprError> {
+    check_text_len(&s)?;
+    Ok(s)
 }
 
 fn eval_call(
@@ -869,27 +862,7 @@ fn call_truncate(s: &EvalValue, n: &EvalValue) -> EvalValue {
     let clamped = count.min(cap);
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let max_chars = clamped as usize;
-    let truncated: String = text.chars().take(max_chars).collect();
-    EvalValue::Text(truncate_to_byte_cap(truncated))
-}
-
-/// `truncate(s, n)`'s own byte-safety backstop, kept exactly as authorised
-/// by the controller ruling: after clamping to at most `n` *characters*, a
-/// multi-byte character can still push the result past `MAX_OUTPUT_LEN`
-/// *bytes* (e.g. `MAX_OUTPUT_LEN` four-byte emoji). The author already
-/// asked for truncation here, so trimming the last partial character is
-/// the same requested operation, not the unrequested-overflow condition
-/// [`ExprError::OutputTooLong`] exists for -- this is the one place in the
-/// module that still truncates rather than erroring.
-fn truncate_to_byte_cap(mut s: String) -> String {
-    if s.len() > MAX_OUTPUT_LEN {
-        let mut end = MAX_OUTPUT_LEN;
-        while end > 0 && !s.is_char_boundary(end) {
-            end -= 1;
-        }
-        s.truncate(end);
-    }
-    s
+    EvalValue::Text(text.chars().take(max_chars).collect())
 }
 
 fn call_icon(name: &EvalValue, icons: Option<&HashMap<String, u32>>) -> EvalValue {
@@ -1218,13 +1191,28 @@ mod tests {
     }
 
     #[test]
-    fn a_ten_megabyte_string_is_a_named_error_not_a_panic_or_unbounded_allocation() {
+    fn borrowed_provider_text_is_checked_before_the_evaluator_clones_it() {
+        let oversized = "x".repeat(MAX_OUTPUT_LEN + 1);
+        assert_eq!(
+            check_text_len(&oversized),
+            Err(ExprError::OutputTooLong {
+                limit: MAX_OUTPUT_LEN,
+                actual: MAX_OUTPUT_LEN + 1,
+            })
+        );
+    }
+
+    #[test]
+    fn a_ten_megabyte_provider_string_is_rejected_without_an_evaluator_clone() {
         // Controller ruling (fix round 1): a value this oversized was never
         // asked to be shortened, so it must not be silently truncated
         // (indistinguishable from `truncate(s, n)`'s deliberate behaviour)
         // or reported as `Missing` (which would claim the data isn't
         // there, when it is -- just too large). A named error is the only
-        // outcome that stays both total (no panic) and honest.
+        // outcome that stays both total (no panic) and honest. The JSON
+        // value necessarily owns these bytes already; the regression is
+        // that evaluation must reject its borrowed length before cloning
+        // another 10 MiB allocation.
         let huge = "x".repeat(10 * 1024 * 1024);
         let data = serde_json::json!({ "huge": huge });
         let ctx = EvalContext::with_data(&data);
@@ -1272,30 +1260,6 @@ mod tests {
             }
             other => panic!("expected OutputTooLong, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn truncate_still_shortens_a_normal_field_unaffected_by_the_new_error_path() {
-        // Requirement 4 (fix round 1): confirm truncate(s, n)'s own
-        // deliberate truncation is unaffected by making OutputTooLong an
-        // error elsewhere. This exercises the same clamp-then-truncate
-        // logic `functions_compose` and
-        // `truncate_is_char_boundary_safe_on_multibyte_text` already pin,
-        // with an input comfortably under MAX_OUTPUT_LEN (truncate's
-        // *input* argument is evaluated through the same field-read path
-        // as everything else, so an input already over MAX_OUTPUT_LEN
-        // would itself hit OutputTooLong before truncate() ever ran --
-        // truncate() bounds output smaller than its input, it cannot
-        // rescue an input that was already rejected at the point it was
-        // read; see the fix report's note on `truncate_to_byte_cap`).
-        let data = serde_json::json!({ "s": "hello world this is long" });
-        let ctx = EvalContext::with_data(&data);
-        let mut fuel = Fuel::new(FUEL_BUDGET);
-        let value = Expr::parse("truncate(data.s, 5)")
-            .unwrap()
-            .eval(&ctx, &mut fuel)
-            .unwrap();
-        assert_eq!(value, EvalValue::Text("hello".to_string()));
     }
 
     #[test]

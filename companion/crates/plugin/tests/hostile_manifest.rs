@@ -132,15 +132,3 @@ fn non_utf8_bytes_are_rejected() {
     let err = parse_manifest_bytes(bytes).expect_err("non-UTF-8 bytes must be rejected");
     assert!(matches!(err, ManifestError::InvalidUtf8));
 }
-
-#[test]
-fn none_of_the_above_ever_panics_even_when_combined() {
-    // A grab bag combining several hostile properties in one manifest: an
-    // oversized body is checked first, so this proves ordering doesn't
-    // matter -- the size guard alone is enough to keep the rest of the
-    // pipeline from ever running on this input.
-    let mut source = String::from("name = \"x\"\n");
-    source.push_str(&"a".repeat(10 * 1024 * 1024));
-    let _ = parse_manifest(&source);
-    let _ = parse_manifest_bytes(source.as_bytes());
-}

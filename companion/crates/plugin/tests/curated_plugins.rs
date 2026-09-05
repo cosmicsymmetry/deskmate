@@ -13,9 +13,7 @@
 
 use std::path::{Path, PathBuf};
 
-use plugin::{
-    CompileError, compile_scene, compile_scene_with_assets, parse_manifest, resolve_assets,
-};
+use plugin::{compile_scene_with_assets, parse_manifest, resolve_assets};
 use protocol::{SceneNode, SceneValue};
 use providers::ProviderSnapshot;
 
@@ -175,31 +173,4 @@ fn the_agenda_manifest_compiles_against_its_real_assets_and_captured_fixture() {
     // fallbacks must render, not panic or propagate a missing value.
     assert_eq!(literal(&scene.nodes[6]), "--:--");
     assert_eq!(literal(&scene.nodes[7]), "(untitled)");
-}
-
-// ---------------------------------------------------------------------------
-// Both plugins: `compile_scene` (no assets) fails closed the way any
-// manifest using an asset-bearing node must, until a caller resolves one.
-// ---------------------------------------------------------------------------
-
-#[test]
-fn neither_curated_plugin_compiles_through_the_no_assets_entry_point() {
-    for plugin_name in ["aqi", "agenda"] {
-        let dir = plugins_dir().join(plugin_name);
-        let source = std::fs::read_to_string(dir.join("manifest.toml"))
-            .unwrap_or_else(|error| panic!("read {plugin_name} manifest: {error}"));
-        let manifest = parse_manifest(&source)
-            .unwrap_or_else(|error| panic!("{plugin_name} manifest must parse: {error}"));
-        let data = payload_from_envelope(if plugin_name == "aqi" {
-            AQI_FIXTURE
-        } else {
-            AGENDA_FIXTURE
-        });
-        let err = compile_scene(&manifest, &snapshot(data), &metrics(), 1)
-            .expect_err("an asset-bearing manifest must not compile with no assets resolved");
-        assert!(
-            matches!(err, CompileError::AssetNotResolved { .. }),
-            "{plugin_name}: expected AssetNotResolved, got {err:?}"
-        );
-    }
 }

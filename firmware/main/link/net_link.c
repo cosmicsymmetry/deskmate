@@ -357,7 +357,6 @@ static uint32_t net_link_rx_dropped_bytes(void)
 }
 
 static const link_transport_t s_net_transport = {
-    .name = "network",
     .read = net_link_read,
     .write_frame = net_link_write_frame,
     .dropped_bytes = net_link_rx_dropped_bytes,

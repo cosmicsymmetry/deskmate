@@ -28,12 +28,12 @@ typedef struct {
 void ui_command_queue_init(ui_command_queue_t *queue);
 
 /**
- * Copy one caller-owned fixed command. View/standalone commands and an
- * offline transition supersede older view work while retaining pending scalar
- * state; patches for the same widget and scalar state commands replace their
- * pending predecessor. A full non-coalescible queue drops the newest command
+ * Copy one caller-owned fixed command. An offline transition supersedes older
+ * card-fallback work while retaining pending scalar state; card fallbacks and
+ * scalar state commands replace their pending predecessor. A full
+ * non-coalescible queue drops the newest command
  * and increments the pressure counter. Since template patches were removed,
- * normal traffic has only four coalescing categories for four slots; a drop
+ * normal traffic has only three coalescing categories for four slots; a drop
  * now signals an unexpected command mix rather than ordinary render pressure,
  * and the high-water metric is correspondingly a coarse compatibility
  * diagnostic rather than the signal it was for template-bearing traffic.
@@ -44,7 +44,7 @@ bool ui_command_queue_push(ui_command_queue_t *queue,
 bool ui_command_queue_pop(ui_command_queue_t *queue,
                           ui_command_t *command);
 
-/** Remove queued card-fallback work without disturbing a forced standalone
+/** Remove queued card-fallback work without disturbing an offline link
  * transition. Returns true when at least one fallback was removed. */
 bool ui_command_queue_discard_card_fallbacks(ui_command_queue_t *queue);
 

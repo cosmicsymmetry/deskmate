@@ -858,11 +858,9 @@ esp_err_t ota_mark_running_image_valid(void)
     }
     set_state(PROTOCOL_OTA_PENDING_VERIFY);
 
-    bool lvgl_running = false;
-    if (lvgl_port_lock(0U)) {
-        lvgl_running = lv_display_get_default() != NULL;
-        lvgl_port_unlock();
-    }
+    lvgl_port_lock(0U);
+    bool lvgl_running = lv_display_get_default() != NULL;
+    lvgl_port_unlock();
     nvs_stats_t nvs_stats;
     bool nvs_readable = nvs_get_stats(NULL, &nvs_stats) == ESP_OK;
     bool display_up = board_display_io() != NULL;

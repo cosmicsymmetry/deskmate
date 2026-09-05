@@ -9,16 +9,14 @@ static ui_command_t s_command;
 static ui_command_t s_output;
 
 /* A UI command no longer carries a template field registry snapshot. Scenes
- * bypass this queue, so its only payloads are the standalone-clock fallback
- * and scalar link/time state. */
+ * bypass this queue, so its only payloads are the card fallback and scalar
+ * link/time state. */
 _Static_assert(sizeof(ui_command_t) <= 8U,
                "shipping UI commands still carry a C-template payload");
 
 static void test_card_fallback_maps_to_standalone_clock(void)
 {
     assert(ui_command_action(UI_COMMAND_SHOW_CARD_FALLBACK) ==
-           UI_COMMAND_ACTION_SHOW_STANDALONE_CLOCK);
-    assert(ui_command_action(UI_COMMAND_SHOW_STANDALONE) ==
            UI_COMMAND_ACTION_SHOW_STANDALONE_CLOCK);
     assert(ui_command_action(UI_COMMAND_LINK_STATE) ==
            UI_COMMAND_ACTION_APPLY_LINK_STATE);
@@ -37,7 +35,7 @@ static void test_card_fallback_round_trips_through_queue(void)
     assert(!ui_command_queue_pop(&s_queue, &s_output));
 }
 
-static void test_standalone_fallback_supersedes_older_fallback(void)
+static void test_duplicate_card_fallbacks_coalesce(void)
 {
     ui_command_queue_init(&s_queue);
     memset(&s_command, 0, sizeof(s_command));
@@ -68,21 +66,17 @@ static void test_scene_cancels_only_the_card_fallback(void)
 {
     ui_command_queue_init(&s_queue);
     memset(&s_command, 0, sizeof(s_command));
-    s_command.type = UI_COMMAND_SHOW_CARD_FALLBACK;
-    assert(ui_command_queue_push(&s_queue, &s_command));
-    assert(ui_command_queue_discard_card_fallbacks(&s_queue));
-    assert(!ui_command_queue_pop(&s_queue, &s_output));
-
-    s_command.type = UI_COMMAND_SHOW_STANDALONE;
+    s_command.type = UI_COMMAND_LINK_STATE;
+    s_command.online = false;
     assert(ui_command_queue_push(&s_queue, &s_command));
     s_command.type = UI_COMMAND_SHOW_CARD_FALLBACK;
     assert(ui_command_queue_push(&s_queue, &s_command));
 
     /* A successful PushScene removes the provisional card fallback, but it
-     * must never cancel the forced standalone transition used for host loss. */
-    assert(!ui_command_queue_discard_card_fallbacks(&s_queue));
+     * must never cancel the authoritative offline transition for host loss. */
+    assert(ui_command_queue_discard_card_fallbacks(&s_queue));
     assert(ui_command_queue_pop(&s_queue, &s_output));
-    assert(s_output.type == UI_COMMAND_SHOW_STANDALONE);
+    assert(s_output.type == UI_COMMAND_LINK_STATE && !s_output.online);
     assert(!ui_command_queue_pop(&s_queue, &s_output));
 }
 
@@ -114,7 +108,7 @@ int main(void)
 {
     test_card_fallback_maps_to_standalone_clock();
     test_card_fallback_round_trips_through_queue();
-    test_standalone_fallback_supersedes_older_fallback();
+    test_duplicate_card_fallbacks_coalesce();
     test_scalar_updates_replace_pending();
     test_scene_cancels_only_the_card_fallback();
     test_offline_transition_cannot_be_starved();

@@ -38,8 +38,7 @@ static bool same_coalescing_key(const ui_command_t *pending,
 
 static bool is_view_work(ui_command_type_t type)
 {
-    return type == UI_COMMAND_SHOW_STANDALONE ||
-           type == UI_COMMAND_SHOW_CARD_FALLBACK;
+    return type == UI_COMMAND_SHOW_CARD_FALLBACK;
 }
 
 static void discard_superseded_view_work(ui_command_queue_t *queue)
@@ -99,22 +98,11 @@ bool ui_command_queue_push(ui_command_queue_t *queue,
         return false;
     }
     lock_queue(queue);
-    if (command->type == UI_COMMAND_SHOW_STANDALONE ||
-        (command->type == UI_COMMAND_LINK_STATE && !command->online)) {
+    if (command->type == UI_COMMAND_LINK_STATE && !command->online) {
         /* Screen replacement makes older view work obsolete, but scalar
          * time/link state still has to reach the fallback/new screen in order. */
         discard_superseded_view_work(queue);
     } else if (command->type == UI_COMMAND_SHOW_CARD_FALLBACK) {
-        for (size_t i = 0U; i < queue->count; ++i) {
-            if (queue->commands[slot_index(queue, i)].type ==
-                UI_COMMAND_SHOW_STANDALONE) {
-                /* Host loss is authoritative. A later card/config command
-                 * cannot replace its forced standalone transition. */
-                increment(&queue->coalesced);
-                unlock_queue(queue);
-                return true;
-            }
-        }
         (void)discard_card_fallbacks_locked(queue);
     } else {
         for (size_t i = 0U; i < queue->count; ++i) {

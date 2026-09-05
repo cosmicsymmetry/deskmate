@@ -262,7 +262,11 @@ static void apply_online_state(void *unused)
 {
     (void)unused;
     if (s_hint_label != NULL) {
-        if (atomic_load(&s_online)) {
+        bool online = atomic_load(&s_online);
+        if (online == lv_obj_has_flag(s_hint_label, LV_OBJ_FLAG_HIDDEN)) {
+            return;
+        }
+        if (online) {
             lv_obj_add_flag(s_hint_label, LV_OBJ_FLAG_HIDDEN);
         } else {
             lv_obj_remove_flag(s_hint_label, LV_OBJ_FLAG_HIDDEN);

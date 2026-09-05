@@ -15,7 +15,6 @@
  * transport, so protocol_frame.c is unchanged.
  */
 typedef struct {
-    const char *name;
     size_t (*read)(uint8_t *out, size_t capacity, TickType_t timeout_ticks);
     esp_err_t (*write_frame)(const uint8_t *frame, size_t length,
                              TickType_t timeout_ticks);

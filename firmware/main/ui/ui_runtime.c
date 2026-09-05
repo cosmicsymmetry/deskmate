@@ -1,6 +1,5 @@
 #include "ui_runtime.h"
 
-#include <stdatomic.h>
 #include <string.h>
 
 #include "clock_screen.h"
@@ -21,34 +20,19 @@
 
 static const char *TAG = "ui_runtime";
 static ui_command_queue_t s_queue;
-static ui_command_t s_publish_command;
 static ui_command_t s_consume_command;
-static atomic_flag s_publish_lock = ATOMIC_FLAG_INIT;
 static lv_timer_t *s_command_timer;
 static bool s_initialized;
 
-_Static_assert(sizeof(s_queue) + sizeof(s_publish_command) +
-                   sizeof(s_consume_command) <= 16U * 1024U,
+_Static_assert(sizeof(s_queue) + sizeof(s_consume_command) <= 16U * 1024U,
                "fixed UI mailbox exceeded its M2 RAM budget");
 
-static void lock_publisher(void)
+static bool publish_scalar(const ui_command_t *command)
 {
-    while (atomic_flag_test_and_set_explicit(&s_publish_lock,
-                                              memory_order_acquire)) {
-    }
-}
-
-static void unlock_publisher(void)
-{
-    atomic_flag_clear_explicit(&s_publish_lock, memory_order_release);
-}
-
-static bool publish_scalar(ui_command_type_t type)
-{
-    bool accepted = ui_command_queue_push(&s_queue, &s_publish_command);
+    bool accepted = ui_command_queue_push(&s_queue, command);
     if (!accepted) {
         ESP_LOGW(TAG, "UI queue full; dropped command type=%u",
-                 (unsigned)type);
+                 (unsigned)command->type);
     }
     return accepted;
 }
@@ -56,8 +40,7 @@ static bool publish_scalar(ui_command_type_t type)
 static void consume_command(const ui_command_t *command)
 {
     if (ota_screen_active_in_lvgl() &&
-        (command->type == UI_COMMAND_SHOW_STANDALONE ||
-         command->type == UI_COMMAND_SHOW_CARD_FALLBACK)) {
+        command->type == UI_COMMAND_SHOW_CARD_FALLBACK) {
         /* The OTA task owns the panel until it reboots or restores the clock. */
         return;
     }
@@ -110,8 +93,6 @@ esp_err_t ui_runtime_init(void)
     ESP_RETURN_ON_FALSE(!s_initialized, ESP_ERR_INVALID_STATE, TAG,
                         "UI runtime already initialized");
     ui_command_queue_init(&s_queue);
-    atomic_flag_clear(&s_publish_lock);
-    memset(&s_publish_command, 0, sizeof(s_publish_command));
     memset(&s_consume_command, 0, sizeof(s_consume_command));
 
     lvgl_port_lock(0);
@@ -132,30 +113,13 @@ bool ui_runtime_is_initialized(void)
     return s_initialized;
 }
 
-bool ui_runtime_show_standalone(void)
-{
-    if (!s_initialized) {
-        return false;
-    }
-    lock_publisher();
-    memset(&s_publish_command, 0, sizeof(s_publish_command));
-    s_publish_command.type = UI_COMMAND_SHOW_STANDALONE;
-    bool accepted = publish_scalar(UI_COMMAND_SHOW_STANDALONE);
-    unlock_publisher();
-    return accepted;
-}
-
 bool ui_runtime_show_card_fallback(void)
 {
     if (!s_initialized) {
         return false;
     }
-    lock_publisher();
-    memset(&s_publish_command, 0, sizeof(s_publish_command));
-    s_publish_command.type = UI_COMMAND_SHOW_CARD_FALLBACK;
-    bool accepted = publish_scalar(UI_COMMAND_SHOW_CARD_FALLBACK);
-    unlock_publisher();
-    return accepted;
+    ui_command_t command = {.type = UI_COMMAND_SHOW_CARD_FALLBACK};
+    return publish_scalar(&command);
 }
 
 bool ui_runtime_discard_card_fallbacks(void)
@@ -171,13 +135,11 @@ bool ui_runtime_set_online(bool online)
     if (!s_initialized) {
         return false;
     }
-    lock_publisher();
-    memset(&s_publish_command, 0, sizeof(s_publish_command));
-    s_publish_command.type = UI_COMMAND_LINK_STATE;
-    s_publish_command.online = online;
-    bool accepted = publish_scalar(UI_COMMAND_LINK_STATE);
-    unlock_publisher();
-    return accepted;
+    ui_command_t command = {
+        .type = UI_COMMAND_LINK_STATE,
+        .online = online,
+    };
+    return publish_scalar(&command);
 }
 
 bool ui_runtime_set_utc_offset_minutes(int16_t offset_minutes)
@@ -185,23 +147,16 @@ bool ui_runtime_set_utc_offset_minutes(int16_t offset_minutes)
     if (!s_initialized) {
         return false;
     }
-    lock_publisher();
-    memset(&s_publish_command, 0, sizeof(s_publish_command));
-    s_publish_command.type = UI_COMMAND_TIME_OFFSET;
-    s_publish_command.utc_offset_minutes = offset_minutes;
-    bool accepted = publish_scalar(UI_COMMAND_TIME_OFFSET);
-    unlock_publisher();
-    return accepted;
+    ui_command_t command = {
+        .type = UI_COMMAND_TIME_OFFSET,
+        .utc_offset_minutes = offset_minutes,
+    };
+    return publish_scalar(&command);
 }
 
 uint32_t ui_runtime_dropped_commands(void)
 {
     return ui_command_queue_dropped(&s_queue);
-}
-
-uint32_t ui_runtime_coalesced_commands(void)
-{
-    return ui_command_queue_coalesced(&s_queue);
 }
 
 uint32_t ui_runtime_queue_high_water(void)

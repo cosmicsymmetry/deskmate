@@ -4,8 +4,7 @@
  * the LVGL runtime must take. Keep this under core/ so the standalone-clock
  * fallback rule is covered by the plain-C host suite. */
 typedef enum {
-    UI_COMMAND_SHOW_STANDALONE = 0,
-    UI_COMMAND_SHOW_CARD_FALLBACK,
+    UI_COMMAND_SHOW_CARD_FALLBACK = 0,
     UI_COMMAND_LINK_STATE,
     UI_COMMAND_TIME_OFFSET,
 } ui_command_type_t;

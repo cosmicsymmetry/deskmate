@@ -419,32 +419,20 @@ static void bind_scene_carousel(protocol_context_t *context)
 /* Builds `scene` onto the panel.
  *
  * Called from this task, not handed to ui_runtime's command queue, for a
- * reason that is not convenience: sizeof(scene_t) is ~6 KB, and ui_command_t
- * is a pair of file-scope statics in internal DRAM whose combined size is
- * asserted under 16 KB. Putting a scene through that queue would put ~12 KB
- * of scene into .bss, on a board where a ~105-byte .bss shift once broke OTA
- * downloads outright. Passing a pointer through the queue instead would hand
- * the LVGL task a pointer into `message`, which the very next frame
- * overwrites. So the handoff is synchronous under lvgl_port_lock(), which is
- * the mechanism CLAUDE.md names for LVGL calls made outside LVGL callbacks
- * and the one dispatch_asset_release() already uses for font_registry_reset().
- * The LVGL task cannot be inside a callback while this lock is held.
- *
- * Note lvgl_port_lock(0U) does NOT mean "try": esp_lvgl_port maps a 0 timeout
- * onto portMAX_DELAY, so it blocks until the mutex is free and never returns
- * false. The failure branch below is therefore unreachable defensively-coded
- * dead weight kept only to match the shape of every other lock site in this
- * file. The real cost to be aware of is the blocking itself: this task now
- * waits on the LVGL mutex on every scene show, every asset release, and the
- * 250 ms binding tick -- four times a second whenever a scene is up. */
+ * reason that is not convenience: sizeof(scene_t) is ~6 KB, too large for
+ * the bounded value queue and its fixed mailbox budget. Passing a pointer
+ * through the queue instead would hand the LVGL task a pointer into
+ * `message`, which the very next frame overwrites. So the handoff is
+ * synchronous under lvgl_port_lock(), the mechanism CLAUDE.md names for LVGL
+ * calls made outside LVGL callbacks and the one dispatch_asset_release()
+ * already uses for font_registry_reset(). The LVGL task cannot be inside a
+ * callback while this lock is held. */
 static show_scene_result_t show_scene(protocol_context_t *context,
                                       const scene_t *scene)
 {
     scene_binding_context_t binding;
     fill_scene_binding_context(context, &binding);
-    if (!lvgl_port_lock(0U)) {
-        return SHOW_SCENE_BUSY;
-    }
+    lvgl_port_lock(0U);
     show_scene_result_t result = SHOW_SCENE_BUSY;
     // The OTA task owns the panel until it reboots or restores the clock.
     // ui_runtime's queue consumer drops SHOW_* commands for that reason and
@@ -477,9 +465,7 @@ static bool refresh_scene_bindings(protocol_context_t *context,
 {
     scene_binding_context_t binding;
     fill_scene_binding_context(context, &binding);
-    if (!lvgl_port_lock(0U)) {
-        return context->scene_live;
-    }
+    lvgl_port_lock(0U);
     if (authoritative) {
         scene_view_refresh_bindings(&binding);
     } else {
@@ -1370,11 +1356,7 @@ static void dispatch_asset_release(protocol_context_t *context,
     // later screen change; in the second it would put a stale scene back
     // over newer content. Reading the authority under the lock we
     // already hold costs nothing and cannot be wrong.
-    if (!lvgl_port_lock(0U)) {
-        transmit_error(context, request_id, PROTOCOL_ERROR_INTERNAL,
-                       "display lock unavailable");
-        return;
-    }
+    lvgl_port_lock(0U);
     // Three conditions, and each one earns its place:
     //  - a scene really is on the panel (the authority, see above);
     //  - it reads bytes compaction can move -- a scene of baked fonts and
@@ -1578,15 +1560,6 @@ static void dispatch_request(protocol_context_t *context,
     switch (context->message.type) {
     case PROTOCOL_TYPE_STATUS_REQUEST:
         transmit_status(context, frame->request_id);
-        if (frame->request_id == OTA_CHECK_STATUS_REQUEST_ID &&
-            context->response_transport == usb_link_transport()) {
-            esp_err_t ota_result = ota_check_now();
-            if (ota_result != ESP_OK &&
-                ota_result != ESP_ERR_INVALID_STATE) {
-                ESP_LOGW(TAG, "USB firmware check trigger failed: %s",
-                         esp_err_to_name(ota_result));
-            }
-        }
         break;
     case PROTOCOL_TYPE_TIME_SYNC:
         dispatch_time_sync(context, frame->request_id);

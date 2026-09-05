@@ -845,6 +845,18 @@ still correct), and the plan's Task 6 text said `timer.pct` where the contract i
 This is the one hardware session. Use `tools/hwcam/` for panel observations and quote
 server/device timestamps and status values. Do not start Phase B if Phase A fails.
 
+> **Prep note (2026-09-05, board away):** everything board-free is staged and recorded in
+> `docs/hardware/2026-09-05-task7-session-runbook.md` — the post-cleanup server is
+> redeployed from `f40958a` (registry 5/0 including the new
+> `tools/hw-session-fixtures/svg-live-clock` refuse fixture), `v2.0.0-raster1` is built
+> (sha `29f15a6f…`), staged in the catalog dir and verified through the tunnel but **not
+> published** (env pin stays `v2.0.0-live2`), the diag variant is built, and
+> `firmware/version.txt` moved to `v2.0.0-raster1`. Two prep findings: the server no
+> longer builds from a `companion/`-only export (`include_bytes!` reaches
+> `tools/fonts/`), and Phase A's BUSY/OTA-owner clause needs an OTA in flight, so the
+> runbook defaults to observing it during Step 10 as a recorded deviation. No checkbox
+> below is ticked by prep; every observation is still owed.
+
 #### Phase A — pay stage 3b Task 9 on the predecessor image
 
 - [ ] **Step 1: Redeploy the server and load the real curated registry.** Use a

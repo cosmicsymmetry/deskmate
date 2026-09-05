@@ -5,15 +5,15 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use app_core::{
-    AlertHold, AppConfig, BakedFontMetrics, CalendarRefreshRequest, CalendarRefreshResult,
-    CalendarRefresher, CardAlert, CardErrorKind, CardField, CardFieldValue, CardSettings,
-    CarouselAdvance, ConnectionState, DesiredAsset, DeviceCapability, DeviceConnection,
-    DeviceOtaState, DeviceTier, DeviceWifiState, DisplayOrientation, DisplayTemplate,
-    NetworkConfig, PersistenceState, Playlist, PlaylistEntry, PluginHost, PomodoroAction,
-    PomodoroState, ProviderRequest, ProvisioningTier, RefreshPolicy, RuntimeDevice, RuntimeError,
-    RuntimeHandle, RuntimeOptions, RuntimeState, SceneCandidate, WidgetTapAction,
+    AlertHold, AppConfig, CalendarRefreshRequest, CalendarRefreshResult, CalendarRefresher,
+    CardAlert, CardErrorKind, CardField, CardFieldValue, CardSettings, CarouselAdvance,
+    ConnectionState, DesiredAsset, DeviceCapability, DeviceConnection, DeviceOtaState, DeviceTier,
+    DeviceWifiState, DisplayOrientation, DisplayTemplate, NetworkConfig, PersistenceState,
+    Playlist, PlaylistEntry, PluginHost, PomodoroAction, PomodoroState, ProviderRequest,
+    ProvisioningTier, RefreshPolicy, RuntimeDevice, RuntimeError, RuntimeHandle, RuntimeOptions,
+    RuntimeState, SceneCandidate, WidgetTapAction,
 };
-use chrono::Utc;
+use chrono::{TimeZone as _, Utc};
 use device::{DeviceError, ReceivedEvent, SessionDiagnostics, TransportError};
 use protocol::{
     Ack, AssetBegin, AssetChunk, AssetCommit, AssetRelease, DeviceEvent, ErrorCode, ErrorResponse,
@@ -625,6 +625,10 @@ struct PluginRefresher {
     error: Option<String>,
 }
 
+fn plugin_refreshed_at() -> chrono::DateTime<Utc> {
+    Utc.with_ymd_and_hms(2026, 9, 5, 12, 34, 56).unwrap()
+}
+
 impl CalendarRefresher for PluginRefresher {
     fn refresh(&mut self, request: CalendarRefreshRequest) -> CalendarRefreshResult {
         assert!(
@@ -645,7 +649,7 @@ impl CalendarRefresher for PluginRefresher {
                 },
             ],
             value: Some(self.value.clone()),
-            refreshed_at: Some(request.now),
+            refreshed_at: Some(plugin_refreshed_at()),
             age: Some(Duration::from_secs(7)),
             stale: self.stale,
             error: self.error.clone(),
@@ -710,7 +714,6 @@ impl PluginHost for FakePluginHost {
         &mut self,
         plugin_id: &str,
         snapshot: &providers::ProviderSnapshot<serde_json::Value>,
-        _metrics: &BakedFontMetrics,
         revision: u32,
     ) -> Result<SceneCandidate, String> {
         let mut state = self.control.state.lock().unwrap();
@@ -1175,6 +1178,7 @@ fn plugin_card_pushes_the_host_scene_unmodified_after_raw_data_arrives() {
     assert!(render.snapshot.stale);
     assert_eq!(render.snapshot.error.as_deref(), Some("upstream is stale"));
     assert_eq!(render.snapshot.age, Some(Duration::from_secs(7)));
+    assert_eq!(render.snapshot.refreshed_at, Some(plugin_refreshed_at()));
     assert_eq!(push.revision, render.revision);
     assert_eq!(push.scene.background, 0x1234);
     assert!(
@@ -1321,7 +1325,13 @@ fn plugin_card_without_a_cached_snapshot_is_refused_visibly() {
 #[test]
 fn plugin_card_without_an_injected_host_is_refused_visibly() {
     let control = MockDeviceControl::default();
-    let runtime = start_plugin_runtime(&control, None);
+    let runtime = RuntimeHandle::start(
+        plugin_config(),
+        Box::new(MockDevice::new(control)),
+        Box::<app_core::SystemProviderRefresher>::default(),
+        options(),
+    )
+    .unwrap();
 
     let snapshot = wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
         snapshot.card_errors.iter().any(|error| {
@@ -2507,8 +2517,8 @@ fn subscribers_are_bounded_and_coalesce_pressure_to_the_latest_snapshot() {
     runtime.set_paused(false).unwrap();
     runtime.activate_screen("clock").unwrap();
     wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
-        snapshot.diagnostics.subscriber_snapshots_overwritten >= 1
-            && snapshot.device.active_screen_id.as_deref() == Some("clock")
+        snapshot.device.active_screen_id.as_deref() == Some("clock")
+            && snapshot.runtime == RuntimeState::Running
     });
     let latest = subscription
         .recv_timeout(Duration::from_secs(1))
@@ -2516,6 +2526,54 @@ fn subscribers_are_bounded_and_coalesce_pressure_to_the_latest_snapshot() {
         .unwrap();
     assert_eq!(latest.device.active_screen_id.as_deref(), Some("clock"));
     assert_eq!(latest.runtime, RuntimeState::Running);
+    runtime.shutdown().unwrap();
+}
+
+#[test]
+fn lagging_subscriber_does_not_cause_a_diagnostic_only_second_snapshot() {
+    let control = MockDeviceControl::default();
+    let mut runtime_options = options();
+    runtime_options.pomodoro_interval = Duration::from_hours(1);
+    runtime_options.status_interval = Duration::from_hours(1);
+    let runtime = RuntimeHandle::start(
+        AppConfig::default(),
+        Box::new(MockDevice::new(control)),
+        Box::new(FixedRefresher {
+            delay: Duration::ZERO,
+        }),
+        runtime_options,
+    )
+    .unwrap();
+    wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
+        snapshot.device.connection == ConnectionState::Online
+    });
+    let subscription = runtime.subscribe().unwrap();
+    subscription
+        .recv_timeout(Duration::from_secs(1))
+        .unwrap()
+        .expect("subscription starts with the latest snapshot");
+
+    runtime.set_paused(true).unwrap();
+    wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
+        snapshot.runtime == RuntimeState::Paused
+    });
+    runtime.set_paused(false).unwrap();
+    wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
+        snapshot.runtime == RuntimeState::Running
+    });
+
+    let latest = subscription
+        .recv_timeout(Duration::from_secs(1))
+        .unwrap()
+        .expect("the unread slot contains the latest substantive state");
+    assert_eq!(latest.runtime, RuntimeState::Running);
+    assert!(
+        subscription
+            .recv_timeout(Duration::from_millis(50))
+            .unwrap()
+            .is_none(),
+        "delivery diagnostics must not publish themselves"
+    );
     runtime.shutdown().unwrap();
 }
 

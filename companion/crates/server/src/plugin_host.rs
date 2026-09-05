@@ -43,7 +43,6 @@ impl PluginHost for ServerPluginHost {
         &mut self,
         plugin_id: &str,
         snapshot: &ProviderSnapshot<serde_json::Value>,
-        metrics: &BakedFontMetrics,
         revision: u32,
     ) -> Result<SceneCandidate, String> {
         let loaded = self
@@ -66,7 +65,7 @@ impl PluginHost for ServerPluginHost {
             plugin::compile_scene_with_assets(
                 &loaded.manifest,
                 snapshot,
-                metrics,
+                &BakedFontMetrics::SHIPPED,
                 revision,
                 &loaded.assets,
             )
@@ -184,7 +183,7 @@ mod tests {
     fn real_aqi_plugin_compiles_to_a_protocol_valid_scene() {
         let mut host = ServerPluginHost::new(curated_registry());
         let candidate = host
-            .render_scene("aqi", &aqi_snapshot(), &BakedFontMetrics::SHIPPED, 41)
+            .render_scene("aqi", &aqi_snapshot(), 41)
             .expect("compile AQI scene");
         let SceneCandidate::DisplayList(scene) = candidate else {
             panic!("a display-list plugin must produce a native candidate");
@@ -203,12 +202,7 @@ mod tests {
         let mut host = ServerPluginHost::new(curated_registry());
 
         let candidate = host
-            .render_scene(
-                "aqi",
-                &raw_aqi_envelope_snapshot(),
-                &BakedFontMetrics::SHIPPED,
-                42,
-            )
+            .render_scene("aqi", &raw_aqi_envelope_snapshot(), 42)
             .expect("missing expression paths currently degrade to empty text");
         let SceneCandidate::DisplayList(scene) = candidate else {
             panic!("a display-list plugin must produce a native candidate");
@@ -229,7 +223,7 @@ mod tests {
         let mut host = ServerPluginHost::new(curated_registry());
 
         let candidate = host
-            .render_scene("svg-aqi", &aqi_snapshot(), &BakedFontMetrics::SHIPPED, 43)
+            .render_scene("svg-aqi", &aqi_snapshot(), 43)
             .expect("an SVG template must produce a candidate, not an error");
 
         // The curated svg-aqi face binds only provider data (`data.*`), so it
@@ -267,12 +261,7 @@ mod tests {
         let mut host = ServerPluginHost::new(curated_registry());
 
         let error = host
-            .render_scene(
-                "not-installed",
-                &aqi_snapshot(),
-                &BakedFontMetrics::SHIPPED,
-                1,
-            )
+            .render_scene("not-installed", &aqi_snapshot(), 1)
             .expect_err("unknown plugin must be refused");
 
         assert!(error.contains("unknown plugin id") && error.contains("not-installed"));

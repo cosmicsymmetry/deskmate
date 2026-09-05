@@ -15,7 +15,7 @@ pub(crate) struct Scheduler {
     next_status: Instant,
     next_time_sync: Instant,
     providers: BTreeMap<String, ProviderDeadline>,
-    rotation: Option<RotationDeadline>,
+    rotation: Option<Instant>,
     /// Keyed to the specific interrupt token the hold belongs to. A code
     /// review of the first version of this feature found that a single
     /// unkeyed `Option<Instant>` cross-talks between the arbiter's active and
@@ -42,11 +42,6 @@ struct ProviderDeadline {
     interval: Option<Duration>,
     next: Option<Instant>,
     skipped_while_paused: bool,
-}
-
-struct RotationDeadline {
-    dwell: Duration,
-    next: Instant,
 }
 
 impl Scheduler {
@@ -166,10 +161,7 @@ impl Scheduler {
     /// duration every time the rotation advances. `None` disarms rotation
     /// entirely, which is how `CarouselAdvance::Manual` is represented.
     pub(crate) fn set_rotation(&mut self, dwell: Option<Duration>, now: Instant) {
-        self.rotation = dwell.map(|dwell| RotationDeadline {
-            dwell,
-            next: now + dwell,
-        });
+        self.rotation = dwell.map(|dwell| now + dwell);
     }
 
     pub(crate) fn clear_rotation(&mut self) {
@@ -177,13 +169,13 @@ impl Scheduler {
     }
 
     pub(crate) fn rotation_due(&mut self, now: Instant) -> bool {
-        let Some(rotation) = self.rotation.as_mut() else {
+        let Some(deadline) = self.rotation else {
             return false;
         };
-        if now < rotation.next {
+        if now < deadline {
             return false;
         }
-        rotation.next = now + rotation.dwell;
+        self.rotation = None;
         true
     }
 
@@ -287,7 +279,7 @@ impl Scheduler {
             .providers
             .values()
             .filter_map(|deadline| deadline.next)
-            .chain(self.rotation.iter().map(|rotation| rotation.next))
+            .chain(self.rotation.iter().copied())
             .chain(self.alert_hold.map(|(_, deadline)| deadline))
             .chain(self.event_alert_checks.values().copied())
             .chain(self.raster_deadline)
@@ -356,7 +348,7 @@ mod tests {
     }
 
     #[test]
-    fn rotation_deadline_fires_once_per_dwell_and_bounds_the_wait() {
+    fn rotation_deadline_fires_once_and_bounds_the_wait_until_the_caller_rearms() {
         let now = Instant::now();
         let mut scheduler = Scheduler::new(
             now,
@@ -375,12 +367,11 @@ mod tests {
         scheduler.set_rotation(None, now);
         assert!(!scheduler.rotation_due(now + Duration::from_hours(1)));
 
-        // Timed advance: fires once at the deadline, then rearms.
+        // Timed advance: fires once at the deadline, then the caller must re-arm it.
         scheduler.set_rotation(Some(Duration::from_secs(20)), now);
         assert!(!scheduler.rotation_due(now + Duration::from_secs(19)));
         assert!(scheduler.rotation_due(now + Duration::from_secs(20)));
         assert!(!scheduler.rotation_due(now + Duration::from_secs(20)));
-        assert!(scheduler.rotation_due(now + Duration::from_secs(40)));
 
         // The loop cannot sleep past a pending rotation.
         scheduler.set_rotation(Some(Duration::from_secs(5)), now);

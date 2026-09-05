@@ -22,8 +22,7 @@ pub struct ServerProviderRefresher<F: PluginFetcher = SystemPluginFetcher> {
 }
 
 struct PluginProviderEntry<F: PluginFetcher> {
-    title: String,
-    request: ProviderRequest,
+    plugin_id: String,
     provider: PluginDataProvider<F>,
 }
 
@@ -67,7 +66,7 @@ where
         let needs_replacement = self
             .plugins
             .get(&request.widget_id)
-            .is_none_or(|entry| entry.title != request.title || entry.request != request.provider);
+            .is_none_or(|entry| entry.plugin_id != plugin_id);
         if needs_replacement {
             let Some(plugin) = self.registry.get(&plugin_id) else {
                 return plugin_error_result(request, format!("plugin {plugin_id:?} is not loaded"));
@@ -85,8 +84,7 @@ where
             self.plugins.insert(
                 request.widget_id.clone(),
                 PluginProviderEntry {
-                    title: request.title.clone(),
-                    request: request.provider.clone(),
+                    plugin_id,
                     provider,
                 },
             );
@@ -186,7 +184,6 @@ mod tests {
             title: "Air quality".into(),
             provider: ProviderRequest::Plugin {
                 plugin_id: "aqi".into(),
-                refresh_interval: Duration::from_mins(15),
             },
             active_provider_ids: active_provider_ids
                 .iter()
@@ -306,13 +303,14 @@ mod tests {
     }
 
     #[test]
-    fn title_or_provider_request_changes_replace_the_cached_provider() {
+    fn title_or_card_cadence_edits_keep_last_good_until_the_plugin_id_changes() {
         let fetcher = FakeFetcher {
             responses: Arc::new(Mutex::new(
                 vec![
                     Ok(ok_response(br#"{"current":{"aqi":42}}"#)),
-                    Ok(ok_response(br#"{"current":{"aqi":43}}"#)),
-                    Ok(ok_response(br#"{"current":{"aqi":44}}"#)),
+                    Err(EgressError::Timeout),
+                    Err(EgressError::Timeout),
+                    Err(EgressError::Timeout),
                 ]
                 .into(),
             )),
@@ -324,23 +322,37 @@ mod tests {
             fetcher.clone()
         });
         let first = plugin_request("aqi-card", &["aqi-card"]);
-        refresher.refresh(first.clone());
+        let good = refresher.refresh(first.clone());
 
         let mut renamed = first.clone();
         renamed.title = "Outside air".into();
-        refresher.refresh(renamed.clone());
+        let after_title_edit = refresher.refresh(renamed.clone());
+        assert_eq!(after_title_edit.value, good.value);
+        assert_eq!(
+            after_title_edit.fields,
+            vec![title_field("Outside air".into())]
+        );
+        assert!(after_title_edit.stale);
 
-        let mut rescheduled = renamed;
-        rescheduled.provider = ProviderRequest::Plugin {
-            plugin_id: "aqi".into(),
-            refresh_interval: Duration::from_mins(30),
+        // Card cadence belongs to app-core's scheduler and is no longer part
+        // of ProviderRequest::Plugin, so a cadence-only edit reaches this
+        // cache with the same provider identity.
+        let mut after_cadence_edit = renamed.clone();
+        after_cadence_edit.now += chrono::Duration::minutes(15);
+        let after_cadence_edit = refresher.refresh(after_cadence_edit);
+        assert_eq!(after_cadence_edit.value, good.value);
+        assert!(after_cadence_edit.stale);
+
+        let mut changed_plugin = renamed;
+        changed_plugin.provider = ProviderRequest::Plugin {
+            plugin_id: "svg-aqi".into(),
         };
-        refresher.refresh(rescheduled);
-
+        let after_plugin_edit = refresher.refresh(changed_plugin);
+        assert_eq!(after_plugin_edit.value, Some(serde_json::Value::Null));
         assert_eq!(
             constructions.load(Ordering::Relaxed),
-            3,
-            "title/request changes reused a stale provider cache entry"
+            2,
+            "only a plugin-id change may replace the cached provider"
         );
     }
 }

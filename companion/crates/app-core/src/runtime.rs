@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TryRecvError};
@@ -169,7 +169,6 @@ pub trait PluginHost: Send + 'static {
         &mut self,
         plugin_id: &str,
         snapshot: &providers::ProviderSnapshot<serde_json::Value>,
-        metrics: &BakedFontMetrics,
         revision: u32,
     ) -> Result<SceneCandidate, String>;
 
@@ -334,7 +333,6 @@ pub enum ProviderRequest {
     },
     Plugin {
         plugin_id: String,
-        refresh_interval: Duration,
     },
 }
 
@@ -755,15 +753,6 @@ pub struct RuntimeHandle {
     publisher: Arc<SnapshotPublisher>,
     diagnostics: Arc<RuntimeDiagnosticCounters>,
     command_timeout: Duration,
-    operator_injections: Arc<Mutex<VecDeque<OperatorPluginInjection>>>,
-    next_operator_injection: AtomicU64,
-}
-
-struct OperatorPluginInjection {
-    token: u64,
-    card_id: String,
-    plugin_id: String,
-    snapshot: providers::ProviderSnapshot<serde_json::Value>,
 }
 
 impl RuntimeHandle {
@@ -810,7 +799,6 @@ impl RuntimeHandle {
             diagnostics: Arc::clone(&diagnostics),
         });
         let (sender, receiver) = mpsc::sync_channel(options.command_capacity.max(1));
-        let operator_injections = Arc::new(Mutex::new(VecDeque::new()));
         let worker_publisher = Arc::clone(&publisher);
         let worker_diagnostics = Arc::clone(&diagnostics);
         let worker_inputs = RuntimeWorkerInputs {
@@ -818,7 +806,6 @@ impl RuntimeHandle {
             device,
             refresher,
             plugin_host,
-            operator_injections: Arc::clone(&operator_injections),
         };
         let worker = thread::Builder::new()
             .name("deskmate-runtime".into())
@@ -840,8 +827,6 @@ impl RuntimeHandle {
             publisher,
             diagnostics,
             command_timeout: options.command_timeout,
-            operator_injections,
-            next_operator_injection: AtomicU64::new(1),
         })
     }
 
@@ -908,36 +893,20 @@ impl RuntimeHandle {
         self.request(|reply| RuntimeCommand::PushScene { push, reply })
     }
 
-    /// Replaces one configured plugin card's cached snapshot and wakes the
-    /// ordinary active-scene executor. The existing `RefreshProvider` command
-    /// is used only as the bounded worker wake; no provider fetch is scheduled.
+    /// Replaces one configured plugin card's cached snapshot through the
+    /// ordinary bounded worker command channel.
     pub fn inject_plugin_snapshot(
         &self,
         card_id: impl Into<String>,
         plugin_id: impl Into<String>,
         snapshot: providers::ProviderSnapshot<serde_json::Value>,
     ) -> Result<(), RuntimeError> {
-        let token = self.next_operator_injection.fetch_add(1, Ordering::Relaxed);
-        let card_id = card_id.into();
-        self.operator_injections
-            .lock()
-            .map_err(|_| RuntimeError::WorkerStopped)?
-            .push_back(OperatorPluginInjection {
-                token,
-                card_id: card_id.clone(),
-                plugin_id: plugin_id.into(),
-                snapshot,
-            });
-        let result = self.request(|reply| RuntimeCommand::RefreshProvider {
-            widget_id: card_id,
+        self.request(|reply| RuntimeCommand::InjectPluginSnapshot {
+            card_id: card_id.into(),
+            plugin_id: plugin_id.into(),
+            snapshot,
             reply,
-        });
-        if result.is_err()
-            && let Ok(mut pending) = self.operator_injections.lock()
-        {
-            pending.retain(|injection| injection.token != token);
-        }
-        result
+        })
     }
 
     /// Provision through the session already owned by the runtime worker. This command never
@@ -1033,7 +1002,6 @@ struct WorkerState {
     latest_fields: BTreeMap<String, Vec<Field>>,
     plugin_snapshots: BTreeMap<String, providers::ProviderSnapshot<serde_json::Value>>,
     plugin_host: Option<Box<dyn PluginHost>>,
-    operator_injections: Arc<Mutex<VecDeque<OperatorPluginInjection>>>,
     dirty_widgets: BTreeSet<String>,
     /// Card ID -> the most recent typed refusal for that card. There is deliberately
     /// one editor-visible slot per card: if data and scene refusals happen before
@@ -1054,7 +1022,6 @@ struct WorkerState {
     /// The active card needs rebuilding as a scene because a host-owned fact
     /// changed. Consumed once by `push_active_scene`; scheduled ticks never set it.
     active_scene_dirty: bool,
-    active_rotation_index: usize,
     connected: bool,
     ever_connected: bool,
     needs_full_sync: bool,
@@ -1088,7 +1055,6 @@ impl WorkerState {
             latest_fields: BTreeMap::new(),
             plugin_snapshots: BTreeMap::new(),
             plugin_host: None,
-            operator_injections: Arc::new(Mutex::new(VecDeque::new())),
             dirty_widgets: BTreeSet::new(),
             push_rejections: BTreeMap::new(),
             pomodoros: BTreeMap::new(),
@@ -1099,7 +1065,6 @@ impl WorkerState {
             active_screen: None,
             active_screen_dirty: false,
             active_scene_dirty: false,
-            active_rotation_index: 0,
             connected: false,
             ever_connected: false,
             needs_full_sync: true,
@@ -1218,7 +1183,6 @@ impl WorkerState {
         } else {
             rotation_card_ids.first().cloned()
         };
-        self.device.active_screen_id.clone_from(&self.active_screen);
         self.active_screen_dirty = self.active_screen.is_some();
         self.active_scene_dirty = self.active_screen.is_some();
         self.rearm_rotation_for_active_screen(scheduler, now);
@@ -1276,12 +1240,12 @@ impl WorkerState {
     /// normally fast and this only shortens one card's first showing.
     fn rearm_rotation_for_active_screen(&mut self, scheduler: &mut Scheduler, now: Instant) {
         let rotation_ids = rotation_card_ids(&self.config);
-        self.active_rotation_index = self
+        let active_rotation_index = self
             .active_screen
             .as_ref()
             .and_then(|active| rotation_ids.iter().position(|id| id == active))
             .unwrap_or(0);
-        scheduler.set_rotation(current_dwell(&self.config, self.active_rotation_index), now);
+        scheduler.set_rotation(current_dwell(&self.config, active_rotation_index), now);
     }
 
     fn restore_pomodoro(
@@ -1299,17 +1263,7 @@ impl WorkerState {
                 Pomodoro::new(label, duration_seconds).expect("validated pomodoro duration")
             });
         let update = timer.update(now);
-        self.latest_fields.insert(id.into(), update.fields);
-        self.pomodoro_snapshots.insert(
-            id.into(),
-            PomodoroSnapshot {
-                widget_id: id.into(),
-                state: pomodoro_state(update.state),
-                duration_seconds: update.duration_seconds,
-                remaining_seconds: update.remaining_seconds,
-            },
-        );
-        if update.completion_interrupt && card_wants_completion_interrupt(&self.config, id) {
+        if record_pomodoro_update(self, id, update) {
             let _ = self.interrupts.schedule(id, "Timer finished");
         }
         self.pomodoros.insert(id.into(), timer);
@@ -1354,10 +1308,12 @@ impl WorkerState {
     }
 
     fn snapshot(&self, diagnostics: &RuntimeDiagnosticCounters) -> AppSnapshot {
+        let mut device = self.device.clone();
+        device.active_screen_id.clone_from(&self.active_screen);
         AppSnapshot {
             config: self.config.clone(),
             runtime: self.runtime.clone(),
-            device: self.device.clone(),
+            device,
             providers: self
                 .providers
                 .values()
@@ -1381,7 +1337,16 @@ impl WorkerState {
         diagnostics: &RuntimeDiagnosticCounters,
     ) {
         let snapshot = self.snapshot(diagnostics);
-        if self.last_published.as_ref() != Some(&snapshot) {
+        let changed = self.last_published.as_ref().is_none_or(|last_published| {
+            let mut comparable = snapshot.clone();
+            // Delivery pressure is reported opportunistically with the next
+            // substantive snapshot, but it cannot itself cause another
+            // delivery and feed back into this counter forever.
+            comparable.diagnostics.subscriber_snapshots_overwritten =
+                last_published.diagnostics.subscriber_snapshots_overwritten;
+            last_published != &comparable
+        });
+        if changed {
             publisher.publish(&snapshot);
             self.last_published = Some(snapshot);
         }
@@ -1404,10 +1369,13 @@ fn rotation_card_ids(config: &AppConfig) -> Vec<String> {
 }
 
 /// The dwell for the active-playlist entry at `index`, resolved against the
-/// playlist's default. Returns `None` under `CarouselAdvance::Manual`, which
-/// is what keeps the rotation deadline disarmed in manual mode.
+/// playlist's default. Returns `None` under `CarouselAdvance::Manual` or when
+/// fewer than two entries exist, keeping no-op rotation deadlines disarmed.
 fn current_dwell(config: &AppConfig, index: usize) -> Option<Duration> {
     let playlist = config.active_playlist()?;
+    if playlist.entries.len() < 2 {
+        return None;
+    }
     let default = playlist.advance.default_dwell_seconds()?;
     let entry = playlist.entries.get(index)?;
     Some(Duration::from_secs(u64::from(
@@ -1424,18 +1392,16 @@ fn current_dwell(config: &AppConfig, index: usize) -> Option<Duration> {
 fn advance_rotation(state: &mut WorkerState, scheduler: &mut Scheduler, now: Instant) {
     let ids = rotation_card_ids(&state.config);
     if ids.len() > 1 {
-        state.active_rotation_index = (state.active_rotation_index + 1) % ids.len();
-        state.active_screen = Some(ids[state.active_rotation_index].clone());
-        state
-            .device
-            .active_screen_id
-            .clone_from(&state.active_screen);
+        let current_index = state
+            .active_screen
+            .as_ref()
+            .and_then(|active| ids.iter().position(|id| id == active))
+            .unwrap_or(0);
+        let next_index = (current_index + 1) % ids.len();
+        state.active_screen = Some(ids[next_index].clone());
         state.active_screen_dirty = true;
         state.active_scene_dirty = true;
-        scheduler.set_rotation(
-            current_dwell(&state.config, state.active_rotation_index),
-            now,
-        );
+        scheduler.set_rotation(current_dwell(&state.config, next_index), now);
     } else {
         scheduler.clear_rotation();
     }
@@ -1446,7 +1412,6 @@ struct RuntimeWorkerInputs {
     device: Box<dyn RuntimeDevice>,
     refresher: Box<dyn CalendarRefresher>,
     plugin_host: Option<Box<dyn PluginHost>>,
-    operator_injections: Arc<Mutex<VecDeque<OperatorPluginInjection>>>,
 }
 
 fn run_runtime(
@@ -1461,7 +1426,6 @@ fn run_runtime(
         mut device,
         refresher,
         plugin_host,
-        operator_injections,
     } = inputs;
     let now = Instant::now();
     let mut scheduler = Scheduler::new(
@@ -1472,7 +1436,6 @@ fn run_runtime(
     );
     let mut state = WorkerState::new(config, now, &mut scheduler);
     state.plugin_host = plugin_host;
-    state.operator_injections = operator_injections;
     let provider = ProviderWorker::new(refresher, options.provider_job_capacity);
     state.publish_if_changed(publisher, diagnostics);
 
@@ -1565,22 +1528,13 @@ fn process_command(
         .fetch_add(1, Ordering::Relaxed);
     match command {
         RuntimeCommand::ApplyConfig { config, reply } => {
-            let result =
-                config
-                    .compile(1)
-                    .map(|_| ())
-                    .map_err(|error| RuntimeError::InvalidConfig {
-                        issues: error.issues,
-                    });
-            let result = result.and_then(|()| {
-                let now = Instant::now();
-                state.replace_config(config, now, scheduler);
-                if state.connected && !state.config.preferences.paused {
-                    synchronize_full(state, scheduler, device, now)
-                } else {
-                    Ok(())
-                }
-            });
+            let now = Instant::now();
+            state.replace_config(config, now, scheduler);
+            let result = if state.connected && !state.config.preferences.paused {
+                synchronize_full(state, scheduler, device, now)
+            } else {
+                Ok(())
+            };
             let _ = reply.send(result);
         }
         RuntimeCommand::SetPaused { paused, reply } => {
@@ -1621,19 +1575,7 @@ fn process_command(
             let _ = reply.send(result);
         }
         RuntimeCommand::RefreshProvider { widget_id, reply } => {
-            let injection = state
-                .operator_injections
-                .lock()
-                .ok()
-                .and_then(|mut pending| {
-                    let index = pending
-                        .iter()
-                        .position(|injection| injection.card_id == widget_id)?;
-                    pending.remove(index)
-                });
-            let result = if let Some(injection) = injection {
-                apply_operator_plugin_injection(state, scheduler, device, injection)
-            } else if let Some(provider) = state.providers.get(&widget_id) {
+            let result = if let Some(provider) = state.providers.get(&widget_id) {
                 if !provider.in_flight {
                     scheduler.schedule_provider_now(&widget_id, Instant::now());
                 }
@@ -1641,6 +1583,17 @@ fn process_command(
             } else {
                 Err(RuntimeError::UnknownWidget { widget_id })
             };
+            let _ = reply.send(result);
+        }
+        RuntimeCommand::InjectPluginSnapshot {
+            card_id,
+            plugin_id,
+            snapshot,
+            reply,
+        } => {
+            let result = apply_operator_plugin_injection(
+                state, scheduler, device, card_id, &plugin_id, snapshot,
+            );
             let _ = reply.send(result);
         }
         RuntimeCommand::ActivateScreen { screen_id, reply } => {
@@ -1674,7 +1627,9 @@ fn apply_operator_plugin_injection(
     state: &mut WorkerState,
     scheduler: &mut Scheduler,
     device: &mut dyn RuntimeDevice,
-    injection: OperatorPluginInjection,
+    card_id: String,
+    plugin_id: &str,
+    snapshot: providers::ProviderSnapshot<serde_json::Value>,
 ) -> Result<(), RuntimeError> {
     if !state.connected {
         return Err(RuntimeError::DeviceDisconnected);
@@ -1689,31 +1644,28 @@ fn apply_operator_plugin_injection(
                 title,
                 plugin_id,
                 ..
-            } if id == &injection.card_id => Some((title.clone(), plugin_id.clone())),
+            } if id == &card_id => Some((title.clone(), plugin_id.clone())),
             _ => None,
         })
         .ok_or_else(|| RuntimeError::Provider {
             message: format!(
-                "operator-plugin-mismatch: card {:?} is not a configured plugin card",
-                injection.card_id
+                "operator-plugin-mismatch: card {card_id:?} is not a configured plugin card"
             ),
         })?;
-    if configured_plugin_id != injection.plugin_id {
+    if configured_plugin_id != plugin_id {
         return Err(RuntimeError::Provider {
             message: format!(
-                "operator-plugin-mismatch: card {:?} is configured for plugin {:?}, not {:?}",
-                injection.card_id, configured_plugin_id, injection.plugin_id
+                "operator-plugin-mismatch: card {card_id:?} is configured for plugin \
+                 {configured_plugin_id:?}, not {plugin_id:?}"
             ),
         });
     }
 
-    let snapshot_stale = injection.snapshot.stale;
-    let error = injection.snapshot.error.clone().unwrap_or_default();
-    state
-        .plugin_snapshots
-        .insert(injection.card_id.clone(), injection.snapshot);
+    let snapshot_stale = snapshot.stale;
+    let error = snapshot.error.clone().unwrap_or_default();
+    state.plugin_snapshots.insert(card_id.clone(), snapshot);
     state.latest_fields.insert(
-        injection.card_id.clone(),
+        card_id.clone(),
         vec![
             Field {
                 key: "title".into(),
@@ -1729,7 +1681,7 @@ fn apply_operator_plugin_injection(
             },
         ],
     );
-    activate_screen_command(state, scheduler, device, injection.card_id)
+    activate_screen_command(state, scheduler, device, card_id)
 }
 
 fn activate_screen_command(
@@ -1743,13 +1695,11 @@ fn activate_screen_command(
         return Err(RuntimeError::UnknownScreen { screen_id });
     };
     state.active_screen = Some(screen_id.clone());
-    state.device.active_screen_id = Some(screen_id);
     state.active_screen_dirty = true;
     state.active_scene_dirty = true;
     // An explicit activation is a manual override, same as a physical
     // swipe: restart the dwell from the card just landed on instead of
     // advancing early from wherever rotation last left off.
-    state.active_rotation_index = index;
     scheduler.set_rotation(current_dwell(&state.config, index), Instant::now());
     if state.connected && !state.config.preferences.paused {
         send_screen(state, device)
@@ -2029,7 +1979,6 @@ fn provider_request(state: &WorkerState, widget_id: &str) -> Option<ProviderRefr
             id,
             title,
             plugin_id,
-            refresh,
             ..
         } if id == widget_id => Some(ProviderRefreshRequest {
             generation: state.generation,
@@ -2037,7 +1986,6 @@ fn provider_request(state: &WorkerState, widget_id: &str) -> Option<ProviderRefr
             title: title.clone(),
             provider: ProviderRequest::Plugin {
                 plugin_id: plugin_id.clone(),
-                refresh_interval: refresh_interval(*refresh),
             },
             active_provider_ids: active_provider_ids.clone(),
             now: Utc::now(),
@@ -2146,21 +2094,11 @@ fn update_pomodoros(state: &mut WorkerState, now: Instant) {
         };
         let update = timer.update(now);
         let changed = state.latest_fields.get(&widget_id) != Some(&update.fields);
+        let completion_interrupt = record_pomodoro_update(state, &widget_id, update);
         if changed {
-            state.latest_fields.insert(widget_id.clone(), update.fields);
             state.dirty_widgets.insert(widget_id.clone());
         }
-        state.pomodoro_snapshots.insert(
-            widget_id.clone(),
-            PomodoroSnapshot {
-                widget_id: widget_id.clone(),
-                state: pomodoro_state(update.state),
-                duration_seconds: update.duration_seconds,
-                remaining_seconds: update.remaining_seconds,
-            },
-        );
-        if update.completion_interrupt && card_wants_completion_interrupt(&state.config, &widget_id)
-        {
+        if completion_interrupt {
             let _ = state
                 .interrupts
                 .schedule(widget_id.clone(), "Timer finished");
@@ -2187,18 +2125,9 @@ fn control_pomodoro(
         PomodoroAction::Toggle => timer.toggle(now),
         PomodoroAction::Reset => timer.reset(now),
     };
-    state.latest_fields.insert(widget_id.into(), update.fields);
+    let completion_interrupt = record_pomodoro_update(state, widget_id, update);
     state.dirty_widgets.insert(widget_id.into());
-    state.pomodoro_snapshots.insert(
-        widget_id.into(),
-        PomodoroSnapshot {
-            widget_id: widget_id.into(),
-            state: pomodoro_state(update.state),
-            duration_seconds: update.duration_seconds,
-            remaining_seconds: update.remaining_seconds,
-        },
-    );
-    if update.completion_interrupt && card_wants_completion_interrupt(&state.config, widget_id) {
+    if completion_interrupt {
         state
             .interrupts
             .schedule(widget_id, "Timer finished")
@@ -2211,6 +2140,26 @@ fn control_pomodoro(
         flush_interrupts(state, scheduler, device, now)?;
     }
     Ok(())
+}
+
+fn record_pomodoro_update(
+    state: &mut WorkerState,
+    widget_id: &str,
+    update: engine::pomodoro::PomodoroUpdate,
+) -> bool {
+    let completion_interrupt =
+        update.completion_interrupt && card_wants_completion_interrupt(&state.config, widget_id);
+    state.latest_fields.insert(widget_id.into(), update.fields);
+    state.pomodoro_snapshots.insert(
+        widget_id.into(),
+        PomodoroSnapshot {
+            widget_id: widget_id.into(),
+            state: pomodoro_state(update.state),
+            duration_seconds: update.duration_seconds,
+            remaining_seconds: update.remaining_seconds,
+        },
+    );
+    completion_interrupt
 }
 
 /// The configured alert for a card, or `CardAlert::None` if the card is
@@ -2437,10 +2386,6 @@ fn drain_device_events(
                 let ids = rotation_card_ids(&state.config);
                 if let Some(index) = ids.iter().position(|id| *id == received.event.screen_id) {
                     state.active_screen = Some(received.event.screen_id.clone());
-                    state
-                        .device
-                        .active_screen_id
-                        .clone_from(&state.active_screen);
                     // The gesture already changed the physical display. Remember it for
                     // future replay without issuing a redundant activation now.
                     state.active_screen_dirty = false;
@@ -2449,12 +2394,6 @@ fn drain_device_events(
                     state.active_scene_dirty = true;
                     // A manual swipe restarts the dwell from the card just landed on,
                     // rather than letting a soon-to-expire deadline advance early.
-                    // With a single in-rotation card this still re-arms unconditionally
-                    // (current_dwell can return Some for that lone card), so the
-                    // deadline fires once more and `advance_rotation` immediately
-                    // disarms it again via `clear_rotation` — one harmless extra
-                    // wake-and-clear cycle, not a leak.
-                    state.active_rotation_index = index;
                     scheduler.set_rotation(current_dwell(&state.config, index), now);
                 }
             }
@@ -2725,7 +2664,11 @@ fn field_boolean(fields: &[Field], key: &str) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum CardCandidate {
     Push(PushScene),
-    RasterOnly { bindings: BTreeSet<String> },
+    RasterOnly {
+        plugin_id: String,
+        snapshot: providers::ProviderSnapshot<serde_json::Value>,
+        bindings: BTreeSet<String>,
+    },
 }
 
 fn build_card_scene(
@@ -2743,16 +2686,16 @@ fn build_card_scene(
         .ok_or_else(|| format!("card {card_id:?} is not present in the active configuration"))?;
     let metrics = &BakedFontMetrics::SHIPPED;
     let scene = if let CardSettings::Plugin { plugin_id, .. } = card {
+        let host = plugin_host.ok_or_else(|| {
+            format!("card {card_id:?} cannot render because no plugin host is configured")
+        })?;
         let snapshot = plugin_snapshot.ok_or_else(|| {
             format!(
                 "card {card_id:?} has no fetched plugin snapshot cached yet; wait for its first refresh"
             )
         })?;
-        let host = plugin_host.ok_or_else(|| {
-            format!("card {card_id:?} cannot render because no plugin host is configured")
-        })?;
         let candidate = host
-            .render_scene(plugin_id, snapshot, metrics, revision)
+            .render_scene(plugin_id, snapshot, revision)
             .map_err(|error| {
                 format!("plugin {plugin_id:?} could not render card {card_id:?}: {error}")
             })?;
@@ -2764,7 +2707,11 @@ fn build_card_scene(
             // Nothing to validate or push: negotiation decides whether this
             // becomes a rasterized frame (Task 5) or a typed refusal.
             SceneCandidate::RasterOnly { bindings } => {
-                return Ok(CardCandidate::RasterOnly { bindings });
+                return Ok(CardCandidate::RasterOnly {
+                    plugin_id: plugin_id.clone(),
+                    snapshot: snapshot.clone(),
+                    bindings,
+                });
             }
         }
     } else {
@@ -2970,7 +2917,7 @@ fn negotiate_candidate(
 > {
     let requirements = match candidate {
         CardCandidate::Push(push) => render_negotiation::analyze_scene(&push.scene),
-        CardCandidate::RasterOnly { bindings } => {
+        CardCandidate::RasterOnly { bindings, .. } => {
             render_negotiation::analyze_raster_only(bindings.iter().cloned())
         }
     }
@@ -3195,13 +3142,7 @@ fn execute_raster_render(
     }
     state.next_scene_revision = revision;
     state.active_scene_dirty = false;
-    let request = match raster_request(state, &card_id, candidate, fields) {
-        Ok(request) => request,
-        Err(message) => {
-            record_scene_refusal(state, card_id, message);
-            return;
-        }
-    };
+    let request = raster_request(candidate, fields);
     let Some(host) = state.plugin_host.as_deref_mut() else {
         record_scene_refusal(
             state,
@@ -3327,42 +3268,21 @@ fn durable_asset_digests(
     )
 }
 
-fn raster_request(
-    state: &WorkerState,
-    card_id: &str,
-    candidate: &CardCandidate,
-    fields: &[Field],
-) -> Result<RasterRequest, String> {
+fn raster_request(candidate: &CardCandidate, fields: &[Field]) -> RasterRequest {
     match candidate {
-        CardCandidate::Push(push) => Ok(RasterRequest::DisplayList {
+        CardCandidate::Push(push) => RasterRequest::DisplayList {
             scene: push.scene.clone(),
             fields: fields.to_vec(),
-        }),
-        CardCandidate::RasterOnly { .. } => {
-            let plugin_id = state
-                .config
-                .cards
-                .iter()
-                .find_map(|card| match card {
-                    CardSettings::Plugin { id, plugin_id, .. } if id == card_id => {
-                        Some(plugin_id.clone())
-                    }
-                    _ => None,
-                })
-                .ok_or_else(|| format!("raster-only card {card_id:?} is not a plugin card"))?;
-            let snapshot = state
-                .plugin_snapshots
-                .get(card_id)
-                .cloned()
-                .ok_or_else(|| {
-                    format!("card {card_id:?} has no fetched plugin snapshot cached yet")
-                })?;
-            Ok(RasterRequest::PluginSvg {
-                plugin_id,
-                snapshot,
-                fields: fields.to_vec(),
-            })
-        }
+        },
+        CardCandidate::RasterOnly {
+            plugin_id,
+            snapshot,
+            ..
+        } => RasterRequest::PluginSvg {
+            plugin_id: plugin_id.clone(),
+            snapshot: snapshot.clone(),
+            fields: fields.to_vec(),
+        },
     }
 }
 
@@ -3939,6 +3859,17 @@ mod tests {
         }
     }
 
+    fn plugin_card(id: &str, title: &str, plugin_id: &str, refresh: RefreshPolicy) -> CardSettings {
+        CardSettings::Plugin {
+            id: id.into(),
+            title: title.into(),
+            plugin_id: plugin_id.into(),
+            tap_action: WidgetTapAction::None,
+            refresh,
+            alert: CardAlert::None,
+        }
+    }
+
     fn rotation_config(
         cards: Vec<CardSettings>,
         advance: CarouselAdvance,
@@ -4364,6 +4295,15 @@ mod tests {
         assert!(current_dwell(&manual_two_card, 1).is_none());
     }
 
+    #[test]
+    fn current_dwell_is_none_for_a_one_card_timed_playlist() {
+        let mut config = AppConfig::default();
+        config.playlists[0].advance = CarouselAdvance::Timed {
+            default_dwell_seconds: 5,
+        };
+        assert!(current_dwell(&config, 0).is_none());
+    }
+
     // F2: dwell is resolved per-card against the carousel default, not the other way
     // around. Uses the brief's own example: an explicit dwell wins over the default,
     // and an absent one falls back to it. If `current_dwell` ever ignored the card's own
@@ -4406,20 +4346,14 @@ mod tests {
             Duration::from_hours(1),
         );
         let mut state = WorkerState::new(config, now, &mut scheduler);
-        assert_eq!(state.active_rotation_index, 0);
         assert_eq!(state.active_screen.as_deref(), Some("a"));
 
         advance_rotation(&mut state, &mut scheduler, now);
-        assert_eq!(state.active_rotation_index, 1);
         assert_eq!(state.active_screen.as_deref(), Some("b"));
         assert!(state.active_screen_dirty);
 
         state.active_screen_dirty = false;
         advance_rotation(&mut state, &mut scheduler, now);
-        assert_eq!(
-            state.active_rotation_index, 0,
-            "wraps back to the first card"
-        );
         assert_eq!(state.active_screen.as_deref(), Some("a"));
         assert!(state.active_screen_dirty);
     }
@@ -4476,10 +4410,6 @@ mod tests {
             now,
         );
 
-        assert_eq!(
-            state.active_rotation_index, 1,
-            "\"c\" is rotation index 1 (within [\"a\", \"c\"]), not list position 2"
-        );
         assert_eq!(state.active_screen.as_deref(), Some("c"));
         // Re-armed from "c"'s own 5s dwell, not left over from "a".
         assert!(!scheduler.rotation_due(now + Duration::from_secs(4)));
@@ -4519,10 +4449,6 @@ mod tests {
 
         assert!(!shutting_down);
         reply_receiver.recv().unwrap().unwrap();
-        assert_eq!(
-            state.active_rotation_index, 1,
-            "\"c\" is rotation index 1 (within [\"a\", \"c\"]), not list position 2"
-        );
         assert_eq!(state.active_screen.as_deref(), Some("c"));
         // `process_command`'s `ActivateScreen` arm uses `Instant::now()` internally
         // (there is no injectable clock in this runtime), so assert with a margin
@@ -4571,10 +4497,7 @@ mod tests {
             &options,
         );
 
-        assert_eq!(
-            state.active_rotation_index, 1,
-            "rotation advances locally even while paused and disconnected"
-        );
+        assert_eq!(state.active_screen.as_deref(), Some("b"));
         assert!(
             state.active_screen_dirty,
             "queued for the device, not yet sent"
@@ -4601,20 +4524,8 @@ mod tests {
         )
     }
 
-    // Task 2 gated a pomodoro's completion interrupt on "any configured alert".
-    // Task 6 narrows that to `CardAlert::OnTimerFinish` specifically. This is the
-    // positive half of that narrowing (the negative half, `alert: none`, is
-    // already pinned by `pomodoro_completion_without_an_alert_does_not_schedule_an_interrupt`
-    // in `tests/runtime.rs`): with two pomodoros completing at the same instant,
-    // only the `OnTimerFinish` card's completion reaches the interrupt arbiter.
-    //
-    // NOTE (Task 6 review Critical-2): this test alone does *not* distinguish
-    // the narrowing from the old, wider Task 2 gate (`!alert.is_none()`) —
-    // `alert: none` vs. `OnTimerFinish` is handled identically by both. See
-    // `card_wants_completion_interrupt_rejects_before_event_even_on_a_pomodoro_card`
-    // below for the input that actually pins the narrowing.
     #[test]
-    fn only_on_timer_finish_alerts_fire_when_a_pomodoro_completes() {
+    fn mixed_pomodoro_completion_batch_queues_only_the_alerting_timer() {
         let now = Instant::now();
         let config = rotation_config(
             vec![
@@ -5503,7 +5414,6 @@ mod tests {
             &mut self,
             _plugin_id: &str,
             _snapshot: &providers::ProviderSnapshot<serde_json::Value>,
-            _metrics: &BakedFontMetrics,
             _revision: u32,
         ) -> Result<SceneCandidate, String> {
             self.candidate
@@ -5561,14 +5471,7 @@ mod tests {
     fn native_asset_transcript_confirms_durable_before_push_without_volatile_transfer() {
         let now = Instant::now();
         let digest = [0x11; 32];
-        let card = CardSettings::Plugin {
-            id: "asset-card".into(),
-            title: "Asset".into(),
-            plugin_id: "asset-plugin".into(),
-            tap_action: WidgetTapAction::None,
-            refresh: RefreshPolicy::Manual,
-            alert: CardAlert::None,
-        };
+        let card = plugin_card("asset-card", "Asset", "asset-plugin", RefreshPolicy::Manual);
         let config = rotation_config(vec![card], CarouselAdvance::Manual, &[("asset-card", None)]);
         let mut scheduler = fresh_scheduler(now);
         let mut state = WorkerState::new(config, now, &mut scheduler);
@@ -5898,7 +5801,6 @@ mod tests {
             &mut self,
             _plugin_id: &str,
             _snapshot: &providers::ProviderSnapshot<serde_json::Value>,
-            _metrics: &BakedFontMetrics,
             _revision: u32,
         ) -> Result<SceneCandidate, String> {
             unreachable!()
@@ -6171,39 +6073,13 @@ mod tests {
     }
 
     #[test]
-    fn build_card_scene_refuses_a_plugin_card_typed_and_visibly() {
-        // Until the first fetch lands there is no manifest input to compile. The
-        // runtime must refuse through the existing `Result<_, String>` ->
-        // `record_scene_refusal` -> `CardErrorKind::SceneRefused` path rather than
-        // panicking or drawing an unrelated built-in face.
-        let card = CardSettings::Plugin {
-            id: "aqi".into(),
-            title: "Air quality".into(),
-            plugin_id: "aqi".into(),
-            tap_action: WidgetTapAction::None,
-            refresh: RefreshPolicy::Interval { minutes: 15 },
-            alert: CardAlert::None,
-        };
-        let config = rotation_config(vec![card], CarouselAdvance::Manual, &[("aqi", None)]);
-
-        let error = build_card_scene(&config, "aqi", &[], None, None, 1).unwrap_err();
-
-        assert!(
-            error.contains("\"aqi\"") && error.contains("no fetched plugin snapshot"),
-            "expected a typed refusal naming the plugin card by id, got {error:?}"
+    fn plugin_provider_request_preserves_card_and_plugin_identity() {
+        let card = plugin_card(
+            "aqi",
+            "Air quality",
+            "curated-aqi",
+            RefreshPolicy::Interval { minutes: 15 },
         );
-    }
-
-    #[test]
-    fn plugin_provider_request_preserves_identity_and_refresh_policy() {
-        let card = CardSettings::Plugin {
-            id: "aqi".into(),
-            title: "Air quality".into(),
-            plugin_id: "curated-aqi".into(),
-            tap_action: WidgetTapAction::None,
-            refresh: RefreshPolicy::Interval { minutes: 15 },
-            alert: CardAlert::None,
-        };
         let config = rotation_config(vec![card], CarouselAdvance::Manual, &[("aqi", None)]);
         let now = Instant::now();
         let mut scheduler = fresh_scheduler(now);
@@ -6215,70 +6091,13 @@ mod tests {
         assert_eq!(request.title, "Air quality");
         assert!(matches!(
             request.provider,
-            ProviderRequest::Plugin {
-                plugin_id,
-                refresh_interval,
-            } if plugin_id == "curated-aqi" && refresh_interval == Duration::from_mins(15)
+            ProviderRequest::Plugin { plugin_id } if plugin_id == "curated-aqi"
         ));
     }
 
     #[test]
-    fn raw_plugin_value_survives_apply_provider_result_into_the_snapshot_cache() {
-        let card = CardSettings::Plugin {
-            id: "aqi".into(),
-            title: "Air quality".into(),
-            plugin_id: "aqi".into(),
-            tap_action: WidgetTapAction::None,
-            refresh: RefreshPolicy::Manual,
-            alert: CardAlert::None,
-        };
-        let config = rotation_config(vec![card], CarouselAdvance::Manual, &[("aqi", None)]);
-        let now = Instant::now();
-        let mut scheduler = fresh_scheduler(now);
-        let mut state = WorkerState::new(config, now, &mut scheduler);
-        let diagnostics = RuntimeDiagnosticCounters::default();
-        let refreshed_at = Utc::now();
-        let generation = state.generation;
-
-        apply_provider_result(
-            &mut state,
-            &mut scheduler,
-            &diagnostics,
-            now,
-            ProviderRefreshResult {
-                generation,
-                widget_id: "aqi".into(),
-                fields: Vec::new(),
-                value: Some(serde_json::json!({"aqi": 73, "category": "moderate"})),
-                refreshed_at: Some(refreshed_at),
-                age: Some(Duration::from_secs(9)),
-                stale: true,
-                error: Some("using last good response".into()),
-            },
-        );
-
-        assert_eq!(
-            state.plugin_snapshots.get("aqi"),
-            Some(&providers::ProviderSnapshot {
-                value: serde_json::json!({"aqi": 73, "category": "moderate"}),
-                refreshed_at: Some(refreshed_at),
-                age: Some(Duration::from_secs(9)),
-                stale: true,
-                error: Some("using last good response".into()),
-            })
-        );
-    }
-
-    #[test]
     fn plugin_snapshot_is_evicted_when_its_card_leaves_the_config() {
-        let card = CardSettings::Plugin {
-            id: "aqi".into(),
-            title: "Air quality".into(),
-            plugin_id: "aqi".into(),
-            tap_action: WidgetTapAction::None,
-            refresh: RefreshPolicy::Manual,
-            alert: CardAlert::None,
-        };
+        let card = plugin_card("aqi", "Air quality", "aqi", RefreshPolicy::Manual);
         let config = rotation_config(vec![card], CarouselAdvance::Manual, &[("aqi", None)]);
         let now = Instant::now();
         let mut scheduler = fresh_scheduler(now);
@@ -6309,7 +6128,6 @@ mod tests {
             title: "Air quality".into(),
             provider: ProviderRequest::Plugin {
                 plugin_id: "aqi".into(),
-                refresh_interval: Duration::from_mins(15),
             },
             active_provider_ids: vec!["aqi".into()],
             now: Utc::now(),
@@ -6342,7 +6160,6 @@ mod tests {
             &mut self,
             _plugin_id: &str,
             _snapshot: &providers::ProviderSnapshot<serde_json::Value>,
-            _metrics: &BakedFontMetrics,
             _revision: u32,
         ) -> Result<SceneCandidate, String> {
             unreachable!("this test exercises only full synchronization")
@@ -6351,14 +6168,7 @@ mod tests {
 
     #[test]
     fn asset_sync_failure_is_card_scoped_and_full_sync_continues() {
-        let card = CardSettings::Plugin {
-            id: "aqi".into(),
-            title: "Air quality".into(),
-            plugin_id: "aqi".into(),
-            tap_action: WidgetTapAction::None,
-            refresh: RefreshPolicy::Manual,
-            alert: CardAlert::None,
-        };
+        let card = plugin_card("aqi", "Air quality", "aqi", RefreshPolicy::Manual);
         let config = rotation_config(vec![card], CarouselAdvance::Manual, &[("aqi", None)]);
         let now = Instant::now();
         let mut scheduler = fresh_scheduler(now);
@@ -6381,14 +6191,7 @@ mod tests {
 
     #[test]
     fn full_sync_keep_set_retains_old_volatile_until_its_replacement_scene_succeeds() {
-        let card = CardSettings::Plugin {
-            id: "aqi".into(),
-            title: "Air quality".into(),
-            plugin_id: "aqi".into(),
-            tap_action: WidgetTapAction::None,
-            refresh: RefreshPolicy::Manual,
-            alert: CardAlert::None,
-        };
+        let card = plugin_card("aqi", "Air quality", "aqi", RefreshPolicy::Manual);
         let config = rotation_config(vec![card], CarouselAdvance::Manual, &[("aqi", None)]);
         let now = Instant::now();
         let mut scheduler = fresh_scheduler(now);
@@ -6419,7 +6222,6 @@ mod tests {
             &mut self,
             _plugin_id: &str,
             _snapshot: &providers::ProviderSnapshot<serde_json::Value>,
-            _metrics: &BakedFontMetrics,
             _revision: u32,
         ) -> Result<SceneCandidate, String> {
             unreachable!("this test exercises only full synchronization")
@@ -6436,14 +6238,7 @@ mod tests {
     /// in `synchronize_full` makes this fail.
     #[test]
     fn an_empty_desired_asset_set_sends_no_release_rather_than_wiping_the_device() {
-        let card = CardSettings::Plugin {
-            id: "aqi".into(),
-            title: "Air quality".into(),
-            plugin_id: "aqi".into(),
-            tap_action: WidgetTapAction::None,
-            refresh: RefreshPolicy::Manual,
-            alert: CardAlert::None,
-        };
+        let card = plugin_card("aqi", "Air quality", "aqi", RefreshPolicy::Manual);
         let config = rotation_config(vec![card], CarouselAdvance::Manual, &[("aqi", None)]);
         let now = Instant::now();
         let mut scheduler = fresh_scheduler(now);
@@ -6469,14 +6264,7 @@ mod tests {
     /// so the guard above cannot be satisfied by never reconciling at all.
     #[test]
     fn a_non_empty_desired_asset_set_still_sends_its_keep_set() {
-        let card = CardSettings::Plugin {
-            id: "aqi".into(),
-            title: "Air quality".into(),
-            plugin_id: "aqi".into(),
-            tap_action: WidgetTapAction::None,
-            refresh: RefreshPolicy::Manual,
-            alert: CardAlert::None,
-        };
+        let card = plugin_card("aqi", "Air quality", "aqi", RefreshPolicy::Manual);
         let config = rotation_config(vec![card], CarouselAdvance::Manual, &[("aqi", None)]);
         let now = Instant::now();
         let mut scheduler = fresh_scheduler(now);

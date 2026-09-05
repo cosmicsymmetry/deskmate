@@ -79,6 +79,12 @@ pub(crate) enum RuntimeCommand {
         widget_id: String,
         reply: CommandReply,
     },
+    InjectPluginSnapshot {
+        card_id: String,
+        plugin_id: String,
+        snapshot: providers::ProviderSnapshot<serde_json::Value>,
+        reply: CommandReply,
+    },
     ActivateScreen {
         screen_id: String,
         reply: CommandReply,

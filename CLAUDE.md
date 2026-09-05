@@ -75,10 +75,10 @@ of letting code and documentation diverge.
   Two items did not close: the `show_seconds`-false analog clock showed an
   undiagnosed wrong time (untested hypothesis: the test config pinned UTC while the
   board sits at UTC+4; the hour/minute angles provably do not depend on the flag),
-  and `unknown_field_count` is **not observable on hardware** — it is absent from
-  `StatusResponse` and `widget_model_unknown_field_count()` has no callers, so that
-  checklist item cannot be closed as written; a host test covers the weather field
-  set instead. Do not describe either as verified. The card model
+  and `unknown_field_count` is **not observable on hardware** — it was absent from
+  `StatusResponse` and `widget_model_unknown_field_count()` had no callers (the counter
+  and its getter were removed in the 2026-09-05 cleanup), so that checklist item cannot
+  be closed as written; a host test covers the weather field set instead. Do not describe either as verified. The card model
   was physically verified on 2026-08-06:
   eight of the nine checks pass, recorded in `docs/hardware/board-notes.md`. `AlertHold`
   is decided: `hold` is host-side bookkeeping only and never clears the panel, which

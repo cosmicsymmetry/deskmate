@@ -1339,8 +1339,8 @@ is what made the CLI sweep possible.
       **NOT VERIFIABLE ON HARDWARE — this item cannot be closed as written.**
       `unknown_field_count` never reaches the host: it is not a field in
       `StatusResponse`, and `widget_model_unknown_field_count()`
-      (`firmware/main/core/widget_model.c:323`) has **no callers anywhere in the
-      firmware**. The counter is accumulated and never read, so no host-observable
+      (`firmware/main/core/widget_model.c:323` at the time) had **no callers anywhere
+      in the firmware**; the counter and getter were removed in the 2026-09-05 cleanup. The counter is accumulated and never read, so no host-observable
       behaviour distinguishes zero from nonzero. An unknown field is counted and
       ignored; unlike a type mismatch, it does not reject the push.
 
@@ -3453,7 +3453,8 @@ tier networked, rotation 270, `active_screen_id: clock`. Counters clean after
    `ota.c:43` sets `OTA_CHECK_INTERVAL_MS` to 86,400,000 (24 h, ±1 h jitter),
    and `ota_task` checks once immediately at boot. The firmware *has* a
    force-check path — `ota_check_now()` (`ota.c:809`), reached by a request
-   carrying `OTA_CHECK_STATUS_REQUEST_ID` (`protocol_task.c:1468`) — but
+   carrying `OTA_CHECK_STATUS_REQUEST_ID` (`protocol_task.c:1468`; the sentinel was
+   removed in the 2026-09-05 cleanup because nothing ever sent it) — but
    **nothing host-side sends it**: the server has only three admin routes
    (create device, get device, put config), and neither the Mac app nor the
    `device`/`protocol` crates reference it. So publishing an image and waiting

@@ -4441,3 +4441,56 @@ device had already applied it (`rotation: 270`, and the stored config shows
 retained-scene rebuild, and the `BUSY`/OTA-owner interaction). It remains without an
 automated test and without a hardware observation. Stage 4 makes it more urgent because
 rasterization turns volatile assets into the common case.
+
+## Stage 4 Task 7 Phase A — asset-GC teardown, PARTIAL (2026-09-06)
+
+Board on `v2.0.0-live2`, networked tier, `dev-0005`, capabilities **491** (no bit 9 yet
+— correct for the predecessor image). WiFi re-provisioned over the cable to
+`Slate7Legacy` earlier this session; same device identity/token, no identity cost. Server
+redeployed 2026-09-05 from `f40958a`, registry 5/0
+(`agenda, aqi, claude-limits, svg-aqi, svg-live-clock`).
+
+**Method.** Stage 3b Task 9 Steps 1-5/7 already passed 2026-08-30, so Phase A is only
+Step 6, the teardown. Drove a registry-wide desired-asset change: moved
+`/var/lib/deskmate/plugins/aqi` aside (dropping its `icons.ttf`, digest `40bbbac71546`,
+from the desired set), restarted the server, let the device reconnect so `synchronize_full`
+issues an `AssetRelease` with the shrunk keep-set; then restored `aqi` and restarted again.
+
+**Observed (webcam clip `20260905T201625Z-gc-teardown.mp4`, 2 fps frames):**
+- **Scene rebuilt live, no reboot.** Across both registry changes (aqi out 20:16:30Z,
+  aqi back 20:20:09Z) the device uptime ran continuously to **749,961 ms** with
+  `valid_frames` climbing 237→456 and **0 malformed / 0 crc / 0 overflow**; `free_heap`
+  flat at ~8.315 MB (PSRAM). The panel tore down and rebuilt its scene without a blank
+  reboot: link re-established 2.4 s after each restart, `card_errors: []` throughout.
+- **Compaction did not wipe.** The device stayed healthy after the release — the empty-set
+  wipe hazard (`AssetRelease { digests: [] }`) did not fire, and the retained agenda badge
+  digest (`e19db5d47bbd`) stayed in the keep-set. This is the `synchronize_full` +
+  `compose_asset_keep_set` behaviour the wire-sequence test (`hostile_device.rs`) pins,
+  now exercised on hardware.
+- **`claude-limits` drew on the panel for the first time** (frame
+  `20260905T202312Z-phaseA-settled.jpg`): SESSION 40% / WEEKLY 19% / RESETS Sun 1:40 AM /
+  Wed 8:00 PM / "Max 5×", a clean Native scene that survived the teardown intact. Closes
+  the runbook's "claude-limits on the panel" debt.
+
+**NOT observed, and why (honest gaps, not failures):**
+- **Font-registry reset with a displayed registry font, and the glyph disappearing.**
+  None of `dev-0005`'s cards (clock, weather, rss, pomodoro, claude-limits) display a
+  registry font/image — the released `icons.ttf` was held but not on screen — so the
+  font-release-on-destroy step is not panel-visible on this config. The rebuild path that
+  contains `font_registry_reset()` did run (the scene rebuilt correctly with its baked-font
+  cards); the specific glyph-vanishes moment was not reproduced. Re-observing it would mean
+  re-treading 2026-08-30's operator-route glyph render purely to tear it down.
+- **Asset-store compaction counters.** The device exposes no asset-used-byte / DEAD-record
+  counter through `status` or the admin snapshot (`diagnostics` covers queues/providers
+  only), so "absent digest marked DEAD" is confirmed by wire contract and the
+  did-not-wipe/did-not-break evidence above, not by a device-reported number.
+- **The `BUSY`/OTA-owner interaction.** Needs an OTA in flight, which Phase A cannot have
+  without publishing firmware. Folded into Phase B Step 10's "repeat one release while OTA
+  owns the panel", recorded there as completing this clause — an explicit, planned
+  deviation from strict phase ordering (see the session runbook).
+
+**Verdict: Phase A did not fail** — the teardown/release/rebuild mechanism works on
+hardware and nothing regressed — but Step 6 is only **partially** observed. The
+font-vanish and BUSY/OTA pieces are deferred (the latter into Phase B by design; the
+former is not reproducible on this device's card set). Proceeding to Phase B is therefore
+justified, with the BUSY/OTA observation owed inside it.

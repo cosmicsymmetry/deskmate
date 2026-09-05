@@ -9,6 +9,7 @@ import {
   libraryCards,
 } from "../lib/configDraft";
 import { providerTrouble } from "../lib/providers";
+import { FieldIssues } from "./FieldIssues";
 import { Icon } from "./Icon";
 import type {
   AppConfig,
@@ -83,8 +84,13 @@ function tileValue(
       return fieldText(data, "hero") ?? "—";
     case "calendar":
     case "rss": {
-      const rows = (data?.fields ?? []).filter((field) => field.key.startsWith("row"));
-      return rows.length > 0 ? String(rows.length) : "—";
+      const rowCount = (data?.fields ?? []).filter(
+        (field) =>
+          /^row\d+_title$/.test(field.key) &&
+          field.value.kind === "text" &&
+          field.value.value.trim() !== "",
+      ).length;
+      return rowCount > 0 ? String(rowCount) : "—";
     }
   }
 }
@@ -94,19 +100,6 @@ function tileValue(
 function removeLabel(card: CardSettings): string {
   const title = cardTitle(card);
   return title ? `${cardLabel(card)} — ${title}` : cardLabel(card);
-}
-
-function FieldIssues({ issues }: { issues: ValidationIssue[] }) {
-  if (issues.length === 0) {
-    return null;
-  }
-  return (
-    <ul className="field-errors card-tile__issues" role="alert">
-      {issues.map((issue) => (
-        <li key={`${issue.path}:${issue.code}`}>{issue.message}</li>
-      ))}
-    </ul>
-  );
 }
 
 export function CardList({
@@ -150,13 +143,7 @@ export function CardList({
         </span>
       </div>
 
-      {containerIssues.length > 0 && (
-        <ul className="field-errors" role="alert">
-          {containerIssues.map((issue) => (
-            <li key={`${issue.path}:${issue.code}`}>{issue.message}</li>
-          ))}
-        </ul>
-      )}
+      <FieldIssues issues={containerIssues} />
 
       {cards.length === 0 ? (
         <div className="empty-state">
@@ -217,7 +204,7 @@ export function CardList({
                 >
                   <Icon name="close" />
                 </button>
-                <FieldIssues issues={cardIssues} />
+                <FieldIssues issues={cardIssues} className="card-tile__issues" />
               </li>
             );
           })}

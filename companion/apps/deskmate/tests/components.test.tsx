@@ -64,12 +64,15 @@ let provisionImpl: (input: ProvisionDeviceInput) => Promise<NetworkSettings> = a
   device_id: input.device_id,
   tier: input.tier,
 });
-let setServerEndpointImpl: (serverUrl: string, adminToken: string) => Promise<NetworkSettings> =
-  async (serverUrl) => ({
-    server_url: serverUrl,
-    device_id: "desk-1",
-    tier: "networked",
-  });
+let setServerEndpointImpl: (
+  serverUrl: string,
+  deviceId: string,
+  adminToken: string,
+) => Promise<NetworkSettings> = async (serverUrl, deviceId) => ({
+  server_url: serverUrl,
+  device_id: deviceId,
+  tier: "networked",
+});
 let useLocalOwnershipImpl: () => Promise<NetworkSettings> = async () => ({
   server_url: "https://desk.example",
   device_id: "desk-1",
@@ -86,8 +89,8 @@ mock.module("../src/lib/tauri", () => ({
   saveServerConfig: (config: AppConfig) => serverSaveImpl(config),
   getNetworkSettings: () => networkSettingsImpl(),
   provisionDevice: (input: ProvisionDeviceInput) => provisionImpl(input),
-  setServerEndpoint: (serverUrl: string, adminToken: string) =>
-    setServerEndpointImpl(serverUrl, adminToken),
+  setServerEndpoint: (serverUrl: string, deviceId: string, adminToken: string) =>
+    setServerEndpointImpl(serverUrl, deviceId, adminToken),
   chooseLocalOwnership: () => useLocalOwnershipImpl(),
   getAutostartStatus: async () => ({ enabled: false, preference_enabled: false }),
 }));
@@ -166,7 +169,7 @@ function cardListConfig(
   entries = cardList.map((card) => ({ card_id: card.id, dwell_seconds: null })),
 ): AppConfig {
   return {
-    schema_version: 4,
+    schema_version: snapshot.config.schema_version,
     preferences: { timezone: "UTC", autostart: false, paused: false, orientation: "landscape" },
     cards: cardList,
     assets: [],
@@ -218,12 +221,10 @@ describe("settings accessibility and states", () => {
     tier,
     wifiState,
     ip,
-    ssid = "",
   }: {
     tier: "local" | "networked";
     wifiState: "down" | "connected";
     ip: string;
-    ssid?: string;
   }) {
     // Deliberately include hostile extra properties at the runtime boundary. The
     // public prop type does not admit them, and the component must continue to ignore
@@ -231,7 +232,6 @@ describe("settings accessibility and states", () => {
     const publicSettingsWithStoredSecrets = {
       serverUrl: "https://desk.example",
       deviceId: "desk-1",
-      ssid,
       passphrase: "stored-wifi-secret",
       deviceToken: "stored-device-secret",
       adminToken: "stored-admin-secret",
@@ -282,9 +282,7 @@ describe("settings accessibility and states", () => {
       tier: "networked",
       wifiState: "connected",
       ip: "192.168.1.42",
-      ssid: "home-network",
     });
-    expect(html).toContain("home-network");
     expect(html).toContain("https://desk.example");
     expect(html).toContain("desk-1");
     expect(html).not.toContain("stored-wifi-secret");
@@ -326,7 +324,6 @@ describe("settings accessibility and states", () => {
             settings={{
               serverUrl: "https://desk.example",
               deviceId: "desk-1",
-              ssid: "home-network",
             }}
             onPair={async (input) => {
               submitted = input;
@@ -338,6 +335,7 @@ describe("settings accessibility and states", () => {
         ),
       );
       await act(async () => {
+        setInput("WiFi network", "home-network");
         setInput("WiFi passphrase", "wifi-secret-92");
         setInput("Device token", "device-secret-17");
         setInput("Admin token", "admin-secret-46");
@@ -369,6 +367,7 @@ describe("settings accessibility and states", () => {
 
   test("the mounted pairing flow provisions before persisting server access", async () => {
     const order: string[] = [];
+    let serverAccess: [string, string, string] | null = null;
     snapshotImpl = async () => snapshot;
     networkSettingsImpl = async () => ({
       server_url: "https://desk.example",
@@ -383,9 +382,10 @@ describe("settings accessibility and states", () => {
         tier: input.tier,
       };
     };
-    setServerEndpointImpl = async (serverUrl) => {
+    setServerEndpointImpl = async (serverUrl, deviceId, adminToken) => {
       order.push("server-access");
-      return { server_url: serverUrl, device_id: "desk-1", tier: "networked" };
+      serverAccess = [serverUrl, deviceId, adminToken];
+      return { server_url: serverUrl, device_id: deviceId, tier: "networked" };
     };
     previewImpl = async () => ({ png_base64: "cHJldmlldw==", sample: false });
 
@@ -417,6 +417,7 @@ describe("settings accessibility and states", () => {
       await waitFor(() => expect(order).toHaveLength(2));
 
       expect(order).toEqual(["provision", "server-access"]);
+      expect(serverAccess).toEqual(["https://desk.example", "desk-1", "admin-secret"]);
     } finally {
       await act(async () => root.unmount());
       container.remove();
@@ -425,9 +426,9 @@ describe("settings accessibility and states", () => {
         device_id: input.device_id,
         tier: input.tier,
       });
-      setServerEndpointImpl = async (serverUrl) => ({
+      setServerEndpointImpl = async (serverUrl, deviceId) => ({
         server_url: serverUrl,
-        device_id: "desk-1",
+        device_id: deviceId,
         tier: "networked",
       });
     }
@@ -610,6 +611,40 @@ describe("settings accessibility and states", () => {
     );
     expect(library).toContain("Digital clock");
     expect(library).not.toContain("card-tile__name");
+  });
+
+  test("row-list tiles count only populated title fields from real provider snapshots", () => {
+    const calendar = calendarCard("calendar");
+    const html = renderToStaticMarkup(
+      <CardList
+        config={cardListConfig([calendar])}
+        issues={[]}
+        cardData={[
+          {
+            card_id: calendar.id,
+            fields: [
+              { key: "row0_title", value: { kind: "text", value: "Standup" } },
+              { key: "row0_time", value: { kind: "text", value: "09:30" } },
+              { key: "row1_title", value: { kind: "text", value: "Design review" } },
+              { key: "row1_time", value: { kind: "text", value: "13:00" } },
+              { key: "row2_title", value: { kind: "text", value: "" } },
+              { key: "row2_time", value: { kind: "text", value: "" } },
+              { key: "row3_title", value: { kind: "text", value: "   " } },
+              { key: "row3_time", value: { kind: "text", value: "" } },
+              { key: "row4_title", value: { kind: "text", value: "" } },
+              { key: "row4_time", value: { kind: "text", value: "" } },
+            ],
+          },
+        ]}
+        pomodoros={[]}
+        providers={[]}
+        selectedCardId={calendar.id}
+        onSelect={() => {}}
+        onAdd={() => {}}
+        onRemove={() => {}}
+      />,
+    );
+    expect(html).toContain('<strong class="card-tile__value numeral">2</strong>');
   });
 
   test("never shows the wire id", () => {
@@ -1209,7 +1244,7 @@ describe("settings accessibility and states", () => {
       message: refusal,
     });
 
-    expect(editor).toContain('class="panel editor-panel"');
+    expect(editor).toContain('class="panel"');
     expect(editor).toContain("This card could not be rendered.");
     expect(editor).toContain(refusal);
     expect(editor).toContain("time:HH:mm");
@@ -1277,7 +1312,7 @@ describe("settings accessibility and states", () => {
       expect(img).not.toBeNull();
       expect(img?.getAttribute("src")).toBe("data:image/png;base64,Zmlyc3QtZnJhbWU=");
     });
-    expect(container.querySelector(".preview-sample-badge")).toBeNull();
+    expect(container.querySelector(".stage__badge")).toBeNull();
     await act(async () => root.unmount());
   });
 
@@ -1475,7 +1510,7 @@ describe("settings accessibility and states", () => {
 
   function filmstripConfig(): AppConfig {
     return {
-      schema_version: 4,
+      schema_version: snapshot.config.schema_version,
       preferences: { timezone: "UTC", autostart: false, paused: false, orientation: "landscape" },
       cards: [
         calendarCard("first", "Desk"),

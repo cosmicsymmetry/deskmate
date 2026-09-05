@@ -1,8 +1,5 @@
 import type {
   AppConfig,
-  CardAlert,
-  CardDataSnapshot,
-  CardFieldValue,
   CardKind,
   CardSettings,
   CarouselAdvance,
@@ -248,18 +245,6 @@ export function activePlaylist(config: AppConfig): Playlist | null {
   return config.playlists.find((playlist) => playlist.id === config.active_playlist_id) ?? null;
 }
 
-export function playlistEntries(config: AppConfig, playlistId: string): CardSettings[] {
-  const playlist = config.playlists.find((candidate) => candidate.id === playlistId);
-  if (!playlist) {
-    return [];
-  }
-  const cards = new Map(config.cards.map((card) => [card.id, card]));
-  return playlist.entries.flatMap((entry) => {
-    const card = cards.get(entry.card_id);
-    return card ? [card] : [];
-  });
-}
-
 export function libraryCards(config: AppConfig): CardSettings[] {
   return config.cards;
 }
@@ -456,24 +441,6 @@ export function loopSeconds(config: AppConfig, playlistId: string): number | nul
   }
   const fallback = playlist.advance.default_dwell_seconds;
   return playlist.entries.reduce((total, entry) => total + (entry.dwell_seconds ?? fallback), 0);
-}
-
-/// The published field values for one card, keyed by field name — e.g.
-/// `row0_title`, `stale`, `next_start_unix_ms`. These are the SAME values
-/// the physical device receives, sourced from `AppSnapshot.card_data`, not
-/// from the (possibly unsaved) draft. An empty map means the runtime has no
-/// snapshot for this card yet — never pushed, because the card was just
-/// added and never saved — which is the one condition callers should treat
-/// as "show a clearly marked sample" rather than as empty real data.
-export function cardFields(
-  cardData: CardDataSnapshot[],
-  cardId: string,
-): Map<string, CardFieldValue> {
-  const snapshot = cardData.find((entry) => entry.card_id === cardId);
-  if (!snapshot) {
-    return new Map();
-  }
-  return new Map(snapshot.fields.map((field) => [field.key, field.value]));
 }
 
 /// One ribbon segment: an active-playlist card plus its resolved dwell and the
@@ -713,11 +680,6 @@ export function issuesForField(cardIssues: ValidationIssue[], field: string): Va
     const suffix = dot < 0 ? "" : issue.path.slice(dot + 1);
     return suffix === field;
   });
-}
-
-/// Applies a new alert to a card. Playlist membership is independent of alerts.
-export function withAlert(card: CardSettings, alert: CardAlert): CardSettings {
-  return { ...card, alert };
 }
 
 /// A plain-language statement of what tapping this card does, for the

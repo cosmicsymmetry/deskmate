@@ -18,7 +18,6 @@ interface NetworkDeviceView {
 interface NetworkPanelSettings {
   serverUrl: string;
   deviceId: string;
-  ssid: string;
 }
 
 interface NetworkPanelProps {
@@ -63,7 +62,7 @@ export function NetworkPanel({
   allowLocalOverride = false,
   onUseLocalMode,
 }: NetworkPanelProps) {
-  const [ssid, setSsid] = useState(settings.ssid);
+  const [ssid, setSsid] = useState("");
   const [serverUrl, setServerUrl] = useState(settings.serverUrl);
   const [deviceId, setDeviceId] = useState(settings.deviceId);
   const [passphrase, setPassphrase] = useState("");
@@ -73,7 +72,6 @@ export function NetworkPanel({
   const [announcement, setAnnouncement] = useState("");
   const [error, setError] = useState("");
 
-  useEffect(() => setSsid(settings.ssid), [settings.ssid]);
   useEffect(() => setServerUrl(settings.serverUrl), [settings.serverUrl]);
   useEffect(() => setDeviceId(settings.deviceId), [settings.deviceId]);
 

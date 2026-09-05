@@ -4,9 +4,9 @@ import {
   issuesForField,
   numberValue,
   tapActionDescription,
-  withAlert,
 } from "../lib/configDraft";
 import { providerTrouble } from "../lib/providers";
+import { FieldIssues } from "./FieldIssues";
 import { Icon } from "./Icon";
 import type {
   AlertHold,
@@ -44,19 +44,6 @@ interface CardEditorProps {
   onTimerAction: (action: "start" | "pause" | "reset") => void;
   onChooseCalendarFile: () => void;
   onRefreshProvider: () => void;
-}
-
-function FieldIssues({ issues }: { issues: ValidationIssue[] }) {
-  if (issues.length === 0) {
-    return null;
-  }
-  return (
-    <ul className="field-errors" role="alert">
-      {issues.map((issue) => (
-        <li key={`${issue.path}:${issue.code}`}>{issue.message}</li>
-      ))}
-    </ul>
-  );
 }
 
 function HoldSelector({
@@ -125,7 +112,7 @@ export function CardEditor({
 }: CardEditorProps) {
   if (!card) {
     return (
-      <section className="panel editor-panel" aria-labelledby="editor-heading">
+      <section className="panel" aria-labelledby="editor-heading">
         <div className="panel-heading">
           <div>
             <h2 id="editor-heading">Choose a card</h2>
@@ -141,11 +128,10 @@ export function CardEditor({
 
   const fieldIssues = (field: string) => issuesForField(issues, field);
   const trouble = providerTrouble(provider);
-  const canAlert = card.kind === "pomodoro" || card.kind === "calendar";
-  const setAlert = (alert: CardAlert) => onChange(withAlert(card, alert));
+  const setAlert = (alert: CardAlert) => onChange({ ...card, alert });
 
   return (
-    <section className="panel editor-panel" aria-labelledby="editor-heading">
+    <section className="panel" aria-labelledby="editor-heading">
       <div className="panel-heading">
         <div className="editor-title">
           <h2 id="editor-heading">{cardLabel(card)}</h2>
@@ -188,32 +174,46 @@ export function CardEditor({
       )}
 
       <div className="form-grid">
+        {card.kind !== "pomodoro" && (
+          <label className="field">
+            <span>{card.kind === "clock" ? "Name" : "Heading"}</span>
+            <input
+              value={card.title}
+              maxLength={64}
+              onChange={(event) => onChange({ ...card, title: event.currentTarget.value })}
+              aria-invalid={fieldIssues("title").length > 0}
+            />
+            <FieldIssues issues={fieldIssues("title")} />
+          </label>
+        )}
+
+        {(card.kind === "json-feed" || card.kind === "rss") && (
+          <label className="field">
+            <span>Feed address</span>
+            <input
+              type="url"
+              value={card.url}
+              maxLength={2048}
+              placeholder={`https://example.com/${card.kind === "json-feed" ? "data.json" : "feed.xml"}`}
+              onChange={(event) => onChange({ ...card, url: event.currentTarget.value })}
+              aria-invalid={fieldIssues("url").length > 0}
+            />
+            <FieldIssues issues={fieldIssues("url")} />
+          </label>
+        )}
+
         {card.kind === "clock" && (
-          <>
-            <label className="field">
-              <span>Name</span>
-              <input
-                value={card.title}
-                maxLength={64}
-                onChange={(event) => onChange({ ...card, title: event.currentTarget.value })}
-                aria-invalid={fieldIssues("title").length > 0}
-              />
-              <FieldIssues issues={fieldIssues("title")} />
-            </label>
-            <label className="check-field">
-              <input
-                type="checkbox"
-                checked={card.show_seconds}
-                onChange={(event) =>
-                  onChange({ ...card, show_seconds: event.currentTarget.checked })
-                }
-              />
-              <span>
-                <strong>Show seconds</strong>
-                <small>Add seconds beside the large time.</small>
-              </span>
-            </label>
-          </>
+          <label className="check-field">
+            <input
+              type="checkbox"
+              checked={card.show_seconds}
+              onChange={(event) => onChange({ ...card, show_seconds: event.currentTarget.checked })}
+            />
+            <span>
+              <strong>Show seconds</strong>
+              <small>Add seconds beside the large time.</small>
+            </span>
+          </label>
         )}
 
         {card.kind === "pomodoro" && (
@@ -292,16 +292,6 @@ export function CardEditor({
 
         {card.kind === "calendar" && (
           <>
-            <label className="field">
-              <span>Heading</span>
-              <input
-                value={card.title}
-                maxLength={64}
-                onChange={(event) => onChange({ ...card, title: event.currentTarget.value })}
-                aria-invalid={fieldIssues("title").length > 0}
-              />
-              <FieldIssues issues={fieldIssues("title")} />
-            </label>
             <fieldset className="source-picker">
               <legend>Calendar source</legend>
               <label>
@@ -372,16 +362,6 @@ export function CardEditor({
         {card.kind === "weather" && (
           <>
             <label className="field">
-              <span>Heading</span>
-              <input
-                value={card.title}
-                maxLength={64}
-                onChange={(event) => onChange({ ...card, title: event.currentTarget.value })}
-                aria-invalid={fieldIssues("title").length > 0}
-              />
-              <FieldIssues issues={fieldIssues("title")} />
-            </label>
-            <label className="field">
               <span>Location</span>
               <input
                 value={card.location}
@@ -408,136 +388,88 @@ export function CardEditor({
         )}
 
         {card.kind === "json-feed" && (
-          <>
-            <label className="field">
-              <span>Heading</span>
-              <input
-                value={card.title}
-                maxLength={64}
-                onChange={(event) => onChange({ ...card, title: event.currentTarget.value })}
-                aria-invalid={fieldIssues("title").length > 0}
-              />
-              <FieldIssues issues={fieldIssues("title")} />
-            </label>
-            <label className="field">
-              <span>Feed address</span>
-              <input
-                type="url"
-                value={card.url}
-                maxLength={2048}
-                placeholder="https://example.com/data.json"
-                onChange={(event) => onChange({ ...card, url: event.currentTarget.value })}
-                aria-invalid={fieldIssues("url").length > 0}
-              />
-              <FieldIssues issues={fieldIssues("url")} />
-            </label>
-            <fieldset className="mapping-list">
-              <legend>Field mappings</legend>
-              {card.mappings.length === 0 && (
-                <p className="behaviour-hint">
-                  No fields mapped yet. Add one to pull a value out of the feed.
-                </p>
-              )}
-              {card.mappings.map((mapping, index) => {
-                const updateMapping = (patch: Partial<JsonFieldMapping>) =>
-                  onChange({
-                    ...card,
-                    mappings: card.mappings.map((entry, entryIndex) =>
-                      entryIndex === index ? { ...entry, ...patch } : entry,
-                    ),
-                  });
-                return (
-                  // biome-ignore lint/suspicious/noArrayIndexKey: mappings have no id field; rows are addressed by position.
-                  <div className="mapping-row" key={index}>
-                    <input
-                      aria-label="Field name"
-                      value={mapping.field}
-                      maxLength={32}
-                      placeholder="field name"
-                      onChange={(event) => updateMapping({ field: event.currentTarget.value })}
-                      aria-invalid={fieldIssues(`mappings[${index}].field`).length > 0}
-                    />
-                    <input
-                      aria-label="JSON path"
-                      value={mapping.path}
-                      maxLength={256}
-                      placeholder="json.path.to.value"
-                      onChange={(event) => updateMapping({ path: event.currentTarget.value })}
-                      aria-invalid={fieldIssues(`mappings[${index}].path`).length > 0}
-                    />
-                    <button
-                      type="button"
-                      className="text-button text-button--danger"
-                      onClick={() =>
-                        onChange({
-                          ...card,
-                          mappings: card.mappings.filter((_, entryIndex) => entryIndex !== index),
-                        })
-                      }
-                    >
-                      Remove
-                    </button>
-                    <FieldIssues issues={fieldIssues(`mappings[${index}].field`)} />
-                    <FieldIssues issues={fieldIssues(`mappings[${index}].path`)} />
-                  </div>
-                );
-              })}
-              <button
-                type="button"
-                className="button button--quiet"
-                disabled={card.mappings.length >= MAX_JSON_MAPPINGS}
-                onClick={() =>
-                  onChange({ ...card, mappings: [...card.mappings, { field: "", path: "" }] })
-                }
-              >
-                Add field mapping
-              </button>
-              <FieldIssues issues={fieldIssues("mappings")} />
-            </fieldset>
-          </>
+          <fieldset className="mapping-list">
+            <legend>Field mappings</legend>
+            {card.mappings.length === 0 && (
+              <p className="behaviour-hint">
+                No fields mapped yet. Add one to pull a value out of the feed.
+              </p>
+            )}
+            {card.mappings.map((mapping, index) => {
+              const updateMapping = (patch: Partial<JsonFieldMapping>) =>
+                onChange({
+                  ...card,
+                  mappings: card.mappings.map((entry, entryIndex) =>
+                    entryIndex === index ? { ...entry, ...patch } : entry,
+                  ),
+                });
+              return (
+                // biome-ignore lint/suspicious/noArrayIndexKey: mappings have no id field; rows are addressed by position.
+                <div className="mapping-row" key={index}>
+                  <input
+                    aria-label="Field name"
+                    value={mapping.field}
+                    maxLength={32}
+                    placeholder="field name"
+                    onChange={(event) => updateMapping({ field: event.currentTarget.value })}
+                    aria-invalid={fieldIssues(`mappings[${index}].field`).length > 0}
+                  />
+                  <input
+                    aria-label="JSON path"
+                    value={mapping.path}
+                    maxLength={256}
+                    placeholder="json.path.to.value"
+                    onChange={(event) => updateMapping({ path: event.currentTarget.value })}
+                    aria-invalid={fieldIssues(`mappings[${index}].path`).length > 0}
+                  />
+                  <button
+                    type="button"
+                    className="text-button text-button--danger"
+                    onClick={() =>
+                      onChange({
+                        ...card,
+                        mappings: card.mappings.filter((_, entryIndex) => entryIndex !== index),
+                      })
+                    }
+                  >
+                    Remove
+                  </button>
+                  <FieldIssues issues={fieldIssues(`mappings[${index}].field`)} />
+                  <FieldIssues issues={fieldIssues(`mappings[${index}].path`)} />
+                </div>
+              );
+            })}
+            <button
+              type="button"
+              className="button button--quiet"
+              disabled={card.mappings.length >= MAX_JSON_MAPPINGS}
+              onClick={() =>
+                onChange({ ...card, mappings: [...card.mappings, { field: "", path: "" }] })
+              }
+            >
+              Add field mapping
+            </button>
+            <FieldIssues issues={fieldIssues("mappings")} />
+          </fieldset>
         )}
 
         {card.kind === "rss" && (
-          <>
-            <label className="field">
-              <span>Heading</span>
-              <input
-                value={card.title}
-                maxLength={64}
-                onChange={(event) => onChange({ ...card, title: event.currentTarget.value })}
-                aria-invalid={fieldIssues("title").length > 0}
-              />
-              <FieldIssues issues={fieldIssues("title")} />
-            </label>
-            <label className="field">
-              <span>Feed address</span>
-              <input
-                type="url"
-                value={card.url}
-                maxLength={2048}
-                placeholder="https://example.com/feed.xml"
-                onChange={(event) => onChange({ ...card, url: event.currentTarget.value })}
-                aria-invalid={fieldIssues("url").length > 0}
-              />
-              <FieldIssues issues={fieldIssues("url")} />
-            </label>
-            <label className="field">
-              <span>Headlines shown</span>
-              <input
-                type="number"
-                className="numeral"
-                min={1}
-                max={MAX_RSS_ITEMS}
-                step={1}
-                value={card.max_items}
-                onChange={(event) =>
-                  onChange({ ...card, max_items: numberValue(event.currentTarget.value) })
-                }
-                aria-invalid={fieldIssues("max_items").length > 0}
-              />
-              <FieldIssues issues={fieldIssues("max_items")} />
-            </label>
-          </>
+          <label className="field">
+            <span>Headlines shown</span>
+            <input
+              type="number"
+              className="numeral"
+              min={1}
+              max={MAX_RSS_ITEMS}
+              step={1}
+              value={card.max_items}
+              onChange={(event) =>
+                onChange({ ...card, max_items: numberValue(event.currentTarget.value) })
+              }
+              aria-invalid={fieldIssues("max_items").length > 0}
+            />
+            <FieldIssues issues={fieldIssues("max_items")} />
+          </label>
         )}
 
         {/* Shared across every kind whose refresh policy is an interval — calendar,
@@ -574,7 +506,7 @@ export function CardEditor({
           </label>
         )}
 
-        {canAlert && card.kind === "pomodoro" && (
+        {card.kind === "pomodoro" && (
           <fieldset className="alert-fieldset">
             <legend>Alert</legend>
             <label className="check-field">
@@ -614,7 +546,7 @@ export function CardEditor({
           </fieldset>
         )}
 
-        {canAlert && card.kind === "calendar" && (
+        {card.kind === "calendar" && (
           <fieldset className="alert-fieldset">
             <legend>Alert</legend>
             <label className="check-field">

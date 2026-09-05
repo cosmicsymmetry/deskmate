@@ -228,9 +228,7 @@ export function LoopRing({ config, selectedCardId, onSelect, onReorder }: LoopRi
           {playlist?.name}
         </p>
         <div className="loop__head-right">
-          <span className="tile-label tile-label--quiet">
-            {isTimed ? "Timed loop" : "Manual order"}
-          </span>
+          <span className="tile-label">{isTimed ? "Timed loop" : "Manual order"}</span>
           {isTimed && segments.length > 1 && (
             <div className="loop__transport">
               <button
@@ -286,7 +284,7 @@ export function LoopRing({ config, selectedCardId, onSelect, onReorder }: LoopRi
             <strong className="loop__total numeral">
               {isTimed && total !== null ? compactDuration(total) : String(segments.length)}
             </strong>
-            <span className="tile-label tile-label--quiet">
+            <span className="tile-label">
               {isTimed ? "Loop length" : segments.length === 1 ? "Card" : "Cards"}
             </span>
           </div>

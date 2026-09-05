@@ -57,7 +57,6 @@
 
   /* The panel is an OLED. It is black in every scheme. */
   --stage: #000000;
-  --stage-ink: #ffffff;
   --stage-bloom: 0 14px 34px -18px rgb(0 0 0 / 40%);
 
   --r-tile: 18px;
@@ -237,12 +236,9 @@ h3 {
 /*
  * The label type role. One size, one weight, one tracking, everywhere — it is what
  * makes a complication read as a complication rather than as a heading.
- * `.eyebrow`, `.step-label` and `.section-label` are legacy aliases kept so that
- * markup outside the rewritten components keeps the same voice.
+ * `.section-label` carries the same role in the playlist editor.
  */
 .tile-label,
-.eyebrow,
-.step-label,
 .section-label {
   display: block;
   margin: 0;
@@ -251,10 +247,6 @@ h3 {
   font-weight: 700;
   letter-spacing: 0.085em;
   text-transform: uppercase;
-}
-
-.tile-label--quiet {
-  color: var(--ink-3);
 }
 
 /* ── Shell ─────────────────────────────────────────────────────────────── */
@@ -466,13 +458,6 @@ h3 {
   gap: 7px;
 }
 
-.stage__head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  padding: 0 2px;
-}
-
 /*
  * The one emissive object in the window. The bloom is the panel's own light
  * falling on the desk behind it, which is why nothing else in this design carries
@@ -523,12 +508,6 @@ h3 {
   font-weight: 700;
   letter-spacing: 0.06em;
   text-transform: uppercase;
-}
-
-.stage__note {
-  padding: 0 2px;
-  color: var(--ink-3);
-  font-size: 0.7rem;
 }
 
 /* ── The loop ring ─────────────────────────────────────────────────────── */
@@ -626,10 +605,8 @@ h3 {
 }
 
 .loop__total {
-  font-family: var(--round);
   font-size: 1.75rem;
   font-weight: 540;
-  font-variant-numeric: tabular-nums;
   letter-spacing: -0.02em;
   line-height: 1;
 }
@@ -786,10 +763,7 @@ h3 {
 /* ── Panels in the work column ─────────────────────────────────────────── */
 
 .panel,
-.playlist-panel,
-.network-panel,
-.editor-panel,
-.preferences {
+.network-panel {
   display: flex;
   flex-direction: column;
   gap: 12px;
@@ -827,10 +801,6 @@ h3 {
   color: var(--ink-3);
   font-size: 0.72rem;
   font-weight: 560;
-}
-
-.panel-heading--compact {
-  gap: 8px;
 }
 
 .count-badge {
@@ -913,10 +883,8 @@ fieldset legend {
 }
 
 .card-tile__value {
-  font-family: var(--round);
   font-size: 1.75rem;
   font-weight: 500;
-  font-variant-numeric: tabular-nums;
   letter-spacing: -0.025em;
   line-height: 1.15;
 }
@@ -1493,8 +1461,6 @@ fieldset legend {
   padding: 5px 8px;
   font-size: 0.73rem;
   text-align: right;
-  font-family: var(--round);
-  font-variant-numeric: tabular-nums;
 }
 
 .card-row__moves {
@@ -1747,11 +1713,6 @@ fieldset legend {
 
 .button--quiet:hover:not(:disabled) {
   background: var(--tile-2);
-}
-
-.button--quiet.is-armed {
-  border-color: color-mix(in srgb, var(--warn) 50%, transparent);
-  color: var(--warn);
 }
 
 .button--secondary {

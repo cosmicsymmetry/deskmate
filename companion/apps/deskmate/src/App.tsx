@@ -643,7 +643,6 @@ export function App() {
             settings={{
               serverUrl: networkSettings.server_url,
               deviceId: networkSettings.device_id,
-              ssid: "",
             }}
             onPair={async (input) => {
               await pairDevice(input);

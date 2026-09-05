@@ -5,7 +5,6 @@ import {
   addCard,
   addEntry,
   addPlaylist,
-  cardFields,
   cardMoveFromKey,
   cardsOutsidePlaylist,
   cardsContainerIssues,
@@ -24,7 +23,6 @@ import {
   moveEntry,
   nextFilmstripCardId,
   numberValue,
-  playlistEntries,
   removeCard,
   removeEntry,
   removePlaylist,
@@ -33,14 +31,13 @@ import {
   setEntryDwell,
   setPlaylistAdvance,
   tapActionDescription,
-  withAlert,
 } from "../src/lib/configDraft";
-import type { AppConfig, CardDataSnapshot, CardSettings, ValidationIssue } from "../src/lib/types";
+import type { AppConfig, ValidationIssue } from "../src/lib/types";
 import { ipcContractFixtures } from "../src/lib/types.contract";
 
 function initialConfig(): AppConfig {
   return {
-    schema_version: 5,
+    schema_version: ipcContractFixtures.snapshot.config.schema_version,
     preferences: {
       timezone: "UTC",
       autostart: false,
@@ -193,28 +190,6 @@ describe("configuration draft helpers", () => {
     expect(activePlaylist({ ...config, active_playlist_id: "missing" })).toBeNull();
   });
 
-  test("resolves playlist entries in entry order and omits missing card references", () => {
-    const withTimer = addCard(initialConfig(), "pomodoro").config;
-    const config: AppConfig = {
-      ...withTimer,
-      playlists: [
-        {
-          ...withTimer.playlists[0],
-          entries: [
-            { card_id: "pomodoro", dwell_seconds: null },
-            { card_id: "missing", dwell_seconds: null },
-            { card_id: "clock", dwell_seconds: null },
-          ],
-        },
-      ],
-    };
-    expect(playlistEntries(config, "workday").map((card) => card.id)).toEqual([
-      "pomodoro",
-      "clock",
-    ]);
-    expect(playlistEntries(config, "missing")).toEqual([]);
-  });
-
   test("returns every library card and cards outside one playlist", () => {
     const config = addCard(addCard(initialConfig(), "pomodoro").config, "weather").config;
     expect(libraryCards(config).map((card) => card.id)).toEqual(["clock", "pomodoro", "weather"]);
@@ -355,28 +330,6 @@ describe("configuration draft helpers", () => {
       [],
     ]);
     expect(firstSelectableCard(next)).toBe("clock");
-  });
-
-  test("cardFields reads a card's published fields, keyed by name", () => {
-    const cardData: CardDataSnapshot[] = [
-      {
-        card_id: "upnext",
-        fields: [
-          { key: "row0_title", value: { kind: "text", value: "Q3 Planning Sync" } },
-          { key: "stale", value: { kind: "boolean", value: false } },
-        ],
-      },
-    ];
-    const fields = cardFields(cardData, "upnext");
-    expect(fields.get("row0_title")).toEqual({ kind: "text", value: "Q3 Planning Sync" });
-    expect(fields.get("stale")).toEqual({ kind: "boolean", value: false });
-    expect(fields.get("row1_title")).toBeUndefined();
-  });
-
-  test("cardFields returns an empty map for a card with no published snapshot yet", () => {
-    expect(cardFields([], "upnext").size).toBe(0);
-    const cardData: CardDataSnapshot[] = [{ card_id: "some-other-card", fields: [] }];
-    expect(cardFields(cardData, "upnext").size).toBe(0);
   });
 
   test("filmstripSegments proportions active-playlist entries by resolved dwell and excludes library-only cards", () => {
@@ -564,16 +517,6 @@ describe("configuration draft helpers", () => {
     ];
     expect(issuesForField(cardIssues, "alert")).toEqual([cardIssues[0]]);
     expect(issuesForField(cardIssues, "alert.lead_minutes")).toEqual([cardIssues[1]]);
-  });
-
-  test("withAlert updates only the card's alert", () => {
-    const card: CardSettings = {
-      ...addCard(initialConfig(), "pomodoro").config.cards[0],
-      alert: { kind: "on-timer-finish", hold: { kind: "until-dismissed" } },
-    };
-    const next = withAlert(card, { kind: "none" });
-    expect(next.alert).toEqual({ kind: "none" });
-    expect(next).toEqual({ ...card, alert: { kind: "none" } });
   });
 
   test("tapActionDescription states plain-language tap behaviour per action", () => {

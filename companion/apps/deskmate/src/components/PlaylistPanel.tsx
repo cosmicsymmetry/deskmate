@@ -25,31 +25,13 @@ import {
   type AppConfig,
   type ValidationIssue,
 } from "../lib/types";
+import { FieldIssues } from "./FieldIssues";
 
 interface PlaylistPanelProps {
   config: AppConfig;
   issues: ValidationIssue[];
   onChange: (config: AppConfig) => void;
   onSelectCard: (cardId: string) => void;
-}
-
-function FieldIssues({
-  issues,
-  className = "",
-}: {
-  issues: ValidationIssue[];
-  className?: string;
-}) {
-  if (issues.length === 0) {
-    return null;
-  }
-  return (
-    <ul className={`field-errors${className ? ` ${className}` : ""}`} role="alert">
-      {issues.map((issue) => (
-        <li key={`${issue.path}:${issue.code}`}>{issue.message}</li>
-      ))}
-    </ul>
-  );
 }
 
 const DEFAULT_DWELL_SECONDS = 20;
@@ -149,7 +131,7 @@ export function PlaylistPanel({ config, issues, onChange, onSelectCard }: Playli
   };
 
   return (
-    <section className="panel playlist-panel" aria-labelledby="playlist-heading">
+    <section className="panel" aria-labelledby="playlist-heading">
       <div className="panel-heading">
         <div>
           <h2 id="playlist-heading">What plays, and when</h2>

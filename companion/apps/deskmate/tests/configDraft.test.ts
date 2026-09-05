@@ -6,7 +6,9 @@ import {
   addEntry,
   addPlaylist,
   cardMoveFromKey,
+  cardLabel,
   cardsOutsidePlaylist,
+  copyConfig,
   cardsContainerIssues,
   filmstripAdvance,
   filmstripDeadline,
@@ -32,7 +34,7 @@ import {
   setPlaylistAdvance,
   tapActionDescription,
 } from "../src/lib/configDraft";
-import type { AppConfig, ValidationIssue } from "../src/lib/types";
+import type { AppConfig, CardSettings, ValidationIssue } from "../src/lib/types";
 import { ipcContractFixtures } from "../src/lib/types.contract";
 
 function initialConfig(): AppConfig {
@@ -78,6 +80,18 @@ function cardsConfig(ids: string[]): AppConfig {
   };
 }
 
+function pluginCard(): CardSettings {
+  return {
+    kind: "plugin",
+    id: "plugin-card",
+    title: "Office air",
+    plugin_id: "com.example.air-quality",
+    tap_action: { kind: "none" },
+    refresh: { kind: "interval", minutes: 15 },
+    alert: { kind: "none" },
+  };
+}
+
 describe("configuration draft helpers", () => {
   test("adds cards with stable unique card IDs", () => {
     const withSecondClock = addCard(initialConfig(), "clock");
@@ -92,6 +106,16 @@ describe("configuration draft helpers", () => {
       "calendar",
     ]);
     expect(new Set(complete.config.cards.map((card) => card.id)).size).toBe(4);
+  });
+
+  test("copies plugin cards without inventing a built-in template", () => {
+    const plugin = pluginCard();
+    const copied = copyConfig({ ...initialConfig(), cards: [plugin] });
+
+    expect(copied.cards[0]).toEqual(plugin);
+    expect(copied.cards[0]).not.toBe(plugin);
+    expect(copied.cards[0]).not.toHaveProperty("template");
+    expect(cardLabel(copied.cards[0])).toBe("com.example.air-quality");
   });
 
   test("first-run guidance follows add a card, add it to a playlist, then save without demanding a card kind", () => {
@@ -549,6 +573,13 @@ describe("configuration draft helpers", () => {
 
     const advanceKinds = ipcContractFixtures.carousel_advances.map((a) => a.kind).sort();
     expect(advanceKinds).toEqual(["manual", "timed"]);
+  });
+
+  test("the contract represents plugin cards and every known device capability", () => {
+    const plugin = ipcContractFixtures.card_settings.find((card) => card.kind === "plugin");
+    expect(plugin).toEqual({ ...pluginCard(), id: "air-quality" });
+    expect(plugin).not.toHaveProperty("template");
+    expect(ipcContractFixtures.device_capabilities).toContain("volatile-assets");
   });
 });
 

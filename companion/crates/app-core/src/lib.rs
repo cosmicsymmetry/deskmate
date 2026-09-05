@@ -1,3 +1,4 @@
+pub mod admin;
 pub mod asset_sync;
 pub mod commands;
 pub mod config;
@@ -10,6 +11,7 @@ mod secure_file;
 pub mod state;
 pub mod store;
 
+pub use admin::AdminConfigErrorBody;
 pub use asset_sync::DesiredAsset;
 pub use commands::{PomodoroAction, RuntimeError};
 pub use config::{
@@ -33,7 +35,10 @@ pub use network_settings::{
     NetworkSettingsLoadOutcome, NetworkSettingsStore, NetworkSettingsStoreError,
     NetworkSettingsUpdate,
 };
-pub use protocol::{NetworkConfig, Tier as ProvisioningTier};
+pub use protocol::{
+    MAX_DEVICE_ID_LEN, MAX_DEVICE_TOKEN_LEN, MAX_PSK_LEN, MAX_SERVER_URL_LEN, MAX_SSID_LEN,
+    NetworkConfig, Tier as ProvisioningTier,
+};
 pub use providers::ics::MAX_ICS_BYTES;
 pub use render_negotiation::{
     BindingClass, BindingRequirements, DeviceRenderProfile, NativeSource, RenderDecision,

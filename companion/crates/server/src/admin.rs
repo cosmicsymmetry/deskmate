@@ -1,8 +1,9 @@
 //! Admin-token-protected provisioning, configuration, and status routes.
 
 use app_core::{
-    AppConfig, AppSnapshot, BakedFontMetrics, ClockCard, MAX_CONFIG_FILE_BYTES, RuntimeError,
-    SaveReceipt, StoreError, ValidationIssue, build_digital_clock_scene,
+    AdminConfigErrorBody, AppConfig, AppSnapshot, BakedFontMetrics, ClockCard,
+    MAX_CONFIG_FILE_BYTES, RuntimeError, SaveReceipt, StoreError, ValidationIssue,
+    build_digital_clock_scene,
 };
 use axum::Json;
 use axum::Router;
@@ -1089,7 +1090,6 @@ impl From<RuntimeError> for AdminError {
 enum ErrorBody<'a> {
     InvalidJson { message: &'a str },
     InvalidScene { message: &'a str },
-    InvalidConfig { issues: &'a [ValidationIssue] },
     Store { message: &'a str },
     Runtime { message: &'a str },
     Internal,
@@ -1110,7 +1110,7 @@ impl IntoResponse for AdminError {
                 .into_response(),
             Self::InvalidConfig { issues } => (
                 StatusCode::UNPROCESSABLE_ENTITY,
-                Json(ErrorBody::InvalidConfig { issues: &issues }),
+                Json(AdminConfigErrorBody::InvalidConfig { issues }),
             )
                 .into_response(),
             Self::Store { message } => (

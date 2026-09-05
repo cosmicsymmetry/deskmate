@@ -138,8 +138,8 @@ export function chooseLocalOwnership(): Promise<NetworkSettings> {
   return invokeTyped("use_local_ownership");
 }
 
-export function setPushingPaused(paused: boolean): Promise<void> {
-  return invokeTyped("set_pushing_paused", { paused });
+export function resumePushing(): Promise<void> {
+  return invokeTyped("resume_pushing");
 }
 
 export function controlPomodoro(widgetId: string, action: PomodoroAction): Promise<void> {
@@ -163,10 +163,6 @@ export function getAutostartStatus(): Promise<AutostartStatus> {
 
 export function setAutostartEnabled(enabled: boolean): Promise<AutostartStatus> {
   return invokeTyped("set_autostart_enabled", { enabled });
-}
-
-export function setSettingsWindowVisible(visible: boolean): Promise<AppSnapshot> {
-  return invokeTyped("set_settings_window_visible", { visible });
 }
 
 export function renderCardPreview(cardId: string): Promise<PreviewFrame> {

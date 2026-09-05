@@ -1,4 +1,5 @@
 import type {
+  AddableCardKind,
   AppConfig,
   CardKind,
   CardSettings,
@@ -18,7 +19,7 @@ export function copyConfig(config: AppConfig): AppConfig {
       ...(card.kind === "json-feed"
         ? { mappings: card.mappings.map((mapping) => ({ ...mapping })) }
         : {}),
-      template: { ...card.template },
+      ...(card.kind === "plugin" ? {} : { template: { ...card.template } }),
       tap_action: { ...card.tap_action },
       refresh: { ...card.refresh },
       alert: { ...card.alert },
@@ -55,6 +56,8 @@ export function cardName(card: CardSettings): string {
     case "json-feed":
     case "rss":
       return card.title || cardKindName(card.kind);
+    case "plugin":
+      return card.title || card.plugin_id;
   }
 }
 
@@ -69,7 +72,7 @@ export function cardName(card: CardSettings): string {
  * thing that names the card.
  */
 export function cardLabel(card: CardSettings): string {
-  return cardKindName(card.kind);
+  return card.kind === "plugin" ? card.plugin_id : cardKindName(card.kind);
 }
 
 /**
@@ -95,6 +98,8 @@ export function cardKindName(kind: CardKind): string {
       return "JSON feed";
     case "rss":
       return "RSS feed";
+    case "plugin":
+      return "Plugin";
   }
 }
 
@@ -115,7 +120,7 @@ function nextId(prefix: string, used: Set<string>): string {
 /// membership is an explicit, separate edit.
 export function addCard(
   config: AppConfig,
-  kind: CardKind,
+  kind: AddableCardKind,
 ): {
   config: AppConfig;
   cardId: string;

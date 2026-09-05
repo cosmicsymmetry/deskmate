@@ -164,6 +164,18 @@ function weatherCard(id: string, alert: CardSettings["alert"] = { kind: "none" }
   };
 }
 
+function pluginCard(id = "internal-plugin-card"): CardSettings {
+  return {
+    kind: "plugin",
+    id,
+    title: "Office air",
+    plugin_id: "com.example.air-quality",
+    tap_action: { kind: "none" },
+    refresh: { kind: "interval", minutes: 15 },
+    alert: { kind: "none" },
+  };
+}
+
 function cardListConfig(
   cardList: CardSettings[],
   entries = cardList.map((card) => ({ card_id: card.id, dwell_seconds: null })),
@@ -611,6 +623,35 @@ describe("settings accessibility and states", () => {
     );
     expect(library).toContain("Digital clock");
     expect(library).not.toContain("card-tile__name");
+  });
+
+  test("plugin cards have a lossless tile and title editor but cannot be added", () => {
+    const plugin = pluginCard();
+    const library = renderToStaticMarkup(
+      <CardList
+        config={cardListConfig([plugin])}
+        issues={[]}
+        cardData={[]}
+        pomodoros={[]}
+        providers={[]}
+        selectedCardId={plugin.id}
+        onSelect={() => {}}
+        onAdd={() => {}}
+        onRemove={() => {}}
+      />,
+    );
+    const editor = renderCardEditor(plugin);
+
+    expect(library).toContain('class="tile-label">com.example.air-quality<');
+    expect(library).toContain('<strong class="card-tile__value numeral">Plugin</strong>');
+    expect(library).toContain('class="card-tile__name">Office air<');
+    expect(library).not.toContain(plugin.id);
+    expect(library.match(/class="add-card"/g)?.length).toBe(6);
+    expect(library).not.toContain("<strong>Plugin</strong>");
+    expect(editor).toContain('id="editor-heading">com.example.air-quality<');
+    expect(editor).toContain("<span>Name</span>");
+    expect(editor).toContain("<span>Refresh every</span>");
+    expect(editor).not.toContain("Template");
   });
 
   test("row-list tiles count only populated title fields from real provider snapshots", () => {

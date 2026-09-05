@@ -119,9 +119,19 @@ export type CardSettings =
       tap_action: WidgetTapAction;
       refresh: RefreshPolicy;
       alert: CardAlert;
+    }
+  | {
+      kind: "plugin";
+      id: string;
+      title: string;
+      plugin_id: string;
+      tap_action: WidgetTapAction;
+      refresh: RefreshPolicy;
+      alert: CardAlert;
     };
 
 export type CardKind = CardSettings["kind"];
+export type AddableCardKind = Exclude<CardKind, "plugin">;
 
 export type CalendarSource = { kind: "file"; value: string } | { kind: "url"; value: string };
 
@@ -267,7 +277,8 @@ export type DeviceCapability =
   | "asset-transfer"
   | "firmware-update"
   | "networking"
-  | "scene-render";
+  | "scene-render"
+  | "volatile-assets";
 
 export interface DeviceCounters {
   host_reconnects: number;

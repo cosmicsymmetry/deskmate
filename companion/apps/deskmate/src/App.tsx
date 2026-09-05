@@ -27,14 +27,14 @@ import {
   getAutostartStatus,
   refreshProvider,
   setAutostartEnabled,
-  setPushingPaused,
+  resumePushing,
   toIpcError,
   validateConfigDraft,
 } from "./lib/tauri";
 import type {
   AppConfig,
   AppSnapshot,
-  CardKind,
+  AddableCardKind,
   CardSettings,
   DisplayOrientation,
   DraftValidation,
@@ -231,7 +231,7 @@ export function App() {
     setDirty(true);
     setSaveState({ kind: "idle" });
   };
-  const handleAdd = (kind: CardKind) => {
+  const handleAdd = (kind: AddableCardKind) => {
     const result = addCard(draft, kind);
     replaceDraft(result.config);
     setSelectedCardId(result.cardId);
@@ -403,10 +403,10 @@ export function App() {
                 <button
                   className="button button--quiet"
                   type="button"
-                  disabled={busyAction === "pause"}
-                  onClick={() => void runAction("pause", () => setPushingPaused(false))}
+                  disabled={busyAction === "resume"}
+                  onClick={() => void runAction("resume", resumePushing)}
                 >
-                  {busyAction === "pause" ? "Resuming…" : "Resume sending"}
+                  {busyAction === "resume" ? "Resuming…" : "Resume sending"}
                 </button>
               </div>
             </aside>

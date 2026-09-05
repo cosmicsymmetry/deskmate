@@ -26,7 +26,6 @@ const NETWORK_SETTINGS_FILE_NAME: &str = "network-settings.json";
 const MAIN_WINDOW_LABEL: &str = "main";
 const TRAY_ID: &str = "deskmate";
 const STATUS_ITEM_ID: &str = "device-status";
-const PAUSE_ITEM_ID: &str = "pause-pushing";
 const OPEN_ITEM_ID: &str = "open-settings";
 const AUTOSTART_ITEM_ID: &str = "autostart";
 const QUIT_ITEM_ID: &str = "quit";
@@ -36,7 +35,6 @@ const TRAY_OFFLINE: &[u8] = include_bytes!("../icons/tray-offline.png");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TrayAction {
-    TogglePause,
     OpenSettings,
     ToggleAutostart,
     Quit,
@@ -45,7 +43,6 @@ enum TrayAction {
 impl TrayAction {
     fn from_id(id: &str) -> Option<Self> {
         match id {
-            PAUSE_ITEM_ID => Some(Self::TogglePause),
             OPEN_ITEM_ID => Some(Self::OpenSettings),
             AUTOSTART_ITEM_ID => Some(Self::ToggleAutostart),
             QUIT_ITEM_ID => Some(Self::Quit),
@@ -56,7 +53,6 @@ impl TrayAction {
 
 struct TrayPresentation {
     device_text: &'static str,
-    pause_text: &'static str,
     tooltip: String,
     online: bool,
 }
@@ -75,7 +71,6 @@ impl TrayPresentation {
         };
         Self {
             device_text,
-            pause_text: pause_menu_text(paused),
             tooltip,
             online,
         }
@@ -91,17 +86,8 @@ fn connection_presentation(connection: &ConnectionState) -> (&'static str, bool)
     }
 }
 
-const fn pause_menu_text(paused: bool) -> &'static str {
-    if paused {
-        "Resume pushing"
-    } else {
-        "Pause pushing"
-    }
-}
-
 struct TrayControls {
     status: MenuItem<Wry>,
-    pause: MenuItem<Wry>,
     autostart: CheckMenuItem<Wry>,
     tray: TrayIcon<Wry>,
 }
@@ -110,7 +96,6 @@ impl TrayControls {
     fn update(&self, snapshot: &AppSnapshot) -> tauri::Result<()> {
         let presentation = TrayPresentation::from_snapshot(snapshot);
         self.status.set_text(presentation.device_text)?;
-        self.pause.set_text(presentation.pause_text)?;
         self.tray.set_tooltip(Some(presentation.tooltip))?;
         self.tray.set_icon(Some(tray_image(presentation.online)?))?;
         Ok(())
@@ -224,11 +209,6 @@ impl DesktopState {
         self.networked_config.replace(config)
     }
 
-    fn toggle_paused(&self) -> Result<(), commands::IpcError> {
-        let paused = !self.runtime.snapshot()?.config.preferences.paused;
-        commands::set_paused(self, paused)
-    }
-
     fn toggle_autostart(&self, app: &AppHandle) -> Result<(), commands::IpcError> {
         let enabled = !app
             .autolaunch()
@@ -337,13 +317,6 @@ fn create_tray(
         false,
         None::<&str>,
     )?;
-    let pause = MenuItem::with_id(
-        app,
-        PAUSE_ITEM_ID,
-        presentation.pause_text,
-        true,
-        None::<&str>,
-    )?;
     let open = MenuItem::with_id(app, OPEN_ITEM_ID, "Open settings", true, None::<&str>)?;
     let autostart = CheckMenuItem::with_id(
         app,
@@ -361,7 +334,6 @@ fn create_tray(
         &[
             &status,
             &separator_one,
-            &pause,
             &open,
             &autostart,
             &separator_two,
@@ -380,7 +352,6 @@ fn create_tray(
 
     Ok(TrayControls {
         status,
-        pause,
         autostart,
         tray,
     })
@@ -392,12 +363,6 @@ fn handle_tray_action(app: &AppHandle, id: &str) {
     };
     match action {
         TrayAction::OpenSettings => show_settings(app),
-        TrayAction::TogglePause => {
-            let state = app.state::<DesktopState>();
-            if let Err(error) = state.toggle_paused() {
-                eprintln!("cannot change pause state: {}", error.log_label());
-            }
-        }
         TrayAction::ToggleAutostart => {
             let state = app.state::<DesktopState>();
             if let Err(error) = state.toggle_autostart(app) {
@@ -440,8 +405,9 @@ fn setup_app(app: &mut App) -> Result<(), Box<dyn Error>> {
     }
     let last_known_tier = network_settings.settings().tier;
     let loaded = store.load();
-    let has_saved_config = load_has_saved_config(&loaded);
-    let auto_open_settings = auto_open_settings_on_launch(&loaded);
+    let first_run = is_first_run(&loaded);
+    let has_saved_config = !first_run;
+    let auto_open_settings = first_run;
     let persistence = load_failure_persistence(&loaded);
     if let Some(persistence) = &persistence {
         eprintln!(
@@ -535,18 +501,14 @@ fn secure_config_directory(path: &Path) -> std::io::Result<()> {
 /// Only a clean defaults load means no document existed. Recovery and validation
 /// failures still came from a persisted document, so they must not turn an existing
 /// installation back into first-run mode.
-fn load_has_saved_config(loaded: &LoadOutcome) -> bool {
-    !matches!(
+fn is_first_run(loaded: &LoadOutcome) -> bool {
+    matches!(
         loaded,
         LoadOutcome::Loaded {
             origin: ConfigOrigin::Defaults,
             ..
         }
     )
-}
-
-fn auto_open_settings_on_launch(loaded: &LoadOutcome) -> bool {
-    !load_has_saved_config(loaded)
 }
 
 fn load_failure_persistence(loaded: &LoadOutcome) -> Option<PersistenceState> {
@@ -594,13 +556,12 @@ pub fn run() {
             commands::provision_device,
             commands::factory_reset_device,
             commands::use_local_ownership,
-            commands::set_pushing_paused,
+            commands::resume_pushing,
             commands::control_pomodoro,
             commands::refresh_provider,
             commands::choose_ics_file,
             commands::get_autostart_status,
             commands::set_autostart_enabled,
-            commands::set_settings_window_visible,
             commands::render_card_preview,
         ])
         .setup(setup_app)
@@ -639,10 +600,6 @@ mod tests {
     #[test]
     fn tray_ids_map_only_to_supported_actions() {
         assert_eq!(
-            TrayAction::from_id(PAUSE_ITEM_ID),
-            Some(TrayAction::TogglePause)
-        );
-        assert_eq!(
             TrayAction::from_id(OPEN_ITEM_ID),
             Some(TrayAction::OpenSettings)
         );
@@ -652,11 +609,12 @@ mod tests {
         );
         assert_eq!(TrayAction::from_id(QUIT_ITEM_ID), Some(TrayAction::Quit));
         assert_eq!(TrayAction::from_id(STATUS_ITEM_ID), None);
+        assert_eq!(TrayAction::from_id("pause-pushing"), None);
         assert_eq!(TrayAction::from_id("unknown"), None);
     }
 
     #[test]
-    fn device_and_pause_copy_cover_each_runtime_state() {
+    fn device_copy_covers_each_connection_state() {
         assert_eq!(
             connection_presentation(&ConnectionState::Online),
             ("Device: Connected", true)
@@ -673,8 +631,6 @@ mod tests {
             connection_presentation(&ConnectionState::Disconnected { reason: None }),
             ("Device: Disconnected", false)
         );
-        assert_eq!(pause_menu_text(false), "Pause pushing");
-        assert_eq!(pause_menu_text(true), "Resume pushing");
     }
 
     #[test]
@@ -824,29 +780,6 @@ mod tests {
                 message: "expected value".into(),
             },
         };
-
-        assert!(!load_has_saved_config(&defaults));
-        assert!(load_has_saved_config(&current));
-        assert!(load_has_saved_config(&recovered));
-    }
-
-    #[test]
-    fn settings_auto_open_only_for_a_missing_settings_document() {
-        let defaults = LoadOutcome::Loaded {
-            config: AppConfig::default(),
-            origin: ConfigOrigin::Defaults,
-        };
-        let current = LoadOutcome::Loaded {
-            config: AppConfig::default(),
-            origin: ConfigOrigin::Current,
-        };
-        let recovered = LoadOutcome::Recovered {
-            config: AppConfig::default(),
-            origin: ConfigOrigin::Defaults,
-            error: StoreError::InvalidJson {
-                message: "expected value".into(),
-            },
-        };
         let validation_failed = LoadOutcome::ValidationFailed {
             config: AppConfig::default(),
             origin: ConfigOrigin::Defaults,
@@ -857,10 +790,10 @@ mod tests {
             }],
         };
 
-        assert!(auto_open_settings_on_launch(&defaults));
-        assert!(!auto_open_settings_on_launch(&current));
-        assert!(!auto_open_settings_on_launch(&recovered));
-        assert!(!auto_open_settings_on_launch(&validation_failed));
+        assert!(is_first_run(&defaults));
+        assert!(!is_first_run(&current));
+        assert!(!is_first_run(&recovered));
+        assert!(!is_first_run(&validation_failed));
     }
 
     #[test]

@@ -497,6 +497,22 @@ export const ipcContractFixtures = {
       "alert": {
         "kind": "none"
       }
+    },
+    {
+      "kind": "plugin",
+      "id": "air-quality",
+      "title": "Office air",
+      "plugin_id": "com.example.air-quality",
+      "tap_action": {
+        "kind": "none"
+      },
+      "refresh": {
+        "kind": "interval",
+        "minutes": 15
+      },
+      "alert": {
+        "kind": "none"
+      }
     }
   ],
   "playlists": [
@@ -701,7 +717,8 @@ export const ipcContractFixtures = {
     "asset-transfer",
     "firmware-update",
     "networking",
-    "scene-render"
+    "scene-render",
+    "volatile-assets"
   ],
   "runtime_states": [
     {

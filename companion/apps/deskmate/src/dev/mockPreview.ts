@@ -200,6 +200,8 @@ export function renderMockFrame(
       rowList(ctx, card.title || (card.kind === "rss" ? "Headlines" : "Calendar"), rows);
       break;
     }
+    case "plugin":
+      break;
   }
 
   return canvas.toDataURL("image/png").replace(/^data:image\/png;base64,/, "");

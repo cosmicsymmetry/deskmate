@@ -176,7 +176,7 @@ export function CardEditor({
       <div className="form-grid">
         {card.kind !== "pomodoro" && (
           <label className="field">
-            <span>{card.kind === "clock" ? "Name" : "Heading"}</span>
+            <span>{card.kind === "clock" || card.kind === "plugin" ? "Name" : "Heading"}</span>
             <input
               value={card.title}
               maxLength={64}
@@ -480,7 +480,8 @@ export function CardEditor({
         {(card.kind === "calendar" ||
           card.kind === "weather" ||
           card.kind === "json-feed" ||
-          card.kind === "rss") && (
+          card.kind === "rss" ||
+          card.kind === "plugin") && (
           <label className="field">
             <span>Refresh every</span>
             <select

@@ -168,7 +168,8 @@ function validate(draft: AppConfig): DraftValidation {
             push(`${at}.mappings[${m}].path`, "empty", "Enter a JSON path.");
         });
         break;
-      default:
+      case "clock":
+      case "plugin":
         break;
     }
     if (card.alert.kind !== "none" && card.alert.hold.kind === "seconds") {
@@ -262,12 +263,12 @@ export async function mockInvoke<T>(command: string, args?: Record<string, unkno
       publish();
       return delay({ save: { generation: 1, warning: null } }, 350) as Promise<T>;
     }
-    case "set_pushing_paused":
+    case "resume_pushing":
       config = {
         ...config,
-        preferences: { ...config.preferences, paused: Boolean(args?.paused) },
+        preferences: { ...config.preferences, paused: false },
       };
-      snapshot.runtime = { kind: args?.paused ? "paused" : "running" };
+      snapshot.runtime = { kind: "running" };
       publish();
       return delay(undefined as T);
     case "control_pomodoro": {
@@ -302,6 +303,12 @@ export async function mockInvoke<T>(command: string, args?: Record<string, unkno
       const cardId = args?.cardId as string;
       const card = config.cards.find((candidate) => candidate.id === cardId);
       if (!card) throw { category: "not-found", message: "No such card." };
+      if (card.kind === "plugin") {
+        throw {
+          category: "unsupported",
+          message: "Plugin previews require the server plugin host.",
+        };
+      }
       const timer = snapshot.pomodoros.find((candidate) => candidate.widget_id === cardId);
       return {
         png_base64: renderMockFrame(
@@ -350,8 +357,6 @@ export async function mockInvoke<T>(command: string, args?: Record<string, unkno
       snapshot.device.tier = "local";
       publish();
       return delay(network) as Promise<T>;
-    case "set_settings_window_visible":
-      return delay(snapshot) as Promise<T>;
     default:
       throw { category: "not-found", message: `mock backend has no command \`${command}\`` };
   }

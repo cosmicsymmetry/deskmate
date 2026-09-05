@@ -12,9 +12,9 @@ import { providerTrouble } from "../lib/providers";
 import { FieldIssues } from "./FieldIssues";
 import { Icon } from "./Icon";
 import type {
+  AddableCardKind,
   AppConfig,
   CardDataSnapshot,
-  CardKind,
   CardSettings,
   PomodoroSnapshot,
   ProviderSnapshot,
@@ -31,11 +31,11 @@ interface CardListProps {
   providers: ProviderSnapshot[];
   selectedCardId: string | null;
   onSelect: (cardId: string) => void;
-  onAdd: (kind: CardKind) => void;
+  onAdd: (kind: AddableCardKind) => void;
   onRemove: (cardId: string) => void;
 }
 
-const addableKinds: { kind: CardKind; description: string }[] = [
+const addableKinds: { kind: AddableCardKind; description: string }[] = [
   { kind: "clock", description: "Time and date" },
   { kind: "pomodoro", description: "Focus timer" },
   { kind: "calendar", description: "Upcoming events" },
@@ -92,6 +92,8 @@ function tileValue(
       ).length;
       return rowCount > 0 ? String(rowCount) : "—";
     }
+    case "plugin":
+      return fieldText(data, "hero") ?? "Plugin";
   }
 }
 

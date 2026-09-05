@@ -6,29 +6,22 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use app_core::{
-    AppConfig, CardField, CardFieldValue, CardSettings, ConfigStore, DisplayOrientation,
-    DisplayTemplate, MAX_CONFIG_FILE_BYTES, MAX_ICS_BYTES, MAX_ICS_SOURCE_LEN, MAX_WIDGET_ID_LEN,
-    NetworkConfig, NetworkSettings, NetworkSettingsStore, NetworkSettingsStoreError,
-    NetworkSettingsUpdate, PomodoroAction, ProvisioningTier, RuntimeError, RuntimeHandle,
-    SaveReceipt, StoreError, ValidationIssue, utc_offset_minutes,
+    AdminConfigErrorBody, AppConfig, CardField, CardFieldValue, CardSettings, ConfigStore,
+    DisplayOrientation, DisplayTemplate, MAX_CONFIG_FILE_BYTES, MAX_DEVICE_ID_LEN,
+    MAX_DEVICE_TOKEN_LEN, MAX_ICS_BYTES, MAX_ICS_SOURCE_LEN, MAX_PSK_LEN, MAX_SERVER_URL_LEN,
+    MAX_SSID_LEN, MAX_WIDGET_ID_LEN, NetworkConfig, NetworkSettings, NetworkSettingsStore,
+    NetworkSettingsStoreError, NetworkSettingsUpdate, PomodoroAction, ProvisioningTier,
+    RuntimeError, RuntimeHandle, SaveReceipt, StoreError, ValidationIssue, utc_offset_minutes,
 };
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, State};
 use tauri_plugin_autostart::ManagerExt;
 use tauri_plugin_dialog::DialogExt;
 
-use crate::{DesktopSnapshot, DesktopState, MAIN_WINDOW_LABEL, NetworkedConfigProjection};
+use crate::{DesktopSnapshot, DesktopState, NetworkedConfigProjection};
 
-// These are the protocol-v1 NetworkConfig bounds. app-core deliberately exposes the
-// command type, not protocol implementation constants, so the shell repeats them at
-// its untrusted IPC edge and the runtime remains the final encoder-side authority.
-const MAX_SSID_BYTES: usize = 32;
-const MAX_PASSPHRASE_BYTES: usize = 64;
-const MAX_SERVER_URL_BYTES: usize = 128;
-const MAX_DEVICE_ID_BYTES: usize = 32;
-const MAX_DEVICE_TOKEN_BYTES: usize = 128;
 const MAX_SERVER_ERROR_BYTES: usize = 64 * 1_024;
 
 /// The draft travels as a bounded JSON envelope so an IPC caller cannot make serde
@@ -126,12 +119,6 @@ pub struct ProvisionDeviceRequest {
 #[serde(deny_unknown_fields)]
 pub struct ServerConfigRequest {
     draft: DraftPayload,
-}
-
-#[derive(Deserialize)]
-#[serde(tag = "kind", rename_all = "kebab-case")]
-enum ServerErrorBody {
-    InvalidConfig { issues: Vec<ValidationIssue> },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -243,6 +230,26 @@ impl IpcError {
             Self::Unsupported { .. } => "unsupported",
         }
     }
+
+    fn map_message(mut self, map: impl FnOnce(String) -> String) -> Self {
+        let message = match &mut self {
+            Self::InvalidPayload { message }
+            | Self::PayloadTooLarge { message, .. }
+            | Self::Validation { message, .. }
+            | Self::Persistence { message }
+            | Self::RuntimeBusy { message }
+            | Self::RuntimeUnavailable { message }
+            | Self::NotFound { message }
+            | Self::Device { message }
+            | Self::Provider { message }
+            | Self::Autostart { message }
+            | Self::Window { message }
+            | Self::Internal { message }
+            | Self::Unsupported { message } => message,
+        };
+        *message = map(std::mem::take(message));
+        self
+    }
 }
 
 #[tauri::command]
@@ -323,7 +330,7 @@ fn set_server_endpoint_with_context(
     let device_id = if request.device_id.trim().is_empty() {
         current.device_id
     } else {
-        validate_target(&request.device_id, MAX_DEVICE_ID_BYTES, "device ID")?;
+        validate_target(&request.device_id, MAX_DEVICE_ID_LEN, "device ID")?;
         request.device_id
     };
     let settings = NetworkSettings {
@@ -540,7 +547,7 @@ fn prepare_server_save(
     ensure_device_compatibility(&snapshot.device, compiled.required_capabilities)?;
 
     let settings = context.config.network_store.load().settings().clone();
-    if !server_owns_device(snapshot.device.tier, &settings) {
+    if save_destination(snapshot.device.tier, &settings) != SaveDestination::Server {
         return Err(IpcError::InvalidPayload {
             message: "display ownership is not known to be networked; connect it over USB to confirm ownership before saving".into(),
         });
@@ -583,90 +590,42 @@ fn prepare_server_save(
 }
 
 fn server_error_after_local_save(error: IpcError) -> IpcError {
-    fn message(message: String) -> String {
+    error.map_message(|message| {
         format!(
             "The draft was saved on this Mac, but the server destination did not succeed: {message}"
         )
-    }
-    match error {
-        IpcError::InvalidPayload { message: value } => IpcError::InvalidPayload {
-            message: message(value),
-        },
-        IpcError::PayloadTooLarge {
-            message: value,
-            maximum_bytes,
-        } => IpcError::PayloadTooLarge {
-            message: message(value),
-            maximum_bytes,
-        },
-        IpcError::Validation {
-            message: value,
-            issues,
-        } => IpcError::Validation {
-            message: message(value),
-            issues,
-        },
-        IpcError::Persistence { message: value } => IpcError::Persistence {
-            message: message(value),
-        },
-        IpcError::RuntimeBusy { message: value } => IpcError::RuntimeBusy {
-            message: message(value),
-        },
-        IpcError::RuntimeUnavailable { message: value } => IpcError::RuntimeUnavailable {
-            message: message(value),
-        },
-        IpcError::NotFound { message: value } => IpcError::NotFound {
-            message: message(value),
-        },
-        IpcError::Device { message: value } => IpcError::Device {
-            message: message(value),
-        },
-        IpcError::Provider { message: value } => IpcError::Provider {
-            message: message(value),
-        },
-        IpcError::Autostart { message: value } => IpcError::Autostart {
-            message: message(value),
-        },
-        IpcError::Window { message: value } => IpcError::Window {
-            message: message(value),
-        },
-        IpcError::Internal { message: value } => IpcError::Internal {
-            message: message(value),
-        },
-        IpcError::Unsupported { message: value } => IpcError::Unsupported {
-            message: message(value),
-        },
-    }
+    })
 }
 
-fn server_owns_device(tier: Option<app_core::DeviceTier>, settings: &NetworkSettings) -> bool {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SaveDestination {
+    Local,
+    Server,
+}
+
+fn save_destination(
+    tier: Option<app_core::DeviceTier>,
+    settings: &NetworkSettings,
+) -> SaveDestination {
     match tier {
-        Some(app_core::DeviceTier::Networked) => true,
-        Some(app_core::DeviceTier::Local) => false,
+        Some(app_core::DeviceTier::Networked) => SaveDestination::Server,
+        Some(app_core::DeviceTier::Local) => SaveDestination::Local,
         None => {
-            matches!(settings.tier, Some(app_core::DeviceTier::Networked))
+            if matches!(settings.tier, Some(app_core::DeviceTier::Networked))
                 || (settings.tier.is_none()
                     && (!settings.server_url.is_empty() || !settings.device_id.is_empty()))
-        }
-    }
-}
-
-fn local_owns_device(tier: Option<app_core::DeviceTier>, settings: &NetworkSettings) -> bool {
-    match tier {
-        Some(app_core::DeviceTier::Local) => true,
-        Some(app_core::DeviceTier::Networked) => false,
-        None => {
-            matches!(settings.tier, Some(app_core::DeviceTier::Local))
-                || (settings.tier.is_none()
-                    && settings.server_url.is_empty()
-                    && settings.device_id.is_empty())
+            {
+                SaveDestination::Server
+            } else {
+                SaveDestination::Local
+            }
         }
     }
 }
 
 #[tauri::command]
-pub fn set_pushing_paused(state: State<'_, DesktopState>, paused: bool) -> Result<(), IpcError> {
-    set_paused(&state, paused)
+pub fn resume_pushing(state: State<'_, DesktopState>) -> Result<(), IpcError> {
+    set_paused(&state, false)
 }
 
 #[tauri::command]
@@ -752,28 +711,6 @@ pub fn set_autostart_enabled(
     enabled: bool,
 ) -> Result<AutostartStatus, IpcError> {
     set_autostart(&app, &state, enabled)
-}
-
-#[tauri::command]
-pub fn set_settings_window_visible(
-    app: AppHandle,
-    state: State<'_, DesktopState>,
-    visible: bool,
-) -> Result<DesktopSnapshot, IpcError> {
-    let window = app
-        .get_webview_window(MAIN_WINDOW_LABEL)
-        .ok_or_else(|| IpcError::Window {
-            message: "settings window is unavailable".into(),
-        })?;
-    if visible {
-        window.unminimize().map_err(window_error)?;
-        window.show().map_err(window_error)?;
-        window.set_focus().map_err(window_error)?;
-    } else {
-        window.hide().map_err(window_error)?;
-    }
-    let snapshot = state.runtime.snapshot().map_err(IpcError::from)?;
-    Ok(state.project_snapshot(snapshot))
 }
 
 /// Renders one card exactly as the firmware's own template would: the same
@@ -945,7 +882,9 @@ pub(crate) fn set_autostart(
         .tray
         .autostart
         .set_checked(enabled)
-        .map_err(window_error)?;
+        .map_err(|error| IpcError::Window {
+            message: format!("cannot update settings window: {error}"),
+        })?;
     Ok(AutostartStatus {
         enabled,
         preference_enabled: enabled,
@@ -964,7 +903,7 @@ fn save_and_apply(
         })?;
     let snapshot = context.runtime.snapshot().map_err(IpcError::from)?;
     let settings = context.network_store.load().settings().clone();
-    if !local_owns_device(snapshot.device.tier, &settings) {
+    if save_destination(snapshot.device.tier, &settings) != SaveDestination::Local {
         return Err(IpcError::InvalidPayload {
             message: local_save_refusal(&settings).into(),
         });
@@ -1145,24 +1084,16 @@ fn parse_draft(draft: &DraftPayload) -> Result<AppConfig, IpcError> {
 }
 
 fn validate_network_config_request(request: &ProvisionDeviceRequest) -> Result<(), IpcError> {
-    validate_bounded(&request.ssid, MAX_SSID_BYTES, "WiFi network")?;
-    validate_bounded(&request.passphrase, MAX_PASSPHRASE_BYTES, "WiFi passphrase")?;
-    validate_bounded(&request.server_url, MAX_SERVER_URL_BYTES, "server URL")?;
-    validate_bounded(&request.device_id, MAX_DEVICE_ID_BYTES, "device ID")?;
-    validate_bounded(
-        &request.device_token,
-        MAX_DEVICE_TOKEN_BYTES,
-        "device token",
-    )?;
+    validate_bounded(&request.ssid, MAX_SSID_LEN, "WiFi network")?;
+    validate_bounded(&request.passphrase, MAX_PSK_LEN, "WiFi passphrase")?;
+    validate_bounded(&request.server_url, MAX_SERVER_URL_LEN, "server URL")?;
+    validate_bounded(&request.device_id, MAX_DEVICE_ID_LEN, "device ID")?;
+    validate_bounded(&request.device_token, MAX_DEVICE_TOKEN_LEN, "device token")?;
     if matches!(request.tier, app_core::DeviceTier::Networked) {
-        validate_target(&request.ssid, MAX_SSID_BYTES, "WiFi network")?;
+        validate_target(&request.ssid, MAX_SSID_LEN, "WiFi network")?;
         validate_server_url(&request.server_url)?;
-        validate_target(&request.device_id, MAX_DEVICE_ID_BYTES, "device ID")?;
-        validate_secret(
-            &request.device_token,
-            MAX_DEVICE_TOKEN_BYTES,
-            "device token",
-        )?;
+        validate_target(&request.device_id, MAX_DEVICE_ID_LEN, "device ID")?;
+        validate_secret(&request.device_token, MAX_DEVICE_TOKEN_LEN, "device token")?;
     }
     Ok(())
 }
@@ -1191,7 +1122,7 @@ fn validate_secret(value: &str, maximum: usize, label: &str) -> Result<(), IpcEr
 }
 
 fn validate_server_url(value: &str) -> Result<url::Url, IpcError> {
-    validate_target(value, MAX_SERVER_URL_BYTES, "server URL")?;
+    validate_target(value, MAX_SERVER_URL_LEN, "server URL")?;
     let url = url::Url::parse(value).map_err(|_| IpcError::InvalidPayload {
         message: "server URL must be an absolute HTTP or HTTPS URL".into(),
     })?;
@@ -1225,12 +1156,12 @@ fn device_link_url(server_url: &str) -> Result<String, IpcError> {
     url.set_query(None);
     url.set_fragment(None);
     let value = url.to_string();
-    validate_bounded(&value, MAX_SERVER_URL_BYTES, "derived device link URL")?;
+    validate_bounded(&value, MAX_SERVER_URL_LEN, "derived device link URL")?;
     Ok(value)
 }
 
 fn server_config_url(server_url: &str, device_id: &str) -> Result<url::Url, IpcError> {
-    validate_target(device_id, MAX_DEVICE_ID_BYTES, "device ID")?;
+    validate_target(device_id, MAX_DEVICE_ID_LEN, "device ID")?;
     let mut url = validate_server_url(server_url)?;
     url.set_query(None);
     url.set_fragment(None);
@@ -1293,8 +1224,8 @@ fn server_failure(status: u16, body: &[u8]) -> IpcError {
         404 => IpcError::NotFound {
             message: "the configured device was not found on the server".into(),
         },
-        422 => match serde_json::from_slice::<ServerErrorBody>(body) {
-            Ok(ServerErrorBody::InvalidConfig { issues }) => IpcError::Validation {
+        422 => match serde_json::from_slice::<AdminConfigErrorBody>(body) {
+            Ok(AdminConfigErrorBody::InvalidConfig { issues }) => IpcError::Validation {
                 message: format!(
                     "the server rejected this configuration with {} validation issue(s)",
                     issues.len()
@@ -1328,12 +1259,6 @@ fn validate_target(value: &str, maximum: usize, label: &str) -> Result<(), IpcEr
 pub(crate) fn autostart_error(error: impl std::fmt::Display) -> IpcError {
     IpcError::Autostart {
         message: format!("cannot update start-at-login: {error}"),
-    }
-}
-
-fn window_error(error: impl std::fmt::Display) -> IpcError {
-    IpcError::Window {
-        message: format!("cannot update settings window: {error}"),
     }
 }
 
@@ -1421,6 +1346,36 @@ mod tests {
         WidgetTapAction,
     };
     use serde::Serialize;
+
+    fn read_http_request(stream: &mut std::net::TcpStream) -> Vec<u8> {
+        use std::io::Read as _;
+
+        let mut request = Vec::new();
+        while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+            let mut chunk = [0_u8; 1_024];
+            let length = stream.read(&mut chunk).unwrap();
+            assert_ne!(length, 0, "request ended before its HTTP headers");
+            request.extend_from_slice(&chunk[..length]);
+        }
+        let header_end = request
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .unwrap()
+            + 4;
+        let headers = String::from_utf8_lossy(&request[..header_end]).to_ascii_lowercase();
+        let content_length = headers
+            .lines()
+            .find_map(|line| line.strip_prefix("content-length: "))
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(0);
+        while request.len() < header_end + content_length {
+            let mut chunk = [0_u8; 1_024];
+            let length = stream.read(&mut chunk).unwrap();
+            assert_ne!(length, 0, "request ended before its HTTP body");
+            request.extend_from_slice(&chunk[..length]);
+        }
+        request
+    }
 
     /// Mirrors `CardSettings::wire_config`'s `TemplateKind` mapping (`app-core`'s
     /// `config.rs`) 1:1, for every `DisplayTemplate` variant the app can construct.
@@ -1795,29 +1750,58 @@ mod tests {
     }
 
     #[test]
-    fn unplugged_server_identity_routes_networked_but_live_local_ownership_wins() {
-        let mut settings = NetworkSettings {
-            server_url: "https://desk.example".into(),
-            device_id: "desk-1".into(),
-            tier: Some(app_core::DeviceTier::Networked),
-        };
-        assert!(server_owns_device(None, &settings));
-        assert!(!local_owns_device(None, &settings));
-        assert!(!server_owns_device(
-            Some(app_core::DeviceTier::Local),
-            &settings
-        ));
-        assert!(local_owns_device(
-            Some(app_core::DeviceTier::Local),
-            &settings
-        ));
+    fn save_destination_follows_live_persisted_and_legacy_ownership() {
+        use app_core::DeviceTier::{Local, Networked};
 
-        settings.tier = None;
-        assert!(server_owns_device(None, &settings));
-        settings.server_url.clear();
-        settings.device_id.clear();
-        assert!(!server_owns_device(None, &settings));
-        assert!(local_owns_device(None, &settings));
+        let settings = |server_url: &str, device_id: &str, tier| NetworkSettings {
+            server_url: server_url.into(),
+            device_id: device_id.into(),
+            tier,
+        };
+        let cases = [
+            (
+                Some(Networked),
+                settings("", "", Some(Local)),
+                SaveDestination::Server,
+            ),
+            (
+                Some(Local),
+                settings("https://desk.example", "desk-1", Some(Networked)),
+                SaveDestination::Local,
+            ),
+            (
+                None,
+                settings("", "", Some(Networked)),
+                SaveDestination::Server,
+            ),
+            (
+                None,
+                settings("https://desk.example", "desk-1", Some(Networked)),
+                SaveDestination::Server,
+            ),
+            (None, settings("", "", Some(Local)), SaveDestination::Local),
+            (
+                None,
+                settings("https://desk.example", "desk-1", Some(Local)),
+                SaveDestination::Local,
+            ),
+            (None, settings("", "", None), SaveDestination::Local),
+            (
+                None,
+                settings("https://desk.example", "", None),
+                SaveDestination::Server,
+            ),
+            (None, settings("", "desk-1", None), SaveDestination::Server),
+            (
+                None,
+                settings("https://desk.example", "desk-1", None),
+                SaveDestination::Server,
+            ),
+        ];
+
+        for (live_tier, settings, expected) in cases {
+            assert_eq!(save_destination(live_tier, &settings), expected);
+        }
     }
 
     /// A Mac that has only ever *observed* a networked board knows its tier but not
@@ -2080,7 +2064,7 @@ mod tests {
 
     #[test]
     fn server_request_runs_after_the_mutation_lock_is_released() {
-        use std::io::{Read, Write};
+        use std::io::Write;
         use std::net::TcpListener;
         use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -2132,30 +2116,7 @@ mod tests {
                 mutation_lock.try_lock().is_ok(),
                 "the server request started while the desktop mutation lock was held"
             );
-            let mut request = Vec::new();
-            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
-                let mut chunk = [0_u8; 1_024];
-                let length = stream.read(&mut chunk).unwrap();
-                assert_ne!(length, 0, "request ended before its HTTP headers");
-                request.extend_from_slice(&chunk[..length]);
-            }
-            let header_end = request
-                .windows(4)
-                .position(|window| window == b"\r\n\r\n")
-                .unwrap()
-                + 4;
-            let headers = String::from_utf8_lossy(&request[..header_end]).to_ascii_lowercase();
-            let content_length = headers
-                .lines()
-                .find_map(|line| line.strip_prefix("content-length: "))
-                .and_then(|value| value.parse::<usize>().ok())
-                .unwrap_or(0);
-            while request.len() < header_end + content_length {
-                let mut chunk = [0_u8; 1_024];
-                let length = stream.read(&mut chunk).unwrap();
-                assert_ne!(length, 0, "request ended before its HTTP body");
-                request.extend_from_slice(&chunk[..length]);
-            }
+            let request = read_http_request(&mut stream);
             assert!(String::from_utf8_lossy(&request).starts_with("PUT "));
             stream
                 .write_all(
@@ -2204,7 +2165,7 @@ mod tests {
 
     #[test]
     fn server_transport_keeps_the_bounded_422_validation_body() {
-        use std::io::{Read, Write};
+        use std::io::Write;
         use std::net::TcpListener;
 
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -2212,30 +2173,7 @@ mod tests {
         let body = br#"{"kind":"invalid-config","issues":[{"path":"cards","code":"empty","message":"Add a card."}]}"#;
         let server = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            let mut request = Vec::new();
-            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
-                let mut chunk = [0_u8; 1_024];
-                let length = stream.read(&mut chunk).unwrap();
-                assert_ne!(length, 0, "request ended before its HTTP headers");
-                request.extend_from_slice(&chunk[..length]);
-            }
-            let header_end = request
-                .windows(4)
-                .position(|window| window == b"\r\n\r\n")
-                .unwrap()
-                + 4;
-            let headers = String::from_utf8_lossy(&request[..header_end]).to_ascii_lowercase();
-            let content_length = headers
-                .lines()
-                .find_map(|line| line.strip_prefix("content-length: "))
-                .and_then(|value| value.parse::<usize>().ok())
-                .unwrap_or(0);
-            while request.len() < header_end + content_length {
-                let mut chunk = [0_u8; 1_024];
-                let length = stream.read(&mut chunk).unwrap();
-                assert_ne!(length, 0, "request ended before its HTTP body");
-                request.extend_from_slice(&chunk[..length]);
-            }
+            let request = read_http_request(&mut stream);
             let request = String::from_utf8_lossy(&request);
             assert!(request.starts_with("PUT /v1/devices/desk-1/config "));
             assert!(
@@ -2347,6 +2285,18 @@ mod tests {
         preview_frame: PreviewFrame,
     }
 
+    fn contract_card_kind(card: &CardSettings) -> &'static str {
+        match card {
+            CardSettings::Clock { .. } => "clock",
+            CardSettings::Pomodoro { .. } => "pomodoro",
+            CardSettings::Calendar { .. } => "calendar",
+            CardSettings::Weather { .. } => "weather",
+            CardSettings::JsonFeed { .. } => "json-feed",
+            CardSettings::Rss { .. } => "rss",
+            CardSettings::Plugin { .. } => "plugin",
+        }
+    }
+
     #[allow(clippy::too_many_lines)]
     fn contract_fixtures() -> ContractFixtures {
         let issue = ValidationIssue {
@@ -2428,6 +2378,14 @@ mod tests {
                 max_items: 3,
                 template: DisplayTemplate::RowList,
                 tap_action: WidgetTapAction::Dismiss,
+                refresh: RefreshPolicy::Interval { minutes: 15 },
+                alert: CardAlert::None,
+            },
+            CardSettings::Plugin {
+                id: "air-quality".into(),
+                title: "Office air".into(),
+                plugin_id: "com.example.air-quality".into(),
+                tap_action: WidgetTapAction::None,
                 refresh: RefreshPolicy::Interval { minutes: 15 },
                 alert: CardAlert::None,
             },
@@ -2756,17 +2714,7 @@ mod tests {
                 DisplayOrientation::Landscape,
                 DisplayOrientation::LandscapeFlipped,
             ],
-            device_capabilities: vec![
-                DeviceCapability::CoreWidgets,
-                DeviceCapability::ConfigRotation,
-                DeviceCapability::DashboardLayouts,
-                DeviceCapability::ExtendedTemplates,
-                DeviceCapability::HostTapActions,
-                DeviceCapability::AssetTransfer,
-                DeviceCapability::FirmwareUpdate,
-                DeviceCapability::Networking,
-                DeviceCapability::SceneRender,
-            ],
+            device_capabilities: DeviceCapability::from_bits(DeviceCapability::known_bits()),
             runtime_states,
             connection_states,
             provider_states,
@@ -2798,6 +2746,27 @@ mod tests {
                 sample: true,
             },
         }
+    }
+
+    #[test]
+    fn contract_fixture_covers_every_card_settings_variant() {
+        let kinds = contract_fixtures()
+            .card_settings
+            .iter()
+            .map(contract_card_kind)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            kinds,
+            [
+                "clock",
+                "pomodoro",
+                "calendar",
+                "weather",
+                "json-feed",
+                "rss",
+                "plugin",
+            ]
+        );
     }
 
     fn typescript_contract_source() -> String {

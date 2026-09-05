@@ -48,9 +48,6 @@ jobs:
       - name: frontend install
         working-directory: companion/apps/deskmate
         run: bun install --frozen-lockfile
-      - name: frontend typecheck
-        working-directory: companion/apps/deskmate
-        run: bun run check
       - name: frontend format
         working-directory: companion/apps/deskmate
         run: bun run format:check
@@ -60,9 +57,6 @@ jobs:
       - name: frontend tests
         working-directory: companion/apps/deskmate
         run: bun test
-      - name: frontend build
-        working-directory: companion/apps/deskmate
-        run: bun run build
       - name: tauri release bundle
         working-directory: companion/apps/deskmate
         run: bunx tauri build

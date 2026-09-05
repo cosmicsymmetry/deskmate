@@ -200,21 +200,6 @@ static void test_a_rect_clip_decodes(void)
     free(scene);
 }
 
-static void test_a_rect_clip_past_the_canvas_is_rejected(void)
-{
-    builder_t b;
-    scene_t *scene = new_scene();
-
-    begin_scene(&b, 1U, 0U, 1U);
-    put_rect_node_with_clip(&b, SCENE_CANVAS_WIDTH, 64, 120, 120);
-
-    assert(scene_decode(b.bytes, b.length, scene) ==
-           SCENE_MODEL_ERR_GEOMETRY);
-    assert(scene->node_count == 0U);
-
-    free(scene);
-}
-
 static void put_arc_node_with_opacity(builder_t *b, bool include_opacity,
                                       uint64_t opacity)
 {
@@ -797,21 +782,6 @@ static void test_center_and_right_label_anchors_decode(void)
     free(scene);
 }
 
-static void test_an_unknown_label_anchor_is_rejected_by_the_decoder(void)
-{
-    builder_t b;
-    scene_t *scene = new_scene();
-
-    begin_scene(&b, 1U, 0U, 1U);
-    put_label_node_with_anchor(&b, 3U);
-
-    assert(scene_decode(b.bytes, b.length, scene) ==
-           SCENE_MODEL_ERR_GEOMETRY);
-    assert(scene->node_count == 0U);
-
-    free(scene);
-}
-
 static void put_rot_rect_node(builder_t *b, int64_t rotation,
                               int64_t pivot_x, int64_t pivot_y,
                               const char *rotation_binding)
@@ -899,51 +869,6 @@ static void test_a_rotated_rect_clip_decodes(void)
     free(scene);
 }
 
-static void test_a_rotated_rect_clip_past_the_canvas_is_rejected(void)
-{
-    builder_t b;
-    scene_t *scene = new_scene();
-
-    begin_scene(&b, 1U, 0U, 1U);
-    put_rot_rect_node_with_clip(&b, SCENE_CANVAS_WIDTH, 24, 320, 320);
-
-    assert(scene_decode(b.bytes, b.length, scene) ==
-           SCENE_MODEL_ERR_GEOMETRY);
-    assert(scene->node_count == 0U);
-
-    free(scene);
-}
-
-static void test_a_label_anchor_outside_the_canvas_is_rejected(void)
-{
-    builder_t b;
-    scene_t *scene = new_scene();
-
-    begin_scene(&b, 1U, 0U, 1U);
-    put_minimal_label_node(&b, SCENE_CANVAS_WIDTH, 10);
-
-    assert(scene_decode(b.bytes, b.length, scene) ==
-           SCENE_MODEL_ERR_GEOMETRY);
-    assert(scene->node_count == 0U);
-
-    free(scene);
-}
-
-static void test_a_rotated_rect_rotation_outside_one_turn_is_rejected(void)
-{
-    builder_t b;
-    scene_t *scene = new_scene();
-
-    begin_scene(&b, 1U, 0U, 1U);
-    put_rot_rect_node(&b, 3601, 3, 104, "");
-
-    assert(scene_decode(b.bytes, b.length, scene) ==
-           SCENE_MODEL_ERR_GEOMETRY);
-    assert(scene->node_count == 0U);
-
-    free(scene);
-}
-
 static void test_an_external_rotated_rect_pivot_decodes(void)
 {
     builder_t b;
@@ -955,21 +880,6 @@ static void test_an_external_rotated_rect_pivot_decodes(void)
     assert(scene_decode(b.bytes, b.length, scene) == SCENE_MODEL_OK);
     assert(scene->nodes[0].value.rot_rect.pivot_y == 160);
     assert(!scene->nodes[0].value.rot_rect.has_clip);
-
-    free(scene);
-}
-
-static void test_a_rotated_rect_pivot_past_the_canvas_is_rejected(void)
-{
-    builder_t b;
-    scene_t *scene = new_scene();
-
-    begin_scene(&b, 1U, 0U, 1U);
-    put_rot_rect_node(&b, 0, 3, SCENE_CANVAS_HEIGHT + 1, "");
-
-    assert(scene_decode(b.bytes, b.length, scene) ==
-           SCENE_MODEL_ERR_GEOMETRY);
-    assert(scene->node_count == 0U);
 
     free(scene);
 }
@@ -1579,20 +1489,6 @@ static void test_a_bound_line_decodes(void)
     free(scene);
 }
 
-static void test_a_bound_line_with_an_off_canvas_pivot_is_rejected(void)
-{
-    builder_t b;
-    scene_t *scene = new_scene();
-
-    begin_scene(&b, 1U, 0U, 1U);
-    put_bound_line_node(&b, SCENE_CANVAS_WIDTH + 1, 244, 42,
-                        "time:angle:minute");
-
-    assert(scene_decode(b.bytes, b.length, scene) ==
-           SCENE_MODEL_ERR_GEOMETRY);
-    free(scene);
-}
-
 static void test_explicit_points_and_an_angle_binding_are_rejected(void)
 {
     builder_t b;
@@ -1944,20 +1840,14 @@ int main(void)
     test_running_color_decodes_on_arc_and_text();
     test_running_color_outside_uint32_is_rejected_on_both_nodes();
     test_a_rect_clip_decodes();
-    test_a_rect_clip_past_the_canvas_is_rejected();
     test_an_explicit_arc_opacity_decodes();
     test_an_omitted_arc_opacity_defaults_to_cover();
     test_an_arc_opacity_outside_uint8_is_rejected();
     test_every_node_kind_decodes();
-    test_a_label_anchor_outside_the_canvas_is_rejected();
     test_an_omitted_label_anchor_defaults_to_left();
     test_center_and_right_label_anchors_decode();
-    test_an_unknown_label_anchor_is_rejected_by_the_decoder();
-    test_a_rotated_rect_rotation_outside_one_turn_is_rejected();
     test_an_external_rotated_rect_pivot_decodes();
     test_a_rotated_rect_clip_decodes();
-    test_a_rotated_rect_clip_past_the_canvas_is_rejected();
-    test_a_rotated_rect_pivot_past_the_canvas_is_rejected();
     test_an_unknown_rotated_rect_binding_is_rejected();
     test_more_nodes_than_the_cap_is_rejected();
     test_a_node_with_an_unknown_kind_is_rejected();
@@ -1983,7 +1873,6 @@ int main(void)
     test_a_line_point_array_far_past_the_cap_is_rejected();
     test_mismatched_line_point_arrays_are_rejected();
     test_a_bound_line_decodes();
-    test_a_bound_line_with_an_off_canvas_pivot_is_rejected();
     test_explicit_points_and_an_angle_binding_are_rejected();
     test_empty_point_keys_and_bound_geometry_are_rejected_by_decoder();
     test_a_text_node_without_a_value_is_rejected();

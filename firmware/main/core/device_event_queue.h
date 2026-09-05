@@ -33,4 +33,3 @@ bool device_event_queue_pop(device_event_queue_t *queue,
 
 uint32_t device_event_queue_dropped(device_event_queue_t *queue);
 uint32_t device_event_queue_high_water(device_event_queue_t *queue);
-uint64_t device_event_queue_latest_sequence(device_event_queue_t *queue);

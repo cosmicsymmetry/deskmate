@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "cbor.h"
+#include "core/apply_config_validation.h"
 #include "core/scene_decode.h"
 
 #define REQUIRED_BIT(key) (UINT32_C(1) << (key))
@@ -29,12 +30,6 @@ static bool bounded_length(const char *text, size_t capacity, size_t *length)
     }
     *length = (size_t)(end - text);
     return true;
-}
-
-bool protocol_template_kind_valid(protocol_template_kind_t kind)
-{
-    return kind >= PROTOCOL_TEMPLATE_DIGITAL_CLOCK &&
-           kind <= PROTOCOL_TEMPLATE_ICON_BADGE_TEXT;
 }
 
 /* The capability bit docs/protocol/v1.md gates `type` on, or 0 for a request
@@ -548,82 +543,32 @@ static protocol_message_result_t decode_network_config(
 static protocol_message_result_t validate_apply_config(
     const protocol_apply_config_t *config)
 {
-    if (config->revision == 0U || config->widget_count == 0U ||
-        config->screen_count == 0U) {
-        return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
-    }
-    if (config->widget_count > PROTOCOL_MAX_CONFIG_WIDGETS ||
-        config->screen_count > PROTOCOL_MAX_CONFIG_SCREENS) {
+    switch (apply_config_validate(config)) {
+    case APPLY_CONFIG_VALID:
+        return PROTOCOL_MESSAGE_OK;
+    case APPLY_CONFIG_TOO_LARGE:
         return PROTOCOL_MESSAGE_ERR_CONFIG_TOO_LARGE;
-    }
-    if (config->rotation != 90U && config->rotation != 270U) {
+    case APPLY_CONFIG_DUPLICATE_ID:
+        return PROTOCOL_MESSAGE_ERR_DUPLICATE_KEY;
+    case APPLY_CONFIG_UNKNOWN_WIDGET:
+        return PROTOCOL_MESSAGE_ERR_UNKNOWN_WIDGET;
+    case APPLY_CONFIG_UNSUPPORTED_TEMPLATE:
+        return PROTOCOL_MESSAGE_ERR_UNSUPPORTED_TEMPLATE;
+    case APPLY_CONFIG_UNSUPPORTED_SIZE_CLASS:
+        return PROTOCOL_MESSAGE_ERR_UNSUPPORTED_SIZE_CLASS;
+    case APPLY_CONFIG_INVALID_ARGUMENT:
+    case APPLY_CONFIG_INVALID_VALUE:
+    default:
         return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
     }
-    for (size_t i = 0U; i < config->widget_count; ++i) {
-        const protocol_widget_config_t *widget = &config->widgets[i];
-        size_t length = 0U;
-        if (!bounded_length(widget->widget_id, sizeof(widget->widget_id),
-                            &length) ||
-            length == 0U) {
-            return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
-        }
-        if (!protocol_template_kind_valid(widget->template_kind)) {
-            return PROTOCOL_MESSAGE_ERR_UNSUPPORTED_TEMPLATE;
-        }
-        if (widget->size_class == PROTOCOL_SIZE_TILE ||
-            widget->size_class < PROTOCOL_SIZE_FULL ||
-            widget->size_class > PROTOCOL_SIZE_TILE) {
-            return PROTOCOL_MESSAGE_ERR_UNSUPPORTED_SIZE_CLASS;
-        }
-        if (widget->tap_action < PROTOCOL_TAP_NONE ||
-            widget->tap_action > PROTOCOL_TAP_RESET ||
-            widget->interrupt_policy < PROTOCOL_INTERRUPT_DISABLED ||
-            widget->interrupt_policy > PROTOCOL_INTERRUPT_ENABLED ||
-            (widget->template_kind != PROTOCOL_TEMPLATE_PROGRESS_RING &&
-             widget->tap_action != PROTOCOL_TAP_NONE)) {
-            return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
-        }
-        for (size_t j = 0U; j < i; ++j) {
-            if (strcmp(widget->widget_id, config->widgets[j].widget_id) == 0) {
-                return PROTOCOL_MESSAGE_ERR_DUPLICATE_KEY;
-            }
-        }
-    }
-    for (size_t i = 0U; i < config->screen_count; ++i) {
-        const protocol_screen_config_t *screen = &config->screens[i];
-        size_t length = 0U;
-        if (!bounded_length(screen->screen_id, sizeof(screen->screen_id),
-                            &length) ||
-            length == 0U ||
-            !bounded_length(screen->widget_id, sizeof(screen->widget_id),
-                            &length) ||
-            length == 0U) {
-            return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
-        }
-        for (size_t j = 0U; j < i; ++j) {
-            if (strcmp(screen->screen_id, config->screens[j].screen_id) == 0) {
-                return PROTOCOL_MESSAGE_ERR_DUPLICATE_KEY;
-            }
-        }
-        bool found = false;
-        for (size_t j = 0U; j < config->widget_count; ++j) {
-            if (strcmp(screen->widget_id, config->widgets[j].widget_id) == 0) {
-                found = true;
-                break;
-            }
-        }
-        if (!found) {
-            return PROTOCOL_MESSAGE_ERR_UNKNOWN_WIDGET;
-        }
-    }
-    return PROTOCOL_MESSAGE_OK;
 }
 
 /* AssetBegin payload keys (additive protocol-v1 table):
  *   0 digest             required 32-byte bstr
  *   1 kind               required asset kind
  *   2 total_length       required WIRE length
- *   3 volatile           optional; false when absent, emitted only when true
+ *   3 volatile           optional on decode; false when absent, but always
+ *                        emitted (including false) for deployed-v1 compatibility
  *   4 encoding           optional; raw (0) when absent, emitted only non-raw
  *   5 decoded_length     optional; required iff encoding is non-raw
  */
@@ -1403,6 +1348,36 @@ static protocol_message_result_t decode_device_event(
     return validate_device_event(event);
 }
 
+static protocol_message_result_t validate_ack_payload(
+    const protocol_ack_t *ack)
+{
+    bool acknowledged_type_valid =
+        ack->acknowledged_type == PROTOCOL_TYPE_TIME_SYNC ||
+        ack->acknowledged_type == PROTOCOL_TYPE_PUSH_DATA ||
+        ack->acknowledged_type == PROTOCOL_TYPE_APPLY_CONFIG ||
+        ack->acknowledged_type == PROTOCOL_TYPE_ACTIVATE_SCREEN ||
+        ack->acknowledged_type == PROTOCOL_TYPE_TRIGGER_INTERRUPT ||
+        ack->acknowledged_type == PROTOCOL_TYPE_NETWORK_CONFIG ||
+        ack->acknowledged_type == PROTOCOL_TYPE_FACTORY_RESET ||
+        ack->acknowledged_type == PROTOCOL_TYPE_ASSET_BEGIN ||
+        ack->acknowledged_type == PROTOCOL_TYPE_ASSET_CHUNK ||
+        ack->acknowledged_type == PROTOCOL_TYPE_ASSET_COMMIT ||
+        ack->acknowledged_type == PROTOCOL_TYPE_ASSET_RELEASE ||
+        ack->acknowledged_type == PROTOCOL_TYPE_PUSH_SCENE;
+    bool revision_required =
+        ack->acknowledged_type == PROTOCOL_TYPE_PUSH_DATA ||
+        ack->acknowledged_type == PROTOCOL_TYPE_APPLY_CONFIG ||
+        ack->acknowledged_type == PROTOCOL_TYPE_PUSH_SCENE;
+    bool already_present_required =
+        ack->acknowledged_type == PROTOCOL_TYPE_ASSET_BEGIN;
+    return acknowledged_type_valid &&
+                   revision_required == ack->has_revision &&
+                   (!ack->has_revision || ack->revision != 0U) &&
+                   already_present_required == ack->has_already_present
+               ? PROTOCOL_MESSAGE_OK
+               : PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
+}
+
 static protocol_message_result_t decode_ack(const protocol_frame_t *frame,
                                              protocol_ack_t *ack)
 {
@@ -1452,36 +1427,7 @@ static protocol_message_result_t decode_ack(const protocol_frame_t *frame,
     if ((present & REQUIRED_BIT(0)) == 0U) {
         return PROTOCOL_MESSAGE_ERR_MISSING_FIELD;
     }
-    bool revision_required =
-        ack->acknowledged_type == PROTOCOL_TYPE_PUSH_DATA ||
-        ack->acknowledged_type == PROTOCOL_TYPE_APPLY_CONFIG ||
-        ack->acknowledged_type == PROTOCOL_TYPE_PUSH_SCENE;
-    bool already_present_required =
-        ack->acknowledged_type == PROTOCOL_TYPE_ASSET_BEGIN;
-    if (ack->acknowledged_type != PROTOCOL_TYPE_TIME_SYNC &&
-        ack->acknowledged_type != PROTOCOL_TYPE_PUSH_DATA &&
-        ack->acknowledged_type != PROTOCOL_TYPE_APPLY_CONFIG &&
-        ack->acknowledged_type != PROTOCOL_TYPE_ACTIVATE_SCREEN &&
-        ack->acknowledged_type != PROTOCOL_TYPE_TRIGGER_INTERRUPT &&
-        ack->acknowledged_type != PROTOCOL_TYPE_NETWORK_CONFIG &&
-        ack->acknowledged_type != PROTOCOL_TYPE_FACTORY_RESET &&
-        ack->acknowledged_type != PROTOCOL_TYPE_ASSET_BEGIN &&
-        ack->acknowledged_type != PROTOCOL_TYPE_ASSET_CHUNK &&
-        ack->acknowledged_type != PROTOCOL_TYPE_ASSET_COMMIT &&
-        ack->acknowledged_type != PROTOCOL_TYPE_ASSET_RELEASE &&
-        ack->acknowledged_type != PROTOCOL_TYPE_PUSH_SCENE) {
-        return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
-    }
-    if (revision_required != ack->has_revision) {
-        return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
-    }
-    if (ack->has_revision && ack->revision == 0U) {
-        return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
-    }
-    if (already_present_required != ack->has_already_present) {
-        return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
-    }
-    return PROTOCOL_MESSAGE_OK;
+    return validate_ack_payload(ack);
 }
 
 static protocol_message_result_t decode_heartbeat_ack(
@@ -1980,35 +1926,8 @@ static protocol_message_result_t validate_message(
             return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
         }
         return PROTOCOL_MESSAGE_OK;
-    case PROTOCOL_TYPE_ACK: {
-        const protocol_ack_t *ack = &message->value.ack;
-        bool acknowledged_type_valid =
-            ack->acknowledged_type == PROTOCOL_TYPE_TIME_SYNC ||
-            ack->acknowledged_type == PROTOCOL_TYPE_PUSH_DATA ||
-            ack->acknowledged_type == PROTOCOL_TYPE_APPLY_CONFIG ||
-            ack->acknowledged_type == PROTOCOL_TYPE_ACTIVATE_SCREEN ||
-            ack->acknowledged_type == PROTOCOL_TYPE_TRIGGER_INTERRUPT ||
-            ack->acknowledged_type == PROTOCOL_TYPE_NETWORK_CONFIG ||
-            ack->acknowledged_type == PROTOCOL_TYPE_FACTORY_RESET ||
-            ack->acknowledged_type == PROTOCOL_TYPE_ASSET_BEGIN ||
-            ack->acknowledged_type == PROTOCOL_TYPE_ASSET_CHUNK ||
-            ack->acknowledged_type == PROTOCOL_TYPE_ASSET_COMMIT ||
-            ack->acknowledged_type == PROTOCOL_TYPE_ASSET_RELEASE ||
-            ack->acknowledged_type == PROTOCOL_TYPE_PUSH_SCENE;
-        bool revision_required =
-            ack->acknowledged_type == PROTOCOL_TYPE_PUSH_DATA ||
-            ack->acknowledged_type == PROTOCOL_TYPE_APPLY_CONFIG ||
-            ack->acknowledged_type == PROTOCOL_TYPE_PUSH_SCENE;
-        bool already_present_required =
-            ack->acknowledged_type == PROTOCOL_TYPE_ASSET_BEGIN;
-        if (!acknowledged_type_valid ||
-            revision_required != ack->has_revision ||
-            (ack->has_revision && ack->revision == 0U) ||
-            already_present_required != ack->has_already_present) {
-            return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
-        }
-        return PROTOCOL_MESSAGE_OK;
-    }
+    case PROTOCOL_TYPE_ACK:
+        return validate_ack_payload(&message->value.ack);
     case PROTOCOL_TYPE_PUSH_DATA: {
         const protocol_push_data_t *push = &message->value.push_data;
         if (!bounded_length(push->widget_id, sizeof(push->widget_id),

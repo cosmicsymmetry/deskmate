@@ -58,7 +58,6 @@ typedef struct {
 
 typedef struct {
     const asset_flash_io_t *io;
-    uint32_t partition_size;
     uint32_t record_capacity;
     uint32_t blob_region_offset;
     uint32_t blob_region_size;

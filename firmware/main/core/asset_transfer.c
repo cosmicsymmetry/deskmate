@@ -16,8 +16,7 @@ static bool asset_kind_is_valid(uint8_t kind)
 
 asset_transfer_result_t asset_transfer_begin(asset_transfer_t *transfer,
                                              const uint8_t *digest, uint8_t kind,
-                                             uint32_t total_length,
-                                             bool volatile_tier)
+                                             uint32_t total_length)
 {
     if (transfer == NULL || digest == NULL) {
         return ASSET_TRANSFER_ERR_ARGUMENT;
@@ -35,8 +34,6 @@ asset_transfer_result_t asset_transfer_begin(asset_transfer_t *transfer,
     memset(transfer, 0, sizeof *transfer);
     memcpy(transfer->digest, digest, ASSET_DIGEST_BYTES);
     transfer->total_length = total_length;
-    transfer->kind = kind;
-    transfer->volatile_tier = volatile_tier;
     transfer->active = true;
     return ASSET_TRANSFER_OK;
 }
@@ -95,14 +92,6 @@ bool asset_transfer_is_complete(const asset_transfer_t *transfer)
         return false;
     }
     return transfer->active && transfer->committed_offset == transfer->total_length;
-}
-
-uint32_t asset_transfer_resume_offset(const asset_transfer_t *transfer)
-{
-    if (transfer == NULL) {
-        return 0U;
-    }
-    return transfer->committed_offset;
 }
 
 void asset_transfer_abort(asset_transfer_t *transfer)

@@ -391,7 +391,11 @@ typedef enum {
     PROTOCOL_MESSAGE_ERR_UNKNOWN_WIDGET,
 } protocol_message_result_t;
 
-bool protocol_template_kind_valid(protocol_template_kind_t kind);
+static inline bool protocol_template_kind_valid(protocol_template_kind_t kind)
+{
+    return kind >= PROTOCOL_TEMPLATE_DIGITAL_CLOCK &&
+           kind <= PROTOCOL_TEMPLATE_ICON_BADGE_TEXT;
+}
 
 typedef enum {
     PROTOCOL_REQUEST_DISPATCHABLE = 0,

@@ -71,14 +71,12 @@ static void test_registry_and_defaults(void)
 static void test_progress_resolution_is_atomic(void)
 {
     assert(template_fields_init(PROTOCOL_TEMPLATE_PROGRESS_RING, &s_state));
-    template_field_patch_t patch;
     protocol_push_data_t missing = {
         .widget_id = "timer",
         .revision = 1U,
     };
-    assert(template_fields_resolve(&s_state, &s_staging, &missing, &patch) ==
+    assert(template_fields_resolve(&s_state, &s_staging, &missing) ==
            TEMPLATE_FIELDS_MISSING_REQUIRED);
-    assert(patch.dirty_mask == 0U);
     assert(strcmp(template_fields_get(&s_state, "label")->value.text,
                   "Pomodoro") == 0);
 
@@ -86,10 +84,8 @@ static void test_progress_resolution_is_atomic(void)
     strcpy(add_field(&push, "label", PROTOCOL_FIELD_TEXT)->value.text,
            "Deep work");
     add_field(&push, "future", PROTOCOL_FIELD_BOOLEAN)->value.boolean = true;
-    assert(template_fields_resolve(&s_state, &s_staging, &push, &patch) ==
+    assert(template_fields_resolve(&s_state, &s_staging, &push) ==
            TEMPLATE_FIELDS_OK);
-    assert(patch.dirty_mask != 0U);
-    assert(patch.unknown_fields == 1U);
     assert(template_fields_get(&s_state, "duration_seconds")
                ->value.integer == 1500);
     assert(template_fields_get(&s_state, "remaining_seconds")
@@ -98,22 +94,20 @@ static void test_progress_resolution_is_atomic(void)
     assert(strcmp(template_fields_get(&s_state, "label")->value.text,
                   "Deep work") == 0);
 
-    assert(template_fields_resolve(&s_state, &s_staging, &push, &patch) ==
+    assert(template_fields_resolve(&s_state, &s_staging, &push) ==
            TEMPLATE_FIELDS_OK);
-    assert(patch.dirty_mask == 0U);
 
     protocol_push_data_t invalid = push;
     invalid.fields[0].type = PROTOCOL_FIELD_TEXT;
     strcpy(invalid.fields[0].value.text, "wrong");
-    assert(template_fields_resolve(&s_state, &s_staging, &invalid, &patch) ==
+    assert(template_fields_resolve(&s_state, &s_staging, &invalid) ==
            TEMPLATE_FIELDS_WRONG_TYPE);
-    assert(patch.dirty_mask == 0U);
     assert(template_fields_get(&s_state, "duration_seconds")
                ->value.integer == 1500);
 
     invalid = push;
     invalid.fields[1].value.integer = 1501;
-    assert(template_fields_resolve(&s_state, &s_staging, &invalid, &patch) ==
+    assert(template_fields_resolve(&s_state, &s_staging, &invalid) ==
            TEMPLATE_FIELDS_OUT_OF_RANGE);
     assert(template_fields_get(&s_state, "remaining_seconds")
                ->value.integer == 1200);
@@ -126,8 +120,7 @@ static void test_common_state_and_row_bounds(void)
     add_field(&push, "stale", PROTOCOL_FIELD_BOOLEAN)->value.boolean = true;
     strcpy(add_field(&push, "error", PROTOCOL_FIELD_TEXT)->value.text,
            "provider offline");
-    template_field_patch_t patch;
-    assert(template_fields_resolve(&s_state, &s_staging, &push, &patch) ==
+    assert(template_fields_resolve(&s_state, &s_staging, &push) ==
            TEMPLATE_FIELDS_OK);
     assert(template_fields_get(&s_state, "stale")->value.boolean);
     assert(strcmp(template_fields_get(&s_state, "error")->value.text,
@@ -141,14 +134,14 @@ static void test_common_state_and_row_bounds(void)
            "Standup");
     strcpy(add_field(&push, "row0_time", PROTOCOL_FIELD_TEXT)->value.text,
            "10:00");
-    assert(template_fields_resolve(&s_state, &s_staging, &push, &patch) ==
+    assert(template_fields_resolve(&s_state, &s_staging, &push) ==
            TEMPLATE_FIELDS_OK);
     assert(strcmp(template_fields_get(&s_state, "row0_title")->value.text,
                   "Standup") == 0);
 
     memset(push.fields[0].value.text, 'x', 97U);
     push.fields[0].value.text[97] = '\0';
-    assert(template_fields_resolve(&s_state, &s_staging, &push, &patch) ==
+    assert(template_fields_resolve(&s_state, &s_staging, &push) ==
            TEMPLATE_FIELDS_OUT_OF_RANGE);
     assert(strcmp(template_fields_get(&s_state, "row0_title")->value.text,
                   "Standup") == 0);
@@ -173,7 +166,7 @@ static void test_extended_template_registries(void)
     assert(fields != NULL);
     assert(count == 10U);
 
-    /* dirty_mask is uint16_t: no registry may exceed 16 fields. */
+    /* The uint16_t seen mask requires every registry to fit 16 fields. */
     for (int kind = PROTOCOL_TEMPLATE_DIGITAL_CLOCK;
          kind <= PROTOCOL_TEMPLATE_ICON_BADGE_TEXT; ++kind) {
         (void)template_fields_registry((protocol_template_kind_t)kind, &count);
@@ -181,10 +174,9 @@ static void test_extended_template_registries(void)
     }
 }
 
-static void test_weather_push_has_no_unknown_fields(void)
+static void test_weather_registry_covers_every_provider_field(void)
 {
-    /* Every field the weather provider emits must be declared, so
-     * unknown_field_count stays a real diagnostic signal. */
+    /* Every field the weather provider emits must remain declared. */
     static const char *emitted[] = {
         "title", "value", "label", "badge", "icon",
         "temperature_tenths", "apparent_temperature_tenths", "unit",
@@ -224,7 +216,6 @@ static void test_icon_badge_text_temperature_bounds(void)
      * 101.3 F == 1013 tenths) must not push the whole card stale. */
     template_field_state_t state;
     template_field_state_t staging;
-    template_field_patch_t patch;
     assert(template_fields_init(PROTOCOL_TEMPLATE_ICON_BADGE_TEXT, &state));
 
     protocol_push_data_t hot_fahrenheit = {
@@ -233,8 +224,8 @@ static void test_icon_badge_text_temperature_bounds(void)
     };
     add_field(&hot_fahrenheit, "temperature_tenths", PROTOCOL_FIELD_INTEGER)
         ->value.integer = 1013;
-    assert(template_fields_resolve(&state, &staging, &hot_fahrenheit,
-                                   &patch) == TEMPLATE_FIELDS_OK);
+    assert(template_fields_resolve(&state, &staging, &hot_fahrenheit) ==
+           TEMPLATE_FIELDS_OK);
     assert(template_fields_get(&state, "temperature_tenths")->value.integer ==
            1013);
 
@@ -244,7 +235,7 @@ static void test_icon_badge_text_temperature_bounds(void)
     };
     add_field(&out_of_range, "temperature_tenths", PROTOCOL_FIELD_INTEGER)
         ->value.integer = 25000;
-    assert(template_fields_resolve(&state, &staging, &out_of_range, &patch) ==
+    assert(template_fields_resolve(&state, &staging, &out_of_range) ==
            TEMPLATE_FIELDS_OUT_OF_RANGE);
 }
 
@@ -282,7 +273,7 @@ int main(void)
     test_progress_resolution_is_atomic();
     test_common_state_and_row_bounds();
     test_extended_template_registries();
-    test_weather_push_has_no_unknown_fields();
+    test_weather_registry_covers_every_provider_field();
     test_big_number_label_defaults_are_safe();
     test_icon_badge_text_temperature_bounds();
     test_every_valid_kind_has_a_registry();

@@ -62,13 +62,6 @@ static const template_field_descriptor_t s_row_list_fields[] = {
     TEXT_FIELD("error", false, 96U, ""),
 };
 
-static const template_field_descriptor_t s_analog_clock_fields[] = {
-    TEXT_FIELD("title", false, 64U, ""),
-    BOOL_FIELD("show_seconds", false, true),
-    BOOL_FIELD("stale", false, false),
-    TEXT_FIELD("error", false, 96U, ""),
-};
-
 static const template_field_descriptor_t s_big_number_label_fields[] = {
     TEXT_FIELD("title", false, 64U, ""),
     TEXT_FIELD("value", false, 16U, "--"),
@@ -78,7 +71,7 @@ static const template_field_descriptor_t s_big_number_label_fields[] = {
 };
 
 /* Declares every field the weather provider emits, including the three the
- * layout does not draw, so unknown_field_count stays zero on a weather push.
+ * layout does not draw, so those forward-compatible inputs remain known.
  * See this task's note in the plan before removing any of them. */
 static const template_field_descriptor_t s_icon_badge_text_fields[] = {
     TEXT_FIELD("title", false, 64U, ""),
@@ -117,9 +110,9 @@ const template_field_descriptor_t *template_fields_registry(
         count = array_length(sizeof(s_row_list_fields),
                              sizeof(s_row_list_fields[0]));
     } else if (template_kind == PROTOCOL_TEMPLATE_ANALOG_CLOCK) {
-        fields = s_analog_clock_fields;
-        count = array_length(sizeof(s_analog_clock_fields),
-                             sizeof(s_analog_clock_fields[0]));
+        fields = s_digital_clock_fields;
+        count = array_length(sizeof(s_digital_clock_fields),
+                             sizeof(s_digital_clock_fields[0]));
     } else if (template_kind == PROTOCOL_TEMPLATE_BIG_NUMBER_LABEL) {
         fields = s_big_number_label_fields;
         count = array_length(sizeof(s_big_number_label_fields),
@@ -175,21 +168,6 @@ static bool bounded_text_length(const char *text,
     return true;
 }
 
-static bool values_equal(const template_field_value_t *left,
-                         const template_field_value_t *right)
-{
-    if (left->type != right->type) {
-        return false;
-    }
-    if (left->type == PROTOCOL_FIELD_TEXT) {
-        return strcmp(left->value.text, right->value.text) == 0;
-    }
-    if (left->type == PROTOCOL_FIELD_INTEGER) {
-        return left->value.integer == right->value.integer;
-    }
-    return left->value.boolean == right->value.boolean;
-}
-
 static size_t descriptor_index(
     const template_field_descriptor_t *fields,
     size_t count,
@@ -206,14 +184,12 @@ static size_t descriptor_index(
 template_fields_result_t template_fields_resolve(
     template_field_state_t *state,
     template_field_state_t *staging,
-    const protocol_push_data_t *push,
-    template_field_patch_t *patch)
+    const protocol_push_data_t *push)
 {
-    if (state == NULL || staging == NULL || push == NULL || patch == NULL ||
-        state == staging || push->field_count > PROTOCOL_MAX_FIELD_COUNT) {
+    if (state == NULL || staging == NULL || push == NULL || state == staging ||
+        push->field_count > PROTOCOL_MAX_FIELD_COUNT) {
         return TEMPLATE_FIELDS_INVALID_ARGUMENT;
     }
-    memset(patch, 0, sizeof(*patch));
     size_t count = 0U;
     const template_field_descriptor_t *fields = template_fields_registry(
         state->template_kind, &count);
@@ -233,7 +209,6 @@ template_fields_result_t template_fields_resolve(
         }
         size_t index = descriptor_index(fields, count, incoming->key);
         if (index == count) {
-            ++patch->unknown_fields;
             continue;
         }
         uint16_t bit = (uint16_t)(UINT16_C(1) << index);
@@ -281,11 +256,6 @@ template_fields_result_t template_fields_resolve(
         }
     }
 
-    for (size_t i = 0U; i < count; ++i) {
-        if (!values_equal(&state->values[i], &staging->values[i])) {
-            patch->dirty_mask |= (uint16_t)(UINT16_C(1) << i);
-        }
-    }
     *state = *staging;
     return TEMPLATE_FIELDS_OK;
 }

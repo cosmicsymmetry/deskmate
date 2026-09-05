@@ -16,6 +16,7 @@
 #define DATE_TOKEN "date"
 #define FIELD_PREFIX "field."
 #define TIMER_SECONDS_MAX INT64_C(86400)
+#define TIMER_MS_MAX (UINT64_C(86400) * UINT64_C(1000))
 #define CLOCK_DIAL_ROTATION 270
 #define CLOCK_TRIGO_SHIFT 15
 
@@ -34,20 +35,30 @@ static void update_timer_ratios(scene_timer_snapshot_t *snapshot)
         snapshot->total_ms);
 }
 
-/* Keep this producer and lvgl-sim's fill_scene_timer_context() on the same
- * invariant: total is clamped to 86400s, remaining is clamped to total, and
- * both remaining ratios truncate after multiplying. The shim must duplicate
- * that arithmetic because temporal parity advances sub-second millisecond
- * values that this public seconds-in producer cannot represent. */
+scene_timer_snapshot_t scene_timer_snapshot_ms(
+    uint64_t total_ms, uint64_t remaining_ms, bool running,
+    uint32_t anchor_ms)
+{
+    total_ms = total_ms > TIMER_MS_MAX ? TIMER_MS_MAX : total_ms;
+    remaining_ms = remaining_ms > total_ms ? total_ms : remaining_ms;
+    scene_timer_snapshot_t snapshot = {
+        .total_ms = (uint32_t)total_ms,
+        .remaining_ms = (uint32_t)remaining_ms,
+        .anchor_ms = anchor_ms,
+        .running = total_ms != 0U && running,
+    };
+    update_timer_ratios(&snapshot);
+    return snapshot;
+}
+
 scene_timer_snapshot_t scene_timer_snapshot(int64_t duration_seconds,
                                             int64_t remaining_seconds,
                                             bool running,
                                             uint64_t anchor_ms,
                                             uint64_t now_ms)
 {
-    scene_timer_snapshot_t snapshot = {0};
     if (duration_seconds <= 0) {
-        return snapshot;
+        return (scene_timer_snapshot_t){0};
     }
     if (duration_seconds > TIMER_SECONDS_MAX) {
         duration_seconds = TIMER_SECONDS_MAX;
@@ -65,17 +76,9 @@ scene_timer_snapshot_t scene_timer_snapshot(int64_t duration_seconds,
             ? 0
             : remaining_ms - (int64_t)elapsed_ms;
     }
-    if (remaining_ms < 0) {
-        remaining_ms = 0;
-    } else if (remaining_ms > total_ms) {
-        remaining_ms = total_ms;
-    }
-    snapshot.remaining_ms = (uint32_t)remaining_ms;
-    snapshot.total_ms = (uint32_t)total_ms;
-    snapshot.anchor_ms = (uint32_t)now_ms;
-    snapshot.running = running;
-    update_timer_ratios(&snapshot);
-    return snapshot;
+    return scene_timer_snapshot_ms((uint64_t)total_ms,
+                                   (uint64_t)remaining_ms, running,
+                                   (uint32_t)now_ms);
 }
 
 scene_timer_snapshot_t scene_timer_snapshot_at(
@@ -463,8 +466,8 @@ scene_binding_result_t scene_binding_evaluate(
             return write_placeholder(out, out_capacity, binding->argument);
         }
         char date[32];
-        timefmt_date(date, tm_local.tm_year + 1900, tm_local.tm_mon + 1,
-                     tm_local.tm_mday, (tm_local.tm_wday + 6) % 7);
+        timefmt_date(date, tm_local.tm_mon + 1, tm_local.tm_mday,
+                     (tm_local.tm_wday + 6) % 7);
         return write_bounded(out, out_capacity, date);
     }
     case SCENE_BINDING_TIMER_REMAINING: {

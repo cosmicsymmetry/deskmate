@@ -37,11 +37,6 @@ typedef struct {
     template_field_value_t values[PROTOCOL_MAX_FIELD_COUNT];
 } template_field_state_t;
 
-typedef struct {
-    uint16_t dirty_mask;
-    size_t unknown_fields;
-} template_field_patch_t;
-
 typedef enum {
     TEMPLATE_FIELDS_OK = 0,
     TEMPLATE_FIELDS_INVALID_ARGUMENT,
@@ -61,14 +56,13 @@ bool template_fields_init(protocol_template_kind_t template_kind,
 /**
  * Resolve one complete PushData snapshot into caller-owned staging storage.
  * The live state is copied from staging only after every known field and
- * required-field relationship validates. Unknown fields are counted and
- * ignored. Neither state nor revision ownership lives in this layer.
+ * required-field relationship validates. Unknown fields are ignored.
+ * Neither state nor revision ownership lives in this layer.
  */
 template_fields_result_t template_fields_resolve(
     template_field_state_t *state,
     template_field_state_t *staging,
-    const protocol_push_data_t *push,
-    template_field_patch_t *patch);
+    const protocol_push_data_t *push);
 
 const template_field_value_t *template_fields_get(
     const template_field_state_t *state,

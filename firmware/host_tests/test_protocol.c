@@ -62,7 +62,7 @@ static void test_crc(void)
     assert(protocol_crc32c(NULL, 0U) == 0U);
 }
 
-static void test_status_request_accepts_reserved_ota_trigger_id(void)
+static void test_status_request_accepts_the_maximum_request_id(void)
 {
     protocol_message_t request = {.type = PROTOCOL_TYPE_STATUS_REQUEST};
     uint8_t encoded[PROTOCOL_MAX_WIRE_FRAME];
@@ -1615,7 +1615,7 @@ static void test_a_malformed_scene_is_refused_by_content_not_by_type(void)
 int main(void)
 {
     test_crc();
-    test_status_request_accepts_reserved_ota_trigger_id();
+    test_status_request_accepts_the_maximum_request_id();
     test_valid_fixtures();
     test_scene_fixtures_pin_new_fields_and_omitted_defaults();
     test_status_capability_handshake_and_legacy_defaults();

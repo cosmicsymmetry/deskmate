@@ -1,83 +1,34 @@
 #include "widget_model.h"
 
-#include <limits.h>
 #include <string.h>
+
+#include "core/apply_config_validation.h"
 
 _Static_assert(sizeof(widget_model_t) <= 48U * 1024U,
                "fixed widget model exceeded its M2 RAM budget");
 
-static bool bounded_text(const char *text,
-                         size_t capacity,
-                         size_t minimum_length)
+static widget_model_config_result_t config_validation_result(
+    apply_config_validation_result_t result)
 {
-    const char *end = memchr(text, '\0', capacity);
-    return end != NULL && (size_t)(end - text) >= minimum_length;
-}
-
-static widget_model_config_result_t validate_config(
-    const protocol_apply_config_t *config)
-{
-    if (config == NULL || config->revision == 0U ||
-        config->widget_count == 0U || config->screen_count == 0U) {
-        return WIDGET_MODEL_CONFIG_INVALID_VALUE;
-    }
-    if (config->widget_count > PROTOCOL_MAX_CONFIG_WIDGETS ||
-        config->screen_count > PROTOCOL_MAX_CONFIG_SCREENS) {
+    switch (result) {
+    case APPLY_CONFIG_VALID:
+        return WIDGET_MODEL_CONFIG_APPLIED;
+    case APPLY_CONFIG_TOO_LARGE:
         return WIDGET_MODEL_CONFIG_TOO_LARGE;
-    }
-    if (config->rotation != 90U && config->rotation != 270U) {
+    case APPLY_CONFIG_DUPLICATE_ID:
+        return WIDGET_MODEL_CONFIG_DUPLICATE_ID;
+    case APPLY_CONFIG_UNKNOWN_WIDGET:
+        return WIDGET_MODEL_CONFIG_UNKNOWN_WIDGET;
+    case APPLY_CONFIG_UNSUPPORTED_TEMPLATE:
+        return WIDGET_MODEL_CONFIG_UNSUPPORTED_TEMPLATE;
+    case APPLY_CONFIG_UNSUPPORTED_SIZE_CLASS:
+        return WIDGET_MODEL_CONFIG_UNSUPPORTED_SIZE_CLASS;
+    case APPLY_CONFIG_INVALID_ARGUMENT:
+        return WIDGET_MODEL_CONFIG_INVALID_ARGUMENT;
+    case APPLY_CONFIG_INVALID_VALUE:
+    default:
         return WIDGET_MODEL_CONFIG_INVALID_VALUE;
     }
-    for (size_t i = 0U; i < config->widget_count; ++i) {
-        const protocol_widget_config_t *widget = &config->widgets[i];
-        if (!bounded_text(widget->widget_id, sizeof(widget->widget_id), 1U)) {
-            return WIDGET_MODEL_CONFIG_INVALID_VALUE;
-        }
-        if (!protocol_template_kind_valid(widget->template_kind)) {
-            return WIDGET_MODEL_CONFIG_UNSUPPORTED_TEMPLATE;
-        }
-        if (widget->size_class == PROTOCOL_SIZE_TILE ||
-            (widget->size_class != PROTOCOL_SIZE_FULL &&
-             widget->size_class != PROTOCOL_SIZE_STANDARD)) {
-            return WIDGET_MODEL_CONFIG_UNSUPPORTED_SIZE_CLASS;
-        }
-        if (widget->tap_action < PROTOCOL_TAP_NONE ||
-            widget->tap_action > PROTOCOL_TAP_RESET ||
-            widget->interrupt_policy < PROTOCOL_INTERRUPT_DISABLED ||
-            widget->interrupt_policy > PROTOCOL_INTERRUPT_ENABLED ||
-            (widget->template_kind != PROTOCOL_TEMPLATE_PROGRESS_RING &&
-             widget->tap_action != PROTOCOL_TAP_NONE)) {
-            return WIDGET_MODEL_CONFIG_INVALID_VALUE;
-        }
-        for (size_t j = 0U; j < i; ++j) {
-            if (strcmp(widget->widget_id, config->widgets[j].widget_id) == 0) {
-                return WIDGET_MODEL_CONFIG_DUPLICATE_ID;
-            }
-        }
-    }
-    for (size_t i = 0U; i < config->screen_count; ++i) {
-        const protocol_screen_config_t *screen = &config->screens[i];
-        if (!bounded_text(screen->screen_id, sizeof(screen->screen_id), 1U) ||
-            !bounded_text(screen->widget_id, sizeof(screen->widget_id), 1U)) {
-            return WIDGET_MODEL_CONFIG_INVALID_VALUE;
-        }
-        for (size_t j = 0U; j < i; ++j) {
-            if (strcmp(screen->screen_id, config->screens[j].screen_id) == 0) {
-                return WIDGET_MODEL_CONFIG_DUPLICATE_ID;
-            }
-        }
-        bool found = false;
-        for (size_t j = 0U; j < config->widget_count; ++j) {
-            if (strcmp(screen->widget_id, config->widgets[j].widget_id) == 0) {
-                found = true;
-                break;
-            }
-        }
-        if (!found) {
-            return WIDGET_MODEL_CONFIG_UNKNOWN_WIDGET;
-        }
-    }
-    return WIDGET_MODEL_CONFIG_APPLIED;
 }
 
 static bool configs_equal(const protocol_apply_config_t *left,
@@ -161,7 +112,8 @@ widget_model_config_result_t widget_model_check_config(
     if (model == NULL || config == NULL) {
         return WIDGET_MODEL_CONFIG_INVALID_ARGUMENT;
     }
-    widget_model_config_result_t validation = validate_config(config);
+    widget_model_config_result_t validation = config_validation_result(
+        apply_config_validate(config));
     if (validation != WIDGET_MODEL_CONFIG_APPLIED) {
         return validation;
     }
@@ -206,8 +158,6 @@ widget_model_config_result_t widget_model_apply_config(
         next_active = 0U;
     }
 
-    memset(model->widget_has_data[staging_index], 0,
-           sizeof(model->widget_has_data[staging_index]));
     for (size_t i = 0U; i < staging->widget_count; ++i) {
         bool initialized = template_fields_init(
             staging->widgets[i].template_kind,
@@ -252,36 +202,13 @@ bool widget_model_activate_screen(widget_model_t *model,
     return true;
 }
 
-bool widget_model_navigate(widget_model_t *model,
-                           widget_navigation_t direction)
-{
-    const protocol_apply_config_t *config = widget_model_config(model);
-    if (config == NULL || config->screen_count == 0U ||
-        (direction != WIDGET_NAVIGATE_PREVIOUS &&
-         direction != WIDGET_NAVIGATE_NEXT)) {
-        return false;
-    }
-    if (direction == WIDGET_NAVIGATE_NEXT) {
-        model->active_screen_index =
-            (model->active_screen_index + 1U) % config->screen_count;
-    } else if (model->active_screen_index == 0U) {
-        model->active_screen_index = config->screen_count - 1U;
-    } else {
-        --model->active_screen_index;
-    }
-    return true;
-}
-
 widget_model_push_result_t widget_model_apply_push(
     widget_model_t *model,
-    const protocol_push_data_t *push,
-    widget_model_update_t *update)
+    const protocol_push_data_t *push)
 {
-    if (model == NULL || push == NULL || update == NULL ||
-        push->revision == 0U) {
+    if (model == NULL || push == NULL || push->revision == 0U) {
         return WIDGET_MODEL_PUSH_INVALID_ARGUMENT;
     }
-    memset(update, 0, sizeof(*update));
     if (push->revision <= model->latest_data_revision) {
         return WIDGET_MODEL_PUSH_STALE_REVISION;
     }
@@ -293,36 +220,21 @@ widget_model_push_result_t widget_model_apply_push(
     if (index == config->widget_count) {
         return WIDGET_MODEL_PUSH_UNKNOWN_WIDGET;
     }
-    template_field_patch_t patch;
     template_fields_result_t result = template_fields_resolve(
         &model->widget_fields[model->live_config_index][index],
-        &model->field_staging, push, &patch);
+        &model->field_staging, push);
     if (result != TEMPLATE_FIELDS_OK) {
         return result == TEMPLATE_FIELDS_INVALID_ARGUMENT
                    ? WIDGET_MODEL_PUSH_INVALID_ARGUMENT
                    : WIDGET_MODEL_PUSH_INVALID_FIELDS;
     }
-    update->widget_index = index;
-    update->dirty_mask = patch.dirty_mask;
-    update->unknown_fields = patch.unknown_fields;
     model->latest_data_revision = push->revision;
-    model->widget_has_data[model->live_config_index][index] = true;
-    if (patch.unknown_fields > UINT32_MAX - model->unknown_field_count) {
-        model->unknown_field_count = UINT32_MAX;
-    } else {
-        model->unknown_field_count += (uint32_t)patch.unknown_fields;
-    }
     return WIDGET_MODEL_PUSH_ACCEPTED;
 }
 
 uint32_t widget_model_latest_data_revision(const widget_model_t *model)
 {
     return model != NULL ? model->latest_data_revision : 0U;
-}
-
-uint32_t widget_model_unknown_field_count(const widget_model_t *model)
-{
-    return model != NULL ? model->unknown_field_count : 0U;
 }
 
 const template_field_state_t *widget_model_widget_fields(
@@ -337,18 +249,6 @@ const template_field_state_t *widget_model_widget_fields(
     return index < config->widget_count
                ? &model->widget_fields[model->live_config_index][index]
                : NULL;
-}
-
-bool widget_model_widget_has_data(const widget_model_t *model,
-                                  const char *widget_id)
-{
-    const protocol_apply_config_t *config = widget_model_config(model);
-    if (config == NULL || widget_id == NULL) {
-        return false;
-    }
-    size_t index = widget_index(config, widget_id);
-    return index < config->widget_count &&
-           model->widget_has_data[model->live_config_index][index];
 }
 
 bool widget_model_has_running_progress(const widget_model_t *model)

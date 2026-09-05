@@ -16,7 +16,7 @@ static void test_wraparound_split_copy_and_transitions(void)
     net_ring_t ring;
 
     net_ring_init(&ring, storage, sizeof(storage));
-    assert(net_ring_used(&ring) == 0U);
+    assert(ring.used == 0U);
     assert(net_ring_read(&ring, output, sizeof(output)) == 0U);
 
     assert(net_ring_write(&ring, first, sizeof(first)) == sizeof(first));
@@ -26,14 +26,14 @@ static void test_wraparound_split_copy_and_transitions(void)
     // head is at 6: this write must split two bytes at the physical end and
     // four at the beginning, reaching the full transition exactly.
     assert(net_ring_write(&ring, second, sizeof(second)) == sizeof(second));
-    assert(net_ring_used(&ring) == sizeof(storage));
+    assert(ring.used == sizeof(storage));
     assert(net_ring_write(&ring, second, 1U) == 0U);
     assert(net_ring_dropped_bytes(&ring) == 1U);
 
     // tail is at 4: reading all logical bytes must split at the boundary too.
     assert(net_ring_read(&ring, output, sizeof(output)) == sizeof(output));
     assert(memcmp(output, expected, sizeof(expected)) == 0);
-    assert(net_ring_used(&ring) == 0U);
+    assert(ring.used == 0U);
     assert(net_ring_read(&ring, output, sizeof(output)) == 0U);
 }
 
@@ -66,7 +66,7 @@ static void test_clear_discards_bytes_and_preserves_diagnostics(void)
     assert(net_ring_dropped_bytes(&ring) == 1U);
 
     net_ring_clear(&ring);
-    assert(net_ring_used(&ring) == 0U);
+    assert(ring.used == 0U);
     assert(net_ring_dropped_bytes(&ring) == 1U);
     assert(net_ring_read(&ring, output, sizeof(output)) == 0U);
 

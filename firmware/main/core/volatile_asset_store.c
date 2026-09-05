@@ -1,6 +1,5 @@
 #include "core/volatile_asset_store.h"
 
-#include <limits.h>
 #include <string.h>
 
 /* No frame buffer, slot array, or mutable metadata lives at file scope.
@@ -155,7 +154,7 @@ volatile_asset_store_result_t volatile_asset_store_begin_encoded(
     slot->kind = kind;
     slot->state = VOLATILE_ASSET_SLOT_INCOMING;
     if (asset_transfer_begin(&store->incoming_transfer, digest, kind,
-                             total_length, true) != ASSET_TRANSFER_OK) {
+                             total_length) != ASSET_TRANSFER_OK) {
         free_slot(store, slot);
         return VOLATILE_ASSET_STORE_ERR_ARGUMENT;
     }
@@ -227,37 +226,18 @@ volatile_asset_store_result_t volatile_asset_store_write(
     return VOLATILE_ASSET_STORE_OK;
 }
 
-bool volatile_asset_frame_valid(const uint8_t *bytes, size_t length)
+static bool volatile_asset_frame_valid(const uint8_t *bytes, size_t length)
 {
-    if (bytes == NULL || length < VOLATILE_ASSET_HEADER_BYTES) {
+    if (bytes == NULL || length != VOLATILE_ASSET_FRAME_BYTES) {
         return false;
     }
-    uint32_t width = read_u16_le(bytes + 4U);
-    uint32_t height = read_u16_le(bytes + 6U);
-    uint32_t stride = read_u16_le(bytes + 8U);
-
-    /* Check the decoded arithmetic before comparing canonical dimensions.
-     * A hostile 0xffff x 0xffff header would overflow width*height*2 in
-     * uint32_t even though each individual packed field is only 16 bits. */
-    if (width != 0U && height > UINT32_MAX / width) {
-        return false;
-    }
-    uint32_t pixels = width * height;
-    if (pixels > (UINT32_MAX - VOLATILE_ASSET_HEADER_BYTES) / 2U) {
-        return false;
-    }
-    uint32_t decoded_length =
-        VOLATILE_ASSET_HEADER_BYTES + pixels * 2U;
-
     return bytes[0] == VOLATILE_ASSET_IMAGE_MAGIC &&
            bytes[1] == VOLATILE_ASSET_RGB565_FORMAT &&
            bytes[2] == 0U && bytes[3] == 0U &&
-           width == (uint32_t)SCENE_CANVAS_WIDTH &&
-           height == (uint32_t)SCENE_CANVAS_HEIGHT &&
-           stride == VOLATILE_ASSET_FRAME_STRIDE &&
-           bytes[10] == 0U && bytes[11] == 0U &&
-           decoded_length == VOLATILE_ASSET_FRAME_BYTES &&
-           length == decoded_length;
+           read_u16_le(bytes + 4U) == (uint16_t)SCENE_CANVAS_WIDTH &&
+           read_u16_le(bytes + 6U) == (uint16_t)SCENE_CANVAS_HEIGHT &&
+           read_u16_le(bytes + 8U) == VOLATILE_ASSET_FRAME_STRIDE &&
+           bytes[10] == 0U && bytes[11] == 0U;
 }
 
 volatile_asset_store_result_t volatile_asset_store_commit(

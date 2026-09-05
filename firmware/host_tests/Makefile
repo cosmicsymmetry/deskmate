@@ -55,14 +55,12 @@ test_protocol: test_protocol.c $(PROTOCOL_SRCS)
 test_link_state: test_link_state.c ../main/core/link_state.c
 	$(CC) $(CFLAGS) -I../main -o $@ $^
 
-test_template_fields: test_template_fields.c ../main/core/template_fields.c \
-	$(PROTOCOL_SRCS)
-	$(CC) $(CFLAGS) -I$(CBOR_DIR) -I../main -o $@ $^
+test_template_fields: test_template_fields.c ../main/core/template_fields.c
+	$(CC) $(CFLAGS) -I../main -o $@ $^
 
 test_widget_model: test_widget_model.c ../main/core/widget_model.c \
-	../main/core/template_fields.c ../main/core/link_state.c \
-	$(PROTOCOL_SRCS)
-	$(CC) $(CFLAGS) -I$(CBOR_DIR) -I../main -o $@ $^
+	../main/core/template_fields.c ../main/core/link_state.c
+	$(CC) $(CFLAGS) -I../main -o $@ $^
 
 test_ui_command_queue: test_ui_command_queue.c ../main/ui/ui_command_queue.c \
 	../main/core/ui_command_policy.c

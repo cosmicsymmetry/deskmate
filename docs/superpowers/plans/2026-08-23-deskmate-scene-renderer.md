@@ -1055,10 +1055,11 @@ one.** `RuntimeDevice` has no `push_scene`, `device::Session` has no `push_scene
 `build_digital_clock_scene`'s only caller is the parity test. This was found on the board
 on 2026-08-25 and is the reason the panel check did not run that session.
 
-The cable is not a way around it. `net_config_usb_message_allowed()` admits only
-status / heartbeat / ack / error / event / `NetworkConfig` / `FactoryReset` over USB in
-networked tier, so a `PushScene` from `deskmate-cli` is refused with `WRONG_TIER` --
-correctly, because the server owns the display. Flipping the device to local tier to
+The cable is not a way around it. After the request-direction gate,
+`net_config_usb_message_allowed()` admits only status / heartbeat / `NetworkConfig` /
+`FactoryReset` requests over USB in networked tier, so a `PushScene` from `deskmate-cli`
+is refused with `WRONG_TIER` -- correctly, because the server owns the display. Flipping
+the device to local tier to
 dodge that costs a device identity, since only digests are stored. The scene has to come
 from the server.
 

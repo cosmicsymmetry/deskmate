@@ -176,6 +176,15 @@ static void a_running_timer_subtracts_elapsed_time(void)
     assert(s.remaining_pct == 33);
 }
 
+static void a_subsecond_timer_snapshot_is_normalized(void)
+{
+    scene_timer_snapshot_t s =
+        scene_timer_snapshot_ms(1501U, 1000U, true, 37U);
+    assert(s.total_ms == 1501U && s.remaining_ms == 1000U);
+    assert(s.remaining_pct == 66U && s.remaining_permille == 666U);
+    assert(s.running && s.anchor_ms == 37U);
+}
+
 static void local_timer_actions_move_a_paused_snapshot(void)
 {
     scene_timer_snapshot_t snapshot =
@@ -433,8 +442,8 @@ static void the_date_binding_matches_timefmt_date(void)
     struct tm tm_local;
     time_t local = (time_t)ctx.unix_seconds + ctx.utc_offset_minutes * 60;
     gmtime_r(&local, &tm_local);
-    timefmt_date(expected, tm_local.tm_year + 1900, tm_local.tm_mon + 1,
-                 tm_local.tm_mday, (tm_local.tm_wday + 6) % 7);
+    timefmt_date(expected, tm_local.tm_mon + 1, tm_local.tm_mday,
+                 (tm_local.tm_wday + 6) % 7);
     assert(strcmp(out, expected) == 0);
 }
 
@@ -454,15 +463,15 @@ static void the_date_binding_crosses_local_midnight_with_the_offset(void)
     time_t local = (time_t)ctx.unix_seconds + ctx.utc_offset_minutes * 60;
     struct tm tm_local;
     assert(gmtime_r(&local, &tm_local) != NULL);
-    timefmt_date(expected, tm_local.tm_year + 1900, tm_local.tm_mon + 1,
-                 tm_local.tm_mday, (tm_local.tm_wday + 6) % 7);
+    timefmt_date(expected, tm_local.tm_mon + 1, tm_local.tm_mday,
+                 (tm_local.tm_wday + 6) % 7);
     assert(strcmp(out, expected) == 0);
 
     time_t utc = (time_t)ctx.unix_seconds;
     struct tm tm_utc;
     assert(gmtime_r(&utc, &tm_utc) != NULL);
-    timefmt_date(expected, tm_utc.tm_year + 1900, tm_utc.tm_mon + 1,
-                 tm_utc.tm_mday, (tm_utc.tm_wday + 6) % 7);
+    timefmt_date(expected, tm_utc.tm_mon + 1, tm_utc.tm_mday,
+                 (tm_utc.tm_wday + 6) % 7);
     assert(strcmp(out, expected) != 0);
 }
 
@@ -547,6 +556,7 @@ int main(void)
     a_finished_timer_reads_zero_percent();
     a_never_started_timer_reads_one_hundred();
     a_running_timer_subtracts_elapsed_time();
+    a_subsecond_timer_snapshot_is_normalized();
     local_timer_actions_move_a_paused_snapshot();
     a_running_timer_survives_the_tick_counter_wrapping();
     a_non_positive_duration_returns_an_empty_snapshot();

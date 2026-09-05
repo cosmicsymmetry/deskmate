@@ -531,14 +531,15 @@ of letting code and documentation diverge.
   looking at the panel, so that number is still only a software prediction — and §6's 96 px
   glyph-cache-miss timing was not measured.
   - **The operator scene route's caller-supplied `revision` is a footgun worth knowing.**
-    `firmware/main/core/link_state.c` keeps ONE `latest_revision` that both `PushScene` and
-    `PushData` are checked against, and `POST /v1/devices/{id}/scene` accepts any revision.
+    The device keeps one revision per message type — `widget_model` owns PushData's (Status
+    key 9 and the PushData Ack report it) and PushScene has its own, with no cross-type
+    ordering rule — and `POST /v1/devices/{id}/scene` accepts any revision.
     Pushing scenes at 910-932 left the runtime's own `next_scene_revision` (~243) below it
     and every card went `data-refused (StaleRevision)`. **It does not self-heal**:
     `next_scene_revision` starts at 0 and only increments, and the status-based adoption in
     `runtime.rs` is deliberately for the *interrupt token* only. Restarting the server makes
     it worse (`WorkerState::new` resets the counter to 0). `ApplyConfig` cleared it; a power
-    cycle would too (`link_state_init` memsets). Push revisions just above the runtime's
+    cycle would too. Push revisions just above the runtime's
     current counter, not arbitrary large ones. **Stage 3b's software side is complete** — the ledger's "Stage 3b
   exit" section records how its two inherited risks actually resolved, and stage 4 is
   planned in `docs/superpowers/plans/2026-08-29-deskmate-rasterization.md`, whose single

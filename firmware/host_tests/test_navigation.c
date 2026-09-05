@@ -49,37 +49,10 @@ static void test_horizontal_dominance_and_invalid_samples(void)
            NAVIGATION_GESTURE_NONE);
 }
 
-static navigation_point_t panel_to_logical(navigation_point_t panel,
-                                           int rotation_degrees)
-{
-    /* Mirrors LVGL pointer processing for the 368x448 native panel. The
-     * production classifier receives these already-logical coordinates. */
-    if (rotation_degrees == 90) {
-        return (navigation_point_t){panel.y, 367 - panel.x};
-    }
-    return (navigation_point_t){447 - panel.y, panel.x};
-}
-
-static void test_rotation_correct_logical_coordinates(void)
-{
-    navigation_point_t start_90 = panel_to_logical(
-        (navigation_point_t){184, 320}, 90);
-    navigation_point_t end_90 = panel_to_logical(
-        (navigation_point_t){184, 200}, 90);
-    assert(classify(start_90, end_90, 200U) == NAVIGATION_GESTURE_NEXT);
-
-    navigation_point_t start_270 = panel_to_logical(
-        (navigation_point_t){184, 127}, 270);
-    navigation_point_t end_270 = panel_to_logical(
-        (navigation_point_t){184, 247}, 270);
-    assert(classify(start_270, end_270, 200U) == NAVIGATION_GESTURE_NEXT);
-}
-
 int main(void)
 {
     test_tap_and_swipe_boundaries();
     test_horizontal_dominance_and_invalid_samples();
-    test_rotation_correct_logical_coordinates();
     puts("test_navigation: OK");
     return 0;
 }

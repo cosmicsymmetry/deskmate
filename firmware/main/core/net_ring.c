@@ -87,11 +87,6 @@ size_t net_ring_read(net_ring_t *ring, uint8_t *out, size_t capacity)
     return count;
 }
 
-size_t net_ring_used(const net_ring_t *ring)
-{
-    return ring == NULL ? 0U : ring->used;
-}
-
 uint32_t net_ring_dropped_bytes(const net_ring_t *ring)
 {
     return ring == NULL ? 0U : ring->dropped_bytes;

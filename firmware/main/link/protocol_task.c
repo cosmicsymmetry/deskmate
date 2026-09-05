@@ -536,7 +536,8 @@ static void transmit_status(protocol_context_t *context, uint32_t request_id)
     status->display_height = landscape ? BOARD_LCD_H_RES : BOARD_LCD_V_RES;
     status->brightness = board_display_brightness();
     status->online = context->link.online;
-    status->latest_revision = context->link.latest_revision;
+    status->latest_revision =
+        widget_model_latest_data_revision(&context->model);
     status->valid_frames = context->valid_frames;
     status->malformed_frames = context->malformed_frames;
     status->crc_errors = context->crc_errors;
@@ -638,9 +639,8 @@ static void dispatch_push_data(protocol_context_t *context,
                                uint32_t request_id)
 {
     const protocol_push_data_t *push = &context->message.value.push_data;
-    widget_model_update_t update;
     widget_model_push_result_t result = widget_model_apply_push(
-        &context->model, push, &update);
+        &context->model, push);
     if (result == WIDGET_MODEL_PUSH_STALE_REVISION) {
         transmit_error(context, request_id, PROTOCOL_ERROR_STALE_REVISION,
                        "stale revision");
@@ -656,13 +656,6 @@ static void dispatch_push_data(protocol_context_t *context,
                        "invalid push data");
         return;
     }
-    if (link_state_accept_push(&context->link, push) !=
-        LINK_STATE_PUSH_ACCEPTED) {
-        transmit_error(context, request_id, PROTOCOL_ERROR_INTERNAL,
-                       "revision state mismatch");
-        return;
-    }
-
     // The scene's binding context reads its `field.` values straight out of
     // the widget model updated above, so there is nothing further to copy:
     // re-evaluating the bindings in place is the whole update. Deliberately
@@ -674,7 +667,7 @@ static void dispatch_push_data(protocol_context_t *context,
         context->scene_live = refresh_scene_bindings(context, true);
     }
     transmit_ack(context, request_id, PROTOCOL_TYPE_PUSH_DATA, true,
-                 context->link.latest_revision);
+                 widget_model_latest_data_revision(&context->model));
 }
 
 static void dispatch_push_scene(protocol_context_t *context,
@@ -1071,8 +1064,8 @@ static void dispatch_asset_begin(protocol_context_t *context,
         return;
     }
     if (asset_transfer_begin(&context->asset_transfer, begin->digest,
-                             (uint8_t)begin->kind, begin->total_length,
-                             false) != ASSET_TRANSFER_OK) {
+                             (uint8_t)begin->kind, begin->total_length) !=
+        ASSET_TRANSFER_OK) {
         // The reservation above succeeded but the in-RAM transfer could not
         // start; nothing else will ever learn this index, so reclaim it now
         // rather than leaking it the same way an interrupted transfer would.

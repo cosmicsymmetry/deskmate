@@ -191,7 +191,7 @@ void digital_clock_tick(template_widget_view_t *view,
     snprintf(seconds_text, sizeof(seconds_text), "%02d", now.tm_sec);
     lv_label_set_text(view->objects[OBJ_SECONDS], seconds_text);
     char date[32];
-    timefmt_date(date, now.tm_year + 1900, now.tm_mon + 1, now.tm_mday,
+    timefmt_date(date, now.tm_mon + 1, now.tm_mday,
                  (now.tm_wday + 6) % 7);
     lv_label_set_text(view->objects[OBJ_DATE], date);
 

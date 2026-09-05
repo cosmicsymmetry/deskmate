@@ -14,23 +14,23 @@ int main(void)
     timefmt_hhmm(buf, 0, 0);
     assert(strcmp(buf, "00:00") == 0);
 
-    timefmt_date(buf, 2026, 8, 3, 0); // dow: 0 = Monday
+    timefmt_date(buf, 8, 3, 0); // dow: 0 = Monday
     assert(strcmp(buf, "Mon, Aug 3") == 0);
-    timefmt_date(buf, 2026, 12, 31, 3); // Thursday
+    timefmt_date(buf, 12, 31, 3); // Thursday
     assert(strcmp(buf, "Thu, Dec 31") == 0);
 
     // Out-of-range dow/month must never index DOW[]/MON[] out of bounds
     // (M2 will feed this host-pushed data; bad input must never crash
     // firmware per spec). Clamp/deflect to "???" tokens instead.
-    timefmt_date(buf, 2026, 8, 3, -1);
+    timefmt_date(buf, 8, 3, -1);
     assert(strcmp(buf, "???, Aug 3") == 0);
-    timefmt_date(buf, 2026, 8, 3, 7);
+    timefmt_date(buf, 8, 3, 7);
     assert(strcmp(buf, "???, Aug 3") == 0);
-    timefmt_date(buf, 2026, 0, 3, 0);
+    timefmt_date(buf, 0, 3, 0);
     assert(strcmp(buf, "Mon, ??? 3") == 0);
-    timefmt_date(buf, 2026, 13, 3, 0);
+    timefmt_date(buf, 13, 3, 0);
     assert(strcmp(buf, "Mon, ??? 3") == 0);
-    timefmt_date(buf, 2026, 0, 3, -1);
+    timefmt_date(buf, 0, 3, -1);
     assert(strcmp(buf, "???, ??? 3") == 0);
 
     printf("test_timefmt: OK\n");

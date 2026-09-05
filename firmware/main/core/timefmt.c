@@ -10,10 +10,8 @@ void timefmt_hhmm(char out[6], int hour, int minute)
     snprintf(out, 6, "%02d:%02d", hour, minute);
 }
 
-void timefmt_date(char out[32], int year, int month, int day, int dow)
+void timefmt_date(char out[32], int month, int day, int dow)
 {
-    (void)year;
-
     // dow/month arrive from host-pushed data starting M2; the spec requires
     // bad input to never crash firmware, so out-of-range values are deflected
     // to a "???" token rather than indexing DOW[]/MON[] out of bounds.

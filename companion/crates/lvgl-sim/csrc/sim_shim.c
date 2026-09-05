@@ -518,46 +518,20 @@ static sim_scene_result_t map_decode_result(scene_model_result_t result)
     }
 }
 
-#define SIM_TIMER_MS_MAX (UINT32_C(86400) * UINT32_C(1000))
-
-/* This is the millisecond-input counterpart of scene_timer_snapshot(). Keep
- * their invariant joint and explicit: total clamps to 86400s, remaining
- * clamps to total, and percent/per-mille truncate after multiplying. The
- * duplicate exists because temporal parity needs sub-second remaining values
- * that scene_timer_snapshot()'s seconds-in API cannot express. */
 static void fill_scene_timer_context(scene_binding_context_t *context,
                                      bool timer_active,
                                      uint32_t timer_total_ms,
                                      uint32_t timer_remaining_ms,
                                      bool timer_running)
 {
-    context->timer_active = false;
-    context->timer_running = false;
-    context->timer_total_ms = 0U;
-    context->timer_remaining_ms = 0U;
-    context->timer_remaining_pct = 0U;
-    context->timer_remaining_permille = 0U;
-    if (!timer_active || timer_total_ms == 0U) {
-        return;
-    }
-    if (timer_total_ms > SIM_TIMER_MS_MAX) {
-        timer_total_ms = SIM_TIMER_MS_MAX;
-    }
-    if (timer_remaining_ms > timer_total_ms) {
-        timer_remaining_ms = timer_total_ms;
-    }
-    context->timer_active = true;
-    context->timer_running = timer_running;
-    context->timer_total_ms = timer_total_ms;
-    context->timer_remaining_ms = timer_remaining_ms;
-    context->timer_remaining_pct = timer_total_ms == 0U
-        ? 0U
-        : (uint8_t)(((uint64_t)timer_remaining_ms * 100U) /
-                    timer_total_ms);
-    context->timer_remaining_permille = timer_total_ms == 0U
-        ? 0U
-        : (uint16_t)(((uint64_t)timer_remaining_ms * 1000U) /
-                     timer_total_ms);
+    scene_timer_snapshot_t snapshot = scene_timer_snapshot_ms(
+        timer_total_ms, timer_remaining_ms, timer_running, 0U);
+    context->timer_active = timer_active && snapshot.total_ms != 0U;
+    context->timer_running = context->timer_active && snapshot.running;
+    context->timer_total_ms = snapshot.total_ms;
+    context->timer_remaining_ms = snapshot.remaining_ms;
+    context->timer_remaining_pct = snapshot.remaining_pct;
+    context->timer_remaining_permille = snapshot.remaining_permille;
 }
 
 sim_scene_result_t sim_render_scene(const uint8_t *payload, size_t payload_length,

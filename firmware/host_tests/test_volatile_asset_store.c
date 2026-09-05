@@ -427,14 +427,16 @@ static void test_incomplete_commit_is_rejected_and_aborted(void)
     volatile_asset_store_destroy(&store);
 }
 
-static void assert_corrupt_header_rejected(size_t offset, uint8_t value)
+static void assert_corrupt_header_rejected(size_t offset,
+                                           const uint8_t *replacement,
+                                           size_t replacement_length)
 {
     tracked_heap_t heap = {0};
     volatile_asset_store_t store = new_store(&heap);
     uint8_t active[ASSET_DIGEST_BYTES];
     uint8_t incoming[ASSET_DIGEST_BYTES];
     uint8_t *frame = new_frame(0xa2U, incoming);
-    frame[offset] = value;
+    memcpy(frame + offset, replacement, replacement_length);
     digest_bytes(frame, VOLATILE_ASSET_FRAME_BYTES, incoming);
     commit_frame(&store, 0xa1U, active);
     assert(volatile_asset_store_begin(&store, incoming, ASSET_KIND_IMAGE,
@@ -451,44 +453,31 @@ static void assert_corrupt_header_rejected(size_t offset, uint8_t value)
 
 static void test_malformed_header_is_rejected(void)
 {
-    assert_corrupt_header_rejected(2U, 1U);
+    static const uint8_t nonzero_reserved[] = {1U};
+    assert_corrupt_header_rejected(2U, nonzero_reserved,
+                                   sizeof(nonzero_reserved));
 }
 
 static void test_wrong_magic_format_dimensions_and_stride_are_rejected(void)
 {
-    assert_corrupt_header_rejected(0U, 0U);
-    assert_corrupt_header_rejected(1U, 0U);
-    assert_corrupt_header_rejected(4U, 0U);
-    assert_corrupt_header_rejected(6U, 0U);
-    assert_corrupt_header_rejected(8U, 0U);
-}
-
-static void test_decoded_length_overflow_is_rejected(void)
-{
-    tracked_heap_t heap = {0};
-    volatile_asset_store_t store = new_store(&heap);
-    uint8_t active[ASSET_DIGEST_BYTES];
-    uint8_t incoming[ASSET_DIGEST_BYTES];
-    uint8_t *frame = new_frame(0xafU, incoming);
-    frame[4] = 0xffU;
-    frame[5] = 0xffU;
-    frame[6] = 0xffU;
-    frame[7] = 0xffU;
-    frame[8] = 0xffU;
-    frame[9] = 0xffU;
-    digest_bytes(frame, VOLATILE_ASSET_FRAME_BYTES, incoming);
-    commit_frame(&store, 0xaeU, active);
-
-    assert(volatile_asset_store_begin(&store, incoming, ASSET_KIND_IMAGE,
-                                      VOLATILE_ASSET_FRAME_BYTES) ==
-           VOLATILE_ASSET_STORE_OK);
-    send_frame_chunks(&store, incoming, frame);
-    assert(volatile_asset_store_commit(&store, incoming) ==
-           VOLATILE_ASSET_STORE_ERR_FRAME);
-    assert(heap.live == 1U);
-    assert_found(&store, active, 0xaeU);
-    free(frame);
-    volatile_asset_store_destroy(&store);
+    static const struct {
+        size_t offset;
+        uint8_t replacement[2];
+        size_t replacement_length;
+    } cases[] = {
+        {0U, {0U, 0U}, 1U},
+        {1U, {0U, 0U}, 1U},
+        {4U, {0U, 0U}, 1U},
+        {6U, {0U, 0U}, 1U},
+        {8U, {0U, 0U}, 1U},
+        /* Hostile but arithmetic-free: 0xffff is noncanonical width. */
+        {4U, {0xffU, 0xffU}, 2U},
+    };
+    for (size_t i = 0U; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+        assert_corrupt_header_rejected(cases[i].offset,
+                                       cases[i].replacement,
+                                       cases[i].replacement_length);
+    }
 }
 
 static void test_allocation_failure_preserves_prior_frame(void)
@@ -660,7 +649,6 @@ int main(void)
     test_incomplete_commit_is_rejected_and_aborted();
     test_malformed_header_is_rejected();
     test_wrong_magic_format_dimensions_and_stride_are_rejected();
-    test_decoded_length_overflow_is_rejected();
     test_allocation_failure_preserves_prior_frame();
     test_zero_count_overrun_and_trailing_rle_preserve_prior_frame();
     test_truncated_and_short_rle_preserve_prior_frame();

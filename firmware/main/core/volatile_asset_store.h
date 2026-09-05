@@ -125,8 +125,6 @@ volatile_asset_store_result_t volatile_asset_store_release(
 
 void volatile_asset_store_destroy(volatile_asset_store_t *store);
 
-bool volatile_asset_frame_valid(const uint8_t *bytes, size_t length);
-
 /* Pure keep/use predicate for AssetRelease's display teardown decision.
  * A kept volatile allocation never moves, so a scene reading only that
  * allocation need not flap through the standalone clock while an old frame

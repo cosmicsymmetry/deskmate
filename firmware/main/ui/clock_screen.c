@@ -148,7 +148,7 @@ static void clock_timer_cb(lv_timer_t *timer)
     // 0=Monday..6=Sunday.
     int dow = (tm_now.tm_wday + 6) % 7;
     char date_str[32];
-    timefmt_date(date_str, tm_now.tm_year + 1900, tm_now.tm_mon + 1, tm_now.tm_mday, dow);
+    timefmt_date(date_str, tm_now.tm_mon + 1, tm_now.tm_mday, dow);
     lv_label_set_text(s_date_label, date_str);
 
     // The CO5300 retains GRAM across soft resets and M1 uses partial render

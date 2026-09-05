@@ -70,6 +70,10 @@ typedef struct {
     int32_t y;
 } scene_line_endpoint_t;
 
+scene_timer_snapshot_t scene_timer_snapshot_ms(
+    uint64_t total_ms, uint64_t remaining_ms, bool running,
+    uint32_t anchor_ms);
+
 scene_timer_snapshot_t scene_timer_snapshot(int64_t duration_seconds,
                                             int64_t remaining_seconds,
                                             bool running,

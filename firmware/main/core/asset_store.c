@@ -240,7 +240,6 @@ asset_store_result_t asset_store_open(asset_store_t *store,
     }
 
     store->io = io;
-    store->partition_size = partition_size;
     store->record_capacity = record_capacity;
     store->blob_region_offset = blob_region_offset;
     store->blob_region_size = blob_region_size;

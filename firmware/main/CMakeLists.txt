@@ -4,7 +4,7 @@ idf_component_register(
          "core/asset_transfer.c"
          "core/rle565.c"
          "core/volatile_asset_store.c"
-         "core/clock_source.c" "core/device_event_queue.c" "core/interrupt_state.c"
+         "core/device_event_queue.c" "core/interrupt_state.c"
          "core/link_state.c" "core/navigation.c"
          "core/net_config.c"
          "core/net_ring.c"

@@ -156,15 +156,6 @@ export interface UpdaterSettings {
   checks: "disabled" | "notify";
 }
 
-export interface FirmwareArtifactMetadata {
-  version: string;
-  model: string;
-  byte_length: number;
-  sha256_hex: string;
-  signing_key_id: string;
-  signature_base64: string;
-}
-
 export type ValidationCode =
   | "unsupported-version"
   | "empty"
@@ -172,14 +163,10 @@ export type ValidationCode =
   | "too-many"
   | "duplicate-id"
   | "missing-reference"
-  | "missing-screen"
-  | "duplicate-reference"
-  | "unsupported-size"
   | "out-of-range"
   | "invalid-timezone"
   | "invalid-source"
   | "invalid-composition"
-  | "overlap"
   | "too-large"
   | "requires-capability";
 
@@ -424,7 +411,6 @@ export interface IpcContractFixtures {
   asset_kinds: AssetSettings["kind"][];
   update_channels: UpdaterSettings["channel"][];
   update_check_policies: UpdaterSettings["checks"][];
-  firmware_artifacts: FirmwareArtifactMetadata[];
   display_orientations: DisplayOrientation[];
   device_capabilities: DeviceCapability[];
   runtime_states: RuntimeState[];

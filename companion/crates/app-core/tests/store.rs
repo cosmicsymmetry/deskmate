@@ -1,6 +1,4 @@
 use std::fs;
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Barrier};
 use std::thread;
 
@@ -16,36 +14,17 @@ use app_core::{
     WidgetTapAction,
 };
 
-static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(1);
-
-struct TestDirectory(PathBuf);
-
-impl TestDirectory {
-    fn new(name: &str) -> Self {
-        let serial = NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!(
-            "deskmate-app-core-{name}-{}-{serial}",
-            std::process::id()
-        ));
-        fs::create_dir(&path).unwrap();
-        Self(path)
-    }
-
-    fn config_path(&self) -> PathBuf {
-        self.0.join("config.json")
-    }
-}
-
-impl Drop for TestDirectory {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
-    }
+fn test_directory(name: &str) -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .prefix(&format!("deskmate-app-core-{name}-"))
+        .tempdir()
+        .unwrap()
 }
 
 #[test]
 fn missing_file_loads_defaults_without_writing() {
-    let directory = TestDirectory::new("first-run");
-    let path = directory.config_path();
+    let directory = test_directory("first-run");
+    let path = directory.path().join("config.json");
     let store = ConfigStore::new(&path);
 
     let outcome = store.load();
@@ -57,8 +36,8 @@ fn missing_file_loads_defaults_without_writing() {
 
 #[test]
 fn invalid_persisted_config_keeps_last_good_and_reports_typed_error() {
-    let directory = TestDirectory::new("validation-recovery");
-    let path = directory.config_path();
+    let directory = test_directory("validation-recovery");
+    let path = directory.path().join("config.json");
     let store = ConfigStore::new(&path);
     let mut last_good = AppConfig::default();
     last_good.preferences.autostart = true;
@@ -94,8 +73,8 @@ fn invalid_persisted_config_keeps_last_good_and_reports_typed_error() {
 
 #[test]
 fn invalid_persisted_config_without_last_good_labels_fallback_as_defaults() {
-    let directory = TestDirectory::new("validation-defaults");
-    let path = directory.config_path();
+    let directory = test_directory("validation-defaults");
+    let path = directory.path().join("config.json");
     let store = ConfigStore::new(&path);
     let mut invalid = serde_json::to_value(AppConfig::default()).unwrap();
     invalid["active_playlist_id"] = serde_json::json!("ghost");
@@ -116,8 +95,8 @@ fn invalid_persisted_config_without_last_good_labels_fallback_as_defaults() {
 
 #[test]
 fn save_round_trips_and_migration_is_explicit() {
-    let directory = TestDirectory::new("round-trip");
-    let path = directory.config_path();
+    let directory = test_directory("round-trip");
+    let path = directory.path().join("config.json");
     let store = ConfigStore::new(&path);
     let mut config = AppConfig::default();
     config.preferences.timezone = "Asia/Tbilisi".into();
@@ -198,8 +177,8 @@ fn save_round_trips_and_migration_is_explicit() {
 #[cfg(unix)]
 #[test]
 fn saved_config_is_user_readable_and_writable_only() {
-    let directory = TestDirectory::new("private-save");
-    let path = directory.config_path();
+    let directory = test_directory("private-save");
+    let path = directory.path().join("config.json");
     let store = ConfigStore::new(&path);
 
     store.save(&AppConfig::default()).unwrap();
@@ -213,8 +192,8 @@ fn saved_config_is_user_readable_and_writable_only() {
 #[cfg(unix)]
 #[test]
 fn loading_repairs_a_permissive_existing_config_mode() {
-    let directory = TestDirectory::new("private-load");
-    let path = directory.config_path();
+    let directory = test_directory("private-load");
+    let path = directory.path().join("config.json");
     let bytes = serde_json::to_vec_pretty(&AppConfig::default()).unwrap();
     fs::OpenOptions::new()
         .write(true)
@@ -239,8 +218,8 @@ fn loading_repairs_a_permissive_existing_config_mode() {
 
 #[test]
 fn v3_migrates_to_one_playlist_preserving_rotation_order_and_dwell() {
-    let directory = TestDirectory::new("v3-migration");
-    let path = directory.config_path();
+    let directory = test_directory("v3-migration");
+    let path = directory.path().join("config.json");
     let store = ConfigStore::new(&path);
     fs::write(&path, include_bytes!("fixtures/v3-roundtrip.json")).unwrap();
 
@@ -329,8 +308,8 @@ fn v3_migrates_to_one_playlist_preserving_rotation_order_and_dwell() {
 
 #[test]
 fn v3_all_alert_only_migrates_to_valid_config() {
-    let directory = TestDirectory::new("v3-alert-only");
-    let path = directory.config_path();
+    let directory = test_directory("v3-alert-only");
+    let path = directory.path().join("config.json");
     let store = ConfigStore::new(&path);
     let alert_only = br#"{
       "schema_version": 3,
@@ -391,8 +370,8 @@ fn v4_config_migrates_to_v6_unchanged() {
     // saved v4 config has ever contained one: migration to the current schema is a
     // version bump with no data transformation (v4 -> v6 directly, not chained
     // through v5).
-    let directory = TestDirectory::new("v4-migration");
-    let path = directory.config_path();
+    let directory = test_directory("v4-migration");
+    let path = directory.path().join("config.json");
     let store = ConfigStore::new(&path);
     fs::write(&path, include_bytes!("fixtures/v4-roundtrip.json")).unwrap();
 
@@ -416,8 +395,8 @@ fn v5_config_migrates_to_v6_unchanged() {
     // could ever contain (it did not exist yet). Every other type is byte-for-byte
     // the same shape, so migration is a version bump with no data transformation --
     // the same pattern as v4 -> v5 before it.
-    let directory = TestDirectory::new("v5-migration");
-    let path = directory.config_path();
+    let directory = test_directory("v5-migration");
+    let path = directory.path().join("config.json");
     let store = ConfigStore::new(&path);
     fs::write(&path, include_bytes!("fixtures/v5-roundtrip.json")).unwrap();
 
@@ -451,8 +430,8 @@ fn v5_config_migrates_to_v6_unchanged() {
 
 #[test]
 fn v0_v1_v2_migrate_directly_to_v6() {
-    let directory = TestDirectory::new("legacy-direct-to-v6");
-    let path = directory.config_path();
+    let directory = test_directory("legacy-direct-to-v6");
+    let path = directory.path().join("config.json");
     let store = ConfigStore::new(&path);
 
     for (fixture, origin, expected_ids) in [
@@ -490,8 +469,8 @@ fn v0_v1_v2_migrate_directly_to_v6() {
 
 #[test]
 fn malformed_truncated_and_oversized_files_preserve_bytes_and_last_good() {
-    let directory = TestDirectory::new("recovery");
-    let path = directory.config_path();
+    let directory = test_directory("recovery");
+    let path = directory.path().join("config.json");
     let store = ConfigStore::new(&path);
     let mut last_good = AppConfig::default();
     last_good.preferences.autostart = true;
@@ -524,26 +503,12 @@ fn malformed_truncated_and_oversized_files_preserve_bytes_and_last_good() {
         Some(StoreError::TooLarge { .. })
     ));
     assert_eq!(fs::metadata(&path).unwrap().len(), oversized.len() as u64);
-
-    let future = include_bytes!("fixtures/future-v7.json");
-    fs::write(&path, future).unwrap();
-    let recovered = store.load();
-    assert_eq!(recovered.origin(), ConfigOrigin::LastGood);
-    assert_eq!(recovered.config(), &last_good);
-    assert_eq!(
-        recovered.recovery(),
-        Some(StoreError::UnsupportedVersion {
-            found: 7,
-            supported: 6,
-        })
-    );
-    assert_eq!(fs::read(&path).unwrap(), future);
 }
 
 #[test]
 fn failed_replace_preserves_last_good() {
-    let directory = TestDirectory::new("replace-failure");
-    let target = directory.0.join("target-is-a-directory");
+    let directory = test_directory("replace-failure");
+    let target = directory.path().join("target-is-a-directory");
     fs::create_dir(&target).unwrap();
     let store = ConfigStore::new(&target);
     let before = store.last_good().unwrap();
@@ -556,8 +521,8 @@ fn failed_replace_preserves_last_good() {
 
 #[test]
 fn concurrent_saves_are_serialized_and_disk_matches_latest_generation() {
-    let directory = TestDirectory::new("concurrent");
-    let path = directory.config_path();
+    let directory = test_directory("concurrent");
+    let path = directory.path().join("config.json");
     let store = Arc::new(ConfigStore::new(&path));
     let barrier = Arc::new(Barrier::new(5));
     let mut threads = Vec::new();
@@ -590,13 +555,13 @@ fn concurrent_saves_are_serialized_and_disk_matches_latest_generation() {
     let disk: AppConfig = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
     assert_eq!(disk, latest.1);
     assert_eq!(store.last_good().unwrap(), latest.1);
-    assert_eq!(fs::read_dir(&directory.0).unwrap().count(), 1);
+    assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
 }
 
 #[test]
 fn calendar_persistence_contains_source_metadata_but_no_fetched_payload() {
-    let directory = TestDirectory::new("calendar-metadata");
-    let path = directory.config_path();
+    let directory = test_directory("calendar-metadata");
+    let path = directory.path().join("config.json");
     let store = ConfigStore::new(&path);
     let mut config: AppConfig = serde_json::from_str(include_str!("fixtures/full.json")).unwrap();
     let calendar = config
@@ -618,8 +583,8 @@ fn calendar_persistence_contains_source_metadata_but_no_fetched_payload() {
 
 #[test]
 fn v2_documents_migrate_to_cards_in_screen_order() {
-    let directory = TestDirectory::new("v2-migration");
-    let path = directory.config_path();
+    let directory = test_directory("v2-migration");
+    let path = directory.path().join("config.json");
     let store = ConfigStore::new(&path);
     fs::write(&path, include_bytes!("fixtures/v2-legacy.json")).unwrap();
 
@@ -672,8 +637,8 @@ fn v2_documents_migrate_to_cards_in_screen_order() {
 
 #[test]
 fn migrated_v2_documents_always_satisfy_the_rotation_rule() {
-    let directory = TestDirectory::new("v2-rotation-rule");
-    let path = directory.config_path();
+    let directory = test_directory("v2-rotation-rule");
+    let path = directory.path().join("config.json");
     let store = ConfigStore::new(&path);
     fs::write(&path, include_bytes!("fixtures/v2-legacy.json")).unwrap();
 
@@ -684,8 +649,8 @@ fn migrated_v2_documents_always_satisfy_the_rotation_rule() {
 
 #[test]
 fn future_v7_is_a_recoverable_error_preserving_bytes() {
-    let directory = TestDirectory::new("future-version");
-    let path = directory.config_path();
+    let directory = test_directory("future-version");
+    let path = directory.path().join("config.json");
     let store = ConfigStore::new(&path);
 
     let mut last_good = AppConfig::default();
@@ -719,8 +684,8 @@ fn v2_dashboard_layout_document_fails_to_deserialize_as_a_recoverable_error() {
     // an unknown `kind` variant, surfacing as a recoverable `StoreError::InvalidJson`.
     // This fresh store has no last-good document, so the fallback is explicitly
     // labeled as defaults rather than inventing a dashboard-to-card mapping.
-    let directory = TestDirectory::new("v2-dashboard");
-    let path = directory.config_path();
+    let directory = test_directory("v2-dashboard");
+    let path = directory.path().join("config.json");
     let store = ConfigStore::new(&path);
 
     let dashboard_v2 = br#"{
@@ -779,8 +744,8 @@ fn v2_orphan_widgets_become_alert_only_or_off_instead_of_being_dropped() {
     // pomodoro-kind orphan's historical `interrupt_policy: enabled` means it becomes
     // alert-only (its alert can still fire); the clock-kind orphan's `disabled`
     // becomes off.
-    let directory = TestDirectory::new("v2-orphans");
-    let path = directory.config_path();
+    let directory = test_directory("v2-orphans");
+    let path = directory.path().join("config.json");
     let store = ConfigStore::new(&path);
 
     let with_orphans = br#"{
@@ -861,8 +826,8 @@ fn v1_orphan_widgets_become_alert_only_or_off_instead_of_being_dropped() {
     // screen must not be silently dropped. Pomodoro widgets are historically
     // `interrupt_policy: enabled` (per the design spec's migration rule), so the
     // orphaned pomodoro becomes alert-only; the orphaned clock becomes off.
-    let directory = TestDirectory::new("v1-orphans");
-    let path = directory.config_path();
+    let directory = test_directory("v1-orphans");
+    let path = directory.path().join("config.json");
     let store = ConfigStore::new(&path);
 
     let with_orphans = br#"{

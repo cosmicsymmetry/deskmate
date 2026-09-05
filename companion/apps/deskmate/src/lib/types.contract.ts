@@ -688,16 +688,6 @@ export const ipcContractFixtures = {
     "disabled",
     "notify"
   ],
-  "firmware_artifacts": [
-    {
-      "version": "1.0.0",
-      "model": "waveshare-1.8",
-      "byte_length": 524288,
-      "sha256_hex": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-      "signing_key_id": "deskmate-release-1",
-      "signature_base64": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="
-    }
-  ],
   "display_orientations": [
     "landscape",
     "landscape-flipped"
@@ -826,14 +816,10 @@ export const ipcContractFixtures = {
     "too-many",
     "duplicate-id",
     "missing-reference",
-    "missing-screen",
-    "duplicate-reference",
-    "unsupported-size",
     "out-of-range",
     "invalid-timezone",
     "invalid-source",
     "invalid-composition",
-    "overlap",
     "too-large",
     "requires-capability"
   ],

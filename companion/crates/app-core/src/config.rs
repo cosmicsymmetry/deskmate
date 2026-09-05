@@ -372,11 +372,6 @@ pub const MAX_TOTAL_ASSET_BYTES: u32 = 1_048_576;
 pub const MAX_ICON_GLYPHS: usize = 256;
 pub const MAX_ICON_GLYPH_NAME_LEN: usize = 64;
 pub const MAX_HOST_ACTION_TARGET_LEN: usize = 2_048;
-pub const MAX_UPDATE_ARTIFACT_BYTES: u32 = 1_048_576;
-pub const MAX_UPDATE_VERSION_LEN: usize = 64;
-pub const MAX_UPDATE_MODEL_LEN: usize = 64;
-pub const MAX_SIGNING_KEY_ID_LEN: usize = 64;
-pub const ED25519_SIGNATURE_BASE64_LEN: usize = 88;
 pub const MAX_RSS_ITEMS: u8 = 5;
 /// Bound for a `plugin` card's `plugin_id`, which names a curated plugin by its
 /// manifest's own `name` field. This mirrors `plugin::manifest::MAX_NAME_LEN`
@@ -2002,17 +1997,6 @@ pub enum UpdateCheckPolicy {
     Notify,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct FirmwareArtifactMetadata {
-    pub version: String,
-    pub model: String,
-    pub byte_length: u32,
-    pub sha256_hex: String,
-    pub signing_key_id: String,
-    pub signature_base64: String,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompiledAppConfig {
     pub layout: ApplyConfig,
@@ -2030,14 +2014,10 @@ pub enum ValidationCode {
     TooMany,
     DuplicateId,
     MissingReference,
-    MissingScreen,
-    DuplicateReference,
-    UnsupportedSize,
     OutOfRange,
     InvalidTimezone,
     InvalidSource,
     InvalidComposition,
-    Overlap,
     TooLarge,
     RequiresCapability,
 }
@@ -2468,67 +2448,6 @@ impl AssetSettings {
                     }
                 }
             }
-        }
-    }
-}
-
-impl FirmwareArtifactMetadata {
-    pub fn validate(&self) -> Result<(), ConfigValidationError> {
-        let mut issues = Vec::new();
-        validate_text(
-            "version",
-            &self.version,
-            MAX_UPDATE_VERSION_LEN,
-            true,
-            &mut issues,
-        );
-        validate_text(
-            "model",
-            &self.model,
-            MAX_UPDATE_MODEL_LEN,
-            true,
-            &mut issues,
-        );
-        if !(1..=MAX_UPDATE_ARTIFACT_BYTES).contains(&self.byte_length) {
-            issues.push(ValidationIssue::new(
-                "byte_length",
-                ValidationCode::OutOfRange,
-                format!("firmware artifact must be 1..={MAX_UPDATE_ARTIFACT_BYTES} bytes"),
-            ));
-        }
-        if self.sha256_hex.len() != 64
-            || !self.sha256_hex.bytes().all(|byte| byte.is_ascii_hexdigit())
-        {
-            issues.push(ValidationIssue::new(
-                "sha256_hex",
-                ValidationCode::InvalidSource,
-                "firmware SHA-256 must contain exactly 64 hexadecimal characters",
-            ));
-        }
-        validate_text(
-            "signing_key_id",
-            &self.signing_key_id,
-            MAX_SIGNING_KEY_ID_LEN,
-            true,
-            &mut issues,
-        );
-        let signature = self.signature_base64.as_bytes();
-        if signature.len() != ED25519_SIGNATURE_BASE64_LEN
-            || signature[ED25519_SIGNATURE_BASE64_LEN - 2..] != *b"=="
-            || !signature[..ED25519_SIGNATURE_BASE64_LEN - 2]
-                .iter()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/'))
-        {
-            issues.push(ValidationIssue::new(
-                "signature_base64",
-                ValidationCode::InvalidSource,
-                "firmware Ed25519 signature must be an 88-character base64 value",
-            ));
-        }
-        if issues.is_empty() {
-            Ok(())
-        } else {
-            Err(ConfigValidationError { issues })
         }
     }
 }

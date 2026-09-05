@@ -1414,11 +1414,11 @@ mod tests {
         CURRENT_SCHEMA_VERSION, CalendarSource, CardAlert, CardDataSnapshot, CardError,
         CardErrorKind, CardField, CardFieldValue, CardSettings, CarouselAdvance, ConnectionState,
         DeviceCapability, DeviceCounters, DeviceSnapshot, DisplayOrientation, DisplayTemplate,
-        FirmwareArtifactMetadata, IconGlyphMapping, PersistenceState, Playlist, PlaylistEntry,
-        PomodoroSnapshot, PomodoroState, ProviderSnapshot, ProviderState, RefreshPolicy,
-        RuntimeDiagnostics, RuntimeError, RuntimeState, SAVED_SETTINGS_VALIDATION_FAILURE_MESSAGE,
-        StoreWarning, UpdateChannel, UpdateCheckPolicy, UpdaterSettings, ValidationCode,
-        WeatherUnits, WidgetTapAction,
+        IconGlyphMapping, PersistenceState, Playlist, PlaylistEntry, PomodoroSnapshot,
+        PomodoroState, ProviderSnapshot, ProviderState, RefreshPolicy, RuntimeDiagnostics,
+        RuntimeError, RuntimeState, SAVED_SETTINGS_VALIDATION_FAILURE_MESSAGE, StoreWarning,
+        UpdateChannel, UpdateCheckPolicy, UpdaterSettings, ValidationCode, WeatherUnits,
+        WidgetTapAction,
     };
     use serde::Serialize;
 
@@ -2330,7 +2330,6 @@ mod tests {
         asset_kinds: Vec<AssetKind>,
         update_channels: Vec<UpdateChannel>,
         update_check_policies: Vec<UpdateCheckPolicy>,
-        firmware_artifacts: Vec<FirmwareArtifactMetadata>,
         display_orientations: Vec<DisplayOrientation>,
         device_capabilities: Vec<DeviceCapability>,
         runtime_states: Vec<RuntimeState>,
@@ -2627,14 +2626,10 @@ mod tests {
             ValidationCode::TooMany,
             ValidationCode::DuplicateId,
             ValidationCode::MissingReference,
-            ValidationCode::MissingScreen,
-            ValidationCode::DuplicateReference,
-            ValidationCode::UnsupportedSize,
             ValidationCode::OutOfRange,
             ValidationCode::InvalidTimezone,
             ValidationCode::InvalidSource,
             ValidationCode::InvalidComposition,
-            ValidationCode::Overlap,
             ValidationCode::TooLarge,
             ValidationCode::RequiresCapability,
         ];
@@ -2757,15 +2752,6 @@ mod tests {
                 UpdateChannel::Manual,
             ],
             update_check_policies: vec![UpdateCheckPolicy::Disabled, UpdateCheckPolicy::Notify],
-            firmware_artifacts: vec![FirmwareArtifactMetadata {
-                version: "1.0.0".into(),
-                model: "waveshare-1.8".into(),
-                byte_length: 524_288,
-                sha256_hex: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-                    .into(),
-                signing_key_id: "deskmate-release-1".into(),
-                signature_base64: format!("{}==", "A".repeat(86)),
-            }],
             display_orientations: vec![
                 DisplayOrientation::Landscape,
                 DisplayOrientation::LandscapeFlipped,

@@ -2,11 +2,10 @@ use app_core::{
     AlertHold, AppConfig, AppSnapshot, AssetKind, AssetSettings, AssetSource, CalendarSource,
     CardAlert, CardDataSnapshot, CardError, CardErrorKind, CardField, CardFieldValue, CardSettings,
     CarouselAdvance, ConnectionState, DeviceCounters, DeviceSnapshot, DisplayTemplate,
-    FirmwareArtifactMetadata, JsonFieldMapping, MAX_ASSET_BYTES, MAX_PLAYLIST_ENTRIES,
-    MAX_PLAYLIST_NAME_LEN, MAX_PLAYLISTS, MAX_PLUGIN_ID_LEN, MAX_PROVIDER_URL_LEN,
-    MAX_UPDATE_ARTIFACT_BYTES, PersistenceState, Playlist, PlaylistEntry, PomodoroSnapshot,
-    PomodoroState, ProviderSnapshot, ProviderState, RefreshPolicy, RuntimeDiagnostics,
-    RuntimeState, ValidationCode, WeatherUnits, WidgetTapAction,
+    JsonFieldMapping, MAX_ASSET_BYTES, MAX_PLAYLIST_ENTRIES, MAX_PLAYLIST_NAME_LEN, MAX_PLAYLISTS,
+    MAX_PLUGIN_ID_LEN, MAX_PROVIDER_URL_LEN, PersistenceState, Playlist, PlaylistEntry,
+    PomodoroSnapshot, PomodoroState, ProviderSnapshot, ProviderState, RefreshPolicy,
+    RuntimeDiagnostics, RuntimeState, ValidationCode, WeatherUnits, WidgetTapAction,
 };
 use protocol::{
     CAPABILITY_ASSET_TRANSFER, CAPABILITY_CONFIG_ROTATION, CAPABILITY_CORE_WIDGETS,
@@ -315,39 +314,6 @@ fn network_provider_urls_cannot_embed_credentials_and_weather_has_a_refresh_floo
     }));
     assert!(!format!("{error:?}").contains("secret"));
     assert!(!format!("{error:?}").contains("calendar-secret"));
-}
-
-#[test]
-fn firmware_artifact_metadata_is_bounded_before_update_work_exists() {
-    let valid = FirmwareArtifactMetadata {
-        version: "1.0.0".into(),
-        model: "waveshare-1.8".into(),
-        byte_length: MAX_UPDATE_ARTIFACT_BYTES,
-        sha256_hex: "a".repeat(64),
-        signing_key_id: "deskmate-release-1".into(),
-        signature_base64: format!("{}==", "A".repeat(86)),
-    };
-    valid.validate().unwrap();
-
-    let invalid = FirmwareArtifactMetadata {
-        byte_length: MAX_UPDATE_ARTIFACT_BYTES + 1,
-        sha256_hex: "not-a-digest".into(),
-        signature_base64: "invalid".into(),
-        ..valid
-    };
-    let error = invalid.validate().unwrap_err();
-    assert!(
-        error
-            .issues
-            .iter()
-            .any(|issue| issue.code == ValidationCode::OutOfRange)
-    );
-    assert!(
-        error
-            .issues
-            .iter()
-            .any(|issue| issue.code == ValidationCode::InvalidSource)
-    );
 }
 
 #[test]

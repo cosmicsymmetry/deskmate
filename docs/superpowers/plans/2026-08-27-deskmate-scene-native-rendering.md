@@ -757,7 +757,11 @@ alike, and this repository has twice spent days on the former with every test gr
       `live1` -> `live2` in 66 s, link then continuous for 6.5 min. Evidence is the
       server journal (this session had no admin token, so `ota_state` and
       `last_ota_error` were **not** read; rollback-window survival across a second boot
-      is **not** settled). Recorded in `docs/hardware/board-notes.md`. This is the check the layout hazard
+      is **not** settled). **The rollback-survival item closed 2026-09-06:** the device
+      ran `v2.0.0-live2` across every subsequent reboot — including that session's USB
+      RTS reset — and the templates-removed successor `v2.0.0-raster1` then installed
+      first-try over OTA and survived its own rollback window (board-notes, "Stage 4
+      Task 7 Phase B"). Recorded in `docs/hardware/board-notes.md`. This is the check the layout hazard
       demands: `firmware_version`, `ota_state: idle`, `last_ota_error: null`, link
       connected, and survival of the rollback window. **If the download fails, do not
       retry blindly** — the documented failure mode is *deterministic*, and `3f2aa03` was
@@ -821,7 +825,10 @@ alike, and this repository has twice spent days on the former with every test gr
    host loss after a ~39 s retained-scene window. **"Nothing visibly changed" is FALSE:**
    the standalone clock now flashes for ~220-250 ms at every carousel transition — see
    board-notes. Still owed: rollback survival across a second boot (the device has not
-   rebooted since installing live2).
+   rebooted since installing live2). **Closed 2026-09-06:** live2 survived every
+   subsequent reboot through the stage-4 hardware session, and its templates-removed
+   successor `v2.0.0-raster1` installed first-try over OTA and survived the rollback
+   window (board-notes, "Stage 4 Task 7 Phase B"). Nothing from Gate B remains owed.
 9. `docs/protocol/v1.md` documents every new binding, including the two sentences whose
    absence caused Task 1's defects.
 

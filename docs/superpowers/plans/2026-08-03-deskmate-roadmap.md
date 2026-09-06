@@ -5,9 +5,11 @@ Spec: `docs/superpowers/specs/2026-08-03-deskmate-design.md`
 **Current:** V1's exit items are closed; declaration and tag still require explicit
 owner authorization. V2 is implemented on `feat/v2-networked-device`, with only the
 shipping-build widening-backoff observation and tap-latency observation owed. Scene
-stages 2a and 2b are delivered. Stages 3a, 3b, and 4 are software-delivered with the
-hardware gates named in the table still open: 3a's template-removal OTA observation,
-3b's asset-GC teardown, and stage 4's hardware session and payload/framebuffer check.
+stages 2a and 2b are delivered. Stages 3a, 3b, and 4 are delivered and, as of the
+2026-09-06 hardware session (board-notes, "Stage 4 Task 7"), confirmed on the board:
+3a's Gate B is closed, stage 4's Task 7 session and on-target framebuffer check
+(96/10/86, 0 differing) both PASSED, and 3b's asset-GC teardown is partially observed —
+only its BUSY/OTA-owner variant, which needs a pending OTA in flight, remains owed.
 Stage 5 remains a risk review only; implementation awaits review completion and explicit
 owner approval. M0/M1 are tagged `m0`/`m1`; later milestones remain untagged without
 that authorization.
@@ -38,9 +40,9 @@ exit (the spec is the architecture for all five, not one implementation plan):
 | --- | --- | --- |
 | 2a | `2026-08-23-deskmate-scene-renderer.md` | Delivered; drew on the panel 2026-08-25/26 |
 | 2b | `2026-08-26-deskmate-scene-templates.md` | Delivered; all six faces byte-identical |
-| 3a | `2026-08-27-deskmate-scene-native-rendering.md` | Delivered; the six C templates no longer ship. Gate B (the OTA download with them removed) is published and **not yet observed** |
-| 3b | `2026-08-28-deskmate-plugin-manifest.md` | **Task 9 PASSED on the board 2026-08-30** — both plugin faces at 270° and 90°, a runtime glyph at 72 px, the image node clean, and `field.*` drawing a real value for the first time. Only Step 6 (asset-GC teardown) is still owed |
-| 4 | `2026-08-29-deskmate-rasterization.md` | **Software-complete 2026-09-01** (Tasks 1-6: negotiation, manifest v2, resvg rasterizer, volatile PSRAM assets + bit 9 / capabilities 1003, RLE565 wire, the 30 s-floor executor, evidence rows). Task 7 — the single hardware session, which pays 3b's remaining Step 6 first — and Task 6 Step 5 are open; nothing stage-4 is hardware-observed |
+| 3a | `2026-08-27-deskmate-scene-native-rendering.md` | Delivered; the six C templates no longer ship. Gate B is closed: the templates-removed OTA download passed 2026-08-28 (`live1` -> `live2`), and the last owed piece — rollback survival across a second boot — closed 2026-09-06, when live2 had survived every subsequent reboot and its templates-removed successor `v2.0.0-raster1` installed first-try and survived the rollback window (board-notes, "Stage 4 Task 7 Phase B") |
+| 3b | `2026-08-28-deskmate-plugin-manifest.md` | **Task 9 PASSED on the board 2026-08-30** — both plugin faces at 270° and 90°, a runtime glyph at 72 px, the image node clean, and `field.*` drawing a real value for the first time. Step 6 (asset-GC teardown) was partially observed 2026-09-06 — the teardown/release/rebuild works live with no reboot, but the font-vanish moment is not panel-visible on dev-0005's card set — and only its BUSY/OTA-owner variant (needs a pending OTA in flight) is still owed |
+| 4 | `2026-08-29-deskmate-rasterization.md` | **Software-complete 2026-09-01** (Tasks 1-6: negotiation, manifest v2, resvg rasterizer, volatile PSRAM assets + bit 9 / capabilities 1003, RLE565 wire, the 30 s-floor executor, evidence rows). **Task 7's hardware session ran 2026-09-06 and PASSED** — the `v2.0.0-raster1` OTA installed first-try and survived the rollback window, capabilities read 1003, native and raster cards drew at 270° and 90°, the typed refuse rule and the 30 s floor held exactly, and 20-revision volatile churn kept the heap flat — and **Task 6 Step 5's on-target `framebuffer_diff` PASSED the same day: 96 total / 10 excluded / 86 identical / 0 differing** (predicted 96/8/88; corrected by three test-harness-only fixes, no firmware change). Only the BUSY/OTA-owner variant remains owed, and 3b's Phase A teardown was only partially observable (board-notes, "Stage 4 Task 7") |
 | 5 | `2026-09-01-deskmate-plugin-upload-risk-review.md` | Risk-review plan written (Task 8 Step 3); implementation begins only after the review completes and the owner explicitly approves |
 
 First-widget order and why:

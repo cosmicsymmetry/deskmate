@@ -4441,3 +4441,164 @@ device had already applied it (`rotation: 270`, and the stored config shows
 retained-scene rebuild, and the `BUSY`/OTA-owner interaction). It remains without an
 automated test and without a hardware observation. Stage 4 makes it more urgent because
 rasterization turns volatile assets into the common case.
+
+## Stage 4 Task 7 Phase A — asset-GC teardown, PARTIAL (2026-09-06)
+
+Board on `v2.0.0-live2`, networked tier, `dev-0005`, capabilities **491** (no bit 9 yet
+— correct for the predecessor image). WiFi re-provisioned over the cable to
+`Slate7Legacy` earlier this session; same device identity/token, no identity cost. Server
+redeployed 2026-09-05 from `f40958a`, registry 5/0
+(`agenda, aqi, claude-limits, svg-aqi, svg-live-clock`).
+
+**Method.** Stage 3b Task 9 Steps 1-5/7 already passed 2026-08-30, so Phase A is only
+Step 6, the teardown. Drove a registry-wide desired-asset change: moved
+`/var/lib/deskmate/plugins/aqi` aside (dropping its `icons.ttf`, digest `40bbbac71546`,
+from the desired set), restarted the server, let the device reconnect so `synchronize_full`
+issues an `AssetRelease` with the shrunk keep-set; then restored `aqi` and restarted again.
+
+**Observed (webcam clip `20260905T201625Z-gc-teardown.mp4`, 2 fps frames):**
+- **Scene rebuilt live, no reboot.** Across both registry changes (aqi out 20:16:30Z,
+  aqi back 20:20:09Z) the device uptime ran continuously to **749,961 ms** with
+  `valid_frames` climbing 237→456 and **0 malformed / 0 crc / 0 overflow**; `free_heap`
+  flat at ~8.315 MB (PSRAM). The panel tore down and rebuilt its scene without a blank
+  reboot: link re-established 2.4 s after each restart, `card_errors: []` throughout.
+- **Compaction did not wipe.** The device stayed healthy after the release — the empty-set
+  wipe hazard (`AssetRelease { digests: [] }`) did not fire, and the retained agenda badge
+  digest (`e19db5d47bbd`) stayed in the keep-set. This is the `synchronize_full` +
+  `compose_asset_keep_set` behaviour the wire-sequence test (`hostile_device.rs`) pins,
+  now exercised on hardware.
+- **`claude-limits` drew on the panel for the first time** (frame
+  `20260905T202312Z-phaseA-settled.jpg`): SESSION 40% / WEEKLY 19% / RESETS Sun 1:40 AM /
+  Wed 8:00 PM / "Max 5×", a clean Native scene that survived the teardown intact. Closes
+  the runbook's "claude-limits on the panel" debt.
+
+**NOT observed, and why (honest gaps, not failures):**
+- **Font-registry reset with a displayed registry font, and the glyph disappearing.**
+  None of `dev-0005`'s cards (clock, weather, rss, pomodoro, claude-limits) display a
+  registry font/image — the released `icons.ttf` was held but not on screen — so the
+  font-release-on-destroy step is not panel-visible on this config. The rebuild path that
+  contains `font_registry_reset()` did run (the scene rebuilt correctly with its baked-font
+  cards); the specific glyph-vanishes moment was not reproduced. Re-observing it would mean
+  re-treading 2026-08-30's operator-route glyph render purely to tear it down.
+- **Asset-store compaction counters.** The device exposes no asset-used-byte / DEAD-record
+  counter through `status` or the admin snapshot (`diagnostics` covers queues/providers
+  only), so "absent digest marked DEAD" is confirmed by wire contract and the
+  did-not-wipe/did-not-break evidence above, not by a device-reported number.
+- **The `BUSY`/OTA-owner interaction.** Needs an OTA in flight, which Phase A cannot have
+  without publishing firmware. Folded into Phase B Step 10's "repeat one release while OTA
+  owns the panel", recorded there as completing this clause — an explicit, planned
+  deviation from strict phase ordering (see the session runbook).
+
+**Verdict: Phase A did not fail** — the teardown/release/rebuild mechanism works on
+hardware and nothing regressed — but Step 6 is only **partially** observed. The
+font-vanish and BUSY/OTA pieces are deferred (the latter into Phase B by design; the
+former is not reproducible on this device's card set). Proceeding to Phase B is therefore
+justified, with the BUSY/OTA observation owed inside it.
+
+## Stage 4 Task 7 Phase B — PASSED on hardware (2026-09-06)
+
+Published `v2.0.0-raster1` (built from `f40958a`, sha
+`29f15a6f7ee1f6f5717deaa09a21a3bdb75bd19c6ddeae5dd2b51ade1afc3b15`) by flipping
+`DESKMATE_FIRMWARE_VERSION` on docker-vm and restarting. Baseline memory (same tree):
+DIRAM total 203,867 (`.text` 93,635, `.bss` 87,104, `.data` 23,128), IRAM 16,384/16,384
+(0 remaining) — internal RAM byte-flat vs the cleanup tree.
+
+**B5 — OTA download + rollback survival: PASSED.** The device only checks firmware at
+boot (24 h interval otherwise), so a USB RTS reset re-ran the boot check. Sequence (server
+UTC): reset 20:54:41 → boot, `ota_state: checking` at uptime 13,002 ms → downloaded and
+installed → rebooted into the new slot → `v2.0.0-raster1`, `ota_state: idle`, uptime reset
+to 8,807 ms at 20:55:29. **Installed on the first attempt**, `last_ota_error: None`
+throughout. Rollback-window survived: uptime then climbed 24k→86k ms and stayed on
+raster1 with no revert to live2, so the image marked itself valid. The documented
+memory-layout OTA hazard did not bite.
+
+**B6 — capability truth: PASSED.** Device and server report numeric **1003**; the server
+decodes the bit set by name as `core-widgets, config-rotation, extended-templates,
+asset-transfer, firmware-update, networking, scene-render, volatile-assets`;
+`unknown_capability_bits: 0x0`. A volatile transfer was accepted (see B7).
+
+**B7 — native vs raster: PASSED at 270°.** The native weather card
+(`icon-badge-text`) drew cleanly. Pushing `svg-aqi` (a manifest-v2 SVG template →
+`RasterOnly`) via the operator route produced a server-side `resvg` render → one 448×368
+RGB565 volatile frame → one-node scene: the panel showed "GOOD / ⬤ / 42 / AQI".
+`free_heap` dropped ~334 KB on the push (one 329,740-byte RGB565 frame in PSRAM),
+confirming the volatile transfer. (The circle reads bright/white on the webcam — likely
+exposure of the bright fill; not diagnosable from the camera.) **90° not yet captured in
+this checkpoint.**
+
+**B8 — refuse rule: PASSED (mandatory rollout observation).** `svg-live-clock` (an SVG
+face binding `{{ time:HH:mm }}`) pushed via the operator route *with data*, so the only
+possible refusal cause is the live binding. Result: HTTP 200, **no raster asset and no
+frozen scene sent**, and a typed `scene-refused` card error naming `time:HH:mm` ("…a
+server-rendered image of it would freeze, so it is refused instead…"). The panel showed
+the **live standalone clock** (observed ticking 21:03→21:08), i.e. the device kept drawing
+time itself rather than freezing a rastered clock — the exact intended behaviour.
+
+**B9 — 30-second floor: core behaviours PASSED (mandatory rollout observation).** Through
+the operator route, three distinct `svg-aqi` snapshots pushed at t≈0/5/11 s (AQI 11 / 88 /
+199), all HTTP 200. Observed (1 fps frames of `…-floor.mp4`): (1) the first frame (11)
+rendered immediately; (2) no new frame appeared before 30 s; (3) at the 30 s boundary
+(push A 21:03:25 → 21:03:55) the **newest** snapshot (199 "UNHEALTHY") appeared — the
+intermediate 88 was coalesced away and never shown. Floor timing was exact.
+- **One caveat, root-caused as a test-setup artifact, not a floor defect:** during the
+  deferral window the panel fell back to the standalone clock instead of holding the
+  prior frame (11). Cause: `svg-aqi`'s source is `https://example.invalid/` (unfetchable
+  by design), so its provider fetch kept failing (`providers[svg-aqi-card].state = error:
+  dns resolution failed`, `provider_jobs_started` 3→5) and the resulting data-less error
+  snapshot made the SVG evaluation fail, clobbering the operator-injected good data
+  between pushes. With a real fetchable source this would not occur. Worth noting: that
+  SVG-evaluation failure surfaced only in the `providers` block, not as a `card_errors`
+  entry.
+
+Config note: these observations used a temporary manual single-card playlist `svg-test`
+with added plugin cards `svg-aqi-card`/`svg-live-clock-card`; dev-0005's original config
+is saved and is restored at the end of the session.
+
+### Phase B continued — B7 both orientations, B10 churn, restore (2026-09-06)
+
+**B7 — raster at BOTH orientations: PASSED.** The same `svg-aqi` raster
+("GOOD / ⬤ / 42 / AQI") drew correctly at 270° (`landscape-flipped`, upright to the
+camera) and at 90° (`landscape`, 180°-inverted to the camera because the board sits
+optimally for 270°). The full scene renders under both software rotations; the physical
+transform and rounder handle the volatile RGB565 frame. Capturing a single still needed
+the 30 s floor to be clear and a push-then-capture within a few seconds, because
+`svg-aqi`'s unfetchable `example.invalid` source repeatedly clobbers operator data with
+an error snapshot (see the B9 caveat).
+
+**B10 — volatile churn: core PASSED.** 20 raster revisions pushed via the operator route
+at ~31 s intervals (AQI 39→210), all HTTP 200. `free_heap` stayed flat at **7,981,503**
+(±20 bytes; two transient dips to ~7,979,900 caught a sample mid-swap with the incoming
+slot briefly allocated) across the whole ~10-minute run — **PSRAM did not trend down**, so
+old volatile frames are freed as new ones display; no leak. Uptime ran continuously
+(no reboot), `valid_frames` 456→1196, 0 malformed/crc/overflow/dropped-ui-commands. The
+final raster drew with no tearing/artifact. When the svg cards were later removed from
+config, `free_heap` returned to 8,317,395 — the held volatile frame was released on
+teardown, a bonus confirmation of release-on-card-removal.
+- **Limits:** the device exposes no flash asset-used-byte counter, so "decoded frames
+  never touch the flash counter" is inferred from `free_heap` being PSRAM and no durable
+  `AssetRelease` growth, not read directly. And "no standalone-clock flash on an ordinary
+  old→new swap" could not be isolated, because the `example.invalid` provider clobbers to
+  the clock between the 31 s-spaced pushes regardless of the swap.
+
+**Restore.** dev-0005's original production config was PUT back (generation 4): rotation
+270°, original cards (`claude-limits, clock, pomodoro, rss, weather`), no card errors.
+The device remains on the shipping image **v2.0.0-raster1** in networked tier with its
+dev-0005 identity — never left networked tier, so no re-provision was needed.
+
+**Still owed on hardware (Phase B remainder), each needing its own setup:**
+- **B11 / Task 6 Step 5 — the on-target `framebuffer_diff` byte comparison** (expected
+  96/8/88). Needs a `DESKMATE_DEV_DIAG=1` flash and a local-tier round-trip (networked
+  tier refuses `PushScene` over the cable), which takes the device off the shipping image
+  temporarily; the diag image is built (`firmware/build-diag`, sha
+  `f815edf07cef7981698304d964f468ed7cde6296d7a1783c4f32843f16fb1dbc`). Deliberately not
+  run at the tail of this session to avoid a fatigued mis-restore; the plaintext token in
+  `pass` means it restores to the same dev-0005 identity.
+- **The BUSY/OTA-owner variant** (carried from stage 3b Task 9 Step 6 / Phase A): observe
+  a raster release while an OTA owns the panel. Needs a pending OTA in flight (i.e. a
+  freshly published newer version) concurrent with a push; `ota_state` stayed `idle`
+  through churn, so it was not observed.
+
+**Phase B verdict: the shipping stage-4 image passed every gate that does not require the
+diag build** — OTA download/install/rollback survival, capabilities 1003, native and
+raster at both orientations, the typed refuse rule, the 30 s floor, and 20-revision
+volatile churn with flat PSRAM. Stage 4 is confirmed working on the physical board.

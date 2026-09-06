@@ -9,8 +9,8 @@ import { CardList } from "../src/components/CardList";
 import { DevicePreview } from "../src/components/DevicePreview";
 import { LoopRing } from "../src/components/LoopRing";
 import { NetworkPanel, ownershipLabel } from "../src/components/NetworkPanel";
-import { PlaylistPanel } from "../src/components/PlaylistPanel";
 import {
+  addCard,
   cardsContainerIssues,
   issuesForCard,
   issuesForPath,
@@ -164,6 +164,19 @@ function weatherCard(id: string, alert: CardSettings["alert"] = { kind: "none" }
   };
 }
 
+function pomodoroCard(id: string, label = `Card ${id}`): CardSettings {
+  return {
+    kind: "pomodoro",
+    id,
+    label,
+    duration_seconds: 1500,
+    template: { kind: "progress-ring" },
+    tap_action: { kind: "start-pause" },
+    refresh: { kind: "device-local" },
+    alert: { kind: "on-timer-finish", hold: { kind: "until-dismissed" } },
+  };
+}
+
 function pluginCard(id = "internal-plugin-card"): CardSettings {
   return {
     kind: "plugin",
@@ -213,7 +226,9 @@ describe("settings accessibility and states", () => {
     return renderToStaticMarkup(
       <CardEditor
         card={card}
+        config={cardListConfig([card])}
         issues={issues}
+        entryIssues={[]}
         cardError={cardError}
         pomodoro={null}
         provider={null}
@@ -221,6 +236,7 @@ describe("settings accessibility and states", () => {
         filePickerBusy={false}
         providerRefreshing={false}
         onChange={() => {}}
+        onConfigChange={() => {}}
         onRemove={() => {}}
         onTimerAction={() => {}}
         onChooseCalendarFile={() => {}}
@@ -577,28 +593,33 @@ describe("settings accessibility and states", () => {
         cardData={[]}
         pomodoros={[]}
         providers={[]}
+        pluginKinds={[]}
         selectedCardId="internal-uuid-0001"
         onSelect={() => {}}
         onAdd={() => {}}
+        onChange={() => {}}
         onRemove={() => {}}
       />,
     );
-    const playlists = renderToStaticMarkup(
-      <PlaylistPanel config={config} issues={[]} onChange={() => {}} onSelectCard={() => {}} />,
-    );
     const loop = renderToStaticMarkup(
-      <LoopRing config={config} selectedCardId={null} onSelect={() => {}} onReorder={() => {}} />,
+      <LoopRing
+        config={config}
+        issues={[]}
+        selectedCardId={null}
+        onSelect={() => {}}
+        onChange={() => {}}
+      />,
     );
     const editor = renderCardEditor(clockCard("internal-uuid-0001", "Desk"));
 
     expect(library).toContain('class="tile-label">Digital clock<');
     expect(library).toContain('class="card-tile__name">Desk<');
-    expect(playlists).toContain("<strong>Digital clock</strong><small>Desk</small>");
+    expect(library).toContain('aria-label="Move Digital clock — Desk earlier"');
+    expect(library).toContain('aria-label="Move Digital clock — Desk later"');
+    expect(library).toContain('aria-label="Remove Digital clock — Desk');
     expect(loop).toContain('class="loop__entry-name">Digital clock<');
     expect(loop).toContain('class="loop__entry-title">Desk<');
     expect(editor).toContain('id="editor-heading">Digital clock<');
-    // The generic "Select card" line the playlist row used to carry said nothing.
-    expect(playlists).not.toContain("Select card");
   });
 
   test("an untitled card is not labelled with its template twice", () => {
@@ -615,9 +636,11 @@ describe("settings accessibility and states", () => {
         cardData={[]}
         pomodoros={[]}
         providers={[]}
+        pluginKinds={[]}
         selectedCardId={null}
         onSelect={() => {}}
         onAdd={() => {}}
+        onChange={() => {}}
         onRemove={() => {}}
       />,
     );
@@ -634,9 +657,11 @@ describe("settings accessibility and states", () => {
         cardData={[]}
         pomodoros={[]}
         providers={[]}
+        pluginKinds={[]}
         selectedCardId={plugin.id}
         onSelect={() => {}}
         onAdd={() => {}}
+        onChange={() => {}}
         onRemove={() => {}}
       />,
     );
@@ -646,7 +671,8 @@ describe("settings accessibility and states", () => {
     expect(library).toContain('<strong class="card-tile__value numeral">Plugin</strong>');
     expect(library).toContain('class="card-tile__name">Office air<');
     expect(library).not.toContain(plugin.id);
-    expect(library.match(/class="add-card"/g)?.length).toBe(6);
+    expect(library).toContain("Add a card");
+    expect(library).not.toContain("Plugins on the server");
     expect(library).not.toContain("<strong>Plugin</strong>");
     expect(editor).toContain('id="editor-heading">com.example.air-quality<');
     expect(editor).toContain("<span>Name</span>");
@@ -679,9 +705,11 @@ describe("settings accessibility and states", () => {
         ]}
         pomodoros={[]}
         providers={[]}
+        pluginKinds={[]}
         selectedCardId={calendar.id}
         onSelect={() => {}}
         onAdd={() => {}}
+        onChange={() => {}}
         onRemove={() => {}}
       />,
     );
@@ -738,10 +766,120 @@ describe("settings accessibility and states", () => {
     }
     const html = renderCardEditor(clock);
     expect(html).toContain("Tapping this card does nothing.");
+    expect(html).toContain("Swiping the screen moves through the loop.");
     expect(html).toContain("a tap dismisses it");
   });
 
-  test("the library renders every card with alert and unused badges, never wire ids", () => {
+  test("the selected card's timed-loop dwell field writes its active entry", async () => {
+    const card = clockCard("clock-1", "Desk");
+    const initial = cardListConfig([card]);
+    let latest = initial;
+
+    function Harness() {
+      const [config, setConfig] = useState(initial);
+      latest = config;
+      return (
+        <CardEditor
+          card={card}
+          config={config}
+          issues={[]}
+          entryIssues={[
+            {
+              path: "playlists[0].entries[0].dwell_seconds",
+              code: "out-of-range",
+              message: "Entry dwell is out of range.",
+            },
+          ]}
+          cardError={null}
+          pomodoro={null}
+          provider={null}
+          timerBusy={false}
+          filePickerBusy={false}
+          providerRefreshing={false}
+          onChange={() => {}}
+          onConfigChange={setConfig}
+          onRemove={() => {}}
+          onTimerAction={() => {}}
+          onChooseCalendarFile={() => {}}
+          onRefreshProvider={() => {}}
+        />
+      );
+    }
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<Harness />));
+      const dwell = container.querySelector<HTMLInputElement>(
+        'input[aria-label="Stays on the panel for Digital clock — Desk"]',
+      );
+      expect(dwell?.placeholder).toBe("20 s, the loop's default");
+      expect(dwell?.getAttribute("aria-invalid")).toBe("true");
+      expect(container.textContent).toContain("Entry dwell is out of range.");
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set?.call(
+          dwell,
+          "45",
+        );
+        dwell?.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+      expect(latest.playlists[0].entries[0].dwell_seconds).toBe(45);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("the dwell field is shown only when an enrolled card can use it or must repair it", () => {
+    const card = clockCard("clock-1", "Desk");
+    const issue: ValidationIssue = {
+      path: "playlists[0].entries[0].dwell_seconds",
+      code: "out-of-range",
+      message: "Entry dwell is out of range.",
+    };
+    const renderDwell = (config: AppConfig, entryIssues: ValidationIssue[] = []) =>
+      renderToStaticMarkup(
+        <CardEditor
+          card={card}
+          config={config}
+          issues={[]}
+          entryIssues={entryIssues}
+          cardError={null}
+          pomodoro={null}
+          provider={null}
+          timerBusy={false}
+          filePickerBusy={false}
+          providerRefreshing={false}
+          onChange={() => {}}
+          onConfigChange={() => {}}
+          onRemove={() => {}}
+          onTimerAction={() => {}}
+          onChooseCalendarFile={() => {}}
+          onRefreshProvider={() => {}}
+        />,
+      );
+
+    const outside = renderDwell(cardListConfig([card], []));
+    expect(outside).not.toContain("Stays on the panel for");
+
+    const manualNullConfig = cardListConfig([card]);
+    manualNullConfig.playlists[0].advance = { kind: "manual" };
+    const manualNull = renderDwell(manualNullConfig);
+    expect(manualNull).not.toContain("Stays on the panel for");
+
+    const manualInvalidConfig = structuredClone(manualNullConfig);
+    manualInvalidConfig.playlists[0].entries[0].dwell_seconds = 2;
+    const manualInvalid = renderDwell(manualInvalidConfig, [issue]);
+    expect(manualInvalid).toContain("Stays on the panel for");
+    expect(manualInvalid).toContain('aria-invalid="true"');
+    expect(manualInvalid).toContain("Dwell applies when the loop is timed.");
+
+    const timed = renderDwell(cardListConfig([card]));
+    expect(timed).toContain("Stays on the panel for");
+  });
+
+  test("the grid renders loop entries first, then outsiders with consequence flags", () => {
     const config = cardListConfig(
       [
         clockCard("internal-uuid-0001", "Desk"),
@@ -763,25 +901,73 @@ describe("settings accessibility and states", () => {
         cardData={[]}
         pomodoros={[]}
         providers={[]}
+        pluginKinds={[]}
         selectedCardId="first-clock-id"
         onSelect={() => {}}
         onAdd={() => {}}
+        onChange={() => {}}
         onRemove={() => {}}
       />,
     );
-    expect(html).toContain('aria-label="Card library"');
+    expect(html).toContain('aria-label="Cards, loop order first"');
     expect(html).toContain("Desk");
     expect(html).toContain("Focus");
     expect(html).toContain("Spare");
     expect(html).toContain(">alerts<");
-    expect(html).toContain(">unused<");
+    expect(html).toContain(">not in loop<");
+    expect(html).toContain(">Add to loop<");
+    expect(html.indexOf("Desk")).toBeLessThan(html.indexOf("Focus"));
+    expect(html.indexOf("Focus")).toBeLessThan(html.indexOf("Spare"));
+    expect(html).not.toContain(">unused<");
     // Internal identifiers never reach the user — only their titles do.
     expect(html).not.toContain("internal-uuid-0001");
     expect(html).not.toContain("internal-uuid-0002");
     expect(html).not.toContain("internal-uuid-0003");
   });
 
-  test("adding is disabled at the eight-card contract limit", () => {
+  test("the grid renders active entries container issues and scopes resolved entry issues", () => {
+    const config = cardListConfig([clockCard("first", "Desk"), clockCard("second", "Up next")]);
+    const containerIssue: ValidationIssue = {
+      path: "playlists[0].entries",
+      code: "out-of-range",
+      message: "The loop entries need attention.",
+    };
+    const secondDwellIssue: ValidationIssue = {
+      path: "playlists[0].entries[1].dwell_seconds",
+      code: "out-of-range",
+      message: "The second dwell is out of range.",
+    };
+    const container = document.createElement("div");
+    container.innerHTML = renderToStaticMarkup(
+      <CardList
+        config={config}
+        issues={[containerIssue, secondDwellIssue]}
+        cardData={[]}
+        pomodoros={[]}
+        providers={[]}
+        pluginKinds={[]}
+        selectedCardId={null}
+        onSelect={() => {}}
+        onAdd={() => {}}
+        onChange={() => {}}
+        onRemove={() => {}}
+      />,
+    );
+
+    expect(container.textContent).toContain("The loop entries need attention.");
+    const firstTile = [...container.querySelectorAll<HTMLLIElement>(".card-tile")].find((tile) =>
+      tile.textContent?.includes("Desk"),
+    );
+    const secondTile = [...container.querySelectorAll<HTMLLIElement>(".card-tile")].find((tile) =>
+      tile.textContent?.includes("Up next"),
+    );
+    expect(firstTile?.classList.contains("has-issue")).toBe(false);
+    expect(firstTile?.textContent).not.toContain("The second dwell is out of range.");
+    expect(secondTile?.classList.contains("has-issue")).toBe(true);
+    expect(secondTile?.textContent).toContain("The second dwell is out of range.");
+  });
+
+  test("the add slot is disabled at capacity and names the limiting contract", () => {
     const config = cardListConfig(
       Array.from({ length: 8 }, (_, index) => clockCard(`card-${index}`)),
     );
@@ -792,22 +978,296 @@ describe("settings accessibility and states", () => {
         cardData={[]}
         pomodoros={[]}
         providers={[]}
+        pluginKinds={[]}
         selectedCardId={null}
         onSelect={() => {}}
         onAdd={() => {}}
+        onChange={() => {}}
         onRemove={() => {}}
       />,
     );
-    const addButtons = html.match(/<button class="add-card"[^>]*>[\s\S]*?<\/button>/g) ?? [];
-    expect(addButtons.length).toBe(6);
-    for (const button of addButtons) {
-      expect(button).toContain('disabled=""');
-      // Every add control still names the kind it adds.
-      expect(button).toMatch(/<strong>[^<]+<\/strong>/);
+    expect(html).toContain('class="card-tile__add"');
+    expect(html).toContain('aria-describedby="add-card-capacity"');
+    expect(html).toContain('disabled=""');
+    expect(html).toContain("The limit is 8 cards.");
+  });
+
+  test("the add slot distinguishes a full loop from a full card library", () => {
+    const cards = Array.from({ length: 7 }, (_, index) => clockCard(`card-${index}`));
+    const config = cardListConfig(cards, [
+      ...cards.map((card) => ({ card_id: card.id, dwell_seconds: null })),
+      { card_id: "missing-card", dwell_seconds: null },
+    ]);
+    const html = renderToStaticMarkup(
+      <CardList
+        config={config}
+        issues={[]}
+        cardData={[]}
+        pomodoros={[]}
+        providers={[]}
+        pluginKinds={[]}
+        selectedCardId={null}
+        onSelect={() => {}}
+        onAdd={() => {}}
+        onChange={() => {}}
+        onRemove={() => {}}
+      />,
+    );
+    expect(html).toContain('aria-describedby="add-card-capacity"');
+    expect(html).toContain("The limit is 8 in the loop.");
+
+    const outsider = clockCard("outside", "Spare");
+    const fullLoopWithOutsider = { ...config, cards: [...config.cards, outsider] };
+    const container = document.createElement("div");
+    container.innerHTML = renderToStaticMarkup(
+      <CardList
+        config={fullLoopWithOutsider}
+        issues={[]}
+        cardData={[]}
+        pomodoros={[]}
+        providers={[]}
+        pluginKinds={[]}
+        selectedCardId={null}
+        onSelect={() => {}}
+        onAdd={() => {}}
+        onChange={() => {}}
+        onRemove={() => {}}
+      />,
+    );
+    expect(
+      container.querySelector<HTMLButtonElement>(
+        'button[aria-label="Add Digital clock — Spare to the loop"]',
+      )?.disabled,
+    ).toBe(true);
+  });
+
+  test("the add menu aligns to the slot end only when its measured width would overflow", async () => {
+    const config = cardListConfig([clockCard("clock", "Desk")]);
+    const container = document.createElement("div");
+    container.className = "face__work";
+    Object.defineProperty(container, "clientWidth", { configurable: true, value: 1000 });
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    try {
+      await act(async () =>
+        root.render(
+          <CardList
+            config={config}
+            issues={[]}
+            cardData={[]}
+            pomodoros={[]}
+            providers={[]}
+            pluginKinds={[]}
+            selectedCardId={null}
+            onSelect={() => {}}
+            onAdd={() => {}}
+            onChange={() => {}}
+            onRemove={() => {}}
+          />,
+        ),
+      );
+      const slotRoot = container.querySelector<HTMLLIElement>(".card-tile--add");
+      const slot = container.querySelector<HTMLButtonElement>(".card-tile__add");
+      if (!slotRoot) {
+        throw new Error("add-card slot root was not rendered");
+      }
+
+      slotRoot.getBoundingClientRect = () => ({ right: 800 }) as DOMRect;
+      await act(async () => slot?.click());
+      expect(container.querySelector(".menu")?.classList.contains("menu--end")).toBe(true);
+
+      await act(async () => slot?.click());
+      slotRoot.getBoundingClientRect = () => ({ right: 100 }) as DOMRect;
+      await act(async () => slot?.click());
+      expect(container.querySelector(".menu")?.classList.contains("menu--end")).toBe(false);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
     }
   });
 
-  test("playlist entry reorder updates the ordered draft", async () => {
+  test("the add slot menu restores focus on Escape and a picked kind enrols and selects", async () => {
+    const initial = cardListConfig([clockCard("clock", "Desk")]);
+    let latest = initial;
+    let selected: string | null = null;
+
+    function Harness() {
+      const [config, setConfig] = useState(initial);
+      const [selectedCardId, setSelectedCardId] = useState<string | null>(null);
+      latest = config;
+      selected = selectedCardId;
+      return (
+        <CardList
+          config={config}
+          issues={[]}
+          cardData={[]}
+          pomodoros={[]}
+          providers={[]}
+          pluginKinds={[]}
+          selectedCardId={selectedCardId}
+          onSelect={setSelectedCardId}
+          onAdd={(kind) => {
+            const result = addCard(config, kind);
+            setConfig(result.config);
+            setSelectedCardId(result.cardId);
+          }}
+          onChange={setConfig}
+          onRemove={() => {}}
+        />
+      );
+    }
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<Harness />));
+      const slot = container.querySelector<HTMLButtonElement>(".card-tile__add");
+      await act(async () => slot?.click());
+      expect(slot?.getAttribute("aria-expanded")).toBe("true");
+      expect(container.querySelector('[role="menu"]')).not.toBeNull();
+      expect(container.textContent).not.toContain("Plugins on the server");
+
+      const firstItem = container.querySelector<HTMLButtonElement>('[role="menuitem"]');
+      await act(async () => {
+        firstItem?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(container.querySelector('[role="menu"]')).toBeNull();
+      expect(document.activeElement === slot).toBe(true);
+
+      await act(async () => slot?.click());
+      slot?.focus();
+      await act(async () => {
+        slot?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(container.querySelector('[role="menu"]')).toBeNull();
+      expect(slot?.getAttribute("aria-expanded")).toBe("false");
+      expect(document.activeElement === slot).toBe(true);
+
+      await act(async () => slot?.click());
+      const weather = [...container.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find(
+        (button) => button.textContent?.includes("Weather"),
+      );
+      await act(async () => weather?.click());
+      expect(latest.cards.at(-1)?.kind).toBe("weather");
+      expect(latest.playlists[0].entries.at(-1)?.card_id).toBe("weather");
+      expect(selected).toBe("weather");
+      expect(container.querySelector('[role="menu"]')).toBeNull();
+      expect(document.activeElement !== document.body).toBe(true);
+      expect(document.activeElement?.classList.contains("card-tile__body")).toBe(true);
+      expect(document.activeElement?.textContent).toContain("Weather");
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("tabbing focus outside the add slot closes its menu", async () => {
+    const config = cardListConfig([clockCard("clock", "Desk")]);
+    const container = document.createElement("div");
+    const outside = document.createElement("button");
+    outside.textContent = "Outside the menu";
+    document.body.append(container, outside);
+    const root = createRoot(container);
+
+    try {
+      await act(async () =>
+        root.render(
+          <CardList
+            config={config}
+            issues={[]}
+            cardData={[]}
+            pomodoros={[]}
+            providers={[]}
+            pluginKinds={[]}
+            selectedCardId={null}
+            onSelect={() => {}}
+            onAdd={() => {}}
+            onChange={() => {}}
+            onRemove={() => {}}
+          />,
+        ),
+      );
+      const slot = container.querySelector<HTMLButtonElement>(".card-tile__add");
+      await act(async () => slot?.click());
+      container.querySelector<HTMLButtonElement>('[role="menuitem"]')?.focus();
+      await act(async () => outside.focus());
+
+      expect(container.querySelector('[role="menu"]')).toBeNull();
+      expect(slot?.getAttribute("aria-expanded")).toBe("false");
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      outside.remove();
+    }
+  });
+
+  test("menu arrow wrapping ignores stale refs after the option list shrinks", async () => {
+    const config = cardListConfig([clockCard("clock", "Desk")]);
+    let hidePlugin = () => {};
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    function Harness() {
+      const [showPlugin, setShowPlugin] = useState(true);
+      hidePlugin = () => setShowPlugin(false);
+      return (
+        <CardList
+          config={config}
+          issues={[]}
+          cardData={[]}
+          pomodoros={[]}
+          providers={[]}
+          pluginKinds={
+            showPlugin
+              ? [
+                  {
+                    id: "weather-plus",
+                    version: "1",
+                    description: "Plugin weather",
+                    onAdd: () => {},
+                  },
+                ]
+              : []
+          }
+          selectedCardId={null}
+          onSelect={() => {}}
+          onAdd={() => {}}
+          onChange={() => {}}
+          onRemove={() => {}}
+        />
+      );
+    }
+
+    try {
+      await act(async () => root.render(<Harness />));
+      const slot = container.querySelector<HTMLButtonElement>(".card-tile__add");
+      await act(async () => slot?.click());
+      expect(container.querySelectorAll('[role="menuitem"]')).toHaveLength(7);
+      await act(async () => slot?.click());
+      await act(async () => hidePlugin());
+      await act(async () => slot?.click());
+
+      const currentItems = container.querySelectorAll<HTMLButtonElement>('[role="menuitem"]');
+      expect(currentItems).toHaveLength(6);
+      const firstItem = currentItems[0];
+      const lastItem = currentItems[currentItems.length - 1];
+      await act(async () =>
+        firstItem.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true })),
+      );
+      expect(lastItem.textContent).toContain("RSS feed");
+      expect(document.activeElement === lastItem).toBe(true);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("grid move buttons and Alt arrows update active-loop order", async () => {
     const config = cardListConfig([clockCard("first", "Desk"), clockCard("second", "Up next")]);
     let latest = config;
     const container = document.createElement("div");
@@ -818,63 +1278,325 @@ describe("settings accessibility and states", () => {
       const [value, setValue] = useState(config);
       latest = value;
       return (
-        <PlaylistPanel config={value} issues={[]} onChange={setValue} onSelectCard={() => {}} />
+        <CardList
+          config={value}
+          issues={[]}
+          cardData={[]}
+          pomodoros={[]}
+          providers={[]}
+          pluginKinds={[]}
+          selectedCardId={null}
+          onSelect={() => {}}
+          onAdd={() => {}}
+          onChange={setValue}
+          onRemove={() => {}}
+        />
       );
     }
 
-    await act(async () => root.render(<Harness />));
-    // Both entries are clocks, so the control names the owner's title as well as
-    // the template — which is the whole point of keeping the title around.
-    const moveUp = container.querySelector<HTMLButtonElement>(
-      'button[aria-label="Move Digital clock — Up next up"]',
-    );
-    expect(moveUp).not.toBeNull();
-    await act(async () => moveUp?.click());
-    expect(latest.playlists[0].entries.map((entry) => entry.card_id)).toEqual(["second", "first"]);
-    await act(async () => root.unmount());
-    container.remove();
+    try {
+      await act(async () => root.render(<Harness />));
+      expect(
+        container.querySelector<HTMLButtonElement>(
+          'button[aria-label="Move Digital clock — Desk earlier"]',
+        )?.disabled,
+      ).toBe(true);
+      expect(
+        container.querySelector<HTMLButtonElement>(
+          'button[aria-label="Move Digital clock — Up next later"]',
+        )?.disabled,
+      ).toBe(true);
+      const earlier = container.querySelector<HTMLButtonElement>(
+        'button[aria-label="Move Digital clock — Up next earlier"]',
+      );
+      expect(earlier).not.toBeNull();
+      await act(async () => earlier?.click());
+      expect(latest.playlists[0].entries.map((entry) => entry.card_id)).toEqual([
+        "second",
+        "first",
+      ]);
+
+      const later = container.querySelector<HTMLButtonElement>(
+        'button[aria-label="Move Digital clock — Up next later"]',
+      );
+      await act(async () => later?.click());
+      expect(latest.playlists[0].entries.map((entry) => entry.card_id)).toEqual([
+        "first",
+        "second",
+      ]);
+
+      let selectedTile = [
+        ...container.querySelectorAll<HTMLButtonElement>(".card-tile .card-tile__body"),
+      ].find((button) => button.textContent?.includes("Desk"));
+      expect(selectedTile).not.toBeNull();
+      await act(async () => {
+        selectedTile?.dispatchEvent(
+          new KeyboardEvent("keydown", { key: "ArrowRight", altKey: true, bubbles: true }),
+        );
+      });
+      expect(latest.playlists[0].entries.map((entry) => entry.card_id)).toEqual([
+        "second",
+        "first",
+      ]);
+
+      selectedTile = [
+        ...container.querySelectorAll<HTMLButtonElement>(".card-tile .card-tile__body"),
+      ].find((button) => button.textContent?.includes("Desk"));
+      await act(async () => {
+        selectedTile?.dispatchEvent(
+          new KeyboardEvent("keydown", { key: "ArrowLeft", altKey: true, bubbles: true }),
+        );
+      });
+      expect(latest.playlists[0].entries.map((entry) => entry.card_id)).toEqual([
+        "first",
+        "second",
+      ]);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
   });
 
-  test("cards already in a playlist are disabled in Add from library", () => {
-    const config = cardListConfig([clockCard("first", "Desk"), clockCard("second", "Up next")]);
-    const html = renderToStaticMarkup(
-      <PlaylistPanel config={config} issues={[]} onChange={() => {}} onSelectCard={() => {}} />,
+  test("duplicate loop entries use their rendered index for move boundaries", () => {
+    const card = clockCard("duplicate", "Desk");
+    const config = cardListConfig(
+      [card],
+      [
+        { card_id: card.id, dwell_seconds: null },
+        { card_id: card.id, dwell_seconds: 45 },
+      ],
     );
-    const options = html.match(/<option[^>]*>[^<]*already added<\/option>/g) ?? [];
-    expect(options).toHaveLength(2);
-    expect(options.every((option) => option.includes('disabled=""'))).toBe(true);
-    expect(html).toContain("Every library card is already in this playlist");
-  });
-
-  test("card and playlist-entry validation paths render on their corresponding rows", () => {
-    const config = cardListConfig([clockCard("first", "Desk"), clockCard("second", "Up next")]);
-    const issues: ValidationIssue[] = [
-      { path: "cards[1].title", code: "too-long", message: "Card title is too long." },
-      {
-        path: "playlists[0].entries[1].dwell_seconds",
-        code: "out-of-range",
-        message: "Entry dwell is out of range.",
-      },
-    ];
-    const library = renderToStaticMarkup(
+    const container = document.createElement("div");
+    container.innerHTML = renderToStaticMarkup(
       <CardList
         config={config}
-        issues={issues}
+        issues={[]}
         cardData={[]}
         pomodoros={[]}
         providers={[]}
+        pluginKinds={[]}
         selectedCardId={null}
         onSelect={() => {}}
         onAdd={() => {}}
+        onChange={() => {}}
         onRemove={() => {}}
       />,
     );
-    const playlists = renderToStaticMarkup(
-      <PlaylistPanel config={config} issues={issues} onChange={() => {}} onSelectCard={() => {}} />,
+
+    const earlier = container.querySelectorAll<HTMLButtonElement>(
+      'button[aria-label="Move Digital clock — Desk earlier"]',
     );
-    expect(library).toContain("Card title is too long.");
-    expect(playlists).toContain("Entry dwell is out of range.");
-    expect(playlists).toContain('aria-invalid="true"');
+    const later = container.querySelectorAll<HTMLButtonElement>(
+      'button[aria-label="Move Digital clock — Desk later"]',
+    );
+    expect(earlier).toHaveLength(2);
+    expect(later).toHaveLength(2);
+    expect(earlier[0].disabled).toBe(true);
+    expect(later[0].disabled).toBe(false);
+    expect(earlier[1].disabled).toBe(false);
+    expect(later[1].disabled).toBe(true);
+  });
+
+  test("keyboard reorder restores focus to the moved tile body", async () => {
+    const config = cardListConfig([clockCard("first", "Desk"), clockCard("second", "Up next")]);
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    function Harness() {
+      const [value, setValue] = useState(config);
+      return (
+        <CardList
+          config={value}
+          issues={[]}
+          cardData={[]}
+          pomodoros={[]}
+          providers={[]}
+          pluginKinds={[]}
+          selectedCardId={null}
+          onSelect={() => {}}
+          onAdd={() => {}}
+          onChange={(next) => {
+            (document.activeElement as HTMLElement | null)?.blur();
+            setValue(next);
+          }}
+          onRemove={() => {}}
+        />
+      );
+    }
+
+    try {
+      await act(async () => root.render(<Harness />));
+      const firstTile = [...container.querySelectorAll<HTMLButtonElement>(".card-tile__body")].find(
+        (button) => button.textContent?.includes("Desk"),
+      );
+      firstTile?.focus();
+      await act(async () =>
+        firstTile?.dispatchEvent(
+          new KeyboardEvent("keydown", { key: "ArrowRight", altKey: true, bubbles: true }),
+        ),
+      );
+      const movedTile = [...container.querySelectorAll<HTMLButtonElement>(".card-tile__body")].find(
+        (button) => button.textContent?.includes("Desk"),
+      );
+      expect(movedTile?.textContent).toContain("Desk");
+      expect(document.activeElement === movedTile).toBe(true);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("dropping a loop tile on itself does not emit a draft change", async () => {
+    const config = cardListConfig([clockCard("first", "Desk"), clockCard("second", "Up next")]);
+    let changeCount = 0;
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    try {
+      await act(async () =>
+        root.render(
+          <CardList
+            config={config}
+            issues={[]}
+            cardData={[]}
+            pomodoros={[]}
+            providers={[]}
+            pluginKinds={[]}
+            selectedCardId={null}
+            onSelect={() => {}}
+            onAdd={() => {}}
+            onChange={() => {
+              changeCount += 1;
+            }}
+            onRemove={() => {}}
+          />,
+        ),
+      );
+      const firstTile = [
+        ...container.querySelectorAll<HTMLLIElement>('.card-tile[draggable="true"]'),
+      ].find((tile) => tile.textContent?.includes("Desk"));
+      const transfer = new DataTransfer();
+      transfer.setData("text/plain", "first");
+      const drop = new Event("drop", { bubbles: true }) as DragEvent;
+      Object.defineProperty(drop, "dataTransfer", { value: transfer });
+      await act(async () => firstTile?.dispatchEvent(drop));
+      expect(changeCount).toBe(0);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("an outside tile says why it is outside and enrols directly into the loop", async () => {
+    const outside = pomodoroCard("outside", "Spare");
+    const initial = cardListConfig(
+      [clockCard("inside", "Desk"), outside],
+      [{ card_id: "inside", dwell_seconds: null }],
+    );
+    let latest = initial;
+
+    function Harness() {
+      const [config, setConfig] = useState(initial);
+      latest = config;
+      return (
+        <CardList
+          config={config}
+          issues={[]}
+          cardData={[]}
+          pomodoros={[]}
+          providers={[]}
+          pluginKinds={[]}
+          selectedCardId={null}
+          onSelect={() => {}}
+          onAdd={() => {}}
+          onChange={setConfig}
+          onRemove={() => {}}
+        />
+      );
+    }
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<Harness />));
+      expect(container.textContent).toContain("not in loop");
+      expect(container.textContent).toContain("alerts");
+      const join = container.querySelector<HTMLButtonElement>(
+        'button[aria-label="Add Pomodoro — Spare to the loop"]',
+      );
+      await act(async () => join?.click());
+      expect(latest.playlists[0].entries.at(-1)?.card_id).toBe("outside");
+      expect(container.textContent).not.toContain("not in loop");
+      expect(document.activeElement !== document.body).toBe(true);
+      expect(document.activeElement?.classList.contains("card-tile__body")).toBe(true);
+      expect(document.activeElement?.textContent).toContain("Spare");
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("a missing-card entry remains visible with all of its entry issues and can be removed", async () => {
+    const initial = cardListConfig(
+      [clockCard("first", "Desk")],
+      [{ card_id: "missing-card", dwell_seconds: null }],
+    );
+    const issues: ValidationIssue[] = [
+      {
+        path: "playlists[0].entries[0].card_id",
+        code: "missing-reference",
+        message: "This loop entry references a missing card.",
+      },
+      {
+        path: "playlists[0].entries[0].dwell_seconds",
+        code: "out-of-range",
+        message: "Dwell time is out of range.",
+      },
+    ];
+    let latest = initial;
+
+    function Harness() {
+      const [config, setConfig] = useState(initial);
+      latest = config;
+      return (
+        <CardList
+          config={config}
+          issues={issues}
+          cardData={[]}
+          pomodoros={[]}
+          providers={[]}
+          pluginKinds={[]}
+          selectedCardId={null}
+          onSelect={() => {}}
+          onAdd={() => {}}
+          onChange={setConfig}
+          onRemove={() => {}}
+        />
+      );
+    }
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<Harness />));
+      expect(container.textContent).toContain("Missing card");
+      expect(container.textContent).toContain("This loop entry references a missing card.");
+      expect(container.textContent).toContain("Dwell time is out of range.");
+      expect(container.querySelector(".card-tile.has-issue")).not.toBeNull();
+      await act(async () =>
+        container
+          .querySelector<HTMLButtonElement>('button[aria-label="Remove Missing card"]')
+          ?.click(),
+      );
+      expect(latest.playlists[0].entries).toEqual([]);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
   });
 
   test("editing an already-saved config does not resurface first-run guidance", async () => {
@@ -897,26 +1619,24 @@ describe("settings accessibility and states", () => {
     const root = createRoot(container);
     try {
       await act(async () => root.render(<App />));
-      await waitFor(() => expect(container.textContent).toContain("Workday"));
+      await waitFor(() => expect(buttonWithText(container, "Manual")).toBeDefined());
       expect(container.textContent).not.toContain("Make the display yours");
 
       const manualTab = buttonWithText(container, "Manual");
       expect(manualTab).not.toBeUndefined();
       await act(async () => manualTab?.click());
-      const makeActive = buttonWithText(container, "Make active");
-      expect(makeActive).not.toBeUndefined();
-      await act(async () => makeActive?.click());
 
       await waitFor(() => expect(container.textContent).toContain("Unsaved changes"));
       expect(container.textContent).not.toContain("Make the display yours");
-      await waitFor(() => expect(container.textContent).toContain("Manualactive"));
+      expect(buttonWithText(container, "Manual")?.getAttribute("aria-pressed")).toBe("true");
       await waitFor(() => {
         const save = buttonWithText(container, "Save & apply");
         expect(save?.disabled).toBe(false);
       });
       await act(async () => buttonWithText(container, "Save & apply")?.click());
       await waitFor(() => expect(saved).toHaveLength(1));
-      expect(saved[0].active_playlist_id).toBe("manual");
+      expect(saved[0].active_playlist_id).toBe(snapshot.config.active_playlist_id);
+      expect(saved[0].playlists[0].advance).toEqual({ kind: "manual" });
     } finally {
       await act(async () => root.unmount());
       container.remove();
@@ -947,7 +1667,6 @@ describe("settings accessibility and states", () => {
       expect(container.textContent).toContain("Save your settings");
 
       await act(async () => buttonWithText(container, "Manual")?.click());
-      await act(async () => buttonWithText(container, "Make active")?.click());
       await waitFor(() => expect(container.textContent).toContain("Unsaved changes"));
       expect(container.textContent).toContain("Make the display yours");
       await waitFor(() => {
@@ -956,8 +1675,7 @@ describe("settings accessibility and states", () => {
       await act(async () => buttonWithText(container, "Save & apply")?.click());
       await waitFor(() => expect(container.textContent).not.toContain("Make the display yours"));
 
-      await act(async () => buttonWithText(container, "Workday")?.click());
-      await act(async () => buttonWithText(container, "Make active")?.click());
+      await act(async () => buttonWithText(container, "Timed")?.click());
       await waitFor(() => expect(container.textContent).toContain("Unsaved changes"));
       expect(container.textContent).not.toContain("Make the display yours");
     } finally {
@@ -1003,7 +1721,6 @@ describe("settings accessibility and states", () => {
       await act(async () => root.render(<App />));
       await waitFor(() => expect(buttonWithText(container, "Save to server")).toBeDefined());
       await act(async () => buttonWithText(container, "Manual")?.click());
-      await act(async () => buttonWithText(container, "Make active")?.click());
       await waitFor(() =>
         expect(buttonWithText(container, "Save to server")?.disabled).toBe(false),
       );
@@ -1040,7 +1757,7 @@ describe("settings accessibility and states", () => {
     const root = createRoot(container);
     try {
       await act(async () => root.render(<App />));
-      await waitFor(() => expect(container.textContent).toContain("Workday"));
+      await waitFor(() => expect(buttonWithText(container, "Manual")).toBeDefined());
       const unavailable = buttonWithText(container, "Ownership unavailable");
       expect(unavailable?.disabled).toBe(true);
       expect(container.textContent).toContain(
@@ -1092,9 +1809,8 @@ describe("settings accessibility and states", () => {
     const root = createRoot(container);
     try {
       await act(async () => root.render(<App />));
-      await waitFor(() => expect(container.textContent).toContain("Workday"));
+      await waitFor(() => expect(buttonWithText(container, "Manual")).toBeDefined());
       await act(async () => buttonWithText(container, "Manual")?.click());
-      await act(async () => buttonWithText(container, "Make active")?.click());
       await waitFor(() =>
         expect(buttonWithText(container, "Save to server")?.disabled).toBe(false),
       );
@@ -1258,7 +1974,9 @@ describe("settings accessibility and states", () => {
     const editor = renderToStaticMarkup(
       <CardEditor
         card={cards[0]}
+        config={cardListConfig([cards[0]])}
         issues={[]}
+        entryIssues={[]}
         cardError={null}
         pomodoro={null}
         provider={troubled}
@@ -1266,6 +1984,7 @@ describe("settings accessibility and states", () => {
         filePickerBusy={false}
         providerRefreshing={false}
         onChange={() => {}}
+        onConfigChange={() => {}}
         onRemove={() => {}}
         onTimerAction={() => {}}
         onChooseCalendarFile={() => {}}
@@ -1577,7 +2296,13 @@ describe("settings accessibility and states", () => {
 
   function renderLoopRing(config: AppConfig): string {
     return renderToStaticMarkup(
-      <LoopRing config={config} selectedCardId="first" onSelect={() => {}} onReorder={() => {}} />,
+      <LoopRing
+        config={config}
+        issues={[]}
+        selectedCardId="first"
+        onSelect={() => {}}
+        onChange={() => {}}
+      />,
     );
   }
 
@@ -1600,26 +2325,26 @@ describe("settings accessibility and states", () => {
     expect(html).toContain("Desk");
   });
 
-  test("loop ring keyboard reorder maps visible arcs back to playlist entry indexes", async () => {
+  test("the loop ring owns pacing and writes the active loop advance mode", async () => {
     const initial = filmstripConfig();
-    initial.playlists[0].entries = [
-      { card_id: "first", dwell_seconds: 45 },
-      { card_id: "missing-card", dwell_seconds: null },
-      { card_id: "second", dwell_seconds: null },
-    ];
     let latest = initial;
 
     function Harness() {
       const [config, setConfig] = useState(initial);
+      latest = config;
       return (
         <LoopRing
           config={config}
+          issues={[
+            {
+              path: "playlists[0].advance.default_dwell_seconds",
+              code: "out-of-range",
+              message: "Default dwell is out of range.",
+            },
+          ]}
           selectedCardId="first"
           onSelect={() => {}}
-          onReorder={(next) => {
-            latest = next;
-            setConfig(next);
-          }}
+          onChange={setConfig}
         />
       );
     }
@@ -1629,22 +2354,103 @@ describe("settings accessibility and states", () => {
     const root = createRoot(container);
     try {
       await act(async () => root.render(<Harness />));
-      const firstSegment = container.querySelector<HTMLButtonElement>(".loop__entry-body");
-      expect(firstSegment).not.toBeNull();
-      await act(async () => {
-        firstSegment?.dispatchEvent(
-          new KeyboardEvent("keydown", { key: "ArrowDown", altKey: true, bubbles: true }),
-        );
-      });
-      expect(latest.playlists[0].entries.map((entry) => entry.card_id)).toEqual([
-        "missing-card",
-        "second",
-        "first",
-      ]);
+      expect(container.textContent).toContain("The loop");
+      expect(container.textContent).not.toContain("Workday");
+      const dwell = container.querySelector<HTMLInputElement>(".loop__dwell input");
+      expect(dwell?.getAttribute("aria-invalid")).toBe("true");
+      expect(dwell?.getAttribute("aria-describedby")).toBe("loop-pacing-issues");
+      expect(container.querySelector("#loop-pacing-issues")?.tagName).toBe("UL");
+      expect(container.textContent).toContain("Default dwell is out of range.");
+      const manual = buttonWithText(container, "Manual");
+      expect(manual?.getAttribute("aria-pressed")).toBe("false");
+      await act(async () => manual?.click());
+      expect(latest.playlists[0].advance).toEqual({ kind: "manual" });
+      expect(buttonWithText(container, "Manual")?.getAttribute("aria-pressed")).toBe("true");
     } finally {
       await act(async () => root.unmount());
       container.remove();
     }
+  });
+
+  test("clicking the already-selected pacing mode does not emit a draft change", async () => {
+    const config = filmstripConfig();
+    let changeCount = 0;
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    try {
+      await act(async () =>
+        root.render(
+          <LoopRing
+            config={config}
+            issues={[]}
+            selectedCardId="first"
+            onSelect={() => {}}
+            onChange={() => {
+              changeCount += 1;
+            }}
+          />,
+        ),
+      );
+      await act(async () => buttonWithText(container, "Timed")?.click());
+      expect(changeCount).toBe(0);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("clearing the default dwell input keeps an empty edit without writing zero", async () => {
+    const initial = filmstripConfig();
+    let latest = initial;
+
+    function Harness() {
+      const [config, setConfig] = useState(initial);
+      latest = config;
+      return (
+        <LoopRing
+          config={config}
+          issues={[]}
+          selectedCardId="first"
+          onSelect={() => {}}
+          onChange={setConfig}
+        />
+      );
+    }
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<Harness />));
+      const dwell = container.querySelector<HTMLInputElement>(".loop__dwell input");
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set?.call(dwell, "");
+        dwell?.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+      expect(dwell?.value).toBe("");
+      expect(latest.playlists[0].advance).toEqual({
+        kind: "timed",
+        default_dwell_seconds: 20,
+      });
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("the loop legend only displays and selects; it has no reorder affordance", () => {
+    const initial = filmstripConfig();
+    initial.playlists[0].entries = [
+      { card_id: "first", dwell_seconds: 45 },
+      { card_id: "missing-card", dwell_seconds: null },
+      { card_id: "second", dwell_seconds: null },
+    ];
+    const html = renderLoopRing(initial);
+    expect(html).not.toContain("draggable");
+    expect(html).not.toContain("loop__moves");
+    expect(html).not.toContain("Move ICS calendar");
   });
 
   test("formats provider staleness without exposing raw timestamps", () => {
@@ -1685,7 +2491,7 @@ describe("settings accessibility and states", () => {
     ];
 
     // Reconstructed independently from the same public helpers each real surface calls
-    // (App scopes CardList/CardEditor/PlaylistPanel/the timezone field this exact way —
+    // (App scopes CardList/CardEditor/LoopRing/the timezone field this exact way —
     // see App.tsx), plus the fallback under test. This is the invariant that actually
     // guards against the class of bug this fix addresses: if a surface's claim and
     // `unclaimedIssues`'s notion of "claimed" ever drift apart, an issue either goes
@@ -1694,13 +2500,89 @@ describe("settings accessibility and states", () => {
     const union = [
       ...cardsContainerIssues(issues),
       ...config.cards.flatMap((card) => issuesForCard(issues, config, card.id)),
-      ...issuesForPath(issues, "playlists"),
+      ...issuesForPath(issues, "playlists[0].entries"),
+      ...issuesForPath(issues, "playlists[0].advance"),
       ...issuesForPath(issues, "preferences.timezone"),
       ...unclaimedIssues(issues, config),
     ];
 
     expect(union).toHaveLength(issues.length);
     expect(new Set(union)).toEqual(new Set(issues));
+  });
+
+  test("active playlist index one claims and renders only its entries and advance issues", () => {
+    const base = cardListConfig([clockCard("clock", "Desk")]);
+    const active = base.playlists[0];
+    const config: AppConfig = {
+      ...base,
+      playlists: [
+        { id: "inactive", name: "Inactive", advance: { kind: "manual" }, entries: [] },
+        active,
+      ],
+      active_playlist_id: active.id,
+    };
+    const issues: ValidationIssue[] = [
+      { path: "playlists[1].entries", code: "entries", message: "Active entries issue." },
+      {
+        path: "playlists[1].entries[0].dwell_seconds",
+        code: "dwell",
+        message: "Active dwell issue.",
+      },
+      { path: "playlists[1].advance", code: "advance", message: "Active advance issue." },
+      {
+        path: "playlists[1].advance.default_dwell_seconds",
+        code: "default-dwell",
+        message: "Active default dwell issue.",
+      },
+      { path: "playlists", code: "root", message: "Playlists root issue." },
+      { path: "playlists[0].id", code: "inactive-id", message: "Inactive id issue." },
+      {
+        path: "playlists[0].entries",
+        code: "inactive-entries",
+        message: "Inactive entries issue.",
+      },
+      {
+        path: "active_playlist_id",
+        code: "active-id",
+        message: "Active playlist id issue.",
+      },
+    ];
+
+    const grid = renderToStaticMarkup(
+      <CardList
+        config={config}
+        issues={issues}
+        cardData={[]}
+        pomodoros={[]}
+        providers={[]}
+        pluginKinds={[]}
+        selectedCardId={null}
+        onSelect={() => {}}
+        onAdd={() => {}}
+        onChange={() => {}}
+        onRemove={() => {}}
+      />,
+    );
+    const ring = renderToStaticMarkup(
+      <LoopRing
+        config={config}
+        issues={issues}
+        selectedCardId="clock"
+        onSelect={() => {}}
+        onChange={() => {}}
+      />,
+    );
+
+    expect(grid).toContain("Active entries issue.");
+    expect(grid).toContain("Active dwell issue.");
+    expect(ring).toContain("Active advance issue.");
+    expect(ring).toContain("Active default dwell issue.");
+    expect(unclaimedIssues(issues, config).map((issue) => issue.path)).toEqual([
+      "playlists",
+      "playlists[0].id",
+      "playlists[0].entries",
+      "active_playlist_id",
+    ]);
   });
 
   test("includes narrow-window and reduced-motion fallbacks", async () => {

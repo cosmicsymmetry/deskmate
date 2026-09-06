@@ -6,17 +6,18 @@ import { Icon } from "./components/Icon";
 import { LoopRing } from "./components/LoopRing";
 import { DevicePreview } from "./components/DevicePreview";
 import { NetworkPanel, ownershipLabel } from "./components/NetworkPanel";
-import { PlaylistPanel } from "./components/PlaylistPanel";
 import { type SaveState, SaveBar, type ValidationState } from "./components/SaveBar";
 import { SettingsSheet } from "./components/SettingsSheet";
 import { TopBar } from "./components/TopBar";
 import {
   addCard,
+  activePlaylist,
   cardLabel,
   copyConfig,
   firstRunSteps,
   firstSelectableCard,
   issuesForCard,
+  issuesForPath,
   removeCard,
   unclaimedIssues,
   updateWidget,
@@ -185,6 +186,18 @@ export function App() {
     snapshot.pomodoros.find((candidate) => candidate.widget_id === selectedCardId) ?? null;
   const issues = validation.result.issues;
   const cardIssues = selectedCardId ? issuesForCard(issues, draft, selectedCardId) : [];
+  const active = activePlaylist(draft);
+  const activeIndex = draft.playlists.findIndex(
+    (playlist) => playlist.id === draft.active_playlist_id,
+  );
+  const selectedEntryIndex =
+    selectedCardId && active
+      ? active.entries.findIndex((entry) => entry.card_id === selectedCardId)
+      : -1;
+  const selectedEntryIssues =
+    activeIndex >= 0 && selectedEntryIndex >= 0
+      ? issuesForPath(issues, `playlists[${activeIndex}].entries[${selectedEntryIndex}]`)
+      : [];
   const selectedCardError =
     snapshot.card_errors.find((error) => error.card_id === selectedCardId) ?? null;
   const cardErrorCount = snapshot.card_errors.length;
@@ -233,6 +246,9 @@ export function App() {
   };
   const handleAdd = (kind: AddableCardKind) => {
     const result = addCard(draft, kind);
+    if (!result.cardId) {
+      return;
+    }
     replaceDraft(result.config);
     setSelectedCardId(result.cardId);
   };
@@ -366,9 +382,10 @@ export function App() {
           />
           <LoopRing
             config={draft}
+            issues={issues}
             selectedCardId={selectedCardId}
             onSelect={setSelectedCardId}
-            onReorder={(next) => replaceDraft(next)}
+            onChange={replaceDraft}
           />
         </aside>
 
@@ -521,15 +538,19 @@ export function App() {
             cardData={snapshot.card_data}
             pomodoros={snapshot.pomodoros}
             providers={snapshot.providers}
+            pluginKinds={[]}
             selectedCardId={selectedCardId}
             onSelect={setSelectedCardId}
             onAdd={handleAdd}
+            onChange={replaceDraft}
             onRemove={handleRemoveCard}
           />
 
           <CardEditor
             card={selectedWidget}
+            config={draft}
             issues={cardIssues}
+            entryIssues={selectedEntryIssues}
             cardError={selectedCardError}
             pomodoro={pomodoro}
             provider={selectedProvider}
@@ -537,17 +558,11 @@ export function App() {
             filePickerBusy={busyAction === "calendar-file"}
             providerRefreshing={refreshingProviderId === selectedCardId}
             onChange={handleWidgetChange}
+            onConfigChange={replaceDraft}
             onRemove={handleRemove}
             onTimerAction={handleTimerAction}
             onChooseCalendarFile={handleChooseCalendarFile}
             onRefreshProvider={() => selectedCardId && handleProviderRefresh(selectedCardId)}
-          />
-
-          <PlaylistPanel
-            config={draft}
-            issues={issues}
-            onChange={replaceDraft}
-            onSelectCard={setSelectedCardId}
           />
         </main>
       </div>

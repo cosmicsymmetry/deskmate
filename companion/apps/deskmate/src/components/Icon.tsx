@@ -8,19 +8,14 @@ import type { ReactElement } from "react";
  * and ↑ as icons, hands their weight and alignment to whatever font resolves. These
  * are drawn instead, so a control's mark carries the same stroke as every other.
  */
-type IconName = "up" | "down" | "close" | "plus" | "check" | "grip" | "refresh" | "settings";
+type IconName = "left" | "right" | "close" | "plus" | "check" | "refresh" | "settings";
 
 const PATHS: Record<IconName, ReactElement> = {
-  up: <path d="M4 10 8 6l4 4" />,
-  down: <path d="M4 6l4 4 4-4" />,
+  left: <path d="M10 4 6 8l4 4" />,
+  right: <path d="M6 4l4 4-4 4" />,
   close: <path d="M4.5 4.5l7 7M11.5 4.5l-7 7" />,
   plus: <path d="M8 3.5v9M3.5 8h9" />,
   check: <path d="M3.5 8.5l3 3 6-6.5" />,
-  grip: (
-    <>
-      <path d="M6 4h.01M6 8h.01M6 12h.01M10 4h.01M10 8h.01M10 12h.01" />
-    </>
-  ),
   refresh: <path d="M13 8a5 5 0 1 1-1.6-3.7M13 2.5V5h-2.5" />,
   /* Sliders, not a cogwheel: eight teeth turn to mush at 1.75 stroke on a 16 grid,
      and the line breaks below keep each knob legible instead of overprinting it. */

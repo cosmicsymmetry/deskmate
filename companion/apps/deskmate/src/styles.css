@@ -29,8 +29,9 @@
  *    Every duration, time, count and index uses it so digits hold their columns
  *    while they tick.
  *
- * 5. NOTHING IS BEHIND A DISCLOSURE. No tabs, no accordions, no settings drawer.
- *    Focus is by luminance; context stays legible.
+ * 5. NO STATE IS BEHIND A DISCLOSURE. No tabs, no accordions, no settings drawer.
+ *    Focus is by luminance; context stays legible. The one menu — the add-card slot's —
+ *    holds choices, never state (see DESIGN.md, Composition).
  */
 
 :root {
@@ -236,10 +237,8 @@ h3 {
 /*
  * The label type role. One size, one weight, one tracking, everywhere — it is what
  * makes a complication read as a complication rather than as a heading.
- * `.section-label` carries the same role in the playlist editor.
  */
-.tile-label,
-.section-label {
+.tile-label {
   display: block;
   margin: 0;
   color: var(--ink-3);
@@ -524,6 +523,7 @@ h3 {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: 12px;
   min-height: 26px;
 }
@@ -531,7 +531,60 @@ h3 {
 .loop__head-right {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 6px;
+}
+
+.loop__pacing {
+  display: flex;
+  gap: 1px;
+  margin: 0;
+  padding: 2px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-pill);
+  background: var(--tile-2);
+}
+
+.loop__pace {
+  padding: 3px 9px;
+  border: 0;
+  border-radius: var(--r-pill);
+  background: none;
+  color: var(--ink-2);
+  font-size: 0.68rem;
+  font-weight: 600;
+  transition: background 150ms var(--ease);
+}
+
+.loop__pace[aria-pressed="true"] {
+  background: var(--tile);
+  color: var(--ink);
+  font-weight: 640;
+}
+
+.loop__dwell {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--ink-3);
+  font-size: 0.7rem;
+  font-weight: 600;
+}
+
+.loop__dwell input {
+  /* A number input keeps room for its spinner; 40px clipped "20" to "2(". */
+  width: 58px;
+  padding: 4px 6px;
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  background: var(--tile);
+  color: var(--ink);
+  font-size: 0.72rem;
+  text-align: right;
+}
+
+.loop__dwell input[aria-invalid="true"] {
+  border-color: var(--bad);
+  background: color-mix(in srgb, var(--bad) 7%, var(--tile));
 }
 
 .loop__empty {
@@ -642,6 +695,7 @@ h3 {
 }
 
 .loop__hint {
+  flex-basis: 100%;
   color: var(--ink-3);
   font-size: 0.7rem;
 }
@@ -663,10 +717,6 @@ h3 {
 
 .loop__entry:hover {
   background: var(--tile-2);
-}
-
-.loop__entry.is-dragging {
-  opacity: 0.4;
 }
 
 .loop__entry.is-live {
@@ -730,36 +780,6 @@ h3 {
   font-size: 0.72rem;
 }
 
-.loop__moves {
-  display: flex;
-  flex-shrink: 0;
-  gap: 1px;
-  opacity: 0;
-  transition: opacity 150ms var(--ease);
-}
-
-.loop__entry:hover .loop__moves,
-.loop__entry:focus-within .loop__moves {
-  opacity: 1;
-}
-
-.loop__moves button,
-.card-row__moves button {
-  display: grid;
-  place-items: center;
-  width: 22px;
-  height: 22px;
-  border: 0;
-  border-radius: 6px;
-  background: var(--tile-3);
-  color: var(--ink-2);
-  font-size: 0.8rem;
-}
-
-.loop__moves button:disabled {
-  opacity: 0.3;
-}
-
 /* ── Panels in the work column ─────────────────────────────────────────── */
 
 .panel,
@@ -789,7 +809,22 @@ h3 {
   gap: 12px;
 }
 
-/* A card is titled by its name; its template is a quiet fact beside it. */
+.panel-heading__right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.keyboard-hint {
+  padding: 3px 8px;
+  border-radius: 6px;
+  background: var(--tile-2);
+  color: var(--ink-3);
+  font-family: var(--round);
+  font-size: 0.66rem;
+}
+
+/* A card is headed by its template; the owner's title is the quiet fact beside it. */
 .editor-title {
   display: flex;
   align-items: baseline;
@@ -854,6 +889,11 @@ fieldset legend {
   background: var(--tile-2);
 }
 
+.card-tile.is-dragging {
+  opacity: 0.45;
+  transform: translateY(-3px);
+}
+
 /* Selection inverts the tile rather than adding a ring beside it. */
 .card-tile.is-selected {
   border-color: var(--act);
@@ -873,6 +913,10 @@ fieldset legend {
   border: 0;
   background: none;
   text-align: left;
+}
+
+.card-grid .card-tile[draggable="true"] .card-tile__body {
+  cursor: grab;
 }
 
 .card-tile__body::after {
@@ -905,6 +949,7 @@ fieldset legend {
 
 .card-tile__flags {
   display: flex;
+  flex-wrap: wrap;
   gap: 4px;
   margin-top: 6px;
 }
@@ -950,6 +995,7 @@ fieldset legend {
 }
 
 .card-tile:hover .card-tile__remove,
+.card-tile:focus-within .card-tile__remove,
 .card-tile__remove:focus-visible {
   opacity: 1;
 }
@@ -967,45 +1013,115 @@ fieldset legend {
   margin-top: 7px;
 }
 
-.card-add {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(158px, 1fr));
-  gap: 6px;
-  margin: 0;
-  padding: 13px 0 0;
-  border: 0;
-  border-top: 1px solid var(--hairline);
+.card-tile[draggable="true"] .card-tile__flags,
+.card-tile[draggable="true"] .card-tile__issues {
+  padding-right: 46px;
 }
 
-.card-add legend {
-  padding: 0;
-}
-
-.add-card {
+.card-tile__moves {
   display: flex;
-  align-items: center;
-  gap: 9px;
-  padding: 8px 10px;
-  border: 1px dashed var(--hairline);
-  border-radius: var(--r-control);
-  background: none;
-  text-align: left;
-  transition:
-    border-color 150ms var(--ease),
-    background 150ms var(--ease);
+  position: absolute;
+  z-index: 1;
+  right: 7px;
+  bottom: 7px;
+  gap: 3px;
+  opacity: 0;
+  transition: opacity 150ms var(--ease);
 }
 
-.add-card:hover:not(:disabled) {
-  border-color: var(--act);
+.card-tile:hover .card-tile__moves,
+.card-tile:focus-within .card-tile__moves {
+  opacity: 1;
+}
+
+.card-tile__moves button {
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border: 0;
+  border-radius: 50%;
+  background: var(--tile-3);
+  color: var(--ink-2);
+  font-size: 0.8rem;
+}
+
+.card-tile__moves button:disabled {
+  opacity: 0.3;
+}
+
+.card-tile__moves button:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--act) 14%, var(--tile));
+  color: var(--act);
+}
+
+.card-tile--outside .card-tile__flags {
+  row-gap: 5px;
+}
+
+.card-tile--outside .flag {
+  white-space: nowrap;
+}
+
+.card-tile__join {
+  position: relative;
+  z-index: 1;
+  flex-basis: 100%;
+  margin-left: -7px;
+  padding: 2px 7px;
+  color: var(--act);
+  text-align: left;
+}
+
+.card-tile__join:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--act) 12%, transparent);
+}
+
+.card-tile--add {
+  justify-content: center;
+  min-height: 92px;
+  border-style: dashed;
+  background: none;
+}
+
+.card-tile--add:hover,
+.card-tile--add:focus-within {
   border-style: solid;
+  border-color: var(--act);
   background: color-mix(in srgb, var(--act) 8%, transparent);
 }
 
-.add-card:disabled {
-  opacity: 0.4;
+.card-tile--add:has(.card-tile__add:disabled) {
+  border-color: var(--hairline);
+  border-style: dashed;
+  background: none;
+  opacity: 0.55;
 }
 
-.add-card__plus {
+.card-tile__add {
+  display: flex;
+  align-items: center;
+  flex: 1;
+  gap: 9px;
+  padding: 0;
+  border: 0;
+  background: none;
+  text-align: left;
+}
+
+.card-tile__add strong {
+  display: block;
+  font-size: 0.75rem;
+  font-weight: 570;
+}
+
+.card-tile__add small {
+  display: block;
+  color: var(--ink-3);
+  font-size: 0.66rem;
+}
+
+.card-tile__plus {
   display: grid;
   flex-shrink: 0;
   place-items: center;
@@ -1017,13 +1133,68 @@ fieldset legend {
   font-size: 0.8rem;
 }
 
-.add-card strong {
+.menu {
+  position: absolute;
+  z-index: 6;
+  top: calc(100% + 6px);
+  left: 0;
+  width: 272px;
+  max-height: 300px;
+  padding: 6px;
+  overflow-y: auto;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-control);
+  background: var(--tile);
+  scrollbar-color: var(--tile-3) transparent;
+  scrollbar-width: thin;
+}
+
+.menu--end {
+  right: 0;
+  left: auto;
+}
+
+.menu__group {
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.menu__group + .menu__group {
+  margin-top: 4px;
+  padding-top: 6px;
+  border-top: 1px solid var(--hairline);
+}
+
+.menu__label {
+  padding: 5px 8px 3px;
+}
+
+.menu__item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 8px;
+  background: none;
+  text-align: left;
+  transition: background 120ms var(--ease);
+}
+
+.menu__item:hover,
+.menu__item:focus-visible {
+  background: var(--tile-2);
+}
+
+.menu__item strong {
   display: block;
   font-size: 0.75rem;
   font-weight: 570;
 }
 
-.add-card small {
+.menu__item small {
   display: block;
   color: var(--ink-3);
   font-size: 0.66rem;
@@ -1054,9 +1225,7 @@ fieldset legend {
 .field input,
 .field select,
 .field textarea,
-.mapping-row input,
-.entry-dwell-field input,
-.advance-dwell-field input {
+.mapping-row input {
   padding: 8px 11px;
   width: 100%;
   border: 1px solid var(--hairline);
@@ -1081,8 +1250,7 @@ fieldset legend {
 }
 
 .field input[aria-invalid="true"],
-.mapping-row input[aria-invalid="true"],
-.entry-dwell-field input[aria-invalid="true"] {
+.mapping-row input[aria-invalid="true"] {
   border-color: var(--bad);
   background: color-mix(in srgb, var(--bad) 7%, var(--tile-2));
 }
@@ -1194,7 +1362,6 @@ fieldset legend {
 }
 
 .source-picker,
-.advance-fieldset,
 .alert-fieldset,
 .mapping-list,
 .timer-controls {
@@ -1203,8 +1370,7 @@ fieldset legend {
   gap: 10px;
 }
 
-.source-picker label,
-.advance-option {
+.source-picker label {
   display: flex;
   align-items: flex-start;
   gap: 9px;
@@ -1212,21 +1378,9 @@ fieldset legend {
   cursor: pointer;
 }
 
-.source-picker input,
-.advance-option input {
+.source-picker input {
   margin: 2px 0 0;
   accent-color: var(--act);
-}
-
-.advance-option strong {
-  display: block;
-  font-weight: 570;
-}
-
-.advance-option small {
-  display: block;
-  color: var(--ink-3);
-  font-size: 0.69rem;
 }
 
 .timer-controls {
@@ -1280,196 +1434,6 @@ fieldset legend {
   color: var(--ink-3);
   font-size: 0.71rem;
   line-height: 1.5;
-}
-
-/* ── Playlists ─────────────────────────────────────────────────────────── */
-
-.playlist-tabs {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
-.playlist-tabs > li button {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 12px;
-  border: 1px solid var(--hairline);
-  border-radius: var(--r-pill);
-  background: var(--tile-2);
-  font-size: 0.75rem;
-}
-
-.playlist-tabs > li.is-selected button {
-  border-color: var(--act);
-  background: color-mix(in srgb, var(--act) 13%, var(--tile-2));
-  color: var(--act);
-}
-
-.playlist-tab__dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  border: 1.5px solid var(--ink-3);
-}
-
-.playlist-tab__dot.is-active {
-  border-color: var(--live);
-  background: var(--live);
-}
-
-.playlist-tabs small {
-  color: var(--live);
-  font-size: 0.62rem;
-  font-weight: 700;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
-}
-
-.playlist-tab__issue-count {
-  padding: 0 5px;
-  border-radius: var(--r-pill);
-  background: var(--bad);
-  color: #fff;
-  font-size: 0.6rem;
-  font-weight: 700;
-}
-
-.playlist-add-form,
-.playlist-add-entry {
-  display: flex;
-  align-items: flex-end;
-  gap: 8px;
-}
-
-.playlist-add-form .field,
-.playlist-add-entry .field {
-  flex: 1;
-}
-
-.playlist-detail {
-  display: flex;
-  flex-direction: column;
-  gap: 13px;
-  padding-top: 13px;
-  border-top: 1px solid var(--hairline);
-}
-
-.playlist-actions {
-  display: flex;
-  flex-direction: column;
-  gap: 9px;
-}
-
-.playlist-action-buttons {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 7px;
-}
-
-.playlist-entries-heading {
-  display: flex;
-  align-items: flex-end;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.playlist-entries-heading small {
-  color: var(--ink-3);
-  font-size: 0.69rem;
-}
-
-.keyboard-hint {
-  padding: 3px 8px;
-  border-radius: 6px;
-  background: var(--tile-2);
-  color: var(--ink-3);
-  font-size: 0.66rem;
-  font-family: var(--round);
-}
-
-.playlist-entry-list {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.playlist-entry {
-  display: grid;
-  grid-template-columns: auto auto minmax(0, 1fr) 74px auto auto;
-  align-items: center;
-  gap: 9px;
-  padding: 7px 10px;
-  border-radius: var(--r-control);
-  background: var(--tile-2);
-}
-
-.playlist-entry.is-dragging {
-  opacity: 0.4;
-}
-
-.playlist-entry .field-errors {
-  grid-column: 1 / -1;
-}
-
-.card-row__handle {
-  display: grid;
-  place-items: center;
-  color: var(--ink-3);
-  cursor: grab;
-  font-size: 0.85rem;
-}
-
-.card-row__index {
-  display: grid;
-  place-items: center;
-  width: 20px;
-  height: 20px;
-  border-radius: 6px;
-  background: var(--tile-3);
-  color: var(--ink-2);
-  font-size: 0.68rem;
-  font-weight: 640;
-}
-
-.card-row__body {
-  padding: 0;
-  min-width: 0;
-  border: 0;
-  background: none;
-  text-align: left;
-}
-
-.card-row__body strong {
-  display: block;
-  overflow: hidden;
-  font-size: 0.78rem;
-  font-weight: 560;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-}
-
-.card-row__body small {
-  display: block;
-  color: var(--ink-3);
-  font-size: 0.66rem;
-}
-
-.entry-dwell-field input {
-  padding: 5px 8px;
-  font-size: 0.73rem;
-  text-align: right;
-}
-
-.card-row__moves {
-  display: flex;
-  gap: 1px;
-}
-
-.card-row__moves button:disabled {
-  opacity: 0.3;
 }
 
 /* ── Network ───────────────────────────────────────────────────────────── */
@@ -1957,17 +1921,8 @@ fieldset legend {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .card-add {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .playlist-entry {
-    grid-template-columns: auto auto minmax(0, 1fr) 64px;
-    row-gap: 6px;
-  }
-
-  .card-row__moves {
-    grid-column: 3 / -1;
+  .card-tile {
+    padding-bottom: 34px;
   }
 
   .network-fields {
@@ -1984,11 +1939,8 @@ fieldset legend {
     width: 100%;
   }
 
-  .loop__moves {
-    opacity: 1;
-  }
-
-  .card-tile__remove {
+  .card-tile__remove,
+  .card-tile__moves {
     opacity: 1;
   }
 }

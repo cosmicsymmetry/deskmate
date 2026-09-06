@@ -145,6 +145,38 @@ of letting code and documentation diverge.
   dwell) names `template — title`. Two regression tests pin this. `cardName()` still
   exists for the old "title with a kind fallback" shape; prefer `cardLabel`/`cardTitle`
   for anything user-visible.
+- **The window has ONE LOOP; the card library and named playlists are gone from the UI
+  (2026-09-06, on explicit owner direction; plan
+  `docs/superpowers/plans/2026-09-06-deskmate-one-loop.md`, branch `feat/one-loop`).**
+  The owner's finding was that adding a card to a library and then placing it in a
+  playlist was a step with no purpose in a one-playlist world; the evidence agreed (the
+  owner's own config has one playlist, the "Workday/Evening" case lived only in fixtures,
+  and nothing on the wire knows the word playlist). **Schema v6 is untouched**: the
+  document still carries `playlists[]` and `active_playlist_id`, the app exposes exactly
+  one playlist and never creates another, and extra playlists in older files round-trip
+  unchanged. What the window does now: the complication **tile grid is the loop**, in
+  loop order, and it is where the order changes (drag, hover earlier/later, ⌥ ← →); the
+  ring legend only displays and selects (DESIGN.md was amended — it used to assign
+  reorder to the legend); **adding a card is one dashed slot at the end of the grid that
+  opens a menu** of built-in kinds plus a `pluginKinds` group the app passes as `[]`
+  today (there is no plugin registry source in the app; do not fabricate one), and the
+  new card joins the loop at once (`addCard` now enrols, gated on both `MAX_CARDS` and
+  `MAX_PLAYLIST_ENTRIES`); a tile owns one fact, so **dwell is edited in the card's
+  editor ("Stays on the panel for")**, never printed on the tile; the pacing control
+  (Timed / Manual + default dwell) replaced the "TIMED LOOP" label in the ring's head; a
+  card an older file left outside the loop trails the others in the same grid, flagged
+  `not in loop` (+ `alerts` when it still can), with one action "Add to loop"; a
+  playlist entry whose card id does not resolve renders as a "Missing card" tile with its
+  issue. `PlaylistPanel.tsx` is deleted, and so are `addPlaylist`/`renamePlaylist`/
+  `removePlaylist`/`setActivePlaylist`. **`claimedIssues` was narrowed** to the active
+  playlist's `entries*` and `advance*` so nothing is claimed that no surface renders;
+  `playlists[i].name`/`id`, inactive playlists and `active_playlist_id` fall to the
+  leftover banner. Three judged layouts preceded this (list in the rail, grid as loop,
+  rows under the editor); the rail version was rejected because the rail is the face and
+  has a fixed height budget — do not move creation or deletion into it. The add menu is
+  the one menu the design allows beside the settings sheet; it holds choices, never
+  state. Known and deliberately unfixed: a `preferences.timezone` issue is rendered only
+  inside the closed Settings sheet (pre-existing).
 - **V2's exit gate is OPEN, but no longer blocked.** Task 11 Step 11 failed on hardware
   on 2026-08-19 and **passed on a re-run the same day** after two real defects were
   fixed; what remains open is the gate's own unobserved items, not a blocker. The first
@@ -721,11 +753,33 @@ of letting code and documentation diverge.
   running ring hardware can be compared on, covering the running status colour. Do not
   "simplify" these back into one case, and do not flip `running-mid-countdown` to
   `running: false` — that would delete the running-hue golden.
-- **Stage 4 (rasterization fallback and SVG plugins) is SOFTWARE-COMPLETE and entirely
-  unobserved on hardware.** Plan `docs/superpowers/plans/2026-08-29-deskmate-rasterization.md`
-  (Tasks 1-6 delivered 2026-09-01 with per-task execution notes; Task 6 Step 5 and Task 7,
-  the single hardware session, are open; Task 8's physical-observation half waits on it).
-  What it delivers, and the durable facts:
+- **Stage 4 (rasterization fallback and SVG plugins) is SOFTWARE-COMPLETE and CONFIRMED
+  ON HARDWARE except two items that each need their own setup.** Plan
+  `docs/superpowers/plans/2026-08-29-deskmate-rasterization.md`
+  (Tasks 1-6 delivered 2026-09-01 with per-task execution notes). **Task 7's hardware
+  session ran 2026-09-06** (recorded in `docs/hardware/board-notes.md` under "Stage 4 Task
+  7"): the shipping image is `v2.0.0-raster1` (built from `f40958a`, sha `29f15a6f…`), now
+  the published fleet pin and running on `dev-0005`. **PASSED on the board:** the OTA
+  download installed first-try and survived the rollback window (the memory-layout hazard
+  did not bite; DIRAM/`.bss`/IRAM byte-flat vs the cleanup tree); capabilities read **1003**
+  with `volatile-assets` by name and no unknown bits; native and raster cards both drew at
+  270° **and** 90°; the typed refuse rule sent no raster and left the live standalone clock
+  ticking; the 30 s floor's immediate/defer/newest-at-boundary behaviours held exactly; and
+  20-revision volatile churn kept `free_heap` flat (no PSRAM leak, no reboot, no tearing),
+  with the frame released on card teardown. **Two items remain owed, each needing a distinct
+  setup and deliberately not run at the tail of that session:** the on-target
+  `framebuffer_diff` byte comparison (Task 6 Step 5 / expected 96/8/88 — needs a
+  `DESKMATE_DEV_DIAG=1` flash and a local-tier round-trip; the diag image is built, sha
+  `f815edf…`), and the BUSY/OTA-owner variant carried from stage 3b Task 9 Step 6 (needs a
+  pending OTA in flight). **Phase A (the asset-GC teardown) was partially observed** — the
+  teardown/release/rebuild works live with no reboot, but the font-vanish moment is not
+  panel-visible on dev-0005's card set and the compaction counters are not exposed by the
+  admin API. Two test-setup facts worth not relearning: the curated `svg-aqi`/`svg-live-clock`
+  fixtures point at `example.invalid` (unfetchable by design), so their providers clobber
+  operator-pushed data with an error snapshot between pushes — use the operator route and
+  capture promptly; and the device only checks firmware at boot (24 h interval otherwise),
+  so a USB RTS reset is what triggers an OTA on demand. What it delivers, and the durable
+  facts:
   - **Spec §3's render negotiation is live**: `app-core/src/render_negotiation.rs` decides
     Native / RefuseLive / Rasterize per (scene, device, revision), pure and uncached, from
     capability bits, explicit node-kind support, per-device confirmed/installable digests,
@@ -795,11 +849,13 @@ of letting code and documentation diverge.
     at 178 px BODY, native LVGL ellipsizes, raster shows the full date as a pinned
     allowed difference, never "parity"). The expected framebuffer diff is now
     **96 total / 8 excluded / 88 identical — a software prediction; not run on hardware**.
-  - Still owed on hardware (one session, Task 7): stage 3b Task 9 Step 6 (asset-GC
-    teardown) FIRST, then the stage-4 OTA download, a live raster push with the 30 s
-    floor observed on real timestamps, the refuse-rule on the panel/editor, both
-    orientations, the 20-frame PSRAM/flash-flatness run, and Task 6 Step 5's
-    framebuffer-vs-payload byte comparison.
+  - Hardware status after the 2026-09-06 session: the OTA download, live raster push with
+    the 30 s floor, refuse rule, both orientations, and the 20-revision PSRAM-flatness run
+    all PASSED (see the stage-4 headline above and board-notes). **Still owed:** Task 6
+    Step 5's on-target `framebuffer_diff` byte comparison (needs the diag flash +
+    local-tier round-trip) and the BUSY/OTA-owner variant (needs a pending OTA); Phase A's
+    asset-GC teardown was only partially observable on dev-0005's card set. The 96/8/88
+    split remains a software prediction until `framebuffer_diff` is run on the diag build.
 - **A third curated plugin exists: `claude-limits`** (2026-09-03), the Deskmate twin of
   the owner's TRMNL "Claude - Usage" panel — Session/Weekly subscription usage as two
   complication tiles. Its data path reuses the TRMNL pipeline end to end with zero new

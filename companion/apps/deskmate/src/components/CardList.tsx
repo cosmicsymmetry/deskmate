@@ -1,27 +1,50 @@
-import { useEffect, useState } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type DragEvent,
+  type KeyboardEvent,
+} from "react";
 
 import {
+  activePlaylist,
+  addEntry,
   cardKindName,
   cardLabel,
+  cardMoveFromKey,
   cardTitle,
   cardsContainerIssues,
+  cardsOutsideLoop,
   issuesForCard,
-  libraryCards,
+  issuesForPath,
+  loopEntries,
+  MAX_CARDS,
+  moveEntry,
+  removeEntry,
 } from "../lib/configDraft";
 import { providerTrouble } from "../lib/providers";
+import {
+  MAX_PLAYLIST_ENTRIES,
+  type AddableCardKind,
+  type AppConfig,
+  type CardDataSnapshot,
+  type CardSettings,
+  type PomodoroSnapshot,
+  type ProviderSnapshot,
+  type ValidationIssue,
+} from "../lib/types";
 import { FieldIssues } from "./FieldIssues";
 import { Icon } from "./Icon";
-import type {
-  AddableCardKind,
-  AppConfig,
-  CardDataSnapshot,
-  CardSettings,
-  PomodoroSnapshot,
-  ProviderSnapshot,
-  ValidationIssue,
-} from "../lib/types";
 
-const MAX_CARDS = 8;
+/** Future server-registry rows bring their own add operation. The app passes an
+ * empty list today because it has no registry source and must not fabricate one. */
+export interface PluginKindOption {
+  id: string;
+  version: string;
+  description?: string;
+  onAdd: () => void;
+}
 
 interface CardListProps {
   config: AppConfig;
@@ -29,9 +52,11 @@ interface CardListProps {
   cardData: CardDataSnapshot[];
   pomodoros: PomodoroSnapshot[];
   providers: ProviderSnapshot[];
+  pluginKinds: PluginKindOption[];
   selectedCardId: string | null;
   onSelect: (cardId: string) => void;
   onAdd: (kind: AddableCardKind) => void;
+  onChange: (config: AppConfig) => void;
   onRemove: (cardId: string) => void;
 }
 
@@ -52,11 +77,7 @@ function fieldText(data: CardDataSnapshot | undefined, key: string): string | nu
   return field.value.kind === "text" ? field.value.value : String(field.value.value);
 }
 
-/**
- * The live face of a card, which is what makes these tiles complications rather
- * than a list: each shows the thing its card is currently for. A card with no data
- * yet says so with an em dash rather than borrowing a plausible-looking number.
- */
+/** The live fact that makes a tile a complication rather than a list row. */
 function tileValue(
   card: CardSettings,
   data: CardDataSnapshot | undefined,
@@ -97,9 +118,8 @@ function tileValue(
   }
 }
 
-/** Two cards can share a template, so a remove control names the owner's title too
- *  when there is one — otherwise a screen reader hears "Remove Weather" twice. */
-function removeLabel(card: CardSettings): string {
+/** Every control that acts on one card names template and typed title together. */
+function controlLabel(card: CardSettings): string {
   const title = cardTitle(card);
   return title ? `${cardLabel(card)} — ${title}` : cardLabel(card);
 }
@@ -110,22 +130,51 @@ export function CardList({
   cardData,
   pomodoros,
   providers,
+  pluginKinds,
   selectedCardId,
   onSelect,
   onAdd,
+  onChange,
   onRemove,
 }: CardListProps) {
-  const cards = libraryCards(config);
-  const atCapacity = cards.length >= MAX_CARDS;
-  const containerIssues = cardsContainerIssues(issues);
-  const usedCardIds = new Set(
-    config.playlists.flatMap((playlist) => playlist.entries.map((entry) => entry.card_id)),
+  const playlist = activePlaylist(config);
+  const entries = loopEntries(config);
+  const outsideCards = cardsOutsideLoop(config);
+  const playlistIndex = config.playlists.findIndex(
+    (candidate) => candidate.id === config.active_playlist_id,
   );
-
-  // A face whose clock does not move is a picture of a face. One tick a second is
-  // enough, and it is the only timer this component owns.
+  const cardsFull = config.cards.length >= MAX_CARDS;
+  const loopFull = (playlist?.entries.length ?? 0) >= MAX_PLAYLIST_ENTRIES;
+  const atCapacity = cardsFull || loopFull || !playlist;
+  const capacityDescription = cardsFull
+    ? `The limit is ${MAX_CARDS} cards.`
+    : loopFull
+      ? `The limit is ${MAX_PLAYLIST_ENTRIES} in the loop.`
+      : !playlist
+        ? "An active loop is required."
+        : null;
+  const containerIssues = [
+    ...cardsContainerIssues(issues),
+    ...(playlistIndex < 0
+      ? []
+      : issues.filter((issue) => issue.path === `playlists[${playlistIndex}].entries`)),
+  ];
   const [now, setNow] = useState(() => new Date());
-  const hasClock = cards.some((card) => card.kind === "clock");
+  const [draggedCardId, setDraggedCardId] = useState<string | null>(null);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [menuAlignEnd, setMenuAlignEnd] = useState(false);
+  const menuRootRef = useRef<HTMLLIElement>(null);
+  const addButtonRef = useRef<HTMLButtonElement>(null);
+  const menuItemRefs = useRef<HTMLButtonElement[]>([]);
+  const tileBodyRefs = useRef(new Map<string, HTMLButtonElement>());
+  const pendingFocusCardIdRef = useRef<string | null>(null);
+  const pendingNewCardIdsRef = useRef<Set<string> | null>(null);
+  const hasClock = config.cards.some((card) => card.kind === "clock");
+  const entryOrder = entries.map(({ entry }) => entry.card_id).join("\u0000");
+  const pendingNewCardId = pendingNewCardIdsRef.current
+    ? (config.cards.find((card) => !pendingNewCardIdsRef.current?.has(card.id))?.id ?? null)
+    : null;
+
   useEffect(() => {
     if (!hasClock) {
       return;
@@ -134,106 +183,409 @@ export function CardList({
     return () => window.clearInterval(interval);
   }, [hasClock]);
 
+  useEffect(() => {
+    if (!menuOpen) {
+      return;
+    }
+    const closeOnOutsideClick = (event: MouseEvent) => {
+      if (!menuRootRef.current?.contains(event.target as Node)) {
+        setMenuOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", closeOnOutsideClick);
+    return () => document.removeEventListener("mousedown", closeOnOutsideClick);
+  }, [menuOpen]);
+
+  useLayoutEffect(() => {
+    if (!menuOpen || !menuRootRef.current) {
+      return;
+    }
+    const menuRoot = menuRootRef.current;
+    const scrollContainer = menuRoot.closest(".face__work") as HTMLElement | null;
+    const availableWidth = scrollContainer?.clientWidth ?? document.documentElement.clientWidth;
+    setMenuAlignEnd(menuRoot.getBoundingClientRect().right + 272 > availableWidth);
+  }, [menuOpen]);
+
+  useLayoutEffect(() => {
+    const previousCardIds = pendingNewCardIdsRef.current;
+    const cardId = pendingFocusCardIdRef.current ?? pendingNewCardId;
+    if (!cardId) {
+      if (previousCardIds && !menuOpen) {
+        addButtonRef.current?.focus();
+        pendingNewCardIdsRef.current = null;
+      }
+      return;
+    }
+    const tileBody = entryOrder ? tileBodyRefs.current.get(cardId) : undefined;
+    if (tileBody) {
+      tileBody.focus();
+      pendingFocusCardIdRef.current = null;
+      pendingNewCardIdsRef.current = null;
+    }
+  }, [entryOrder, pendingNewCardId, menuOpen]);
+
+  const closeMenu = (restoreFocus: boolean) => {
+    setMenuOpen(false);
+    if (restoreFocus) {
+      queueMicrotask(() => addButtonRef.current?.focus());
+    }
+  };
+
+  const openMenu = () => {
+    if (atCapacity) {
+      return;
+    }
+    menuItemRefs.current = [];
+    setMenuOpen(true);
+    queueMicrotask(() => menuItemRefs.current[0]?.focus());
+  };
+
+  const chooseBuiltIn = (kind: AddableCardKind) => {
+    pendingNewCardIdsRef.current = new Set(config.cards.map((card) => card.id));
+    onAdd(kind);
+    closeMenu(false);
+  };
+
+  const choosePlugin = (plugin: PluginKindOption) => {
+    pendingNewCardIdsRef.current = new Set(config.cards.map((card) => card.id));
+    plugin.onAdd();
+    closeMenu(false);
+  };
+
+  const onMenuKeyDown = (
+    event: KeyboardEvent<HTMLButtonElement>,
+    index: number,
+    choose: () => void,
+  ) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeMenu(true);
+      return;
+    }
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      const direction = event.key === "ArrowDown" ? 1 : -1;
+      const count = addableKinds.length + pluginKinds.length;
+      menuItemRefs.current[(index + direction + count) % count]?.focus();
+      return;
+    }
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      choose();
+    }
+  };
+
+  /** Resolve both indexes from the current draft at the moment an action fires. */
+  const moveTo = (cardId: string, targetCardId: string) => {
+    const current = activePlaylist(config);
+    if (!current) {
+      return;
+    }
+    const from = current.entries.findIndex((entry) => entry.card_id === cardId);
+    const to = current.entries.findIndex((entry) => entry.card_id === targetCardId);
+    if (from >= 0 && to >= 0) {
+      const next = moveEntry(config, current.id, from, to);
+      if (next !== config) {
+        pendingFocusCardIdRef.current = cardId;
+        onChange(next);
+      }
+    }
+  };
+
+  const moveBy = (cardId: string, delta: -1 | 1) => {
+    const current = activePlaylist(config);
+    const from = current?.entries.findIndex((entry) => entry.card_id === cardId) ?? -1;
+    const target = current?.entries[from + delta];
+    if (target) {
+      moveTo(cardId, target.card_id);
+    }
+  };
+
+  const onTileKeyDown = (event: KeyboardEvent<HTMLButtonElement>, cardId: string) => {
+    const delta = cardMoveFromKey(event.key, event.altKey);
+    if (delta === 0) {
+      return;
+    }
+    event.preventDefault();
+    moveBy(cardId, delta);
+  };
+
+  const onDragStart = (event: DragEvent<HTMLLIElement>, cardId: string) => {
+    setDraggedCardId(cardId);
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", cardId);
+  };
+
+  const onDrop = (event: DragEvent<HTMLLIElement>, targetCardId: string) => {
+    event.preventDefault();
+    const sourceCardId = draggedCardId ?? event.dataTransfer.getData("text/plain");
+    if (sourceCardId) {
+      moveTo(sourceCardId, targetCardId);
+    }
+    setDraggedCardId(null);
+  };
+
+  const renderCardTile = (card: CardSettings, inLoop: boolean, entryIndex?: number) => {
+    const cardIssues = issuesForCard(issues, config, card.id);
+    const entryIssues =
+      inLoop && playlistIndex >= 0 && entryIndex !== undefined
+        ? issuesForPath(issues, `playlists[${playlistIndex}].entries[${entryIndex}]`)
+        : [];
+    const tileIssues = [...cardIssues, ...entryIssues];
+    const hasAlert = card.alert.kind !== "none";
+    const data = cardData.find((candidate) => candidate.card_id === card.id);
+    const pomodoro = pomodoros.find((candidate) => candidate.widget_id === card.id);
+    const stale =
+      providerTrouble(providers.find((candidate) => candidate.widget_id === card.id)) !== null;
+    const index = inLoop ? (entryIndex ?? -1) : -1;
+    const label = controlLabel(card);
+    return (
+      <li
+        key={inLoop ? `loop:${entryIndex}:${card.id}` : `outside:${card.id}`}
+        draggable={inLoop}
+        className={`card-tile${inLoop ? "" : " card-tile--outside"}${
+          selectedCardId === card.id ? " is-selected" : ""
+        }${tileIssues.length > 0 ? " has-issue" : ""}${
+          draggedCardId === card.id ? " is-dragging" : ""
+        }`}
+        onDragStart={inLoop ? (event) => onDragStart(event, card.id) : undefined}
+        onDragEnd={inLoop ? () => setDraggedCardId(null) : undefined}
+        onDragOver={inLoop ? (event) => event.preventDefault() : undefined}
+        onDrop={inLoop ? (event) => onDrop(event, card.id) : undefined}
+      >
+        <button
+          ref={(element) => {
+            if (element) {
+              tileBodyRefs.current.set(card.id, element);
+            } else {
+              tileBodyRefs.current.delete(card.id);
+            }
+          }}
+          type="button"
+          className="card-tile__body"
+          aria-pressed={selectedCardId === card.id}
+          onClick={() => onSelect(card.id)}
+          onKeyDown={inLoop ? (event) => onTileKeyDown(event, card.id) : undefined}
+        >
+          <span className="tile-label">{cardLabel(card)}</span>
+          <strong className="card-tile__value numeral">
+            {tileValue(card, data, pomodoro, now, config.preferences.timezone)}
+          </strong>
+          {cardTitle(card) && <span className="card-tile__name">{cardTitle(card)}</span>}
+        </button>
+        <span className="card-tile__flags">
+          {!inLoop && <span className="flag">not in loop</span>}
+          {stale && <span className="flag flag--stale">stale</span>}
+          {hasAlert && <span className="flag flag--alert">alerts</span>}
+          {!inLoop && (
+            <button
+              type="button"
+              className="text-button card-tile__join"
+              aria-label={`Add ${label} to the loop`}
+              disabled={loopFull || !playlist}
+              onClick={() => {
+                if (playlist) {
+                  pendingFocusCardIdRef.current = card.id;
+                  onChange(addEntry(config, playlist.id, card.id));
+                }
+              }}
+            >
+              Add to loop
+            </button>
+          )}
+        </span>
+        <button
+          type="button"
+          className="card-tile__remove"
+          aria-label={
+            config.cards.length === 1
+              ? `Remove ${label} (keep at least one card)`
+              : `Remove ${label}`
+          }
+          title={config.cards.length === 1 ? "This is your only card." : "Remove"}
+          disabled={config.cards.length === 1}
+          onClick={() => onRemove(card.id)}
+        >
+          <Icon name="close" />
+        </button>
+        {inLoop && (
+          <span className="card-tile__moves">
+            <button
+              type="button"
+              aria-label={`Move ${label} earlier`}
+              disabled={index === 0}
+              onClick={() => moveBy(card.id, -1)}
+            >
+              <Icon name="left" />
+            </button>
+            <button
+              type="button"
+              aria-label={`Move ${label} later`}
+              disabled={index === entries.length - 1}
+              onClick={() => moveBy(card.id, 1)}
+            >
+              <Icon name="right" />
+            </button>
+          </span>
+        )}
+        <FieldIssues issues={tileIssues} className="card-tile__issues" />
+      </li>
+    );
+  };
+
   return (
     <section className="panel library" aria-labelledby="card-list-heading">
       <div className="panel-heading">
         <div>
-          <h2 id="card-list-heading">Card library</h2>
+          <h2 id="card-list-heading">The loop</h2>
         </div>
-        <span className="count-badge numeral" id="card-capacity">
-          {cards.length}/{MAX_CARDS}
-        </span>
+        <div className="panel-heading__right">
+          <span className="keyboard-hint">Drag to reorder · ⌥ ← →</span>
+          <span className="count-badge numeral">
+            {config.cards.length}/{MAX_CARDS}
+          </span>
+        </div>
       </div>
 
       <FieldIssues issues={containerIssues} />
 
-      {cards.length === 0 ? (
-        <div className="empty-state">
-          <strong>No cards yet</strong>
-          <span>Add one below, then place it in a playlist.</span>
-        </div>
-      ) : (
-        <ul className="card-grid" aria-label="Card library">
-          {cards.map((card) => {
-            const cardIssues = issuesForCard(issues, config, card.id);
-            const hasAlert = card.alert.kind !== "none";
-            const isUnused = !usedCardIds.has(card.id);
-            const data = cardData.find((candidate) => candidate.card_id === card.id);
-            const pomodoro = pomodoros.find((candidate) => candidate.widget_id === card.id);
-            // The single fact the old data-sources panel carried that was worth
-            // keeping: which card's number you should not trust right now.
-            const stale =
-              providerTrouble(providers.find((candidate) => candidate.widget_id === card.id)) !==
-              null;
-            return (
-              <li
-                key={card.id}
-                className={`card-tile${selectedCardId === card.id ? " is-selected" : ""}${
-                  cardIssues.length > 0 ? " has-issue" : ""
-                }`}
+      <ul className="card-grid" aria-label="Cards, loop order first">
+        {entries.map(({ index, entry, card }) => {
+          if (card) {
+            return renderCardTile(card, true, index);
+          }
+          const entryIssues =
+            playlistIndex < 0
+              ? []
+              : issuesForPath(issues, `playlists[${playlistIndex}].entries[${index}]`);
+          return (
+            <li
+              key={`missing:${entry.card_id}:${index}`}
+              className={`card-tile${entryIssues.length > 0 ? " has-issue" : ""}`}
+            >
+              <div className="card-tile__body">
+                <span className="tile-label">Missing card</span>
+                <strong className="card-tile__value numeral">—</strong>
+              </div>
+              <button
+                type="button"
+                className="card-tile__remove"
+                aria-label="Remove Missing card"
+                title="Remove"
+                onClick={() => playlist && onChange(removeEntry(config, playlist.id, index))}
               >
-                <button
-                  type="button"
-                  className="card-tile__body"
-                  aria-pressed={selectedCardId === card.id}
-                  onClick={() => onSelect(card.id)}
-                >
-                  {/* The template names the card here and everywhere else; the
-                      owner's own words sit under it, and are omitted rather than
-                      repeated when they were never typed. */}
-                  <span className="tile-label">{cardLabel(card)}</span>
-                  <strong className="card-tile__value numeral">
-                    {tileValue(card, data, pomodoro, now, config.preferences.timezone)}
-                  </strong>
-                  {cardTitle(card) && <span className="card-tile__name">{cardTitle(card)}</span>}
-                </button>
-                <span className="card-tile__flags">
-                  {stale && <span className="flag flag--stale">stale</span>}
-                  {hasAlert && <span className="flag flag--alert">alerts</span>}
-                  {isUnused && <span className="flag">unused</span>}
-                </span>
-                <button
-                  type="button"
-                  className="card-tile__remove"
-                  aria-label={
-                    cards.length === 1
-                      ? `Remove ${removeLabel(card)} (keep at least one card)`
-                      : `Remove ${removeLabel(card)}`
-                  }
-                  title={cards.length === 1 ? "This is your only card." : "Remove"}
-                  disabled={cards.length === 1}
-                  onClick={() => onRemove(card.id)}
-                >
-                  <Icon name="close" />
-                </button>
-                <FieldIssues issues={cardIssues} className="card-tile__issues" />
-              </li>
-            );
-          })}
-        </ul>
-      )}
-
-      <fieldset className="card-add">
-        <legend className="tile-label">Add a card</legend>
-        {addableKinds.map(({ kind, description }) => (
+                <Icon name="close" />
+              </button>
+              <FieldIssues issues={entryIssues} className="card-tile__issues" />
+            </li>
+          );
+        })}
+        {outsideCards.map((card) => renderCardTile(card, false))}
+        <li
+          className="card-tile card-tile--add"
+          ref={menuRootRef}
+          onBlur={(event) => {
+            if (!menuRootRef.current?.contains(event.relatedTarget)) {
+              closeMenu(false);
+            }
+          }}
+        >
           <button
-            className="add-card"
+            ref={addButtonRef}
             type="button"
-            key={kind}
-            onClick={() => onAdd(kind)}
+            className="card-tile__add"
+            aria-haspopup="menu"
+            aria-expanded={menuOpen}
+            aria-controls="add-card-menu"
+            aria-describedby={capacityDescription ? "add-card-capacity" : undefined}
             disabled={atCapacity}
-            aria-describedby={atCapacity ? "card-capacity" : undefined}
+            onClick={() => (menuOpen ? closeMenu(false) : openMenu())}
+            onKeyDown={(event) => {
+              if (event.key === "Escape" && menuOpen) {
+                event.preventDefault();
+                closeMenu(true);
+              }
+            }}
           >
-            <span className="add-card__plus">
+            <span className="card-tile__plus">
               <Icon name="plus" />
             </span>
             <span>
-              <strong>{cardKindName(kind)}</strong>
-              <small>{description}</small>
+              <strong>Add a card</strong>
+              <small>Built in, or a plugin</small>
             </span>
           </button>
-        ))}
-      </fieldset>
+          {capacityDescription && (
+            <span className="sr-only" id="add-card-capacity">
+              {capacityDescription}
+            </span>
+          )}
+          {menuOpen && (
+            <div
+              className={`menu${menuAlignEnd ? " menu--end" : ""}`}
+              id="add-card-menu"
+              role="menu"
+              aria-label="Add a card"
+            >
+              <fieldset className="menu__group">
+                <legend className="tile-label menu__label">Built in</legend>
+                {addableKinds.map(({ kind, description }, index) => {
+                  const choose = () => chooseBuiltIn(kind);
+                  return (
+                    <button
+                      ref={(element) => {
+                        if (element) {
+                          menuItemRefs.current[index] = element;
+                        }
+                      }}
+                      type="button"
+                      className="menu__item"
+                      role="menuitem"
+                      key={kind}
+                      onClick={choose}
+                      onKeyDown={(event) => onMenuKeyDown(event, index, choose)}
+                    >
+                      <span>
+                        <strong>{cardKindName(kind)}</strong>
+                        <small>{description}</small>
+                      </span>
+                    </button>
+                  );
+                })}
+              </fieldset>
+              {pluginKinds.length > 0 && (
+                <fieldset className="menu__group">
+                  <legend className="tile-label menu__label">Plugins on the server</legend>
+                  {pluginKinds.map((plugin, pluginIndex) => {
+                    const index = addableKinds.length + pluginIndex;
+                    const choose = () => choosePlugin(plugin);
+                    return (
+                      <button
+                        ref={(element) => {
+                          if (element) {
+                            menuItemRefs.current[index] = element;
+                          }
+                        }}
+                        type="button"
+                        className="menu__item"
+                        role="menuitem"
+                        key={plugin.id}
+                        onClick={choose}
+                        onKeyDown={(event) => onMenuKeyDown(event, index, choose)}
+                      >
+                        <span>
+                          <strong>{plugin.id}</strong>
+                          <small>{plugin.description ?? `Plugin · ${plugin.version}`}</small>
+                        </span>
+                      </button>
+                    );
+                  })}
+                </fieldset>
+              )}
+            </div>
+          )}
+        </li>
+      </ul>
     </section>
   );
 }

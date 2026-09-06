@@ -37,7 +37,7 @@ Deskmate is a small emissive AMOLED panel (368×448 physical, driven as a 448×3
 landscape UI) that clips to a monitor and shows one card at a time — clock, focus
 timer, calendar, weather, a JSON feed, RSS headlines. This desktop app is the
 **authoring and ownership surface** for that hardware: it is where a person builds
-their card library, arranges cards into named playlists, decides what advances when,
+the loop of cards the panel cycles through, decides what advances when,
 watches provider health, provisions the device onto WiFi and a server, and hands
 ownership between the Mac and that server.
 
@@ -79,22 +79,29 @@ Three facts a neighbouring "smart display companion" could not truthfully copy:
 
 ## Capabilities and Constraints
 
-**Objects.** The app edits six built-in card kinds (library, max 8): `clock`,
+**Objects.** The app edits six built-in card kinds (max 8): `clock`,
 `pomodoro`, `calendar`, `weather`, `json-feed`, and `rss`. Schema v6 also carries
 server-side `plugin` cards: the app shows them (labelled by plugin id, with a tile and a
 name/refresh editor) but cannot add one, and its hostless runtime refuses to render them
 with a typed reason; the server renders them.
-Playlists (max 8, max 8 entries each) have exactly one active. Entries carry an
-optional per-entry dwell that inherits the playlist default. Advance is `manual` or
+The window has **one loop** (since 2026-09-06): the document's active playlist. Schema
+v6 still carries `playlists[]` (max 8, max 8 entries each, one active); the app exposes
+exactly one, never creates another, and round-trips any extra playlist an older file
+holds untouched. A new card joins the loop as it is added; a card outside the loop is
+shown in the same grid, flagged, with one action to join. Each card in the loop carries
+an optional dwell that inherits the loop default. Advance is `manual` or
 `timed`. Alerts exist on `pomodoro` (on timer finish) and `calendar` (before event)
 only, each with a hold that is host-side bookkeeping and never clears the panel.
 
 **Surfaces in the current app.** A `TopBar` wordmark and Settings button;
-`SettingsSheet` as the sole disclosure for device ownership, pairing, link/WiFi/IP/
-update state, timezone, mounting orientation, and start-at-login; first-run and error
-notices; the card library; the playlist and per-card editors; `DevicePreview`;
-`LoopRing` (arc ∝ dwell, with a playhead); card-local stale/provider recovery; and save
-controls in both the work column and settings sheet.
+`SettingsSheet` as the sole disclosure of state, for device ownership, pairing,
+link/WiFi/IP/update state, timezone, mounting orientation, and start-at-login; first-run
+and error notices; the loop grid (complication tiles in loop order, reordered in place,
+with the add-card slot and its menu of built-in kinds and, when a registry is available,
+plugins); the per-card editor, which also edits the card's dwell; `DevicePreview`;
+`LoopRing` (arc ∝ dwell, with a playhead, and the pacing control in its head);
+card-local stale/provider recovery; and save controls in both the work column and
+settings sheet.
 
 **Hard constraints that outlive any visual direction.**
 - Config schema is **v6** and frozen (`docs/config/v6.md`); wire protocol is **v1**.

@@ -674,8 +674,9 @@ of letting code and documentation diverge.
     `crates/lvgl-sim/tests/plugin_scene.rs` against `tests/golden/plugin-scene/`.
 - **SUPERSEDED NUMBERS (2026-09-01): stage 4's Task 6 evidence rows moved the expected
   framebuffer diff from 92/8/84 to `total=96 excluded=8 identical=88` — the stage-4
-  bullet below is authoritative; neither composition has run on hardware.** The rest of
-  this bullet is accurate history. After C-template retirement AND Task 8's curated
+  bullet below is authoritative. That prediction ran on hardware on 2026-09-06 and was
+  itself corrected to the observed `96/10/86` (three test-harness fidelity fixes; see the
+  stage-4 headline).** The rest of this bullet is accurate history. After C-template retirement AND Task 8's curated
   plugins, the framebuffer diff
   expected `total=92 excluded=8` (`identical=84` is the expectation for a device that has
   not yet run this composition — see below), and any differing case on a real run is a
@@ -734,12 +735,29 @@ of letting code and documentation diverge.
   270° **and** 90°; the typed refuse rule sent no raster and left the live standalone clock
   ticking; the 30 s floor's immediate/defer/newest-at-boundary behaviours held exactly; and
   20-revision volatile churn kept `free_heap` flat (no PSRAM leak, no reboot, no tearing),
-  with the frame released on card teardown. **Two items remain owed, each needing a distinct
-  setup and deliberately not run at the tail of that session:** the on-target
-  `framebuffer_diff` byte comparison (Task 6 Step 5 / expected 96/8/88 — needs a
-  `DESKMATE_DEV_DIAG=1` flash and a local-tier round-trip; the diag image is built, sha
-  `f815edf…`), and the BUSY/OTA-owner variant carried from stage 3b Task 9 Step 6 (needs a
-  pending OTA in flight). **Phase A (the asset-GC teardown) was partially observed** — the
+  with the frame released on card teardown. **B11 / Task 6 Step 5 — the on-target
+  `framebuffer_diff` byte comparison — then PASSED on the board on 2026-09-06:
+  `96 total / 10 excluded / 86 identical / 0 differing / 0 errored`, exit 0** (recorded in
+  `docs/hardware/board-notes.md` under "B11 / Task 6 Step 5"). The predicted split was
+  96/8/88; the first hardware run corrected it to **96/10/86** by surfacing three
+  test-harness fidelity issues, **none a firmware or renderer defect** — all fixed
+  test-only, so no OTA re-verification is owed: (a) `plugin-v2-timer` pinned
+  `now_unix_seconds: 0`, below the device's `PROTOCOL_MIN_UNIX_SECONDS` (2020-01-01) floor,
+  so `TimeSync` rejected it — fixed to a valid instant (the timer scene has no clock
+  binding, so the frame is unchanged and the two rows now pass); (b) `plugin-aqi--empty`
+  is now **excluded** (2 rows) because the device registers a configured card's template
+  fields, so `field.title` returns `""` (renders nothing) not the NULL that yields the
+  simulator's `"--"` placeholder — the device cannot reproduce it, same class as the
+  `field.status` exclusions, golden kept; (c) `scene-image--flipped` failed a re-render
+  only under back-to-back heavy-image orientation flips (async image-buffer teardown race,
+  not a renderer defect — proven byte-identical run alone at either orientation), fixed by
+  a `CONFIG_SETTLE` before asset-bearing re-renders. **The stale staged diag image
+  (`f815edf…`, an Aug-21 pre-scene-renderer build reporting `v2.0.0-swaes6`/caps 203) was
+  caught by reading device status before trusting it and rebuilt fresh from HEAD**
+  (`6eae2138…`); the release restore artifact rebuilt byte-identical to the shipping image
+  (`29f15a6f…`). **Only the BUSY/OTA-owner variant** carried from stage 3b Task 9 Step 6
+  (a raster release while an OTA owns the panel; needs a pending OTA in flight) remains
+  owed. **Phase A (the asset-GC teardown) was partially observed** — the
   teardown/release/rebuild works live with no reboot, but the font-vanish moment is not
   panel-visible on dev-0005's card set and the compaction counters are not exposed by the
   admin API. Two test-setup facts worth not relearning: the curated `svg-aqi`/`svg-live-clock`
@@ -815,15 +833,16 @@ of letting code and documentation diverge.
     176 px box — now exists (`plugin-v2-timer--remaining-357-of-1000`, semantic
     remaining-35% assertion before pixels; `digital-clock--date-overflow`, "Wed, May 13"
     at 178 px BODY, native LVGL ellipsizes, raster shows the full date as a pinned
-    allowed difference, never "parity"). The expected framebuffer diff is now
-    **96 total / 8 excluded / 88 identical — a software prediction; not run on hardware**.
+    allowed difference, never "parity"). The framebuffer diff was predicted
+    **96 total / 8 excluded / 88 identical**; the first on-board run (2026-09-06)
+    corrected it to **96/10/86 and PASSED (0 differing, 0 errored)** — see the stage-4
+    headline and board-notes for the three test-harness fixes that moved it.
   - Hardware status after the 2026-09-06 session: the OTA download, live raster push with
     the 30 s floor, refuse rule, both orientations, and the 20-revision PSRAM-flatness run
-    all PASSED (see the stage-4 headline above and board-notes). **Still owed:** Task 6
-    Step 5's on-target `framebuffer_diff` byte comparison (needs the diag flash +
-    local-tier round-trip) and the BUSY/OTA-owner variant (needs a pending OTA); Phase A's
-    asset-GC teardown was only partially observable on dev-0005's card set. The 96/8/88
-    split remains a software prediction until `framebuffer_diff` is run on the diag build.
+    all PASSED (see the stage-4 headline above and board-notes). Task 6 Step 5's on-target
+    `framebuffer_diff` byte comparison then also PASSED on 2026-09-06 (**96/10/86**, see the
+    headline). **Still owed:** only the BUSY/OTA-owner variant (needs a pending OTA); Phase
+    A's asset-GC teardown was only partially observable on dev-0005's card set.
 - **A third curated plugin exists: `claude-limits`** (2026-09-03), the Deskmate twin of
   the owner's TRMNL "Claude - Usage" panel — Session/Weekly subscription usage as two
   complication tiles. Its data path reuses the TRMNL pipeline end to end with zero new
@@ -837,7 +856,7 @@ of letting code and documentation diverge.
   through Cloudflare. The manifest is v1 (no envelope, no assets, no live bindings — it
   negotiates Native). **Golden-only by design**: `claude_limits_scene_cases()` is
   deliberately NOT part of `plugin_scene_cases()` (whose 16-row count is a historical
-  invariant) and does not join the hardware framebuffer matrix, which stays 96/8/88 —
+  invariant) and does not join the hardware framebuffer matrix, which is 96/10/86 —
   the card is content, not machinery. Deployed live: registry loads
   `[agenda, aqi, claude-limits]` with no failures, and `dev-0005`'s config carries the
   card in its library and active playlist (generation 1, no warning); it renders when

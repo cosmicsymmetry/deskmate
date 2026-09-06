@@ -4602,3 +4602,81 @@ dev-0005 identity — never left networked tier, so no re-provision was needed.
 diag build** — OTA download/install/rollback survival, capabilities 1003, native and
 raster at both orientations, the typed refuse rule, the 30 s floor, and 20-revision
 volatile churn with flat PSRAM. Stage 4 is confirmed working on the physical board.
+
+## Stage 4 Task 7 — B11 / Task 6 Step 5: on-target `framebuffer_diff` — PASSED (2026-09-06)
+
+The one Phase B item that needs the diag build. Ran later the same day.
+
+**Setup.** The staged diag image (`f815edf…`) turned out to be **stale** — an Aug-21
+build predating the scene renderer: on boot it reported `v2.0.0-swaes6`, capabilities
+`0xcb` (203). Caught by reading `deskmate-cli status` before trusting it; comparing the
+current simulator against that firmware would have been meaningless. The "no source drift
+since the runbook" check had verified the source, not that the staged *binary* matched it
+— the runbook's own hash was of a leftover. Rebuilt the diag image fresh from HEAD
+(`idf.py -C firmware -B firmware/build-diag -DDESKMATE_DEV_DIAG=1 build`, sha
+`6eae2138702332cb4663d4e415465bd19f9dbb7b3c281310ef6a25459a829491`), which reported
+`v2.0.0-raster1` / caps `0x3eb` (1003) as expected. The release restore artifact was
+rebuilt too and **reproduces the shipping image byte-identically** (sha
+`29f15a6f7ee1f6f5717deaa09a21a3bdb75bd19c6ddeae5dd2b51ade1afc3b15`), so the diag build
+(same source + `DESKMATE_DEV_DIAG`) is trustworthy for the comparison. Device taken to
+**local tier** over the cable (`provision --tier local`), which is what lets it accept
+`ApplyConfig`/`PushScene` over USB.
+
+**Result: `total=96 identical=86 differing=0 errored=0 excluded=10` — exit 0.** Every
+includable case is byte-identical, both orientations, no tolerance. The log is at
+`docs/hardware/media/2026-09-06-task7/framebuffer_diff-2026-09-06.log`.
+
+**The predicted split was 96/8/88; the first hardware run corrected it to 96/10/86 by
+surfacing three test-harness fidelity issues — none a firmware or renderer defect:**
+
+1. **`plugin-v2-timer--remaining-357-of-1000` (both orientations): time sync rejected.**
+   The case pinned `now_unix_seconds: 0`, below the device's `PROTOCOL_MIN_UNIX_SECONDS`
+   (1577836800 = 2020-01-01) sanity floor, so every push failed at `TimeSync` with
+   `InvalidValue("unix seconds")`. The timer scene binds only `timer.permille` /
+   `timer.remaining`, never `time:`/`date`, so the instant is irrelevant to the frame —
+   the harness just time-syncs every case unconditionally. **Fixed** by pinning a valid
+   instant (`SCENE_NOW`); both rows now render identically on the board. (Firmware is
+   correct — rejecting a nonsense clock is the intended bound.)
+
+2. **`plugin-aqi--empty` (both orientations): 36 px differ (14×3 strip at the
+   `field.title` box).** The simulator drew `"--"`, the device drew nothing. `aqi`'s empty
+   state pushes no `title` field and its scene binds `{{ field.title }}`. `scene_binding.c`
+   writes the `"--"` placeholder only when `context->field()` returns **NULL**. The
+   simulator gets an empty field array → `title` absent → NULL → `"--"`. The device has
+   `title` **registered** (a configured card always registers its template's fields; the
+   harness's `apply_case_config` uses `DigitalClock`) → returns `""` (empty, non-NULL) →
+   renders nothing. Same C, different field input; the device *cannot* reproduce the
+   placeholder for a name its registry knows. **Excluded from hardware, kept in the golden
+   suite** (its deliberate placeholder coverage) — the same shape as the existing
+   `field.status` (`scene-text`/`scene-label`) exclusions. This is the "injected/absent
+   binding-input" blindness the ledger warned of, made visible.
+
+3. **`scene-image--flipped`: `InvalidPayload "scene could not be rendered"` — a teardown
+   race, not a renderer defect.** The synthetic image case has **four** image nodes
+   (agenda has one, and never tripped it). Run alone at either orientation the case is
+   byte-identical; it failed **only** when the same 4-image scene was re-rendered at 270°
+   immediately after 90° (the matrix flips orientation between a case and its
+   counterpart). The device frees the previous scene's image buffers asynchronously on the
+   UI tick, so back-to-back heavy-image renders outpaced the teardown and the new render
+   failed to allocate. `free_heap` was 8.4 MB (PSRAM) throughout — not gross exhaustion.
+   A post-config settle before an asset-bearing re-render removes it (500 ms sufficed;
+   `CONFIG_SETTLE` = 700 ms for margin). The renderer itself draws multi-image scenes
+   correctly at both orientations. *Worth noting for possible future firmware hardening:*
+   a runtime orientation change with a heavy-image card live can transiently fail one
+   re-render before the async teardown frees memory; production orientation changes carry
+   natural latency and the device recovers, so this was recorded, not fixed.
+
+The three fixes are test-only (`cases.rs`, `examples/framebuffer_diff.rs`) — no firmware,
+protocol, or config change — so no OTA re-verification is owed. The harness unit test now
+pins the 96/10/86 split with the per-reason exclusion breakdown.
+
+**Restore.** Re-provisioned networked (`dev-0005`, WiFi `Slate7Legacy`, offset 240,
+plaintext token from `pass`), then full-flashed the verified release image (sha
+`29f15a6f…`). Device came up `v2.0.0-raster1`, caps `0x3eb` (1003), tier networked, WiFi
+connected (`192.168.8.168`), rotation 270°; the server confirms `dev-0005` **connected**,
+`v2.0.0-raster1`, `volatile-assets` present — **same identity, no re-mint** (the plaintext
+token authenticated). Production config restored automatically on reconnect.
+
+**Still owed on hardware:** only the **BUSY/OTA-owner variant** (a raster release while an
+OTA owns the panel) — needs a pending OTA in flight, a distinct setup, not run this
+session. B11 is now closed.

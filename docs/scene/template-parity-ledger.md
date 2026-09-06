@@ -257,8 +257,20 @@ Two limits on that claim, both permanent and worth not relearning:
   registered fields — `title`, `show_seconds`, `stale`, `error`. A plugin does not get a
   registry of its own. This is why `scene-text`/`scene-label` stay excluded from
   `framebuffer_diff`: they bind a synthetic `field.status` that no registry accepts.
-- **None of it is hardware-observed.** Task 9 is deferred; `field.title` drawing on the
-  panel from a server-pushed value has never been seen.
+- **`plugin-aqi--empty` is now excluded too (2026-09-06, the first on-board
+  `framebuffer_diff`).** Its empty state pushes no `title`, and the device drew **nothing**
+  there while the simulator drew `--`. `scene_binding.c` writes the `--` placeholder only
+  when the field lookup returns NULL; on the device `title` is a *registered* field of the
+  card's template, so an unpushed `title` resolves to `""` (renders nothing), never NULL.
+  The simulator's field array is empty, so its lookup returns NULL → `--`. A device cannot
+  reproduce the `--` placeholder for a name its registry knows; the case stays golden-only.
+  (Distinct from the pre-Task-8b production note above, which described a plugin card whose
+  field was not registered at all.)
+- **`field.title` HAS now been hardware-observed** — the non-empty `plugin-aqi` rows push
+  `title` and drew it byte-identically on the board on 2026-09-06 (and stage 3b Task 9 saw
+  `field.title` render "Headlines" from a server value on 2026-08-30). The empty-state
+  `--` placeholder for a registered field is the one thing the device provably does *not*
+  produce.
 
 **`timer.pct` is unchanged, and its position is subtler than "uncovered".** It has
 synthetic pixel coverage — `lvgl-sim/src/cases.rs`'s scene-arc case binds it, and

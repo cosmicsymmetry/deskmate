@@ -1942,7 +1942,15 @@ pub fn timer_producer_scene_cases() -> Vec<(String, SceneRenderRequest)> {
                     scene: scene.clone(),
                     assets: Vec::new(),
                     utc_offset_minutes: 0,
-                    now_unix_seconds: 0,
+                    // A valid instant (>= the wire's PROTOCOL_MIN_UNIX_SECONDS
+                    // 2020-01-01 floor), not 0. This scene binds only
+                    // timer.permille / timer.remaining, never time:/date, so
+                    // the produced frame is identical for any instant -- but
+                    // the framebuffer_diff harness time-syncs every case, and
+                    // a device rejects unix_seconds 0 as InvalidValue, which
+                    // made this case un-runnable on hardware (found on the
+                    // board 2026-09-06, Task 6 Step 5).
+                    now_unix_seconds: SCENE_NOW,
                     timer: Some(TIMER_V2_SNAPSHOT),
                     fields: Vec::new(),
                     orientation,

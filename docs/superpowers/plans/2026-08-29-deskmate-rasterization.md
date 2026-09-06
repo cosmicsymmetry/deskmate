@@ -911,9 +911,18 @@ server/device timestamps and status values. Do not start Phase B if Phase A fail
       resolvable, no standalone-clock flash occurs on an ordinary old->new swap, PSRAM does
       not trend downward, and the panel shows no tear/artifact. Repeat one release while
       OTA owns the panel and observe the documented defer/rebuild behaviour.
-- [ ] **Step 11: Run the exact payload delivery row on hardware.** Record the actual
-      `framebuffer_diff` totals and the byte comparison for the raster row, with its honest
-      claim: payload delivery, not source-render correctness.
+- [x] **Step 11: Run the exact payload delivery row on hardware.** DONE on the board
+      2026-09-06 (recorded in `docs/hardware/board-notes.md` under "B11 / Task 6 Step 5").
+      `framebuffer_diff` = **96 total / 10 excluded / 86 identical / 0 differing / 0
+      errored**, exit 0. The predicted 96/8/88 was corrected to 96/10/86 by three
+      test-harness fidelity fixes the first hardware run surfaced (a wire-invalid
+      `now_unix_seconds: 0` on the v2-timer rows; `plugin-aqi--empty`'s `field.title` `--`
+      placeholder being unreachable on a device that registers its card's template fields,
+      now excluded; and a heavy-image orientation-flip teardown race fixed by a
+      `CONFIG_SETTLE`) — none a firmware or renderer defect, all test-only. The staged diag
+      image was stale and was rebuilt fresh from HEAD; the release restore artifact rebuilt
+      byte-identical to the shipping image. The raster row's honest claim stands: payload
+      delivery, not source-render correctness.
 - [ ] **Step 12: Record every observation and non-observation in
       `docs/hardware/board-notes.md`.** Keep Phase A and Phase B separate, include exact
       version/memory/timestamp values, and never promote a simulator golden into a panel

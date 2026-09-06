@@ -5,10 +5,14 @@
     reason = "these primitives are wired into the store by later foundation tasks"
 )]
 
+use app_core::secure_file;
 use base64::prelude::{BASE64_STANDARD, Engine as _};
 use chacha20poly1305::aead::{Aead, KeyInit, OsRng, Payload};
 use chacha20poly1305::{AeadCore, XChaCha20Poly1305, XNonce};
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use zeroize::ZeroizeOnDrop;
 
 /// Environment variable naming a `0o600` keyfile that holds the base64 master key.
@@ -29,6 +33,10 @@ const NONCE_LEN: usize = 24;
 /// Generous ceiling: integration secrets are a small JSON map. Bounds a hostile
 /// or corrupt file before it is base64-decoded.
 const MAX_SECRETS_FILE_BYTES: usize = 262_144;
+
+/// The at-rest secrets file, kept next to `device-identities.json` in the config
+/// directory (spec §2). The key that decrypts it lives elsewhere (Task 3).
+pub const SECRETS_STORE_FILE: &str = "secrets.enc";
 
 /// A 32-byte master key, held in memory only, wiped on drop. No `Clone`: the key
 /// is moved into the one `IntegrationStore` that owns it.
@@ -68,6 +76,120 @@ pub enum SecretsError {
     Encrypt,
     #[error("secrets could not be (de)serialized: {0}")]
     Serialize(String),
+}
+
+/// One integration's stored credentials. `deny_unknown_fields` so a format drift
+/// is a loud decode error, not a silent dropped field.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IntegrationSecret {
+    /// The identity provider, e.g. `"google"`.
+    pub provider: String,
+    /// The long-lived OAuth refresh token.
+    pub refresh_token: String,
+    /// The OAuth client secret, when the deployment stores it here rather than in a
+    /// separate keyfile. `None` when supplied out-of-band.
+    pub client_secret: Option<String>,
+    /// The scopes granted at authorization time.
+    pub scopes: Vec<String>,
+    /// Unix seconds when these credentials were obtained.
+    pub obtained_at: i64,
+}
+
+/// Encrypted-at-rest map of `integration_id -> IntegrationSecret`. Cheap to share
+/// behind an `Arc`; every mutation persists the whole sealed file atomically.
+pub struct IntegrationStore {
+    path: PathBuf,
+    key: SecretsKey,
+    secrets: Mutex<BTreeMap<String, IntegrationSecret>>,
+}
+
+impl IntegrationStore {
+    /// Loads and decrypts an existing `secrets.enc`, or starts empty if none exists.
+    /// A present-but-undecryptable file is a hard error (fail closed) rather than a
+    /// silent reset that would discard the owner's integrations.
+    pub fn open(path: PathBuf, key: SecretsKey) -> Result<Self, SecretsError> {
+        let secrets = match secure_file::read_bounded(&path, MAX_SECRETS_FILE_BYTES) {
+            Ok(Some(file_bytes)) => {
+                let plaintext = open(&key, &file_bytes)?;
+                serde_json::from_slice(&plaintext)
+                    .map_err(|error| SecretsError::Serialize(error.to_string()))?
+            }
+            Ok(None) => BTreeMap::new(),
+            Err(secure_file::BoundedReadError::TooLarge { maximum }) => {
+                return Err(SecretsError::TooLarge { maximum });
+            }
+            Err(secure_file::BoundedReadError::Io(error)) => {
+                let (operation, detail) = error.into_strings("secrets file");
+                return Err(SecretsError::Io { operation, detail });
+            }
+        };
+        Ok(Self {
+            path,
+            key,
+            secrets: Mutex::new(secrets),
+        })
+    }
+
+    pub fn get(&self, integration_id: &str) -> Option<IntegrationSecret> {
+        self.lock().get(integration_id).cloned()
+    }
+
+    pub fn put(
+        &self,
+        integration_id: String,
+        secret: IntegrationSecret,
+    ) -> Result<(), SecretsError> {
+        let mut secrets = self.lock();
+        secrets.insert(integration_id, secret);
+        self.persist(&secrets)
+    }
+
+    /// Removes an integration's secret. Returns whether one was present.
+    pub fn remove(&self, integration_id: &str) -> Result<bool, SecretsError> {
+        let mut secrets = self.lock();
+        let existed = secrets.remove(integration_id).is_some();
+        if existed {
+            self.persist(&secrets)?;
+        }
+        Ok(existed)
+    }
+
+    /// The integration ids present, sorted. Carries no secret values (spec §6:
+    /// presence, never token values).
+    pub fn integration_ids(&self) -> Vec<String> {
+        self.lock().keys().cloned().collect()
+    }
+
+    fn persist(&self, secrets: &BTreeMap<String, IntegrationSecret>) -> Result<(), SecretsError> {
+        let plaintext = serde_json::to_vec(secrets)
+            .map_err(|error| SecretsError::Serialize(error.to_string()))?;
+        let sealed = seal(&self.key, &plaintext)?;
+
+        if let Some(parent) = secure_file::usable_parent(&self.path) {
+            secure_file::create_directory(parent).map_err(|error| {
+                let (operation, detail) = error.into_strings("secrets directory");
+                SecretsError::Io { operation, detail }
+            })?;
+        }
+        secure_file::write_and_replace(&self.path, &sealed).map_err(|error| {
+            let (operation, detail) = error.into_strings("secrets file");
+            SecretsError::Io { operation, detail }
+        })?;
+        if let Some(parent) = secure_file::usable_parent(&self.path) {
+            secure_file::sync_parent(parent).map_err(|error| {
+                let (operation, detail) = error.into_strings("secrets directory");
+                SecretsError::Io { operation, detail }
+            })?;
+        }
+        Ok(())
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, BTreeMap<String, IntegrationSecret>> {
+        self.secrets
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -412,5 +534,112 @@ mod tests {
     #[test]
     fn debug_redacts_the_key() {
         assert_eq!(format!("{:?}", test_key(5)), "SecretsKey(redacted)");
+    }
+
+    fn sample_secret() -> IntegrationSecret {
+        IntegrationSecret {
+            provider: "google".to_string(),
+            refresh_token: "super-secret-refresh-token-value".to_string(),
+            client_secret: Some("client-secret-value".to_string()),
+            scopes: vec!["https://www.googleapis.com/auth/calendar.events.readonly".to_string()],
+            obtained_at: 1_725_600_000,
+        }
+    }
+
+    #[test]
+    fn put_then_get_round_trips_across_reopen() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(SECRETS_STORE_FILE);
+
+        let store = IntegrationStore::open(path.clone(), test_key(11)).expect("open empty");
+        store
+            .put("google-primary".to_string(), sample_secret())
+            .expect("put");
+        drop(store);
+
+        let reopened = IntegrationStore::open(path, test_key(11)).expect("reopen");
+        assert_eq!(reopened.get("google-primary"), Some(sample_secret()));
+        assert_eq!(reopened.get("absent"), None);
+    }
+
+    #[test]
+    fn remove_deletes_and_reports_presence() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(SECRETS_STORE_FILE);
+        let store = IntegrationStore::open(path, test_key(12)).expect("open");
+
+        store.put("id".to_string(), sample_secret()).expect("put");
+        assert!(store.remove("id").expect("remove existing"));
+        assert!(!store.remove("id").expect("remove absent"));
+        assert_eq!(store.get("id"), None);
+    }
+
+    #[test]
+    fn integration_ids_lists_keys_only() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(SECRETS_STORE_FILE);
+        let store = IntegrationStore::open(path, test_key(13)).expect("open");
+
+        store.put("b".to_string(), sample_secret()).expect("put b");
+        store.put("a".to_string(), sample_secret()).expect("put a");
+        assert_eq!(
+            store.integration_ids(),
+            vec!["a".to_string(), "b".to_string()]
+        );
+    }
+
+    #[test]
+    fn opening_with_the_wrong_key_fails_closed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(SECRETS_STORE_FILE);
+        IntegrationStore::open(path.clone(), test_key(1))
+            .expect("open")
+            .put("id".to_string(), sample_secret())
+            .expect("put");
+
+        assert!(matches!(
+            IntegrationStore::open(path, test_key(2)),
+            Err(SecretsError::Decrypt)
+        ));
+    }
+
+    #[test]
+    fn persisted_file_contains_no_plaintext_secret() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(SECRETS_STORE_FILE);
+        let store = IntegrationStore::open(path.clone(), test_key(14)).expect("open");
+        store.put("id".to_string(), sample_secret()).expect("put");
+
+        let on_disk = std::fs::read(&path).expect("read file");
+        for needle in [
+            b"super-secret-refresh-token-value".as_slice(),
+            b"client-secret-value".as_slice(),
+            b"google".as_slice(),
+        ] {
+            assert!(
+                !on_disk.windows(needle.len()).any(|window| window == needle),
+                "plaintext leaked to disk: {:?}",
+                String::from_utf8_lossy(needle)
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn persisted_file_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(SECRETS_STORE_FILE);
+        IntegrationStore::open(path.clone(), test_key(15))
+            .expect("open")
+            .put("id".to_string(), sample_secret())
+            .expect("put");
+
+        let mode = std::fs::metadata(&path)
+            .expect("metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
     }
 }

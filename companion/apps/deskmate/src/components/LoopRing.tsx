@@ -1,25 +1,27 @@
-import { useEffect, useMemo, useRef, useState, type DragEvent, type KeyboardEvent } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import {
   activePlaylist,
-  cardMoveFromKey,
   filmstripAdvance,
   filmstripDeadline,
   filmstripSegments,
   formatDuration,
+  issuesForPath,
   loopSeconds,
-  moveEntry,
+  setPlaylistAdvance,
 } from "../lib/configDraft";
-import { Icon } from "./Icon";
-import type { AppConfig } from "../lib/types";
+import type { AppConfig, ValidationIssue } from "../lib/types";
+import { FieldIssues } from "./FieldIssues";
 
 interface LoopRingProps {
   config: AppConfig;
+  issues: ValidationIssue[];
   selectedCardId: string | null;
   onSelect: (cardId: string) => void;
-  onReorder: (config: AppConfig) => void;
+  onChange: (config: AppConfig) => void;
 }
 
+const DEFAULT_DWELL_SECONDS = 20;
 const TICK_MS = 1000;
 const RADIUS = 82;
 const CIRCUMFERENCE = 2 * Math.PI * RADIUS;
@@ -32,11 +34,6 @@ const GAP_DEGREES = 2.4;
  * up to eight. Two arcs sharing a colour breaks the only mapping there is from an arc
  * back to its name in the legend.
  */
-/** Two entries can share a template, so a move control has to say which one. */
-function entryLabel(arc: { name: string; title: string | null }): string {
-  return arc.title ? `${arc.name} — ${arc.title}` : arc.name;
-}
-
 function rampStep(index: number, count: number): number {
   return count < 2 ? 0 : index / (count - 1);
 }
@@ -66,19 +63,25 @@ function compactDuration(totalSeconds: number): string {
  * the ring and any other consumer of loop length can never drift apart. This
  * component only maps those numbers onto a circle and wires the events.
  *
- * The ring is the display; the legend beneath it carries selection and reordering.
- * Dragging arcs around a circle has no keyboard equivalent worth shipping, and the
- * reorder affordance has to stay reachable — so the legend keeps drag, the arrow
- * buttons, and the same Alt+Up/Down the playlist editor uses.
+ * The ring and legend display the loop; the grid is the one place its order changes.
  */
-export function LoopRing({ config, selectedCardId, onSelect, onReorder }: LoopRingProps) {
+export function LoopRing({ config, issues, selectedCardId, onSelect, onChange }: LoopRingProps) {
   const playlist = activePlaylist(config);
+  const playlistIndex = config.playlists.findIndex(
+    (candidate) => candidate.id === config.active_playlist_id,
+  );
   const isTimed = playlist?.advance.kind === "timed";
   const segments = useMemo(() => filmstripSegments(config), [config]);
   const total = playlist ? loopSeconds(config, playlist.id) : null;
   const [isPlaying, setIsPlaying] = useState(false);
-  const [draggedId, setDraggedId] = useState<string | null>(null);
   const [reducedMotion, setReducedMotion] = useState(false);
+  const configuredDefaultDwell =
+    playlist?.advance.kind === "timed" ? String(playlist.advance.default_dwell_seconds) : "";
+  const [defaultDwellInput, setDefaultDwellInput] = useState(configuredDefaultDwell);
+
+  useEffect(() => {
+    setDefaultDwellInput(configuredDefaultDwell);
+  }, [configuredDefaultDwell]);
 
   useEffect(() => {
     const query = window.matchMedia("(prefers-reduced-motion: reduce)");
@@ -146,55 +149,117 @@ export function LoopRing({ config, selectedCardId, onSelect, onReorder }: LoopRi
     onSelect,
   ]);
 
-  if (segments.length === 0) {
-    return (
-      <section className="loop" aria-labelledby="loop-heading">
+  const advanceIssues =
+    playlistIndex < 0 ? [] : issuesForPath(issues, `playlists[${playlistIndex}].advance`);
+  const defaultDwellPath = `playlists[${playlistIndex}].advance.default_dwell_seconds`;
+  const pacing = playlist && (
+    <>
+      <fieldset className="loop__pacing">
+        <legend className="sr-only">Pacing</legend>
+        <button
+          type="button"
+          className="loop__pace"
+          aria-pressed={isTimed}
+          onClick={() => {
+            if (!isTimed) {
+              onChange(
+                setPlaylistAdvance(config, playlist.id, {
+                  kind: "timed",
+                  default_dwell_seconds: DEFAULT_DWELL_SECONDS,
+                }),
+              );
+            }
+          }}
+        >
+          Timed
+        </button>
+        <button
+          type="button"
+          className="loop__pace"
+          aria-pressed={!isTimed}
+          onClick={() => {
+            if (isTimed) {
+              onChange(setPlaylistAdvance(config, playlist.id, { kind: "manual" }));
+            }
+          }}
+        >
+          Manual
+        </button>
+      </fieldset>
+      {playlist.advance.kind === "timed" && (
+        <label className="loop__dwell">
+          <span className="sr-only">Default dwell in seconds</span>
+          <input
+            className="numeral"
+            type="number"
+            inputMode="numeric"
+            min={5}
+            max={3600}
+            step={1}
+            value={defaultDwellInput}
+            onChange={(event) => {
+              const raw = event.currentTarget.value;
+              setDefaultDwellInput(raw);
+              if (raw.trim() === "") {
+                return;
+              }
+              const parsed = Number(raw);
+              if (Number.isFinite(parsed)) {
+                onChange(
+                  setPlaylistAdvance(config, playlist.id, {
+                    kind: "timed",
+                    default_dwell_seconds: parsed,
+                  }),
+                );
+              }
+            }}
+            aria-invalid={advanceIssues.some((issue) => issue.path === defaultDwellPath)}
+            aria-describedby={advanceIssues.length > 0 ? "loop-pacing-issues" : undefined}
+          />
+          <span aria-hidden="true">s</span>
+        </label>
+      )}
+    </>
+  );
+
+  const head = (
+    <>
+      <div className="loop__head">
         <p className="tile-label" id="loop-heading">
           The loop
         </p>
-        <p className="loop__empty">
-          {playlist ? `${playlist.name} has no cards yet.` : "No playlist is active."}
-        </p>
+        <div className="loop__head-right">
+          {pacing}
+          {isTimed && segments.length > 1 && (
+            <div className="loop__transport">
+              <button
+                type="button"
+                className={`loop__play${isPlaying ? " is-playing" : ""}`}
+                aria-pressed={isPlaying}
+                disabled={reducedMotion}
+                onClick={() => setIsPlaying((value) => !value)}
+              >
+                {isPlaying ? "Pause preview" : "Play the loop"}
+              </button>
+            </div>
+          )}
+        </div>
+        {isTimed && segments.length > 1 && reducedMotion && (
+          <span className="loop__hint">Playback is off while reduced motion is on.</span>
+        )}
+      </div>
+      <FieldIssues issues={advanceIssues} className="loop__pacing-issues" id="loop-pacing-issues" />
+    </>
+  );
+
+  if (segments.length === 0) {
+    return (
+      <section className="loop" aria-labelledby="loop-heading">
+        {head}
+        <p className="loop__empty">No cards yet.</p>
       </section>
     );
   }
-
-  const moveTo = (cardId: string, targetSegmentIndex: number) => {
-    if (!playlist) {
-      return;
-    }
-    const targetCardId = segments[targetSegmentIndex]?.cardId;
-    if (!targetCardId) {
-      return;
-    }
-    const sourceIndex = playlist.entries.findIndex((entry) => entry.card_id === cardId);
-    const targetEntryIndex = playlist.entries.findIndex((entry) => entry.card_id === targetCardId);
-    if (sourceIndex < 0 || targetEntryIndex < 0) {
-      return;
-    }
-    onReorder(moveEntry(config, playlist.id, sourceIndex, targetEntryIndex));
-  };
-  const onDragStart = (event: DragEvent<HTMLLIElement>, cardId: string) => {
-    setDraggedId(cardId);
-    event.dataTransfer.effectAllowed = "move";
-    event.dataTransfer.setData("text/plain", cardId);
-  };
-  const onDrop = (event: DragEvent<HTMLLIElement>, targetIndex: number) => {
-    event.preventDefault();
-    const cardId = draggedId ?? event.dataTransfer.getData("text/plain");
-    if (cardId) {
-      moveTo(cardId, targetIndex);
-    }
-    setDraggedId(null);
-  };
-  const onKeyDown = (event: KeyboardEvent<HTMLButtonElement>, index: number) => {
-    const delta = cardMoveFromKey(event.key, event.altKey);
-    if (delta === 0 || !segments[index + delta]) {
-      return;
-    }
-    event.preventDefault();
-    moveTo(segments[index].cardId, index + delta);
-  };
 
   // Equal arcs when the playlist advances manually: with no dwell there is no
   // proportion to encode, and a ring that implied one would be inventing it.
@@ -223,30 +288,7 @@ export function LoopRing({ config, selectedCardId, onSelect, onReorder }: LoopRi
 
   return (
     <section className="loop" aria-labelledby="loop-heading">
-      <div className="loop__head">
-        <p className="tile-label" id="loop-heading">
-          {playlist?.name}
-        </p>
-        <div className="loop__head-right">
-          <span className="tile-label">{isTimed ? "Timed loop" : "Manual order"}</span>
-          {isTimed && segments.length > 1 && (
-            <div className="loop__transport">
-              <button
-                type="button"
-                className={`loop__play${isPlaying ? " is-playing" : ""}`}
-                aria-pressed={isPlaying}
-                disabled={reducedMotion}
-                onClick={() => setIsPlaying((value) => !value)}
-              >
-                {isPlaying ? "Pause preview" : "Play the loop"}
-              </button>
-              {reducedMotion && (
-                <span className="loop__hint">Playback is off while reduced motion is on.</span>
-              )}
-            </div>
-          )}
-        </div>
-      </div>
+      {head}
 
       <div className="loop__body">
         <div className="loop__ring">
@@ -289,18 +331,11 @@ export function LoopRing({ config, selectedCardId, onSelect, onReorder }: LoopRi
             </span>
           </div>
         </div>
-        <ol className="loop__legend" aria-label="Cards in the active playlist">
+        <ol className="loop__legend" aria-label="Cards in the loop">
           {arcs.map((arc, index) => (
             <li
               key={arc.cardId}
-              draggable
-              className={`loop__entry${draggedId === arc.cardId ? " is-dragging" : ""}${
-                arc.cardId === activeCardId ? " is-live" : ""
-              }`}
-              onDragStart={(event) => onDragStart(event, arc.cardId)}
-              onDragEnd={() => setDraggedId(null)}
-              onDragOver={(event) => event.preventDefault()}
-              onDrop={(event) => onDrop(event, index)}
+              className={`loop__entry${arc.cardId === activeCardId ? " is-live" : ""}`}
             >
               <span
                 className="loop__swatch"
@@ -312,7 +347,6 @@ export function LoopRing({ config, selectedCardId, onSelect, onReorder }: LoopRi
                 className="loop__entry-body"
                 aria-pressed={arc.cardId === selectedCardId}
                 onClick={() => onSelect(arc.cardId)}
-                onKeyDown={(event) => onKeyDown(event, index)}
               >
                 <span className="loop__entry-text">
                   <span className="loop__entry-name">{arc.name}</span>
@@ -320,24 +354,6 @@ export function LoopRing({ config, selectedCardId, onSelect, onReorder }: LoopRi
                 </span>
                 {isTimed && <span className="loop__entry-dwell numeral">{arc.dwellSeconds}s</span>}
               </button>
-              <span className="loop__moves">
-                <button
-                  type="button"
-                  aria-label={`Move ${entryLabel(arc)} earlier`}
-                  disabled={index === 0}
-                  onClick={() => moveTo(arc.cardId, index - 1)}
-                >
-                  <Icon name="up" />
-                </button>
-                <button
-                  type="button"
-                  aria-label={`Move ${entryLabel(arc)} later`}
-                  disabled={index === arcs.length - 1}
-                  onClick={() => moveTo(arc.cardId, index + 1)}
-                >
-                  <Icon name="down" />
-                </button>
-              </span>
             </li>
           ))}
         </ol>

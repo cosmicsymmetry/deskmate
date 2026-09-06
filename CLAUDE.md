@@ -145,6 +145,38 @@ of letting code and documentation diverge.
   dwell) names `template — title`. Two regression tests pin this. `cardName()` still
   exists for the old "title with a kind fallback" shape; prefer `cardLabel`/`cardTitle`
   for anything user-visible.
+- **The window has ONE LOOP; the card library and named playlists are gone from the UI
+  (2026-09-06, on explicit owner direction; plan
+  `docs/superpowers/plans/2026-09-06-deskmate-one-loop.md`, branch `feat/one-loop`).**
+  The owner's finding was that adding a card to a library and then placing it in a
+  playlist was a step with no purpose in a one-playlist world; the evidence agreed (the
+  owner's own config has one playlist, the "Workday/Evening" case lived only in fixtures,
+  and nothing on the wire knows the word playlist). **Schema v6 is untouched**: the
+  document still carries `playlists[]` and `active_playlist_id`, the app exposes exactly
+  one playlist and never creates another, and extra playlists in older files round-trip
+  unchanged. What the window does now: the complication **tile grid is the loop**, in
+  loop order, and it is where the order changes (drag, hover earlier/later, ⌥ ← →); the
+  ring legend only displays and selects (DESIGN.md was amended — it used to assign
+  reorder to the legend); **adding a card is one dashed slot at the end of the grid that
+  opens a menu** of built-in kinds plus a `pluginKinds` group the app passes as `[]`
+  today (there is no plugin registry source in the app; do not fabricate one), and the
+  new card joins the loop at once (`addCard` now enrols, gated on both `MAX_CARDS` and
+  `MAX_PLAYLIST_ENTRIES`); a tile owns one fact, so **dwell is edited in the card's
+  editor ("Stays on the panel for")**, never printed on the tile; the pacing control
+  (Timed / Manual + default dwell) replaced the "TIMED LOOP" label in the ring's head; a
+  card an older file left outside the loop trails the others in the same grid, flagged
+  `not in loop` (+ `alerts` when it still can), with one action "Add to loop"; a
+  playlist entry whose card id does not resolve renders as a "Missing card" tile with its
+  issue. `PlaylistPanel.tsx` is deleted, and so are `addPlaylist`/`renamePlaylist`/
+  `removePlaylist`/`setActivePlaylist`. **`claimedIssues` was narrowed** to the active
+  playlist's `entries*` and `advance*` so nothing is claimed that no surface renders;
+  `playlists[i].name`/`id`, inactive playlists and `active_playlist_id` fall to the
+  leftover banner. Three judged layouts preceded this (list in the rail, grid as loop,
+  rows under the editor); the rail version was rejected because the rail is the face and
+  has a fixed height budget — do not move creation or deletion into it. The add menu is
+  the one menu the design allows beside the settings sheet; it holds choices, never
+  state. Known and deliberately unfixed: a `preferences.timezone` issue is rendered only
+  inside the closed Settings sheet (pre-existing).
 - **V2's exit gate is OPEN, but no longer blocked.** Task 11 Step 11 failed on hardware
   on 2026-08-19 and **passed on a re-run the same day** after two real defects were
   fixed; what remains open is the gate's own unobserved items, not a blocker. The first

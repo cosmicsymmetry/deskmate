@@ -4,10 +4,9 @@ import {
   activePlaylist,
   addCard,
   addEntry,
-  addPlaylist,
   cardMoveFromKey,
   cardLabel,
-  cardsOutsidePlaylist,
+  cardsOutsideLoop,
   copyConfig,
   cardsContainerIssues,
   filmstripAdvance,
@@ -20,6 +19,7 @@ import {
   issuesForField,
   issuesForPath,
   libraryCards,
+  loopEntries,
   loopSeconds,
   moveCard,
   moveEntry,
@@ -27,12 +27,10 @@ import {
   numberValue,
   removeCard,
   removeEntry,
-  removePlaylist,
-  renamePlaylist,
-  setActivePlaylist,
   setEntryDwell,
   setPlaylistAdvance,
   tapActionDescription,
+  unclaimedIssues,
 } from "../src/lib/configDraft";
 import type { AppConfig, CardSettings, ValidationIssue } from "../src/lib/types";
 import { ipcContractFixtures } from "../src/lib/types.contract";
@@ -118,31 +116,48 @@ describe("configuration draft helpers", () => {
     expect(cardLabel(copied.cards[0])).toBe("com.example.air-quality");
   });
 
-  test("first-run guidance follows add a card, add it to a playlist, then save without demanding a card kind", () => {
+  test("first-run guidance follows add a card, then save without demanding a card kind", () => {
     const empty: AppConfig = {
       ...initialConfig(),
       cards: [],
       playlists: [{ ...initialConfig().playlists[0], entries: [] }],
     };
-    expect(firstRunSteps(empty, false).map((step) => step.done)).toEqual([false, false, false]);
+    expect(firstRunSteps(empty, false).map((step) => step.done)).toEqual([false, false]);
 
     const withWeather = addCard(empty, "weather").config;
-    expect(firstRunSteps(withWeather, false).map((step) => step.done)).toEqual([
-      true,
-      false,
-      false,
-    ]);
-
-    const configured = addEntry(withWeather, "workday", "weather");
-    expect(firstRunSteps(configured, false).map((step) => step.done)).toEqual([true, true, false]);
-    expect(firstRunSteps(configured, true).every((step) => step.done)).toBe(true);
+    expect(firstRunSteps(withWeather, false).map((step) => step.done)).toEqual([true, false]);
+    expect(firstRunSteps(withWeather, true).every((step) => step.done)).toBe(true);
   });
 
-  test("adding a card appends it without creating a screen", () => {
+  test("adding a card appends it to the library and enrols it at the end of the active loop", () => {
     const { config, cardId } = addCard(initialConfig(), "weather");
     expect(config.cards.map((card) => card.kind)).toContain("weather");
     expect(cardId).toBe("weather");
+    expect(config.playlists[0].entries.at(-1)).toEqual({
+      card_id: "weather",
+      dwell_seconds: null,
+    });
     expect("screens" in config).toBe(false);
+  });
+
+  test("adding a card is gated by both the card and active-loop entry limits", () => {
+    const cardFull = cardsConfig(["a", "b", "c", "d", "e", "f", "g", "h"]);
+    expect(addCard(cardFull, "weather")).toEqual({ config: cardFull, cardId: null });
+
+    const entryFullBase = cardsConfig(["a", "b", "c", "d", "e", "f", "g"]);
+    const entryFull: AppConfig = {
+      ...entryFullBase,
+      playlists: [
+        {
+          ...entryFullBase.playlists[0],
+          entries: Array.from({ length: 8 }, (_, index) => ({
+            card_id: index < 7 ? entryFullBase.cards[index].id : "missing-card",
+            dwell_seconds: null,
+          })),
+        },
+      ],
+    };
+    expect(addCard(entryFull, "weather")).toEqual({ config: entryFull, cardId: null });
   });
 
   test("adding every kind produces a reachable, addable card", () => {
@@ -214,45 +229,28 @@ describe("configuration draft helpers", () => {
     expect(activePlaylist({ ...config, active_playlist_id: "missing" })).toBeNull();
   });
 
-  test("returns every library card and cards outside one playlist", () => {
-    const config = addCard(addCard(initialConfig(), "pomodoro").config, "weather").config;
+  test("resolves active-loop entries without dropping missing references, then finds active-loop outsiders", () => {
+    const withCards = addCard(addCard(initialConfig(), "pomodoro").config, "weather").config;
+    const config = {
+      ...withCards,
+      playlists: [
+        {
+          ...withCards.playlists[0],
+          entries: [
+            { card_id: "weather", dwell_seconds: 15 },
+            { card_id: "missing-card", dwell_seconds: null },
+            { card_id: "clock", dwell_seconds: null },
+          ],
+        },
+      ],
+    };
     expect(libraryCards(config).map((card) => card.id)).toEqual(["clock", "pomodoro", "weather"]);
-    expect(cardsOutsidePlaylist(config, "workday").map((card) => card.id)).toEqual([
-      "pomodoro",
-      "weather",
+    expect(loopEntries(config)).toEqual([
+      { index: 0, entry: config.playlists[0].entries[0], card: config.cards[2] },
+      { index: 1, entry: config.playlists[0].entries[1], card: null },
+      { index: 2, entry: config.playlists[0].entries[2], card: config.cards[0] },
     ]);
-  });
-
-  test("adds playlists with slugified, unique ids", () => {
-    const once = addPlaylist(initialConfig(), "  Deep Focus!  ");
-    const twice = addPlaylist(once, "Deep Focus");
-    expect(once.playlists.at(-1)).toEqual({
-      id: "deep-focus",
-      name: "Deep Focus!",
-      advance: { kind: "manual" },
-      entries: [],
-    });
-    expect(twice.playlists.at(-1)?.id).toBe("deep-focus-2");
-  });
-
-  test("renames a playlist without changing its stable id", () => {
-    const next = renamePlaylist(initialConfig(), "workday", "  Work hours  ");
-    expect(next.playlists[0].id).toBe("workday");
-    expect(next.playlists[0].name).toBe("Work hours");
-  });
-
-  test("removing the active playlist activates the first remaining playlist and refuses the last", () => {
-    const withSecond = addPlaylist(initialConfig(), "Evening");
-    const next = removePlaylist(withSecond, "workday");
-    expect(next.playlists.map((playlist) => playlist.id)).toEqual(["evening"]);
-    expect(next.active_playlist_id).toBe("evening");
-    expect(removePlaylist(next, "evening")).toBe(next);
-  });
-
-  test("sets the active playlist only when it exists", () => {
-    const config = addPlaylist(initialConfig(), "Evening");
-    expect(setActivePlaylist(config, "evening").active_playlist_id).toBe("evening");
-    expect(setActivePlaylist(config, "missing")).toBe(config);
+    expect(cardsOutsideLoop(config).map((card) => card.id)).toEqual(["pomodoro"]);
   });
 
   test("adds a playlist entry but refuses duplicates and a ninth entry", () => {
@@ -277,7 +275,7 @@ describe("configuration draft helpers", () => {
   });
 
   test("removes a playlist entry by index and ignores an out-of-range index", () => {
-    const config = addEntry(addCard(initialConfig(), "pomodoro").config, "workday", "pomodoro");
+    const config = addCard(initialConfig(), "pomodoro").config;
     const next = removeEntry(config, "workday", 0);
     expect(next.playlists[0].entries.map((entry) => entry.card_id)).toEqual(["pomodoro"]);
     expect(removeEntry(next, "workday", 4)).toBe(next);
@@ -315,7 +313,13 @@ describe("configuration draft helpers", () => {
   });
 
   test("sets one playlist's advance mode", () => {
-    const config = addPlaylist(initialConfig(), "Evening");
+    const config: AppConfig = {
+      ...initialConfig(),
+      playlists: [
+        initialConfig().playlists[0],
+        { id: "evening", name: "Evening", advance: { kind: "manual" }, entries: [] },
+      ],
+    };
     const next = setPlaylistAdvance(config, "evening", {
       kind: "timed",
       default_dwell_seconds: 30,
@@ -325,6 +329,19 @@ describe("configuration draft helpers", () => {
       kind: "timed",
       default_dwell_seconds: 30,
     });
+  });
+
+  test("keeps the draft reference when the playlist advance is deep-equal", () => {
+    const manual = initialConfig();
+    expect(setPlaylistAdvance(manual, "workday", { kind: "manual" })).toBe(manual);
+
+    const timed = setPlaylistAdvance(manual, "workday", {
+      kind: "timed",
+      default_dwell_seconds: 30,
+    });
+    expect(setPlaylistAdvance(timed, "workday", { kind: "timed", default_dwell_seconds: 30 })).toBe(
+      timed,
+    );
   });
 
   test("loop length sums playlist entry dwell with the timed default and is null for manual", () => {
@@ -344,9 +361,18 @@ describe("configuration draft helpers", () => {
 
   test("removing a card strips its entries from every playlist", () => {
     let config = addCard(initialConfig(), "pomodoro").config;
-    config = addEntry(config, "workday", "pomodoro");
-    config = addPlaylist(config, "Evening");
-    config = addEntry(config, "evening", "pomodoro");
+    config = {
+      ...config,
+      playlists: [
+        config.playlists[0],
+        {
+          id: "evening",
+          name: "Evening",
+          advance: { kind: "manual" },
+          entries: [{ card_id: "pomodoro", dwell_seconds: null }],
+        },
+      ],
+    };
     const next = removeCard(config, "pomodoro");
     expect(next.cards.map((card) => card.id)).toEqual(["clock"]);
     expect(next.playlists.map((playlist) => playlist.entries)).toEqual([
@@ -359,7 +385,15 @@ describe("configuration draft helpers", () => {
   test("filmstripSegments proportions active-playlist entries by resolved dwell and excludes library-only cards", () => {
     let config = addCard(initialConfig(), "pomodoro").config;
     config = addCard(config, "weather").config;
-    config = addEntry(config, "workday", "pomodoro");
+    config = {
+      ...config,
+      playlists: [
+        {
+          ...config.playlists[0],
+          entries: config.playlists[0].entries.filter((entry) => entry.card_id !== "weather"),
+        },
+      ],
+    };
     config = setEntryDwell(config, "workday", 0, 45);
     config = setPlaylistAdvance(config, "workday", {
       kind: "timed",
@@ -554,6 +588,23 @@ describe("configuration draft helpers", () => {
     expect(tapActionDescription(pomodoro)).toBe("Tapping this card starts or pauses its timer.");
   });
 
+  test("inactive-playlist issues fall through to the unclaimed fallback", () => {
+    const base = initialConfig();
+    const config: AppConfig = {
+      ...base,
+      playlists: [
+        base.playlists[0],
+        { id: "evening", name: "Evening", advance: { kind: "manual" }, entries: [] },
+      ],
+    };
+    const issue: ValidationIssue = {
+      path: "playlists[1].name",
+      code: "empty",
+      message: "Playlist name is required.",
+    };
+    expect(unclaimedIssues([issue], config)).toEqual([issue]);
+  });
+
   test("contract fixtures expose cards, not widgets or screens", () => {
     const config = ipcContractFixtures.snapshot.config;
     expect(config.schema_version).toBe(6);
@@ -627,7 +678,9 @@ describe("moveCard", () => {
 describe("cardMoveFromKey", () => {
   test("keyboard reorder requires Alt plus an arrow", () => {
     expect(cardMoveFromKey("ArrowUp", true)).toBe(-1);
+    expect(cardMoveFromKey("ArrowLeft", true)).toBe(-1);
     expect(cardMoveFromKey("ArrowDown", true)).toBe(1);
+    expect(cardMoveFromKey("ArrowRight", true)).toBe(1);
     expect(cardMoveFromKey("ArrowDown", false)).toBe(0);
     expect(cardMoveFromKey("Enter", true)).toBe(0);
   });

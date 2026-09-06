@@ -183,8 +183,10 @@ of letting code and documentation diverge.
     pulling USB changes nothing, the Mac app holds the cable without taking the display
     (`reconnects: 0`), OTA installs and reboots, and **rollback works unattended** —
     otadata marks the broken image `ABORTED` and the previous slot `VALID`.
-  - Still owed: Task 8's widening-backoff observation on a shipping build, and Task 9's
-    tap latency. (The rotation-stall anomaly was retracted; there is no defect.) The OTA
+  - Still owed: Task 9's tap latency. (Task 8's widening-backoff observation was
+    discharged on the shipping build 2026-09-06 — board-notes "V2 Task 8 — widening-backoff
+    observation on the shipping build, PASSED"; the rotation-stall anomaly was retracted;
+    there is no defect.) The OTA
     observability gap is **partly** closed: additive protocol-v1 `StatusResponse` key 30
     carries bounded `last_ota_error`, `GET /v1/devices/{id}` exposes it under
     `snapshot.device`, and it was verified on the board.
@@ -467,8 +469,9 @@ of letting code and documentation diverge.
   as unobserved. That was overtaken by the sessions recorded higher up in this file and in
   board-notes: the headline demo, OTA install-and-reboot, unattended rollback, and the OTA
   deferral **were** subsequently observed. **The authoritative list of what V2 still owes is
-  the "Still owed" line in the V2 section above** — Task 8's widening-backoff observation on
-  a shipping build, and Task 9's tap latency — and that is the only V2 statement to trust.
+  the "Still owed" line in the V2 section above** — now just Task 9's tap latency (Task 8's
+  widening-backoff observation was discharged on the shipping build 2026-09-06) — and that is
+  the only V2 statement to trust.
   Tasks 3, 4, 5 and 6 were verified on the board on 2026-08-18 and are recorded in
   `docs/hardware/board-notes.md`, including the WiFi crash-loop root-cause, so do not redo
   that work either.

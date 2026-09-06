@@ -4679,4 +4679,62 @@ token authenticated). Production config restored automatically on reconnect.
 
 **Still owed on hardware:** only the **BUSY/OTA-owner variant** (a raster release while an
 OTA owns the panel) — needs a pending OTA in flight, a distinct setup, not run this
-session. B11 is now closed.
+session. B11 is now closed. (V2 Task 8's widening-backoff observation on the shipping
+build was discharged 2026-09-06 — see the entry at the end of this file.)
+
+## V2 Task 8 — widening-backoff observation on the shipping build, PASSED (2026-09-06)
+
+Board `dev-0005`, shipping image `v2.0.0-raster1` (caps 1003), networked tier, WiFi up
+throughout, USB attached. This closes the item that had been stuck as a catch-22: the
+shipping build routes its console to UART0 only
+(`CONFIG_ESP_CONSOLE_UART_DEFAULT=y`, `SECONDARY_NONE`), so `websocket_client: Reconnect
+after N ms` never reaches the USB cable, and the indirect "outage-length -> return-time"
+method is provably invalid (uniform sample in [0,T]). Both are recorded above as the
+reason prior sessions could not discharge it.
+
+**Method that worked — observe the retry schedule at the server socket.** Stopped
+`deskmate-server` and bound a bare TCP listener to its port `192.168.8.20:8443` that
+accepts each connection, logs a UTC-ms timestamp, and closes. Caddy proxies the device's
+WSS reconnect attempts to it, so the interval between logged connections is the device's
+own reconnect delay. Two sources appeared: a constant 2.01 s health probe from the host
+IP (104 conns, filtered out) and the device's proxied retries via the docker bridge
+`172.26.0.2`.
+
+**Widening curve observed (device retries, seconds between attempts):**
+`3.1 -> 5.1 -> 10.7 -> 16.6 -> 35.0 -> 50.3 -> 66.2` — doubling and capping at the 60 s
+ceiling, the last two being jittered draws of the capped 60 s base (±20% -> [48,72]).
+This is the genuine backoff schedule: the failure shape only affects what happens after
+TCP connect, not when the device dials, and the clean doubling confirms it. Log:
+`docs/hardware/media/2026-09-06-task8/listener-conns.log`.
+
+**Panel behaviour.** ~30 s in, the retained Weather card still showed (link-timeout
+fallback is 45 s). Past 45 s the panel fell to the standalone clock
+(`panel-standalone-fallback.jpg`) — no reboot, no spin. After the server was restored
+the device reconnected and live weather was pushed back down
+(`panel-restored-weather.jpg`).
+
+**A confound found and resolved — the "kill the server" clause was then run properly.**
+The listener run *also* rebooted the device ~181 s in (`uptime_ms` dropped; no fresh
+coredump was written — the flash coredump is a stale `4160f1cb8` image, not raster1's
+`d663a6a58`, so the reboot was not a panic/abort). The accept-then-close listener is a
+half-open failure shape a real outage does not produce. So a second run used a **plain
+`systemctl stop` (real HTTP-502 outage, no listener)** for 210 s with a non-resetting
+USB serial logger attached. The boot ROM prints its banner on USB-JTAG at every reset;
+the serial log showed **only the baseline attach-reset banner
+(`rst:0x15 USB_UART_CHIP_RESET`) and no new banner during the outage window** — the
+device did **not** reboot under a genuine outage, stayed on the standalone clock, and
+reconnected on restore. Log: `plain-outage-serial.log`. Every device reset seen this
+session was either `USB_UART_CHIP_RESET` (my serial logger's control lines — the
+attach/detach-resets-the-board hazard, now confirmed by reason code) or the accept-close
+listener's induced reboot; none was a crash/watchdog/brownout and none occurred under a
+plain 502 outage.
+
+**Verdict.** V2 Task 8's "killing the server leaves the device retrying with visibly
+widening gaps rather than rebooting or spinning" is **satisfied on the shipping build**:
+widening intervals observed (listener run) and no reboot under a genuine outage (plain
+run). Two robustness/ops notes, neither a V2 blocker: (1) a peer that repeatedly accepts
+then closes the socket half-open can drive the device to reboot after ~3 min (~7
+attempts) — likely internal-RAM churn on repeated TLS setup; worth a follow-up but
+distinct from the normal outage path; (2) the device briefly displayed an apparently
+wrong wall-clock time during the outage (standalone clock ~6 h off real local) — the VM
+clock is NTP-synced and correct now, so glance at the TimeSync/offset path later.

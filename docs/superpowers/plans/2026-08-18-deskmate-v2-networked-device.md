@@ -1606,10 +1606,15 @@ retrying with visibly widening gaps rather than rebooting or spinning.
 >    *default* config (`config.origin: "defaults"`) and applies it on connect, so the
 >    panel correctly leaves the fallback and renders the server's clock card. Amend the
 >    expectation; do not change the code.
-> 4. **Killing the server — PARTIAL.** A ~65 s outage was survived with no reboot and
->    an unattended reconnect, but the *widening gaps* were only ever observed on the
->    diagnostic-console build (8.8 s → 13.6 s, against failing TLS). Not discharged on
->    the shipping build.
+> 4. **Killing the server — DISCHARGED on the shipping build (2026-09-06).** Earlier
+>    the *widening gaps* had only been seen on the diagnostic-console build (8.8 s →
+>    13.6 s). On 2026-09-06 they were observed on `v2.0.0-raster1` by timestamping the
+>    device's reconnect attempts at a bare listener bound to the server port: 3.1 → 5.1
+>    → 10.7 → 16.6 → 35.0 → 50.3 → 66.2 s, doubling to the 60 s cap. A separate plain
+>    `systemctl stop` outage (real 502, no listener) confirmed the device does **not**
+>    reboot under a genuine outage — it held the standalone clock for 210 s and
+>    reconnected. See board-notes "V2 Task 8 — widening-backoff observation on the
+>    shipping build, PASSED (2026-09-06)".
 >
 > Also note for anyone reading a boot log: `net_link_start()` runs before DHCP/DNS, so
 > the first attempts legitimately fail `ESP_ERR_ESP_TLS_CANNOT_RESOLVE_HOSTNAME` at

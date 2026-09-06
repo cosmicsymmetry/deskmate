@@ -114,18 +114,19 @@ only text naming a value ("LINK", "ADD A CARD", "WORKDAY").
 ┌─────────────────────────────────────────────────────────────┐
 │ ● Deskmate                                     ⚙ Settings   │  chrome
 ├──────────────────────────┬──────────────────────────────────┤
-│ ┌──────────────────────┐ │  Card library              6/8   │
+│ ┌──────────────────────┐ │  The loop      drag · ⌥ ← →  3/8 │
 │ │                      │ │  ┌────────┐┌────────┐┌────────┐  │
-│ │        17:24         │ │  │ 17:24  ││ 12:38  ││  18°   │  │  live tiles
-│ │   Wednesday 19 Aug   │ │  │ Desk   ││Deep work││Outside │  │
+│ │        17:24         │ │  │ 17:24  ││  18°   ││   3    │  │  live tiles,
+│ │   Wednesday 19 Aug   │ │  │ Desk   ││Outside ││Headline│  │  in loop order
 │ │                      │ │  └────────┘└────────┘└────────┘  │
-│ └──────────────────────┘ │  ─────────────────────────────   │
-│  WORKDAY      TIMED LOOP │  Digital clock         Remove    │
+│ └──────────────────────┘ │  ┌ + Add a card ┐                 │  the slot
+│  THE LOOP [Timed]Manual  │  ─────────────────────────────   │
+│           50 s   ▷ Play  │  Digital clock         Remove    │
 │         ╭─────╮          │  Name  [ Desk               ]    │
-│        │ 1:50 │          │  ─────────────────────────────   │
-│         ╰─────╯          │  What plays, and when      2/8   │
-│  ● Desk            45s   │  ─────────────────────────────   │
-│  ● Deep work       20s   │  Preferences                     │
+│        │ 2:30 │          │  Show seconds  [ ]               │
+│         ╰─────╯          │  Stays on the panel for [     ]  │
+│  ● Desk            50s   │                                  │
+│  ● Outside         50s   │                                  │
 ├──────────────────────────┴──────────────────────────────────┤
 │ Everything is up to date                    [Save to server] │  save bar
 └─────────────────────────────────────────────────────────────┘
@@ -146,13 +147,27 @@ only text naming a value ("LINK", "ADD A CARD", "WORKDAY").
   and update state beside it. When one of those turns bad the button carries a dot and
   the work column carries the sentence explaining it — so the sheet is a place to *go*,
   never a place where news can hide.
-- **Exactly one disclosure, and nothing else.** No tabs, no accordions, no drawer for
-  anything you touch more than twice. Everything the design is about — cards, the loop,
-  the panel — is on one surface, focused by luminance. This is what keeps the redesign
-  from being slower than what it replaced.
+- **The grid is the loop.** (2026-09-06, on owner direction.) There is no card library
+  and no playlist anywhere in the window: the complication tiles in the work column *are*
+  the loop, in loop order, and they are where the order changes — drag a tile, use the
+  earlier / later buttons that appear on hover, or ⌥ ← → on a focused tile. Adding a card
+  is one dashed slot at the end of the grid; the new card joins the loop at once. A tile
+  owns one fact, so dwell is never printed on it: the ring draws the proportion and the
+  card's editor edits it ("Stays on the panel for"). A card an older file left outside
+  the loop trails the others in the same grid, flagged `not in loop` (and `alerts` when
+  it still can), with one action, "Add to loop" — nothing plays that is not listed, and
+  nothing listed is silently inert. Schema v6 still carries `playlists[]` underneath;
+  the window exposes exactly one and never creates another.
+- **Exactly one disclosure for state, and one menu.** No tabs, no accordions, no drawer
+  for anything you touch more than twice. Everything the design is about — cards, the
+  loop, the panel — is on one surface, focused by luminance. This is what keeps the
+  redesign from being slower than what it replaced. The add-card slot's menu
+  (2026-09-06) is the one menu: it holds choices, never state, so nothing can hide in
+  it — and it exists because a plugin registry that grows must never reshape the
+  window. When that list is long enough to want search, it becomes a picker window.
 - **One card, one name — and the name says what the card is.** A card is identified by
-  its template on every surface: library tile, ring legend, playlist row, editor
-  heading, picker. The owner's own title rides beside it in quiet type, and is dropped
+  its template on every surface: loop tile, ring legend, editor heading, the add-card
+  menu. The owner's own title rides beside it in quiet type, and is dropped
   rather than repeated when none was typed. Two names for one object is the failure this
   rule prevents; a label that teaches a first-time reader nothing ("Outside", "Desk") is
   the failure it prevents second.
@@ -168,7 +183,7 @@ become permanently visible.
 ## Signature: the loop ring
 
 `src/components/LoopRing.tsx`. A 124px ring paired side by side with its legend, one arc
-per active-playlist entry, sweep proportional to that entry's resolved dwell, the
+per card in the loop, sweep proportional to that card's resolved dwell, the
 on-panel entry at full luminance with a marker riding its start, and the loop total in
 the centre at 1.75rem.
 
@@ -184,17 +199,20 @@ and any other consumer of loop length cannot drift apart.
 
 Two decisions worth keeping:
 
-- **Manual playlists get equal arcs.** With no dwell there is no proportion to encode, and
+- **A manual loop gets equal arcs.** With no dwell there is no proportion to encode, and
   a ring implying one would be inventing it.
-- **The ring displays; the legend beside it selects and reorders.** Dragging arcs around
-  a circle has no keyboard equivalent worth shipping, so the legend keeps drag, the arrow
-  buttons and the same Alt+Up/Down as the playlist editor.
+- **The ring displays; the legend beside it selects.** Reordering lives on the grid in
+  the work column (2026-09-06; it used to be here), so one order has exactly one place
+  to change it. Dragging arcs around a circle still has no keyboard equivalent worth
+  shipping.
 - **Arc colour spreads across the ramp**, `index / (count - 1)`, never `index % 4`. A
-  playlist holds up to eight entries, and two arcs sharing a colour would break the only
+  loop holds up to eight cards, and two arcs sharing a colour would break the only
   mapping there is from an arc back to its name.
 - **The whole ring, its legend and its transport fit above the save bar at 1060×740**,
   the app's real default window. The transport lives in the loop's head row for exactly
-  this reason. Anything added here has to pay for itself out of that budget.
+  this reason, and so does the pacing control (Timed / Manual and the default dwell),
+  which replaced the "TIMED LOOP" label rather than adding to the row. Anything added
+  here has to pay for itself out of that budget.
 
 ## Icons
 

@@ -7,7 +7,9 @@ import type {
   Playlist,
   ValidationIssue,
 } from "./types";
-import { MAX_PLAYLIST_ENTRIES, MAX_PLAYLISTS } from "./types";
+import { MAX_PLAYLIST_ENTRIES } from "./types";
+
+export const MAX_CARDS = 8;
 
 export function copyConfig(config: AppConfig): AppConfig {
   return {
@@ -62,8 +64,8 @@ export function cardName(card: CardSettings): string {
 }
 
 /**
- * What a card is called on every surface that identifies one: the library tile, the
- * ring legend, the playlist row, the editor heading, the picker.
+ * What a card is called on every surface that identifies one: the loop tile, the
+ * ring legend, the editor heading, the picker.
  *
  * It is the template's name, not the owner's title, by explicit owner direction: a
  * person meeting a card called "Outside" or "Desk" for the first time learns nothing
@@ -114,17 +116,25 @@ function nextId(prefix: string, used: Set<string>): string {
   return `${prefix}-${suffix}`;
 }
 
-/// Appends a new card with sane defaults for its kind. Supports all six card
-/// kinds — weather, JSON feed and RSS are reachable here, not just
-/// clock/pomodoro/calendar. A new card starts in the library; playlist
-/// membership is an explicit, separate edit.
+/// Appends a new card with sane defaults for its kind and enrols it at the end
+/// of the active loop in the same draft. Supports all six built-in card kinds.
+/// Both v6 limits are checked before either collection changes, so adding is
+/// atomic even when a legacy card outside the loop has filled only one limit.
 export function addCard(
   config: AppConfig,
   kind: AddableCardKind,
 ): {
   config: AppConfig;
-  cardId: string;
+  cardId: string | null;
 } {
+  const playlist = activePlaylist(config);
+  if (
+    config.cards.length >= MAX_CARDS ||
+    !playlist ||
+    playlist.entries.length >= MAX_PLAYLIST_ENTRIES
+  ) {
+    return { config, cardId: null };
+  }
   const used = new Set(config.cards.map((card) => card.id));
   const cardId = nextId(kind, used);
   const common = {
@@ -218,7 +228,8 @@ export function addCard(
   // path (every pre-existing card in the returned draft would alias the live snapshot's
   // card objects instead of being an independent copy).
   const copied = copyConfig(config);
-  return { config: { ...copied, cards: [...copied.cards, card] }, cardId };
+  const withCard = { ...copied, cards: [...copied.cards, card] };
+  return { config: addEntry(withCard, playlist.id, cardId), cardId };
 }
 
 export function updateWidget(
@@ -254,76 +265,31 @@ export function libraryCards(config: AppConfig): CardSettings[] {
   return config.cards;
 }
 
-export function cardsOutsidePlaylist(config: AppConfig, playlistId: string): CardSettings[] {
-  const playlist = config.playlists.find((candidate) => candidate.id === playlistId);
+export interface LoopEntry {
+  index: number;
+  entry: Playlist["entries"][number];
+  card: CardSettings | null;
+}
+
+/** Active-loop entries in document order, including unresolved card references. */
+export function loopEntries(config: AppConfig): LoopEntry[] {
+  const playlist = activePlaylist(config);
+  if (!playlist) {
+    return [];
+  }
+  const cards = new Map(config.cards.map((card) => [card.id, card]));
+  return playlist.entries.map((entry, index) => ({
+    index,
+    entry,
+    card: cards.get(entry.card_id) ?? null,
+  }));
+}
+
+/** Library cards with no entry in the active loop. Inactive playlists do not count. */
+export function cardsOutsideLoop(config: AppConfig): CardSettings[] {
+  const playlist = activePlaylist(config);
   const used = new Set(playlist?.entries.map((entry) => entry.card_id) ?? []);
   return config.cards.filter((card) => !used.has(card.id));
-}
-
-function slugifyPlaylistName(name: string): string {
-  const slug = name
-    .normalize("NFKD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-  return slug || "playlist";
-}
-
-export function addPlaylist(config: AppConfig, name: string): AppConfig {
-  const trimmedName = name.trim();
-  if (!trimmedName || config.playlists.length >= MAX_PLAYLISTS) {
-    return config;
-  }
-  const id = nextId(
-    slugifyPlaylistName(trimmedName),
-    new Set(config.playlists.map((playlist) => playlist.id)),
-  );
-  return {
-    ...config,
-    playlists: [
-      ...config.playlists,
-      { id, name: trimmedName, advance: { kind: "manual" }, entries: [] },
-    ],
-  };
-}
-
-export function renamePlaylist(config: AppConfig, playlistId: string, name: string): AppConfig {
-  const trimmedName = name.trim();
-  const index = config.playlists.findIndex((playlist) => playlist.id === playlistId);
-  if (index < 0 || !trimmedName || config.playlists[index].name === trimmedName) {
-    return config;
-  }
-  return {
-    ...config,
-    playlists: config.playlists.map((playlist, playlistIndex) =>
-      playlistIndex === index ? { ...playlist, name: trimmedName } : playlist,
-    ),
-  };
-}
-
-export function removePlaylist(config: AppConfig, playlistId: string): AppConfig {
-  const index = config.playlists.findIndex((playlist) => playlist.id === playlistId);
-  if (index < 0 || config.playlists.length <= 1) {
-    return config;
-  }
-  const playlists = config.playlists.filter((playlist) => playlist.id !== playlistId);
-  return {
-    ...config,
-    playlists,
-    active_playlist_id:
-      config.active_playlist_id === playlistId ? playlists[0].id : config.active_playlist_id,
-  };
-}
-
-export function setActivePlaylist(config: AppConfig, playlistId: string): AppConfig {
-  if (
-    config.active_playlist_id === playlistId ||
-    !config.playlists.some((playlist) => playlist.id === playlistId)
-  ) {
-    return config;
-  }
-  return { ...config, active_playlist_id: playlistId };
 }
 
 function replacePlaylist(
@@ -433,7 +399,19 @@ export function setPlaylistAdvance(
   playlistId: string,
   advance: CarouselAdvance,
 ): AppConfig {
-  return replacePlaylist(config, playlistId, (playlist) => ({ ...playlist, advance }));
+  return replacePlaylist(config, playlistId, (playlist) => {
+    if (playlist.advance.kind === "manual" && advance.kind === "manual") {
+      return playlist;
+    }
+    if (
+      playlist.advance.kind === "timed" &&
+      advance.kind === "timed" &&
+      playlist.advance.default_dwell_seconds === advance.default_dwell_seconds
+    ) {
+      return playlist;
+    }
+    return { ...playlist, advance };
+  });
 }
 
 /// Total time for one pass through a playlist, in seconds, inheriting that
@@ -602,8 +580,8 @@ export function cardsContainerIssues(issues: ValidationIssue[]): ValidationIssue
 /// Every issue an existing surface already claims and renders: the cards container
 /// banner (`cardsContainerIssues`), each card's own row-scoped issues (`issuesForCard`,
 /// checked for every card in the draft — not just whichever one is currently selected,
-/// since selection is a UI-only concern this must not depend on), playlist surfaces,
-/// and the timezone field. Returns the actual issue objects (by
+/// since selection is a UI-only concern this must not depend on), the active loop's
+/// entries and pacing control, and the timezone field. Returns the actual issue objects (by
 /// reference into `issues`) rather than paths, so `unclaimedIssues` can compute an exact
 /// set difference without re-deriving path-matching rules of its own.
 function claimedIssues(issues: ValidationIssue[], config: AppConfig): ValidationIssue[] {
@@ -617,8 +595,15 @@ function claimedIssues(issues: ValidationIssue[], config: AppConfig): Validation
   for (const card of config.cards) {
     claim(issuesForCard(issues, config, card.id));
   }
-  claim(issuesForPath(issues, "playlists"));
-  claim(issuesForPath(issues, "active_playlist_id"));
+  const activeIndex = config.playlists.findIndex(
+    (playlist) => playlist.id === config.active_playlist_id,
+  );
+  // An unresolved `active_playlist_id` has no in-app recovery and is unreachable
+  // through this UI: the store rejects such a file before the app can load it.
+  if (activeIndex >= 0) {
+    claim(issuesForPath(issues, `playlists[${activeIndex}].entries`));
+    claim(issuesForPath(issues, `playlists[${activeIndex}].advance`));
+  }
   claim(issuesForPath(issues, "preferences.timezone"));
   return [...claimed];
 }
@@ -689,7 +674,7 @@ export function issuesForField(cardIssues: ValidationIssue[], field: string): Va
 
 /// A plain-language statement of what tapping this card does, for the
 /// editor's gesture disclosure. Three gestures share one physical screen —
-/// tap runs the card's own action, swipe navigates the active playlist, and a tap
+/// tap runs the card's own action, swipe moves through the loop, and a tap
 /// while an alert is showing dismisses it instead — and nothing else in the
 /// app states this, so the editor is where a person can find out what their
 /// tap will actually do before they rely on it.
@@ -735,10 +720,10 @@ export function cardMoveFromKey(key: string, altKey: boolean): -1 | 0 | 1 {
   if (!altKey) {
     return 0;
   }
-  if (key === "ArrowUp") {
+  if (key === "ArrowUp" || key === "ArrowLeft") {
     return -1;
   }
-  if (key === "ArrowDown") {
+  if (key === "ArrowDown" || key === "ArrowRight") {
     return 1;
   }
   return 0;
@@ -748,7 +733,7 @@ export function firstSelectableCard(config: AppConfig): string | null {
   return config.cards[0]?.id ?? null;
 }
 
-/// The first-run checklist is about the library/playlist workflow and never
+/// The first-run checklist is about the one-loop workflow and never
 /// demands any specific card kind. The caller supplies whether the current
 /// draft has been saved.
 export function firstRunSteps(
@@ -756,11 +741,7 @@ export function firstRunSteps(
   saved: boolean,
 ): { label: string; done: boolean }[] {
   return [
-    { label: "Add a card to your library", done: config.cards.length > 0 },
-    {
-      label: "Add it to a playlist",
-      done: config.playlists.some((playlist) => playlist.entries.length > 0),
-    },
+    { label: "Add a card", done: config.cards.length > 0 },
     { label: "Save your settings", done: saved },
   ];
 }

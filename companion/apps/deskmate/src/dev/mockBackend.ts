@@ -82,10 +82,19 @@ function applyScenario() {
       };
       break;
     case "firstrun":
+      // A real first run is `AppConfig::default()`: one clock, already in the loop. The
+      // only step left is saving.
       config = {
         ...mockConfig(),
         cards: [mockConfig().cards[0]],
-        playlists: [{ id: "day", name: "Workday", advance: { kind: "manual" }, entries: [] }],
+        playlists: [
+          {
+            id: "day",
+            name: "Workday",
+            advance: { kind: "manual" },
+            entries: [{ card_id: mockConfig().cards[0].id, dwell_seconds: null }],
+          },
+        ],
       };
       snapshot = mockSnapshot(config);
       snapshot.has_saved_config = false;

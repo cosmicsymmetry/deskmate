@@ -1,8 +1,10 @@
 import {
+  activePlaylist,
   cardLabel,
   cardTitle,
   issuesForField,
   numberValue,
+  setEntryDwell,
   tapActionDescription,
 } from "../lib/configDraft";
 import { providerTrouble } from "../lib/providers";
@@ -10,6 +12,7 @@ import { FieldIssues } from "./FieldIssues";
 import { Icon } from "./Icon";
 import type {
   AlertHold,
+  AppConfig,
   CardAlert,
   CardError,
   CardSettings,
@@ -25,11 +28,15 @@ const MAX_RSS_ITEMS = 5;
 
 interface CardEditorProps {
   card: CardSettings | null;
+  config: AppConfig;
   /// Already scoped to this card by the caller via `issuesForCard` —
   /// CardEditor never resolves a card index itself, which is what makes
   /// dragging a card in the list safe: there is no stale index here for a
   /// reorder to invalidate.
   issues: ValidationIssue[];
+  /// Issues scoped to this card's active-loop entry. Empty for a card outside
+  /// the loop, where no dwell field is rendered.
+  entryIssues: ValidationIssue[];
   /// A typed device refusal for this card's last data or scene update.
   cardError: CardError | null;
   pomodoro: PomodoroSnapshot | null;
@@ -40,6 +47,7 @@ interface CardEditorProps {
   filePickerBusy: boolean;
   providerRefreshing: boolean;
   onChange: (card: CardSettings) => void;
+  onConfigChange: (config: AppConfig) => void;
   onRemove: () => void;
   onTimerAction: (action: "start" | "pause" | "reset") => void;
   onChooseCalendarFile: () => void;
@@ -97,7 +105,9 @@ function HoldSelector({
 
 export function CardEditor({
   card,
+  config,
   issues,
+  entryIssues,
   cardError,
   pomodoro,
   provider,
@@ -105,6 +115,7 @@ export function CardEditor({
   filePickerBusy,
   providerRefreshing,
   onChange,
+  onConfigChange,
   onRemove,
   onTimerAction,
   onChooseCalendarFile,
@@ -129,6 +140,15 @@ export function CardEditor({
   const fieldIssues = (field: string) => issuesForField(issues, field);
   const trouble = providerTrouble(provider);
   const setAlert = (alert: CardAlert) => onChange({ ...card, alert });
+  const playlist = activePlaylist(config);
+  const entryIndex = playlist?.entries.findIndex((entry) => entry.card_id === card.id) ?? -1;
+  const entry = entryIndex >= 0 ? playlist?.entries[entryIndex] : undefined;
+  const isTimed = playlist?.advance.kind === "timed";
+  const title = cardTitle(card);
+  const controlName = title ? `${cardLabel(card)} — ${title}` : cardLabel(card);
+  const dwellIssues = entryIssues.filter((issue) => issue.path.endsWith(".dwell_seconds"));
+  const showDwell =
+    entry !== undefined && (isTimed || entry.dwell_seconds !== null || dwellIssues.length > 0);
 
   return (
     <section className="panel" aria-labelledby="editor-heading">
@@ -618,11 +638,47 @@ export function CardEditor({
           </fieldset>
         )}
 
+        {showDwell && playlist && entry && (
+          <label className="field">
+            <span>Stays on the panel for</span>
+            <input
+              type="number"
+              className="numeral"
+              inputMode="numeric"
+              min={5}
+              max={3600}
+              step={1}
+              value={entry.dwell_seconds ?? ""}
+              placeholder={
+                playlist.advance.kind === "timed"
+                  ? `${playlist.advance.default_dwell_seconds} s, the loop's default`
+                  : undefined
+              }
+              aria-label={`Stays on the panel for ${controlName}`}
+              aria-invalid={dwellIssues.length > 0}
+              onChange={(event) =>
+                onConfigChange(
+                  setEntryDwell(
+                    config,
+                    playlist.id,
+                    entryIndex,
+                    event.currentTarget.value === ""
+                      ? null
+                      : numberValue(event.currentTarget.value),
+                  ),
+                )
+              }
+            />
+            {!isTimed && <small>Dwell applies when the loop is timed.</small>}
+            <FieldIssues issues={dwellIssues} />
+          </label>
+        )}
+
         <div className="gesture-note">
           <p>{tapActionDescription(card)}</p>
           <p>
-            Swiping the screen moves through the active playlist. While an alert is on screen, a tap
-            dismisses it instead of performing the card's usual tap action.
+            Swiping the screen moves through the loop. While an alert is on screen, a tap dismisses
+            it instead of performing the card's usual tap action.
           </p>
         </div>
       </div>

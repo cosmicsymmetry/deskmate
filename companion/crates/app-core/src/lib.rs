@@ -7,7 +7,7 @@ pub mod render_negotiation;
 pub mod runtime;
 pub mod scene_build;
 mod scheduler;
-mod secure_file;
+pub mod secure_file;
 pub mod state;
 pub mod store;
 

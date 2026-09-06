@@ -10,13 +10,13 @@ use atomic_write_file::unix::OpenOptionsExt as AtomicOpenOptionsExt;
 use std::os::unix::fs::{OpenOptionsExt as UnixOpenOptionsExt, PermissionsExt};
 
 #[derive(Debug)]
-pub(crate) enum BoundedReadError {
+pub enum BoundedReadError {
     Io(FileIoError),
     TooLarge { maximum: usize },
 }
 
 #[derive(Debug)]
-pub(crate) struct FileIoError {
+pub struct FileIoError {
     pub operation: FileOperation,
     pub source: io::Error,
 }
@@ -28,7 +28,7 @@ impl FileIoError {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(crate) enum FileOperation {
+pub enum FileOperation {
     CreateDirectory,
     Open,
     Read,
@@ -55,10 +55,7 @@ impl FileOperation {
     }
 }
 
-pub(crate) fn read_bounded(
-    path: &Path,
-    maximum: usize,
-) -> Result<Option<Vec<u8>>, BoundedReadError> {
+pub fn read_bounded(path: &Path, maximum: usize) -> Result<Option<Vec<u8>>, BoundedReadError> {
     read_bounded_with_mode_repair(path, maximum, secure_open)
 }
 
@@ -96,7 +93,7 @@ pub(crate) fn read_bounded_with_mode_repair(
     }
 }
 
-pub(crate) fn usable_parent(path: &Path) -> Option<&Path> {
+pub fn usable_parent(path: &Path) -> Option<&Path> {
     let parent = path.parent()?;
     if parent.as_os_str().is_empty() {
         Some(Path::new("."))
@@ -105,14 +102,14 @@ pub(crate) fn usable_parent(path: &Path) -> Option<&Path> {
     }
 }
 
-pub(crate) fn create_directory(path: &Path) -> Result<(), FileIoError> {
+pub fn create_directory(path: &Path) -> Result<(), FileIoError> {
     fs::create_dir_all(path).map_err(|source| FileIoError {
         operation: FileOperation::CreateDirectory,
         source,
     })
 }
 
-pub(crate) fn write_and_replace(target: &Path, bytes: &[u8]) -> Result<(), FileIoError> {
+pub fn write_and_replace(target: &Path, bytes: &[u8]) -> Result<(), FileIoError> {
     let mut options = AtomicWriteFile::options();
     secure_atomic_options(&mut options);
     let mut file = options.open(target).map_err(|source| FileIoError {
@@ -153,7 +150,7 @@ fn secure_atomic_options(options: &mut atomic_write_file::OpenOptions) {
 fn secure_atomic_options(_options: &mut atomic_write_file::OpenOptions) {}
 
 #[cfg(unix)]
-pub(crate) fn sync_parent(parent: &Path) -> Result<(), FileIoError> {
+pub fn sync_parent(parent: &Path) -> Result<(), FileIoError> {
     File::open(parent)
         .and_then(|directory| directory.sync_all())
         .map_err(|source| FileIoError {
@@ -163,6 +160,6 @@ pub(crate) fn sync_parent(parent: &Path) -> Result<(), FileIoError> {
 }
 
 #[cfg(not(unix))]
-pub(crate) fn sync_parent(_parent: &Path) -> Result<(), FileIoError> {
+pub fn sync_parent(_parent: &Path) -> Result<(), FileIoError> {
     Ok(())
 }

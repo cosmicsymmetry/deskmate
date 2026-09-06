@@ -1,9 +1,5 @@
 //! Encrypted-at-rest storage for per-integration OAuth secrets (spec §1.1, §6).
 //! Server-crate only; never depended on by `app-core`.
-#![allow(
-    dead_code,
-    reason = "these primitives are wired into the store by later foundation tasks"
-)]
 
 use app_core::secure_file;
 use base64::prelude::{BASE64_STANDARD, Engine as _};
@@ -352,6 +348,53 @@ pub fn acquire_key_from_env(config_dir: &Path) -> Result<SecretsKey, KeyError> {
     acquire_key(config_dir, keyfile.as_deref(), inline.as_deref())
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum StartupError {
+    #[error(
+        "a secrets key is required: set {ENV_KEY_FILE} (preferred) or {ENV_KEY} before starting"
+    )]
+    KeyRequired,
+    #[error(
+        "{SECRETS_STORE_FILE} exists but no secrets key is configured; refusing to start. \
+         Set {ENV_KEY_FILE} to the keyfile that decrypts it (spec fail-closed rule)"
+    )]
+    KeyRequiredForExistingSecrets,
+    #[error("secrets key error: {0}")]
+    Key(#[source] KeyError),
+    #[error("secrets store error: {0}")]
+    Store(#[source] SecretsError),
+}
+
+/// Opens the integration store from an injected key result, applying the
+/// fail-closed startup rule (spec §1.1). A missing key when a `secrets.enc`
+/// already exists is the emphatic refusal; a missing key with no file yet is
+/// still an error, because integrations cannot function without one and a
+/// "works until you connect an account" failure is worse.
+pub fn open_integration_store_with(
+    config_dir: &Path,
+    key: Result<SecretsKey, KeyError>,
+) -> Result<IntegrationStore, StartupError> {
+    let secrets_path = config_dir.join(SECRETS_STORE_FILE);
+    let key = match key {
+        Ok(key) => key,
+        Err(KeyError::NotConfigured) => {
+            return Err(if secrets_path.exists() {
+                StartupError::KeyRequiredForExistingSecrets
+            } else {
+                StartupError::KeyRequired
+            });
+        }
+        Err(other) => return Err(StartupError::Key(other)),
+    };
+    IntegrationStore::open(secrets_path, key).map_err(StartupError::Store)
+}
+
+/// Production entry point: reads the key from the environment (Task 3), then
+/// applies [`open_integration_store_with`].
+pub fn open_integration_store(config_dir: &Path) -> Result<IntegrationStore, StartupError> {
+    open_integration_store_with(config_dir, acquire_key_from_env(config_dir))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -641,5 +684,47 @@ mod tests {
             .mode()
             & 0o777;
         assert_eq!(mode, 0o600);
+    }
+
+    #[test]
+    fn startup_fails_closed_when_key_missing_and_secrets_exist() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(SECRETS_STORE_FILE);
+        // Materialize a real sealed secrets file first.
+        IntegrationStore::open(path, test_key(21))
+            .expect("open")
+            .put("id".to_string(), sample_secret())
+            .expect("put");
+
+        let result = open_integration_store_with(dir.path(), Err(KeyError::NotConfigured));
+        assert!(matches!(
+            result,
+            Err(StartupError::KeyRequiredForExistingSecrets)
+        ));
+    }
+
+    #[test]
+    fn startup_requires_a_key_even_with_no_secrets_yet() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let result = open_integration_store_with(dir.path(), Err(KeyError::NotConfigured));
+        assert!(matches!(result, Err(StartupError::KeyRequired)));
+    }
+
+    #[test]
+    fn startup_propagates_a_concrete_key_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let result =
+            open_integration_store_with(dir.path(), Err(KeyError::WrongLength { got: 10 }));
+        assert!(matches!(
+            result,
+            Err(StartupError::Key(KeyError::WrongLength { got: 10 }))
+        ));
+    }
+
+    #[test]
+    fn startup_opens_the_store_with_a_valid_key() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = open_integration_store_with(dir.path(), Ok(test_key(22))).expect("store opens");
+        assert!(store.integration_ids().is_empty());
     }
 }

@@ -26,6 +26,7 @@ pub mod plugin_registry;
 mod rasterizer;
 pub mod registry;
 pub mod runtime_device;
+pub mod secrets;
 mod store;
 
 use std::collections::HashMap;

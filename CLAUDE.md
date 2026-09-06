@@ -517,8 +517,16 @@ of letting code and documentation diverge.
   review is `docs/security/v1-review.md`. The hands-on install matrix passed
   (results table in the plan, recorded 2026-08-17); it surfaced and fixed one
   defect — the settings window auto-opened on every launch and now auto-opens
-  on first run only (`fc3750b`). All V1-exit items are closed; declaring V1
-  exit (tag, V2 brainstorm) awaits explicit user authorization. No tags exist.
+  on first run only (`fc3750b`). **V1 and V2 are EXITED and TAGGED by explicit owner
+  direction on 2026-09-06:** `v1` (lightweight) at `7abd496` (all V1-exit items closed),
+  `v2` (lightweight) at `fdf85ba` (the verified networked-device state, which predates and
+  excludes the later `feat/one-loop` merge). V2 was declared exited with three hardware
+  observations deferred — not observed, and by owner direction not exit blockers: Task 9
+  tap latency, the BUSY/OTA-owner refusal (the panel-owned-with-link-alive window between
+  `ota.c:554` and `:595` is sub-millisecond, externally unhittable without a firmware
+  test-hook), and the §6 96 px glyph-cache timing (internal LVGL-task timing, needs
+  instrumentation). Tags `m0`/`m1`/`v1`/`v2` now exist; later milestones remain untagged
+  without that authorization. Next milestone is V3 (server host).
 - **Clock faces carry no title chip and no `DATE` eyebrow** (delivered 2026-08-17; spec
   `docs/superpowers/specs/2026-08-17-deskmate-clock-title-removal-design.md`, plan
   `docs/superpowers/plans/2026-08-17-deskmate-clock-title-removal.md`). All three clock

@@ -76,7 +76,7 @@ pub enum SecretsError {
 
 /// One integration's stored credentials. `deny_unknown_fields` so a format drift
 /// is a loud decode error, not a silent dropped field.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct IntegrationSecret {
     /// The identity provider, e.g. `"google"`.
@@ -90,6 +90,20 @@ pub struct IntegrationSecret {
     pub scopes: Vec<String>,
     /// Unix seconds when these credentials were obtained.
     pub obtained_at: i64,
+}
+
+impl std::fmt::Debug for IntegrationSecret {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let client_secret = self.client_secret.as_ref().map(|_| "<redacted>");
+        formatter
+            .debug_struct("IntegrationSecret")
+            .field("provider", &self.provider)
+            .field("refresh_token", &"<redacted>")
+            .field("client_secret", &client_secret)
+            .field("scopes", &self.scopes)
+            .field("obtained_at", &self.obtained_at)
+            .finish()
+    }
 }
 
 /// Encrypted-at-rest map of `integration_id -> IntegrationSecret`. Cheap to share
@@ -463,6 +477,20 @@ mod tests {
     }
 
     #[test]
+    fn acquire_key_does_not_fall_back_when_the_keyfile_fails_to_load() {
+        use base64::prelude::{BASE64_STANDARD, Engine as _};
+        let config = tempfile::tempdir().expect("config dir");
+        let keydir = tempfile::tempdir().expect("key dir");
+        let keyfile = keydir.path().join("secrets.key");
+        write_keyfile(&keyfile, &BASE64_STANDARD.encode([7u8; 16]), 0o600);
+
+        assert!(matches!(
+            acquire_key(config.path(), Some(&keyfile), Some(&valid_key_base64())),
+            Err(KeyError::WrongLength { got: 16 })
+        ));
+    }
+
+    #[test]
     fn acquire_key_rejects_a_keyfile_inside_the_config_dir() {
         let config = tempfile::tempdir().expect("config dir");
         let keyfile = config.path().join("secrets.key");
@@ -587,6 +615,16 @@ mod tests {
             scopes: vec!["https://www.googleapis.com/auth/calendar.events.readonly".to_string()],
             obtained_at: 1_725_600_000,
         }
+    }
+
+    #[test]
+    fn debug_redacts_integration_secret_credentials() {
+        let debug = format!("{:?}", sample_secret());
+
+        assert!(debug.contains("provider"));
+        assert!(debug.contains("google"));
+        assert!(!debug.contains("super-secret-refresh-token-value"));
+        assert!(!debug.contains("client-secret-value"));
     }
 
     #[test]

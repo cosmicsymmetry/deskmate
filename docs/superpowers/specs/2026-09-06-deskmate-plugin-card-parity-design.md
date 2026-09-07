@@ -220,7 +220,7 @@ Nothing new reaches the device.
 | Local tier | `needs the server` flag, value "—" | "Plugin cards render on the server" | Plugin field read-only, "Needs the server to render" |
 | Networked, server unreachable | last projection kept; one notice in the work column | last frame kept; state word if none | catalog from last fetch; Retry |
 | Plugin not on the server | `not on the server` flag | server's message | selected-but-invalid option |
-| Waiting for first refresh | "—", no flag | "No data yet" badge | — |
+| Waiting for first refresh | "—", no flag | "Waiting for the first refresh" | — |
 | Provider stale / error | `stale` flag, trouble line, Refresh disabled with the reason "refreshes on the server" | frame with the footer the panel shows | same trouble line |
 
 Every validation issue stays claimed by a surface: `cards[i].plugin_id` moves from the
@@ -253,6 +253,22 @@ tile-only fallback to the editor's Plugin field (and stays on the tile).
 2. Mac app second. No schema bump, so no lockstep is required beyond the preview route.
 3. Docs in the same change: `docs/plugins/manifest-v2.md` amendment, PRODUCT.md's
    preview positioning and objects, DESIGN.md's naming bullet, CLAUDE.md state.
+
+## 10a. Corrections made while planning (2026-09-07)
+
+Two facts checked against the code changed a sentence each; both are folded into the
+plan and into §5.2/§6.5/§8 above.
+
+- **The waiting state prints a word, not the "No data yet" badge.** The badge means "a
+  real frame, rendered from sample data"; a plugin card waiting for its first refresh has
+  no frame at all, so `render_card_preview` returns `png_base64: null, sample: false,
+  state: "Waiting for the first refresh"` and the stage prints that sentence. §5.2's
+  earlier "maps `waiting` to `sample: true`" is superseded.
+- **The new `hero` field is safe on the wire, and this was verified rather than assumed.**
+  A plugin card's wire template is `DigitalClock`, whose firmware registry declares only
+  `title`, `show_seconds`, `stale` and `error`. `firmware/main/core/template_fields.h`
+  states that unknown fields are ignored, so the device silently drops `hero` and no
+  device-side change is needed. The plan records this as a comment beside the test.
 
 ## 11. Open question for the owner
 

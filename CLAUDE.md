@@ -1055,6 +1055,17 @@ of letting code and documentation diverge.
   the `esp_lvgl_port` display config, including for 90°/270° software rotation.
 - Firmware is ESP-IDF 5.x/C with LVGL 9. Host tooling is Rust per the design spec.
 
+- **`feat/display-brightness` is a DEAD BRANCH kept only for reference; do not rebase it.**
+  Two commits (`fb159f3`, `dd248c6`, 2026-08-23) add a display-brightness setting: a config
+  bump its own commit message calls "schema v6", a `brightness` field on the `ApplyConfig`
+  wire contract, firmware decode, and regenerated protocol fixtures. The name collides
+  with the **real** v6, which is the plugin card kind and shipped instead. Reviving the
+  feature therefore is not a rebase: it needs a fresh schema bump (v7), a wire change,
+  a firmware change, and — because it moves firmware statics — an on-board OTA download
+  re-verification. Treat the branch as a design sketch of what brightness would cost, and
+  plan it as new work if it is ever wanted. Its worktree was removed 2026-09-09; the
+  branch itself is retained.
+
 ## Working agreement
 
 - Start by reading this file, checking `git status`, and reading the roadmap, active

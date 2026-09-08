@@ -52,3 +52,17 @@ To find dependencies that require specific target platforms, try to use option `
 ```
 
 The GTK3/GLib crates remain in `Cargo.lock` because Tauri, Tao, Wry, WebKitGTK, dialog, and tray dependencies use them on Linux. Neither `gtk` nor `glib` is in the `aarch64-apple-darwin` dependency graph, so those warnings do not affect the macOS-only V1 artifact. They must be resolved or re-triaged before Deskmate adds Linux support.
+
+## First-party findings (not dependency advisories)
+
+Everything above is dependency triage from the V1 audit. This section is the index of
+defects found in **Deskmate's own code**, so this file remains the one blocking triage
+record CLAUDE.md points at. Full analysis for both entries below lives in
+`docs/security/stage5-plugin-upload-risk-review.md` (R2); they were found while reviewing
+stage 5's threat model, but **both are present in the curated path today** and neither
+depends on stage 5 happening.
+
+| Found | Where | Finding | Exploitable today? | Status |
+|---|---|---|---|---|
+| 2026-09-09 | `firmware/main/ui/scene_view.c:780` (`build_image`) | The durable image-asset path validates the asset kind, and that the blob is longer than an `lv_image_header_t` — but never that the header's own `w * h * bpp` fits inside `data_size`. The node's scene bounds limit the box that is *drawn*, not the buffer LVGL *walks*, so an undersized payload with an oversized header is an out-of-bounds read. The **volatile** raster path is not affected: `volatile_asset_store.c:104-124` pins `total_length` to exactly one canonical frame. | **No.** Durable assets reach the device only from the server that owns it, and every curated blob is produced by the canonical encoder. It is a missing invariant, not a live vulnerability. | **Open, deliberately deferred.** The fix is firmware C, so it must ride a firmware wave and be re-verified with an on-board OTA download check (this repo has twice lost days to memory-layout shifts with every test green). Fixing it in isolation would create exactly the hardware debt it is meant to avoid. It also violates CLAUDE.md's own standing rule — "treat all bytes received from the host as untrusted: bound lengths and counts" — so it should not wait indefinitely. |
+| 2026-09-09 | `companion/crates/server/src/egress.rs:470-475` + `companion/crates/plugin/src/manifest.rs:87` | A plugin's declared source URL is pinned to `https` at parse time, but every redirect hop is re-validated through `egress_guard`, which accepts `http` as well. An `https` source can therefore redirect the fetch into cleartext. | **Marginally.** Curated sources do not redirect. It matters because one curated feed (`claude-limits`) carries a capability token in its URL path, which a downgraded hop would put on the wire in the clear. | **FIXED 2026-09-09** — a redirect may no longer downgrade the scheme; see the commit and its test. |

@@ -749,6 +749,7 @@ async fn fetch_inner(url: &str, resolver: &impl HopResolver) -> Result<FetchResp
             let next = current
                 .join(location)
                 .map_err(|error| EgressError::BadRedirect(error.to_string()))?;
+            deny_scheme_downgrade(&current, &next)?;
             // Re-run the full guard (scheme + literal-IP deny check) on the
             // redirect target: a permitted host can redirect to
             // 169.254.169.254, and this is what catches that.
@@ -760,6 +761,27 @@ async fn fetch_inner(url: &str, resolver: &impl HopResolver) -> Result<FetchResp
         let body = read_capped_body(response).await?;
         return Ok(FetchResponse { status, body });
     }
+}
+
+/// Refuses a redirect that walks an `https` fetch down onto `http`.
+///
+/// `egress_guard` deliberately accepts both schemes, because a plugin may name an
+/// `http` feed and that is its own choice. What it cannot express is that a fetch
+/// which *started* encrypted must stay encrypted: the manifest parser pins a
+/// plugin's declared source to `https` (`plugin::manifest::ALLOWED_URL_SCHEME`),
+/// and without this check a single `Location: http://...` silently undoes that pin
+/// for every remaining hop. One curated feed carries a capability token in its URL
+/// path, so a downgraded hop puts a credential on the wire in the clear.
+///
+/// Upgrades (`http` -> `https`) and same-scheme hops are unaffected.
+fn deny_scheme_downgrade(current: &Url, next: &Url) -> Result<(), EgressError> {
+    if current.scheme() == "https" && next.scheme() != "https" {
+        return Err(EgressError::BadRedirect(format!(
+            "refusing to downgrade an https fetch to {}",
+            next.scheme()
+        )));
+    }
+    Ok(())
 }
 
 async fn read_capped_body(mut response: reqwest::Response) -> Result<Vec<u8>, EgressError> {
@@ -791,6 +813,28 @@ mod tests {
     enum AddressCase {
         Url(&'static str),
         Ip(&'static str),
+    }
+
+    /// A redirect must not walk an encrypted fetch down onto cleartext. Every
+    /// plugin's declared source is pinned to `https` at parse time, and this is what
+    /// keeps that pin true for the rest of the chain -- `egress_guard` itself
+    /// accepts `http`, so it will never catch a downgrade on its own.
+    #[test]
+    fn a_redirect_may_not_downgrade_https_to_http() {
+        let secure = Url::parse("https://feeds.example/data.json").expect("url");
+        let cleartext = Url::parse("http://feeds.example/data.json").expect("url");
+
+        let error =
+            deny_scheme_downgrade(&secure, &cleartext).expect_err("https -> http must be refused");
+        assert!(
+            matches!(&error, EgressError::BadRedirect(detail) if detail.contains("downgrade")),
+            "unexpected error: {error}"
+        );
+
+        // The three hops that are not downgrades all stay allowed.
+        deny_scheme_downgrade(&secure, &secure).expect("https -> https is fine");
+        deny_scheme_downgrade(&cleartext, &secure).expect("http -> https is an upgrade");
+        deny_scheme_downgrade(&cleartext, &cleartext).expect("http -> http is the caller's choice");
     }
 
     #[test]

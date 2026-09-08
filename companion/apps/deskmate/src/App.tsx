@@ -387,6 +387,7 @@ export function App() {
           <LoopRing
             config={draft}
             issues={issues}
+            catalog={null}
             selectedCardId={selectedCardId}
             onSelect={setSelectedCardId}
             onChange={replaceDraft}

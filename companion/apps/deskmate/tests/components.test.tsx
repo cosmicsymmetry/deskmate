@@ -727,6 +727,7 @@ describe("settings accessibility and states", () => {
     );
     const loop = renderToStaticMarkup(
       <LoopRing
+        catalog={null}
         config={config}
         issues={[]}
         selectedCardId={null}
@@ -744,6 +745,38 @@ describe("settings accessibility and states", () => {
     expect(loop).toContain('class="loop__entry-name">Digital clock<');
     expect(loop).toContain('class="loop__entry-title">Desk<');
     expect(editor).toContain('id="editor-heading">Digital clock<');
+  });
+
+  test("the ring legend calls a plugin card what every other surface calls it", () => {
+    const plugin = pluginCard();
+    const html = renderToStaticMarkup(
+      <LoopRing
+        config={cardListConfig([plugin])}
+        issues={[]}
+        catalog={{
+          plugins: [
+            {
+              id: "com.example.air-quality",
+              name: "aqi",
+              version: "1.0.0",
+              node_count: 7,
+              assets: [],
+              display_name: "Air quality",
+              description: null,
+              manifest_version: 2,
+              template: "display-list",
+              refresh_minutes: 15,
+            },
+          ],
+          load_failures: [],
+        }}
+        selectedCardId={plugin.id}
+        onSelect={() => {}}
+        onChange={() => {}}
+      />,
+    );
+    expect(html).toContain('class="loop__entry-name">Air quality<');
+    expect(html).toContain('class="loop__entry-title">Office air<');
   });
 
   test("an untitled card is not labelled with its template twice", () => {
@@ -2692,6 +2725,7 @@ describe("settings accessibility and states", () => {
   function renderLoopRing(config: AppConfig): string {
     return renderToStaticMarkup(
       <LoopRing
+        catalog={null}
         config={config}
         issues={[]}
         selectedCardId="first"
@@ -2729,6 +2763,7 @@ describe("settings accessibility and states", () => {
       latest = config;
       return (
         <LoopRing
+          catalog={null}
           config={config}
           issues={[
             {
@@ -2778,6 +2813,7 @@ describe("settings accessibility and states", () => {
       await act(async () =>
         root.render(
           <LoopRing
+            catalog={null}
             config={config}
             issues={[]}
             selectedCardId="first"
@@ -2805,6 +2841,7 @@ describe("settings accessibility and states", () => {
       latest = config;
       return (
         <LoopRing
+          catalog={null}
           config={config}
           issues={[]}
           selectedCardId="first"
@@ -2963,6 +3000,7 @@ describe("settings accessibility and states", () => {
     );
     const ring = renderToStaticMarkup(
       <LoopRing
+        catalog={null}
         config={config}
         issues={issues}
         selectedCardId="clock"

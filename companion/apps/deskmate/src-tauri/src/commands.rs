@@ -1028,10 +1028,7 @@ pub async fn render_card_preview(
     let now = chrono::Utc::now();
     let utc_offset_minutes = utc_offset_minutes(&snapshot.config.preferences.timezone, now)
         .map_err(|message| IpcError::Internal { message })?;
-    let orientation = match snapshot.config.preferences.orientation {
-        DisplayOrientation::Landscape => lvgl_sim::SimOrientation::Landscape,
-        DisplayOrientation::LandscapeFlipped => lvgl_sim::SimOrientation::LandscapeFlipped,
-    };
+    let orientation = preview_orientation(snapshot.config.preferences.orientation);
 
     let request = lvgl_sim::RenderRequest {
         template,
@@ -1049,6 +1046,27 @@ pub async fn render_card_preview(
         sample,
         state: None,
     })
+}
+
+/// The orientation the settings-window preview renders at.
+///
+/// Deliberately NOT the configured mounting. `LandscapeFlipped` is the 180 degree
+/// mount, and the simulator reproduces it by reversing the finished frame
+/// index-by-index (`lvgl-sim/csrc/sim_shim.c`'s `copy_frame_out`) exactly as the
+/// firmware's `LV_DISPLAY_ROTATION_270` does. On the panel that flip is cancelled by
+/// the physical mounting, so a person always sees an upright face; rendered into a
+/// window that is not itself upside down, it is just upside down. The preview's job is
+/// to show what the person will see, so it renders upright for both mountings.
+///
+/// Because the flip is a pure 180 degree rotation of identical content, nothing is
+/// lost by this: the upright frame IS the flipped frame, read the way the viewer
+/// reads it.
+fn preview_orientation(configured: DisplayOrientation) -> lvgl_sim::SimOrientation {
+    match configured {
+        DisplayOrientation::Landscape | DisplayOrientation::LandscapeFlipped => {
+            lvgl_sim::SimOrientation::Landscape
+        }
+    }
 }
 
 /// Mirrors the wire mapping `CardSettings::wire_config` uses for `TemplateKind`
@@ -1716,6 +1734,25 @@ pub(crate) mod tests {
             }),
             lvgl_sim::SimTemplate::IconBadgeText
         );
+    }
+
+    /// The preview shows what a person standing at the panel sees, which is upright
+    /// at BOTH mountings -- the 180 degree mount is cancelled by the mounting itself.
+    /// Restoring the pass-through this replaced (returning `LandscapeFlipped` for the
+    /// flipped mounting) puts an upside-down clock in the settings window, and fails
+    /// here.
+    #[test]
+    fn the_preview_renders_upright_whichever_way_the_panel_is_mounted() {
+        for configured in [
+            DisplayOrientation::Landscape,
+            DisplayOrientation::LandscapeFlipped,
+        ] {
+            assert_eq!(
+                preview_orientation(configured),
+                lvgl_sim::SimOrientation::Landscape,
+                "preview orientation for {configured:?} must be upright"
+            );
+        }
     }
 
     #[test]

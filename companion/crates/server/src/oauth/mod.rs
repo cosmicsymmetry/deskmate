@@ -8,5 +8,5 @@ pub mod session;
 pub mod token;
 pub mod transport;
 
-pub use routes::IntegrationRuntime;
+pub use routes::{IntegrationRuntime, PendingAuth};
 pub use token::{GoogleOAuthConfig, IntegrationHealth, TokenError, TokenManager};

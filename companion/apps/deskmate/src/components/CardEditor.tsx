@@ -16,7 +16,9 @@ import type {
   CardAlert,
   CardError,
   CardSettings,
+  DeviceTier,
   JsonFieldMapping,
+  PluginCatalog,
   PomodoroSnapshot,
   ProviderSnapshot,
   ValidationIssue,
@@ -43,6 +45,10 @@ interface CardEditorProps {
   /// The feed behind this card, when it has one. Only ever rendered when it is in
   /// trouble — see `providerTrouble`.
   provider: ProviderSnapshot | null;
+  /// The server's plugin registry, or null in local tier and before the first read.
+  /// The Plugin field is read-only without it, because there is nothing to choose from.
+  catalog: PluginCatalog | null;
+  ownershipTier: DeviceTier | null;
   timerBusy: boolean;
   filePickerBusy: boolean;
   providerRefreshing: boolean;
@@ -111,6 +117,8 @@ export function CardEditor({
   cardError,
   pomodoro,
   provider,
+  catalog,
+  ownershipTier,
   timerBusy,
   filePickerBusy,
   providerRefreshing,
@@ -139,13 +147,17 @@ export function CardEditor({
 
   const fieldIssues = (field: string) => issuesForField(issues, field);
   const trouble = providerTrouble(provider);
+  const catalogEntry =
+    card.kind === "plugin"
+      ? (catalog?.plugins.find((entry) => entry.id === card.plugin_id) ?? null)
+      : null;
   const setAlert = (alert: CardAlert) => onChange({ ...card, alert });
   const playlist = activePlaylist(config);
   const entryIndex = playlist?.entries.findIndex((entry) => entry.card_id === card.id) ?? -1;
   const entry = entryIndex >= 0 ? playlist?.entries[entryIndex] : undefined;
   const isTimed = playlist?.advance.kind === "timed";
   const title = cardTitle(card);
-  const controlName = title ? `${cardLabel(card)} — ${title}` : cardLabel(card);
+  const controlName = title ? `${cardLabel(card, catalog)} — ${title}` : cardLabel(card, catalog);
   const dwellIssues = entryIssues.filter((issue) => issue.path.endsWith(".dwell_seconds"));
   const showDwell =
     entry !== undefined && (isTimed || entry.dwell_seconds !== null || dwellIssues.length > 0);
@@ -154,7 +166,7 @@ export function CardEditor({
     <section className="panel" aria-labelledby="editor-heading">
       <div className="panel-heading">
         <div className="editor-title">
-          <h2 id="editor-heading">{cardLabel(card)}</h2>
+          <h2 id="editor-heading">{cardLabel(card, catalog)}</h2>
           {cardTitle(card) && <span className="editor-title__kind">{cardTitle(card)}</span>}
         </div>
         <button className="text-button text-button--danger" type="button" onClick={onRemove}>
@@ -489,6 +501,44 @@ export function CardEditor({
               aria-invalid={fieldIssues("max_items").length > 0}
             />
             <FieldIssues issues={fieldIssues("max_items")} />
+          </label>
+        )}
+
+        {card.kind === "plugin" && (
+          <label className="field">
+            <span>Plugin</span>
+            <select
+              value={card.plugin_id}
+              disabled={catalog === null}
+              onChange={(event) => onChange({ ...card, plugin_id: event.currentTarget.value })}
+              aria-invalid={fieldIssues("plugin_id").length > 0}
+            >
+              {/* A saved id the registry no longer carries stays selected and says
+                  why. Dropping it would silently rewrite the document on first
+                  render, which is a data loss nobody asked for. */}
+              {!catalogEntry && (
+                <option
+                  value={card.plugin_id}
+                >{`${card.plugin_id} · Not installed on the server`}</option>
+              )}
+              {catalog?.plugins.map((entry) => (
+                <option key={entry.id} value={entry.id}>
+                  {`${entry.display_name ?? entry.id} · ${entry.version}`}
+                </option>
+              ))}
+            </select>
+            {/* The machine id, quietly — it is the only identity a card has when the
+                catalog is unreachable, so it is never the thing that disappears. */}
+            <small>
+              {catalog === null
+                ? `${card.plugin_id} · ${
+                    ownershipTier === "local"
+                      ? "Needs the server to render"
+                      : "The plugin list comes from the server"
+                  }`
+                : card.plugin_id}
+            </small>
+            <FieldIssues issues={fieldIssues("plugin_id")} />
           </label>
         )}
 

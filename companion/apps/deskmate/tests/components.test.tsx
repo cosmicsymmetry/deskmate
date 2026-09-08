@@ -245,6 +245,8 @@ describe("settings accessibility and states", () => {
     card: CardSettings,
     issues: ValidationIssue[] = [],
     cardError: CardError | null = null,
+    catalog: PluginCatalog | null = null,
+    ownershipTier: "local" | "networked" = "networked",
   ) {
     return renderToStaticMarkup(
       <CardEditor
@@ -258,6 +260,8 @@ describe("settings accessibility and states", () => {
         timerBusy={false}
         filePickerBusy={false}
         providerRefreshing={false}
+        catalog={catalog}
+        ownershipTier={ownershipTier}
         onChange={() => {}}
         onConfigChange={() => {}}
         onRemove={() => {}}
@@ -902,6 +906,68 @@ describe("settings accessibility and states", () => {
     }
   });
 
+  test("the editor names the plugin, owns its issue, and says when it cannot change it", () => {
+    const plugin = pluginCard();
+    const catalog: PluginCatalog = {
+      plugins: [
+        {
+          id: "com.example.air-quality",
+          name: "aqi",
+          version: "1.0.0",
+          node_count: 7,
+          assets: [],
+          display_name: "Air quality",
+          description: "EPA index for a location",
+          manifest_version: 2,
+          template: "display-list",
+          refresh_minutes: 15,
+        },
+      ],
+      load_failures: [],
+    };
+
+    const editable = renderCardEditor(plugin, [], null, catalog);
+    expect(editable).toContain('id="editor-heading">Air quality<');
+    expect(editable).toContain("<span>Plugin</span>");
+    expect(editable).toContain("Air quality · 1.0.0");
+    expect(editable).toContain("com.example.air-quality");
+    expect(editable).toContain("<span>Name</span>");
+    expect(editable).not.toMatch(/<select[^>]*disabled/);
+
+    // A validation issue on the id now attaches to the control that can fix it.
+    const flagged = renderCardEditor(
+      plugin,
+      [
+        {
+          path: "cards[0].plugin_id",
+          code: "missing-reference",
+          message: "That plugin is not installed on the server.",
+        },
+      ],
+      null,
+      catalog,
+    );
+    expect(flagged).toContain('aria-invalid="true"');
+    expect(flagged).toContain("That plugin is not installed on the server.");
+
+    // An id the catalog lacks stays selected, and says so rather than resetting.
+    const unknown = renderCardEditor(
+      { ...plugin, plugin_id: "com.example.gone" },
+      [],
+      null,
+      catalog,
+    );
+    expect(unknown).toContain("Not installed on the server");
+
+    // No catalog: read-only, with the reason the tier makes true.
+    const localHtml = renderCardEditor(plugin, [], null, null, "local");
+    expect(localHtml).toMatch(/<select[^>]*disabled/);
+    expect(localHtml).toContain("Needs the server to render");
+    expect(renderCardEditor(plugin, [], null, null, "networked")).toContain(
+      "The plugin list comes from the server",
+    );
+  });
+
   test("row-list tiles count only populated title fields from real provider snapshots", () => {
     const calendar = calendarCard("calendar");
     const html = renderToStaticMarkup(
@@ -1021,6 +1087,8 @@ describe("settings accessibility and states", () => {
           timerBusy={false}
           filePickerBusy={false}
           providerRefreshing={false}
+          catalog={null}
+          ownershipTier="networked"
           onChange={() => {}}
           onConfigChange={setConfig}
           onRemove={() => {}}
@@ -1076,6 +1144,8 @@ describe("settings accessibility and states", () => {
           timerBusy={false}
           filePickerBusy={false}
           providerRefreshing={false}
+          catalog={null}
+          ownershipTier="networked"
           onChange={() => {}}
           onConfigChange={() => {}}
           onRemove={() => {}}
@@ -2254,6 +2324,8 @@ describe("settings accessibility and states", () => {
         timerBusy={false}
         filePickerBusy={false}
         providerRefreshing={false}
+        catalog={null}
+        ownershipTier="networked"
         onChange={() => {}}
         onConfigChange={() => {}}
         onRemove={() => {}}

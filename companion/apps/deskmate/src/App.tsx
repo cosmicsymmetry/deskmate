@@ -579,6 +579,8 @@ export function App() {
             timerBusy={busyAction === "timer"}
             filePickerBusy={busyAction === "calendar-file"}
             providerRefreshing={refreshingProviderId === selectedCardId}
+            catalog={null}
+            ownershipTier={ownershipTier}
             onChange={handleWidgetChange}
             onConfigChange={replaceDraft}
             onRemove={handleRemove}

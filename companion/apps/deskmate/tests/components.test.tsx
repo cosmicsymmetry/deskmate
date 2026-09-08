@@ -939,6 +939,101 @@ describe("settings accessibility and states", () => {
     }
   });
 
+  test("the window names a plugin card from the catalog everywhere at once", async () => {
+    snapshotImpl = async () => ({
+      ...snapshot,
+      config: {
+        ...snapshot.config,
+        cards: [pluginCard("air")],
+        playlists: [
+          {
+            id: "workday",
+            name: "Workday",
+            advance: { kind: "timed" as const, default_dwell_seconds: 20 },
+            entries: [{ card_id: "air", dwell_seconds: null }],
+          },
+        ],
+        active_playlist_id: "workday",
+      },
+      device: { ...snapshot.device, tier: "networked" },
+      providers: [],
+      pomodoros: [],
+      card_data: [],
+      card_errors: [],
+    });
+    networkSettingsImpl = async () => ({
+      server_url: "https://desk.example",
+      device_id: "desk-1",
+      tier: "networked",
+    });
+    serverPluginsImpl = async () => ({
+      plugins: [
+        {
+          id: "com.example.air-quality",
+          name: "aqi",
+          version: "1.0.0",
+          node_count: 7,
+          assets: [],
+          display_name: "Air quality",
+          description: "EPA index for a location",
+          manifest_version: 2,
+          template: "display-list" as const,
+          refresh_minutes: 15,
+        },
+      ],
+      load_failures: [],
+    });
+    serverCardStateImpl = async () => [
+      { card_id: "air", provider: { kind: "fresh" as const }, hero: "42", errors: [] },
+    ];
+    previewImpl = async () => ({ png_base64: null, sample: false, state: null });
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await renderPreviewInto(root, <App />);
+      await waitFor(() => {
+        expect(container.querySelector(".card-tile__value")?.textContent).toBe("42");
+      });
+      // Tile, legend and editor heading all say the same thing.
+      // Scoped to the card's own tile body: `.tile-label` is also the ring's
+      // "The loop" heading and its "Loop length" caption, both of which precede
+      // the card grid in document order.
+      expect(container.querySelector(".card-tile__body .tile-label")?.textContent).toBe(
+        "Air quality",
+      );
+      expect(container.querySelector(".loop__entry-name")?.textContent).toBe("Air quality");
+      expect(container.querySelector("#editor-heading")?.textContent).toBe("Air quality");
+      // And the menu offers it back.
+      const slot = container.querySelector<HTMLButtonElement>(".card-tile__add");
+      await act(async () => slot?.click());
+      expect(container.textContent).toContain("Plugins on the server");
+      const row = [...container.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find(
+        (button) => button.textContent?.includes("Air quality"),
+      );
+      await act(async () => row?.click());
+      await waitFor(() => {
+        expect(container.querySelectorAll(".card-tile__body")).toHaveLength(2);
+      });
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      serverPluginsImpl = async () => ({ plugins: [], load_failures: [] });
+      serverCardStateImpl = async () => [];
+      // Also restore what this test overrode beyond the two server impls — see the
+      // matching comment on the "unreachable server" test above.
+      snapshotImpl = async () => snapshot;
+      networkSettingsImpl = async () => ({
+        server_url: "https://desk.example",
+        device_id: "desk-1",
+        tier: "local",
+      });
+      previewImpl = () =>
+        Promise.reject(new Error("renderCardPreview not configured for this test"));
+    }
+  });
+
   test("the editor names the plugin, owns its issue, and says when it cannot change it", () => {
     const plugin = pluginCard();
     const catalog: PluginCatalog = {

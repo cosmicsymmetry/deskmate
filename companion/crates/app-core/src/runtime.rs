@@ -789,8 +789,9 @@ impl RuntimeHandle {
             .map_err(|error| RuntimeError::InvalidConfig {
                 issues: error.issues,
             })?;
+        let renders_plugin_cards = plugin_host.is_some();
         let diagnostics = Arc::new(RuntimeDiagnosticCounters::default());
-        let initial = initial_snapshot(&config, diagnostics.snapshot());
+        let initial = initial_snapshot(&config, diagnostics.snapshot(), renders_plugin_cards);
         let latest = Arc::new(RwLock::new(initial));
         let publisher = Arc::new(SnapshotPublisher {
             latest,
@@ -1046,7 +1047,24 @@ struct WorkerState {
 }
 
 impl WorkerState {
+    /// A hostless worker for tests that don't care about plugin behaviour. The
+    /// only production caller (`run_runtime`) always has a `plugin_host` to
+    /// thread through, even when it is `None`, so it calls
+    /// `new_with_plugin_host` directly and this wrapper is test-only.
+    #[cfg(test)]
     fn new(config: AppConfig, now: Instant, scheduler: &mut Scheduler) -> Self {
+        Self::new_with_plugin_host(config, now, scheduler, None)
+    }
+
+    /// The host must be installed before the first `replace_config`: whether
+    /// this runtime schedules and reports a plugin card at all is decided
+    /// there, and a host assigned afterwards would arrive one config too late.
+    fn new_with_plugin_host(
+        config: AppConfig,
+        now: Instant,
+        scheduler: &mut Scheduler,
+        plugin_host: Option<Box<dyn PluginHost>>,
+    ) -> Self {
         let mut state = Self {
             config: config.clone(),
             runtime: RuntimeState::Starting,
@@ -1054,7 +1072,7 @@ impl WorkerState {
             persistence: PersistenceState::Clean,
             latest_fields: BTreeMap::new(),
             plugin_snapshots: BTreeMap::new(),
-            plugin_host: None,
+            plugin_host,
             dirty_widgets: BTreeSet::new(),
             push_rejections: BTreeMap::new(),
             pomodoros: BTreeMap::new(),
@@ -1143,11 +1161,17 @@ impl WorkerState {
                         now,
                     );
                 }
-                CardSettings::Calendar { id, refresh, .. }
-                | CardSettings::Weather { id, refresh, .. }
-                | CardSettings::JsonFeed { id, refresh, .. }
-                | CardSettings::Rss { id, refresh, .. }
-                | CardSettings::Plugin { id, refresh, .. } => {
+                CardSettings::Plugin { id, refresh, .. } => {
+                    // Spec 5.3: with no plugin host this runtime can neither
+                    // fetch nor draw the card, so it schedules nothing and
+                    // reports nothing about it -- including the compiled
+                    // placeholder fields, which are a stand-in for data, not
+                    // data. Dropping the carried-over snapshot with them is
+                    // correct: there is no one here to render it.
+                    if self.plugin_host.is_none() {
+                        self.latest_fields.remove(id);
+                        continue;
+                    }
                     let interval = refresh
                         .interval_minutes()
                         .map(|minutes| Duration::from_secs(u64::from(minutes) * 60));
@@ -1162,12 +1186,28 @@ impl WorkerState {
                         &mut previous_fields,
                         &mut previous_providers,
                     );
-                    if matches!(card, CardSettings::Plugin { .. })
-                        && unchanged
-                        && let Some(snapshot) = previous_plugin_snapshots.remove(id)
-                    {
+                    if unchanged && let Some(snapshot) = previous_plugin_snapshots.remove(id) {
                         self.plugin_snapshots.insert(id.clone(), snapshot);
                     }
+                }
+                CardSettings::Calendar { id, refresh, .. }
+                | CardSettings::Weather { id, refresh, .. }
+                | CardSettings::JsonFeed { id, refresh, .. }
+                | CardSettings::Rss { id, refresh, .. } => {
+                    let interval = refresh
+                        .interval_minutes()
+                        .map(|minutes| Duration::from_secs(u64::from(minutes) * 60));
+                    provider_deadlines.push((id.clone(), interval));
+                    let unchanged = previous_config
+                        .cards
+                        .iter()
+                        .any(|previous| previous == card);
+                    self.restore_provider(
+                        id,
+                        unchanged,
+                        &mut previous_fields,
+                        &mut previous_providers,
+                    );
                 }
                 CardSettings::Clock { .. } => {}
             }
@@ -1434,8 +1474,7 @@ fn run_runtime(
         options.status_interval,
         options.time_sync_interval,
     );
-    let mut state = WorkerState::new(config, now, &mut scheduler);
-    state.plugin_host = plugin_host;
+    let mut state = WorkerState::new_with_plugin_host(config, now, &mut scheduler, plugin_host);
     let provider = ProviderWorker::new(refresher, options.provider_job_capacity);
     state.publish_if_changed(publisher, diagnostics);
 
@@ -3630,7 +3669,11 @@ fn pomodoro_state(state: EnginePomodoroState) -> PomodoroState {
     }
 }
 
-fn initial_snapshot(config: &AppConfig, diagnostics: RuntimeDiagnostics) -> AppSnapshot {
+fn initial_snapshot(
+    config: &AppConfig,
+    diagnostics: RuntimeDiagnostics,
+    renders_plugin_cards: bool,
+) -> AppSnapshot {
     let mut providers = Vec::new();
     let mut pomodoros = Vec::new();
     let compiled_card_ids: BTreeSet<&str> = config.compiled_card_ids().into_iter().collect();
@@ -3650,17 +3693,27 @@ fn initial_snapshot(config: &AppConfig, diagnostics: RuntimeDiagnostics) -> AppS
                 duration_seconds: *duration_seconds,
                 remaining_seconds: *duration_seconds,
             }),
+            CardSettings::Plugin { id, .. } if renders_plugin_cards => {
+                providers.push(ProviderSnapshot {
+                    widget_id: id.clone(),
+                    state: ProviderState::Idle,
+                    last_success_unix_ms: None,
+                    age_seconds: None,
+                });
+            }
             CardSettings::Calendar { id, .. }
             | CardSettings::Weather { id, .. }
             | CardSettings::JsonFeed { id, .. }
-            | CardSettings::Rss { id, .. }
-            | CardSettings::Plugin { id, .. } => providers.push(ProviderSnapshot {
+            | CardSettings::Rss { id, .. } => providers.push(ProviderSnapshot {
                 widget_id: id.clone(),
                 state: ProviderState::Idle,
                 last_success_unix_ms: None,
                 age_seconds: None,
             }),
-            CardSettings::Clock { .. } => {}
+            // Matches the worker: a runtime with no host says nothing at all
+            // about a plugin card, not even "idle" -- the same nothing an
+            // unrendered clock reports.
+            CardSettings::Plugin { .. } | CardSettings::Clock { .. } => {}
         }
     }
     AppSnapshot {

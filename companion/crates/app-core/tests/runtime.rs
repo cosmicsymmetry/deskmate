@@ -1347,6 +1347,52 @@ fn plugin_card_without_an_injected_host_is_refused_visibly() {
     runtime.shutdown().unwrap();
 }
 
+/// Spec 5.3. A runtime with no plugin host can neither fetch nor draw a plugin
+/// card, so it must say nothing about one rather than faking a refresh. The old
+/// behaviour published a permanent `stale` flag carrying the refresher's own
+/// internal message -- a defect presented as a state, the same shape the V1
+/// validation-mislabeling fix exists to forbid. The Mac projects the server's
+/// real provider state over this gap instead.
+#[test]
+fn a_hostless_runtime_neither_refreshes_nor_reports_a_plugin_card() {
+    let control = MockDeviceControl::default();
+    let refreshes = Arc::new(AtomicU64::new(0));
+    let runtime = RuntimeHandle::start(
+        plugin_config(),
+        Box::new(MockDevice::new(control.clone())),
+        Box::new(CountingRefresher {
+            calls: Arc::clone(&refreshes),
+        }),
+        options(),
+    )
+    .unwrap();
+
+    let snapshot = wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
+        snapshot.device.connection == ConnectionState::Online
+    });
+    assert!(
+        snapshot.providers.is_empty(),
+        "a runtime that cannot fetch a plugin card must not invent a provider state for it"
+    );
+    assert!(
+        !snapshot
+            .card_data
+            .iter()
+            .any(|data| data.card_id == "plugin-card"),
+        "the compiled placeholder fields are not data; do not publish them as a card's value"
+    );
+
+    thread::sleep(Duration::from_millis(80));
+    assert_eq!(
+        refreshes.load(Ordering::Relaxed),
+        0,
+        "no provider deadline may be scheduled for a card this runtime cannot render"
+    );
+    let settled = runtime.snapshot().unwrap();
+    assert!(settled.providers.is_empty());
+    runtime.shutdown().unwrap();
+}
+
 #[test]
 fn plugin_host_error_degrades_one_card_and_the_next_render_clears_it() {
     let control = MockDeviceControl::default();

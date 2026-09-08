@@ -19,7 +19,11 @@ export function DevicePreview({
   dataGeneration,
 }: DevicePreviewProps) {
   const widget = cards.find((card) => card.id === selectedWidgetId) ?? cards[0];
-  const [frame, setFrame] = useState<{ pngBase64: string | null; sample: boolean } | null>(null);
+  const [frame, setFrame] = useState<{
+    pngBase64: string | null;
+    sample: boolean;
+    state: string | null;
+  } | null>(null);
   const [unavailable, setUnavailable] = useState(false);
   const generation = useRef(0);
 
@@ -38,7 +42,11 @@ export function DevicePreview({
       try {
         const rendered = await renderCardPreview(widget.id);
         if (!cancelled && requested === generation.current) {
-          setFrame({ pngBase64: rendered.png_base64, sample: rendered.sample });
+          setFrame({
+            pngBase64: rendered.png_base64,
+            sample: rendered.sample,
+            state: rendered.state,
+          });
           setUnavailable(false);
         }
       } catch {
@@ -79,6 +87,11 @@ export function DevicePreview({
               height={368}
               src={`data:image/png;base64,${frame.pngBase64}`}
             />
+          ) : frame?.state ? (
+            /* A state, not a fault: "Preview unavailable" stays reserved for a
+               transport failure, which is the one case the reader can do nothing
+               about. */
+            <p className="stage__unavailable">{frame.state}</p>
           ) : null}
           {/* The badge means "a real frame, drawn from sample data". A frame with no
               pixels has nothing to badge; Step 14 gives that case its own word. */}

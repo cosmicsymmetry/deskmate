@@ -2621,6 +2621,23 @@ describe("settings accessibility and states", () => {
     await act(async () => root.unmount());
   });
 
+  test("a frameless preview prints its state word, never the fault message", async () => {
+    previewImpl = async () => ({
+      png_base64: null,
+      sample: false,
+      state: "Waiting for the first refresh",
+    });
+    const { container, root } = await mountPreview(pluginCard("air"));
+    await waitFor(() => {
+      expect(container.textContent).toContain("Waiting for the first refresh");
+    });
+    expect(container.textContent).not.toContain("Preview unavailable");
+    expect(container.querySelector("img")).toBeNull();
+    // The badge means "a real frame from sample data". There is no frame here.
+    expect(container.querySelector(".stage__badge")).toBeNull();
+    await act(async () => root.unmount());
+  });
+
   test("re-requests the preview when dataGeneration bumps", async () => {
     let calls = 0;
     previewImpl = async () => {

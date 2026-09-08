@@ -818,19 +818,38 @@ fn save_destination(
     tier: Option<app_core::DeviceTier>,
     settings: &NetworkSettings,
 ) -> SaveDestination {
-    match tier {
-        Some(app_core::DeviceTier::Networked) => SaveDestination::Server,
-        Some(app_core::DeviceTier::Local) => SaveDestination::Local,
-        None => {
-            if matches!(settings.tier, Some(app_core::DeviceTier::Networked))
-                || (settings.tier.is_none()
-                    && (!settings.server_url.is_empty() || !settings.device_id.is_empty()))
-            {
-                SaveDestination::Server
-            } else {
-                SaveDestination::Local
-            }
-        }
+    match resolved_device_tier(tier, settings) {
+        app_core::DeviceTier::Networked => SaveDestination::Server,
+        app_core::DeviceTier::Local => SaveDestination::Local,
+    }
+}
+
+/// The app's single ownership resolution: a live tier read over the cable wins,
+/// otherwise the persisted tier decides, and a legacy server identity with no
+/// recorded tier is conservatively read as networked so an unplugged save never
+/// reaches for USB.
+///
+/// `resolveDeviceTier` in `useAppState.ts` is its TypeScript twin and must keep
+/// answering the same way. Everything that depends on ownership -- where a save
+/// goes, whether a preview asks the server, and whether the snapshot projector
+/// overlays the server's plugin card state -- reads this one answer, because two
+/// resolutions disagreeing is exactly the defect the projector had: the ordinary
+/// networked case (cable out, so `device.tier` is `None`) routed saves to the
+/// server while the projector treated the display as possibly local.
+pub(crate) fn resolved_device_tier(
+    tier: Option<app_core::DeviceTier>,
+    settings: &NetworkSettings,
+) -> app_core::DeviceTier {
+    if let Some(tier) = tier {
+        return tier;
+    }
+    if let Some(tier) = settings.tier {
+        return tier;
+    }
+    if settings.server_url.is_empty() && settings.device_id.is_empty() {
+        app_core::DeviceTier::Local
+    } else {
+        app_core::DeviceTier::Networked
     }
 }
 
@@ -2275,7 +2294,7 @@ pub(crate) mod tests {
             Some(app_core::DeviceTier::Local)
         );
         let mut projected = AppConfig::default();
-        projection.project(Some(app_core::DeviceTier::Networked), &mut projected);
+        projection.project(app_core::DeviceTier::Networked, &mut projected);
         assert_eq!(projected, AppConfig::default());
         fs::remove_dir_all(directory).unwrap();
     }

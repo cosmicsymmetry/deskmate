@@ -107,8 +107,8 @@ impl TrayControls {
 struct NetworkedConfigProjection(Mutex<Option<AppConfig>>);
 
 impl NetworkedConfigProjection {
-    fn project(&self, tier: Option<DeviceTier>, config: &mut AppConfig) {
-        if !matches!(tier, Some(DeviceTier::Networked)) {
+    fn project(&self, tier: DeviceTier, config: &mut AppConfig) {
+        if tier != DeviceTier::Networked {
             return;
         }
         if let Ok(networked) = self.0.lock()
@@ -150,8 +150,8 @@ impl ServerStateProjection {
         Ok(())
     }
 
-    fn project(&self, tier: Option<DeviceTier>, app: &mut AppSnapshot) {
-        if !matches!(tier, Some(DeviceTier::Networked)) {
+    fn project(&self, tier: DeviceTier, app: &mut AppSnapshot) {
+        if tier != DeviceTier::Networked {
             return;
         }
         let Ok(states) = self.0.lock() else {
@@ -198,12 +198,34 @@ impl DesktopSnapshotProjector {
         if let Some(tier) = app.device.tier {
             self.remember_device_tier(tier);
         }
-        self.networked_config
-            .project(app.device.tier, &mut app.config);
-        self.server_card_state.project(app.device.tier, &mut app);
+        let tier = self.resolve_tier(app.device.tier);
+        self.networked_config.project(tier, &mut app.config);
+        self.server_card_state.project(tier, &mut app);
         DesktopSnapshot {
             app,
             has_saved_config: self.has_saved_config.load(Ordering::Acquire),
+        }
+    }
+
+    /// Ownership for this snapshot, resolved exactly once and exactly the way a
+    /// save is routed (`commands::resolved_device_tier`) and the way the frontend
+    /// answers (`resolveDeviceTier` in `useAppState.ts`).
+    ///
+    /// Gating on the live `device.tier` alone was a real defect: in the ordinary
+    /// networked case -- no cable, cold app start -- it is `None`, so neither
+    /// projection ran. The tile still showed the server's hero, because the
+    /// frontend resolves ownership its own way, but nothing else the server knows
+    /// reached the window: no provider entry, so no `stale` flag and no trouble
+    /// line in the editor, and no `card_errors`, so no notice in the work column.
+    ///
+    /// The safety intent is unchanged. A resolution of `Local` paints nothing,
+    /// so server state can still never land on a display this Mac owns itself.
+    /// The settings file is read only when there is no live tier, so a connected
+    /// cable costs no read per snapshot.
+    fn resolve_tier(&self, live: Option<DeviceTier>) -> DeviceTier {
+        match live {
+            Some(tier) => tier,
+            None => commands::resolved_device_tier(None, self.network_store.load().settings()),
         }
     }
 
@@ -741,19 +763,19 @@ mod tests {
     }
 
     #[test]
-    fn a_local_save_clears_the_server_projection_and_unknown_tier_never_projects_it() {
+    fn a_local_save_clears_the_server_projection_and_local_tier_never_projects_it() {
         let projection = NetworkedConfigProjection::default();
         let mut server_config = AppConfig::default();
         server_config.preferences.timezone = "Asia/Tbilisi".into();
         projection.replace(Some(server_config.clone())).unwrap();
 
-        let mut unplugged_config = AppConfig::default();
-        projection.project(None, &mut unplugged_config);
-        assert_eq!(unplugged_config, AppConfig::default());
+        let mut local_config = AppConfig::default();
+        projection.project(DeviceTier::Local, &mut local_config);
+        assert_eq!(local_config, AppConfig::default());
 
         projection.clear_for_local_save().unwrap();
         let mut later_networked_config = AppConfig::default();
-        projection.project(Some(DeviceTier::Networked), &mut later_networked_config);
+        projection.project(DeviceTier::Networked, &mut later_networked_config);
         assert_eq!(later_networked_config, AppConfig::default());
     }
 
@@ -992,9 +1014,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn server_card_state_overlays_only_in_networked_tier() {
-        use app_core::{CardErrorKind, CardFieldValue};
+    fn server_state_projection() -> ServerStateProjection {
+        use app_core::CardErrorKind;
 
         let projection = ServerStateProjection::default();
         projection
@@ -1009,18 +1030,26 @@ mod tests {
                 }],
             }])
             .unwrap();
+        projection
+    }
 
-        // Cable-out (tier unknown) must not paint server state onto a display this
-        // Mac may own locally.
-        let mut cabled_out = plugin_card_snapshot();
-        projection.project(None, &mut cabled_out);
-        assert_eq!(cabled_out.providers.len(), 1);
-        assert_eq!(cabled_out.providers[0].state, ProviderState::Idle);
-        assert!(cabled_out.card_data[0].fields.is_empty());
-        assert!(cabled_out.card_errors.is_empty());
+    #[test]
+    fn server_card_state_overlays_only_in_networked_tier() {
+        use app_core::CardFieldValue;
+
+        let projection = server_state_projection();
+
+        // Local ownership must never be painted over with server state: this Mac
+        // genuinely owns that display, and the server's answer is about another one.
+        let mut local = plugin_card_snapshot();
+        projection.project(DeviceTier::Local, &mut local);
+        assert_eq!(local.providers.len(), 1);
+        assert_eq!(local.providers[0].state, ProviderState::Idle);
+        assert!(local.card_data[0].fields.is_empty());
+        assert!(local.card_errors.is_empty());
 
         let mut app = plugin_card_snapshot();
-        projection.project(Some(DeviceTier::Networked), &mut app);
+        projection.project(DeviceTier::Networked, &mut app);
         assert_eq!(app.providers.len(), 1, "the stale entry was appended to");
         assert_eq!(app.providers[0].widget_id, "air");
         assert_eq!(app.providers[0].state, ProviderState::Fresh);
@@ -1033,5 +1062,82 @@ mod tests {
         );
         assert_eq!(app.card_errors.len(), 1);
         assert_eq!(app.card_errors[0].card_id, "air");
+    }
+
+    fn temp_network_store(label: &str) -> (Arc<NetworkSettingsStore>, std::path::PathBuf) {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let serial = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "deskmate-{label}-{}-{serial}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let store = Arc::new(NetworkSettingsStore::new(
+            directory.join("network-settings.json"),
+        ));
+        (store, directory)
+    }
+
+    fn projector_over(store: &Arc<NetworkSettingsStore>) -> DesktopSnapshotProjector {
+        DesktopSnapshotProjector {
+            network_store: Arc::clone(store),
+            networked_config: Arc::new(NetworkedConfigProjection::default()),
+            server_card_state: Arc::new(server_state_projection()),
+            last_known_tier: Mutex::new(None),
+            has_saved_config: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// The ordinary networked case: no cable, a cold start, so `device.tier` is
+    /// `None` and the persisted settings are the only ownership fact there is.
+    /// The overlay has to run here -- this is the mode the server-rendered card
+    /// exists for -- because a tile's `stale` flag, the editor's trouble line and
+    /// the work column's card errors all read the snapshot the projector emits,
+    /// while the tile's hero reads the frontend's own resolution. Two resolutions
+    /// meant a tile that showed a value and never showed it going stale.
+    #[test]
+    fn a_cable_out_networked_mac_still_gets_the_server_overlay() {
+        use app_core::NetworkSettingsUpdate;
+
+        let (store, directory) = temp_network_store("tier-resolution-networked");
+        store
+            .save(NetworkSettingsUpdate::new(
+                "https://desk.example",
+                "desk-1",
+                Some(DeviceTier::Networked),
+                None,
+            ))
+            .unwrap();
+        let projector = projector_over(&store);
+        let mut snapshot = plugin_card_snapshot();
+        snapshot.device.tier = None;
+
+        let projected = projector.project_snapshot(snapshot);
+
+        assert_eq!(projected.app.providers[0].state, ProviderState::Fresh);
+        assert_eq!(projected.app.card_data[0].fields.len(), 1);
+        assert_eq!(projected.app.card_errors.len(), 1);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// The same unresolved live tier with no server identity stored resolves to
+    /// local, and a local display is never painted with another device's state.
+    #[test]
+    fn a_cable_out_mac_with_no_server_identity_keeps_its_local_state() {
+        let (store, directory) = temp_network_store("tier-resolution-local");
+        let projector = projector_over(&store);
+        let mut snapshot = plugin_card_snapshot();
+        snapshot.device.tier = None;
+
+        let projected = projector.project_snapshot(snapshot);
+
+        assert_eq!(projected.app.providers[0].state, ProviderState::Idle);
+        assert!(projected.app.card_data[0].fields.is_empty());
+        assert!(projected.app.card_errors.is_empty());
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }

@@ -1129,6 +1129,114 @@ describe("settings accessibility and states", () => {
     }
   });
 
+  /// The realistic networked case, and the one every other test here skipped: no
+  /// cable, so `device.tier` is null and the persisted settings are the only
+  /// ownership fact. The Rust projector resolves ownership the same way this hook
+  /// does, so the overlay runs and the window shows a plugin card's freshness --
+  /// the `stale` flag on its tile and the trouble line in its editor -- exactly as
+  /// it does for a built-in card. Before that resolution matched, the hero
+  /// appeared and nothing else about the card's health ever did.
+  test("a plugin card shows its freshness with the cable out", async () => {
+    snapshotImpl = async () => ({
+      ...snapshot,
+      config: {
+        ...snapshot.config,
+        cards: [pluginCard("air")],
+        playlists: [
+          {
+            id: "workday",
+            name: "Workday",
+            advance: { kind: "timed" as const, default_dwell_seconds: 20 },
+            entries: [{ card_id: "air", dwell_seconds: null }],
+          },
+        ],
+        active_playlist_id: "workday",
+      },
+      // No cable: the live tier is unknown, which is the ordinary state of a
+      // networked Mac, not an edge case.
+      device: { ...snapshot.device, tier: null },
+      // What `ServerStateProjection` overlays once it resolves ownership from the
+      // persisted settings: the server's own provider state for this card, with no
+      // timestamps because `ServerCardState` carries none.
+      providers: [
+        {
+          widget_id: "air",
+          state: { kind: "stale" as const, message: "The air quality feed timed out." },
+          last_success_unix_ms: null,
+          age_seconds: null,
+        },
+      ],
+      pomodoros: [],
+      card_data: [],
+      card_errors: [],
+    });
+    networkSettingsImpl = async () => ({
+      server_url: "https://desk.example",
+      device_id: "desk-1",
+      tier: "networked",
+    });
+    serverPluginsImpl = async () => ({
+      plugins: [
+        {
+          id: "com.example.air-quality",
+          name: "aqi",
+          version: "1.0.0",
+          node_count: 7,
+          assets: [],
+          display_name: "Air quality",
+          description: "EPA index for a location",
+          manifest_version: 2,
+          template: "display-list" as const,
+          refresh_minutes: 15,
+        },
+      ],
+      load_failures: [],
+    });
+    serverCardStateImpl = async () => [
+      {
+        card_id: "air",
+        provider: { kind: "stale" as const, message: "The air quality feed timed out." },
+        hero: "42",
+        errors: [],
+      },
+    ];
+    previewImpl = async () => ({ png_base64: null, sample: false, state: null });
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await renderPreviewInto(root, <App />);
+      await waitFor(() => {
+        expect(container.querySelector(".card-tile__value")?.textContent).toBe("42");
+      });
+      expect(container.querySelector(".card-tile__body .tile-label")?.textContent).toBe(
+        "Air quality",
+      );
+      expect(container.querySelector(".flag--stale")?.textContent).toBe("stale");
+      // One data note, in the selected card's editor, carrying the server's own
+      // sentence and the reason its Refresh cannot act.
+      const note = container.querySelector(".data-note")?.textContent;
+      expect(note).toContain("The air quality feed timed out.");
+      expect(note).toContain("This card refreshes on the server.");
+      const refresh = buttonWithText(container, "Refresh");
+      expect(refresh?.disabled).toBe(true);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      serverPluginsImpl = async () => ({ plugins: [], load_failures: [] });
+      serverCardStateImpl = async () => [];
+      snapshotImpl = async () => snapshot;
+      networkSettingsImpl = async () => ({
+        server_url: "https://desk.example",
+        device_id: "desk-1",
+        tier: "local",
+      });
+      previewImpl = () =>
+        Promise.reject(new Error("renderCardPreview not configured for this test"));
+    }
+  });
+
   test("the editor names the plugin, owns its issue, and says when it cannot change it", () => {
     const plugin = pluginCard();
     const catalog: PluginCatalog = {

@@ -89,6 +89,139 @@ impl ProvisionContext {
     }
 }
 
+/// Everything a read-only server call needs, cloned out of `DesktopState` so the
+/// blocking half can move onto a worker thread. No config, no runtime, no locks:
+/// these calls never mutate anything the desktop owns.
+#[derive(Clone)]
+struct ServerQueryContext {
+    agent: ureq::Agent,
+    network_store: Arc<NetworkSettingsStore>,
+}
+
+impl ServerQueryContext {
+    fn from_desktop(state: &DesktopState) -> Self {
+        Self {
+            agent: state.server_client.clone(),
+            network_store: Arc::clone(&state.network_store),
+        }
+    }
+
+    /// The store lends the token for one call and never returns it; a missing token
+    /// is a typed instruction, not a transport failure.
+    fn with_admin_token<T>(
+        &self,
+        operation: impl FnOnce(&str) -> Result<T, IpcError>,
+    ) -> Result<T, IpcError> {
+        self.network_store
+            .with_admin_token(operation)
+            .map_err(IpcError::from)?
+            .ok_or_else(|| IpcError::InvalidPayload {
+                message: "Enter the admin token in Network setup before reading server state."
+                    .into(),
+            })?
+    }
+}
+
+fn fetch_server_plugins(
+    context: &ServerQueryContext,
+) -> Result<app_core::admin::PluginCatalog, IpcError> {
+    let settings = context.network_store.load().settings().clone();
+    let url =
+        crate::server_client::server_url(&settings.server_url, &["v1", "plugins"])?.to_string();
+    context.with_admin_token(|token| {
+        crate::server_client::get_server_json(&context.agent, &url, token, MAX_SERVER_ERROR_BYTES)
+    })
+}
+
+fn fetch_server_card_state(context: &ServerQueryContext) -> Result<Vec<ServerCardState>, IpcError> {
+    let settings = context.network_store.load().settings().clone();
+    validate_target(&settings.device_id, MAX_DEVICE_ID_LEN, "device ID")?;
+    let url = crate::server_client::server_url(
+        &settings.server_url,
+        &["v1", "devices", &settings.device_id],
+    )?
+    .to_string();
+    let status: ServerDeviceStatus = context.with_admin_token(|token| {
+        crate::server_client::get_server_json(&context.agent, &url, token, MAX_SERVER_ERROR_BYTES)
+    })?;
+    Ok(project_server_card_state(&status))
+}
+
+/// The tier decides where a plugin card's face comes from, and it decides first:
+/// in local tier there is no server and no plugin host, so this returns the
+/// sentence without opening a socket. Only in networked tier is a request made,
+/// and only then can a 404 mean what `PLUGIN_PREVIEW_NEEDS_A_NEWER_SERVER` says.
+fn plugin_card_preview(
+    context: &ServerQueryContext,
+    tier: Option<app_core::DeviceTier>,
+    card_id: &str,
+) -> Result<PreviewFrame, IpcError> {
+    validate_target(card_id, MAX_WIDGET_ID_LEN, "card ID")?;
+    let settings = context.network_store.load().settings().clone();
+    if save_destination(tier, &settings) != SaveDestination::Server {
+        return Ok(unrendered_plugin_frame(PLUGIN_RENDERS_ON_THE_SERVER));
+    }
+    validate_target(&settings.device_id, MAX_DEVICE_ID_LEN, "device ID")?;
+    let url = crate::server_client::server_url(
+        &settings.server_url,
+        &[
+            "v1",
+            "devices",
+            &settings.device_id,
+            "cards",
+            card_id,
+            "preview",
+        ],
+    )?
+    .to_string();
+    let response = context.with_admin_token(|token| {
+        crate::server_client::get_server_json::<app_core::admin::CardPreviewResponse>(
+            &context.agent,
+            &url,
+            token,
+            crate::server_client::MAX_SERVER_PREVIEW_BYTES,
+        )
+    });
+    match response {
+        Ok(response) => Ok(plugin_preview_frame(response)),
+        // Spec section 10: additive routes fail closed against an older server.
+        Err(IpcError::NotFound { .. }) => Ok(unrendered_plugin_frame(
+            PLUGIN_PREVIEW_NEEDS_A_NEWER_SERVER,
+        )),
+        Err(error) => Err(error),
+    }
+}
+
+async fn on_server_worker<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T, IpcError> + Send + 'static,
+) -> Result<T, IpcError> {
+    tauri::async_runtime::spawn_blocking(work)
+        .await
+        .map_err(|_| IpcError::RuntimeUnavailable {
+            message: "the server request worker stopped unexpectedly".into(),
+        })?
+}
+
+#[tauri::command]
+pub async fn get_server_plugins(
+    state: State<'_, DesktopState>,
+) -> Result<app_core::admin::PluginCatalog, IpcError> {
+    let context = ServerQueryContext::from_desktop(&state);
+    on_server_worker(move || fetch_server_plugins(&context)).await
+}
+
+#[tauri::command]
+pub async fn get_server_card_state(
+    state: State<'_, DesktopState>,
+) -> Result<Vec<ServerCardState>, IpcError> {
+    let context = ServerQueryContext::from_desktop(&state);
+    let states = on_server_worker(move || fetch_server_card_state(&context)).await?;
+    // The snapshot stream is what a tile actually reads, so a successful poll
+    // updates the projection before it answers the caller.
+    state.server_card_state.replace(states.clone())?;
+    Ok(states)
+}
+
 struct ServerSaveContext {
     config: ConfigSaveContext,
     server_client: ureq::Agent,
@@ -802,8 +935,14 @@ pub fn set_autostart_enabled(
 /// device's actual unconfigured appearance. `sample` tells the caller this happened
 /// so the settings UI can badge it, without the renderer itself lying about what it
 /// drew.
+///
+/// A plugin card is the one kind this simulator cannot draw: it has no
+/// `DisplayTemplate`, and its face was compiled from a manifest and rasterized by
+/// the server. That card's preview is fetched rather than rendered, which is why
+/// this command is `async` -- the fetch runs on a blocking worker, never on the
+/// thread that would otherwise stall the settings window for the agent's timeout.
 #[tauri::command]
-pub fn render_card_preview(
+pub async fn render_card_preview(
     state: State<'_, DesktopState>,
     card_id: String,
 ) -> Result<PreviewFrame, IpcError> {
@@ -817,6 +956,14 @@ pub fn render_card_preview(
         .ok_or_else(|| IpcError::NotFound {
             message: format!("no card with id {card_id:?}"),
         })?;
+
+    if matches!(card, CardSettings::Plugin { .. }) {
+        let context = ServerQueryContext::from_desktop(&state);
+        let tier = snapshot.device.tier;
+        let requested = card_id.clone();
+        return on_server_worker(move || plugin_card_preview(&context, tier, &requested)).await;
+    }
+
     let template = preview_template_for(card, &card_id)?;
 
     let data = snapshot
@@ -3033,6 +3180,180 @@ pub(crate) mod tests {
             "snapshot": null
         });
         assert!(project_server_card_state(&serde_json::from_value(body).unwrap()).is_empty());
+    }
+
+    /// Builds a `ServerQueryContext` pointed at a loopback listener with a stored
+    /// admin token, in the tier the caller names.
+    fn server_query_fixture(
+        label: &str,
+        tier: app_core::DeviceTier,
+    ) -> (ServerQueryContext, std::net::TcpListener, std::path::PathBuf) {
+        let directory = scratch_directory(label);
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let network_store = Arc::new(NetworkSettingsStore::new(
+            directory.join("network-settings.json"),
+        ));
+        network_store
+            .save(NetworkSettingsUpdate::new(
+                format!("http://{address}"),
+                "desk-1",
+                Some(tier),
+                Some("admin-secret".into()),
+            ))
+            .unwrap();
+        let context = ServerQueryContext {
+            agent: crate::server_http_agent(),
+            network_store,
+        };
+        (context, listener, directory)
+    }
+
+    fn answer_once(
+        listener: std::net::TcpListener,
+        status: &'static str,
+        body: &'static str,
+    ) -> std::thread::JoinHandle<String> {
+        use std::io::Write as _;
+
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let request = String::from_utf8_lossy(&read_http_request(&mut stream)).to_string();
+            write!(
+                stream,
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
+            request
+        })
+    }
+
+    #[test]
+    fn the_catalog_command_reads_the_shared_admin_dto() {
+        let (context, listener, directory) =
+            server_query_fixture("catalog", app_core::DeviceTier::Networked);
+        let server = answer_once(
+            listener,
+            "200 OK",
+            r#"{"plugins":[{"id":"aqi","name":"aqi","version":"1.0.0","node_count":4,
+                "assets":[{"file":"icons.ttf","kind":"icon-font","byte_length":12,"digest":"ab"}],
+                "display_name":"Air quality","description":"EPA index for a location",
+                "manifest_version":2,"template":"display-list","refresh_minutes":15}],
+              "load_failures":[{"id":"broken","error":"unknown key"}]}"#,
+        );
+
+        let catalog = fetch_server_plugins(&context).unwrap();
+
+        let request = server.join().unwrap();
+        assert!(request.starts_with("GET /v1/plugins "));
+        assert_eq!(catalog.plugins.len(), 1);
+        assert_eq!(
+            catalog.plugins[0].display_name.as_deref(),
+            Some("Air quality")
+        );
+        assert_eq!(catalog.plugins[0].refresh_minutes, 15);
+        assert_eq!(
+            catalog.plugins[0].template,
+            app_core::admin::PluginTemplateKind::DisplayList
+        );
+        assert_eq!(catalog.load_failures[0].id, "broken");
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn the_card_state_command_asks_for_this_device_and_keeps_only_plugin_cards() {
+        let (context, listener, directory) =
+            server_query_fixture("card-state", app_core::DeviceTier::Networked);
+        let server = answer_once(
+            listener,
+            "200 OK",
+            r#"{"device_id":"desk-1","connected":true,"last_seen_unix_ms":1,
+                "config":{"origin":"current","using_fallback":false,"fallback_reason":null},
+                "snapshot":{"config":{"cards":[
+                    {"kind":"plugin","id":"air","title":"","plugin_id":"aqi",
+                     "tap_action":{"kind":"none"},"refresh":{"kind":"interval","minutes":15},
+                     "alert":{"kind":"none"}}]},
+                  "providers":[{"widget_id":"air","state":{"kind":"fresh"},
+                    "last_success_unix_ms":null,"age_seconds":null}],
+                  "card_data":[{"card_id":"air","fields":[
+                    {"key":"hero","value":{"kind":"text","value":"42"}}]}],
+                  "card_errors":[]}}"#,
+        );
+
+        let states = fetch_server_card_state(&context).unwrap();
+
+        let request = server.join().unwrap();
+        assert!(request.starts_with("GET /v1/devices/desk-1 "));
+        assert_eq!(states.len(), 1);
+        assert_eq!(states[0].hero.as_deref(), Some("42"));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn a_plugin_preview_asks_the_card_route_and_returns_its_frame() {
+        let (context, listener, directory) =
+            server_query_fixture("preview-ok", app_core::DeviceTier::Networked);
+        let server = answer_once(
+            listener,
+            "200 OK",
+            r#"{"png_base64":"iVBORw0KGgo=","state":"fresh","message":null,
+                "refreshed_at_unix_ms":1787000000000}"#,
+        );
+
+        let frame = plugin_card_preview(&context, Some(app_core::DeviceTier::Networked), "air")
+            .unwrap();
+
+        let request = server.join().unwrap();
+        assert!(request.starts_with("GET /v1/devices/desk-1/cards/air/preview "));
+        assert_eq!(frame.png_base64.as_deref(), Some("iVBORw0KGgo="));
+        assert_eq!(frame.state, None);
+        assert!(!frame.sample);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// Spec section 10: the Mac's GETs are additive, so a server that has never
+    /// heard of this route 404s. That reads as "needs a newer server", not as a
+    /// fault, and specifically not as the local-tier sentence, which is chosen
+    /// before any request is made.
+    ///
+    /// An unknown device, an unknown card and a non-plugin card also 404, and this
+    /// call path cannot reach any of them: the Mac only asks for a card that is in
+    /// its own config, for the device id it is configured with, and only when that
+    /// card is `CardSettings::Plugin`. They are not distinguished, and pretending to
+    /// would mean inventing a difference the status code does not carry.
+    #[test]
+    fn a_preview_route_an_old_server_lacks_degrades_instead_of_erroring() {
+        let (context, listener, directory) =
+            server_query_fixture("preview-404", app_core::DeviceTier::Networked);
+        let server = answer_once(listener, "404 Not Found", "");
+
+        let frame = plugin_card_preview(&context, Some(app_core::DeviceTier::Networked), "air")
+            .unwrap();
+
+        server.join().unwrap();
+        assert_eq!(
+            frame.state.as_deref(),
+            Some(PLUGIN_PREVIEW_NEEDS_A_NEWER_SERVER)
+        );
+        assert_eq!(frame.png_base64, None);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// Local tier has no server to render on and the Mac has no plugin host, so it
+    /// says so from the tier alone rather than opening a socket at all.
+    #[test]
+    fn a_local_tier_plugin_preview_never_reaches_the_network() {
+        let (context, listener, directory) =
+            server_query_fixture("preview-local", app_core::DeviceTier::Local);
+
+        let frame =
+            plugin_card_preview(&context, Some(app_core::DeviceTier::Local), "air").unwrap();
+
+        assert_eq!(frame.state.as_deref(), Some(PLUGIN_RENDERS_ON_THE_SERVER));
+        assert_eq!(frame.png_base64, None);
+        drop(listener);
+        fs::remove_dir_all(directory).unwrap();
     }
 
     fn typescript_contract_source() -> String {

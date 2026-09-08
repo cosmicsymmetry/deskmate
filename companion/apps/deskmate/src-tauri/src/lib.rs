@@ -627,6 +627,8 @@ pub fn run() {
             commands::get_autostart_status,
             commands::set_autostart_enabled,
             commands::render_card_preview,
+            commands::get_server_plugins,
+            commands::get_server_card_state,
         ])
         .setup(setup_app)
         .build(tauri::generate_context!())

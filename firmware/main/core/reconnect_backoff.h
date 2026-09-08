@@ -26,6 +26,3 @@ uint32_t reconnect_backoff_next_delay_ms(reconnect_backoff_t *backoff);
 
 /** Reset the next base delay to 1 s. */
 void reconnect_backoff_reset(reconnect_backoff_t *backoff);
-
-/** Return the unjittered base delay that will be used next. */
-uint32_t reconnect_backoff_base_delay_ms(const reconnect_backoff_t *backoff);

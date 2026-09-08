@@ -14,12 +14,21 @@
 //! `firmware`.
 
 mod admin;
+pub use app_core::asset_sync;
 mod auth;
 mod device_link;
+pub mod egress;
 pub mod firmware;
+pub mod plugin_host;
+pub mod plugin_provider;
+pub mod plugin_refresher;
+pub mod plugin_registry;
+mod rasterizer;
 pub mod registry;
 pub mod runtime_device;
 mod store;
+#[cfg(test)]
+mod test_plugins;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -38,6 +47,7 @@ use tower::limit::GlobalConcurrencyLimitLayer;
 use tower::load_shed::error::Overloaded;
 
 use firmware::FirmwareCatalog;
+use plugin_registry::{PluginLoadFailure, PluginRegistry};
 use registry::{DEVICE_IDENTITY_STORE_FILE, Registry};
 use runtime_device::SocketConnector;
 
@@ -80,6 +90,8 @@ struct StateInner {
     registry: Registry,
     admin_token: String,
     firmware: FirmwareCatalog,
+    plugins: Arc<PluginRegistry>,
+    plugin_load_failures: Arc<[PluginLoadFailure]>,
     configs: store::DeviceConfigStores,
     /// Keeps the dedicated config root alive for [`ServerState::in_memory`].
     /// Production paths are operator-owned and leave this as `None`.
@@ -96,7 +108,36 @@ impl ServerState {
     #[must_use]
     pub fn new(admin_token: String, firmware: FirmwareCatalog, config_directory: PathBuf) -> Self {
         let registry = Registry::load(config_directory.join(DEVICE_IDENTITY_STORE_FILE));
-        Self::with_config_temp_dir(admin_token, firmware, config_directory, registry, None)
+        Self::with_config_temp_dir(
+            admin_token,
+            firmware,
+            config_directory,
+            registry,
+            empty_plugin_registry(),
+            Vec::new(),
+            None,
+        )
+    }
+
+    /// Builds production state with the plugin catalog loaded once at startup.
+    #[must_use]
+    pub fn new_with_plugins(
+        admin_token: String,
+        firmware: FirmwareCatalog,
+        config_directory: PathBuf,
+        plugins: Arc<PluginRegistry>,
+        plugin_load_failures: Vec<PluginLoadFailure>,
+    ) -> Self {
+        let registry = Registry::load(config_directory.join(DEVICE_IDENTITY_STORE_FILE));
+        Self::with_config_temp_dir(
+            admin_token,
+            firmware,
+            config_directory,
+            registry,
+            plugins,
+            plugin_load_failures,
+            None,
+        )
     }
 
     fn with_config_temp_dir(
@@ -104,6 +145,8 @@ impl ServerState {
         firmware: FirmwareCatalog,
         config_directory: PathBuf,
         registry: Registry,
+        plugins: Arc<PluginRegistry>,
+        plugin_load_failures: Vec<PluginLoadFailure>,
         config_temp_dir: Option<tempfile::TempDir>,
     ) -> Self {
         Self {
@@ -111,6 +154,8 @@ impl ServerState {
                 registry,
                 admin_token,
                 firmware,
+                plugins,
+                plugin_load_failures: plugin_load_failures.into(),
                 configs: store::DeviceConfigStores::new(config_directory),
                 _config_temp_dir: config_temp_dir,
                 device_links: Mutex::new(HashMap::new()),
@@ -135,6 +180,8 @@ impl ServerState {
             firmware,
             config_directory,
             Registry::new(),
+            empty_plugin_registry(),
+            Vec::new(),
             Some(config_temp_dir),
         )
     }
@@ -144,25 +191,26 @@ impl ServerState {
         &self.inner.registry
     }
 
-    #[must_use]
-    pub fn admin_token(&self) -> &str {
-        &self.inner.admin_token
-    }
-
     /// Compares `presented` against the admin token in constant time. This
-    /// is the *only* sanctioned way to check the admin token -- callers
-    /// (Task 9's Mac-facing routes) must not compare `admin_token()` with
-    /// `==` themselves, which would quietly undo this crate's
+    /// is the *only* sanctioned way to check the admin token, preserving the
     /// constant-time-comparison guarantee for the one secret that protects
     /// every write.
     #[must_use]
     pub fn verify_admin_token(&self, presented: &str) -> bool {
-        registry::constant_time_eq(self.admin_token().as_bytes(), presented.as_bytes())
+        registry::constant_time_eq(self.inner.admin_token.as_bytes(), presented.as_bytes())
     }
 
     #[must_use]
     pub fn firmware(&self) -> &FirmwareCatalog {
         &self.inner.firmware
+    }
+
+    pub(crate) fn plugins(&self) -> &Arc<PluginRegistry> {
+        &self.inner.plugins
+    }
+
+    pub(crate) fn plugin_load_failures(&self) -> &[PluginLoadFailure] {
+        &self.inner.plugin_load_failures
     }
 
     /// A fresh handle to the device-link concurrency cap. Returns an
@@ -225,6 +273,10 @@ impl ServerState {
             }
         }
     }
+}
+
+fn empty_plugin_registry() -> Arc<PluginRegistry> {
+    Arc::new(PluginRegistry::empty())
 }
 
 #[derive(Default)]

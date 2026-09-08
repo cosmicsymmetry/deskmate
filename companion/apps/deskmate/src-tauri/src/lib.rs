@@ -20,13 +20,13 @@ use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 mod commands;
 mod events;
 mod preview;
+mod server_client;
 
 const CONFIG_FILE_NAME: &str = "config.json";
 const NETWORK_SETTINGS_FILE_NAME: &str = "network-settings.json";
 const MAIN_WINDOW_LABEL: &str = "main";
 const TRAY_ID: &str = "deskmate";
 const STATUS_ITEM_ID: &str = "device-status";
-const PAUSE_ITEM_ID: &str = "pause-pushing";
 const OPEN_ITEM_ID: &str = "open-settings";
 const AUTOSTART_ITEM_ID: &str = "autostart";
 const QUIT_ITEM_ID: &str = "quit";
@@ -36,7 +36,6 @@ const TRAY_OFFLINE: &[u8] = include_bytes!("../icons/tray-offline.png");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TrayAction {
-    TogglePause,
     OpenSettings,
     ToggleAutostart,
     Quit,
@@ -45,7 +44,6 @@ enum TrayAction {
 impl TrayAction {
     fn from_id(id: &str) -> Option<Self> {
         match id {
-            PAUSE_ITEM_ID => Some(Self::TogglePause),
             OPEN_ITEM_ID => Some(Self::OpenSettings),
             AUTOSTART_ITEM_ID => Some(Self::ToggleAutostart),
             QUIT_ITEM_ID => Some(Self::Quit),
@@ -56,7 +54,6 @@ impl TrayAction {
 
 struct TrayPresentation {
     device_text: &'static str,
-    pause_text: &'static str,
     tooltip: String,
     online: bool,
 }
@@ -75,7 +72,6 @@ impl TrayPresentation {
         };
         Self {
             device_text,
-            pause_text: pause_menu_text(paused),
             tooltip,
             online,
         }
@@ -91,17 +87,8 @@ fn connection_presentation(connection: &ConnectionState) -> (&'static str, bool)
     }
 }
 
-const fn pause_menu_text(paused: bool) -> &'static str {
-    if paused {
-        "Resume pushing"
-    } else {
-        "Pause pushing"
-    }
-}
-
 struct TrayControls {
     status: MenuItem<Wry>,
-    pause: MenuItem<Wry>,
     autostart: CheckMenuItem<Wry>,
     tray: TrayIcon<Wry>,
 }
@@ -110,7 +97,6 @@ impl TrayControls {
     fn update(&self, snapshot: &AppSnapshot) -> tauri::Result<()> {
         let presentation = TrayPresentation::from_snapshot(snapshot);
         self.status.set_text(presentation.device_text)?;
-        self.pause.set_text(presentation.pause_text)?;
         self.tray.set_tooltip(Some(presentation.tooltip))?;
         self.tray.set_icon(Some(tray_image(presentation.online)?))?;
         Ok(())
@@ -121,8 +107,8 @@ impl TrayControls {
 struct NetworkedConfigProjection(Mutex<Option<AppConfig>>);
 
 impl NetworkedConfigProjection {
-    fn project(&self, tier: Option<DeviceTier>, config: &mut AppConfig) {
-        if !matches!(tier, Some(DeviceTier::Networked)) {
+    fn project(&self, tier: DeviceTier, config: &mut AppConfig) {
+        if tier != DeviceTier::Networked {
             return;
         }
         if let Ok(networked) = self.0.lock()
@@ -144,9 +130,65 @@ impl NetworkedConfigProjection {
     }
 }
 
+/// The last successful `get_server_card_state` poll. In networked tier the server
+/// owns every plugin card's data, so its answer replaces whatever the local
+/// hostless runtime holds for those ids -- and only those ids. A failed poll keeps
+/// the previous projection rather than blanking a tile that was correct a moment
+/// ago; the frontend surfaces the failure as one notice.
+///
+/// The provider entry is rebuilt with no timestamps because `ServerCardState`
+/// deliberately carries none: a tile reads the state word, and a fetch time
+/// measured on the server is not a fact about this Mac's clock.
+#[derive(Default)]
+struct ServerStateProjection(Mutex<Vec<commands::ServerCardState>>);
+
+impl ServerStateProjection {
+    fn replace(&self, states: Vec<commands::ServerCardState>) -> Result<(), commands::IpcError> {
+        *self.0.lock().map_err(|_| commands::IpcError::Internal {
+            message: "server plugin state is unavailable".into(),
+        })? = states;
+        Ok(())
+    }
+
+    fn project(&self, tier: DeviceTier, app: &mut AppSnapshot) {
+        if tier != DeviceTier::Networked {
+            return;
+        }
+        let Ok(states) = self.0.lock() else {
+            return;
+        };
+        for state in states.iter() {
+            let card_id = state.card_id.as_str();
+            app.providers
+                .retain(|provider| provider.widget_id != card_id);
+            app.providers.push(app_core::ProviderSnapshot {
+                widget_id: state.card_id.clone(),
+                state: state.provider.clone(),
+                last_success_unix_ms: None,
+                age_seconds: None,
+            });
+            app.card_data.retain(|data| data.card_id != card_id);
+            if let Some(hero) = state.hero.as_ref() {
+                app.card_data.push(app_core::CardDataSnapshot {
+                    card_id: state.card_id.clone(),
+                    fields: vec![app_core::CardField {
+                        key: "hero".into(),
+                        value: app_core::CardFieldValue::Text {
+                            value: hero.clone(),
+                        },
+                    }],
+                });
+            }
+            app.card_errors.retain(|error| error.card_id != card_id);
+            app.card_errors.extend(state.errors.iter().cloned());
+        }
+    }
+}
+
 struct DesktopSnapshotProjector {
     network_store: Arc<NetworkSettingsStore>,
     networked_config: Arc<NetworkedConfigProjection>,
+    server_card_state: Arc<ServerStateProjection>,
     last_known_tier: Mutex<Option<DeviceTier>>,
     has_saved_config: Arc<AtomicBool>,
 }
@@ -156,11 +198,34 @@ impl DesktopSnapshotProjector {
         if let Some(tier) = app.device.tier {
             self.remember_device_tier(tier);
         }
-        self.networked_config
-            .project(app.device.tier, &mut app.config);
+        let tier = self.resolve_tier(app.device.tier);
+        self.networked_config.project(tier, &mut app.config);
+        self.server_card_state.project(tier, &mut app);
         DesktopSnapshot {
             app,
             has_saved_config: self.has_saved_config.load(Ordering::Acquire),
+        }
+    }
+
+    /// Ownership for this snapshot, resolved exactly once and exactly the way a
+    /// save is routed (`commands::resolved_device_tier`) and the way the frontend
+    /// answers (`resolveDeviceTier` in `useAppState.ts`).
+    ///
+    /// Gating on the live `device.tier` alone was a real defect: in the ordinary
+    /// networked case -- no cable, cold app start -- it is `None`, so neither
+    /// projection ran. The tile still showed the server's hero, because the
+    /// frontend resolves ownership its own way, but nothing else the server knows
+    /// reached the window: no provider entry, so no `stale` flag and no trouble
+    /// line in the editor, and no `card_errors`, so no notice in the work column.
+    ///
+    /// The safety intent is unchanged. A resolution of `Local` paints nothing,
+    /// so server state can still never land on a display this Mac owns itself.
+    /// The settings file is read only when there is no live tier, so a connected
+    /// cable costs no read per snapshot.
+    fn resolve_tier(&self, live: Option<DeviceTier>) -> DeviceTier {
+        match live {
+            Some(tier) => tier,
+            None => commands::resolved_device_tier(None, self.network_store.load().settings()),
         }
     }
 
@@ -195,6 +260,7 @@ struct DesktopState {
     store: Arc<ConfigStore>,
     network_store: Arc<NetworkSettingsStore>,
     networked_config: Arc<NetworkedConfigProjection>,
+    server_card_state: Arc<ServerStateProjection>,
     snapshot_projector: DesktopSnapshotProjector,
     server_client: ureq::Agent,
     has_saved_config: Arc<AtomicBool>,
@@ -222,11 +288,6 @@ impl DesktopState {
 
     fn set_networked_config(&self, config: Option<AppConfig>) -> Result<(), commands::IpcError> {
         self.networked_config.replace(config)
-    }
-
-    fn toggle_paused(&self) -> Result<(), commands::IpcError> {
-        let paused = !self.runtime.snapshot()?.config.preferences.paused;
-        commands::set_paused(self, paused)
     }
 
     fn toggle_autostart(&self, app: &AppHandle) -> Result<(), commands::IpcError> {
@@ -313,6 +374,8 @@ const fn runtime_error_log_label(error: &app_core::RuntimeError) -> &'static str
         app_core::RuntimeError::ResponseTimeout => "response-timeout",
         app_core::RuntimeError::UnknownWidget { .. } => "unknown-widget",
         app_core::RuntimeError::UnknownScreen { .. } => "unknown-screen",
+        app_core::RuntimeError::UnknownCard { .. } => "unknown-card",
+        app_core::RuntimeError::NotAPluginCard { .. } => "not-a-plugin-card",
         app_core::RuntimeError::DeviceDisconnected | app_core::RuntimeError::Device { .. } => {
             "device"
         }
@@ -337,13 +400,6 @@ fn create_tray(
         false,
         None::<&str>,
     )?;
-    let pause = MenuItem::with_id(
-        app,
-        PAUSE_ITEM_ID,
-        presentation.pause_text,
-        true,
-        None::<&str>,
-    )?;
     let open = MenuItem::with_id(app, OPEN_ITEM_ID, "Open settings", true, None::<&str>)?;
     let autostart = CheckMenuItem::with_id(
         app,
@@ -361,7 +417,6 @@ fn create_tray(
         &[
             &status,
             &separator_one,
-            &pause,
             &open,
             &autostart,
             &separator_two,
@@ -380,7 +435,6 @@ fn create_tray(
 
     Ok(TrayControls {
         status,
-        pause,
         autostart,
         tray,
     })
@@ -392,12 +446,6 @@ fn handle_tray_action(app: &AppHandle, id: &str) {
     };
     match action {
         TrayAction::OpenSettings => show_settings(app),
-        TrayAction::TogglePause => {
-            let state = app.state::<DesktopState>();
-            if let Err(error) = state.toggle_paused() {
-                eprintln!("cannot change pause state: {}", error.log_label());
-            }
-        }
         TrayAction::ToggleAutostart => {
             let state = app.state::<DesktopState>();
             if let Err(error) = state.toggle_autostart(app) {
@@ -440,8 +488,9 @@ fn setup_app(app: &mut App) -> Result<(), Box<dyn Error>> {
     }
     let last_known_tier = network_settings.settings().tier;
     let loaded = store.load();
-    let has_saved_config = load_has_saved_config(&loaded);
-    let auto_open_settings = auto_open_settings_on_launch(&loaded);
+    let first_run = is_first_run(&loaded);
+    let has_saved_config = !first_run;
+    let auto_open_settings = first_run;
     let persistence = load_failure_persistence(&loaded);
     if let Some(persistence) = &persistence {
         eprintln!(
@@ -464,10 +513,12 @@ fn setup_app(app: &mut App) -> Result<(), Box<dyn Error>> {
     let initial_snapshot = runtime.snapshot()?;
     let tray = create_tray(app, &initial_snapshot, autostart_enabled)?;
     let networked_config = Arc::new(NetworkedConfigProjection::default());
+    let server_card_state = Arc::new(ServerStateProjection::default());
     let has_saved_config = Arc::new(AtomicBool::new(has_saved_config));
     let snapshot_projector = DesktopSnapshotProjector {
         network_store: Arc::clone(&network_store),
         networked_config: Arc::clone(&networked_config),
+        server_card_state: Arc::clone(&server_card_state),
         last_known_tier: Mutex::new(last_known_tier),
         has_saved_config: Arc::clone(&has_saved_config),
     };
@@ -477,6 +528,7 @@ fn setup_app(app: &mut App) -> Result<(), Box<dyn Error>> {
         store,
         network_store,
         networked_config,
+        server_card_state,
         snapshot_projector,
         server_client: server_http_agent(),
         has_saved_config,
@@ -535,18 +587,14 @@ fn secure_config_directory(path: &Path) -> std::io::Result<()> {
 /// Only a clean defaults load means no document existed. Recovery and validation
 /// failures still came from a persisted document, so they must not turn an existing
 /// installation back into first-run mode.
-fn load_has_saved_config(loaded: &LoadOutcome) -> bool {
-    !matches!(
+fn is_first_run(loaded: &LoadOutcome) -> bool {
+    matches!(
         loaded,
         LoadOutcome::Loaded {
             origin: ConfigOrigin::Defaults,
             ..
         }
     )
-}
-
-fn auto_open_settings_on_launch(loaded: &LoadOutcome) -> bool {
-    !load_has_saved_config(loaded)
 }
 
 fn load_failure_persistence(loaded: &LoadOutcome) -> Option<PersistenceState> {
@@ -594,14 +642,15 @@ pub fn run() {
             commands::provision_device,
             commands::factory_reset_device,
             commands::use_local_ownership,
-            commands::set_pushing_paused,
+            commands::resume_pushing,
             commands::control_pomodoro,
             commands::refresh_provider,
             commands::choose_ics_file,
             commands::get_autostart_status,
             commands::set_autostart_enabled,
-            commands::set_settings_window_visible,
             commands::render_card_preview,
+            commands::get_server_plugins,
+            commands::get_server_card_state,
         ])
         .setup(setup_app)
         .build(tauri::generate_context!())
@@ -639,10 +688,6 @@ mod tests {
     #[test]
     fn tray_ids_map_only_to_supported_actions() {
         assert_eq!(
-            TrayAction::from_id(PAUSE_ITEM_ID),
-            Some(TrayAction::TogglePause)
-        );
-        assert_eq!(
             TrayAction::from_id(OPEN_ITEM_ID),
             Some(TrayAction::OpenSettings)
         );
@@ -652,11 +697,12 @@ mod tests {
         );
         assert_eq!(TrayAction::from_id(QUIT_ITEM_ID), Some(TrayAction::Quit));
         assert_eq!(TrayAction::from_id(STATUS_ITEM_ID), None);
+        assert_eq!(TrayAction::from_id("pause-pushing"), None);
         assert_eq!(TrayAction::from_id("unknown"), None);
     }
 
     #[test]
-    fn device_and_pause_copy_cover_each_runtime_state() {
+    fn device_copy_covers_each_connection_state() {
         assert_eq!(
             connection_presentation(&ConnectionState::Online),
             ("Device: Connected", true)
@@ -673,8 +719,6 @@ mod tests {
             connection_presentation(&ConnectionState::Disconnected { reason: None }),
             ("Device: Disconnected", false)
         );
-        assert_eq!(pause_menu_text(false), "Pause pushing");
-        assert_eq!(pause_menu_text(true), "Resume pushing");
     }
 
     #[test]
@@ -719,19 +763,19 @@ mod tests {
     }
 
     #[test]
-    fn a_local_save_clears_the_server_projection_and_unknown_tier_never_projects_it() {
+    fn a_local_save_clears_the_server_projection_and_local_tier_never_projects_it() {
         let projection = NetworkedConfigProjection::default();
         let mut server_config = AppConfig::default();
         server_config.preferences.timezone = "Asia/Tbilisi".into();
         projection.replace(Some(server_config.clone())).unwrap();
 
-        let mut unplugged_config = AppConfig::default();
-        projection.project(None, &mut unplugged_config);
-        assert_eq!(unplugged_config, AppConfig::default());
+        let mut local_config = AppConfig::default();
+        projection.project(DeviceTier::Local, &mut local_config);
+        assert_eq!(local_config, AppConfig::default());
 
         projection.clear_for_local_save().unwrap();
         let mut later_networked_config = AppConfig::default();
-        projection.project(Some(DeviceTier::Networked), &mut later_networked_config);
+        projection.project(DeviceTier::Networked, &mut later_networked_config);
         assert_eq!(later_networked_config, AppConfig::default());
     }
 
@@ -763,6 +807,7 @@ mod tests {
         let projector = DesktopSnapshotProjector {
             network_store: Arc::clone(&network_store),
             networked_config: Arc::new(NetworkedConfigProjection::default()),
+            server_card_state: Arc::new(ServerStateProjection::default()),
             last_known_tier: Mutex::new(Some(DeviceTier::Local)),
             has_saved_config: Arc::new(AtomicBool::new(false)),
         };
@@ -824,29 +869,6 @@ mod tests {
                 message: "expected value".into(),
             },
         };
-
-        assert!(!load_has_saved_config(&defaults));
-        assert!(load_has_saved_config(&current));
-        assert!(load_has_saved_config(&recovered));
-    }
-
-    #[test]
-    fn settings_auto_open_only_for_a_missing_settings_document() {
-        let defaults = LoadOutcome::Loaded {
-            config: AppConfig::default(),
-            origin: ConfigOrigin::Defaults,
-        };
-        let current = LoadOutcome::Loaded {
-            config: AppConfig::default(),
-            origin: ConfigOrigin::Current,
-        };
-        let recovered = LoadOutcome::Recovered {
-            config: AppConfig::default(),
-            origin: ConfigOrigin::Defaults,
-            error: StoreError::InvalidJson {
-                message: "expected value".into(),
-            },
-        };
         let validation_failed = LoadOutcome::ValidationFailed {
             config: AppConfig::default(),
             origin: ConfigOrigin::Defaults,
@@ -857,10 +879,10 @@ mod tests {
             }],
         };
 
-        assert!(auto_open_settings_on_launch(&defaults));
-        assert!(!auto_open_settings_on_launch(&current));
-        assert!(!auto_open_settings_on_launch(&recovered));
-        assert!(!auto_open_settings_on_launch(&validation_failed));
+        assert!(is_first_run(&defaults));
+        assert!(!is_first_run(&current));
+        assert!(!is_first_run(&recovered));
+        assert!(!is_first_run(&validation_failed));
     }
 
     #[test]
@@ -942,5 +964,178 @@ mod tests {
 
         assert!(!unavailable_directory.exists());
         std::fs::remove_file(blocking_file).unwrap();
+    }
+
+    /// One plugin card as a hostless Mac runtime reports it: an idle provider entry
+    /// that will never refresh, an empty field set, and no error. The overlay has to
+    /// replace all three, not append beside them.
+    fn plugin_card_snapshot() -> AppSnapshot {
+        use app_core::{
+            CardDataSnapshot, DeviceCounters, DeviceSnapshot, ProviderSnapshot, RuntimeDiagnostics,
+        };
+
+        AppSnapshot {
+            config: AppConfig::default(),
+            runtime: RuntimeState::Running,
+            device: DeviceSnapshot {
+                connection: ConnectionState::Online,
+                port_name: None,
+                firmware_version: Some("2.0.0".into()),
+                protocol_version: Some(1),
+                max_protocol_version: Some(1),
+                capabilities: Vec::new(),
+                unknown_capability_bits: 0,
+                uptime_ms: None,
+                free_heap: None,
+                rotation: None,
+                tier: Some(DeviceTier::Networked),
+                wifi_state: None,
+                wifi_rssi: None,
+                ip: None,
+                last_network_error: None,
+                ota_state: None,
+                active_screen_id: None,
+                counters: DeviceCounters::default(),
+            },
+            providers: vec![ProviderSnapshot {
+                widget_id: "air".into(),
+                state: ProviderState::Idle,
+                last_success_unix_ms: None,
+                age_seconds: None,
+            }],
+            pomodoros: Vec::new(),
+            card_data: vec![CardDataSnapshot {
+                card_id: "air".into(),
+                fields: Vec::new(),
+            }],
+            card_errors: Vec::new(),
+            persistence: PersistenceState::Clean,
+            diagnostics: RuntimeDiagnostics::default(),
+        }
+    }
+
+    fn server_state_projection() -> ServerStateProjection {
+        use app_core::CardErrorKind;
+
+        let projection = ServerStateProjection::default();
+        projection
+            .replace(vec![commands::ServerCardState {
+                card_id: "air".into(),
+                provider: ProviderState::Fresh,
+                hero: Some("42".into()),
+                errors: vec![app_core::CardError {
+                    kind: CardErrorKind::SceneRefused,
+                    card_id: "air".into(),
+                    message: "no snapshot cached yet".into(),
+                }],
+            }])
+            .unwrap();
+        projection
+    }
+
+    #[test]
+    fn server_card_state_overlays_only_in_networked_tier() {
+        use app_core::CardFieldValue;
+
+        let projection = server_state_projection();
+
+        // Local ownership must never be painted over with server state: this Mac
+        // genuinely owns that display, and the server's answer is about another one.
+        let mut local = plugin_card_snapshot();
+        projection.project(DeviceTier::Local, &mut local);
+        assert_eq!(local.providers.len(), 1);
+        assert_eq!(local.providers[0].state, ProviderState::Idle);
+        assert!(local.card_data[0].fields.is_empty());
+        assert!(local.card_errors.is_empty());
+
+        let mut app = plugin_card_snapshot();
+        projection.project(DeviceTier::Networked, &mut app);
+        assert_eq!(app.providers.len(), 1, "the stale entry was appended to");
+        assert_eq!(app.providers[0].widget_id, "air");
+        assert_eq!(app.providers[0].state, ProviderState::Fresh);
+        assert_eq!(app.card_data.len(), 1);
+        assert_eq!(app.card_data[0].fields.len(), 1);
+        assert_eq!(app.card_data[0].fields[0].key, "hero");
+        assert_eq!(
+            app.card_data[0].fields[0].value,
+            CardFieldValue::Text { value: "42".into() }
+        );
+        assert_eq!(app.card_errors.len(), 1);
+        assert_eq!(app.card_errors[0].card_id, "air");
+    }
+
+    fn temp_network_store(label: &str) -> (Arc<NetworkSettingsStore>, std::path::PathBuf) {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let serial = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory =
+            std::env::temp_dir().join(format!("deskmate-{label}-{}-{serial}", std::process::id()));
+        std::fs::create_dir(&directory).unwrap();
+        let store = Arc::new(NetworkSettingsStore::new(
+            directory.join("network-settings.json"),
+        ));
+        (store, directory)
+    }
+
+    fn projector_over(store: &Arc<NetworkSettingsStore>) -> DesktopSnapshotProjector {
+        DesktopSnapshotProjector {
+            network_store: Arc::clone(store),
+            networked_config: Arc::new(NetworkedConfigProjection::default()),
+            server_card_state: Arc::new(server_state_projection()),
+            last_known_tier: Mutex::new(None),
+            has_saved_config: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// The ordinary networked case: no cable, a cold start, so `device.tier` is
+    /// `None` and the persisted settings are the only ownership fact there is.
+    /// The overlay has to run here -- this is the mode the server-rendered card
+    /// exists for -- because a tile's `stale` flag, the editor's trouble line and
+    /// the work column's card errors all read the snapshot the projector emits,
+    /// while the tile's hero reads the frontend's own resolution. Two resolutions
+    /// meant a tile that showed a value and never showed it going stale.
+    #[test]
+    fn a_cable_out_networked_mac_still_gets_the_server_overlay() {
+        use app_core::NetworkSettingsUpdate;
+
+        let (store, directory) = temp_network_store("tier-resolution-networked");
+        store
+            .save(NetworkSettingsUpdate::new(
+                "https://desk.example",
+                "desk-1",
+                Some(DeviceTier::Networked),
+                None,
+            ))
+            .unwrap();
+        let projector = projector_over(&store);
+        let mut snapshot = plugin_card_snapshot();
+        snapshot.device.tier = None;
+
+        let projected = projector.project_snapshot(snapshot);
+
+        assert_eq!(projected.app.providers[0].state, ProviderState::Fresh);
+        assert_eq!(projected.app.card_data[0].fields.len(), 1);
+        assert_eq!(projected.app.card_errors.len(), 1);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// The same unresolved live tier with no server identity stored resolves to
+    /// local, and a local display is never painted with another device's state.
+    #[test]
+    fn a_cable_out_mac_with_no_server_identity_keeps_its_local_state() {
+        let (store, directory) = temp_network_store("tier-resolution-local");
+        let projector = projector_over(&store);
+        let mut snapshot = plugin_card_snapshot();
+        snapshot.device.tier = None;
+
+        let projected = projector.project_snapshot(snapshot);
+
+        assert_eq!(projected.app.providers[0].state, ProviderState::Idle);
+        assert!(projected.app.card_data[0].fields.is_empty());
+        assert!(projected.app.card_errors.is_empty());
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }

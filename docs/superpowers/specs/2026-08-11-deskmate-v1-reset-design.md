@@ -297,6 +297,18 @@ First-run guidance, stable ids, unsaved drafts, keyboard/pointer parity, visible
 focus, and reduced-motion behaviour carry over as requirements from the M3/M4
 settings work.
 
+**Amended 2026-09-06 (owner direction; plan
+`docs/superpowers/plans/2026-09-06-deskmate-one-loop.md`).** The settings UX no longer
+exposes a card library or named playlists. The window has one loop: the complication
+tile grid in loop order, reordered in place, with an add-card slot whose menu enrols the
+new card at once; the per-card editor edits the card's dwell; the ring's head carries
+the pacing control. Schema v4/v5/v6's `playlists[]` and `active_playlist_id` are
+untouched — the document keeps exactly one playlist, the app never creates another, and
+extra playlists in older files round-trip unchanged. The reasons, in the owner's words:
+adding a card and then placing it was a step with no purpose in a one-playlist world,
+and a growing plugin registry must never reshape the window. §4.1–4.5 remain the
+schema contract.
+
 ## 5. V1 Section 4 — partition table and baked typeface
 
 ### 5.1 Partition table (irreversible)

@@ -1,7 +1,7 @@
 use std::fmt;
 use std::time::{Duration, Instant};
 
-use protocol::{Field, FieldValue};
+use protocol::{Field, FieldValue, truncate_utf8_to_bytes};
 
 pub const MIN_POMODORO_SECONDS: u32 = 1;
 pub const MAX_POMODORO_SECONDS: u32 = 86_400;
@@ -56,7 +56,10 @@ impl Pomodoro {
             return Err(PomodoroError::InvalidDuration);
         }
         Ok(Self {
-            label: truncate_utf8(&label.into(), 64),
+            label: {
+                let label = label.into();
+                truncate_utf8_to_bytes(&label, 64).to_owned()
+            },
             duration: Duration::from_secs(u64::from(duration_seconds)),
             state: PomodoroState::Idle,
             accumulated: Duration::ZERO,
@@ -70,7 +73,7 @@ impl Pomodoro {
     }
 
     pub fn matches_settings(&self, label: &str, duration_seconds: u32) -> bool {
-        self.label == truncate_utf8(label, 64)
+        self.label == truncate_utf8_to_bytes(label, 64)
             && self.duration == Duration::from_secs(u64::from(duration_seconds))
     }
 
@@ -181,17 +184,6 @@ fn integer_field(key: &str, value: u32) -> Field {
         key: key.into(),
         value: FieldValue::Integer(i64::from(value)),
     }
-}
-
-fn truncate_utf8(value: &str, maximum_bytes: usize) -> String {
-    if value.len() <= maximum_bytes {
-        return value.to_owned();
-    }
-    let mut end = maximum_bytes;
-    while !value.is_char_boundary(end) {
-        end -= 1;
-    }
-    value[..end].to_owned()
 }
 
 #[cfg(test)]

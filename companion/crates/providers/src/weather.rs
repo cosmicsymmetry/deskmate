@@ -1,11 +1,11 @@
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use protocol::{Field, FieldValue};
+use protocol::{Field, FieldValue, truncate_utf8_to_bytes};
 use serde_json::Value;
 
 use crate::http::{HttpClient, SystemHttpClient};
-use crate::{LastGood, Provider, ProviderError, ProviderSnapshot, RefreshPolicy, truncate_utf8};
+use crate::{LastGood, Provider, ProviderError, ProviderSnapshot, RefreshPolicy, text_field};
 
 pub const MIN_WEATHER_REFRESH_INTERVAL: Duration = Duration::from_mins(10);
 const GEOCODING_ENDPOINT: &str = "https://geocoding-api.open-meteo.com/v1/search";
@@ -35,8 +35,6 @@ pub struct WeatherReading {
     pub location: String,
     pub temperature_tenths: i64,
     pub apparent_temperature_tenths: i64,
-    pub weather_code: u16,
-    pub is_day: bool,
     pub summary: String,
     pub icon: String,
     pub unit: String,
@@ -50,10 +48,10 @@ impl WeatherReading {
             (self.temperature_tenths - 5) / 10
         };
         vec![
-            text_field("title", truncate_utf8(title, 64)),
+            text_field("title", truncate_utf8_to_bytes(title, 64)),
             text_field("value", format!("{rounded}°")),
-            text_field("label", truncate_utf8(&self.summary, 64)),
-            text_field("badge", truncate_utf8(&self.location, 64)),
+            text_field("label", truncate_utf8_to_bytes(&self.summary, 64)),
+            text_field("badge", truncate_utf8_to_bytes(&self.location, 64)),
             text_field("icon", self.icon.clone()),
             Field {
                 key: "temperature_tenths".into(),
@@ -70,7 +68,7 @@ impl WeatherReading {
             },
             text_field(
                 "error",
-                error.map_or_else(String::new, |value| truncate_utf8(value, 96)),
+                error.map_or("", |value| truncate_utf8_to_bytes(value, 96)),
             ),
         ]
     }
@@ -220,11 +218,9 @@ fn parse_forecast(
     };
     let (summary, icon) = describe_weather(weather_code, is_day);
     Ok(WeatherReading {
-        location: truncate_utf8(location, 64),
+        location: truncate_utf8_to_bytes(location, 64).to_owned(),
         temperature_tenths: to_tenths(temperature)?,
         apparent_temperature_tenths: to_tenths(apparent)?,
-        weather_code,
-        is_day,
         summary: summary.into(),
         icon: icon.into(),
         unit: match units {
@@ -270,13 +266,6 @@ fn describe_weather(code: u16, is_day: bool) -> (&'static str, &'static str) {
         71 | 73 | 75 | 77 | 85 | 86 => ("Snow", "snow"),
         95 | 96 | 99 => ("Thunderstorm", "storm"),
         _ => ("Unknown", "unknown"),
-    }
-}
-
-fn text_field(key: impl Into<String>, value: String) -> Field {
-    Field {
-        key: key.into(),
-        value: FieldValue::Text(value),
     }
 }
 

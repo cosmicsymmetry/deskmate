@@ -16,9 +16,10 @@ import type {
   DeviceCounters,
   NetworkSettings,
 } from "../lib/types";
+import { ipcContractFixtures } from "../lib/types.contract";
 
 export const MOCK_COUNTERS: DeviceCounters = {
-  reconnects: 0,
+  host_reconnects: 0,
   valid_frames: 48213,
   malformed_frames: 0,
   crc_errors: 0,
@@ -35,7 +36,7 @@ export const MOCK_COUNTERS: DeviceCounters = {
 
 export function mockConfig(): AppConfig {
   return {
-    schema_version: 4,
+    schema_version: ipcContractFixtures.snapshot.config.schema_version,
     preferences: {
       timezone: "Asia/Tbilisi",
       autostart: true,
@@ -151,16 +152,31 @@ export function mockCardData(): CardDataSnapshot[] {
     {
       card_id: "calendar",
       fields: [
-        { key: "row0", value: { kind: "text", value: "09:30  Standup" } },
-        { key: "row1", value: { kind: "text", value: "13:00  Design review" } },
-        { key: "row2", value: { kind: "text", value: "16:30  1:1 with Ana" } },
+        { key: "row0_title", value: { kind: "text", value: "Standup" } },
+        { key: "row0_time", value: { kind: "text", value: "09:30" } },
+        { key: "row1_title", value: { kind: "text", value: "Design review" } },
+        { key: "row1_time", value: { kind: "text", value: "13:00" } },
+        { key: "row2_title", value: { kind: "text", value: "1:1 with Ana" } },
+        { key: "row2_time", value: { kind: "text", value: "16:30" } },
+        { key: "row3_title", value: { kind: "text", value: "" } },
+        { key: "row3_time", value: { kind: "text", value: "" } },
+        { key: "row4_title", value: { kind: "text", value: "" } },
+        { key: "row4_time", value: { kind: "text", value: "" } },
       ],
     },
     {
       card_id: "rss",
       fields: [
-        { key: "row0", value: { kind: "text", value: "Show HN: A tiny desk display" } },
-        { key: "row1", value: { kind: "text", value: "The case for boring software" } },
+        { key: "row0_title", value: { kind: "text", value: "Show HN: A tiny desk display" } },
+        { key: "row0_time", value: { kind: "text", value: "8 min ago" } },
+        { key: "row1_title", value: { kind: "text", value: "The case for boring software" } },
+        { key: "row1_time", value: { kind: "text", value: "24 min ago" } },
+        { key: "row2_title", value: { kind: "text", value: "" } },
+        { key: "row2_time", value: { kind: "text", value: "" } },
+        { key: "row3_title", value: { kind: "text", value: "" } },
+        { key: "row3_time", value: { kind: "text", value: "" } },
+        { key: "row4_title", value: { kind: "text", value: "" } },
+        { key: "row4_time", value: { kind: "text", value: "" } },
       ],
     },
     {
@@ -247,6 +263,7 @@ export function mockSnapshot(config: AppConfig): AppSnapshot {
       provider_queue_full: 0,
       provider_results_discarded: 0,
       subscriber_snapshots_overwritten: 2,
+      interrupt_dismissals_ignored: 0,
     },
   };
 }

@@ -5,8 +5,6 @@
 #include <string.h>
 
 #define CHECK_PATH "/v1/device/firmware?current="
-#define FIRMWARE_PATH_PREFIX "/v1/firmware/"
-#define FIRMWARE_PATH_SUFFIX ".bin"
 
 typedef struct {
     const char *bytes;
@@ -149,18 +147,18 @@ static bool path_matches_version(const char *path,
                                  const char *version,
                                  size_t version_length)
 {
-    size_t expected_length = (sizeof(FIRMWARE_PATH_PREFIX) - 1U) +
-                             version_length +
-                             (sizeof(FIRMWARE_PATH_SUFFIX) - 1U);
+    size_t expected_length =
+        (sizeof(OTA_POLICY_FIRMWARE_PATH_PREFIX) - 1U) + version_length +
+        (sizeof(OTA_POLICY_FIRMWARE_PATH_SUFFIX) - 1U);
     return path_length == expected_length &&
-           memcmp(path, FIRMWARE_PATH_PREFIX,
-                  sizeof(FIRMWARE_PATH_PREFIX) - 1U) == 0 &&
-           memcmp(path + sizeof(FIRMWARE_PATH_PREFIX) - 1U,
+           memcmp(path, OTA_POLICY_FIRMWARE_PATH_PREFIX,
+                  sizeof(OTA_POLICY_FIRMWARE_PATH_PREFIX) - 1U) == 0 &&
+           memcmp(path + sizeof(OTA_POLICY_FIRMWARE_PATH_PREFIX) - 1U,
                   version, version_length) == 0 &&
            memcmp(path + expected_length -
-                      (sizeof(FIRMWARE_PATH_SUFFIX) - 1U),
-                  FIRMWARE_PATH_SUFFIX,
-                  sizeof(FIRMWARE_PATH_SUFFIX) - 1U) == 0;
+                      (sizeof(OTA_POLICY_FIRMWARE_PATH_SUFFIX) - 1U),
+                  OTA_POLICY_FIRMWARE_PATH_SUFFIX,
+                  sizeof(OTA_POLICY_FIRMWARE_PATH_SUFFIX) - 1U) == 0;
 }
 
 bool ota_policy_build_download_url(const char *server_url,

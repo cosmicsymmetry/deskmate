@@ -23,7 +23,7 @@ struct ConnectionSequence {
 async fn spawn() -> (String, server::registry::DeviceIdentity, String) {
     let state = ServerState::in_memory();
     let identity = state.registry().mint().expect("mint identity");
-    let admin_token = state.admin_token().to_string();
+    let admin_token = support::IN_MEMORY_ADMIN_TOKEN.to_string();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     tokio::spawn(async move {

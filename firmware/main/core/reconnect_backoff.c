@@ -55,8 +55,3 @@ void reconnect_backoff_reset(reconnect_backoff_t *backoff)
         backoff->base_delay_ms = RECONNECT_BACKOFF_MIN_DELAY_MS;
     }
 }
-
-uint32_t reconnect_backoff_base_delay_ms(const reconnect_backoff_t *backoff)
-{
-    return backoff == NULL ? 0U : backoff->base_delay_ms;
-}

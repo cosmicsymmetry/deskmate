@@ -9,6 +9,8 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 pub type DeviceSocket =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
+pub const IN_MEMORY_ADMIN_TOKEN: &str = "in-memory-admin-token";
+
 pub async fn drive_until_config(socket: &mut DeviceSocket, widget_id: &str) -> ApplyConfig {
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         let mut target_config = None;
@@ -87,9 +89,41 @@ pub async fn drive_until_push(socket: &mut DeviceSocket, widget_id: &str) -> pro
     .expect("timed out waiting for the expected data push")
 }
 
+pub async fn drive_until_scene(socket: &mut DeviceSocket) -> protocol::PushScene {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            match socket.next().await {
+                Some(Ok(WsMessage::Binary(bytes))) => {
+                    let frame = protocol::decode_wire_frame(&bytes)
+                        .expect("device received a malformed frame");
+                    let message = protocol::decode_message(&frame)
+                        .expect("device received an undecodable message");
+                    let target = matches!(&message, Message::PushScene(_));
+                    reply(socket, frame.request_id, &message).await;
+                    if target {
+                        let Message::PushScene(push) = message else {
+                            unreachable!("target is true only for PushScene");
+                        };
+                        return push;
+                    }
+                }
+                Some(Ok(WsMessage::Ping(payload))) => {
+                    socket.send(WsMessage::Pong(payload)).await.unwrap();
+                }
+                Some(Ok(other)) => panic!("unexpected WebSocket message: {other:?}"),
+                Some(Err(error)) => panic!("WebSocket read failed: {error}"),
+                None => panic!("socket closed before the expected scene arrived"),
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for the expected scene")
+}
+
 /// Drives a runtime's first connection through full synchronization and the
-/// initial scheduled status/time-sync work. Do not use this for reattachment:
-/// a retained scheduler does not restart those periodic deadlines.
+/// initial scheduled status/time-sync work. Use [`reattach_runtime`] for a
+/// reconnect: it replays a retained runtime rather than bootstrapping one,
+/// though both now finish the same periodic schedule.
 pub async fn bootstrap_runtime(socket: &mut DeviceSocket) {
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
@@ -121,8 +155,15 @@ pub async fn bootstrap_runtime(socket: &mut DeviceSocket) {
 }
 
 /// Drives a retained runtime's reconnect replay. Replay restores the cached
-/// device model through `ActivateScreen`, but deliberately does not restart
-/// app-core's initial periodic schedule.
+/// device model through `ActivateScreen`, and is then followed by the same
+/// status and time sync a first connection performs.
+///
+/// That last part changed when the runtime worker's busy-loop was fixed. The
+/// status and time-sync deadlines are now consumed on every tick so they cannot
+/// sit in the past and spin `recv_timeout` on a zero wait, and they are re-armed
+/// at the connect transition instead. A reconnect therefore refreshes promptly,
+/// which is the behaviour a dropped link needs: the device may have rebooted and
+/// its clock may have drifted while it was away.
 pub async fn reattach_runtime(socket: &mut DeviceSocket) {
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
@@ -135,6 +176,7 @@ pub async fn reattach_runtime(socket: &mut DeviceSocket) {
                     let complete = matches!(message, Message::ActivateScreen(_));
                     reply(socket, frame.request_id, &message).await;
                     if complete {
+                        finish_initial_schedule(socket).await;
                         flush_socket(socket).await;
                         return;
                     }
@@ -221,28 +263,91 @@ pub async fn flush_socket(socket: &mut DeviceSocket) {
     }
 }
 
+/// Every card-bearing message the device receives during `window`, in order,
+/// answering each one exactly as [`flush_socket`] does.
+///
+/// Link housekeeping -- `StatusRequest`, `TimeSync`, `Heartbeat` -- is
+/// answered but not recorded: it is the transport keeping itself alive, not a
+/// face. Everything that can change what the panel shows is recorded. Note
+/// `reply` panics on any message it does not know, the four asset-transfer
+/// messages included, so an unexpected asset push fails the caller too.
+pub async fn card_messages_during(
+    socket: &mut DeviceSocket,
+    window: std::time::Duration,
+) -> Vec<&'static str> {
+    let deadline = tokio::time::Instant::now() + window;
+    let mut seen = Vec::new();
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return seen;
+        }
+        let Ok(next) = tokio::time::timeout(remaining, socket.next()).await else {
+            return seen;
+        };
+        match next {
+            Some(Ok(WsMessage::Binary(bytes))) => {
+                let frame = protocol::decode_wire_frame(&bytes).expect("transcript frame");
+                let message = protocol::decode_message(&frame).expect("transcript message");
+                if let Some(name) = card_message_name(&message) {
+                    seen.push(name);
+                }
+                reply(socket, frame.request_id, &message).await;
+            }
+            Some(Ok(WsMessage::Ping(payload))) => {
+                socket.send(WsMessage::Pong(payload)).await.unwrap();
+            }
+            Some(Ok(WsMessage::Pong(_))) => {}
+            Some(Ok(other)) => panic!("unexpected transcript WebSocket message: {other:?}"),
+            Some(Err(error)) => panic!("transcript WebSocket read failed: {error}"),
+            None => panic!("socket closed during the transcript window"),
+        }
+    }
+}
+
+fn card_message_name(message: &Message) -> Option<&'static str> {
+    match message {
+        Message::ApplyConfig(_) => Some("ApplyConfig"),
+        Message::PushData(_) => Some("PushData"),
+        Message::PushScene(_) => Some("PushScene"),
+        Message::ActivateScreen(_) => Some("ActivateScreen"),
+        Message::TriggerInterrupt(_) => Some("TriggerInterrupt"),
+        _ => None,
+    }
+}
+
 async fn reply(socket: &mut DeviceSocket, request_id: u32, request: &Message) {
     let response = match request {
         Message::StatusRequest => Message::StatusResponse(sample_status()),
         Message::TimeSync(_) => Message::Ack(Ack {
             acknowledged_type: protocol::TYPE_TIME_SYNC,
             revision: None,
+            already_present: None,
         }),
         Message::ApplyConfig(config) => Message::Ack(Ack {
             acknowledged_type: protocol::TYPE_APPLY_CONFIG,
             revision: Some(config.revision),
+            already_present: None,
         }),
         Message::PushData(push) => Message::Ack(Ack {
             acknowledged_type: protocol::TYPE_PUSH_DATA,
             revision: Some(push.revision),
+            already_present: None,
         }),
         Message::ActivateScreen(_) => Message::Ack(Ack {
             acknowledged_type: protocol::TYPE_ACTIVATE_SCREEN,
             revision: None,
+            already_present: None,
         }),
         Message::TriggerInterrupt(_) => Message::Ack(Ack {
             acknowledged_type: protocol::TYPE_TRIGGER_INTERRUPT,
             revision: None,
+            already_present: None,
+        }),
+        Message::PushScene(push) => Message::Ack(Ack {
+            acknowledged_type: protocol::TYPE_PUSH_SCENE,
+            revision: Some(push.revision),
+            already_present: None,
         }),
         Message::Heartbeat => Message::HeartbeatAck(HeartbeatAck { uptime_ms: 1_234 }),
         other => panic!("server sent an unexpected device request: {other:?}"),
@@ -259,9 +364,11 @@ fn sample_status() -> StatusResponse {
     StatusResponse {
         protocol_version: protocol::PROTOCOL_VERSION,
         max_protocol_version: protocol::MAX_PROTOCOL_VERSION,
-        capabilities: protocol::CAPABILITY_CORE_WIDGETS
-            | protocol::CAPABILITY_CONFIG_ROTATION
-            | protocol::CAPABILITY_EXTENDED_TEMPLATES,
+        // A device that reached this server over WSS advertised networking
+        // capability to get here. Use the full shipping set so this shared
+        // fixture cannot describe an impossible tunnel peer or mask the next
+        // host-side capability gate.
+        capabilities: protocol::CURRENT_CAPABILITIES,
         firmware_version: "test-device".to_owned(),
         uptime_ms: 1_234,
         free_heap: 5_678,

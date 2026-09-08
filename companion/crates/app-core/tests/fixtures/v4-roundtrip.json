@@ -1,0 +1,45 @@
+{
+  "schema_version": 4,
+  "preferences": {
+    "timezone": "Asia/Tbilisi",
+    "autostart": true,
+    "paused": false,
+    "orientation": "landscape-flipped"
+  },
+  "cards": [
+    {
+      "kind": "clock",
+      "id": "clock",
+      "title": "Desk",
+      "show_seconds": true,
+      "template": { "kind": "digital-clock" },
+      "tap_action": { "kind": "none" },
+      "refresh": { "kind": "device-local" },
+      "alert": { "kind": "none" }
+    },
+    {
+      "kind": "pomodoro",
+      "id": "focus",
+      "label": "Focus",
+      "duration_seconds": 1500,
+      "template": { "kind": "progress-ring" },
+      "tap_action": { "kind": "start-pause" },
+      "refresh": { "kind": "device-local" },
+      "alert": { "kind": "on-timer-finish", "hold": { "kind": "until-dismissed" } }
+    }
+  ],
+  "assets": [],
+  "playlists": [
+    {
+      "id": "workday",
+      "name": "Workday",
+      "advance": { "kind": "timed", "default_dwell_seconds": 30 },
+      "entries": [
+        { "card_id": "clock", "dwell_seconds": null },
+        { "card_id": "focus", "dwell_seconds": 20 }
+      ]
+    }
+  ],
+  "active_playlist_id": "workday",
+  "updater": { "channel": "beta", "checks": "notify" }
+}

@@ -6,30 +6,33 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use app_core::{
-    AppConfig, CardField, CardFieldValue, ConfigStore, DisplayOrientation, DisplayTemplate,
-    MAX_CONFIG_FILE_BYTES, MAX_ICS_BYTES, MAX_ICS_SOURCE_LEN, MAX_WIDGET_ID_LEN, NetworkConfig,
-    NetworkSettings, NetworkSettingsStore, NetworkSettingsStoreError, NetworkSettingsUpdate,
-    PomodoroAction, ProvisioningTier, RuntimeError, RuntimeHandle, SaveReceipt, StoreError,
-    ValidationIssue, utc_offset_minutes,
+    AdminConfigErrorBody, AppConfig, CardField, CardFieldValue, CardSettings, ConfigStore,
+    DisplayOrientation, DisplayTemplate, MAX_CONFIG_FILE_BYTES, MAX_DEVICE_ID_LEN,
+    MAX_DEVICE_TOKEN_LEN, MAX_ICS_BYTES, MAX_ICS_SOURCE_LEN, MAX_PSK_LEN, MAX_SERVER_URL_LEN,
+    MAX_SSID_LEN, MAX_WIDGET_ID_LEN, NetworkConfig, NetworkSettings, NetworkSettingsStore,
+    NetworkSettingsStoreError, NetworkSettingsUpdate, PomodoroAction, ProvisioningTier,
+    RuntimeError, RuntimeHandle, SaveReceipt, StoreError, ValidationIssue, utc_offset_minutes,
 };
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, State};
 use tauri_plugin_autostart::ManagerExt;
 use tauri_plugin_dialog::DialogExt;
 
-use crate::{DesktopSnapshot, DesktopState, MAIN_WINDOW_LABEL, NetworkedConfigProjection};
+use crate::{DesktopSnapshot, DesktopState, NetworkedConfigProjection};
 
-// These are the protocol-v1 NetworkConfig bounds. app-core deliberately exposes the
-// command type, not protocol implementation constants, so the shell repeats them at
-// its untrusted IPC edge and the runtime remains the final encoder-side authority.
-const MAX_SSID_BYTES: usize = 32;
-const MAX_PASSPHRASE_BYTES: usize = 64;
-const MAX_SERVER_URL_BYTES: usize = 128;
-const MAX_DEVICE_ID_BYTES: usize = 32;
-const MAX_DEVICE_TOKEN_BYTES: usize = 128;
-const MAX_SERVER_ERROR_BYTES: usize = 64 * 1_024;
+pub(crate) const MAX_SERVER_ERROR_BYTES: usize = 64 * 1_024;
+
+/// The device-status read's own bound, which must EXCEED
+/// [`app_core::MAX_CONFIG_FILE_BYTES`] rather than match it: `GET
+/// /v1/devices/{id}` embeds the device's whole `AppConfig`, itself legal right up
+/// to that limit, and then wraps it in a snapshot of providers, card data and card
+/// errors. Sharing the 64 KiB error-body bound made a near-maximal config a
+/// permanent "oversized response" -- a card-state poll that could never succeed,
+/// reported with the same notice an unreachable server gets. Expressed as a
+/// multiple so the relationship survives someone editing either number.
+pub(crate) const MAX_SERVER_DEVICE_STATUS_BYTES: usize = 8 * MAX_CONFIG_FILE_BYTES;
 
 /// The draft travels as a bounded JSON envelope so an IPC caller cannot make serde
 /// allocate an arbitrarily deep application document before domain validation runs.
@@ -96,6 +99,144 @@ impl ProvisionContext {
     }
 }
 
+/// Everything a read-only server call needs, cloned out of `DesktopState` so the
+/// blocking half can move onto a worker thread. No config, no runtime, no locks:
+/// these calls never mutate anything the desktop owns.
+#[derive(Clone)]
+struct ServerQueryContext {
+    agent: ureq::Agent,
+    network_store: Arc<NetworkSettingsStore>,
+}
+
+impl ServerQueryContext {
+    fn from_desktop(state: &DesktopState) -> Self {
+        Self {
+            agent: state.server_client.clone(),
+            network_store: Arc::clone(&state.network_store),
+        }
+    }
+
+    /// The store lends the token for one call and never returns it; a missing token
+    /// is a typed instruction, not a transport failure.
+    fn with_admin_token<T>(
+        &self,
+        operation: impl FnOnce(&str) -> Result<T, IpcError>,
+    ) -> Result<T, IpcError> {
+        self.network_store
+            .with_admin_token(operation)
+            .map_err(IpcError::from)?
+            .ok_or_else(|| IpcError::InvalidPayload {
+                message: "Enter the admin token in Network setup before reading server state."
+                    .into(),
+            })?
+    }
+}
+
+fn fetch_server_plugins(
+    context: &ServerQueryContext,
+) -> Result<app_core::admin::PluginCatalog, IpcError> {
+    let settings = context.network_store.load().settings().clone();
+    let url =
+        crate::server_client::server_url(&settings.server_url, &["v1", "plugins"])?.to_string();
+    context.with_admin_token(|token| {
+        crate::server_client::get_server_json(&context.agent, &url, token, MAX_SERVER_ERROR_BYTES)
+    })
+}
+
+fn fetch_server_card_state(context: &ServerQueryContext) -> Result<Vec<ServerCardState>, IpcError> {
+    let settings = context.network_store.load().settings().clone();
+    validate_target(&settings.device_id, MAX_DEVICE_ID_LEN, "device ID")?;
+    let url = crate::server_client::server_url(
+        &settings.server_url,
+        &["v1", "devices", &settings.device_id],
+    )?
+    .to_string();
+    let status: ServerDeviceStatus = context.with_admin_token(|token| {
+        crate::server_client::get_server_json(
+            &context.agent,
+            &url,
+            token,
+            MAX_SERVER_DEVICE_STATUS_BYTES,
+        )
+    })?;
+    Ok(project_server_card_state(&status))
+}
+
+/// The tier decides where a plugin card's face comes from, and it decides first:
+/// in local tier there is no server and no plugin host, so this returns the
+/// sentence without opening a socket. Only in networked tier is a request made,
+/// and only then can a 404 be read as `PLUGIN_PREVIEW_UNAVAILABLE`.
+fn plugin_card_preview(
+    context: &ServerQueryContext,
+    tier: Option<app_core::DeviceTier>,
+    card_id: &str,
+) -> Result<PreviewFrame, IpcError> {
+    validate_target(card_id, MAX_WIDGET_ID_LEN, "card ID")?;
+    let settings = context.network_store.load().settings().clone();
+    if save_destination(tier, &settings) != SaveDestination::Server {
+        return Ok(unrendered_plugin_frame(PLUGIN_RENDERS_ON_THE_SERVER));
+    }
+    validate_target(&settings.device_id, MAX_DEVICE_ID_LEN, "device ID")?;
+    let url = crate::server_client::server_url(
+        &settings.server_url,
+        &[
+            "v1",
+            "devices",
+            &settings.device_id,
+            "cards",
+            card_id,
+            "preview",
+        ],
+    )?
+    .to_string();
+    let response = context.with_admin_token(|token| {
+        crate::server_client::get_server_json::<app_core::admin::CardPreviewResponse>(
+            &context.agent,
+            &url,
+            token,
+            crate::server_client::MAX_SERVER_PREVIEW_BYTES,
+        )
+    });
+    match response {
+        Ok(response) => Ok(plugin_preview_frame(response)),
+        // Spec section 10: additive routes fail closed. What a 404 means beyond
+        // "no preview came back" is not knowable here, so the sentence does not
+        // guess -- see `PLUGIN_PREVIEW_UNAVAILABLE`.
+        Err(IpcError::NotFound { .. }) => Ok(unrendered_plugin_frame(PLUGIN_PREVIEW_UNAVAILABLE)),
+        Err(error) => Err(error),
+    }
+}
+
+async fn on_server_worker<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T, IpcError> + Send + 'static,
+) -> Result<T, IpcError> {
+    tauri::async_runtime::spawn_blocking(work)
+        .await
+        .map_err(|_| IpcError::RuntimeUnavailable {
+            message: "the server request worker stopped unexpectedly".into(),
+        })?
+}
+
+#[tauri::command]
+pub async fn get_server_plugins(
+    state: State<'_, DesktopState>,
+) -> Result<app_core::admin::PluginCatalog, IpcError> {
+    let context = ServerQueryContext::from_desktop(&state);
+    on_server_worker(move || fetch_server_plugins(&context)).await
+}
+
+#[tauri::command]
+pub async fn get_server_card_state(
+    state: State<'_, DesktopState>,
+) -> Result<Vec<ServerCardState>, IpcError> {
+    let context = ServerQueryContext::from_desktop(&state);
+    let states = on_server_worker(move || fetch_server_card_state(&context)).await?;
+    // The snapshot stream is what a tile actually reads, so a successful poll
+    // updates the projection before it answers the caller.
+    state.server_card_state.replace(states.clone())?;
+    Ok(states)
+}
+
 struct ServerSaveContext {
     config: ConfigSaveContext,
     server_client: ureq::Agent,
@@ -107,6 +248,7 @@ struct ServerSaveContext {
 #[serde(deny_unknown_fields)]
 pub struct ServerEndpointRequest {
     server_url: String,
+    device_id: String,
     admin_token: String,
 }
 
@@ -127,29 +269,101 @@ pub struct ServerConfigRequest {
     draft: DraftPayload,
 }
 
-#[derive(Deserialize)]
-#[serde(tag = "kind", rename_all = "kebab-case")]
-enum ServerErrorBody {
-    InvalidConfig { issues: Vec<ValidationIssue> },
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AutostartStatus {
     pub enabled: bool,
     pub preference_enabled: bool,
 }
 
-/// A rendered card preview: the exact PNG bytes the firmware's own template
-/// renderer produced, base64-encoded for the typed IPC boundary (the webview never
-/// receives anything besides these bytes — see the module docs on `preview`).
+/// A rendered card preview. `png_base64` is `None` when there is nothing to draw
+/// and `state` then names why, in the server's own words: the stage prints that
+/// sentence rather than "Preview unavailable", which stays reserved for a real
+/// transport failure. Built-in cards always set `png_base64` and never `state`.
+///
 /// `sample` is set when the card has never published data (the runtime holds no
 /// `CardDataSnapshot` for it): the request still renders, with an empty field set,
 /// so the image is the firmware's own unconfigured appearance for that template
-/// rather than an invented placeholder.
+/// rather than an invented placeholder. It therefore only ever accompanies a real
+/// frame -- a card with no frame is not a sample of anything.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PreviewFrame {
-    pub png_base64: String,
+    pub png_base64: Option<String>,
     pub sample: bool,
+    pub state: Option<String>,
+}
+
+/// The server's view of one plugin card, projected onto the Mac's snapshot so a
+/// plugin tile carries the same value, freshness and error copy a built-in does.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServerCardState {
+    pub card_id: String,
+    pub provider: app_core::ProviderState,
+    pub hero: Option<String>,
+    pub errors: Vec<app_core::CardError>,
+}
+
+/// Deliberately partial. `AdminSnapshot` injects `last_ota_error` and
+/// `observed_age_seconds` into `device` after serialization, so parsing the whole
+/// `AppSnapshot` back would couple this app to a shape only the server writes.
+/// These four collections are all a plugin tile needs.
+#[derive(Deserialize)]
+pub(crate) struct ServerDeviceStatus {
+    snapshot: Option<ServerRuntimeSnapshot>,
+}
+
+#[derive(Deserialize)]
+struct ServerRuntimeSnapshot {
+    config: ServerSnapshotConfig,
+    providers: Vec<app_core::ProviderSnapshot>,
+    card_data: Vec<app_core::CardDataSnapshot>,
+    card_errors: Vec<app_core::CardError>,
+}
+
+#[derive(Deserialize)]
+struct ServerSnapshotConfig {
+    cards: Vec<CardSettings>,
+}
+
+fn project_server_card_state(status: &ServerDeviceStatus) -> Vec<ServerCardState> {
+    let Some(snapshot) = status.snapshot.as_ref() else {
+        return Vec::new();
+    };
+    snapshot
+        .config
+        .cards
+        .iter()
+        .filter(|card| matches!(card, CardSettings::Plugin { .. }))
+        .map(|card| {
+            let card_id = card.id();
+            ServerCardState {
+                card_id: card_id.to_owned(),
+                provider: snapshot
+                    .providers
+                    .iter()
+                    .find(|provider| provider.widget_id == card_id)
+                    .map_or(app_core::ProviderState::Idle, |provider| {
+                        provider.state.clone()
+                    }),
+                // The summary the manifest declares arrives as `hero`; a non-text
+                // value is not a headline, so it is not shown as one.
+                hero: snapshot
+                    .card_data
+                    .iter()
+                    .find(|data| data.card_id == card_id)
+                    .and_then(|data| data.fields.iter().find(|field| field.key == "hero"))
+                    .and_then(|field| match &field.value {
+                        CardFieldValue::Text { value } => Some(value.clone()),
+                        CardFieldValue::Integer { .. } | CardFieldValue::Boolean { .. } => None,
+                    }),
+                errors: snapshot
+                    .card_errors
+                    .iter()
+                    .filter(|error| error.card_id == card_id)
+                    .cloned()
+                    .collect(),
+            }
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -175,6 +389,17 @@ pub enum IpcError {
     RuntimeUnavailable {
         message: String,
     },
+    /// The server was reached, answered, and said something this app cannot read.
+    ///
+    /// Distinct from `RuntimeUnavailable` because the difference is the whole
+    /// message: "couldn't reach the server" is simply false here. The reachable
+    /// cause is the documented server-then-Mac rollout -- a server built before
+    /// this app answers an additive route without the keys this app's DTOs
+    /// require -- so the window's sentence for it means "update the server",
+    /// never "check your network".
+    IncompatibleServer {
+        message: String,
+    },
     NotFound {
         message: String,
     },
@@ -193,6 +418,13 @@ pub enum IpcError {
     Internal {
         message: String,
     },
+    /// A typed, visible refusal for input this build genuinely cannot act on yet --
+    /// mirrors runtime.rs's `CardErrorKind::SceneRefused` for the same reason: say so
+    /// explicitly rather than pretending to render something, or miscategorizing the
+    /// refusal as an unexpected internal error.
+    Unsupported {
+        message: String,
+    },
 }
 
 impl std::fmt::Display for IpcError {
@@ -204,12 +436,14 @@ impl std::fmt::Display for IpcError {
             | Self::Persistence { message }
             | Self::RuntimeBusy { message }
             | Self::RuntimeUnavailable { message }
+            | Self::IncompatibleServer { message }
             | Self::NotFound { message }
             | Self::Device { message }
             | Self::Provider { message }
             | Self::Autostart { message }
             | Self::Window { message }
-            | Self::Internal { message } => formatter.write_str(message),
+            | Self::Internal { message }
+            | Self::Unsupported { message } => formatter.write_str(message),
         }
     }
 }
@@ -225,13 +459,36 @@ impl IpcError {
             Self::Persistence { .. } => "persistence",
             Self::RuntimeBusy { .. } => "runtime-busy",
             Self::RuntimeUnavailable { .. } => "runtime-unavailable",
+            Self::IncompatibleServer { .. } => "incompatible-server",
             Self::NotFound { .. } => "not-found",
             Self::Device { .. } => "device",
             Self::Provider { .. } => "provider",
             Self::Autostart { .. } => "autostart",
             Self::Window { .. } => "window",
             Self::Internal { .. } => "internal",
+            Self::Unsupported { .. } => "unsupported",
         }
+    }
+
+    fn map_message(mut self, map: impl FnOnce(String) -> String) -> Self {
+        let message = match &mut self {
+            Self::InvalidPayload { message }
+            | Self::PayloadTooLarge { message, .. }
+            | Self::Validation { message, .. }
+            | Self::Persistence { message }
+            | Self::RuntimeBusy { message }
+            | Self::RuntimeUnavailable { message }
+            | Self::IncompatibleServer { message }
+            | Self::NotFound { message }
+            | Self::Device { message }
+            | Self::Provider { message }
+            | Self::Autostart { message }
+            | Self::Window { message }
+            | Self::Internal { message }
+            | Self::Unsupported { message } => message,
+        };
+        *message = map(std::mem::take(message));
+        self
     }
 }
 
@@ -296,16 +553,32 @@ pub fn set_server_endpoint(
     state: State<'_, DesktopState>,
     request: ServerEndpointRequest,
 ) -> Result<NetworkSettings, IpcError> {
+    set_server_endpoint_with_context(&state.network_store, request)
+}
+
+fn set_server_endpoint_with_context(
+    network_store: &NetworkSettingsStore,
+    request: ServerEndpointRequest,
+) -> Result<NetworkSettings, IpcError> {
     validate_server_url(&request.server_url)?;
     validate_secret(&request.admin_token, 4_096, "admin token")?;
-    let current = state.network_store.load().settings().clone();
+    let current = network_store.load().settings().clone();
+    // A blank box means "leave the stored id alone", which keeps the pre-pairing
+    // endpoint save working. Anything typed is authoritative: without this, a Mac
+    // that knows the tier but not the id has no path to the id at all, since pairing
+    // demands a device token the server retains only as a digest.
+    let device_id = if request.device_id.trim().is_empty() {
+        current.device_id
+    } else {
+        validate_target(&request.device_id, MAX_DEVICE_ID_LEN, "device ID")?;
+        request.device_id
+    };
     let settings = NetworkSettings {
         server_url: request.server_url,
-        device_id: current.device_id,
+        device_id,
         tier: current.tier,
     };
-    state
-        .network_store
+    network_store
         .save(NetworkSettingsUpdate::new(
             settings.server_url.clone(),
             settings.device_id.clone(),
@@ -514,7 +787,7 @@ fn prepare_server_save(
     ensure_device_compatibility(&snapshot.device, compiled.required_capabilities)?;
 
     let settings = context.config.network_store.load().settings().clone();
-    if !server_owns_device(snapshot.device.tier, &settings) {
+    if save_destination(snapshot.device.tier, &settings) != SaveDestination::Server {
         return Err(IpcError::InvalidPayload {
             message: "display ownership is not known to be networked; connect it over USB to confirm ownership before saving".into(),
         });
@@ -557,87 +830,61 @@ fn prepare_server_save(
 }
 
 fn server_error_after_local_save(error: IpcError) -> IpcError {
-    fn message(message: String) -> String {
+    error.map_message(|message| {
         format!(
             "The draft was saved on this Mac, but the server destination did not succeed: {message}"
         )
-    }
-    match error {
-        IpcError::InvalidPayload { message: value } => IpcError::InvalidPayload {
-            message: message(value),
-        },
-        IpcError::PayloadTooLarge {
-            message: value,
-            maximum_bytes,
-        } => IpcError::PayloadTooLarge {
-            message: message(value),
-            maximum_bytes,
-        },
-        IpcError::Validation {
-            message: value,
-            issues,
-        } => IpcError::Validation {
-            message: message(value),
-            issues,
-        },
-        IpcError::Persistence { message: value } => IpcError::Persistence {
-            message: message(value),
-        },
-        IpcError::RuntimeBusy { message: value } => IpcError::RuntimeBusy {
-            message: message(value),
-        },
-        IpcError::RuntimeUnavailable { message: value } => IpcError::RuntimeUnavailable {
-            message: message(value),
-        },
-        IpcError::NotFound { message: value } => IpcError::NotFound {
-            message: message(value),
-        },
-        IpcError::Device { message: value } => IpcError::Device {
-            message: message(value),
-        },
-        IpcError::Provider { message: value } => IpcError::Provider {
-            message: message(value),
-        },
-        IpcError::Autostart { message: value } => IpcError::Autostart {
-            message: message(value),
-        },
-        IpcError::Window { message: value } => IpcError::Window {
-            message: message(value),
-        },
-        IpcError::Internal { message: value } => IpcError::Internal {
-            message: message(value),
-        },
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SaveDestination {
+    Local,
+    Server,
+}
+
+fn save_destination(
+    tier: Option<app_core::DeviceTier>,
+    settings: &NetworkSettings,
+) -> SaveDestination {
+    match resolved_device_tier(tier, settings) {
+        app_core::DeviceTier::Networked => SaveDestination::Server,
+        app_core::DeviceTier::Local => SaveDestination::Local,
     }
 }
 
-fn server_owns_device(tier: Option<app_core::DeviceTier>, settings: &NetworkSettings) -> bool {
-    match tier {
-        Some(app_core::DeviceTier::Networked) => true,
-        Some(app_core::DeviceTier::Local) => false,
-        None => {
-            matches!(settings.tier, Some(app_core::DeviceTier::Networked))
-                || (settings.tier.is_none()
-                    && (!settings.server_url.is_empty() || !settings.device_id.is_empty()))
-        }
+/// The app's single ownership resolution: a live tier read over the cable wins,
+/// otherwise the persisted tier decides, and a legacy server identity with no
+/// recorded tier is conservatively read as networked so an unplugged save never
+/// reaches for USB.
+///
+/// `resolveDeviceTier` in `useAppState.ts` is its TypeScript twin and must keep
+/// answering the same way. Everything that depends on ownership -- where a save
+/// goes, whether a preview asks the server, and whether the snapshot projector
+/// overlays the server's plugin card state -- reads this one answer, because two
+/// resolutions disagreeing is exactly the defect the projector had: the ordinary
+/// networked case (cable out, so `device.tier` is `None`) routed saves to the
+/// server while the projector treated the display as possibly local.
+pub(crate) fn resolved_device_tier(
+    tier: Option<app_core::DeviceTier>,
+    settings: &NetworkSettings,
+) -> app_core::DeviceTier {
+    if let Some(tier) = tier {
+        return tier;
     }
-}
-
-fn local_owns_device(tier: Option<app_core::DeviceTier>, settings: &NetworkSettings) -> bool {
-    match tier {
-        Some(app_core::DeviceTier::Local) => true,
-        Some(app_core::DeviceTier::Networked) => false,
-        None => {
-            matches!(settings.tier, Some(app_core::DeviceTier::Local))
-                || (settings.tier.is_none()
-                    && settings.server_url.is_empty()
-                    && settings.device_id.is_empty())
-        }
+    if let Some(tier) = settings.tier {
+        return tier;
+    }
+    if settings.server_url.is_empty() && settings.device_id.is_empty() {
+        app_core::DeviceTier::Local
+    } else {
+        app_core::DeviceTier::Networked
     }
 }
 
 #[tauri::command]
-pub fn set_pushing_paused(state: State<'_, DesktopState>, paused: bool) -> Result<(), IpcError> {
-    set_paused(&state, paused)
+pub fn resume_pushing(state: State<'_, DesktopState>) -> Result<(), IpcError> {
+    set_paused(&state, false)
 }
 
 #[tauri::command]
@@ -725,28 +972,6 @@ pub fn set_autostart_enabled(
     set_autostart(&app, &state, enabled)
 }
 
-#[tauri::command]
-pub fn set_settings_window_visible(
-    app: AppHandle,
-    state: State<'_, DesktopState>,
-    visible: bool,
-) -> Result<DesktopSnapshot, IpcError> {
-    let window = app
-        .get_webview_window(MAIN_WINDOW_LABEL)
-        .ok_or_else(|| IpcError::Window {
-            message: "settings window is unavailable".into(),
-        })?;
-    if visible {
-        window.unminimize().map_err(window_error)?;
-        window.show().map_err(window_error)?;
-        window.set_focus().map_err(window_error)?;
-    } else {
-        window.hide().map_err(window_error)?;
-    }
-    let snapshot = state.runtime.snapshot().map_err(IpcError::from)?;
-    Ok(state.project_snapshot(snapshot))
-}
-
 /// Renders one card exactly as the firmware's own template would: the same
 /// `SimTemplate` `wire_config` would compile it to, the same last-good field values
 /// the device holds (`AppSnapshot.card_data`), the same timezone offset the device's
@@ -758,8 +983,14 @@ pub fn set_settings_window_visible(
 /// device's actual unconfigured appearance. `sample` tells the caller this happened
 /// so the settings UI can badge it, without the renderer itself lying about what it
 /// drew.
+///
+/// A plugin card is the one kind this simulator cannot draw: it has no
+/// `DisplayTemplate`, and its face was compiled from a manifest and rasterized by
+/// the server. That card's preview is fetched rather than rendered, which is why
+/// this command is `async` -- the fetch runs on a blocking worker, never on the
+/// thread that would otherwise stall the settings window for the agent's timeout.
 #[tauri::command]
-pub fn render_card_preview(
+pub async fn render_card_preview(
     state: State<'_, DesktopState>,
     card_id: String,
 ) -> Result<PreviewFrame, IpcError> {
@@ -773,7 +1004,15 @@ pub fn render_card_preview(
         .ok_or_else(|| IpcError::NotFound {
             message: format!("no card with id {card_id:?}"),
         })?;
-    let template = sim_template(card.template());
+
+    if matches!(card, CardSettings::Plugin { .. }) {
+        let context = ServerQueryContext::from_desktop(&state);
+        let tier = snapshot.device.tier;
+        let requested = card_id.clone();
+        return on_server_worker(move || plugin_card_preview(&context, tier, &requested)).await;
+    }
+
+    let template = preview_template_for(card, &card_id)?;
 
     let data = snapshot
         .card_data
@@ -806,8 +1045,9 @@ pub fn render_card_preview(
         .render(request)
         .map_err(|message| IpcError::Internal { message })?;
     Ok(PreviewFrame {
-        png_base64: BASE64_STANDARD.encode(png),
+        png_base64: Some(BASE64_STANDARD.encode(png)),
         sample,
+        state: None,
     })
 }
 
@@ -815,6 +1055,29 @@ pub fn render_card_preview(
 /// (`app-core`'s `config.rs`), except targeting `lvgl_sim::SimTemplate` — the two
 /// enums are exhaustively 1:1, so this can never fail to map a `DisplayTemplate` the
 /// rest of the app accepts; there is no "unknown template" branch to fall back from.
+/// Resolves the preview simulator's `SimTemplate` for one card, or a typed refusal.
+///
+/// A plugin card has no `DisplayTemplate`: it renders from its manifest-compiled
+/// scene, on the server, not from any of the six built-in templates this preview
+/// simulator knows how to draw. `render_card_preview` sends a plugin card to
+/// `plugin_card_preview` before reaching here, so this arm is a GUARD, not a path
+/// -- kept, and typed, so a future caller that forgets that routing is refused
+/// visibly (mirroring `runtime.rs`'s `SceneRefused` handling for the same absence)
+/// instead of silently drawing a plugin card as some unrelated built-in face.
+fn preview_template_for(
+    card: &CardSettings,
+    card_id: &str,
+) -> Result<lvgl_sim::SimTemplate, IpcError> {
+    let Some(template) = card.template() else {
+        return Err(IpcError::Unsupported {
+            message: format!(
+                "card {card_id:?} is a plugin card; its preview is rendered by the server, not by this simulator"
+            ),
+        });
+    };
+    Ok(sim_template(template))
+}
+
 fn sim_template(template: &DisplayTemplate) -> lvgl_sim::SimTemplate {
     match template {
         DisplayTemplate::DigitalClock => lvgl_sim::SimTemplate::DigitalClock,
@@ -835,6 +1098,51 @@ fn sim_field(field: &CardField) -> lvgl_sim::SimField {
     lvgl_sim::SimField {
         name: field.key.clone(),
         value,
+    }
+}
+
+/// Chosen from the tier the Mac already knows, before any socket is opened: in
+/// local tier there is no server to render on and this app has no plugin host.
+pub(crate) const PLUGIN_RENDERS_ON_THE_SERVER: &str = "Plugin cards render on the server";
+
+/// Chosen only after a networked-tier request came back 404.
+///
+/// Four different things answer 404 on this route -- a server built before it
+/// exists, an unknown device, an unknown card, and a card that is not a plugin
+/// card -- and the status code carries nothing that tells them apart. So the
+/// sentence states what was observed and asserts no cause. It said "Plugin
+/// previews need a newer server" until the whole-branch review, which was a
+/// guess three quarters of the time.
+pub(crate) const PLUGIN_PREVIEW_UNAVAILABLE: &str = "The server has no preview for this card";
+
+fn unrendered_plugin_frame(state: &str) -> PreviewFrame {
+    PreviewFrame {
+        png_base64: None,
+        sample: false,
+        state: Some(state.to_owned()),
+    }
+}
+
+/// Section 4.2 promises `png_base64` exactly when the state is `fresh` or `stale`
+/// and `message` exactly when it is `error` or `waiting`. This keys off the frame
+/// rather than the word, so a server that breaks that invariant still produces a
+/// stage that is either an image or a sentence, never a blank black rectangle.
+fn plugin_preview_frame(response: app_core::admin::CardPreviewResponse) -> PreviewFrame {
+    match response.png_base64 {
+        Some(png_base64) => PreviewFrame {
+            png_base64: Some(png_base64),
+            sample: false,
+            state: None,
+        },
+        None => PreviewFrame {
+            png_base64: None,
+            sample: false,
+            state: Some(
+                response
+                    .message
+                    .unwrap_or_else(|| "The server sent no preview for this card".to_owned()),
+            ),
+        },
     }
 }
 
@@ -895,7 +1203,9 @@ pub(crate) fn set_autostart(
         .tray
         .autostart
         .set_checked(enabled)
-        .map_err(window_error)?;
+        .map_err(|error| IpcError::Window {
+            message: format!("cannot update settings window: {error}"),
+        })?;
     Ok(AutostartStatus {
         enabled,
         preference_enabled: enabled,
@@ -914,7 +1224,7 @@ fn save_and_apply(
         })?;
     let snapshot = context.runtime.snapshot().map_err(IpcError::from)?;
     let settings = context.network_store.load().settings().clone();
-    if !local_owns_device(snapshot.device.tier, &settings) {
+    if save_destination(snapshot.device.tier, &settings) != SaveDestination::Local {
         return Err(IpcError::InvalidPayload {
             message: local_save_refusal(&settings).into(),
         });
@@ -1095,24 +1405,16 @@ fn parse_draft(draft: &DraftPayload) -> Result<AppConfig, IpcError> {
 }
 
 fn validate_network_config_request(request: &ProvisionDeviceRequest) -> Result<(), IpcError> {
-    validate_bounded(&request.ssid, MAX_SSID_BYTES, "WiFi network")?;
-    validate_bounded(&request.passphrase, MAX_PASSPHRASE_BYTES, "WiFi passphrase")?;
-    validate_bounded(&request.server_url, MAX_SERVER_URL_BYTES, "server URL")?;
-    validate_bounded(&request.device_id, MAX_DEVICE_ID_BYTES, "device ID")?;
-    validate_bounded(
-        &request.device_token,
-        MAX_DEVICE_TOKEN_BYTES,
-        "device token",
-    )?;
+    validate_bounded(&request.ssid, MAX_SSID_LEN, "WiFi network")?;
+    validate_bounded(&request.passphrase, MAX_PSK_LEN, "WiFi passphrase")?;
+    validate_bounded(&request.server_url, MAX_SERVER_URL_LEN, "server URL")?;
+    validate_bounded(&request.device_id, MAX_DEVICE_ID_LEN, "device ID")?;
+    validate_bounded(&request.device_token, MAX_DEVICE_TOKEN_LEN, "device token")?;
     if matches!(request.tier, app_core::DeviceTier::Networked) {
-        validate_target(&request.ssid, MAX_SSID_BYTES, "WiFi network")?;
+        validate_target(&request.ssid, MAX_SSID_LEN, "WiFi network")?;
         validate_server_url(&request.server_url)?;
-        validate_target(&request.device_id, MAX_DEVICE_ID_BYTES, "device ID")?;
-        validate_secret(
-            &request.device_token,
-            MAX_DEVICE_TOKEN_BYTES,
-            "device token",
-        )?;
+        validate_target(&request.device_id, MAX_DEVICE_ID_LEN, "device ID")?;
+        validate_secret(&request.device_token, MAX_DEVICE_TOKEN_LEN, "device token")?;
     }
     Ok(())
 }
@@ -1140,8 +1442,8 @@ fn validate_secret(value: &str, maximum: usize, label: &str) -> Result<(), IpcEr
     validate_bounded(value, maximum, label)
 }
 
-fn validate_server_url(value: &str) -> Result<url::Url, IpcError> {
-    validate_target(value, MAX_SERVER_URL_BYTES, "server URL")?;
+pub(crate) fn validate_server_url(value: &str) -> Result<url::Url, IpcError> {
+    validate_target(value, MAX_SERVER_URL_LEN, "server URL")?;
     let url = url::Url::parse(value).map_err(|_| IpcError::InvalidPayload {
         message: "server URL must be an absolute HTTP or HTTPS URL".into(),
     })?;
@@ -1175,28 +1477,13 @@ fn device_link_url(server_url: &str) -> Result<String, IpcError> {
     url.set_query(None);
     url.set_fragment(None);
     let value = url.to_string();
-    validate_bounded(&value, MAX_SERVER_URL_BYTES, "derived device link URL")?;
+    validate_bounded(&value, MAX_SERVER_URL_LEN, "derived device link URL")?;
     Ok(value)
 }
 
 fn server_config_url(server_url: &str, device_id: &str) -> Result<url::Url, IpcError> {
-    validate_target(device_id, MAX_DEVICE_ID_BYTES, "device ID")?;
-    let mut url = validate_server_url(server_url)?;
-    url.set_query(None);
-    url.set_fragment(None);
-    let mut segments = url
-        .path_segments_mut()
-        .map_err(|()| IpcError::InvalidPayload {
-            message: "server URL cannot be used as a base URL".into(),
-        })?;
-    segments
-        .pop_if_empty()
-        .push("v1")
-        .push("devices")
-        .push(device_id)
-        .push("config");
-    drop(segments);
-    Ok(url)
+    validate_target(device_id, MAX_DEVICE_ID_LEN, "device ID")?;
+    crate::server_client::server_url(server_url, &["v1", "devices", device_id, "config"])
 }
 
 fn put_server_config(
@@ -1235,7 +1522,7 @@ fn put_server_config(
     Ok((status, response_body))
 }
 
-fn server_failure(status: u16, body: &[u8]) -> IpcError {
+pub(crate) fn server_failure(status: u16, body: &[u8]) -> IpcError {
     match status {
         401 => IpcError::InvalidPayload {
             message: "the server rejected the admin token".into(),
@@ -1243,8 +1530,8 @@ fn server_failure(status: u16, body: &[u8]) -> IpcError {
         404 => IpcError::NotFound {
             message: "the configured device was not found on the server".into(),
         },
-        422 => match serde_json::from_slice::<ServerErrorBody>(body) {
-            Ok(ServerErrorBody::InvalidConfig { issues }) => IpcError::Validation {
+        422 => match serde_json::from_slice::<AdminConfigErrorBody>(body) {
+            Ok(AdminConfigErrorBody::InvalidConfig { issues }) => IpcError::Validation {
                 message: format!(
                     "the server rejected this configuration with {} validation issue(s)",
                     issues.len()
@@ -1256,7 +1543,7 @@ fn server_failure(status: u16, body: &[u8]) -> IpcError {
             },
         },
         _ => IpcError::RuntimeUnavailable {
-            message: format!("the server rejected the configuration (HTTP {status})"),
+            message: format!("the server rejected the request (HTTP {status})"),
         },
     }
 }
@@ -1281,12 +1568,6 @@ pub(crate) fn autostart_error(error: impl std::fmt::Display) -> IpcError {
     }
 }
 
-fn window_error(error: impl std::fmt::Display) -> IpcError {
-    IpcError::Window {
-        message: format!("cannot update settings window: {error}"),
-    }
-}
-
 impl From<RuntimeError> for IpcError {
     fn from(error: RuntimeError) -> Self {
         match error {
@@ -1302,11 +1583,12 @@ impl From<RuntimeError> for IpcError {
                     message: error.to_string(),
                 }
             }
-            RuntimeError::UnknownWidget { .. } | RuntimeError::UnknownScreen { .. } => {
-                Self::NotFound {
-                    message: error.to_string(),
-                }
-            }
+            RuntimeError::UnknownWidget { .. }
+            | RuntimeError::UnknownScreen { .. }
+            | RuntimeError::UnknownCard { .. }
+            | RuntimeError::NotAPluginCard { .. } => Self::NotFound {
+                message: error.to_string(),
+            },
             RuntimeError::DeviceDisconnected => Self::Device {
                 message: "device is disconnected".into(),
             },
@@ -1339,23 +1621,68 @@ impl From<NetworkSettingsStoreError> for IpcError {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    /// A private directory named for the test that owns it, so parallel runs of these
+    /// store-backed tests cannot collide on one path.
+    fn scratch_directory(label: &str) -> std::path::PathBuf {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let serial = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory =
+            std::env::temp_dir().join(format!("deskmate-{label}-{}-{serial}", std::process::id()));
+        fs::create_dir(&directory).unwrap();
+        directory
+    }
     use std::fs;
     use std::path::Path;
 
     use app_core::{
         AlertHold, AppConfig, AppPreferences, AppSnapshot, AssetKind, AssetSource,
-        CURRENT_SCHEMA_VERSION, CalendarSource, CardAlert, CardDataSnapshot, CardError, CardField,
-        CardFieldValue, CardSettings, CarouselAdvance, ConnectionState, DeviceCapability,
-        DeviceCounters, DeviceSnapshot, DisplayOrientation, DisplayTemplate,
-        FirmwareArtifactMetadata, GlyphRange, PersistenceState, Playlist, PlaylistEntry,
-        PomodoroSnapshot, PomodoroState, ProviderSnapshot, ProviderState, RefreshPolicy,
-        RuntimeDiagnostics, RuntimeError, RuntimeState, SAVED_SETTINGS_VALIDATION_FAILURE_MESSAGE,
-        StoreWarning, UpdateChannel, UpdateCheckPolicy, UpdaterSettings, ValidationCode,
-        WeatherUnits, WidgetTapAction,
+        CURRENT_SCHEMA_VERSION, CalendarSource, CardAlert, CardDataSnapshot, CardError,
+        CardErrorKind, CardField, CardFieldValue, CardSettings, CarouselAdvance, ConnectionState,
+        DeviceCapability, DeviceCounters, DeviceSnapshot, DisplayOrientation, DisplayTemplate,
+        IconGlyphMapping, PersistenceState, Playlist, PlaylistEntry, PomodoroSnapshot,
+        PomodoroState, ProviderSnapshot, ProviderState, RefreshPolicy, RuntimeDiagnostics,
+        RuntimeError, RuntimeState, SAVED_SETTINGS_VALIDATION_FAILURE_MESSAGE, StoreWarning,
+        UpdateChannel, UpdateCheckPolicy, UpdaterSettings, ValidationCode, WeatherUnits,
+        WidgetTapAction,
     };
     use serde::Serialize;
+
+    pub(crate) fn read_http_request(stream: &mut std::net::TcpStream) -> Vec<u8> {
+        use std::io::Read as _;
+
+        let mut request = Vec::new();
+        while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+            let mut chunk = [0_u8; 1_024];
+            let length = stream.read(&mut chunk).unwrap();
+            assert_ne!(length, 0, "request ended before its HTTP headers");
+            request.extend_from_slice(&chunk[..length]);
+        }
+        let header_end = request
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .unwrap()
+            + 4;
+        let headers = String::from_utf8_lossy(&request[..header_end]).to_ascii_lowercase();
+        let content_length = headers
+            .lines()
+            .find_map(|line| line.strip_prefix("content-length: "))
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(0);
+        while request.len() < header_end + content_length {
+            let mut chunk = [0_u8; 1_024];
+            let length = stream.read(&mut chunk).unwrap();
+            assert_ne!(length, 0, "request ended before its HTTP body");
+            request.extend_from_slice(&chunk[..length]);
+        }
+        request
+    }
 
     /// Mirrors `CardSettings::wire_config`'s `TemplateKind` mapping (`app-core`'s
     /// `config.rs`) 1:1, for every `DisplayTemplate` variant the app can construct.
@@ -1388,6 +1715,44 @@ mod tests {
                 icon_asset_id: Some("weather-icons".into())
             }),
             lvgl_sim::SimTemplate::IconBadgeText
+        );
+    }
+
+    #[test]
+    fn preview_template_for_resolves_every_built_in_template() {
+        let card = CardSettings::Clock {
+            id: "clock".into(),
+            title: "Desk".into(),
+            show_seconds: true,
+            template: DisplayTemplate::DigitalClock,
+            tap_action: WidgetTapAction::None,
+            refresh: RefreshPolicy::DeviceLocal,
+            alert: CardAlert::None,
+        };
+        assert_eq!(
+            preview_template_for(&card, "clock").unwrap(),
+            lvgl_sim::SimTemplate::DigitalClock
+        );
+    }
+
+    /// The guard behind the routing, not the routing itself:
+    /// `render_card_preview` never reaches this arm for a plugin card. It stays
+    /// because a caller that forgets that must be refused, not served a built-in
+    /// face at random.
+    #[test]
+    fn preview_template_for_a_plugin_card_is_a_typed_unsupported_refusal() {
+        let card = CardSettings::Plugin {
+            id: "aqi".into(),
+            title: "Air quality".into(),
+            plugin_id: "aqi".into(),
+            tap_action: WidgetTapAction::None,
+            refresh: RefreshPolicy::Interval { minutes: 15 },
+            alert: CardAlert::None,
+        };
+        let error = preview_template_for(&card, "aqi").unwrap_err();
+        assert!(
+            matches!(error, IpcError::Unsupported { ref message } if message.contains("plugin")),
+            "expected IpcError::Unsupported naming the plugin card, got {error:?}"
         );
     }
 
@@ -1696,29 +2061,129 @@ mod tests {
     }
 
     #[test]
-    fn unplugged_server_identity_routes_networked_but_live_local_ownership_wins() {
-        let mut settings = NetworkSettings {
-            server_url: "https://desk.example".into(),
-            device_id: "desk-1".into(),
-            tier: Some(app_core::DeviceTier::Networked),
-        };
-        assert!(server_owns_device(None, &settings));
-        assert!(!local_owns_device(None, &settings));
-        assert!(!server_owns_device(
-            Some(app_core::DeviceTier::Local),
-            &settings
-        ));
-        assert!(local_owns_device(
-            Some(app_core::DeviceTier::Local),
-            &settings
-        ));
+    fn save_destination_follows_live_persisted_and_legacy_ownership() {
+        use app_core::DeviceTier::{Local, Networked};
 
-        settings.tier = None;
-        assert!(server_owns_device(None, &settings));
-        settings.server_url.clear();
-        settings.device_id.clear();
-        assert!(!server_owns_device(None, &settings));
-        assert!(local_owns_device(None, &settings));
+        let settings = |server_url: &str, device_id: &str, tier| NetworkSettings {
+            server_url: server_url.into(),
+            device_id: device_id.into(),
+            tier,
+        };
+        let cases = [
+            (
+                Some(Networked),
+                settings("", "", Some(Local)),
+                SaveDestination::Server,
+            ),
+            (
+                Some(Local),
+                settings("https://desk.example", "desk-1", Some(Networked)),
+                SaveDestination::Local,
+            ),
+            (
+                None,
+                settings("", "", Some(Networked)),
+                SaveDestination::Server,
+            ),
+            (
+                None,
+                settings("https://desk.example", "desk-1", Some(Networked)),
+                SaveDestination::Server,
+            ),
+            (None, settings("", "", Some(Local)), SaveDestination::Local),
+            (
+                None,
+                settings("https://desk.example", "desk-1", Some(Local)),
+                SaveDestination::Local,
+            ),
+            (None, settings("", "", None), SaveDestination::Local),
+            (
+                None,
+                settings("https://desk.example", "", None),
+                SaveDestination::Server,
+            ),
+            (None, settings("", "desk-1", None), SaveDestination::Server),
+            (
+                None,
+                settings("https://desk.example", "desk-1", None),
+                SaveDestination::Server,
+            ),
+        ];
+
+        for (live_tier, settings, expected) in cases {
+            assert_eq!(save_destination(live_tier, &settings), expected);
+        }
+    }
+
+    /// A Mac that has only ever *observed* a networked board knows its tier but not
+    /// its id: `remember_device_tier` persists the tier alone. Pairing cannot supply
+    /// the id either, because that needs a plaintext device token the server keeps
+    /// only as a digest. Saving server access is therefore the one path left, so the
+    /// id typed beside the URL has to survive it.
+    #[test]
+    fn saving_server_access_persists_the_typed_device_id() {
+        let directory = scratch_directory("server-access-device-id");
+        let network_store = NetworkSettingsStore::new(directory.join("network-settings.json"));
+        network_store
+            .save(NetworkSettingsUpdate::new(
+                "",
+                "",
+                Some(app_core::DeviceTier::Networked),
+                None,
+            ))
+            .unwrap();
+
+        let settings = set_server_endpoint_with_context(
+            &network_store,
+            ServerEndpointRequest {
+                server_url: "https://desk.example".into(),
+                device_id: "dev-0003".into(),
+                admin_token: "admin-secret".into(),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(settings.device_id, "dev-0003");
+        assert_eq!(
+            NetworkSettingsStore::new(directory.join("network-settings.json"))
+                .load()
+                .settings()
+                .device_id,
+            "dev-0003",
+            "the typed device id never reached the settings file"
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// Saving an endpoint before a device is paired is a supported flow -- it is what
+    /// `use_local_ownership` exists to recover from -- so a blank box must mean "leave
+    /// the id alone" rather than "erase the id I already have".
+    #[test]
+    fn saving_server_access_keeps_the_stored_device_id_when_the_box_is_blank() {
+        let directory = scratch_directory("server-access-blank-device-id");
+        let network_store = NetworkSettingsStore::new(directory.join("network-settings.json"));
+        network_store
+            .save(NetworkSettingsUpdate::new(
+                "https://old.example",
+                "dev-0003",
+                Some(app_core::DeviceTier::Networked),
+                None,
+            ))
+            .unwrap();
+
+        let settings = set_server_endpoint_with_context(
+            &network_store,
+            ServerEndpointRequest {
+                server_url: "https://desk.example".into(),
+                device_id: "   ".into(),
+                admin_token: "admin-secret".into(),
+            },
+        )
+        .expect("a blank device id must not fail the save");
+
+        assert_eq!(settings.device_id, "dev-0003");
+        assert_eq!(settings.server_url, "https://desk.example");
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
@@ -1869,7 +2334,7 @@ mod tests {
             Some(app_core::DeviceTier::Local)
         );
         let mut projected = AppConfig::default();
-        projection.project(Some(app_core::DeviceTier::Networked), &mut projected);
+        projection.project(app_core::DeviceTier::Networked, &mut projected);
         assert_eq!(projected, AppConfig::default());
         fs::remove_dir_all(directory).unwrap();
     }
@@ -1910,7 +2375,7 @@ mod tests {
 
     #[test]
     fn server_request_runs_after_the_mutation_lock_is_released() {
-        use std::io::{Read, Write};
+        use std::io::Write;
         use std::net::TcpListener;
         use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1962,30 +2427,7 @@ mod tests {
                 mutation_lock.try_lock().is_ok(),
                 "the server request started while the desktop mutation lock was held"
             );
-            let mut request = Vec::new();
-            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
-                let mut chunk = [0_u8; 1_024];
-                let length = stream.read(&mut chunk).unwrap();
-                assert_ne!(length, 0, "request ended before its HTTP headers");
-                request.extend_from_slice(&chunk[..length]);
-            }
-            let header_end = request
-                .windows(4)
-                .position(|window| window == b"\r\n\r\n")
-                .unwrap()
-                + 4;
-            let headers = String::from_utf8_lossy(&request[..header_end]).to_ascii_lowercase();
-            let content_length = headers
-                .lines()
-                .find_map(|line| line.strip_prefix("content-length: "))
-                .and_then(|value| value.parse::<usize>().ok())
-                .unwrap_or(0);
-            while request.len() < header_end + content_length {
-                let mut chunk = [0_u8; 1_024];
-                let length = stream.read(&mut chunk).unwrap();
-                assert_ne!(length, 0, "request ended before its HTTP body");
-                request.extend_from_slice(&chunk[..length]);
-            }
+            let request = read_http_request(&mut stream);
             assert!(String::from_utf8_lossy(&request).starts_with("PUT "));
             stream
                 .write_all(
@@ -2034,7 +2476,7 @@ mod tests {
 
     #[test]
     fn server_transport_keeps_the_bounded_422_validation_body() {
-        use std::io::{Read, Write};
+        use std::io::Write;
         use std::net::TcpListener;
 
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -2042,30 +2484,7 @@ mod tests {
         let body = br#"{"kind":"invalid-config","issues":[{"path":"cards","code":"empty","message":"Add a card."}]}"#;
         let server = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            let mut request = Vec::new();
-            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
-                let mut chunk = [0_u8; 1_024];
-                let length = stream.read(&mut chunk).unwrap();
-                assert_ne!(length, 0, "request ended before its HTTP headers");
-                request.extend_from_slice(&chunk[..length]);
-            }
-            let header_end = request
-                .windows(4)
-                .position(|window| window == b"\r\n\r\n")
-                .unwrap()
-                + 4;
-            let headers = String::from_utf8_lossy(&request[..header_end]).to_ascii_lowercase();
-            let content_length = headers
-                .lines()
-                .find_map(|line| line.strip_prefix("content-length: "))
-                .and_then(|value| value.parse::<usize>().ok())
-                .unwrap_or(0);
-            while request.len() < header_end + content_length {
-                let mut chunk = [0_u8; 1_024];
-                let length = stream.read(&mut chunk).unwrap();
-                assert_ne!(length, 0, "request ended before its HTTP body");
-                request.extend_from_slice(&chunk[..length]);
-            }
+            let request = read_http_request(&mut stream);
             let request = String::from_utf8_lossy(&request);
             assert!(request.starts_with("PUT /v1/devices/desk-1/config "));
             assert!(
@@ -2160,7 +2579,6 @@ mod tests {
         asset_kinds: Vec<AssetKind>,
         update_channels: Vec<UpdateChannel>,
         update_check_policies: Vec<UpdateCheckPolicy>,
-        firmware_artifacts: Vec<FirmwareArtifactMetadata>,
         display_orientations: Vec<DisplayOrientation>,
         device_capabilities: Vec<DeviceCapability>,
         runtime_states: Vec<RuntimeState>,
@@ -2175,7 +2593,21 @@ mod tests {
         draft_validation: DraftValidation,
         config_apply_result: ConfigApplyResult,
         autostart_status: AutostartStatus,
+        plugin_catalog: app_core::admin::PluginCatalog,
+        server_card_state: Vec<ServerCardState>,
         preview_frame: PreviewFrame,
+    }
+
+    fn contract_card_kind(card: &CardSettings) -> &'static str {
+        match card {
+            CardSettings::Clock { .. } => "clock",
+            CardSettings::Pomodoro { .. } => "pomodoro",
+            CardSettings::Calendar { .. } => "calendar",
+            CardSettings::Weather { .. } => "weather",
+            CardSettings::JsonFeed { .. } => "json-feed",
+            CardSettings::Rss { .. } => "rss",
+            CardSettings::Plugin { .. } => "plugin",
+        }
     }
 
     #[allow(clippy::too_many_lines)]
@@ -2259,6 +2691,14 @@ mod tests {
                 max_items: 3,
                 template: DisplayTemplate::RowList,
                 tap_action: WidgetTapAction::Dismiss,
+                refresh: RefreshPolicy::Interval { minutes: 15 },
+                alert: CardAlert::None,
+            },
+            CardSettings::Plugin {
+                id: "air-quality".into(),
+                title: "Office air".into(),
+                plugin_id: "com.example.air-quality".into(),
+                tap_action: WidgetTapAction::None,
                 refresh: RefreshPolicy::Interval { minutes: 15 },
                 alert: CardAlert::None,
             },
@@ -2356,7 +2796,7 @@ mod tests {
                     ota_state: None,
                     active_screen_id: Some("clock".into()),
                     counters: DeviceCounters {
-                        reconnects: 1,
+                        host_reconnects: 1,
                         valid_frames: 2,
                         malformed_frames: 3,
                         crc_errors: 4,
@@ -2387,6 +2827,7 @@ mod tests {
                 }],
                 card_data: card_data.clone(),
                 card_errors: vec![CardError {
+                    kind: CardErrorKind::DataRefused,
                     card_id: "json".into(),
                     message:
                         "the display refused this card's data (InvalidPayload): invalid push data"
@@ -2403,6 +2844,7 @@ mod tests {
                     provider_queue_full: 4,
                     provider_results_discarded: 5,
                     subscriber_snapshots_overwritten: 6,
+                    interrupt_dismissals_ignored: 7,
                 },
             },
         };
@@ -2455,14 +2897,10 @@ mod tests {
             ValidationCode::TooMany,
             ValidationCode::DuplicateId,
             ValidationCode::MissingReference,
-            ValidationCode::MissingScreen,
-            ValidationCode::DuplicateReference,
-            ValidationCode::UnsupportedSize,
             ValidationCode::OutOfRange,
             ValidationCode::InvalidTimezone,
             ValidationCode::InvalidSource,
             ValidationCode::InvalidComposition,
-            ValidationCode::Overlap,
             ValidationCode::TooLarge,
             ValidationCode::RequiresCapability,
         ];
@@ -2493,6 +2931,9 @@ mod tests {
             IpcError::RuntimeUnavailable {
                 message: "unavailable".into(),
             },
+            IpcError::IncompatibleServer {
+                message: "incompatible".into(),
+            },
             IpcError::NotFound {
                 message: "missing".into(),
             },
@@ -2510,6 +2951,9 @@ mod tests {
             },
             IpcError::Internal {
                 message: "internal".into(),
+            },
+            IpcError::Unsupported {
+                message: "unsupported".into(),
             },
         ];
 
@@ -2565,19 +3009,16 @@ mod tests {
                 RefreshPolicy::Interval { minutes: 15 },
             ],
             weather_units: vec![WeatherUnits::Metric, WeatherUnits::Imperial],
-            asset_sources: vec![AssetSource::File("/tmp/weather-icons.bin".into())],
+            asset_sources: vec![AssetSource::File("/tmp/weather-icons.ttf".into())],
             asset_kinds: vec![
-                AssetKind::Icon {
-                    width: 32,
-                    height: 32,
-                },
-                AssetKind::Font {
-                    pixel_size: 18,
-                    glyph_ranges: vec![GlyphRange {
-                        start: 0x20,
-                        end: 0x7e,
+                AssetKind::Font,
+                AssetKind::IconFont {
+                    glyphs: vec![IconGlyphMapping {
+                        name: "cloud-rain".into(),
+                        codepoint: 0xf729,
                     }],
                 },
+                AssetKind::Image,
             ],
             update_channels: vec![
                 UpdateChannel::Stable,
@@ -2585,29 +3026,11 @@ mod tests {
                 UpdateChannel::Manual,
             ],
             update_check_policies: vec![UpdateCheckPolicy::Disabled, UpdateCheckPolicy::Notify],
-            firmware_artifacts: vec![FirmwareArtifactMetadata {
-                version: "1.0.0".into(),
-                model: "waveshare-1.8".into(),
-                byte_length: 524_288,
-                sha256_hex: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-                    .into(),
-                signing_key_id: "deskmate-release-1".into(),
-                signature_base64: format!("{}==", "A".repeat(86)),
-            }],
             display_orientations: vec![
                 DisplayOrientation::Landscape,
                 DisplayOrientation::LandscapeFlipped,
             ],
-            device_capabilities: vec![
-                DeviceCapability::CoreWidgets,
-                DeviceCapability::ConfigRotation,
-                DeviceCapability::DashboardLayouts,
-                DeviceCapability::ExtendedTemplates,
-                DeviceCapability::HostTapActions,
-                DeviceCapability::AssetTransfer,
-                DeviceCapability::FirmwareUpdate,
-                DeviceCapability::Networking,
-            ],
+            device_capabilities: DeviceCapability::from_bits(DeviceCapability::known_bits()),
             runtime_states,
             connection_states,
             provider_states,
@@ -2634,11 +3057,442 @@ mod tests {
                 enabled: true,
                 preference_enabled: false,
             },
+            plugin_catalog: app_core::admin::PluginCatalog {
+                plugins: vec![app_core::admin::PluginCatalogEntry {
+                    id: "aqi".into(),
+                    name: "aqi".into(),
+                    version: "1.0.0".into(),
+                    node_count: 4,
+                    assets: vec![app_core::admin::PluginCatalogAsset {
+                        file: "icons.ttf".into(),
+                        kind: "icon-font".into(),
+                        byte_length: 40_960,
+                        digest: "0f1e2d3c".into(),
+                    }],
+                    display_name: Some("Air quality".into()),
+                    description: Some("EPA index for a location".into()),
+                    manifest_version: 2,
+                    template: app_core::admin::PluginTemplateKind::DisplayList,
+                    refresh_minutes: 15,
+                }],
+                load_failures: vec![app_core::admin::PluginLoadFailure {
+                    id: "broken".into(),
+                    error: "unknown key \"summry\"".into(),
+                }],
+            },
+            server_card_state: vec![ServerCardState {
+                card_id: "air-quality".into(),
+                provider: ProviderState::Fresh,
+                hero: Some("42".into()),
+                errors: vec![CardError {
+                    kind: CardErrorKind::SceneRefused,
+                    card_id: "air-quality".into(),
+                    message: "no snapshot cached yet".into(),
+                }],
+            }],
             preview_frame: PreviewFrame {
-                png_base64: "iVBORw0KGgo=".into(),
+                png_base64: Some("iVBORw0KGgo=".into()),
                 sample: true,
+                state: None,
             },
         }
+    }
+
+    #[test]
+    fn contract_fixture_covers_every_card_settings_variant() {
+        let kinds = contract_fixtures()
+            .card_settings
+            .iter()
+            .map(contract_card_kind)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            kinds,
+            [
+                "clock",
+                "pomodoro",
+                "calendar",
+                "weather",
+                "json-feed",
+                "rss",
+                "plugin",
+            ]
+        );
+    }
+
+    #[test]
+    fn every_server_preview_outcome_maps_to_one_stage_state() {
+        use app_core::admin::{CardPreviewResponse, CardPreviewState};
+
+        let rendered = plugin_preview_frame(CardPreviewResponse {
+            png_base64: Some("iVBORw0KGgo=".into()),
+            state: CardPreviewState::Stale,
+            message: None,
+            refreshed_at_unix_ms: Some(1_787_000_000_000),
+        });
+        assert_eq!(
+            rendered,
+            PreviewFrame {
+                png_base64: Some("iVBORw0KGgo=".into()),
+                sample: false,
+                state: None,
+            }
+        );
+
+        // `sample` means "a real frame rendered, from an empty field set" -- it is
+        // what puts the "No data yet" badge on a drawn image. A waiting plugin card
+        // has no frame at all, so it is NOT sample: it prints the state sentence.
+        let waiting = plugin_preview_frame(CardPreviewResponse {
+            png_base64: None,
+            state: CardPreviewState::Waiting,
+            message: Some("Waiting for the first refresh".into()),
+            refreshed_at_unix_ms: None,
+        });
+        assert_eq!(
+            waiting,
+            PreviewFrame {
+                png_base64: None,
+                sample: false,
+                state: Some("Waiting for the first refresh".into()),
+            }
+        );
+
+        let failed = plugin_preview_frame(CardPreviewResponse {
+            png_base64: None,
+            state: CardPreviewState::Error,
+            message: Some("Plugin \"x\" is not loaded on the server".into()),
+            refreshed_at_unix_ms: None,
+        });
+        assert_eq!(
+            failed,
+            PreviewFrame {
+                png_base64: None,
+                sample: false,
+                state: Some("Plugin \"x\" is not loaded on the server".into()),
+            }
+        );
+
+        // A server that says nothing still says something on the stage.
+        let mute = plugin_preview_frame(CardPreviewResponse {
+            png_base64: None,
+            state: CardPreviewState::Error,
+            message: None,
+            refreshed_at_unix_ms: None,
+        });
+        assert!(matches!(mute.state, Some(message) if !message.is_empty()));
+    }
+
+    #[test]
+    fn a_plugin_card_the_mac_cannot_render_says_where_it_renders() {
+        assert_eq!(
+            unrendered_plugin_frame(PLUGIN_RENDERS_ON_THE_SERVER),
+            PreviewFrame {
+                png_base64: None,
+                sample: false,
+                state: Some("Plugin cards render on the server".into()),
+            }
+        );
+        assert_eq!(
+            unrendered_plugin_frame(PLUGIN_PREVIEW_UNAVAILABLE).state,
+            Some("The server has no preview for this card".into())
+        );
+    }
+
+    #[test]
+    fn server_card_state_covers_plugin_cards_only_and_reads_the_hero_field() {
+        let body = serde_json::json!({
+            "device_id": "desk-1",
+            "connected": true,
+            "last_seen_unix_ms": 1_787_000_000_000_u64,
+            "config": { "origin": "current", "using_fallback": false, "fallback_reason": null },
+            "snapshot": {
+                "config": {
+                    "cards": [
+                        { "kind": "clock", "id": "clock", "title": "Desk",
+                          "show_seconds": true, "template": { "kind": "digital-clock" },
+                          "tap_action": { "kind": "none" },
+                          "refresh": { "kind": "device-local" }, "alert": { "kind": "none" } },
+                        { "kind": "plugin", "id": "air", "title": "", "plugin_id": "aqi",
+                          "tap_action": { "kind": "none" },
+                          "refresh": { "kind": "interval", "minutes": 15 },
+                          "alert": { "kind": "none" } },
+                        { "kind": "plugin", "id": "news", "title": "", "plugin_id": "agenda",
+                          "tap_action": { "kind": "none" },
+                          "refresh": { "kind": "interval", "minutes": 30 },
+                          "alert": { "kind": "none" } }
+                    ]
+                },
+                "device": { "observed_age_seconds": 4, "last_ota_error": null },
+                "providers": [
+                    { "widget_id": "air", "state": { "kind": "fresh" },
+                      "last_success_unix_ms": 1_787_000_000_000_i64, "age_seconds": 30 },
+                    { "widget_id": "clock", "state": { "kind": "idle" },
+                      "last_success_unix_ms": null, "age_seconds": null }
+                ],
+                "card_data": [
+                    { "card_id": "air", "fields": [
+                        { "key": "title", "value": { "kind": "text", "value": "Air quality" } },
+                        { "key": "hero", "value": { "kind": "text", "value": "42" } } ] },
+                    { "card_id": "clock", "fields": [] }
+                ],
+                "card_errors": [
+                    { "kind": "scene-refused", "card_id": "news",
+                      "message": "no snapshot cached yet" },
+                    { "kind": "data-refused", "card_id": "clock", "message": "ignored" }
+                ]
+            }
+        });
+
+        let states = project_server_card_state(&serde_json::from_value(body).unwrap());
+
+        assert_eq!(
+            states,
+            vec![
+                ServerCardState {
+                    card_id: "air".into(),
+                    provider: ProviderState::Fresh,
+                    hero: Some("42".into()),
+                    errors: Vec::new(),
+                },
+                // No provider entry yet is Idle, not an invented staleness.
+                ServerCardState {
+                    card_id: "news".into(),
+                    provider: ProviderState::Idle,
+                    hero: None,
+                    errors: vec![CardError {
+                        kind: CardErrorKind::SceneRefused,
+                        card_id: "news".into(),
+                        message: "no snapshot cached yet".into(),
+                    }],
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_device_with_no_runtime_projects_no_plugin_state() {
+        let body = serde_json::json!({
+            "device_id": "desk-1", "connected": false, "last_seen_unix_ms": null,
+            "config": { "origin": "defaults", "using_fallback": false, "fallback_reason": null },
+            "snapshot": null
+        });
+        assert!(project_server_card_state(&serde_json::from_value(body).unwrap()).is_empty());
+    }
+
+    /// Builds a `ServerQueryContext` pointed at a loopback listener with a stored
+    /// admin token, in the tier the caller names.
+    fn server_query_fixture(
+        label: &str,
+        tier: app_core::DeviceTier,
+    ) -> (
+        ServerQueryContext,
+        std::net::TcpListener,
+        std::path::PathBuf,
+    ) {
+        let directory = scratch_directory(label);
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let network_store = Arc::new(NetworkSettingsStore::new(
+            directory.join("network-settings.json"),
+        ));
+        network_store
+            .save(NetworkSettingsUpdate::new(
+                format!("http://{address}"),
+                "desk-1",
+                Some(tier),
+                Some("admin-secret".into()),
+            ))
+            .unwrap();
+        let context = ServerQueryContext {
+            agent: crate::server_http_agent(),
+            network_store,
+        };
+        (context, listener, directory)
+    }
+
+    fn answer_once(
+        listener: std::net::TcpListener,
+        status: &'static str,
+        body: impl Into<String>,
+    ) -> std::thread::JoinHandle<String> {
+        use std::io::Write as _;
+
+        let body = body.into();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let request = String::from_utf8_lossy(&read_http_request(&mut stream)).to_string();
+            write!(
+                stream,
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
+            request
+        })
+    }
+
+    #[test]
+    fn the_catalog_command_reads_the_shared_admin_dto() {
+        let (context, listener, directory) =
+            server_query_fixture("catalog", app_core::DeviceTier::Networked);
+        let server = answer_once(
+            listener,
+            "200 OK",
+            r#"{"plugins":[{"id":"aqi","name":"aqi","version":"1.0.0","node_count":4,
+                "assets":[{"file":"icons.ttf","kind":"icon-font","byte_length":12,"digest":"ab"}],
+                "display_name":"Air quality","description":"EPA index for a location",
+                "manifest_version":2,"template":"display-list","refresh_minutes":15}],
+              "load_failures":[{"id":"broken","error":"unknown key"}]}"#,
+        );
+
+        let catalog = fetch_server_plugins(&context).unwrap();
+
+        let request = server.join().unwrap();
+        assert!(request.starts_with("GET /v1/plugins "));
+        assert_eq!(catalog.plugins.len(), 1);
+        assert_eq!(
+            catalog.plugins[0].display_name.as_deref(),
+            Some("Air quality")
+        );
+        assert_eq!(catalog.plugins[0].refresh_minutes, 15);
+        assert_eq!(
+            catalog.plugins[0].template,
+            app_core::admin::PluginTemplateKind::DisplayList
+        );
+        assert_eq!(catalog.load_failures[0].id, "broken");
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn the_card_state_command_asks_for_this_device_and_keeps_only_plugin_cards() {
+        let (context, listener, directory) =
+            server_query_fixture("card-state", app_core::DeviceTier::Networked);
+        let server = answer_once(
+            listener,
+            "200 OK",
+            r#"{"device_id":"desk-1","connected":true,"last_seen_unix_ms":1,
+                "config":{"origin":"current","using_fallback":false,"fallback_reason":null},
+                "snapshot":{"config":{"cards":[
+                    {"kind":"plugin","id":"air","title":"","plugin_id":"aqi",
+                     "tap_action":{"kind":"none"},"refresh":{"kind":"interval","minutes":15},
+                     "alert":{"kind":"none"}}]},
+                  "providers":[{"widget_id":"air","state":{"kind":"fresh"},
+                    "last_success_unix_ms":null,"age_seconds":null}],
+                  "card_data":[{"card_id":"air","fields":[
+                    {"key":"hero","value":{"kind":"text","value":"42"}}]}],
+                  "card_errors":[]}}"#,
+        );
+
+        let states = fetch_server_card_state(&context).unwrap();
+
+        let request = server.join().unwrap();
+        assert!(request.starts_with("GET /v1/devices/desk-1 "));
+        assert_eq!(states.len(), 1);
+        assert_eq!(states[0].hero.as_deref(), Some("42"));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// The device-status body embeds the device's whole `AppConfig`, which is
+    /// itself legal up to `MAX_CONFIG_FILE_BYTES`. Reading it under the 64 KiB
+    /// error-body bound made a near-maximal config a permanent "oversized
+    /// response" -- a poll that could never succeed, reported as the same notice a
+    /// dead server gets. The filler here is ordinary config the Mac's partial DTO
+    /// ignores, sized past that old bound.
+    #[test]
+    fn a_device_status_body_larger_than_a_maximal_config_is_still_read() {
+        let (context, listener, directory) =
+            server_query_fixture("card-state-large", app_core::DeviceTier::Networked);
+        let playlists = (0..800)
+            .map(|index| {
+                format!(
+                    r#"{{"id":"loop-{index}","name":"Loop {index}","advance":{{"kind":"timed","default_dwell_seconds":20}},"entries":[]}}"#
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let body = format!(
+            r#"{{"device_id":"desk-1","connected":true,"last_seen_unix_ms":1,
+                "config":{{"origin":"current","using_fallback":false,"fallback_reason":null}},
+                "snapshot":{{"config":{{"playlists":[{playlists}],"cards":[
+                    {{"kind":"plugin","id":"air","title":"","plugin_id":"aqi",
+                     "tap_action":{{"kind":"none"}},"refresh":{{"kind":"interval","minutes":15}},
+                     "alert":{{"kind":"none"}}}}]}},
+                  "providers":[],"card_data":[],"card_errors":[]}}}}"#
+        );
+        assert!(
+            body.len() > MAX_SERVER_ERROR_BYTES,
+            "the filler must exceed the error-body bound to prove anything"
+        );
+        assert!(body.len() < MAX_SERVER_DEVICE_STATUS_BYTES);
+        let server = answer_once(listener, "200 OK", body);
+
+        let states = fetch_server_card_state(&context).unwrap();
+
+        server.join().unwrap();
+        assert_eq!(states.len(), 1);
+        assert_eq!(states[0].card_id, "air");
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn a_plugin_preview_asks_the_card_route_and_returns_its_frame() {
+        let (context, listener, directory) =
+            server_query_fixture("preview-ok", app_core::DeviceTier::Networked);
+        let server = answer_once(
+            listener,
+            "200 OK",
+            r#"{"png_base64":"iVBORw0KGgo=","state":"fresh","message":null,
+                "refreshed_at_unix_ms":1787000000000}"#,
+        );
+
+        let frame =
+            plugin_card_preview(&context, Some(app_core::DeviceTier::Networked), "air").unwrap();
+
+        let request = server.join().unwrap();
+        assert!(request.starts_with("GET /v1/devices/desk-1/cards/air/preview "));
+        assert_eq!(frame.png_base64.as_deref(), Some("iVBORw0KGgo="));
+        assert_eq!(frame.state, None);
+        assert!(!frame.sample);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// Spec section 10: the Mac's GETs are additive, so a server that has never
+    /// heard of this route 404s. That degrades to a printed sentence rather than a
+    /// fault, and it is not the local-tier sentence, which is chosen before any
+    /// request is made.
+    ///
+    /// An unknown device, an unknown card and a non-plugin card also 404, and the
+    /// status code cannot tell any of the four apart -- so the sentence claims only
+    /// that no preview came back. An earlier version said "Plugin previews need a
+    /// newer server", which asserted a cause this code cannot know.
+    #[test]
+    fn a_preview_the_server_does_not_return_degrades_instead_of_erroring() {
+        let (context, listener, directory) =
+            server_query_fixture("preview-404", app_core::DeviceTier::Networked);
+        let server = answer_once(listener, "404 Not Found", "");
+
+        let frame =
+            plugin_card_preview(&context, Some(app_core::DeviceTier::Networked), "air").unwrap();
+
+        server.join().unwrap();
+        assert_eq!(frame.state.as_deref(), Some(PLUGIN_PREVIEW_UNAVAILABLE));
+        assert_eq!(frame.png_base64, None);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// Local tier has no server to render on and the Mac has no plugin host, so it
+    /// says so from the tier alone rather than opening a socket at all.
+    #[test]
+    fn a_local_tier_plugin_preview_never_reaches_the_network() {
+        let (context, listener, directory) =
+            server_query_fixture("preview-local", app_core::DeviceTier::Local);
+
+        let frame =
+            plugin_card_preview(&context, Some(app_core::DeviceTier::Local), "air").unwrap();
+
+        assert_eq!(frame.state.as_deref(), Some(PLUGIN_RENDERS_ON_THE_SERVER));
+        assert_eq!(frame.png_base64, None);
+        drop(listener);
+        fs::remove_dir_all(directory).unwrap();
     }
 
     fn typescript_contract_source() -> String {

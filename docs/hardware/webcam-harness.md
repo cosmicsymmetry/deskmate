@@ -28,6 +28,14 @@ the link is down, release firmware, and real-panel artifacts.
   shots (≥ 15 s); true period ≈ interval + 5 s. Start/stop/failure lines go
   to `<session-dir>/timelapse.log`; a failed shot is logged and the loop
   continues.
+- `tools/hwcam/record.sh <session-dir> <seconds> [label]` — one H.264 clip at
+  60 fps, for observations about *when* something happened rather than what
+  the panel shows. Tap latency is the case it was written for: a still cannot
+  put the finger and the panel change in one timebase, and comparing a Mac
+  timestamp against the server's journal measures the two hosts' clock offset
+  as much as it measures the device. One frame is 16.7 ms. Extract frames with
+  `ffmpeg -i <clip> -vf fps=60 -q:v 3 <dir>/%05d.jpg` and count from finger
+  contact to first panel change.
 
 ## Sessions
 

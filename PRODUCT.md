@@ -37,7 +37,7 @@ Deskmate is a small emissive AMOLED panel (368×448 physical, driven as a 448×3
 landscape UI) that clips to a monitor and shows one card at a time — clock, focus
 timer, calendar, weather, a JSON feed, RSS headlines. This desktop app is the
 **authoring and ownership surface** for that hardware: it is where a person builds
-their card library, arranges cards into named playlists, decides what advances when,
+the loop of cards the panel cycles through, decides what advances when,
 watches provider health, provisions the device onto WiFi and a server, and hands
 ownership between the Mac and that server.
 
@@ -49,10 +49,26 @@ without connecting a console.
 
 Three facts a neighbouring "smart display companion" could not truthfully copy:
 
-1. **The preview is not a mock.** `render_card_preview` runs the *device's own*
-   templates and returns exact-pixel PNG frames; a framebuffer diff harness proves
-   the simulator and the firmware agree pixel for pixel. What the app shows is what
-   the panel will show.
+1. **The preview is not a mock.** For the six built-in kinds, `render_card_preview` sends
+   host-built scenes through the firmware/LVGL renderer and returns exact-pixel PNG
+   frames; the retired C templates survive only in `lvgl-sim` as the reference oracle,
+   not as templates shipped on the device. A framebuffer diff harness proves the
+   simulator and firmware agree pixel for pixel. What the app shows is what the panel
+   will show.
+
+   **For a plugin card the claim is narrower, and it is stated rather than glossed
+   (2026-09-07).** The Mac holds no plugin registry and no rasterizer, so a plugin
+   card's preview is rendered on the server by `resvg` and returned as a PNG built from
+   the same cached snapshot the panel's face is built from. For an SVG-template plugin
+   that is exact by construction — the raster *is* what the panel shows. For a
+   display-list plugin it can differ exactly where stage 4's rasterization work already
+   found and pinned it (`docs/superpowers/plans/2026-08-29-deskmate-rasterization.md`'s
+   Task 6 evidence row `digital-clock--date-overflow`): LVGL ellipsizes an overflowing
+   line where the raster shows it whole. It is a render of the real card from the real
+   data, never a drawing of a card that does not exist. Rendering the server's compiled
+   scene in the Mac's own
+   simulator, byte-exact, remains available later as an additive extension of the same
+   route.
 2. **Ownership is a single implementation with two tiers.** In `local` tier the Mac
    owns the device over USB; in `networked` tier a single-tenant server owns it
    through the same `RuntimeDevice` seam and the app becomes a configurator. Where
@@ -78,36 +94,56 @@ Three facts a neighbouring "smart display companion" could not truthfully copy:
 
 ## Capabilities and Constraints
 
-**Objects.** Cards (library, max 8) of six kinds: `clock`, `pomodoro`, `calendar`,
-`weather`, `json-feed`, `rss`. Playlists (max 8, max 8 entries each), exactly one
-active. Entries carry an optional per-entry dwell that inherits the playlist default.
-Advance is `manual` or `timed`. Alerts exist on `pomodoro` (on timer finish) and
-`calendar` (before event) only, each with a hold that is host-side bookkeeping and
-never clears the panel.
+**Objects.** The app edits six built-in card kinds (max 8): `clock`,
+`pomodoro`, `calendar`, `weather`, `json-feed`, and `rss`. Schema v6 also carries
+server-side `plugin` cards, and since 2026-09-07 a plugin card is a peer of a built-in
+one in `networked` tier: added from the same menu with the same gesture, named by its
+manifest's `display_name`, showing a live headline on its tile, carrying the same
+freshness and error states, previewing on the stage, and edited in an editor whose
+Plugin field owns `cards[i].plugin_id`. The server still renders it; the Mac reads the
+server's catalog, per-card state and preview over the admin bearer. In `local` tier
+there is no server to render it, so the card is flagged `needs the server` and the stage
+says so — and the hostless runtime no longer schedules a refresh it cannot perform, which
+is what used to show as a permanent `stale`.
+The window has **one loop** (since 2026-09-06): the document's active playlist. Schema
+v6 still carries `playlists[]` (max 8, max 8 entries each, one active); the app exposes
+exactly one, never creates another, and round-trips any extra playlist an older file
+holds untouched. A new card joins the loop as it is added; a card outside the loop is
+shown in the same grid, flagged, with one action to join. Each card in the loop carries
+an optional dwell that inherits the loop default. Advance is `manual` or
+`timed`. Alerts exist on `pomodoro` (on timer finish) and `calendar` (before event)
+only, each with a hold that is host-side bookkeeping and never clears the panel.
 
-**Surfaces in the current app.** Device header with connection state and a pause
-toggle; up to four recovery banners; a first-run checklist; a network/ownership
-panel; the card library; the playlist editor; the per-card editor; the device
-preview; the loop ribbon (segment width ∝ dwell, with a playhead); provider health;
-app preferences (timezone, mounting orientation, start-at-login); a sticky save bar.
+**Surfaces in the current app.** A `TopBar` wordmark and Settings button;
+`SettingsSheet` as the sole disclosure of state, for device ownership, pairing,
+link/WiFi/IP/update state, timezone, mounting orientation, and start-at-login; first-run
+and error notices; the loop grid (complication tiles in loop order, reordered in place,
+with the add-card slot and its menu of built-in kinds and, in networked tier, the
+server's plugins with their descriptions); the per-card editor, which also edits the
+card's dwell and, for a plugin card, chooses its plugin; `DevicePreview`;
+`LoopRing` (arc ∝ dwell, with a playhead, and the pacing control in its head);
+card-local stale/provider recovery; and save controls in both the work column and
+settings sheet.
 
 **Hard constraints that outlive any visual direction.**
-- Config schema is **v4** and frozen (`docs/config/v4.md`); wire protocol is **v1**.
+- Config schema is **v6** and frozen (`docs/config/v6.md`); wire protocol is **v1**.
   A redesign of this app must not require a schema or wire change.
 - Canvas is a single clean 448×368 landscape. Orientation is `landscape` or
   `landscape-flipped` only — no portrait, and orientation is owned by this settings
   app, never by a device gesture.
-- Clock faces carry no title chip and no eyebrow on the device. `title` is still a
-  schema field the app owns as the card's **name in the library** ("Name" for clocks,
-  "Heading" elsewhere).
+- Clock faces carry no title chip and no eyebrow on the device. User-visible card
+  identity is card-kind-first: `cardLabel(card, catalog)` returns the template name for a
+  built-in card and the plugin's `display_name` for a plugin card — never the word
+  "Plugin", and never a bare machine id without a word saying why; the owner's `title` is
+  a quiet second line that distinguishes cards of the same kind.
 - Tauri CSP blocks every external host. All fonts, images, and scripts must be local.
 - Secrets (WiFi passphrase, device token, admin token) are **write-only**: accepted
   by IPC, absent from every snapshot and response, and never displayed back.
 - Save is blocked when ownership tier is unknown, when validation fails, or while a
   save is in flight — and the reason must always be legible.
-- Undecided: whether the app ever gains a firmware-update UI beyond the read-only
-  `ota_state` field. An OTA failure currently carries **no reason on the wire**, so
-  the app cannot explain a failed update. Do not invent one.
+- Undecided: whether the app ever gains a firmware-update UI beyond read-only status.
+  Protocol-v1 `last_ota_error` exists on the wire and the server exposes it, but the
+  app does not yet present it as an OTA-failure explanation.
 
 ## Brand Commitments
 
@@ -123,14 +159,16 @@ exclaims, and never blames the user.
 
 ## Evidence on Hand
 
-- Real, working exact-pixel device previews via IPC (`render_card_preview`).
+- Real, working exact-pixel device previews via IPC (`render_card_preview`) for the six
+  built-in kinds, and server-rendered PNG previews for plugin cards.
 - A full typed IPC contract (`src/lib/types.ts`, cross-checked against Rust
   serialization in CI) — enough to build a faithful mock backend.
 - Existing tests: `tests/components.test.tsx`, `useAppState.test.ts`,
   `configDraft.test.ts`, run under Bun.
 - A live deployed server at `deskmate.rodi.one`, and physical hardware on the desk.
 - **Absent, and must not be fabricated:** users other than the author, testimonials,
-  install counts, pricing, any App Store presence, and any OTA failure reason.
+  install counts, pricing, any App Store presence, and an app UI explanation of
+  `last_ota_error`.
 
 ## Product Principles
 

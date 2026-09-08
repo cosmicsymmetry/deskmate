@@ -30,21 +30,15 @@ static size_t slot_index(const ui_command_queue_t *queue, size_t offset)
 static bool same_coalescing_key(const ui_command_t *pending,
                                 const ui_command_t *incoming)
 {
-    if (incoming->type == UI_COMMAND_PATCH_VIEW &&
-        (pending->type == UI_COMMAND_PATCH_VIEW ||
-         pending->type == UI_COMMAND_SHOW_VIEW)) {
-        return strcmp(pending->widget_id, incoming->widget_id) == 0;
-    }
     return incoming->type == pending->type &&
-           (incoming->type == UI_COMMAND_LINK_STATE ||
+           (incoming->type == UI_COMMAND_SHOW_CARD_FALLBACK ||
+            incoming->type == UI_COMMAND_LINK_STATE ||
             incoming->type == UI_COMMAND_TIME_OFFSET);
 }
 
 static bool is_view_work(ui_command_type_t type)
 {
-    return type == UI_COMMAND_SHOW_STANDALONE ||
-           type == UI_COMMAND_SHOW_VIEW ||
-           type == UI_COMMAND_PATCH_VIEW;
+    return type == UI_COMMAND_SHOW_CARD_FALLBACK;
 }
 
 static void discard_superseded_view_work(ui_command_queue_t *queue)
@@ -66,6 +60,29 @@ static void discard_superseded_view_work(ui_command_queue_t *queue)
     queue->count = kept;
 }
 
+static bool discard_card_fallbacks_locked(ui_command_queue_t *queue)
+{
+    size_t original_count = queue->count;
+    size_t kept = 0U;
+    bool discarded = false;
+    for (size_t i = 0U; i < original_count; ++i) {
+        size_t read_index = slot_index(queue, i);
+        if (queue->commands[read_index].type ==
+            UI_COMMAND_SHOW_CARD_FALLBACK) {
+            increment(&queue->coalesced);
+            discarded = true;
+            continue;
+        }
+        size_t write_index = slot_index(queue, kept);
+        if (write_index != read_index) {
+            queue->commands[write_index] = queue->commands[read_index];
+        }
+        ++kept;
+    }
+    queue->count = kept;
+    return discarded;
+}
+
 void ui_command_queue_init(ui_command_queue_t *queue)
 {
     if (queue != NULL) {
@@ -81,27 +98,17 @@ bool ui_command_queue_push(ui_command_queue_t *queue,
         return false;
     }
     lock_queue(queue);
-    if (command->type == UI_COMMAND_SHOW_VIEW ||
-        command->type == UI_COMMAND_SHOW_STANDALONE ||
-        (command->type == UI_COMMAND_LINK_STATE && !command->online)) {
+    if (command->type == UI_COMMAND_LINK_STATE && !command->online) {
         /* Screen replacement makes older view work obsolete, but scalar
          * time/link state still has to reach the fallback/new screen in order. */
         discard_superseded_view_work(queue);
+    } else if (command->type == UI_COMMAND_SHOW_CARD_FALLBACK) {
+        (void)discard_card_fallbacks_locked(queue);
     } else {
         for (size_t i = 0U; i < queue->count; ++i) {
             ui_command_t *pending = &queue->commands[slot_index(queue, i)];
             if (same_coalescing_key(pending, command)) {
-                uint16_t dirty = pending->dirty_mask | command->dirty_mask;
-                ui_command_type_t type = pending->type;
-                protocol_size_class_t size_class = pending->size_class;
-                ui_view_context_t view_context = pending->view_context;
                 *pending = *command;
-                pending->dirty_mask = dirty;
-                if (type == UI_COMMAND_SHOW_VIEW) {
-                    pending->type = type;
-                    pending->size_class = size_class;
-                    pending->view_context = view_context;
-                }
                 increment(&queue->coalesced);
                 unlock_queue(queue);
                 return true;
@@ -120,6 +127,17 @@ bool ui_command_queue_push(ui_command_queue_t *queue,
     }
     unlock_queue(queue);
     return true;
+}
+
+bool ui_command_queue_discard_card_fallbacks(ui_command_queue_t *queue)
+{
+    if (queue == NULL) {
+        return false;
+    }
+    lock_queue(queue);
+    bool discarded = discard_card_fallbacks_locked(queue);
+    unlock_queue(queue);
+    return discarded;
 }
 
 bool ui_command_queue_pop(ui_command_queue_t *queue,

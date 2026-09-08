@@ -6,17 +6,20 @@ use std::time::{Duration, Instant};
 
 use app_core::{
     AlertHold, AppConfig, CalendarRefreshRequest, CalendarRefreshResult, CalendarRefresher,
-    CardAlert, CardField, CardFieldValue, CardSettings, CarouselAdvance, ConnectionState,
-    DeviceCapability, DeviceConnection, DeviceOtaState, DeviceTier, DeviceWifiState,
-    DisplayOrientation, DisplayTemplate, NetworkConfig, PersistenceState, Playlist, PlaylistEntry,
-    PomodoroAction, PomodoroState, ProviderRequest, ProvisioningTier, RefreshPolicy, RuntimeDevice,
-    RuntimeError, RuntimeHandle, RuntimeOptions, RuntimeState, WidgetTapAction,
+    CardAlert, CardErrorKind, CardField, CardFieldValue, CardPreviewState, CardSettings,
+    CarouselAdvance, ConnectionState, DesiredAsset, DeviceCapability, DeviceConnection,
+    DeviceOtaState, DeviceTier, DeviceWifiState, DisplayOrientation, DisplayTemplate,
+    NetworkConfig, PersistenceState, Playlist, PlaylistEntry, PluginHost, PomodoroAction,
+    PomodoroState, ProviderRequest, ProvisioningTier, RasterFrame, RasterRequest, RefreshPolicy,
+    RuntimeDevice, RuntimeError, RuntimeHandle, RuntimeOptions, RuntimeState, SceneCandidate,
+    WidgetTapAction,
 };
-use chrono::Utc;
+use chrono::{TimeZone as _, Utc};
 use device::{DeviceError, ReceivedEvent, SessionDiagnostics, TransportError};
 use protocol::{
-    DeviceEvent, ErrorCode, ErrorResponse, EventAction, EventKind, Field, FieldValue,
-    PROTOCOL_VERSION, ScreenConfig, StatusResponse, TimeSync, TriggerInterrupt, WidgetConfig,
+    Ack, AssetBegin, AssetChunk, AssetCommit, AssetRelease, DeviceEvent, ErrorCode, ErrorResponse,
+    EventAction, EventKind, Field, FieldValue, PROTOCOL_VERSION, PushScene, Scene, SceneNode,
+    SceneValue, ScreenConfig, StatusResponse, TimeSync, TriggerInterrupt, WidgetConfig,
 };
 
 const FULL_JSON: &str = include_str!("fixtures/full.json");
@@ -30,6 +33,9 @@ enum Operation {
     TimeSync,
     ApplyLayout(u16),
     Push(String),
+    PushScene(PushScene),
+    AssetBegin([u8; protocol::ASSET_DIGEST_LEN]),
+    AssetRelease(Vec<[u8; protocol::ASSET_DIGEST_LEN]>),
     Activate(String),
     Interrupt(u32),
     ReplayTime,
@@ -75,9 +81,14 @@ struct MockState {
     latest_interrupt_token: u32,
     status_override: Option<StatusResponse>,
     next_push_gate: Option<Arc<PushGate>>,
+    next_scene_gate: Option<Arc<PushGate>>,
+    next_apply_layout_error: Option<DeviceError>,
+    scene_errors: VecDeque<DeviceError>,
     /// Widgets whose pushes the device understands and refuses, exactly as real
     /// firmware does for a field the widget's template does not declare.
     refused_pushes: BTreeSet<String>,
+    /// Cards whose scene the device understands but cannot render exactly.
+    refused_scenes: BTreeSet<String>,
     /// Simulates the tier changing between the last status response and a host sync.
     /// The rejection also changes later status responses to Networked, as hardware
     /// does after accepting provisioning and rebooting into server ownership.
@@ -169,6 +180,20 @@ impl MockDeviceControl {
         gate
     }
 
+    fn block_next_scene(&self) -> Arc<PushGate> {
+        let gate = Arc::new(PushGate::default());
+        self.state.lock().unwrap().next_scene_gate = Some(Arc::clone(&gate));
+        gate
+    }
+
+    fn fail_next_apply_layout_with(&self, error: DeviceError) {
+        self.state.lock().unwrap().next_apply_layout_error = Some(error);
+    }
+
+    fn fail_next_scene_with(&self, error: DeviceError) {
+        self.state.lock().unwrap().scene_errors.push_back(error);
+    }
+
     fn set_latest_interrupt_token(&self, token: u32) {
         self.state.lock().unwrap().latest_interrupt_token = token;
     }
@@ -183,6 +208,14 @@ impl MockDeviceControl {
             .unwrap()
             .refused_pushes
             .insert(widget_id.to_owned());
+    }
+
+    fn refuse_scenes_for(&self, card_id: &str) {
+        self.state
+            .lock()
+            .unwrap()
+            .refused_scenes
+            .insert(card_id.to_owned());
     }
 
     fn reject_time_sync_as_wrong_tier(&self) {
@@ -339,6 +372,9 @@ impl RuntimeDevice for MockDevice {
         _widgets: Vec<WidgetConfig>,
         _screens: Vec<ScreenConfig>,
     ) -> Result<(), DeviceError> {
+        if let Some(error) = self.with_connected(|state| state.next_apply_layout_error.take())? {
+            return Err(error);
+        }
         self.with_connected(|state| {
             state.replay.layout = true;
             state.replay.pushes.clear();
@@ -372,6 +408,26 @@ impl RuntimeDevice for MockDevice {
         })
     }
 
+    fn push_scene(&mut self, push: PushScene) -> Result<(), DeviceError> {
+        let gate = self.with_connected(|state| state.next_scene_gate.take())?;
+        if let Some(gate) = gate {
+            gate.enter_and_wait();
+        }
+        self.with_connected(|state| {
+            state.operations.push(Operation::PushScene(push.clone()));
+            if let Some(error) = state.scene_errors.pop_front() {
+                return Err(error);
+            }
+            if state.refused_scenes.contains(&push.card_id) {
+                return Err(DeviceError::Rejected(ErrorResponse {
+                    code: ErrorCode::InvalidPayload,
+                    diagnostic: "scene could not be rendered".into(),
+                }));
+            }
+            Ok(())
+        })?
+    }
+
     fn trigger_interrupt(&mut self, interrupt: TriggerInterrupt) -> Result<(), DeviceError> {
         self.with_connected(|state| {
             state.latest_interrupt_token = state.latest_interrupt_token.max(interrupt.token);
@@ -380,6 +436,33 @@ impl RuntimeDevice for MockDevice {
                 .interrupts
                 .insert(interrupt.token, interrupt.clone());
             state.operations.push(Operation::Interrupt(interrupt.token));
+        })
+    }
+
+    fn send_asset_begin(&mut self, begin: AssetBegin) -> Result<Ack, DeviceError> {
+        self.with_connected(|state| {
+            state.operations.push(Operation::AssetBegin(begin.digest));
+            Ack {
+                acknowledged_type: protocol::TYPE_ASSET_BEGIN,
+                revision: None,
+                already_present: Some(false),
+            }
+        })
+    }
+
+    fn send_asset_chunk(&mut self, _chunk: AssetChunk) -> Result<(), DeviceError> {
+        self.with_connected(|_state| ())
+    }
+
+    fn send_asset_commit(&mut self, _commit: AssetCommit) -> Result<(), DeviceError> {
+        self.with_connected(|_state| ())
+    }
+
+    fn send_asset_release(&mut self, release: AssetRelease) -> Result<(), DeviceError> {
+        self.with_connected(|state| {
+            state
+                .operations
+                .push(Operation::AssetRelease(release.digests));
         })
     }
 
@@ -431,6 +514,7 @@ impl CalendarRefresher for FixedRefresher {
                     value: FieldValue::Boolean(false),
                 },
             ],
+            value: None,
             refreshed_at: Some(request.now),
             age: Some(Duration::ZERO),
             stale: false,
@@ -465,6 +549,7 @@ impl CalendarRefresher for MultiProviderRefresher {
             ProviderRequest::Weather { .. } => "weather",
             ProviderRequest::JsonFeed { .. } => "json-feed",
             ProviderRequest::Rss { .. } => "rss",
+            ProviderRequest::Plugin { .. } => "plugin",
         };
         self.calls
             .lock()
@@ -479,6 +564,7 @@ impl CalendarRefresher for MultiProviderRefresher {
                     key: "title".into(),
                     value: FieldValue::Text(request.title),
                 }],
+                value: None,
                 refreshed_at: None,
                 age: None,
                 stale: true,
@@ -525,11 +611,150 @@ impl CalendarRefresher for LastGoodRefresher {
                     value: FieldValue::Text("offline".into()),
                 },
             ],
+            value: None,
             refreshed_at: self.last_success,
             age: Some(Duration::from_mins(1)),
             stale: true,
             error: Some("offline".into()),
         }
+    }
+}
+
+struct PluginRefresher {
+    value: serde_json::Value,
+    stale: bool,
+    error: Option<String>,
+}
+
+fn plugin_refreshed_at() -> chrono::DateTime<Utc> {
+    Utc.with_ymd_and_hms(2026, 9, 5, 12, 34, 56).unwrap()
+}
+
+impl CalendarRefresher for PluginRefresher {
+    fn refresh(&mut self, request: CalendarRefreshRequest) -> CalendarRefreshResult {
+        assert!(
+            matches!(request.provider, ProviderRequest::Plugin { .. }),
+            "plugin cards must be scheduled as plugin provider requests"
+        );
+        CalendarRefreshResult {
+            generation: request.generation,
+            widget_id: request.widget_id,
+            fields: vec![
+                Field {
+                    key: "stale".into(),
+                    value: FieldValue::Boolean(self.stale),
+                },
+                Field {
+                    key: "error".into(),
+                    value: FieldValue::Text(self.error.clone().unwrap_or_default()),
+                },
+            ],
+            value: Some(self.value.clone()),
+            refreshed_at: Some(plugin_refreshed_at()),
+            age: Some(Duration::from_secs(7)),
+            stale: self.stale,
+            error: self.error.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct PluginRenderCall {
+    plugin_id: String,
+    snapshot: providers::ProviderSnapshot<serde_json::Value>,
+    revision: u32,
+}
+
+#[derive(Default)]
+struct FakePluginHostState {
+    outcomes: VecDeque<Result<(), String>>,
+    renders: Vec<PluginRenderCall>,
+    desired_assets: Vec<DesiredAsset>,
+    invalid_scene: bool,
+    frame: Option<RasterFrame>,
+    raster_requests: Vec<RasterRequest>,
+}
+
+#[derive(Clone, Default)]
+struct FakePluginHostControl {
+    state: Arc<Mutex<FakePluginHostState>>,
+}
+
+impl FakePluginHostControl {
+    fn host(&self) -> FakePluginHost {
+        FakePluginHost {
+            control: self.clone(),
+        }
+    }
+
+    fn queue_render_outcome(&self, outcome: Result<(), String>) {
+        self.state.lock().unwrap().outcomes.push_back(outcome);
+    }
+
+    fn renders(&self) -> Vec<PluginRenderCall> {
+        self.state.lock().unwrap().renders.clone()
+    }
+
+    fn set_desired_assets(&self, desired_assets: Vec<DesiredAsset>) {
+        self.state.lock().unwrap().desired_assets = desired_assets;
+    }
+
+    fn return_invalid_scene(&self) {
+        self.state.lock().unwrap().invalid_scene = true;
+    }
+
+    fn set_raster_frame(&self, frame: RasterFrame) {
+        self.state.lock().unwrap().frame = Some(frame);
+    }
+
+    fn raster_requests(&self) -> Vec<RasterRequest> {
+        self.state.lock().unwrap().raster_requests.clone()
+    }
+}
+
+struct FakePluginHost {
+    control: FakePluginHostControl,
+}
+
+impl PluginHost for FakePluginHost {
+    fn desired_assets(&mut self) -> Vec<DesiredAsset> {
+        self.control.state.lock().unwrap().desired_assets.clone()
+    }
+
+    fn render_scene(
+        &mut self,
+        plugin_id: &str,
+        snapshot: &providers::ProviderSnapshot<serde_json::Value>,
+        revision: u32,
+    ) -> Result<SceneCandidate, String> {
+        let mut state = self.control.state.lock().unwrap();
+        state.renders.push(PluginRenderCall {
+            plugin_id: plugin_id.to_owned(),
+            snapshot: snapshot.clone(),
+            revision,
+        });
+        if let Some(outcome) = state.outcomes.pop_front() {
+            outcome?;
+        }
+        let nodes = if state.invalid_scene {
+            vec![SceneNode::Rect(protocol::SceneRect::default()); protocol::MAX_SCENE_NODES + 1]
+        } else {
+            Vec::new()
+        };
+        Ok(SceneCandidate::DisplayList(Scene {
+            revision,
+            background: 0x1234,
+            nodes,
+        }))
+    }
+
+    fn rasterize(&mut self, request: &RasterRequest) -> Result<RasterFrame, String> {
+        let mut state = self.control.state.lock().unwrap();
+        state.raster_requests.push(request.clone());
+        state
+            .frame
+            .clone()
+            .ok_or_else(|| "the fixture host has no frame".to_owned())
     }
 }
 
@@ -634,6 +859,45 @@ fn multi_provider_config() -> AppConfig {
     config
 }
 
+fn plugin_config() -> AppConfig {
+    let mut config = full_config();
+    config.cards = vec![CardSettings::Plugin {
+        id: "plugin-card".into(),
+        title: "Plugin card".into(),
+        plugin_id: "test-plugin".into(),
+        tap_action: WidgetTapAction::None,
+        refresh: RefreshPolicy::Manual,
+        alert: CardAlert::None,
+    }];
+    config.playlists[0].entries = vec![PlaylistEntry {
+        card_id: "plugin-card".into(),
+        dwell_seconds: None,
+    }];
+    config
+}
+
+fn plugin_refresher() -> PluginRefresher {
+    PluginRefresher {
+        value: serde_json::json!({"aqi": 42, "label": "fresh"}),
+        stale: true,
+        error: Some("upstream is stale".into()),
+    }
+}
+
+fn start_plugin_runtime(
+    control: &MockDeviceControl,
+    host: Option<Box<dyn PluginHost>>,
+) -> RuntimeHandle {
+    RuntimeHandle::start_with_plugin_host(
+        plugin_config(),
+        Box::new(MockDevice::new(control.clone())),
+        Box::new(plugin_refresher()),
+        options(),
+        host,
+    )
+    .unwrap()
+}
+
 fn start_runtime(config: AppConfig, control: &MockDeviceControl, delay: Duration) -> RuntimeHandle {
     RuntimeHandle::start(
         config,
@@ -669,12 +933,11 @@ fn wait_for(timeout: Duration, predicate: impl Fn() -> bool) {
 }
 
 #[test]
-fn v2_status_and_networking_capability_survive_into_the_device_snapshot() {
+fn v2_status_and_current_capabilities_survive_into_the_device_snapshot() {
     let control = MockDeviceControl::default();
     let unknown_bit = 1_u64 << 63;
     let mut device_status = status(42);
-    device_status.capabilities =
-        protocol::CAPABILITY_CORE_WIDGETS | protocol::CAPABILITY_NETWORKING | unknown_bit;
+    device_status.capabilities = protocol::CURRENT_CAPABILITIES | unknown_bit;
     device_status.tier = protocol::Tier::Networked;
     device_status.wifi_state = protocol::WifiState::Failed;
     device_status.wifi_rssi = -58;
@@ -703,8 +966,22 @@ fn v2_status_and_networking_capability_survive_into_the_device_snapshot() {
             .capabilities
             .contains(&DeviceCapability::Networking)
     );
+    assert!(
+        snapshot
+            .device
+            .capabilities
+            .contains(&DeviceCapability::SceneRender)
+    );
     assert_eq!(snapshot.device.unknown_capability_bits, unknown_bit);
     let json = serde_json::to_value(&snapshot.device).unwrap();
+    assert!(
+        json["capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|capability| capability.as_str() == Some("scene-render"))
+    );
+    assert_eq!(json["unknown_capability_bits"], "0x8000000000000000");
     assert_eq!(json["tier"], "networked");
     assert_eq!(json["wifi_state"], "failed");
     assert_eq!(json["wifi_rssi"], -58);
@@ -829,6 +1106,1006 @@ fn provision_and_factory_reset_use_the_runtime_owned_device_without_reconnecting
             .count(),
         1
     );
+    runtime.shutdown().unwrap();
+}
+
+#[test]
+fn push_scene_uses_the_runtime_owned_device_without_reconnecting() {
+    let control = MockDeviceControl::default();
+    let runtime = start_runtime(full_config(), &control, Duration::ZERO);
+    wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
+        snapshot.device.connection == ConnectionState::Online
+    });
+    let connections_before = control.connection_count();
+    let push = PushScene {
+        card_id: "clock".into(),
+        revision: 7,
+        scene: Scene {
+            revision: 7,
+            background: 0,
+            nodes: Vec::new(),
+        },
+    };
+
+    runtime.push_scene(push.clone()).unwrap();
+
+    assert_eq!(control.connection_count(), connections_before);
+    assert_eq!(
+        control
+            .operations()
+            .iter()
+            .filter(|operation| **operation == Operation::PushScene(push.clone()))
+            .count(),
+        1
+    );
+    runtime.shutdown().unwrap();
+}
+
+#[test]
+fn scene_capable_device_receives_the_active_card_as_a_scene() {
+    let control = MockDeviceControl::default();
+    let runtime = start_runtime(full_config(), &control, Duration::ZERO);
+
+    wait_for(Duration::from_secs(1), || {
+        control.operations().iter().any(
+            |operation| matches!(operation, Operation::PushScene(push) if push.card_id == "clock"),
+        )
+    });
+
+    let operations = control.operations();
+    let activation = operations
+        .iter()
+        .position(|operation| *operation == Operation::Activate("clock".into()))
+        .expect("the device model is activated before its scene");
+    let scene = operations
+        .iter()
+        .position(
+            |operation| matches!(operation, Operation::PushScene(push) if push.card_id == "clock"),
+        )
+        .expect("scene-capable device receives PushScene");
+    assert!(activation < scene, "the scene must remain the visible face");
+    runtime.shutdown().unwrap();
+}
+
+#[test]
+fn plugin_card_pushes_the_host_scene_unmodified_after_raw_data_arrives() {
+    let control = MockDeviceControl::default();
+    let host = FakePluginHostControl::default();
+    let runtime = start_plugin_runtime(&control, Some(Box::new(host.host())));
+
+    wait_for(Duration::from_secs(1), || {
+        control.operations().iter().any(|operation| {
+            matches!(operation, Operation::PushScene(push) if push.card_id == "plugin-card")
+        })
+    });
+
+    let push = control
+        .operations()
+        .into_iter()
+        .rev()
+        .find_map(|operation| match operation {
+            Operation::PushScene(push) if push.card_id == "plugin-card" => Some(push),
+            _ => None,
+        })
+        .expect("the plugin scene was pushed");
+    let renders = host.renders();
+    let render = renders.last().expect("the plugin host rendered once");
+    assert_eq!(render.plugin_id, "test-plugin");
+    assert_eq!(
+        render.snapshot.value,
+        serde_json::json!({"aqi": 42, "label": "fresh"})
+    );
+    assert!(render.snapshot.stale);
+    assert_eq!(render.snapshot.error.as_deref(), Some("upstream is stale"));
+    assert_eq!(render.snapshot.age, Some(Duration::from_secs(7)));
+    assert_eq!(render.snapshot.refreshed_at, Some(plugin_refreshed_at()));
+    assert_eq!(push.revision, render.revision);
+    assert_eq!(push.scene.background, 0x1234);
+    assert!(
+        push.scene.nodes.is_empty(),
+        "the runtime must not append a second stale/error footer to the host scene"
+    );
+    assert!(runtime.snapshot().unwrap().card_errors.is_empty());
+    runtime.shutdown().unwrap();
+}
+
+#[test]
+fn a_card_preview_answers_without_a_device_push_and_leaves_the_revision_counter_alone() {
+    let control = MockDeviceControl::default();
+    let host = FakePluginHostControl::default();
+    host.set_raster_frame(RasterFrame {
+        digest: [0x77; protocol::ASSET_DIGEST_LEN],
+        bytes: Arc::from(&[0x19, 0x12, 0, 0, 0xc0, 1, 0x70, 1, 0x80, 3, 0, 0, 1, 2][..]),
+    });
+    let runtime = start_plugin_runtime(&control, Some(Box::new(host.host())));
+    wait_for(Duration::from_secs(1), || {
+        control.operations().iter().any(|operation| {
+            matches!(operation, Operation::PushScene(push) if push.card_id == "plugin-card")
+        })
+    });
+
+    let pushed_revision = |operations: &[Operation]| -> Option<u32> {
+        operations
+            .iter()
+            .rev()
+            .find_map(|operation| match operation {
+                Operation::PushScene(push) if push.card_id == "plugin-card" => Some(push.revision),
+                _ => None,
+            })
+    };
+    let scene_pushes = |operations: &[Operation]| -> usize {
+        operations
+            .iter()
+            .filter(|operation| matches!(operation, Operation::PushScene(_)))
+            .count()
+    };
+    let activations = |operations: &[Operation]| -> usize {
+        operations
+            .iter()
+            .filter(|operation| matches!(operation, Operation::Activate(_)))
+            .count()
+    };
+    let before = control.operations();
+    let pushes_before = scene_pushes(&before);
+    let activations_before = activations(&before);
+    let last_revision = pushed_revision(&before).expect("the plugin card was pushed");
+    let active_before = runtime.snapshot().unwrap().device.active_screen_id;
+
+    let preview = runtime.render_card_preview("plugin-card").unwrap();
+
+    assert_eq!(preview.state, CardPreviewState::Stale);
+    assert_eq!(preview.message, None);
+    assert_eq!(
+        preview.refreshed_at_unix_ms,
+        u64::try_from(plugin_refreshed_at().timestamp_millis()).ok()
+    );
+    assert_eq!(
+        preview.frame.expect("a stale card still draws").digest,
+        [0x77; protocol::ASSET_DIGEST_LEN]
+    );
+    assert_eq!(host.raster_requests().len(), 1);
+    assert_eq!(
+        host.renders()
+            .last()
+            .expect("the preview rendered")
+            .revision,
+        0,
+        "a preview builds at the revision the wire refuses"
+    );
+    let after = control.operations();
+    assert_eq!(
+        scene_pushes(&after),
+        pushes_before,
+        "a preview must never reach the device"
+    );
+    assert_eq!(
+        activations(&after),
+        activations_before,
+        "the preview route never activates the card"
+    );
+    assert_eq!(
+        runtime.snapshot().unwrap().device.active_screen_id,
+        active_before,
+        "the preview route never changes which card the panel is showing"
+    );
+
+    runtime
+        .inject_plugin_snapshot(
+            "plugin-card",
+            "test-plugin",
+            providers::ProviderSnapshot {
+                value: serde_json::json!({"after": "preview"}),
+                refreshed_at: None,
+                age: None,
+                stale: false,
+                error: None,
+            },
+        )
+        .unwrap();
+    wait_for(Duration::from_secs(1), || {
+        pushed_revision(&control.operations()).is_some_and(|revision| revision > last_revision)
+    });
+    assert_eq!(
+        pushed_revision(&control.operations()),
+        Some(last_revision + 1),
+        "the preview must not have consumed a revision the next push then skips"
+    );
+    runtime.shutdown().unwrap();
+}
+
+#[test]
+fn a_preview_of_a_card_that_is_not_a_plugin_card_is_typed() {
+    let control = MockDeviceControl::default();
+    let runtime = start_runtime(full_config(), &control, Duration::ZERO);
+
+    assert!(matches!(
+        runtime.render_card_preview("clock"),
+        Err(RuntimeError::NotAPluginCard { ref card_id }) if card_id == "clock"
+    ));
+    assert!(matches!(
+        runtime.render_card_preview("nope"),
+        Err(RuntimeError::UnknownCard { ref card_id }) if card_id == "nope"
+    ));
+    runtime.shutdown().unwrap();
+}
+
+#[test]
+fn operator_plugin_snapshot_uses_the_same_runtime_compiler_and_runtime_minted_revision() {
+    let control = MockDeviceControl::default();
+    let host = FakePluginHostControl::default();
+    let runtime = start_plugin_runtime(&control, Some(Box::new(host.host())));
+    wait_for(Duration::from_secs(1), || !host.renders().is_empty());
+    let before_revision = host.renders().last().unwrap().revision;
+
+    runtime
+        .inject_plugin_snapshot(
+            "plugin-card",
+            "test-plugin",
+            providers::ProviderSnapshot {
+                value: serde_json::json!({"operator": "newest"}),
+                refreshed_at: None,
+                age: None,
+                stale: false,
+                error: None,
+            },
+        )
+        .unwrap();
+
+    wait_for(Duration::from_secs(1), || {
+        host.renders()
+            .iter()
+            .any(|render| render.snapshot.value == serde_json::json!({"operator": "newest"}))
+    });
+    let render = host
+        .renders()
+        .into_iter()
+        .find(|render| render.snapshot.value == serde_json::json!({"operator": "newest"}))
+        .unwrap();
+    assert!(render.revision > before_revision);
+    assert!(control.operations().iter().any(|operation| {
+        matches!(operation, Operation::PushScene(push) if push.card_id == "plugin-card" && push.revision == render.revision)
+    }));
+    runtime.shutdown().unwrap();
+}
+
+#[test]
+fn operator_plugin_snapshot_rejects_a_configured_card_plugin_mismatch() {
+    let control = MockDeviceControl::default();
+    let host = FakePluginHostControl::default();
+    let runtime = start_plugin_runtime(&control, Some(Box::new(host.host())));
+    wait_for(Duration::from_secs(1), || !host.renders().is_empty());
+    let render_count = host.renders().len();
+
+    let error = runtime
+        .inject_plugin_snapshot(
+            "plugin-card",
+            "different-plugin",
+            providers::ProviderSnapshot {
+                value: serde_json::json!({}),
+                refreshed_at: None,
+                age: None,
+                stale: false,
+                error: None,
+            },
+        )
+        .expect_err("plugin/card mismatch must be typed");
+
+    assert!(
+        matches!(error, RuntimeError::Provider { ref message } if message.contains("operator-plugin-mismatch") && message.contains("test-plugin") && message.contains("different-plugin"))
+    );
+    thread::sleep(Duration::from_millis(50));
+    assert_eq!(host.renders().len(), render_count);
+    runtime.shutdown().unwrap();
+}
+
+#[test]
+fn plugin_assets_are_reconciled_before_the_plugin_scene_is_pushed() {
+    let control = MockDeviceControl::default();
+    let host = FakePluginHostControl::default();
+    let digest = [0x3c; protocol::ASSET_DIGEST_LEN];
+    host.set_desired_assets(vec![DesiredAsset {
+        digest,
+        kind: protocol::AssetKind::Font,
+        bytes: Arc::from(&b"fixture font bytes"[..]),
+    }]);
+    let runtime = start_plugin_runtime(&control, Some(Box::new(host.host())));
+
+    wait_for(Duration::from_secs(1), || {
+        control.operations().iter().any(|operation| {
+            matches!(operation, Operation::PushScene(push) if push.card_id == "plugin-card")
+        })
+    });
+    let operations = control.operations();
+    let begin = operations
+        .iter()
+        .position(|operation| *operation == Operation::AssetBegin(digest))
+        .expect("plugin asset upload began");
+    let release = operations
+        .iter()
+        .position(|operation| *operation == Operation::AssetRelease(vec![digest]))
+        .expect("plugin asset inventory was released");
+    let scene = operations
+        .iter()
+        .position(|operation| {
+            matches!(operation, Operation::PushScene(push) if push.card_id == "plugin-card")
+        })
+        .expect("plugin scene was pushed");
+    assert!(begin < release && release < scene);
+    runtime.shutdown().unwrap();
+}
+
+#[test]
+fn plugin_card_without_a_cached_snapshot_is_refused_visibly() {
+    let control = MockDeviceControl::default();
+    let host = FakePluginHostControl::default();
+    let runtime = RuntimeHandle::start_with_plugin_host(
+        plugin_config(),
+        Box::new(MockDevice::new(control.clone())),
+        Box::<app_core::SystemProviderRefresher>::default(),
+        options(),
+        Some(Box::new(host.host())),
+    )
+    .unwrap();
+
+    let snapshot = wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
+        snapshot.card_errors.iter().any(|error| {
+            error.kind == CardErrorKind::SceneRefused
+                && error.card_id == "plugin-card"
+                && error.message.contains("no fetched plugin snapshot")
+        })
+    });
+    assert!(matches!(
+        snapshot.providers[0].state,
+        app_core::ProviderState::Error { .. }
+    ));
+    assert!(host.renders().is_empty());
+    runtime.shutdown().unwrap();
+}
+
+#[test]
+fn plugin_card_without_an_injected_host_is_refused_visibly() {
+    let control = MockDeviceControl::default();
+    let runtime = RuntimeHandle::start(
+        plugin_config(),
+        Box::new(MockDevice::new(control)),
+        Box::<app_core::SystemProviderRefresher>::default(),
+        options(),
+    )
+    .unwrap();
+
+    let snapshot = wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
+        snapshot.card_errors.iter().any(|error| {
+            error.kind == CardErrorKind::SceneRefused
+                && error.card_id == "plugin-card"
+                && error.message.contains("no plugin host is configured")
+        })
+    });
+    assert!(snapshot.card_errors.iter().all(|error| {
+        error.kind != CardErrorKind::SceneRefused
+            || !error.message.contains("no fetched plugin snapshot")
+    }));
+    runtime.shutdown().unwrap();
+}
+
+/// Spec 5.3. A runtime with no plugin host can neither fetch nor draw a plugin
+/// card, so it must say nothing about one rather than faking a refresh. The old
+/// behaviour published a permanent `stale` flag carrying the refresher's own
+/// internal message -- a defect presented as a state, the same shape the V1
+/// validation-mislabeling fix exists to forbid. The Mac projects the server's
+/// real provider state over this gap instead.
+#[test]
+fn a_hostless_runtime_neither_refreshes_nor_reports_a_plugin_card() {
+    let control = MockDeviceControl::default();
+    let refreshes = Arc::new(AtomicU64::new(0));
+    let runtime = RuntimeHandle::start(
+        plugin_config(),
+        Box::new(MockDevice::new(control.clone())),
+        Box::new(CountingRefresher {
+            calls: Arc::clone(&refreshes),
+        }),
+        options(),
+    )
+    .unwrap();
+
+    let snapshot = wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
+        snapshot.device.connection == ConnectionState::Online
+    });
+    assert!(
+        snapshot.providers.is_empty(),
+        "a runtime that cannot fetch a plugin card must not invent a provider state for it"
+    );
+    assert!(
+        !snapshot
+            .card_data
+            .iter()
+            .any(|data| data.card_id == "plugin-card"),
+        "the compiled placeholder fields are not data; do not publish them as a card's value"
+    );
+
+    thread::sleep(Duration::from_millis(80));
+    assert_eq!(
+        refreshes.load(Ordering::Relaxed),
+        0,
+        "no provider deadline may be scheduled for a card this runtime cannot render"
+    );
+    let settled = runtime.snapshot().unwrap();
+    assert!(settled.providers.is_empty());
+    runtime.shutdown().unwrap();
+}
+
+#[test]
+fn plugin_host_error_degrades_one_card_and_the_next_render_clears_it() {
+    let control = MockDeviceControl::default();
+    let host = FakePluginHostControl::default();
+    host.queue_render_outcome(Err("fixture compiler failure".into()));
+    let runtime = start_plugin_runtime(&control, Some(Box::new(host.host())));
+
+    let failed = wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
+        snapshot.card_errors.iter().any(|error| {
+            error.kind == CardErrorKind::SceneRefused
+                && error.card_id == "plugin-card"
+                && error.message.contains("fixture compiler failure")
+        })
+    });
+    assert_eq!(failed.device.connection, ConnectionState::Online);
+    assert!(!matches!(failed.runtime, RuntimeState::Error { .. }));
+
+    runtime.refresh_provider("plugin-card").unwrap();
+    wait_for(Duration::from_secs(1), || {
+        control.operations().iter().any(|operation| {
+            matches!(operation, Operation::PushScene(push) if push.card_id == "plugin-card")
+        })
+    });
+    let recovered = wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
+        snapshot.card_errors.is_empty()
+    });
+    assert_eq!(recovered.device.connection, ConnectionState::Online);
+    assert!(host.renders().len() >= 2);
+    runtime.shutdown().unwrap();
+}
+
+#[test]
+fn invalid_plugin_host_scene_is_refused_before_device_delivery() {
+    let control = MockDeviceControl::default();
+    let host = FakePluginHostControl::default();
+    host.return_invalid_scene();
+    let runtime = start_plugin_runtime(&control, Some(Box::new(host.host())));
+
+    let snapshot = wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
+        snapshot.card_errors.iter().any(|error| {
+            error.kind == CardErrorKind::SceneRefused
+                && error.card_id == "plugin-card"
+                && error.message.contains("host-built scene is invalid")
+        })
+    });
+    assert_eq!(snapshot.device.connection, ConnectionState::Online);
+    assert!(control.operations().iter().all(|operation| {
+        !matches!(operation, Operation::PushScene(push) if push.card_id == "plugin-card")
+    }));
+    runtime.shutdown().unwrap();
+}
+
+#[test]
+fn config_apply_replies_before_the_followup_scene_round_trip_finishes() {
+    let control = MockDeviceControl::default();
+    let runtime = start_runtime(full_config(), &control, Duration::ZERO);
+    wait_for(Duration::from_secs(1), || {
+        control
+            .operations()
+            .iter()
+            .any(|operation| matches!(operation, Operation::PushScene(_)))
+    });
+
+    let scene_gate = control.block_next_scene();
+    let mut changed = full_config();
+    let CardSettings::Clock { show_seconds, .. } = &mut changed.cards[0] else {
+        panic!("fixture's first card stopped being a clock");
+    };
+    *show_seconds = false;
+
+    let (reply_sender, reply_receiver) = std::sync::mpsc::sync_channel(1);
+    thread::scope(|scope| {
+        scope.spawn(|| {
+            reply_sender.send(runtime.apply_config(changed)).unwrap();
+        });
+
+        scene_gate.wait_until_entered();
+        let result_before_scene_reply = reply_receiver.recv_timeout(Duration::from_millis(250));
+        scene_gate.open();
+        assert_eq!(
+            result_before_scene_reply
+                .expect("config apply stayed blocked on the follow-up scene request/response"),
+            Ok(())
+        );
+    });
+
+    runtime.shutdown().unwrap();
+}
+
+#[test]
+fn automatic_scene_delivery_does_not_gate_the_online_connection_state() {
+    let control = MockDeviceControl::default();
+    let scene_gate = control.block_next_scene();
+    let runtime = start_runtime(full_config(), &control, Duration::ZERO);
+
+    let snapshot = wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
+        snapshot.device.connection == ConnectionState::Online
+    });
+    assert_eq!(snapshot.device.connection, ConnectionState::Online);
+    scene_gate.wait_until_entered();
+    assert_eq!(
+        runtime.snapshot().unwrap().device.connection,
+        ConnectionState::Online,
+        "a best-effort render request must not turn an owned device back into Connecting"
+    );
+
+    scene_gate.open();
+    runtime.shutdown().unwrap();
+}
+
+#[test]
+fn explicit_scene_command_follows_one_automatic_attempt_without_spawning_another() {
+    let control = MockDeviceControl::default();
+    let automatic_gate = control.block_next_scene();
+    let runtime = start_runtime(full_config(), &control, Duration::ZERO);
+    wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
+        snapshot.device.connection == ConnectionState::Online
+    });
+    automatic_gate.wait_until_entered();
+
+    let explicit = PushScene {
+        card_id: "clock".into(),
+        revision: 77,
+        scene: Scene {
+            revision: 77,
+            background: 0,
+            nodes: Vec::new(),
+        },
+    };
+    let (reply_sender, reply_receiver) = std::sync::mpsc::sync_channel(1);
+    thread::scope(|scope| {
+        scope.spawn(|| {
+            reply_sender
+                .send(runtime.push_scene(explicit.clone()))
+                .unwrap();
+        });
+        automatic_gate.open();
+        assert_eq!(
+            reply_receiver
+                .recv_timeout(Duration::from_secs(1))
+                .expect("explicit PushScene remained stuck behind the automatic attempt"),
+            Ok(())
+        );
+    });
+
+    wait_for(Duration::from_secs(1), || {
+        control
+            .operations()
+            .iter()
+            .any(|operation| matches!(operation, Operation::PushScene(push) if push.revision == 77))
+    });
+    thread::sleep(Duration::from_millis(100));
+    assert_eq!(
+        control
+            .operations()
+            .iter()
+            .filter(|operation| matches!(operation, Operation::PushScene(_)))
+            .count(),
+        2,
+        "one automatic event plus one explicit command must produce exactly two scene attempts"
+    );
+    runtime.shutdown().unwrap();
+}
+
+#[test]
+fn failed_full_sync_never_pushes_a_scene_before_activation_succeeds() {
+    let control = MockDeviceControl::default();
+    control.fail_next_apply_layout_with(DeviceError::Timeout);
+    let runtime = start_runtime(full_config(), &control, Duration::ZERO);
+
+    wait_for(Duration::from_secs(1), || {
+        control
+            .operations()
+            .iter()
+            .any(|operation| matches!(operation, Operation::PushScene(_)))
+    });
+    let operations = control.operations();
+    let activation = operations
+        .iter()
+        .position(|operation| *operation == Operation::Activate("clock".into()))
+        .expect("the retried ownership sync never activated the card");
+    let scene = operations
+        .iter()
+        .position(|operation| matches!(operation, Operation::PushScene(_)))
+        .expect("the successful full-sync retry never produced its scene");
+    assert!(
+        activation < scene,
+        "a scene reached the device before its config and activation"
+    );
+    runtime.shutdown().unwrap();
+}
+
+#[test]
+fn legacy_device_receives_widget_config_and_never_receives_a_scene() {
+    let control = MockDeviceControl::default();
+    let mut legacy = status(42);
+    legacy.capabilities &= !protocol::CAPABILITY_SCENE_RENDER;
+    control.set_status(legacy);
+    let runtime = start_runtime(full_config(), &control, Duration::ZERO);
+
+    wait_for(Duration::from_secs(1), || {
+        let operations = control.operations();
+        operations.contains(&Operation::ApplyLayout(270))
+            && operations.contains(&Operation::Push("clock".into()))
+            && operations.contains(&Operation::Activate("clock".into()))
+    });
+    // Soft negative over ten complete 10 ms runtime intervals: unlike the
+    // positive event assertions, absence has no notification to wait on.
+    thread::sleep(Duration::from_millis(100));
+    assert!(
+        control
+            .operations()
+            .iter()
+            .all(|operation| !matches!(operation, Operation::PushScene(_))),
+        "firmware without bit 8 must stay on the legacy widget path"
+    );
+    runtime.shutdown().unwrap();
+}
+
+#[test]
+fn render_path_is_re_resolved_from_fresh_capabilities_on_every_reconnect() {
+    let control = MockDeviceControl::default();
+    let mut legacy = status(42);
+    legacy.capabilities &= !protocol::CAPABILITY_SCENE_RENDER;
+    control.set_status(legacy.clone());
+    let runtime = start_runtime(full_config(), &control, Duration::ZERO);
+
+    wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
+        snapshot.device.connection == ConnectionState::Online
+    });
+    assert!(
+        control
+            .operations()
+            .iter()
+            .all(|operation| !matches!(operation, Operation::PushScene(_)))
+    );
+
+    control.set_status(status(84));
+    control.force_disconnect(false);
+    wait_for(Duration::from_secs(1), || {
+        control.connection_count() >= 2
+            && control
+                .operations()
+                .iter()
+                .any(|operation| matches!(operation, Operation::PushScene(_)))
+    });
+
+    let scene_count = control
+        .operations()
+        .iter()
+        .filter(|operation| matches!(operation, Operation::PushScene(_)))
+        .count();
+    control.set_status(legacy);
+    control.force_disconnect(false);
+    wait_for(Duration::from_secs(1), || control.connection_count() >= 3);
+    thread::sleep(Duration::from_millis(100));
+    assert_eq!(
+        control
+            .operations()
+            .iter()
+            .filter(|operation| matches!(operation, Operation::PushScene(_)))
+            .count(),
+        scene_count,
+        "a device returning on legacy firmware must switch back to widgets"
+    );
+    runtime.shutdown().unwrap();
+}
+
+#[test]
+fn a_refused_scene_is_card_scoped_visible_and_not_periodically_retried() {
+    let control = MockDeviceControl::default();
+    control.refuse_scenes_for("clock");
+    let runtime = start_runtime(full_config(), &control, Duration::ZERO);
+
+    let snapshot = wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
+        snapshot.card_errors.iter().any(|error| {
+            error.kind == CardErrorKind::SceneRefused
+                && error.card_id == "clock"
+                && error.message.contains("scene")
+        })
+    });
+    assert!(
+        !matches!(snapshot.runtime, RuntimeState::Error { .. }),
+        "one refused scene must not park the whole runtime"
+    );
+    assert_eq!(snapshot.device.connection, ConnectionState::Online);
+    let attempts = control
+        .operations()
+        .iter()
+        .filter(|operation| matches!(operation, Operation::PushScene(_)))
+        .count();
+    thread::sleep(Duration::from_millis(100));
+    assert_eq!(
+        control
+            .operations()
+            .iter()
+            .filter(|operation| matches!(operation, Operation::PushScene(_)))
+            .count(),
+        attempts,
+        "a terminal refusal is retried only after a new host event"
+    );
+    runtime.shutdown().unwrap();
+}
+
+#[test]
+fn busy_scene_is_retried_without_becoming_a_card_fault() {
+    let control = MockDeviceControl::default();
+    control.fail_next_scene_with(DeviceError::Rejected(ErrorResponse {
+        code: ErrorCode::Busy,
+        diagnostic: "LVGL is flushing".into(),
+    }));
+    let runtime = start_runtime(full_config(), &control, Duration::ZERO);
+
+    wait_for(Duration::from_secs(1), || {
+        control
+            .operations()
+            .iter()
+            .filter(|operation| matches!(operation, Operation::PushScene(_)))
+            .count()
+            >= 2
+    });
+    assert!(runtime.snapshot().unwrap().card_errors.is_empty());
+    runtime.shutdown().unwrap();
+}
+
+#[test]
+fn scene_transport_failures_retry_without_masquerading_as_card_faults() {
+    for error in [
+        DeviceError::Timeout,
+        DeviceError::Transport(TransportError::Io("temporary stall".into())),
+        DeviceError::MalformedResponse("truncated ACK".into()),
+        DeviceError::UnexpectedMessage,
+    ] {
+        let control = MockDeviceControl::default();
+        control.fail_next_scene_with(error);
+        let runtime = start_runtime(full_config(), &control, Duration::ZERO);
+
+        wait_for(Duration::from_secs(1), || {
+            control
+                .operations()
+                .iter()
+                .filter(|operation| matches!(operation, Operation::PushScene(_)))
+                .count()
+                >= 2
+        });
+        let snapshot = runtime.snapshot().unwrap();
+        assert!(snapshot.card_errors.is_empty());
+        assert_eq!(snapshot.device.connection, ConnectionState::Online);
+        runtime.shutdown().unwrap();
+    }
+}
+
+#[test]
+fn no_device_scene_failure_enters_reconnect_without_becoming_a_card_fault() {
+    let control = MockDeviceControl::default();
+    control.fail_next_scene_with(DeviceError::NoDevice);
+    let runtime = start_runtime(full_config(), &control, Duration::ZERO);
+
+    wait_for(Duration::from_secs(1), || control.connection_count() >= 2);
+    let snapshot = wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
+        snapshot.device.connection == ConnectionState::Online
+    });
+    assert!(snapshot.card_errors.is_empty());
+    assert!(
+        control
+            .operations()
+            .iter()
+            .filter(|operation| matches!(operation, Operation::PushScene(_)))
+            .count()
+            >= 2,
+        "the reconnect did not retry the scene event"
+    );
+    runtime.shutdown().unwrap();
+}
+
+#[test]
+fn terminal_scene_session_faults_are_visible_and_never_silently_retried() {
+    for error in [
+        DeviceError::VersionMismatch(2),
+        DeviceError::InvalidRequest,
+        DeviceError::RevisionExhausted,
+    ] {
+        let expected = error.to_string();
+        let control = MockDeviceControl::default();
+        control.fail_next_scene_with(error);
+        let runtime = start_runtime(full_config(), &control, Duration::ZERO);
+
+        let snapshot = wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
+            matches!(
+                &snapshot.runtime,
+                RuntimeState::Error { message } if message.contains(&expected)
+            )
+        });
+        assert!(snapshot.card_errors.is_empty());
+        let attempts = control
+            .operations()
+            .iter()
+            .filter(|operation| matches!(operation, Operation::PushScene(_)))
+            .count();
+        thread::sleep(Duration::from_millis(100));
+        assert_eq!(
+            control
+                .operations()
+                .iter()
+                .filter(|operation| matches!(operation, Operation::PushScene(_)))
+                .count(),
+            attempts,
+            "terminal scene session fault was silently retried"
+        );
+        runtime.shutdown().unwrap();
+    }
+}
+
+#[test]
+fn wrong_tier_scene_recovery_replays_the_model_and_rearms_the_scene() {
+    let control = MockDeviceControl::default();
+    control.fail_next_scene_with(DeviceError::Rejected(ErrorResponse {
+        code: ErrorCode::WrongTier,
+        diagnostic: "server owns this device".into(),
+    }));
+    let runtime = start_runtime(full_config(), &control, Duration::ZERO);
+
+    wait_for(Duration::from_secs(1), || {
+        control
+            .operations()
+            .iter()
+            .filter(|operation| matches!(operation, Operation::PushScene(_)))
+            .count()
+            >= 2
+    });
+    let operations = control.operations();
+    let second_scene = operations
+        .iter()
+        .rposition(|operation| matches!(operation, Operation::PushScene(_)))
+        .unwrap();
+    let last_activation = operations
+        .iter()
+        .rposition(|operation| *operation == Operation::Activate("clock".into()))
+        .expect("ownership recovery did not replay the active screen");
+    assert!(last_activation < second_scene);
+    assert!(runtime.snapshot().unwrap().card_errors.is_empty());
+    runtime.shutdown().unwrap();
+}
+
+#[test]
+fn scenes_push_on_host_events_and_never_on_clock_or_pomodoro_ticks() {
+    let control = MockDeviceControl::default();
+    let runtime = start_runtime(full_config(), &control, Duration::ZERO);
+    let scene_count = || {
+        control
+            .operations()
+            .iter()
+            .filter(|operation| matches!(operation, Operation::PushScene(_)))
+            .count()
+    };
+
+    wait_for(Duration::from_secs(1), || scene_count() >= 1);
+    let initial = scene_count();
+    thread::sleep(Duration::from_millis(100));
+    assert_eq!(
+        scene_count(),
+        initial,
+        "the live clock must not schedule periodic scene pushes"
+    );
+
+    let mut changed = full_config();
+    let CardSettings::Clock { show_seconds, .. } = &mut changed.cards[0] else {
+        panic!("fixture's first card stopped being a clock");
+    };
+    *show_seconds = false;
+    runtime.apply_config(changed).unwrap();
+    wait_for(Duration::from_secs(1), || scene_count() > initial);
+    let after_config = scene_count();
+
+    runtime.activate_screen("pomodoro").unwrap();
+    wait_for(Duration::from_secs(1), || {
+        control.operations().iter().rev().any(
+            |operation| matches!(operation, Operation::PushScene(push) if push.card_id == "pomodoro"),
+        )
+    });
+    let after_playlist_advance = scene_count();
+    assert!(after_playlist_advance > after_config);
+    runtime
+        .control_pomodoro("pomodoro", PomodoroAction::Start)
+        .unwrap();
+    wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
+        snapshot
+            .pomodoros
+            .iter()
+            .any(|timer| timer.widget_id == "pomodoro" && timer.state == PomodoroState::Running)
+    });
+    let after_timer_start = scene_count();
+    thread::sleep(Duration::from_millis(100));
+    assert_eq!(
+        scene_count(),
+        after_timer_start,
+        "pomodoro scheduler ticks update bindings through PushData, not scene rebuilds"
+    );
+
+    runtime.activate_screen("calendar").unwrap();
+    wait_for(Duration::from_secs(1), || {
+        control.operations().iter().rev().any(
+            |operation| matches!(operation, Operation::PushScene(push) if push.card_id == "calendar"),
+        )
+    });
+    let before_provider = scene_count();
+    runtime.refresh_provider("calendar").unwrap();
+    wait_for(Duration::from_secs(1), || scene_count() > before_provider);
+    assert!(control.operations().iter().rev().any(
+        |operation| matches!(operation, Operation::PushScene(push) if push.card_id == "calendar"),
+    ));
+    runtime.shutdown().unwrap();
+}
+
+#[test]
+fn stale_error_transition_rebuilds_the_active_scene_with_its_footer() {
+    let control = MockDeviceControl::default();
+    let runtime = RuntimeHandle::start(
+        full_config(),
+        Box::new(MockDevice::new(control.clone())),
+        Box::<LastGoodRefresher>::default(),
+        options(),
+    )
+    .unwrap();
+    wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
+        snapshot
+            .providers
+            .first()
+            .is_some_and(|provider| matches!(provider.state, app_core::ProviderState::Fresh))
+    });
+    runtime.activate_screen("calendar").unwrap();
+    wait_for(Duration::from_secs(1), || {
+        control.operations().iter().any(
+            |operation| matches!(operation, Operation::PushScene(push) if push.card_id == "calendar"),
+        )
+    });
+    let before_stale = control
+        .operations()
+        .iter()
+        .filter(|operation| matches!(operation, Operation::PushScene(_)))
+        .count();
+
+    runtime.refresh_provider("calendar").unwrap();
+    wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
+        snapshot
+            .providers
+            .first()
+            .is_some_and(|provider| matches!(provider.state, app_core::ProviderState::Stale { .. }))
+    });
+    wait_for(Duration::from_secs(1), || {
+        control
+            .operations()
+            .iter()
+            .filter(|operation| matches!(operation, Operation::PushScene(_)))
+            .count()
+            > before_stale
+    });
+    let latest = control
+        .operations()
+        .into_iter()
+        .rev()
+        .find_map(|operation| match operation {
+            Operation::PushScene(push) if push.card_id == "calendar" => Some(push),
+            _ => None,
+        })
+        .expect("stale provider result rebuilt the calendar scene");
+    assert!(latest.scene.nodes.iter().any(|node| {
+        matches!(
+            node,
+            SceneNode::Text(text)
+                if text.value == SceneValue::Literal("offline".into())
+        )
+    }));
     runtime.shutdown().unwrap();
 }
 
@@ -1100,6 +2377,16 @@ fn pomodoro_events_complete_once_and_dismissed_interrupts_do_not_replay() {
         !control
             .operations()
             .contains(&Operation::ReplayInterrupt(1))
+    );
+    // The counter must stay at zero for a dismissal the host *did* apply, or it
+    // says nothing: one that always increments is not a signal.
+    assert_eq!(
+        runtime
+            .snapshot()
+            .unwrap()
+            .diagnostics
+            .interrupt_dismissals_ignored,
+        0
     );
     runtime.shutdown().unwrap();
 }
@@ -1416,8 +2703,8 @@ fn subscribers_are_bounded_and_coalesce_pressure_to_the_latest_snapshot() {
     runtime.set_paused(false).unwrap();
     runtime.activate_screen("clock").unwrap();
     wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
-        snapshot.diagnostics.subscriber_snapshots_overwritten >= 1
-            && snapshot.device.active_screen_id.as_deref() == Some("clock")
+        snapshot.device.active_screen_id.as_deref() == Some("clock")
+            && snapshot.runtime == RuntimeState::Running
     });
     let latest = subscription
         .recv_timeout(Duration::from_secs(1))
@@ -1425,6 +2712,54 @@ fn subscribers_are_bounded_and_coalesce_pressure_to_the_latest_snapshot() {
         .unwrap();
     assert_eq!(latest.device.active_screen_id.as_deref(), Some("clock"));
     assert_eq!(latest.runtime, RuntimeState::Running);
+    runtime.shutdown().unwrap();
+}
+
+#[test]
+fn lagging_subscriber_does_not_cause_a_diagnostic_only_second_snapshot() {
+    let control = MockDeviceControl::default();
+    let mut runtime_options = options();
+    runtime_options.pomodoro_interval = Duration::from_hours(1);
+    runtime_options.status_interval = Duration::from_hours(1);
+    let runtime = RuntimeHandle::start(
+        AppConfig::default(),
+        Box::new(MockDevice::new(control)),
+        Box::new(FixedRefresher {
+            delay: Duration::ZERO,
+        }),
+        runtime_options,
+    )
+    .unwrap();
+    wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
+        snapshot.device.connection == ConnectionState::Online
+    });
+    let subscription = runtime.subscribe().unwrap();
+    subscription
+        .recv_timeout(Duration::from_secs(1))
+        .unwrap()
+        .expect("subscription starts with the latest snapshot");
+
+    runtime.set_paused(true).unwrap();
+    wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
+        snapshot.runtime == RuntimeState::Paused
+    });
+    runtime.set_paused(false).unwrap();
+    wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
+        snapshot.runtime == RuntimeState::Running
+    });
+
+    let latest = subscription
+        .recv_timeout(Duration::from_secs(1))
+        .unwrap()
+        .expect("the unread slot contains the latest substantive state");
+    assert_eq!(latest.runtime, RuntimeState::Running);
+    assert!(
+        subscription
+            .recv_timeout(Duration::from_millis(50))
+            .unwrap()
+            .is_none(),
+        "delivery diagnostics must not publish themselves"
+    );
     runtime.shutdown().unwrap();
 }
 
@@ -1528,6 +2863,7 @@ fn a_refused_push_is_not_retried_and_does_not_starve_other_cards() {
         !snapshot.card_errors.is_empty()
     });
     assert_eq!(snapshot.card_errors.len(), 1);
+    assert_eq!(snapshot.card_errors[0].kind, CardErrorKind::DataRefused);
     assert_eq!(snapshot.card_errors[0].card_id, "clock");
     assert!(
         snapshot.card_errors[0].message.contains("refused"),
@@ -2221,5 +3557,240 @@ fn card_data_carries_live_fields_and_excludes_library_only_cards() {
         "a non-alerting card outside the playlist must not contribute an entry to card_data"
     );
 
+    runtime.shutdown().unwrap();
+}
+
+/// The interrupt token counter must follow the device's *interrupt* counter and
+/// nothing else. `latest_revision` and `config_revision` are the data-push and
+/// config counters; they climb with ordinary traffic and have no relationship to
+/// interrupts. Coupling them made a delivered interrupt arrive with a token 25
+/// higher than its predecessor during the 2026-08-20 hardware gate, which read as
+/// lost interrupts and cost a session's worth of doubt on a path that has already
+/// produced two real defects.
+#[test]
+fn interrupt_tokens_do_not_follow_the_unrelated_revision_counters() {
+    let control = MockDeviceControl::default();
+    let mut seeded = status(0);
+    // A session's worth of ordinary field pushes and config writes.
+    seeded.latest_revision = 84;
+    seeded.config_revision = 77;
+    control.set_status(seeded);
+    control.set_latest_interrupt_token(60);
+    let mut config = full_config();
+    for widget in &mut config.cards {
+        if let CardSettings::Pomodoro {
+            duration_seconds, ..
+        } = widget
+        {
+            *duration_seconds = 1;
+        }
+    }
+    let runtime = start_runtime(config, &control, Duration::ZERO);
+    wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
+        snapshot.device.connection == ConnectionState::Online
+    });
+    control.push_event(DeviceEvent {
+        sequence: 1,
+        kind: EventKind::Tap,
+        widget_id: "pomodoro".into(),
+        screen_id: "pomodoro".into(),
+        action: EventAction::StartPause,
+        interrupt_token: None,
+    });
+    wait_for(Duration::from_secs(2), || {
+        control
+            .operations()
+            .iter()
+            .any(|operation| matches!(operation, Operation::Interrupt(_)))
+    });
+    let tokens: Vec<u32> = control
+        .operations()
+        .iter()
+        .filter_map(|operation| match operation {
+            Operation::Interrupt(token) => Some(*token),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        tokens,
+        vec![61],
+        "the token must be one past the device's interrupt counter (60), not one past \
+         its data revision (84)"
+    );
+    runtime.shutdown().unwrap();
+}
+
+/// The other half of the same rule. `latest_interrupt_token` is additive in M3 and
+/// decodes to 0 when a pre-M3 image omits key 21, and 0 is also what a current image
+/// reports before it has accepted any interrupt. In both cases there is no interrupt
+/// counter to follow, so the revisions stay as the monotonic floor — starting above a
+/// counter the device has already issued is always accepted, starting below it is
+/// rejected as stale forever.
+#[test]
+fn an_absent_interrupt_counter_still_takes_the_revision_floor() {
+    let control = MockDeviceControl::default();
+    let mut seeded = status(0);
+    seeded.latest_revision = 84;
+    seeded.config_revision = 77;
+    control.set_status(seeded);
+    control.set_latest_interrupt_token(0);
+    let mut config = full_config();
+    for widget in &mut config.cards {
+        if let CardSettings::Pomodoro {
+            duration_seconds, ..
+        } = widget
+        {
+            *duration_seconds = 1;
+        }
+    }
+    let runtime = start_runtime(config, &control, Duration::ZERO);
+    wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
+        snapshot.device.connection == ConnectionState::Online
+    });
+    control.push_event(DeviceEvent {
+        sequence: 1,
+        kind: EventKind::Tap,
+        widget_id: "pomodoro".into(),
+        screen_id: "pomodoro".into(),
+        action: EventAction::StartPause,
+        interrupt_token: None,
+    });
+    wait_for(Duration::from_secs(2), || {
+        control
+            .operations()
+            .iter()
+            .any(|operation| matches!(operation, Operation::Interrupt(_)))
+    });
+    let tokens: Vec<u32> = control
+        .operations()
+        .iter()
+        .filter_map(|operation| match operation {
+            Operation::Interrupt(token) => Some(*token),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        tokens,
+        vec![85],
+        "with no interrupt counter to follow, the highest revision (84) is the floor"
+    );
+    runtime.shutdown().unwrap();
+}
+
+/// A dismissal whose token the arbiter no longer tracks is deliberately not
+/// applied — but it must not be *invisible*. The common cause is benign (a
+/// bounded hold expired host-side and freed the slot before the user tapped the
+/// overlay the device was still showing), yet during the 2026-08-15 hardware
+/// session a tap that the host silently declined was indistinguishable from an
+/// event that never arrived, and the difference is the whole diagnosis.
+#[test]
+fn a_dismissal_for_an_untracked_token_is_counted_rather_than_silently_dropped() {
+    let control = MockDeviceControl::default();
+    let runtime = start_runtime(full_config(), &control, Duration::ZERO);
+    wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
+        snapshot.device.connection == ConnectionState::Online
+    });
+    // No interrupt was ever scheduled, so token 4242 is tracked by nobody.
+    control.push_event(DeviceEvent {
+        sequence: 1,
+        kind: EventKind::InterruptDismissed,
+        widget_id: "pomodoro".into(),
+        screen_id: "pomodoro".into(),
+        action: EventAction::DismissInterrupt,
+        interrupt_token: Some(4242),
+    });
+    wait_for_snapshot(&runtime, Duration::from_secs(2), |snapshot| {
+        snapshot.diagnostics.interrupt_dismissals_ignored == 1
+    });
+    assert_eq!(
+        runtime
+            .snapshot()
+            .unwrap()
+            .diagnostics
+            .interrupt_dismissals_ignored,
+        1
+    );
+    runtime.shutdown().unwrap();
+}
+
+/// A tap on an already-Completed pomodoro is a deliberate host no-op
+/// (`engine::pomodoro::toggle` on `Completed` only refreshes), but the firmware
+/// applies optimistic local feedback on every `START_PAUSE` tap regardless of
+/// state -- `progress_ring_local_action` flips `progress_running` and repaints
+/// the arc and status text in the running hue. Only an authoritative push of
+/// `running: false` puts that back, because `progress_ring.c`'s patch path calls
+/// `set_running_color` unconditionally.
+///
+/// So the host must still push after a no-op tap. The 2026-08-15 hardware
+/// session recorded the red "done" sticking until the next tap and attributed it
+/// to the host pushing nothing back; this pins what the host actually does.
+#[test]
+fn a_tap_on_a_completed_pomodoro_still_pushes_authoritative_state() {
+    let control = MockDeviceControl::default();
+    let mut config = full_config();
+    for card in &mut config.cards {
+        if let CardSettings::Pomodoro {
+            duration_seconds,
+            alert,
+            ..
+        } = card
+        {
+            *duration_seconds = 1;
+            *alert = CardAlert::None;
+        }
+    }
+    let runtime = start_runtime(config, &control, Duration::ZERO);
+    wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
+        snapshot.device.connection == ConnectionState::Online
+    });
+    control.push_event(DeviceEvent {
+        sequence: 1,
+        kind: EventKind::Tap,
+        widget_id: "pomodoro".into(),
+        screen_id: "pomodoro".into(),
+        action: EventAction::StartPause,
+        interrupt_token: None,
+    });
+    wait_for_snapshot(&runtime, Duration::from_secs(3), |snapshot| {
+        snapshot
+            .pomodoros
+            .first()
+            .is_some_and(|pomodoro| pomodoro.state == PomodoroState::Completed)
+    });
+
+    let pushes_before = control
+        .operations()
+        .iter()
+        .filter(|operation| matches!(operation, Operation::Push(id) if id == "pomodoro"))
+        .count();
+
+    // The no-op tap.
+    control.push_event(DeviceEvent {
+        sequence: 2,
+        kind: EventKind::Tap,
+        widget_id: "pomodoro".into(),
+        screen_id: "pomodoro".into(),
+        action: EventAction::StartPause,
+        interrupt_token: None,
+    });
+    wait_for(Duration::from_secs(2), || {
+        control
+            .operations()
+            .iter()
+            .filter(|operation| matches!(operation, Operation::Push(id) if id == "pomodoro"))
+            .count()
+            > pushes_before
+    });
+
+    assert_eq!(
+        runtime
+            .snapshot()
+            .unwrap()
+            .pomodoros
+            .first()
+            .map(|pomodoro| pomodoro.state),
+        Some(PomodoroState::Completed),
+        "the tap must remain a no-op on host state"
+    );
     runtime.shutdown().unwrap();
 }

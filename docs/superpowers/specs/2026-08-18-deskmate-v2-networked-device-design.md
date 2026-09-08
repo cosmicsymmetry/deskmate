@@ -337,9 +337,12 @@ wire cap; and any protocol **version** bump. V2 is additive within protocol v1.
   could hide inside the re-baselining. The plan should capture the new baseline before
   the soak, not derive it from the soak.
 - **Carried forward, still unresolved:** `unknown_field_count` remains unobservable on
-  hardware; and `progress-ring--running-mid-countdown` cannot pass the framebuffer diff
-  deterministically (see `CLAUDE.md`). Neither is V2's to fix, and neither may be
-  described as resolved.
+  hardware. It is not V2's to fix and may not be described as resolved.
+- **Carried forward, now RESOLVED 2026-08-21:** `progress-ring--running-mid-countdown`
+  could not pass the framebuffer diff deterministically. It is now golden-only and
+  excluded from the hardware comparison, with `paused-mid-countdown` and
+  `running-at-zero` added to keep hardware coverage. The gate's framebuffer diff should
+  now read `total=58 identical=54 differing=0 excluded=4`; see `CLAUDE.md`.
 
 ## 10. Roadmap impact
 

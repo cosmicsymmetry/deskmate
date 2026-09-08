@@ -1,15 +1,16 @@
 import type {
+  AddableCardKind,
   AppConfig,
-  CardAlert,
-  CardDataSnapshot,
-  CardFieldValue,
-  CardKind,
   CardSettings,
   CarouselAdvance,
+  DeviceTier,
   Playlist,
+  PluginCatalog,
   ValidationIssue,
 } from "./types";
-import { MAX_PLAYLIST_ENTRIES, MAX_PLAYLISTS } from "./types";
+import { MAX_PLAYLIST_ENTRIES } from "./types";
+
+export const MAX_CARDS = 8;
 
 export function copyConfig(config: AppConfig): AppConfig {
   return {
@@ -21,7 +22,7 @@ export function copyConfig(config: AppConfig): AppConfig {
       ...(card.kind === "json-feed"
         ? { mappings: card.mappings.map((mapping) => ({ ...mapping })) }
         : {}),
-      template: { ...card.template },
+      ...(card.kind === "plugin" ? {} : { template: { ...card.template } }),
       tap_action: { ...card.tap_action },
       refresh: { ...card.refresh },
       alert: { ...card.alert },
@@ -30,12 +31,9 @@ export function copyConfig(config: AppConfig): AppConfig {
       ...asset,
       source: { ...asset.source },
       kind:
-        asset.kind.kind === "icon"
-          ? { ...asset.kind }
-          : {
-              ...asset.kind,
-              glyph_ranges: asset.kind.glyph_ranges.map((range) => ({ ...range })),
-            },
+        asset.kind.kind === "icon-font"
+          ? { ...asset.kind, glyphs: asset.kind.glyphs.map((glyph) => ({ ...glyph })) }
+          : { ...asset.kind },
     })),
     playlists: config.playlists.map((playlist) => ({
       ...playlist,
@@ -61,21 +59,62 @@ export function cardName(card: CardSettings): string {
     case "json-feed":
     case "rss":
       return card.title || cardKindName(card.kind);
+    case "plugin":
+      return card.title || card.plugin_id;
   }
 }
 
 /**
- * What a card is called on every surface that identifies one: the library tile, the
- * ring legend, the playlist row, the editor heading, the picker.
+ * What a card is called on every surface that identifies one: the loop tile, the
+ * ring legend, the editor heading, the picker.
  *
  * It is the template's name, not the owner's title, by explicit owner direction: a
  * person meeting a card called "Outside" or "Desk" for the first time learns nothing
  * from it, where "Weather" and "Digital clock" say what the thing is. The owner's own
  * words survive as `cardTitle` — a quiet second line beside the label, never the
  * thing that names the card.
+ *
+ * A plugin card's template is its plugin, so its display name is whatever the
+ * server's catalog declares for it. Both fallbacks land on the plugin id rather than
+ * the word "Plugin": an id at least identifies the thing, where a category name
+ * identified every plugin card identically. The word that says *why* a bare id is
+ * showing is `pluginCardFlag`, not this — a name is a name, not a diagnosis.
  */
-export function cardLabel(card: CardSettings): string {
-  return cardKindName(card.kind);
+export function cardLabel(card: CardSettings, catalog?: PluginCatalog | null): string {
+  if (card.kind !== "plugin") {
+    return cardKindName(card.kind);
+  }
+  const entry = catalog?.plugins.find((plugin) => plugin.id === card.plugin_id);
+  return entry?.display_name ?? card.plugin_id;
+}
+
+export type PluginCardFlag = "not on the server" | "needs the server";
+
+/**
+ * The word beside a plugin card whose name could not be resolved. Order matters:
+ * local tier is the reason that outranks every other, because no catalog, however
+ * complete, can make a plugin render on a Mac that owns the display itself. A
+ * missing catalog in networked tier is deliberately silent — the window has not
+ * heard from the server yet, and "not on the server" would be an accusation the
+ * app cannot support.
+ */
+export function pluginCardFlag(
+  card: CardSettings,
+  catalog: PluginCatalog | null,
+  tier: DeviceTier | null,
+): PluginCardFlag | null {
+  if (card.kind !== "plugin") {
+    return null;
+  }
+  if (tier === "local") {
+    return "needs the server";
+  }
+  if (!catalog) {
+    return null;
+  }
+  return catalog.plugins.some((plugin) => plugin.id === card.plugin_id)
+    ? null
+    : "not on the server";
 }
 
 /**
@@ -87,7 +126,7 @@ export function cardTitle(card: CardSettings): string | null {
   return typed.trim() === "" ? null : typed;
 }
 
-export function cardKindName(kind: CardKind): string {
+export function cardKindName(kind: AddableCardKind): string {
   switch (kind) {
     case "clock":
       return "Digital clock";
@@ -115,19 +154,39 @@ function nextId(prefix: string, used: Set<string>): string {
   return `${prefix}-${suffix}`;
 }
 
-/// Appends a new card with sane defaults for its kind. Supports all six card
-/// kinds — weather, JSON feed and RSS are reachable here, not just
-/// clock/pomodoro/calendar. A new card starts in the library; playlist
-/// membership is an explicit, separate edit.
+/**
+ * What the caller is asking to add. A built-in is named by its kind; a plugin is
+ * named by its registry id plus the cadence its manifest declares, because the
+ * catalog is the only thing that knows either.
+ */
+export type AddCardRequest =
+  | AddableCardKind
+  | { kind: "plugin"; pluginId: string; refreshMinutes: number };
+
+/// Appends a new card with sane defaults for its kind and enrols it at the end
+/// of the active loop in the same draft. Supports all six built-in card kinds
+/// and a plugin from the server's catalog. Both v6 limits are checked before
+/// either collection changes, so adding is atomic even when a legacy card
+/// outside the loop has filled only one limit.
 export function addCard(
   config: AppConfig,
-  kind: CardKind,
+  request: AddCardRequest,
 ): {
   config: AppConfig;
-  cardId: string;
+  cardId: string | null;
 } {
+  const playlist = activePlaylist(config);
+  if (
+    config.cards.length >= MAX_CARDS ||
+    !playlist ||
+    playlist.entries.length >= MAX_PLAYLIST_ENTRIES
+  ) {
+    return { config, cardId: null };
+  }
   const used = new Set(config.cards.map((card) => card.id));
-  const cardId = nextId(kind, used);
+  // "plugin" as the id stem, never the plugin id: `plugin_id` is bounded at 64 bytes
+  // and a card id at 32, and two cards of one plugin are legitimate.
+  const cardId = nextId(typeof request === "string" ? request : "plugin", used);
   const common = {
     id: cardId,
     tap_action: { kind: "none" } as const,
@@ -135,82 +194,94 @@ export function addCard(
   };
 
   let card: CardSettings;
-  switch (kind) {
-    case "clock":
-      card = {
-        kind,
-        ...common,
-        title: "Desk",
-        show_seconds: true,
-        template: { kind: "digital-clock" },
-        refresh: { kind: "device-local" },
-      };
-      break;
-    case "pomodoro":
-      card = {
-        kind,
-        ...common,
-        label: "Focus",
-        duration_seconds: 25 * 60,
-        template: { kind: "progress-ring" },
-        tap_action: { kind: "start-pause" },
-        refresh: { kind: "device-local" },
-        alert: { kind: "on-timer-finish", hold: { kind: "until-dismissed" } },
-      };
-      break;
-    case "calendar":
-      card = {
-        kind,
-        ...common,
-        title: "Up next",
-        source: { kind: "url", value: "" },
-        template: { kind: "row-list" },
-        refresh: { kind: "interval", minutes: 15 },
-      };
-      break;
-    case "weather":
-      card = {
-        kind,
-        ...common,
-        title: "Weather",
-        location: "",
-        units: "metric",
-        // `icon-badge-text` is the template weather's field composition was designed
-        // for (`value`/`label`/`badge`/`icon`/`temperature_tenths`/
-        // `apparent_temperature_tenths`/`unit`), and `wire_config()` now lowers it to
-        // the device — see `companion/crates/app-core/src/config.rs`. `icon_asset_id`
-        // stays unset here: rendering a pushed custom icon needs
-        // `CAPABILITY_ASSET_TRANSFER`, which is a later milestone task; until then the
-        // device renders its built-in icon for the `icon` field.
-        template: { kind: "icon-badge-text", icon_asset_id: null },
-        refresh: { kind: "interval", minutes: 30 },
-      };
-      break;
-    case "json-feed":
-      card = {
-        kind,
-        ...common,
-        title: "Feed",
-        url: "",
-        mappings: [],
-        // `big-number-label` is the template json-feed's single mapped value is
-        // designed for, and `wire_config()` now lowers it to the device — see
-        // `companion/crates/app-core/src/config.rs`.
-        template: { kind: "big-number-label" },
-        refresh: { kind: "interval", minutes: 15 },
-      };
-      break;
-    case "rss":
-      card = {
-        kind,
-        ...common,
-        title: "Headlines",
-        url: "",
-        max_items: 3,
-        template: { kind: "row-list" },
-        refresh: { kind: "interval", minutes: 30 },
-      };
-      break;
+  if (typeof request !== "string") {
+    card = {
+      kind: "plugin",
+      ...common,
+      // Blank on purpose: the display name already says what the card is, and a
+      // pre-filled title would be a second name nobody chose.
+      title: "",
+      plugin_id: request.pluginId,
+      refresh: { kind: "interval", minutes: request.refreshMinutes },
+    };
+  } else {
+    switch (request) {
+      case "clock":
+        card = {
+          kind: request,
+          ...common,
+          title: "Desk",
+          show_seconds: true,
+          template: { kind: "digital-clock" },
+          refresh: { kind: "device-local" },
+        };
+        break;
+      case "pomodoro":
+        card = {
+          kind: request,
+          ...common,
+          label: "Focus",
+          duration_seconds: 25 * 60,
+          template: { kind: "progress-ring" },
+          tap_action: { kind: "start-pause" },
+          refresh: { kind: "device-local" },
+          alert: { kind: "on-timer-finish", hold: { kind: "until-dismissed" } },
+        };
+        break;
+      case "calendar":
+        card = {
+          kind: request,
+          ...common,
+          title: "Up next",
+          source: { kind: "url", value: "" },
+          template: { kind: "row-list" },
+          refresh: { kind: "interval", minutes: 15 },
+        };
+        break;
+      case "weather":
+        card = {
+          kind: request,
+          ...common,
+          title: "Weather",
+          location: "",
+          units: "metric",
+          // `icon-badge-text` is the template weather's field composition was designed
+          // for (`value`/`label`/`badge`/`icon`/`temperature_tenths`/
+          // `apparent_temperature_tenths`/`unit`), and `wire_config()` now lowers it to
+          // the device — see `companion/crates/app-core/src/config.rs`. `icon_asset_id`
+          // stays unset here: rendering a pushed custom icon needs
+          // `CAPABILITY_ASSET_TRANSFER`, which is a later milestone task; until then the
+          // device renders its built-in icon for the `icon` field.
+          template: { kind: "icon-badge-text", icon_asset_id: null },
+          refresh: { kind: "interval", minutes: 30 },
+        };
+        break;
+      case "json-feed":
+        card = {
+          kind: request,
+          ...common,
+          title: "Feed",
+          url: "",
+          mappings: [],
+          // `big-number-label` is the template json-feed's single mapped value is
+          // designed for, and `wire_config()` now lowers it to the device — see
+          // `companion/crates/app-core/src/config.rs`.
+          template: { kind: "big-number-label" },
+          refresh: { kind: "interval", minutes: 15 },
+        };
+        break;
+      case "rss":
+        card = {
+          kind: request,
+          ...common,
+          title: "Headlines",
+          url: "",
+          max_items: 3,
+          template: { kind: "row-list" },
+          refresh: { kind: "interval", minutes: 30 },
+        };
+        break;
+    }
   }
 
   // Spread the COPIED config's own `cards` array, not the original `config.cards` —
@@ -219,7 +290,8 @@ export function addCard(
   // path (every pre-existing card in the returned draft would alias the live snapshot's
   // card objects instead of being an independent copy).
   const copied = copyConfig(config);
-  return { config: { ...copied, cards: [...copied.cards, card] }, cardId };
+  const withCard = { ...copied, cards: [...copied.cards, card] };
+  return { config: addEntry(withCard, playlist.id, cardId), cardId };
 }
 
 export function updateWidget(
@@ -251,92 +323,35 @@ export function activePlaylist(config: AppConfig): Playlist | null {
   return config.playlists.find((playlist) => playlist.id === config.active_playlist_id) ?? null;
 }
 
-export function playlistEntries(config: AppConfig, playlistId: string): CardSettings[] {
-  const playlist = config.playlists.find((candidate) => candidate.id === playlistId);
-  if (!playlist) {
-    return [];
-  }
-  const cards = new Map(config.cards.map((card) => [card.id, card]));
-  return playlist.entries.flatMap((entry) => {
-    const card = cards.get(entry.card_id);
-    return card ? [card] : [];
-  });
-}
-
 export function libraryCards(config: AppConfig): CardSettings[] {
   return config.cards;
 }
 
-export function cardsOutsidePlaylist(config: AppConfig, playlistId: string): CardSettings[] {
-  const playlist = config.playlists.find((candidate) => candidate.id === playlistId);
+export interface LoopEntry {
+  index: number;
+  entry: Playlist["entries"][number];
+  card: CardSettings | null;
+}
+
+/** Active-loop entries in document order, including unresolved card references. */
+export function loopEntries(config: AppConfig): LoopEntry[] {
+  const playlist = activePlaylist(config);
+  if (!playlist) {
+    return [];
+  }
+  const cards = new Map(config.cards.map((card) => [card.id, card]));
+  return playlist.entries.map((entry, index) => ({
+    index,
+    entry,
+    card: cards.get(entry.card_id) ?? null,
+  }));
+}
+
+/** Library cards with no entry in the active loop. Inactive playlists do not count. */
+export function cardsOutsideLoop(config: AppConfig): CardSettings[] {
+  const playlist = activePlaylist(config);
   const used = new Set(playlist?.entries.map((entry) => entry.card_id) ?? []);
   return config.cards.filter((card) => !used.has(card.id));
-}
-
-function slugifyPlaylistName(name: string): string {
-  const slug = name
-    .normalize("NFKD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-  return slug || "playlist";
-}
-
-export function addPlaylist(config: AppConfig, name: string): AppConfig {
-  const trimmedName = name.trim();
-  if (!trimmedName || config.playlists.length >= MAX_PLAYLISTS) {
-    return config;
-  }
-  const id = nextId(
-    slugifyPlaylistName(trimmedName),
-    new Set(config.playlists.map((playlist) => playlist.id)),
-  );
-  return {
-    ...config,
-    playlists: [
-      ...config.playlists,
-      { id, name: trimmedName, advance: { kind: "manual" }, entries: [] },
-    ],
-  };
-}
-
-export function renamePlaylist(config: AppConfig, playlistId: string, name: string): AppConfig {
-  const trimmedName = name.trim();
-  const index = config.playlists.findIndex((playlist) => playlist.id === playlistId);
-  if (index < 0 || !trimmedName || config.playlists[index].name === trimmedName) {
-    return config;
-  }
-  return {
-    ...config,
-    playlists: config.playlists.map((playlist, playlistIndex) =>
-      playlistIndex === index ? { ...playlist, name: trimmedName } : playlist,
-    ),
-  };
-}
-
-export function removePlaylist(config: AppConfig, playlistId: string): AppConfig {
-  const index = config.playlists.findIndex((playlist) => playlist.id === playlistId);
-  if (index < 0 || config.playlists.length <= 1) {
-    return config;
-  }
-  const playlists = config.playlists.filter((playlist) => playlist.id !== playlistId);
-  return {
-    ...config,
-    playlists,
-    active_playlist_id:
-      config.active_playlist_id === playlistId ? playlists[0].id : config.active_playlist_id,
-  };
-}
-
-export function setActivePlaylist(config: AppConfig, playlistId: string): AppConfig {
-  if (
-    config.active_playlist_id === playlistId ||
-    !config.playlists.some((playlist) => playlist.id === playlistId)
-  ) {
-    return config;
-  }
-  return { ...config, active_playlist_id: playlistId };
 }
 
 function replacePlaylist(
@@ -446,7 +461,19 @@ export function setPlaylistAdvance(
   playlistId: string,
   advance: CarouselAdvance,
 ): AppConfig {
-  return replacePlaylist(config, playlistId, (playlist) => ({ ...playlist, advance }));
+  return replacePlaylist(config, playlistId, (playlist) => {
+    if (playlist.advance.kind === "manual" && advance.kind === "manual") {
+      return playlist;
+    }
+    if (
+      playlist.advance.kind === "timed" &&
+      advance.kind === "timed" &&
+      playlist.advance.default_dwell_seconds === advance.default_dwell_seconds
+    ) {
+      return playlist;
+    }
+    return { ...playlist, advance };
+  });
 }
 
 /// Total time for one pass through a playlist, in seconds, inheriting that
@@ -459,24 +486,6 @@ export function loopSeconds(config: AppConfig, playlistId: string): number | nul
   }
   const fallback = playlist.advance.default_dwell_seconds;
   return playlist.entries.reduce((total, entry) => total + (entry.dwell_seconds ?? fallback), 0);
-}
-
-/// The published field values for one card, keyed by field name — e.g.
-/// `row0_title`, `stale`, `next_start_unix_ms`. These are the SAME values
-/// the physical device receives, sourced from `AppSnapshot.card_data`, not
-/// from the (possibly unsaved) draft. An empty map means the runtime has no
-/// snapshot for this card yet — never pushed, because the card was just
-/// added and never saved — which is the one condition callers should treat
-/// as "show a clearly marked sample" rather than as empty real data.
-export function cardFields(
-  cardData: CardDataSnapshot[],
-  cardId: string,
-): Map<string, CardFieldValue> {
-  const snapshot = cardData.find((entry) => entry.card_id === cardId);
-  if (!snapshot) {
-    return new Map();
-  }
-  return new Map(snapshot.fields.map((field) => [field.key, field.value]));
 }
 
 /// One ribbon segment: an active-playlist card plus its resolved dwell and the
@@ -501,7 +510,10 @@ export interface FilmstripSegment {
 /// there is no dwell to speak of, so every segment is given equal width
 /// instead of a zero-width one, which is what lets the ribbon still show
 /// order (just not timing) in that mode.
-export function filmstripSegments(config: AppConfig): FilmstripSegment[] {
+export function filmstripSegments(
+  config: AppConfig,
+  catalog?: PluginCatalog | null,
+): FilmstripSegment[] {
   const playlist = activePlaylist(config);
   if (!playlist) {
     return [];
@@ -522,7 +534,7 @@ export function filmstripSegments(config: AppConfig): FilmstripSegment[] {
     const widthPercent = total > 0 ? (dwellSeconds[index] / total) * 100 : equalShare;
     const segment: FilmstripSegment = {
       cardId: card.id,
-      name: cardLabel(card),
+      name: cardLabel(card, catalog),
       title: cardTitle(card),
       dwellSeconds: dwellSeconds[index],
       widthPercent,
@@ -633,8 +645,8 @@ export function cardsContainerIssues(issues: ValidationIssue[]): ValidationIssue
 /// Every issue an existing surface already claims and renders: the cards container
 /// banner (`cardsContainerIssues`), each card's own row-scoped issues (`issuesForCard`,
 /// checked for every card in the draft — not just whichever one is currently selected,
-/// since selection is a UI-only concern this must not depend on), playlist surfaces,
-/// and the timezone field. Returns the actual issue objects (by
+/// since selection is a UI-only concern this must not depend on), the active loop's
+/// entries and pacing control, and the timezone field. Returns the actual issue objects (by
 /// reference into `issues`) rather than paths, so `unclaimedIssues` can compute an exact
 /// set difference without re-deriving path-matching rules of its own.
 function claimedIssues(issues: ValidationIssue[], config: AppConfig): ValidationIssue[] {
@@ -648,8 +660,15 @@ function claimedIssues(issues: ValidationIssue[], config: AppConfig): Validation
   for (const card of config.cards) {
     claim(issuesForCard(issues, config, card.id));
   }
-  claim(issuesForPath(issues, "playlists"));
-  claim(issuesForPath(issues, "active_playlist_id"));
+  const activeIndex = config.playlists.findIndex(
+    (playlist) => playlist.id === config.active_playlist_id,
+  );
+  // An unresolved `active_playlist_id` has no in-app recovery and is unreachable
+  // through this UI: the store rejects such a file before the app can load it.
+  if (activeIndex >= 0) {
+    claim(issuesForPath(issues, `playlists[${activeIndex}].entries`));
+    claim(issuesForPath(issues, `playlists[${activeIndex}].advance`));
+  }
   claim(issuesForPath(issues, "preferences.timezone"));
   return [...claimed];
 }
@@ -718,14 +737,9 @@ export function issuesForField(cardIssues: ValidationIssue[], field: string): Va
   });
 }
 
-/// Applies a new alert to a card. Playlist membership is independent of alerts.
-export function withAlert(card: CardSettings, alert: CardAlert): CardSettings {
-  return { ...card, alert };
-}
-
 /// A plain-language statement of what tapping this card does, for the
 /// editor's gesture disclosure. Three gestures share one physical screen —
-/// tap runs the card's own action, swipe navigates the active playlist, and a tap
+/// tap runs the card's own action, swipe moves through the loop, and a tap
 /// while an alert is showing dismisses it instead — and nothing else in the
 /// app states this, so the editor is where a person can find out what their
 /// tap will actually do before they rely on it.
@@ -771,10 +785,10 @@ export function cardMoveFromKey(key: string, altKey: boolean): -1 | 0 | 1 {
   if (!altKey) {
     return 0;
   }
-  if (key === "ArrowUp") {
+  if (key === "ArrowUp" || key === "ArrowLeft") {
     return -1;
   }
-  if (key === "ArrowDown") {
+  if (key === "ArrowDown" || key === "ArrowRight") {
     return 1;
   }
   return 0;
@@ -784,7 +798,7 @@ export function firstSelectableCard(config: AppConfig): string | null {
   return config.cards[0]?.id ?? null;
 }
 
-/// The first-run checklist is about the library/playlist workflow and never
+/// The first-run checklist is about the one-loop workflow and never
 /// demands any specific card kind. The caller supplies whether the current
 /// draft has been saved.
 export function firstRunSteps(
@@ -792,11 +806,7 @@ export function firstRunSteps(
   saved: boolean,
 ): { label: string; done: boolean }[] {
   return [
-    { label: "Add a card to your library", done: config.cards.length > 0 },
-    {
-      label: "Add it to a playlist",
-      done: config.playlists.some((playlist) => playlist.entries.length > 0),
-    },
+    { label: "Add a card", done: config.cards.length > 0 },
     { label: "Save your settings", done: saved },
   ];
 }

@@ -1339,8 +1339,8 @@ is what made the CLI sweep possible.
       **NOT VERIFIABLE ON HARDWARE — this item cannot be closed as written.**
       `unknown_field_count` never reaches the host: it is not a field in
       `StatusResponse`, and `widget_model_unknown_field_count()`
-      (`firmware/main/core/widget_model.c:323`) has **no callers anywhere in the
-      firmware**. The counter is accumulated and never read, so no host-observable
+      (`firmware/main/core/widget_model.c:323` at the time) had **no callers anywhere
+      in the firmware**; the counter and getter were removed in the 2026-09-05 cleanup. The counter is accumulated and never read, so no host-observable
       behaviour distinguishes zero from nonzero. An unknown field is counted and
       ignored; unlike a type mismatch, it does not reject the push.
 
@@ -1389,6 +1389,18 @@ observed on hardware. What was verified, all on host tooling:
 - `idf.py -C firmware build` (plain release build) and
   `idf.py -C firmware -DDESKMATE_DEV_DIAG=1 build` (dev-diag build, separate build
   directory) both compile clean.
+- To keep the generated diagnostic configuration disposable and isolated from a release
+  build, create it inside its own build directory:
+
+  ```sh
+  idf.py -C firmware -B firmware/build-diag \
+    -DSDKCONFIG=build-diag/sdkconfig \
+    -DSDKCONFIG_DEFAULTS='sdkconfig.defaults;sdkconfig.diag' \
+    -DDESKMATE_DEV_DIAG=1 build
+  ```
+
+  `sdkconfig.diag` routes diagnostic logs onto the protocol pipe. Active logging can
+  corrupt COBS frames; this build must never ship and cannot supply acceptance evidence.
 - The plain build's `.elf` contains neither the `dev_capture_handle_request` symbol
   (`nm` found no match) nor the `"dev_capture"` log-tag string (`strings` found no
   match), against a control check (`nm`/`strings` on the same `.elf` confirmed the
@@ -1704,10 +1716,59 @@ reconnect flush after a fresh boot) has not been performed.
    ever reconciles — the "done" word flashes red and stays red until the next
    tap. Confirmed by the event stream: such taps arrive as `tap start-pause`,
    the host processes them, state does not change, nothing is pushed back.
+
+   > **The "nothing is pushed back" half is REFUTED in software, 2026-08-21. The
+   > observation stands; its explanation does not.** `control_pomodoro` does not
+   > gate on whether state changed — it inserts into `latest_fields`, marks the
+   > widget dirty and pushes unconditionally — and `Session::push_fields` has no
+   > unchanged-payload dedupe, so a real push goes out. `PomodoroUpdate.fields`
+   > always carries `running`, which on `Completed` is `false`. On the firmware
+   > side `progress_ring.c`'s patch calls `set_running_color(view, running)`
+   > unconditionally (no early return; the early return in `render_remaining`
+   > affects only the label text), and `carousel.c` states the intent outright:
+   > "Optimistic feedback is intentionally reconciled by the next full
+   > authoritative PushData snapshot". Pinned by
+   > `a_tap_on_a_completed_pomodoro_still_pushes_authoritative_state`.
+   >
+   > Two hypotheses were checked and dropped. The tapped surface was **not** the
+   > interrupt overlay: `carousel.c` returns early on an interrupt tap, emitting
+   > `DISMISS_INTERRUPT` without ever calling
+   > `template_view_apply_local_action`, so an overlay tap applies no optimistic
+   > feedback at all. And the device layer does not dedupe identical pushes.
+   >
+   > **What remains, for the board.** The leading candidate is that the push did
+   > not happen *on that occasion* rather than that it never happens:
+   > `control_pomodoro` only pushes inline when
+   > `state.connected && !preferences.paused`, so a paused config would leave the
+   > red standing until the next authoritative push. The cheap check is to tap a
+   > completed pomodoro and look for a `PushData` for that widget in the same
+   > second — if it is there and the red persists, the defect is in firmware's
+   > apply path and not in the host; if it is absent, read `preferences.paused`
+   > and the connection state at that moment. Do not "fix" this host-side
+   > without that evidence: the host is currently doing what both sides document.
 3. The host silently ignores an `InterruptDismissed` event whose token it no
    longer tracks (`runtime.rs`, the dismissal arm's `.is_ok()` gate) — benign
    today because the firmware restores its own saved screen on a validated
    dismissal, but a debug log would make future sessions easier to read.
+
+   > **ADDRESSED 2026-08-21, as a counter rather than a log.** `app-core` has no
+   > logging facility at all, so a debug log would have meant adding a dependency
+   > to emit something a hardware session may not even capture. The runtime
+   > snapshot is what actually gets read on the board, so the signal went there:
+   > `RuntimeDiagnostics.interrupt_dismissals_ignored` counts every
+   > `InterruptDismissed` the host received and did not apply — unknown token, or
+   > no token at all. Declining is still correct; what changes is that it is now
+   > visible, so "the host saw my tap and declined it" and "the event never
+   > arrived" stop looking identical. Reachable in **both** tiers without extra
+   > work: it rides the existing `AppSnapshot`, so the networked tier gets it
+   > under `snapshot.diagnostics` in `GET /v1/devices/{id}`.
+   >
+   > Two tests pin it, because a counter that always increments is not a signal:
+   > one asserts an untracked token counts, and
+   > `pomodoro_events_complete_once_and_dismissed_interrupts_do_not_replay` now
+   > asserts a *valid* dismissal leaves it at zero. The field crosses the
+   > cross-language IPC contract, so `types.ts`, the generated
+   > `types.contract.ts` and the dev-harness fixture moved with it.
 
 Counters at session end: `valid=3261 malformed=0 crc=0 overflow=0`,
 `events dropped=1` (one event emitted while the link was down, dropped by
@@ -1792,9 +1853,33 @@ capture lands before or after the device's next one-second tick decides the comp
 Unrelated to this change — `progress_ring.c` was not touched, and the case pins
 `running: true`. It also means V1 acceptance's recorded `0 differing` was luck rather
 than proof, and that the expectation of `identical=52` in this plan was unattainable.
-Not fixed here (out of scope); options when someone does address it are to pin
-`running: false` for the compared case, or to exclude it in `exclusion_reason()` the way
-the `row-list--truncation-boundary` pair already is.
+Not fixed here (out of scope).
+
+> **FIXED 2026-08-21, and neither of the options guessed at above was the right one.**
+> Pinning `running: false` on the compared case would have deleted the only pixel
+> coverage of the running arc-indicator hue, and a plain exclusion would have lost the
+> partial-arc geometry with it — the other two progress-ring cases sit at the arc's
+> extremes (0 and full). A third option was available because the flakiness lives only in
+> the *device-vs-simulator* comparison: the simulator's own goldens are deterministic, so
+> the case is now **golden-only**, kept in `cases::golden_cases()` and excluded from
+> hardware by name in `exclusion_reason()`. Two deterministic cases replace its hardware
+> coverage: `paused-mid-countdown` (same 900/1500 partial arc, ring stopped, so both
+> sides render the pinned value) and `running-at-zero` (the only running ring hardware
+> can be compared on — `current_remaining_ms` clamps to 0 whenever
+> `elapsed >= remaining_ms`, which at 0 holds for any elapsed; it covers the running
+> status colour but not the arc hue, because a zero-length arc draws no indicator).
+>
+> Worth recording that **no running value could have worked**: the label's
+> `(remaining_ms + 999) / 1000` ceiling flips a second every second by construction,
+> whatever the duration, so "choose a steadier remaining_seconds" was never on the table.
+> The expectation on this date, before C-template retirement, was
+> `total=58 identical=54 differing=0 excluded=4`. Task 8's review restored those 58
+> six-face rows as device-pushable scenes alongside 18 synthetic node-kind rows. Gate B's
+> current expectation is therefore `total=76 identical=64 differing=0 excluded=12`:
+> four face-row exclusions (the two orientations of this running case and the row-list
+> truncation boundary) plus eight synthetic asset/field exclusions. Both name-based
+> exclusions are reachable and active again. A differing case is a real disagreement,
+> not something to recognise and wave through.
 
 **PASSED (with a stated limit) — the standalone fallback screen at 90°.** This is the one
 surface the framebuffer diff cannot reach, because it has no golden case, so the webcam
@@ -2227,7 +2312,8 @@ and it cannot — they are DMA by definition.
 `install_update()` suspends the WebSocket for the duration of the download and resumes
 it on every failure path (`0ad1a51`). Owner chose this over raising the internal
 reserve (which would take RAM from the pool behind two previous incidents) or
-disabling hardware AES (which would slow every TLS operation).
+disabling hardware AES with `CONFIG_MBEDTLS_HARDWARE_AES=n` (which would slow every TLS
+operation).
 
 Two implementation notes that matter:
 
@@ -3064,6 +3150,26 @@ fields are the **last values received**, not current ones. `up=66761` looked lik
 uptime from a freshly booted board; it was a frozen sample from before the link closed.
 `connected: false` beside it is the only thing that says so.
 
+> **Closed 2026-08-21: the snapshot now says how old it is, inside `device`.**
+> `snapshot.device.observed_age_seconds` is injected next to the values it qualifies, by
+> the same mechanism that already puts `last_ota_error` there. The information was not
+> strictly absent before — `last_seen_unix_ms` sits at the top level — but as raw epoch
+> milliseconds several screens away from the numbers it governs, which is why it was
+> missed. A frozen `uptime_ms` beside `observed_age_seconds: 412` cannot be read as live.
+> `null` means never heard from, deliberately not `0`, which would read as "just now";
+> the subtraction saturates, because `SystemTime` is not monotonic and an NTP step
+> backwards would otherwise report an age of half a billion years.
+>
+> **The sibling trap in the same response is closed the same day, by renaming:
+> `counters.reconnects` is now `counters.host_reconnects`.** Every other counter in that
+> struct is reported by the device in its `StatusResponse`; that one is the host's own
+> tally, incremented when the session re-establishes and replays, so it resets when the
+> server process restarts while the device keeps running. Reading 0 beside a device that
+> has plainly reconnected is correct, and the 2026-08-19 note below already had to
+> explain exactly that in prose. The struct already carried `host_dropped_events`, so the
+> prefix is the convention rather than a new one. **Observations recorded before
+> 2026-08-21 name it `reconnects`; the number means the same thing.**
+
 ## V2 gate item 7 — alert replay across a reconnect PASSES, 2026-08-20
 
 Bounded-hold alert, fired while the link was down, delivered on reconnect. This is the
@@ -3094,10 +3200,32 @@ forgot" instead of "the server remembered while it could not reach the device".
 
 ### Two things not resolved
 
-1. **The token jumped by 25, not 1.** Delivery is not in doubt — the counter moved — but
-   `busy_retry_and_reconnect_replay_reuse_identical_tokens` documents tokens as *reused*
-   across retries, so a jump of that size is unexplained. Possible token churn while
-   disconnected. Worth a look; it does not change the pass.
+1. **The token jumped by 25, not 1. ROOT-CAUSED AND FIXED 2026-08-21 — it was a host
+   defect, not token churn, and no interrupt was ever lost.** `update_device_status` in
+   `companion/crates/app-core/src/runtime.rs` advanced the arbiter's interrupt counter to
+   `max(latest_interrupt_token, latest_revision, config_revision)` on *every* status
+   response. Only the first of those counts interrupts: `latest_revision` is the
+   data-push counter (`link_state.c` stores `push->revision`) and `config_revision` is
+   the config counter, and both climb with ordinary traffic. So the next interrupt was
+   minted at *data revision + 1*. The device's 60 was its last accepted interrupt
+   (`interrupt_state.c` stores the host's token verbatim, and only on acceptance); its
+   data revision had reached 84 across the session's clock and weather pushes; the alert
+   was therefore minted 85. The gap was the distance between two unrelated counters.
+
+   The code's own comment described the revision term as a floor for "an older v1 image
+   that omits it", but it was applied unconditionally and forever. The fix gates it on
+   `latest_interrupt_token == 0` — a pre-M3 image (key 21 absent decodes to 0) or a
+   device that has accepted no interrupt yet, the only cases with no interrupt counter to
+   follow. Both branches are pinned by tests in `crates/app-core/tests/runtime.rs`:
+   `interrupt_tokens_do_not_follow_the_unrelated_revision_counters` reproduces this exact
+   observation in-process — it failed with `left: [85]`, the board's number — and
+   `an_absent_interrupt_counter_still_takes_the_revision_floor` keeps the legacy floor.
+
+   Two things this does **not** change: gate item 7 still passes (the counter moved, which
+   was always the evidence of delivery), and
+   `busy_retry_and_reconnect_replay_reuse_identical_tokens` was never contradicted — the
+   token was minted high once, not churned. Host-only Rust, so firmware statics are
+   untouched and the OTA download hazard does not apply.
 2. **No panel frame exists for this run.** The webcam harness produced solid black on
    every attempt, including with a 60-frame warmup, while the board was demonstrably
    alive (link online, uptime climbing, CLI answering over USB). The physical OBSBOT is
@@ -3107,3 +3235,1506 @@ forgot" instead of "the server remembered while it could not reach the device".
    session where a black frame was read as "the panel is off". That conclusion happened to
    be right, but it was carried by the absent serial port and the failed ping, not by the
    frame.
+
+## Reconnect backoff does not widen on the WSS path — observed 2026-08-23
+
+Observed on the physical board while away from the home network, so the device was
+failing to reach `deskmate.rodi.one` continuously. Captured by reading the USB serial
+line directly (see the second finding below for why the CLI could not be used).
+
+**Task 8's owed exit-gate observation is answered, and the answer is no.** Over ~60
+seconds of uninterrupted failure the reconnect interval stayed flat at roughly
+0.85–1.2 s with jitter, and never widened:
+
+```
+E (126651) esp-tls: couldn't get hostname for :deskmate.rodi.one: getaddrinfo() returns 202
+W (126671) net_link: WebSocket TLS/transport failure, status=0, error_type=tcp_transport
+I (126681) websocket_client: Reconnect after 1130 ms
+...
+I (129031) websocket_client: Reconnect after 1090 ms
+I (130051) websocket_client: Reconnect after  980 ms
+I (132891) websocket_client: Reconnect after  990 ms
+I (141141) websocket_client: Reconnect after 1160 ms
+```
+
+The gap between successive `net_link: WebSocket disconnected after an error` lines is
+~1 s throughout, from uptime 126 s to 142 s.
+
+`net_link.c` does use the backoff module — `s_reconnect_backoff` at :37,
+`reconnect_backoff_next_delay_ms()` at :105 — but `:247` passes
+`reconnect_backoff_peek_delay_ms()` into the websocket client's `.reconnect_timeout_ms`
+**at client construction**. `esp_websocket_client` then runs its own auto-reconnect on
+that initial value, so a widening computed later never reaches the thing actually
+scheduling the retries. `core/reconnect_backoff.c`'s host tests pass because the module
+is correct in isolation; it simply is not governing this path.
+
+Practical consequence: a device that cannot resolve its server retries DNS about once a
+second indefinitely. Not diagnosed further here and **not fixed** — recorded so the gate
+item is answered by evidence rather than left open.
+
+Also confirmed in the same capture: `wifi_station: WiFi disconnected, reason=201`
+(`NO_AP_FOUND`) — the device was not associated at all, it was looking for an SSID that
+was not present, which is why every `getaddrinfo` failed.
+
+## A diagnostic build puts console logs on the protocol pipe — observed 2026-08-23
+
+The device was running `v2.0.0-swaes6` (the software-AES experiment build; the repo's
+`firmware/version.txt` was pinned to it, and the clean `f6cb0ea` tree pins
+`v2.0.0-gate6`). `deskmate-cli status` failed every attempt with
+`malformed device response: Cobs`, and a raw read of `/dev/cu.usbmodem3101` showed
+ESP-IDF log text rather than framed packets.
+
+`link/usb_link.c` carries the protocol over **`usb_serial_jtag`**, and
+`sdkconfig.defaults` deliberately keeps the console on UART0
+(`CONFIG_ESP_CONSOLE_UART_DEFAULT=y`, `CONFIG_ESP_CONSOLE_SECONDARY_NONE=y`). The diag
+build evidently routes the console onto the USB-Serial-JTAG instead, so logs and protocol
+frames interleave on one pipe and COBS framing cannot survive.
+
+This violates the repo's own standing rule — keep diagnostic logs out of the machine
+protocol byte stream.
+
+**Corrected later the same day:** the impact is narrower than first written. Once the
+device came back online and stopped logging, `deskmate-cli status` decoded cleanly
+against the *same* `v2.0.0-swaes6` build. So the collision only corrupts framing **while
+the device is actively emitting log lines** — at the time of the first observation it was
+failing DNS roughly once a second, so every frame was interleaved with error output. A
+quiet diag build is usable over the cable; a diag build in a fault loop is not, which is
+precisely when you most need to reach it. Treat it as a hazard, not an absolute block.
+
+## Task 14 minimal OTA gate — INCONCLUSIVE on hotel WiFi, 2026-08-23
+
+Stage 1's hardware gate was reduced by owner direction to a single check: does a build
+carrying the asset store's static footprint still download and install over the air.
+
+**Partially answered yes, incidentally.** `v2.0.0-gate6` (= `f6cb0ea`, which contains
+Task 9 and therefore the full `.bss` growth) was downloaded and installed over the
+network by this device earlier the same day, twice. So the asset store's static footprint
+does not by itself break OTA.
+
+**The fix-wave delta is unproven.** `v2.0.0-gate11` was built from `fe1356f` (all four
+whole-branch fixes), published, and pinned. Two attempts, both `ota_state: failed`, device
+remained on `gate6`.
+
+**Not recorded as a regression, because the evidence points at RF:**
+
+- `.bss` at `gate11` is **102,608 — byte-identical to `gate6`**, which downloaded fine.
+  The fix wave's new `static asset_release_fn s_release` landed inside existing linker
+  alignment padding, which also resolves the "unexplained slack" noted earlier.
+- WiFi RSSI was **-72 dBm** when `gate6` downloaded successfully, **-75** at the first
+  `gate11` attempt and **-93** at the second. -93 dBm is borderline unusable for a
+  sustained 1.5 MB TLS transfer.
+- The server logged the firmware *check* for both attempts but **no download request at
+  all**, consistent with failing before or during connection setup rather than a
+  mid-transfer abort.
+
+Retest on a stable network before drawing any conclusion. Do **not** bisect on this
+evidence.
+
+### Real observability defect found regardless of cause
+
+`ota_state` read `failed` while `last_ota_error` was **absent** on both attempts. That
+field exists precisely so an OTA failure is diagnosable — it is what made `3f2aa03`'s own
+regression findable. Only two code paths set `PROTOCOL_OTA_FAILED` (`ota.c:224`, `:236`)
+and both pack a stage, so a `FAILED` state with `OTA_FAILURE_STAGE_NONE` should not be
+reachable. One candidate worth checking: `clear_last_error()` (`ota.c:215-218`) stores a
+zero packed value while preserving the *current* state, so if it runs while the state is
+already `FAILED` it produces exactly this — failed with no reason. Not diagnosed further.
+
+The catalog was reverted to `v2.0.0-gate6` so the device does not retry a failing 1.5 MB
+download daily over a weak link. `v2.0.0-gate11.bin` remains published and ready to pin
+when the retest happens.
+
+## The board's identity is `dev-0005`, and the registry is the only source for it — 2026-08-23
+
+Configuring the Mac app against the server failed twice in a row this morning for two
+unrelated reasons. Both are recorded because both cost real time and neither is
+discoverable from the app's own error text.
+
+### The current device identity is `dev-0005`
+
+This file said `dev-0003` (see the 2026-08-18 entry), and it was three identities stale.
+The live registry at `/var/lib/deskmate/configs/device-identities.json` holds
+`dev-0001` … `dev-0005` with `next_sequence: 5`, and the server log shows the board
+dialling in continuously as `dev-0005`:
+
+```
+09:39:18  INFO server::device_link: device link established  device_id=dev-0005
+```
+
+Every re-pair mints a new identity — that is the "a tier round-trip costs a device
+identity" rule in CLAUDE.md, seen from the other side. **Read the registry, not this
+file, when you need the board's current id.** A prose note in a document cannot track a
+value that changes whenever someone re-pairs.
+
+Pushing a config to a stale-but-minted id **succeeds and reports success**. `PUT
+/v1/devices/{id}/config` accepts a config for any minted identity whether or not a device
+is attached, because a device must be configurable while unplugged; nothing in the
+protocol distinguishes "stored for later" from "delivered". The app's confirmation was
+truthful — the save reached the server — and the panel simply never changed.
+
+The reliable tell is `GET /v1/devices/{id}`: **`connected: false` together with
+`last_seen_unix_ms: null` and no `snapshot` means the identity has never been used at
+all.** Since `12e5f4d` made runtimes per-device and long-lived, any identity that has ever
+connected retains a runtime and still returns a snapshot while disconnected. Absent
+snapshot is therefore a much stronger signal than a false `connected`.
+
+Orphans left in place, not pruned: `dev-0003.json` and `dev-0004.json` configs, plus the
+dead `dev-0001`/`dev-0002` identities. Deleting an identity is irreversible — only digests
+are stored — so this needs an explicit decision rather than a tidy-up.
+
+### The deployed server was a schema version behind the app
+
+Before the id problem was visible, every save was rejected with:
+
+```json
+{"path":"schema_version","code":"unsupported-version",
+ "message":"schema version 4 is not supported; expected 5"}
+```
+
+The app and the server carry **independent** copies of `CURRENT_SCHEMA_VERSION`. Schema v5
+landed 2026-08-22 in `0c7c467`; the deployed binary was built 2026-08-21 13:23. Redeploy
+the server whenever the schema moves — the mismatch surfaces only as a validation failure
+on the first save, which reads like a config problem rather than a deploy problem.
+
+Redeploy notes worth keeping: reach the VM over **Tailscale** (`docker-vm`,
+100.93.166.123), because `~/.ssh/config` pins its LAN address `192.168.8.20`, which is
+unreachable from any other network. The build container must match
+`companion/rust-toolchain.toml` (**`rust:1.98-bookworm`** since the 1.98.0 pin), and the
+previous deploy leaves a root-owned `companion/target/` — keep it and replace only the
+sources, which turns a cold build into ~40 seconds. Verify without writing anything by
+PUTting a deliberately old-versioned body and reading which version the server names back.
+
+### Unrelated observation, not diagnosed
+
+`DESKMATE_SERVER_BIND=192.168.8.20:8443` — a LAN interface, not the loopback the runbook
+specifies. The tunnel is the only thing that needs to reach the server, so this exposes the
+admin surface, guarded by one bearer token, to the whole LAN. Also `systemctl` reported
+`Consumed 46min 24.911s CPU time` across roughly two days with no device attached for most
+of it. Neither was changed.
+
+## Scene renderer OTA + boot — verified 2026-08-25
+
+First hardware run of the scene-renderer branch (`v2.0.0-scene1`, built at
+`55d1a97`). **The OTA download works with the moved `.bss`.** That was the one
+check the branch could not close on software grounds: `.bss` went 102,608 →
+102,624 (+16, `scene_view.c`'s three existing pointers becoming reachable once
+Task 10 linked the file), and this board has twice lost days to a memory-layout
+shift breaking OTA outright with every test green (`3f2aa03`).
+
+Observed, `dev-0005` over `deskmate.rodi.one`:
+
+- **Attempt 1 FAILED** — `ota_state: failed`, `last_ota_error: "download: ESP_FAIL"`,
+  device rolled back and stayed on `v2.0.0-gate6`. RSSI -77.
+- **Attempt 2 SUCCEEDED** — identical image, same location, same signal band
+  (-75..-82). Downloaded, installed, rebooted onto `v2.0.0-scene1`, and marked
+  itself valid (uptime passed the rollback window and stayed on the new slot).
+
+**Ruling: the first failure was transient, not the `.bss` hazard.** The
+layout-shift failure mode documented for `3f2aa03` is *deterministic* — three
+builds from an identical base decided it, and the bad one failed every time,
+"whether or not a critical section touches them". A retry of the identical
+image succeeding is not that signature. Same inconclusive-then-fine pattern as
+the `gate11` attempt on 2026-08-23. Ruled out by direct test, not inference:
+the image fetched clean over the public URL from the Mac (HTTP 200, 1,599,376
+bytes, md5 `768e1351…` matching the local build, 21 MB/s), and `ota_0`/`ota_1`
+are 4 MB against a 1.6 MB image.
+
+Also confirmed on the new firmware: `capabilities` carries bit 8
+(`unknown_capability_bits: 0x0000000000000100` — the DEPLOYED SERVER PREDATES
+this branch and has no name for it, which is why it reads as unknown rather
+than as `scene-render`; the device is advertising 491 correctly). Protocol v1,
+tier networked, rotation 270, `active_screen_id: clock`. Counters clean after
+~2 minutes: 0 `crc_errors`, 0 `malformed_frames`, 0 `overflow_frames`, 75
+`valid_frames`, `ui_queue_high_water` 1.
+
+### Two operational findings from this session
+
+1. **The device checks for firmware exactly twice a day and cannot be asked.**
+   `ota.c:43` sets `OTA_CHECK_INTERVAL_MS` to 86,400,000 (24 h, ±1 h jitter),
+   and `ota_task` checks once immediately at boot. The firmware *has* a
+   force-check path — `ota_check_now()` (`ota.c:809`), reached by a request
+   carrying `OTA_CHECK_STATUS_REQUEST_ID` (`protocol_task.c:1468`; the sentinel was
+   removed in the 2026-09-05 cleanup because nothing ever sent it) — but
+   **nothing host-side sends it**: the server has only three admin routes
+   (create device, get device, put config), and neither the Mac app nor the
+   `device`/`protocol` crates reference it. So publishing an image and waiting
+   does nothing; a power cycle is the only way to trigger an update. Note a USB
+   unplug will NOT do it — the board has a battery, so that is link loss, not
+   power loss.
+2. **Nothing reports free INTERNAL DRAM, which is the one number that would
+   diagnose this failure class.** `free_heap` reads ~8.3 MB, which is PSRAM and
+   already recorded as useless as a TLS health signal on this board. When an OTA
+   download fails, there is currently no way to distinguish "internal DRAM
+   exhausted on the TLS/AES path" from RF without bisecting builds.
+
+### Not verified
+
+The scene renderer itself has **not** been exercised on the panel. All four of
+the asset-GC teardown observations require pushing a scene with an asset font,
+and **the server cannot push a scene** — no file under
+`companion/crates/server/src/` references `PushScene`, `Scene` or
+`encode_scene_payload`, and `build_digital_clock_scene`'s only caller is the
+parity test. The device can receive and render one; nothing sends one yet.
+
+## The scene renderer draws on the panel — verified 2026-08-25
+
+**First time a host-built scene has ever rendered on the physical display.** The
+server pushed `build_digital_clock_scene`'s `DigitalClock` scene to `dev-0005`
+over `deskmate.rodi.one` via the new `POST /v1/devices/{id}/scene`, on
+`v2.0.0-scene1` in networked tier — the release image, over the shipping path,
+with no flash and no tier change.
+
+**Observed: a ticking seconds field, and no visual artifacts.** That is
+conclusive on its own. The saved config carries `show_seconds: false` (confirmed
+in the server's snapshot for the clock card), so the shipped C `digital_clock`
+template cannot draw seconds. Seconds on the panel can only have come from the
+pushed scene, which means `scene_decode()` → `scene_model_validate()` →
+`scene_view.c` → LVGL all ran correctly on the device against real baked fonts.
+
+### Not verified — do not describe these as observed
+
+- **The date line was not confirmed.** The scene pinned `local_now` to
+  `2019-07-04`, so a correct render reads `Thu, Jul 4`; the observer did not
+  report the date either way. The date is the host-computed static, so confirming
+  it would have pinned `BakedFontMetrics::measure()` and the date box on hardware.
+- **Only 270 degrees was exercised.** The device's saved rotation is 270. 90 was
+  never pushed, so nothing here speaks to the other mount.
+- **No pixel claim of any kind.** This was an eyeball observation over a webcam-less
+  session. Byte-exact interpreter parity is Task 11a's harness, which is written
+  and still unrun.
+
+### The defect this found: a late reply fails the NEXT request
+
+Pushing every 3 s produced 7 acks and then 12 straight failures; pushing every
+20 s produced this:
+
+```
+07:37:27 rev 100: HTTP 200
+07:38:09 rev 102: HTTP 502 -- response request ID mismatch (expected 472, received 471)
+07:38:32 rev 103: HTTP 502 -- response request ID mismatch (expected 485, received 478)
+07:39:16 rev 105: HTTP 502 -- device request timed out
+```
+
+Root-caused to `SocketPeer`'s read loop taking the pending waiter **before**
+comparing request ids, so a late reply to an abandoned request failed whichever
+request was in flight — self-sustaining until traffic stopped. The drift from one
+behind to seven behind is the cascade widening. Fixed in `95ed9eb`; the same
+shape was latent in `DeviceClient` and `DeviceSession`, i.e. over the cable too.
+
+**The device was never at fault.** `malformed_frames: 0`, `overflow_frames: 0`,
+`ui_queue_high_water: 2`, no reboot across 2 h of uptime, and full recovery every
+time traffic stopped. Two device-side facts are worth carrying forward anyway:
+
+1. `dropped_responses` reached 11, and it increments only when
+   `protocol_message_encode` fails or `write_frame` misses
+   **`PROTOCOL_WRITE_TIMEOUT_MS`, which is 200 ms** (`protocol_task.c:53`). An Ack
+   is far too small to fail encoding, so the device genuinely could not write
+   those replies inside 200 ms. Whether that is marginal RF (RSSI -77 here) or
+   internal-DRAM pressure on the TLS/AES path is **undetermined** — see below.
+   The correlation fix stops the cascade; it does not make the device faster.
+2. **The missing internal-DRAM number blocked this diagnosis, for the second time
+   in 24 hours.** The 2026-08-25 OTA entry already recorded that nothing reports
+   free internal DRAM and that it is "precisely the number that would separate
+   this failure class from RF without bisecting builds". `free_heap` reads ~8.3 MB
+   of PSRAM and says nothing. Adding it to `StatusResponse` is additive and cheap.
+
+Operational notes for the next session: the active playlist rotates every **50 s**
+(`default_dwell_seconds`), and each tick sends `ActivateScreen`, which puts a
+template view back over a pushed scene — so a scene must be re-asserted inside that
+window, or the playlist paused (`preferences.paused` gates the device send, though
+rotation still advances locally). `card_id` need not name a configured card:
+`dispatch_push_scene` uses it only to scope `field.`/`timer.` binding lookups.
+
+### Reliability after the correlation fix — 2026-08-26
+
+Re-measured with the fixed server deployed (`6a51dc2`), same device, same link, same
+scene: **20 of 20 pushes accepted at 5 s intervals, `dropped_responses` 0.** Compare
+the pre-fix runs: 7 of 19 at 3 s, and 4 of 9 at 20 s. The host-side cascade was the
+entire failure.
+
+**The 200 ms write budget is therefore an unproven suspect, and is deliberately NOT being
+changed.** It remains a genuine asymmetry worth knowing about: `net_link_write_frame`
+gives `esp_websocket_client_send_bin` `PROTOCOL_WRITE_TIMEOUT_MS` = 200 ms
+(`protocol_task.c:53`) to deliver a reply the host will wait a full 2000 ms for, so any
+transient TLS stall or websocket-client lock contention destroys a reply the host would
+still have accepted. The clean fix, if it is ever needed, is a per-transport write budget
+beside `link_transport_t`'s existing `link_timeout_ms`, leaving USB at 200 ms. It is not
+being made now because a firmware change costs an OTA-download re-verification, which on
+this board needs a physical power cycle (the device checks twice a day, cannot be asked,
+and the battery means a USB unplug is not a power loss) — and there is currently no
+evidence the timeout ever bites at realistic cadence. The 11 drops seen on 2026-08-25
+occurred during a 3 s burst that was also mid-cascade, so they cannot be attributed to
+the timeout alone.
+
+Note the device rebooted between the two sessions (uptime 2 h 08 m → 1 h 00 m), so the
+2026-08-26 counters are fresh rather than cumulative.
+
+## Scene Label + RotRect software layout — hardware check owed 2026-08-26
+
+Task 1b added scene kinds 8 (`Label`) and 9 (`RotRect`) without adding any
+file-scope storage. The release-config `idf.py build`/`idf.py size` comparison is
+byte-flat in every memory-layout figure that has mattered to the OTA hazard:
+
+- `.bss`: **102,624 → 102,624 bytes** (delta 0)
+- `.data`: **23,128 → 23,128 bytes** (delta 0)
+- IRAM: **16,384/16,384 → 16,384/16,384 bytes**, 0 remaining (delta 0)
+
+Flash grew, as expected for decoder/renderer code: image-size accounting moved
+1,599,259 → 1,603,703 bytes, while `deskmate.bin` moved 0x186790 → 0x1878f0.
+No OTA download or panel observation was performed here; the plan assigns that
+single power-cycle/download check to the owner, and unchanged static figures do
+not waive it.
+
+### DIRAM `.text` checked too, and it is flat — 2026-08-26
+
+Following up the entry above, because `.bss` is not the whole hazard.
+`idf.py size` splits DIRAM into three components, and **DIRAM `.text` — code
+resident in internal RAM — is carved from the same 341,760-byte pool as `.bss`**,
+so it reduces the runtime heap in exactly the way static data does. `3f2aa03` was
+about internal DRAM available to the heap, not about `.bss` specifically.
+
+Measured on the same tree, before and after Task 1b:
+
+- DIRAM `.text`: **93,635 → 93,635 bytes** (delta 0), total DIRAM 219,387 both times.
+
+`deskmate.map` attributes every byte of the new code to flash-mapped text
+(`0x420…`), with **zero** DIRAM/IRAM text from `protocol_message.c.obj`,
+`scene_decode.c.obj`, `scene_view.c.obj` and `scene_model.c.obj`:
+`rotation_for_time` at `0x42012124`, the inlined label and rotated-rect builders
+inside `build_nodes` at `0x420121c4`, the encoder arms inside
+`protocol_message_encode` at `0x42019a48`, the decoder arms inside
+`scene_decode_map` at `0x4201c1a0`, and `scene_model_parse_rotation_binding` at
+`0x4201d624`. No new function reached internal RAM through `IRAM_ATTR`, through
+inlining from an IRAM-resident caller, or through a linker-fragment rule.
+
+**A stale figure caused a false alarm here, which is worth not repeating.**
+`CLAUDE.md` recorded total DIRAM as 219,307 at `5699f1d`; it now reads 219,387.
+Task 10 of the previous plan explains +16 of that. The remaining ~64 bytes
+accumulated between those commits and are **not** attributable to the scene
+nodes. A fresh total compared against a figure captured at a different commit is
+not evidence about a recent change — only a before/after on the same tree is.
+
+### Horizontal-anchor follow-up before the owed download — 2026-08-26
+
+Before the unchecked Task 1b Step 9 was run, `Label` gained optional horizontal
+anchoring so BigNumberLabel's content-sized pill can be centred by LVGL rather
+than measured by the host. No board check was performed here; this is intended
+to ride the same not-yet-tested image and the hardware item remains owed.
+
+The release-config same-tree comparison is still byte-flat in all four internal
+memory figures: `.bss` **102,624 → 102,624**, `.data` **23,128 → 23,128**, IRAM
+**16,384 → 16,384**, and DIRAM `.text` **93,635 → 93,635**. Flash code and total
+image size each grew by 144 bytes; `deskmate.bin` moved `0x1878f0 → 0x187980`.
+
+## Stage 2b OTA check — PASSED 2026-08-26
+
+`v2.0.0-scene2`, the image carrying scene node kinds 8 (`Label`) and 9
+(`RotRect`) plus the label's horizontal anchor, downloaded and installed on
+`dev-0005` over `deskmate.rodi.one` on the first attempt. Observed immediately
+after: `firmware_version: v2.0.0-scene2`, `uptime_ms: 110116`, `ota_state: idle`,
+`last_ota_error: null`, link connected. It survived the rollback window on the
+new slot, the same evidence standard the 2026-08-25 entry used.
+
+**This is the whole hardware cost of stage 2b.** Every remaining task in
+`docs/superpowers/plans/2026-08-26-deskmate-scene-templates.md` is host-only.
+
+Two things this run confirms beyond the download itself:
+
+1. **Flat internal RAM predicted a clean OTA, for the first time deliberately.**
+   `.bss` 102,624, DIRAM `.text` 93,635, `.data` 23,128 and IRAM 16,384 were all
+   byte-flat across the change, verified before and after on the same tree. The
+   two failures this repository has paid for — the V1 boot crash-loop and
+   `3f2aa03` — were both internal-DRAM layout shifts. Holding all four figures
+   flat and then seeing a first-attempt download is the first time that
+   relationship has been used as a prediction rather than read backwards from a
+   failure. It is one data point, not a law: keep running the check.
+2. **A power cycle alone proves nothing if nothing is published.** An earlier
+   cycle the same day found no update, because `DESKMATE_FIRMWARE_VERSION` still
+   named the version the device was already running. The device checked, matched,
+   and correctly did nothing. Publishing is three steps and all three are
+   required: put `<version>.bin` in `$DESKMATE_FIRMWARE_DIR`, set
+   `DESKMATE_FIRMWARE_VERSION` to that string, restart the server. Then power
+   cycle — the device checks once at boot and twice a day, cannot be asked, and a
+   USB unplug is link loss rather than power loss because the board has a battery.
+
+## The server was pinning a CPU core, and had been for days — fixed 2026-08-26
+
+Reported by the owner. The deployed server was at **100% of one core**, memory flat
+at 6-11 MB across every instance, so a spin rather than a leak. systemd's
+per-instance accounting shows how long it had been going on:
+
+| Instance started | Wall | CPU | Duty |
+| --- | --- | --- | --- |
+| Aug 24 07:59 | 21h07m | 20h08m41s | **95%** |
+| Aug 25 05:06 | 13h40m | 11h20m11s | 83% |
+| Aug 25 18:46 | 13h13m | 10h28m34s | 79% |
+| Aug 26 10:37 | 7h26m | 5h49m47s | 78% |
+
+**This entry corrects an earlier one.** The 2026-08-25 note recorded
+"`Consumed 46min 24.911s CPU time` across roughly two days with no device attached
+for most of it" and treated it as an aside. That was 46 minutes over **2h24m** —
+a 32% duty cycle, not a rounding error. The observation that should have caught
+this filed it as trivia. When a note quotes a cumulative CPU figure, quote the
+wall time beside it or the number means nothing.
+
+### Root cause
+
+`run_scheduled_work` returned early when `!state.connected`, **above** the calls to
+`Scheduler::status_due()` and `time_sync_due()` — and those calls are what advance
+the deadlines, through `take_deadline`'s side effect. So while the device was away,
+both deadlines stayed permanently in the past. `wait_duration()` takes `.min()`
+across every deadline and calls `saturating_duration_since(now)`, which returns
+**zero** for a past instant, so `command_receiver.recv_timeout(0)` returned
+instantly, forever. The paused early-return had the same shape, and provider
+deadlines could sit in the past while a previous job was in flight.
+
+Fixed in `e06d6ab`: a deadline is consumed whenever a tick examines it, before any
+gate decides whether the I/O happens. `wait_duration` was deliberately **not**
+clamped to a minimum sleep — that would mask a past-due deadline instead of
+resolving it, and hide the next bug of this shape.
+
+The naive fix regresses something worth keeping: `next_status` sitting in the past
+is also what makes a status fire promptly on reconnect, and this device drops its
+link on idle timeout routinely. The deadlines are re-armed at the connect
+transition instead, so a reconnect still refreshes promptly — which a dropped link
+needs, since the device may have rebooted and its clock drifted while away.
+
+### Why it looked intermittent
+
+**A server that has never seen a device does not spin.** Runtimes are per-device
+and long-lived, so with no device attached there is no worker loop at all. The
+spin needs a runtime that exists but has no live socket — created on connect, then
+stranded on disconnect. A fresh restart therefore always looks healthy, and
+degrades only once a device has connected and gone away.
+
+### Verification status: NOT yet proven on the deployment
+
+The fix is deployed and the server sits at 0.0% — but **that proves nothing on its
+own**, because the device has been offline since 13:50 and no runtime has been
+created in this instance. The honest check is a full cycle: let the device
+connect, let the link drop, and confirm CPU stays flat afterwards. Until that is
+observed, this is fixed in test and unproven in the field.
+
+## Stage 2b OTA check — PASSED 2026-08-27, `v2.0.0-scene3`
+
+One image carrying **four** firmware needs downloaded, installed and rebooted on `dev-0005`
+over `deskmate.rodi.one`. Owner-reported: the panel showed no artifacts.
+
+One image carries all four firmware needs stage 2b surfaced, because it was never
+published between them:
+
+| Need | Wire | Unblocks |
+| --- | --- | --- |
+| `SceneArc.opacity` | key 9, omission = `LV_OPA_COVER` | all 8 `ProgressRing` parity rows |
+| external rot-rect pivot | no new key; a relaxed, axis-wise canvas bound | all 8 `AnalogClock` rows |
+| `SceneRect.clip` | key 7 | STORM's 14 clipped pixels |
+| `SceneRotRect.clip` | key 10 | `AnalogClock`'s 8 tick-edge pixels |
+
+Protocol stays v1 and additive, `PROTOCOL_CURRENT_CAPABILITIES` stays 491, schema stays v5.
+
+**Internal RAM is byte-flat across all of it**, on a same-tree before/after taken at
+`09404ca` and re-measured after each firmware commit — `.bss` **102,624 → 102,624**,
+DIRAM `.text` **93,635 → 93,635**, `.data` **23,128 → 23,128**, IRAM
+**16,384/16,384 → 16,384/16,384 with 0 remaining**, DIRAM total **219,387 → 219,387**.
+Only flash `.text` moved, **1,140,180 → 1,141,824**, and that is off-chip. Flat internal
+figures have predicted a clean download exactly once (2026-08-26), which is one data
+point and not a law — hence this check.
+
+### What was published, and verified
+
+`deskmate.bin` 1,605,600 bytes, md5 `4aa60a714d841a7e504cfcf16ee04cf7`, published as
+`v2.0.0-scene3`. All three required steps were done and each was checked rather than
+assumed:
+
+1. The image is in `/var/lib/deskmate/firmware/v2.0.0-scene3.bin`, owned by
+   `deskmate-server`, and `md5sum` on the VM matches the local build.
+2. `DESKMATE_FIRMWARE_VERSION` in `/etc/deskmate/server.env` reads `v2.0.0-scene3`.
+   `firmware/version.txt` was moved to match in `26e4246` — required, because the catalog
+   offers its version in **either** direction, so a device left on a different string is
+   offered a change within the minute.
+3. `deskmate-server.service` was restarted and is active.
+
+Then end-to-end through the public tunnel, not just on the VM:
+`GET https://deskmate.rodi.one/v1/firmware/v2.0.0-scene3.bin` returned **200**,
+1,605,600 bytes in 0.9 s, md5 `4aa60a714d841a7e504cfcf16ee04cf7` — byte-identical to the
+local build. So the image a device would fetch is provably the image that was built.
+
+**Reaching the VM needs Tailscale (`100.93.166.123`), not the `~/.ssh/config` host**,
+whose pinned LAN address `192.168.8.20` times out from any other network. That cost a
+round trip here and will again.
+
+`GET /v1/devices/dev-0005` immediately after the restart: `connected: false`,
+`snapshot: null`. The retained runtime does not survive a server restart, so this says
+nothing about the board's health — only that the link is down, which is expected while
+the board is off or asleep.
+
+### The result
+
+Owner power-cycled; the device downloaded and installed. `GET /v1/devices/dev-0005`
+immediately after, quoted rather than paraphrased:
+
+```
+firmware_version   v2.0.0-scene3      ota_state          idle
+last_ota_error     null               last_network_error null
+connected          true               wifi_state         connected
+uptime_ms          69670              wifi_rssi          -76 dBm
+rotation           270                tier               networked
+free_heap          8299971            protocol_version   1
+```
+
+Every counter clean: `crc_errors` 0, `malformed_frames` 0, `overflow_frames` 0,
+`dropped_events` 0, `dropped_responses` 0, `dropped_ui_commands` 0, `rx_dropped_bytes` 0,
+`valid_frames` 43, `event_queue_high_water` 1, `ui_queue_high_water` 1. `host_reconnects`
+is 1, which is the server restart during publishing, not a link fault.
+
+**This is the whole hardware cost of stage 2b, and it bought four firmware needs**:
+`SceneArc.opacity`, the external rot-rect pivot, `SceneRect.clip` and `SceneRotRect.clip`.
+Deferring each one as it was found rather than fixing it in place is what collapsed four
+verifications into one.
+
+**Flat internal RAM has now predicted a clean download twice** (2026-08-26, 2026-08-27).
+That is two data points, not a law — the failure mode it guards against is *deterministic*,
+so a pass says the layout did not move somewhere fatal, not that it never can. Keep running
+the check.
+
+Note `free_heap` reads ~8 MB. That is PSRAM and is **not** a TLS health signal on this
+board.
+
+**What this does NOT prove.** The download and the absence of artifacts, nothing more. No
+scene was pushed, so the four new node capabilities were not exercised on the panel — arc
+opacity, an external pivot, and either clip have never drawn on hardware. The parity gate
+that proves them is simulator-to-simulator, and real 270° geometry is only ever provable by
+looking at the panel. Stage 3 owes that observation.
+
+### Two things learned while publishing
+
+**The server binary was deliberately not rebuilt**, and did not need to be: nothing in
+stage 2b changed the server, and the check exercises the firmware catalog and the device's
+updater, neither of which moved. `POST /v1/devices/{id}/scene` is present in the deployed
+binary — confirmed by probing it against controls (422 on the scene route, 405 on a
+known-present route, 404 on a bogus one).
+
+**A `strings`-based conclusion about that binary was wrong, and the controls caught it.**
+`strings` is not installed on the VM, so `strings … | grep -c` returned 0 for every pattern
+including ones certain to be present. A zero from a tool that is not there looks exactly
+like a zero from a tool that ran. Calibrate a negative against a positive control before
+believing it.
+
+### A defect this check surfaced, unrelated to the OTA
+
+The same query reports `unknown_capability_bits: 0x0000000000000100` — bit 8,
+`CAPABILITY_SCENE_RENDER` — and lists only six named capabilities. The device correctly
+advertises 491; **the host cannot name bit 8**. This is not stale deployment:
+`companion/crates/protocol` defines and exports `CAPABILITY_SCENE_RENDER`, but
+`app-core`'s `DeviceCapability` enum has eight variants and never learned it, so `bit()`,
+`label()`, `from_bits()` and `known_bits()` all omit it. A freshly built server reports the
+same. The consequence is exactly what that enum exists to prevent — its own doc comment
+says a raw bitmask "tells the user nothing about what to change or which firmware to
+install", and every scene-capable device now trips that path.
+
+## Stage 3a Gate A — OTA download failed once, then PASSED on retry, 2026-08-28
+
+`v2.0.0-live1` was published and offered; the board power-cycled and **did not install
+it**. It remains on `v2.0.0-scene3`.
+
+```
+firmware_version  v2.0.0-scene3     ota_state         failed
+last_ota_error    download: ESP_FAIL
+wifi_state        connected         wifi_rssi         -76 dBm
+uptime_ms         45828             tier              networked
+```
+
+Counters otherwise clean: `crc_errors` 0, `malformed_frames` 0, `overflow_frames` 0,
+`rx_dropped_bytes` 0, `valid_frames` 35. `dropped_responses` is **1**, and
+`host_reconnects` 1.
+
+### Where the failure actually is, read from `ota.c` rather than guessed
+
+`last_ota_error` is `download: ESP_FAIL` — stage DOWNLOAD, `esp_err_t` `ESP_FAIL`. Only
+one path produces that combination: `firmware/main/link/ota.c:669`, reached after the
+`esp_https_ota_perform()` loop exits with a non-`ESP_OK`, non-`IN_PROGRESS` result. That
+places the failure **inside the body transfer**, and it means everything before it
+succeeded:
+
+- `esp_https_ota_begin()` returned `ESP_OK` — otherwise the stage would read `begin`.
+  **So TLS was set up.** That is the step the internal-DMA/AES memory hazard breaks
+  (`62e5aea`, `0ad1a51`), and it did not break here.
+- `esp_https_ota_get_status_code()` was **200** — otherwise `set_http_failure` would have
+  recorded an HTTP status instead of an `esp_err_t`.
+- The image size passed the partition bound, and `esp_https_ota_get_img_desc()` both
+  succeeded and **version-matched** — otherwise the stage would read `verify`.
+
+So the device reached the server, was served the right image, read its descriptor, and
+then lost the transfer partway through.
+
+**This is not the documented memory-layout signature.** That failure mode kills
+`mbedtls_ssl_setup()` before any socket work, and would surface as stage `begin`. The
+same-tree measurement supports that reading: `.bss` 102,624, DIRAM `.text` 93,635,
+`.data` 23,128, IRAM 16,384/16,384 and DIRAM total 219,387 are all **byte-flat** against
+the `05500ef` baseline, across all five firmware tasks. Only flash `.text` moved
+(1,141,824 → 1,145,532).
+
+The server log corroborates the sequence and its speed:
+
+```
+05:15:17  device link established
+05:15:21  firmware check  current=v2.0.0-scene3
+05:15:23  device link closed        <- install_update() suspends the WSS link
+05:15:25  device link established   <- resumed on the failure path
+```
+
+Two seconds from link-suspend to link-resume. A 1.6 MB body over this link cannot
+complete in that window, so the transfer died early rather than timing out —
+`ota_policy_download_timed_out` would have recorded `ESP_ERR_TIMEOUT`, not `ESP_FAIL`.
+
+### A methodological note, because it cost two wrong turns
+
+Neither the server journal nor the Caddy container log showed any request for
+`/v1/firmware/v2.0.0-live1.bin`, which looked like strong evidence the device never asked
+for it. **It was not evidence at all**: a control request issued by hand returned HTTP
+200 and *also* produced zero log lines, so that path simply is not logged. This is the
+second time in two days that a cheap negative has been misleading here — the first was
+`strings` not being installed on the VM. Calibrate a negative against a positive control
+before believing it.
+
+### Precedent, and what is owed
+
+There is a direct precedent: the 2026-08-25 stage-2a check failed once and **succeeded on
+a retry of the identical image at the same signal**, and was recorded as transient
+precisely because the layout-shift mode is deterministic. `-76 dBm` is the same weak link
+board-notes already describes as "download daily over a weak link".
+
+So the next step is a **retry of the identical image**, which is decisive either way:
+
+- succeeds → transient, and the reading above holds;
+- fails identically → deterministic, and it must be bisected on the board across builds
+  from an identical base, as `3f2aa03` was, rather than retried further.
+
+The device checks at boot and twice a day and cannot be asked, so a retry means another
+power cycle. Nothing was republished between attempts: the catalog still offers
+`v2.0.0-live1`, md5 `d2a8d5e0b8b5d829b812d65287d18f96`.
+
+**Do not describe stage 3a Gate A as passed.** Nothing has been observed on the panel;
+the renderer's live bindings have still never drawn on hardware.
+
+### The retry installed it — the first failure was transient
+
+Second power cycle, **identical image, nothing republished**:
+
+```
+firmware_version  v2.0.0-live1      ota_state         idle
+last_ota_error    null              last_network_error null
+wifi_state        connected         wifi_rssi         -77 dBm  (was -80 at boot)
+uptime_ms         51238             tier              networked
+```
+
+Counters clean: `crc_errors` 0, `malformed_frames` 0, `overflow_frames` 0,
+`dropped_events` 0, `dropped_responses` 0, `rx_dropped_bytes` 0. `host_reconnects` 3
+covers the two failed/retried cycles and the server restart.
+
+It downloaded, installed, rebooted onto the new slot and survived the rollback window —
+the same evidence standard the 2026-08-25 and 2026-08-26 entries used.
+
+**So the reading of the first failure was right**: `esp_https_ota_perform()` lost the body
+partway through on a weak link, and it was not the memory-layout mode. That mode is
+deterministic and would have failed the retry identically at stage `begin`.
+
+**The transient-download tally is now two out of four** on this board — 2026-08-25 and
+2026-08-28 both failed once and installed on a retry of the identical image, both at
+roughly -76 to -80 dBm. That is no longer a curiosity; at this signal a single failed
+download should be **retried before it is investigated**, and only a second identical
+failure justifies a bisect. Diagnosing the first one cost real time here, though the
+`ota.c` stage/error reading is what made the retry decision confident rather than hopeful,
+so it was not wasted.
+
+**Flat internal RAM has now preceded a clean download three times** (2026-08-26,
+2026-08-27, 2026-08-28) — still not a law, and still not a substitute for the check.
+
+### What Gate A still owes
+
+**Nothing has been observed on the panel, and the live bindings have still never drawn.**
+That is not merely unobserved, it is currently *unobservable*: the deployed server binary
+predates every one of Tasks 1-7, so nothing is pushing scenes that use the new bindings.
+It also predates the `SceneRender` capability naming fix, which is why the device — which
+correctly advertises 491 — is still reported with `unknown_capability_bits: 0x100` and
+only six named capabilities.
+
+Gate A's panel observations therefore require the **server** to be redeployed first.
+
+
+### Server redeployed so Gate A becomes observable — 2026-08-28
+
+Built from a `git archive HEAD` export in `rust:1.98-bookworm` against the retained
+root-owned `companion/target/`: **20.6 s**. Installed over
+`/usr/local/bin/deskmate-server` with the previous binary kept as
+`deskmate-server.bak-20260828`. The device reconnected 2 s after the restart.
+
+**The bin target is `server`, not `deskmate-server`** — `cargo build -p server --bin
+deskmate-server` fails with "no bin target named". The *installed* file is renamed on the
+way in. Worth recording; it cost a build cycle.
+
+Immediately confirmed live, and this is the first end-to-end proof of the capability fix
+from `05500ef`:
+
+```
+unknown_capability_bits  0x0000000000000000   (was 0x100)
+capabilities             core-widgets, config-rotation, extended-templates,
+                         asset-transfer, firmware-update, networking, scene-render
+```
+
+The device has advertised 491 all along; the host can finally name bit 8. Counters clean
+after the reconnect: `crc_errors` 0, `malformed_frames` 0, `dropped_responses` 0,
+`host_reconnects` 0, `valid_frames` 105.
+
+### What the panel can and cannot settle, which matters for how Gate A is judged
+
+**A scene and its C template are pixel-identical by construction** — that is precisely
+what the 132-row byte-exact gate guarantees — so *looking at the panel cannot distinguish
+which path drew it*. Neither can the admin API: `active_screen_id` is the same either way,
+and `app-core` has no tracing on the scene path (raising `RUST_LOG` to `app_core=debug`
+produced nothing, and was reverted).
+
+So the panel observation is not "is this a scene?". It is **"is what the device draws
+correct, at both orientations, over time"** — the clock crossing a minute with its date and
+both dial hands right, a timer whose STATUS word and indicator colour follow its state, and
+a tap that moves the timer with the link down. Which path produced it is settled by the
+negotiation logic and its tests, not by eyes.
+
+Stage 2a had a decisive visual tell — a ticking seconds field against a saved config with
+`show_seconds: false`, which the C template *cannot* draw. That tell is not available here:
+the automatic path builds the scene from the same card, so both halves agree about seconds
+by design. Do not go looking for it.
+
+### Gate A panel observation — PASSED, with three items still owed — 2026-08-28
+
+Owner-observed on `v2.0.0-live1` with the redeployed server pushing scenes: **the panel
+renders correctly with no artifacts**, at the board's current **270°**.
+
+That is the substance of Gate A. Combined with the clean OTA install and the negotiation
+logic's own tests, the renderer's live-binding path is now known to draw correctly on real
+hardware — which it never had before. Arc opacity, the external rot-rect pivot and both
+clip forms have now drawn on the panel for the first time.
+
+**Do not read more into it than was said.** Three of Task 6 Step 4's observations were not
+separately confirmed and remain owed:
+
+1. **A minute boundary crossing** — that the date line and both small-dial hands, which
+   were literals before this stage, actually step. A still frame cannot show this, and it
+   is the specific thing the `date` and `time:angle:*` bindings exist to fix.
+2. **90°.** The board sits at 270°. Real 270° geometry is only ever provable by looking,
+   and so is 90°; the simulator's flipped framebuffer is an exact index reversal and proves
+   neither.
+3. **A `ProgressRing` timer advancing** with its STATUS word and indicator colour
+   following state, and **a tap moving the timer with the link down** (Task 4).
+
+**Ruling: these three are folded into Gate B (Task 9) rather than gating Task 8.** Gate B
+needs its own power cycle regardless, so bundling costs nothing, and the risk Gate A exists
+to isolate — a rendering fault being confused with a memory-layout fault — is already
+substantially retired by a clean install and a clean panel. If any of the three then fails,
+the C templates are gone and the diagnosis is harder; that is the accepted cost, and it is
+accepted deliberately rather than by omission.
+
+### Gate B — the OTA download with the C templates removed — PASSED — 2026-08-28
+
+The check the 15,496-byte `.bss` shrink demanded. Session
+`~/deskmate-hw-sessions/2026-08-28-stage3a-gate-b/`.
+
+Evidence is the server journal on docker-vm, not the admin API: this session had no
+`DESKMATE_ADMIN_TOKEN`. Quoted rather than paraphrased:
+
+    08:27:24Z  INFO server::device_link: device link established device_id=dev-0005
+    08:27:26Z DEBUG server::firmware:    firmware check device_id=dev-0005 current=v2.0.0-live1
+    08:27:27Z  INFO server::device_link: device link closed device_id=dev-0005
+    08:28:33Z  INFO server::device_link: device link established device_id=dev-0005
+    08:28:36Z DEBUG server::firmware:    firmware check device_id=dev-0005 current=v2.0.0-live2
+
+The one-second gap between the `live1` check and the close is `install_update()`
+suspending the link for the download — the `0ad1a51` behaviour, forced by the hardware
+AES accelerator's DMA buffers needing internal RAM, which is why two concurrent TLS
+sessions cannot coexist on this board. Sixty-six seconds later the device is back
+reporting `v2.0.0-live2`.
+
+**It downloaded and installed on the first attempt.** No earlier failed attempt appears
+in the journal after the 07:54:41Z server restart that moved the catalog. Stage 2a's
+equivalent check failed once and succeeded on a retry of the identical image; the
+publish commit (`045f432`) explicitly pre-authorised one retry here. None was needed.
+
+The link established at 08:28:33Z was still open, with no intervening close, at
+08:35:03Z — 6.5 minutes continuous on the new image. Catalog and device now both read
+`v2.0.0-live2`, so no change is offered in either direction.
+
+Published artifact re-verified through the tunnel during the session:
+`GET https://deskmate.rodi.one/v1/firmware/v2.0.0-live2.bin` -> 200, 1,597,168 bytes,
+md5 `47686777a8725924d16b2a6d85c31422`, matching the build recorded in `045f432`.
+
+This is the third consecutive time flat-or-moved internal RAM has predicted a clean
+download (2026-08-26, 2026-08-27, today), and the first time the movement was a *shrink*
+— 15,496 bytes, roughly 140x the ~105 bytes that broke downloads outright in `3f2aa03`,
+in the opposite direction. **Three data points are still not a law.** The hazard is
+movement, not exhaustion, and the check stays mandatory after any change to firmware
+statics.
+
+**Not observed, and not to be described as verified:**
+
+1. `ota_state` and `last_ota_error` from `GET /v1/devices/dev-0005`. The version
+   transition and the sustained link establish that the download completed and the image
+   is running; the two status fields themselves were not read.
+2. **Rollback-window survival across a second boot.** The image is running and has been
+   for minutes, but `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y` acts at the *next* boot.
+   Only another power cycle settles whether `ota_mark_running_image_valid()` ran.
+3. Everything in Task 9 Steps 3-4 — one card per template at both orientations, and the
+   standalone clock on host loss — plus the three items Gate A folded in here (a minute
+   boundary crossing, 90 degrees, and a `ProgressRing` advancing with a tap while the
+   link is down). The panel was not observed in this session: the OBSBOT Meet 2 was
+   physically disconnected, absent from both `system_profiler SPUSBDataType` and the
+   avfoundation device list, with only its virtual-camera extension loaded publishing a
+   "camera off" placeholder.
+
+### Gate B Steps 2-3 and a new defect — 2026-08-28 (continued)
+
+Same session as the OTA entry above, resumed with admin-API access.
+
+**Step 2's remaining fields, now read.** `GET /v1/devices/dev-0005`:
+`firmware_version v2.0.0-live2`, `ota_state idle`, `last_ota_error null`,
+`last_network_error null`, `connected true`, `tier networked`, `rotation 270`,
+`wifi_state connected`, `wifi_rssi -56`, capabilities `core-widgets, config-rotation,
+extended-templates, asset-transfer, firmware-update, networking, scene-render`,
+`unknown_capability_bits 0x0`, and every counter zero — `crc_errors`,
+`malformed_frames`, `dropped_responses`, `dropped_events`, `dropped_ui_commands`,
+`overflow_frames`, `host_reconnects` — over 1,286 valid frames.
+
+**`wifi_rssi -56` deserves recording against the first-attempt download.** Both prior
+downloads on this board that failed and then succeeded on retry sat around -76 to -80 dBm.
+A link 20 dB stronger is a more ordinary explanation for the clean run than anything about
+the 15,496-byte `.bss` shrink. Do not credit the shrink with the smooth download.
+
+**`uptime_ms` 2,415,110 (~40 min) shows no reboot since the install**, so rollback survival
+across a second boot is still unproven, exactly as recorded above.
+
+**Step 3 — one card per template at both orientations — PASSED.** The saved config only
+had cards for four of the six templates, so a test config added `clock-analog`
+(analog-clock) and `weather-big` (big-number-label), put all six in one playlist at a 12 s
+dwell, and — deliberately — set the pomodoro `alert` to `none`, because an until-dismissed
+alert postpones firmware updates indefinitely and a gate session must not strand the device
+that way. All six faces render correctly at **270** and at **90**, the latter inverted in
+camera against the physically fixed board, which is what a real 180-degree UI rotation
+looks like. Session frames `*-six270.jpg` and `*-six90.jpg`.
+
+#### DEFECT: the standalone clock flashes for ~220-250 ms at every carousel transition
+
+Found as an unexplained frame during the 270 sweep, reproduced, then measured. **The link
+is up throughout**; this is not the host-loss fallback.
+
+`show_current_content()` in `protocol_task.c` queues `UI_COMMAND_SHOW_CARD_FALLBACK` when
+the host activates a screen, and `core/ui_command_policy.c` maps that to
+`UI_COMMAND_ACTION_SHOW_STANDALONE_CLOCK`. `dispatch_push_scene` then calls
+`ui_runtime_discard_card_fallbacks()` to pull the pending fallback back off the queue
+before the scene loads — its comment says so in as many words. **That only wins if the
+scene beats the LVGL command timer, and `UI_COMMAND_POLL_MS` is 20 ms.** Across
+Cloudflare -> cloudflared -> Caddy -> WSS, the scene never does.
+
+**This could not happen before stage 3a.** `git show 7d47ab6^:firmware/main/ui/ui_runtime.c`
+carries `UI_COMMAND_SHOW_VIEW`/`UI_COMMAND_PATCH_VIEW`: the device drew the next card
+immediately from its compiled-in C template plus retained field data, with no host round
+trip at all. `SHOW_CARD_FALLBACK` arrived in `35c46d2`. Retiring the C templates converted
+"render the next card locally, now" into "show the standalone clock until the server sends
+a scene".
+
+Measured from `20260828T091832Z-flash.mp4` (45 s, 59.94 fps) with ffmpeg scene detection
+over the panel crop; transitions come in pairs, 12 s apart, matching the dwell:
+
+    7.482 -> 7.699    217 ms
+    19.450 -> 19.679  229 ms
+    43.624 -> 43.874  250 ms
+    31.563            one change only — it entered the DigitalClock card, which resembles
+                      the standalone clock too closely to cross the threshold
+
+Frames at t=7.40/7.58/7.80 show `BigNumberLabel` -> **standalone clock** -> `RowList`. The
+middle face is positively identified as `clock_screen.c`: line 223 hides the "Connect
+deskmate app" hint when `s_online` is true, which is why the flash carries no hint where
+the genuine host-loss fallback did.
+
+Counters stayed clean throughout, so nothing is being rejected — this is a latency race,
+not a decode failure. **Not fixed here:** any firmware change costs an OTA re-verification
+cycle, so the fix is the owner's call.
+
+**The 132-row byte-exact parity gate is structurally blind to this.** It compares one
+rendered scene against one C template. It says nothing about what the panel shows in the
+gap between two of them, which is where this lives. Add it to the list of things that gate
+cannot prove, beside shared code and injected binding inputs.
+
+#### Gate A's folded item 3: the ProgressRing state machine — PASSED (online), offline tap owed
+
+Pomodoro pinned as the sole playlist entry so it stayed on screen; owner tapped. Frames
+`*-tap.jpg` in the session directory, 09:23-09:25Z, at 270 degrees. Observed in order:
+
+    Ready    full lavender ring, STATUS "Ready" white, ELAPSED 00:00
+    Running  ring RED and shrinking, STATUS "Running" RED, 00:59->00:43, ELAPSED 00:01->00:17
+    Paused   ring lavender again at its partial sweep, STATUS "Paused" white, frozen 00:39
+    Running  red again, 00:37->00:09, ELAPSED 00:23->00:51
+    Done     00:00, ELAPSED 01:00, STATUS "Done" white, indicator arc at zero sweep
+
+**This is the first hardware evidence for five of stage 3a's six additions at once:**
+`timer.status`, `timer.elapsed`, `timer.total`, `timer.permille` and `running_color`.
+Note the arc **shrinks** as the timer runs down — the ledger's inverted-percent defect
+(the device using elapsed where the C arc used remaining, which would have made a native
+ring grow) is genuinely fixed on the board, not just in tests.
+
+**The offline tap is NOT observed and remains owed** — but the reason is subtler than
+"no tap arrived", and the distinction is the point. Three attempts were made, dropping the
+link at 09:25:57Z, 09:28:17Z and 09:30:16Z. The owner reports tapping during the third and
+seeing the panel switch to the clock card immediately. **That switch does not require a tap
+to explain it.**
+
+A fourth run settled it: link dropped at 09:34:39Z, 60 s recorded at 60 fps, and the owner
+did not tap at all — scene detection over the whole clip finds nothing but the transition
+itself (three crossfade frames at t=38.87/38.89/38.91, no finger anywhere). **With no tap,
+the panel still left the pomodoro scene for the standalone clock at t=38.9 s.** In the
+third attempt the link dropped at 09:30:16Z, putting that timeout at ~09:30:55, and the
+last still frame was 09:30:56 — so the tap and the timeout coincided to within a couple of
+seconds. The owner's observation was real; the causal reading is what does not survive.
+
+This also sharpens the retained-scene window to **~39 s from link close**, measured at
+60 fps, replacing the ~42-45 s inferred from 3 s-spaced stills earlier in the session.
+That is the budget any future offline-interaction check must work inside, and it is why
+the first three attempts were built wrong.
+
+**Owner reports the offline tap works.** On the final attempt (link dropped 09:37:32Z)
+the owner tapped and the ring started counting — the local action doing exactly what it
+should with no host. Recorded as an **owner observation**, on the same footing as Gate A's.
+One honest caveat, stated once and not laboured: the 60 fps clip covering 09:37:32-09:38:02
+contains no finger and no panel change, so the tap fell outside that window, and the link
+was restored at 09:38:07 — the recording does not independently corroborate it. Treat this
+as owner-observed, not instrument-confirmed.
+
+The local-action path exists and was read — `carousel.c:79` -> `scene_view_apply_local_action`
+-> `scene_timer_apply_local_action` (`core/scene_binding.c:95`), which toggles `running`
+unconditionally so a tap from Ready or Done both produce a visible change — but reading
+the code is not observing the panel.
+
+Two incidental facts worth keeping:
+
+- **The retained-scene window before the standalone fallback is ~45 s.** Measured at
+  09:03:36Z link close -> ~09:04:21Z fallback, and corroborated by attempt 3, where a
+  40 s window did not fall back. That is the budget any future offline-interaction check
+  has to work inside.
+- **Reconnect (server-up to link-established) was 4 s, 47 s and 29 s across the three
+  drops.** Variable, not monotonically widening, so this is **not** evidence for Task 8's
+  widening backoff — recorded so a future session does not mistake one long reconnect for
+  that observation. Outages were 71 s, 91 s and 60 s respectively.
+
+**Device restored to its saved configuration** at the end of the session and verified via
+`GET /v1/devices/dev-0005`: the original five cards (test cards `clock-analog` and
+`weather-big` removed), playlist clock/weather/rss at 50 s dwell, orientation
+`landscape-flipped` / `rotation 270`, and the pomodoro `alert` re-armed to
+`on-timer-finish` with `until-dismissed` hold. Closing state: `v2.0.0-live2`,
+`ota_state idle`, `last_ota_error null`, `wifi_rssi -54`, `uptime_ms` ~63 min with no
+reboot. `dropped_events` moved 0 -> 1 during the deliberate link drops; every other
+counter is still zero.
+
+## Stage 3b Task 9 — PARTIAL, blocked on the panel; a link-timeout asymmetry found, 2026-08-29
+
+Session on `v2.0.0-live2`, device `dev-0005`, networked tier, rotation 270. **The gate did
+NOT close.** No plugin face was ever seen on the panel, because the OBSBOT app held the
+physical camera while publishing a muted "video off" frame on its virtual device, so every
+capture returned that placeholder rather than the board. Nothing below is a panel
+observation, and the visual half of Task 9 Steps 3-5 remains entirely unobserved.
+
+**What did pass, and is real:**
+
+- **The server redeploy and plugin load.** Built from a `git archive HEAD` export in
+  `rust:1.98-bookworm` on docker-vm (49 s warm, `target/` preserved), installed to
+  `/usr/local/bin/deskmate-server`. Startup logged
+  `plugin registry loaded path=/var/lib/deskmate/plugins plugin_count=2 failure_count=0`.
+  `DESKMATE_PLUGINS_DIR` was NOT set and did not need to be: `DEFAULT_PLUGINS_DIR` is
+  already `/var/lib/deskmate/plugins`.
+- **Task 9 Step 2's digest comparison, on the server side.** `GET /v1/plugins` reported
+  digests identical to `sha256sum` run independently on the VM and `shasum -a 256` run on
+  the Mac: `aqi/icons.ttf` = `40bbbac715465adf7ba539f53a0cb16991a2c1f73a4fb57af209d39e0c62b327`
+  (4320 bytes), `agenda/badge.rgb565` =
+  `e19db5d47bbdae46bf80e5a7df400795bce84973817c9f124642bc76bf41d33a` (812 bytes).
+  `icons.ttf` is byte-identical to `crates/lvgl-sim/assets/Inter-subset.ttf`, confirming
+  what CLAUDE.md claims.
+- **A real plugin scene compiled and reached the device.** `POST /v1/devices/dev-0005/scene`
+  with `template: "plugin"`, `plugin_id: "aqi"` and the committed fixture's inner
+  `payload` returned **HTTP 200**; `card_errors` stayed `[]`, `commands_processed` went to
+  1, and the device's `latest_revision` advanced 185 -> 191 with `malformed_frames`,
+  `crc_errors`, `overflow_frames` and `dropped_ui_commands` all still 0. So the registry
+  lookup, manifest compile with real assets, `validate_message`, and delivery to physical
+  hardware all work. **Whether it drew correctly is unknown.**
+
+**Task 9 Step 2 cannot be closed as written, and this is structural.** It asks to confirm
+"the digests the device reports". `StatusResponse` carries no asset inventory — the device
+reports holding a digest only implicitly, through `AssetBegin`'s `already_present` ack.
+Same class as M4's `unknown_field_count` item. The server side is confirmed above; the
+device side needs either a panel observation or a new status field.
+
+**Finding: the server reaps an idle link 4.5x faster than the device notices it is gone.**
+`server/src/runtime_device.rs` sets `IDLE_TIMEOUT = protocol::LINK_TIMEOUT_MS` = **10 s**
+with `PING_INTERVAL` 3 s, while the device's networked transport uses
+`NET_LINK_TIMEOUT_MS` = **45 s** (`firmware/main/link/net_link.c:25`; the USB path uses
+`PROTOCOL_LINK_TIMEOUT_MS` = 10 s, so this asymmetry is specific to the network link).
+Observed consequence, twice: the server logged `device link idle timeout, closing` while
+the device continued to report `online: true`, `wifi_state connected`, and every frame
+counter clean. Timestamps: established 14:30:38, closed 14:51:45; re-established 14:53:36,
+closed 14:53:57 — the second link survived **21 s**. One reconnect gap measured at
+**111 s** (14:51:45 -> 14:53:36). A later reconnect had not completed within 30 s of
+watching, consistent with a widening backoff but **not** an observation of one: a single
+gap does not show widening, and V2 Task 8's backoff item stays open.
+
+Signal was poor throughout and is the most likely proximate cause: `wifi_rssi` read
+**-91 to -93 dBm** early in the session and **-81 dBm** later. Do not read the drops as a
+proven defect in the link code; do read the 10 s / 45 s asymmetry as real and worth
+deciding about, since it means the server can abandon a device that still believes it is
+connected.
+
+Two scene pushes failed on that instability: one `502 {"kind":"runtime","message":"device
+request timed out"}` and one `502 ... "device is disconnected"`. The agenda plugin — the
+one with the `image` node — was therefore **never** successfully pushed, so the image-node
+and `board_lcd_rounder_cb` observations are unattempted, not failed.
+
+The board did not reboot at any point (`uptime_ms` rose monotonically 340,646 ->
+1,997,191, ~33 min) and `free_heap` stayed flat at ~8.30-8.31 MB (PSRAM; not a TLS health
+signal on this board). `dropped_responses` moved 0 -> 1 across the drops; every other
+counter stayed 0. The USB serial port re-enumerated `/dev/cu.usbmodem3101` ->
+`/dev/cu.usbmodem1101` mid-session with no reboot, consistent with the battery making a
+USB replug a link event rather than a power event.
+
+**Still owed from this stage:** every panel observation (Steps 3-5), the asset-GC teardown
+(Step 6), and the device-side half of the digest check.
+
+## Stage 3b Task 9, second attempt — plugin faces STILL unobserved; the 200 ms write budget bites for real, 2026-08-29
+
+Camera working this time (physical `OBSBOT Meet 2 StreamCamera` at 3840x2160, after the
+app released it). Same device `dev-0005`, `v2.0.0-live2`, rotation 270, no reboot across
+the whole session (`uptime_ms` reached 19,311,571, ~5.4 h). **No plugin face was seen. The
+gate still does not close**, but the reason is now diagnosed rather than unknown.
+
+**Two faces WERE observed rendering correctly, and both are host-pushed scenes** (stage 3a
+retired every C template, so anything on the panel is the scene renderer):
+
+- The **`RowList`/rss face**: "Headlines" chip, a truncated headline row
+  (`Sat, ...  The Internet Is Ki...`), and the count ring showing `1`. Clean, no artifacts.
+- The **`DigitalClock` card face**: hero `19:42`, a `Sat, Aug 29` date box, and the analog
+  dial complication with orange hands and tick marks. Clean, no artifacts, correct layout.
+
+**Closed, unplanned: the standalone fallback clock at 270 degrees, bottom margin included.**
+While the link was down the panel showed `clock_screen.c`'s fallback — hero time, date box,
+and the dim `Connect deskmate app` hint (`clock_screen.c:221`) — with no title chip and no
+`DATE` eyebrow, matching the clock-title-removal spec. The bottom margin is fully visible
+and uncropped in the frame. **Both items CLAUDE.md listed as unverified from that work (the
+fallback at 270 degrees, and its bottom margin) are now observed.** Note the fallback showed
+`23:43` where the host-driven face showed `19:42`: the fallback renders local UTC+4 while
+the host was pushing UTC, consistent with the board sitting at UTC+4.
+
+**Finding: the deliberately-unfixed 200 ms write budget DOES bite at realistic cadence.**
+CLAUDE.md records `PROTOCOL_WRITE_TIMEOUT_MS` = 200 ms for the device to deliver a reply the
+host waits 2000 ms for, and says "No evidence it bites at realistic cadence." **There is now
+evidence.** Over this session `dropped_responses` climbed **1 -> 15** while
+`malformed_frames`, `crc_errors` and `overflow_frames` all stayed **0** — the link was not
+corrupting anything, the device simply could not write replies inside 200 ms. Host-side this
+appeared as repeated `502 {"kind":"runtime","message":"device: device request timed out"}`
+on `POST /v1/devices/{id}/scene`.
+
+The two timeouts compose into a flap loop: the device drops a reply (200 ms), the server
+sees no activity and reaps at `IDLE_TIMEOUT` 10 s, the device reconnects in ~2 s
+(`19:43:58` closed -> `19:44:00` established), and it repeats. `wifi_rssi` was **-77 dBm**
+here, improved from the -91/-93 earlier, so this is not purely a fringe-signal artifact.
+
+**Why no plugin face could be captured, mechanically.** The pushes were not lost: server
+`diagnostics.commands_processed` reached **7** with `command_queue_full: 0` and
+`card_errors: []`, so the runtime accepted and processed every `PushScene`; only the acks
+timed out. But an operator-pushed scene is transient — on every reconnect the runtime
+replays the active card's own scene, which overwrites it, and with the link flapping on a
+~10 s period the pushed face is wiped before it can be photographed. Rotation compounds it
+(`my-playlist` is timed, 50 s dwell, clock -> weather -> rss).
+
+**Deliberately NOT done: raising the server's `IDLE_TIMEOUT` to stop the flapping.** It
+would very likely have unblocked the capture, but a gate observed on a hand-modified
+timeout is not evidence about the shipping configuration, and this session's whole purpose
+is evidence. The asymmetry recorded in the previous entry (server 10 s vs device
+`NET_LINK_TIMEOUT_MS` 45 s) and the 200 ms write budget are now both supported by
+measurements and want a real decision, not a workaround applied mid-gate.
+
+**Still owed, unchanged:** every plugin-face observation (Steps 3-5), the asset-GC teardown
+(Step 6), and the device-side half of the digest check. Nothing about the plugin faces is
+hardware-verified.
+
+## Stage 3b Task 9 — PASSED 2026-08-30: both plugin faces on the panel at both orientations
+
+Device `dev-0005`, `v2.0.0-live2`, networked tier, server at `0b9075f`. **The plugin faces
+drew on the panel.** Steps 1-5 pass; Step 6 (asset-GC teardown) was not run.
+
+**What made it possible.** The 2026-08-29 sessions failed on a link that flapped every
+~10 s. `0b9075f` moved the server's `IDLE_TIMEOUT` off `protocol::LINK_TIMEOUT_MS` (10 s,
+the USB value) to 30 s, derived as `DEVICE_NETWORK_LINK_TIMEOUT_SECS - IDLE_TIMEOUT_MARGIN_SECS`
+so it sits between a healthy link's silence and the device's own 45 s
+(`net_link.c`'s `NET_LINK_TIMEOUT_MS`). Result, measured: **0 idle timeouts in 15 minutes**
+against a prior baseline of links lasting 21-24 s, and operator scene pushes went **0/3 ->
+3/3 acked**. Signal was also better (`wifi_rssi` -67 to -69 vs -93 earlier) and
+`dropped_responses` stayed **0** for the whole session, so the fix is not the only variable
+— but the flapping stopped and stayed stopped.
+
+**Step 2 - digests.** `GET /v1/plugins` matched independent `sha256sum` (VM) and
+`shasum -a 256` (Mac): `aqi/icons.ttf` =
+`40bbbac715465adf7ba539f53a0cb16991a2c1f73a4fb57af209d39e0c62b327` (4320 B),
+`agenda/badge.rgb565` = `e19db5d47bbdae46bf80e5a7df400795bce84973817c9f124642bc76bf41d33a`
+(812 B). The device-side half is confirmed **transitively and unavoidably**: `StatusResponse`
+has no asset inventory (see the 2026-08-29 entry), but the aqi glyph could only resolve if
+the device held those exact bytes under that digest — and it drew.
+
+**Steps 3-4 - the aqi face, both orientations.** Every node rendered as the manifest
+specifies: `MODERATE` (`upper(data.current.category)`), an orange `M` glyph from the
+uploaded `icons.ttf` **at pixel_size 72, a size no baked tier provides** — which is the
+whole point of `SceneFont::Asset` and Step 4's requirement — a `42` hero
+(`data.current.aqi`), `AQI`, `42` + `PM2.5`
+(`default(round(data.current.pollutants.pm25.value, 0), "--")`), and `field.title`.
+No first-render hitch was visible at the capture cadence used; §6's 96 px glyph-cache-miss
+timing gate was **not** measured and is still owed.
+
+**`field.*` drew a real value for the first time in this project.** The aqi face's
+`{{ field.title }}` node rendered **"Headlines"** — the title of the `rss` card the scene
+was pushed to. The binding CLAUDE.md and the parity ledger both recorded as having no
+producer is now live end to end: `ServerProviderRefresher` emits the card's `title` ->
+`PushData` -> device retains it -> `field.title` resolves it at render. Note the reach is
+still what the ledger says: a plugin card's wire template is always `DigitalClock`, so only
+its four registered fields can ever resolve.
+
+**Step 5 - the agenda face and the image node, both orientations.** `2026-08-28`
+(`data.date`), the `badge.rgb565` **image node** as a white square, and exactly **five**
+event rows from a fixture carrying **six** — `MAX_REPEAT_ITEMS` enforced on hardware. The
+long first title truncated to `Standup with the who...` (a real `truncate()`), and the
+event with null time and null title rendered `--:--  (untitled)`. **No artifacts at either
+orientation with an image node present**, which is the `board_lcd_rounder_cb` observation
+§6 deferred out of stage 3a.
+
+**Real 90-degree geometry is now observed, not inferred.** Orientation was flipped by
+`PUT /v1/devices/{id}/config` with `preferences.orientation` `landscape-flipped` ->
+`landscape`, confirmed by the device reporting `rotation: 90`, and both faces were captured
+again. Both appeared correctly inverted in the camera with identical layout and no
+clipping. This is the claim no host gate can make: the parity gate and the `0x7E` capture
+both carry `flipped(A) == flipped(B)` blindness. Orientation was restored to
+`landscape-flipped` afterwards and verified both live and in
+`/var/lib/deskmate/configs/dev-0005.json`.
+
+**Finding: the operator scene route's caller-supplied `revision` shares one counter with
+`PushData`, and a high value stalls the runtime.** `link_state.c:116-120` keeps a single
+`latest_revision` that both `PushScene` and `PushData` are checked against. Pushing scenes
+at revisions 910-932 left the runtime's own `next_scene_revision` (~243) below it, and
+every card went `data-refused (StaleRevision)`. It does not self-heal by design:
+`next_scene_revision` starts at 0 and only increments, and the status-based adoption at
+`runtime.rs:3049` is deliberately for the **interrupt token** only (a 2026-08-20 note
+explains that coupling it to revisions misread 24 lost interrupts). Restarting the server
+makes it worse — `WorkerState::new` sets the counter to 0. What actually cleared it here
+was `ApplyConfig`, which reset the device's baseline: `latest_revision` read **248**
+afterwards and live weather resumed rendering. A device power cycle would also clear it
+(`link_state_init` memsets). **Treat a large operator `revision` as a footgun**; prefer
+values just above the runtime's current counter.
+
+**Also observed again: a request whose work succeeded but whose ack was lost.** The
+orientation-restore `PUT` returned `504 runtime command response timed out` while the
+device had already applied it (`rotation: 270`, and the stored config shows
+`landscape-flipped`). Same 200 ms `PROTOCOL_WRITE_TIMEOUT_MS` shape as 2026-08-29; the
+30 s idle timeout does not address it and was not intended to.
+
+**Not done:** Step 6, the asset-GC teardown (release, compaction, font-registry reset,
+retained-scene rebuild, and the `BUSY`/OTA-owner interaction). It remains without an
+automated test and without a hardware observation. Stage 4 makes it more urgent because
+rasterization turns volatile assets into the common case.
+
+## Stage 4 Task 7 Phase A — asset-GC teardown, PARTIAL (2026-09-06)
+
+Board on `v2.0.0-live2`, networked tier, `dev-0005`, capabilities **491** (no bit 9 yet
+— correct for the predecessor image). WiFi re-provisioned over the cable to
+`Slate7Legacy` earlier this session; same device identity/token, no identity cost. Server
+redeployed 2026-09-05 from `f40958a`, registry 5/0
+(`agenda, aqi, claude-limits, svg-aqi, svg-live-clock`).
+
+**Method.** Stage 3b Task 9 Steps 1-5/7 already passed 2026-08-30, so Phase A is only
+Step 6, the teardown. Drove a registry-wide desired-asset change: moved
+`/var/lib/deskmate/plugins/aqi` aside (dropping its `icons.ttf`, digest `40bbbac71546`,
+from the desired set), restarted the server, let the device reconnect so `synchronize_full`
+issues an `AssetRelease` with the shrunk keep-set; then restored `aqi` and restarted again.
+
+**Observed (webcam clip `20260905T201625Z-gc-teardown.mp4`, 2 fps frames):**
+- **Scene rebuilt live, no reboot.** Across both registry changes (aqi out 20:16:30Z,
+  aqi back 20:20:09Z) the device uptime ran continuously to **749,961 ms** with
+  `valid_frames` climbing 237→456 and **0 malformed / 0 crc / 0 overflow**; `free_heap`
+  flat at ~8.315 MB (PSRAM). The panel tore down and rebuilt its scene without a blank
+  reboot: link re-established 2.4 s after each restart, `card_errors: []` throughout.
+- **Compaction did not wipe.** The device stayed healthy after the release — the empty-set
+  wipe hazard (`AssetRelease { digests: [] }`) did not fire, and the retained agenda badge
+  digest (`e19db5d47bbd`) stayed in the keep-set. This is the `synchronize_full` +
+  `compose_asset_keep_set` behaviour the wire-sequence test (`hostile_device.rs`) pins,
+  now exercised on hardware.
+- **`claude-limits` drew on the panel for the first time** (frame
+  `20260905T202312Z-phaseA-settled.jpg`): SESSION 40% / WEEKLY 19% / RESETS Sun 1:40 AM /
+  Wed 8:00 PM / "Max 5×", a clean Native scene that survived the teardown intact. Closes
+  the runbook's "claude-limits on the panel" debt.
+
+**NOT observed, and why (honest gaps, not failures):**
+- **Font-registry reset with a displayed registry font, and the glyph disappearing.**
+  None of `dev-0005`'s cards (clock, weather, rss, pomodoro, claude-limits) display a
+  registry font/image — the released `icons.ttf` was held but not on screen — so the
+  font-release-on-destroy step is not panel-visible on this config. The rebuild path that
+  contains `font_registry_reset()` did run (the scene rebuilt correctly with its baked-font
+  cards); the specific glyph-vanishes moment was not reproduced. Re-observing it would mean
+  re-treading 2026-08-30's operator-route glyph render purely to tear it down.
+- **Asset-store compaction counters.** The device exposes no asset-used-byte / DEAD-record
+  counter through `status` or the admin snapshot (`diagnostics` covers queues/providers
+  only), so "absent digest marked DEAD" is confirmed by wire contract and the
+  did-not-wipe/did-not-break evidence above, not by a device-reported number.
+- **The `BUSY`/OTA-owner interaction.** Needs an OTA in flight, which Phase A cannot have
+  without publishing firmware. Folded into Phase B Step 10's "repeat one release while OTA
+  owns the panel", recorded there as completing this clause — an explicit, planned
+  deviation from strict phase ordering (see the session runbook).
+
+**Verdict: Phase A did not fail** — the teardown/release/rebuild mechanism works on
+hardware and nothing regressed — but Step 6 is only **partially** observed. The
+font-vanish and BUSY/OTA pieces are deferred (the latter into Phase B by design; the
+former is not reproducible on this device's card set). Proceeding to Phase B is therefore
+justified, with the BUSY/OTA observation owed inside it.
+
+## Stage 4 Task 7 Phase B — PASSED on hardware (2026-09-06)
+
+Published `v2.0.0-raster1` (built from `f40958a`, sha
+`29f15a6f7ee1f6f5717deaa09a21a3bdb75bd19c6ddeae5dd2b51ade1afc3b15`) by flipping
+`DESKMATE_FIRMWARE_VERSION` on docker-vm and restarting. Baseline memory (same tree):
+DIRAM total 203,867 (`.text` 93,635, `.bss` 87,104, `.data` 23,128), IRAM 16,384/16,384
+(0 remaining) — internal RAM byte-flat vs the cleanup tree.
+
+**B5 — OTA download + rollback survival: PASSED.** The device only checks firmware at
+boot (24 h interval otherwise), so a USB RTS reset re-ran the boot check. Sequence (server
+UTC): reset 20:54:41 → boot, `ota_state: checking` at uptime 13,002 ms → downloaded and
+installed → rebooted into the new slot → `v2.0.0-raster1`, `ota_state: idle`, uptime reset
+to 8,807 ms at 20:55:29. **Installed on the first attempt**, `last_ota_error: None`
+throughout. Rollback-window survived: uptime then climbed 24k→86k ms and stayed on
+raster1 with no revert to live2, so the image marked itself valid. The documented
+memory-layout OTA hazard did not bite.
+
+**B6 — capability truth: PASSED.** Device and server report numeric **1003**; the server
+decodes the bit set by name as `core-widgets, config-rotation, extended-templates,
+asset-transfer, firmware-update, networking, scene-render, volatile-assets`;
+`unknown_capability_bits: 0x0`. A volatile transfer was accepted (see B7).
+
+**B7 — native vs raster: PASSED at 270°.** The native weather card
+(`icon-badge-text`) drew cleanly. Pushing `svg-aqi` (a manifest-v2 SVG template →
+`RasterOnly`) via the operator route produced a server-side `resvg` render → one 448×368
+RGB565 volatile frame → one-node scene: the panel showed "GOOD / ⬤ / 42 / AQI".
+`free_heap` dropped ~334 KB on the push (one 329,740-byte RGB565 frame in PSRAM),
+confirming the volatile transfer. (The circle reads bright/white on the webcam — likely
+exposure of the bright fill; not diagnosable from the camera.) **90° not yet captured in
+this checkpoint.**
+
+**B8 — refuse rule: PASSED (mandatory rollout observation).** `svg-live-clock` (an SVG
+face binding `{{ time:HH:mm }}`) pushed via the operator route *with data*, so the only
+possible refusal cause is the live binding. Result: HTTP 200, **no raster asset and no
+frozen scene sent**, and a typed `scene-refused` card error naming `time:HH:mm` ("…a
+server-rendered image of it would freeze, so it is refused instead…"). The panel showed
+the **live standalone clock** (observed ticking 21:03→21:08), i.e. the device kept drawing
+time itself rather than freezing a rastered clock — the exact intended behaviour.
+
+**B9 — 30-second floor: core behaviours PASSED (mandatory rollout observation).** Through
+the operator route, three distinct `svg-aqi` snapshots pushed at t≈0/5/11 s (AQI 11 / 88 /
+199), all HTTP 200. Observed (1 fps frames of `…-floor.mp4`): (1) the first frame (11)
+rendered immediately; (2) no new frame appeared before 30 s; (3) at the 30 s boundary
+(push A 21:03:25 → 21:03:55) the **newest** snapshot (199 "UNHEALTHY") appeared — the
+intermediate 88 was coalesced away and never shown. Floor timing was exact.
+- **One caveat, root-caused as a test-setup artifact, not a floor defect:** during the
+  deferral window the panel fell back to the standalone clock instead of holding the
+  prior frame (11). Cause: `svg-aqi`'s source is `https://example.invalid/` (unfetchable
+  by design), so its provider fetch kept failing (`providers[svg-aqi-card].state = error:
+  dns resolution failed`, `provider_jobs_started` 3→5) and the resulting data-less error
+  snapshot made the SVG evaluation fail, clobbering the operator-injected good data
+  between pushes. With a real fetchable source this would not occur. Worth noting: that
+  SVG-evaluation failure surfaced only in the `providers` block, not as a `card_errors`
+  entry.
+
+Config note: these observations used a temporary manual single-card playlist `svg-test`
+with added plugin cards `svg-aqi-card`/`svg-live-clock-card`; dev-0005's original config
+is saved and is restored at the end of the session.
+
+### Phase B continued — B7 both orientations, B10 churn, restore (2026-09-06)
+
+**B7 — raster at BOTH orientations: PASSED.** The same `svg-aqi` raster
+("GOOD / ⬤ / 42 / AQI") drew correctly at 270° (`landscape-flipped`, upright to the
+camera) and at 90° (`landscape`, 180°-inverted to the camera because the board sits
+optimally for 270°). The full scene renders under both software rotations; the physical
+transform and rounder handle the volatile RGB565 frame. Capturing a single still needed
+the 30 s floor to be clear and a push-then-capture within a few seconds, because
+`svg-aqi`'s unfetchable `example.invalid` source repeatedly clobbers operator data with
+an error snapshot (see the B9 caveat).
+
+**B10 — volatile churn: core PASSED.** 20 raster revisions pushed via the operator route
+at ~31 s intervals (AQI 39→210), all HTTP 200. `free_heap` stayed flat at **7,981,503**
+(±20 bytes; two transient dips to ~7,979,900 caught a sample mid-swap with the incoming
+slot briefly allocated) across the whole ~10-minute run — **PSRAM did not trend down**, so
+old volatile frames are freed as new ones display; no leak. Uptime ran continuously
+(no reboot), `valid_frames` 456→1196, 0 malformed/crc/overflow/dropped-ui-commands. The
+final raster drew with no tearing/artifact. When the svg cards were later removed from
+config, `free_heap` returned to 8,317,395 — the held volatile frame was released on
+teardown, a bonus confirmation of release-on-card-removal.
+- **Limits:** the device exposes no flash asset-used-byte counter, so "decoded frames
+  never touch the flash counter" is inferred from `free_heap` being PSRAM and no durable
+  `AssetRelease` growth, not read directly. And "no standalone-clock flash on an ordinary
+  old→new swap" could not be isolated, because the `example.invalid` provider clobbers to
+  the clock between the 31 s-spaced pushes regardless of the swap.
+
+**Restore.** dev-0005's original production config was PUT back (generation 4): rotation
+270°, original cards (`claude-limits, clock, pomodoro, rss, weather`), no card errors.
+The device remains on the shipping image **v2.0.0-raster1** in networked tier with its
+dev-0005 identity — never left networked tier, so no re-provision was needed.
+
+**Still owed on hardware (Phase B remainder), each needing its own setup:**
+- **B11 / Task 6 Step 5 — the on-target `framebuffer_diff` byte comparison** (expected
+  96/8/88). Needs a `DESKMATE_DEV_DIAG=1` flash and a local-tier round-trip (networked
+  tier refuses `PushScene` over the cable), which takes the device off the shipping image
+  temporarily; the diag image is built (`firmware/build-diag`, sha
+  `f815edf07cef7981698304d964f468ed7cde6296d7a1783c4f32843f16fb1dbc`). Deliberately not
+  run at the tail of this session to avoid a fatigued mis-restore; the plaintext token in
+  `pass` means it restores to the same dev-0005 identity.
+- **The BUSY/OTA-owner variant** (carried from stage 3b Task 9 Step 6 / Phase A): observe
+  a raster release while an OTA owns the panel. Needs a pending OTA in flight (i.e. a
+  freshly published newer version) concurrent with a push; `ota_state` stayed `idle`
+  through churn, so it was not observed.
+
+**Phase B verdict: the shipping stage-4 image passed every gate that does not require the
+diag build** — OTA download/install/rollback survival, capabilities 1003, native and
+raster at both orientations, the typed refuse rule, the 30 s floor, and 20-revision
+volatile churn with flat PSRAM. Stage 4 is confirmed working on the physical board.
+
+## Stage 4 Task 7 — B11 / Task 6 Step 5: on-target `framebuffer_diff` — PASSED (2026-09-06)
+
+The one Phase B item that needs the diag build. Ran later the same day.
+
+**Setup.** The staged diag image (`f815edf…`) turned out to be **stale** — an Aug-21
+build predating the scene renderer: on boot it reported `v2.0.0-swaes6`, capabilities
+`0xcb` (203). Caught by reading `deskmate-cli status` before trusting it; comparing the
+current simulator against that firmware would have been meaningless. The "no source drift
+since the runbook" check had verified the source, not that the staged *binary* matched it
+— the runbook's own hash was of a leftover. Rebuilt the diag image fresh from HEAD
+(`idf.py -C firmware -B firmware/build-diag -DDESKMATE_DEV_DIAG=1 build`, sha
+`6eae2138702332cb4663d4e415465bd19f9dbb7b3c281310ef6a25459a829491`), which reported
+`v2.0.0-raster1` / caps `0x3eb` (1003) as expected. The release restore artifact was
+rebuilt too and **reproduces the shipping image byte-identically** (sha
+`29f15a6f7ee1f6f5717deaa09a21a3bdb75bd19c6ddeae5dd2b51ade1afc3b15`), so the diag build
+(same source + `DESKMATE_DEV_DIAG`) is trustworthy for the comparison. Device taken to
+**local tier** over the cable (`provision --tier local`), which is what lets it accept
+`ApplyConfig`/`PushScene` over USB.
+
+**Result: `total=96 identical=86 differing=0 errored=0 excluded=10` — exit 0.** Every
+includable case is byte-identical, both orientations, no tolerance. The log is at
+`docs/hardware/media/2026-09-06-task7/framebuffer_diff-2026-09-06.log`.
+
+**The predicted split was 96/8/88; the first hardware run corrected it to 96/10/86 by
+surfacing three test-harness fidelity issues — none a firmware or renderer defect:**
+
+1. **`plugin-v2-timer--remaining-357-of-1000` (both orientations): time sync rejected.**
+   The case pinned `now_unix_seconds: 0`, below the device's `PROTOCOL_MIN_UNIX_SECONDS`
+   (1577836800 = 2020-01-01) sanity floor, so every push failed at `TimeSync` with
+   `InvalidValue("unix seconds")`. The timer scene binds only `timer.permille` /
+   `timer.remaining`, never `time:`/`date`, so the instant is irrelevant to the frame —
+   the harness just time-syncs every case unconditionally. **Fixed** by pinning a valid
+   instant (`SCENE_NOW`); both rows now render identically on the board. (Firmware is
+   correct — rejecting a nonsense clock is the intended bound.)
+
+2. **`plugin-aqi--empty` (both orientations): 36 px differ (14×3 strip at the
+   `field.title` box).** The simulator drew `"--"`, the device drew nothing. `aqi`'s empty
+   state pushes no `title` field and its scene binds `{{ field.title }}`. `scene_binding.c`
+   writes the `"--"` placeholder only when `context->field()` returns **NULL**. The
+   simulator gets an empty field array → `title` absent → NULL → `"--"`. The device has
+   `title` **registered** (a configured card always registers its template's fields; the
+   harness's `apply_case_config` uses `DigitalClock`) → returns `""` (empty, non-NULL) →
+   renders nothing. Same C, different field input; the device *cannot* reproduce the
+   placeholder for a name its registry knows. **Excluded from hardware, kept in the golden
+   suite** (its deliberate placeholder coverage) — the same shape as the existing
+   `field.status` (`scene-text`/`scene-label`) exclusions. This is the "injected/absent
+   binding-input" blindness the ledger warned of, made visible.
+
+3. **`scene-image--flipped`: `InvalidPayload "scene could not be rendered"` — a teardown
+   race, not a renderer defect.** The synthetic image case has **four** image nodes
+   (agenda has one, and never tripped it). Run alone at either orientation the case is
+   byte-identical; it failed **only** when the same 4-image scene was re-rendered at 270°
+   immediately after 90° (the matrix flips orientation between a case and its
+   counterpart). The device frees the previous scene's image buffers asynchronously on the
+   UI tick, so back-to-back heavy-image renders outpaced the teardown and the new render
+   failed to allocate. `free_heap` was 8.4 MB (PSRAM) throughout — not gross exhaustion.
+   A post-config settle before an asset-bearing re-render removes it (500 ms sufficed;
+   `CONFIG_SETTLE` = 700 ms for margin). The renderer itself draws multi-image scenes
+   correctly at both orientations. *Worth noting for possible future firmware hardening:*
+   a runtime orientation change with a heavy-image card live can transiently fail one
+   re-render before the async teardown frees memory; production orientation changes carry
+   natural latency and the device recovers, so this was recorded, not fixed.
+
+The three fixes are test-only (`cases.rs`, `examples/framebuffer_diff.rs`) — no firmware,
+protocol, or config change — so no OTA re-verification is owed. The harness unit test now
+pins the 96/10/86 split with the per-reason exclusion breakdown.
+
+**Restore.** Re-provisioned networked (`dev-0005`, WiFi `Slate7Legacy`, offset 240,
+plaintext token from `pass`), then full-flashed the verified release image (sha
+`29f15a6f…`). Device came up `v2.0.0-raster1`, caps `0x3eb` (1003), tier networked, WiFi
+connected (`192.168.8.168`), rotation 270°; the server confirms `dev-0005` **connected**,
+`v2.0.0-raster1`, `volatile-assets` present — **same identity, no re-mint** (the plaintext
+token authenticated). Production config restored automatically on reconnect.
+
+**Still owed on hardware:** only the **BUSY/OTA-owner variant** (a raster release while an
+OTA owns the panel) — needs a pending OTA in flight, a distinct setup, not run this
+session. B11 is now closed. (V2 Task 8's widening-backoff observation on the shipping
+build was discharged 2026-09-06 — see the entry at the end of this file.)
+
+## V2 Task 8 — widening-backoff observation on the shipping build, PASSED (2026-09-06)
+
+Board `dev-0005`, shipping image `v2.0.0-raster1` (caps 1003), networked tier, WiFi up
+throughout, USB attached. This closes the item that had been stuck as a catch-22: the
+shipping build routes its console to UART0 only
+(`CONFIG_ESP_CONSOLE_UART_DEFAULT=y`, `SECONDARY_NONE`), so `websocket_client: Reconnect
+after N ms` never reaches the USB cable, and the indirect "outage-length -> return-time"
+method is provably invalid (uniform sample in [0,T]). Both are recorded above as the
+reason prior sessions could not discharge it.
+
+**Method that worked — observe the retry schedule at the server socket.** Stopped
+`deskmate-server` and bound a bare TCP listener to its port `192.168.8.20:8443` that
+accepts each connection, logs a UTC-ms timestamp, and closes. Caddy proxies the device's
+WSS reconnect attempts to it, so the interval between logged connections is the device's
+own reconnect delay. Two sources appeared: a constant 2.01 s health probe from the host
+IP (104 conns, filtered out) and the device's proxied retries via the docker bridge
+`172.26.0.2`.
+
+**Widening curve observed (device retries, seconds between attempts):**
+`3.1 -> 5.1 -> 10.7 -> 16.6 -> 35.0 -> 50.3 -> 66.2` — doubling and capping at the 60 s
+ceiling, the last two being jittered draws of the capped 60 s base (±20% -> [48,72]).
+This is the genuine backoff schedule: the failure shape only affects what happens after
+TCP connect, not when the device dials, and the clean doubling confirms it. Log:
+`docs/hardware/media/2026-09-06-task8/listener-conns.log`.
+
+**Panel behaviour.** ~30 s in, the retained Weather card still showed (link-timeout
+fallback is 45 s). Past 45 s the panel fell to the standalone clock
+(`panel-standalone-fallback.jpg`) — no reboot, no spin. After the server was restored
+the device reconnected and live weather was pushed back down
+(`panel-restored-weather.jpg`).
+
+**A confound found and resolved — the "kill the server" clause was then run properly.**
+The listener run *also* rebooted the device ~181 s in (`uptime_ms` dropped; no fresh
+coredump was written — the flash coredump is a stale `4160f1cb8` image, not raster1's
+`d663a6a58`, so the reboot was not a panic/abort). The accept-then-close listener is a
+half-open failure shape a real outage does not produce. So a second run used a **plain
+`systemctl stop` (real HTTP-502 outage, no listener)** for 210 s with a non-resetting
+USB serial logger attached. The boot ROM prints its banner on USB-JTAG at every reset;
+the serial log showed **only the baseline attach-reset banner
+(`rst:0x15 USB_UART_CHIP_RESET`) and no new banner during the outage window** — the
+device did **not** reboot under a genuine outage, stayed on the standalone clock, and
+reconnected on restore. Log: `plain-outage-serial.log`. Every device reset seen this
+session was either `USB_UART_CHIP_RESET` (my serial logger's control lines — the
+attach/detach-resets-the-board hazard, now confirmed by reason code) or the accept-close
+listener's induced reboot; none was a crash/watchdog/brownout and none occurred under a
+plain 502 outage.
+
+**Verdict.** V2 Task 8's "killing the server leaves the device retrying with visibly
+widening gaps rather than rebooting or spinning" is **satisfied on the shipping build**:
+widening intervals observed (listener run) and no reboot under a genuine outage (plain
+run). Two robustness/ops notes, neither a V2 blocker: (1) a peer that repeatedly accepts
+then closes the socket half-open can drive the device to reboot after ~3 min (~7
+attempts) — likely internal-RAM churn on repeated TLS setup; worth a follow-up but
+distinct from the normal outage path; (2) the device briefly displayed an apparently
+wrong wall-clock time during the outage (standalone clock ~6 h off real local) — the VM
+clock is NTP-synced and correct now, so glance at the TimeSync/offset path later.

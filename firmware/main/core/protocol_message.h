@@ -4,6 +4,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "core/asset_store.h"
+#include "core/scene_model.h"
 #include "protocol_frame.h"
 
 #define PROTOCOL_LINK_TIMEOUT_MS 10000U
@@ -30,19 +32,43 @@
 #define PROTOCOL_CAPABILITY_ASSET_TRANSFER (UINT64_C(1) << 5)
 #define PROTOCOL_CAPABILITY_FIRMWARE_UPDATE (UINT64_C(1) << 6)
 #define PROTOCOL_CAPABILITY_NETWORKING (UINT64_C(1) << 7)
+/* Gates PushScene (type 19). A host that does not see this bit must not
+ * send one -- the same contract NetworkConfig and FactoryReset have under
+ * bit 7. Defining a bit is not switching it on: bit 7 sat defined-but-dark
+ * for most of V2 and the constant read 75 instead of 203, so the value
+ * below is pinned by a test in both languages. */
+#define PROTOCOL_CAPABILITY_SCENE_RENDER (UINT64_C(1) << 8)
+/* A build advertising this bit accepts `AssetBegin { volatile: true }` and
+ * resolves committed volatile image bytes. Bit 5 cannot carry that promise:
+ * deployed bit-5 builds explicitly reject volatile begins. */
+#define PROTOCOL_CAPABILITY_VOLATILE_ASSETS (UINT64_C(1) << 9)
 #define PROTOCOL_LEGACY_CAPABILITIES PROTOCOL_CAPABILITY_CORE_WIDGETS
 #define PROTOCOL_CURRENT_CAPABILITIES                            \
     (PROTOCOL_CAPABILITY_CORE_WIDGETS |                          \
      PROTOCOL_CAPABILITY_CONFIG_ROTATION |                       \
      PROTOCOL_CAPABILITY_EXTENDED_TEMPLATES |                    \
+     PROTOCOL_CAPABILITY_ASSET_TRANSFER |                        \
      PROTOCOL_CAPABILITY_FIRMWARE_UPDATE |                       \
-     PROTOCOL_CAPABILITY_NETWORKING)
+     PROTOCOL_CAPABILITY_NETWORKING |                            \
+     PROTOCOL_CAPABILITY_SCENE_RENDER |                          \
+     PROTOCOL_CAPABILITY_VOLATILE_ASSETS)
 #define PROTOCOL_MAX_SSID_LENGTH 32U
 #define PROTOCOL_MAX_PSK_LENGTH 64U
 #define PROTOCOL_MAX_SERVER_URL_LENGTH 128U
 #define PROTOCOL_MAX_DEVICE_TOKEN_LENGTH 128U
 #define PROTOCOL_MAX_DEVICE_ID_LENGTH 32U
 #define PROTOCOL_MAX_IP_LENGTH 15U
+/* 1920, not the 2034-byte envelope cap: the CBOR map header, the 32-byte
+ * digest with its bstr header, the offset key/value, and the data bstr
+ * header cost roughly 46 bytes; this leaves deliberate margin. */
+#define PROTOCOL_MAX_ASSET_CHUNK_BYTES 1920U
+#define PROTOCOL_MAX_ASSET_DIGESTS 32U
+#define PROTOCOL_ASSET_ENCODING_RAW 0U
+#define PROTOCOL_ASSET_ENCODING_RLE565 1U
+#define PROTOCOL_VOLATILE_IMAGE_DECODED_LENGTH 329740U
+/* Same 32 bytes as a widget id, and for the same reason: a card id is an
+ * identifier the host chose, not free text. */
+#define PROTOCOL_MAX_CARD_ID_LENGTH 32U
 
 typedef enum {
     PROTOCOL_TYPE_STATUS_REQUEST = 1,
@@ -59,6 +85,11 @@ typedef enum {
     PROTOCOL_TYPE_DEVICE_EVENT = 12,
     PROTOCOL_TYPE_NETWORK_CONFIG = 13,
     PROTOCOL_TYPE_FACTORY_RESET = 14,
+    PROTOCOL_TYPE_ASSET_BEGIN = 15,
+    PROTOCOL_TYPE_ASSET_CHUNK = 16,
+    PROTOCOL_TYPE_ASSET_COMMIT = 17,
+    PROTOCOL_TYPE_ASSET_RELEASE = 18,
+    PROTOCOL_TYPE_PUSH_SCENE = 19,
 } protocol_message_type_t;
 
 typedef enum {
@@ -153,6 +184,32 @@ typedef struct {
 } protocol_network_config_t;
 
 typedef struct {
+    uint8_t digest[ASSET_DIGEST_BYTES];
+    asset_kind_t kind;
+    uint32_t total_length;
+    bool volatile_tier;
+    uint8_t encoding;
+    bool has_decoded_length;
+    uint32_t decoded_length;
+} protocol_asset_begin_t;
+
+typedef struct {
+    uint8_t digest[ASSET_DIGEST_BYTES];
+    uint32_t offset;
+    uint8_t data[PROTOCOL_MAX_ASSET_CHUNK_BYTES];
+    size_t data_length;
+} protocol_asset_chunk_t;
+
+typedef struct {
+    uint8_t digest[ASSET_DIGEST_BYTES];
+} protocol_asset_commit_t;
+
+typedef struct {
+    uint8_t digests[PROTOCOL_MAX_ASSET_DIGESTS][ASSET_DIGEST_BYTES];
+    size_t digest_count;
+} protocol_asset_release_t;
+
+typedef struct {
     char widget_id[PROTOCOL_MAX_WIDGET_ID_LENGTH + 1U];
     protocol_template_kind_t template_kind;
     protocol_size_class_t size_class;
@@ -217,6 +274,20 @@ typedef struct {
     protocol_field_t fields[PROTOCOL_MAX_FIELD_COUNT];
 } protocol_push_data_t;
 
+/* PushScene: one card's whole display list, replacing whatever that card
+ * drew before. `scene` is embedded by value rather than pointed at because
+ * protocol_message_t is the decoder's single destination and nothing here
+ * allocates -- but it is ~6 KB, which makes protocol_message_t ~6.4 KB.
+ * link/protocol_task.c holds its one instance inside the PSRAM-allocated
+ * protocol_context_t, so this costs no internal DRAM and nothing on the
+ * 8 KiB task stack; a new caller putting a protocol_message_t on a stack
+ * would, and must not. */
+typedef struct {
+    char card_id[PROTOCOL_MAX_CARD_ID_LENGTH + 1U];
+    uint32_t revision;
+    scene_t scene;
+} protocol_push_scene_t;
+
 typedef struct {
     int64_t unix_seconds;
     int16_t utc_offset_minutes;
@@ -226,6 +297,8 @@ typedef struct {
     uint8_t acknowledged_type;
     bool has_revision;
     uint32_t revision;
+    bool has_already_present;
+    bool already_present;
 } protocol_ack_t;
 
 typedef struct {
@@ -262,6 +335,10 @@ typedef struct {
     char last_network_error[PROTOCOL_MAX_DIAGNOSTIC_LENGTH + 1U];
     bool has_last_ota_error;
     char last_ota_error[PROTOCOL_MAX_DIAGNOSTIC_LENGTH + 1U];
+    bool has_asset_store_stats;
+    uint32_t asset_store_used_bytes;
+    uint32_t asset_store_free_bytes;
+    uint32_t asset_count;
 } protocol_status_response_t;
 
 typedef struct {
@@ -287,6 +364,11 @@ typedef struct {
         protocol_trigger_interrupt_t trigger_interrupt;
         protocol_device_event_t device_event;
         protocol_network_config_t network_config;
+        protocol_asset_begin_t asset_begin;
+        protocol_asset_chunk_t asset_chunk;
+        protocol_asset_commit_t asset_commit;
+        protocol_asset_release_t asset_release;
+        protocol_push_scene_t push_scene;
     } value;
 } protocol_message_t;
 
@@ -309,7 +391,47 @@ typedef enum {
     PROTOCOL_MESSAGE_ERR_UNKNOWN_WIDGET,
 } protocol_message_result_t;
 
-bool protocol_template_kind_valid(protocol_template_kind_t kind);
+static inline bool protocol_template_kind_valid(protocol_template_kind_t kind)
+{
+    return kind >= PROTOCOL_TEMPLATE_DIGITAL_CLOCK &&
+           kind <= PROTOCOL_TEMPLATE_ICON_BADGE_TEXT;
+}
+
+typedef enum {
+    PROTOCOL_REQUEST_DISPATCHABLE = 0,
+    /* A response-only type (Ack, Error, StatusResponse, HeartbeatAck,
+     * DeviceEvent) arriving as a request. */
+    PROTOCOL_REQUEST_NOT_A_REQUEST,
+    /* A request type whose capability bit this build does not advertise. */
+    PROTOCOL_REQUEST_MISSING_CAPABILITY,
+} protocol_request_gate_t;
+
+/* The device's request-admission policy: whether a build advertising
+ * `capabilities` dispatches `type` when it arrives as a request.
+ *
+ * It lives here, rather than inline in link/protocol_task.c where it is
+ * used, for one reason: it is the only part of dispatch a host test can
+ * reach, and the failure it guards against has bitten this project once
+ * already in mirror image. Bit 7 was defined and never set, so a conforming
+ * host could not provision the device at all; the inverse -- a bit
+ * advertised whose messages are refused -- is worse, because the host acts
+ * on the advertisement. Keeping the table and PROTOCOL_CURRENT_CAPABILITIES
+ * in the same header lets test_protocol.c assert the two agree, for every
+ * bit, rather than for whichever one someone remembered.
+ *
+ * `capabilities` is a parameter and not PROTOCOL_CURRENT_CAPABILITIES so
+ * that a build profile omitting a bit is refused explicitly rather than
+ * silently accepting messages its firmware did not compile support for. */
+protocol_request_gate_t protocol_message_request_gate(
+    protocol_message_type_t type,
+    uint64_t capabilities);
+
+/* The four asset-transfer message types remain gated by bit 5. This second
+ * payload-aware gate adds bit 9 only for the volatile form of AssetBegin, so
+ * an older bit-5 device never accepts a tier it cannot actually store. */
+protocol_request_gate_t protocol_asset_begin_request_gate(
+    const protocol_asset_begin_t *begin,
+    uint64_t capabilities);
 
 protocol_message_result_t protocol_message_decode(
     const protocol_frame_t *frame,

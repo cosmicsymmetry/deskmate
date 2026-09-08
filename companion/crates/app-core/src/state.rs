@@ -10,22 +10,31 @@ pub struct AppSnapshot {
     pub providers: Vec<ProviderSnapshot>,
     pub pomodoros: Vec<PomodoroSnapshot>,
     pub card_data: Vec<CardDataSnapshot>,
-    /// Cards whose last data push the device understood and refused. Retrying an
-    /// identical payload can only fail again, so the runtime drops it from the dirty
-    /// set and records it here instead of looping. See `CardError`.
+    /// Cards whose last data push was refused, or whose complete scene could not be
+    /// built or rendered exactly. Retrying an identical payload can only fail again,
+    /// so the runtime records the typed actionable failure here instead of looping.
+    /// See `CardError`.
     pub card_errors: Vec<CardError>,
     pub persistence: PersistenceState,
     pub diagnostics: RuntimeDiagnostics,
 }
 
-/// A card-scoped, user-actionable failure: the device accepted the connection and
-/// the frame, understood the push, and refused its contents (an undeclared field
-/// type, an over-long text value, a value outside the template's declared range).
-/// Transport failures are never reported here — those are connection state.
+/// A card-scoped, user-actionable failure. Transport failures are never reported
+/// here — those are connection state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CardError {
+    pub kind: CardErrorKind,
     pub card_id: String,
     pub message: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CardErrorKind {
+    /// The display rejected an otherwise valid `PushData` payload.
+    DataRefused,
+    /// The host could not build, or the display could not render, the complete scene.
+    SceneRefused,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -36,6 +45,18 @@ pub struct RuntimeDiagnostics {
     pub provider_queue_full: u64,
     pub provider_results_discarded: u64,
     pub subscriber_snapshots_overwritten: u64,
+    /// `InterruptDismissed` events the host received but could not apply,
+    /// because the arbiter no longer tracks the token they carry (or they
+    /// carry none at all).
+    ///
+    /// Not an error on its own: the common cause is benign, a bounded alert
+    /// hold expiring host-side and freeing the slot before the user got round
+    /// to tapping the overlay the device is still showing. But it was
+    /// previously invisible, and a hardware session spent time on a tap that
+    /// looked like it did nothing. A nonzero value here says the host saw the
+    /// tap and deliberately declined it, which is a different diagnosis from
+    /// the event never arriving at all.
+    pub interrupt_dismissals_ignored: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -132,9 +153,24 @@ pub enum DeviceCapability {
     AssetTransfer,
     FirmwareUpdate,
     Networking,
+    SceneRender,
+    VolatileAssets,
 }
 
 impl DeviceCapability {
+    const ALL: [Self; 10] = [
+        Self::CoreWidgets,
+        Self::ConfigRotation,
+        Self::DashboardLayouts,
+        Self::ExtendedTemplates,
+        Self::HostTapActions,
+        Self::AssetTransfer,
+        Self::FirmwareUpdate,
+        Self::Networking,
+        Self::SceneRender,
+        Self::VolatileAssets,
+    ];
+
     pub const fn bit(self) -> u64 {
         match self {
             Self::CoreWidgets => protocol::CAPABILITY_CORE_WIDGETS,
@@ -145,6 +181,8 @@ impl DeviceCapability {
             Self::AssetTransfer => protocol::CAPABILITY_ASSET_TRANSFER,
             Self::FirmwareUpdate => protocol::CAPABILITY_FIRMWARE_UPDATE,
             Self::Networking => protocol::CAPABILITY_NETWORKING,
+            Self::SceneRender => protocol::CAPABILITY_SCENE_RENDER,
+            Self::VolatileAssets => protocol::CAPABILITY_VOLATILE_ASSETS,
         }
     }
 
@@ -161,34 +199,73 @@ impl DeviceCapability {
             Self::AssetTransfer => "icon and font asset transfer",
             Self::FirmwareUpdate => "firmware update",
             Self::Networking => "networking",
+            Self::SceneRender => "declarative scene rendering",
+            Self::VolatileAssets => "volatile raster assets",
         }
     }
 
     pub fn from_bits(bits: u64) -> Vec<Self> {
-        const ALL: [DeviceCapability; 8] = [
-            DeviceCapability::CoreWidgets,
-            DeviceCapability::ConfigRotation,
-            DeviceCapability::DashboardLayouts,
-            DeviceCapability::ExtendedTemplates,
-            DeviceCapability::HostTapActions,
-            DeviceCapability::AssetTransfer,
-            DeviceCapability::FirmwareUpdate,
-            DeviceCapability::Networking,
-        ];
-        ALL.into_iter()
+        Self::ALL
+            .into_iter()
             .filter(|capability| bits & capability.bit() != 0)
             .collect()
     }
 
     pub const fn known_bits() -> u64 {
-        protocol::CAPABILITY_CORE_WIDGETS
-            | protocol::CAPABILITY_CONFIG_ROTATION
-            | protocol::CAPABILITY_DASHBOARD_LAYOUTS
-            | protocol::CAPABILITY_EXTENDED_TEMPLATES
-            | protocol::CAPABILITY_HOST_TAP_ACTIONS
-            | protocol::CAPABILITY_ASSET_TRANSFER
-            | protocol::CAPABILITY_FIRMWARE_UPDATE
-            | protocol::CAPABILITY_NETWORKING
+        let mut bits = 0;
+        let mut index = 0;
+        while index < Self::ALL.len() {
+            bits |= Self::ALL[index].bit();
+            index += 1;
+        }
+        bits
+    }
+}
+
+#[cfg(test)]
+mod device_capability_tests {
+    use super::DeviceCapability;
+
+    #[test]
+    fn every_current_firmware_capability_has_a_host_name() {
+        let unnamed_bits = protocol::CURRENT_CAPABILITIES & !DeviceCapability::known_bits();
+
+        assert_eq!(
+            unnamed_bits, 0,
+            "current firmware advertises capability bits the host cannot name: {unnamed_bits:#018x}"
+        );
+    }
+
+    #[test]
+    fn scene_render_capability_has_a_person_facing_name_and_round_trips() {
+        assert_eq!(
+            DeviceCapability::SceneRender.bit(),
+            protocol::CAPABILITY_SCENE_RENDER
+        );
+        assert_eq!(
+            DeviceCapability::SceneRender.label(),
+            "declarative scene rendering"
+        );
+        assert_eq!(
+            DeviceCapability::from_bits(protocol::CAPABILITY_SCENE_RENDER),
+            vec![DeviceCapability::SceneRender]
+        );
+    }
+
+    #[test]
+    fn volatile_assets_capability_has_a_name_bit_and_serde_contract() {
+        assert_eq!(
+            DeviceCapability::VolatileAssets.bit(),
+            protocol::CAPABILITY_VOLATILE_ASSETS
+        );
+        assert_eq!(
+            DeviceCapability::from_bits(protocol::CAPABILITY_VOLATILE_ASSETS),
+            vec![DeviceCapability::VolatileAssets]
+        );
+        assert_eq!(
+            serde_json::to_string(&DeviceCapability::VolatileAssets).unwrap(),
+            "\"volatile-assets\""
+        );
     }
 }
 
@@ -252,7 +329,16 @@ impl From<protocol::OtaState> for DeviceOtaState {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceCounters {
-    pub reconnects: u64,
+    /// Reconnections performed by *this host process*, not by the device.
+    ///
+    /// Every other counter in this struct is reported by the device in its
+    /// `StatusResponse`; this one is the host's own tally, incremented when the
+    /// session re-establishes and replays. So it resets when the host restarts
+    /// while the device keeps running — reading 0 beside a device that has
+    /// plainly reconnected is correct, not a bug. It carries the `host_` prefix
+    /// for the same reason `host_dropped_events` does: to say whose number it is
+    /// in the JSON, where this comment is not visible.
+    pub host_reconnects: u64,
     pub valid_frames: u32,
     pub malformed_frames: u32,
     pub crc_errors: u32,

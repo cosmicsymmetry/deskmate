@@ -134,9 +134,3 @@ const interrupt_slot_t *interrupt_state_active(
 {
     return state != NULL && state->active.occupied ? &state->active : NULL;
 }
-
-const interrupt_slot_t *interrupt_state_pending(
-    const interrupt_state_t *state)
-{
-    return state != NULL && state->pending.occupied ? &state->pending : NULL;
-}

@@ -71,7 +71,7 @@ static protocol_push_data_t timer_push(uint32_t revision)
     return push;
 }
 
-static void test_atomic_config_and_navigation(void)
+static void test_atomic_config_and_activation(void)
 {
     widget_model_init(&s_model);
     assert(widget_model_config(&s_model) == NULL);
@@ -83,12 +83,6 @@ static void test_atomic_config_and_navigation(void)
     assert(strcmp(widget_model_active_screen(&s_model)->screen_id, "home") ==
            0);
 
-    assert(widget_model_navigate(&s_model, WIDGET_NAVIGATE_PREVIOUS));
-    assert(strcmp(widget_model_active_screen(&s_model)->screen_id, "focus") ==
-           0);
-    assert(widget_model_navigate(&s_model, WIDGET_NAVIGATE_NEXT));
-    assert(strcmp(widget_model_active_screen(&s_model)->screen_id, "home") ==
-           0);
     assert(widget_model_activate_screen(&s_model, "focus"));
     assert(!widget_model_activate_screen(&s_model, "missing"));
     assert(strcmp(widget_model_active_screen(&s_model)->screen_id, "focus") ==
@@ -143,35 +137,34 @@ static void test_replay_and_global_data_revisions(void)
     protocol_apply_config_t config = config_two_screens(4U);
     assert(widget_model_apply_config(&s_model, &config) ==
            WIDGET_MODEL_CONFIG_APPLIED);
-    widget_model_update_t update;
     protocol_push_data_t push = clock_push(10U);
-    assert(widget_model_apply_push(&s_model, &push, &update) ==
+    assert(widget_model_apply_push(&s_model, &push) ==
            WIDGET_MODEL_PUSH_ACCEPTED);
-    assert(update.widget_index == 0U);
     assert(widget_model_latest_data_revision(&s_model) == 10U);
-    assert(widget_model_widget_has_data(&s_model, "clock"));
+    assert(!template_fields_get(widget_model_widget_fields(&s_model, "clock"),
+                                "show_seconds")->value.boolean);
 
     assert(widget_model_apply_config(&s_model, &config) ==
            WIDGET_MODEL_CONFIG_REPLAYED);
-    assert(widget_model_widget_has_data(&s_model, "clock"));
+    assert(!template_fields_get(widget_model_widget_fields(&s_model, "clock"),
+                                "show_seconds")->value.boolean);
 
     push = timer_push(11U);
-    assert(widget_model_apply_push(&s_model, &push, &update) ==
+    assert(widget_model_apply_push(&s_model, &push) ==
            WIDGET_MODEL_PUSH_ACCEPTED);
-    assert(update.widget_index == 1U);
     push = clock_push(11U);
-    assert(widget_model_apply_push(&s_model, &push, &update) ==
+    assert(widget_model_apply_push(&s_model, &push) ==
            WIDGET_MODEL_PUSH_STALE_REVISION);
 
     push = timer_push(12U);
     push.fields[1].value.integer = 1600;
-    assert(widget_model_apply_push(&s_model, &push, &update) ==
+    assert(widget_model_apply_push(&s_model, &push) ==
            WIDGET_MODEL_PUSH_INVALID_FIELDS);
     assert(widget_model_latest_data_revision(&s_model) == 11U);
 
     push = clock_push(12U);
     strcpy(push.widget_id, "missing");
-    assert(widget_model_apply_push(&s_model, &push, &update) ==
+    assert(widget_model_apply_push(&s_model, &push) ==
            WIDGET_MODEL_PUSH_UNKNOWN_WIDGET);
     assert(widget_model_latest_data_revision(&s_model) == 11U);
 
@@ -180,22 +173,24 @@ static void test_replay_and_global_data_revisions(void)
     strcpy(push.fields[1].key, "future_field");
     push.fields[1].type = PROTOCOL_FIELD_BOOLEAN;
     push.fields[1].value.boolean = true;
-    assert(widget_model_apply_push(&s_model, &push, &update) ==
+    assert(widget_model_apply_push(&s_model, &push) ==
            WIDGET_MODEL_PUSH_ACCEPTED);
-    assert(update.unknown_fields == 1U);
-    assert(widget_model_unknown_field_count(&s_model) == 1U);
+    assert(!template_fields_get(widget_model_widget_fields(&s_model, "clock"),
+                                "show_seconds")->value.boolean);
+    assert(widget_model_latest_data_revision(&s_model) == 12U);
 
     protocol_apply_config_t changed_same_revision = config;
     changed_same_revision.rotation = 270U;
     assert(widget_model_apply_config(&s_model, &changed_same_revision) ==
            WIDGET_MODEL_CONFIG_STALE_REVISION);
-    assert(widget_model_widget_has_data(&s_model, "clock"));
+    assert(!template_fields_get(widget_model_widget_fields(&s_model, "clock"),
+                                "show_seconds")->value.boolean);
 
     protocol_apply_config_t replacement = config_two_screens(5U);
     assert(widget_model_apply_config(&s_model, &replacement) ==
            WIDGET_MODEL_CONFIG_APPLIED);
-    assert(!widget_model_widget_has_data(&s_model, "clock"));
-    assert(!widget_model_widget_has_data(&s_model, "timer"));
+    assert(template_fields_get(widget_model_widget_fields(&s_model, "clock"),
+                               "show_seconds")->value.boolean);
     assert(widget_model_latest_data_revision(&s_model) == 12U);
 }
 
@@ -289,8 +284,7 @@ static void test_timeout_retains_replay_state(void)
     assert(widget_model_apply_config(&s_model, &config) ==
            WIDGET_MODEL_CONFIG_APPLIED);
     protocol_push_data_t push = clock_push(7U);
-    widget_model_update_t update;
-    assert(widget_model_apply_push(&s_model, &push, &update) ==
+    assert(widget_model_apply_push(&s_model, &push) ==
            WIDGET_MODEL_PUSH_ACCEPTED);
 
     assert(link_state_note_valid_request(&link, 100U));
@@ -305,13 +299,13 @@ static void test_timeout_retains_replay_state(void)
     assert(widget_model_apply_config(&s_model, &config) ==
            WIDGET_MODEL_CONFIG_REPLAYED);
     push = clock_push(8U);
-    assert(widget_model_apply_push(&s_model, &push, &update) ==
+    assert(widget_model_apply_push(&s_model, &push) ==
            WIDGET_MODEL_PUSH_ACCEPTED);
 
     widget_model_init(&s_model);
     assert(widget_model_config_revision(&s_model) == 0U);
     assert(widget_model_latest_data_revision(&s_model) == 0U);
-    assert(widget_model_apply_push(&s_model, &push, &update) ==
+    assert(widget_model_apply_push(&s_model, &push) ==
            WIDGET_MODEL_PUSH_UNKNOWN_WIDGET);
 }
 
@@ -324,22 +318,21 @@ static void test_running_progress_is_visible_to_ota_policy(void)
            WIDGET_MODEL_CONFIG_APPLIED);
     assert(!widget_model_has_running_progress(&s_model));
 
-    widget_model_update_t update;
     protocol_push_data_t push = timer_push(1U);
-    assert(widget_model_apply_push(&s_model, &push, &update) ==
+    assert(widget_model_apply_push(&s_model, &push) ==
            WIDGET_MODEL_PUSH_ACCEPTED);
     assert(widget_model_has_running_progress(&s_model));
 
     push = timer_push(2U);
     push.fields[2].value.boolean = false;
-    assert(widget_model_apply_push(&s_model, &push, &update) ==
+    assert(widget_model_apply_push(&s_model, &push) ==
            WIDGET_MODEL_PUSH_ACCEPTED);
     assert(!widget_model_has_running_progress(&s_model));
 }
 
 int main(void)
 {
-    test_atomic_config_and_navigation();
+    test_atomic_config_and_activation();
     test_replay_and_global_data_revisions();
     test_config_preflight_does_not_mutate_model();
     test_extended_templates_are_accepted();

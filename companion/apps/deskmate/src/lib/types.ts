@@ -119,24 +119,32 @@ export type CardSettings =
       tap_action: WidgetTapAction;
       refresh: RefreshPolicy;
       alert: CardAlert;
+    }
+  | {
+      kind: "plugin";
+      id: string;
+      title: string;
+      plugin_id: string;
+      tap_action: WidgetTapAction;
+      refresh: RefreshPolicy;
+      alert: CardAlert;
     };
 
 export type CardKind = CardSettings["kind"];
+export type AddableCardKind = Exclude<CardKind, "plugin">;
 
 export type CalendarSource = { kind: "file"; value: string } | { kind: "url"; value: string };
 
 export interface AssetSettings {
   id: string;
   source: { kind: "file"; value: string };
-  kind:
-    | { kind: "icon"; width: number; height: number }
-    | { kind: "font"; pixel_size: number; glyph_ranges: GlyphRange[] };
+  kind: { kind: "font" } | { kind: "icon-font"; glyphs: IconGlyphMapping[] } | { kind: "image" };
   maximum_bytes: number;
 }
 
-export interface GlyphRange {
-  start: number;
-  end: number;
+export interface IconGlyphMapping {
+  name: string;
+  codepoint: number;
 }
 
 export type CarouselAdvance = { kind: "manual" } | { kind: "timed"; default_dwell_seconds: number };
@@ -158,15 +166,6 @@ export interface UpdaterSettings {
   checks: "disabled" | "notify";
 }
 
-export interface FirmwareArtifactMetadata {
-  version: string;
-  model: string;
-  byte_length: number;
-  sha256_hex: string;
-  signing_key_id: string;
-  signature_base64: string;
-}
-
 export type ValidationCode =
   | "unsupported-version"
   | "empty"
@@ -174,14 +173,10 @@ export type ValidationCode =
   | "too-many"
   | "duplicate-id"
   | "missing-reference"
-  | "missing-screen"
-  | "duplicate-reference"
-  | "unsupported-size"
   | "out-of-range"
   | "invalid-timezone"
   | "invalid-source"
   | "invalid-composition"
-  | "overlap"
   | "too-large"
   | "requires-capability";
 
@@ -209,6 +204,7 @@ export interface AppSnapshot {
 /// identical payload can only fail again, so the runtime drops it and surfaces this
 /// instead of looping.
 export interface CardError {
+  kind: "data-refused" | "scene-refused";
   card_id: string;
   message: string;
 }
@@ -280,10 +276,12 @@ export type DeviceCapability =
   | "host-tap-actions"
   | "asset-transfer"
   | "firmware-update"
-  | "networking";
+  | "networking"
+  | "scene-render"
+  | "volatile-assets";
 
 export interface DeviceCounters {
-  reconnects: number;
+  host_reconnects: number;
   valid_frames: number;
   malformed_frames: number;
   crc_errors: number;
@@ -336,6 +334,46 @@ export interface CardDataSnapshot {
   fields: CardField[];
 }
 
+export type PluginTemplateKind = "display-list" | "svg";
+
+export interface PluginCatalogAsset {
+  file: string;
+  kind: string;
+  byte_length: number;
+  digest: string;
+}
+
+export interface PluginCatalogEntry {
+  id: string;
+  name: string;
+  version: string;
+  node_count: number;
+  assets: PluginCatalogAsset[];
+  display_name: string | null;
+  description: string | null;
+  manifest_version: number;
+  template: PluginTemplateKind;
+  refresh_minutes: number;
+}
+
+export interface PluginLoadFailure {
+  id: string;
+  error: string;
+}
+
+export interface PluginCatalog {
+  plugins: PluginCatalogEntry[];
+  load_failures: PluginLoadFailure[];
+}
+
+/** The server's own view of one plugin card, projected onto this window's snapshot. */
+export interface ServerCardState {
+  card_id: string;
+  provider: ProviderState;
+  hero: string | null;
+  errors: CardError[];
+}
+
 export type PersistenceState =
   | { kind: "clean" }
   | { kind: "saving" }
@@ -349,6 +387,7 @@ export interface RuntimeDiagnostics {
   provider_queue_full: number;
   provider_results_discarded: number;
   subscriber_snapshots_overwritten: number;
+  interrupt_dismissals_ignored: number;
 }
 
 export type PomodoroAction = "start" | "pause" | "toggle" | "reset";
@@ -378,9 +417,16 @@ export interface AutostartStatus {
   preference_enabled: boolean;
 }
 
+/**
+ * `png_base64` is null exactly when the renderer produced no pixels; `state` then
+ * carries the word for why ("Waiting for the first refresh", "Plugin cards render on
+ * the server", the server's own error). Built-in cards keep `png_base64` set and
+ * `state` null, so nothing about them changes.
+ */
 export interface PreviewFrame {
-  png_base64: string;
+  png_base64: string | null;
   sample: boolean;
+  state: string | null;
 }
 
 type MessageError<Category extends string> = {
@@ -395,12 +441,14 @@ export type IpcError =
   | MessageError<"persistence">
   | MessageError<"runtime-busy">
   | MessageError<"runtime-unavailable">
+  | MessageError<"incompatible-server">
   | MessageError<"not-found">
   | MessageError<"device">
   | MessageError<"provider">
   | MessageError<"autostart">
   | MessageError<"window">
-  | MessageError<"internal">;
+  | MessageError<"internal">
+  | MessageError<"unsupported">;
 
 // This fixture shape is generated from Rust serialization in a backend test, then
 // compiled against these declarations. Either side changing makes CI fail.
@@ -422,7 +470,6 @@ export interface IpcContractFixtures {
   asset_kinds: AssetSettings["kind"][];
   update_channels: UpdaterSettings["channel"][];
   update_check_policies: UpdaterSettings["checks"][];
-  firmware_artifacts: FirmwareArtifactMetadata[];
   display_orientations: DisplayOrientation[];
   device_capabilities: DeviceCapability[];
   runtime_states: RuntimeState[];
@@ -437,5 +484,7 @@ export interface IpcContractFixtures {
   draft_validation: DraftValidation;
   config_apply_result: ConfigApplyResult;
   autostart_status: AutostartStatus;
+  plugin_catalog: PluginCatalog;
+  server_card_state: ServerCardState[];
   preview_frame: PreviewFrame;
 }

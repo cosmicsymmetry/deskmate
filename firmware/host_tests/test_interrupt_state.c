@@ -39,7 +39,7 @@ static void test_active_pending_busy_and_restore(void)
     assert(dismissal.token == 10U && dismissal.promoted_pending);
     assert(!dismissal.restore_saved_screen);
     assert(interrupt_state_active(&s_state)->token == 11U);
-    assert(interrupt_state_pending(&s_state) == NULL);
+    assert(!s_state.pending.occupied);
 
     /* Busy did not consume token 12, so the exact request is retryable. */
     assert(interrupt_state_trigger(&s_state, &third, "ignored") ==

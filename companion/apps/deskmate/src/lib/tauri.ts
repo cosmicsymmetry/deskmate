@@ -9,9 +9,11 @@ import type {
   DraftValidation,
   IpcError,
   NetworkSettings,
+  PluginCatalog,
   PomodoroAction,
   PreviewFrame,
   ProvisionDeviceInput,
+  ServerCardState,
 } from "./types";
 
 export const APP_STATE_EVENT = "app-state";
@@ -24,12 +26,14 @@ const IPC_ERROR_CATEGORIES = new Set<IpcError["category"]>([
   "persistence",
   "runtime-busy",
   "runtime-unavailable",
+  "incompatible-server",
   "not-found",
   "device",
   "provider",
   "autostart",
   "window",
   "internal",
+  "unsupported",
 ]);
 
 export class DeskmateCommandError extends Error {
@@ -115,9 +119,13 @@ export function getNetworkSettings(): Promise<NetworkSettings> {
   return invokeTyped("get_network_settings");
 }
 
-export function setServerEndpoint(serverUrl: string, adminToken: string): Promise<NetworkSettings> {
+export function setServerEndpoint(
+  serverUrl: string,
+  deviceId: string,
+  adminToken: string,
+): Promise<NetworkSettings> {
   return invokeTyped("set_server_endpoint", {
-    request: { server_url: serverUrl, admin_token: adminToken },
+    request: { server_url: serverUrl, device_id: deviceId, admin_token: adminToken },
   });
 }
 
@@ -133,8 +141,8 @@ export function chooseLocalOwnership(): Promise<NetworkSettings> {
   return invokeTyped("use_local_ownership");
 }
 
-export function setPushingPaused(paused: boolean): Promise<void> {
-  return invokeTyped("set_pushing_paused", { paused });
+export function resumePushing(): Promise<void> {
+  return invokeTyped("resume_pushing");
 }
 
 export function controlPomodoro(widgetId: string, action: PomodoroAction): Promise<void> {
@@ -160,12 +168,16 @@ export function setAutostartEnabled(enabled: boolean): Promise<AutostartStatus> 
   return invokeTyped("set_autostart_enabled", { enabled });
 }
 
-export function setSettingsWindowVisible(visible: boolean): Promise<AppSnapshot> {
-  return invokeTyped("set_settings_window_visible", { visible });
-}
-
 export function renderCardPreview(cardId: string): Promise<PreviewFrame> {
   return invokeTyped("render_card_preview", { cardId });
+}
+
+export function getServerPlugins(): Promise<PluginCatalog> {
+  return invokeTyped("get_server_plugins");
+}
+
+export function getServerCardState(): Promise<ServerCardState[]> {
+  return invokeTyped("get_server_card_state");
 }
 
 export function listenToAppState(onSnapshot: (snapshot: AppSnapshot) => void): Promise<UnlistenFn> {

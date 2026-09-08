@@ -2,10 +2,11 @@
 
 use core::fmt;
 
+use crate::PROTOCOL_VERSION;
 use crate::cbor::{CborError, Decoder, Encoder, deterministic_key_before};
 use crate::frame::{Frame, FrameError, MAX_PAYLOAD_SIZE, encode_frame};
+use crate::scene::{Scene, decode_scene, encode_scene, validate_scene};
 
-pub const PROTOCOL_VERSION: u8 = 1;
 pub const MAX_PROTOCOL_VERSION: u8 = 1;
 pub const CAPABILITY_CORE_WIDGETS: u64 = 1 << 0;
 pub const CAPABILITY_CONFIG_ROTATION: u64 = 1 << 1;
@@ -15,12 +16,26 @@ pub const CAPABILITY_HOST_TAP_ACTIONS: u64 = 1 << 4;
 pub const CAPABILITY_ASSET_TRANSFER: u64 = 1 << 5;
 pub const CAPABILITY_FIRMWARE_UPDATE: u64 = 1 << 6;
 pub const CAPABILITY_NETWORKING: u64 = 1 << 7;
+/// Gates `PushScene` (type 19). A host that does not see this bit in the
+/// device's `StatusResponse` must not send one -- the same contract
+/// `NetworkConfig` and `FactoryReset` have under bit 7. Defining a bit is not
+/// switching it on: bit 7 sat defined-but-dark for most of V2 and the constant
+/// read 75 instead of 203, so [`CURRENT_CAPABILITIES`] is pinned by a test in
+/// both languages.
+pub const CAPABILITY_SCENE_RENDER: u64 = 1 << 8;
+/// Accepts and resolves `AssetBegin { volatile: true }` image assets. This is
+/// separate from bit 5 because deployed asset-transfer builds reject that
+/// tier explicitly.
+pub const CAPABILITY_VOLATILE_ASSETS: u64 = 1 << 9;
 pub const LEGACY_CAPABILITIES: u64 = CAPABILITY_CORE_WIDGETS;
 pub const CURRENT_CAPABILITIES: u64 = CAPABILITY_CORE_WIDGETS
     | CAPABILITY_CONFIG_ROTATION
     | CAPABILITY_EXTENDED_TEMPLATES
+    | CAPABILITY_ASSET_TRANSFER
     | CAPABILITY_FIRMWARE_UPDATE
-    | CAPABILITY_NETWORKING;
+    | CAPABILITY_NETWORKING
+    | CAPABILITY_SCENE_RENDER
+    | CAPABILITY_VOLATILE_ASSETS;
 pub const LINK_TIMEOUT_MS: u64 = 10_000;
 pub const MAX_WIDGET_ID_LEN: usize = 32;
 pub const MAX_SCREEN_ID_LEN: usize = 32;
@@ -42,6 +57,17 @@ pub const MAX_SERVER_URL_LEN: usize = 128;
 pub const MAX_DEVICE_TOKEN_LEN: usize = 128;
 pub const MAX_DEVICE_ID_LEN: usize = 32;
 pub const MAX_IP_LEN: usize = 15;
+/// 1920, not the 2034-byte envelope cap: the CBOR map header, the 32-byte
+/// digest with its bstr header, the offset key/value, and the data bstr
+/// header cost roughly 46 bytes; this leaves deliberate margin. Must match
+/// firmware's `PROTOCOL_MAX_ASSET_CHUNK_BYTES` exactly.
+pub const MAX_ASSET_CHUNK_BYTES: usize = 1920;
+pub const MAX_ASSET_DIGESTS: usize = 32;
+pub const ASSET_DIGEST_LEN: usize = 32;
+pub const MAX_ASSET_TOTAL_LENGTH: u32 = 1_048_576;
+pub const ASSET_ENCODING_RAW: u8 = 0;
+pub const ASSET_ENCODING_RLE565: u8 = 1;
+pub const VOLATILE_IMAGE_DECODED_LENGTH: u32 = 329_740;
 
 pub const TYPE_STATUS_REQUEST: u8 = 1;
 pub const TYPE_STATUS_RESPONSE: u8 = 2;
@@ -57,6 +83,15 @@ pub const TYPE_TRIGGER_INTERRUPT: u8 = 11;
 pub const TYPE_DEVICE_EVENT: u8 = 12;
 pub const TYPE_NETWORK_CONFIG: u8 = 13;
 pub const TYPE_FACTORY_RESET: u8 = 14;
+pub const TYPE_ASSET_BEGIN: u8 = 15;
+pub const TYPE_ASSET_CHUNK: u8 = 16;
+pub const TYPE_ASSET_COMMIT: u8 = 17;
+pub const TYPE_ASSET_RELEASE: u8 = 18;
+pub const TYPE_PUSH_SCENE: u8 = 19;
+
+/// Same 32 bytes as a widget id, and for the same reason: a card id is an
+/// identifier the host chose, not free text.
+pub const MAX_CARD_ID_LEN: usize = 32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -103,7 +138,6 @@ pub enum EventKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum EventAction {
-    None = 0,
     StartPause = 1,
     Reset = 2,
     NavigatePrevious = 3,
@@ -137,6 +171,14 @@ pub enum OtaState {
     Failed = 4,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum AssetKind {
+    Font = 1,
+    IconFont = 2,
+    Image = 3,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NetworkConfig {
     pub ssid: String,
@@ -146,6 +188,44 @@ pub struct NetworkConfig {
     pub token: String,
     pub utc_offset_minutes: i16,
     pub tier: Tier,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AssetBegin {
+    pub digest: [u8; ASSET_DIGEST_LEN],
+    pub kind: AssetKind,
+    pub total_length: u32,
+    pub volatile: bool,
+    pub encoding: u8,
+    pub decoded_length: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssetChunk {
+    pub digest: [u8; ASSET_DIGEST_LEN],
+    pub offset: u32,
+    pub data: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AssetCommit {
+    pub digest: [u8; ASSET_DIGEST_LEN],
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssetRelease {
+    pub digests: Vec<[u8; ASSET_DIGEST_LEN]>,
+}
+
+/// One card's whole display list, replacing whatever that card drew before.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PushScene {
+    pub card_id: String,
+    /// Required and nonzero, like `PushData`'s and `ApplyConfig`'s: a scene
+    /// the host cannot pin a revision to is one it cannot tell apart from the
+    /// scene already on the panel.
+    pub revision: u32,
+    pub scene: Scene,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -223,6 +303,9 @@ pub struct TimeSync {
 pub struct Ack {
     pub acknowledged_type: u8,
     pub revision: Option<u32>,
+    /// `Some` iff `acknowledged_type == TYPE_ASSET_BEGIN`; both directions
+    /// enforce this symmetrically on encode and decode.
+    pub already_present: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -332,6 +415,11 @@ pub enum Message {
     DeviceEvent(DeviceEvent),
     NetworkConfig(NetworkConfig),
     FactoryReset,
+    AssetBegin(AssetBegin),
+    AssetChunk(AssetChunk),
+    AssetCommit(AssetCommit),
+    AssetRelease(AssetRelease),
+    PushScene(PushScene),
 }
 
 impl Message {
@@ -352,7 +440,34 @@ impl Message {
             Self::DeviceEvent(_) => TYPE_DEVICE_EVENT,
             Self::NetworkConfig(_) => TYPE_NETWORK_CONFIG,
             Self::FactoryReset => TYPE_FACTORY_RESET,
+            Self::AssetBegin(_) => TYPE_ASSET_BEGIN,
+            Self::AssetChunk(_) => TYPE_ASSET_CHUNK,
+            Self::AssetCommit(_) => TYPE_ASSET_COMMIT,
+            Self::AssetRelease(_) => TYPE_ASSET_RELEASE,
+            Self::PushScene(_) => TYPE_PUSH_SCENE,
         }
+    }
+
+    /// Encodes this message as a complete wire frame.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MessageError`] if the message fails validation, its payload
+    /// exceeds the frame's maximum size, or `request_id` is inconsistent
+    /// with the message type.
+    pub fn encode(&self, request_id: u32) -> Result<Vec<u8>, MessageError> {
+        encode_message(request_id, self)
+    }
+
+    /// Decodes a complete wire frame into a message.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MessageError`] if the bytes are not a well-formed frame or
+    /// the payload fails to decode into a known message.
+    pub fn decode(wire: &[u8]) -> Result<Message, MessageError> {
+        let frame = crate::frame::decode_wire_frame(wire)?;
+        decode_message(&frame)
     }
 }
 
@@ -479,6 +594,15 @@ fn ota_state_from_wire(value: u8) -> Result<OtaState, MessageError> {
     }
 }
 
+fn asset_kind_from_wire(value: u8) -> Result<AssetKind, MessageError> {
+    match value {
+        1 => Ok(AssetKind::Font),
+        2 => Ok(AssetKind::IconFont),
+        3 => Ok(AssetKind::Image),
+        _ => Err(MessageError::InvalidValue("asset kind")),
+    }
+}
+
 fn event_kind(value: u8) -> Result<EventKind, MessageError> {
     match value {
         1 => Ok(EventKind::Tap),
@@ -490,13 +614,35 @@ fn event_kind(value: u8) -> Result<EventKind, MessageError> {
 
 fn event_action(value: u8) -> Result<EventAction, MessageError> {
     match value {
-        0 => Ok(EventAction::None),
         1 => Ok(EventAction::StartPause),
         2 => Ok(EventAction::Reset),
         3 => Ok(EventAction::NavigatePrevious),
         4 => Ok(EventAction::NavigateNext),
         5 => Ok(EventAction::DismissInterrupt),
         _ => Err(MessageError::InvalidValue("event action")),
+    }
+}
+
+/// Returns the sole valid response type for a host request type.
+///
+/// Response-only, unsolicited, and unknown type IDs return `None`.
+pub const fn expected_response_type(request_type: u8) -> Option<u8> {
+    match request_type {
+        TYPE_STATUS_REQUEST => Some(TYPE_STATUS_RESPONSE),
+        TYPE_TIME_SYNC
+        | TYPE_PUSH_DATA
+        | TYPE_APPLY_CONFIG
+        | TYPE_ACTIVATE_SCREEN
+        | TYPE_TRIGGER_INTERRUPT
+        | TYPE_NETWORK_CONFIG
+        | TYPE_FACTORY_RESET
+        | TYPE_ASSET_BEGIN
+        | TYPE_ASSET_CHUNK
+        | TYPE_ASSET_COMMIT
+        | TYPE_ASSET_RELEASE
+        | TYPE_PUSH_SCENE => Some(TYPE_ACK),
+        TYPE_HEARTBEAT => Some(TYPE_HEARTBEAT_ACK),
+        _ => None,
     }
 }
 
@@ -508,6 +654,52 @@ fn validate_network_config(config: &NetworkConfig) -> Result<(), MessageError> {
     checked_text(&config.token, 0, MAX_DEVICE_TOKEN_LEN, "token")?;
     if !(MIN_UTC_OFFSET_MINUTES..=MAX_UTC_OFFSET_MINUTES).contains(&config.utc_offset_minutes) {
         return Err(MessageError::InvalidValue("UTC offset"));
+    }
+    Ok(())
+}
+
+fn validate_asset_begin(begin: &AssetBegin) -> Result<(), MessageError> {
+    if begin.total_length == 0 || begin.total_length > MAX_ASSET_TOTAL_LENGTH {
+        return Err(MessageError::InvalidValue("asset total length"));
+    }
+    match begin.encoding {
+        ASSET_ENCODING_RAW => {
+            if begin.decoded_length.is_some() {
+                return Err(MessageError::InvalidValue("decoded length on raw asset"));
+            }
+        }
+        ASSET_ENCODING_RLE565 => {
+            if !begin.volatile {
+                return Err(MessageError::InvalidValue("encoded durable asset"));
+            }
+            let decoded_length = begin
+                .decoded_length
+                .ok_or(MessageError::InvalidValue("missing decoded length"))?;
+            if decoded_length == 0 || decoded_length > MAX_ASSET_TOTAL_LENGTH {
+                return Err(MessageError::InvalidValue("asset decoded length"));
+            }
+            if begin.kind == AssetKind::Image && decoded_length != VOLATILE_IMAGE_DECODED_LENGTH {
+                return Err(MessageError::InvalidValue("volatile image decoded length"));
+            }
+            if begin.total_length >= decoded_length {
+                return Err(MessageError::InvalidValue("expanding RLE asset"));
+            }
+        }
+        _ => return Err(MessageError::InvalidValue("asset encoding")),
+    }
+    Ok(())
+}
+
+fn validate_asset_chunk(chunk: &AssetChunk) -> Result<(), MessageError> {
+    if chunk.data.len() > MAX_ASSET_CHUNK_BYTES {
+        return Err(MessageError::InvalidValue("asset chunk data too large"));
+    }
+    Ok(())
+}
+
+fn validate_asset_release(release: &AssetRelease) -> Result<(), MessageError> {
+    if release.digests.len() > MAX_ASSET_DIGESTS {
+        return Err(MessageError::InvalidValue("too many asset digests"));
     }
     Ok(())
 }
@@ -611,7 +803,17 @@ fn validate_push(push: &PushData) -> Result<(), MessageError> {
     Ok(())
 }
 
-fn validate_message(message: &Message) -> Result<(), MessageError> {
+/// Checks a message against the wire contract before a host sends it, without
+/// requiring an encode attempt and a later failure to interpret.
+///
+/// # Errors
+///
+/// Returns [`MessageError`] when the message violates the wire contract.
+// One arm per message type; it grows by a few lines whenever the protocol
+// gains one, and splitting it would put a type's bounds somewhere other than
+// with every other type's.
+#[allow(clippy::too_many_lines)]
+pub fn validate_message(message: &Message) -> Result<(), MessageError> {
     match message {
         Message::StatusResponse(status) => {
             if status.protocol_version != PROTOCOL_VERSION {
@@ -649,18 +851,12 @@ fn validate_message(message: &Message) -> Result<(), MessageError> {
             Ok(())
         }
         Message::Ack(ack) => {
-            let revision_required =
-                matches!(ack.acknowledged_type, TYPE_PUSH_DATA | TYPE_APPLY_CONFIG);
-            if !matches!(
+            let revision_required = matches!(
                 ack.acknowledged_type,
-                TYPE_TIME_SYNC
-                    | TYPE_PUSH_DATA
-                    | TYPE_APPLY_CONFIG
-                    | TYPE_ACTIVATE_SCREEN
-                    | TYPE_TRIGGER_INTERRUPT
-                    | TYPE_NETWORK_CONFIG
-                    | TYPE_FACTORY_RESET
-            ) {
+                TYPE_PUSH_DATA | TYPE_APPLY_CONFIG | TYPE_PUSH_SCENE
+            );
+            let already_present_required = ack.acknowledged_type == TYPE_ASSET_BEGIN;
+            if expected_response_type(ack.acknowledged_type) != Some(TYPE_ACK) {
                 return Err(MessageError::InvalidValue("acknowledged type"));
             }
             if revision_required != ack.revision.is_some() {
@@ -668,6 +864,9 @@ fn validate_message(message: &Message) -> Result<(), MessageError> {
             }
             if ack.revision == Some(0) {
                 return Err(MessageError::InvalidValue("ack revision"));
+            }
+            if already_present_required != ack.already_present.is_some() {
+                return Err(MessageError::InvalidValue("ack already present"));
             }
             Ok(())
         }
@@ -695,6 +894,16 @@ fn validate_message(message: &Message) -> Result<(), MessageError> {
         }
         Message::DeviceEvent(event) => validate_device_event(event),
         Message::NetworkConfig(config) => validate_network_config(config),
+        Message::AssetBegin(begin) => validate_asset_begin(begin),
+        Message::AssetChunk(chunk) => validate_asset_chunk(chunk),
+        Message::AssetRelease(release) => validate_asset_release(release),
+        Message::PushScene(push) => {
+            checked_text(&push.card_id, 1, MAX_CARD_ID_LEN, "card id")?;
+            if push.revision == 0 {
+                return Err(MessageError::InvalidValue("scene revision"));
+            }
+            validate_scene(&push.scene)
+        }
         _ => Ok(()),
     }
 }
@@ -843,6 +1052,7 @@ fn encode_network_config_payload(encoder: &mut Encoder, config: &NetworkConfig) 
     encoder.unsigned(u64::from(config.tier as u8));
 }
 
+#[allow(clippy::too_many_lines)]
 fn encode_payload(message: &Message) -> Result<Vec<u8>, MessageError> {
     validate_message(message)?;
     let mut encoder = Encoder::new();
@@ -891,12 +1101,19 @@ fn encode_payload(message: &Message) -> Result<Vec<u8>, MessageError> {
         }
         Message::DeviceEvent(event) => encode_device_event_payload(&mut encoder, event),
         Message::Ack(ack) => {
-            encoder.map(if ack.revision.is_some() { 2 } else { 1 });
+            let field_count = 1
+                + usize::from(ack.revision.is_some())
+                + usize::from(ack.already_present.is_some());
+            encoder.map(field_count);
             encoder.unsigned(0);
             encoder.unsigned(u64::from(ack.acknowledged_type));
             if let Some(revision) = ack.revision {
                 encoder.unsigned(1);
                 encoder.unsigned(u64::from(revision));
+            }
+            if let Some(already_present) = ack.already_present {
+                encoder.unsigned(2);
+                encoder.boolean(already_present);
             }
         }
         Message::HeartbeatAck(ack) => {
@@ -913,6 +1130,57 @@ fn encode_payload(message: &Message) -> Result<Vec<u8>, MessageError> {
         }
         Message::StatusResponse(status) => encode_status_payload(&mut encoder, status),
         Message::NetworkConfig(config) => encode_network_config_payload(&mut encoder, config),
+        Message::AssetBegin(begin) => {
+            let optional_count = usize::from(begin.encoding != ASSET_ENCODING_RAW)
+                + usize::from(begin.decoded_length.is_some());
+            encoder.map(4 + optional_count);
+            encoder.unsigned(0);
+            encoder.bytes(&begin.digest);
+            encoder.unsigned(1);
+            encoder.unsigned(u64::from(begin.kind as u8));
+            encoder.unsigned(2);
+            encoder.unsigned(u64::from(begin.total_length));
+            // Key 3 is ALWAYS emitted, false included, although this side's
+            // decoder tolerates its absence. Every deployed firmware decoder
+            // requires it (`REQUIRED_BIT(3)` until the encoding keys landed),
+            // so omitting the false case would break durable asset sync
+            // against the fleet the moment the server redeployed. The
+            // canonical emission rule yields to wire history here; keys 4/5
+            // are genuinely optional because no deployed decoder knows them.
+            encoder.unsigned(3);
+            encoder.boolean(begin.volatile);
+            if begin.encoding != ASSET_ENCODING_RAW {
+                encoder.unsigned(4);
+                encoder.unsigned(u64::from(begin.encoding));
+            }
+            if let Some(decoded_length) = begin.decoded_length {
+                encoder.unsigned(5);
+                encoder.unsigned(u64::from(decoded_length));
+            }
+        }
+        Message::AssetChunk(chunk) => {
+            encoder.map(3);
+            encoder.unsigned(0);
+            encoder.bytes(&chunk.digest);
+            encoder.unsigned(1);
+            encoder.unsigned(u64::from(chunk.offset));
+            encoder.unsigned(2);
+            encoder.bytes(&chunk.data);
+        }
+        Message::AssetCommit(commit) => {
+            encoder.map(1);
+            encoder.unsigned(0);
+            encoder.bytes(&commit.digest);
+        }
+        Message::AssetRelease(release) => {
+            encoder.map(1);
+            encoder.unsigned(0);
+            encoder.array(release.digests.len());
+            for digest in &release.digests {
+                encoder.bytes(digest);
+            }
+        }
+        Message::PushScene(push) => encode_push_scene_payload(&mut encoder, push),
     }
     let payload = encoder.into_bytes();
     if payload.len() > MAX_PAYLOAD_SIZE {
@@ -956,6 +1224,11 @@ fn read_u16(decoder: &mut Decoder<'_>, name: &'static str) -> Result<u16, Messag
 
 fn read_u32(decoder: &mut Decoder<'_>, name: &'static str) -> Result<u32, MessageError> {
     u32::try_from(decoder.unsigned()?).map_err(|_| MessageError::InvalidValue(name))
+}
+
+fn read_digest(decoder: &mut Decoder<'_>) -> Result<[u8; ASSET_DIGEST_LEN], MessageError> {
+    let raw = decoder.bytes()?;
+    <[u8; ASSET_DIGEST_LEN]>::try_from(raw).map_err(|_| MessageError::InvalidValue("asset digest"))
 }
 
 fn require_empty_map(payload: &[u8]) -> Result<(), MessageError> {
@@ -1274,10 +1547,12 @@ fn decode_ack(payload: &[u8]) -> Result<Ack, MessageError> {
     let mut previous = None;
     let mut acknowledged_type = None;
     let mut revision = None;
+    let mut already_present = None;
     for _ in 0..len {
         match next_numeric_key(&mut decoder, &mut previous)? {
             0 => acknowledged_type = Some(read_u8(&mut decoder, "acknowledged type")?),
             1 => revision = Some(read_u32(&mut decoder, "revision")?),
+            2 => already_present = Some(decoder.boolean()?),
             _ => decoder.skip()?,
         }
     }
@@ -1285,8 +1560,153 @@ fn decode_ack(payload: &[u8]) -> Result<Ack, MessageError> {
     let value = Ack {
         acknowledged_type: acknowledged_type.ok_or(MessageError::MissingField(0))?,
         revision,
+        already_present,
     };
     validate_message(&Message::Ack(value))?;
+    Ok(value)
+}
+
+fn encode_push_scene_payload(encoder: &mut Encoder, push: &PushScene) {
+    encoder.map(3);
+    encoder.unsigned(0);
+    encoder.text(&push.card_id);
+    encoder.unsigned(1);
+    encoder.unsigned(u64::from(push.revision));
+    encoder.unsigned(2);
+    encode_scene(encoder, &push.scene);
+}
+
+fn decode_push_scene(payload: &[u8]) -> Result<PushScene, MessageError> {
+    let mut decoder = Decoder::new(payload);
+    let len = decoder.map_len()?;
+    let mut previous = None;
+    let mut card_id = None;
+    let mut revision = None;
+    let mut scene = None;
+    for _ in 0..len {
+        match next_numeric_key(&mut decoder, &mut previous)? {
+            0 => card_id = Some(decoder.text()?.to_owned()),
+            1 => revision = Some(read_u32(&mut decoder, "scene revision")?),
+            2 => scene = Some(decode_scene(&mut decoder)?),
+            _ => decoder.skip()?,
+        }
+    }
+    decoder.finish()?;
+    let value = PushScene {
+        card_id: card_id.ok_or(MessageError::MissingField(0))?,
+        revision: revision.ok_or(MessageError::MissingField(1))?,
+        scene: scene.ok_or(MessageError::MissingField(2))?,
+    };
+    validate_message(&Message::PushScene(value.clone()))?;
+    Ok(value)
+}
+
+fn decode_asset_begin(payload: &[u8]) -> Result<AssetBegin, MessageError> {
+    let mut decoder = Decoder::new(payload);
+    let len = decoder.map_len()?;
+    let mut previous = None;
+    let mut digest = None;
+    let mut kind = None;
+    let mut total_length = None;
+    let mut volatile = None;
+    let mut encoding = None;
+    let mut decoded_length = None;
+    for _ in 0..len {
+        match next_numeric_key(&mut decoder, &mut previous)? {
+            0 => digest = Some(read_digest(&mut decoder)?),
+            1 => kind = Some(asset_kind_from_wire(read_u8(&mut decoder, "asset kind")?)?),
+            2 => total_length = Some(read_u32(&mut decoder, "asset total length")?),
+            3 => volatile = Some(decoder.boolean()?),
+            4 => encoding = Some(read_u8(&mut decoder, "asset encoding")?),
+            5 => decoded_length = Some(read_u32(&mut decoder, "asset decoded length")?),
+            _ => decoder.skip()?,
+        }
+    }
+    decoder.finish()?;
+    let value = AssetBegin {
+        digest: digest.ok_or(MessageError::MissingField(0))?,
+        kind: kind.ok_or(MessageError::MissingField(1))?,
+        total_length: total_length.ok_or(MessageError::MissingField(2))?,
+        volatile: volatile.unwrap_or(false),
+        encoding: encoding.unwrap_or(ASSET_ENCODING_RAW),
+        decoded_length,
+    };
+    validate_asset_begin(&value)?;
+    Ok(value)
+}
+
+fn decode_asset_chunk(payload: &[u8]) -> Result<AssetChunk, MessageError> {
+    let mut decoder = Decoder::new(payload);
+    let len = decoder.map_len()?;
+    let mut previous = None;
+    let mut digest = None;
+    let mut offset = None;
+    let mut data = None;
+    for _ in 0..len {
+        match next_numeric_key(&mut decoder, &mut previous)? {
+            0 => digest = Some(read_digest(&mut decoder)?),
+            1 => offset = Some(read_u32(&mut decoder, "asset chunk offset")?),
+            2 => data = Some(decoder.bytes()?.to_vec()),
+            _ => decoder.skip()?,
+        }
+    }
+    decoder.finish()?;
+    let value = AssetChunk {
+        digest: digest.ok_or(MessageError::MissingField(0))?,
+        offset: offset.ok_or(MessageError::MissingField(1))?,
+        data: data.ok_or(MessageError::MissingField(2))?,
+    };
+    validate_asset_chunk(&value)?;
+    Ok(value)
+}
+
+fn decode_asset_commit(payload: &[u8]) -> Result<AssetCommit, MessageError> {
+    let mut decoder = Decoder::new(payload);
+    let len = decoder.map_len()?;
+    let mut previous = None;
+    let mut digest = None;
+    for _ in 0..len {
+        match next_numeric_key(&mut decoder, &mut previous)? {
+            0 => digest = Some(read_digest(&mut decoder)?),
+            _ => decoder.skip()?,
+        }
+    }
+    decoder.finish()?;
+    Ok(AssetCommit {
+        digest: digest.ok_or(MessageError::MissingField(0))?,
+    })
+}
+
+fn decode_asset_digests(
+    decoder: &mut Decoder<'_>,
+) -> Result<Vec<[u8; ASSET_DIGEST_LEN]>, MessageError> {
+    let count = decoder.array_len()?;
+    if count > MAX_ASSET_DIGESTS {
+        return Err(MessageError::InvalidValue("too many asset digests"));
+    }
+    let mut digests = Vec::with_capacity(count);
+    for _ in 0..count {
+        digests.push(read_digest(decoder)?);
+    }
+    Ok(digests)
+}
+
+fn decode_asset_release(payload: &[u8]) -> Result<AssetRelease, MessageError> {
+    let mut decoder = Decoder::new(payload);
+    let len = decoder.map_len()?;
+    let mut previous = None;
+    let mut digests = None;
+    for _ in 0..len {
+        match next_numeric_key(&mut decoder, &mut previous)? {
+            0 => digests = Some(decode_asset_digests(&mut decoder)?),
+            _ => decoder.skip()?,
+        }
+    }
+    decoder.finish()?;
+    let value = AssetRelease {
+        digests: digests.ok_or(MessageError::MissingField(0))?,
+    };
+    validate_asset_release(&value)?;
     Ok(value)
 }
 
@@ -1494,6 +1914,11 @@ pub fn decode_message(frame: &Frame) -> Result<Message, MessageError> {
             require_empty_map(&frame.payload)?;
             Message::FactoryReset
         }
+        TYPE_ASSET_BEGIN => Message::AssetBegin(decode_asset_begin(&frame.payload)?),
+        TYPE_ASSET_CHUNK => Message::AssetChunk(decode_asset_chunk(&frame.payload)?),
+        TYPE_ASSET_COMMIT => Message::AssetCommit(decode_asset_commit(&frame.payload)?),
+        TYPE_ASSET_RELEASE => Message::AssetRelease(decode_asset_release(&frame.payload)?),
+        TYPE_PUSH_SCENE => Message::PushScene(decode_push_scene(&frame.payload)?),
         other => return Err(MessageError::UnsupportedType(other)),
     };
     Ok(message)
@@ -1502,6 +1927,9 @@ pub fn decode_message(frame: &Frame) -> Result<Message, MessageError> {
 #[cfg(test)]
 mod tests {
     use crate::frame::decode_wire_frame;
+    use crate::scene::{
+        MAX_SCENE_NODES, SceneFont, SceneFontTier, SceneNode, SceneRect, SceneText, SceneValue,
+    };
 
     use super::*;
 
@@ -1563,6 +1991,7 @@ mod tests {
         round_trip(&Message::Ack(Ack {
             acknowledged_type: TYPE_TIME_SYNC,
             revision: None,
+            already_present: None,
         }));
         round_trip(&Message::PushData(PushData {
             widget_id: "weather".into(),
@@ -1619,6 +2048,67 @@ mod tests {
             action: EventAction::DismissInterrupt,
             interrupt_token: Some(4),
         }));
+    }
+
+    #[test]
+    fn event_action_zero_is_reserved_and_invalid() {
+        let mut encoder = Encoder::new();
+        encoder.map(5);
+        encoder.unsigned(0);
+        encoder.unsigned(1);
+        encoder.unsigned(1);
+        encoder.unsigned(EventKind::Tap as u64);
+        encoder.unsigned(2);
+        encoder.text("timer");
+        encoder.unsigned(3);
+        encoder.text("focus");
+        encoder.unsigned(4);
+        encoder.unsigned(0);
+        let frame = Frame::new(TYPE_DEVICE_EVENT, 0, encoder.into_bytes());
+
+        assert_eq!(
+            decode_message(&frame),
+            Err(MessageError::InvalidValue("event action"))
+        );
+    }
+
+    #[test]
+    fn expected_response_table_covers_every_request_type() {
+        assert_eq!(
+            expected_response_type(TYPE_STATUS_REQUEST),
+            Some(TYPE_STATUS_RESPONSE)
+        );
+        assert_eq!(
+            expected_response_type(TYPE_HEARTBEAT),
+            Some(TYPE_HEARTBEAT_ACK)
+        );
+        for request_type in [
+            TYPE_TIME_SYNC,
+            TYPE_PUSH_DATA,
+            TYPE_APPLY_CONFIG,
+            TYPE_ACTIVATE_SCREEN,
+            TYPE_TRIGGER_INTERRUPT,
+            TYPE_NETWORK_CONFIG,
+            TYPE_FACTORY_RESET,
+            TYPE_ASSET_BEGIN,
+            TYPE_ASSET_CHUNK,
+            TYPE_ASSET_COMMIT,
+            TYPE_ASSET_RELEASE,
+            TYPE_PUSH_SCENE,
+        ] {
+            assert_eq!(expected_response_type(request_type), Some(TYPE_ACK));
+        }
+        for response_or_unsolicited_type in [
+            TYPE_STATUS_RESPONSE,
+            TYPE_ACK,
+            TYPE_HEARTBEAT_ACK,
+            TYPE_ERROR,
+            TYPE_DEVICE_EVENT,
+            0,
+            u8::MAX,
+        ] {
+            assert_eq!(expected_response_type(response_or_unsolicited_type), None);
+        }
     }
 
     #[test]
@@ -1725,8 +2215,11 @@ mod tests {
         // Keys 21 (latest_interrupt_token), 22 (max_protocol_version), and 23
         // (capabilities) are still encoded contiguously and in this order
         // because keys are canonical; locate and drop them regardless of
-        // what now follows them on the wire.
-        let pattern = [0x15, 0x09, 0x16, 0x01, 0x17, 0x18, 0xcb];
+        // what now follows them on the wire. The tail is
+        // CURRENT_CAPABILITIES; bit 8 took it from 235 to 491 and bit 9 now
+        // takes it to 1003 (0x03eb). It moves whenever a capability bit is
+        // added to the constant.
+        let pattern = [0x15, 0x09, 0x16, 0x01, 0x17, 0x19, 0x03, 0xeb];
         let offset = payload
             .windows(pattern.len())
             .position(|window| window == pattern)
@@ -1858,5 +2351,353 @@ mod tests {
             decode_message(&frame),
             Err(MessageError::UnsupportedType(99))
         );
+    }
+
+    /// Encodes a `PushScene` payload WITHOUT validating it, so the decode
+    /// direction can be handed something a conforming host would never send.
+    fn encode_push_scene_payload_unchecked(push: &PushScene) -> Vec<u8> {
+        let mut encoder = Encoder::new();
+        encode_push_scene_payload(&mut encoder, push);
+        encoder.into_bytes()
+    }
+
+    fn sample_scene() -> Scene {
+        Scene {
+            revision: 9,
+            background: 0x0000_0000,
+            nodes: vec![
+                SceneNode::Rect(SceneRect {
+                    x: 4,
+                    y: 5,
+                    w: 10,
+                    h: 11,
+                    ..SceneRect::default()
+                }),
+                SceneNode::Text(SceneText {
+                    x: 16,
+                    baseline_y: 200,
+                    w: 400,
+                    font: SceneFont::Baked(SceneFontTier::Body),
+                    value: SceneValue::Binding("time:HH:mm".into()),
+                    ..SceneText::default()
+                }),
+            ],
+        }
+    }
+
+    #[test]
+    fn push_scene_roundtrips() {
+        let message = Message::PushScene(PushScene {
+            card_id: "clock".into(),
+            revision: 7,
+            scene: sample_scene(),
+        });
+        let wire = message.encode(45).unwrap();
+        assert_eq!(Message::decode(&wire).unwrap(), message);
+    }
+
+    #[test]
+    fn push_scene_rejects_a_scene_over_the_node_cap() {
+        // Every node is individually valid and inside the canvas, and the
+        // envelope around them is one the message layer accepts, so the count
+        // is the only thing that can refuse this.
+        let node = SceneNode::Rect(SceneRect {
+            x: 4,
+            y: 5,
+            w: 10,
+            h: 11,
+            ..SceneRect::default()
+        });
+        let at_cap = PushScene {
+            card_id: "clock".into(),
+            revision: 3,
+            scene: Scene {
+                revision: 9,
+                background: 0,
+                nodes: vec![node.clone(); MAX_SCENE_NODES],
+            },
+        };
+        let wire = Message::PushScene(at_cap.clone()).encode(45).unwrap();
+        assert!(Message::decode(&wire).is_ok());
+
+        let mut over_cap = at_cap;
+        over_cap.scene.nodes.push(node);
+        // The encoder refuses to emit it at all ...
+        assert_eq!(
+            Message::PushScene(over_cap.clone()).encode(45),
+            Err(MessageError::InvalidValue("scene node count"))
+        );
+        // ... and a hand-built frame carrying one is refused on decode, which
+        // is the direction that matters for an untrusted peer.
+        let payload = encode_push_scene_payload_unchecked(&over_cap);
+        let frame = Frame::new(TYPE_PUSH_SCENE, 45, payload);
+        assert_eq!(
+            decode_message(&frame),
+            Err(MessageError::InvalidValue("scene node count"))
+        );
+    }
+
+    /// The mirror of C's `test_push_scene_skips_an_unknown_key_after_the_scene`.
+    ///
+    /// `docs/protocol/v1.md` promises unknown integer keys are skipped so a
+    /// later revision can add a field. Every other `PushScene` test and both
+    /// fixtures end the payload map at key 2, so nothing else reads the
+    /// decoder's position AFTER the nested scene -- on the firmware side that
+    /// is what makes `cbor_value_leave_container()` untested, and on this side
+    /// it is what makes the `_ => decoder.skip()?` arm untested for anything
+    /// following a scene.
+    #[test]
+    fn push_scene_skips_an_unknown_key_after_the_scene() {
+        let push = PushScene {
+            card_id: "clock".into(),
+            revision: 6,
+            scene: sample_scene(),
+        };
+        // Hand-built rather than encoded: a conforming encoder never emits an
+        // unknown key, which is exactly why this case needs one.
+        let mut encoder = Encoder::new();
+        encoder.map(4);
+        encoder.unsigned(0);
+        encoder.text(&push.card_id);
+        encoder.unsigned(1);
+        encoder.unsigned(u64::from(push.revision));
+        encoder.unsigned(2);
+        crate::scene::encode_scene(&mut encoder, &push.scene);
+        encoder.unsigned(3);
+        encoder.unsigned(42);
+
+        let frame = Frame::new(TYPE_PUSH_SCENE, 45, encoder.into_bytes());
+        // Not merely accepted -- everything before the skipped key survives.
+        assert_eq!(decode_message(&frame), Ok(Message::PushScene(push)));
+    }
+
+    #[test]
+    fn push_scene_rejects_an_off_canvas_node() {
+        let message = Message::PushScene(PushScene {
+            card_id: "clock".into(),
+            revision: 3,
+            scene: Scene {
+                revision: 9,
+                background: 0,
+                nodes: vec![SceneNode::Rect(SceneRect {
+                    x: 0,
+                    y: 0,
+                    w: 4096,
+                    h: 10,
+                    ..SceneRect::default()
+                })],
+            },
+        });
+        assert!(message.encode(45).is_err());
+    }
+
+    #[test]
+    fn push_scene_rejects_a_zero_revision() {
+        let message = Message::PushScene(PushScene {
+            card_id: "clock".into(),
+            revision: 0,
+            scene: sample_scene(),
+        });
+        assert!(message.encode(45).is_err());
+    }
+
+    #[test]
+    fn ack_for_push_scene_requires_a_revision() {
+        let with = Message::Ack(Ack {
+            acknowledged_type: TYPE_PUSH_SCENE,
+            revision: Some(5),
+            already_present: None,
+        });
+        let wire = with.encode(45).unwrap();
+        assert_eq!(Message::decode(&wire).unwrap(), with);
+
+        let without = Message::Ack(Ack {
+            acknowledged_type: TYPE_PUSH_SCENE,
+            revision: None,
+            already_present: None,
+        });
+        assert!(without.encode(45).is_err());
+    }
+
+    #[test]
+    fn asset_begin_roundtrips() {
+        let message = Message::AssetBegin(AssetBegin {
+            digest: [0x5a; 32],
+            kind: AssetKind::Font,
+            total_length: 4096,
+            volatile: false,
+            encoding: ASSET_ENCODING_RAW,
+            decoded_length: None,
+        });
+        let frame = message.encode(7).expect("encode");
+        let decoded = Message::decode(&frame).expect("decode");
+        assert_eq!(decoded, message);
+        // Four keys: digest, kind, total_length, and volatile. Key 3 is
+        // always emitted -- false included -- because every deployed decoder
+        // requires it; only the encoding keys (4/5) follow the omit-default
+        // rule, and a raw begin therefore carries neither.
+        let wire_frame = crate::decode_wire_frame(&frame).unwrap();
+        assert_eq!(wire_frame.payload[0], 0xa4, "raw begin: 4 keys, no 4/5");
+    }
+
+    #[test]
+    fn rle_asset_begin_roundtrips_with_wire_and_decoded_lengths() {
+        let message = Message::AssetBegin(AssetBegin {
+            digest: [0x6b; 32],
+            kind: AssetKind::Image,
+            total_length: 10_032,
+            volatile: true,
+            encoding: ASSET_ENCODING_RLE565,
+            decoded_length: Some(VOLATILE_IMAGE_DECODED_LENGTH),
+        });
+        let frame = message.encode(8).expect("encode");
+        assert_eq!(Message::decode(&frame).unwrap(), message);
+    }
+
+    #[test]
+    fn asset_chunk_roundtrips() {
+        let message = Message::AssetChunk(AssetChunk {
+            digest: [0x11; 32],
+            offset: 512,
+            data: vec![0xab; 128],
+        });
+        let frame = message.encode(8).expect("encode");
+        let decoded = Message::decode(&frame).expect("decode");
+        assert_eq!(decoded, message);
+    }
+
+    #[test]
+    fn asset_commit_roundtrips() {
+        let message = Message::AssetCommit(AssetCommit { digest: [0x22; 32] });
+        let frame = message.encode(9).expect("encode");
+        let decoded = Message::decode(&frame).expect("decode");
+        assert_eq!(decoded, message);
+    }
+
+    #[test]
+    fn asset_release_roundtrips() {
+        let message = Message::AssetRelease(AssetRelease {
+            digests: vec![[0x33; 32], [0x44; 32]],
+        });
+        let frame = message.encode(10).expect("encode");
+        let decoded = Message::decode(&frame).expect("decode");
+        assert_eq!(decoded, message);
+    }
+
+    #[test]
+    fn ack_already_present_roundtrips_on_asset_begin() {
+        let message = Message::Ack(Ack {
+            acknowledged_type: TYPE_ASSET_BEGIN,
+            revision: None,
+            already_present: Some(true),
+        });
+        let frame = message.encode(11).expect("encode");
+        let decoded = Message::decode(&frame).expect("decode");
+        assert_eq!(decoded, message);
+    }
+
+    #[test]
+    fn asset_chunk_rejects_oversize_data() {
+        let message = Message::AssetChunk(AssetChunk {
+            digest: [0x01; 32],
+            offset: 0,
+            data: vec![0u8; MAX_ASSET_CHUNK_BYTES + 1],
+        });
+        assert!(matches!(
+            message.encode(8),
+            Err(MessageError::InvalidValue("asset chunk data too large"))
+        ));
+    }
+
+    #[test]
+    fn asset_release_rejects_too_many_digests() {
+        let message = Message::AssetRelease(AssetRelease {
+            digests: vec![[0u8; 32]; MAX_ASSET_DIGESTS + 1],
+        });
+        assert!(matches!(
+            message.encode(9),
+            Err(MessageError::InvalidValue("too many asset digests"))
+        ));
+    }
+
+    #[test]
+    fn asset_begin_rejects_out_of_range_total_length() {
+        let mut too_small = Message::AssetBegin(AssetBegin {
+            digest: [0x5a; 32],
+            kind: AssetKind::Image,
+            total_length: 0,
+            volatile: true,
+            encoding: ASSET_ENCODING_RAW,
+            decoded_length: None,
+        });
+        assert!(too_small.encode(7).is_err());
+        if let Message::AssetBegin(begin) = &mut too_small {
+            begin.total_length = 1_048_577;
+        }
+        assert!(too_small.encode(7).is_err());
+    }
+
+    #[test]
+    fn asset_begin_rejects_invalid_encoding_relationships() {
+        let base = AssetBegin {
+            digest: [0x5a; 32],
+            kind: AssetKind::Image,
+            total_length: 10_032,
+            volatile: true,
+            encoding: ASSET_ENCODING_RLE565,
+            decoded_length: Some(VOLATILE_IMAGE_DECODED_LENGTH),
+        };
+        for invalid in [
+            AssetBegin {
+                encoding: 2,
+                ..base
+            },
+            AssetBegin {
+                encoding: ASSET_ENCODING_RAW,
+                ..base
+            },
+            AssetBegin {
+                decoded_length: None,
+                ..base
+            },
+            AssetBegin {
+                volatile: false,
+                ..base
+            },
+            AssetBegin {
+                decoded_length: Some(0),
+                ..base
+            },
+            AssetBegin {
+                decoded_length: Some(MAX_ASSET_TOTAL_LENGTH + 1),
+                ..base
+            },
+            AssetBegin {
+                total_length: VOLATILE_IMAGE_DECODED_LENGTH,
+                ..base
+            },
+        ] {
+            assert!(validate_message(&Message::AssetBegin(invalid)).is_err());
+        }
+    }
+
+    #[test]
+    fn already_present_is_rejected_on_non_asset_begin_acks() {
+        let message = Message::Ack(Ack {
+            acknowledged_type: TYPE_ASSET_COMMIT,
+            revision: None,
+            already_present: Some(true),
+        });
+        assert!(message.encode(10).is_err());
+    }
+
+    #[test]
+    fn already_present_is_required_on_asset_begin_acks() {
+        let message = Message::Ack(Ack {
+            acknowledged_type: TYPE_ASSET_BEGIN,
+            revision: None,
+            already_present: None,
+        });
+        assert!(message.encode(12).is_err());
     }
 }

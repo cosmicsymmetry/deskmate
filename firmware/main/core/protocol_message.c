@@ -3,6 +3,8 @@
 #include <string.h>
 
 #include "cbor.h"
+#include "core/apply_config_validation.h"
+#include "core/scene_decode.h"
 
 #define REQUIRED_BIT(key) (UINT32_C(1) << (key))
 
@@ -30,10 +32,66 @@ static bool bounded_length(const char *text, size_t capacity, size_t *length)
     return true;
 }
 
-bool protocol_template_kind_valid(protocol_template_kind_t kind)
+/* The capability bit docs/protocol/v1.md gates `type` on, or 0 for a request
+ * every conforming device answers. One place, so a new gated message cannot
+ * be added to the dispatch table without deciding which bit it rides on. */
+static uint64_t request_capability(protocol_message_type_t type)
 {
-    return kind >= PROTOCOL_TEMPLATE_DIGITAL_CLOCK &&
-           kind <= PROTOCOL_TEMPLATE_ICON_BADGE_TEXT;
+    switch (type) {
+    case PROTOCOL_TYPE_NETWORK_CONFIG:
+    case PROTOCOL_TYPE_FACTORY_RESET:
+        return PROTOCOL_CAPABILITY_NETWORKING;
+    case PROTOCOL_TYPE_ASSET_BEGIN:
+    case PROTOCOL_TYPE_ASSET_CHUNK:
+    case PROTOCOL_TYPE_ASSET_COMMIT:
+    case PROTOCOL_TYPE_ASSET_RELEASE:
+        return PROTOCOL_CAPABILITY_ASSET_TRANSFER;
+    case PROTOCOL_TYPE_PUSH_SCENE:
+        return PROTOCOL_CAPABILITY_SCENE_RENDER;
+    default:
+        return 0U;
+    }
+}
+
+protocol_request_gate_t protocol_message_request_gate(
+    protocol_message_type_t type,
+    uint64_t capabilities)
+{
+    switch (type) {
+    case PROTOCOL_TYPE_STATUS_REQUEST:
+    case PROTOCOL_TYPE_TIME_SYNC:
+    case PROTOCOL_TYPE_PUSH_DATA:
+    case PROTOCOL_TYPE_HEARTBEAT:
+    case PROTOCOL_TYPE_APPLY_CONFIG:
+    case PROTOCOL_TYPE_ACTIVATE_SCREEN:
+    case PROTOCOL_TYPE_TRIGGER_INTERRUPT:
+    case PROTOCOL_TYPE_NETWORK_CONFIG:
+    case PROTOCOL_TYPE_FACTORY_RESET:
+    case PROTOCOL_TYPE_ASSET_BEGIN:
+    case PROTOCOL_TYPE_ASSET_CHUNK:
+    case PROTOCOL_TYPE_ASSET_COMMIT:
+    case PROTOCOL_TYPE_ASSET_RELEASE:
+    case PROTOCOL_TYPE_PUSH_SCENE:
+        break;
+    default:
+        return PROTOCOL_REQUEST_NOT_A_REQUEST;
+    }
+    uint64_t required = request_capability(type);
+    if (required != 0U && (capabilities & required) == 0U) {
+        return PROTOCOL_REQUEST_MISSING_CAPABILITY;
+    }
+    return PROTOCOL_REQUEST_DISPATCHABLE;
+}
+
+protocol_request_gate_t protocol_asset_begin_request_gate(
+    const protocol_asset_begin_t *begin,
+    uint64_t capabilities)
+{
+    if (begin != NULL && begin->volatile_tier &&
+        (capabilities & PROTOCOL_CAPABILITY_VOLATILE_ASSETS) == 0U) {
+        return PROTOCOL_REQUEST_MISSING_CAPABILITY;
+    }
+    return PROTOCOL_REQUEST_DISPATCHABLE;
 }
 
 static protocol_message_result_t open_payload_map(
@@ -130,6 +188,58 @@ static protocol_message_result_t read_text(CborValue *value,
     }
     destination[copied] = '\0';
     *value = next;
+    return PROTOCOL_MESSAGE_OK;
+}
+
+static protocol_message_result_t read_bytes_exact(CborValue *value,
+                                                   uint8_t *destination,
+                                                   size_t exact_length)
+{
+    if (!cbor_value_is_byte_string(value)) {
+        return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
+    }
+    size_t length = 0U;
+    CborError error = cbor_value_calculate_string_length(value, &length);
+    if (error != CborNoError) {
+        return cbor_result(error);
+    }
+    if (length != exact_length) {
+        return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
+    }
+    size_t copied = exact_length;
+    CborValue next;
+    error = cbor_value_copy_byte_string(value, destination, &copied, &next);
+    if (error != CborNoError) {
+        return cbor_result(error);
+    }
+    *value = next;
+    return PROTOCOL_MESSAGE_OK;
+}
+
+static protocol_message_result_t read_bytes_bounded(CborValue *value,
+                                                     uint8_t *destination,
+                                                     size_t max_length,
+                                                     size_t *out_length)
+{
+    if (!cbor_value_is_byte_string(value)) {
+        return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
+    }
+    size_t length = 0U;
+    CborError error = cbor_value_calculate_string_length(value, &length);
+    if (error != CborNoError) {
+        return cbor_result(error);
+    }
+    if (length > max_length) {
+        return PROTOCOL_MESSAGE_ERR_TOO_LARGE;
+    }
+    size_t copied = max_length;
+    CborValue next;
+    error = cbor_value_copy_byte_string(value, destination, &copied, &next);
+    if (error != CborNoError) {
+        return cbor_result(error);
+    }
+    *value = next;
+    *out_length = copied;
     return PROTOCOL_MESSAGE_OK;
 }
 
@@ -433,73 +543,375 @@ static protocol_message_result_t decode_network_config(
 static protocol_message_result_t validate_apply_config(
     const protocol_apply_config_t *config)
 {
-    if (config->revision == 0U || config->widget_count == 0U ||
-        config->screen_count == 0U) {
-        return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
-    }
-    if (config->widget_count > PROTOCOL_MAX_CONFIG_WIDGETS ||
-        config->screen_count > PROTOCOL_MAX_CONFIG_SCREENS) {
+    switch (apply_config_validate(config)) {
+    case APPLY_CONFIG_VALID:
+        return PROTOCOL_MESSAGE_OK;
+    case APPLY_CONFIG_TOO_LARGE:
         return PROTOCOL_MESSAGE_ERR_CONFIG_TOO_LARGE;
-    }
-    if (config->rotation != 90U && config->rotation != 270U) {
+    case APPLY_CONFIG_DUPLICATE_ID:
+        return PROTOCOL_MESSAGE_ERR_DUPLICATE_KEY;
+    case APPLY_CONFIG_UNKNOWN_WIDGET:
+        return PROTOCOL_MESSAGE_ERR_UNKNOWN_WIDGET;
+    case APPLY_CONFIG_UNSUPPORTED_TEMPLATE:
+        return PROTOCOL_MESSAGE_ERR_UNSUPPORTED_TEMPLATE;
+    case APPLY_CONFIG_UNSUPPORTED_SIZE_CLASS:
+        return PROTOCOL_MESSAGE_ERR_UNSUPPORTED_SIZE_CLASS;
+    case APPLY_CONFIG_INVALID_ARGUMENT:
+    case APPLY_CONFIG_INVALID_VALUE:
+    default:
         return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
     }
-    for (size_t i = 0U; i < config->widget_count; ++i) {
-        const protocol_widget_config_t *widget = &config->widgets[i];
-        size_t length = 0U;
-        if (!bounded_length(widget->widget_id, sizeof(widget->widget_id),
-                            &length) ||
-            length == 0U) {
-            return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
+}
+
+/* AssetBegin payload keys (additive protocol-v1 table):
+ *   0 digest             required 32-byte bstr
+ *   1 kind               required asset kind
+ *   2 total_length       required WIRE length
+ *   3 volatile           optional on decode; false when absent, but always
+ *                        emitted (including false) for deployed-v1 compatibility
+ *   4 encoding           optional; raw (0) when absent, emitted only non-raw
+ *   5 decoded_length     optional; required iff encoding is non-raw
+ */
+static protocol_message_result_t decode_asset_begin(
+    const protocol_frame_t *frame,
+    protocol_asset_begin_t *begin)
+{
+    CborParser parser;
+    CborValue contents;
+    size_t count = 0U;
+    protocol_message_result_t result = open_payload_map(
+        frame->payload, frame->payload_length, &parser, &contents, &count);
+    if (result != PROTOCOL_MESSAGE_OK) {
+        return result;
+    }
+    uint32_t present = 0U;
+    uint64_t previous = 0U;
+    bool has_previous = false;
+    for (size_t i = 0U; i < count; ++i) {
+        uint64_t key = 0U;
+        result = read_key(&contents, &key, &previous, &has_previous);
+        if (result != PROTOCOL_MESSAGE_OK) {
+            return result;
         }
-        if (!protocol_template_kind_valid(widget->template_kind)) {
-            return PROTOCOL_MESSAGE_ERR_UNSUPPORTED_TEMPLATE;
-        }
-        if (widget->size_class == PROTOCOL_SIZE_TILE ||
-            widget->size_class < PROTOCOL_SIZE_FULL ||
-            widget->size_class > PROTOCOL_SIZE_TILE) {
-            return PROTOCOL_MESSAGE_ERR_UNSUPPORTED_SIZE_CLASS;
-        }
-        if (widget->tap_action < PROTOCOL_TAP_NONE ||
-            widget->tap_action > PROTOCOL_TAP_RESET ||
-            widget->interrupt_policy < PROTOCOL_INTERRUPT_DISABLED ||
-            widget->interrupt_policy > PROTOCOL_INTERRUPT_ENABLED ||
-            (widget->template_kind != PROTOCOL_TEMPLATE_PROGRESS_RING &&
-             widget->tap_action != PROTOCOL_TAP_NONE)) {
-            return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
-        }
-        for (size_t j = 0U; j < i; ++j) {
-            if (strcmp(widget->widget_id, config->widgets[j].widget_id) == 0) {
-                return PROTOCOL_MESSAGE_ERR_DUPLICATE_KEY;
+        if (key == 0U) {
+            result = read_bytes_exact(&contents, begin->digest,
+                                      ASSET_DIGEST_BYTES);
+        } else if (key == 1U) {
+            uint64_t raw = 0U;
+            result = read_unsigned(&contents, &raw);
+            if (result == PROTOCOL_MESSAGE_OK) {
+                if (raw != (uint64_t)ASSET_KIND_FONT &&
+                    raw != (uint64_t)ASSET_KIND_ICON_FONT &&
+                    raw != (uint64_t)ASSET_KIND_IMAGE) {
+                    result = PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
+                } else {
+                    begin->kind = (asset_kind_t)raw;
+                }
             }
+        } else if (key == 2U) {
+            uint64_t raw = 0U;
+            result = read_unsigned(&contents, &raw);
+            if (result == PROTOCOL_MESSAGE_OK &&
+                (raw == 0U || raw > (uint64_t)ASSET_MAX_BYTES)) {
+                result = PROTOCOL_MESSAGE_ERR_TOO_LARGE;
+            }
+            if (result == PROTOCOL_MESSAGE_OK) {
+                begin->total_length = (uint32_t)raw;
+            }
+        } else if (key == 3U) {
+            result = read_boolean(&contents, &begin->volatile_tier);
+        } else if (key == 4U) {
+            uint64_t raw = 0U;
+            result = read_unsigned(&contents, &raw);
+            if (result == PROTOCOL_MESSAGE_OK &&
+                raw != PROTOCOL_ASSET_ENCODING_RAW &&
+                raw != PROTOCOL_ASSET_ENCODING_RLE565) {
+                result = PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
+            }
+            if (result == PROTOCOL_MESSAGE_OK) {
+                begin->encoding = (uint8_t)raw;
+            }
+        } else if (key == 5U) {
+            uint64_t raw = 0U;
+            result = read_unsigned(&contents, &raw);
+            if (result == PROTOCOL_MESSAGE_OK &&
+                (raw == 0U || raw > (uint64_t)ASSET_MAX_BYTES)) {
+                result = PROTOCOL_MESSAGE_ERR_TOO_LARGE;
+            }
+            if (result == PROTOCOL_MESSAGE_OK) {
+                begin->decoded_length = (uint32_t)raw;
+                begin->has_decoded_length = true;
+            }
+        } else {
+            result = skip_value(&contents);
+        }
+        if (result != PROTOCOL_MESSAGE_OK) {
+            return result;
+        }
+        if (key <= 5U) {
+            present |= REQUIRED_BIT((uint32_t)key);
         }
     }
-    for (size_t i = 0U; i < config->screen_count; ++i) {
-        const protocol_screen_config_t *screen = &config->screens[i];
-        size_t length = 0U;
-        if (!bounded_length(screen->screen_id, sizeof(screen->screen_id),
-                            &length) ||
-            length == 0U ||
-            !bounded_length(screen->widget_id, sizeof(screen->widget_id),
-                            &length) ||
-            length == 0U) {
+    uint32_t required =
+        REQUIRED_BIT(0) | REQUIRED_BIT(1) | REQUIRED_BIT(2);
+    if ((present & required) != required) {
+        return PROTOCOL_MESSAGE_ERR_MISSING_FIELD;
+    }
+    if (begin->encoding == PROTOCOL_ASSET_ENCODING_RAW) {
+        if (begin->has_decoded_length) {
             return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
         }
-        for (size_t j = 0U; j < i; ++j) {
-            if (strcmp(screen->screen_id, config->screens[j].screen_id) == 0) {
-                return PROTOCOL_MESSAGE_ERR_DUPLICATE_KEY;
+        return PROTOCOL_MESSAGE_OK;
+    }
+    if (!begin->has_decoded_length) {
+        return PROTOCOL_MESSAGE_ERR_MISSING_FIELD;
+    }
+    if (!begin->volatile_tier) {
+        return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
+    }
+    if (begin->kind == ASSET_KIND_IMAGE &&
+        begin->decoded_length != PROTOCOL_VOLATILE_IMAGE_DECODED_LENGTH) {
+        return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
+    }
+    if (begin->total_length >= begin->decoded_length) {
+        return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
+    }
+    return PROTOCOL_MESSAGE_OK;
+}
+
+/* Every structural scene failure is a payload the device refuses; the only
+ * distinction worth carrying into the protocol's own vocabulary is "too
+ * many nodes", which is a capacity answer a host can act on by splitting
+ * the scene rather than by fixing its encoder. scene_model_result_t
+ * deliberately has no CBOR-specific code (see scene_model.h), so the rest
+ * cannot be told apart here either. */
+static protocol_message_result_t scene_result(scene_model_result_t status)
+{
+    switch (status) {
+    case SCENE_MODEL_OK:
+        return PROTOCOL_MESSAGE_OK;
+    case SCENE_MODEL_ERR_NODE_COUNT:
+        return PROTOCOL_MESSAGE_ERR_TOO_LARGE;
+    default:
+        return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
+    }
+}
+
+static protocol_message_result_t decode_push_scene(
+    const protocol_frame_t *frame,
+    protocol_push_scene_t *push)
+{
+    CborParser parser;
+    CborValue contents;
+    size_t count = 0U;
+    /* open_payload_map() validates the WHOLE payload at the root --
+     * canonical form, unique keys, UTF-8, complete data, no undefined, no
+     * tags -- so the scene nested under key 2 inherits all of it. That is
+     * what lets scene_decode_map() read a sub-map without re-validating;
+     * see core/scene_decode.h. */
+    protocol_message_result_t result = open_payload_map(
+        frame->payload, frame->payload_length, &parser, &contents, &count);
+    if (result != PROTOCOL_MESSAGE_OK) {
+        return result;
+    }
+    uint32_t present = 0U;
+    uint64_t previous = 0U;
+    bool has_previous = false;
+    for (size_t i = 0U; i < count; ++i) {
+        uint64_t key = 0U;
+        result = read_key(&contents, &key, &previous, &has_previous);
+        if (result != PROTOCOL_MESSAGE_OK) {
+            return result;
+        }
+        if (key == 0U) {
+            result = read_text(&contents, push->card_id,
+                               sizeof(push->card_id), 1U,
+                               PROTOCOL_MAX_CARD_ID_LENGTH);
+        } else if (key == 1U) {
+            uint64_t raw = 0U;
+            result = read_unsigned(&contents, &raw);
+            if (result == PROTOCOL_MESSAGE_OK &&
+                (raw == 0U || raw > UINT32_MAX)) {
+                result = PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
             }
-        }
-        bool found = false;
-        for (size_t j = 0U; j < config->widget_count; ++j) {
-            if (strcmp(screen->widget_id, config->widgets[j].widget_id) == 0) {
-                found = true;
-                break;
+            if (result == PROTOCOL_MESSAGE_OK) {
+                push->revision = (uint32_t)raw;
             }
+        } else if (key == 2U) {
+            result = scene_result(scene_decode_map(&contents, &push->scene));
+        } else {
+            result = skip_value(&contents);
         }
-        if (!found) {
-            return PROTOCOL_MESSAGE_ERR_UNKNOWN_WIDGET;
+        if (result != PROTOCOL_MESSAGE_OK) {
+            return result;
         }
+        if (key <= 2U) {
+            present |= REQUIRED_BIT((uint32_t)key);
+        }
+    }
+    uint32_t required = REQUIRED_BIT(0) | REQUIRED_BIT(1) | REQUIRED_BIT(2);
+    if ((present & required) != required) {
+        return PROTOCOL_MESSAGE_ERR_MISSING_FIELD;
+    }
+    return PROTOCOL_MESSAGE_OK;
+}
+
+static protocol_message_result_t decode_asset_chunk(
+    const protocol_frame_t *frame,
+    protocol_asset_chunk_t *chunk)
+{
+    CborParser parser;
+    CborValue contents;
+    size_t count = 0U;
+    protocol_message_result_t result = open_payload_map(
+        frame->payload, frame->payload_length, &parser, &contents, &count);
+    if (result != PROTOCOL_MESSAGE_OK) {
+        return result;
+    }
+    uint32_t present = 0U;
+    uint64_t previous = 0U;
+    bool has_previous = false;
+    for (size_t i = 0U; i < count; ++i) {
+        uint64_t key = 0U;
+        result = read_key(&contents, &key, &previous, &has_previous);
+        if (result != PROTOCOL_MESSAGE_OK) {
+            return result;
+        }
+        if (key == 0U) {
+            result = read_bytes_exact(&contents, chunk->digest,
+                                      ASSET_DIGEST_BYTES);
+        } else if (key == 1U) {
+            uint64_t raw = 0U;
+            result = read_unsigned(&contents, &raw);
+            if (result == PROTOCOL_MESSAGE_OK && raw > UINT32_MAX) {
+                result = PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
+            }
+            if (result == PROTOCOL_MESSAGE_OK) {
+                chunk->offset = (uint32_t)raw;
+            }
+        } else if (key == 2U) {
+            result = read_bytes_bounded(&contents, chunk->data,
+                                        PROTOCOL_MAX_ASSET_CHUNK_BYTES,
+                                        &chunk->data_length);
+        } else {
+            result = skip_value(&contents);
+        }
+        if (result != PROTOCOL_MESSAGE_OK) {
+            return result;
+        }
+        if (key <= 2U) {
+            present |= REQUIRED_BIT((uint32_t)key);
+        }
+    }
+    uint32_t required = REQUIRED_BIT(0) | REQUIRED_BIT(1) | REQUIRED_BIT(2);
+    if ((present & required) != required) {
+        return PROTOCOL_MESSAGE_ERR_MISSING_FIELD;
+    }
+    return PROTOCOL_MESSAGE_OK;
+}
+
+static protocol_message_result_t decode_asset_commit(
+    const protocol_frame_t *frame,
+    protocol_asset_commit_t *commit)
+{
+    CborParser parser;
+    CborValue contents;
+    size_t count = 0U;
+    protocol_message_result_t result = open_payload_map(
+        frame->payload, frame->payload_length, &parser, &contents, &count);
+    if (result != PROTOCOL_MESSAGE_OK) {
+        return result;
+    }
+    uint32_t present = 0U;
+    uint64_t previous = 0U;
+    bool has_previous = false;
+    for (size_t i = 0U; i < count; ++i) {
+        uint64_t key = 0U;
+        result = read_key(&contents, &key, &previous, &has_previous);
+        if (result != PROTOCOL_MESSAGE_OK) {
+            return result;
+        }
+        if (key == 0U) {
+            result = read_bytes_exact(&contents, commit->digest,
+                                      ASSET_DIGEST_BYTES);
+            present |= REQUIRED_BIT(0);
+        } else {
+            result = skip_value(&contents);
+        }
+        if (result != PROTOCOL_MESSAGE_OK) {
+            return result;
+        }
+    }
+    if ((present & REQUIRED_BIT(0)) == 0U) {
+        return PROTOCOL_MESSAGE_ERR_MISSING_FIELD;
+    }
+    return PROTOCOL_MESSAGE_OK;
+}
+
+static protocol_message_result_t decode_asset_digests(
+    CborValue *value,
+    protocol_asset_release_t *release)
+{
+    if (!cbor_value_is_array(value)) {
+        return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
+    }
+    size_t count = 0U;
+    CborError error = cbor_value_get_array_length(value, &count);
+    if (error != CborNoError) {
+        return cbor_result(error);
+    }
+    if (count > PROTOCOL_MAX_ASSET_DIGESTS) {
+        return PROTOCOL_MESSAGE_ERR_TOO_LARGE;
+    }
+    CborValue items;
+    error = cbor_value_enter_container(value, &items);
+    if (error != CborNoError) {
+        return cbor_result(error);
+    }
+    for (size_t i = 0U; i < count; ++i) {
+        protocol_message_result_t result = read_bytes_exact(
+            &items, release->digests[i], ASSET_DIGEST_BYTES);
+        if (result != PROTOCOL_MESSAGE_OK) {
+            return result;
+        }
+    }
+    release->digest_count = count;
+    return cbor_result(cbor_value_leave_container(value, &items));
+}
+
+static protocol_message_result_t decode_asset_release(
+    const protocol_frame_t *frame,
+    protocol_asset_release_t *release)
+{
+    CborParser parser;
+    CborValue contents;
+    size_t count = 0U;
+    protocol_message_result_t result = open_payload_map(
+        frame->payload, frame->payload_length, &parser, &contents, &count);
+    if (result != PROTOCOL_MESSAGE_OK) {
+        return result;
+    }
+    uint32_t present = 0U;
+    uint64_t previous = 0U;
+    bool has_previous = false;
+    for (size_t i = 0U; i < count; ++i) {
+        uint64_t key = 0U;
+        result = read_key(&contents, &key, &previous, &has_previous);
+        if (result != PROTOCOL_MESSAGE_OK) {
+            return result;
+        }
+        if (key == 0U) {
+            result = decode_asset_digests(&contents, release);
+            present |= REQUIRED_BIT(0);
+        } else {
+            result = skip_value(&contents);
+        }
+        if (result != PROTOCOL_MESSAGE_OK) {
+            return result;
+        }
+    }
+    if ((present & REQUIRED_BIT(0)) == 0U) {
+        return PROTOCOL_MESSAGE_ERR_MISSING_FIELD;
     }
     return PROTOCOL_MESSAGE_OK;
 }
@@ -936,6 +1348,36 @@ static protocol_message_result_t decode_device_event(
     return validate_device_event(event);
 }
 
+static protocol_message_result_t validate_ack_payload(
+    const protocol_ack_t *ack)
+{
+    bool acknowledged_type_valid =
+        ack->acknowledged_type == PROTOCOL_TYPE_TIME_SYNC ||
+        ack->acknowledged_type == PROTOCOL_TYPE_PUSH_DATA ||
+        ack->acknowledged_type == PROTOCOL_TYPE_APPLY_CONFIG ||
+        ack->acknowledged_type == PROTOCOL_TYPE_ACTIVATE_SCREEN ||
+        ack->acknowledged_type == PROTOCOL_TYPE_TRIGGER_INTERRUPT ||
+        ack->acknowledged_type == PROTOCOL_TYPE_NETWORK_CONFIG ||
+        ack->acknowledged_type == PROTOCOL_TYPE_FACTORY_RESET ||
+        ack->acknowledged_type == PROTOCOL_TYPE_ASSET_BEGIN ||
+        ack->acknowledged_type == PROTOCOL_TYPE_ASSET_CHUNK ||
+        ack->acknowledged_type == PROTOCOL_TYPE_ASSET_COMMIT ||
+        ack->acknowledged_type == PROTOCOL_TYPE_ASSET_RELEASE ||
+        ack->acknowledged_type == PROTOCOL_TYPE_PUSH_SCENE;
+    bool revision_required =
+        ack->acknowledged_type == PROTOCOL_TYPE_PUSH_DATA ||
+        ack->acknowledged_type == PROTOCOL_TYPE_APPLY_CONFIG ||
+        ack->acknowledged_type == PROTOCOL_TYPE_PUSH_SCENE;
+    bool already_present_required =
+        ack->acknowledged_type == PROTOCOL_TYPE_ASSET_BEGIN;
+    return acknowledged_type_valid &&
+                   revision_required == ack->has_revision &&
+                   (!ack->has_revision || ack->revision != 0U) &&
+                   already_present_required == ack->has_already_present
+               ? PROTOCOL_MESSAGE_OK
+               : PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
+}
+
 static protocol_message_result_t decode_ack(const protocol_frame_t *frame,
                                              protocol_ack_t *ack)
 {
@@ -972,6 +1414,9 @@ static protocol_message_result_t decode_ack(const protocol_frame_t *frame,
                 ack->has_revision = true;
                 ack->revision = (uint32_t)value;
             }
+        } else if (key == 2U) {
+            result = read_boolean(&contents, &ack->already_present);
+            ack->has_already_present = true;
         } else {
             result = skip_value(&contents);
         }
@@ -982,25 +1427,7 @@ static protocol_message_result_t decode_ack(const protocol_frame_t *frame,
     if ((present & REQUIRED_BIT(0)) == 0U) {
         return PROTOCOL_MESSAGE_ERR_MISSING_FIELD;
     }
-    bool revision_required =
-        ack->acknowledged_type == PROTOCOL_TYPE_PUSH_DATA ||
-        ack->acknowledged_type == PROTOCOL_TYPE_APPLY_CONFIG;
-    if (ack->acknowledged_type != PROTOCOL_TYPE_TIME_SYNC &&
-        ack->acknowledged_type != PROTOCOL_TYPE_PUSH_DATA &&
-        ack->acknowledged_type != PROTOCOL_TYPE_APPLY_CONFIG &&
-        ack->acknowledged_type != PROTOCOL_TYPE_ACTIVATE_SCREEN &&
-        ack->acknowledged_type != PROTOCOL_TYPE_TRIGGER_INTERRUPT &&
-        ack->acknowledged_type != PROTOCOL_TYPE_NETWORK_CONFIG &&
-        ack->acknowledged_type != PROTOCOL_TYPE_FACTORY_RESET) {
-        return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
-    }
-    if (revision_required != ack->has_revision) {
-        return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
-    }
-    if (ack->has_revision && ack->revision == 0U) {
-        return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
-    }
-    return PROTOCOL_MESSAGE_OK;
+    return validate_ack_payload(ack);
 }
 
 static protocol_message_result_t decode_heartbeat_ack(
@@ -1204,6 +1631,68 @@ static protocol_message_result_t assign_status_unsigned(
     return PROTOCOL_MESSAGE_OK;
 }
 
+static protocol_message_result_t decode_asset_store_stats(
+    CborValue *value,
+    protocol_status_response_t *status)
+{
+    if (!cbor_value_is_map(value)) {
+        return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
+    }
+    size_t count = 0U;
+    CborError error = cbor_value_get_map_length(value, &count);
+    if (error != CborNoError) {
+        return cbor_result(error);
+    }
+    CborValue fields;
+    error = cbor_value_enter_container(value, &fields);
+    if (error != CborNoError) {
+        return cbor_result(error);
+    }
+    uint32_t present = 0U;
+    uint64_t previous = 0U;
+    bool has_previous = false;
+    for (size_t i = 0U; i < count; ++i) {
+        uint64_t key = 0U;
+        protocol_message_result_t result =
+            read_key(&fields, &key, &previous, &has_previous);
+        if (result != PROTOCOL_MESSAGE_OK) {
+            return result;
+        }
+        if (key <= 2U) {
+            uint64_t raw = 0U;
+            result = read_unsigned(&fields, &raw);
+            if (result == PROTOCOL_MESSAGE_OK && raw > UINT32_MAX) {
+                result = PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
+            }
+            if (result == PROTOCOL_MESSAGE_OK) {
+                if (key == 0U) {
+                    status->asset_store_used_bytes = (uint32_t)raw;
+                } else if (key == 1U) {
+                    status->asset_store_free_bytes = (uint32_t)raw;
+                } else {
+                    status->asset_count = (uint32_t)raw;
+                }
+            }
+            present |= REQUIRED_BIT((uint32_t)key);
+        } else {
+            result = skip_value(&fields);
+        }
+        if (result != PROTOCOL_MESSAGE_OK) {
+            return result;
+        }
+    }
+    error = cbor_value_leave_container(value, &fields);
+    if (error != CborNoError) {
+        return cbor_result(error);
+    }
+    uint32_t required = REQUIRED_BIT(0) | REQUIRED_BIT(1) | REQUIRED_BIT(2);
+    if ((present & required) != required) {
+        return PROTOCOL_MESSAGE_ERR_MISSING_FIELD;
+    }
+    status->has_asset_store_stats = true;
+    return PROTOCOL_MESSAGE_OK;
+}
+
 static protocol_message_result_t decode_status(
     const protocol_frame_t *frame,
     protocol_status_response_t *status)
@@ -1217,6 +1706,10 @@ static protocol_message_result_t decode_status(
     status->last_network_error[0] = '\0';
     status->has_last_ota_error = false;
     status->last_ota_error[0] = '\0';
+    status->has_asset_store_stats = false;
+    status->asset_store_used_bytes = 0U;
+    status->asset_store_free_bytes = 0U;
+    status->asset_count = 0U;
     CborParser parser;
     CborValue contents;
     size_t count = 0U;
@@ -1270,6 +1763,9 @@ static protocol_message_result_t decode_status(
                 status->has_last_ota_error = true;
             }
             present |= REQUIRED_BIT(30);
+        } else if (key == 31U) {
+            result = decode_asset_store_stats(&contents, status);
+            present |= REQUIRED_BIT(31);
         } else if (key <= 25U || key == 28U) {
             uint64_t value = 0U;
             result = read_unsigned(&contents, &value);
@@ -1350,6 +1846,16 @@ protocol_message_result_t protocol_message_decode(
         return decode_network_config(frame, &message->value.network_config);
     case PROTOCOL_TYPE_FACTORY_RESET:
         return require_empty_map(frame);
+    case PROTOCOL_TYPE_ASSET_BEGIN:
+        return decode_asset_begin(frame, &message->value.asset_begin);
+    case PROTOCOL_TYPE_ASSET_CHUNK:
+        return decode_asset_chunk(frame, &message->value.asset_chunk);
+    case PROTOCOL_TYPE_ASSET_COMMIT:
+        return decode_asset_commit(frame, &message->value.asset_commit);
+    case PROTOCOL_TYPE_ASSET_RELEASE:
+        return decode_asset_release(frame, &message->value.asset_release);
+    case PROTOCOL_TYPE_PUSH_SCENE:
+        return decode_push_scene(frame, &message->value.push_scene);
     default:
         return PROTOCOL_MESSAGE_ERR_UNSUPPORTED_TYPE;
     }
@@ -1421,30 +1927,7 @@ static protocol_message_result_t validate_message(
         }
         return PROTOCOL_MESSAGE_OK;
     case PROTOCOL_TYPE_ACK:
-        if ((message->value.ack.acknowledged_type !=
-                 PROTOCOL_TYPE_TIME_SYNC &&
-             message->value.ack.acknowledged_type !=
-                 PROTOCOL_TYPE_PUSH_DATA &&
-             message->value.ack.acknowledged_type !=
-                 PROTOCOL_TYPE_APPLY_CONFIG &&
-             message->value.ack.acknowledged_type !=
-                 PROTOCOL_TYPE_ACTIVATE_SCREEN &&
-             message->value.ack.acknowledged_type !=
-                 PROTOCOL_TYPE_TRIGGER_INTERRUPT &&
-             message->value.ack.acknowledged_type !=
-                 PROTOCOL_TYPE_NETWORK_CONFIG &&
-             message->value.ack.acknowledged_type !=
-                 PROTOCOL_TYPE_FACTORY_RESET) ||
-            (((message->value.ack.acknowledged_type ==
-                   PROTOCOL_TYPE_PUSH_DATA ||
-               message->value.ack.acknowledged_type ==
-                   PROTOCOL_TYPE_APPLY_CONFIG)) !=
-             message->value.ack.has_revision) ||
-            (message->value.ack.has_revision &&
-             message->value.ack.revision == 0U)) {
-            return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
-        }
-        return PROTOCOL_MESSAGE_OK;
+        return validate_ack_payload(&message->value.ack);
     case PROTOCOL_TYPE_PUSH_DATA: {
         const protocol_push_data_t *push = &message->value.push_data;
         if (!bounded_length(push->widget_id, sizeof(push->widget_id),
@@ -1512,6 +1995,65 @@ static protocol_message_result_t validate_message(
         return validate_network_config(&message->value.network_config);
     case PROTOCOL_TYPE_FACTORY_RESET:
         return PROTOCOL_MESSAGE_OK;
+    case PROTOCOL_TYPE_ASSET_BEGIN: {
+        const protocol_asset_begin_t *begin = &message->value.asset_begin;
+        if (begin->kind != ASSET_KIND_FONT &&
+            begin->kind != ASSET_KIND_ICON_FONT &&
+            begin->kind != ASSET_KIND_IMAGE) {
+            return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
+        }
+        if (begin->total_length == 0U ||
+            begin->total_length > (uint32_t)ASSET_MAX_BYTES) {
+            return PROTOCOL_MESSAGE_ERR_TOO_LARGE;
+        }
+        if (begin->encoding != PROTOCOL_ASSET_ENCODING_RAW &&
+            begin->encoding != PROTOCOL_ASSET_ENCODING_RLE565) {
+            return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
+        }
+        if (begin->encoding == PROTOCOL_ASSET_ENCODING_RAW) {
+            return begin->has_decoded_length
+                       ? PROTOCOL_MESSAGE_ERR_INVALID_VALUE
+                       : PROTOCOL_MESSAGE_OK;
+        }
+        if (!begin->volatile_tier || !begin->has_decoded_length ||
+            begin->decoded_length == 0U ||
+            begin->decoded_length > (uint32_t)ASSET_MAX_BYTES ||
+            (begin->kind == ASSET_KIND_IMAGE &&
+             begin->decoded_length !=
+                 PROTOCOL_VOLATILE_IMAGE_DECODED_LENGTH) ||
+            begin->total_length >= begin->decoded_length) {
+            return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
+        }
+        return PROTOCOL_MESSAGE_OK;
+    }
+    case PROTOCOL_TYPE_ASSET_CHUNK:
+        if (message->value.asset_chunk.data_length >
+            PROTOCOL_MAX_ASSET_CHUNK_BYTES) {
+            return PROTOCOL_MESSAGE_ERR_TOO_LARGE;
+        }
+        return PROTOCOL_MESSAGE_OK;
+    case PROTOCOL_TYPE_ASSET_COMMIT:
+        return PROTOCOL_MESSAGE_OK;
+    case PROTOCOL_TYPE_ASSET_RELEASE:
+        if (message->value.asset_release.digest_count >
+            PROTOCOL_MAX_ASSET_DIGESTS) {
+            return PROTOCOL_MESSAGE_ERR_TOO_LARGE;
+        }
+        return PROTOCOL_MESSAGE_OK;
+    case PROTOCOL_TYPE_PUSH_SCENE: {
+        const protocol_push_scene_t *push = &message->value.push_scene;
+        if (!bounded_length(push->card_id, sizeof(push->card_id), &length) ||
+            length == 0U || push->revision == 0U) {
+            return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
+        }
+        /* The scene's own invariants belong to scene_model_validate(), and
+         * are checked here rather than restated. Note it does NOT cover
+         * bindings -- scene_binding_parse() is applied on the DECODE path
+         * only, because a binding is untrusted input rather than a bound
+         * on this struct, and pulling that parser in here would put it in
+         * the encode path of every message. */
+        return scene_result(scene_model_validate(&push->scene));
+    }
     default:
         return PROTOCOL_MESSAGE_ERR_UNSUPPORTED_TYPE;
     }
@@ -1537,6 +2079,13 @@ static protocol_message_result_t encode_text(CborEncoder *encoder,
 static protocol_message_result_t encode_bool(CborEncoder *encoder, bool value)
 {
     return cbor_result(cbor_encode_boolean(encoder, value));
+}
+
+static protocol_message_result_t encode_bytes(CborEncoder *encoder,
+                                               const uint8_t *data,
+                                               size_t length)
+{
+    return cbor_result(cbor_encode_byte_string(encoder, data, length));
 }
 
 static protocol_message_result_t begin_map(CborEncoder *parent,
@@ -1711,7 +2260,8 @@ static protocol_message_result_t encode_status_payload(
     CborEncoder map;
     size_t entry_count = 24U + 5U +
                          (status->has_last_network_error ? 1U : 0U) +
-                         (status->has_last_ota_error ? 1U : 0U);
+                         (status->has_last_ota_error ? 1U : 0U) +
+                         (status->has_asset_store_stats ? 1U : 0U);
     protocol_message_result_t result = begin_map(root, &map, entry_count);
     if (result != PROTOCOL_MESSAGE_OK) return result;
     result = encode_pair_uint(&map, 0U, status->protocol_version);
@@ -1758,8 +2308,699 @@ static protocol_message_result_t encode_status_payload(
             result = encode_text(&map, status->last_ota_error);
         }
     }
+    if (result == PROTOCOL_MESSAGE_OK && status->has_asset_store_stats) {
+        result = encode_uint(&map, 31U);
+        if (result == PROTOCOL_MESSAGE_OK) {
+            CborEncoder stats_map;
+            result = begin_map(&map, &stats_map, 3U);
+            if (result == PROTOCOL_MESSAGE_OK) {
+                result = encode_pair_uint(&stats_map, 0U,
+                                          status->asset_store_used_bytes);
+            }
+            if (result == PROTOCOL_MESSAGE_OK) {
+                result = encode_pair_uint(&stats_map, 1U,
+                                          status->asset_store_free_bytes);
+            }
+            if (result == PROTOCOL_MESSAGE_OK) {
+                result = encode_pair_uint(&stats_map, 2U, status->asset_count);
+            }
+            if (result == PROTOCOL_MESSAGE_OK) {
+                result = end_map(&map, &stats_map);
+            }
+        }
+    }
     if (result != PROTOCOL_MESSAGE_OK) return result;
     return end_map(root, &map);
+}
+
+static protocol_message_result_t encode_asset_begin_payload(
+    CborEncoder *root,
+    const protocol_asset_begin_t *begin)
+{
+    CborEncoder map;
+    /* Key 3 always emitted (see the Rust encoder's comment): deployed
+     * decoders require it, so only keys 4/5 follow the optional rule. */
+    size_t pair_count = 4U +
+                        (begin->encoding != PROTOCOL_ASSET_ENCODING_RAW ? 1U
+                                                                        : 0U) +
+                        (begin->has_decoded_length ? 1U : 0U);
+    protocol_message_result_t result = begin_map(root, &map, pair_count);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 0U);
+    if (result == PROTOCOL_MESSAGE_OK) {
+        result = encode_bytes(&map, begin->digest, ASSET_DIGEST_BYTES);
+    }
+    if (result == PROTOCOL_MESSAGE_OK) {
+        result = encode_pair_uint(&map, 1U, (uint64_t)begin->kind);
+    }
+    if (result == PROTOCOL_MESSAGE_OK) {
+        result = encode_pair_uint(&map, 2U, begin->total_length);
+    }
+    if (result == PROTOCOL_MESSAGE_OK) {
+        result = encode_uint(&map, 3U);
+        if (result == PROTOCOL_MESSAGE_OK) {
+            result = encode_bool(&map, begin->volatile_tier);
+        }
+    }
+    if (result == PROTOCOL_MESSAGE_OK &&
+        begin->encoding != PROTOCOL_ASSET_ENCODING_RAW) {
+        result = encode_pair_uint(&map, 4U, begin->encoding);
+    }
+    if (result == PROTOCOL_MESSAGE_OK && begin->has_decoded_length) {
+        result = encode_pair_uint(&map, 5U, begin->decoded_length);
+    }
+    if (result == PROTOCOL_MESSAGE_OK) result = end_map(root, &map);
+    return result;
+}
+
+static protocol_message_result_t encode_asset_chunk_payload(
+    CborEncoder *root,
+    const protocol_asset_chunk_t *chunk)
+{
+    CborEncoder map;
+    protocol_message_result_t result = begin_map(root, &map, 3U);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 0U);
+    if (result == PROTOCOL_MESSAGE_OK) {
+        result = encode_bytes(&map, chunk->digest, ASSET_DIGEST_BYTES);
+    }
+    if (result == PROTOCOL_MESSAGE_OK) {
+        result = encode_pair_uint(&map, 1U, chunk->offset);
+    }
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 2U);
+    if (result == PROTOCOL_MESSAGE_OK) {
+        result = encode_bytes(&map, chunk->data, chunk->data_length);
+    }
+    if (result == PROTOCOL_MESSAGE_OK) result = end_map(root, &map);
+    return result;
+}
+
+static protocol_message_result_t encode_asset_commit_payload(
+    CborEncoder *root,
+    const protocol_asset_commit_t *commit)
+{
+    CborEncoder map;
+    protocol_message_result_t result = begin_map(root, &map, 1U);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 0U);
+    if (result == PROTOCOL_MESSAGE_OK) {
+        result = encode_bytes(&map, commit->digest, ASSET_DIGEST_BYTES);
+    }
+    if (result == PROTOCOL_MESSAGE_OK) result = end_map(root, &map);
+    return result;
+}
+
+static protocol_message_result_t encode_asset_release_payload(
+    CborEncoder *root,
+    const protocol_asset_release_t *release)
+{
+    CborEncoder map;
+    CborEncoder digests;
+    protocol_message_result_t result = begin_map(root, &map, 1U);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 0U);
+    if (result == PROTOCOL_MESSAGE_OK) {
+        result = begin_array(&map, &digests, release->digest_count);
+    }
+    for (size_t i = 0U;
+         result == PROTOCOL_MESSAGE_OK && i < release->digest_count; ++i) {
+        result = encode_bytes(&digests, release->digests[i], ASSET_DIGEST_BYTES);
+    }
+    if (result == PROTOCOL_MESSAGE_OK) result = end_map(&map, &digests);
+    if (result == PROTOCOL_MESSAGE_OK) result = end_map(root, &map);
+    return result;
+}
+
+/* ------------------------------------------------------------------
+ * The scene encoder.
+ *
+ * The device never SENDS a PushScene. This exists so the cross-language
+ * fixture corpus can prove the two implementations agree byte for byte:
+ * firmware/host_tests/test_protocol.c decodes protocol/fixtures/v1/
+ * push_scene.bin, re-encodes it here, and memcmp's the result against the
+ * file the Rust encoder wrote. Without an encoder on this side that check
+ * would not exist for the largest and most nested message on the wire.
+ *
+ * CANONICAL EMISSION RULE, and both languages must follow it or the
+ * round-trip above fails: a required key is always emitted; an OPTIONAL key
+ * is emitted only when its value differs from the default the decoder would
+ * have supplied. That is not tidiness -- it is what keeps a 24-node scene
+ * inside the 2034-byte payload (see the wire-shape comment at the top of
+ * core/scene_decode.c). The defaults are: RECT radius 0, fill 0, opacity
+ * 255, clip absent; ARC color 0, rounded false, end_binding "", opacity 255,
+ * running_color absent; LINE color 0; TEXT align LEFT, color 0,
+ * ellipsize false, running_color absent; IMAGE recolor false, color 0; GLYPH color
+ * 0; SCALE major_tick_color 0; LABEL colours/style fields 0,
+ * hide_when_empty false, horizontal_anchor LEFT; ROT_RECT style/transform
+ * fields 0, rotation_binding "", and clip absent; the value map's literal
+ * and binding "".
+ * ------------------------------------------------------------------ */
+
+static size_t scene_rect_entries(const scene_rect_t *rect)
+{
+    return 4U + (rect->radius != 0 ? 1U : 0U) + (rect->fill != 0U ? 1U : 0U) +
+           (rect->opacity != UINT8_MAX ? 1U : 0U) +
+           (rect->has_clip ? 1U : 0U);
+}
+
+static protocol_message_result_t encode_scene_clip_rect(
+    CborEncoder *parent,
+    const scene_clip_rect_t *clip)
+{
+    CborEncoder map;
+    protocol_message_result_t result = begin_map(parent, &map, 4U);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 0U);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_int(&map, clip->x);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 1U);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_int(&map, clip->y);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 2U);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_int(&map, clip->w);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 3U);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_int(&map, clip->h);
+    if (result == PROTOCOL_MESSAGE_OK) result = end_map(parent, &map);
+    return result;
+}
+
+static protocol_message_result_t encode_scene_rect(CborEncoder *parent,
+                                                    const scene_rect_t *rect)
+{
+    CborEncoder map;
+    protocol_message_result_t result =
+        begin_map(parent, &map, scene_rect_entries(rect));
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 0U);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_int(&map, rect->x);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 1U);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_int(&map, rect->y);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 2U);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_int(&map, rect->w);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 3U);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_int(&map, rect->h);
+    if (result == PROTOCOL_MESSAGE_OK && rect->radius != 0) {
+        result = encode_uint(&map, 4U);
+        if (result == PROTOCOL_MESSAGE_OK) result = encode_int(&map, rect->radius);
+    }
+    if (result == PROTOCOL_MESSAGE_OK && rect->fill != 0U) {
+        result = encode_pair_uint(&map, 5U, rect->fill);
+    }
+    if (result == PROTOCOL_MESSAGE_OK && rect->opacity != UINT8_MAX) {
+        result = encode_pair_uint(&map, 6U, rect->opacity);
+    }
+    if (result == PROTOCOL_MESSAGE_OK && rect->has_clip) {
+        result = encode_uint(&map, 7U);
+        if (result == PROTOCOL_MESSAGE_OK) {
+            result = encode_scene_clip_rect(&map, &rect->clip);
+        }
+    }
+    if (result == PROTOCOL_MESSAGE_OK) result = end_map(parent, &map);
+    return result;
+}
+
+static protocol_message_result_t encode_scene_arc(CborEncoder *parent,
+                                                   const scene_arc_t *arc)
+{
+    CborEncoder map;
+    size_t entries = 6U + (arc->color != 0U ? 1U : 0U) +
+                     (arc->rounded ? 1U : 0U) +
+                     (arc->end_binding[0] != '\0' ? 1U : 0U) +
+                     (arc->opacity != UINT8_MAX ? 1U : 0U) +
+                     (arc->has_running_color ? 1U : 0U);
+    protocol_message_result_t result = begin_map(parent, &map, entries);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 0U);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_int(&map, arc->cx);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 1U);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_int(&map, arc->cy);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 2U);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_int(&map, arc->r);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 3U);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_int(&map, arc->start_deg);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 4U);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_int(&map, arc->end_deg);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 5U);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_int(&map, arc->width);
+    if (result == PROTOCOL_MESSAGE_OK && arc->color != 0U) {
+        result = encode_pair_uint(&map, 6U, arc->color);
+    }
+    if (result == PROTOCOL_MESSAGE_OK && arc->rounded) {
+        result = encode_uint(&map, 7U);
+        if (result == PROTOCOL_MESSAGE_OK) result = encode_bool(&map, true);
+    }
+    if (result == PROTOCOL_MESSAGE_OK && arc->end_binding[0] != '\0') {
+        result = encode_uint(&map, 8U);
+        if (result == PROTOCOL_MESSAGE_OK) result = encode_text(&map, arc->end_binding);
+    }
+    if (result == PROTOCOL_MESSAGE_OK && arc->opacity != UINT8_MAX) {
+        result = encode_pair_uint(&map, 9U, arc->opacity);
+    }
+    if (result == PROTOCOL_MESSAGE_OK && arc->has_running_color) {
+        result = encode_pair_uint(&map, 10U, arc->running_color);
+    }
+    if (result == PROTOCOL_MESSAGE_OK) result = end_map(parent, &map);
+    return result;
+}
+
+static protocol_message_result_t encode_scene_points(CborEncoder *map,
+                                                      uint64_t key,
+                                                      const int32_t *points,
+                                                      uint32_t count)
+{
+    protocol_message_result_t result = encode_uint(map, key);
+    CborEncoder array;
+    if (result == PROTOCOL_MESSAGE_OK) result = begin_array(map, &array, count);
+    for (uint32_t i = 0U; result == PROTOCOL_MESSAGE_OK && i < count; ++i) {
+        result = encode_int(&array, points[i]);
+    }
+    if (result == PROTOCOL_MESSAGE_OK) result = end_map(map, &array);
+    return result;
+}
+
+static protocol_message_result_t encode_scene_line(CborEncoder *parent,
+                                                    const scene_line_t *line)
+{
+    CborEncoder map;
+    bool bound = line->angle_binding[0] != '\0';
+    protocol_message_result_t result =
+        begin_map(parent, &map,
+                  (bound ? 5U : 3U) + (line->color != 0U ? 1U : 0U));
+    if (result == PROTOCOL_MESSAGE_OK && !bound) {
+        result = encode_scene_points(&map, 0U, line->xs, line->point_count);
+    }
+    if (result == PROTOCOL_MESSAGE_OK && !bound) {
+        result = encode_scene_points(&map, 1U, line->ys, line->point_count);
+    }
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 2U);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_int(&map, line->width);
+    if (result == PROTOCOL_MESSAGE_OK && line->color != 0U) {
+        result = encode_pair_uint(&map, 3U, line->color);
+    }
+    if (result == PROTOCOL_MESSAGE_OK && bound) {
+        result = encode_uint(&map, 4U);
+    }
+    if (result == PROTOCOL_MESSAGE_OK && bound) {
+        result = encode_int(&map, line->pivot_x);
+    }
+    if (result == PROTOCOL_MESSAGE_OK && bound) {
+        result = encode_uint(&map, 5U);
+    }
+    if (result == PROTOCOL_MESSAGE_OK && bound) {
+        result = encode_int(&map, line->pivot_y);
+    }
+    if (result == PROTOCOL_MESSAGE_OK && bound) {
+        result = encode_uint(&map, 6U);
+    }
+    if (result == PROTOCOL_MESSAGE_OK && bound) {
+        result = encode_int(&map, line->length);
+    }
+    if (result == PROTOCOL_MESSAGE_OK && bound) {
+        result = encode_uint(&map, 7U);
+    }
+    if (result == PROTOCOL_MESSAGE_OK && bound) {
+        result = encode_text(&map, line->angle_binding);
+    }
+    if (result == PROTOCOL_MESSAGE_OK) result = end_map(parent, &map);
+    return result;
+}
+
+/* A BAKED font carries its tier and no digest; an ASSET font carries its
+ * digest and pixel size and no tier. Emitting the other half either way
+ * would spend 34 bytes a node on a field the decoder ignores. */
+static protocol_message_result_t encode_scene_font(CborEncoder *parent,
+                                                    const scene_font_ref_t *font)
+{
+    CborEncoder map;
+    bool asset = font->kind == SCENE_FONT_ASSET;
+    protocol_message_result_t result = begin_map(parent, &map, asset ? 3U : 2U);
+    if (result == PROTOCOL_MESSAGE_OK) {
+        result = encode_pair_uint(&map, 0U, (uint64_t)font->kind);
+    }
+    if (result == PROTOCOL_MESSAGE_OK && !asset) {
+        result = encode_pair_uint(&map, 1U, (uint64_t)font->baked);
+    }
+    if (result == PROTOCOL_MESSAGE_OK && asset) {
+        result = encode_uint(&map, 2U);
+        if (result == PROTOCOL_MESSAGE_OK) {
+            result = encode_bytes(&map, font->digest, ASSET_DIGEST_BYTES);
+        }
+        if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 3U);
+        if (result == PROTOCOL_MESSAGE_OK) result = encode_int(&map, font->pixel_size);
+    }
+    if (result == PROTOCOL_MESSAGE_OK) result = end_map(parent, &map);
+    return result;
+}
+
+static protocol_message_result_t encode_scene_value(CborEncoder *parent,
+                                                     const scene_value_t *value)
+{
+    CborEncoder map;
+    size_t entries = 1U + (value->literal[0] != '\0' ? 1U : 0U) +
+                     (value->binding[0] != '\0' ? 1U : 0U);
+    protocol_message_result_t result = begin_map(parent, &map, entries);
+    if (result == PROTOCOL_MESSAGE_OK) {
+        result = encode_pair_uint(&map, 0U, (uint64_t)value->kind);
+    }
+    if (result == PROTOCOL_MESSAGE_OK && value->literal[0] != '\0') {
+        result = encode_uint(&map, 1U);
+        if (result == PROTOCOL_MESSAGE_OK) result = encode_text(&map, value->literal);
+    }
+    if (result == PROTOCOL_MESSAGE_OK && value->binding[0] != '\0') {
+        result = encode_uint(&map, 2U);
+        if (result == PROTOCOL_MESSAGE_OK) result = encode_text(&map, value->binding);
+    }
+    if (result == PROTOCOL_MESSAGE_OK) result = end_map(parent, &map);
+    return result;
+}
+
+static protocol_message_result_t encode_scene_text(CborEncoder *parent,
+                                                    const scene_text_t *text)
+{
+    CborEncoder map;
+    size_t entries = 5U + (text->align != SCENE_ALIGN_LEFT ? 1U : 0U) +
+                     (text->color != 0U ? 1U : 0U) +
+                     (text->ellipsize ? 1U : 0U) +
+                     (text->has_running_color ? 1U : 0U);
+    protocol_message_result_t result = begin_map(parent, &map, entries);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 0U);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_int(&map, text->x);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 1U);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_int(&map, text->baseline_y);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 2U);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_int(&map, text->w);
+    if (result == PROTOCOL_MESSAGE_OK && text->align != SCENE_ALIGN_LEFT) {
+        result = encode_pair_uint(&map, 3U, (uint64_t)text->align);
+    }
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 4U);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_scene_font(&map, &text->font);
+    if (result == PROTOCOL_MESSAGE_OK && text->color != 0U) {
+        result = encode_pair_uint(&map, 5U, text->color);
+    }
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 6U);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_scene_value(&map, &text->value);
+    if (result == PROTOCOL_MESSAGE_OK && text->ellipsize) {
+        result = encode_uint(&map, 7U);
+        if (result == PROTOCOL_MESSAGE_OK) result = encode_bool(&map, true);
+    }
+    if (result == PROTOCOL_MESSAGE_OK && text->has_running_color) {
+        result = encode_pair_uint(&map, 8U, text->running_color);
+    }
+    if (result == PROTOCOL_MESSAGE_OK) result = end_map(parent, &map);
+    return result;
+}
+
+static protocol_message_result_t encode_scene_image(CborEncoder *parent,
+                                                     const scene_image_t *image)
+{
+    CborEncoder map;
+    size_t entries = 5U + (image->recolor ? 1U : 0U) +
+                     (image->color != 0U ? 1U : 0U);
+    protocol_message_result_t result = begin_map(parent, &map, entries);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 0U);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_int(&map, image->x);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 1U);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_int(&map, image->y);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 2U);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_int(&map, image->w);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 3U);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_int(&map, image->h);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 4U);
+    if (result == PROTOCOL_MESSAGE_OK) {
+        result = encode_bytes(&map, image->digest, ASSET_DIGEST_BYTES);
+    }
+    if (result == PROTOCOL_MESSAGE_OK && image->recolor) {
+        result = encode_uint(&map, 5U);
+        if (result == PROTOCOL_MESSAGE_OK) result = encode_bool(&map, true);
+    }
+    if (result == PROTOCOL_MESSAGE_OK && image->color != 0U) {
+        result = encode_pair_uint(&map, 6U, image->color);
+    }
+    if (result == PROTOCOL_MESSAGE_OK) result = end_map(parent, &map);
+    return result;
+}
+
+static protocol_message_result_t encode_scene_glyph(CborEncoder *parent,
+                                                     const scene_glyph_t *glyph)
+{
+    CborEncoder map;
+    protocol_message_result_t result =
+        begin_map(parent, &map, 5U + (glyph->color != 0U ? 1U : 0U));
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 0U);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_int(&map, glyph->x);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 1U);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_int(&map, glyph->baseline_y);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 2U);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_int(&map, glyph->size);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 3U);
+    if (result == PROTOCOL_MESSAGE_OK) {
+        result = encode_bytes(&map, glyph->digest, ASSET_DIGEST_BYTES);
+    }
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 4U);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_text(&map, glyph->name);
+    if (result == PROTOCOL_MESSAGE_OK && glyph->color != 0U) {
+        result = encode_pair_uint(&map, 5U, glyph->color);
+    }
+    if (result == PROTOCOL_MESSAGE_OK) result = end_map(parent, &map);
+    return result;
+}
+
+static protocol_message_result_t encode_scene_scale(CborEncoder *parent,
+                                                     const scene_scale_t *scale)
+{
+    CborEncoder map;
+    protocol_message_result_t result =
+        begin_map(parent, &map, 5U + (scale->major_tick_color != 0U ? 1U : 0U));
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 0U);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_int(&map, scale->x);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 1U);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_int(&map, scale->y);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 2U);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_int(&map, scale->box);
+    if (result == PROTOCOL_MESSAGE_OK) {
+        result = encode_pair_uint(&map, 3U, scale->total_tick_count);
+    }
+    if (result == PROTOCOL_MESSAGE_OK) {
+        result = encode_pair_uint(&map, 4U, scale->major_tick_every);
+    }
+    if (result == PROTOCOL_MESSAGE_OK && scale->major_tick_color != 0U) {
+        result = encode_pair_uint(&map, 5U, scale->major_tick_color);
+    }
+    if (result == PROTOCOL_MESSAGE_OK) result = end_map(parent, &map);
+    return result;
+}
+
+static protocol_message_result_t encode_scene_label(CborEncoder *parent,
+                                                     const scene_label_t *label)
+{
+    CborEncoder map;
+    size_t entries = 4U + (label->ink != 0U ? 1U : 0U) +
+                     (label->fill != 0U ? 1U : 0U) +
+                     (label->fill_opacity != 0U ? 1U : 0U) +
+                     (label->radius != 0 ? 1U : 0U) +
+                     (label->pad_hor != 0 ? 1U : 0U) +
+                     (label->pad_ver != 0 ? 1U : 0U) +
+                     (label->letter_space != 0 ? 1U : 0U) +
+                     (label->hide_when_empty ? 1U : 0U) +
+                     (label->horizontal_anchor != SCENE_LABEL_ANCHOR_LEFT ? 1U : 0U);
+    protocol_message_result_t result = begin_map(parent, &map, entries);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 0U);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_int(&map, label->x);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 1U);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_int(&map, label->y);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 2U);
+    if (result == PROTOCOL_MESSAGE_OK) {
+        result = encode_scene_font(&map, &label->font);
+    }
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 3U);
+    if (result == PROTOCOL_MESSAGE_OK) {
+        result = encode_scene_value(&map, &label->value);
+    }
+    if (result == PROTOCOL_MESSAGE_OK && label->ink != 0U) {
+        result = encode_pair_uint(&map, 4U, label->ink);
+    }
+    if (result == PROTOCOL_MESSAGE_OK && label->fill != 0U) {
+        result = encode_pair_uint(&map, 5U, label->fill);
+    }
+    if (result == PROTOCOL_MESSAGE_OK && label->fill_opacity != 0U) {
+        result = encode_pair_uint(&map, 6U, label->fill_opacity);
+    }
+    if (result == PROTOCOL_MESSAGE_OK && label->radius != 0) {
+        result = encode_uint(&map, 7U);
+        if (result == PROTOCOL_MESSAGE_OK) {
+            result = encode_int(&map, label->radius);
+        }
+    }
+    if (result == PROTOCOL_MESSAGE_OK && label->pad_hor != 0) {
+        result = encode_uint(&map, 8U);
+        if (result == PROTOCOL_MESSAGE_OK) {
+            result = encode_int(&map, label->pad_hor);
+        }
+    }
+    if (result == PROTOCOL_MESSAGE_OK && label->pad_ver != 0) {
+        result = encode_uint(&map, 9U);
+        if (result == PROTOCOL_MESSAGE_OK) {
+            result = encode_int(&map, label->pad_ver);
+        }
+    }
+    if (result == PROTOCOL_MESSAGE_OK && label->letter_space != 0) {
+        result = encode_uint(&map, 10U);
+        if (result == PROTOCOL_MESSAGE_OK) {
+            result = encode_int(&map, label->letter_space);
+        }
+    }
+    if (result == PROTOCOL_MESSAGE_OK && label->hide_when_empty) {
+        result = encode_uint(&map, 11U);
+        if (result == PROTOCOL_MESSAGE_OK) result = encode_bool(&map, true);
+    }
+    if (result == PROTOCOL_MESSAGE_OK &&
+        label->horizontal_anchor != SCENE_LABEL_ANCHOR_LEFT) {
+        result = encode_pair_uint(&map, 12U,
+                                  (uint64_t)label->horizontal_anchor);
+    }
+    if (result == PROTOCOL_MESSAGE_OK) result = end_map(parent, &map);
+    return result;
+}
+
+static protocol_message_result_t encode_scene_rot_rect(
+    CborEncoder *parent,
+    const scene_rot_rect_t *rect)
+{
+    CborEncoder map;
+    size_t entries = 4U + (rect->radius != 0 ? 1U : 0U) +
+                     (rect->fill != 0U ? 1U : 0U) +
+                     (rect->pivot_x != 0 ? 1U : 0U) +
+                     (rect->pivot_y != 0 ? 1U : 0U) +
+                     (rect->rotation != 0 ? 1U : 0U) +
+                     (rect->rotation_binding[0] != '\0' ? 1U : 0U) +
+                     (rect->has_clip ? 1U : 0U);
+    protocol_message_result_t result = begin_map(parent, &map, entries);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 0U);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_int(&map, rect->x);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 1U);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_int(&map, rect->y);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 2U);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_int(&map, rect->w);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 3U);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_int(&map, rect->h);
+    if (result == PROTOCOL_MESSAGE_OK && rect->radius != 0) {
+        result = encode_uint(&map, 4U);
+        if (result == PROTOCOL_MESSAGE_OK) {
+            result = encode_int(&map, rect->radius);
+        }
+    }
+    if (result == PROTOCOL_MESSAGE_OK && rect->fill != 0U) {
+        result = encode_pair_uint(&map, 5U, rect->fill);
+    }
+    if (result == PROTOCOL_MESSAGE_OK && rect->pivot_x != 0) {
+        result = encode_uint(&map, 6U);
+        if (result == PROTOCOL_MESSAGE_OK) {
+            result = encode_int(&map, rect->pivot_x);
+        }
+    }
+    if (result == PROTOCOL_MESSAGE_OK && rect->pivot_y != 0) {
+        result = encode_uint(&map, 7U);
+        if (result == PROTOCOL_MESSAGE_OK) {
+            result = encode_int(&map, rect->pivot_y);
+        }
+    }
+    if (result == PROTOCOL_MESSAGE_OK && rect->rotation != 0) {
+        result = encode_uint(&map, 8U);
+        if (result == PROTOCOL_MESSAGE_OK) {
+            result = encode_int(&map, rect->rotation);
+        }
+    }
+    if (result == PROTOCOL_MESSAGE_OK &&
+        rect->rotation_binding[0] != '\0') {
+        result = encode_uint(&map, 9U);
+        if (result == PROTOCOL_MESSAGE_OK) {
+            result = encode_text(&map, rect->rotation_binding);
+        }
+    }
+    if (result == PROTOCOL_MESSAGE_OK && rect->has_clip) {
+        result = encode_uint(&map, 10U);
+        if (result == PROTOCOL_MESSAGE_OK) {
+            result = encode_scene_clip_rect(&map, &rect->clip);
+        }
+    }
+    if (result == PROTOCOL_MESSAGE_OK) result = end_map(parent, &map);
+    return result;
+}
+
+static protocol_message_result_t encode_scene_node(CborEncoder *parent,
+                                                    const scene_node_t *node)
+{
+    CborEncoder map;
+    protocol_message_result_t result = begin_map(parent, &map, 2U);
+    if (result == PROTOCOL_MESSAGE_OK) {
+        result = encode_pair_uint(&map, 0U, (uint64_t)node->kind);
+    }
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 1U);
+    if (result == PROTOCOL_MESSAGE_OK) {
+        switch (node->kind) {
+        case SCENE_NODE_RECT:
+            result = encode_scene_rect(&map, &node->value.rect);
+            break;
+        case SCENE_NODE_ARC:
+            result = encode_scene_arc(&map, &node->value.arc);
+            break;
+        case SCENE_NODE_LINE:
+            result = encode_scene_line(&map, &node->value.line);
+            break;
+        case SCENE_NODE_TEXT:
+            result = encode_scene_text(&map, &node->value.text);
+            break;
+        case SCENE_NODE_IMAGE:
+            result = encode_scene_image(&map, &node->value.image);
+            break;
+        case SCENE_NODE_GLYPH:
+            result = encode_scene_glyph(&map, &node->value.glyph);
+            break;
+        case SCENE_NODE_SCALE:
+            result = encode_scene_scale(&map, &node->value.scale);
+            break;
+        case SCENE_NODE_LABEL:
+            result = encode_scene_label(&map, &node->value.label);
+            break;
+        case SCENE_NODE_ROT_RECT:
+            result = encode_scene_rot_rect(&map, &node->value.rot_rect);
+            break;
+        default:
+            /* Unreachable: validate_message() ran scene_model_validate()
+             * before encode_payload() was called, and it refuses any kind
+             * outside this switch. */
+            result = PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
+            break;
+        }
+    }
+    if (result == PROTOCOL_MESSAGE_OK) result = end_map(parent, &map);
+    return result;
+}
+
+static protocol_message_result_t encode_push_scene_payload(
+    CborEncoder *root,
+    const protocol_push_scene_t *push)
+{
+    CborEncoder map;
+    protocol_message_result_t result = begin_map(root, &map, 3U);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 0U);
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_text(&map, push->card_id);
+    if (result == PROTOCOL_MESSAGE_OK) {
+        result = encode_pair_uint(&map, 1U, push->revision);
+    }
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 2U);
+    CborEncoder scene;
+    if (result == PROTOCOL_MESSAGE_OK) result = begin_map(&map, &scene, 3U);
+    if (result == PROTOCOL_MESSAGE_OK) {
+        result = encode_pair_uint(&scene, 0U, push->scene.revision);
+    }
+    if (result == PROTOCOL_MESSAGE_OK) {
+        result = encode_pair_uint(&scene, 1U, push->scene.background);
+    }
+    if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&scene, 2U);
+    CborEncoder nodes;
+    if (result == PROTOCOL_MESSAGE_OK) {
+        result = begin_array(&scene, &nodes, push->scene.node_count);
+    }
+    for (uint32_t i = 0U;
+         result == PROTOCOL_MESSAGE_OK && i < push->scene.node_count; ++i) {
+        result = encode_scene_node(&nodes, &push->scene.nodes[i]);
+    }
+    if (result == PROTOCOL_MESSAGE_OK) result = end_map(&scene, &nodes);
+    if (result == PROTOCOL_MESSAGE_OK) result = end_map(&map, &scene);
+    if (result == PROTOCOL_MESSAGE_OK) result = end_map(root, &map);
+    return result;
 }
 
 static protocol_message_result_t encode_payload(
@@ -1793,12 +3034,20 @@ static protocol_message_result_t encode_payload(
         if (result == PROTOCOL_MESSAGE_OK) result = encode_int(&map, message->value.time_sync.utc_offset_minutes);
         if (result == PROTOCOL_MESSAGE_OK) result = end_map(&root, &map);
         break;
-    case PROTOCOL_TYPE_ACK:
-        result = begin_map(&root, &map, message->value.ack.has_revision ? 2U : 1U);
+    case PROTOCOL_TYPE_ACK: {
+        size_t ack_field_count = 1U;
+        if (message->value.ack.has_revision) ++ack_field_count;
+        if (message->value.ack.has_already_present) ++ack_field_count;
+        result = begin_map(&root, &map, ack_field_count);
         if (result == PROTOCOL_MESSAGE_OK) result = encode_pair_uint(&map, 0U, message->value.ack.acknowledged_type);
         if (result == PROTOCOL_MESSAGE_OK && message->value.ack.has_revision) result = encode_pair_uint(&map, 1U, message->value.ack.revision);
+        if (result == PROTOCOL_MESSAGE_OK && message->value.ack.has_already_present) {
+            result = encode_uint(&map, 2U);
+            if (result == PROTOCOL_MESSAGE_OK) result = encode_bool(&map, message->value.ack.already_present);
+        }
         if (result == PROTOCOL_MESSAGE_OK) result = end_map(&root, &map);
         break;
+    }
     case PROTOCOL_TYPE_PUSH_DATA:
         result = begin_map(&root, &map, 3U);
         if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 0U);
@@ -1855,6 +3104,21 @@ static protocol_message_result_t encode_payload(
         if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 1U);
         if (result == PROTOCOL_MESSAGE_OK) result = encode_text(&map, message->value.error.diagnostic);
         if (result == PROTOCOL_MESSAGE_OK) result = end_map(&root, &map);
+        break;
+    case PROTOCOL_TYPE_ASSET_BEGIN:
+        result = encode_asset_begin_payload(&root, &message->value.asset_begin);
+        break;
+    case PROTOCOL_TYPE_ASSET_CHUNK:
+        result = encode_asset_chunk_payload(&root, &message->value.asset_chunk);
+        break;
+    case PROTOCOL_TYPE_ASSET_COMMIT:
+        result = encode_asset_commit_payload(&root, &message->value.asset_commit);
+        break;
+    case PROTOCOL_TYPE_ASSET_RELEASE:
+        result = encode_asset_release_payload(&root, &message->value.asset_release);
+        break;
+    case PROTOCOL_TYPE_PUSH_SCENE:
+        result = encode_push_scene_payload(&root, &message->value.push_scene);
         break;
     default:
         return PROTOCOL_MESSAGE_ERR_UNSUPPORTED_TYPE;

@@ -317,9 +317,10 @@ host suites here; the end-to-end "reaches the host" half of this acceptance can 
 once Task 5 lands the demultiplexing session, so leave it open across both tasks.
 
 **Firmware/host-test evidence (2026-08-04):** Gesture classification freezes logical
-tap/swipe distance and duration thresholds and covers both landscape rotations,
-dominance/edge cases, carousel wrap, and tap-vs-swipe routing. LVGL callbacks enqueue
-into an 8-slot, 808-byte at-most-once event queue; pressure drops newest after consuming
+tap/swipe distance and duration thresholds, dominance/edge cases, carousel wrap, and
+tap-vs-swipe routing. Both physical rotations are evidenced by the hardware observations
+recorded in `docs/hardware/board-notes.md`. LVGL callbacks enqueue into an 8-slot,
+808-byte at-most-once event queue; pressure drops newest after consuming
 its sequence, making the gap observable. The protocol task processes at most two events
 per 50 ms read poll, never writes USB in LVGL context, drives local navigation/model
 activation, and publishes request-ID-zero events with a 10 ms write deadline. Interrupt

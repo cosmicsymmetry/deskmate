@@ -1,0 +1,13 @@
+manifest_version = 2
+name = "svg"
+version = "1.0.0"
+
+[source]
+kind = "json"
+url = "https://example.invalid/data.json"
+refresh_minutes = 15
+root = "payload"
+
+[template]
+kind = "svg"
+file = "face.svg"

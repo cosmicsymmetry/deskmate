@@ -64,12 +64,7 @@ bool net_config_usb_message_allowed(protocol_tier_t tier,
 
     switch (type) {
         case PROTOCOL_TYPE_STATUS_REQUEST:
-        case PROTOCOL_TYPE_STATUS_RESPONSE:
-        case PROTOCOL_TYPE_ACK:
         case PROTOCOL_TYPE_HEARTBEAT:
-        case PROTOCOL_TYPE_HEARTBEAT_ACK:
-        case PROTOCOL_TYPE_ERROR:
-        case PROTOCOL_TYPE_DEVICE_EVENT:
         case PROTOCOL_TYPE_NETWORK_CONFIG:
         case PROTOCOL_TYPE_FACTORY_RESET:
             return true;

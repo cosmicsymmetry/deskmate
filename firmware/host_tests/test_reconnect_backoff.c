@@ -34,13 +34,13 @@ static void test_curve_caps_and_reset(void)
 
     for (size_t index = 0U; index < sizeof(expected) / sizeof(expected[0]);
          ++index) {
-        assert(reconnect_backoff_base_delay_ms(&backoff) == expected[index]);
+        assert(backoff.base_delay_ms == expected[index]);
         assert(reconnect_backoff_next_delay_ms(&backoff) == expected[index]);
     }
-    assert(reconnect_backoff_base_delay_ms(&backoff) == 60000U);
+    assert(backoff.base_delay_ms == 60000U);
 
     reconnect_backoff_reset(&backoff);
-    assert(reconnect_backoff_base_delay_ms(&backoff) == 1000U);
+    assert(backoff.base_delay_ms == 1000U);
     assert(reconnect_backoff_next_delay_ms(&backoff) == 1000U);
 }
 
@@ -57,7 +57,7 @@ static void test_jitter_bounds(void)
 
     assert(reconnect_backoff_peek_delay_ms(&backoff) == 800U);
     assert(reconnect_backoff_peek_delay_ms(&backoff) == 1200U);
-    assert(reconnect_backoff_base_delay_ms(&backoff) == 1000U);
+    assert(backoff.base_delay_ms == 1000U);
 }
 
 int main(void)

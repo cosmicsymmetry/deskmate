@@ -1,51 +1,30 @@
 use std::fs;
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
 use app_core::{
-    AppConfig, ConfigStore, DeviceTier, NetworkSettingsLoadOutcome, NetworkSettingsOrigin,
-    NetworkSettingsStore, NetworkSettingsUpdate,
+    AppConfig, ConfigStore, DeviceTier, NetworkSettingsLoadOutcome, NetworkSettingsStore,
+    NetworkSettingsUpdate,
 };
 
-static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(1);
-
-struct TestDirectory(PathBuf);
-
-impl TestDirectory {
-    fn new(name: &str) -> Self {
-        let serial = NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!(
-            "deskmate-network-settings-{name}-{}-{serial}",
-            std::process::id()
-        ));
-        fs::create_dir(&path).unwrap();
-        Self(path)
-    }
-
-    fn path(&self, name: &str) -> PathBuf {
-        self.0.join(name)
-    }
-}
-
-impl Drop for TestDirectory {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
-    }
+fn test_directory(name: &str) -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .prefix(&format!("deskmate-network-settings-{name}-"))
+        .tempdir()
+        .unwrap()
 }
 
 #[test]
 fn admin_credential_and_tier_round_trip_with_the_secret_redacted_from_readback() {
-    let directory = TestDirectory::new("round-trip");
-    let config_path = directory.path("config.json");
+    let directory = test_directory("round-trip");
+    let config_path = directory.path().join("config.json");
     ConfigStore::new(&config_path)
         .save(&AppConfig::default())
         .unwrap();
     let config_before = fs::read(&config_path).unwrap();
 
-    let settings_path = directory.path("network-settings.json");
+    let settings_path = directory.path().join("network-settings.json");
     NetworkSettingsStore::new(&settings_path)
         .save(NetworkSettingsUpdate::new(
             "https://deskmate.example",
@@ -56,7 +35,6 @@ fn admin_credential_and_tier_round_trip_with_the_secret_redacted_from_readback()
         .unwrap();
 
     let outcome = NetworkSettingsStore::new(&settings_path).load();
-    assert_eq!(outcome.origin(), NetworkSettingsOrigin::Current);
     assert_eq!(outcome.settings().server_url, "https://deskmate.example");
     assert_eq!(outcome.settings().device_id, "dev-0042");
     assert_eq!(outcome.settings().tier, Some(DeviceTier::Networked));
@@ -77,14 +55,14 @@ fn admin_credential_and_tier_round_trip_with_the_secret_redacted_from_readback()
         serde_json::from_slice::<AppConfig>(&config_before)
             .unwrap()
             .schema_version,
-        4
+        app_core::CURRENT_SCHEMA_VERSION
     );
 }
 
 #[test]
 fn blank_write_only_input_preserves_admin_token_and_tier_across_store_recreation() {
-    let directory = TestDirectory::new("preserve-secrets");
-    let settings_path = directory.path("network-settings.json");
+    let directory = test_directory("preserve-secrets");
+    let settings_path = directory.path().join("network-settings.json");
     NetworkSettingsStore::new(&settings_path)
         .save(NetworkSettingsUpdate::new(
             "https://old.example",
@@ -119,8 +97,8 @@ fn blank_write_only_input_preserves_admin_token_and_tier_across_store_recreation
 
 #[test]
 fn legacy_device_token_is_accepted_then_removed_on_the_next_save() {
-    let directory = TestDirectory::new("legacy-device-token");
-    let settings_path = directory.path("network-settings.json");
+    let directory = test_directory("legacy-device-token");
+    let settings_path = directory.path().join("network-settings.json");
     fs::write(
         &settings_path,
         br#"{
@@ -144,12 +122,11 @@ fn legacy_device_token_is_accepted_then_removed_on_the_next_save() {
 
 #[test]
 fn absent_and_corrupt_network_settings_degrade_to_redacted_defaults() {
-    let directory = TestDirectory::new("recovery");
-    let settings_path = directory.path("network-settings.json");
+    let directory = test_directory("recovery");
+    let settings_path = directory.path().join("network-settings.json");
     let store = NetworkSettingsStore::new(&settings_path);
 
     let missing = store.load();
-    assert_eq!(missing.origin(), NetworkSettingsOrigin::Defaults);
     assert_eq!(missing.settings().server_url, "");
     assert_eq!(missing.settings().device_id, "");
     assert_eq!(missing.settings().tier, None);
@@ -157,15 +134,11 @@ fn absent_and_corrupt_network_settings_degrade_to_redacted_defaults() {
     assert!(!settings_path.exists());
 
     fs::write(&settings_path, b"{\"format_version\":1,\"admin_token\":").unwrap();
-    let NetworkSettingsLoadOutcome::Recovered {
-        settings,
-        origin,
-        error: _,
-    } = NetworkSettingsStore::new(&settings_path).load()
+    let NetworkSettingsLoadOutcome::Recovered { settings, error: _ } =
+        NetworkSettingsStore::new(&settings_path).load()
     else {
         panic!("corrupt settings must recover instead of failing startup");
     };
-    assert_eq!(origin, NetworkSettingsOrigin::Defaults);
     assert_eq!(settings.server_url, "");
     assert_eq!(settings.device_id, "");
 }
@@ -173,8 +146,8 @@ fn absent_and_corrupt_network_settings_degrade_to_redacted_defaults() {
 #[cfg(unix)]
 #[test]
 fn network_settings_file_is_private() {
-    let directory = TestDirectory::new("mode");
-    let settings_path = directory.path("network-settings.json");
+    let directory = test_directory("mode");
+    let settings_path = directory.path().join("network-settings.json");
     NetworkSettingsStore::new(&settings_path)
         .save(NetworkSettingsUpdate::new(
             "https://deskmate.example",

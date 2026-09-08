@@ -1,12 +1,12 @@
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use protocol::{Field, FieldValue};
+use protocol::{Field, FieldValue, truncate_utf8_to_bytes};
 use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
 
 use crate::http::{HttpClient, SystemHttpClient, validate_http_url};
-use crate::{LastGood, Provider, ProviderError, ProviderSnapshot, RefreshPolicy, truncate_utf8};
+use crate::{LastGood, Provider, ProviderError, ProviderSnapshot, RefreshPolicy, text_field};
 
 pub const MAX_RSS_ITEMS: usize = 5;
 pub const MAX_XML_DEPTH: usize = 32;
@@ -61,17 +61,17 @@ pub struct RssFeed {
 impl RssFeed {
     pub fn fields(&self, title: &str, stale: bool, error: Option<&str>) -> Vec<Field> {
         let mut fields = Vec::with_capacity(13);
-        fields.push(text_field("title", truncate_utf8(title, 64)));
+        fields.push(text_field("title", truncate_utf8_to_bytes(title, 64)));
         for row in 0..MAX_RSS_ITEMS {
             let item = self.items.get(row);
             fields.push(text_field(
                 format!("row{row}_title"),
-                item.map_or_else(String::new, |item| truncate_utf8(&item.title, 96)),
+                item.map_or("", |item| truncate_utf8_to_bytes(&item.title, 96)),
             ));
             fields.push(text_field(
                 format!("row{row}_time"),
                 item.and_then(|item| item.published.as_deref())
-                    .map_or_else(String::new, |value| truncate_utf8(value, 32)),
+                    .map_or("", |value| truncate_utf8_to_bytes(value, 32)),
             ));
         }
         fields.push(Field {
@@ -80,7 +80,7 @@ impl RssFeed {
         });
         fields.push(text_field(
             "error",
-            error.map_or_else(String::new, |value| truncate_utf8(value, 96)),
+            error.map_or("", |value| truncate_utf8_to_bytes(value, 96)),
         ));
         fields
     }
@@ -299,7 +299,7 @@ fn assign_link(item: &mut FeedItem, raw: &str) -> Result<(), ProviderError> {
         return Ok(());
     }
     validate_http_url(&link).map_err(|_| ProviderError::UnsafeContent)?;
-    item.link = Some(truncate_utf8(&link, 2_048));
+    item.link = Some(truncate_utf8_to_bytes(&link, 2_048).to_owned());
     Ok(())
 }
 
@@ -325,7 +325,7 @@ fn plain_text(raw: &str) -> Result<String, ProviderError> {
         return Err(ProviderError::UnsafeContent);
     }
     let collapsed = output.split_whitespace().collect::<Vec<_>>().join(" ");
-    Ok(truncate_utf8(&collapsed, 128))
+    Ok(truncate_utf8_to_bytes(&collapsed, 128).to_owned())
 }
 
 fn reject_active_element(name: &str) -> Result<(), ProviderError> {
@@ -389,13 +389,6 @@ fn attribute(start: &BytesStart<'_>, sought: &[u8]) -> Result<Option<String>, Pr
         }
     }
     Ok(None)
-}
-
-fn text_field(key: impl Into<String>, value: String) -> Field {
-    Field {
-        key: key.into(),
-        value: FieldValue::Text(value),
-    }
 }
 
 #[cfg(test)]

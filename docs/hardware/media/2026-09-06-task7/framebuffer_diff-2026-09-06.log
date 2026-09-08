@@ -1,0 +1,99 @@
+connected port=/dev/cu.usbmodem101
+scene-rect--landscape: identical
+scene-rect--flipped: identical
+scene-arc--landscape: identical
+scene-arc--flipped: identical
+scene-line--landscape: identical
+scene-line--flipped: identical
+scene-text--landscape: excluded (the scene binds a field.* name outside DigitalClock's PushData registry (title/show_seconds/stale/error) -- apply_case_config always selects DigitalClock's template for a no-timer case, so any other field name is rejected by the device)
+scene-text--flipped: excluded (the scene binds a field.* name outside DigitalClock's PushData registry (title/show_seconds/stale/error) -- apply_case_config always selects DigitalClock's template for a no-timer case, so any other field name is rejected by the device)
+scene-image--landscape: identical
+scene-image--flipped: identical
+scene-glyph--landscape: identical
+scene-glyph--flipped: identical
+scene-scale--landscape: identical
+scene-scale--flipped: identical
+scene-label--landscape: excluded (the scene binds a field.* name outside DigitalClock's PushData registry (title/show_seconds/stale/error) -- apply_case_config always selects DigitalClock's template for a no-timer case, so any other field name is rejected by the device)
+scene-label--flipped: excluded (the scene binds a field.* name outside DigitalClock's PushData registry (title/show_seconds/stale/error) -- apply_case_config always selects DigitalClock's template for a no-timer case, so any other field name is rejected by the device)
+scene-rot-rect--landscape: identical
+scene-rot-rect--flipped: identical
+digital-clock--typical--landscape: identical
+digital-clock--typical--flipped: identical
+digital-clock--no-seconds--landscape: identical
+digital-clock--no-seconds--flipped: identical
+digital-clock--tabular-1135--landscape: identical
+digital-clock--tabular-1135--flipped: identical
+digital-clock--tabular-0000--landscape: identical
+digital-clock--tabular-0000--flipped: identical
+analog-clock--typical--landscape: identical
+analog-clock--typical--flipped: identical
+analog-clock--no-seconds--landscape: identical
+analog-clock--no-seconds--flipped: identical
+analog-clock--midnight--landscape: identical
+analog-clock--midnight--flipped: identical
+progress-ring--running-mid-countdown--landscape: excluded (a running ring keeps counting down from lv_tick_get() after its fields are pushed, so the device frame moves while the simulator's fixed fake tick freezes it -- the MM:SS label flips a second as soon as push-to-capture latency crosses 1000ms, making the comparison a race rather than a check. No running value avoids this. The case is kept for the deterministic simulator goldens, which do cover the running arc hue; paused-mid-countdown covers the same geometry here, and running-at-zero the running palette)
+progress-ring--running-mid-countdown--flipped: excluded (a running ring keeps counting down from lv_tick_get() after its fields are pushed, so the device frame moves while the simulator's fixed fake tick freezes it -- the MM:SS label flips a second as soon as push-to-capture latency crosses 1000ms, making the comparison a race rather than a check. No running value avoids this. The case is kept for the deterministic simulator goldens, which do cover the running arc hue; paused-mid-countdown covers the same geometry here, and running-at-zero the running palette)
+progress-ring--paused-mid-countdown--landscape: identical
+progress-ring--paused-mid-countdown--flipped: identical
+progress-ring--running-at-zero--landscape: identical
+progress-ring--running-at-zero--flipped: identical
+progress-ring--finished--landscape: identical
+progress-ring--finished--flipped: identical
+progress-ring--never-started--landscape: identical
+progress-ring--never-started--flipped: identical
+row-list--five-full-rows--landscape: identical
+row-list--five-full-rows--flipped: identical
+row-list--one-row--landscape: identical
+row-list--one-row--flipped: identical
+row-list--zero-rows--landscape: identical
+row-list--zero-rows--flipped: identical
+row-list--truncation-boundary--landscape: excluded (row0_title is 128 chars (the wire's generic field ceiling), exceeding row-list's own registry maximum of 96 for that field -- the device rejects this push)
+row-list--truncation-boundary--flipped: excluded (row0_title is 128 chars (the wire's generic field ceiling), exceeding row-list's own registry maximum of 96 for that field -- the device rejects this push)
+row-list--unicode-row--landscape: identical
+row-list--unicode-row--flipped: identical
+row-list--stale--landscape: identical
+row-list--stale--flipped: identical
+row-list--error--landscape: identical
+row-list--error--flipped: identical
+big-number-label--typical--landscape: identical
+big-number-label--typical--flipped: identical
+big-number-label--empty-value--landscape: identical
+big-number-label--empty-value--flipped: identical
+big-number-label--maximal-length-value--landscape: identical
+big-number-label--maximal-length-value--flipped: identical
+big-number-label--alphabetic-value--landscape: identical
+big-number-label--alphabetic-value--flipped: identical
+big-number-label--empty-label--landscape: identical
+big-number-label--empty-label--flipped: identical
+icon-badge-text--icon-sun--landscape: identical
+icon-badge-text--icon-sun--flipped: identical
+icon-badge-text--icon-storm--landscape: identical
+icon-badge-text--icon-storm--flipped: identical
+icon-badge-text--icon-unknown--landscape: identical
+icon-badge-text--icon-unknown--flipped: identical
+icon-badge-text--empty-badge--landscape: identical
+icon-badge-text--empty-badge--flipped: identical
+icon-badge-text--empty-value--landscape: identical
+icon-badge-text--empty-value--flipped: identical
+plugin-aqi--fresh--landscape: identical
+plugin-aqi--fresh--flipped: identical
+plugin-aqi--stale--landscape: identical
+plugin-aqi--stale--flipped: identical
+plugin-aqi--error--landscape: identical
+plugin-aqi--error--flipped: identical
+plugin-aqi--empty--landscape: excluded (the empty state binds field.title with no title pushed; the device registers the card's template fields so field.title is "" (renders nothing), never the NULL that yields the simulator's "--" placeholder)
+plugin-aqi--empty--flipped: excluded (the empty state binds field.title with no title pushed; the device registers the card's template fields so field.title is "" (renders nothing), never the NULL that yields the simulator's "--" placeholder)
+plugin-agenda--fresh--landscape: identical
+plugin-agenda--fresh--flipped: identical
+plugin-agenda--stale--landscape: identical
+plugin-agenda--stale--flipped: identical
+plugin-agenda--error--landscape: identical
+plugin-agenda--error--flipped: identical
+plugin-agenda--empty--landscape: identical
+plugin-agenda--empty--flipped: identical
+plugin-v2-timer--remaining-357-of-1000--landscape: identical
+plugin-v2-timer--remaining-357-of-1000--flipped: identical
+digital-clock--date-overflow--landscape: identical
+digital-clock--date-overflow--flipped: identical
+SUMMARY total=96 identical=86 differing=0 errored=0 excluded=10
+FBDIFF_EXIT=0

@@ -75,6 +75,21 @@ mod strict_tagged_enum {
         Interval { minutes: u16 },
     }
 
+    /// Mirrors `super::AssetKind`. The device now rasterizes any size from a TTF
+    /// at runtime, so `font` carries no pixel size and no glyph ranges; `icon-font`
+    /// carries a TTF plus a name→codepoint map so a plugin can write a symbolic
+    /// icon name instead of a raw codepoint; `image` carries no extra fields
+    /// because the host converts the source to an LVGL binary image itself.
+    #[derive(Debug, Serialize, Deserialize)]
+    #[serde(tag = "kind", rename_all = "kebab-case")]
+    pub enum AssetKindInner {
+        Font,
+        IconFont {
+            glyphs: Vec<super::IconGlyphMapping>,
+        },
+        Image,
+    }
+
     /// Mirrors `super::CardSettings`. Fields that are themselves internally
     /// tagged enums are typed as the outer, validating public type so that
     /// deserializing a card recursively re-validates every nested tagged object.
@@ -136,6 +151,18 @@ mod strict_tagged_enum {
             url: String,
             max_items: u8,
             template: super::DisplayTemplate,
+            tap_action: super::WidgetTapAction,
+            refresh: super::RefreshPolicy,
+            alert: super::CardAlert,
+        },
+        /// A plugin card names a curated plugin by id and renders whatever its
+        /// manifest compiles to (a host-pushed scene), not one of the six
+        /// built-in `DisplayTemplate`s -- deliberately absent here, see
+        /// `super::CardSettings::Plugin`.
+        Plugin {
+            id: String,
+            title: String,
+            plugin_id: String,
             tap_action: super::WidgetTapAction,
             refresh: super::RefreshPolicy,
             alert: super::CardAlert,
@@ -211,6 +238,16 @@ mod strict_tagged_enum {
         }
     }
 
+    impl ValidatingDeserialize for AssetKindInner {
+        fn allowed_fields(kind: &str) -> Option<&'static [&'static str]> {
+            match kind {
+                "font" | "image" => Some(&["kind"]),
+                "icon-font" => Some(&["kind", "glyphs"]),
+                _ => None,
+            }
+        }
+    }
+
     impl ValidatingDeserialize for CardSettingsInner {
         fn allowed_fields(kind: &str) -> Option<&'static [&'static str]> {
             match kind {
@@ -277,6 +314,15 @@ mod strict_tagged_enum {
                     "refresh",
                     "alert",
                 ]),
+                "plugin" => Some(&[
+                    "kind",
+                    "id",
+                    "title",
+                    "plugin_id",
+                    "tap_action",
+                    "refresh",
+                    "alert",
+                ]),
                 _ => None,
             }
         }
@@ -306,7 +352,7 @@ mod strict_tagged_enum {
     }
 }
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 4;
+pub const CURRENT_SCHEMA_VERSION: u32 = 6;
 pub(crate) const DEFAULT_PLAYLIST_ID: &str = "my-playlist";
 pub(crate) const DEFAULT_PLAYLIST_NAME: &str = "My playlist";
 pub const MAX_WIDGET_TITLE_LEN: usize = 64;
@@ -323,16 +369,16 @@ pub const MAX_ASSETS: usize = 16;
 pub const MAX_ASSET_SOURCE_LEN: usize = 2_048;
 pub const MAX_ASSET_BYTES: u32 = 262_144;
 pub const MAX_TOTAL_ASSET_BYTES: u32 = 1_048_576;
-pub const MAX_ICON_DIMENSION: u16 = 128;
-pub const MAX_FONT_GLYPHS: u16 = 512;
-pub const MAX_GLYPH_RANGES: usize = 16;
+pub const MAX_ICON_GLYPHS: usize = 256;
+pub const MAX_ICON_GLYPH_NAME_LEN: usize = 64;
 pub const MAX_HOST_ACTION_TARGET_LEN: usize = 2_048;
-pub const MAX_UPDATE_ARTIFACT_BYTES: u32 = 1_048_576;
-pub const MAX_UPDATE_VERSION_LEN: usize = 64;
-pub const MAX_UPDATE_MODEL_LEN: usize = 64;
-pub const MAX_SIGNING_KEY_ID_LEN: usize = 64;
-pub const ED25519_SIGNATURE_BASE64_LEN: usize = 88;
 pub const MAX_RSS_ITEMS: u8 = 5;
+/// Bound for a `plugin` card's `plugin_id`, which names a curated plugin by its
+/// manifest's own `name` field. This mirrors `plugin::manifest::MAX_NAME_LEN`
+/// (64 bytes) rather than importing it: the `plugin` crate depends on `app-core`
+/// (it compiles a manifest against `providers`/`app-core` types), so the reverse
+/// dependency would be circular. Keep this value equal to that one by hand.
+pub const MAX_PLUGIN_ID_LEN: usize = 64;
 pub const MIN_POMODORO_SECONDS: u32 = 1;
 pub const MAX_POMODORO_SECONDS: u32 = 86_400;
 pub const MIN_CALENDAR_REFRESH_MINUTES: u16 = 1;
@@ -709,9 +755,9 @@ impl AppConfig {
             ));
         }
         for (index, card) in self.cards.iter().enumerate() {
-            if let DisplayTemplate::IconBadgeText {
+            if let Some(DisplayTemplate::IconBadgeText {
                 icon_asset_id: Some(asset_id),
-            } = card.template()
+            }) = card.template()
             {
                 match assets_by_id.get(asset_id.as_str()) {
                     None => issues.push(ValidationIssue::new(
@@ -719,11 +765,11 @@ impl AppConfig {
                         ValidationCode::MissingReference,
                         format!("asset {asset_id:?} does not exist"),
                     )),
-                    Some(kind) if !matches!(kind, AssetKind::Icon { .. }) => {
+                    Some(kind) if !matches!(kind, AssetKind::IconFont { .. }) => {
                         issues.push(ValidationIssue::new(
                             format!("cards[{index}].template.icon_asset_id"),
                             ValidationCode::InvalidComposition,
-                            "icon template must reference an icon asset",
+                            "icon template must reference an icon-font asset",
                         ));
                     }
                     Some(_) => {}
@@ -816,13 +862,6 @@ impl AppConfig {
             }
             widgets.push(widget);
         }
-        if !self.assets.is_empty() {
-            compatibility_issues.push(ValidationIssue::new(
-                "assets",
-                ValidationCode::RequiresCapability,
-                "asset transfer is not implemented by this build",
-            ));
-        }
         if !compatibility_issues.is_empty() {
             return Err(ConfigValidationError {
                 issues: compatibility_issues,
@@ -851,6 +890,7 @@ impl AppConfig {
                 screens,
             },
             initial_pushes,
+            assets: self.assets.clone(),
             required_capabilities: self.required_device_capabilities(),
         })
     }
@@ -861,11 +901,17 @@ impl AppConfig {
             required |= protocol::CAPABILITY_CONFIG_ROTATION;
         }
         if self.cards.iter().any(|card| {
-            !matches!(
+            // A plugin card's `template()` is `None`: it does not use any built-in
+            // template, extended or otherwise, so it does not itself require this
+            // capability (see `wire_config`'s comment for what it puts on the wire).
+            matches!(
                 card.template(),
-                DisplayTemplate::DigitalClock
-                    | DisplayTemplate::ProgressRing
-                    | DisplayTemplate::RowList
+                Some(t) if !matches!(
+                    t,
+                    DisplayTemplate::DigitalClock
+                        | DisplayTemplate::ProgressRing
+                        | DisplayTemplate::RowList
+                )
             )
         }) {
             required |= protocol::CAPABILITY_EXTENDED_TEMPLATES;
@@ -1225,6 +1271,20 @@ pub enum CardSettings {
         refresh: RefreshPolicy,
         alert: CardAlert,
     },
+    /// Renders from a curated plugin's manifest-compiled scene rather than one
+    /// of the six built-in `DisplayTemplate`s, so it carries no `template`
+    /// field: there is nothing to select among. `plugin_id` names the plugin
+    /// (matching its manifest's own `name`); the server resolves it to a
+    /// manifest, fetches its data source, and pushes the resulting scene
+    /// (Task 7). `title` is the card's own label, same as every other kind.
+    Plugin {
+        id: String,
+        title: String,
+        plugin_id: String,
+        tap_action: WidgetTapAction,
+        refresh: RefreshPolicy,
+        alert: CardAlert,
+    },
 }
 
 impl<'de> Deserialize<'de> for CardSettings {
@@ -1346,6 +1406,21 @@ impl<'de> Deserialize<'de> for CardSettings {
                 refresh,
                 alert,
             },
+            strict_tagged_enum::CardSettingsInner::Plugin {
+                id,
+                title,
+                plugin_id,
+                tap_action,
+                refresh,
+                alert,
+            } => CardSettings::Plugin {
+                id,
+                title,
+                plugin_id,
+                tap_action,
+                refresh,
+                alert,
+            },
         })
     }
 }
@@ -1358,7 +1433,8 @@ impl CardSettings {
             | Self::Calendar { id, .. }
             | Self::Weather { id, .. }
             | Self::JsonFeed { id, .. }
-            | Self::Rss { id, .. } => id,
+            | Self::Rss { id, .. }
+            | Self::Plugin { id, .. } => id,
         }
     }
 
@@ -1369,7 +1445,8 @@ impl CardSettings {
             | Self::Calendar { alert, .. }
             | Self::Weather { alert, .. }
             | Self::JsonFeed { alert, .. }
-            | Self::Rss { alert, .. } => *alert,
+            | Self::Rss { alert, .. }
+            | Self::Plugin { alert, .. } => *alert,
         }
     }
 
@@ -1380,18 +1457,27 @@ impl CardSettings {
             | Self::Calendar { refresh, .. }
             | Self::Weather { refresh, .. }
             | Self::JsonFeed { refresh, .. }
-            | Self::Rss { refresh, .. } => *refresh,
+            | Self::Rss { refresh, .. }
+            | Self::Plugin { refresh, .. } => *refresh,
         }
     }
 
-    pub fn template(&self) -> &DisplayTemplate {
+    /// `None` for a plugin card: it has no `DisplayTemplate` to select among
+    /// because it renders from its manifest-compiled scene, not one of the six
+    /// built-in templates. Callers that only care about the built-in surface
+    /// (the `IconBadgeText` asset check, the extended-templates capability
+    /// gate) already treat `None` as "nothing to check here"; callers that
+    /// need a wire `TemplateKind` regardless (`wire_config`) pick an inert
+    /// placeholder explicitly, with their own comment.
+    pub fn template(&self) -> Option<&DisplayTemplate> {
         match self {
             Self::Clock { template, .. }
             | Self::Pomodoro { template, .. }
             | Self::Calendar { template, .. }
             | Self::Weather { template, .. }
             | Self::JsonFeed { template, .. }
-            | Self::Rss { template, .. } => template,
+            | Self::Rss { template, .. } => Some(template),
+            Self::Plugin { .. } => None,
         }
     }
 
@@ -1402,7 +1488,8 @@ impl CardSettings {
             | Self::Calendar { tap_action, .. }
             | Self::Weather { tap_action, .. }
             | Self::JsonFeed { tap_action, .. }
-            | Self::Rss { tap_action, .. } => tap_action,
+            | Self::Rss { tap_action, .. }
+            | Self::Plugin { tap_action, .. } => tap_action,
         }
     }
 
@@ -1426,7 +1513,7 @@ impl CardSettings {
                 validate_composition(
                     path,
                     ProviderKind::Clock,
-                    template,
+                    Some(template),
                     tap_action,
                     *refresh,
                     issues,
@@ -1459,7 +1546,7 @@ impl CardSettings {
                 validate_composition(
                     path,
                     ProviderKind::Pomodoro,
-                    template,
+                    Some(template),
                     tap_action,
                     *refresh,
                     issues,
@@ -1484,7 +1571,7 @@ impl CardSettings {
                 validate_composition(
                     path,
                     ProviderKind::Calendar,
-                    template,
+                    Some(template),
                     tap_action,
                     *refresh,
                     issues,
@@ -1515,7 +1602,7 @@ impl CardSettings {
                 validate_composition(
                     path,
                     ProviderKind::Weather,
-                    template,
+                    Some(template),
                     tap_action,
                     *refresh,
                     issues,
@@ -1589,7 +1676,7 @@ impl CardSettings {
                 validate_composition(
                     path,
                     ProviderKind::JsonFeed,
-                    template,
+                    Some(template),
                     tap_action,
                     *refresh,
                     issues,
@@ -1622,7 +1709,36 @@ impl CardSettings {
                 validate_composition(
                     path,
                     ProviderKind::Rss,
-                    template,
+                    Some(template),
+                    tap_action,
+                    *refresh,
+                    issues,
+                );
+            }
+            Self::Plugin {
+                title,
+                plugin_id,
+                tap_action,
+                refresh,
+                ..
+            } => {
+                validate_text(
+                    &format!("{path}.title"),
+                    title,
+                    MAX_WIDGET_TITLE_LEN,
+                    false,
+                    issues,
+                );
+                validate_identifier(
+                    &format!("{path}.plugin_id"),
+                    plugin_id,
+                    MAX_PLUGIN_ID_LEN,
+                    issues,
+                );
+                validate_composition(
+                    path,
+                    ProviderKind::Plugin,
+                    None,
                     tap_action,
                     *refresh,
                     issues,
@@ -1631,9 +1747,9 @@ impl CardSettings {
         }
         self.tap_action()
             .validate(&format!("{path}.tap_action"), issues);
-        if let DisplayTemplate::IconBadgeText {
+        if let Some(DisplayTemplate::IconBadgeText {
             icon_asset_id: Some(asset_id),
-        } = self.template()
+        }) = self.template()
         {
             validate_identifier(
                 &format!("{path}.template.icon_asset_id"),
@@ -1646,12 +1762,21 @@ impl CardSettings {
 
     fn wire_config(&self) -> Option<WidgetConfig> {
         let template = match self.template() {
-            DisplayTemplate::DigitalClock => TemplateKind::DigitalClock,
-            DisplayTemplate::ProgressRing => TemplateKind::ProgressRing,
-            DisplayTemplate::RowList => TemplateKind::RowList,
-            DisplayTemplate::AnalogClock => TemplateKind::AnalogClock,
-            DisplayTemplate::BigNumberLabel => TemplateKind::BigNumberLabel,
-            DisplayTemplate::IconBadgeText { .. } => TemplateKind::IconBadgeText,
+            // A plugin card (`None`) carries no `DisplayTemplate`: it renders from a
+            // host-pushed scene (`PushScene`), not any of the six built-in C
+            // templates. Firmware no longer switches on this field to choose a
+            // renderer at all (stage 3a retired every built-in template in favour of
+            // scenes for every card), so this byte is inert for a plugin card;
+            // `DigitalClock` is picked arbitrarily to keep `WidgetConfig` fully
+            // populated for older tooling that still reads it. Do not read rendering
+            // meaning into it for a plugin card, and do not read the merge with the
+            // real digital-clock arm below as anything but that shared byte value.
+            Some(DisplayTemplate::DigitalClock) | None => TemplateKind::DigitalClock,
+            Some(DisplayTemplate::ProgressRing) => TemplateKind::ProgressRing,
+            Some(DisplayTemplate::RowList) => TemplateKind::RowList,
+            Some(DisplayTemplate::AnalogClock) => TemplateKind::AnalogClock,
+            Some(DisplayTemplate::BigNumberLabel) => TemplateKind::BigNumberLabel,
+            Some(DisplayTemplate::IconBadgeText { .. }) => TemplateKind::IconBadgeText,
         };
         let tap_action = match self.tap_action() {
             WidgetTapAction::None => TapAction::None,
@@ -1709,7 +1834,14 @@ impl CardSettings {
                 fields.push(text_field("error", "Waiting for calendar refresh"));
                 fields
             }
-            Self::Weather { title, .. } => vec![
+            // A plugin's own fields are named by its manifest (`field.*` bindings),
+            // which app-core does not parse -- that is the plugin crate's job, and
+            // the manifest lives in a file this crate never reads. Only the
+            // housekeeping fields every provider-backed card carries are known here
+            // (the same set weather uses); the server pushes the plugin's real
+            // fields once it resolves the manifest and fetches the first snapshot
+            // (Task 7).
+            Self::Weather { title, .. } | Self::Plugin { title, .. } => vec![
                 text_field("title", title),
                 bool_field("stale", true),
                 text_field("error", "Waiting for provider refresh"),
@@ -1794,24 +1926,44 @@ pub enum AssetSource {
     File(String),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+/// The device rasterizes glyphs at any size from a TTF/OTF at runtime (`tiny_ttf`),
+/// so unlike v4's `Icon { width, height }` / `Font { pixel_size, glyph_ranges }`, no
+/// v5 variant pins a size or a pre-baked glyph set.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum AssetKind {
-    Icon {
-        width: u16,
-        height: u16,
-    },
-    Font {
-        pixel_size: u16,
-        glyph_ranges: Vec<GlyphRange>,
-    },
+    /// A TTF/OTF text font. Size is chosen per text node at render time.
+    Font,
+    /// A TTF/OTF icon font plus a name→codepoint map, so a plugin can write
+    /// `icon: "cloud-rain"` instead of a raw codepoint.
+    IconFont { glyphs: Vec<IconGlyphMapping> },
+    /// An LVGL binary image, converted host-side so the device needs no PNG
+    /// decoder.
+    Image,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+impl<'de> Deserialize<'de> for AssetKind {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let inner: strict_tagged_enum::AssetKindInner =
+            strict_tagged_enum::validate_and_deserialize(&value)
+                .map_err(serde::de::Error::custom)?;
+        Ok(match inner {
+            strict_tagged_enum::AssetKindInner::Font => Self::Font,
+            strict_tagged_enum::AssetKindInner::IconFont { glyphs } => Self::IconFont { glyphs },
+            strict_tagged_enum::AssetKindInner::Image => Self::Image,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct GlyphRange {
-    pub start: u32,
-    pub end: u32,
+pub struct IconGlyphMapping {
+    pub name: String,
+    pub codepoint: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1845,21 +1997,11 @@ pub enum UpdateCheckPolicy {
     Notify,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct FirmwareArtifactMetadata {
-    pub version: String,
-    pub model: String,
-    pub byte_length: u32,
-    pub sha256_hex: String,
-    pub signing_key_id: String,
-    pub signature_base64: String,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompiledAppConfig {
     pub layout: ApplyConfig,
     pub initial_pushes: Vec<PushData>,
+    pub assets: Vec<AssetSettings>,
     pub required_capabilities: u64,
 }
 
@@ -1872,14 +2014,10 @@ pub enum ValidationCode {
     TooMany,
     DuplicateId,
     MissingReference,
-    MissingScreen,
-    DuplicateReference,
-    UnsupportedSize,
     OutOfRange,
     InvalidTimezone,
     InvalidSource,
     InvalidComposition,
-    Overlap,
     TooLarge,
     RequiresCapability,
 }
@@ -2007,73 +2145,108 @@ enum ProviderKind {
     Weather,
     JsonFeed,
     Rss,
+    Plugin,
 }
 
 fn validate_composition(
     path: &str,
     provider: ProviderKind,
-    template: &DisplayTemplate,
+    template: Option<&DisplayTemplate>,
     tap_action: &WidgetTapAction,
     refresh: RefreshPolicy,
     issues: &mut Vec<ValidationIssue>,
 ) {
-    // A pairing is allowed only when the provider actually populates the fields the
-    // template declares (`firmware/main/core/template_fields.c`). A template whose
-    // renderable fields the provider never sends draws its placeholders forever, and
-    // every field the provider sends that the template does not declare is counted in
-    // the device's `unknown_field_count` on EVERY refresh — degrading the diagnostic
-    // that exists to catch real host/firmware schema drift.
-    let template_supported = match provider {
-        // Clock sends only title/show_seconds; `big-number-label`'s `value` would
-        // never be written and the card would show a permanent "--".
-        ProviderKind::Clock => matches!(
-            template,
-            DisplayTemplate::DigitalClock | DisplayTemplate::AnalogClock
-        ),
-        // Pomodoro sends `label`, `duration_seconds`, `remaining_seconds` and
-        // `running`; `big-number-label` declares only `label` out of those, so its
-        // hero `value` stayed "--" forever while the other three counted as unknown
-        // on EVERY tick — a continuous drip, worse than the calendar case above.
-        // Unlike weather's `row-list` this strands no saved configuration: v0/v1
-        // migration hard-codes pomodoro to `ProgressRing`, and while v2 migration
-        // copies `template` verbatim, no v2 file could hold `big-number-label` on a
-        // pomodoro card because `save_and_apply` compiled before persisting and
-        // `wire_config()` refused to lower that template at the time.
-        ProviderKind::Pomodoro => matches!(template, DisplayTemplate::ProgressRing),
-        // Calendar and RSS send `title` plus ten `rowN_*` fields, which only
-        // `row-list` declares. On `icon-badge-text` all ten counted as unknown on
-        // every refresh and the card rendered the hollow `unknown` ring and "--".
-        ProviderKind::Calendar | ProviderKind::Rss => {
-            matches!(template, DisplayTemplate::RowList)
+    // `template` is `None` only for `ProviderKind::Plugin`: a plugin card renders
+    // from its manifest-compiled scene, not one of the six built-in
+    // `DisplayTemplate`s, so there is no template/provider field-compatibility
+    // pairing to check and no template-gated tap-action rule to enforce here. The
+    // provider-gated tap-action check and the refresh-policy checks below still
+    // apply to every provider, plugin included.
+    if let Some(template) = template {
+        // A pairing is allowed only when the provider actually populates the fields
+        // the template declares (`firmware/main/core/template_fields.c`). A template
+        // whose renderable fields the provider never sends draws its placeholders
+        // forever, and every field the provider sends that the template does not
+        // declare is counted in the device's `unknown_field_count` on EVERY refresh —
+        // degrading the diagnostic that exists to catch real host/firmware schema
+        // drift.
+        let template_supported = match provider {
+            // Clock sends only title/show_seconds; `big-number-label`'s `value` would
+            // never be written and the card would show a permanent "--".
+            ProviderKind::Clock => matches!(
+                template,
+                DisplayTemplate::DigitalClock | DisplayTemplate::AnalogClock
+            ),
+            // Pomodoro sends `label`, `duration_seconds`, `remaining_seconds` and
+            // `running`; `big-number-label` declares only `label` out of those, so its
+            // hero `value` stayed "--" forever while the other three counted as
+            // unknown on EVERY tick — a continuous drip, worse than the calendar case
+            // above. Unlike weather's `row-list` this strands no saved configuration:
+            // v0/v1 migration hard-codes pomodoro to `ProgressRing`, and while v2
+            // migration copies `template` verbatim, no v2 file could hold
+            // `big-number-label` on a pomodoro card because `save_and_apply` compiled
+            // before persisting and `wire_config()` refused to lower that template at
+            // the time.
+            ProviderKind::Pomodoro => matches!(template, DisplayTemplate::ProgressRing),
+            // Calendar and RSS send `title` plus ten `rowN_*` fields, which only
+            // `row-list` declares. On `icon-badge-text` all ten counted as unknown on
+            // every refresh and the card rendered the hollow `unknown` ring and "--".
+            ProviderKind::Calendar | ProviderKind::Rss => {
+                matches!(template, DisplayTemplate::RowList)
+            }
+            // `icon-badge-text` is what weather's field set was designed for and
+            // `big-number-label` renders its `title`/`value`/`label` subset. `RowList`
+            // must stay: `validate()` runs on config LOAD, cards are never migrated to
+            // a new template, and every weather card saved before the extended
+            // templates shipped is still on `row-list` (it was the only weather-legal
+            // template `wire_config()` could lower back then). Removing it would make
+            // those saved configurations fail to load.
+            ProviderKind::Weather => matches!(
+                template,
+                DisplayTemplate::BigNumberLabel
+                    | DisplayTemplate::IconBadgeText { .. }
+                    | DisplayTemplate::RowList
+            ),
+            // Every json-feed field is user-mapped by name, so the user can populate
+            // any template's declared text fields, including `row-list`'s `rowN_*`
+            // set.
+            ProviderKind::JsonFeed => matches!(
+                template,
+                DisplayTemplate::BigNumberLabel
+                    | DisplayTemplate::IconBadgeText { .. }
+                    | DisplayTemplate::RowList
+            ),
+            // A plugin card never passes `Some(template)` — see the comment above. This
+            // arm is unreachable by construction today, but the function validates
+            // untrusted config content, so it returns a safe `false` (an
+            // `InvalidComposition` issue) rather than panicking if that ever stops
+            // being true.
+            ProviderKind::Plugin => false,
+        };
+        if !template_supported {
+            issues.push(ValidationIssue::new(
+                format!("{path}.template"),
+                ValidationCode::InvalidComposition,
+                "display template is incompatible with this provider",
+            ));
         }
-        // `icon-badge-text` is what weather's field set was designed for and
-        // `big-number-label` renders its `title`/`value`/`label` subset. `RowList`
-        // must stay: `validate()` runs on config LOAD, cards are never migrated to a
-        // new template, and every weather card saved before the extended templates
-        // shipped is still on `row-list` (it was the only weather-legal template
-        // `wire_config()` could lower back then). Removing it would make those saved
-        // configurations fail to load.
-        ProviderKind::Weather => matches!(
-            template,
-            DisplayTemplate::BigNumberLabel
-                | DisplayTemplate::IconBadgeText { .. }
-                | DisplayTemplate::RowList
-        ),
-        // Every json-feed field is user-mapped by name, so the user can populate any
-        // template's declared text fields, including `row-list`'s `rowN_*` set.
-        ProviderKind::JsonFeed => matches!(
-            template,
-            DisplayTemplate::BigNumberLabel
-                | DisplayTemplate::IconBadgeText { .. }
-                | DisplayTemplate::RowList
-        ),
-    };
-    if !template_supported {
-        issues.push(ValidationIssue::new(
-            format!("{path}.template"),
-            ValidationCode::InvalidComposition,
-            "display template is incompatible with this provider",
-        ));
+
+        // `widget_model.c` refuses any widget whose template is not `PROGRESS_RING`
+        // while carrying a non-`NONE` tap action, and `validate_config` is
+        // all-or-nothing: one such widget makes the device reject the entire
+        // `ApplyConfig`, so no card updates at all. Mirror that rule host-side
+        // instead of letting a saveable configuration take the whole layout down.
+        if matches!(
+            tap_action,
+            WidgetTapAction::StartPause | WidgetTapAction::Reset
+        ) && !matches!(template, DisplayTemplate::ProgressRing)
+        {
+            issues.push(ValidationIssue::new(
+                format!("{path}.tap_action"),
+                ValidationCode::InvalidComposition,
+                "start/pause and reset actions require the progress-ring template",
+            ));
+        }
     }
 
     if matches!(
@@ -2088,23 +2261,6 @@ fn validate_composition(
         ));
     }
 
-    // `widget_model.c` refuses any widget whose template is not `PROGRESS_RING` while
-    // carrying a non-`NONE` tap action, and `validate_config` is all-or-nothing: one
-    // such widget makes the device reject the entire `ApplyConfig`, so no card updates
-    // at all. Mirror that rule host-side instead of letting a saveable configuration
-    // take the whole layout down.
-    if matches!(
-        tap_action,
-        WidgetTapAction::StartPause | WidgetTapAction::Reset
-    ) && !matches!(template, DisplayTemplate::ProgressRing)
-    {
-        issues.push(ValidationIssue::new(
-            format!("{path}.tap_action"),
-            ValidationCode::InvalidComposition,
-            "start/pause and reset actions require the progress-ring template",
-        ));
-    }
-
     let refresh_supported = match provider {
         ProviderKind::Clock | ProviderKind::Pomodoro => {
             matches!(refresh, RefreshPolicy::DeviceLocal)
@@ -2112,7 +2268,8 @@ fn validate_composition(
         ProviderKind::Calendar
         | ProviderKind::Weather
         | ProviderKind::JsonFeed
-        | ProviderKind::Rss => matches!(
+        | ProviderKind::Rss
+        | ProviderKind::Plugin => matches!(
             refresh,
             RefreshPolicy::Manual | RefreshPolicy::Interval { .. }
         ),
@@ -2257,125 +2414,40 @@ impl AssetSettings {
             ));
         }
         match &self.kind {
-            AssetKind::Icon { width, height } => {
-                if !(1..=MAX_ICON_DIMENSION).contains(width)
-                    || !(1..=MAX_ICON_DIMENSION).contains(height)
-                {
+            AssetKind::Font | AssetKind::Image => {}
+            AssetKind::IconFont { glyphs } => {
+                if glyphs.is_empty() || glyphs.len() > MAX_ICON_GLYPHS {
                     issues.push(ValidationIssue::new(
-                        format!("{path}.kind"),
+                        format!("{path}.kind.glyphs"),
                         ValidationCode::OutOfRange,
-                        format!("icon dimensions must be 1..={MAX_ICON_DIMENSION} pixels"),
+                        format!("icon-font must contain 1..={MAX_ICON_GLYPHS} glyph mappings"),
                     ));
                 }
-            }
-            AssetKind::Font {
-                pixel_size,
-                glyph_ranges,
-            } => {
-                if !(8..=96).contains(pixel_size) {
-                    issues.push(ValidationIssue::new(
-                        format!("{path}.kind.pixel_size"),
-                        ValidationCode::OutOfRange,
-                        "font pixel size must be 8..=96",
-                    ));
-                }
-                if glyph_ranges.is_empty() || glyph_ranges.len() > MAX_GLYPH_RANGES {
-                    issues.push(ValidationIssue::new(
-                        format!("{path}.kind.glyph_ranges"),
-                        ValidationCode::OutOfRange,
-                        format!("font must contain 1..={MAX_GLYPH_RANGES} glyph ranges"),
-                    ));
-                }
-                let mut glyph_count = 0_u32;
-                let mut previous_end = None;
-                for (index, range) in glyph_ranges.iter().enumerate() {
-                    let includes_surrogate = range.start <= 0xdfff && range.end >= 0xd800;
-                    let overlaps_or_unsorted = previous_end.is_some_and(|end| range.start <= end);
-                    if range.start > range.end
-                        || range.end > 0x0010_ffff
-                        || includes_surrogate
-                        || overlaps_or_unsorted
-                    {
+                let mut seen_names = HashSet::with_capacity(glyphs.len());
+                for (index, glyph) in glyphs.iter().enumerate() {
+                    validate_identifier(
+                        &format!("{path}.kind.glyphs[{index}].name"),
+                        &glyph.name,
+                        MAX_ICON_GLYPH_NAME_LEN,
+                        issues,
+                    );
+                    if !seen_names.insert(glyph.name.as_str()) {
                         issues.push(ValidationIssue::new(
-                            format!("{path}.kind.glyph_ranges[{index}]"),
-                            ValidationCode::OutOfRange,
-                            "glyph ranges must be ascending, non-overlapping Unicode scalar values",
+                            format!("{path}.kind.glyphs[{index}].name"),
+                            ValidationCode::DuplicateId,
+                            format!("icon name {:?} is duplicated", glyph.name),
                         ));
-                    } else {
-                        glyph_count =
-                            glyph_count.saturating_add(range.end.saturating_sub(range.start) + 1);
-                        previous_end = Some(range.end);
+                    }
+                    let is_surrogate = (0xd800..=0xdfff).contains(&glyph.codepoint);
+                    if glyph.codepoint > 0x0010_ffff || is_surrogate {
+                        issues.push(ValidationIssue::new(
+                            format!("{path}.kind.glyphs[{index}].codepoint"),
+                            ValidationCode::OutOfRange,
+                            "codepoint must be a valid Unicode scalar value",
+                        ));
                     }
                 }
-                if glyph_count > u32::from(MAX_FONT_GLYPHS) {
-                    issues.push(ValidationIssue::new(
-                        format!("{path}.kind.glyph_ranges"),
-                        ValidationCode::TooMany,
-                        format!("font must contain at most {MAX_FONT_GLYPHS} glyphs"),
-                    ));
-                }
             }
-        }
-    }
-}
-
-impl FirmwareArtifactMetadata {
-    pub fn validate(&self) -> Result<(), ConfigValidationError> {
-        let mut issues = Vec::new();
-        validate_text(
-            "version",
-            &self.version,
-            MAX_UPDATE_VERSION_LEN,
-            true,
-            &mut issues,
-        );
-        validate_text(
-            "model",
-            &self.model,
-            MAX_UPDATE_MODEL_LEN,
-            true,
-            &mut issues,
-        );
-        if !(1..=MAX_UPDATE_ARTIFACT_BYTES).contains(&self.byte_length) {
-            issues.push(ValidationIssue::new(
-                "byte_length",
-                ValidationCode::OutOfRange,
-                format!("firmware artifact must be 1..={MAX_UPDATE_ARTIFACT_BYTES} bytes"),
-            ));
-        }
-        if self.sha256_hex.len() != 64
-            || !self.sha256_hex.bytes().all(|byte| byte.is_ascii_hexdigit())
-        {
-            issues.push(ValidationIssue::new(
-                "sha256_hex",
-                ValidationCode::InvalidSource,
-                "firmware SHA-256 must contain exactly 64 hexadecimal characters",
-            ));
-        }
-        validate_text(
-            "signing_key_id",
-            &self.signing_key_id,
-            MAX_SIGNING_KEY_ID_LEN,
-            true,
-            &mut issues,
-        );
-        let signature = self.signature_base64.as_bytes();
-        if signature.len() != ED25519_SIGNATURE_BASE64_LEN
-            || signature[ED25519_SIGNATURE_BASE64_LEN - 2..] != *b"=="
-            || !signature[..ED25519_SIGNATURE_BASE64_LEN - 2]
-                .iter()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/'))
-        {
-            issues.push(ValidationIssue::new(
-                "signature_base64",
-                ValidationCode::InvalidSource,
-                "firmware Ed25519 signature must be an 88-character base64 value",
-            ));
-        }
-        if issues.is_empty() {
-            Ok(())
-        } else {
-            Err(ConfigValidationError { issues })
         }
     }
 }

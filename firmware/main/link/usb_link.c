@@ -83,7 +83,6 @@ uint32_t usb_link_rx_dropped_bytes(void)
 }
 
 static const link_transport_t s_usb_transport = {
-    .name = "usb",
     .read = usb_link_read,
     .write_frame = usb_link_write_frame,
     .dropped_bytes = usb_link_rx_dropped_bytes,

@@ -1,18 +1,24 @@
 import {
+  activePlaylist,
   cardLabel,
   cardTitle,
   issuesForField,
   numberValue,
+  setEntryDwell,
   tapActionDescription,
-  withAlert,
 } from "../lib/configDraft";
 import { providerTrouble } from "../lib/providers";
+import { FieldIssues } from "./FieldIssues";
 import { Icon } from "./Icon";
 import type {
   AlertHold,
+  AppConfig,
   CardAlert,
+  CardError,
   CardSettings,
+  DeviceTier,
   JsonFieldMapping,
+  PluginCatalog,
   PomodoroSnapshot,
   ProviderSnapshot,
   ValidationIssue,
@@ -24,36 +30,34 @@ const MAX_RSS_ITEMS = 5;
 
 interface CardEditorProps {
   card: CardSettings | null;
+  config: AppConfig;
   /// Already scoped to this card by the caller via `issuesForCard` —
   /// CardEditor never resolves a card index itself, which is what makes
   /// dragging a card in the list safe: there is no stale index here for a
   /// reorder to invalidate.
   issues: ValidationIssue[];
+  /// Issues scoped to this card's active-loop entry. Empty for a card outside
+  /// the loop, where no dwell field is rendered.
+  entryIssues: ValidationIssue[];
+  /// A typed device refusal for this card's last data or scene update.
+  cardError: CardError | null;
   pomodoro: PomodoroSnapshot | null;
   /// The feed behind this card, when it has one. Only ever rendered when it is in
   /// trouble — see `providerTrouble`.
   provider: ProviderSnapshot | null;
+  /// The server's plugin registry, or null in local tier and before the first read.
+  /// The Plugin field is read-only without it, because there is nothing to choose from.
+  catalog: PluginCatalog | null;
+  ownershipTier: DeviceTier | null;
   timerBusy: boolean;
   filePickerBusy: boolean;
   providerRefreshing: boolean;
   onChange: (card: CardSettings) => void;
+  onConfigChange: (config: AppConfig) => void;
   onRemove: () => void;
   onTimerAction: (action: "start" | "pause" | "reset") => void;
   onChooseCalendarFile: () => void;
   onRefreshProvider: () => void;
-}
-
-function FieldIssues({ issues }: { issues: ValidationIssue[] }) {
-  if (issues.length === 0) {
-    return null;
-  }
-  return (
-    <ul className="field-errors" role="alert">
-      {issues.map((issue) => (
-        <li key={`${issue.path}:${issue.code}`}>{issue.message}</li>
-      ))}
-    </ul>
-  );
 }
 
 function HoldSelector({
@@ -107,13 +111,19 @@ function HoldSelector({
 
 export function CardEditor({
   card,
+  config,
   issues,
+  entryIssues,
+  cardError,
   pomodoro,
   provider,
+  catalog,
+  ownershipTier,
   timerBusy,
   filePickerBusy,
   providerRefreshing,
   onChange,
+  onConfigChange,
   onRemove,
   onTimerAction,
   onChooseCalendarFile,
@@ -121,7 +131,7 @@ export function CardEditor({
 }: CardEditorProps) {
   if (!card) {
     return (
-      <section className="panel editor-panel" aria-labelledby="editor-heading">
+      <section className="panel" aria-labelledby="editor-heading">
         <div className="panel-heading">
           <div>
             <h2 id="editor-heading">Choose a card</h2>
@@ -137,14 +147,37 @@ export function CardEditor({
 
   const fieldIssues = (field: string) => issuesForField(issues, field);
   const trouble = providerTrouble(provider);
-  const canAlert = card.kind === "pomodoro" || card.kind === "calendar";
-  const setAlert = (alert: CardAlert) => onChange(withAlert(card, alert));
+  const catalogEntry =
+    card.kind === "plugin"
+      ? (catalog?.plugins.find((entry) => entry.id === card.plugin_id) ?? null)
+      : null;
+  // What the small line already says when there is no catalog to check against —
+  // shared with the Plugin select's fallback option so the two can never disagree.
+  // It states only what the tier makes true, never whether the plugin is installed.
+  const catalogUnavailableReason =
+    ownershipTier === "local"
+      ? "Needs the server to render"
+      : "The plugin list comes from the server";
+  // The server owns a plugin card's fetching, so the Mac has nothing to refresh.
+  // The reason rides the same sentence as the trouble, because a disabled control
+  // with no stated reason is worse than no control.
+  const refreshesOnServer = card.kind === "plugin";
+  const setAlert = (alert: CardAlert) => onChange({ ...card, alert });
+  const playlist = activePlaylist(config);
+  const entryIndex = playlist?.entries.findIndex((entry) => entry.card_id === card.id) ?? -1;
+  const entry = entryIndex >= 0 ? playlist?.entries[entryIndex] : undefined;
+  const isTimed = playlist?.advance.kind === "timed";
+  const title = cardTitle(card);
+  const controlName = title ? `${cardLabel(card, catalog)} — ${title}` : cardLabel(card, catalog);
+  const dwellIssues = entryIssues.filter((issue) => issue.path.endsWith(".dwell_seconds"));
+  const showDwell =
+    entry !== undefined && (isTimed || entry.dwell_seconds !== null || dwellIssues.length > 0);
 
   return (
-    <section className="panel editor-panel" aria-labelledby="editor-heading">
+    <section className="panel" aria-labelledby="editor-heading">
       <div className="panel-heading">
         <div className="editor-title">
-          <h2 id="editor-heading">{cardLabel(card)}</h2>
+          <h2 id="editor-heading">{cardLabel(card, catalog)}</h2>
           {cardTitle(card) && <span className="editor-title__kind">{cardTitle(card)}</span>}
         </div>
         <button className="text-button text-button--danger" type="button" onClick={onRemove}>
@@ -152,16 +185,31 @@ export function CardEditor({
         </button>
       </div>
 
+      {cardError && (
+        <p className="data-note data-note--bad" role="alert">
+          <span>
+            <strong>
+              {cardError.kind === "scene-refused"
+                ? "This card could not be rendered."
+                : "This card’s data was refused."}
+            </strong>{" "}
+            {cardError.message} Adjust the card and save to try again.
+          </span>
+        </p>
+      )}
+
       {/* The recovery half of the removed data-sources panel, moved to where it is
           actionable: beside the card whose data went bad, not in a list of every
           feed in the app that was healthy anyway. */}
       {trouble && (
         <p className="data-note" role="status">
-          <span>{trouble}</span>
+          <span>
+            {refreshesOnServer ? `${trouble} This card refreshes on the server.` : trouble}
+          </span>
           <button
             className="text-button"
             type="button"
-            disabled={providerRefreshing}
+            disabled={providerRefreshing || refreshesOnServer}
             onClick={onRefreshProvider}
           >
             <Icon name="refresh" />
@@ -171,32 +219,46 @@ export function CardEditor({
       )}
 
       <div className="form-grid">
+        {card.kind !== "pomodoro" && (
+          <label className="field">
+            <span>{card.kind === "clock" || card.kind === "plugin" ? "Name" : "Heading"}</span>
+            <input
+              value={card.title}
+              maxLength={64}
+              onChange={(event) => onChange({ ...card, title: event.currentTarget.value })}
+              aria-invalid={fieldIssues("title").length > 0}
+            />
+            <FieldIssues issues={fieldIssues("title")} />
+          </label>
+        )}
+
+        {(card.kind === "json-feed" || card.kind === "rss") && (
+          <label className="field">
+            <span>Feed address</span>
+            <input
+              type="url"
+              value={card.url}
+              maxLength={2048}
+              placeholder={`https://example.com/${card.kind === "json-feed" ? "data.json" : "feed.xml"}`}
+              onChange={(event) => onChange({ ...card, url: event.currentTarget.value })}
+              aria-invalid={fieldIssues("url").length > 0}
+            />
+            <FieldIssues issues={fieldIssues("url")} />
+          </label>
+        )}
+
         {card.kind === "clock" && (
-          <>
-            <label className="field">
-              <span>Name</span>
-              <input
-                value={card.title}
-                maxLength={64}
-                onChange={(event) => onChange({ ...card, title: event.currentTarget.value })}
-                aria-invalid={fieldIssues("title").length > 0}
-              />
-              <FieldIssues issues={fieldIssues("title")} />
-            </label>
-            <label className="check-field">
-              <input
-                type="checkbox"
-                checked={card.show_seconds}
-                onChange={(event) =>
-                  onChange({ ...card, show_seconds: event.currentTarget.checked })
-                }
-              />
-              <span>
-                <strong>Show seconds</strong>
-                <small>Add seconds beside the large time.</small>
-              </span>
-            </label>
-          </>
+          <label className="check-field">
+            <input
+              type="checkbox"
+              checked={card.show_seconds}
+              onChange={(event) => onChange({ ...card, show_seconds: event.currentTarget.checked })}
+            />
+            <span>
+              <strong>Show seconds</strong>
+              <small>Add seconds beside the large time.</small>
+            </span>
+          </label>
         )}
 
         {card.kind === "pomodoro" && (
@@ -275,16 +337,6 @@ export function CardEditor({
 
         {card.kind === "calendar" && (
           <>
-            <label className="field">
-              <span>Heading</span>
-              <input
-                value={card.title}
-                maxLength={64}
-                onChange={(event) => onChange({ ...card, title: event.currentTarget.value })}
-                aria-invalid={fieldIssues("title").length > 0}
-              />
-              <FieldIssues issues={fieldIssues("title")} />
-            </label>
             <fieldset className="source-picker">
               <legend>Calendar source</legend>
               <label>
@@ -355,16 +407,6 @@ export function CardEditor({
         {card.kind === "weather" && (
           <>
             <label className="field">
-              <span>Heading</span>
-              <input
-                value={card.title}
-                maxLength={64}
-                onChange={(event) => onChange({ ...card, title: event.currentTarget.value })}
-                aria-invalid={fieldIssues("title").length > 0}
-              />
-              <FieldIssues issues={fieldIssues("title")} />
-            </label>
-            <label className="field">
               <span>Location</span>
               <input
                 value={card.location}
@@ -391,136 +433,127 @@ export function CardEditor({
         )}
 
         {card.kind === "json-feed" && (
-          <>
-            <label className="field">
-              <span>Heading</span>
-              <input
-                value={card.title}
-                maxLength={64}
-                onChange={(event) => onChange({ ...card, title: event.currentTarget.value })}
-                aria-invalid={fieldIssues("title").length > 0}
-              />
-              <FieldIssues issues={fieldIssues("title")} />
-            </label>
-            <label className="field">
-              <span>Feed address</span>
-              <input
-                type="url"
-                value={card.url}
-                maxLength={2048}
-                placeholder="https://example.com/data.json"
-                onChange={(event) => onChange({ ...card, url: event.currentTarget.value })}
-                aria-invalid={fieldIssues("url").length > 0}
-              />
-              <FieldIssues issues={fieldIssues("url")} />
-            </label>
-            <fieldset className="mapping-list">
-              <legend>Field mappings</legend>
-              {card.mappings.length === 0 && (
-                <p className="behaviour-hint">
-                  No fields mapped yet. Add one to pull a value out of the feed.
-                </p>
-              )}
-              {card.mappings.map((mapping, index) => {
-                const updateMapping = (patch: Partial<JsonFieldMapping>) =>
-                  onChange({
-                    ...card,
-                    mappings: card.mappings.map((entry, entryIndex) =>
-                      entryIndex === index ? { ...entry, ...patch } : entry,
-                    ),
-                  });
-                return (
-                  // biome-ignore lint/suspicious/noArrayIndexKey: mappings have no id field; rows are addressed by position.
-                  <div className="mapping-row" key={index}>
-                    <input
-                      aria-label="Field name"
-                      value={mapping.field}
-                      maxLength={32}
-                      placeholder="field name"
-                      onChange={(event) => updateMapping({ field: event.currentTarget.value })}
-                      aria-invalid={fieldIssues(`mappings[${index}].field`).length > 0}
-                    />
-                    <input
-                      aria-label="JSON path"
-                      value={mapping.path}
-                      maxLength={256}
-                      placeholder="json.path.to.value"
-                      onChange={(event) => updateMapping({ path: event.currentTarget.value })}
-                      aria-invalid={fieldIssues(`mappings[${index}].path`).length > 0}
-                    />
-                    <button
-                      type="button"
-                      className="text-button text-button--danger"
-                      onClick={() =>
-                        onChange({
-                          ...card,
-                          mappings: card.mappings.filter((_, entryIndex) => entryIndex !== index),
-                        })
-                      }
-                    >
-                      Remove
-                    </button>
-                    <FieldIssues issues={fieldIssues(`mappings[${index}].field`)} />
-                    <FieldIssues issues={fieldIssues(`mappings[${index}].path`)} />
-                  </div>
-                );
-              })}
-              <button
-                type="button"
-                className="button button--quiet"
-                disabled={card.mappings.length >= MAX_JSON_MAPPINGS}
-                onClick={() =>
-                  onChange({ ...card, mappings: [...card.mappings, { field: "", path: "" }] })
-                }
-              >
-                Add field mapping
-              </button>
-              <FieldIssues issues={fieldIssues("mappings")} />
-            </fieldset>
-          </>
+          <fieldset className="mapping-list">
+            <legend>Field mappings</legend>
+            {card.mappings.length === 0 && (
+              <p className="behaviour-hint">
+                No fields mapped yet. Add one to pull a value out of the feed.
+              </p>
+            )}
+            {card.mappings.map((mapping, index) => {
+              const updateMapping = (patch: Partial<JsonFieldMapping>) =>
+                onChange({
+                  ...card,
+                  mappings: card.mappings.map((entry, entryIndex) =>
+                    entryIndex === index ? { ...entry, ...patch } : entry,
+                  ),
+                });
+              return (
+                // biome-ignore lint/suspicious/noArrayIndexKey: mappings have no id field; rows are addressed by position.
+                <div className="mapping-row" key={index}>
+                  <input
+                    aria-label="Field name"
+                    value={mapping.field}
+                    maxLength={32}
+                    placeholder="field name"
+                    onChange={(event) => updateMapping({ field: event.currentTarget.value })}
+                    aria-invalid={fieldIssues(`mappings[${index}].field`).length > 0}
+                  />
+                  <input
+                    aria-label="JSON path"
+                    value={mapping.path}
+                    maxLength={256}
+                    placeholder="json.path.to.value"
+                    onChange={(event) => updateMapping({ path: event.currentTarget.value })}
+                    aria-invalid={fieldIssues(`mappings[${index}].path`).length > 0}
+                  />
+                  <button
+                    type="button"
+                    className="text-button text-button--danger"
+                    onClick={() =>
+                      onChange({
+                        ...card,
+                        mappings: card.mappings.filter((_, entryIndex) => entryIndex !== index),
+                      })
+                    }
+                  >
+                    Remove
+                  </button>
+                  <FieldIssues issues={fieldIssues(`mappings[${index}].field`)} />
+                  <FieldIssues issues={fieldIssues(`mappings[${index}].path`)} />
+                </div>
+              );
+            })}
+            <button
+              type="button"
+              className="button button--quiet"
+              disabled={card.mappings.length >= MAX_JSON_MAPPINGS}
+              onClick={() =>
+                onChange({ ...card, mappings: [...card.mappings, { field: "", path: "" }] })
+              }
+            >
+              Add field mapping
+            </button>
+            <FieldIssues issues={fieldIssues("mappings")} />
+          </fieldset>
         )}
 
         {card.kind === "rss" && (
-          <>
-            <label className="field">
-              <span>Heading</span>
-              <input
-                value={card.title}
-                maxLength={64}
-                onChange={(event) => onChange({ ...card, title: event.currentTarget.value })}
-                aria-invalid={fieldIssues("title").length > 0}
-              />
-              <FieldIssues issues={fieldIssues("title")} />
-            </label>
-            <label className="field">
-              <span>Feed address</span>
-              <input
-                type="url"
-                value={card.url}
-                maxLength={2048}
-                placeholder="https://example.com/feed.xml"
-                onChange={(event) => onChange({ ...card, url: event.currentTarget.value })}
-                aria-invalid={fieldIssues("url").length > 0}
-              />
-              <FieldIssues issues={fieldIssues("url")} />
-            </label>
-            <label className="field">
-              <span>Headlines shown</span>
-              <input
-                type="number"
-                className="numeral"
-                min={1}
-                max={MAX_RSS_ITEMS}
-                step={1}
-                value={card.max_items}
-                onChange={(event) =>
-                  onChange({ ...card, max_items: numberValue(event.currentTarget.value) })
-                }
-                aria-invalid={fieldIssues("max_items").length > 0}
-              />
-              <FieldIssues issues={fieldIssues("max_items")} />
-            </label>
-          </>
+          <label className="field">
+            <span>Headlines shown</span>
+            <input
+              type="number"
+              className="numeral"
+              min={1}
+              max={MAX_RSS_ITEMS}
+              step={1}
+              value={card.max_items}
+              onChange={(event) =>
+                onChange({ ...card, max_items: numberValue(event.currentTarget.value) })
+              }
+              aria-invalid={fieldIssues("max_items").length > 0}
+            />
+            <FieldIssues issues={fieldIssues("max_items")} />
+          </label>
+        )}
+
+        {card.kind === "plugin" && (
+          <label className="field">
+            <span>Plugin</span>
+            <select
+              value={card.plugin_id}
+              disabled={catalog === null}
+              onChange={(event) => onChange({ ...card, plugin_id: event.currentTarget.value })}
+              aria-invalid={fieldIssues("plugin_id").length > 0}
+            >
+              {/* A saved id the registry no longer carries stays selected and says
+                  why. Dropping it would silently rewrite the document on first
+                  render, which is a data loss nobody asked for. When there is no
+                  catalog at all, "not installed" would be a claim the app cannot
+                  back up — it knows only that it cannot check, so it says that
+                  instead, in the same words as the small line below. */}
+              {!catalogEntry && (
+                <option value={card.plugin_id}>
+                  {catalog === null
+                    ? `${card.plugin_id} · ${catalogUnavailableReason}`
+                    : `${card.plugin_id} · Not installed on the server`}
+                </option>
+              )}
+              {catalog?.plugins.map((entry) => (
+                <option key={entry.id} value={entry.id}>
+                  {`${entry.display_name ?? entry.id} · ${entry.version}`}
+                </option>
+              ))}
+            </select>
+            {/* The machine id, quietly — it is the only identity a card has when the
+                catalog is unreachable, so it is never the thing that disappears. */}
+            <small>
+              {catalog === null
+                ? `${card.plugin_id} · ${catalogUnavailableReason}`
+                : card.plugin_id}
+            </small>
+            <FieldIssues issues={fieldIssues("plugin_id")} />
+          </label>
         )}
 
         {/* Shared across every kind whose refresh policy is an interval — calendar,
@@ -531,7 +564,8 @@ export function CardEditor({
         {(card.kind === "calendar" ||
           card.kind === "weather" ||
           card.kind === "json-feed" ||
-          card.kind === "rss") && (
+          card.kind === "rss" ||
+          card.kind === "plugin") && (
           <label className="field">
             <span>Refresh every</span>
             <select
@@ -553,11 +587,16 @@ export function CardEditor({
               <option value="30">30 minutes</option>
               <option value="60">1 hour</option>
             </select>
+            {catalogEntry && (
+              <small>
+                {`The server fetches this plugin every ${catalogEntry.refresh_minutes} minutes.`}
+              </small>
+            )}
             <FieldIssues issues={fieldIssues("refresh")} />
           </label>
         )}
 
-        {canAlert && card.kind === "pomodoro" && (
+        {card.kind === "pomodoro" && (
           <fieldset className="alert-fieldset">
             <legend>Alert</legend>
             <label className="check-field">
@@ -597,7 +636,7 @@ export function CardEditor({
           </fieldset>
         )}
 
-        {canAlert && card.kind === "calendar" && (
+        {card.kind === "calendar" && (
           <fieldset className="alert-fieldset">
             <legend>Alert</legend>
             <label className="check-field">
@@ -668,11 +707,47 @@ export function CardEditor({
           </fieldset>
         )}
 
+        {showDwell && playlist && entry && (
+          <label className="field">
+            <span>Stays on the panel for</span>
+            <input
+              type="number"
+              className="numeral"
+              inputMode="numeric"
+              min={5}
+              max={3600}
+              step={1}
+              value={entry.dwell_seconds ?? ""}
+              placeholder={
+                playlist.advance.kind === "timed"
+                  ? `${playlist.advance.default_dwell_seconds} s, the loop's default`
+                  : undefined
+              }
+              aria-label={`Stays on the panel for ${controlName}`}
+              aria-invalid={dwellIssues.length > 0}
+              onChange={(event) =>
+                onConfigChange(
+                  setEntryDwell(
+                    config,
+                    playlist.id,
+                    entryIndex,
+                    event.currentTarget.value === ""
+                      ? null
+                      : numberValue(event.currentTarget.value),
+                  ),
+                )
+              }
+            />
+            {!isTimed && <small>Dwell applies when the loop is timed.</small>}
+            <FieldIssues issues={dwellIssues} />
+          </label>
+        )}
+
         <div className="gesture-note">
           <p>{tapActionDescription(card)}</p>
           <p>
-            Swiping the screen moves through the active playlist. While an alert is on screen, a tap
-            dismisses it instead of performing the card's usual tap action.
+            Swiping the screen moves through the loop. While an alert is on screen, a tap dismisses
+            it instead of performing the card's usual tap action.
           </p>
         </div>
       </div>

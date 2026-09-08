@@ -3,7 +3,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::config::{DEFAULT_PLAYLIST_ID, DEFAULT_PLAYLIST_NAME};
 use crate::secure_file::{self, BoundedReadError, FileIoError};
@@ -125,6 +125,8 @@ pub enum ConfigOrigin {
     MigratedV1,
     MigratedV2,
     MigratedV3,
+    MigratedV4,
+    MigratedV5,
     LastGood,
 }
 
@@ -240,7 +242,8 @@ struct VersionHeader {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct LegacyConfigV0 {
-    schema_version: u32,
+    #[serde(rename = "schema_version")]
+    _schema_version: u32,
     timezone: String,
     widgets: Vec<LegacyWidgetSettings>,
     screens: Vec<LegacyScreenSettings>,
@@ -249,7 +252,8 @@ struct LegacyConfigV0 {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct LegacyConfigV1 {
-    schema_version: u32,
+    #[serde(rename = "schema_version")]
+    _schema_version: u32,
     preferences: AppPreferences,
     widgets: Vec<LegacyWidgetSettings>,
     screens: Vec<LegacyScreenSettings>,
@@ -307,7 +311,8 @@ struct LegacyScreenSettings {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct LegacyConfigV2 {
-    schema_version: u32,
+    #[serde(rename = "schema_version")]
+    _schema_version: u32,
     preferences: AppPreferences,
     widgets: Vec<LegacyWidgetV2>,
     screens: Vec<LegacyScreenV2>,
@@ -322,7 +327,8 @@ struct LegacyConfigV2 {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct LegacyConfigV3 {
-    schema_version: u32,
+    #[serde(rename = "schema_version")]
+    _schema_version: u32,
     preferences: AppPreferences,
     cards: Vec<LegacyCardV3>,
     assets: Vec<AssetSettings>,
@@ -940,72 +946,61 @@ fn synthesize_playlist(
     }
 }
 
+fn parse_json<T: DeserializeOwned>(text: &str) -> Result<T, StoreError> {
+    serde_json::from_str(text).map_err(|error| StoreError::InvalidJson {
+        message: error.to_string(),
+    })
+}
+
+#[allow(clippy::too_many_lines)]
 fn decode_config(bytes: &[u8]) -> Result<(AppConfig, ConfigOrigin), StoreError> {
     let text = std::str::from_utf8(bytes).map_err(|_| StoreError::InvalidUtf8)?;
-    let header: VersionHeader =
-        serde_json::from_str(text).map_err(|error| StoreError::InvalidJson {
-            message: error.to_string(),
-        })?;
+    let header: VersionHeader = parse_json(text)?;
     let (config, origin) = match header.schema_version {
-        CURRENT_SCHEMA_VERSION => (
-            serde_json::from_str(text).map_err(|error| StoreError::InvalidJson {
-                message: error.to_string(),
-            })?,
-            ConfigOrigin::Current,
-        ),
+        CURRENT_SCHEMA_VERSION => (parse_json(text)?, ConfigOrigin::Current),
+        version @ (4 | 5) => {
+            // v4's asset variants (`icon { width, height }`, `font { pixel_size,
+            // glyph_ranges }`) encoded the pre-tiny_ttf design where glyphs were
+            // baked at a fixed size. `config.rs`'s compile step has always
+            // rejected a non-empty `assets` array, so no saved v4 config has ever
+            // contained one, which makes this migration a version bump with no
+            // data transformation: the current `AppConfig` shape parses a v4
+            // document unchanged because `assets` is always empty, and the v5->v6
+            // change (a new card kind no v4 document could contain either) adds
+            // nothing that shape lacks. v4 therefore migrates directly to the
+            // current schema in one step, not chained through v5. v5 likewise differs
+            // only by adding the plugin card kind, so both paths are version bumps.
+            let legacy: AppConfig = parse_json(text)?;
+            let origin = match version {
+                4 => ConfigOrigin::MigratedV4,
+                5 => ConfigOrigin::MigratedV5,
+                _ => unreachable!(),
+            };
+            (
+                AppConfig {
+                    schema_version: CURRENT_SCHEMA_VERSION,
+                    ..legacy
+                },
+                origin,
+            )
+        }
         3 => {
-            let legacy: LegacyConfigV3 =
-                serde_json::from_str(text).map_err(|error| StoreError::InvalidJson {
-                    message: error.to_string(),
-                })?;
-            if legacy.schema_version != 3 {
-                return Err(StoreError::UnsupportedVersion {
-                    found: legacy.schema_version,
-                    supported: CURRENT_SCHEMA_VERSION,
-                });
-            }
+            let legacy: LegacyConfigV3 = parse_json(text)?;
             (migrate_v3(legacy), ConfigOrigin::MigratedV3)
         }
         2 => {
-            let legacy: LegacyConfigV2 =
-                serde_json::from_str(text).map_err(|error| StoreError::InvalidJson {
-                    message: error.to_string(),
-                })?;
-            if legacy.schema_version != 2 {
-                return Err(StoreError::UnsupportedVersion {
-                    found: legacy.schema_version,
-                    supported: CURRENT_SCHEMA_VERSION,
-                });
-            }
+            let legacy: LegacyConfigV2 = parse_json(text)?;
             (migrate_v2(legacy), ConfigOrigin::MigratedV2)
         }
         1 => {
-            let legacy: LegacyConfigV1 =
-                serde_json::from_str(text).map_err(|error| StoreError::InvalidJson {
-                    message: error.to_string(),
-                })?;
-            if legacy.schema_version != 1 {
-                return Err(StoreError::UnsupportedVersion {
-                    found: legacy.schema_version,
-                    supported: CURRENT_SCHEMA_VERSION,
-                });
-            }
+            let legacy: LegacyConfigV1 = parse_json(text)?;
             (
                 migrate_legacy(legacy.preferences, legacy.widgets, legacy.screens),
                 ConfigOrigin::MigratedV1,
             )
         }
         0 => {
-            let legacy: LegacyConfigV0 =
-                serde_json::from_str(text).map_err(|error| StoreError::InvalidJson {
-                    message: error.to_string(),
-                })?;
-            if legacy.schema_version != 0 {
-                return Err(StoreError::UnsupportedVersion {
-                    found: legacy.schema_version,
-                    supported: CURRENT_SCHEMA_VERSION,
-                });
-            }
+            let legacy: LegacyConfigV0 = parse_json(text)?;
             (
                 migrate_legacy(
                     AppPreferences {

@@ -1,0 +1,19 @@
+manifest_version = 2
+name = "svg-aqi"
+version = "1.0.0"
+# Presentation keys (manifest v2, plugin parity) -- see aqi's manifest for
+# what each one is. `root = "payload"` below means the summary, like the
+# template, evaluates against the envelope's inner value.
+display_name = "Air quality (SVG)"
+description = "EPA index for a location, drawn from an SVG template"
+summary = "{{ data.current.aqi }}"
+
+[source]
+kind = "json"
+url = "https://example.invalid/aqi.json"
+refresh_minutes = 15
+root = "payload"
+
+[template]
+kind = "svg"
+file = "face.svg"

@@ -7,11 +7,6 @@
 
 #include "core/protocol_message.h"
 
-/* Firmware-only diagnostic trigger: a StatusRequest carrying this reserved
- * request ID over native USB schedules an OTA check without changing the v1
- * wire schema. The ordinary StatusResponse is still returned. */
-#define OTA_CHECK_STATUS_REQUEST_ID UINT32_MAX
-
 /**
  * Confirm the running image so the bootloader stops holding a rollback.
  *

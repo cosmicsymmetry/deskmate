@@ -1,10 +1,10 @@
-//! Headless renderer for the firmware's LVGL templates.
+//! Headless renderer for Deskmate's LVGL surfaces.
 //!
-//! This crate links the firmware's own C sources (LVGL, the template
-//! renderers under `firmware/main/ui/templates`, and the hardware-independent
-//! core under `firmware/main/core`) and drives them from Rust so the exact
-//! on-device pixels can be produced on the host for previews and tests. See
-//! `build.rs` for the source list and `csrc/sim_shim.c` for the C-side glue.
+//! This crate links the shipping scene interpreter and hardware-independent
+//! firmware core, plus the retired C templates from its clearly isolated
+//! `reference-oracle/`. Rust can therefore produce exact device pixels and
+//! keep comparing scenes against the live historical oracle. See `build.rs`
+//! for the source list and `csrc/sim_shim.c` for the C-side glue.
 
 use std::ffi::CString;
 use std::fmt;
@@ -12,10 +12,19 @@ use std::os::raw::c_char;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-/// The golden-frame case table shared by this crate's `tests/golden.rs` and
-/// `companion/crates/device/examples/framebuffer_diff.rs` (Task 10). See
-/// `cases.rs`'s module doc for why it lives here instead of under `tests/`.
+/// The reference-template golden cases and the scene cases used by the
+/// physical framebuffer harness. See `cases.rs` for their distinct roles.
 pub mod cases;
+
+/// The runtime font asset used by the 72px asset-backed SceneText golden.
+/// See its module doc for why the vendored TTF is patched before being subset.
+pub mod assets;
+
+/// Task 8: rendering a declarative scene through the firmware's own decoder
+/// and `ui/scene_view.c` interpreter, the device-side half of the plugin
+/// display list. See its module doc for why it goes through the wire format
+/// rather than filling a `scene_t` over FFI.
+pub mod scene;
 
 pub const LOGICAL_WIDTH: u32 = 448;
 pub const LOGICAL_HEIGHT: u32 = 368;
@@ -30,6 +39,20 @@ pub enum SimTemplate {
     AnalogClock,
     BigNumberLabel,
     IconBadgeText,
+}
+
+impl SimTemplate {
+    /// The corresponding `protocol_template_kind_t` value used by the C ABI.
+    fn wire_kind(self) -> i32 {
+        match self {
+            Self::DigitalClock => 1,
+            Self::ProgressRing => 2,
+            Self::RowList => 3,
+            Self::AnalogClock => 4,
+            Self::BigNumberLabel => 5,
+            Self::IconBadgeText => 6,
+        }
+    }
 }
 
 /// A field value pinned for one render. Kind mirrors `protocol_field_type_t`.
@@ -65,7 +88,11 @@ pub struct RenderRequest {
 }
 
 /// Errors from simulator setup or rendering.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Deliberately not `Copy`: [`SimError::SceneInvalid`] carries the protocol
+/// validator's own reason, and losing that reason to keep the enum a scalar
+/// would trade the only diagnostic a rejected scene has for nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SimError {
     /// A `Simulator` already exists in this process; LVGL's global state
     /// (via the shim's static display/frame buffers) allows exactly one.
@@ -77,6 +104,28 @@ pub enum SimError {
     RenderFailed,
     /// PNG encoding of a successfully rendered frame failed.
     EncodeFailed,
+    /// Task 8: the scene failed `protocol::validate_scene`, the host mirror of
+    /// the device's `scene_model_validate()`. Caught before encoding, so the
+    /// reason survives; the device would have refused the same scene with no
+    /// reason attached.
+    SceneInvalid(protocol::MessageError),
+    /// Task 8: an asset a scene names could not be put in the simulator's
+    /// asset store — a full store, or a malformed image.
+    AssetRegistrationFailed,
+    /// Task 8: `sim_render_scene`'s own `sim_init`, asset store, or font
+    /// registry setup failed. Nothing about this scene's bytes or content —
+    /// see `SceneDecodeFailed` and `SceneRenderRefused` for those.
+    SceneSetupFailed,
+    /// Task 8: `firmware/main/core/scene_decode.c`'s `scene_decode()` refused
+    /// the encoded payload. This is the failure mode the encode/decode design
+    /// introduces — the encoder and decoder disagreeing about the wire shape
+    /// — and it must stay distinguishable from `SceneRenderRefused` (a
+    /// drawing-time failure) without a debugger.
+    SceneDecodeFailed(scene::SceneDecodeReason),
+    /// Task 8: `firmware/main/ui/scene_view.c`'s `scene_view_show()` refused
+    /// the decoded scene — an asset it could not acquire, or an allocation
+    /// failure. The payload decoded fine; drawing it did not work.
+    SceneRenderRefused,
 }
 
 impl fmt::Display for SimError {
@@ -86,6 +135,15 @@ impl fmt::Display for SimError {
             SimError::InitFailed => "LVGL simulator initialization failed",
             SimError::RenderFailed => "template render failed",
             SimError::EncodeFailed => "PNG encoding failed",
+            SimError::SceneInvalid(reason) => {
+                return write!(f, "scene rejected by the protocol validator: {reason}");
+            }
+            SimError::AssetRegistrationFailed => "scene asset registration failed",
+            SimError::SceneSetupFailed => "scene renderer setup failed",
+            SimError::SceneDecodeFailed(reason) => {
+                return write!(f, "scene payload rejected by scene_decode(): {reason}");
+            }
+            SimError::SceneRenderRefused => "scene_view_show() refused the decoded scene",
         };
         f.write_str(message)
     }
@@ -130,7 +188,7 @@ unsafe extern "C" {
 /// copying at the NUL and renders everything before it; truncating here
 /// instead of blanking matches that behavior so the preview shows the same
 /// prefix the firmware would.
-fn truncated_cstring(s: &str) -> CString {
+pub(crate) fn truncated_cstring(s: &str) -> CString {
     match CString::new(s) {
         Ok(cstring) => cstring,
         Err(err) => {
@@ -207,50 +265,9 @@ impl Simulator {
     /// Renders one template with the given fields at a pinned instant.
     /// Returns 448*368 RGB565 pixels in logical landscape orientation.
     pub fn render(&mut self, request: &RenderRequest) -> Result<Vec<u16>, SimError> {
-        let template_kind = match request.template {
-            SimTemplate::DigitalClock => 1,
-            SimTemplate::ProgressRing => 2,
-            SimTemplate::RowList => 3,
-            SimTemplate::AnalogClock => 4,
-            SimTemplate::BigNumberLabel => 5,
-            SimTemplate::IconBadgeText => 6,
-        };
-
         // Keep CStrings alive across the call: `RawField` below only holds
         // pointers into them.
-        let names: Vec<CString> = request
-            .fields
-            .iter()
-            .map(|field| truncated_cstring(field.name.as_str()))
-            .collect();
-        let texts: Vec<CString> = request
-            .fields
-            .iter()
-            .map(|field| match &field.value {
-                SimFieldValue::Text(text) => truncated_cstring(text.as_str()),
-                SimFieldValue::Integer(_) | SimFieldValue::Boolean(_) => CString::default(),
-            })
-            .collect();
-        let raw: Vec<RawField> = request
-            .fields
-            .iter()
-            .zip(names.iter())
-            .zip(texts.iter())
-            .map(|((field, name), text)| {
-                let (kind, integer, boolean) = match &field.value {
-                    SimFieldValue::Text(_) => (0, 0, false),
-                    SimFieldValue::Integer(value) => (1, *value, false),
-                    SimFieldValue::Boolean(value) => (2, 0, *value),
-                };
-                RawField {
-                    name: name.as_ptr(),
-                    kind,
-                    text: text.as_ptr(),
-                    integer,
-                    boolean,
-                }
-            })
-            .collect();
+        let (_names, _texts, raw) = scene::prepare_template_fields(request);
 
         let mut pixels = vec![0_u16; (LOGICAL_WIDTH * LOGICAL_HEIGHT) as usize];
         // SAFETY: `raw` and the `CString`s backing its pointers are alive for
@@ -259,7 +276,7 @@ impl Simulator {
         // `sim_render` writes (SIM_WIDTH * SIM_HEIGHT in the shim).
         let ok = unsafe {
             sim_render(
-                template_kind,
+                request.template.wire_kind(),
                 raw.as_ptr(),
                 raw.len(),
                 request.utc_offset_minutes,
@@ -279,24 +296,38 @@ impl Simulator {
     /// RGB PNG.
     pub fn render_png(&mut self, request: &RenderRequest) -> Result<Vec<u8>, SimError> {
         let pixels = self.render(request)?;
-        let mut rgb = Vec::with_capacity(pixels.len() * 3);
-        for pixel in &pixels {
-            rgb.push((((pixel >> 11) & 0x1f) as u8) << 3); // R5 -> 8
-            rgb.push((((pixel >> 5) & 0x3f) as u8) << 2); // G6 -> 8
-            rgb.push(((pixel & 0x1f) as u8) << 3); // B5 -> 8
-        }
-        let mut out = Vec::new();
-        {
-            let mut encoder = png::Encoder::new(&mut out, LOGICAL_WIDTH, LOGICAL_HEIGHT);
-            encoder.set_color(png::ColorType::Rgb);
-            encoder.set_depth(png::BitDepth::Eight);
-            let mut writer = encoder.write_header().map_err(|_| SimError::EncodeFailed)?;
-            writer
-                .write_image_data(&rgb)
-                .map_err(|_| SimError::EncodeFailed)?;
-        }
-        Ok(out)
+        pixels_to_png(&pixels)
     }
+}
+
+/// Encodes 448*368 RGB565 pixels (logical landscape, as returned by
+/// [`Simulator::render`]) as an 8-bit RGB PNG.
+///
+/// This is public so hardware/parity diagnostics can write failure frames
+/// with the same bit-identical encoder as the simulator's golden suites.
+///
+/// # Errors
+///
+/// Returns [`SimError::EncodeFailed`] if the PNG header or image data cannot
+/// be encoded.
+pub fn pixels_to_png(pixels: &[u16]) -> Result<Vec<u8>, SimError> {
+    let mut rgb = Vec::with_capacity(pixels.len() * 3);
+    for pixel in pixels {
+        rgb.push((((pixel >> 11) & 0x1f) as u8) << 3); // R5 -> 8
+        rgb.push((((pixel >> 5) & 0x3f) as u8) << 2); // G6 -> 8
+        rgb.push(((pixel & 0x1f) as u8) << 3); // B5 -> 8
+    }
+    let mut out = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut out, LOGICAL_WIDTH, LOGICAL_HEIGHT);
+        encoder.set_color(png::ColorType::Rgb);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().map_err(|_| SimError::EncodeFailed)?;
+        writer
+            .write_image_data(&rgb)
+            .map_err(|_| SimError::EncodeFailed)?;
+    }
+    Ok(out)
 }
 
 impl Drop for Simulator {

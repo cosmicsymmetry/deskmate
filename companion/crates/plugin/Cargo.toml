@@ -1,0 +1,22 @@
+[package]
+name = "plugin"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+app-core = { path = "../app-core" }
+protocol = { path = "../protocol" }
+providers = { path = "../providers" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+toml = "0.8"
+url = "2"
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

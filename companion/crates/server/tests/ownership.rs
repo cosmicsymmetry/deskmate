@@ -12,12 +12,15 @@ mod support;
 /// Mirrors `tests/device_link.rs`'s helper; kept separate so the two files
 /// can diverge without one silently changing the other's fixture.
 async fn spawn() -> (String, server::registry::DeviceIdentity, String) {
-    spawn_state(ServerState::in_memory()).await
+    spawn_state(ServerState::in_memory(), support::IN_MEMORY_ADMIN_TOKEN).await
 }
 
-async fn spawn_state(state: ServerState) -> (String, server::registry::DeviceIdentity, String) {
+async fn spawn_state(
+    state: ServerState,
+    admin_token: &str,
+) -> (String, server::registry::DeviceIdentity, String) {
     let identity = state.registry().mint().expect("mint identity");
-    let admin_token = state.admin_token().to_string();
+    let admin_token = admin_token.to_string();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -511,6 +514,185 @@ async fn config_written_by_admin_reaches_the_device() {
 
     assert_eq!(applied.widgets.len(), 1);
     assert_eq!(applied.widgets[0].widget_id, "clock-1");
+
+    // The config transaction ends at activation. Scene negotiation is the
+    // event-driven follow-up: it must still happen, but its ACK must not hold
+    // the admin response hostage on a slow or briefly stalled device link.
+    let scene = support::drive_until_scene(&mut socket).await;
+    assert_eq!(scene.card_id, "clock-1");
+}
+
+#[tokio::test]
+async fn digital_clock_scene_written_by_admin_reaches_the_device() {
+    let (host, identity, admin_token) = spawn().await;
+    let mut socket = connect_device(&host, &identity.token)
+        .await
+        .expect("connect");
+    support::bootstrap_runtime(&mut socket).await;
+    let local_now = "2026-08-25T14:37:42";
+
+    let admin_request = reqwest::Client::new()
+        .post(format!(
+            "http://{host}/v1/devices/{}/scene",
+            identity.device_id
+        ))
+        .bearer_auth(&admin_token)
+        .header("Content-Type", "application/json")
+        .body(
+            serde_json::json!({
+                "card_id": "clock-1",
+                "revision": 17,
+                "template": "digital_clock",
+                "show_seconds": true,
+                "local_now": local_now,
+            })
+            .to_string(),
+        )
+        .send();
+    let (response, pushed) = tokio::join!(admin_request, support::drive_until_scene(&mut socket));
+    assert_eq!(response.expect("admin request").status(), 200);
+    assert_eq!(pushed.card_id, "clock-1");
+    assert_eq!(pushed.revision, 17);
+    assert_eq!(
+        pushed.scene,
+        app_core::build_digital_clock_scene(
+            &app_core::ClockCard {
+                revision: 17,
+                show_seconds: true,
+                local_now: local_now.parse().expect("valid test instant"),
+            },
+            &app_core::BakedFontMetrics::SHIPPED,
+        )
+    );
+}
+
+#[tokio::test]
+async fn scene_route_rejects_an_unknown_template_with_a_typed_bad_request() {
+    let (host, identity, admin_token) = spawn().await;
+    let response = reqwest::Client::new()
+        .post(format!(
+            "http://{host}/v1/devices/{}/scene",
+            identity.device_id
+        ))
+        .bearer_auth(admin_token)
+        .header("Content-Type", "application/json")
+        .body(
+            serde_json::json!({
+                "card_id": "clock-1",
+                "revision": 17,
+                "template": "analogue_clock",
+                "show_seconds": true,
+                "local_now": "2026-08-25T14:37:42",
+            })
+            .to_string(),
+        )
+        .send()
+        .await
+        .expect("scene request");
+    assert_eq!(response.status(), 400);
+    let error: serde_json::Value =
+        serde_json::from_str(&response.text().await.expect("typed error body"))
+            .expect("typed error JSON");
+    assert_eq!(error["kind"], "invalid-scene");
+    assert!(error["message"].as_str().unwrap().contains("template"));
+}
+
+#[tokio::test]
+async fn scene_route_rejects_a_zero_revision_with_a_typed_bad_request() {
+    let (host, identity, admin_token) = spawn().await;
+    let response = reqwest::Client::new()
+        .post(format!(
+            "http://{host}/v1/devices/{}/scene",
+            identity.device_id
+        ))
+        .bearer_auth(admin_token)
+        .header("Content-Type", "application/json")
+        .body(
+            serde_json::json!({
+                "card_id": "clock-1",
+                "revision": 0,
+                "template": "digital_clock",
+                "show_seconds": true,
+                "local_now": "2026-08-25T14:37:42",
+            })
+            .to_string(),
+        )
+        .send()
+        .await
+        .expect("scene request");
+    assert_eq!(response.status(), 400);
+    let error: serde_json::Value =
+        serde_json::from_str(&response.text().await.expect("typed error body"))
+            .expect("typed error JSON");
+    assert_eq!(error["kind"], "invalid-scene");
+    assert!(
+        error["message"]
+            .as_str()
+            .unwrap()
+            .contains("scene revision")
+    );
+}
+
+#[tokio::test]
+async fn scene_route_rejects_an_overlong_card_id_with_a_typed_bad_request() {
+    let (host, identity, admin_token) = spawn().await;
+    let response = reqwest::Client::new()
+        .post(format!(
+            "http://{host}/v1/devices/{}/scene",
+            identity.device_id
+        ))
+        .bearer_auth(admin_token)
+        .header("Content-Type", "application/json")
+        .body(
+            serde_json::json!({
+                "card_id": "clock-id-that-is-more-than-32-bytes",
+                "revision": 17,
+                "template": "digital_clock",
+                "show_seconds": true,
+                "local_now": "2026-08-25T14:37:42",
+            })
+            .to_string(),
+        )
+        .send()
+        .await
+        .expect("scene request");
+    assert_eq!(response.status(), 400);
+    let error: serde_json::Value =
+        serde_json::from_str(&response.text().await.expect("typed error body"))
+            .expect("typed error JSON");
+    assert_eq!(error["kind"], "invalid-scene");
+    assert!(error["message"].as_str().unwrap().contains("card id"));
+}
+
+#[tokio::test]
+async fn scene_route_rejects_a_malformed_local_instant_with_a_typed_bad_request() {
+    let (host, identity, admin_token) = spawn().await;
+    let response = reqwest::Client::new()
+        .post(format!(
+            "http://{host}/v1/devices/{}/scene",
+            identity.device_id
+        ))
+        .bearer_auth(admin_token)
+        .header("Content-Type", "application/json")
+        .body(
+            serde_json::json!({
+                "card_id": "clock-1",
+                "revision": 17,
+                "template": "digital_clock",
+                "show_seconds": true,
+                "local_now": "2026-08-25 14:37:42",
+            })
+            .to_string(),
+        )
+        .send()
+        .await
+        .expect("scene request");
+    assert_eq!(response.status(), 400);
+    let error: serde_json::Value =
+        serde_json::from_str(&response.text().await.expect("typed error body"))
+            .expect("typed error JSON");
+    assert_eq!(error["kind"], "invalid-scene");
+    assert!(error["message"].as_str().unwrap().contains("local_now"));
 }
 
 #[tokio::test]
@@ -734,6 +916,8 @@ async fn wait_for_pomodoro(
 
 #[tokio::test]
 async fn config_is_written_under_the_explicit_config_directory() {
+    const ADMIN_TOKEN: &str = "explicit-config-admin-token";
+
     // Catches deriving config storage from the firmware path: production's
     // systemd sandbox only makes /var/lib/deskmate writable, so a firmware
     // override must not redirect config writes outside the configured root.
@@ -741,12 +925,8 @@ async fn config_is_written_under_the_explicit_config_directory() {
     let config_root = temp.path().join("explicit-configs");
     let firmware = server::firmware::FirmwareCatalog::in_memory();
     let former_derived_root = firmware.directory().parent().unwrap().join("configs");
-    let state = ServerState::new(
-        "explicit-config-admin-token".to_string(),
-        firmware,
-        config_root.clone(),
-    );
-    let (host, identity, admin_token) = spawn_state(state).await;
+    let state = ServerState::new(ADMIN_TOKEN.to_string(), firmware, config_root.clone());
+    let (host, identity, admin_token) = spawn_state(state, ADMIN_TOKEN).await;
     let config = std::fs::read_to_string(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/tests/fixtures/one-clock-card.json"
@@ -787,6 +967,28 @@ async fn admin_routes_refuse_a_bad_admin_token() {
         .await
         .expect("request");
     assert_eq!(write.status(), 401);
+
+    let scene = client
+        .post(format!(
+            "http://{host}/v1/devices/{}/scene",
+            identity.device_id
+        ))
+        .bearer_auth("not-the-admin-token")
+        .header("Content-Type", "application/json")
+        .body(
+            serde_json::json!({
+                "card_id": "clock-1",
+                "revision": 17,
+                "template": "digital_clock",
+                "show_seconds": true,
+                "local_now": "2026-08-25T14:37:42",
+            })
+            .to_string(),
+        )
+        .send()
+        .await
+        .expect("request");
+    assert_eq!(scene.status(), 401);
 
     let read = client
         .get(format!("http://{host}/v1/devices/{}", identity.device_id))
@@ -945,22 +1147,35 @@ async fn admin_status_reports_live_state_without_device_secrets() {
         status["snapshot"]["device"]["last_ota_error"], "download: ESP_ERR_NO_MEM",
         "status omitted the device's actionable OTA failure reason"
     );
+    // The runtime is retained across a link drop, so every field under `device`
+    // is the last value received rather than a current one, and a frozen
+    // uptime_ms reads exactly like a live one. This is what says how old the
+    // sample is, and it has to sit next to the values it qualifies -- the
+    // top-level `connected` was missed once already.
+    assert!(
+        status["snapshot"]["device"]["observed_age_seconds"]
+            .as_u64()
+            .is_some_and(|age| age < 10),
+        "status omitted how old the device sample is, or reported a nonsense age: {status}"
+    );
 }
 
 #[tokio::test]
 async fn admin_status_reports_defaults_used_after_stored_config_validation_failure() {
+    const ADMIN_TOKEN: &str = "fallback-admin-token";
+
     // Catches calling a fresh process's factory defaults "last-good" and
     // catches omitting fallback state from the only admin status endpoint.
     let temp = tempfile::tempdir().expect("config test temp dir");
     let config_root = temp.path().join("configs");
     std::fs::create_dir_all(&config_root).expect("create config root");
     let state = ServerState::new(
-        "fallback-admin-token".to_string(),
+        ADMIN_TOKEN.to_string(),
         server::firmware::FirmwareCatalog::in_memory(),
         config_root.clone(),
     );
     let identity = state.registry().mint().expect("mint identity");
-    let admin_token = state.admin_token().to_string();
+    let admin_token = ADMIN_TOKEN.to_string();
     let mut invalid: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(concat!(
             env!("CARGO_MANIFEST_DIR"),

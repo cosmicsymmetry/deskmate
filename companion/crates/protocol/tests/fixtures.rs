@@ -41,6 +41,15 @@ fn valid_golden_frames_decode() {
         "factory_reset.bin",
         "status_response_networked.bin",
         "status_response_ota_failed.bin",
+        "asset_begin.bin",
+        "asset_begin_rle.bin",
+        "ack_asset_begin.bin",
+        "asset_chunk.bin",
+        "asset_commit.bin",
+        "asset_release.bin",
+        "push_scene.bin",
+        "push_scene_min.bin",
+        "ack_scene.bin",
     ] {
         let frame =
             decode_wire_frame(&fixture(name)).unwrap_or_else(|error| panic!("{name}: {error}"));
@@ -167,14 +176,218 @@ fn extended_template_kinds_round_trip() {
 
 #[test]
 fn current_capabilities_advertise_implemented_features() {
+    assert_eq!(protocol::CAPABILITY_SCENE_RENDER, 256);
+    assert_eq!(protocol::CAPABILITY_VOLATILE_ASSETS, 512);
     assert_eq!(
         protocol::CURRENT_CAPABILITIES,
         protocol::CAPABILITY_CORE_WIDGETS
             | protocol::CAPABILITY_CONFIG_ROTATION
             | protocol::CAPABILITY_EXTENDED_TEMPLATES
+            | protocol::CAPABILITY_ASSET_TRANSFER
             | protocol::CAPABILITY_FIRMWARE_UPDATE
-            | protocol::CAPABILITY_NETWORKING,
-        "implemented firmware update and networking features must be advertised"
+            | protocol::CAPABILITY_NETWORKING
+            | protocol::CAPABILITY_SCENE_RENDER
+            | protocol::CAPABILITY_VOLATILE_ASSETS,
+        "implemented asset transfer, firmware update, networking, scene \
+         rendering, and volatile-asset features must be advertised"
     );
-    assert_eq!(protocol::CURRENT_CAPABILITIES, 203);
+    assert_eq!(protocol::CURRENT_CAPABILITIES, 1003);
+}
+
+fn assert_rot_rect_clip_is_pinned(nodes: &[protocol::SceneNode]) {
+    let rot_rect = nodes
+        .iter()
+        .find_map(|node| match node {
+            protocol::SceneNode::RotRect(rect) => Some(rect),
+            _ => None,
+        })
+        .expect("the rich fixture carries a rotated rect");
+    assert_eq!(
+        rot_rect.clip,
+        Some(protocol::SceneClipRect {
+            x: 64,
+            y: 24,
+            w: 320,
+            h: 320,
+        })
+    );
+}
+
+fn assert_running_colors_are_pinned(nodes: &[protocol::SceneNode]) {
+    let arc = nodes
+        .iter()
+        .find_map(|node| match node {
+            protocol::SceneNode::Arc(arc) => Some(arc),
+            _ => None,
+        })
+        .expect("the rich fixture carries an arc");
+    assert_eq!(arc.running_color, Some(0x0064_D2FF));
+    let text = nodes
+        .iter()
+        .find_map(|node| match node {
+            protocol::SceneNode::Text(text) if text.running_color.is_some() => Some(text),
+            _ => None,
+        })
+        .expect("the rich fixture carries a text running color");
+    assert_eq!(text.running_color, Some(0x00FF_9F0A));
+}
+
+fn assert_rich_rect_is_pinned(nodes: &[protocol::SceneNode]) {
+    let rect = nodes
+        .iter()
+        .find_map(|node| match node {
+            protocol::SceneNode::Rect(rect) => Some(rect),
+            _ => None,
+        })
+        .expect("the rich fixture carries a rect");
+    assert_eq!(rect.opacity, 0xC8);
+    assert_eq!(
+        rect.clip,
+        Some(protocol::SceneClipRect {
+            x: 16,
+            y: 16,
+            w: 416,
+            h: 336,
+        })
+    );
+}
+
+fn assert_rich_arc_is_pinned(nodes: &[protocol::SceneNode]) {
+    let arc = nodes
+        .iter()
+        .find_map(|node| match node {
+            protocol::SceneNode::Arc(arc) => Some(arc),
+            _ => None,
+        })
+        .expect("the rich fixture carries an arc");
+    assert_eq!(arc.opacity, 0x33);
+}
+
+fn assert_bound_line_is_pinned(nodes: &[protocol::SceneNode]) {
+    let line = nodes
+        .iter()
+        .find_map(|node| match node {
+            protocol::SceneNode::Line(line) if !line.angle_binding.is_empty() => Some(line),
+            _ => None,
+        })
+        .expect("the rich fixture carries a bound line");
+    assert!(line.xs.is_empty());
+    assert!(line.ys.is_empty());
+    assert_eq!(line.pivot_x, 224);
+    assert_eq!(line.pivot_y, 184);
+    assert_eq!(line.length, 80);
+    assert_eq!(line.angle_binding, "time:angle:hour");
+}
+
+fn assert_date_binding_is_pinned(nodes: &[protocol::SceneNode]) {
+    assert!(nodes.iter().any(|node| {
+        matches!(
+            node,
+            protocol::SceneNode::Text(protocol::SceneText {
+                value: protocol::SceneValue::Binding(binding),
+                ..
+            }) if binding == "date"
+        )
+    }));
+}
+
+fn assert_time_binding_is_pinned(nodes: &[protocol::SceneNode]) {
+    assert!(nodes.iter().any(|node| {
+        matches!(
+            node,
+            protocol::SceneNode::Text(protocol::SceneText {
+                value: protocol::SceneValue::Binding(binding),
+                ..
+            }) if binding == "time:HH:mm"
+        )
+    }));
+}
+
+fn assert_label_anchor_default_is_pinned(nodes: &[protocol::SceneNode]) {
+    let label = nodes
+        .iter()
+        .find_map(|node| match node {
+            protocol::SceneNode::Label(label) => Some(label),
+            _ => None,
+        })
+        .expect("the rich fixture carries a label");
+    assert_eq!(
+        label.horizontal_anchor,
+        protocol::SceneLabelAnchor::Left,
+        "the pre-anchor fixture must keep decoding an omitted key as Left"
+    );
+}
+
+fn assert_every_node_kind_is_pinned(nodes: &[protocol::SceneNode]) {
+    let kinds: Vec<std::mem::Discriminant<protocol::SceneNode>> =
+        nodes.iter().map(std::mem::discriminant).collect();
+    for probe in [
+        protocol::SceneNode::Rect(protocol::SceneRect::default()),
+        protocol::SceneNode::Arc(protocol::SceneArc::default()),
+        protocol::SceneNode::Line(protocol::SceneLine::default()),
+        protocol::SceneNode::Text(protocol::SceneText::default()),
+        protocol::SceneNode::Image(protocol::SceneImage::default()),
+        protocol::SceneNode::Glyph(protocol::SceneGlyph::default()),
+        protocol::SceneNode::Scale(protocol::SceneScale::default()),
+        protocol::SceneNode::Label(protocol::SceneLabel::default()),
+        protocol::SceneNode::RotRect(protocol::SceneRotRect::default()),
+    ] {
+        assert!(
+            kinds.contains(&std::mem::discriminant(&probe)),
+            "the rich fixture must cover every node kind"
+        );
+    }
+}
+
+fn assert_minimal_scene_defaults_are_pinned() {
+    // The minimal fixture is the other half of the canonical emission rule:
+    // every optional key at its default, so the file proves both encoders
+    // omit them rather than spelling them out.
+    let minimal = decode_wire_frame(&fixture("push_scene_min.bin")).unwrap();
+    let protocol::Message::PushScene(minimal) = decode_message(&minimal).unwrap() else {
+        panic!("push_scene_min.bin should be a PushScene");
+    };
+    assert_eq!(minimal.scene.nodes.len(), 1);
+    let protocol::SceneNode::Rect(rect) = &minimal.scene.nodes[0] else {
+        panic!("the minimal fixture's only node is a rect");
+    };
+    // An omitted opacity means opaque, which is the one default that is not
+    // the zero value.
+    assert_eq!(rect.opacity, u8::MAX);
+    assert_eq!(rect.clip, None);
+    assert_eq!(
+        *rect,
+        protocol::SceneRect {
+            x: 4,
+            y: 5,
+            w: 10,
+            h: 11,
+            ..protocol::SceneRect::default()
+        }
+    );
+}
+
+#[test]
+fn push_scene_fixtures_carry_what_they_are_meant_to() {
+    let frame = decode_wire_frame(&fixture("push_scene.bin")).unwrap();
+    let protocol::Message::PushScene(push) = decode_message(&frame).unwrap() else {
+        panic!("push_scene.bin should be a PushScene");
+    };
+    assert_eq!(push.card_id, "clock");
+    assert_eq!(push.revision, 12);
+    // Every node kind, both Line forms, both Text value forms, and both live
+    // wall-clock text bindings: an
+    // all-minimal fixture would pass even if the encoders disagreed about the
+    // kinds or additive fields it left out.
+    assert_eq!(push.scene.nodes.len(), 12);
+    assert_rich_rect_is_pinned(&push.scene.nodes);
+    assert_rich_arc_is_pinned(&push.scene.nodes);
+    assert_rot_rect_clip_is_pinned(&push.scene.nodes);
+    assert_running_colors_are_pinned(&push.scene.nodes);
+    assert_bound_line_is_pinned(&push.scene.nodes);
+    assert_time_binding_is_pinned(&push.scene.nodes);
+    assert_date_binding_is_pinned(&push.scene.nodes);
+    assert_label_anchor_default_is_pinned(&push.scene.nodes);
+    assert_every_node_kind_is_pinned(&push.scene.nodes);
+    assert_minimal_scene_defaults_are_pinned();
 }

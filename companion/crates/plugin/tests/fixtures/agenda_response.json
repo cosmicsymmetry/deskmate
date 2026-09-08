@@ -1,0 +1,73 @@
+{
+  "status": "ok",
+  "payload": {
+    "calendar": {
+      "id": "cal-9",
+      "name": "Work",
+      "timezone": "UTC",
+      "color_hex": "3b6cff"
+    },
+    "date": "2026-08-28",
+    "events": [
+      {
+        "id": "evt-1",
+        "title": "Standup with the whole platform team to review yesterday's incident and today's rollout plan",
+        "time": "09:00",
+        "location": "Room 4B",
+        "all_day": false,
+        "attendees": 8
+      },
+      {
+        "id": "evt-2",
+        "title": "1:1",
+        "time": "11:30",
+        "location": null,
+        "all_day": false,
+        "attendees": 2
+      },
+      {
+        "id": "evt-3",
+        "title": null,
+        "time": null,
+        "location": null,
+        "all_day": null,
+        "attendees": null
+      },
+      {
+        "id": "evt-4",
+        "title": "Design review",
+        "time": "14:00",
+        "location": "Zoom",
+        "all_day": false,
+        "attendees": 5
+      },
+      {
+        "id": "evt-5",
+        "title": "Lunch",
+        "time": "12:30",
+        "location": "Cafeteria",
+        "all_day": false,
+        "attendees": 1
+      },
+      {
+        "id": "evt-6",
+        "title": "Sprint retro, sixth item -- past the five-row repeat cap and must never render",
+        "time": "16:00",
+        "location": "Room 2",
+        "all_day": false,
+        "attendees": 6
+      }
+    ],
+    "legacy_event_count": "6",
+    "sync": {
+      "last_success": "2026-08-28T08:55:00Z",
+      "next_attempt_seconds": 900,
+      "degraded": false
+    }
+  },
+  "meta": {
+    "request_id": "7a2c1e3d-9f04-4b8e-8b7a-2c1d3e4f5a6b",
+    "cached": false,
+    "ttl_seconds": 300
+  }
+}

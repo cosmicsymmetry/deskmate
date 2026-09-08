@@ -1,6 +1,6 @@
 use core::fmt;
 
-pub const PROTOCOL_VERSION: u8 = 1;
+use crate::PROTOCOL_VERSION;
 pub const MAX_DECODED_FRAME: usize = 2048;
 pub const MAX_PAYLOAD_SIZE: usize = MAX_DECODED_FRAME - 10 - 4;
 pub const MAX_WIRE_FRAME: usize = 2058;

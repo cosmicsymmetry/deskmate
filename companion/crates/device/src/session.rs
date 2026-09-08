@@ -5,17 +5,19 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use protocol::{
-    Ack, ActivateScreen, ApplyConfig, CAPABILITY_CONFIG_ROTATION, CAPABILITY_CORE_WIDGETS,
-    Deframer, DeviceEvent, EventAction, EventKind, Field, HeartbeatAck, Message, NetworkConfig,
-    PushData, ScreenConfig, StatusResponse, TYPE_ACTIVATE_SCREEN, TYPE_APPLY_CONFIG,
-    TYPE_FACTORY_RESET, TYPE_NETWORK_CONFIG, TYPE_PUSH_DATA, TYPE_TIME_SYNC,
-    TYPE_TRIGGER_INTERRUPT, TimeSync, TriggerInterrupt, WidgetConfig, decode_message,
-    encode_message,
+    Ack, ActivateScreen, ApplyConfig, AssetBegin, AssetChunk, AssetCommit, AssetRelease,
+    CAPABILITY_CONFIG_ROTATION, CAPABILITY_CORE_WIDGETS, Deframer, DeviceEvent, EventAction,
+    EventKind, Field, HeartbeatAck, Message, NetworkConfig, PushData, PushScene,
+    RequestIdAllocator, ScreenConfig, StatusResponse, TYPE_ACTIVATE_SCREEN, TYPE_APPLY_CONFIG,
+    TYPE_ASSET_BEGIN, TYPE_ASSET_CHUNK, TYPE_ASSET_COMMIT, TYPE_ASSET_RELEASE, TYPE_FACTORY_RESET,
+    TYPE_NETWORK_CONFIG, TYPE_PUSH_DATA, TYPE_PUSH_SCENE, TYPE_TIME_SYNC, TYPE_TRIGGER_INTERRUPT,
+    TimeSync, TriggerInterrupt, WidgetConfig, decode_message, encode_message,
+    expected_response_type,
 };
 
 use crate::{
-    ConnectedDevice, DeviceClient, DeviceError, SerialTransport, Transport, TransportError,
-    connect, message_error,
+    ConnectedDevice, DeviceError, SerialTransport, Transport, TransportError, connect,
+    message_error,
 };
 
 pub const DEFAULT_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(3);
@@ -136,7 +138,7 @@ impl<T: Transport + Send + 'static> DeviceSession<T> {
         let connection = SessionConnection {
             transport,
             deframer: Deframer::new(),
-            next_request_id: 1,
+            request_ids: RequestIdAllocator::new(),
             request_timeout: options.request_timeout,
             keepalive_interval: options.keepalive_interval,
             last_request_finished: Instant::now(),
@@ -295,6 +297,19 @@ impl<T: Transport + Send + 'static> DeviceSession<T> {
         }
     }
 
+    pub fn push_scene(&self, push: PushScene) -> Result<Ack, DeviceError> {
+        ensure_capabilities(protocol::CAPABILITY_SCENE_RENDER, self.capabilities())?;
+        let revision = push.revision;
+        match self.request(Message::PushScene(push))? {
+            Message::Ack(ack)
+                if ack.acknowledged_type == TYPE_PUSH_SCENE && ack.revision == Some(revision) =>
+            {
+                Ok(ack)
+            }
+            _ => Err(DeviceError::UnexpectedMessage),
+        }
+    }
+
     pub fn trigger_interrupt(&self, interrupt: TriggerInterrupt) -> Result<Ack, DeviceError> {
         match self.request(Message::TriggerInterrupt(interrupt))? {
             Message::Ack(ack)
@@ -327,6 +342,62 @@ impl<T: Transport + Send + 'static> DeviceSession<T> {
         match self.request(Message::FactoryReset)? {
             Message::Ack(ack)
                 if ack.acknowledged_type == TYPE_FACTORY_RESET && ack.revision.is_none() =>
+            {
+                Ok(ack)
+            }
+            _ => Err(DeviceError::UnexpectedMessage),
+        }
+    }
+
+    /// Reserve (or re-attach to) storage for one asset. Unlike `provision` and
+    /// `factory_reset`, asset transfer is not cable-only -- the same seam
+    /// drives both the serial and networked transports, so this is a plain
+    /// request/reply like `push_fields`. The `Ack`'s `already_present` tells
+    /// the caller whether to skip chunking entirely (content addressing is
+    /// the inventory protocol; see `server::asset_sync`).
+    pub fn asset_begin(&self, begin: AssetBegin) -> Result<Ack, DeviceError> {
+        match self.request(Message::AssetBegin(begin))? {
+            Message::Ack(ack)
+                if ack.acknowledged_type == TYPE_ASSET_BEGIN
+                    && ack.revision.is_none()
+                    && ack.already_present.is_some() =>
+            {
+                Ok(ack)
+            }
+            _ => Err(DeviceError::UnexpectedMessage),
+        }
+    }
+
+    pub fn asset_chunk(&self, chunk: AssetChunk) -> Result<Ack, DeviceError> {
+        match self.request(Message::AssetChunk(chunk))? {
+            Message::Ack(ack)
+                if ack.acknowledged_type == TYPE_ASSET_CHUNK && ack.revision.is_none() =>
+            {
+                Ok(ack)
+            }
+            _ => Err(DeviceError::UnexpectedMessage),
+        }
+    }
+
+    pub fn asset_commit(&self, commit: AssetCommit) -> Result<Ack, DeviceError> {
+        match self.request(Message::AssetCommit(commit))? {
+            Message::Ack(ack)
+                if ack.acknowledged_type == TYPE_ASSET_COMMIT && ack.revision.is_none() =>
+            {
+                Ok(ack)
+            }
+            _ => Err(DeviceError::UnexpectedMessage),
+        }
+    }
+
+    /// Tell the device the full set of digests that should survive. The
+    /// device aborts any in-flight transfer, marks committed records absent
+    /// from this set dead, and compacts -- so this must carry every desired
+    /// digest, not just the ones this session happened to (re)upload.
+    pub fn asset_release(&self, release: AssetRelease) -> Result<Ack, DeviceError> {
+        match self.request(Message::AssetRelease(release))? {
+            Message::Ack(ack)
+                if ack.acknowledged_type == TYPE_ASSET_RELEASE && ack.revision.is_none() =>
             {
                 Ok(ack)
             }
@@ -432,7 +503,7 @@ pub fn connect_session(explicit_port: Option<&str>) -> Result<ConnectedSession, 
 struct SessionConnection<T> {
     transport: T,
     deframer: Deframer,
-    next_request_id: u32,
+    request_ids: RequestIdAllocator,
     request_timeout: Duration,
     keepalive_interval: Duration,
     last_request_finished: Instant,
@@ -447,15 +518,6 @@ struct SessionConnection<T> {
 }
 
 impl<T: Transport> SessionConnection<T> {
-    fn allocate_request_id(&mut self) -> u32 {
-        let request_id = self.next_request_id;
-        self.next_request_id = self.next_request_id.wrapping_add(1);
-        if self.next_request_id == 0 {
-            self.next_request_id = 1;
-        }
-        request_id
-    }
-
     fn keepalive_due(&self) -> bool {
         self.last_request_finished.elapsed() >= self.keepalive_interval
     }
@@ -477,8 +539,8 @@ impl<T: Transport> SessionConnection<T> {
 
     fn transact(&mut self, request: &Message) -> Result<Message, DeviceError> {
         let expected_type =
-            DeviceClient::<T>::expected_response(request).ok_or(DeviceError::InvalidRequest)?;
-        let request_id = self.allocate_request_id();
+            expected_response_type(request.type_id()).ok_or(DeviceError::InvalidRequest)?;
+        let request_id = self.request_ids.allocate();
         let wire = encode_message(request_id, request).map_err(message_error)?;
         let deadline = Instant::now() + self.request_timeout;
         self.write_all(&wire, deadline)?;
@@ -507,20 +569,20 @@ impl<T: Transport> SessionConnection<T> {
                         continue;
                     }
                 };
-                let message = decode_message(&frame).map_err(message_error)?;
                 if frame.request_id == 0 {
-                    match message {
+                    match decode_message(&frame).map_err(message_error)? {
                         Message::DeviceEvent(event) => self.route_event(event),
                         _ => return Err(DeviceError::UnexpectedMessage),
                     }
                     continue;
                 }
                 if frame.request_id != request_id {
-                    return Err(DeviceError::UnexpectedRequestId {
-                        expected: request_id,
-                        received: frame.request_id,
-                    });
+                    self.diagnostics
+                        .unexpected_device_frames
+                        .fetch_add(1, Ordering::Relaxed);
+                    continue;
                 }
+                let message = decode_message(&frame).map_err(message_error)?;
                 if response.is_some() {
                     return Err(DeviceError::UnexpectedMessage);
                 }
@@ -923,7 +985,9 @@ mod tests {
 
     enum ReplyMode {
         Normal,
+        Response(Message),
         Fragmented,
+        StaleResponseBeforeReply(u32),
         EventBeforeReply(DeviceEvent),
         EventAfterReply(DeviceEvent),
         NoReply,
@@ -956,15 +1020,26 @@ mod tests {
                 decode_message(&frame).map_err(|error| TransportError::Io(error.to_string()))?;
             let mut state = self.state.lock().unwrap();
             state.requests.push(request.clone());
-            let response = fake_response(&state.status, &request);
+            let response = match state.reply_modes.front() {
+                Some(ReplyMode::Response(response)) => response.clone(),
+                _ => fake_response(&state.status, &request),
+            };
             let response_wire = encode_message(frame.request_id, &response)
                 .map_err(|error| TransportError::Io(error.to_string()))?;
             match state.reply_modes.pop_front().unwrap_or(ReplyMode::Normal) {
-                ReplyMode::Normal => state.reads.push_back(Ok(response_wire)),
+                ReplyMode::Normal | ReplyMode::Response(_) => {
+                    state.reads.push_back(Ok(response_wire));
+                }
                 ReplyMode::Fragmented => {
                     let split = response_wire.len() / 2;
                     state.reads.push_back(Ok(response_wire[..split].to_vec()));
                     state.reads.push_back(Ok(response_wire[split..].to_vec()));
+                }
+                ReplyMode::StaleResponseBeforeReply(stale_request_id) => {
+                    let mut coalesced = encode_message(stale_request_id, &response)
+                        .map_err(|error| TransportError::Io(error.to_string()))?;
+                    coalesced.extend(response_wire);
+                    state.reads.push_back(Ok(coalesced));
                 }
                 ReplyMode::EventBeforeReply(event) => {
                     let mut coalesced = encode_message(0, &Message::DeviceEvent(event))
@@ -1048,32 +1123,56 @@ mod tests {
             Message::TimeSync(_) => Message::Ack(Ack {
                 acknowledged_type: TYPE_TIME_SYNC,
                 revision: None,
+                already_present: None,
             }),
             Message::PushData(push) => Message::Ack(Ack {
                 acknowledged_type: TYPE_PUSH_DATA,
                 revision: Some(push.revision),
+                already_present: None,
             }),
             Message::ApplyConfig(config) => Message::Ack(Ack {
                 acknowledged_type: TYPE_APPLY_CONFIG,
                 revision: Some(config.revision),
+                already_present: None,
             }),
             Message::ActivateScreen(_) => Message::Ack(Ack {
                 acknowledged_type: TYPE_ACTIVATE_SCREEN,
                 revision: None,
+                already_present: None,
             }),
             Message::TriggerInterrupt(_) => Message::Ack(Ack {
                 acknowledged_type: TYPE_TRIGGER_INTERRUPT,
                 revision: None,
+                already_present: None,
             }),
             Message::NetworkConfig(_) => Message::Ack(Ack {
                 acknowledged_type: TYPE_NETWORK_CONFIG,
                 revision: None,
+                already_present: None,
             }),
             Message::FactoryReset => Message::Ack(Ack {
                 acknowledged_type: TYPE_FACTORY_RESET,
                 revision: None,
+                already_present: None,
+            }),
+            Message::PushScene(push) => Message::Ack(Ack {
+                acknowledged_type: protocol::TYPE_PUSH_SCENE,
+                revision: Some(push.revision),
+                already_present: None,
             }),
             _ => panic!("unexpected fake request: {request:?}"),
+        }
+    }
+
+    fn scene_push(revision: u32) -> protocol::PushScene {
+        protocol::PushScene {
+            card_id: "clock".into(),
+            revision,
+            scene: protocol::Scene {
+                revision,
+                background: 0,
+                nodes: Vec::new(),
+            },
         }
     }
 
@@ -1177,6 +1276,24 @@ mod tests {
     }
 
     #[test]
+    fn late_response_does_not_fail_the_session_request_waiting_for_its_own_response() {
+        let (transport, state) = FakeTransport::new(status(7, 3, 100));
+        state
+            .lock()
+            .unwrap()
+            .reply_modes
+            .push_back(ReplyMode::StaleResponseBeforeReply(41));
+        let session = DeviceSession::with_options(
+            transport,
+            &status(7, 3, 100),
+            options(Duration::from_mins(1), 8),
+        );
+
+        assert_eq!(session.status().unwrap(), status(7, 3, 100));
+        assert_eq!(session.diagnostics().unexpected_device_frames, 1);
+    }
+
+    #[test]
     fn duplicate_and_out_of_order_events_are_ignored_and_gaps_are_reported() {
         let (transport, state) = FakeTransport::new(status(0, 0, 100));
         let session = DeviceSession::with_options(
@@ -1268,6 +1385,77 @@ mod tests {
             state.lock().unwrap().requests.last(),
             Some(Message::PushData(PushData { revision: 42, .. }))
         ));
+    }
+
+    #[test]
+    fn push_scene_requires_the_ack_type_and_revision_it_sent() {
+        let (transport, state) = FakeTransport::new(status(0, 0, 100));
+        let session = DeviceSession::with_options(
+            transport,
+            &status(0, 0, 100),
+            options(Duration::from_mins(1), 8),
+        );
+
+        let push = scene_push(7);
+        let ack = session.push_scene(push.clone()).unwrap();
+        assert_eq!(ack.revision, Some(7));
+        assert_eq!(
+            state.lock().unwrap().requests.last(),
+            Some(&Message::PushScene(push))
+        );
+
+        state
+            .lock()
+            .unwrap()
+            .reply_modes
+            .push_back(ReplyMode::Response(Message::Ack(Ack {
+                acknowledged_type: protocol::TYPE_PUSH_SCENE,
+                revision: Some(8),
+                already_present: None,
+            })));
+        assert_eq!(
+            session.push_scene(scene_push(7)),
+            Err(DeviceError::UnexpectedMessage)
+        );
+
+        state
+            .lock()
+            .unwrap()
+            .reply_modes
+            .push_back(ReplyMode::Response(Message::Ack(Ack {
+                acknowledged_type: TYPE_PUSH_DATA,
+                revision: Some(7),
+                already_present: None,
+            })));
+        assert_eq!(
+            session.push_scene(scene_push(7)),
+            Err(DeviceError::UnexpectedMessage)
+        );
+    }
+
+    #[test]
+    fn firmware_without_scene_render_refuses_push_scene_before_wire_mutation() {
+        let mut legacy = status(0, 0, 100);
+        legacy.capabilities &= !protocol::CAPABILITY_SCENE_RENDER;
+        let (transport, state) = FakeTransport::new(legacy.clone());
+        let session =
+            DeviceSession::with_options(transport, &legacy, options(Duration::from_mins(1), 8));
+
+        assert_eq!(
+            session.push_scene(scene_push(7)),
+            Err(DeviceError::MissingCapabilities {
+                required: protocol::CAPABILITY_SCENE_RENDER,
+                available: legacy.capabilities,
+            })
+        );
+        assert!(
+            state
+                .lock()
+                .unwrap()
+                .requests
+                .iter()
+                .all(|request| !matches!(request, Message::PushScene(_)))
+        );
     }
 
     #[test]

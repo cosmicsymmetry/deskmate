@@ -6,7 +6,29 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+app-core = { path = "../app-core" }
+chrono = { version = "0.4", default-features = false, features = ["std"] }
 png = "0.17"
+plugin = { path = "../plugin" }
+# Task 8 (plugin-manifest stage): the curated plugins' golden cases compile
+# the real `companion/plugins/{aqi,agenda}/manifest.toml` against a real
+# `providers::ProviderSnapshot`, the same shape `plugin::compile_scene_with_assets`
+# takes in production, rather than hand-building an equivalent Scene here and
+# risking it drifting from what the real compiler produces.
+providers = { path = "../providers" }
+serde_json = "1"
+# Task 8: the scene model and its CBOR encoder. `render_scene` hands the
+# firmware's own scene_decode() the bytes protocol::encode_scene_payload
+# writes, so the simulator and the device build their scene_t from the same
+# payload with the same decoder.
+protocol = { path = "../protocol" }
+
+[dev-dependencies]
+# Task 12: verifies assets::INTER_SUBSET_SHA256 still matches the committed
+# assets/Inter-subset.ttf. Not used by the non-test render path itself,
+# which registers assets under the written-down digest constant, never a
+# hash computed at render time.
+sha2 = "0.10"
 
 [build-dependencies]
 cc = "1"

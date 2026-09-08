@@ -27,7 +27,6 @@ static const char *TAG = "wifi_station";
 // explicit initializer is needed (and none is used elsewhere in this
 // codebase for the same atomic pattern -- see clock_screen.c).
 static atomic_int s_wifi_state;
-static atomic_bool s_time_synced;
 
 // Set by time_sync_notification_cb() (the lwIP tcpip task) and cleared by
 // wifi_station_poll() (the protocol task). This is the entire hand-off: the
@@ -39,8 +38,7 @@ static atomic_bool s_offset_apply_pending;
 // WIFI_EVENT_STA_DISCONNECTED) and read by the protocol task when it builds
 // a status response. Guard both sides with the same short spinlock so a
 // reader never observes a torn dotted-quad string; the critical sections are
-// a handful of byte copies, so busy-waiting is appropriate (see
-// ui_runtime.c's lock_publisher()/unlock_publisher() for the same pattern).
+// a handful of byte copies, so busy-waiting is appropriate.
 static atomic_flag s_ip_lock = ATOMIC_FLAG_INIT;
 static char s_ip[PROTOCOL_MAX_IP_LENGTH + 1U];
 
@@ -123,7 +121,6 @@ static void time_sync_notification_cb(struct timeval *tv)
     // see wifi_station_poll()'s doc comment for why it must not touch
     // ui_runtime directly. Only atomics are touched here; the actual UI call
     // happens later, on the protocol task, via wifi_station_poll().
-    atomic_store_explicit(&s_time_synced, true, memory_order_relaxed);
     atomic_store_explicit(&s_offset_apply_pending, true, memory_order_relaxed);
     ESP_LOGI(TAG, "SNTP time sync complete");
 }
@@ -418,9 +415,4 @@ void wifi_station_copy_ip(char *out, size_t len)
     memcpy(out, s_ip, copy_length);
     out[copy_length] = '\0';
     unlock_ip();
-}
-
-bool wifi_station_time_synced(void)
-{
-    return atomic_load_explicit(&s_time_synced, memory_order_relaxed);
 }

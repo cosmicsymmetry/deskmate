@@ -29,7 +29,6 @@ static void test_fifo_and_pressure_gap(void)
            DEVICE_EVENT_QUEUE_CAPACITY);
     assert(!device_event_queue_push(&s_queue, &s_event));
     assert(device_event_queue_dropped(&s_queue) == 1U);
-    assert(device_event_queue_latest_sequence(&s_queue) == 9U);
 
     for (uint64_t expected = 1U;
          expected <= DEVICE_EVENT_QUEUE_CAPACITY; ++expected) {
@@ -48,7 +47,9 @@ static void test_invalid_arguments_do_not_consume_sequence(void)
     device_event_queue_init(&s_queue);
     assert(!device_event_queue_push(NULL, &s_event));
     assert(!device_event_queue_push(&s_queue, NULL));
-    assert(device_event_queue_latest_sequence(&s_queue) == 0U);
+    assert(device_event_queue_push(&s_queue, &s_event));
+    assert(device_event_queue_pop(&s_queue, &s_event));
+    assert(s_event.sequence == 1U);
 }
 
 int main(void)

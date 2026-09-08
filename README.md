@@ -1,160 +1,104 @@
 # deskmate
 
-Monitor-clip AMOLED desk display. Spec: docs/superpowers/specs/2026-08-03-deskmate-design.md
+Deskmate is a monitor-clip ESP32-S3 AMOLED display, a Rust companion workspace, and a
+Tauri/React settings app. The current product description is [PRODUCT.md](PRODUCT.md),
+and the repository’s durable implementation contract is [CLAUDE.md](CLAUDE.md).
 
-**Status: M3 complete; M4 v1 completion active at Task 3.** M0 was
-verified on the target board (Waveshare ESP32-S3-Touch-AMOLED-1.8
-v2, CO5300 panel + CST820 touch): display bring-up over QSPI (LVGL 9 via
-`esp_lvgl_port`), capacitive touch, brightness control, 180-degree rotation, and a
-standalone clock screen that runs with no host connection. Details and known quirks are
-in `docs/hardware/board-notes.md`.
+## Current state
 
-What works today:
-- Display: physical 368x448 CO5300 panel over QSPI, driven through
-  `esp_lcd_co5300` + LVGL 9 (`lvgl` / `esp_lvgl_port`), presented as a 448x368
-  landscape canvas, RGB565.
-- Touch: CST820 (CST816S-family driver) over the shared I2C bus, registered as an LVGL
-  input device.
-- Brightness: 0-255 levels via a QSPI-wrapped DCS `0x51` (write-display-brightness)
-  command.
-- Rotation: landscape 90°/270° software rotation (LVGL's `sw_rotate` path), with touch
-  coordinates correctly remapped by LVGL core for both orientations.
-- Standalone clock screen: renders HH:MM + date with no phone/host pairing required.
-  The HH:MM/date formatting core (`firmware/main/core/timefmt.c`) is host-testable and
-  has its own test suite under `firmware/host_tests/`.
+The live milestone status is in the
+[roadmap](docs/superpowers/plans/2026-08-03-deskmate-roadmap.md). V1 is closed pending
+declaration/tag authorization; V2’s network-owned device path is implemented, with two
+observations still owed. Scene-native rendering, declarative plugins, and the server-side
+`resvg` fallback are delivered in software. The remaining work and hardware gates live
+in these active plans:
 
-M1 added a protocol-only native USB Serial/JTAG channel, COBS + CRC-32C framing, canonical
-CBOR messages, status/liveness handling, host time sync, bounded in-RAM push data, and a
-Rust CLI. Its C/Rust test suites, ESP-IDF build, adversarial-link pass, 30-minute soak,
-visual checks, and ten-cycle physical unplug/replug acceptance all pass.
+- [V2 networked device](docs/superpowers/plans/2026-08-18-deskmate-v2-networked-device.md)
+- [Plugin manifest, including the remaining asset-GC observation](docs/superpowers/plans/2026-08-28-deskmate-plugin-manifest.md)
+- [Rasterization fallback](docs/superpowers/plans/2026-08-29-deskmate-rasterization.md)
+- [Stage 5 plugin-upload risk review](docs/superpowers/plans/2026-09-01-deskmate-plugin-upload-risk-review.md)
 
-M2 Tasks 1-4 now provide the frozen configuration/event protocol, fixed-capacity widget
-model, full/standard digital-clock, progress-ring, and row-list templates, status strip,
-local carousel gestures, bounded device-event/UI queues, and priority-interrupt firmware.
-Tasks 5-7 add the long-lived Rust session, ICS provider, pomodoro/interrupt engine, and M2
-CLI harness. M2's host tests, ESP-IDF build, native double-flash, malformed-link
-recovery, 100 config swaps, 1,000 field patches, flat heap, keepalive idle, corrected
-carousel gestures, pomodoro completion/dismissal, full-power replay, both landscape
-orientations, event burst, and 30-minute mixed soak pass. The user explicitly waived
-nine repeated M2 power cycles after one observed corrected cycle. M3 now has the strict
-typed app/config contract, cross-platform atomic config store, single-owner background
-runtime, pinned Tauri v2 desktop shell, narrow typed IPC, and the complete settings UI.
-The app configures and previews the three proven widgets, reorders the card rotation
-with pointer or keyboard, chooses between the two landscape mounting orientations,
-exposes provider/device/persistence state, and keeps the runtime alive in the tray when
-settings closes. Widgets use the complete 448x368 canvas with no status strip. Its
-software, macOS debug/release, physical UI/replay, sleep/wake, and tray-resident soak
-gates pass.
-M4 Task 1 freezes application config schema v2, lossless M3 migration, bounded closed
-types for the remaining v1 surface, and an additive protocol-v1 capability handshake.
-Task 2B later replaced the widget/screen authoring model with the card model (schema
-v3): `cards[]`, `presence`, `alert`, and host-driven timed rotation. See
-`docs/config/v3.md`, `docs/protocol/v1.md`, `docs/providers/v1.md`, and the active
-M4 plan. Task 2 delivered the bounded weather/JSON/RSS providers and wider ICS
-recurrence; Task 3 now owns the remaining device templates.
+The current application config is frozen at
+[schema v6](docs/config/v6.md), while the additive wire contract remains
+[protocol v1](docs/protocol/v1.md). The device renders host-built scenes; curated
+plugins and rasterization run server-side. Hardware observations and unresolved board
+gates are recorded in [board notes](docs/hardware/board-notes.md).
 
-## M3 companion app
+## Companion app
 
-Install the locked frontend dependencies and launch the desktop app:
+With the locked dependencies already installed:
 
-    cd companion/apps/deskmate
-    bun install --frozen-lockfile
-    PATH="$HOME/.cargo/bin:$PATH" bun run tauri dev
+```sh
+cd companion/apps/deskmate
+PATH="$HOME/.cargo/bin:$PATH" bun run tauri dev
+```
 
-Use Settings to add cards (digital clock, pomodoro, ICS calendar from a URL or local
-file, weather, JSON feed, or RSS), choose USB-below or USB-above landscape mounting,
-reorder the card rotation, and choose Save & apply. Closing Settings hides the window; the
-tray process continues provider refreshes, timer handling, reconnect, and full replay.
-Pomodoro duration and label persist across app restarts. A live timer survives settings
-close/reopen and unrelated saves, but deliberately restarts idle after the entire app
-quits so elapsed time is never guessed from process downtime.
+The app authors the card library and playlists, previews built-in cards, configures
+mounting and ownership, and keeps its runtime alive in the tray when the window closes.
+In networked tier the deployed server owns the device; provisioning remains a USB cable
+operation.
 
-Run the frontend checks from the same directory:
+Frontend checks run from `companion/apps/deskmate`:
 
-    bun run format:check
-    bun run lint
-    bun run check
-    bun test
-    bun run build
+```sh
+bun run format:check
+bun run lint
+bun run check
+bun test
+bun run build
+```
 
-## Firmware build
+## Firmware
 
-    cd firmware
-    idf.py set-target esp32s3
-    idf.py build
-    idf.py -p /dev/cu.usbmodem* flash monitor
+ESP-IDF 5.x is required. The repository is developed against the version installed at
+`~/esp/esp-idf`:
 
-Requires ESP-IDF >= 5.3 exported in the shell.
+```sh
+. "$HOME/esp/esp-idf/export.sh"
+idf.py -C firmware set-target esp32s3
+idf.py -C firmware build
+idf.py -C firmware -p /dev/cu.usbmodem* flash monitor
+```
 
-Developed and verified against ESP-IDF v5.5.5, installed to `~/esp/esp-idf`
-(`. ~/esp/esp-idf/export.sh` before running `idf.py`).
+## Legacy CLI inspection
 
-## M1 CLI
+`deskmate-cli` retains the M1 `status`, `time-sync`, and `push-data` commands and the M2
+config/demo commands as a manual inspection path. The M2 commands are legacy tooling for
+template-era firmware: scene-native firmware cannot draw a card from them. See the
+[M1 protocol/CLI plan](docs/superpowers/plans/2026-08-04-deskmate-m1-protocol-link-cli.md)
+and [M2 walkthrough](docs/superpowers/plans/2026-08-04-deskmate-m2-template-first-widgets.md)
+for the commands and their historical acceptance flow.
 
-Build the CLI with stable Rust:
+## Verification
 
-    cargo build --manifest-path companion/Cargo.toml --release -p deskmate-cli
+Run the narrowest relevant checks while iterating, then the full applicable set before
+handoff:
 
-Then, with the native `303A:1001` application firmware connected:
+```sh
+make -C firmware/host_tests clean test
+make -C firmware/host_tests sanitize
+. "$HOME/esp/esp-idf/export.sh"
+idf.py -C firmware build
+```
 
-    companion/target/release/deskmate-cli status
-    companion/target/release/deskmate-cli time-sync
-    companion/target/release/deskmate-cli push-data --widget weather --revision 1 \
-      --field summary=s:Clear --field temp=i:23 --field ok=b:true
+`sanitize` is not optional for firmware work: two of `core/scene_decode.c`'s bounds
+guard out-of-bounds *writes* that `scene_model_validate()` then reports with the same
+error code the test asserts, so the plain suite passes against a decoder with both
+deleted. ASan is their only proof, and CI now runs it too.
 
-Add `--json` for machine output or `--port /dev/cu.usbmodem...` to bypass discovery.
-The CLI confirms identity with a v1 status handshake rather than relying on a volatile
-device-node suffix. Protocol details and bounds are in `docs/protocol/v1.md`.
+For companion work, run formatting, linting, and workspace tests from `companion/`:
 
-## M2 CLI demo
+```sh
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace --all-targets
+cargo test --workspace --doc
+```
 
-The checked sample uses all three M2 templates and both legacy full/standard size
-classes. Current firmware renders either class as a clean full canvas. Build
-the CLI, then inspect and apply it before pushing widget data:
+Both test invocations are required: `--all-targets` adds example and integration
+targets but removes doctests, so neither invocation alone covers the workspace.
+Keep them as separate lines so a failure names the missing coverage directly; do
+not simplify them back to one command. The workspace currently has no bench targets.
 
-    cargo build --manifest-path companion/Cargo.toml -p deskmate-cli
-    companion/target/debug/deskmate-cli inspect-config \
-      --config companion/examples/m2-carousel.json
-    companion/target/debug/deskmate-cli apply-config \
-      --config companion/examples/m2-carousel.json
-    companion/target/debug/deskmate-cli time-sync
-    companion/target/debug/deskmate-cli push-clock --widget clock --title Desk
-    companion/target/debug/deskmate-cli push-calendar --widget calendar \
-      --ics /path/to/calendar.ics --timezone Asia/Tbilisi
-    companion/target/debug/deskmate-cli select-screen --screen pomodoro-screen
-    companion/target/debug/deskmate-cli pomodoro --widget pomodoro --duration-seconds 60
-
-For a power-cycle-safe full demo, use one long-lived process so the reconnect owner has
-the layout, time, and latest data for all three widgets:
-
-    companion/target/debug/deskmate-cli demo \
-      --config companion/examples/m2-carousel.json \
-      --ics /path/to/calendar.ics --timezone Asia/Tbilisi \
-      --duration-seconds 60
-
-The demo command handles device taps, pushes one-second authoritative pomodoro
-snapshots, reconnects and replays the complete carousel after unplug or power loss, and
-sends one completion interrupt. Individual short-lived commands remain useful for
-manual inspection, but one process cannot replay state owned only by an earlier process.
-For standalone event inspection or manual interrupt testing:
-
-    companion/target/debug/deskmate-cli events --json
-    companion/target/debug/deskmate-cli trigger-interrupt \
-      --widget calendar --token 1 --reason "Meeting starting"
-
-Use `--json` for machine-readable command output and JSON Lines events. Long-running
-commands stop cleanly on Ctrl-C; once keepalives stop, firmware returns to its standalone
-clock on the normal 10-second timeout. Exit 3 means local config validation failed, 4 is
-a provider failure, and 10-15 retain the device/transport/rejection classes.
-
-Run all host-side checks with:
-
-    make -C firmware/host_tests clean test
-    cargo fmt --manifest-path companion/Cargo.toml --all --check
-    cargo clippy --manifest-path companion/Cargo.toml --workspace --all-targets -- -D warnings
-    cargo test --manifest-path companion/Cargo.toml --workspace
-
-The repeatable on-device parser recovery check is:
-
-    cargo run --manifest-path companion/Cargo.toml -p device \
-      --example hardware_acceptance -- --port /dev/cu.usbmodem...
+Hardware-facing changes also require the on-device checks named in the active plan and
+an entry in `docs/hardware/board-notes.md` with the observed result.

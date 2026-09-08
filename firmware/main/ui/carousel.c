@@ -4,7 +4,7 @@
 
 #include "core/navigation.h"
 #include "esp_timer.h"
-#include "template_view.h"
+#include "scene_view.h"
 
 typedef struct {
     device_event_queue_t *event_queue;
@@ -76,7 +76,7 @@ static void emit_event(navigation_gesture_t gesture)
         strcpy(event.screen_id, s_carousel.binding.screen_id);
         /* Optimistic feedback is intentionally reconciled by the next full
          * authoritative PushData snapshot, including when this enqueue drops. */
-        template_view_apply_local_action(event.action);
+        scene_view_apply_local_action(event.action);
     } else if (gesture == NAVIGATION_GESTURE_PREVIOUS) {
         if (strcmp(s_carousel.binding.previous_screen_id,
                    s_carousel.binding.screen_id) == 0) {

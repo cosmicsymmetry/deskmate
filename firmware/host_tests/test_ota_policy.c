@@ -79,6 +79,20 @@ static void test_metadata_is_bounded_and_tied_to_its_version(void)
                                       &metadata));
 }
 
+static void test_maximal_metadata_path_uses_the_exact_buffer(void)
+{
+    static const char maximal[] =
+        "{\"version\":\"12345678901234567890123456789012\","
+        "\"url\":\"/v1/firmware/12345678901234567890123456789012.bin\"}";
+    ota_policy_metadata_t metadata;
+    assert(sizeof(metadata.path) == 50U);
+    assert(ota_policy_parse_metadata(maximal, sizeof(maximal) - 1U,
+                                     &metadata));
+    assert(strlen(metadata.version) ==
+           PROTOCOL_MAX_FIRMWARE_VERSION_LENGTH);
+    assert(strlen(metadata.path) == 49U);
+}
+
 static void test_either_live_focus_state_defers_update(void)
 {
     assert(!ota_policy_update_deferred(false, false));
@@ -182,6 +196,7 @@ int main(void)
     test_urls_use_the_server_origin_and_https();
     test_urls_reject_unsafe_or_truncated_inputs();
     test_metadata_is_bounded_and_tied_to_its_version();
+    test_maximal_metadata_path_uses_the_exact_buffer();
     test_either_live_focus_state_defers_update();
     test_owner_wait_is_bounded_and_readiness_wins();
     test_day_scale_delays_convert_without_32_bit_overflow();

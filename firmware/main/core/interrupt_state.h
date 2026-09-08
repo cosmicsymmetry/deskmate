@@ -57,5 +57,3 @@ bool interrupt_state_dismiss(interrupt_state_t *state,
 
 const interrupt_slot_t *interrupt_state_active(
     const interrupt_state_t *state);
-const interrupt_slot_t *interrupt_state_pending(
-    const interrupt_state_t *state);

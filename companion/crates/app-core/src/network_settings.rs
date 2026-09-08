@@ -57,7 +57,6 @@ pub struct NetworkSettingsStore {
 #[derive(Default)]
 struct NetworkSettingsStoreState {
     last_good: Option<PersistedNetworkSettings>,
-    generation: u64,
 }
 
 impl NetworkSettingsStore {
@@ -76,7 +75,6 @@ impl NetworkSettingsStore {
         let Ok(mut state) = self.state.lock() else {
             return NetworkSettingsLoadOutcome::Recovered {
                 settings: NetworkSettings::default(),
-                origin: NetworkSettingsOrigin::Defaults,
                 error: NetworkSettingsStoreError::LockPoisoned,
             };
         };
@@ -85,23 +83,16 @@ impl NetworkSettingsStore {
             Ok(Some(persisted)) => {
                 let settings = persisted.public_settings();
                 state.last_good = Some(persisted);
-                NetworkSettingsLoadOutcome::Loaded {
-                    settings,
-                    origin: NetworkSettingsOrigin::Current,
-                }
+                NetworkSettingsLoadOutcome::Loaded { settings }
             }
             Ok(None) => NetworkSettingsLoadOutcome::Loaded {
                 settings: NetworkSettings::default(),
-                origin: NetworkSettingsOrigin::Defaults,
             },
             Err(error) => recovered(&state, error),
         }
     }
 
-    pub fn save(
-        &self,
-        update: NetworkSettingsUpdate,
-    ) -> Result<NetworkSettingsSaveReceipt, NetworkSettingsStoreError> {
+    pub fn save(&self, update: NetworkSettingsUpdate) -> Result<(), NetworkSettingsStoreError> {
         let mut state = self
             .state
             .lock()
@@ -156,16 +147,9 @@ impl NetworkSettingsStore {
         secure_file::write_and_replace(&self.path, &bytes)
             .map_err(|error| secure_io_error("network settings", error))?;
 
-        state.generation = state.generation.saturating_add(1);
         state.last_good = Some(persisted);
-        let warning = secure_file::sync_parent(parent).err().map(|error| {
-            let (operation, message) = error.into_strings("network settings directory");
-            NetworkSettingsStoreWarning::Io { operation, message }
-        });
-        Ok(NetworkSettingsSaveReceipt {
-            generation: state.generation,
-            warning,
-        })
+        let _ = secure_file::sync_parent(parent);
+        Ok(())
     }
 
     /// Lends the stored admin token only for the duration of one operation. The
@@ -220,24 +204,14 @@ impl NetworkSettingsStore {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum NetworkSettingsOrigin {
-    Defaults,
-    Current,
-    LastGood,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum NetworkSettingsLoadOutcome {
     Loaded {
         settings: NetworkSettings,
-        origin: NetworkSettingsOrigin,
     },
     Recovered {
         settings: NetworkSettings,
-        origin: NetworkSettingsOrigin,
         error: NetworkSettingsStoreError,
     },
 }
@@ -249,30 +223,12 @@ impl NetworkSettingsLoadOutcome {
         }
     }
 
-    pub const fn origin(&self) -> NetworkSettingsOrigin {
-        match self {
-            Self::Loaded { origin, .. } | Self::Recovered { origin, .. } => *origin,
-        }
-    }
-
     pub fn recovery(&self) -> Option<NetworkSettingsStoreError> {
         match self {
             Self::Loaded { .. } => None,
             Self::Recovered { error, .. } => Some(error.clone()),
         }
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct NetworkSettingsSaveReceipt {
-    pub generation: u64,
-    pub warning: Option<NetworkSettingsStoreWarning>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "kebab-case")]
-pub enum NetworkSettingsStoreWarning {
-    Io { operation: String, message: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -387,15 +343,11 @@ fn recovered(
     state: &NetworkSettingsStoreState,
     error: NetworkSettingsStoreError,
 ) -> NetworkSettingsLoadOutcome {
-    let (settings, origin) = match &state.last_good {
-        Some(persisted) => (persisted.public_settings(), NetworkSettingsOrigin::LastGood),
-        None => (NetworkSettings::default(), NetworkSettingsOrigin::Defaults),
-    };
-    NetworkSettingsLoadOutcome::Recovered {
-        settings,
-        origin,
-        error,
-    }
+    let settings = state.last_good.as_ref().map_or_else(
+        NetworkSettings::default,
+        PersistedNetworkSettings::public_settings,
+    );
+    NetworkSettingsLoadOutcome::Recovered { settings, error }
 }
 
 fn secure_io_error(subject: &str, error: FileIoError) -> NetworkSettingsStoreError {

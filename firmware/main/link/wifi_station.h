@@ -1,6 +1,5 @@
 #pragma once
 
-#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -56,6 +55,3 @@ int8_t wifi_station_rssi(void);
  * NUL-terminated within that bound. No-op if `out` is NULL or `len` is 0.
  */
 void wifi_station_copy_ip(char *out, size_t len);
-
-/** True once SNTP has set the system clock at least once. */
-bool wifi_station_time_synced(void);

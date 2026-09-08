@@ -101,14 +101,3 @@ uint32_t device_event_queue_high_water(device_event_queue_t *queue)
     unlock_queue(queue);
     return value;
 }
-
-uint64_t device_event_queue_latest_sequence(device_event_queue_t *queue)
-{
-    if (queue == NULL) {
-        return 0U;
-    }
-    lock_queue(queue);
-    uint64_t value = queue->latest_sequence;
-    unlock_queue(queue);
-    return value;
-}

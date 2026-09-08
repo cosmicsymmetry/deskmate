@@ -976,7 +976,6 @@ fn event_kind(kind: EventKind) -> &'static str {
 
 fn event_action(action: EventAction) -> &'static str {
     match action {
-        EventAction::None => "none",
         EventAction::StartPause => "start-pause",
         EventAction::Reset => "reset",
         EventAction::NavigatePrevious => "navigate-previous",

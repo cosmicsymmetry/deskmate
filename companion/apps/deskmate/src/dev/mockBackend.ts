@@ -13,6 +13,13 @@
  */
 import { mockCardData, mockConfig, mockNetworkSettings, mockSnapshot } from "./fixture";
 import { renderMockFrame } from "./mockPreview";
+import {
+  MOCK_PLUGIN_CATALOG,
+  mockPluginCardData,
+  mockPluginCardState,
+  mockPluginConfig,
+  mockPluginProviders,
+} from "./pluginFixture";
 import type {
   AppConfig,
   AppSnapshot,
@@ -31,6 +38,8 @@ export const SCENARIOS = [
   "firstrun",
   "empty",
   "carderror",
+  "plugin",
+  "plugin-local",
 ] as const;
 export type Scenario = (typeof SCENARIOS)[number];
 
@@ -82,10 +91,19 @@ function applyScenario() {
       };
       break;
     case "firstrun":
+      // A real first run is `AppConfig::default()`: one clock, already in the loop. The
+      // only step left is saving.
       config = {
         ...mockConfig(),
         cards: [mockConfig().cards[0]],
-        playlists: [{ id: "day", name: "Workday", advance: { kind: "manual" }, entries: [] }],
+        playlists: [
+          {
+            id: "day",
+            name: "Workday",
+            advance: { kind: "manual" },
+            entries: [{ card_id: mockConfig().cards[0].id, dwell_seconds: null }],
+          },
+        ],
       };
       snapshot = mockSnapshot(config);
       snapshot.has_saved_config = false;
@@ -106,8 +124,26 @@ function applyScenario() {
       break;
     case "carderror":
       snapshot.card_errors = [
-        { card_id: "json-feed", message: "field `hero` exceeds the 32-byte text limit" },
+        {
+          kind: "scene-refused",
+          card_id: "json-feed",
+          message: "the display could not render this card's complete scene",
+        },
       ];
+      break;
+    case "plugin":
+    case "plugin-local":
+      config = mockPluginConfig();
+      snapshot = mockSnapshot(config);
+      snapshot.providers = mockPluginProviders();
+      snapshot.card_data = mockPluginCardData();
+      snapshot.pomodoros = [];
+      if (scenario === "plugin-local") {
+        // No server, so no catalog and no rendering: `pluginCardFlag` prints the
+        // word and the stage says where these cards are drawn.
+        snapshot.device.tier = "local";
+        network = { server_url: "", device_id: "", tier: "local" };
+      }
       break;
     default:
       break;
@@ -164,7 +200,8 @@ function validate(draft: AppConfig): DraftValidation {
             push(`${at}.mappings[${m}].path`, "empty", "Enter a JSON path.");
         });
         break;
-      default:
+      case "clock":
+      case "plugin":
         break;
     }
     if (card.alert.kind !== "none" && card.alert.hold.kind === "seconds") {
@@ -232,6 +269,17 @@ function requireArgs(args: Record<string, unknown> | undefined): Record<string, 
 const delay = <T>(value: T, ms = 90): Promise<T> =>
   new Promise((resolve) => window.setTimeout(() => resolve(value), ms));
 
+/** The `hero` field the mock projection published for one card, if any. */
+function heroFor(cardId: string): string | null {
+  const field = snapshot.card_data
+    .find((candidate) => candidate.card_id === cardId)
+    ?.fields.find((candidate) => candidate.key === "hero");
+  if (!field) {
+    return null;
+  }
+  return field.value.kind === "text" ? field.value.value : String(field.value.value);
+}
+
 export async function mockInvoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   switch (command) {
     case "get_app_snapshot":
@@ -240,6 +288,10 @@ export async function mockInvoke<T>(command: string, args?: Record<string, unkno
       return delay(network) as Promise<T>;
     case "get_autostart_status":
       return delay(autostart) as Promise<T>;
+    case "get_server_plugins":
+      return delay(MOCK_PLUGIN_CATALOG) as Promise<T>;
+    case "get_server_card_state":
+      return delay(scenario === "plugin" ? mockPluginCardState() : []) as Promise<T>;
     case "set_autostart_enabled": {
       autostart = { enabled: Boolean(args?.enabled), preference_enabled: Boolean(args?.enabled) };
       return delay(autostart) as Promise<T>;
@@ -258,12 +310,12 @@ export async function mockInvoke<T>(command: string, args?: Record<string, unkno
       publish();
       return delay({ save: { generation: 1, warning: null } }, 350) as Promise<T>;
     }
-    case "set_pushing_paused":
+    case "resume_pushing":
       config = {
         ...config,
-        preferences: { ...config.preferences, paused: Boolean(args?.paused) },
+        preferences: { ...config.preferences, paused: false },
       };
-      snapshot.runtime = { kind: args?.paused ? "paused" : "running" };
+      snapshot.runtime = { kind: "running" };
       publish();
       return delay(undefined as T);
     case "control_pomodoro": {
@@ -298,6 +350,29 @@ export async function mockInvoke<T>(command: string, args?: Record<string, unkno
       const cardId = args?.cardId as string;
       const card = config.cards.find((candidate) => candidate.id === cardId);
       if (!card) throw { category: "not-found", message: "No such card." };
+      if (card.kind === "plugin") {
+        if (scenario === "plugin-local") {
+          return {
+            png_base64: null,
+            sample: false,
+            state: "Plugin cards render on the server",
+          } as T;
+        }
+        if (!MOCK_PLUGIN_CATALOG.plugins.some((plugin) => plugin.id === card.plugin_id)) {
+          return {
+            png_base64: null,
+            sample: false,
+            state: `Plugin “${card.plugin_id}” is not loaded on the server`,
+          } as T;
+        }
+        if (heroFor(cardId) === null) {
+          return {
+            png_base64: null,
+            sample: false,
+            state: "Waiting for the first refresh",
+          } as T;
+        }
+      }
       const timer = snapshot.pomodoros.find((candidate) => candidate.widget_id === cardId);
       return {
         png_base64: renderMockFrame(
@@ -307,16 +382,21 @@ export async function mockInvoke<T>(command: string, args?: Record<string, unkno
           timer?.remaining_seconds ?? null,
         ),
         sample: true,
+        state: null,
       } as T;
     }
     case "choose_ics_file":
       return delay("/Users/you/Calendars/work.ics") as Promise<T>;
-    case "set_server_endpoint":
+    case "set_server_endpoint": {
+      const request = requireArgs(args).request as { server_url: string; device_id: string };
       network = {
         ...network,
-        server_url: (requireArgs(args).request as { server_url: string }).server_url,
+        server_url: request.server_url,
+        // Blank means "leave the stored id alone", matching set_server_endpoint.
+        device_id: request.device_id.trim() === "" ? network.device_id : request.device_id,
       };
       return delay(network) as Promise<T>;
+    }
     case "provision_device": {
       const request = args?.request as {
         server_url: string;
@@ -342,8 +422,6 @@ export async function mockInvoke<T>(command: string, args?: Record<string, unkno
       snapshot.device.tier = "local";
       publish();
       return delay(network) as Promise<T>;
-    case "set_settings_window_visible":
-      return delay(snapshot) as Promise<T>;
     default:
       throw { category: "not-found", message: `mock backend has no command \`${command}\`` };
   }

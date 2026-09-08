@@ -4,10 +4,12 @@ import {
   activePlaylist,
   addCard,
   addEntry,
-  addPlaylist,
-  cardFields,
   cardMoveFromKey,
-  cardsOutsidePlaylist,
+  cardKindName,
+  cardLabel,
+  cardName,
+  cardsOutsideLoop,
+  copyConfig,
   cardsContainerIssues,
   filmstripAdvance,
   filmstripDeadline,
@@ -19,28 +21,33 @@ import {
   issuesForField,
   issuesForPath,
   libraryCards,
+  loopEntries,
   loopSeconds,
   moveCard,
   moveEntry,
   nextFilmstripCardId,
   numberValue,
-  playlistEntries,
+  pluginCardFlag,
   removeCard,
   removeEntry,
-  removePlaylist,
-  renamePlaylist,
-  setActivePlaylist,
   setEntryDwell,
   setPlaylistAdvance,
   tapActionDescription,
-  withAlert,
+  unclaimedIssues,
 } from "../src/lib/configDraft";
-import type { AppConfig, CardDataSnapshot, CardSettings, ValidationIssue } from "../src/lib/types";
+import type {
+  AddableCardKind,
+  AppConfig,
+  CardSettings,
+  DeviceTier,
+  PluginCatalog,
+  ValidationIssue,
+} from "../src/lib/types";
 import { ipcContractFixtures } from "../src/lib/types.contract";
 
 function initialConfig(): AppConfig {
   return {
-    schema_version: 4,
+    schema_version: ipcContractFixtures.snapshot.config.schema_version,
     preferences: {
       timezone: "UTC",
       autostart: false,
@@ -81,6 +88,80 @@ function cardsConfig(ids: string[]): AppConfig {
   };
 }
 
+function pluginCard(): CardSettings {
+  return {
+    kind: "plugin",
+    id: "plugin-card",
+    title: "Office air",
+    plugin_id: "com.example.air-quality",
+    tap_action: { kind: "none" },
+    refresh: { kind: "interval", minutes: 15 },
+    alert: { kind: "none" },
+  };
+}
+
+function pluginCatalog(displayName: string | null = "Air quality"): PluginCatalog {
+  return {
+    plugins: [
+      {
+        id: "com.example.air-quality",
+        name: "aqi",
+        version: "1.0.0",
+        node_count: 7,
+        assets: [],
+        display_name: displayName,
+        description: "EPA index for a location",
+        manifest_version: 2,
+        template: "display-list",
+        refresh_minutes: 15,
+      },
+    ],
+    load_failures: [],
+  };
+}
+
+test("a plugin card is named by its display name, and falls back to its id twice over", () => {
+  const card = pluginCard();
+  expect(cardLabel(card, pluginCatalog())).toBe("Air quality");
+  // Fallback one: the catalog knows the plugin but the manifest declared no name.
+  expect(cardLabel(card, pluginCatalog(null))).toBe("com.example.air-quality");
+  // Fallback two: no catalog at all (local tier, or the server was unreachable).
+  expect(cardLabel(card, null)).toBe("com.example.air-quality");
+  expect(cardLabel(card)).toBe("com.example.air-quality");
+  // A catalog that does not carry this id cannot rename it either.
+  expect(cardLabel({ ...card, plugin_id: "com.example.gone" }, pluginCatalog())).toBe(
+    "com.example.gone",
+  );
+});
+
+test("no card kind is called “Plugin” on any surface", () => {
+  const kinds: AddableCardKind[] = ["clock", "pomodoro", "calendar", "weather", "json-feed", "rss"];
+  expect(kinds.map(cardKindName)).not.toContain("Plugin");
+  expect(cardName(pluginCard())).toBe("Office air");
+  expect(cardName({ ...pluginCard(), title: "" })).toBe("com.example.air-quality");
+});
+
+test("a bare plugin id always carries the word that explains it", () => {
+  const card = pluginCard();
+  const missing = { ...card, plugin_id: "com.example.gone" };
+  const networked: DeviceTier = "networked";
+  const local: DeviceTier = "local";
+
+  // Networked, catalog loaded, plugin present: the name is the whole story.
+  expect(pluginCardFlag(card, pluginCatalog(), networked)).toBeNull();
+  // Networked, catalog loaded, plugin absent: the server does not have it.
+  expect(pluginCardFlag(missing, pluginCatalog(), networked)).toBe("not on the server");
+  // Local tier: there is no server to render it, whatever a stale catalog says.
+  expect(pluginCardFlag(card, pluginCatalog(), local)).toBe("needs the server");
+  expect(pluginCardFlag(missing, null, local)).toBe("needs the server");
+  // Networked with no catalog yet: unknown is not the same as absent, so no word.
+  expect(pluginCardFlag(missing, null, networked)).toBeNull();
+  // Ownership not yet resolved: also unknown, also silent.
+  expect(pluginCardFlag(missing, null, null)).toBeNull();
+  // Built-in cards never carry it.
+  expect(pluginCardFlag(initialConfig().cards[0], null, local)).toBeNull();
+});
+
 describe("configuration draft helpers", () => {
   test("adds cards with stable unique card IDs", () => {
     const withSecondClock = addCard(initialConfig(), "clock");
@@ -97,31 +178,120 @@ describe("configuration draft helpers", () => {
     expect(new Set(complete.config.cards.map((card) => card.id)).size).toBe(4);
   });
 
-  test("first-run guidance follows add a card, add it to a playlist, then save without demanding a card kind", () => {
+  test("copies plugin cards without inventing a built-in template", () => {
+    const plugin = pluginCard();
+    const copied = copyConfig({ ...initialConfig(), cards: [plugin] });
+
+    expect(copied.cards[0]).toEqual(plugin);
+    expect(copied.cards[0]).not.toBe(plugin);
+    expect(copied.cards[0]).not.toHaveProperty("template");
+    expect(cardLabel(copied.cards[0])).toBe("com.example.air-quality");
+  });
+
+  test("first-run guidance follows add a card, then save without demanding a card kind", () => {
     const empty: AppConfig = {
       ...initialConfig(),
       cards: [],
       playlists: [{ ...initialConfig().playlists[0], entries: [] }],
     };
-    expect(firstRunSteps(empty, false).map((step) => step.done)).toEqual([false, false, false]);
+    expect(firstRunSteps(empty, false).map((step) => step.done)).toEqual([false, false]);
 
     const withWeather = addCard(empty, "weather").config;
-    expect(firstRunSteps(withWeather, false).map((step) => step.done)).toEqual([
-      true,
-      false,
-      false,
-    ]);
-
-    const configured = addEntry(withWeather, "workday", "weather");
-    expect(firstRunSteps(configured, false).map((step) => step.done)).toEqual([true, true, false]);
-    expect(firstRunSteps(configured, true).every((step) => step.done)).toBe(true);
+    expect(firstRunSteps(withWeather, false).map((step) => step.done)).toEqual([true, false]);
+    expect(firstRunSteps(withWeather, true).every((step) => step.done)).toBe(true);
   });
 
-  test("adding a card appends it without creating a screen", () => {
+  test("adding a card appends it to the library and enrols it at the end of the active loop", () => {
     const { config, cardId } = addCard(initialConfig(), "weather");
     expect(config.cards.map((card) => card.kind)).toContain("weather");
     expect(cardId).toBe("weather");
+    expect(config.playlists[0].entries.at(-1)).toEqual({
+      card_id: "weather",
+      dwell_seconds: null,
+    });
     expect("screens" in config).toBe(false);
+  });
+
+  test("adding a card is gated by both the card and active-loop entry limits", () => {
+    const cardFull = cardsConfig(["a", "b", "c", "d", "e", "f", "g", "h"]);
+    expect(addCard(cardFull, "weather")).toEqual({ config: cardFull, cardId: null });
+
+    const entryFullBase = cardsConfig(["a", "b", "c", "d", "e", "f", "g"]);
+    const entryFull: AppConfig = {
+      ...entryFullBase,
+      playlists: [
+        {
+          ...entryFullBase.playlists[0],
+          entries: Array.from({ length: 8 }, (_, index) => ({
+            card_id: index < 7 ? entryFullBase.cards[index].id : "missing-card",
+            dwell_seconds: null,
+          })),
+        },
+      ],
+    };
+    expect(addCard(entryFull, "weather")).toEqual({ config: entryFull, cardId: null });
+  });
+
+  test("a plugin card is added by the same call, with the same two caps, as any other", () => {
+    const { config, cardId } = addCard(initialConfig(), {
+      kind: "plugin",
+      pluginId: "com.example.air-quality",
+      refreshMinutes: 15,
+    });
+    expect(cardId).toBe("plugin");
+    const added = config.cards.at(-1);
+    if (added?.kind !== "plugin") {
+      throw new Error("addCard did not append the plugin card");
+    }
+    expect(added).toEqual({
+      kind: "plugin",
+      id: "plugin",
+      title: "",
+      plugin_id: "com.example.air-quality",
+      tap_action: { kind: "none" },
+      refresh: { kind: "interval", minutes: 15 },
+      alert: { kind: "none" },
+    });
+    // Enrolled in the loop by the same code path as a built-in add.
+    expect(config.playlists[0].entries.at(-1)?.card_id).toBe("plugin");
+
+    // The card id is minted, never derived: a 64-byte plugin id cannot fit the
+    // 32-byte card-id bound, and a second card of the same plugin must not collide.
+    const second = addCard(config, {
+      kind: "plugin",
+      pluginId: "com.example.air-quality",
+      refreshMinutes: 15,
+    });
+    expect(second.cardId).toBe("plugin-2");
+
+    const cardFull: AppConfig = {
+      ...initialConfig(),
+      cards: Array.from({ length: 8 }, (_, index) => ({
+        ...initialConfig().cards[0],
+        id: `c${index}`,
+      })),
+    };
+    expect(addCard(cardFull, { kind: "plugin", pluginId: "aqi", refreshMinutes: 15 })).toEqual({
+      config: cardFull,
+      cardId: null,
+    });
+
+    const entryFull: AppConfig = {
+      ...initialConfig(),
+      playlists: [
+        {
+          ...initialConfig().playlists[0],
+          entries: Array.from({ length: 8 }, (_, index) => ({
+            card_id: `c${index}`,
+            dwell_seconds: null,
+          })),
+        },
+      ],
+    };
+    expect(addCard(entryFull, { kind: "plugin", pluginId: "aqi", refreshMinutes: 15 })).toEqual({
+      config: entryFull,
+      cardId: null,
+    });
   });
 
   test("adding every kind produces a reachable, addable card", () => {
@@ -193,67 +363,28 @@ describe("configuration draft helpers", () => {
     expect(activePlaylist({ ...config, active_playlist_id: "missing" })).toBeNull();
   });
 
-  test("resolves playlist entries in entry order and omits missing card references", () => {
-    const withTimer = addCard(initialConfig(), "pomodoro").config;
-    const config: AppConfig = {
-      ...withTimer,
+  test("resolves active-loop entries without dropping missing references, then finds active-loop outsiders", () => {
+    const withCards = addCard(addCard(initialConfig(), "pomodoro").config, "weather").config;
+    const config = {
+      ...withCards,
       playlists: [
         {
-          ...withTimer.playlists[0],
+          ...withCards.playlists[0],
           entries: [
-            { card_id: "pomodoro", dwell_seconds: null },
-            { card_id: "missing", dwell_seconds: null },
+            { card_id: "weather", dwell_seconds: 15 },
+            { card_id: "missing-card", dwell_seconds: null },
             { card_id: "clock", dwell_seconds: null },
           ],
         },
       ],
     };
-    expect(playlistEntries(config, "workday").map((card) => card.id)).toEqual([
-      "pomodoro",
-      "clock",
-    ]);
-    expect(playlistEntries(config, "missing")).toEqual([]);
-  });
-
-  test("returns every library card and cards outside one playlist", () => {
-    const config = addCard(addCard(initialConfig(), "pomodoro").config, "weather").config;
     expect(libraryCards(config).map((card) => card.id)).toEqual(["clock", "pomodoro", "weather"]);
-    expect(cardsOutsidePlaylist(config, "workday").map((card) => card.id)).toEqual([
-      "pomodoro",
-      "weather",
+    expect(loopEntries(config)).toEqual([
+      { index: 0, entry: config.playlists[0].entries[0], card: config.cards[2] },
+      { index: 1, entry: config.playlists[0].entries[1], card: null },
+      { index: 2, entry: config.playlists[0].entries[2], card: config.cards[0] },
     ]);
-  });
-
-  test("adds playlists with slugified, unique ids", () => {
-    const once = addPlaylist(initialConfig(), "  Deep Focus!  ");
-    const twice = addPlaylist(once, "Deep Focus");
-    expect(once.playlists.at(-1)).toEqual({
-      id: "deep-focus",
-      name: "Deep Focus!",
-      advance: { kind: "manual" },
-      entries: [],
-    });
-    expect(twice.playlists.at(-1)?.id).toBe("deep-focus-2");
-  });
-
-  test("renames a playlist without changing its stable id", () => {
-    const next = renamePlaylist(initialConfig(), "workday", "  Work hours  ");
-    expect(next.playlists[0].id).toBe("workday");
-    expect(next.playlists[0].name).toBe("Work hours");
-  });
-
-  test("removing the active playlist activates the first remaining playlist and refuses the last", () => {
-    const withSecond = addPlaylist(initialConfig(), "Evening");
-    const next = removePlaylist(withSecond, "workday");
-    expect(next.playlists.map((playlist) => playlist.id)).toEqual(["evening"]);
-    expect(next.active_playlist_id).toBe("evening");
-    expect(removePlaylist(next, "evening")).toBe(next);
-  });
-
-  test("sets the active playlist only when it exists", () => {
-    const config = addPlaylist(initialConfig(), "Evening");
-    expect(setActivePlaylist(config, "evening").active_playlist_id).toBe("evening");
-    expect(setActivePlaylist(config, "missing")).toBe(config);
+    expect(cardsOutsideLoop(config).map((card) => card.id)).toEqual(["pomodoro"]);
   });
 
   test("adds a playlist entry but refuses duplicates and a ninth entry", () => {
@@ -278,7 +409,7 @@ describe("configuration draft helpers", () => {
   });
 
   test("removes a playlist entry by index and ignores an out-of-range index", () => {
-    const config = addEntry(addCard(initialConfig(), "pomodoro").config, "workday", "pomodoro");
+    const config = addCard(initialConfig(), "pomodoro").config;
     const next = removeEntry(config, "workday", 0);
     expect(next.playlists[0].entries.map((entry) => entry.card_id)).toEqual(["pomodoro"]);
     expect(removeEntry(next, "workday", 4)).toBe(next);
@@ -316,7 +447,13 @@ describe("configuration draft helpers", () => {
   });
 
   test("sets one playlist's advance mode", () => {
-    const config = addPlaylist(initialConfig(), "Evening");
+    const config: AppConfig = {
+      ...initialConfig(),
+      playlists: [
+        initialConfig().playlists[0],
+        { id: "evening", name: "Evening", advance: { kind: "manual" }, entries: [] },
+      ],
+    };
     const next = setPlaylistAdvance(config, "evening", {
       kind: "timed",
       default_dwell_seconds: 30,
@@ -326,6 +463,19 @@ describe("configuration draft helpers", () => {
       kind: "timed",
       default_dwell_seconds: 30,
     });
+  });
+
+  test("keeps the draft reference when the playlist advance is deep-equal", () => {
+    const manual = initialConfig();
+    expect(setPlaylistAdvance(manual, "workday", { kind: "manual" })).toBe(manual);
+
+    const timed = setPlaylistAdvance(manual, "workday", {
+      kind: "timed",
+      default_dwell_seconds: 30,
+    });
+    expect(setPlaylistAdvance(timed, "workday", { kind: "timed", default_dwell_seconds: 30 })).toBe(
+      timed,
+    );
   });
 
   test("loop length sums playlist entry dwell with the timed default and is null for manual", () => {
@@ -345,9 +495,18 @@ describe("configuration draft helpers", () => {
 
   test("removing a card strips its entries from every playlist", () => {
     let config = addCard(initialConfig(), "pomodoro").config;
-    config = addEntry(config, "workday", "pomodoro");
-    config = addPlaylist(config, "Evening");
-    config = addEntry(config, "evening", "pomodoro");
+    config = {
+      ...config,
+      playlists: [
+        config.playlists[0],
+        {
+          id: "evening",
+          name: "Evening",
+          advance: { kind: "manual" },
+          entries: [{ card_id: "pomodoro", dwell_seconds: null }],
+        },
+      ],
+    };
     const next = removeCard(config, "pomodoro");
     expect(next.cards.map((card) => card.id)).toEqual(["clock"]);
     expect(next.playlists.map((playlist) => playlist.entries)).toEqual([
@@ -357,32 +516,18 @@ describe("configuration draft helpers", () => {
     expect(firstSelectableCard(next)).toBe("clock");
   });
 
-  test("cardFields reads a card's published fields, keyed by name", () => {
-    const cardData: CardDataSnapshot[] = [
-      {
-        card_id: "upnext",
-        fields: [
-          { key: "row0_title", value: { kind: "text", value: "Q3 Planning Sync" } },
-          { key: "stale", value: { kind: "boolean", value: false } },
-        ],
-      },
-    ];
-    const fields = cardFields(cardData, "upnext");
-    expect(fields.get("row0_title")).toEqual({ kind: "text", value: "Q3 Planning Sync" });
-    expect(fields.get("stale")).toEqual({ kind: "boolean", value: false });
-    expect(fields.get("row1_title")).toBeUndefined();
-  });
-
-  test("cardFields returns an empty map for a card with no published snapshot yet", () => {
-    expect(cardFields([], "upnext").size).toBe(0);
-    const cardData: CardDataSnapshot[] = [{ card_id: "some-other-card", fields: [] }];
-    expect(cardFields(cardData, "upnext").size).toBe(0);
-  });
-
   test("filmstripSegments proportions active-playlist entries by resolved dwell and excludes library-only cards", () => {
     let config = addCard(initialConfig(), "pomodoro").config;
     config = addCard(config, "weather").config;
-    config = addEntry(config, "workday", "pomodoro");
+    config = {
+      ...config,
+      playlists: [
+        {
+          ...config.playlists[0],
+          entries: config.playlists[0].entries.filter((entry) => entry.card_id !== "weather"),
+        },
+      ],
+    };
     config = setEntryDwell(config, "workday", 0, 45);
     config = setPlaylistAdvance(config, "workday", {
       kind: "timed",
@@ -407,6 +552,22 @@ describe("configuration draft helpers", () => {
     expect(segments.map((segment) => segment.dwellSeconds)).toEqual([0, 0]);
     expect(segments[0].widthPercent).toBe(50);
     expect(segments[1].widthPercent).toBe(50);
+  });
+
+  test("filmstripSegments names a plugin segment from the catalog it is given", () => {
+    const config: AppConfig = {
+      ...initialConfig(),
+      cards: [pluginCard()],
+      playlists: [
+        {
+          ...initialConfig().playlists[0],
+          advance: { kind: "timed", default_dwell_seconds: 20 },
+          entries: [{ card_id: "plugin-card", dwell_seconds: 30 }],
+        },
+      ],
+    };
+    expect(filmstripSegments(config, pluginCatalog())[0].name).toBe("Air quality");
+    expect(filmstripSegments(config)[0].name).toBe("com.example.air-quality");
   });
 
   test("nextFilmstripCardId wraps past the last segment", () => {
@@ -566,16 +727,6 @@ describe("configuration draft helpers", () => {
     expect(issuesForField(cardIssues, "alert.lead_minutes")).toEqual([cardIssues[1]]);
   });
 
-  test("withAlert updates only the card's alert", () => {
-    const card: CardSettings = {
-      ...addCard(initialConfig(), "pomodoro").config.cards[0],
-      alert: { kind: "on-timer-finish", hold: { kind: "until-dismissed" } },
-    };
-    const next = withAlert(card, { kind: "none" });
-    expect(next.alert).toEqual({ kind: "none" });
-    expect(next).toEqual({ ...card, alert: { kind: "none" } });
-  });
-
   test("tapActionDescription states plain-language tap behaviour per action", () => {
     const clock = initialConfig().cards[0];
     const withPomodoro = addCard(initialConfig(), "pomodoro");
@@ -587,9 +738,26 @@ describe("configuration draft helpers", () => {
     expect(tapActionDescription(pomodoro)).toBe("Tapping this card starts or pauses its timer.");
   });
 
+  test("inactive-playlist issues fall through to the unclaimed fallback", () => {
+    const base = initialConfig();
+    const config: AppConfig = {
+      ...base,
+      playlists: [
+        base.playlists[0],
+        { id: "evening", name: "Evening", advance: { kind: "manual" }, entries: [] },
+      ],
+    };
+    const issue: ValidationIssue = {
+      path: "playlists[1].name",
+      code: "empty",
+      message: "Playlist name is required.",
+    };
+    expect(unclaimedIssues([issue], config)).toEqual([issue]);
+  });
+
   test("contract fixtures expose cards, not widgets or screens", () => {
     const config = ipcContractFixtures.snapshot.config;
-    expect(config.schema_version).toBe(4);
+    expect(config.schema_version).toBe(6);
     expect(Array.isArray(config.cards)).toBe(true);
     expect(Array.isArray(config.playlists)).toBe(true);
     expect("widgets" in config).toBe(false);
@@ -606,6 +774,13 @@ describe("configuration draft helpers", () => {
 
     const advanceKinds = ipcContractFixtures.carousel_advances.map((a) => a.kind).sort();
     expect(advanceKinds).toEqual(["manual", "timed"]);
+  });
+
+  test("the contract represents plugin cards and every known device capability", () => {
+    const plugin = ipcContractFixtures.card_settings.find((card) => card.kind === "plugin");
+    expect(plugin).toEqual({ ...pluginCard(), id: "air-quality" });
+    expect(plugin).not.toHaveProperty("template");
+    expect(ipcContractFixtures.device_capabilities).toContain("volatile-assets");
   });
 });
 
@@ -653,7 +828,9 @@ describe("moveCard", () => {
 describe("cardMoveFromKey", () => {
   test("keyboard reorder requires Alt plus an arrow", () => {
     expect(cardMoveFromKey("ArrowUp", true)).toBe(-1);
+    expect(cardMoveFromKey("ArrowLeft", true)).toBe(-1);
     expect(cardMoveFromKey("ArrowDown", true)).toBe(1);
+    expect(cardMoveFromKey("ArrowRight", true)).toBe(1);
     expect(cardMoveFromKey("ArrowDown", false)).toBe(0);
     expect(cardMoveFromKey("Enter", true)).toBe(0);
   });

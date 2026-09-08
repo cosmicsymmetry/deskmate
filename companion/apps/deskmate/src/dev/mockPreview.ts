@@ -189,12 +189,25 @@ export function renderMockFrame(
       break;
     case "calendar":
     case "rss": {
-      const rows = (data?.fields ?? [])
-        .filter((field) => field.key.startsWith("row"))
-        .map((field) => (field.value.kind === "text" ? field.value.value : ""));
+      const rows = (data?.fields ?? []).flatMap((field) => {
+        const match = /^row(\d+)_title$/.exec(field.key);
+        if (!match || field.value.kind !== "text" || field.value.value.trim() === "") {
+          return [];
+        }
+        const time = fieldValue(data, `row${match[1]}_time`);
+        return [time ? `${time}  ${field.value.value}` : field.value.value];
+      });
       rowList(ctx, card.title || (card.kind === "rss" ? "Headlines" : "Calendar"), rows);
       break;
     }
+    case "plugin":
+      heroCaption(
+        ctx,
+        card.title || card.plugin_id,
+        fieldValue(data, "hero") ?? "--",
+        "Rendered on the server",
+      );
+      break;
   }
 
   return canvas.toDataURL("image/png").replace(/^data:image\/png;base64,/, "");

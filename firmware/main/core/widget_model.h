@@ -28,17 +28,6 @@ typedef enum {
     WIDGET_MODEL_PUSH_INVALID_FIELDS,
 } widget_model_push_result_t;
 
-typedef enum {
-    WIDGET_NAVIGATE_PREVIOUS = -1,
-    WIDGET_NAVIGATE_NEXT = 1,
-} widget_navigation_t;
-
-typedef struct {
-    size_t widget_index;
-    uint16_t dirty_mask;
-    size_t unknown_fields;
-} widget_model_update_t;
-
 typedef struct {
     /* Two fixed config buffers make validation + publication an index swap. */
     protocol_apply_config_t configs[2];
@@ -48,12 +37,10 @@ typedef struct {
 
     template_field_state_t
         widget_fields[2][PROTOCOL_MAX_CONFIG_WIDGETS];
-    bool widget_has_data[2][PROTOCOL_MAX_CONFIG_WIDGETS];
     /* Shared fixed scratch; never allocated on the protocol task stack. */
     template_field_state_t field_staging;
 
     uint32_t latest_data_revision;
-    uint32_t unknown_field_count;
 } widget_model_t;
 
 void widget_model_init(widget_model_t *model);
@@ -77,20 +64,11 @@ const protocol_screen_config_t *widget_model_active_screen(
 bool widget_model_activate_screen(widget_model_t *model,
                                   const char *screen_id);
 
-bool widget_model_navigate(widget_model_t *model,
-                           widget_navigation_t direction);
-
 widget_model_push_result_t widget_model_apply_push(
     widget_model_t *model,
-    const protocol_push_data_t *push,
-    widget_model_update_t *update);
+    const protocol_push_data_t *push);
 
 uint32_t widget_model_latest_data_revision(const widget_model_t *model);
-
-uint32_t widget_model_unknown_field_count(const widget_model_t *model);
-
-bool widget_model_widget_has_data(const widget_model_t *model,
-                                  const char *widget_id);
 
 /** True when any configured progress-ring snapshot is currently running. */
 bool widget_model_has_running_progress(const widget_model_t *model);

@@ -3,8 +3,10 @@
 //! `SIGINT`/`SIGTERM`, per the deployment contract in `deploy/README.md`.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use server::firmware::FirmwareCatalog;
+use server::plugin_registry::{PluginLoadFailure, PluginRegistry};
 use server::{ServerState, app};
 
 // Loopback, not `0.0.0.0`: per `deploy/README.md` §4, a Cloudflare Tunnel is
@@ -21,7 +23,7 @@ const DEFAULT_BIND_ADDRESS: &str = "127.0.0.1:8443";
 // reason.
 const DEFAULT_FIRMWARE_DIR: &str = "/var/lib/deskmate/firmware";
 const DEFAULT_CONFIG_DIR: &str = "/var/lib/deskmate/configs";
-const DEFAULT_FIRMWARE_VERSION: &str = "1.0.0";
+const DEFAULT_PLUGINS_DIR: &str = "/var/lib/deskmate/plugins";
 
 #[tokio::main]
 async fn main() {
@@ -47,15 +49,26 @@ async fn main() {
          unspecified under launchd/systemd",
         config_dir.display()
     );
-    let firmware_version = std::env::var("DESKMATE_FIRMWARE_VERSION")
-        .unwrap_or_else(|_| DEFAULT_FIRMWARE_VERSION.to_string());
+    let plugins_dir = std::env::var("DESKMATE_PLUGINS_DIR")
+        .map_or_else(|_| PathBuf::from(DEFAULT_PLUGINS_DIR), PathBuf::from);
+    assert!(
+        plugins_dir.is_absolute(),
+        "DESKMATE_PLUGINS_DIR must be an absolute path (got {}); a relative \
+         path resolves against the process's working directory, which is \
+         unspecified under launchd/systemd",
+        plugins_dir.display()
+    );
+    let firmware_version = required_firmware_version(std::env::var("DESKMATE_FIRMWARE_VERSION"));
     let admin_token = std::env::var("DESKMATE_ADMIN_TOKEN")
         .expect("DESKMATE_ADMIN_TOKEN must be set -- see deploy/README.md");
+    let (plugins, plugin_load_failures) = load_plugins(&plugins_dir);
 
-    let state = ServerState::new(
+    let state = ServerState::new_with_plugins(
         admin_token,
         FirmwareCatalog::new(firmware_dir, firmware_version),
         config_dir,
+        Arc::new(plugins),
+        plugin_load_failures,
     );
 
     let listener = tokio::net::TcpListener::bind(&bind_address)
@@ -76,6 +89,69 @@ async fn main() {
     tokio::task::spawn_blocking(move || shutdown_state.shutdown())
         .await
         .expect("device runtime shutdown worker panicked");
+}
+
+fn required_firmware_version(value: Result<String, std::env::VarError>) -> String {
+    value.expect(
+        "DESKMATE_FIRMWARE_VERSION must be set to the published image's exact \
+         firmware/version.txt value -- see deploy/README.md",
+    )
+}
+
+fn load_plugins(directory: &std::path::Path) -> (PluginRegistry, Vec<PluginLoadFailure>) {
+    let exists = directory.try_exists().unwrap_or_else(|error| {
+        tracing::error!(
+            path = %directory.display(),
+            %error,
+            "plugins directory could not be inspected"
+        );
+        panic!(
+            "plugins directory {} could not be inspected: {error}",
+            directory.display()
+        );
+    });
+    if !exists {
+        tracing::warn!(
+            path = %directory.display(),
+            "plugins directory does not exist; starting with an empty plugin registry"
+        );
+        return (PluginRegistry::empty(), Vec::new());
+    }
+
+    let (registry, failures) = PluginRegistry::load(directory).unwrap_or_else(|error| {
+        tracing::error!(
+            path = %directory.display(),
+            error = ?error,
+            "plugin registry failed to load"
+        );
+        panic!(
+            "plugin registry failed to load from {}: {error}",
+            directory.display()
+        );
+    });
+    for failure in &failures {
+        tracing::warn!(
+            plugin_id = %failure.id,
+            error = ?failure.error,
+            message = %failure.error,
+            "plugin failed to load"
+        );
+    }
+    if registry.is_empty() {
+        tracing::warn!(
+            path = %directory.display(),
+            failure_count = failures.len(),
+            "no plugins loaded; plugin cards will be refused until the registry is populated"
+        );
+    } else {
+        tracing::info!(
+            path = %directory.display(),
+            plugin_count = registry.len(),
+            failure_count = failures.len(),
+            "plugin registry loaded"
+        );
+    }
+    (registry, failures)
 }
 
 /// Resolves once `SIGINT` (Ctrl-C) or, on Unix, `SIGTERM` is received, so
@@ -104,4 +180,23 @@ async fn shutdown_signal() {
     }
 
     tracing::info!("shutdown signal received, draining connections");
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn missing_firmware_version_names_the_authoritative_file_and_runbook() {
+        let panic = std::panic::catch_unwind(|| {
+            super::required_firmware_version(Err(std::env::VarError::NotPresent));
+        })
+        .expect_err("a missing firmware version must stop startup");
+        let message = panic
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| panic.downcast_ref::<&str>().copied())
+            .expect("startup panic carries text");
+        assert!(message.contains("DESKMATE_FIRMWARE_VERSION"));
+        assert!(message.contains("firmware/version.txt"));
+        assert!(message.contains("deploy/README.md"));
+    }
 }

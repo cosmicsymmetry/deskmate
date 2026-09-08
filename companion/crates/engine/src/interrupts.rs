@@ -1,17 +1,10 @@
 use std::fmt;
 
-use protocol::TriggerInterrupt;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InterruptSlot {
-    Active,
-    Pending,
-}
+use protocol::{TriggerInterrupt, truncate_utf8_to_bytes};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrackedInterrupt {
     pub message: TriggerInterrupt,
-    pub slot: InterruptSlot,
     pub acknowledged: bool,
 }
 
@@ -48,17 +41,6 @@ pub struct InterruptArbiter {
 }
 
 impl InterruptArbiter {
-    pub fn with_latest_token(latest_token: u32) -> Self {
-        Self {
-            latest_token,
-            ..Self::default()
-        }
-    }
-
-    pub fn latest_token(&self) -> u32 {
-        self.latest_token
-    }
-
     pub fn advance_latest_token(&mut self, observed: u32) {
         self.latest_token = self.latest_token.max(observed);
     }
@@ -80,30 +62,27 @@ impl InterruptArbiter {
         if widget_id.is_empty() || widget_id.len() > protocol::MAX_WIDGET_ID_LEN {
             return Err(InterruptError::InvalidWidgetId);
         }
-        let slot = if self.active.is_none() {
-            InterruptSlot::Active
-        } else if self.pending.is_none() {
-            InterruptSlot::Pending
-        } else {
+        if self.active.is_some() && self.pending.is_some() {
             return Err(InterruptError::Busy);
-        };
+        }
         let token = self
             .latest_token
             .checked_add(1)
             .ok_or(InterruptError::TokenExhausted)?;
+        let reason = reason.into();
         let message = TriggerInterrupt {
             widget_id,
             token,
-            reason: truncate_utf8(&reason.into(), protocol::MAX_INTERRUPT_REASON_LEN),
+            reason: truncate_utf8_to_bytes(&reason, protocol::MAX_INTERRUPT_REASON_LEN).to_owned(),
         };
         let tracked = TrackedInterrupt {
             message: message.clone(),
-            slot,
             acknowledged: false,
         };
-        match slot {
-            InterruptSlot::Active => self.active = Some(tracked),
-            InterruptSlot::Pending => self.pending = Some(tracked),
+        if self.active.is_none() {
+            self.active = Some(tracked);
+        } else {
+            self.pending = Some(tracked);
         }
         self.latest_token = token;
         Ok(message)
@@ -122,29 +101,6 @@ impl InterruptArbiter {
         Ok(tracked.message.clone())
     }
 
-    pub fn reject(&mut self, token: u32) -> Result<(), InterruptError> {
-        if self
-            .pending
-            .as_ref()
-            .is_some_and(|pending| pending.message.token == token)
-        {
-            self.pending = None;
-            return Ok(());
-        }
-        if self
-            .active
-            .as_ref()
-            .is_some_and(|active| active.message.token == token)
-        {
-            self.active = self.pending.take().map(|mut pending| {
-                pending.slot = InterruptSlot::Active;
-                pending
-            });
-            return Ok(());
-        }
-        Err(InterruptError::UnknownToken)
-    }
-
     pub fn dismiss(&mut self, token: u32) -> Result<(), InterruptError> {
         let Some(active) = &self.active else {
             return Err(InterruptError::UnknownToken);
@@ -160,24 +116,8 @@ impl InterruptArbiter {
                 Err(InterruptError::UnknownToken)
             };
         }
-        self.active = self.pending.take().map(|mut pending| {
-            pending.slot = InterruptSlot::Active;
-            pending
-        });
+        self.active = self.pending.take();
         Ok(())
-    }
-
-    pub fn replay(&self) -> Vec<TriggerInterrupt> {
-        self.active
-            .iter()
-            .chain(self.pending.iter())
-            .map(|tracked| tracked.message.clone())
-            .collect()
-    }
-
-    pub fn clear_for_config_replacement(&mut self) {
-        self.active = None;
-        self.pending = None;
     }
 
     pub fn retain_widgets(&mut self, mut retain: impl FnMut(&str) -> bool) {
@@ -196,10 +136,7 @@ impl InterruptArbiter {
             self.pending = None;
         }
         if self.active.is_none() {
-            self.active = self.pending.take().map(|mut pending| {
-                pending.slot = InterruptSlot::Active;
-                pending
-            });
+            self.active = self.pending.take();
         }
     }
 
@@ -215,17 +152,6 @@ impl InterruptArbiter {
             .as_mut()
             .filter(|pending| pending.message.token == token)
     }
-}
-
-fn truncate_utf8(value: &str, maximum_bytes: usize) -> String {
-    if value.len() <= maximum_bytes {
-        return value.to_owned();
-    }
-    let mut end = maximum_bytes;
-    while !value.is_char_boundary(end) {
-        end -= 1;
-    }
-    value[..end].to_owned()
 }
 
 #[cfg(test)]
@@ -247,25 +173,25 @@ mod tests {
             arbiter.schedule("timer", "third"),
             Err(InterruptError::Busy)
         );
-        assert_eq!(arbiter.latest_token(), 2);
 
         arbiter.acknowledge(1).unwrap();
         arbiter.acknowledge(2).unwrap();
         arbiter.dismiss(1).unwrap();
         assert_eq!(arbiter.active().unwrap().message.token, 2);
-        assert_eq!(arbiter.active().unwrap().slot, InterruptSlot::Active);
+        assert!(arbiter.active().unwrap().acknowledged);
         assert!(arbiter.pending().is_none());
     }
 
     #[test]
     fn busy_retry_and_reconnect_replay_reuse_identical_tokens() {
-        let mut arbiter = InterruptArbiter::with_latest_token(40);
+        let mut arbiter = InterruptArbiter::default();
+        arbiter.advance_latest_token(40);
         let trigger = arbiter.schedule("timer", "done").unwrap();
         assert_eq!(trigger.token, 41);
         let retry = arbiter.mark_busy_for_retry(41).unwrap();
         assert_eq!(retry, trigger);
-        assert_eq!(arbiter.replay(), vec![trigger]);
-        assert_eq!(arbiter.latest_token(), 41);
+        assert_eq!(arbiter.active().unwrap().message, trigger);
+        assert!(!arbiter.active().unwrap().acknowledged);
     }
 
     #[test]
@@ -294,8 +220,8 @@ mod tests {
                 arbiter.schedule("timer", "Timer finished").unwrap();
             }
         }
-        assert_eq!(arbiter.replay().len(), 1);
         assert_eq!(arbiter.active().unwrap().message.token, 1);
+        assert!(arbiter.pending().is_none());
     }
 
     #[test]
@@ -307,17 +233,21 @@ mod tests {
         arbiter.retain_widgets(|widget_id| widget_id == "timer");
 
         assert_eq!(arbiter.active().unwrap().message, retained);
-        assert_eq!(arbiter.active().unwrap().slot, InterruptSlot::Active);
         assert!(arbiter.pending().is_none());
-        assert_eq!(arbiter.latest_token(), 2);
+
+        arbiter.schedule("removed", "third").unwrap();
+        arbiter.retain_widgets(|widget_id| widget_id == "timer");
+        assert_eq!(arbiter.active().unwrap().message, retained);
+        assert!(arbiter.pending().is_none());
     }
 
     #[test]
     fn observed_device_token_advances_but_never_rewinds_the_counter() {
-        let mut arbiter = InterruptArbiter::with_latest_token(4);
+        let mut arbiter = InterruptArbiter::default();
+        arbiter.advance_latest_token(4);
         arbiter.advance_latest_token(9);
         assert_eq!(arbiter.schedule("timer", "done").unwrap().token, 10);
         arbiter.advance_latest_token(2);
-        assert_eq!(arbiter.latest_token(), 10);
+        assert_eq!(arbiter.schedule("timer", "again").unwrap().token, 11);
     }
 }

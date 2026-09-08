@@ -1,25 +1,27 @@
 import { useEffect, useState } from "react";
 
 import { CardEditor } from "./components/CardEditor";
-import { CardList } from "./components/CardList";
+import { CardList, type PluginKindOption } from "./components/CardList";
 import { Icon } from "./components/Icon";
 import { LoopRing } from "./components/LoopRing";
 import { DevicePreview } from "./components/DevicePreview";
 import { NetworkPanel, ownershipLabel } from "./components/NetworkPanel";
-import { PlaylistPanel } from "./components/PlaylistPanel";
 import { type SaveState, SaveBar, type ValidationState } from "./components/SaveBar";
 import { SettingsSheet } from "./components/SettingsSheet";
 import { TopBar } from "./components/TopBar";
 import {
   addCard,
+  activePlaylist,
   cardLabel,
   copyConfig,
   firstRunSteps,
   firstSelectableCard,
   issuesForCard,
+  issuesForPath,
   removeCard,
   unclaimedIssues,
   updateWidget,
+  type AddCardRequest,
 } from "./lib/configDraft";
 import {
   chooseIcsFile,
@@ -27,14 +29,13 @@ import {
   getAutostartStatus,
   refreshProvider,
   setAutostartEnabled,
-  setPushingPaused,
+  resumePushing,
   toIpcError,
   validateConfigDraft,
 } from "./lib/tauri";
 import type {
   AppConfig,
   AppSnapshot,
-  CardKind,
   CardSettings,
   DisplayOrientation,
   DraftValidation,
@@ -72,6 +73,10 @@ export function App() {
     dataGeneration,
     networkSettings,
     ownershipTier,
+    pluginCatalog,
+    catalogError,
+    refreshCatalog,
+    serverCardState,
     saveConfig,
     saveServerAccess,
     pairDevice,
@@ -185,6 +190,38 @@ export function App() {
     snapshot.pomodoros.find((candidate) => candidate.widget_id === selectedCardId) ?? null;
   const issues = validation.result.issues;
   const cardIssues = selectedCardId ? issuesForCard(issues, draft, selectedCardId) : [];
+  const active = activePlaylist(draft);
+  const activeIndex = draft.playlists.findIndex(
+    (playlist) => playlist.id === draft.active_playlist_id,
+  );
+  const selectedEntryIndex =
+    selectedCardId && active
+      ? active.entries.findIndex((entry) => entry.card_id === selectedCardId)
+      : -1;
+  const selectedEntryIssues =
+    activeIndex >= 0 && selectedEntryIndex >= 0
+      ? issuesForPath(issues, `playlists[${activeIndex}].entries[${selectedEntryIndex}]`)
+      : [];
+  const selectedCardError =
+    snapshot.card_errors.find((error) => error.card_id === selectedCardId) ?? null;
+  const cardErrorCount = snapshot.card_errors.length;
+  const allCardErrorsAreDataRefusals = snapshot.card_errors.every(
+    (error) => error.kind === "data-refused",
+  );
+  const allCardErrorsAreSceneRefusals = snapshot.card_errors.every(
+    (error) => error.kind === "scene-refused",
+  );
+  const cardErrorHeading = allCardErrorsAreDataRefusals
+    ? cardErrorCount === 1
+      ? "The display refused one card update"
+      : `The display refused ${cardErrorCount} card updates`
+    : allCardErrorsAreSceneRefusals
+      ? cardErrorCount === 1
+        ? "One card could not be rendered"
+        : `${cardErrorCount} cards could not be rendered`
+      : `${cardErrorCount} card updates need attention`;
+  const affectedCards = cardErrorCount === 1 ? "the affected card" : "each affected card";
+  const affectedCardPronoun = cardErrorCount === 1 ? "it" : "them";
   // Issues no card-, playlist-, or preference-scoped surface below claims — e.g. a
   // `device.capabilities` issue naming a card the connected display can't render.
   // Rendered as its own banner so an unclaimed issue is explained somewhere rather than
@@ -211,11 +248,26 @@ export function App() {
     setDirty(true);
     setSaveState({ kind: "idle" });
   };
-  const handleAdd = (kind: CardKind) => {
-    const result = addCard(draft, kind);
+  const handleAdd = (request: AddCardRequest) => {
+    const result = addCard(draft, request);
+    if (!result.cardId) {
+      return;
+    }
     replaceDraft(result.config);
     setSelectedCardId(result.cardId);
   };
+
+  // The add menu's server group, built from the catalog and nothing else. It is
+  // empty in local tier and before the first read, which is why the group only
+  // renders when it has rows.
+  const pluginKinds: PluginKindOption[] = (pluginCatalog?.plugins ?? []).map((entry) => ({
+    id: entry.id,
+    version: entry.version,
+    displayName: entry.display_name,
+    description: entry.description,
+    onAdd: () =>
+      handleAdd({ kind: "plugin", pluginId: entry.id, refreshMinutes: entry.refresh_minutes }),
+  }));
   const handleWidgetChange = (widget: CardSettings) => {
     if (!selectedCardId) {
       return;
@@ -346,9 +398,11 @@ export function App() {
           />
           <LoopRing
             config={draft}
+            issues={issues}
+            catalog={pluginCatalog}
             selectedCardId={selectedCardId}
             onSelect={setSelectedCardId}
-            onReorder={(next) => replaceDraft(next)}
+            onChange={replaceDraft}
           />
         </aside>
 
@@ -383,10 +437,10 @@ export function App() {
                 <button
                   className="button button--quiet"
                   type="button"
-                  disabled={busyAction === "pause"}
-                  onClick={() => void runAction("pause", () => setPushingPaused(false))}
+                  disabled={busyAction === "resume"}
+                  onClick={() => void runAction("resume", resumePushing)}
                 >
-                  {busyAction === "pause" ? "Resuming…" : "Resume sending"}
+                  {busyAction === "resume" ? "Resuming…" : "Resume sending"}
                 </button>
               </div>
             </aside>
@@ -421,29 +475,40 @@ export function App() {
             </aside>
           )}
 
-          {/* A push the display understood and refused is card-scoped and actionable:
-              name the card and say what it refused, rather than parking the whole app in
-              an error state over one card's data. */}
+          {/* One notice for either server read failing. The last projection and the
+              last catalog are kept — a plugin card keeps its name and its value
+              rather than blanking because a poll missed. */}
+          {catalogError && (
+            <aside className="notice notice--warn" role="status">
+              <div>
+                <strong>{catalogError}</strong>
+                <p>Plugin names and previews are the last ones this window received.</p>
+                <button className="button button--quiet" type="button" onClick={refreshCatalog}>
+                  Try again
+                </button>
+              </div>
+            </aside>
+          )}
+
+          {/* Card-scoped failures stay actionable without inventing a cause: data
+              refusals name the display, while scene failures remain neutral because
+              scene construction can fail before the display sees anything. */}
           {snapshot.card_errors.length > 0 && (
             <aside className="notice notice--warn" role="status">
               <div>
-                <strong>
-                  {snapshot.card_errors.length === 1
-                    ? "The display refused one card's data"
-                    : `The display refused ${snapshot.card_errors.length} cards' data`}
-                </strong>
+                <strong>{cardErrorHeading}</strong>
                 {snapshot.card_errors.map((cardError) => {
                   const card = draft.cards.find((candidate) => candidate.id === cardError.card_id);
                   return (
                     <p key={cardError.card_id}>
-                      <strong>{card ? cardLabel(card) : cardError.card_id}</strong> —{" "}
+                      <strong>{card ? cardLabel(card, pluginCatalog) : cardError.card_id}</strong> —{" "}
                       {cardError.message}
                     </p>
                   );
                 })}
                 <p>
-                  Everything else kept updating. Adjust the card below and save to send its data
-                  again.
+                  Everything else kept updating. Open {affectedCards} to review the details and save
+                  after correcting {affectedCardPronoun}.
                 </p>
               </div>
             </aside>
@@ -505,32 +570,36 @@ export function App() {
             cardData={snapshot.card_data}
             pomodoros={snapshot.pomodoros}
             providers={snapshot.providers}
+            pluginKinds={pluginKinds}
+            catalog={pluginCatalog}
+            serverCardState={serverCardState}
+            ownershipTier={ownershipTier}
             selectedCardId={selectedCardId}
             onSelect={setSelectedCardId}
             onAdd={handleAdd}
+            onChange={replaceDraft}
             onRemove={handleRemoveCard}
           />
 
           <CardEditor
             card={selectedWidget}
+            config={draft}
             issues={cardIssues}
+            entryIssues={selectedEntryIssues}
+            cardError={selectedCardError}
             pomodoro={pomodoro}
             provider={selectedProvider}
             timerBusy={busyAction === "timer"}
             filePickerBusy={busyAction === "calendar-file"}
             providerRefreshing={refreshingProviderId === selectedCardId}
+            catalog={pluginCatalog}
+            ownershipTier={ownershipTier}
             onChange={handleWidgetChange}
+            onConfigChange={replaceDraft}
             onRemove={handleRemove}
             onTimerAction={handleTimerAction}
             onChooseCalendarFile={handleChooseCalendarFile}
             onRefreshProvider={() => selectedCardId && handleProviderRefresh(selectedCardId)}
-          />
-
-          <PlaylistPanel
-            config={draft}
-            issues={issues}
-            onChange={replaceDraft}
-            onSelectCard={setSelectedCardId}
           />
         </main>
       </div>
@@ -626,7 +695,6 @@ export function App() {
             settings={{
               serverUrl: networkSettings.server_url,
               deviceId: networkSettings.device_id,
-              ssid: "",
             }}
             onPair={async (input) => {
               await pairDevice(input);

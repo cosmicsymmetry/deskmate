@@ -4,6 +4,32 @@ fn main() {
     let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
     let firmware = manifest.join("../../../firmware");
     let lvgl = firmware.join("managed_components/lvgl__lvgl");
+    let template_oracle_root = manifest.join("reference-oracle");
+    let template_oracle = template_oracle_root.join("ui");
+
+    // The oracle is useful only while it is live reference code and harmful
+    // if it quietly returns to the device image. Keep that boundary enforced
+    // by the same build that consumes it: a parity run must fail if ESP-IDF's
+    // source manifest ever names the retired view or template directory.
+    let firmware_cmake = std::fs::read_to_string(firmware.join("main/CMakeLists.txt"))
+        .expect("read firmware source manifest");
+    for forbidden in ["ui/template_view.c", "ui/templates/"] {
+        assert!(
+            !firmware_cmake.contains(forbidden),
+            "reference-only C template oracle is shipping again: {forbidden}"
+        );
+    }
+    for forbidden in [
+        firmware.join("main/ui/template_view.c"),
+        firmware.join("main/ui/template_view.h"),
+        firmware.join("main/ui/templates"),
+    ] {
+        assert!(
+            !forbidden.exists(),
+            "reference-only C template oracle was recreated in the shipping include tree: {}",
+            forbidden.display()
+        );
+    }
 
     let mut sources: Vec<PathBuf> = glob::glob(lvgl.join("src/**/*.c").to_str().unwrap())
         .unwrap()
@@ -13,8 +39,22 @@ fn main() {
         "timefmt.c",
         "clock_source.c",
         "template_fields.c",
-        "protocol_message.c",
-        "protocol_frame.c",
+        // Task 12: the runtime asset store, compiled unmodified so the
+        // simulator's digest -> bytes lookup uses the identical format and
+        // logic the device's link/asset_flash.c backs with real flash
+        // I/O -- see csrc/sim_shim.c's RAM-backed asset_flash_io_t.
+        "asset_store.c",
+        // Task 8 (stage 2a): the scene model, its CBOR decoder and its
+        // binding evaluator, compiled unmodified for the same reason
+        // ui/scene_view.c below is -- the stage-2 parity gate compares a
+        // device framebuffer against a simulator framebuffer, and that is
+        // only meaningful while both run the same translation units. All
+        // four are free of ESP-IDF includes by design (see ui/scene_view.h's
+        // header comment), so any compile failure here is a violated
+        // constraint, not a simulator problem.
+        "scene_model.c",
+        "scene_decode.c",
+        "scene_binding.c",
     ] {
         sources.push(firmware.join("main/core").join(core));
     }
@@ -28,9 +68,15 @@ fn main() {
         "template_style.c",
         "weather_icon.c",
     ] {
-        sources.push(firmware.join("main/ui/templates").join(template));
+        sources.push(template_oracle.join("templates").join(template));
     }
-    sources.push(firmware.join("main/ui/template_view.c"));
+    sources.push(template_oracle.join("template_view.c"));
+    // Task 12: free of ESP-IDF includes by design (see its own header
+    // comment) specifically so it can compile into this host binary.
+    sources.push(firmware.join("main/ui/font_registry.c"));
+    // Task 8: the scene interpreter. Its header states the no-ESP-IDF rule
+    // and names this simulator as the reason for it.
+    sources.push(firmware.join("main/ui/scene_view.c"));
     for font in [
         "deskmate_font_18.c",
         "deskmate_font_28.c",
@@ -56,7 +102,12 @@ fn main() {
     build
         .files(&sources)
         .include(&lvgl) // lvgl.h
-        .include(firmware.join("main")) // core/, ui/, templates/
+        // Shipping core/ui headers precede the oracle include roots. The
+        // filesystem assertions above make that safe: a recreated shipping
+        // template header cannot shadow the frozen oracle silently.
+        .include(firmware.join("main"))
+        .include(&template_oracle_root) // ui/templates/weather_icon.h
+        .include(&template_oracle) // reference-only template oracle headers
         .include(&firmware) // lv_conf.h
         .include(&cbor)
         .define("LV_CONF_INCLUDE_SIMPLE", None)
@@ -70,5 +121,6 @@ fn main() {
         firmware.join("lv_conf.h").display()
     );
     println!("cargo:rerun-if-changed={}", firmware.join("main").display());
+    println!("cargo:rerun-if-changed={}", template_oracle.display());
     println!("cargo:rerun-if-changed={}", manifest.join("csrc").display());
 }

@@ -6,12 +6,12 @@
 #include "lvgl.h"
 #include "board/display.h"
 #include "core/timefmt.h"
-#include "templates/template_internal.h"
+#include "design_system.h"
 #include "clock_screen.h"
 
 static const char *TAG = "clock";
 
-// Layout, spec §6.2's complication grammar (see templates/digital_clock.c,
+// Layout, spec §6.2's complication grammar (see the reference oracle's digital clock,
 // this screen's sibling face): a left-anchored hero reading with a single
 // full-width module under it carrying the date. Neither is labelled -- a
 // clock face names itself. This screen's stack is 192px against the card's
@@ -148,7 +148,7 @@ static void clock_timer_cb(lv_timer_t *timer)
     // 0=Monday..6=Sunday.
     int dow = (tm_now.tm_wday + 6) % 7;
     char date_str[32];
-    timefmt_date(date_str, tm_now.tm_year + 1900, tm_now.tm_mon + 1, tm_now.tm_mday, dow);
+    timefmt_date(date_str, tm_now.tm_mon + 1, tm_now.tm_mday, dow);
     lv_label_set_text(s_date_label, date_str);
 
     // The CO5300 retains GRAM across soft resets and M1 uses partial render
@@ -211,7 +211,7 @@ void clock_screen_show_in_lvgl(void)
         DESKMATE_COLOR_PRIMARY, DESKMATE_FONT_BODY);
 
     // Connection hint restyled onto the shared state-footer rail every
-    // face's error/stale label sits on (template_view.c's
+    // former card face's error/stale label sat on (the reference oracle's
     // update_data_state()): same font, same BOTTOM_MID anchor, same
     // -2*DESKMATE_GRID offset. TERTIARY rather than the reserved
     // STALE/ERROR colours, since this is not a data-freshness signal.
@@ -262,7 +262,11 @@ static void apply_online_state(void *unused)
 {
     (void)unused;
     if (s_hint_label != NULL) {
-        if (atomic_load(&s_online)) {
+        bool online = atomic_load(&s_online);
+        if (online == lv_obj_has_flag(s_hint_label, LV_OBJ_FLAG_HIDDEN)) {
+            return;
+        }
+        if (online) {
             lv_obj_add_flag(s_hint_label, LV_OBJ_FLAG_HIDDEN);
         } else {
             lv_obj_remove_flag(s_hint_label, LV_OBJ_FLAG_HIDDEN);

@@ -4,7 +4,7 @@ import type { IpcContractFixtures } from "./types";
 export const ipcContractFixtures = {
   "snapshot": {
     "config": {
-      "schema_version": 4,
+      "schema_version": 6,
       "preferences": {
         "timezone": "Asia/Tbilisi",
         "autostart": true,
@@ -151,7 +151,7 @@ export const ipcContractFixtures = {
       "ota_state": null,
       "active_screen_id": "clock",
       "counters": {
-        "reconnects": 1,
+        "host_reconnects": 1,
         "valid_frames": 2,
         "malformed_frames": 3,
         "crc_errors": 4,
@@ -215,6 +215,7 @@ export const ipcContractFixtures = {
     ],
     "card_errors": [
       {
+        "kind": "data-refused",
         "card_id": "json",
         "message": "the display refused this card's data (InvalidPayload): invalid push data"
       }
@@ -236,13 +237,14 @@ export const ipcContractFixtures = {
       "provider_jobs_started": 3,
       "provider_queue_full": 4,
       "provider_results_discarded": 5,
-      "subscriber_snapshots_overwritten": 6
+      "subscriber_snapshots_overwritten": 6,
+      "interrupt_dismissals_ignored": 7
     },
     "has_saved_config": true
   },
   "configs": [
     {
-      "schema_version": 4,
+      "schema_version": 6,
       "preferences": {
         "timezone": "Asia/Tbilisi",
         "autostart": true,
@@ -495,6 +497,22 @@ export const ipcContractFixtures = {
       "alert": {
         "kind": "none"
       }
+    },
+    {
+      "kind": "plugin",
+      "id": "air-quality",
+      "title": "Office air",
+      "plugin_id": "com.example.air-quality",
+      "tap_action": {
+        "kind": "none"
+      },
+      "refresh": {
+        "kind": "interval",
+        "minutes": 15
+      },
+      "alert": {
+        "kind": "none"
+      }
     }
   ],
   "playlists": [
@@ -657,24 +675,24 @@ export const ipcContractFixtures = {
   "asset_sources": [
     {
       "kind": "file",
-      "value": "/tmp/weather-icons.bin"
+      "value": "/tmp/weather-icons.ttf"
     }
   ],
   "asset_kinds": [
     {
-      "kind": "icon",
-      "width": 32,
-      "height": 32
+      "kind": "font"
     },
     {
-      "kind": "font",
-      "pixel_size": 18,
-      "glyph_ranges": [
+      "kind": "icon-font",
+      "glyphs": [
         {
-          "start": 32,
-          "end": 126
+          "name": "cloud-rain",
+          "codepoint": 63273
         }
       ]
+    },
+    {
+      "kind": "image"
     }
   ],
   "update_channels": [
@@ -685,16 +703,6 @@ export const ipcContractFixtures = {
   "update_check_policies": [
     "disabled",
     "notify"
-  ],
-  "firmware_artifacts": [
-    {
-      "version": "1.0.0",
-      "model": "waveshare-1.8",
-      "byte_length": 524288,
-      "sha256_hex": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-      "signing_key_id": "deskmate-release-1",
-      "signature_base64": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="
-    }
   ],
   "display_orientations": [
     "landscape",
@@ -708,7 +716,9 @@ export const ipcContractFixtures = {
     "host-tap-actions",
     "asset-transfer",
     "firmware-update",
-    "networking"
+    "networking",
+    "scene-render",
+    "volatile-assets"
   ],
   "runtime_states": [
     {
@@ -823,14 +833,10 @@ export const ipcContractFixtures = {
     "too-many",
     "duplicate-id",
     "missing-reference",
-    "missing-screen",
-    "duplicate-reference",
-    "unsupported-size",
     "out-of-range",
     "invalid-timezone",
     "invalid-source",
     "invalid-composition",
-    "overlap",
     "too-large",
     "requires-capability"
   ],
@@ -874,6 +880,10 @@ export const ipcContractFixtures = {
       "message": "unavailable"
     },
     {
+      "category": "incompatible-server",
+      "message": "incompatible"
+    },
+    {
       "category": "not-found",
       "message": "missing"
     },
@@ -896,6 +906,10 @@ export const ipcContractFixtures = {
     {
       "category": "internal",
       "message": "internal"
+    },
+    {
+      "category": "unsupported",
+      "message": "unsupported"
     }
   ],
   "draft_validation": {
@@ -922,8 +936,54 @@ export const ipcContractFixtures = {
     "enabled": true,
     "preference_enabled": false
   },
+  "plugin_catalog": {
+    "plugins": [
+      {
+        "id": "aqi",
+        "name": "aqi",
+        "version": "1.0.0",
+        "node_count": 4,
+        "assets": [
+          {
+            "file": "icons.ttf",
+            "kind": "icon-font",
+            "byte_length": 40960,
+            "digest": "0f1e2d3c"
+          }
+        ],
+        "display_name": "Air quality",
+        "description": "EPA index for a location",
+        "manifest_version": 2,
+        "template": "display-list",
+        "refresh_minutes": 15
+      }
+    ],
+    "load_failures": [
+      {
+        "id": "broken",
+        "error": "unknown key \"summry\""
+      }
+    ]
+  },
+  "server_card_state": [
+    {
+      "card_id": "air-quality",
+      "provider": {
+        "kind": "fresh"
+      },
+      "hero": "42",
+      "errors": [
+        {
+          "kind": "scene-refused",
+          "card_id": "air-quality",
+          "message": "no snapshot cached yet"
+        }
+      ]
+    }
+  ],
   "preview_frame": {
     "png_base64": "iVBORw0KGgo=",
-    "sample": true
+    "sample": true,
+    "state": null
   }
 } as const satisfies IpcContractFixtures;

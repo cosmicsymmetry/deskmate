@@ -3,13 +3,207 @@ use std::fs;
 use std::path::PathBuf;
 
 use protocol::{
-    Ack, ActivateScreen, ApplyConfig, CURRENT_CAPABILITIES, DeviceEvent, ErrorCode, ErrorResponse,
-    EventAction, EventKind, Field, FieldValue, Frame, HeartbeatAck, InterruptPolicy,
-    MAX_CONFIG_SCREENS, MAX_CONFIG_WIDGETS, MAX_DEVICE_TOKEN_LEN, MAX_PAYLOAD_SIZE,
-    MAX_PROTOCOL_VERSION, MAX_WIRE_FRAME, Message, NetworkConfig, OtaState, PushData, ScreenConfig,
-    SizeClass, StatusResponse, TapAction, TemplateKind, Tier, TimeSync, TriggerInterrupt,
-    WidgetConfig, WifiState, encode_message,
+    Ack, ActivateScreen, ApplyConfig, AssetBegin, AssetChunk, AssetCommit, AssetKind, AssetRelease,
+    CURRENT_CAPABILITIES, DeviceEvent, ErrorCode, ErrorResponse, EventAction, EventKind, Field,
+    FieldValue, Frame, HeartbeatAck, InterruptPolicy, MAX_CONFIG_SCREENS, MAX_CONFIG_WIDGETS,
+    MAX_DEVICE_TOKEN_LEN, MAX_PAYLOAD_SIZE, MAX_PROTOCOL_VERSION, MAX_WIRE_FRAME, Message,
+    NetworkConfig, OtaState, PushData, PushScene, Scene, SceneAlign, SceneArc, SceneClipRect,
+    SceneFont, SceneFontTier, SceneGlyph, SceneImage, SceneLabel, SceneLabelAnchor, SceneLine,
+    SceneNode, SceneRect, SceneRotRect, SceneScale, SceneText, SceneValue, ScreenConfig, SizeClass,
+    StatusResponse, TYPE_ASSET_BEGIN, TYPE_PUSH_SCENE, TapAction, TemplateKind, Tier, TimeSync,
+    TriggerInterrupt, VOLATILE_IMAGE_DECODED_LENGTH, WidgetConfig, WifiState, encode_message,
 };
+
+/// A 32-byte digest with distinct, non-zero, ascending bytes starting at
+/// `start` (wrapping). Used instead of an all-zero or all-repeated digest so
+/// a byte-order or truncation bug in either encoder would actually change
+/// the fixture instead of silently matching.
+fn digest_pattern(start: u8) -> [u8; 32] {
+    let mut digest = [0u8; 32];
+    for (index, byte) in digest.iter_mut().enumerate() {
+        *byte = start.wrapping_add(u8::try_from(index).unwrap());
+    }
+    digest
+}
+
+/// A scene reaching every corner of the format at once.
+///
+/// All nine node kinds; text nodes carrying both wall-clock bindings plus a
+/// literal with its optional align/colour/ellipsize set; an arc with an
+/// `end_binding` and a full-turn sweep spelled the way the renderer reads one
+/// (270 -> 630, not start == end); coordinates past 255 so the multi-byte CBOR
+/// integer forms are exercised in both directions; and colours that are
+/// neither 0 nor 0xFFFFFF, so a byte-order or default-omission disagreement
+/// between the two encoders changes the file instead of hiding in it.
+///
+/// An all-minimal scene would pass even if the encoders disagreed, which is
+/// why `push_scene_min.bin` exists alongside this rather than instead of it:
+/// that one is the omitted-optional-keys case, this one is the present-keys
+/// case, and only the pair covers the canonical emission rule in both
+/// directions.
+#[allow(clippy::too_many_lines)]
+fn rich_scene() -> Scene {
+    Scene {
+        revision: 4_294_967_295,
+        background: 0x0011_2233,
+        nodes: vec![
+            SceneNode::Rect(SceneRect {
+                x: 0,
+                y: 0,
+                w: 448,
+                h: 368,
+                radius: 24,
+                fill: 0x0018_1A1F,
+                opacity: 0xC8,
+                clip: Some(SceneClipRect {
+                    x: 16,
+                    y: 16,
+                    w: 416,
+                    h: 336,
+                }),
+            }),
+            SceneNode::Arc(SceneArc {
+                cx: 224,
+                cy: 184,
+                r: 160,
+                start_deg: 270,
+                end_deg: 630,
+                width: 12,
+                color: 0x00FF_9F0A,
+                running_color: Some(0x0064_D2FF),
+                opacity: 0x33,
+                rounded: true,
+                end_binding: "timer.pct".into(),
+            }),
+            SceneNode::Line(SceneLine {
+                xs: vec![224, 300, 380],
+                ys: vec![184, 120, 96],
+                width: 6,
+                color: 0x0032_D74B,
+                ..SceneLine::default()
+            }),
+            SceneNode::Line(SceneLine {
+                width: 4,
+                color: 0x0064_D2FF,
+                pivot_x: 224,
+                pivot_y: 184,
+                length: 80,
+                angle_binding: "time:angle:hour".into(),
+                ..SceneLine::default()
+            }),
+            SceneNode::Text(SceneText {
+                x: 16,
+                baseline_y: 300,
+                w: 416,
+                align: SceneAlign::Center,
+                font: SceneFont::Baked(SceneFontTier::Hero),
+                color: 0x00F2_F2F7,
+                running_color: Some(0x00FF_9F0A),
+                value: SceneValue::Binding("time:HH:mm".into()),
+                ellipsize: false,
+            }),
+            SceneNode::Text(SceneText {
+                x: 16,
+                baseline_y: 260,
+                w: 416,
+                align: SceneAlign::Right,
+                font: SceneFont::Baked(SceneFontTier::Body),
+                color: 0x00F2_F2F7,
+                running_color: None,
+                value: SceneValue::Binding("date".into()),
+                ellipsize: false,
+            }),
+            SceneNode::Text(SceneText {
+                x: 16,
+                baseline_y: 340,
+                w: 416,
+                align: SceneAlign::Left,
+                font: SceneFont::Asset {
+                    digest: digest_pattern(0xA0),
+                    pixel_size: 28,
+                },
+                color: 0,
+                running_color: None,
+                value: SceneValue::Literal("Wednesday 23 August".into()),
+                ellipsize: true,
+            }),
+            SceneNode::Image(SceneImage {
+                x: 320,
+                y: 24,
+                w: 96,
+                h: 96,
+                digest: digest_pattern(0xB0),
+                recolor: true,
+                color: 0x0064_D2FF,
+            }),
+            SceneNode::Glyph(SceneGlyph {
+                x: 24,
+                baseline_y: 120,
+                size: 64,
+                digest: digest_pattern(0xC0),
+                name: "cloud-rain".into(),
+                color: 0x00FF_D60A,
+            }),
+            SceneNode::Scale(SceneScale {
+                x: 74,
+                y: 34,
+                box_size: 300,
+                total_tick_count: 361,
+                major_tick_every: 30,
+                major_tick_color: 0x00BF_5AF2,
+            }),
+            SceneNode::Label(SceneLabel {
+                x: 24,
+                y: 16,
+                horizontal_anchor: SceneLabelAnchor::Left,
+                font: SceneFont::Baked(SceneFontTier::Caption),
+                value: SceneValue::Literal("WEATHER".into()),
+                ink: 0x0004_1A24,
+                fill: 0x0035_B6F5,
+                fill_opacity: u8::MAX,
+                radius: 12,
+                pad_hor: 16,
+                pad_ver: 3,
+                letter_space: 1,
+                hide_when_empty: true,
+            }),
+            SceneNode::RotRect(SceneRotRect {
+                x: 222,
+                y: 80,
+                w: 4,
+                h: 144,
+                radius: 2,
+                fill: 0x00F2_F2F7,
+                pivot_x: 2,
+                pivot_y: 144,
+                rotation: 900,
+                rotation_binding: "time:minute".into(),
+                clip: Some(SceneClipRect {
+                    x: 64,
+                    y: 24,
+                    w: 320,
+                    h: 320,
+                }),
+            }),
+        ],
+    }
+}
+
+/// The other half of the pair: every optional key at its default, so the file
+/// pins that both encoders OMIT them rather than spelling them out.
+fn minimal_scene() -> Scene {
+    Scene {
+        revision: 1,
+        background: 0,
+        nodes: vec![SceneNode::Rect(SceneRect {
+            x: 4,
+            y: 5,
+            w: 10,
+            h: 11,
+            ..SceneRect::default()
+        })],
+    }
+}
 
 fn minimum_config() -> ApplyConfig {
     ApplyConfig {
@@ -307,6 +501,7 @@ fn fixture_messages() -> Vec<(&'static str, u32, Message)> {
             Message::Ack(Ack {
                 acknowledged_type: 3,
                 revision: None,
+                already_present: None,
             }),
         ),
         (
@@ -337,6 +532,7 @@ fn fixture_messages() -> Vec<(&'static str, u32, Message)> {
             Message::Ack(Ack {
                 acknowledged_type: 5,
                 revision: Some(7),
+                already_present: None,
             }),
         ),
         ("heartbeat.bin", 4, Message::Heartbeat),
@@ -364,6 +560,7 @@ fn fixture_messages() -> Vec<(&'static str, u32, Message)> {
             Message::Ack(Ack {
                 acknowledged_type: 9,
                 revision: Some(1),
+                already_present: None,
             }),
         ),
         (
@@ -384,6 +581,7 @@ fn fixture_messages() -> Vec<(&'static str, u32, Message)> {
             Message::Ack(Ack {
                 acknowledged_type: 10,
                 revision: None,
+                already_present: None,
             }),
         ),
         (
@@ -401,6 +599,7 @@ fn fixture_messages() -> Vec<(&'static str, u32, Message)> {
             Message::Ack(Ack {
                 acknowledged_type: 11,
                 revision: None,
+                already_present: None,
             }),
         ),
         (
@@ -501,6 +700,107 @@ fn fixture_messages() -> Vec<(&'static str, u32, Message)> {
                     key: "future_field".into(),
                     value: FieldValue::Boolean(true),
                 }],
+            }),
+        ),
+        (
+            "asset_begin.bin",
+            20,
+            // total_length pinned at the maximum (1_048_576 = 0x100000)
+            // forces the 4-byte CBOR unsigned form (> 0xffff); a digest
+            // with distinct bytes catches any byte-order/truncation bug.
+            Message::AssetBegin(AssetBegin {
+                digest: digest_pattern(0x10),
+                kind: AssetKind::Image,
+                total_length: 1_048_576,
+                volatile: true,
+                encoding: protocol::ASSET_ENCODING_RAW,
+                decoded_length: None,
+            }),
+        ),
+        (
+            "asset_begin_rle.bin",
+            33,
+            // The raw 12-byte LVGL header plus the curated frame's 10,020
+            // encoded pixel bytes. Keys 4 and 5 pin the additive RLE form.
+            Message::AssetBegin(AssetBegin {
+                digest: digest_pattern(0x20),
+                kind: AssetKind::Image,
+                total_length: 10_032,
+                volatile: true,
+                encoding: protocol::ASSET_ENCODING_RLE565,
+                decoded_length: Some(VOLATILE_IMAGE_DECODED_LENGTH),
+            }),
+        ),
+        (
+            "ack_asset_begin.bin",
+            20,
+            // The only fixture pinning the already_present: Some-iff-type-15
+            // rule across languages.
+            Message::Ack(Ack {
+                acknowledged_type: TYPE_ASSET_BEGIN,
+                revision: None,
+                already_present: Some(true),
+            }),
+        ),
+        (
+            "asset_chunk.bin",
+            21,
+            // offset = 0x10000 also forces the 4-byte CBOR form; data is
+            // non-empty and non-repeating.
+            Message::AssetChunk(AssetChunk {
+                digest: digest_pattern(0x40),
+                offset: 65_536,
+                data: (0..64u8).map(|index| index ^ 0xa5).collect(),
+            }),
+        ),
+        (
+            "asset_commit.bin",
+            22,
+            Message::AssetCommit(AssetCommit {
+                digest: digest_pattern(0x70),
+            }),
+        ),
+        (
+            "push_scene.bin",
+            24,
+            Message::PushScene(PushScene {
+                card_id: "clock".into(),
+                revision: 12,
+                scene: rich_scene(),
+            }),
+        ),
+        (
+            "ack_scene.bin",
+            24,
+            // PushScene joins PushData and ApplyConfig as the third
+            // acknowledged type whose revision is required rather than
+            // optional; this fixture pins that across languages.
+            Message::Ack(Ack {
+                acknowledged_type: TYPE_PUSH_SCENE,
+                revision: Some(12),
+                already_present: None,
+            }),
+        ),
+        (
+            "push_scene_min.bin",
+            25,
+            Message::PushScene(PushScene {
+                card_id: "c".into(),
+                revision: 1,
+                scene: minimal_scene(),
+            }),
+        ),
+        (
+            "asset_release.bin",
+            23,
+            // More than one digest: an implementation that only handles a
+            // single-element array would still pass a one-digest fixture.
+            Message::AssetRelease(AssetRelease {
+                digests: vec![
+                    digest_pattern(0x10),
+                    digest_pattern(0x40),
+                    digest_pattern(0x70),
+                ],
             }),
         ),
     ]

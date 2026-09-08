@@ -1,5 +1,5 @@
 {
-  "schema_version": 4,
+  "schema_version": 6,
   "preferences": {
     "timezone": "Asia/Tbilisi",
     "autostart": true,
@@ -77,18 +77,20 @@
   "assets": [
     {
       "id": "icons",
-      "source": { "kind": "file", "value": "/tmp/icons.bin" },
-      "kind": { "kind": "icon", "width": 32, "height": 32 },
+      "source": { "kind": "file", "value": "/tmp/icons.ttf" },
+      "kind": {
+        "kind": "icon-font",
+        "glyphs": [
+          { "name": "cloud-rain", "codepoint": 63232 },
+          { "name": "sun", "codepoint": 63233 }
+        ]
+      },
       "maximum_bytes": 262144
     },
     {
       "id": "font",
-      "source": { "kind": "file", "value": "/tmp/font.bin" },
-      "kind": {
-        "kind": "font",
-        "pixel_size": 18,
-        "glyph_ranges": [{ "start": 32, "end": 126 }]
-      },
+      "source": { "kind": "file", "value": "/tmp/font.ttf" },
+      "kind": { "kind": "font" },
       "maximum_bytes": 262144
     }
   ],

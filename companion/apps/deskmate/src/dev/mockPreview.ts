@@ -201,6 +201,12 @@ export function renderMockFrame(
       break;
     }
     case "plugin":
+      heroCaption(
+        ctx,
+        card.title || card.plugin_id,
+        fieldValue(data, "hero") ?? "--",
+        "Rendered on the server",
+      );
       break;
   }
 

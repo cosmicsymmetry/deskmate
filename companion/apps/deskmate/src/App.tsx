@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 
 import { CardEditor } from "./components/CardEditor";
-import { CardList } from "./components/CardList";
+import { CardList, type PluginKindOption } from "./components/CardList";
 import { Icon } from "./components/Icon";
 import { LoopRing } from "./components/LoopRing";
 import { DevicePreview } from "./components/DevicePreview";
@@ -21,6 +21,7 @@ import {
   removeCard,
   unclaimedIssues,
   updateWidget,
+  type AddCardRequest,
 } from "./lib/configDraft";
 import {
   chooseIcsFile,
@@ -35,7 +36,6 @@ import {
 import type {
   AppConfig,
   AppSnapshot,
-  AddableCardKind,
   CardSettings,
   DisplayOrientation,
   DraftValidation,
@@ -73,6 +73,10 @@ export function App() {
     dataGeneration,
     networkSettings,
     ownershipTier,
+    pluginCatalog,
+    catalogError,
+    refreshCatalog,
+    serverCardState,
     saveConfig,
     saveServerAccess,
     pairDevice,
@@ -244,14 +248,26 @@ export function App() {
     setDirty(true);
     setSaveState({ kind: "idle" });
   };
-  const handleAdd = (kind: AddableCardKind) => {
-    const result = addCard(draft, kind);
+  const handleAdd = (request: AddCardRequest) => {
+    const result = addCard(draft, request);
     if (!result.cardId) {
       return;
     }
     replaceDraft(result.config);
     setSelectedCardId(result.cardId);
   };
+
+  // The add menu's server group, built from the catalog and nothing else. It is
+  // empty in local tier and before the first read, which is why the group only
+  // renders when it has rows.
+  const pluginKinds: PluginKindOption[] = (pluginCatalog?.plugins ?? []).map((entry) => ({
+    id: entry.id,
+    version: entry.version,
+    displayName: entry.display_name,
+    description: entry.description,
+    onAdd: () =>
+      handleAdd({ kind: "plugin", pluginId: entry.id, refreshMinutes: entry.refresh_minutes }),
+  }));
   const handleWidgetChange = (widget: CardSettings) => {
     if (!selectedCardId) {
       return;
@@ -383,6 +399,7 @@ export function App() {
           <LoopRing
             config={draft}
             issues={issues}
+            catalog={pluginCatalog}
             selectedCardId={selectedCardId}
             onSelect={setSelectedCardId}
             onChange={replaceDraft}
@@ -458,6 +475,21 @@ export function App() {
             </aside>
           )}
 
+          {/* One notice for either server read failing. The last projection and the
+              last catalog are kept — a plugin card keeps its name and its value
+              rather than blanking because a poll missed. */}
+          {catalogError && (
+            <aside className="notice notice--warn" role="status">
+              <div>
+                <strong>{catalogError}</strong>
+                <p>Plugin names and previews are the last ones this window received.</p>
+                <button className="button button--quiet" type="button" onClick={refreshCatalog}>
+                  Try again
+                </button>
+              </div>
+            </aside>
+          )}
+
           {/* Card-scoped failures stay actionable without inventing a cause: data
               refusals name the display, while scene failures remain neutral because
               scene construction can fail before the display sees anything. */}
@@ -469,7 +501,7 @@ export function App() {
                   const card = draft.cards.find((candidate) => candidate.id === cardError.card_id);
                   return (
                     <p key={cardError.card_id}>
-                      <strong>{card ? cardLabel(card) : cardError.card_id}</strong> —{" "}
+                      <strong>{card ? cardLabel(card, pluginCatalog) : cardError.card_id}</strong> —{" "}
                       {cardError.message}
                     </p>
                   );
@@ -538,7 +570,10 @@ export function App() {
             cardData={snapshot.card_data}
             pomodoros={snapshot.pomodoros}
             providers={snapshot.providers}
-            pluginKinds={[]}
+            pluginKinds={pluginKinds}
+            catalog={pluginCatalog}
+            serverCardState={serverCardState}
+            ownershipTier={ownershipTier}
             selectedCardId={selectedCardId}
             onSelect={setSelectedCardId}
             onAdd={handleAdd}
@@ -557,6 +592,8 @@ export function App() {
             timerBusy={busyAction === "timer"}
             filePickerBusy={busyAction === "calendar-file"}
             providerRefreshing={refreshingProviderId === selectedCardId}
+            catalog={pluginCatalog}
+            ownershipTier={ownershipTier}
             onChange={handleWidgetChange}
             onConfigChange={replaceDraft}
             onRemove={handleRemove}

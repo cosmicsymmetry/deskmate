@@ -5,7 +5,9 @@ import {
   addCard,
   addEntry,
   cardMoveFromKey,
+  cardKindName,
   cardLabel,
+  cardName,
   cardsOutsideLoop,
   copyConfig,
   cardsContainerIssues,
@@ -25,6 +27,7 @@ import {
   moveEntry,
   nextFilmstripCardId,
   numberValue,
+  pluginCardFlag,
   removeCard,
   removeEntry,
   setEntryDwell,
@@ -32,7 +35,14 @@ import {
   tapActionDescription,
   unclaimedIssues,
 } from "../src/lib/configDraft";
-import type { AppConfig, CardSettings, ValidationIssue } from "../src/lib/types";
+import type {
+  AddableCardKind,
+  AppConfig,
+  CardSettings,
+  DeviceTier,
+  PluginCatalog,
+  ValidationIssue,
+} from "../src/lib/types";
 import { ipcContractFixtures } from "../src/lib/types.contract";
 
 function initialConfig(): AppConfig {
@@ -89,6 +99,68 @@ function pluginCard(): CardSettings {
     alert: { kind: "none" },
   };
 }
+
+function pluginCatalog(displayName: string | null = "Air quality"): PluginCatalog {
+  return {
+    plugins: [
+      {
+        id: "com.example.air-quality",
+        name: "aqi",
+        version: "1.0.0",
+        node_count: 7,
+        assets: [],
+        display_name: displayName,
+        description: "EPA index for a location",
+        manifest_version: 2,
+        template: "display-list",
+        refresh_minutes: 15,
+      },
+    ],
+    load_failures: [],
+  };
+}
+
+test("a plugin card is named by its display name, and falls back to its id twice over", () => {
+  const card = pluginCard();
+  expect(cardLabel(card, pluginCatalog())).toBe("Air quality");
+  // Fallback one: the catalog knows the plugin but the manifest declared no name.
+  expect(cardLabel(card, pluginCatalog(null))).toBe("com.example.air-quality");
+  // Fallback two: no catalog at all (local tier, or the server was unreachable).
+  expect(cardLabel(card, null)).toBe("com.example.air-quality");
+  expect(cardLabel(card)).toBe("com.example.air-quality");
+  // A catalog that does not carry this id cannot rename it either.
+  expect(cardLabel({ ...card, plugin_id: "com.example.gone" }, pluginCatalog())).toBe(
+    "com.example.gone",
+  );
+});
+
+test("no card kind is called “Plugin” on any surface", () => {
+  const kinds: AddableCardKind[] = ["clock", "pomodoro", "calendar", "weather", "json-feed", "rss"];
+  expect(kinds.map(cardKindName)).not.toContain("Plugin");
+  expect(cardName(pluginCard())).toBe("Office air");
+  expect(cardName({ ...pluginCard(), title: "" })).toBe("com.example.air-quality");
+});
+
+test("a bare plugin id always carries the word that explains it", () => {
+  const card = pluginCard();
+  const missing = { ...card, plugin_id: "com.example.gone" };
+  const networked: DeviceTier = "networked";
+  const local: DeviceTier = "local";
+
+  // Networked, catalog loaded, plugin present: the name is the whole story.
+  expect(pluginCardFlag(card, pluginCatalog(), networked)).toBeNull();
+  // Networked, catalog loaded, plugin absent: the server does not have it.
+  expect(pluginCardFlag(missing, pluginCatalog(), networked)).toBe("not on the server");
+  // Local tier: there is no server to render it, whatever a stale catalog says.
+  expect(pluginCardFlag(card, pluginCatalog(), local)).toBe("needs the server");
+  expect(pluginCardFlag(missing, null, local)).toBe("needs the server");
+  // Networked with no catalog yet: unknown is not the same as absent, so no word.
+  expect(pluginCardFlag(missing, null, networked)).toBeNull();
+  // Ownership not yet resolved: also unknown, also silent.
+  expect(pluginCardFlag(missing, null, null)).toBeNull();
+  // Built-in cards never carry it.
+  expect(pluginCardFlag(initialConfig().cards[0], null, local)).toBeNull();
+});
 
 describe("configuration draft helpers", () => {
   test("adds cards with stable unique card IDs", () => {
@@ -158,6 +230,68 @@ describe("configuration draft helpers", () => {
       ],
     };
     expect(addCard(entryFull, "weather")).toEqual({ config: entryFull, cardId: null });
+  });
+
+  test("a plugin card is added by the same call, with the same two caps, as any other", () => {
+    const { config, cardId } = addCard(initialConfig(), {
+      kind: "plugin",
+      pluginId: "com.example.air-quality",
+      refreshMinutes: 15,
+    });
+    expect(cardId).toBe("plugin");
+    const added = config.cards.at(-1);
+    if (added?.kind !== "plugin") {
+      throw new Error("addCard did not append the plugin card");
+    }
+    expect(added).toEqual({
+      kind: "plugin",
+      id: "plugin",
+      title: "",
+      plugin_id: "com.example.air-quality",
+      tap_action: { kind: "none" },
+      refresh: { kind: "interval", minutes: 15 },
+      alert: { kind: "none" },
+    });
+    // Enrolled in the loop by the same code path as a built-in add.
+    expect(config.playlists[0].entries.at(-1)?.card_id).toBe("plugin");
+
+    // The card id is minted, never derived: a 64-byte plugin id cannot fit the
+    // 32-byte card-id bound, and a second card of the same plugin must not collide.
+    const second = addCard(config, {
+      kind: "plugin",
+      pluginId: "com.example.air-quality",
+      refreshMinutes: 15,
+    });
+    expect(second.cardId).toBe("plugin-2");
+
+    const cardFull: AppConfig = {
+      ...initialConfig(),
+      cards: Array.from({ length: 8 }, (_, index) => ({
+        ...initialConfig().cards[0],
+        id: `c${index}`,
+      })),
+    };
+    expect(addCard(cardFull, { kind: "plugin", pluginId: "aqi", refreshMinutes: 15 })).toEqual({
+      config: cardFull,
+      cardId: null,
+    });
+
+    const entryFull: AppConfig = {
+      ...initialConfig(),
+      playlists: [
+        {
+          ...initialConfig().playlists[0],
+          entries: Array.from({ length: 8 }, (_, index) => ({
+            card_id: `c${index}`,
+            dwell_seconds: null,
+          })),
+        },
+      ],
+    };
+    expect(addCard(entryFull, { kind: "plugin", pluginId: "aqi", refreshMinutes: 15 })).toEqual({
+      config: entryFull,
+      cardId: null,
+    });
   });
 
   test("adding every kind produces a reachable, addable card", () => {
@@ -418,6 +552,22 @@ describe("configuration draft helpers", () => {
     expect(segments.map((segment) => segment.dwellSeconds)).toEqual([0, 0]);
     expect(segments[0].widthPercent).toBe(50);
     expect(segments[1].widthPercent).toBe(50);
+  });
+
+  test("filmstripSegments names a plugin segment from the catalog it is given", () => {
+    const config: AppConfig = {
+      ...initialConfig(),
+      cards: [pluginCard()],
+      playlists: [
+        {
+          ...initialConfig().playlists[0],
+          advance: { kind: "timed", default_dwell_seconds: 20 },
+          entries: [{ card_id: "plugin-card", dwell_seconds: 30 }],
+        },
+      ],
+    };
+    expect(filmstripSegments(config, pluginCatalog())[0].name).toBe("Air quality");
+    expect(filmstripSegments(config)[0].name).toBe("com.example.air-quality");
   });
 
   test("nextFilmstripCardId wraps past the last segment", () => {

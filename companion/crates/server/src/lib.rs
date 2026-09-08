@@ -27,6 +27,8 @@ mod rasterizer;
 pub mod registry;
 pub mod runtime_device;
 mod store;
+#[cfg(test)]
+mod test_plugins;
 
 use std::collections::HashMap;
 use std::path::PathBuf;

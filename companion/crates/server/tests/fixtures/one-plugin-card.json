@@ -1,0 +1,33 @@
+{
+  "schema_version": 6,
+  "preferences": {
+    "timezone": "UTC",
+    "autostart": false,
+    "paused": false,
+    "orientation": "landscape"
+  },
+  "cards": [
+    {
+      "kind": "plugin",
+      "id": "aqi-card",
+      "title": "Air quality",
+      "plugin_id": "aqi",
+      "tap_action": { "kind": "none" },
+      "refresh": { "kind": "interval", "minutes": 15 },
+      "alert": { "kind": "none" }
+    }
+  ],
+  "assets": [],
+  "playlists": [
+    {
+      "id": "main",
+      "name": "Main",
+      "advance": { "kind": "manual" },
+      "entries": [
+        { "card_id": "aqi-card", "dwell_seconds": null }
+      ]
+    }
+  ],
+  "active_playlist_id": "main",
+  "updater": { "channel": "stable", "checks": "notify" }
+}

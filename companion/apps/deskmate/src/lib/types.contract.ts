@@ -880,6 +880,10 @@ export const ipcContractFixtures = {
       "message": "unavailable"
     },
     {
+      "category": "incompatible-server",
+      "message": "incompatible"
+    },
+    {
       "category": "not-found",
       "message": "missing"
     },
@@ -932,8 +936,54 @@ export const ipcContractFixtures = {
     "enabled": true,
     "preference_enabled": false
   },
+  "plugin_catalog": {
+    "plugins": [
+      {
+        "id": "aqi",
+        "name": "aqi",
+        "version": "1.0.0",
+        "node_count": 4,
+        "assets": [
+          {
+            "file": "icons.ttf",
+            "kind": "icon-font",
+            "byte_length": 40960,
+            "digest": "0f1e2d3c"
+          }
+        ],
+        "display_name": "Air quality",
+        "description": "EPA index for a location",
+        "manifest_version": 2,
+        "template": "display-list",
+        "refresh_minutes": 15
+      }
+    ],
+    "load_failures": [
+      {
+        "id": "broken",
+        "error": "unknown key \"summry\""
+      }
+    ]
+  },
+  "server_card_state": [
+    {
+      "card_id": "air-quality",
+      "provider": {
+        "kind": "fresh"
+      },
+      "hero": "42",
+      "errors": [
+        {
+          "kind": "scene-refused",
+          "card_id": "air-quality",
+          "message": "no snapshot cached yet"
+        }
+      ]
+    }
+  ],
   "preview_frame": {
     "png_base64": "iVBORw0KGgo=",
-    "sample": true
+    "sample": true,
+    "state": null
   }
 } as const satisfies IpcContractFixtures;

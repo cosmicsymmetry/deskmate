@@ -29,14 +29,14 @@ use crate::render_negotiation;
 use crate::scheduler::Scheduler;
 use crate::{
     AlertHold, AnalogClockCard, AppConfig, AppSnapshot, BakedFontMetrics, BigNumberCard,
-    CalendarSource, CardAlert, CardDataSnapshot, CardError, CardErrorKind, CardSettings, ClockCard,
-    ConnectionState, DesiredAsset, DeviceCounters, DeviceSnapshot, DeviceTier, DisplayTemplate,
-    IconBadgeCard, JsonFieldMapping, PersistenceState, PomodoroSnapshot, PomodoroState,
-    ProgressRingCard, ProviderSnapshot, ProviderState, RowListCard, RuntimeDiagnostics,
-    RuntimeState, SHIPPED_SCENE_SURFACE_COLOR, SceneDataState, WeatherUnits,
-    build_analog_clock_scene, build_big_number_label_scene, build_digital_clock_scene,
-    build_icon_badge_text_scene, build_progress_ring_scene, build_row_list_scene,
-    with_scene_data_state,
+    CalendarSource, CardAlert, CardDataSnapshot, CardError, CardErrorKind, CardPreviewState,
+    CardSettings, ClockCard, ConnectionState, DesiredAsset, DeviceCounters, DeviceSnapshot,
+    DeviceTier, DisplayTemplate, IconBadgeCard, JsonFieldMapping, PersistenceState,
+    PomodoroSnapshot, PomodoroState, ProgressRingCard, ProviderSnapshot, ProviderState,
+    RowListCard, RuntimeDiagnostics, RuntimeState, SHIPPED_SCENE_SURFACE_COLOR, SceneDataState,
+    WeatherUnits, build_analog_clock_scene, build_big_number_label_scene,
+    build_digital_clock_scene, build_icon_badge_text_scene, build_progress_ring_scene,
+    build_row_list_scene, with_scene_data_state,
 };
 
 pub const DEFAULT_RUNTIME_COMMAND_CAPACITY: usize = 16;
@@ -154,6 +154,21 @@ pub enum RasterRequest {
 pub struct RasterFrame {
     pub digest: [u8; protocol::ASSET_DIGEST_LEN],
     pub bytes: Arc<[u8]>,
+}
+
+/// The revision every preview build carries. `protocol::validate_message`
+/// rejects `PushScene` revision 0, so a preview candidate cannot reach a
+/// device even by mistake -- which is exactly the property the route needs.
+pub const PREVIEW_SCENE_REVISION: u32 = 0;
+
+/// One rendered card face for the admin preview route. Never pushed, never
+/// minted, never cached.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CardPreview {
+    pub frame: Option<RasterFrame>,
+    pub state: CardPreviewState,
+    pub message: Option<String>,
+    pub refreshed_at_unix_ms: Option<u64>,
 }
 
 /// Host boundary used by the background runtime for plugin-owned assets and
@@ -789,8 +804,9 @@ impl RuntimeHandle {
             .map_err(|error| RuntimeError::InvalidConfig {
                 issues: error.issues,
             })?;
+        let renders_plugin_cards = plugin_host.is_some();
         let diagnostics = Arc::new(RuntimeDiagnosticCounters::default());
-        let initial = initial_snapshot(&config, diagnostics.snapshot());
+        let initial = initial_snapshot(&config, diagnostics.snapshot(), renders_plugin_cards);
         let latest = Arc::new(RwLock::new(initial));
         let publisher = Arc::new(SnapshotPublisher {
             latest,
@@ -909,6 +925,17 @@ impl RuntimeHandle {
         })
     }
 
+    /// Renders one plugin card's face for an admin preview. It runs on the
+    /// worker beside every other command, and the worker's single-threading is
+    /// the whole of the route's rate limiting: nothing here touches the device,
+    /// mints a revision, activates a card, or marks the active scene dirty.
+    pub fn render_card_preview(&self, card_id: &str) -> Result<CardPreview, RuntimeError> {
+        self.request(|reply| RuntimeCommand::RenderCardPreview {
+            card_id: card_id.to_owned(),
+            reply,
+        })
+    }
+
     /// Provision through the session already owned by the runtime worker. This command never
     /// discovers or opens a serial port; disconnected runtimes fail before touching the device.
     pub fn provision(&self, config: NetworkConfig) -> Result<(), RuntimeError> {
@@ -956,10 +983,10 @@ impl RuntimeHandle {
         result
     }
 
-    fn request(
+    fn request<T>(
         &self,
-        command: impl FnOnce(SyncSender<Result<(), RuntimeError>>) -> RuntimeCommand,
-    ) -> Result<(), RuntimeError> {
+        command: impl FnOnce(SyncSender<Result<T, RuntimeError>>) -> RuntimeCommand,
+    ) -> Result<T, RuntimeError> {
         let (reply_sender, reply_receiver) = mpsc::sync_channel(1);
         match self.sender.try_send(command(reply_sender)) {
             Ok(()) => {}
@@ -1046,7 +1073,24 @@ struct WorkerState {
 }
 
 impl WorkerState {
+    /// A hostless worker for tests that don't care about plugin behaviour. The
+    /// only production caller (`run_runtime`) always has a `plugin_host` to
+    /// thread through, even when it is `None`, so it calls
+    /// `new_with_plugin_host` directly and this wrapper is test-only.
+    #[cfg(test)]
     fn new(config: AppConfig, now: Instant, scheduler: &mut Scheduler) -> Self {
+        Self::new_with_plugin_host(config, now, scheduler, None)
+    }
+
+    /// The host must be installed before the first `replace_config`: whether
+    /// this runtime schedules and reports a plugin card at all is decided
+    /// there, and a host assigned afterwards would arrive one config too late.
+    fn new_with_plugin_host(
+        config: AppConfig,
+        now: Instant,
+        scheduler: &mut Scheduler,
+        plugin_host: Option<Box<dyn PluginHost>>,
+    ) -> Self {
         let mut state = Self {
             config: config.clone(),
             runtime: RuntimeState::Starting,
@@ -1054,7 +1098,7 @@ impl WorkerState {
             persistence: PersistenceState::Clean,
             latest_fields: BTreeMap::new(),
             plugin_snapshots: BTreeMap::new(),
-            plugin_host: None,
+            plugin_host,
             dirty_widgets: BTreeSet::new(),
             push_rejections: BTreeMap::new(),
             pomodoros: BTreeMap::new(),
@@ -1143,11 +1187,17 @@ impl WorkerState {
                         now,
                     );
                 }
-                CardSettings::Calendar { id, refresh, .. }
-                | CardSettings::Weather { id, refresh, .. }
-                | CardSettings::JsonFeed { id, refresh, .. }
-                | CardSettings::Rss { id, refresh, .. }
-                | CardSettings::Plugin { id, refresh, .. } => {
+                CardSettings::Plugin { id, refresh, .. } => {
+                    // Spec 5.3: with no plugin host this runtime can neither
+                    // fetch nor draw the card, so it schedules nothing and
+                    // reports nothing about it -- including the compiled
+                    // placeholder fields, which are a stand-in for data, not
+                    // data. Dropping the carried-over snapshot with them is
+                    // correct: there is no one here to render it.
+                    if self.plugin_host.is_none() {
+                        self.latest_fields.remove(id);
+                        continue;
+                    }
                     let interval = refresh
                         .interval_minutes()
                         .map(|minutes| Duration::from_secs(u64::from(minutes) * 60));
@@ -1162,12 +1212,28 @@ impl WorkerState {
                         &mut previous_fields,
                         &mut previous_providers,
                     );
-                    if matches!(card, CardSettings::Plugin { .. })
-                        && unchanged
-                        && let Some(snapshot) = previous_plugin_snapshots.remove(id)
-                    {
+                    if unchanged && let Some(snapshot) = previous_plugin_snapshots.remove(id) {
                         self.plugin_snapshots.insert(id.clone(), snapshot);
                     }
+                }
+                CardSettings::Calendar { id, refresh, .. }
+                | CardSettings::Weather { id, refresh, .. }
+                | CardSettings::JsonFeed { id, refresh, .. }
+                | CardSettings::Rss { id, refresh, .. } => {
+                    let interval = refresh
+                        .interval_minutes()
+                        .map(|minutes| Duration::from_secs(u64::from(minutes) * 60));
+                    provider_deadlines.push((id.clone(), interval));
+                    let unchanged = previous_config
+                        .cards
+                        .iter()
+                        .any(|previous| previous == card);
+                    self.restore_provider(
+                        id,
+                        unchanged,
+                        &mut previous_fields,
+                        &mut previous_providers,
+                    );
                 }
                 CardSettings::Clock { .. } => {}
             }
@@ -1434,8 +1500,7 @@ fn run_runtime(
         options.status_interval,
         options.time_sync_interval,
     );
-    let mut state = WorkerState::new(config, now, &mut scheduler);
-    state.plugin_host = plugin_host;
+    let mut state = WorkerState::new_with_plugin_host(config, now, &mut scheduler, plugin_host);
     let provider = ProviderWorker::new(refresher, options.provider_job_capacity);
     state.publish_if_changed(publisher, diagnostics);
 
@@ -1595,6 +1660,9 @@ fn process_command(
                 state, scheduler, device, card_id, &plugin_id, snapshot,
             );
             let _ = reply.send(result);
+        }
+        RuntimeCommand::RenderCardPreview { card_id, reply } => {
+            let _ = reply.send(render_card_preview(state, &card_id));
         }
         RuntimeCommand::ActivateScreen { screen_id, reply } => {
             let result = activate_screen_command(state, scheduler, device, screen_id);
@@ -2731,8 +2799,18 @@ fn build_card_scene(
         revision,
         scene,
     };
-    validate_message(&Message::PushScene(push.clone()))
-        .map_err(|error| format!("the host-built scene is invalid: {error}"))?;
+    if push.revision == PREVIEW_SCENE_REVISION {
+        // A preview never becomes a frame on the wire, so validate the scene's
+        // own bounds and leave the message rule -- including the nonzero
+        // revision that makes a preview unpushable -- to the one path that
+        // actually sends messages. Card-id length is already bounded by config
+        // validation (`MAX_WIDGET_ID_LEN`).
+        protocol::validate_scene(&push.scene)
+            .map_err(|error| format!("the host-built scene is invalid: {error}"))?;
+    } else {
+        validate_message(&Message::PushScene(push.clone()))
+            .map_err(|error| format!("the host-built scene is invalid: {error}"))?;
+    }
     Ok(CardCandidate::Push(push))
 }
 
@@ -3282,6 +3360,112 @@ fn raster_request(candidate: &CardCandidate, fields: &[Field]) -> RasterRequest 
     }
 }
 
+/// Builds and rasterizes one plugin card's face without sending it. Takes no
+/// device: the absence of that parameter is the guarantee, not a comment.
+fn render_card_preview(
+    state: &mut WorkerState,
+    card_id: &str,
+) -> Result<CardPreview, RuntimeError> {
+    let Some(card) = state.config.cards.iter().find(|card| card.id() == card_id) else {
+        return Err(RuntimeError::UnknownCard {
+            card_id: card_id.to_owned(),
+        });
+    };
+    if !matches!(card, CardSettings::Plugin { .. }) {
+        return Err(RuntimeError::NotAPluginCard {
+            card_id: card_id.to_owned(),
+        });
+    }
+    // A hostless runtime can neither fetch nor draw a plugin card at all, so
+    // this must be checked before the snapshot lookup below: without a host,
+    // `plugin_snapshots` is never populated for this card (see
+    // `replace_config`'s `CardSettings::Plugin` arm), so a check ordered the
+    // other way would always fall into "Waiting for the first refresh" --
+    // promising an eventual resolution that can never happen. PRODUCT.md's
+    // "show state, not reassurance" forbids exactly that message here.
+    if state.plugin_host.is_none() {
+        return Ok(preview_failure(
+            "this card needs server-side rasterization, which this host does not perform".into(),
+        ));
+    }
+    let Some(snapshot) = state.plugin_snapshots.get(card_id).cloned() else {
+        // No cached snapshot is two different situations that must not share
+        // a message: a provider that has never been asked yet (still
+        // `Idle`) genuinely has a resolution coming, but one that already
+        // came back `Error` -- every curated plugin source points at
+        // `example.invalid`, so this is their ordinary state, not a corner
+        // case -- never will on its own. "Waiting for the first refresh"
+        // promises the second and must not be shown for the first; the same
+        // defect class Task 2 already closed for a hostless runtime.
+        if let Some(ProviderState::Error { message }) = state
+            .providers
+            .get(card_id)
+            .map(|provider| &provider.snapshot.state)
+        {
+            return Ok(preview_failure(message.clone()));
+        }
+        return Ok(CardPreview {
+            frame: None,
+            state: CardPreviewState::Waiting,
+            message: Some("Waiting for the first refresh".into()),
+            refreshed_at_unix_ms: None,
+        });
+    };
+    let refreshed_at_unix_ms = snapshot
+        .refreshed_at
+        .and_then(|time| u64::try_from(time.timestamp_millis()).ok());
+    let fields = state
+        .latest_fields
+        .get(card_id)
+        .cloned()
+        .unwrap_or_default();
+    let candidate = match build_card_scene(
+        &state.config,
+        card_id,
+        &fields,
+        Some(&snapshot),
+        state.plugin_host.as_deref_mut(),
+        PREVIEW_SCENE_REVISION,
+    ) {
+        Ok(candidate) => candidate,
+        Err(message) => return Ok(preview_failure(message)),
+    };
+    let request = raster_request(&candidate, &fields);
+    // `build_card_scene` already refuses a plugin card with no host, so this is
+    // a policy bug rather than a state -- and a policy bug must surface as a
+    // typed outcome, not a panic on the worker thread.
+    let Some(host) = state.plugin_host.as_deref_mut() else {
+        return Ok(preview_failure(
+            "this card needs server-side rasterization, which this host does not perform".into(),
+        ));
+    };
+    match host.rasterize(&request) {
+        Ok(frame) => Ok(CardPreview {
+            frame: Some(frame),
+            // A fetched-but-troubled snapshot still draws: the face carries the
+            // stale/error footer the panel shows. `Error` is reserved for "no
+            // frame at all", which keeps spec 4.2's invariant true.
+            state: if snapshot.stale || snapshot.error.is_some() {
+                CardPreviewState::Stale
+            } else {
+                CardPreviewState::Fresh
+            },
+            message: None,
+            refreshed_at_unix_ms,
+        }),
+        Err(message) => Ok(preview_failure(message)),
+    }
+}
+
+fn preview_failure(message: String) -> CardPreview {
+    CardPreview {
+        frame: None,
+        state: CardPreviewState::Error,
+        message: Some(message),
+        refreshed_at_unix_ms: None,
+    }
+}
+
 /// App-core is the one production owner of the full-bleed image scene. That
 /// keeps revision minting and protocol validation beside every other runtime
 /// push; the server rasterizer owns bytes only.
@@ -3630,7 +3814,11 @@ fn pomodoro_state(state: EnginePomodoroState) -> PomodoroState {
     }
 }
 
-fn initial_snapshot(config: &AppConfig, diagnostics: RuntimeDiagnostics) -> AppSnapshot {
+fn initial_snapshot(
+    config: &AppConfig,
+    diagnostics: RuntimeDiagnostics,
+    renders_plugin_cards: bool,
+) -> AppSnapshot {
     let mut providers = Vec::new();
     let mut pomodoros = Vec::new();
     let compiled_card_ids: BTreeSet<&str> = config.compiled_card_ids().into_iter().collect();
@@ -3650,17 +3838,27 @@ fn initial_snapshot(config: &AppConfig, diagnostics: RuntimeDiagnostics) -> AppS
                 duration_seconds: *duration_seconds,
                 remaining_seconds: *duration_seconds,
             }),
+            CardSettings::Plugin { id, .. } if renders_plugin_cards => {
+                providers.push(ProviderSnapshot {
+                    widget_id: id.clone(),
+                    state: ProviderState::Idle,
+                    last_success_unix_ms: None,
+                    age_seconds: None,
+                });
+            }
             CardSettings::Calendar { id, .. }
             | CardSettings::Weather { id, .. }
             | CardSettings::JsonFeed { id, .. }
-            | CardSettings::Rss { id, .. }
-            | CardSettings::Plugin { id, .. } => providers.push(ProviderSnapshot {
+            | CardSettings::Rss { id, .. } => providers.push(ProviderSnapshot {
                 widget_id: id.clone(),
                 state: ProviderState::Idle,
                 last_success_unix_ms: None,
                 age_seconds: None,
             }),
-            CardSettings::Clock { .. } => {}
+            // Matches the worker: a runtime with no host says nothing at all
+            // about a plugin card, not even "idle" -- the same nothing an
+            // unrendered clock reports.
+            CardSettings::Plugin { .. } | CardSettings::Clock { .. } => {}
         }
     }
     AppSnapshot {
@@ -6275,5 +6473,261 @@ mod tests {
             vec![vec![[0x5a; protocol::ASSET_DIGEST_LEN]]],
             "the desired digest must be named in the keep-set"
         );
+    }
+
+    struct PreviewPluginHost {
+        renders: Arc<Mutex<Vec<u32>>>,
+        requests: Arc<Mutex<Vec<RasterRequest>>>,
+    }
+
+    impl PluginHost for PreviewPluginHost {
+        fn desired_assets(&mut self) -> Vec<DesiredAsset> {
+            Vec::new()
+        }
+
+        fn render_scene(
+            &mut self,
+            _plugin_id: &str,
+            _snapshot: &providers::ProviderSnapshot<serde_json::Value>,
+            revision: u32,
+        ) -> Result<SceneCandidate, String> {
+            self.renders.lock().unwrap().push(revision);
+            Ok(SceneCandidate::DisplayList(protocol::Scene {
+                revision,
+                background: 0x1234,
+                nodes: Vec::new(),
+            }))
+        }
+
+        fn rasterize(&mut self, request: &RasterRequest) -> Result<RasterFrame, String> {
+            self.requests.lock().unwrap().push(request.clone());
+            Ok(RasterFrame {
+                digest: [0x55; protocol::ASSET_DIGEST_LEN],
+                bytes: Arc::from(&[0x19, 0x12, 0, 0, 0xc0, 1, 0x70, 1, 0x80, 3, 0, 0, 1, 2][..]),
+            })
+        }
+    }
+
+    /// Two plugin cards, the FIRST one active. Every preview here targets the
+    /// second, so "the active screen did not move" is an assertion about the
+    /// route rather than a tautology about a one-card config.
+    fn preview_state(
+        now: Instant,
+        renders: &Arc<Mutex<Vec<u32>>>,
+        requests: &Arc<Mutex<Vec<RasterRequest>>>,
+    ) -> (WorkerState, Scheduler) {
+        let config = rotation_config(
+            vec![
+                plugin_card("aqi", "Air quality", "aqi", RefreshPolicy::Manual),
+                plugin_card("agenda", "Agenda", "agenda", RefreshPolicy::Manual),
+            ],
+            CarouselAdvance::Manual,
+            &[("aqi", None), ("agenda", None)],
+        );
+        let mut scheduler = fresh_scheduler(now);
+        let mut state = WorkerState::new_with_plugin_host(
+            config,
+            now,
+            &mut scheduler,
+            Some(Box::new(PreviewPluginHost {
+                renders: Arc::clone(renders),
+                requests: Arc::clone(requests),
+            })),
+        );
+        state.next_scene_revision = 41;
+        state.active_scene_dirty = false;
+        state.active_screen_dirty = false;
+        (state, scheduler)
+    }
+
+    /// The whole safety property of the preview route, in one place: it builds
+    /// at a revision the wire refuses, so the frame it produces is unpushable
+    /// by construction rather than by a caller remembering not to send it.
+    #[test]
+    fn the_preview_revision_is_one_the_wire_refuses() {
+        assert_eq!(
+            validate_message(&Message::PushScene(PushScene {
+                card_id: "aqi".into(),
+                revision: PREVIEW_SCENE_REVISION,
+                scene: protocol::Scene {
+                    revision: PREVIEW_SCENE_REVISION,
+                    background: 0,
+                    nodes: Vec::new(),
+                },
+            })),
+            Err(protocol::MessageError::InvalidValue("scene revision"))
+        );
+    }
+
+    #[test]
+    fn a_card_preview_renders_at_revision_zero_and_never_mints_a_push_revision() {
+        let now = Instant::now();
+        let renders = Arc::new(Mutex::new(Vec::new()));
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let (mut state, _scheduler) = preview_state(now, &renders, &requests);
+        state.plugin_snapshots.insert(
+            "agenda".into(),
+            providers::ProviderSnapshot {
+                value: serde_json::json!({"events": []}),
+                refreshed_at: DateTime::from_timestamp_millis(1_725_600_000_000),
+                age: None,
+                stale: false,
+                error: None,
+            },
+        );
+
+        let preview = render_card_preview(&mut state, "agenda").expect("a plugin card previews");
+
+        assert_eq!(*renders.lock().unwrap(), vec![PREVIEW_SCENE_REVISION]);
+        assert_eq!(requests.lock().unwrap().len(), 1);
+        assert_eq!(preview.state, CardPreviewState::Fresh);
+        assert_eq!(preview.message, None);
+        assert_eq!(preview.refreshed_at_unix_ms, Some(1_725_600_000_000));
+        assert_eq!(
+            preview
+                .frame
+                .expect("a fresh preview carries a frame")
+                .digest,
+            [0x55; protocol::ASSET_DIGEST_LEN]
+        );
+        assert_eq!(
+            state.next_scene_revision, 41,
+            "a preview is never sent, so it must not consume a wire revision"
+        );
+        assert!(
+            !state.active_scene_dirty,
+            "a preview must not schedule a device push"
+        );
+        assert_eq!(
+            state.active_screen.as_deref(),
+            Some("aqi"),
+            "the preview route never activates the card it renders"
+        );
+        assert!(
+            !state.active_screen_dirty,
+            "a preview must not schedule an activation either"
+        );
+    }
+
+    #[test]
+    fn a_plugin_card_with_no_cached_snapshot_previews_as_waiting_without_a_frame() {
+        let now = Instant::now();
+        let renders = Arc::new(Mutex::new(Vec::new()));
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let (mut state, _scheduler) = preview_state(now, &renders, &requests);
+
+        let preview = render_card_preview(&mut state, "agenda").expect("waiting is an outcome");
+
+        assert_eq!(preview.state, CardPreviewState::Waiting);
+        assert_eq!(
+            preview.message.as_deref(),
+            Some("Waiting for the first refresh")
+        );
+        assert!(preview.frame.is_none());
+        assert!(
+            renders.lock().unwrap().is_empty(),
+            "the pre-first-fetch state must not be reported as a compile failure"
+        );
+    }
+
+    #[test]
+    fn a_plugin_card_whose_provider_is_in_error_previews_as_error_not_waiting_forever() {
+        // Every curated plugin source points at `example.invalid`, so a
+        // provider that has already reported `Error` -- and therefore never
+        // populated `plugin_snapshots` at all -- is these plugins' ordinary
+        // state, not a corner case. "Waiting for the first refresh" promises
+        // a resolution that will never come for this card; the same defect
+        // class already closed for a hostless runtime just above.
+        let now = Instant::now();
+        let renders = Arc::new(Mutex::new(Vec::new()));
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let (mut state, _scheduler) = preview_state(now, &renders, &requests);
+        state
+            .providers
+            .get_mut("agenda")
+            .expect("agenda has a provider entry")
+            .snapshot
+            .state = ProviderState::Error {
+            message: "plugin \"agenda\" is not loaded".into(),
+        };
+
+        let preview =
+            render_card_preview(&mut state, "agenda").expect("an errored provider still previews");
+
+        assert_eq!(preview.state, CardPreviewState::Error);
+        assert_eq!(
+            preview.message.as_deref(),
+            Some("plugin \"agenda\" is not loaded")
+        );
+        assert!(preview.frame.is_none());
+        assert!(
+            renders.lock().unwrap().is_empty(),
+            "a permanently failed fetch must not be reported as a compile failure either"
+        );
+    }
+
+    #[test]
+    fn a_stale_or_errored_snapshot_still_draws_its_face() {
+        let now = Instant::now();
+        let renders = Arc::new(Mutex::new(Vec::new()));
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let (mut state, _scheduler) = preview_state(now, &renders, &requests);
+        state.plugin_snapshots.insert(
+            "agenda".into(),
+            providers::ProviderSnapshot {
+                value: serde_json::json!({"events": []}),
+                refreshed_at: None,
+                age: None,
+                stale: true,
+                error: Some("upstream is stale".into()),
+            },
+        );
+
+        let preview = render_card_preview(&mut state, "agenda").expect("a stale card still draws");
+
+        assert_eq!(preview.state, CardPreviewState::Stale);
+        assert_eq!(preview.message, None);
+        assert!(
+            preview.frame.is_some(),
+            "the scene carries the same stale footer the panel shows; the state word is not the fault"
+        );
+    }
+
+    #[test]
+    fn a_card_preview_names_the_wrong_kind_and_the_missing_card_separately() {
+        let now = Instant::now();
+        let config = rotation_config(
+            vec![
+                rotation_clock_card("clock"),
+                plugin_card("aqi", "Air quality", "aqi", RefreshPolicy::Manual),
+            ],
+            CarouselAdvance::Manual,
+            &[("clock", None), ("aqi", None)],
+        );
+        let mut scheduler = fresh_scheduler(now);
+        let mut state = WorkerState::new(config, now, &mut scheduler);
+
+        assert!(matches!(
+            render_card_preview(&mut state, "clock"),
+            Err(RuntimeError::NotAPluginCard { ref card_id }) if card_id == "clock"
+        ));
+        assert!(matches!(
+            render_card_preview(&mut state, "absent"),
+            Err(RuntimeError::UnknownCard { ref card_id }) if card_id == "absent"
+        ));
+
+        // A hostless runtime's `replace_config` never populates
+        // `plugin_snapshots` for a plugin card (spec 5.3), so a genuine
+        // plugin card must surface the "needs server-side rasterization"
+        // error here rather than "Waiting for the first refresh" -- a message
+        // promising a resolution that can never happen on this runtime.
+        let preview =
+            render_card_preview(&mut state, "aqi").expect("a hostless preview is an Ok outcome");
+        assert_eq!(preview.state, CardPreviewState::Error);
+        assert_eq!(
+            preview.message.as_deref(),
+            Some("this card needs server-side rasterization, which this host does not perform")
+        );
+        assert!(preview.frame.is_none());
     }
 }

@@ -11,9 +11,12 @@ is no `DisplayTemplate` selection for a plugin card (`docs/config/v6.md`); the m
 This document is the authoring contract: every bound below is enforced, by name, in
 `companion/crates/plugin/src/{manifest,expr,compile,assets}.rs`, and violating one is a
 parse-time, compile-time, or asset-resolve-time error — never a silent clamp or a panic.
-The two curated plugins that ship today, `companion/plugins/aqi/manifest.toml` and
-`companion/plugins/agenda/manifest.toml`, are worked examples of everything in this
-document; read them alongside it.
+The v1 worked examples are the byte-exact copies of the `aqi` and `agenda` manifests as
+they shipped under v1, `companion/crates/plugin/tests/fixtures/manifest_v1_aqi.toml` and
+`companion/crates/plugin/tests/fixtures/manifest_v1_agenda.toml`; the curated plugins
+under `companion/plugins/` moved to manifest v2 on 2026-09-07 and differ from those
+copies only by the v2 header keys (`manifest-v2.md`). Read the copies alongside this
+document.
 
 ## Top-level shape
 

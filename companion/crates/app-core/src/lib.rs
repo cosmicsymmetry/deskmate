@@ -11,7 +11,10 @@ mod secure_file;
 pub mod state;
 pub mod store;
 
-pub use admin::AdminConfigErrorBody;
+pub use admin::{
+    AdminConfigErrorBody, CardPreviewResponse, CardPreviewState, PluginCatalog, PluginCatalogAsset,
+    PluginCatalogEntry, PluginTemplateKind,
+};
 pub use asset_sync::DesiredAsset;
 pub use commands::{PomodoroAction, RuntimeError};
 pub use config::{
@@ -46,10 +49,11 @@ pub use render_negotiation::{
     classify_binding, negotiate,
 };
 pub use runtime::{
-    CalendarRefreshRequest, CalendarRefreshResult, CalendarRefresher, DeviceConnection, PluginHost,
-    ProviderRefreshRequest, ProviderRefreshResult, ProviderRefresher, ProviderRequest, RasterFrame,
-    RasterRequest, RuntimeDevice, RuntimeHandle, RuntimeOptions, RuntimeSubscription,
-    SceneCandidate, SerialRuntimeDevice, SystemCalendarRefresher, SystemProviderRefresher,
+    CalendarRefreshRequest, CalendarRefreshResult, CalendarRefresher, CardPreview,
+    DeviceConnection, PREVIEW_SCENE_REVISION, PluginHost, ProviderRefreshRequest,
+    ProviderRefreshResult, ProviderRefresher, ProviderRequest, RasterFrame, RasterRequest,
+    RuntimeDevice, RuntimeHandle, RuntimeOptions, RuntimeSubscription, SceneCandidate,
+    SerialRuntimeDevice, SystemCalendarRefresher, SystemProviderRefresher,
 };
 pub use scene_build::{
     AnalogClockCard, BakedFontMetrics, BigNumberCard, ClockCard, IconBadgeCard, NumericAdvances,

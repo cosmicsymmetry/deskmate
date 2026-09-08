@@ -1,6 +1,6 @@
 //! Provider refresher that adds curated plugin data to app-core's system providers.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use app_core::{
@@ -19,6 +19,10 @@ pub struct ServerProviderRefresher<F: PluginFetcher = SystemPluginFetcher> {
     registry: Arc<PluginRegistry>,
     plugins: HashMap<String, PluginProviderEntry<F>>,
     fetcher_factory: Box<dyn FnMut() -> F + Send>,
+    /// Plugin ids whose `summary` has already been reported as failing. A
+    /// broken expression fails every cadence, forever; one line is a defect
+    /// report, one line every ten minutes is a log flood.
+    summary_failures: HashSet<String>,
 }
 
 struct PluginProviderEntry<F: PluginFetcher> {
@@ -46,6 +50,32 @@ where
             registry,
             plugins: HashMap::new(),
             fetcher_factory: Box::new(fetcher_factory),
+            summary_failures: HashSet::new(),
+        }
+    }
+
+    /// The manifest's `summary`, evaluated against what was just fetched.
+    /// A failure costs the tile its headline and nothing else: the fetched
+    /// data, the freshness state and the title all still reach the card.
+    fn evaluate_summary(
+        &mut self,
+        plugin_id: &str,
+        snapshot: &providers::ProviderSnapshot<serde_json::Value>,
+    ) -> Option<String> {
+        let registry = Arc::clone(&self.registry);
+        let plugin = registry.get(plugin_id)?;
+        match plugin::evaluate_summary(&plugin.manifest, snapshot) {
+            Ok(summary) => summary,
+            Err(error) => {
+                if self.summary_failures.insert(plugin_id.to_owned()) {
+                    tracing::warn!(
+                        plugin_id,
+                        %error,
+                        "plugin summary could not be evaluated; the card tile will show no headline"
+                    );
+                }
+                None
+            }
         }
     }
 }
@@ -84,21 +114,30 @@ where
             self.plugins.insert(
                 request.widget_id.clone(),
                 PluginProviderEntry {
-                    plugin_id,
+                    // Cloned, not moved: `plugin_id` is still needed below to
+                    // evaluate the summary, and this arm is conditional.
+                    plugin_id: plugin_id.clone(),
                     provider,
                 },
             );
         }
 
-        let entry = self
-            .plugins
-            .get_mut(&request.widget_id)
-            .expect("plugin provider entry was inserted above");
-        let snapshot = entry.provider.refresh(request.now);
+        // Scoped so the `&mut self.plugins` borrow ends before
+        // `evaluate_summary` takes `&mut self`.
+        let snapshot = {
+            let entry = self
+                .plugins
+                .get_mut(&request.widget_id)
+                .expect("plugin provider entry was inserted above");
+            entry.provider.refresh(request.now)
+        };
+        let hero = self.evaluate_summary(&plugin_id, &snapshot);
+        let mut fields = vec![title_field(request.title)];
+        fields.extend(hero.map(hero_field));
         ProviderRefreshResult {
             generation: request.generation,
             widget_id: request.widget_id,
-            fields: vec![title_field(request.title)],
+            fields,
             value: Some(snapshot.value),
             refreshed_at: snapshot.refreshed_at,
             age: snapshot.age,
@@ -112,6 +151,20 @@ fn title_field(title: String) -> Field {
     Field {
         key: "title".into(),
         value: FieldValue::Text(title),
+    }
+}
+
+/// The tile's live value. This rides the wire in the card's `PushData` and
+/// the device drops it: a plugin card's `WidgetConfig.template` is always
+/// `TemplateKind::DigitalClock` (`app-core/src/config.rs`'s `wire_config`),
+/// whose registry declares only `title`/`show_seconds`/`stale`/`error`, and
+/// `firmware/main/core/template_fields.h:59` states that unknown fields are
+/// ignored -- so it is safe to send. The field exists for the Mac's tile,
+/// which reads it out of `card_data`.
+fn hero_field(summary: String) -> Field {
+    Field {
+        key: "hero".into(),
+        value: FieldValue::Text(summary),
     }
 }
 
@@ -193,13 +246,20 @@ mod tests {
         }
     }
 
-    fn refresher_with(
+    fn refresher_with_registry(
+        registry: Arc<PluginRegistry>,
         responses: Vec<Result<FetchResponse, EgressError>>,
     ) -> ServerProviderRefresher<FakeFetcher> {
         let fetcher = FakeFetcher {
             responses: Arc::new(Mutex::new(responses.into())),
         };
-        ServerProviderRefresher::with_fetcher_factory(registry(), move || fetcher.clone())
+        ServerProviderRefresher::with_fetcher_factory(registry, move || fetcher.clone())
+    }
+
+    fn refresher_with(
+        responses: Vec<Result<FetchResponse, EgressError>>,
+    ) -> ServerProviderRefresher<FakeFetcher> {
+        refresher_with_registry(registry(), responses)
     }
 
     #[test]
@@ -328,9 +388,12 @@ mod tests {
         renamed.title = "Outside air".into();
         let after_title_edit = refresher.refresh(renamed.clone());
         assert_eq!(after_title_edit.value, good.value);
+        // The cached payload is still `{"current":{"aqi":42}}` and the curated
+        // `aqi` manifest's summary reads exactly that, so a last-good refresh
+        // publishes a last-good headline too.
         assert_eq!(
             after_title_edit.fields,
-            vec![title_field("Outside air".into())]
+            vec![title_field("Outside air".into()), hero_field("42".into())]
         );
         assert!(after_title_edit.stale);
 
@@ -354,5 +417,94 @@ mod tests {
             2,
             "only a plugin-id change may replace the cached provider"
         );
+    }
+
+    fn fixture_request(widget_id: &str) -> ProviderRefreshRequest {
+        ProviderRefreshRequest {
+            generation: 7,
+            widget_id: widget_id.into(),
+            title: "Air quality".into(),
+            provider: ProviderRequest::Plugin {
+                plugin_id: "fixture".into(),
+            },
+            active_provider_ids: vec![widget_id.into()],
+            now: Utc.with_ymd_and_hms(2026, 8, 29, 12, 0, 0).unwrap(),
+        }
+    }
+
+    #[test]
+    fn a_declared_summary_is_published_as_the_hero_field_after_the_title() {
+        let (registry, _base) =
+            crate::test_plugins::fixture_registry(crate::test_plugins::V2_NAMED_MANIFEST);
+        let mut refresher = refresher_with_registry(
+            registry,
+            vec![Ok(ok_response(br#"{"current":{"aqi":42}}"#))],
+        );
+
+        let result = refresher.refresh(fixture_request("fixture-card"));
+
+        // Order matters only in that `title` keeps its existing position:
+        // `hero` is additive, and a reader that only knows `title` is unharmed.
+        assert_eq!(
+            result.fields,
+            vec![
+                Field {
+                    key: "title".into(),
+                    value: FieldValue::Text("Air quality".into()),
+                },
+                Field {
+                    key: "hero".into(),
+                    value: FieldValue::Text("42".into()),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_manifest_without_a_summary_publishes_the_title_alone() {
+        // The tile then shows "—", like a weather card with no data.
+        let (registry, _base) =
+            crate::test_plugins::fixture_registry(crate::test_plugins::V2_UNNAMED_MANIFEST);
+        let mut refresher = refresher_with_registry(
+            registry,
+            vec![Ok(ok_response(br#"{"current":{"aqi":42}}"#))],
+        );
+
+        let result = refresher.refresh(fixture_request("fixture-card"));
+
+        assert_eq!(result.fields, vec![title_field("Air quality".into())]);
+    }
+
+    #[test]
+    fn a_summary_that_fails_to_evaluate_drops_the_hero_rather_than_the_refresh() {
+        let (registry, _base) =
+            crate::test_plugins::fixture_registry(crate::test_plugins::V2_NAMED_MANIFEST);
+        // One byte past `expr::MAX_OUTPUT_LEN` is `ExprError::OutputTooLong`,
+        // which the evaluator rejects rather than truncating.
+        let oversized = format!(
+            r#"{{"current":{{"aqi":"{}"}}}}"#,
+            "9".repeat(plugin::MAX_OUTPUT_LEN + 1)
+        );
+        let mut refresher = refresher_with_registry(
+            registry,
+            vec![
+                Ok(ok_response(oversized.as_bytes())),
+                Ok(ok_response(oversized.as_bytes())),
+            ],
+        );
+
+        let result = refresher.refresh(fixture_request("fixture-card"));
+
+        assert_eq!(result.fields, vec![title_field("Air quality".into())]);
+        assert!(!result.stale, "a summary failure poisoned the fetched data");
+        assert!(
+            result.value.is_some(),
+            "a summary failure discarded the payload"
+        );
+
+        // Once per plugin id, not once per refresh: this fires every cadence.
+        refresher.refresh(fixture_request("fixture-card"));
+        assert_eq!(refresher.summary_failures.len(), 1);
+        assert!(refresher.summary_failures.contains("fixture"));
     }
 }

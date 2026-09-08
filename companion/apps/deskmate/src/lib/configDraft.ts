@@ -1,10 +1,11 @@
 import type {
   AddableCardKind,
   AppConfig,
-  CardKind,
   CardSettings,
   CarouselAdvance,
+  DeviceTier,
   Playlist,
+  PluginCatalog,
   ValidationIssue,
 } from "./types";
 import { MAX_PLAYLIST_ENTRIES } from "./types";
@@ -72,9 +73,48 @@ export function cardName(card: CardSettings): string {
  * from it, where "Weather" and "Digital clock" say what the thing is. The owner's own
  * words survive as `cardTitle` — a quiet second line beside the label, never the
  * thing that names the card.
+ *
+ * A plugin card's template is its plugin, so its display name is whatever the
+ * server's catalog declares for it. Both fallbacks land on the plugin id rather than
+ * the word "Plugin": an id at least identifies the thing, where a category name
+ * identified every plugin card identically. The word that says *why* a bare id is
+ * showing is `pluginCardFlag`, not this — a name is a name, not a diagnosis.
  */
-export function cardLabel(card: CardSettings): string {
-  return card.kind === "plugin" ? card.plugin_id : cardKindName(card.kind);
+export function cardLabel(card: CardSettings, catalog?: PluginCatalog | null): string {
+  if (card.kind !== "plugin") {
+    return cardKindName(card.kind);
+  }
+  const entry = catalog?.plugins.find((plugin) => plugin.id === card.plugin_id);
+  return entry?.display_name ?? card.plugin_id;
+}
+
+export type PluginCardFlag = "not on the server" | "needs the server";
+
+/**
+ * The word beside a plugin card whose name could not be resolved. Order matters:
+ * local tier is the reason that outranks every other, because no catalog, however
+ * complete, can make a plugin render on a Mac that owns the display itself. A
+ * missing catalog in networked tier is deliberately silent — the window has not
+ * heard from the server yet, and "not on the server" would be an accusation the
+ * app cannot support.
+ */
+export function pluginCardFlag(
+  card: CardSettings,
+  catalog: PluginCatalog | null,
+  tier: DeviceTier | null,
+): PluginCardFlag | null {
+  if (card.kind !== "plugin") {
+    return null;
+  }
+  if (tier === "local") {
+    return "needs the server";
+  }
+  if (!catalog) {
+    return null;
+  }
+  return catalog.plugins.some((plugin) => plugin.id === card.plugin_id)
+    ? null
+    : "not on the server";
 }
 
 /**
@@ -86,7 +126,7 @@ export function cardTitle(card: CardSettings): string | null {
   return typed.trim() === "" ? null : typed;
 }
 
-export function cardKindName(kind: CardKind): string {
+export function cardKindName(kind: AddableCardKind): string {
   switch (kind) {
     case "clock":
       return "Digital clock";
@@ -100,8 +140,6 @@ export function cardKindName(kind: CardKind): string {
       return "JSON feed";
     case "rss":
       return "RSS feed";
-    case "plugin":
-      return "Plugin";
   }
 }
 
@@ -116,13 +154,23 @@ function nextId(prefix: string, used: Set<string>): string {
   return `${prefix}-${suffix}`;
 }
 
+/**
+ * What the caller is asking to add. A built-in is named by its kind; a plugin is
+ * named by its registry id plus the cadence its manifest declares, because the
+ * catalog is the only thing that knows either.
+ */
+export type AddCardRequest =
+  | AddableCardKind
+  | { kind: "plugin"; pluginId: string; refreshMinutes: number };
+
 /// Appends a new card with sane defaults for its kind and enrols it at the end
-/// of the active loop in the same draft. Supports all six built-in card kinds.
-/// Both v6 limits are checked before either collection changes, so adding is
-/// atomic even when a legacy card outside the loop has filled only one limit.
+/// of the active loop in the same draft. Supports all six built-in card kinds
+/// and a plugin from the server's catalog. Both v6 limits are checked before
+/// either collection changes, so adding is atomic even when a legacy card
+/// outside the loop has filled only one limit.
 export function addCard(
   config: AppConfig,
-  kind: AddableCardKind,
+  request: AddCardRequest,
 ): {
   config: AppConfig;
   cardId: string | null;
@@ -136,7 +184,9 @@ export function addCard(
     return { config, cardId: null };
   }
   const used = new Set(config.cards.map((card) => card.id));
-  const cardId = nextId(kind, used);
+  // "plugin" as the id stem, never the plugin id: `plugin_id` is bounded at 64 bytes
+  // and a card id at 32, and two cards of one plugin are legitimate.
+  const cardId = nextId(typeof request === "string" ? request : "plugin", used);
   const common = {
     id: cardId,
     tap_action: { kind: "none" } as const,
@@ -144,82 +194,94 @@ export function addCard(
   };
 
   let card: CardSettings;
-  switch (kind) {
-    case "clock":
-      card = {
-        kind,
-        ...common,
-        title: "Desk",
-        show_seconds: true,
-        template: { kind: "digital-clock" },
-        refresh: { kind: "device-local" },
-      };
-      break;
-    case "pomodoro":
-      card = {
-        kind,
-        ...common,
-        label: "Focus",
-        duration_seconds: 25 * 60,
-        template: { kind: "progress-ring" },
-        tap_action: { kind: "start-pause" },
-        refresh: { kind: "device-local" },
-        alert: { kind: "on-timer-finish", hold: { kind: "until-dismissed" } },
-      };
-      break;
-    case "calendar":
-      card = {
-        kind,
-        ...common,
-        title: "Up next",
-        source: { kind: "url", value: "" },
-        template: { kind: "row-list" },
-        refresh: { kind: "interval", minutes: 15 },
-      };
-      break;
-    case "weather":
-      card = {
-        kind,
-        ...common,
-        title: "Weather",
-        location: "",
-        units: "metric",
-        // `icon-badge-text` is the template weather's field composition was designed
-        // for (`value`/`label`/`badge`/`icon`/`temperature_tenths`/
-        // `apparent_temperature_tenths`/`unit`), and `wire_config()` now lowers it to
-        // the device — see `companion/crates/app-core/src/config.rs`. `icon_asset_id`
-        // stays unset here: rendering a pushed custom icon needs
-        // `CAPABILITY_ASSET_TRANSFER`, which is a later milestone task; until then the
-        // device renders its built-in icon for the `icon` field.
-        template: { kind: "icon-badge-text", icon_asset_id: null },
-        refresh: { kind: "interval", minutes: 30 },
-      };
-      break;
-    case "json-feed":
-      card = {
-        kind,
-        ...common,
-        title: "Feed",
-        url: "",
-        mappings: [],
-        // `big-number-label` is the template json-feed's single mapped value is
-        // designed for, and `wire_config()` now lowers it to the device — see
-        // `companion/crates/app-core/src/config.rs`.
-        template: { kind: "big-number-label" },
-        refresh: { kind: "interval", minutes: 15 },
-      };
-      break;
-    case "rss":
-      card = {
-        kind,
-        ...common,
-        title: "Headlines",
-        url: "",
-        max_items: 3,
-        template: { kind: "row-list" },
-        refresh: { kind: "interval", minutes: 30 },
-      };
-      break;
+  if (typeof request !== "string") {
+    card = {
+      kind: "plugin",
+      ...common,
+      // Blank on purpose: the display name already says what the card is, and a
+      // pre-filled title would be a second name nobody chose.
+      title: "",
+      plugin_id: request.pluginId,
+      refresh: { kind: "interval", minutes: request.refreshMinutes },
+    };
+  } else {
+    switch (request) {
+      case "clock":
+        card = {
+          kind: request,
+          ...common,
+          title: "Desk",
+          show_seconds: true,
+          template: { kind: "digital-clock" },
+          refresh: { kind: "device-local" },
+        };
+        break;
+      case "pomodoro":
+        card = {
+          kind: request,
+          ...common,
+          label: "Focus",
+          duration_seconds: 25 * 60,
+          template: { kind: "progress-ring" },
+          tap_action: { kind: "start-pause" },
+          refresh: { kind: "device-local" },
+          alert: { kind: "on-timer-finish", hold: { kind: "until-dismissed" } },
+        };
+        break;
+      case "calendar":
+        card = {
+          kind: request,
+          ...common,
+          title: "Up next",
+          source: { kind: "url", value: "" },
+          template: { kind: "row-list" },
+          refresh: { kind: "interval", minutes: 15 },
+        };
+        break;
+      case "weather":
+        card = {
+          kind: request,
+          ...common,
+          title: "Weather",
+          location: "",
+          units: "metric",
+          // `icon-badge-text` is the template weather's field composition was designed
+          // for (`value`/`label`/`badge`/`icon`/`temperature_tenths`/
+          // `apparent_temperature_tenths`/`unit`), and `wire_config()` now lowers it to
+          // the device — see `companion/crates/app-core/src/config.rs`. `icon_asset_id`
+          // stays unset here: rendering a pushed custom icon needs
+          // `CAPABILITY_ASSET_TRANSFER`, which is a later milestone task; until then the
+          // device renders its built-in icon for the `icon` field.
+          template: { kind: "icon-badge-text", icon_asset_id: null },
+          refresh: { kind: "interval", minutes: 30 },
+        };
+        break;
+      case "json-feed":
+        card = {
+          kind: request,
+          ...common,
+          title: "Feed",
+          url: "",
+          mappings: [],
+          // `big-number-label` is the template json-feed's single mapped value is
+          // designed for, and `wire_config()` now lowers it to the device — see
+          // `companion/crates/app-core/src/config.rs`.
+          template: { kind: "big-number-label" },
+          refresh: { kind: "interval", minutes: 15 },
+        };
+        break;
+      case "rss":
+        card = {
+          kind: request,
+          ...common,
+          title: "Headlines",
+          url: "",
+          max_items: 3,
+          template: { kind: "row-list" },
+          refresh: { kind: "interval", minutes: 30 },
+        };
+        break;
+    }
   }
 
   // Spread the COPIED config's own `cards` array, not the original `config.cards` —
@@ -448,7 +510,10 @@ export interface FilmstripSegment {
 /// there is no dwell to speak of, so every segment is given equal width
 /// instead of a zero-width one, which is what lets the ribbon still show
 /// order (just not timing) in that mode.
-export function filmstripSegments(config: AppConfig): FilmstripSegment[] {
+export function filmstripSegments(
+  config: AppConfig,
+  catalog?: PluginCatalog | null,
+): FilmstripSegment[] {
   const playlist = activePlaylist(config);
   if (!playlist) {
     return [];
@@ -469,7 +534,7 @@ export function filmstripSegments(config: AppConfig): FilmstripSegment[] {
     const widthPercent = total > 0 ? (dwellSeconds[index] / total) * 100 : equalShare;
     const segment: FilmstripSegment = {
       cardId: card.id,
-      name: cardLabel(card),
+      name: cardLabel(card, catalog),
       title: cardTitle(card),
       dwellSeconds: dwellSeconds[index],
       widthPercent,

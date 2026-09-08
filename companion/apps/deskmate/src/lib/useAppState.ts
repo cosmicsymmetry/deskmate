@@ -5,6 +5,8 @@ import {
   factoryResetDevice,
   getAppSnapshot,
   getNetworkSettings,
+  getServerCardState,
+  getServerPlugins,
   listenToAppState,
   provisionDevice,
   saveApplyConfig,
@@ -20,7 +22,9 @@ import type {
   DeviceTier,
   IpcError,
   NetworkSettings,
+  PluginCatalog,
   ProvisionDeviceInput,
+  ServerCardState,
 } from "./types";
 
 interface EventTargetLike {
@@ -98,6 +102,111 @@ export function startAppStateSubscription(options: AppStateSubscriptionOptions):
   };
 }
 
+export const SERVER_CARD_STATE_POLL_MS = 30_000;
+export const SERVER_PLUGIN_NOTICE = "Couldn't reach the server for plugin data.";
+/**
+ * The other true sentence. A server that answers with a shape this app cannot read
+ * was reached, so the notice above would be a false statement about it — and the
+ * reachable cause is the documented server-then-Mac rollout, where the server is
+ * briefly older than the app. Naming the fix is the useful half; the app never
+ * invents the values the older server did not send.
+ */
+export const SERVER_PLUGIN_OUTDATED_NOTICE =
+  "The server answered with plugin data this app can't read. Update the server to match this app.";
+
+/** Which of the two sentences a failed server read has earned. */
+export type ServerReadFailure = "unreachable" | "incompatible";
+
+export function serverReadFailure(error: unknown): ServerReadFailure {
+  return toIpcError(error).category === "incompatible-server" ? "incompatible" : "unreachable";
+}
+
+/**
+ * Two server reads, one notice — but not one sentence. An incompatible answer wins
+ * over an unreachable one when both have failed, because it is the one with an
+ * action behind it and it is the more specific fact.
+ */
+export function serverPluginNotice(
+  catalog: ServerReadFailure | null,
+  cardState: ServerReadFailure | null,
+): string | null {
+  if (catalog === "incompatible" || cardState === "incompatible") {
+    return SERVER_PLUGIN_OUTDATED_NOTICE;
+  }
+  if (catalog === "unreachable" || cardState === "unreachable") {
+    return SERVER_PLUGIN_NOTICE;
+  }
+  return null;
+}
+
+export interface IntervalScheduler {
+  set: (handler: () => void, ms: number) => number;
+  clear: (handle: number) => void;
+}
+
+export interface ServerCardStatePollOptions {
+  fetchCardState: () => Promise<ServerCardState[]>;
+  onCardState: (state: ServerCardState[]) => void;
+  onError: (error: IpcError) => void;
+  focusTarget?: EventTargetLike;
+  visibilityTarget?: VisibilityTargetLike;
+  intervalMs?: number;
+  scheduler?: IntervalScheduler;
+}
+
+/**
+ * The server's plugin state is the one thing this window cannot learn from its own
+ * runtime, so it asks — on a slow beat, and only while someone is looking. A hidden
+ * window polling a homelab every thirty seconds forever is a cost with no reader.
+ *
+ * Shaped like `startAppStateSubscription`: an imperative start returning its own
+ * cleanup, so the hook is a two-line caller and the behaviour is testable without a
+ * renderer.
+ */
+export function startServerCardStatePoll(options: ServerCardStatePollOptions): () => void {
+  let active = true;
+  const scheduler: IntervalScheduler = options.scheduler ?? {
+    set: (handler, ms) => window.setInterval(handler, ms),
+    clear: (handle) => window.clearInterval(handle),
+  };
+  const visible = () =>
+    options.visibilityTarget === undefined ||
+    options.visibilityTarget.visibilityState === "visible";
+  const poll = () => {
+    if (!visible()) {
+      return;
+    }
+    void options
+      .fetchCardState()
+      .then((state) => {
+        if (active) {
+          options.onCardState(state);
+        }
+      })
+      .catch((error) => {
+        if (active) {
+          options.onError(toIpcError(error));
+        }
+      });
+  };
+  const onFocus: EventListener = () => poll();
+  const onVisibilityChange: EventListener = () => {
+    if (visible()) {
+      poll();
+    }
+  };
+  options.focusTarget?.addEventListener("focus", onFocus);
+  options.visibilityTarget?.addEventListener("visibilitychange", onVisibilityChange);
+  const handle = scheduler.set(poll, options.intervalMs ?? SERVER_CARD_STATE_POLL_MS);
+  poll();
+  return () => {
+    active = false;
+    scheduler.clear(handle);
+    options.focusTarget?.removeEventListener("focus", onFocus);
+    options.visibilityTarget?.removeEventListener("visibilitychange", onVisibilityChange);
+  };
+}
+
 export interface AppStateValue {
   snapshot: AppSnapshot | null;
   loading: boolean;
@@ -116,6 +225,16 @@ export interface AppStateValue {
   dataGeneration: number;
   networkSettings: NetworkSettings;
   ownershipTier: DeviceTier | null;
+  /** The server's plugin registry, or null in local tier and before the first read. */
+  pluginCatalog: PluginCatalog | null;
+  /**
+   * One notice for either server read having failed, null when both are fine, and
+   * whichever of the two sentences is true of what happened — see
+   * `serverPluginNotice`.
+   */
+  catalogError: string | null;
+  refreshCatalog: () => void;
+  serverCardState: ServerCardState[];
   saveConfig: (config: AppConfig) => Promise<ConfigApplyResult>;
   saveServerAccess: (serverUrl: string, deviceId: string, adminToken: string) => Promise<void>;
   pairDevice: (input: PairDeviceInput) => Promise<void>;
@@ -176,6 +295,21 @@ export function useAppState(): AppStateValue {
     tier: null,
   });
   const [networkSettingsLoaded, setNetworkSettingsLoaded] = useState(false);
+  const [pluginCatalog, setPluginCatalog] = useState<PluginCatalog | null>(null);
+  const [serverCardState, setServerCardState] = useState<ServerCardState[]>([]);
+  // Two failures, one notice. Tracked apart because a working card-state poll is
+  // not evidence that the catalog read succeeded, and clearing one on the other's
+  // success would make the notice depend on which promise settled first. Each holds
+  // WHY it failed, because "couldn't reach the server" and "the server answered
+  // something this app can't read" are different facts and only one of them is
+  // ever true.
+  const [catalogFailure, setCatalogFailure] = useState<ServerReadFailure | null>(null);
+  const [cardStateFailure, setCardStateFailure] = useState<ServerReadFailure | null>(null);
+  // One generation number for BOTH server reads: "Try again" cannot tell which one
+  // is the reason the notice is showing, so it must retry both rather than leave a
+  // card-state failure sitting there until the next scheduled beat or focus event.
+  const [refreshGeneration, setRefreshGeneration] = useState(0);
+  const refreshCatalog = useCallback(() => setRefreshGeneration((current) => current + 1), []);
   const lastCardDataRef = useRef<string | null>(null);
   const snapshotRef = useRef<AppSnapshot | null>(null);
   const networkSettingsRef = useRef(networkSettings);
@@ -329,6 +463,65 @@ export function useAppState(): AppStateValue {
     networkSettings.tier ??
     (networkSettingsLoaded ? resolveDeviceTier(null, networkSettings) : null);
 
+  const catalogError = serverPluginNotice(catalogFailure, cardStateFailure);
+
+  // `refreshGeneration` is never read in either body below — it exists only so
+  // `refreshCatalog` (bumping it) forces both effects to re-run: this one retries
+  // the catalog fetch, and the poll effect below tears down and restarts its
+  // `startServerCardStatePoll`, which polls once immediately on start. Same
+  // "intentional re-fetch trigger" pattern `DevicePreview` uses for
+  // `dataGeneration`/`orientation`.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: see comment above.
+  useEffect(() => {
+    if (ownershipTier !== "networked") {
+      // Local tier has no server, so a catalog held from a previous pairing would be
+      // a stale promise the app cannot keep. `pluginCardFlag` prints the reason.
+      setPluginCatalog(null);
+      setServerCardState([]);
+      setCatalogFailure(null);
+      setCardStateFailure(null);
+      return;
+    }
+    let active = true;
+    void getServerPlugins()
+      .then((catalog) => {
+        if (active) {
+          setPluginCatalog(catalog);
+          setCatalogFailure(null);
+        }
+      })
+      .catch((error) => {
+        if (active) {
+          setCatalogFailure(serverReadFailure(error));
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [ownershipTier, refreshGeneration]);
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: see comment above.
+  useEffect(() => {
+    if (ownershipTier !== "networked") {
+      return;
+    }
+    // Restarting on `refreshGeneration` re-runs `startServerCardStatePoll`, whose
+    // own `poll()` call on start is what makes "Try again" an immediate re-poll
+    // rather than a wait for the next scheduled beat. The poll's own visibility and
+    // focus gating are untouched by this — a manual click can only happen while the
+    // window is visible in the first place.
+    return startServerCardStatePoll({
+      fetchCardState: getServerCardState,
+      onCardState: (next) => {
+        setServerCardState(next);
+        setCardStateFailure(null);
+      },
+      onError: (error) => setCardStateFailure(serverReadFailure(error)),
+      focusTarget: window,
+      visibilityTarget: document,
+    });
+  }, [ownershipTier, refreshGeneration]);
+
   return {
     snapshot,
     loading,
@@ -337,6 +530,10 @@ export function useAppState(): AppStateValue {
     dataGeneration,
     networkSettings,
     ownershipTier,
+    pluginCatalog,
+    catalogError,
+    refreshCatalog,
+    serverCardState,
     saveConfig,
     saveServerAccess,
     pairDevice,

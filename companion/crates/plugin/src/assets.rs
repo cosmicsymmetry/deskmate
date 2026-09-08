@@ -356,6 +356,9 @@ mod tests {
     fn minimal_manifest(assets: Vec<Asset>) -> PluginManifest {
         PluginManifest {
             manifest_version: ManifestVersion::V1,
+            display_name: None,
+            description: None,
+            summary: None,
             name: "test".to_string(),
             version: "1.0.0".to_string(),
             source: Source::Json {

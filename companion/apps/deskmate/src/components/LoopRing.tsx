@@ -10,12 +10,14 @@ import {
   loopSeconds,
   setPlaylistAdvance,
 } from "../lib/configDraft";
-import type { AppConfig, ValidationIssue } from "../lib/types";
+import type { AppConfig, PluginCatalog, ValidationIssue } from "../lib/types";
 import { FieldIssues } from "./FieldIssues";
 
 interface LoopRingProps {
   config: AppConfig;
   issues: ValidationIssue[];
+  /** The server's plugin registry, so a plugin arc is named the same here as elsewhere. */
+  catalog: PluginCatalog | null;
   selectedCardId: string | null;
   onSelect: (cardId: string) => void;
   onChange: (config: AppConfig) => void;
@@ -65,13 +67,20 @@ function compactDuration(totalSeconds: number): string {
  *
  * The ring and legend display the loop; the grid is the one place its order changes.
  */
-export function LoopRing({ config, issues, selectedCardId, onSelect, onChange }: LoopRingProps) {
+export function LoopRing({
+  config,
+  issues,
+  catalog,
+  selectedCardId,
+  onSelect,
+  onChange,
+}: LoopRingProps) {
   const playlist = activePlaylist(config);
   const playlistIndex = config.playlists.findIndex(
     (candidate) => candidate.id === config.active_playlist_id,
   );
   const isTimed = playlist?.advance.kind === "timed";
-  const segments = useMemo(() => filmstripSegments(config), [config]);
+  const segments = useMemo(() => filmstripSegments(config, catalog), [config, catalog]);
   const total = playlist ? loopSeconds(config, playlist.id) : null;
   const [isPlaying, setIsPlaying] = useState(false);
   const [reducedMotion, setReducedMotion] = useState(false);

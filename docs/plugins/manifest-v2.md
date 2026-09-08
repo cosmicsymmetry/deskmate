@@ -14,6 +14,9 @@ manifest-contract discriminator.
 manifest_version = 2
 name = "svg-aqi"
 version = "1.0.0"
+display_name = "Air quality (SVG)"
+description = "EPA index for a location, drawn from an SVG template"
+summary = "{{ data.current.aqi }}"
 
 [source]
 kind = "json"
@@ -28,10 +31,42 @@ file = "face.svg"
 
 The v1 `name`, content `version`, source URL/refresh bounds, assets, expression language,
 node-count budget, repeat budget, stale/error footer, and asset resolution rules remain
-unchanged. V2 adds only the explicit discriminator, source roots, the template union, and
-the two authorable binding positions below.
+unchanged. V2 adds only the explicit discriminator, source roots, the template union, the
+two authorable binding positions below, and the three optional presentation keys.
 
 Every v2 manifest must contain exactly one `[template]`. V1 must contain none.
+
+## Presentation keys (`display_name`, `description`, `summary`)
+
+Three optional top-level keys, added 2026-09-07 for plugin-card parity in the companion
+app (`docs/superpowers/specs/2026-09-06-deskmate-plugin-card-parity-design.md` §3). All
+three are v2-only: a v1 manifest carrying any of them is rejected by name
+(`ManifestError::V2FieldInV1`). Absence is always tolerated. `name` stays the identity
+key and is never repurposed. `RawPluginManifest` remains `deny_unknown_fields`, so an
+unknown top-level key is still a rejection, not a silent no-op.
+
+| Key | Type | Bound | Meaning |
+|---|---|---|---|
+| `display_name` | string | 1..=64 bytes (`MAX_DISPLAY_NAME_LEN`, the card `title` bound) | What the card **is**, on every surface: "Air quality". Absent → the plugin id. |
+| `description` | string | 1..=160 bytes (`MAX_DESCRIPTION_LEN`) | The add-menu's second line: "EPA index for a location". Absent → "Plugin · <version>". |
+| `summary` | expression string | source ≤ 256 bytes (`MAX_EXPR_SOURCE_LEN`, as a text node's `value`); evaluated output truncated to 32 bytes on a char boundary (`MAX_SUMMARY_LEN`) | The tile's live value: `"{{ data.current.aqi }}"`. Evaluated on every refresh by `plugin::evaluate_summary` and published as the card's `hero` field. Absent → the tile shows "—". |
+
+An empty `display_name` or `description` is `ManifestError::EmptyString`, not a fallback
+request; omit the key to fall back.
+
+`summary` uses the same whole-value `{{ ... }}` rule, grammar and six functions as a
+text node's `value`, with one difference: it is **data expressions only**. A device
+binding (`time:*`, `timer.*`, `date`, `field.*`) anywhere in the expression outside a
+string literal is `ManifestError::SummaryUsesDeviceBinding` at parse time, because the
+summary is evaluated on the server at refresh time, where none of those resolve. A
+provider path that merely shares a name, such as `data.date` or `data.events[0].date`,
+is fine. Evaluation rules: a literal is returned as written; an expression that
+evaluates to a missing value (an absent field, a JSON `null`, a type mismatch) yields no
+summary rather than an empty string, so the tile falls back to "—"; a partial
+interpolation or an expression that fails to parse or evaluate is a named `SummaryError`,
+which the server logs once per plugin and otherwise treats as "no summary"; `icon()` has
+no glyph table here and yields no summary. A stale or error snapshot is evaluated like
+any other, because it still carries the last-good value.
 
 ## `[source].root`
 
@@ -137,13 +172,17 @@ requirement natively, the card is refused under the stage-4 negotiation rule.
 
 ## V1 compatibility
 
-The two shipped v1 manifests remain byte-for-byte unchanged:
+The four curated plugins (`aqi`, `agenda`, `claude-limits`, `svg-aqi`) are all manifest
+v2 as of 2026-09-07 and declare every presentation key. The v1 contract keeps real
+coverage through two byte-exact copies of the `aqi` and `agenda` manifests as they
+shipped under v1, frozen at:
 
-- `companion/plugins/aqi/manifest.toml`
-- `companion/plugins/agenda/manifest.toml`
+- `companion/crates/plugin/tests/fixtures/manifest_v1_aqi.toml`
+- `companion/crates/plugin/tests/fixtures/manifest_v1_agenda.toml`
 
-They parse with synthesized typed defaults `ManifestVersion::V1`, `Template::Scene`, and
-`Source::Json { root: None, .. }`; every field present in the frozen v1 typed shape retains
-the same value. A v1 manifest that supplies `manifest_version`, `[source].root`,
-`[template]`, `arc.end_binding`, or bound-line geometry is rejected rather than silently
-changing meaning.
+They parse with synthesized typed defaults `ManifestVersion::V1`, `Template::Scene`,
+`Source::Json { root: None, .. }`, and `display_name`/`description`/`summary` all
+`None`; every field present in the frozen v1 typed shape retains the same value. A v1
+manifest that supplies `manifest_version`, `[source].root`, `[template]`,
+`arc.end_binding`, bound-line geometry, `display_name`, `description`, or `summary` is
+rejected rather than silently changing meaning.

@@ -3376,6 +3376,18 @@ fn render_card_preview(
             card_id: card_id.to_owned(),
         });
     }
+    // A hostless runtime can neither fetch nor draw a plugin card at all, so
+    // this must be checked before the snapshot lookup below: without a host,
+    // `plugin_snapshots` is never populated for this card (see
+    // `replace_config`'s `CardSettings::Plugin` arm), so a check ordered the
+    // other way would always fall into "Waiting for the first refresh" --
+    // promising an eventual resolution that can never happen. PRODUCT.md's
+    // "show state, not reassurance" forbids exactly that message here.
+    if state.plugin_host.is_none() {
+        return Ok(preview_failure(
+            "this card needs server-side rasterization, which this host does not perform".into(),
+        ));
+    }
     let Some(snapshot) = state.plugin_snapshots.get(card_id).cloned() else {
         return Ok(CardPreview {
             frame: None,
@@ -6634,9 +6646,12 @@ mod tests {
     fn a_card_preview_names_the_wrong_kind_and_the_missing_card_separately() {
         let now = Instant::now();
         let config = rotation_config(
-            vec![rotation_clock_card("clock")],
+            vec![
+                rotation_clock_card("clock"),
+                plugin_card("aqi", "Air quality", "aqi", RefreshPolicy::Manual),
+            ],
             CarouselAdvance::Manual,
-            &[("clock", None)],
+            &[("clock", None), ("aqi", None)],
         );
         let mut scheduler = fresh_scheduler(now);
         let mut state = WorkerState::new(config, now, &mut scheduler);
@@ -6649,5 +6664,19 @@ mod tests {
             render_card_preview(&mut state, "absent"),
             Err(RuntimeError::UnknownCard { ref card_id }) if card_id == "absent"
         ));
+
+        // A hostless runtime's `replace_config` never populates
+        // `plugin_snapshots` for a plugin card (spec 5.3), so a genuine
+        // plugin card must surface the "needs server-side rasterization"
+        // error here rather than "Waiting for the first refresh" -- a message
+        // promising a resolution that can never happen on this runtime.
+        let preview =
+            render_card_preview(&mut state, "aqi").expect("a hostless preview is an Ok outcome");
+        assert_eq!(preview.state, CardPreviewState::Error);
+        assert_eq!(
+            preview.message.as_deref(),
+            Some("this card needs server-side rasterization, which this host does not perform")
+        );
+        assert!(preview.frame.is_none());
     }
 }

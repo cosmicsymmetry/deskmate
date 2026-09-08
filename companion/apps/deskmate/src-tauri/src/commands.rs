@@ -150,7 +150,7 @@ fn fetch_server_card_state(context: &ServerQueryContext) -> Result<Vec<ServerCar
 /// The tier decides where a plugin card's face comes from, and it decides first:
 /// in local tier there is no server and no plugin host, so this returns the
 /// sentence without opening a socket. Only in networked tier is a request made,
-/// and only then can a 404 mean what `PLUGIN_PREVIEW_NEEDS_A_NEWER_SERVER` says.
+/// and only then can a 404 be read as `PLUGIN_PREVIEW_UNAVAILABLE`.
 fn plugin_card_preview(
     context: &ServerQueryContext,
     tier: Option<app_core::DeviceTier>,
@@ -184,10 +184,10 @@ fn plugin_card_preview(
     });
     match response {
         Ok(response) => Ok(plugin_preview_frame(response)),
-        // Spec section 10: additive routes fail closed against an older server.
-        Err(IpcError::NotFound { .. }) => {
-            Ok(unrendered_plugin_frame(PLUGIN_PREVIEW_NEEDS_A_NEWER_SERVER))
-        }
+        // Spec section 10: additive routes fail closed. What a 404 means beyond
+        // "no preview came back" is not knowable here, so the sentence does not
+        // guess -- see `PLUGIN_PREVIEW_UNAVAILABLE`.
+        Err(IpcError::NotFound { .. }) => Ok(unrendered_plugin_frame(PLUGIN_PREVIEW_UNAVAILABLE)),
         Err(error) => Err(error),
     }
 }
@@ -1088,10 +1088,15 @@ fn sim_field(field: &CardField) -> lvgl_sim::SimField {
 /// local tier there is no server to render on and this app has no plugin host.
 pub(crate) const PLUGIN_RENDERS_ON_THE_SERVER: &str = "Plugin cards render on the server";
 
-/// Chosen only after a networked-tier request came back 404. Spec section 10 makes
-/// the Mac's GETs additive, so a server built before the preview route answers 404
-/// and this is the honest reading of it.
-pub(crate) const PLUGIN_PREVIEW_NEEDS_A_NEWER_SERVER: &str = "Plugin previews need a newer server";
+/// Chosen only after a networked-tier request came back 404.
+///
+/// Four different things answer 404 on this route -- a server built before it
+/// exists, an unknown device, an unknown card, and a card that is not a plugin
+/// card -- and the status code carries nothing that tells them apart. So the
+/// sentence states what was observed and asserts no cause. It said "Plugin
+/// previews need a newer server" until the whole-branch review, which was a
+/// guess three quarters of the time.
+pub(crate) const PLUGIN_PREVIEW_UNAVAILABLE: &str = "The server has no preview for this card";
 
 fn unrendered_plugin_frame(state: &str) -> PreviewFrame {
     PreviewFrame {
@@ -3166,8 +3171,8 @@ pub(crate) mod tests {
             }
         );
         assert_eq!(
-            unrendered_plugin_frame(PLUGIN_PREVIEW_NEEDS_A_NEWER_SERVER).state,
-            Some("Plugin previews need a newer server".into())
+            unrendered_plugin_frame(PLUGIN_PREVIEW_UNAVAILABLE).state,
+            Some("The server has no preview for this card".into())
         );
     }
 
@@ -3387,17 +3392,16 @@ pub(crate) mod tests {
     }
 
     /// Spec section 10: the Mac's GETs are additive, so a server that has never
-    /// heard of this route 404s. That reads as "needs a newer server", not as a
-    /// fault, and specifically not as the local-tier sentence, which is chosen
-    /// before any request is made.
+    /// heard of this route 404s. That degrades to a printed sentence rather than a
+    /// fault, and it is not the local-tier sentence, which is chosen before any
+    /// request is made.
     ///
-    /// An unknown device, an unknown card and a non-plugin card also 404, and this
-    /// call path cannot reach any of them: the Mac only asks for a card that is in
-    /// its own config, for the device id it is configured with, and only when that
-    /// card is `CardSettings::Plugin`. They are not distinguished, and pretending to
-    /// would mean inventing a difference the status code does not carry.
+    /// An unknown device, an unknown card and a non-plugin card also 404, and the
+    /// status code cannot tell any of the four apart -- so the sentence claims only
+    /// that no preview came back. An earlier version said "Plugin previews need a
+    /// newer server", which asserted a cause this code cannot know.
     #[test]
-    fn a_preview_route_an_old_server_lacks_degrades_instead_of_erroring() {
+    fn a_preview_the_server_does_not_return_degrades_instead_of_erroring() {
         let (context, listener, directory) =
             server_query_fixture("preview-404", app_core::DeviceTier::Networked);
         let server = answer_once(listener, "404 Not Found", "");
@@ -3406,10 +3410,7 @@ pub(crate) mod tests {
             plugin_card_preview(&context, Some(app_core::DeviceTier::Networked), "air").unwrap();
 
         server.join().unwrap();
-        assert_eq!(
-            frame.state.as_deref(),
-            Some(PLUGIN_PREVIEW_NEEDS_A_NEWER_SERVER)
-        );
+        assert_eq!(frame.state.as_deref(), Some(PLUGIN_PREVIEW_UNAVAILABLE));
         assert_eq!(frame.png_base64, None);
         fs::remove_dir_all(directory).unwrap();
     }

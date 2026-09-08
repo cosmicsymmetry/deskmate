@@ -232,9 +232,16 @@ of letting code and documentation diverge.
     server built before this change fails `deny_unknown_fields`, so the plugin drops out of
     the registry into `load_failures` and its cards go dark. Redeploy the binary first,
     then the manifests. Against a server that predates the preview route the stage says
-    "Plugin previews need a newer server" — a distinct sentence from local tier's "Plugin
-    cards render on the server", which is chosen from the known tier before any request is
-    made. The recipe is written down in `companion/crates/server/deploy/README.md` §6.
+    **"The server has no preview for this card"** — a distinct sentence from local tier's
+    "Plugin cards render on the server", which is chosen from the known tier before any
+    request is made. It deliberately asserts no cause: an unknown device, an unknown card
+    and a non-plugin card all 404 too, and the status code cannot tell the four apart (it
+    said "Plugin previews need a newer server" until the whole-branch review). A catalog
+    or card-state body this app cannot parse — the same rollout window, one route earlier
+    — is its own `IpcError::IncompatibleServer`, and the window's single plugin notice
+    then reads "The server answered with plugin data this app can't read. Update the
+    server to match this app." rather than the false "Couldn't reach the server". The
+    recipe is written down in `companion/crates/server/deploy/README.md` §6.
   - **Rendering a plugin card in local tier is an explicit NON-GOAL** — there is no server
     to render it — so the card is flagged `needs the server` and the stage says so. Do not
     add a Mac-side plugin renderer to "fix" it.

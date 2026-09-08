@@ -20,6 +20,7 @@ use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 mod commands;
 mod events;
 mod preview;
+mod server_client;
 
 const CONFIG_FILE_NAME: &str = "config.json";
 const NETWORK_SETTINGS_FILE_NAME: &str = "network-settings.json";

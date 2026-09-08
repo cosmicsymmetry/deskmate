@@ -22,7 +22,7 @@ use tauri_plugin_dialog::DialogExt;
 
 use crate::{DesktopSnapshot, DesktopState, NetworkedConfigProjection};
 
-const MAX_SERVER_ERROR_BYTES: usize = 64 * 1_024;
+pub(crate) const MAX_SERVER_ERROR_BYTES: usize = 64 * 1_024;
 
 /// The draft travels as a bounded JSON envelope so an IPC caller cannot make serde
 /// allocate an arbitrarily deep application document before domain validation runs.
@@ -1121,7 +1121,7 @@ fn validate_secret(value: &str, maximum: usize, label: &str) -> Result<(), IpcEr
     validate_bounded(value, maximum, label)
 }
 
-fn validate_server_url(value: &str) -> Result<url::Url, IpcError> {
+pub(crate) fn validate_server_url(value: &str) -> Result<url::Url, IpcError> {
     validate_target(value, MAX_SERVER_URL_LEN, "server URL")?;
     let url = url::Url::parse(value).map_err(|_| IpcError::InvalidPayload {
         message: "server URL must be an absolute HTTP or HTTPS URL".into(),
@@ -1162,22 +1162,7 @@ fn device_link_url(server_url: &str) -> Result<String, IpcError> {
 
 fn server_config_url(server_url: &str, device_id: &str) -> Result<url::Url, IpcError> {
     validate_target(device_id, MAX_DEVICE_ID_LEN, "device ID")?;
-    let mut url = validate_server_url(server_url)?;
-    url.set_query(None);
-    url.set_fragment(None);
-    let mut segments = url
-        .path_segments_mut()
-        .map_err(|()| IpcError::InvalidPayload {
-            message: "server URL cannot be used as a base URL".into(),
-        })?;
-    segments
-        .pop_if_empty()
-        .push("v1")
-        .push("devices")
-        .push(device_id)
-        .push("config");
-    drop(segments);
-    Ok(url)
+    crate::server_client::server_url(server_url, &["v1", "devices", device_id, "config"])
 }
 
 fn put_server_config(
@@ -1216,7 +1201,7 @@ fn put_server_config(
     Ok((status, response_body))
 }
 
-fn server_failure(status: u16, body: &[u8]) -> IpcError {
+pub(crate) fn server_failure(status: u16, body: &[u8]) -> IpcError {
     match status {
         401 => IpcError::InvalidPayload {
             message: "the server rejected the admin token".into(),
@@ -1237,7 +1222,7 @@ fn server_failure(status: u16, body: &[u8]) -> IpcError {
             },
         },
         _ => IpcError::RuntimeUnavailable {
-            message: format!("the server rejected the configuration (HTTP {status})"),
+            message: format!("the server rejected the request (HTTP {status})"),
         },
     }
 }
@@ -1315,7 +1300,7 @@ impl From<NetworkSettingsStoreError> for IpcError {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// A private directory named for the test that owns it, so parallel runs of these
@@ -1348,7 +1333,7 @@ mod tests {
     };
     use serde::Serialize;
 
-    fn read_http_request(stream: &mut std::net::TcpStream) -> Vec<u8> {
+    pub(crate) fn read_http_request(stream: &mut std::net::TcpStream) -> Vec<u8> {
         use std::io::Read as _;
 
         let mut request = Vec::new();

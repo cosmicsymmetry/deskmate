@@ -1029,9 +1029,7 @@ mod tests {
         assert_eq!(app.card_data[0].fields[0].key, "hero");
         assert_eq!(
             app.card_data[0].fields[0].value,
-            CardFieldValue::Text {
-                value: "42".into()
-            }
+            CardFieldValue::Text { value: "42".into() }
         );
         assert_eq!(app.card_errors.len(), 1);
         assert_eq!(app.card_errors[0].card_id, "air");

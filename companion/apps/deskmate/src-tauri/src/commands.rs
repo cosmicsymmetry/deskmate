@@ -185,9 +185,9 @@ fn plugin_card_preview(
     match response {
         Ok(response) => Ok(plugin_preview_frame(response)),
         // Spec section 10: additive routes fail closed against an older server.
-        Err(IpcError::NotFound { .. }) => Ok(unrendered_plugin_frame(
-            PLUGIN_PREVIEW_NEEDS_A_NEWER_SERVER,
-        )),
+        Err(IpcError::NotFound { .. }) => {
+            Ok(unrendered_plugin_frame(PLUGIN_PREVIEW_NEEDS_A_NEWER_SERVER))
+        }
         Err(error) => Err(error),
     }
 }
@@ -1058,8 +1058,7 @@ pub(crate) const PLUGIN_RENDERS_ON_THE_SERVER: &str = "Plugin cards render on th
 /// Chosen only after a networked-tier request came back 404. Spec section 10 makes
 /// the Mac's GETs additive, so a server built before the preview route answers 404
 /// and this is the honest reading of it.
-pub(crate) const PLUGIN_PREVIEW_NEEDS_A_NEWER_SERVER: &str =
-    "Plugin previews need a newer server";
+pub(crate) const PLUGIN_PREVIEW_NEEDS_A_NEWER_SERVER: &str = "Plugin previews need a newer server";
 
 fn unrendered_plugin_frame(state: &str) -> PreviewFrame {
     PreviewFrame {
@@ -3222,7 +3221,11 @@ pub(crate) mod tests {
     fn server_query_fixture(
         label: &str,
         tier: app_core::DeviceTier,
-    ) -> (ServerQueryContext, std::net::TcpListener, std::path::PathBuf) {
+    ) -> (
+        ServerQueryContext,
+        std::net::TcpListener,
+        std::path::PathBuf,
+    ) {
         let directory = scratch_directory(label);
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
@@ -3336,8 +3339,8 @@ pub(crate) mod tests {
                 "refreshed_at_unix_ms":1787000000000}"#,
         );
 
-        let frame = plugin_card_preview(&context, Some(app_core::DeviceTier::Networked), "air")
-            .unwrap();
+        let frame =
+            plugin_card_preview(&context, Some(app_core::DeviceTier::Networked), "air").unwrap();
 
         let request = server.join().unwrap();
         assert!(request.starts_with("GET /v1/devices/desk-1/cards/air/preview "));
@@ -3363,8 +3366,8 @@ pub(crate) mod tests {
             server_query_fixture("preview-404", app_core::DeviceTier::Networked);
         let server = answer_once(listener, "404 Not Found", "");
 
-        let frame = plugin_card_preview(&context, Some(app_core::DeviceTier::Networked), "air")
-            .unwrap();
+        let frame =
+            plugin_card_preview(&context, Some(app_core::DeviceTier::Networked), "air").unwrap();
 
         server.join().unwrap();
         assert_eq!(

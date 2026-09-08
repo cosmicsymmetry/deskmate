@@ -122,9 +122,12 @@ mod tests {
         // A segment that tries to escape into another route is percent-encoded,
         // not obeyed: `url` encodes `/` as `%2F` inside a pushed segment.
         assert_eq!(
-            server_url("https://desk.example", &["v1", "devices", "a b/c", "config"])
-                .unwrap()
-                .as_str(),
+            server_url(
+                "https://desk.example",
+                &["v1", "devices", "a b/c", "config"]
+            )
+            .unwrap()
+            .as_str(),
             "https://desk.example/v1/devices/a%20b%2Fc/config"
         );
         assert!(server_url("not-a-url", &["v1"]).is_err());

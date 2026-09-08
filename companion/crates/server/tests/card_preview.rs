@@ -209,9 +209,18 @@ async fn rendering_a_preview_adds_nothing_to_the_device_transcript() {
             assert!(body["png_base64"].is_null());
         }
     };
+    // This window is wider than the control window above on purpose: the
+    // production runtime's `RuntimeOptions::default().status_interval` is 2
+    // seconds, and `card_message_name` deliberately excludes `StatusRequest`
+    // as link housekeeping rather than a card-bearing message. A window
+    // shorter than that interval would never see one at all, leaving that
+    // exclusion untested -- an accidentally-un-excluded `StatusRequest`
+    // reaching the device during this window would then pass this assertion
+    // for the wrong reason. 2.3 seconds gives one status tick a safe margin
+    // to land inside the window.
     let ((), transcript) = tokio::join!(
         previews,
-        support::card_messages_during(&mut socket, Duration::from_millis(750))
+        support::card_messages_during(&mut socket, Duration::from_millis(2_300))
     );
     assert_eq!(transcript, Vec::<&'static str>::new());
 }

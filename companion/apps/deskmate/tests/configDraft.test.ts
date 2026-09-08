@@ -148,6 +148,27 @@ test("no card kind is called “Plugin” on any surface", () => {
   expect(cardName({ ...pluginCard(), title: "" })).toBe("com.example.air-quality");
 });
 
+test("a bare plugin id always carries the word that explains it", () => {
+  const card = pluginCard();
+  const missing = { ...card, plugin_id: "com.example.gone" };
+  const networked: DeviceTier = "networked";
+  const local: DeviceTier = "local";
+
+  // Networked, catalog loaded, plugin present: the name is the whole story.
+  expect(pluginCardFlag(card, pluginCatalog(), networked)).toBeNull();
+  // Networked, catalog loaded, plugin absent: the server does not have it.
+  expect(pluginCardFlag(missing, pluginCatalog(), networked)).toBe("not on the server");
+  // Local tier: there is no server to render it, whatever a stale catalog says.
+  expect(pluginCardFlag(card, pluginCatalog(), local)).toBe("needs the server");
+  expect(pluginCardFlag(missing, null, local)).toBe("needs the server");
+  // Networked with no catalog yet: unknown is not the same as absent, so no word.
+  expect(pluginCardFlag(missing, null, networked)).toBeNull();
+  // Ownership not yet resolved: also unknown, also silent.
+  expect(pluginCardFlag(missing, null, null)).toBeNull();
+  // Built-in cards never carry it.
+  expect(pluginCardFlag(initialConfig().cards[0], null, local)).toBeNull();
+});
+
 describe("configuration draft helpers", () => {
   test("adds cards with stable unique card IDs", () => {
     const withSecondClock = addCard(initialConfig(), "clock");

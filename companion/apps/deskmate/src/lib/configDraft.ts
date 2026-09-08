@@ -88,6 +88,35 @@ export function cardLabel(card: CardSettings, catalog?: PluginCatalog | null): s
   return entry?.display_name ?? card.plugin_id;
 }
 
+export type PluginCardFlag = "not on the server" | "needs the server";
+
+/**
+ * The word beside a plugin card whose name could not be resolved. Order matters:
+ * local tier is the reason that outranks every other, because no catalog, however
+ * complete, can make a plugin render on a Mac that owns the display itself. A
+ * missing catalog in networked tier is deliberately silent — the window has not
+ * heard from the server yet, and "not on the server" would be an accusation the
+ * app cannot support.
+ */
+export function pluginCardFlag(
+  card: CardSettings,
+  catalog: PluginCatalog | null,
+  tier: DeviceTier | null,
+): PluginCardFlag | null {
+  if (card.kind !== "plugin") {
+    return null;
+  }
+  if (tier === "local") {
+    return "needs the server";
+  }
+  if (!catalog) {
+    return null;
+  }
+  return catalog.plugins.some((plugin) => plugin.id === card.plugin_id)
+    ? null
+    : "not on the server";
+}
+
 /**
  * The owner's words for this card, if they typed any. Null rather than a fallback,
  * because a secondary line repeating the label it sits under is worse than no line.

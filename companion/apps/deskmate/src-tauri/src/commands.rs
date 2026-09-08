@@ -144,6 +144,80 @@ pub struct PreviewFrame {
     pub state: Option<String>,
 }
 
+/// The server's view of one plugin card, projected onto the Mac's snapshot so a
+/// plugin tile carries the same value, freshness and error copy a built-in does.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServerCardState {
+    pub card_id: String,
+    pub provider: app_core::ProviderState,
+    pub hero: Option<String>,
+    pub errors: Vec<app_core::CardError>,
+}
+
+/// Deliberately partial. `AdminSnapshot` injects `last_ota_error` and
+/// `observed_age_seconds` into `device` after serialization, so parsing the whole
+/// `AppSnapshot` back would couple this app to a shape only the server writes.
+/// These four collections are all a plugin tile needs.
+#[derive(Deserialize)]
+pub(crate) struct ServerDeviceStatus {
+    snapshot: Option<ServerRuntimeSnapshot>,
+}
+
+#[derive(Deserialize)]
+struct ServerRuntimeSnapshot {
+    config: ServerSnapshotConfig,
+    providers: Vec<app_core::ProviderSnapshot>,
+    card_data: Vec<app_core::CardDataSnapshot>,
+    card_errors: Vec<app_core::CardError>,
+}
+
+#[derive(Deserialize)]
+struct ServerSnapshotConfig {
+    cards: Vec<CardSettings>,
+}
+
+fn project_server_card_state(status: &ServerDeviceStatus) -> Vec<ServerCardState> {
+    let Some(snapshot) = status.snapshot.as_ref() else {
+        return Vec::new();
+    };
+    snapshot
+        .config
+        .cards
+        .iter()
+        .filter(|card| matches!(card, CardSettings::Plugin { .. }))
+        .map(|card| {
+            let card_id = card.id();
+            ServerCardState {
+                card_id: card_id.to_owned(),
+                provider: snapshot
+                    .providers
+                    .iter()
+                    .find(|provider| provider.widget_id == card_id)
+                    .map_or(app_core::ProviderState::Idle, |provider| {
+                        provider.state.clone()
+                    }),
+                // The summary the manifest declares arrives as `hero`; a non-text
+                // value is not a headline, so it is not shown as one.
+                hero: snapshot
+                    .card_data
+                    .iter()
+                    .find(|data| data.card_id == card_id)
+                    .and_then(|data| data.fields.iter().find(|field| field.key == "hero"))
+                    .and_then(|field| match &field.value {
+                        CardFieldValue::Text { value } => Some(value.clone()),
+                        CardFieldValue::Integer { .. } | CardFieldValue::Boolean { .. } => None,
+                    }),
+                errors: snapshot
+                    .card_errors
+                    .iter()
+                    .filter(|error| error.card_id == card_id)
+                    .cloned()
+                    .collect(),
+            }
+        })
+        .collect()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "category", rename_all = "kebab-case")]
 pub enum IpcError {
@@ -2878,6 +2952,87 @@ pub(crate) mod tests {
             unrendered_plugin_frame(PLUGIN_PREVIEW_NEEDS_A_NEWER_SERVER).state,
             Some("Plugin previews need a newer server".into())
         );
+    }
+
+    #[test]
+    fn server_card_state_covers_plugin_cards_only_and_reads_the_hero_field() {
+        let body = serde_json::json!({
+            "device_id": "desk-1",
+            "connected": true,
+            "last_seen_unix_ms": 1_787_000_000_000_u64,
+            "config": { "origin": "current", "using_fallback": false, "fallback_reason": null },
+            "snapshot": {
+                "config": {
+                    "cards": [
+                        { "kind": "clock", "id": "clock", "title": "Desk",
+                          "show_seconds": true, "template": { "kind": "digital-clock" },
+                          "tap_action": { "kind": "none" },
+                          "refresh": { "kind": "device-local" }, "alert": { "kind": "none" } },
+                        { "kind": "plugin", "id": "air", "title": "", "plugin_id": "aqi",
+                          "tap_action": { "kind": "none" },
+                          "refresh": { "kind": "interval", "minutes": 15 },
+                          "alert": { "kind": "none" } },
+                        { "kind": "plugin", "id": "news", "title": "", "plugin_id": "agenda",
+                          "tap_action": { "kind": "none" },
+                          "refresh": { "kind": "interval", "minutes": 30 },
+                          "alert": { "kind": "none" } }
+                    ]
+                },
+                "device": { "observed_age_seconds": 4, "last_ota_error": null },
+                "providers": [
+                    { "widget_id": "air", "state": { "kind": "fresh" },
+                      "last_success_unix_ms": 1_787_000_000_000_i64, "age_seconds": 30 },
+                    { "widget_id": "clock", "state": { "kind": "idle" },
+                      "last_success_unix_ms": null, "age_seconds": null }
+                ],
+                "card_data": [
+                    { "card_id": "air", "fields": [
+                        { "key": "title", "value": { "kind": "text", "value": "Air quality" } },
+                        { "key": "hero", "value": { "kind": "text", "value": "42" } } ] },
+                    { "card_id": "clock", "fields": [] }
+                ],
+                "card_errors": [
+                    { "kind": "scene-refused", "card_id": "news",
+                      "message": "no snapshot cached yet" },
+                    { "kind": "data-refused", "card_id": "clock", "message": "ignored" }
+                ]
+            }
+        });
+
+        let states = project_server_card_state(&serde_json::from_value(body).unwrap());
+
+        assert_eq!(
+            states,
+            vec![
+                ServerCardState {
+                    card_id: "air".into(),
+                    provider: ProviderState::Fresh,
+                    hero: Some("42".into()),
+                    errors: Vec::new(),
+                },
+                // No provider entry yet is Idle, not an invented staleness.
+                ServerCardState {
+                    card_id: "news".into(),
+                    provider: ProviderState::Idle,
+                    hero: None,
+                    errors: vec![CardError {
+                        kind: CardErrorKind::SceneRefused,
+                        card_id: "news".into(),
+                        message: "no snapshot cached yet".into(),
+                    }],
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_device_with_no_runtime_projects_no_plugin_state() {
+        let body = serde_json::json!({
+            "device_id": "desk-1", "connected": false, "last_seen_unix_ms": null,
+            "config": { "origin": "defaults", "using_fallback": false, "fallback_reason": null },
+            "snapshot": null
+        });
+        assert!(project_server_card_state(&serde_json::from_value(body).unwrap()).is_empty());
     }
 
     fn typescript_contract_source() -> String {

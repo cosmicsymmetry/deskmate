@@ -2,6 +2,17 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **STATUS (recorded 2026-09-08): Tasks 1-7 are IMPLEMENTED AND COMMITTED; the
+> checkboxes below were never ticked and are NOT a progress signal — read the commits,
+> not the boxes.** One commit per task, `ca319af`..`ee69120`: the egress-guarded POST-form
+> helper, PKCE/`state` primitives, the OAuth transport seam and Google token-response
+> classifier, `TokenManager`, the operator session cookie and `OperatorAuthenticated`
+> gate, the consent/callback/revoke routes with the `IntegrationRuntime` stash, and the
+> `main.rs` wiring. What the boxes cannot tell you is what remains: this sub-project has
+> had **no whole-branch review**, and the plan's own Task 6 Step 5 route integration test
+> is controller-run — Codex's sandbox denies loopback binds, so a green report from it
+> does not cover those. Verify both before calling sub-project 2 complete.
+
 **Goal:** Build the server-side OAuth framework — a `TokenManager` (code exchange, skew-window refresh, revoke, typed health), a provider-agnostic token transport routed through the egress guard, the three consent/callback/revoke routes, and the admin-cookie gate they sit behind — with Google wired as the first (and only) identity.
 
 **Architecture:** All in the `server` crate. A new `oauth` module holds PKCE/`state` primitives, an injectable `OAuthTransport` seam (production impl calls the egress guard, tests inject a fake), a `TokenManager` that owns the in-memory access-token cache and drives the existing `IntegrationStore` for durable refresh-token/client-secret storage, an operator session cookie signed with HMAC-SHA256 keyed by the existing `DESKMATE_ADMIN_TOKEN`, and the Axum routes. The egress guard gains a POST-form helper (it was GET-only) so credential-bearing calls keep resolve-then-pin. No `app-core`, config-schema, protocol, or firmware change.

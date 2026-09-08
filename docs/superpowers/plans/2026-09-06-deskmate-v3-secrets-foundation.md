@@ -2,6 +2,15 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **STATUS (recorded 2026-09-08): DELIVERED. The checkboxes below were never ticked
+> during execution and are NOT a progress signal — read the commits, not the boxes.**
+> Sub-project 1 landed as six commits, `994a422`..`e472113`, with the full companion
+> gate clean and a whole-branch review returning APPROVE. Two carry-forward facts the
+> boxes do not record: `IntegrationStore` holds a sync `Mutex` across disk I/O, so any
+> async Axum handler calling `put`/`remove` must go through `spawn_blocking`; and the
+> key-source fail-closed precedence plus the redacted `IntegrationSecret` `Debug` are
+> pinned by `e472113`.
+
 **Goal:** Build the server-side `IntegrationStore` — an encrypted-at-rest store for per-integration OAuth secrets (refresh tokens, client secrets) with a keyfile-based master key that fails closed at startup.
 
 **Architecture:** A new `secrets` module in the **server** crate holds an `IntegrationStore` keyed by integration id. Plaintext secrets are a JSON map held in memory; at rest they are one `secrets.enc` file — `MAGIC || 24-byte nonce || XChaCha20-Poly1305 ciphertext`, base64-encoded on a single line, written atomically at `0o600` through `app-core`'s existing `secure_file` machinery (promoted from `pub(crate)` to `pub` so there is one implementation, not a second copy alongside the one `registry.rs` already reinvented). The 32-byte master key is read once at startup from a `0o600` keyfile outside the config dir (env-base64 fallback); it never touches disk again and is zeroized on drop. This sub-project is storage + key custody only — no OAuth, no HTTP, no provider (sub-projects 2–4).

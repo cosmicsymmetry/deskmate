@@ -2,6 +2,13 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **STATUS (recorded 2026-09-09): Tasks 1-5 DELIVERED; Task 6's rollout was EXECUTED on
+> 2026-09-08. None of the 107 boxes were ever ticked and they are NOT a progress signal —
+> read the "Rollout record" section at the end of this file, which carries the real
+> evidence.** Rollout A-C passed against the live server; Rollout D is recorded as
+> partly observed, because no card in the fleet currently names a plugin and the board
+> has been offline since 2026-09-07.
+
 **Goal:** A server-rendered plugin card looks and behaves like a built-in card on every
 surface of the Mac app — name, live tile value, freshness, preview, add gesture, editor —
 without a schema or protocol change.

@@ -1071,6 +1071,14 @@ impl From<RuntimeError> for AdminError {
                     message: error.to_string(),
                 }
             }
+            // Naming a card that is not configured, or one that is not a
+            // plugin card, is an addressing mistake by the caller -- the same
+            // bare 404 an unknown device gets from `get_device`, not a runtime
+            // fault with a body. The unit `NotFound` already exists and is
+            // what `IntoResponse` turns into a bare `404`.
+            RuntimeError::UnknownCard { .. } | RuntimeError::NotAPluginCard { .. } => {
+                Self::NotFound
+            }
         }
     }
 }

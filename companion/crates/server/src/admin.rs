@@ -1271,7 +1271,7 @@ mod tests {
                 }],
                 value: fetched.then_some(payload),
                 refreshed_at: fetched.then(chrono::Utc::now),
-                age: fetched.then(|| std::time::Duration::ZERO),
+                age: fetched.then_some(std::time::Duration::ZERO),
                 stale: !fetched,
                 error: (!fetched).then(|| "the first refresh has not landed".to_owned()),
             }

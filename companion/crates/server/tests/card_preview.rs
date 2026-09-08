@@ -144,10 +144,8 @@ async fn rendering_a_preview_adds_nothing_to_the_device_transcript() {
         .header("Content-Type", "application/json")
         .body(config)
         .send();
-    let (response, applied) = tokio::join!(
-        put,
-        support::drive_until_config(&mut socket, "aqi-card")
-    );
+    let (response, applied) =
+        tokio::join!(put, support::drive_until_config(&mut socket, "aqi-card"));
     assert_eq!(response.expect("config PUT").status(), 200);
     assert_eq!(applied.widgets.len(), 1);
 

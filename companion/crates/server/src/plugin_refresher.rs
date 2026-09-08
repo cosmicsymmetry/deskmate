@@ -436,8 +436,10 @@ mod tests {
     fn a_declared_summary_is_published_as_the_hero_field_after_the_title() {
         let (registry, _base) =
             crate::test_plugins::fixture_registry(crate::test_plugins::V2_NAMED_MANIFEST);
-        let mut refresher =
-            refresher_with_registry(registry, vec![Ok(ok_response(br#"{"current":{"aqi":42}}"#))]);
+        let mut refresher = refresher_with_registry(
+            registry,
+            vec![Ok(ok_response(br#"{"current":{"aqi":42}}"#))],
+        );
 
         let result = refresher.refresh(fixture_request("fixture-card"));
 
@@ -463,8 +465,10 @@ mod tests {
         // The tile then shows "—", like a weather card with no data.
         let (registry, _base) =
             crate::test_plugins::fixture_registry(crate::test_plugins::V2_UNNAMED_MANIFEST);
-        let mut refresher =
-            refresher_with_registry(registry, vec![Ok(ok_response(br#"{"current":{"aqi":42}}"#))]);
+        let mut refresher = refresher_with_registry(
+            registry,
+            vec![Ok(ok_response(br#"{"current":{"aqi":42}}"#))],
+        );
 
         let result = refresher.refresh(fixture_request("fixture-card"));
 

@@ -88,7 +88,8 @@ pub(crate) fn fixture_registry(manifest: &str) -> (Arc<PluginRegistry>, tempfile
     std::fs::create_dir(base.path().join("fixture")).expect("plugin fixture directory");
     std::fs::write(base.path().join("fixture/manifest.toml"), manifest)
         .expect("write fixture manifest");
-    let (registry, failures) = PluginRegistry::load(base.path()).expect("load the fixture registry");
+    let (registry, failures) =
+        PluginRegistry::load(base.path()).expect("load the fixture registry");
     assert!(failures.is_empty(), "unexpected failures: {failures:?}");
     (Arc::new(registry), base)
 }

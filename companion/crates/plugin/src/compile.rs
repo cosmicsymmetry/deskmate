@@ -181,7 +181,7 @@ impl std::error::Error for CompileError {}
 /// incidentally reject the same input for an unrelated reason -- a future,
 /// more permissive `Expr` grammar could stop rejecting it at all, silently
 /// turning a mistyped binding into a baked-forever literal.
-fn looks_like_binding_namespace(text: &str) -> bool {
+pub(crate) fn looks_like_binding_namespace(text: &str) -> bool {
     text == "date"
         || text.starts_with("timer.")
         || text.starts_with("time:")

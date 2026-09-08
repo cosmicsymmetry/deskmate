@@ -15,13 +15,17 @@
 //! task) or compile a manifest into a `Scene` (also a later task); it does
 //! not validate node geometry against the 448x368 canvas, because
 //! `protocol::validate_scene` is where that bound already lives and the
-//! compiler that produces a real `Scene` is what calls it.
+//! compiler that produces a real `Scene` is what calls it. The one
+//! exception is `validate_summary_source`, a lexical token scan that still
+//! parses no grammar.
 
 use std::collections::HashSet;
 use std::fmt;
 use std::path::Component;
 
 use serde::Deserialize;
+
+use crate::compile::{ExpressionSource, classify_expression_source, looks_like_binding_namespace};
 
 // ---------------------------------------------------------------------------
 // Bounds. Each protects a specific untrusted-input hazard; each has a test
@@ -617,6 +621,57 @@ fn check_non_empty(field: &'static str, value: &str) -> Result<(), ManifestError
     }
 }
 
+/// Refuses a `summary` whose `{{ ... }}` body references the device-binding
+/// namespace anywhere outside a string literal. This is a lexical scan, not
+/// expression parsing (the grammar stays `expr.rs`'s, exactly as this
+/// module's doc promises): it reads identifier-shaped tokens
+/// (`[A-Za-z0-9_.:]`, so `timer.status` and `time:angle:hour` are one token
+/// each), skips `"..."` literals with the same [`skip_string`] the nesting
+/// pre-scan uses, and asks [`looks_like_binding_namespace`] -- the compiler's
+/// own predicate -- about every token that is not a trailing path segment
+/// (one preceded by `.`, such as the `date` in `data.events[0].date`). A
+/// literal summary cannot reference a binding, and a malformed pair is
+/// `summary::evaluate_summary`'s named error, at the same layer a text
+/// node's is.
+fn validate_summary_source(summary: &str) -> Result<(), ManifestError> {
+    match classify_expression_source(summary) {
+        ExpressionSource::Expression(inner) => match summary_device_binding(inner) {
+            Some(binding) => Err(ManifestError::SummaryUsesDeviceBinding { binding }),
+            None => Ok(()),
+        },
+        ExpressionSource::Literal(_) | ExpressionSource::MalformedPartial => Ok(()),
+    }
+}
+
+fn summary_device_binding(inner: &str) -> Option<String> {
+    fn is_token_byte(byte: u8) -> bool {
+        byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b':')
+    }
+    let bytes = inner.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'"' {
+            i = skip_string(bytes, i, b'"');
+        } else if bytes[i].is_ascii_alphabetic() || bytes[i] == b'_' {
+            let start = i;
+            while i < bytes.len() && is_token_byte(bytes[i]) {
+                i += 1;
+            }
+            // Token bytes are ASCII, so both ends of this slice are char
+            // boundaries: `start` is an ASCII letter and `i` stops at the
+            // first non-token byte, which is never a UTF-8 continuation byte.
+            let token = &inner[start..i];
+            let is_path_segment = start > 0 && bytes[start - 1] == b'.';
+            if !is_path_segment && looks_like_binding_namespace(token) {
+                return Some(token.to_string());
+            }
+        } else {
+            i += 1;
+        }
+    }
+    None
+}
+
 /// Refuses any asset `file` that is not a single plain filename component.
 ///
 /// Final whole-stage review finding 1: `assets.rs` used to do a bare
@@ -711,6 +766,7 @@ impl PluginManifest {
         }
         if let Some(summary) = &self.summary {
             check_len("summary", summary, MAX_EXPR_SOURCE_LEN)?;
+            validate_summary_source(summary)?;
         }
         self.source.validate()?;
 
@@ -1817,5 +1873,46 @@ value = "{{ data.rows[item].label }}"
                 actual: MAX_EXPR_SOURCE_LEN + 1,
             }
         );
+    }
+
+    #[test]
+    fn a_summary_naming_a_device_binding_is_rejected_by_name() {
+        for (summary, binding) in [
+            ("{{ field.title }}", "field.title"),
+            ("{{ upper(timer.status) }}", "timer.status"),
+            ("{{ time:angle:hour }}", "time:angle:hour"),
+            ("{{ date }}", "date"),
+            ("{{ default(data.x, field.title) }}", "field.title"),
+        ] {
+            let err =
+                parse_manifest(&v2_manifest_with(&format!("summary = \"{summary}\""))).unwrap_err();
+            assert_eq!(
+                err,
+                ManifestError::SummaryUsesDeviceBinding {
+                    binding: binding.to_string()
+                },
+                "{summary}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_summary_reading_data_that_merely_looks_like_a_binding_is_accepted() {
+        // `data.date` and `data.timer.status` are provider paths that read as
+        // one dotted token, `data.events[0].date` is the case where a binding
+        // WORD is a trailing path segment after an array index (agenda's own
+        // shape), `"field.title"` is a string literal, and plain text is a
+        // literal summary.
+        for summary in [
+            "{{ data.date }}",
+            "{{ data.timer.status }}",
+            "{{ data.events[0].date }}",
+            r#"{{ \"field.title\" }}"#,
+            r#"{{ default(data.dates, \"--\") }}"#,
+            "Plain text",
+        ] {
+            parse_manifest(&v2_manifest_with(&format!("summary = \"{summary}\"")))
+                .unwrap_or_else(|err| panic!("{summary} must be accepted: {err:?}"));
+        }
     }
 }

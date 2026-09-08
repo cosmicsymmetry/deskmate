@@ -2096,8 +2096,7 @@ pub(crate) mod tests {
     /// panicked in `Pixmap::from_vec`) are refused by name.
     #[test]
     fn a_blob_that_is_not_a_canonical_frame_is_refused_rather_than_panicking() {
-        let expected =
-            12 + usize::try_from(SCENE_CANVAS_WIDTH * SCENE_CANVAS_HEIGHT * 2).unwrap();
+        let expected = 12 + usize::try_from(SCENE_CANVAS_WIDTH * SCENE_CANVAS_HEIGHT * 2).unwrap();
         for length in [0, 11, 12, expected - 2, expected + 2] {
             assert_eq!(
                 frame_png(&vec![0u8; length]),

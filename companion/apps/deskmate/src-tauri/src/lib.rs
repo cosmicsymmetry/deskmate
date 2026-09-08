@@ -1071,10 +1071,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let directory = std::env::temp_dir().join(format!(
-            "deskmate-{label}-{}-{serial}",
-            std::process::id()
-        ));
+        let directory =
+            std::env::temp_dir().join(format!("deskmate-{label}-{}-{serial}", std::process::id()));
         std::fs::create_dir(&directory).unwrap();
         let store = Arc::new(NetworkSettingsStore::new(
             directory.join("network-settings.json"),

@@ -1065,6 +1065,14 @@ of letting code and documentation diverge.
 - Keep plans live: record material decisions, deviations, exact verification results,
   and blockers as they are discovered. Never claim hardware verification that was not
   observed on the physical board.
+- **An unticked `- [ ]` in a plan is NOT evidence that work is outstanding.** Most
+  executors here have never ticked a box: as of the 2026-09-08 audit, roughly 380 open
+  boxes across eight delivered plans describe work that shipped, which makes
+  `grep -c '^- \[ \]'` worthless as a progress signal and, worse, invites planning around
+  phantom debt. Trust the commits, the plan's own prose/status headers, and
+  `docs/hardware/board-notes.md` instead. If you execute a plan, tick as you go; if you
+  find a plan whose boxes lie, put a STATUS header at its top saying so rather than
+  back-filling ticks you did not verify.
 - Write the next milestone plan at the current milestone's exit, using what was learned
   during implementation. Do not start later-milestone breadth early.
 - Use conventional commit prefixes (`feat:`, `fix:`, `test:`, `docs:`, `chore:`) when

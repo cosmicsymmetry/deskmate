@@ -293,6 +293,8 @@ const fn runtime_error_log_label(error: &app_core::RuntimeError) -> &'static str
         app_core::RuntimeError::ResponseTimeout => "response-timeout",
         app_core::RuntimeError::UnknownWidget { .. } => "unknown-widget",
         app_core::RuntimeError::UnknownScreen { .. } => "unknown-screen",
+        app_core::RuntimeError::UnknownCard { .. } => "unknown-card",
+        app_core::RuntimeError::NotAPluginCard { .. } => "not-a-plugin-card",
         app_core::RuntimeError::DeviceDisconnected | app_core::RuntimeError::Device { .. } => {
             "device"
         }

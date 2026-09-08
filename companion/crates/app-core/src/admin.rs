@@ -156,7 +156,10 @@ mod tests {
                 serde_json::to_string(&catalog_entry()).unwrap()
             )
         );
-        assert_eq!(serde_json::from_str::<PluginCatalog>(&json).unwrap(), catalog);
+        assert_eq!(
+            serde_json::from_str::<PluginCatalog>(&json).unwrap(),
+            catalog
+        );
     }
 
     #[test]

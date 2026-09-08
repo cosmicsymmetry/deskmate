@@ -1277,11 +1277,12 @@ impl From<RuntimeError> for IpcError {
                     message: error.to_string(),
                 }
             }
-            RuntimeError::UnknownWidget { .. } | RuntimeError::UnknownScreen { .. } => {
-                Self::NotFound {
-                    message: error.to_string(),
-                }
-            }
+            RuntimeError::UnknownWidget { .. }
+            | RuntimeError::UnknownScreen { .. }
+            | RuntimeError::UnknownCard { .. }
+            | RuntimeError::NotAPluginCard { .. } => Self::NotFound {
+                message: error.to_string(),
+            },
             RuntimeError::DeviceDisconnected => Self::Device {
                 message: "device is disconnected".into(),
             },

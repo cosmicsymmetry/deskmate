@@ -2,9 +2,9 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 import {
   activePlaylist,
-  filmstripAdvance,
-  filmstripDeadline,
-  filmstripSegments,
+  loopAdvance,
+  loopDeadline,
+  loopSegments,
   formatDuration,
   issuesForPath,
   loopSeconds,
@@ -56,12 +56,11 @@ function compactDuration(totalSeconds: number): string {
 /**
  * The loop ring: one arc per active-playlist entry, its sweep proportional to that
  * entry's resolved dwell, with the on-panel entry at full luminance and a marker
- * riding it. It is the successor to the filmstrip and keeps the same truth —
- * a card's share of the loop, which no other control shows — in the form the rest
- * of this world is built from.
+ * riding it. It carries the one truth no other control shows: a card's share of
+ * the loop.
  *
  * All the arithmetic still comes from the pure helpers in `configDraft`
- * (`filmstripSegments`, `loopSeconds`, `filmstripAdvance`, `filmstripDeadline`), so
+ * (`loopSegments`, `loopSeconds`, `loopAdvance`, `loopDeadline`), so
  * the ring and any other consumer of loop length can never drift apart. This
  * component only maps those numbers onto a circle and wires the events.
  *
@@ -80,7 +79,7 @@ export function LoopRing({
     (candidate) => candidate.id === config.active_playlist_id,
   );
   const isTimed = playlist?.advance.kind === "timed";
-  const segments = useMemo(() => filmstripSegments(config, catalog), [config, catalog]);
+  const segments = useMemo(() => loopSegments(config, catalog), [config, catalog]);
   const total = playlist ? loopSeconds(config, playlist.id) : null;
   const [isPlaying, setIsPlaying] = useState(false);
   const [reducedMotion, setReducedMotion] = useState(false);
@@ -116,7 +115,7 @@ export function LoopRing({
   segmentsRef.current = segments;
   const deadlineRef = useRef<number | null>(null);
 
-  // Primitive deps only, for the same reason the filmstrip had them: `segments` and
+  // Primitive deps only: `segments` and
   // `activeSegment` are freshly allocated every render, so depending on them tore
   // down and re-armed the interval on every unrelated re-render — and a running
   // pomodoro re-renders this component once a second, which meant a 20-45s dwell
@@ -129,12 +128,12 @@ export function LoopRing({
     if (reducedMotion) {
       return;
     }
-    deadlineRef.current = filmstripDeadline(Date.now(), activeDwellSeconds);
+    deadlineRef.current = loopDeadline(Date.now(), activeDwellSeconds);
     const interval = window.setInterval(() => {
       if (deadlineRef.current === null) {
         return;
       }
-      const result = filmstripAdvance(
+      const result = loopAdvance(
         segmentsRef.current,
         activeCardId,
         deadlineRef.current,

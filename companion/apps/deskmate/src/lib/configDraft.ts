@@ -493,7 +493,7 @@ export function loopSeconds(config: AppConfig, playlistId: string): number | nul
 /// ribbon. Pure and independent of any DOM/flex mechanics so the width math
 /// — the whole point of the ribbon — can be unit-tested without rendering
 /// anything.
-export interface FilmstripSegment {
+export interface LoopSegment {
   cardId: string;
   name: string;
   /// The owner's own words for this card, or null when they typed none. Two cards
@@ -510,10 +510,7 @@ export interface FilmstripSegment {
 /// there is no dwell to speak of, so every segment is given equal width
 /// instead of a zero-width one, which is what lets the ribbon still show
 /// order (just not timing) in that mode.
-export function filmstripSegments(
-  config: AppConfig,
-  catalog?: PluginCatalog | null,
-): FilmstripSegment[] {
+export function loopSegments(config: AppConfig, catalog?: PluginCatalog | null): LoopSegment[] {
   const playlist = activePlaylist(config);
   if (!playlist) {
     return [];
@@ -532,7 +529,7 @@ export function filmstripSegments(
   let offset = 0;
   return entries.map(({ card }, index) => {
     const widthPercent = total > 0 ? (dwellSeconds[index] / total) * 100 : equalShare;
-    const segment: FilmstripSegment = {
+    const segment: LoopSegment = {
       cardId: card.id,
       name: cardLabel(card, catalog),
       title: cardTitle(card),
@@ -547,8 +544,8 @@ export function filmstripSegments(
 
 /// The segment the ribbon's play control should move to next, wrapping past
 /// the end. Returns `null` only when there is nothing to advance to.
-export function nextFilmstripCardId(
-  segments: FilmstripSegment[],
+export function nextLoopCardId(
+  segments: LoopSegment[],
   currentCardId: string | null,
 ): string | null {
   if (segments.length === 0) {
@@ -567,11 +564,11 @@ export function nextFilmstripCardId(
 /// from a relative duration on every check, which is what let the ribbon's
 /// old relative `setTimeout` get silently re-armed by unrelated re-renders
 /// before it ever had a chance to fire.
-export function filmstripDeadline(startedAtMs: number, dwellSeconds: number): number {
+export function loopDeadline(startedAtMs: number, dwellSeconds: number): number {
   return startedAtMs + Math.max(1, dwellSeconds) * 1000;
 }
 
-export interface FilmstripAdvance {
+export interface LoopAdvance {
   cardId: string;
   deadlineMs: number;
 }
@@ -583,23 +580,23 @@ export interface FilmstripAdvance {
 /// next card in the active playlist together with the deadline for THAT card's own
 /// dwell, so a caller can just feed the previous result's `deadlineMs`
 /// back in on every tick without tracking anything else.
-export function filmstripAdvance(
-  segments: FilmstripSegment[],
+export function loopAdvance(
+  segments: LoopSegment[],
   activeCardId: string | null,
   deadlineMs: number,
   nowMs: number,
-): FilmstripAdvance | null {
+): LoopAdvance | null {
   if (nowMs < deadlineMs) {
     return null;
   }
-  const nextCardId = nextFilmstripCardId(segments, activeCardId);
+  const nextCardId = nextLoopCardId(segments, activeCardId);
   if (!nextCardId) {
     return null;
   }
   const nextSegment = segments.find((segment) => segment.cardId === nextCardId);
   return {
     cardId: nextCardId,
-    deadlineMs: filmstripDeadline(nowMs, nextSegment?.dwellSeconds ?? 0),
+    deadlineMs: loopDeadline(nowMs, nextSegment?.dwellSeconds ?? 0),
   };
 }
 

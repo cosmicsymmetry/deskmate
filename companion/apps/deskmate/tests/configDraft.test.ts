@@ -11,9 +11,9 @@ import {
   cardsOutsideLoop,
   copyConfig,
   cardsContainerIssues,
-  filmstripAdvance,
-  filmstripDeadline,
-  filmstripSegments,
+  loopAdvance,
+  loopDeadline,
+  loopSegments,
   firstRunSteps,
   firstSelectableCard,
   formatDuration,
@@ -25,7 +25,7 @@ import {
   loopSeconds,
   moveCard,
   moveEntry,
-  nextFilmstripCardId,
+  nextLoopCardId,
   numberValue,
   pluginCardFlag,
   removeCard,
@@ -516,7 +516,7 @@ describe("configuration draft helpers", () => {
     expect(firstSelectableCard(next)).toBe("clock");
   });
 
-  test("filmstripSegments proportions active-playlist entries by resolved dwell and excludes library-only cards", () => {
+  test("loopSegments proportions active-playlist entries by resolved dwell and excludes library-only cards", () => {
     let config = addCard(initialConfig(), "pomodoro").config;
     config = addCard(config, "weather").config;
     config = {
@@ -533,7 +533,7 @@ describe("configuration draft helpers", () => {
       kind: "timed",
       default_dwell_seconds: 20,
     });
-    const segments = filmstripSegments(config);
+    const segments = loopSegments(config);
     expect(segments.map((segment) => segment.cardId)).toEqual(["clock", "pomodoro"]);
     expect(segments[0].dwellSeconds).toBe(45);
     expect(segments[1].dwellSeconds).toBe(20);
@@ -544,17 +544,17 @@ describe("configuration draft helpers", () => {
     expect(segments[1].offsetPercent).toBeCloseTo((45 / 65) * 100, 5);
   });
 
-  test("filmstripSegments gives every card an equal share under manual advance, where there is no dwell to encode", () => {
+  test("loopSegments gives every card an equal share under manual advance, where there is no dwell to encode", () => {
     let config = addCard(initialConfig(), "pomodoro").config;
     config = addEntry(config, "workday", "pomodoro");
     config = setEntryDwell(config, "workday", 0, 45);
-    const segments = filmstripSegments(config);
+    const segments = loopSegments(config);
     expect(segments.map((segment) => segment.dwellSeconds)).toEqual([0, 0]);
     expect(segments[0].widthPercent).toBe(50);
     expect(segments[1].widthPercent).toBe(50);
   });
 
-  test("filmstripSegments names a plugin segment from the catalog it is given", () => {
+  test("loopSegments names a plugin segment from the catalog it is given", () => {
     const config: AppConfig = {
       ...initialConfig(),
       cards: [pluginCard()],
@@ -566,27 +566,27 @@ describe("configuration draft helpers", () => {
         },
       ],
     };
-    expect(filmstripSegments(config, pluginCatalog())[0].name).toBe("Air quality");
-    expect(filmstripSegments(config)[0].name).toBe("com.example.air-quality");
+    expect(loopSegments(config, pluginCatalog())[0].name).toBe("Air quality");
+    expect(loopSegments(config)[0].name).toBe("com.example.air-quality");
   });
 
-  test("nextFilmstripCardId wraps past the last segment", () => {
+  test("nextLoopCardId wraps past the last segment", () => {
     let config = addCard(initialConfig(), "pomodoro").config;
     config = addEntry(config, "workday", "pomodoro");
-    const segments = filmstripSegments(config);
-    expect(nextFilmstripCardId(segments, "clock")).toBe("pomodoro");
-    expect(nextFilmstripCardId(segments, "pomodoro")).toBe("clock");
-    expect(nextFilmstripCardId(segments, "unknown-id")).toBe("clock");
-    expect(nextFilmstripCardId([], "clock")).toBeNull();
+    const segments = loopSegments(config);
+    expect(nextLoopCardId(segments, "clock")).toBe("pomodoro");
+    expect(nextLoopCardId(segments, "pomodoro")).toBe("clock");
+    expect(nextLoopCardId(segments, "unknown-id")).toBe("clock");
+    expect(nextLoopCardId([], "clock")).toBeNull();
   });
 
-  test("filmstripDeadline offsets from the given start time by the dwell, flooring a non-positive dwell to one second", () => {
-    expect(filmstripDeadline(1_000, 45)).toBe(1_000 + 45_000);
-    expect(filmstripDeadline(1_000, 0)).toBe(1_000 + 1_000);
-    expect(filmstripDeadline(1_000, -5)).toBe(1_000 + 1_000);
+  test("loopDeadline offsets from the given start time by the dwell, flooring a non-positive dwell to one second", () => {
+    expect(loopDeadline(1_000, 45)).toBe(1_000 + 45_000);
+    expect(loopDeadline(1_000, 0)).toBe(1_000 + 1_000);
+    expect(loopDeadline(1_000, -5)).toBe(1_000 + 1_000);
   });
 
-  test("filmstripAdvance's due/not-due decision is a pure function of elapsed time, not of how many times it is checked", () => {
+  test("loopAdvance's due/not-due decision is a pure function of elapsed time, not of how many times it is checked", () => {
     let config = addCard(initialConfig(), "pomodoro").config;
     config = addEntry(config, "workday", "pomodoro");
     config = setEntryDwell(config, "workday", 0, 45);
@@ -595,9 +595,9 @@ describe("configuration draft helpers", () => {
       kind: "timed",
       default_dwell_seconds: 20,
     });
-    const segments = filmstripSegments(config);
+    const segments = loopSegments(config);
     const startedAtMs = 0;
-    const deadlineMs = filmstripDeadline(startedAtMs, 45); // 45_000
+    const deadlineMs = loopDeadline(startedAtMs, 45); // 45_000
 
     // Simulates a re-render-happy caller re-checking the very same deadline
     // hundreds of times before it is actually due — this is exactly the
@@ -606,49 +606,49 @@ describe("configuration draft helpers", () => {
     // many times this is checked before the deadline, the answer must stay
     // "not yet".
     for (let check = 0; check < 500; check += 1) {
-      expect(filmstripAdvance(segments, "clock", deadlineMs, deadlineMs - 1)).toBeNull();
+      expect(loopAdvance(segments, "clock", deadlineMs, deadlineMs - 1)).toBeNull();
     }
-    expect(filmstripAdvance(segments, "clock", deadlineMs, 0)).toBeNull();
+    expect(loopAdvance(segments, "clock", deadlineMs, 0)).toBeNull();
 
     // Once real time has actually reached the deadline, it advances —
     // regardless of the fact that it was checked 500 times first without
     // effect, and the new deadline is a fresh dwell for the new card.
-    expect(filmstripAdvance(segments, "clock", deadlineMs, deadlineMs)).toEqual({
+    expect(loopAdvance(segments, "clock", deadlineMs, deadlineMs)).toEqual({
       cardId: "pomodoro",
-      deadlineMs: filmstripDeadline(deadlineMs, 20),
+      deadlineMs: loopDeadline(deadlineMs, 20),
     });
     // Checking arbitrarily far past the deadline still advances to the
     // same next card — "due" is a threshold, not a narrow window that can
     // be missed by a slow or delayed check.
-    const late = filmstripAdvance(segments, "clock", deadlineMs, deadlineMs + 999_999);
+    const late = loopAdvance(segments, "clock", deadlineMs, deadlineMs + 999_999);
     expect(late?.cardId).toBe("pomodoro");
-    expect(late?.deadlineMs).toBe(filmstripDeadline(deadlineMs + 999_999, 20));
+    expect(late?.deadlineMs).toBe(loopDeadline(deadlineMs + 999_999, 20));
   });
 
-  test("filmstripAdvance wraps past the last segment and resolves against whatever segments it is given, so a mid-play reorder is honoured on the next check", () => {
+  test("loopAdvance wraps past the last segment and resolves against whatever segments it is given, so a mid-play reorder is honoured on the next check", () => {
     let config = addCard(initialConfig(), "pomodoro").config;
     config = addCard(config, "weather").config;
     config = addEntry(addEntry(config, "workday", "pomodoro"), "workday", "weather");
-    const segments = filmstripSegments(config);
+    const segments = loopSegments(config);
     // pomodoro and weather swapped, leaving clock (the active/current card) exactly where
     // it was — isolating the reorder's effect to "what comes after a".
-    const reordered = filmstripSegments(moveEntry(config, "workday", 1, 2));
+    const reordered = loopSegments(moveEntry(config, "workday", 1, 2));
 
     // In the original order, clock advances to pomodoro...
-    expect(filmstripAdvance(segments, "clock", 1_000, 1_000)?.cardId).toBe("pomodoro");
+    expect(loopAdvance(segments, "clock", 1_000, 1_000)?.cardId).toBe("pomodoro");
     // ...but once the playlist is reordered mid-play, the very
     // same due check for the very same active card resolves against the
     // NEW order instead of a stale one — because the caller passes the
     // latest segments in on every check rather than one captured once at
     // play-start.
-    expect(filmstripAdvance(reordered, "clock", 1_000, 1_000)?.cardId).toBe("weather");
+    expect(loopAdvance(reordered, "clock", 1_000, 1_000)?.cardId).toBe("weather");
 
     // Wrapping past the last segment still returns to the first.
-    expect(filmstripAdvance(segments, "weather", 1_000, 1_000)?.cardId).toBe("clock");
+    expect(loopAdvance(segments, "weather", 1_000, 1_000)?.cardId).toBe("clock");
   });
 
-  test("filmstripAdvance returns null with no segments or nothing to advance to", () => {
-    expect(filmstripAdvance([], "a", 1_000, 1_000)).toBeNull();
+  test("loopAdvance returns null with no segments or nothing to advance to", () => {
+    expect(loopAdvance([], "a", 1_000, 1_000)).toBeNull();
   });
 
   test("formatDuration renders whole-second durations in the ribbon's units, dropping leading zero units", () => {

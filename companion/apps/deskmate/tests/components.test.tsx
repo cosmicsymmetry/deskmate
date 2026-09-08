@@ -3114,7 +3114,7 @@ describe("settings accessibility and states", () => {
     expect(html).not.toContain("<img");
   });
 
-  function filmstripConfig(): AppConfig {
+  function loopConfig(): AppConfig {
     return {
       schema_version: snapshot.config.schema_version,
       preferences: { timezone: "UTC", autostart: false, paused: false, orientation: "landscape" },
@@ -3154,7 +3154,7 @@ describe("settings accessibility and states", () => {
   }
 
   test("the loop ring shows the loop length and only in-rotation cards", () => {
-    const html = renderLoopRing(filmstripConfig());
+    const html = renderLoopRing(loopConfig());
     expect(html).toMatch(/1 min 5 s/);
     expect(html).toContain("Desk");
     expect(html).toContain("Up next");
@@ -3162,7 +3162,7 @@ describe("settings accessibility and states", () => {
   });
 
   test("the loop ring hides timings and the play control under manual advance", () => {
-    const config = filmstripConfig();
+    const config = loopConfig();
     const html = renderLoopRing({
       ...config,
       playlists: [{ ...config.playlists[0], advance: { kind: "manual" } }],
@@ -3173,7 +3173,7 @@ describe("settings accessibility and states", () => {
   });
 
   test("the loop ring owns pacing and writes the active loop advance mode", async () => {
-    const initial = filmstripConfig();
+    const initial = loopConfig();
     let latest = initial;
 
     function Harness() {
@@ -3221,7 +3221,7 @@ describe("settings accessibility and states", () => {
   });
 
   test("clicking the already-selected pacing mode does not emit a draft change", async () => {
-    const config = filmstripConfig();
+    const config = loopConfig();
     let changeCount = 0;
     const container = document.createElement("div");
     document.body.appendChild(container);
@@ -3251,7 +3251,7 @@ describe("settings accessibility and states", () => {
   });
 
   test("clearing the default dwell input keeps an empty edit without writing zero", async () => {
-    const initial = filmstripConfig();
+    const initial = loopConfig();
     let latest = initial;
 
     function Harness() {
@@ -3291,7 +3291,7 @@ describe("settings accessibility and states", () => {
   });
 
   test("the loop legend only displays and selects; it has no reorder affordance", () => {
-    const initial = filmstripConfig();
+    const initial = loopConfig();
     initial.playlists[0].entries = [
       { card_id: "first", dwell_seconds: 45 },
       { card_id: "missing-card", dwell_seconds: null },

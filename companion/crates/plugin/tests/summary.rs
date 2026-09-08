@@ -69,6 +69,31 @@ fn a_missing_value_evaluates_to_none_not_an_empty_string() {
     );
 }
 
+/// A present-but-empty value is "no value" for the same reason a missing one is.
+/// `CardList`'s `pluginHero ?? "—"` keeps an empty string, so a summary of `""`
+/// draws a blank tile where every other card kind draws an em dash -- and
+/// `"aqi": ""` is ordinary provider data, not a manifest typo. The literal case
+/// is here too because the emptiness is judged in one place, after bounding,
+/// rather than once per expression kind.
+#[test]
+fn an_empty_result_evaluates_to_none_rather_than_blanking_the_tile() {
+    let expression = parse_manifest(&v2_manifest("summary = \"{{ data.current.aqi }}\""))
+        .expect("summary parses");
+    assert_eq!(
+        evaluate_summary(
+            &expression,
+            &snapshot(serde_json::json!({ "current": { "aqi": "" } }))
+        ),
+        Ok(None)
+    );
+
+    let literal = parse_manifest(&v2_manifest("summary = \"\"")).expect("empty literal parses");
+    assert_eq!(
+        evaluate_summary(&literal, &snapshot(serde_json::json!({}))),
+        Ok(None)
+    );
+}
+
 #[test]
 fn a_stale_error_snapshot_still_evaluates_its_last_good_value() {
     let manifest = parse_manifest(&v2_manifest("summary = \"{{ data.current.aqi }}\""))

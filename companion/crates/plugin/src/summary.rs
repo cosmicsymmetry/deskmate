@@ -44,11 +44,12 @@ impl std::error::Error for SummaryError {}
 
 /// Evaluates `manifest.summary` against `snapshot.value`.
 ///
-/// Returns `Ok(None)` when the manifest declares no summary and when the
+/// Returns `Ok(None)` when the manifest declares no summary, when the
 /// expression evaluates to `EvalValue::Missing` (an absent field, a JSON
-/// `null`, a type mismatch): a missing headline is "no value", which the
-/// tile prints as an em dash, not an empty string it would print as
-/// nothing. A stale or error snapshot is evaluated like any other, because
+/// `null`, a type mismatch), and when what it evaluates to is empty: a
+/// missing headline is "no value", which the tile prints as an em dash, not
+/// an empty string it would print as nothing. A stale or error snapshot is
+/// evaluated like any other, because
 /// it still carries the last-good value (`providers::LastGood::complete`'s
 /// contract). `icon()` has no icon map here and evaluates to `Missing`; a
 /// codepoint is not a headline.
@@ -64,7 +65,7 @@ pub fn evaluate_summary(
         return Ok(None);
     };
     let inner = match classify_expression_source(source) {
-        ExpressionSource::Literal(literal) => return Ok(Some(bound_summary(literal))),
+        ExpressionSource::Literal(literal) => return Ok(bound_summary(literal)),
         ExpressionSource::Expression(inner) => inner,
         ExpressionSource::MalformedPartial => {
             return Err(SummaryError::MalformedPartialInterpolation {
@@ -81,9 +82,17 @@ pub fn evaluate_summary(
     if value.is_missing() {
         return Ok(None);
     }
-    Ok(Some(bound_summary(&value.to_string())))
+    Ok(bound_summary(&value.to_string()))
 }
 
-fn bound_summary(text: &str) -> String {
-    protocol::truncate_utf8_to_bytes(text, MAX_SUMMARY_LEN).to_owned()
+/// Bounds an evaluated summary, and answers `None` for an empty one.
+///
+/// Emptiness is judged here, once, after bounding, rather than per expression
+/// kind: a present-but-empty JSON string (`"aqi": ""`) is ordinary provider
+/// data, and it means exactly what a missing value means -- no headline. The
+/// tile prints an em dash for `None` and nothing at all for `Some("")`, so the
+/// two must not be distinguishable this far up.
+fn bound_summary(text: &str) -> Option<String> {
+    let bounded = protocol::truncate_utf8_to_bytes(text, MAX_SUMMARY_LEN);
+    (!bounded.is_empty()).then(|| bounded.to_owned())
 }

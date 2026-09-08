@@ -558,6 +558,9 @@ export function App() {
             pomodoros={snapshot.pomodoros}
             providers={snapshot.providers}
             pluginKinds={[]}
+            catalog={null}
+            serverCardState={[]}
+            ownershipTier={ownershipTier}
             selectedCardId={selectedCardId}
             onSelect={setSelectedCardId}
             onAdd={handleAdd}

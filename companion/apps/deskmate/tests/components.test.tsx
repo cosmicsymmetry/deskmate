@@ -711,6 +711,9 @@ describe("settings accessibility and states", () => {
         pomodoros={[]}
         providers={[]}
         pluginKinds={[]}
+        catalog={null}
+        serverCardState={[]}
+        ownershipTier="networked"
         selectedCardId="internal-uuid-0001"
         onSelect={() => {}}
         onAdd={() => {}}
@@ -754,6 +757,9 @@ describe("settings accessibility and states", () => {
         pomodoros={[]}
         providers={[]}
         pluginKinds={[]}
+        catalog={null}
+        serverCardState={[]}
+        ownershipTier="networked"
         selectedCardId={null}
         onSelect={() => {}}
         onAdd={() => {}}
@@ -765,36 +771,71 @@ describe("settings accessibility and states", () => {
     expect(library).not.toContain("card-tile__name");
   });
 
-  test("plugin cards have a lossless tile and title editor but cannot be added", () => {
+  test("a plugin tile is named, valued and flagged like any other complication", () => {
     const plugin = pluginCard();
-    const library = renderToStaticMarkup(
-      <CardList
-        config={cardListConfig([plugin])}
-        issues={[]}
-        cardData={[]}
-        pomodoros={[]}
-        providers={[]}
-        pluginKinds={[]}
-        selectedCardId={plugin.id}
-        onSelect={() => {}}
-        onAdd={() => {}}
-        onChange={() => {}}
-        onRemove={() => {}}
-      />,
-    );
-    const editor = renderCardEditor(plugin);
+    const catalog: PluginCatalog = {
+      plugins: [
+        {
+          id: "com.example.air-quality",
+          name: "aqi",
+          version: "1.0.0",
+          node_count: 7,
+          assets: [],
+          display_name: "Air quality",
+          description: "EPA index for a location",
+          manifest_version: 2,
+          template: "display-list",
+          refresh_minutes: 15,
+        },
+      ],
+      load_failures: [],
+    };
+    const render = (
+      cardCatalog: PluginCatalog | null,
+      serverCardState: ServerCardState[],
+      tier: "local" | "networked",
+    ) =>
+      renderToStaticMarkup(
+        <CardList
+          config={cardListConfig([plugin])}
+          issues={[]}
+          cardData={[]}
+          pomodoros={[]}
+          providers={[]}
+          pluginKinds={[]}
+          catalog={cardCatalog}
+          serverCardState={serverCardState}
+          ownershipTier={tier}
+          selectedCardId={plugin.id}
+          onSelect={() => {}}
+          onAdd={() => {}}
+          onChange={() => {}}
+          onRemove={() => {}}
+        />,
+      );
 
-    expect(library).toContain('class="tile-label">com.example.air-quality<');
-    expect(library).toContain('<strong class="card-tile__value numeral">Plugin</strong>');
-    expect(library).toContain('class="card-tile__name">Office air<');
-    expect(library).not.toContain(plugin.id);
-    expect(library).toContain("Add a card");
-    expect(library).not.toContain("Plugins on the server");
-    expect(library).not.toContain("<strong>Plugin</strong>");
-    expect(editor).toContain('id="editor-heading">com.example.air-quality<');
-    expect(editor).toContain("<span>Name</span>");
-    expect(editor).toContain("<span>Refresh every</span>");
-    expect(editor).not.toContain("Template");
+    const live = render(
+      catalog,
+      [{ card_id: plugin.id, provider: { kind: "fresh" }, hero: "42", errors: [] }],
+      "networked",
+    );
+    expect(live).toContain('class="tile-label">Air quality<');
+    expect(live).toContain('<strong class="card-tile__value numeral">42</strong>');
+    expect(live).toContain('class="card-tile__name">Office air<');
+    expect(live).toContain('aria-label="Remove Air quality — Office air');
+    // Nothing on the tile says "plugin", and the wire id is still never shown.
+    expect(live).not.toContain(">Plugin<");
+    expect(live).not.toContain(plugin.id);
+
+    // No headline yet reads like a weather card with no data, not like a fault.
+    expect(render(catalog, [], "networked")).toContain(
+      '<strong class="card-tile__value numeral">—</strong>',
+    );
+    // The two flags, each beside the bare id it explains.
+    expect(render({ plugins: [], load_failures: [] }, [], "networked")).toContain(
+      '<span class="flag">not on the server</span>',
+    );
+    expect(render(catalog, [], "local")).toContain('<span class="flag">needs the server</span>');
   });
 
   test("row-list tiles count only populated title fields from real provider snapshots", () => {
@@ -823,6 +864,9 @@ describe("settings accessibility and states", () => {
         pomodoros={[]}
         providers={[]}
         pluginKinds={[]}
+        catalog={null}
+        serverCardState={[]}
+        ownershipTier="networked"
         selectedCardId={calendar.id}
         onSelect={() => {}}
         onAdd={() => {}}
@@ -1019,6 +1063,9 @@ describe("settings accessibility and states", () => {
         pomodoros={[]}
         providers={[]}
         pluginKinds={[]}
+        catalog={null}
+        serverCardState={[]}
+        ownershipTier="networked"
         selectedCardId="first-clock-id"
         onSelect={() => {}}
         onAdd={() => {}}
@@ -1063,6 +1110,9 @@ describe("settings accessibility and states", () => {
         pomodoros={[]}
         providers={[]}
         pluginKinds={[]}
+        catalog={null}
+        serverCardState={[]}
+        ownershipTier="networked"
         selectedCardId={null}
         onSelect={() => {}}
         onAdd={() => {}}
@@ -1096,6 +1146,9 @@ describe("settings accessibility and states", () => {
         pomodoros={[]}
         providers={[]}
         pluginKinds={[]}
+        catalog={null}
+        serverCardState={[]}
+        ownershipTier="networked"
         selectedCardId={null}
         onSelect={() => {}}
         onAdd={() => {}}
@@ -1123,6 +1176,9 @@ describe("settings accessibility and states", () => {
         pomodoros={[]}
         providers={[]}
         pluginKinds={[]}
+        catalog={null}
+        serverCardState={[]}
+        ownershipTier="networked"
         selectedCardId={null}
         onSelect={() => {}}
         onAdd={() => {}}
@@ -1144,6 +1200,9 @@ describe("settings accessibility and states", () => {
         pomodoros={[]}
         providers={[]}
         pluginKinds={[]}
+        catalog={null}
+        serverCardState={[]}
+        ownershipTier="networked"
         selectedCardId={null}
         onSelect={() => {}}
         onAdd={() => {}}
@@ -1176,6 +1235,9 @@ describe("settings accessibility and states", () => {
             pomodoros={[]}
             providers={[]}
             pluginKinds={[]}
+            catalog={null}
+            serverCardState={[]}
+            ownershipTier="networked"
             selectedCardId={null}
             onSelect={() => {}}
             onAdd={() => {}}
@@ -1222,6 +1284,9 @@ describe("settings accessibility and states", () => {
           pomodoros={[]}
           providers={[]}
           pluginKinds={[]}
+          catalog={null}
+          serverCardState={[]}
+          ownershipTier="networked"
           selectedCardId={selectedCardId}
           onSelect={setSelectedCardId}
           onAdd={(kind) => {
@@ -1300,6 +1365,9 @@ describe("settings accessibility and states", () => {
             pomodoros={[]}
             providers={[]}
             pluginKinds={[]}
+            catalog={null}
+            serverCardState={[]}
+            ownershipTier="networked"
             selectedCardId={null}
             onSelect={() => {}}
             onAdd={() => {}}
@@ -1351,6 +1419,9 @@ describe("settings accessibility and states", () => {
                 ]
               : []
           }
+          catalog={null}
+          serverCardState={[]}
+          ownershipTier="networked"
           selectedCardId={null}
           onSelect={() => {}}
           onAdd={() => {}}
@@ -1402,6 +1473,9 @@ describe("settings accessibility and states", () => {
           pomodoros={[]}
           providers={[]}
           pluginKinds={[]}
+          catalog={null}
+          serverCardState={[]}
+          ownershipTier="networked"
           selectedCardId={null}
           onSelect={() => {}}
           onAdd={() => {}}
@@ -1492,6 +1566,9 @@ describe("settings accessibility and states", () => {
         pomodoros={[]}
         providers={[]}
         pluginKinds={[]}
+        catalog={null}
+        serverCardState={[]}
+        ownershipTier="networked"
         selectedCardId={null}
         onSelect={() => {}}
         onAdd={() => {}}
@@ -1530,6 +1607,9 @@ describe("settings accessibility and states", () => {
           pomodoros={[]}
           providers={[]}
           pluginKinds={[]}
+          catalog={null}
+          serverCardState={[]}
+          ownershipTier="networked"
           selectedCardId={null}
           onSelect={() => {}}
           onAdd={() => {}}
@@ -1581,6 +1661,9 @@ describe("settings accessibility and states", () => {
             pomodoros={[]}
             providers={[]}
             pluginKinds={[]}
+            catalog={null}
+            serverCardState={[]}
+            ownershipTier="networked"
             selectedCardId={null}
             onSelect={() => {}}
             onAdd={() => {}}
@@ -1625,6 +1708,9 @@ describe("settings accessibility and states", () => {
           pomodoros={[]}
           providers={[]}
           pluginKinds={[]}
+          catalog={null}
+          serverCardState={[]}
+          ownershipTier="networked"
           selectedCardId={null}
           onSelect={() => {}}
           onAdd={() => {}}
@@ -1686,6 +1772,9 @@ describe("settings accessibility and states", () => {
           pomodoros={[]}
           providers={[]}
           pluginKinds={[]}
+          catalog={null}
+          serverCardState={[]}
+          ownershipTier="networked"
           selectedCardId={null}
           onSelect={() => {}}
           onAdd={() => {}}
@@ -2673,6 +2762,9 @@ describe("settings accessibility and states", () => {
         pomodoros={[]}
         providers={[]}
         pluginKinds={[]}
+        catalog={null}
+        serverCardState={[]}
+        ownershipTier="networked"
         selectedCardId={null}
         onSelect={() => {}}
         onAdd={() => {}}

@@ -21,6 +21,7 @@ import {
   loopEntries,
   MAX_CARDS,
   moveEntry,
+  pluginCardFlag,
   removeEntry,
 } from "../lib/configDraft";
 import { providerTrouble } from "../lib/providers";
@@ -30,8 +31,11 @@ import {
   type AppConfig,
   type CardDataSnapshot,
   type CardSettings,
+  type DeviceTier,
+  type PluginCatalog,
   type PomodoroSnapshot,
   type ProviderSnapshot,
+  type ServerCardState,
   type ValidationIssue,
 } from "../lib/types";
 import { FieldIssues } from "./FieldIssues";
@@ -53,6 +57,11 @@ interface CardListProps {
   pomodoros: PomodoroSnapshot[];
   providers: ProviderSnapshot[];
   pluginKinds: PluginKindOption[];
+  /** The server's registry, or null in local tier and before the first read. */
+  catalog: PluginCatalog | null;
+  /** The server's own rows for this device's plugin cards. Empty in local tier. */
+  serverCardState: ServerCardState[];
+  ownershipTier: DeviceTier | null;
   selectedCardId: string | null;
   onSelect: (cardId: string) => void;
   onAdd: (kind: AddableCardKind) => void;
@@ -84,6 +93,7 @@ function tileValue(
   pomodoro: PomodoroSnapshot | undefined,
   now: Date,
   timezone: string,
+  pluginHero: string | null,
 ): string {
   switch (card.kind) {
     case "clock":
@@ -114,14 +124,16 @@ function tileValue(
       return rowCount > 0 ? String(rowCount) : "—";
     }
     case "plugin":
-      return fieldText(data, "hero") ?? "Plugin";
+      // The server's evaluated `summary`, or the same em dash a weather card shows
+      // before its first fetch. A tile owns one fact; it does not narrate.
+      return pluginHero ?? "—";
   }
 }
 
 /** Every control that acts on one card names template and typed title together. */
-function controlLabel(card: CardSettings): string {
+function controlLabel(card: CardSettings, catalog: PluginCatalog | null): string {
   const title = cardTitle(card);
-  return title ? `${cardLabel(card)} — ${title}` : cardLabel(card);
+  return title ? `${cardLabel(card, catalog)} — ${title}` : cardLabel(card, catalog);
 }
 
 export function CardList({
@@ -131,6 +143,9 @@ export function CardList({
   pomodoros,
   providers,
   pluginKinds,
+  catalog,
+  serverCardState,
+  ownershipTier,
   selectedCardId,
   onSelect,
   onAdd,
@@ -338,7 +353,11 @@ export function CardList({
     const stale =
       providerTrouble(providers.find((candidate) => candidate.widget_id === card.id)) !== null;
     const index = inLoop ? (entryIndex ?? -1) : -1;
-    const label = controlLabel(card);
+    const label = controlLabel(card, catalog);
+    // The server's row for this card, when it has one, and the word that explains a
+    // bare plugin id when the catalog or the tier cannot resolve it.
+    const serverState = serverCardState.find((row) => row.card_id === card.id) ?? null;
+    const pluginFlag = pluginCardFlag(card, catalog, ownershipTier);
     return (
       <li
         key={inLoop ? `loop:${entryIndex}:${card.id}` : `outside:${card.id}`}
@@ -367,14 +386,22 @@ export function CardList({
           onClick={() => onSelect(card.id)}
           onKeyDown={inLoop ? (event) => onTileKeyDown(event, card.id) : undefined}
         >
-          <span className="tile-label">{cardLabel(card)}</span>
+          <span className="tile-label">{cardLabel(card, catalog)}</span>
           <strong className="card-tile__value numeral">
-            {tileValue(card, data, pomodoro, now, config.preferences.timezone)}
+            {tileValue(
+              card,
+              data,
+              pomodoro,
+              now,
+              config.preferences.timezone,
+              serverState?.hero ?? null,
+            )}
           </strong>
           {cardTitle(card) && <span className="card-tile__name">{cardTitle(card)}</span>}
         </button>
         <span className="card-tile__flags">
           {!inLoop && <span className="flag">not in loop</span>}
+          {pluginFlag && <span className="flag">{pluginFlag}</span>}
           {stale && <span className="flag flag--stale">stale</span>}
           {hasAlert && <span className="flag flag--alert">alerts</span>}
           {!inLoop && (

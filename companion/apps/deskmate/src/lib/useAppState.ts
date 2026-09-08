@@ -264,8 +264,11 @@ export function useAppState(): AppStateValue {
   // success would make the notice depend on which promise settled first.
   const [catalogFailed, setCatalogFailed] = useState(false);
   const [cardStateFailed, setCardStateFailed] = useState(false);
-  const [catalogGeneration, setCatalogGeneration] = useState(0);
-  const refreshCatalog = useCallback(() => setCatalogGeneration((current) => current + 1), []);
+  // One generation number for BOTH server reads: "Try again" cannot tell which one
+  // is the reason the notice is showing, so it must retry both rather than leave a
+  // card-state failure sitting there until the next scheduled beat or focus event.
+  const [refreshGeneration, setRefreshGeneration] = useState(0);
+  const refreshCatalog = useCallback(() => setRefreshGeneration((current) => current + 1), []);
   const lastCardDataRef = useRef<string | null>(null);
   const snapshotRef = useRef<AppSnapshot | null>(null);
   const networkSettingsRef = useRef(networkSettings);
@@ -421,9 +424,11 @@ export function useAppState(): AppStateValue {
 
   const catalogError = catalogFailed || cardStateFailed ? SERVER_PLUGIN_NOTICE : null;
 
-  // `catalogGeneration` is never read in the body below — it exists only so
-  // `refreshCatalog` (bumping it) forces this effect to re-run and retry the fetch,
-  // the same "intentional re-fetch trigger" pattern `DevicePreview` uses for
+  // `refreshGeneration` is never read in either body below — it exists only so
+  // `refreshCatalog` (bumping it) forces both effects to re-run: this one retries
+  // the catalog fetch, and the poll effect below tears down and restarts its
+  // `startServerCardStatePoll`, which polls once immediately on start. Same
+  // "intentional re-fetch trigger" pattern `DevicePreview` uses for
   // `dataGeneration`/`orientation`.
   // biome-ignore lint/correctness/useExhaustiveDependencies: see comment above.
   useEffect(() => {
@@ -452,12 +457,18 @@ export function useAppState(): AppStateValue {
     return () => {
       active = false;
     };
-  }, [ownershipTier, catalogGeneration]);
+  }, [ownershipTier, refreshGeneration]);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: see comment above.
   useEffect(() => {
     if (ownershipTier !== "networked") {
       return;
     }
+    // Restarting on `refreshGeneration` re-runs `startServerCardStatePoll`, whose
+    // own `poll()` call on start is what makes "Try again" an immediate re-poll
+    // rather than a wait for the next scheduled beat. The poll's own visibility and
+    // focus gating are untouched by this — a manual click can only happen while the
+    // window is visible in the first place.
     return startServerCardStatePoll({
       fetchCardState: getServerCardState,
       onCardState: (next) => {
@@ -468,7 +479,7 @@ export function useAppState(): AppStateValue {
       focusTarget: window,
       visibilityTarget: document,
     });
-  }, [ownershipTier]);
+  }, [ownershipTier, refreshGeneration]);
 
   return {
     snapshot,

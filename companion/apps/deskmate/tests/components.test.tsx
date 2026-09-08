@@ -687,6 +687,101 @@ describe("settings accessibility and states", () => {
     }
   });
 
+  test("Try again re-polls card state, not only the catalog", async () => {
+    snapshotImpl = async () => ({
+      ...snapshot,
+      device: { ...snapshot.device, tier: "networked" },
+      config: {
+        ...snapshot.config,
+        cards: [pluginCard("air")],
+        playlists: [
+          {
+            id: "workday",
+            name: "Workday",
+            advance: { kind: "timed" as const, default_dwell_seconds: 20 },
+            entries: [{ card_id: "air", dwell_seconds: null }],
+          },
+        ],
+        active_playlist_id: "workday",
+      },
+      providers: [],
+      pomodoros: [],
+      card_data: [],
+      card_errors: [],
+    });
+    networkSettingsImpl = async () => ({
+      server_url: "https://desk.example",
+      device_id: "desk-1",
+      tier: "networked",
+    });
+    previewImpl = async () => ({ png_base64: "cHJldmlldw==", sample: false, state: null });
+    // The catalog read succeeds from the start: this test isolates the OTHER
+    // failure source, so a passing catalog can never be what clears the notice.
+    serverPluginsImpl = async () => ({
+      plugins: [
+        {
+          id: "com.example.air-quality",
+          name: "aqi",
+          version: "1.0.0",
+          node_count: 7,
+          assets: [],
+          display_name: "Air quality",
+          description: "EPA index for a location",
+          manifest_version: 2,
+          template: "display-list" as const,
+          refresh_minutes: 15,
+        },
+      ],
+      load_failures: [],
+    });
+    let cardStateCalls = 0;
+    serverCardStateImpl = async () => {
+      cardStateCalls += 1;
+      if (cardStateCalls === 1) {
+        throw { category: "runtime-unavailable", message: "runtime not ready" };
+      }
+      return [{ card_id: "air", provider: { kind: "fresh" as const }, hero: "42", errors: [] }];
+    };
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await renderPreviewInto(root, <App />);
+      await waitFor(() => {
+        expect(container.textContent).toContain("Couldn't reach the server for plugin data.");
+      });
+      // Only the automatic poll on mount has run so far.
+      expect(cardStateCalls).toBe(1);
+
+      const retry = buttonWithText(container, "Try again");
+      expect(retry).toBeDefined();
+      await act(async () => retry?.click());
+      await waitFor(() => {
+        expect(container.textContent).not.toContain("Couldn't reach the server for plugin data.");
+        expect(container.querySelector(".card-tile__body .card-tile__value")?.textContent).toBe(
+          "42",
+        );
+      });
+      // A single click on a control that says "Try again" must retry BOTH server
+      // reads, since the reader cannot tell which one is the reason it is showing.
+      expect(cardStateCalls).toBe(2);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      serverPluginsImpl = async () => ({ plugins: [], load_failures: [] });
+      serverCardStateImpl = async () => [];
+      snapshotImpl = async () => snapshot;
+      networkSettingsImpl = async () => ({
+        server_url: "https://desk.example",
+        device_id: "desk-1",
+        tier: "local",
+      });
+      previewImpl = () =>
+        Promise.reject(new Error("renderCardPreview not configured for this test"));
+    }
+  });
+
   test("names the clock card's title field rather than calling it a heading", () => {
     // The clock faces draw no title chip, so the field only names the card in
     // the library. Weather still renders its chip, so "Heading" stays right
@@ -1079,6 +1174,8 @@ describe("settings accessibility and states", () => {
     expect(flagged).toContain("That plugin is not installed on the server.");
 
     // An id the catalog lacks stays selected, and says so rather than resetting.
+    // This is a claim the app can actually back up (the catalog loaded and does
+    // not have it), so it must never appear when the catalog hasn't loaded at all.
     const unknown = renderCardEditor(
       { ...plugin, plugin_id: "com.example.gone" },
       [],
@@ -1086,14 +1183,20 @@ describe("settings accessibility and states", () => {
       catalog,
     );
     expect(unknown).toContain("Not installed on the server");
+    expect(unknown).not.toContain("Needs the server to render");
+    expect(unknown).not.toContain("The plugin list comes from the server");
 
-    // No catalog: read-only, with the reason the tier makes true.
+    // No catalog: read-only, with the reason the tier makes true. The option and
+    // the small line must agree, and neither may claim the plugin is uninstalled —
+    // the app does not know that; it only knows it cannot check.
     const localHtml = renderCardEditor(plugin, [], null, null, "local");
     expect(localHtml).toMatch(/<select[^>]*disabled/);
     expect(localHtml).toContain("Needs the server to render");
-    expect(renderCardEditor(plugin, [], null, null, "networked")).toContain(
-      "The plugin list comes from the server",
-    );
+    expect(localHtml).not.toContain("Not installed on the server");
+
+    const networkedNoCatalogHtml = renderCardEditor(plugin, [], null, null, "networked");
+    expect(networkedNoCatalogHtml).toContain("The plugin list comes from the server");
+    expect(networkedNoCatalogHtml).not.toContain("Not installed on the server");
   });
 
   test("a plugin card states the manifest's cadence and refuses a refresh it cannot do", () => {

@@ -151,6 +151,13 @@ export function CardEditor({
     card.kind === "plugin"
       ? (catalog?.plugins.find((entry) => entry.id === card.plugin_id) ?? null)
       : null;
+  // What the small line already says when there is no catalog to check against —
+  // shared with the Plugin select's fallback option so the two can never disagree.
+  // It states only what the tier makes true, never whether the plugin is installed.
+  const catalogUnavailableReason =
+    ownershipTier === "local"
+      ? "Needs the server to render"
+      : "The plugin list comes from the server";
   // The server owns a plugin card's fetching, so the Mac has nothing to refresh.
   // The reason rides the same sentence as the trouble, because a disabled control
   // with no stated reason is worse than no control.
@@ -521,11 +528,16 @@ export function CardEditor({
             >
               {/* A saved id the registry no longer carries stays selected and says
                   why. Dropping it would silently rewrite the document on first
-                  render, which is a data loss nobody asked for. */}
+                  render, which is a data loss nobody asked for. When there is no
+                  catalog at all, "not installed" would be a claim the app cannot
+                  back up — it knows only that it cannot check, so it says that
+                  instead, in the same words as the small line below. */}
               {!catalogEntry && (
-                <option
-                  value={card.plugin_id}
-                >{`${card.plugin_id} · Not installed on the server`}</option>
+                <option value={card.plugin_id}>
+                  {catalog === null
+                    ? `${card.plugin_id} · ${catalogUnavailableReason}`
+                    : `${card.plugin_id} · Not installed on the server`}
+                </option>
               )}
               {catalog?.plugins.map((entry) => (
                 <option key={entry.id} value={entry.id}>
@@ -537,11 +549,7 @@ export function CardEditor({
                 catalog is unreachable, so it is never the thing that disappears. */}
             <small>
               {catalog === null
-                ? `${card.plugin_id} · ${
-                    ownershipTier === "local"
-                      ? "Needs the server to render"
-                      : "The plugin list comes from the server"
-                  }`
+                ? `${card.plugin_id} · ${catalogUnavailableReason}`
                 : card.plugin_id}
             </small>
             <FieldIssues issues={fieldIssues("plugin_id")} />

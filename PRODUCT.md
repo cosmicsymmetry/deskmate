@@ -49,11 +49,24 @@ without connecting a console.
 
 Three facts a neighbouring "smart display companion" could not truthfully copy:
 
-1. **The preview is not a mock.** `render_card_preview` sends host-built scenes through
-   the firmware/LVGL renderer and returns exact-pixel PNG frames; the retired C
-   templates survive only in `lvgl-sim` as the reference oracle, not as templates
-   shipped on the device. A framebuffer diff harness proves the simulator and firmware
-   agree pixel for pixel. What the app shows is what the panel will show.
+1. **The preview is not a mock.** For the six built-in kinds, `render_card_preview` sends
+   host-built scenes through the firmware/LVGL renderer and returns exact-pixel PNG
+   frames; the retired C templates survive only in `lvgl-sim` as the reference oracle,
+   not as templates shipped on the device. A framebuffer diff harness proves the
+   simulator and firmware agree pixel for pixel. What the app shows is what the panel
+   will show.
+
+   **For a plugin card the claim is narrower, and it is stated rather than glossed
+   (2026-09-07).** The Mac holds no plugin registry and no rasterizer, so a plugin
+   card's preview is rendered on the server by `resvg` and returned as a PNG built from
+   the same cached snapshot the panel's face is built from. For an SVG-template plugin
+   that is exact by construction — the raster *is* what the panel shows. For a
+   display-list plugin it can differ exactly where `docs/scene/template-parity-ledger.md`
+   already records a difference: LVGL ellipsizes an overflowing line where the raster
+   shows it whole. It is a render of the real card from the real data, never a drawing
+   of a card that does not exist. Rendering the server's compiled scene in the Mac's own
+   simulator, byte-exact, remains available later as an additive extension of the same
+   route.
 2. **Ownership is a single implementation with two tiers.** In `local` tier the Mac
    owns the device over USB; in `networked` tier a single-tenant server owns it
    through the same `RuntimeDevice` seam and the app becomes a configurator. Where
@@ -81,9 +94,15 @@ Three facts a neighbouring "smart display companion" could not truthfully copy:
 
 **Objects.** The app edits six built-in card kinds (max 8): `clock`,
 `pomodoro`, `calendar`, `weather`, `json-feed`, and `rss`. Schema v6 also carries
-server-side `plugin` cards: the app shows them (labelled by plugin id, with a tile and a
-name/refresh editor) but cannot add one, and its hostless runtime refuses to render them
-with a typed reason; the server renders them.
+server-side `plugin` cards, and since 2026-09-07 a plugin card is a peer of a built-in
+one in `networked` tier: added from the same menu with the same gesture, named by its
+manifest's `display_name`, showing a live headline on its tile, carrying the same
+freshness and error states, previewing on the stage, and edited in an editor whose
+Plugin field owns `cards[i].plugin_id`. The server still renders it; the Mac reads the
+server's catalog, per-card state and preview over the admin bearer. In `local` tier
+there is no server to render it, so the card is flagged `needs the server` and the stage
+says so — and the hostless runtime no longer schedules a refresh it cannot perform, which
+is what used to show as a permanent `stale`.
 The window has **one loop** (since 2026-09-06): the document's active playlist. Schema
 v6 still carries `playlists[]` (max 8, max 8 entries each, one active); the app exposes
 exactly one, never creates another, and round-trips any extra playlist an older file
@@ -97,8 +116,9 @@ only, each with a hold that is host-side bookkeeping and never clears the panel.
 `SettingsSheet` as the sole disclosure of state, for device ownership, pairing,
 link/WiFi/IP/update state, timezone, mounting orientation, and start-at-login; first-run
 and error notices; the loop grid (complication tiles in loop order, reordered in place,
-with the add-card slot and its menu of built-in kinds and, when a registry is available,
-plugins); the per-card editor, which also edits the card's dwell; `DevicePreview`;
+with the add-card slot and its menu of built-in kinds and, in networked tier, the
+server's plugins with their descriptions); the per-card editor, which also edits the
+card's dwell and, for a plugin card, chooses its plugin; `DevicePreview`;
 `LoopRing` (arc ∝ dwell, with a playhead, and the pacing control in its head);
 card-local stale/provider recovery; and save controls in both the work column and
 settings sheet.
@@ -110,8 +130,10 @@ settings sheet.
   `landscape-flipped` only — no portrait, and orientation is owned by this settings
   app, never by a device gesture.
 - Clock faces carry no title chip and no eyebrow on the device. User-visible card
-  identity is card-kind-first (`cardLabel()` returns `cardKindName()`); the owner's
-  `title` is a quiet second line that distinguishes cards of the same kind.
+  identity is card-kind-first: `cardLabel(card, catalog)` returns the template name for a
+  built-in card and the plugin's `display_name` for a plugin card — never the word
+  "Plugin", and never a bare machine id without a word saying why; the owner's `title` is
+  a quiet second line that distinguishes cards of the same kind.
 - Tauri CSP blocks every external host. All fonts, images, and scripts must be local.
 - Secrets (WiFi passphrase, device token, admin token) are **write-only**: accepted
   by IPC, absent from every snapshot and response, and never displayed back.
@@ -135,7 +157,8 @@ exclaims, and never blames the user.
 
 ## Evidence on Hand
 
-- Real, working exact-pixel device previews via IPC (`render_card_preview`).
+- Real, working exact-pixel device previews via IPC (`render_card_preview`) for the six
+  built-in kinds, and server-rendered PNG previews for plugin cards.
 - A full typed IPC contract (`src/lib/types.ts`, cross-checked against Rust
   serialization in CI) — enough to build a faithful mock backend.
 - Existing tests: `tests/components.test.tsx`, `useAppState.test.ts`,

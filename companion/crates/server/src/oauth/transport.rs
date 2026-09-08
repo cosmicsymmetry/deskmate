@@ -46,13 +46,25 @@ impl OAuthTransport for EgressTransport {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct GoogleTokenResponse {
     pub access_token: String,
     #[serde(default)]
     pub expires_in: u64,
     #[serde(default)]
     pub refresh_token: Option<String>,
+}
+
+impl std::fmt::Debug for GoogleTokenResponse {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let refresh_token = self.refresh_token.as_ref().map(|_| "<redacted>");
+        formatter
+            .debug_struct("GoogleTokenResponse")
+            .field("access_token", &"<redacted>")
+            .field("expires_in", &self.expires_in)
+            .field("refresh_token", &refresh_token)
+            .finish()
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -120,6 +132,20 @@ mod tests {
         let body = br#"{"access_token":"at2","expires_in":3599}"#;
         let parsed = classify_token_response(200, body).expect("ok");
         assert_eq!(parsed.refresh_token, None);
+    }
+
+    #[test]
+    fn token_response_debug_redacts_both_tokens() {
+        let response = GoogleTokenResponse {
+            access_token: "access-secret".to_string(),
+            expires_in: 3600,
+            refresh_token: Some("refresh-secret".to_string()),
+        };
+
+        let debug = format!("{response:?}");
+        assert!(!debug.contains("access-secret"));
+        assert!(!debug.contains("refresh-secret"));
+        assert!(debug.contains("<redacted>"));
     }
 
     #[test]

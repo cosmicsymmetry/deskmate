@@ -272,6 +272,33 @@ plan and into §5.2/§6.5/§8 above.
   states that unknown fields are ignored, so the device silently drops `hero` and no
   device-side change is needed. The plan records this as a comment beside the test.
 
+## 10b. Corrections made in the whole-branch review (2026-09-08)
+
+Three sentences and one gate above were wrong as written. All four are corrected in
+the code and here; nothing else in this spec changes.
+
+- **§5.4's "when the tier is networked" means the app's ONE ownership resolution, not
+  the live cable tier.** The projector gated on `snapshot.device.tier`, which is
+  `None` in the ordinary networked case (no cable, cold start), so the overlay never
+  ran and §8's "Provider stale / error" row and §2's "the same freshness and error
+  semantics as a built-in card" were unmet exactly when the feature matters. The tier
+  is now resolved as the frontend and `save_destination` already resolved it -- live
+  tier, then the persisted tier, then networked inferred from a stored server identity
+  -- in one place in Rust. A resolution of local still paints nothing.
+- **§5.4's single notice keeps a second sentence.** A body this app cannot parse is
+  not an unreachable server, and "Couldn't reach the server for plugin data" is false
+  about it. The one place it is reachable is §10's rollout window, so it says "The
+  server answered with plugin data this app can't read. Update the server to match
+  this app." No serde defaults were added: inventing a plugin's `manifest_version`,
+  `template` or `refresh_minutes` would fabricate exactly the facts this work exists
+  to stop fabricating.
+- **§10's 404 reading asserted a cause the status code does not carry.** An old
+  server, an unknown device, an unknown card and a non-plugin card all 404. The stage
+  now says "The server has no preview for this card", which is true of all four.
+- **A summary that evaluates to an empty string is no headline.** §3's tile value
+  falls back to "—" for `None`; an empty string reached the tile as itself and drew
+  nothing, and `"aqi": ""` is ordinary provider data.
+
 ## 11. Open question for the owner
 
 None blocking. One judgement call is made here rather than asked: the tile value with

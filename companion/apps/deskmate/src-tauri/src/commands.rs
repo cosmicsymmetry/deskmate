@@ -1058,10 +1058,12 @@ pub async fn render_card_preview(
 /// Resolves the preview simulator's `SimTemplate` for one card, or a typed refusal.
 ///
 /// A plugin card has no `DisplayTemplate`: it renders from its manifest-compiled
-/// scene, not any of the six built-in templates this preview simulator knows how to
-/// draw. Refuse typed and visibly (mirrors `runtime.rs`'s `SceneRefused` handling for
-/// the same absence) rather than inventing a placeholder template, which would
-/// silently render a plugin card as some unrelated built-in face.
+/// scene, on the server, not from any of the six built-in templates this preview
+/// simulator knows how to draw. `render_card_preview` sends a plugin card to
+/// `plugin_card_preview` before reaching here, so this arm is a GUARD, not a path
+/// -- kept, and typed, so a future caller that forgets that routing is refused
+/// visibly (mirroring `runtime.rs`'s `SceneRefused` handling for the same absence)
+/// instead of silently drawing a plugin card as some unrelated built-in face.
 fn preview_template_for(
     card: &CardSettings,
     card_id: &str,
@@ -1069,7 +1071,7 @@ fn preview_template_for(
     let Some(template) = card.template() else {
         return Err(IpcError::Unsupported {
             message: format!(
-                "card {card_id:?} is a plugin card; preview rendering for plugin cards is not implemented yet"
+                "card {card_id:?} is a plugin card; its preview is rendered by the server, not by this simulator"
             ),
         });
     };
@@ -1733,6 +1735,10 @@ pub(crate) mod tests {
         );
     }
 
+    /// The guard behind the routing, not the routing itself:
+    /// `render_card_preview` never reaches this arm for a plugin card. It stays
+    /// because a caller that forgets that must be refused, not served a built-in
+    /// face at random.
     #[test]
     fn preview_template_for_a_plugin_card_is_a_typed_unsupported_refusal() {
         let card = CardSettings::Plugin {

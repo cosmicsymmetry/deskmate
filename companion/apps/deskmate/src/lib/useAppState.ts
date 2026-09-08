@@ -5,6 +5,8 @@ import {
   factoryResetDevice,
   getAppSnapshot,
   getNetworkSettings,
+  getServerCardState,
+  getServerPlugins,
   listenToAppState,
   provisionDevice,
   saveApplyConfig,
@@ -20,7 +22,9 @@ import type {
   DeviceTier,
   IpcError,
   NetworkSettings,
+  PluginCatalog,
   ProvisionDeviceInput,
+  ServerCardState,
 } from "./types";
 
 interface EventTargetLike {
@@ -95,6 +99,77 @@ export function startAppStateSubscription(options: AppStateSubscriptionOptions):
     options.visibilityTarget?.removeEventListener("visibilitychange", onVisibilityChange);
     unlisten?.();
     unlisten = undefined;
+  };
+}
+
+export const SERVER_CARD_STATE_POLL_MS = 30_000;
+export const SERVER_PLUGIN_NOTICE = "Couldn't reach the server for plugin data.";
+
+export interface IntervalScheduler {
+  set: (handler: () => void, ms: number) => number;
+  clear: (handle: number) => void;
+}
+
+export interface ServerCardStatePollOptions {
+  fetchCardState: () => Promise<ServerCardState[]>;
+  onCardState: (state: ServerCardState[]) => void;
+  onError: (error: IpcError) => void;
+  focusTarget?: EventTargetLike;
+  visibilityTarget?: VisibilityTargetLike;
+  intervalMs?: number;
+  scheduler?: IntervalScheduler;
+}
+
+/**
+ * The server's plugin state is the one thing this window cannot learn from its own
+ * runtime, so it asks — on a slow beat, and only while someone is looking. A hidden
+ * window polling a homelab every thirty seconds forever is a cost with no reader.
+ *
+ * Shaped like `startAppStateSubscription`: an imperative start returning its own
+ * cleanup, so the hook is a two-line caller and the behaviour is testable without a
+ * renderer.
+ */
+export function startServerCardStatePoll(options: ServerCardStatePollOptions): () => void {
+  let active = true;
+  const scheduler: IntervalScheduler = options.scheduler ?? {
+    set: (handler, ms) => window.setInterval(handler, ms),
+    clear: (handle) => window.clearInterval(handle),
+  };
+  const visible = () =>
+    options.visibilityTarget === undefined ||
+    options.visibilityTarget.visibilityState === "visible";
+  const poll = () => {
+    if (!visible()) {
+      return;
+    }
+    void options
+      .fetchCardState()
+      .then((state) => {
+        if (active) {
+          options.onCardState(state);
+        }
+      })
+      .catch((error) => {
+        if (active) {
+          options.onError(toIpcError(error));
+        }
+      });
+  };
+  const onFocus: EventListener = () => poll();
+  const onVisibilityChange: EventListener = () => {
+    if (visible()) {
+      poll();
+    }
+  };
+  options.focusTarget?.addEventListener("focus", onFocus);
+  options.visibilityTarget?.addEventListener("visibilitychange", onVisibilityChange);
+  const handle = scheduler.set(poll, options.intervalMs ?? SERVER_CARD_STATE_POLL_MS);
+  poll();
+  return () => {
+    active = false;
+    scheduler.clear(handle);
+    options.focusTarget?.removeEventListener("focus", onFocus);
+    options.visibilityTarget?.removeEventListener("visibilitychange", onVisibilityChange);
   };
 }
 

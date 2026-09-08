@@ -24,6 +24,16 @@ use crate::{DesktopSnapshot, DesktopState, NetworkedConfigProjection};
 
 pub(crate) const MAX_SERVER_ERROR_BYTES: usize = 64 * 1_024;
 
+/// The device-status read's own bound, which must EXCEED
+/// [`app_core::MAX_CONFIG_FILE_BYTES`] rather than match it: `GET
+/// /v1/devices/{id}` embeds the device's whole `AppConfig`, itself legal right up
+/// to that limit, and then wraps it in a snapshot of providers, card data and card
+/// errors. Sharing the 64 KiB error-body bound made a near-maximal config a
+/// permanent "oversized response" -- a card-state poll that could never succeed,
+/// reported with the same notice an unreachable server gets. Expressed as a
+/// multiple so the relationship survives someone editing either number.
+pub(crate) const MAX_SERVER_DEVICE_STATUS_BYTES: usize = 8 * MAX_CONFIG_FILE_BYTES;
+
 /// The draft travels as a bounded JSON envelope so an IPC caller cannot make serde
 /// allocate an arbitrarily deep application document before domain validation runs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -142,7 +152,12 @@ fn fetch_server_card_state(context: &ServerQueryContext) -> Result<Vec<ServerCar
     )?
     .to_string();
     let status: ServerDeviceStatus = context.with_admin_token(|token| {
-        crate::server_client::get_server_json(&context.agent, &url, token, MAX_SERVER_ERROR_BYTES)
+        crate::server_client::get_server_json(
+            &context.agent,
+            &url,
+            token,
+            MAX_SERVER_DEVICE_STATUS_BYTES,
+        )
     })?;
     Ok(project_server_card_state(&status))
 }
@@ -3291,10 +3306,11 @@ pub(crate) mod tests {
     fn answer_once(
         listener: std::net::TcpListener,
         status: &'static str,
-        body: &'static str,
+        body: impl Into<String>,
     ) -> std::thread::JoinHandle<String> {
         use std::io::Write as _;
 
+        let body = body.into();
         std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
             let request = String::from_utf8_lossy(&read_http_request(&mut stream)).to_string();
@@ -3366,6 +3382,48 @@ pub(crate) mod tests {
         assert!(request.starts_with("GET /v1/devices/desk-1 "));
         assert_eq!(states.len(), 1);
         assert_eq!(states[0].hero.as_deref(), Some("42"));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// The device-status body embeds the device's whole `AppConfig`, which is
+    /// itself legal up to `MAX_CONFIG_FILE_BYTES`. Reading it under the 64 KiB
+    /// error-body bound made a near-maximal config a permanent "oversized
+    /// response" -- a poll that could never succeed, reported as the same notice a
+    /// dead server gets. The filler here is ordinary config the Mac's partial DTO
+    /// ignores, sized past that old bound.
+    #[test]
+    fn a_device_status_body_larger_than_a_maximal_config_is_still_read() {
+        let (context, listener, directory) =
+            server_query_fixture("card-state-large", app_core::DeviceTier::Networked);
+        let playlists = (0..800)
+            .map(|index| {
+                format!(
+                    r#"{{"id":"loop-{index}","name":"Loop {index}","advance":{{"kind":"timed","default_dwell_seconds":20}},"entries":[]}}"#
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let body = format!(
+            r#"{{"device_id":"desk-1","connected":true,"last_seen_unix_ms":1,
+                "config":{{"origin":"current","using_fallback":false,"fallback_reason":null}},
+                "snapshot":{{"config":{{"playlists":[{playlists}],"cards":[
+                    {{"kind":"plugin","id":"air","title":"","plugin_id":"aqi",
+                     "tap_action":{{"kind":"none"}},"refresh":{{"kind":"interval","minutes":15}},
+                     "alert":{{"kind":"none"}}}}]}},
+                  "providers":[],"card_data":[],"card_errors":[]}}}}"#
+        );
+        assert!(
+            body.len() > MAX_SERVER_ERROR_BYTES,
+            "the filler must exceed the error-body bound to prove anything"
+        );
+        assert!(body.len() < MAX_SERVER_DEVICE_STATUS_BYTES);
+        let server = answer_once(listener, "200 OK", body);
+
+        let states = fetch_server_card_state(&context).unwrap();
+
+        server.join().unwrap();
+        assert_eq!(states.len(), 1);
+        assert_eq!(states[0].card_id, "air");
         fs::remove_dir_all(directory).unwrap();
     }
 

@@ -5,7 +5,9 @@ import {
   addCard,
   addEntry,
   cardMoveFromKey,
+  cardKindName,
   cardLabel,
+  cardName,
   cardsOutsideLoop,
   copyConfig,
   cardsContainerIssues,
@@ -25,6 +27,7 @@ import {
   moveEntry,
   nextFilmstripCardId,
   numberValue,
+  pluginCardFlag,
   removeCard,
   removeEntry,
   setEntryDwell,
@@ -32,7 +35,14 @@ import {
   tapActionDescription,
   unclaimedIssues,
 } from "../src/lib/configDraft";
-import type { AppConfig, CardSettings, ValidationIssue } from "../src/lib/types";
+import type {
+  AddableCardKind,
+  AppConfig,
+  CardSettings,
+  DeviceTier,
+  PluginCatalog,
+  ValidationIssue,
+} from "../src/lib/types";
 import { ipcContractFixtures } from "../src/lib/types.contract";
 
 function initialConfig(): AppConfig {
@@ -89,6 +99,54 @@ function pluginCard(): CardSettings {
     alert: { kind: "none" },
   };
 }
+
+function pluginCatalog(displayName: string | null = "Air quality"): PluginCatalog {
+  return {
+    plugins: [
+      {
+        id: "com.example.air-quality",
+        name: "aqi",
+        version: "1.0.0",
+        node_count: 7,
+        assets: [],
+        display_name: displayName,
+        description: "EPA index for a location",
+        manifest_version: 2,
+        template: "display-list",
+        refresh_minutes: 15,
+      },
+    ],
+    load_failures: [],
+  };
+}
+
+test("a plugin card is named by its display name, and falls back to its id twice over", () => {
+  const card = pluginCard();
+  expect(cardLabel(card, pluginCatalog())).toBe("Air quality");
+  // Fallback one: the catalog knows the plugin but the manifest declared no name.
+  expect(cardLabel(card, pluginCatalog(null))).toBe("com.example.air-quality");
+  // Fallback two: no catalog at all (local tier, or the server was unreachable).
+  expect(cardLabel(card, null)).toBe("com.example.air-quality");
+  expect(cardLabel(card)).toBe("com.example.air-quality");
+  // A catalog that does not carry this id cannot rename it either.
+  expect(cardLabel({ ...card, plugin_id: "com.example.gone" }, pluginCatalog())).toBe(
+    "com.example.gone",
+  );
+});
+
+test("no card kind is called “Plugin” on any surface", () => {
+  const kinds: AddableCardKind[] = [
+    "clock",
+    "pomodoro",
+    "calendar",
+    "weather",
+    "json-feed",
+    "rss",
+  ];
+  expect(kinds.map(cardKindName)).not.toContain("Plugin");
+  expect(cardName(pluginCard())).toBe("Office air");
+  expect(cardName({ ...pluginCard(), title: "" })).toBe("com.example.air-quality");
+});
 
 describe("configuration draft helpers", () => {
   test("adds cards with stable unique card IDs", () => {

@@ -1,10 +1,11 @@
 import type {
   AddableCardKind,
   AppConfig,
-  CardKind,
   CardSettings,
   CarouselAdvance,
+  DeviceTier,
   Playlist,
+  PluginCatalog,
   ValidationIssue,
 } from "./types";
 import { MAX_PLAYLIST_ENTRIES } from "./types";
@@ -72,9 +73,19 @@ export function cardName(card: CardSettings): string {
  * from it, where "Weather" and "Digital clock" say what the thing is. The owner's own
  * words survive as `cardTitle` — a quiet second line beside the label, never the
  * thing that names the card.
+ *
+ * A plugin card's template is its plugin, so its display name is whatever the
+ * server's catalog declares for it. Both fallbacks land on the plugin id rather than
+ * the word "Plugin": an id at least identifies the thing, where a category name
+ * identified every plugin card identically. The word that says *why* a bare id is
+ * showing is `pluginCardFlag`, not this — a name is a name, not a diagnosis.
  */
-export function cardLabel(card: CardSettings): string {
-  return card.kind === "plugin" ? card.plugin_id : cardKindName(card.kind);
+export function cardLabel(card: CardSettings, catalog?: PluginCatalog | null): string {
+  if (card.kind !== "plugin") {
+    return cardKindName(card.kind);
+  }
+  const entry = catalog?.plugins.find((plugin) => plugin.id === card.plugin_id);
+  return entry?.display_name ?? card.plugin_id;
 }
 
 /**
@@ -86,7 +97,7 @@ export function cardTitle(card: CardSettings): string | null {
   return typed.trim() === "" ? null : typed;
 }
 
-export function cardKindName(kind: CardKind): string {
+export function cardKindName(kind: AddableCardKind): string {
   switch (kind) {
     case "clock":
       return "Digital clock";
@@ -100,8 +111,6 @@ export function cardKindName(kind: CardKind): string {
       return "JSON feed";
     case "rss":
       return "RSS feed";
-    case "plugin":
-      return "Plugin";
   }
 }
 

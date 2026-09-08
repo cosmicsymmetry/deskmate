@@ -20,13 +20,22 @@
 # asymmetric badge (a light frame, an accent-colored body, a darker
 # top-strip "binding" on two corners only) so a flipped or rotated golden
 # cannot be confused with an unflipped one.
+manifest_version = 2
 name = "agenda"
 version = "1.0.0"
+# Presentation keys (manifest v2, plugin parity) -- see aqi's manifest for
+# what each one is. The headline is the next event's start time.
+display_name = "Agenda"
+description = "The next events from a calendar feed"
+summary = "{{ data.events[0].time }}"
 
 [source]
 kind = "json"
 url = "https://example.invalid/agenda.json"
 refresh_minutes = 10
+
+[template]
+kind = "scene"
 
 [[assets]]
 kind = "image"

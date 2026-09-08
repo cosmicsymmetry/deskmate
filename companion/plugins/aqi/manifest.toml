@@ -16,13 +16,25 @@
 # rather than inventing new binary content or leaving the icon-font path
 # untested for want of artwork. Swapping in a real icon font later is a
 # content change, not a shape change.
+manifest_version = 2
 name = "aqi"
 version = "1.0.0"
+# How the card presents itself in the companion app (manifest v2, plugin
+# parity): `display_name` is what the card IS on every surface,
+# `description` is the add-menu's second line, and `summary` is the tile's
+# live value -- evaluated on the server at every refresh and published as
+# the card's `hero` field. None of these touch the scene.
+display_name = "Air quality"
+description = "EPA index for a location"
+summary = "{{ data.current.aqi }}"
 
 [source]
 kind = "json"
 url = "https://example.invalid/aqi.json"
 refresh_minutes = 15
+
+[template]
+kind = "scene"
 
 [[assets]]
 kind = "icon-font"

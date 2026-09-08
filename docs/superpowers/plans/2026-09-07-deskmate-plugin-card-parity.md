@@ -8670,3 +8670,106 @@ export function mockPluginCardData(): CardDataSnapshot[];
   ```
 
 **Task exit:** `cargo test -p plugin --test manifest_v2_doc` green (5 passed) and both Step 2 mutation probes observed red then restored, with `git status --short docs/plugins/manifest-v2.md` printing nothing (Task 1's contract document is byte-unchanged by this task); the four workspace gates from `companion/` green — `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace --all-targets`, `cargo test --workspace --doc`; the four frontend gates from `companion/apps/deskmate` green — `bun test`, `bun run check`, `bun run lint`, `bun run format:check`; `?scenario=plugin` renders every state in Step 9 with no console errors; `GET /v1/plugins` on `deskmate.rodi.one` returns all four curated plugins with non-null `display_name` and `description`, `manifest_version` 2, and `load_failures: []`, and the unauthenticated public path returns `401`; and the rollout record in the plan carries only observations that were actually made.
+
+## Rollout record
+
+Task 6's implementer worked under an explicit hard boundary: no `ssh`, `rsync`, `scp`,
+`systemctl`, or `curl` against `deskmate.rodi.one` or the VM, and nothing that reaches
+outside the worktree. A production deploy is the owner's action, not an agent's. Steps
+10-13 were therefore **documented, not executed** — the exact commands live in
+`companion/crates/server/deploy/README.md` §6 (redeploy) and are repeated below for the
+owner to run and fill in.
+
+| Step | When | Result |
+|---|---|---|
+| Server binary redeployed (§6 recipe) | not run | — |
+| Curated v2 manifests deployed | not run | — |
+| `GET /v1/plugins` on the live server | not run | — |
+| Public `GET /v1/plugins` unauthenticated | not run | — |
+| Mac app against the live server | not run | — |
+
+**Not observed, and not to be described as observed: anything past what Tasks 1-5 already
+verified in software and the dev harness.** This change sends nothing new to the device;
+the panel's faces are unchanged by it. Task 6 verified, in this worktree, without touching
+the live server: the doc-contract test (`cargo test -p plugin --test manifest_v2_doc`, 5
+passed) and its two mutation probes, all four Rust workspace gates, all four frontend
+gates, and a full walk of `?scenario=plugin` in the dev harness. Rollout A-D (Steps 10-13)
+remain owed. To execute them, the owner runs, in order:
+
+1. **Rollout A — redeploy the server binary**, from the worktree root:
+
+   ```sh
+   \
+     rm -rf /tmp/deskmate-deploy && mkdir -p /tmp/deskmate-deploy && \
+     git archive HEAD companion tools/fonts | tar -x -C /tmp/deskmate-deploy && \
+     rsync -a --delete --exclude 'target/' \
+       /tmp/deskmate-deploy/companion/ rodion@100.93.166.123:~/deskmate-build/companion/ && \
+     rsync -a --delete \
+       /tmp/deskmate-deploy/tools/fonts/ rodion@100.93.166.123:~/deskmate-build/tools/fonts/
+   ```
+
+   ```sh
+   ssh rodion@100.93.166.123 'cd ~/deskmate-build && \
+     sudo -n docker run --rm -v "$PWD":/work -w /work/companion rust:1.98-bookworm \
+       cargo build --release -p server && \
+     sudo -n cp -a /usr/local/bin/deskmate-server \
+       "/usr/local/bin/deskmate-server.bak-$(date +%Y%m%d)" && \
+     sudo -n install -m 0755 companion/target/release/server /usr/local/bin/deskmate-server && \
+     sudo -n systemctl restart deskmate-server && \
+     sudo -n journalctl -u deskmate-server -n 5 --no-pager'
+   ```
+
+   Expect the journal's last lines to carry
+   `plugin registry loaded path=/var/lib/deskmate/plugins plugin_count=<n> failure_count=0`
+   with the manifests still v1-shaped at this point. A non-zero `failure_count` means the
+   binary regressed — roll back to the `.bak-<date>` binary before continuing.
+
+2. **Rollout B — deploy the four curated v2 manifests and restart:**
+
+   ```sh
+   rsync -a /tmp/deskmate-deploy/companion/plugins/ rodion@100.93.166.123:~/deskmate-plugins/ && \
+   ssh rodion@100.93.166.123 'sudo -n rsync -a ~/deskmate-plugins/ /var/lib/deskmate/plugins/ && \
+     sudo -n systemctl restart deskmate-server && \
+     sudo -n journalctl -u deskmate-server -n 5 --no-pager'
+   ```
+
+   Expect `plugin registry loaded … failure_count=0` again, with `plugin_count` unchanged
+   from step 1.
+
+3. **Rollout C — verify `GET /v1/plugins` on the live server**, token read into a shell
+   variable and never echoed:
+
+   ```sh
+   ssh rodion@100.93.166.123 'bash -s' <<'REMOTE'
+   set -eu
+   TOKEN=$(sudo -n grep "^DESKMATE_ADMIN_TOKEN=" /etc/deskmate/server.env | cut -d= -f2-)
+   BIND=$(sudo -n grep "^DESKMATE_SERVER_BIND=" /etc/deskmate/server.env | cut -d= -f2-)
+   curl -s -H "Authorization: Bearer $TOKEN" "http://$BIND/v1/plugins" | python3 -m json.tool
+   unset TOKEN
+   REMOTE
+   ```
+
+   Expect one entry per curated id (`agenda`, `aqi`, `claude-limits`, `svg-aqi`) with
+   non-null `display_name`/`description`, `"manifest_version": 2`, a `template`, a
+   `refresh_minutes`, and `"load_failures": []`. Then, from the Mac, with no token:
+
+   ```sh
+   curl -s -o /dev/null -w '%{http_code}\n' https://deskmate.rodi.one/v1/plugins
+   ```
+
+   Expect `401`.
+
+4. **Rollout D — the Mac app against the live server:**
+
+   ```sh
+   cd /Users/rodion/dev/deskmate/.worktrees/plugin-parity/companion/apps/deskmate && /Users/rodion/.bun/bin/bun run tauri dev
+   ```
+
+   With the existing `dev-0005` pairing (networked tier, admin token already stored),
+   confirm: the add-card menu's plugin group lists the four display names with their
+   descriptions matching step 3's output; a plugin card in the loop is named by its
+   display name with a live `hero` value and a real provider flag; selecting it renders a
+   preview PNG, or the state word "Waiting for the first refresh" for a card with no
+   cached snapshot yet (never "Preview unavailable", never a spurious "No data yet"
+   badge); and the editor's Plugin select names the card's plugin and offers the other
+   three. Quit the app and fill in the table above with what was actually observed.

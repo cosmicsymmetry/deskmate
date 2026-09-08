@@ -602,6 +602,18 @@ of letting code and documentation diverge.
   test-hook), and the §6 96 px glyph-cache timing (internal LVGL-task timing, needs
   instrumentation). Tags `m0`/`m1`/`v1`/`v2` now exist; later milestones remain untagged
   without that authorization. Next milestone is V3 (server host).
+- **The card preview shows what a PERSON SEES, never the framebuffer the device
+  receives** (owner direction, 2026-09-09: "the preview should always show unflipped
+  image, otherwise it's bad UI"). `render_card_preview` used to pass
+  `preferences.orientation` straight through, so a `landscape-flipped` mounting drew the
+  clock upside down in the settings window. It is upright on the panel at both mountings —
+  the 270 degree mount is what cancels the flip — so the preview renders upright at both
+  too. Nothing is lost: `sim_shim.c`'s `copy_frame_out` builds the flipped frame by
+  reversing the finished buffer index-by-index, so the flip is a pure 180 degree rotation
+  of identical content. The choice lives in `commands.rs`'s `preview_orientation` with a
+  test pinning both mountings; do not "restore fidelity" by passing the mounting through.
+  This does not touch `lvgl-sim`'s own orientation support, which the parity gate and
+  `framebuffer_diff` still need at both values.
 - **Clock faces carry no title chip and no `DATE` eyebrow** (delivered 2026-08-17; spec
   `docs/superpowers/specs/2026-08-17-deskmate-clock-title-removal-design.md`, plan
   `docs/superpowers/plans/2026-08-17-deskmate-clock-title-removal.md`). All three clock

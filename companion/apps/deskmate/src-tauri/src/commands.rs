@@ -2535,6 +2535,8 @@ pub(crate) mod tests {
         draft_validation: DraftValidation,
         config_apply_result: ConfigApplyResult,
         autostart_status: AutostartStatus,
+        plugin_catalog: app_core::admin::PluginCatalog,
+        server_card_state: Vec<ServerCardState>,
         preview_frame: PreviewFrame,
     }
 
@@ -2994,6 +2996,39 @@ pub(crate) mod tests {
                 enabled: true,
                 preference_enabled: false,
             },
+            plugin_catalog: app_core::admin::PluginCatalog {
+                plugins: vec![app_core::admin::PluginCatalogEntry {
+                    id: "aqi".into(),
+                    name: "aqi".into(),
+                    version: "1.0.0".into(),
+                    node_count: 4,
+                    assets: vec![app_core::admin::PluginCatalogAsset {
+                        file: "icons.ttf".into(),
+                        kind: "icon-font".into(),
+                        byte_length: 40_960,
+                        digest: "0f1e2d3c".into(),
+                    }],
+                    display_name: Some("Air quality".into()),
+                    description: Some("EPA index for a location".into()),
+                    manifest_version: 2,
+                    template: app_core::admin::PluginTemplateKind::DisplayList,
+                    refresh_minutes: 15,
+                }],
+                load_failures: vec![app_core::admin::PluginLoadFailure {
+                    id: "broken".into(),
+                    error: "unknown key \"summry\"".into(),
+                }],
+            },
+            server_card_state: vec![ServerCardState {
+                card_id: "air-quality".into(),
+                provider: ProviderState::Fresh,
+                hero: Some("42".into()),
+                errors: vec![CardError {
+                    kind: CardErrorKind::SceneRefused,
+                    card_id: "air-quality".into(),
+                    message: "no snapshot cached yet".into(),
+                }],
+            }],
             preview_frame: PreviewFrame {
                 png_base64: Some("iVBORw0KGgo=".into()),
                 sample: true,

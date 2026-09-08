@@ -73,9 +73,12 @@ fn assert_frozen_v1_fields_are_identical(source: &str) {
 }
 
 #[test]
-fn both_shipped_v1_manifests_reparse_with_every_frozen_field_unchanged() {
-    assert_frozen_v1_fields_are_identical(include_str!("../../../plugins/aqi/manifest.toml"));
-    assert_frozen_v1_fields_are_identical(include_str!("../../../plugins/agenda/manifest.toml"));
+fn the_frozen_v1_fixture_manifests_reparse_with_every_frozen_field_unchanged() {
+    // Byte-exact copies of `companion/plugins/{aqi,agenda}/manifest.toml` as
+    // they shipped under v1, frozen when the curated plugins moved to v2
+    // (plugin-parity Task 1) so the v1 contract keeps real coverage.
+    assert_frozen_v1_fields_are_identical(include_str!("fixtures/manifest_v1_aqi.toml"));
+    assert_frozen_v1_fields_are_identical(include_str!("fixtures/manifest_v1_agenda.toml"));
 }
 
 #[test]

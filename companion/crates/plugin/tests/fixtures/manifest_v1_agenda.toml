@@ -1,0 +1,84 @@
+# agenda -- the second of Deskmate's two curated plugins (Task 8 of the
+# plugin-manifest stage). A JSON source that is a *list*: it exercises the
+# one repeat form (`[[repeats]]`, capped at `plugin::MAX_REPEAT_ITEMS` = 5
+# rows even though the fixture's `events` array carries six) and a real
+# truncation case (an event title long enough that `truncate()` actually
+# cuts it, on a row also marked `ellipsize = true` so the device's own
+# width-based LVGL ellipsis has something to do too). It also carries the
+# `[[assets]] kind = "image"` entry that gives `framebuffer_diff`'s
+# RGB565-image exclusion category a real, provisionable asset.
+#
+# `badge.rgb565` is NOT a PNG or any other conventional image
+# container -- there is no image-decoding/RGB565-conversion pipeline in this
+# crate or the server yet (`manifest.rs`'s `Node::Image` doc calls that
+# "converted server-side," aspirationally; nothing implements it), so the
+# committed file IS the device-native blob already: a 12-byte
+# `lv_image_header_t` (magic 0x19, `LV_COLOR_FORMAT_RGB565` 0x12, 20x20,
+# stride 40) directly followed by 400 raw host-endian RGB565 pixels, built
+# by hand to match `sim_build_rgb565_image`'s layout in
+# `crates/lvgl-sim/csrc/sim_shim.c` byte for byte. It draws a small
+# asymmetric badge (a light frame, an accent-colored body, a darker
+# top-strip "binding" on two corners only) so a flipped or rotated golden
+# cannot be confused with an unflipped one.
+name = "agenda"
+version = "1.0.0"
+
+[source]
+kind = "json"
+url = "https://example.invalid/agenda.json"
+refresh_minutes = 10
+
+[[assets]]
+kind = "image"
+file = "badge.rgb565"
+
+[[nodes]]
+kind = "text"
+x = 24
+baseline_y = 56
+w = 300
+align = "left"
+font = { tier = "caption" }
+color = 0x5C5C66
+value = "{{ data.date }}"
+
+[[nodes]]
+kind = "image"
+x = 404
+y = 24
+w = 20
+h = 20
+asset = "badge.rgb565"
+
+# The one repeat form: one row per `data.events[N]`, capped at
+# `MAX_REPEAT_ITEMS` (5) however many the fetched array actually holds --
+# the fixture's sixth event must never reach the panel.
+[[repeats]]
+source = "events"
+dx = 0
+dy = 40
+
+[[repeats.nodes]]
+kind = "text"
+x = 24
+baseline_y = 140
+w = 80
+align = "left"
+font = { tier = "body" }
+color = 0x5C5C66
+value = "{{ default(data.events[item].time, \"--:--\") }}"
+
+# The truncation case: `evt-1`'s title is 92 characters, well past this
+# `truncate(..., 40)` cut and, at `body` width 316px, also past what fits
+# on one line -- `ellipsize = true` gives the device's own width-based
+# LVGL long-mode something real to do on top of the expression-level cut.
+[[repeats.nodes]]
+kind = "text"
+x = 112
+baseline_y = 140
+w = 316
+align = "left"
+font = { tier = "body" }
+color = 0xF5F5F7
+value = "{{ truncate(default(data.events[item].title, \"(untitled)\"), 40) }}"
+ellipsize = true

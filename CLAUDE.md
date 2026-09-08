@@ -158,8 +158,8 @@ of letting code and documentation diverge.
   loop order, and it is where the order changes (drag, hover earlier/later, ⌥ ← →); the
   ring legend only displays and selects (DESIGN.md was amended — it used to assign
   reorder to the legend); **adding a card is one dashed slot at the end of the grid that
-  opens a menu** of built-in kinds plus a `pluginKinds` group the app passes as `[]`
-  today (there is no plugin registry source in the app; do not fabricate one), and the
+  opens a menu** of built-in kinds plus a `pluginKinds` group — empty until 2026-09-07,
+  and since then built from the server's catalog (see the next bullet) — and the
   new card joins the loop at once (`addCard` now enrols, gated on both `MAX_CARDS` and
   `MAX_PLAYLIST_ENTRIES`); a tile owns one fact, so **dwell is edited in the card's
   editor ("Stays on the panel for")**, never printed on the tile; the pacing control
@@ -177,6 +177,66 @@ of letting code and documentation diverge.
   the one menu the design allows beside the settings sheet; it holds choices, never
   state. Known and deliberately unfixed: a `preferences.timezone` issue is rendered only
   inside the closed Settings sheet (pre-existing).
+- **A plugin card is a peer of a built-in card in the companion app, and the SERVER
+  renders its preview (2026-09-07; spec
+  `docs/superpowers/specs/2026-09-06-deskmate-plugin-card-parity-design.md`, plan
+  `docs/superpowers/plans/2026-09-07-deskmate-plugin-card-parity.md`, branch
+  `feat/plugin-parity`).** Owner direction: "the user should not see a difference between
+  server rendered cards and regular cards"; approach 2 of three was chosen — the server
+  renders the previews, because the Mac has neither a plugin registry nor a rasterizer.
+  **Schema stays v6, protocol stays v1, nothing new reaches the device.**
+  - **Manifest v2 gains three optional keys** (`docs/plugins/manifest-v2.md`, whose bounds
+    section is machine-checked by `crates/plugin/tests/manifest_v2_doc.rs`):
+    `display_name` (64 bytes), `description` (160 bytes), and `summary` — a **data**
+    expression whose evaluated output is truncated to 32 bytes and published as the card's
+    `hero` field. A device binding (`time:`, `timer.`, `date`, `field.`) in a summary is a
+    parse-time `SummaryUsesDeviceBinding`, and a present-but-empty `display_name` or
+    `description` is `EmptyString` rather than a fallback request. **Manifest v1 stays
+    frozen**; all four curated plugins moved to v2, so v1 coverage now rides on the two
+    byte-exact copies under `crates/plugin/tests/fixtures/`, not on the shipped manifests.
+  - **Two additive admin surfaces, both admin-bearer.** `GET /v1/plugins` carries the new
+    keys plus `manifest_version`, `template` and `refresh_minutes`;
+    `GET /v1/devices/{id}/cards/{card_id}/preview` returns the card's face as a PNG,
+    built on the runtime worker with **revision 0** — never minted, never sent, no device
+    I/O, no raster floor, no dirty mark, and the card is never activated. All seven shared
+    DTOs live in `app-core/src/admin.rs` so the server serializes and the Mac deserializes
+    **one** type, re-exported from the crate root **except** `PluginLoadFailure`, which
+    stays `app_core::admin::PluginLoadFailure` because
+    `server::plugin_registry::PluginLoadFailure` already exists and a second name in one
+    scope is a trap. Existing catalog fields serialize byte-identically to before. An
+    unknown or non-plugin card is `RuntimeError::UnknownCard` / `NotAPluginCard` in
+    app-core and the **existing unit** `AdminError::NotFound` in the server.
+  - **The new `hero` field is safe on the wire, and this was verified rather than
+    assumed.** A plugin card's wire template is always `DigitalClock`, whose firmware
+    registry declares only `title`, `show_seconds`, `stale` and `error`;
+    `firmware/main/core/template_fields.h` states that unknown fields are ignored, so the
+    device drops `hero` and no device-side change was needed.
+  - **The Mac stopped pretending.** With no plugin host the hostless runtime schedules no
+    provider deadline for a plugin card and reports no provider entry for it; the
+    permanent `stale` flag it used to show was a defect, not a state. A
+    `ServerStateProjection` overlays the server's per-card provider state, `hero` value
+    and errors onto the snapshot in networked tier only (polled every 30 s while visible,
+    64 KiB bodies for catalog and status, 1 MiB for a preview).
+  - **A waiting plugin card prints a state WORD, not the "No data yet" badge.** The badge
+    means "a real frame rendered from sample data"; a card waiting for its first refresh
+    has no frame at all, so the preview returns `png_base64: null, sample: false,
+    state: "Waiting for the first refresh"` and the stage prints that sentence.
+  - **The accepted deviation is the preview's fidelity, and PRODUCT.md states it.** A
+    display-list plugin's preview comes from `resvg`, not LVGL, so it can differ exactly
+    where `docs/scene/template-parity-ledger.md` says (LVGL ellipsizes an overflowing
+    line; the raster shows it whole). An SVG-template plugin is exact by construction.
+    Byte-exact Mac-side rendering of the server's compiled scene stays available later as
+    an additive extension of the same route.
+  - **Rollout is server-then-Mac and the order is load-bearing**: a v2 manifest pushed to a
+    server built before this change fails `deny_unknown_fields`, so the plugin drops out of
+    the registry into `load_failures` and its cards go dark. Redeploy the binary first,
+    then the manifests. Against a server that predates the preview route the stage says
+    "Plugin previews need a newer server" — a distinct sentence from local tier's "Plugin
+    cards render on the server", which is chosen from the known tier before any request is
+    made. The recipe is written down in `companion/crates/server/deploy/README.md` §6.
+  - **Rendering a plugin card in local tier is an explicit NON-GOAL** — there is no server
+    to render it — so the card is flagged `needs the server` and the stage says so. Do not
+    add a Mac-side plugin renderer to "fix" it.
 - **V2's exit gate is OPEN, but no longer blocked.** Task 11 Step 11 failed on hardware
   on 2026-08-19 and **passed on a re-run the same day** after two real defects were
   fixed; what remains open is the gate's own unobserved items, not a blocker. The first

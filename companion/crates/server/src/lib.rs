@@ -19,6 +19,7 @@ mod auth;
 mod device_link;
 pub mod egress;
 pub mod firmware;
+pub mod oauth;
 pub mod plugin_host;
 pub mod plugin_provider;
 pub mod plugin_refresher;

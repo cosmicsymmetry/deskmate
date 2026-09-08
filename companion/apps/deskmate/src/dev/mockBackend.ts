@@ -13,6 +13,13 @@
  */
 import { mockCardData, mockConfig, mockNetworkSettings, mockSnapshot } from "./fixture";
 import { renderMockFrame } from "./mockPreview";
+import {
+  MOCK_PLUGIN_CATALOG,
+  mockPluginCardData,
+  mockPluginCardState,
+  mockPluginConfig,
+  mockPluginProviders,
+} from "./pluginFixture";
 import type {
   AppConfig,
   AppSnapshot,
@@ -31,6 +38,8 @@ export const SCENARIOS = [
   "firstrun",
   "empty",
   "carderror",
+  "plugin",
+  "plugin-local",
 ] as const;
 export type Scenario = (typeof SCENARIOS)[number];
 
@@ -121,6 +130,20 @@ function applyScenario() {
           message: "the display could not render this card's complete scene",
         },
       ];
+      break;
+    case "plugin":
+    case "plugin-local":
+      config = mockPluginConfig();
+      snapshot = mockSnapshot(config);
+      snapshot.providers = mockPluginProviders();
+      snapshot.card_data = mockPluginCardData();
+      snapshot.pomodoros = [];
+      if (scenario === "plugin-local") {
+        // No server, so no catalog and no rendering: `pluginCardFlag` prints the
+        // word and the stage says where these cards are drawn.
+        snapshot.device.tier = "local";
+        network = { server_url: "", device_id: "", tier: "local" };
+      }
       break;
     default:
       break;
@@ -246,6 +269,17 @@ function requireArgs(args: Record<string, unknown> | undefined): Record<string, 
 const delay = <T>(value: T, ms = 90): Promise<T> =>
   new Promise((resolve) => window.setTimeout(() => resolve(value), ms));
 
+/** The `hero` field the mock projection published for one card, if any. */
+function heroFor(cardId: string): string | null {
+  const field = snapshot.card_data
+    .find((candidate) => candidate.card_id === cardId)
+    ?.fields.find((candidate) => candidate.key === "hero");
+  if (!field) {
+    return null;
+  }
+  return field.value.kind === "text" ? field.value.value : String(field.value.value);
+}
+
 export async function mockInvoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   switch (command) {
     case "get_app_snapshot":
@@ -254,6 +288,10 @@ export async function mockInvoke<T>(command: string, args?: Record<string, unkno
       return delay(network) as Promise<T>;
     case "get_autostart_status":
       return delay(autostart) as Promise<T>;
+    case "get_server_plugins":
+      return delay(MOCK_PLUGIN_CATALOG) as Promise<T>;
+    case "get_server_card_state":
+      return delay(scenario === "plugin" ? mockPluginCardState() : []) as Promise<T>;
     case "set_autostart_enabled": {
       autostart = { enabled: Boolean(args?.enabled), preference_enabled: Boolean(args?.enabled) };
       return delay(autostart) as Promise<T>;
@@ -313,10 +351,27 @@ export async function mockInvoke<T>(command: string, args?: Record<string, unkno
       const card = config.cards.find((candidate) => candidate.id === cardId);
       if (!card) throw { category: "not-found", message: "No such card." };
       if (card.kind === "plugin") {
-        throw {
-          category: "unsupported",
-          message: "Plugin previews require the server plugin host.",
-        };
+        if (scenario === "plugin-local") {
+          return {
+            png_base64: null,
+            sample: false,
+            state: "Plugin cards render on the server",
+          } as T;
+        }
+        if (!MOCK_PLUGIN_CATALOG.plugins.some((plugin) => plugin.id === card.plugin_id)) {
+          return {
+            png_base64: null,
+            sample: false,
+            state: `Plugin “${card.plugin_id}” is not loaded on the server`,
+          } as T;
+        }
+        if (heroFor(cardId) === null) {
+          return {
+            png_base64: null,
+            sample: false,
+            state: "Waiting for the first refresh",
+          } as T;
+        }
       }
       const timer = snapshot.pomodoros.find((candidate) => candidate.widget_id === cardId);
       return {
@@ -327,6 +382,7 @@ export async function mockInvoke<T>(command: string, args?: Record<string, unkno
           timer?.remaining_seconds ?? null,
         ),
         sample: true,
+        state: null,
       } as T;
     }
     case "choose_ics_file":

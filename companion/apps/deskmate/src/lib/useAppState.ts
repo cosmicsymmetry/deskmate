@@ -421,6 +421,11 @@ export function useAppState(): AppStateValue {
 
   const catalogError = catalogFailed || cardStateFailed ? SERVER_PLUGIN_NOTICE : null;
 
+  // `catalogGeneration` is never read in the body below — it exists only so
+  // `refreshCatalog` (bumping it) forces this effect to re-run and retry the fetch,
+  // the same "intentional re-fetch trigger" pattern `DevicePreview` uses for
+  // `dataGeneration`/`orientation`.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: see comment above.
   useEffect(() => {
     if (ownershipTier !== "networked") {
       // Local tier has no server, so a catalog held from a previous pairing would be

@@ -135,14 +135,7 @@ test("a plugin card is named by its display name, and falls back to its id twice
 });
 
 test("no card kind is called “Plugin” on any surface", () => {
-  const kinds: AddableCardKind[] = [
-    "clock",
-    "pomodoro",
-    "calendar",
-    "weather",
-    "json-feed",
-    "rss",
-  ];
+  const kinds: AddableCardKind[] = ["clock", "pomodoro", "calendar", "weather", "json-feed", "rss"];
   expect(kinds.map(cardKindName)).not.toContain("Plugin");
   expect(cardName(pluginCard())).toBe("Office air");
   expect(cardName({ ...pluginCard(), title: "" })).toBe("com.example.air-quality");

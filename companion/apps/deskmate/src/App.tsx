@@ -501,8 +501,8 @@ export function App() {
                   const card = draft.cards.find((candidate) => candidate.id === cardError.card_id);
                   return (
                     <p key={cardError.card_id}>
-                      <strong>{card ? cardLabel(card, pluginCatalog) : cardError.card_id}</strong>{" "}
-                      — {cardError.message}
+                      <strong>{card ? cardLabel(card, pluginCatalog) : cardError.card_id}</strong> —{" "}
+                      {cardError.message}
                     </p>
                   );
                 })}

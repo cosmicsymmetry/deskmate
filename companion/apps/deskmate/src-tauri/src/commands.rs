@@ -127,17 +127,21 @@ pub struct AutostartStatus {
     pub preference_enabled: bool,
 }
 
-/// A rendered card preview: the exact PNG bytes the firmware's own template
-/// renderer produced, base64-encoded for the typed IPC boundary (the webview never
-/// receives anything besides these bytes — see the module docs on `preview`).
+/// A rendered card preview. `png_base64` is `None` when there is nothing to draw
+/// and `state` then names why, in the server's own words: the stage prints that
+/// sentence rather than "Preview unavailable", which stays reserved for a real
+/// transport failure. Built-in cards always set `png_base64` and never `state`.
+///
 /// `sample` is set when the card has never published data (the runtime holds no
 /// `CardDataSnapshot` for it): the request still renders, with an empty field set,
 /// so the image is the firmware's own unconfigured appearance for that template
-/// rather than an invented placeholder.
+/// rather than an invented placeholder. It therefore only ever accompanies a real
+/// frame -- a card with no frame is not a sample of anything.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PreviewFrame {
-    pub png_base64: String,
+    pub png_base64: Option<String>,
     pub sample: bool,
+    pub state: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -772,8 +776,9 @@ pub fn render_card_preview(
         .render(request)
         .map_err(|message| IpcError::Internal { message })?;
     Ok(PreviewFrame {
-        png_base64: BASE64_STANDARD.encode(png),
+        png_base64: Some(BASE64_STANDARD.encode(png)),
         sample,
+        state: None,
     })
 }
 
@@ -822,6 +827,47 @@ fn sim_field(field: &CardField) -> lvgl_sim::SimField {
     lvgl_sim::SimField {
         name: field.key.clone(),
         value,
+    }
+}
+
+/// Chosen from the tier the Mac already knows, before any socket is opened: in
+/// local tier there is no server to render on and this app has no plugin host.
+pub(crate) const PLUGIN_RENDERS_ON_THE_SERVER: &str = "Plugin cards render on the server";
+
+/// Chosen only after a networked-tier request came back 404. Spec section 10 makes
+/// the Mac's GETs additive, so a server built before the preview route answers 404
+/// and this is the honest reading of it.
+pub(crate) const PLUGIN_PREVIEW_NEEDS_A_NEWER_SERVER: &str =
+    "Plugin previews need a newer server";
+
+fn unrendered_plugin_frame(state: &str) -> PreviewFrame {
+    PreviewFrame {
+        png_base64: None,
+        sample: false,
+        state: Some(state.to_owned()),
+    }
+}
+
+/// Section 4.2 promises `png_base64` exactly when the state is `fresh` or `stale`
+/// and `message` exactly when it is `error` or `waiting`. This keys off the frame
+/// rather than the word, so a server that breaks that invariant still produces a
+/// stage that is either an image or a sentence, never a blank black rectangle.
+fn plugin_preview_frame(response: app_core::admin::CardPreviewResponse) -> PreviewFrame {
+    match response.png_base64 {
+        Some(png_base64) => PreviewFrame {
+            png_base64: Some(png_base64),
+            sample: false,
+            state: None,
+        },
+        None => PreviewFrame {
+            png_base64: None,
+            sample: false,
+            state: Some(
+                response
+                    .message
+                    .unwrap_or_else(|| "The server sent no preview for this card".to_owned()),
+            ),
+        },
     }
 }
 
@@ -2728,8 +2774,9 @@ pub(crate) mod tests {
                 preference_enabled: false,
             },
             preview_frame: PreviewFrame {
-                png_base64: "iVBORw0KGgo=".into(),
+                png_base64: Some("iVBORw0KGgo=".into()),
                 sample: true,
+                state: None,
             },
         }
     }
@@ -2752,6 +2799,84 @@ pub(crate) mod tests {
                 "rss",
                 "plugin",
             ]
+        );
+    }
+
+    #[test]
+    fn every_server_preview_outcome_maps_to_one_stage_state() {
+        use app_core::admin::{CardPreviewResponse, CardPreviewState};
+
+        let rendered = plugin_preview_frame(CardPreviewResponse {
+            png_base64: Some("iVBORw0KGgo=".into()),
+            state: CardPreviewState::Stale,
+            message: None,
+            refreshed_at_unix_ms: Some(1_787_000_000_000),
+        });
+        assert_eq!(
+            rendered,
+            PreviewFrame {
+                png_base64: Some("iVBORw0KGgo=".into()),
+                sample: false,
+                state: None,
+            }
+        );
+
+        // `sample` means "a real frame rendered, from an empty field set" -- it is
+        // what puts the "No data yet" badge on a drawn image. A waiting plugin card
+        // has no frame at all, so it is NOT sample: it prints the state sentence.
+        let waiting = plugin_preview_frame(CardPreviewResponse {
+            png_base64: None,
+            state: CardPreviewState::Waiting,
+            message: Some("Waiting for the first refresh".into()),
+            refreshed_at_unix_ms: None,
+        });
+        assert_eq!(
+            waiting,
+            PreviewFrame {
+                png_base64: None,
+                sample: false,
+                state: Some("Waiting for the first refresh".into()),
+            }
+        );
+
+        let failed = plugin_preview_frame(CardPreviewResponse {
+            png_base64: None,
+            state: CardPreviewState::Error,
+            message: Some("Plugin \"x\" is not loaded on the server".into()),
+            refreshed_at_unix_ms: None,
+        });
+        assert_eq!(
+            failed,
+            PreviewFrame {
+                png_base64: None,
+                sample: false,
+                state: Some("Plugin \"x\" is not loaded on the server".into()),
+            }
+        );
+
+        // A server that says nothing still says something on the stage.
+        let mute = plugin_preview_frame(CardPreviewResponse {
+            png_base64: None,
+            state: CardPreviewState::Error,
+            message: None,
+            refreshed_at_unix_ms: None,
+        });
+        assert!(matches!(mute.state, Some(message) if !message.is_empty()));
+    }
+
+    #[test]
+    fn a_plugin_card_the_mac_cannot_render_says_where_it_renders() {
+        assert_eq!(
+            unrendered_plugin_frame(PLUGIN_RENDERS_ON_THE_SERVER),
+            PreviewFrame {
+                png_base64: None,
+                sample: false,
+                state: Some("Plugin cards render on the server".into()),
+            }
+        );
+        assert_eq!(
+            unrendered_plugin_frame(PLUGIN_PREVIEW_NEEDS_A_NEWER_SERVER).state,
+            Some("Plugin previews need a newer server".into())
         );
     }
 

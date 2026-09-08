@@ -687,6 +687,101 @@ describe("settings accessibility and states", () => {
     }
   });
 
+  /// A server that answers with a shape this app cannot read WAS reached, so
+  /// "Couldn't reach the server" would be a false sentence about it. The reachable
+  /// cause is the documented server-then-Mac rollout, so the notice names the fix
+  /// — and it is still the same one notice, with the same working "Try again".
+  test("a server older than this app gets its own true sentence", async () => {
+    snapshotImpl = async () => ({
+      ...snapshot,
+      device: { ...snapshot.device, tier: "networked" },
+      config: {
+        ...snapshot.config,
+        cards: [pluginCard("air")],
+        playlists: [
+          {
+            id: "workday",
+            name: "Workday",
+            advance: { kind: "timed" as const, default_dwell_seconds: 20 },
+            entries: [{ card_id: "air", dwell_seconds: null }],
+          },
+        ],
+        active_playlist_id: "workday",
+      },
+      providers: [],
+      pomodoros: [],
+      card_data: [],
+      card_errors: [],
+    });
+    networkSettingsImpl = async () => ({
+      server_url: "https://desk.example",
+      device_id: "desk-1",
+      tier: "networked",
+    });
+    previewImpl = async () => ({ png_base64: "cHJldmlldw==", sample: false, state: null });
+    let catalogCalls = 0;
+    serverPluginsImpl = async () => {
+      catalogCalls += 1;
+      if (catalogCalls === 1) {
+        throw {
+          category: "incompatible-server",
+          message: "the server returned a response this app could not read",
+        };
+      }
+      return {
+        plugins: [
+          {
+            id: "com.example.air-quality",
+            name: "aqi",
+            version: "1.0.0",
+            node_count: 7,
+            assets: [],
+            display_name: "Air quality",
+            description: "EPA index for a location",
+            manifest_version: 2,
+            template: "display-list" as const,
+            refresh_minutes: 15,
+          },
+        ],
+        load_failures: [],
+      };
+    };
+    serverCardStateImpl = async () => [];
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await renderPreviewInto(root, <App />);
+      await waitFor(() => {
+        expect(container.textContent).toContain("Update the server to match this app.");
+      });
+      expect(container.textContent).not.toContain("Couldn't reach the server for plugin data.");
+
+      const retry = buttonWithText(container, "Try again");
+      expect(retry).toBeDefined();
+      await act(async () => retry?.click());
+      await waitFor(() => {
+        expect(container.textContent).not.toContain("Update the server to match this app.");
+        expect(container.textContent).toContain("Air quality");
+      });
+      expect(catalogCalls).toBe(2);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      serverPluginsImpl = async () => ({ plugins: [], load_failures: [] });
+      serverCardStateImpl = async () => [];
+      snapshotImpl = async () => snapshot;
+      networkSettingsImpl = async () => ({
+        server_url: "https://desk.example",
+        device_id: "desk-1",
+        tier: "local",
+      });
+      previewImpl = () =>
+        Promise.reject(new Error("renderCardPreview not configured for this test"));
+    }
+  });
+
   test("Try again re-polls card state, not only the catalog", async () => {
     snapshotImpl = async () => ({
       ...snapshot,

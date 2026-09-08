@@ -441,6 +441,7 @@ export type IpcError =
   | MessageError<"persistence">
   | MessageError<"runtime-busy">
   | MessageError<"runtime-unavailable">
+  | MessageError<"incompatible-server">
   | MessageError<"not-found">
   | MessageError<"device">
   | MessageError<"provider">

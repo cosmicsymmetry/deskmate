@@ -26,6 +26,7 @@ const IPC_ERROR_CATEGORIES = new Set<IpcError["category"]>([
   "persistence",
   "runtime-busy",
   "runtime-unavailable",
+  "incompatible-server",
   "not-found",
   "device",
   "provider",

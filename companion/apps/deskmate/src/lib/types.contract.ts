@@ -880,6 +880,10 @@ export const ipcContractFixtures = {
       "message": "unavailable"
     },
     {
+      "category": "incompatible-server",
+      "message": "incompatible"
+    },
+    {
       "category": "not-found",
       "message": "missing"
     },

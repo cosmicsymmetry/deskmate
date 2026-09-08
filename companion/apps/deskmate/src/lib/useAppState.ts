@@ -104,6 +104,40 @@ export function startAppStateSubscription(options: AppStateSubscriptionOptions):
 
 export const SERVER_CARD_STATE_POLL_MS = 30_000;
 export const SERVER_PLUGIN_NOTICE = "Couldn't reach the server for plugin data.";
+/**
+ * The other true sentence. A server that answers with a shape this app cannot read
+ * was reached, so the notice above would be a false statement about it — and the
+ * reachable cause is the documented server-then-Mac rollout, where the server is
+ * briefly older than the app. Naming the fix is the useful half; the app never
+ * invents the values the older server did not send.
+ */
+export const SERVER_PLUGIN_OUTDATED_NOTICE =
+  "The server answered with plugin data this app can't read. Update the server to match this app.";
+
+/** Which of the two sentences a failed server read has earned. */
+export type ServerReadFailure = "unreachable" | "incompatible";
+
+export function serverReadFailure(error: unknown): ServerReadFailure {
+  return toIpcError(error).category === "incompatible-server" ? "incompatible" : "unreachable";
+}
+
+/**
+ * Two server reads, one notice — but not one sentence. An incompatible answer wins
+ * over an unreachable one when both have failed, because it is the one with an
+ * action behind it and it is the more specific fact.
+ */
+export function serverPluginNotice(
+  catalog: ServerReadFailure | null,
+  cardState: ServerReadFailure | null,
+): string | null {
+  if (catalog === "incompatible" || cardState === "incompatible") {
+    return SERVER_PLUGIN_OUTDATED_NOTICE;
+  }
+  if (catalog === "unreachable" || cardState === "unreachable") {
+    return SERVER_PLUGIN_NOTICE;
+  }
+  return null;
+}
 
 export interface IntervalScheduler {
   set: (handler: () => void, ms: number) => number;
@@ -193,7 +227,11 @@ export interface AppStateValue {
   ownershipTier: DeviceTier | null;
   /** The server's plugin registry, or null in local tier and before the first read. */
   pluginCatalog: PluginCatalog | null;
-  /** One sentence for either server read having failed; null when both are fine. */
+  /**
+   * One notice for either server read having failed, null when both are fine, and
+   * whichever of the two sentences is true of what happened — see
+   * `serverPluginNotice`.
+   */
   catalogError: string | null;
   refreshCatalog: () => void;
   serverCardState: ServerCardState[];
@@ -259,11 +297,14 @@ export function useAppState(): AppStateValue {
   const [networkSettingsLoaded, setNetworkSettingsLoaded] = useState(false);
   const [pluginCatalog, setPluginCatalog] = useState<PluginCatalog | null>(null);
   const [serverCardState, setServerCardState] = useState<ServerCardState[]>([]);
-  // Two failures, one sentence. Tracked apart because a working card-state poll is
+  // Two failures, one notice. Tracked apart because a working card-state poll is
   // not evidence that the catalog read succeeded, and clearing one on the other's
-  // success would make the notice depend on which promise settled first.
-  const [catalogFailed, setCatalogFailed] = useState(false);
-  const [cardStateFailed, setCardStateFailed] = useState(false);
+  // success would make the notice depend on which promise settled first. Each holds
+  // WHY it failed, because "couldn't reach the server" and "the server answered
+  // something this app can't read" are different facts and only one of them is
+  // ever true.
+  const [catalogFailure, setCatalogFailure] = useState<ServerReadFailure | null>(null);
+  const [cardStateFailure, setCardStateFailure] = useState<ServerReadFailure | null>(null);
   // One generation number for BOTH server reads: "Try again" cannot tell which one
   // is the reason the notice is showing, so it must retry both rather than leave a
   // card-state failure sitting there until the next scheduled beat or focus event.
@@ -422,7 +463,7 @@ export function useAppState(): AppStateValue {
     networkSettings.tier ??
     (networkSettingsLoaded ? resolveDeviceTier(null, networkSettings) : null);
 
-  const catalogError = catalogFailed || cardStateFailed ? SERVER_PLUGIN_NOTICE : null;
+  const catalogError = serverPluginNotice(catalogFailure, cardStateFailure);
 
   // `refreshGeneration` is never read in either body below — it exists only so
   // `refreshCatalog` (bumping it) forces both effects to re-run: this one retries
@@ -437,8 +478,8 @@ export function useAppState(): AppStateValue {
       // a stale promise the app cannot keep. `pluginCardFlag` prints the reason.
       setPluginCatalog(null);
       setServerCardState([]);
-      setCatalogFailed(false);
-      setCardStateFailed(false);
+      setCatalogFailure(null);
+      setCardStateFailure(null);
       return;
     }
     let active = true;
@@ -446,12 +487,12 @@ export function useAppState(): AppStateValue {
       .then((catalog) => {
         if (active) {
           setPluginCatalog(catalog);
-          setCatalogFailed(false);
+          setCatalogFailure(null);
         }
       })
-      .catch(() => {
+      .catch((error) => {
         if (active) {
-          setCatalogFailed(true);
+          setCatalogFailure(serverReadFailure(error));
         }
       });
     return () => {
@@ -473,9 +514,9 @@ export function useAppState(): AppStateValue {
       fetchCardState: getServerCardState,
       onCardState: (next) => {
         setServerCardState(next);
-        setCardStateFailed(false);
+        setCardStateFailure(null);
       },
-      onError: () => setCardStateFailed(true),
+      onError: (error) => setCardStateFailure(serverReadFailure(error)),
       focusTarget: window,
       visibilityTarget: document,
     });

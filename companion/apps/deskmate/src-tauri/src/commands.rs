@@ -374,6 +374,17 @@ pub enum IpcError {
     RuntimeUnavailable {
         message: String,
     },
+    /// The server was reached, answered, and said something this app cannot read.
+    ///
+    /// Distinct from `RuntimeUnavailable` because the difference is the whole
+    /// message: "couldn't reach the server" is simply false here. The reachable
+    /// cause is the documented server-then-Mac rollout -- a server built before
+    /// this app answers an additive route without the keys this app's DTOs
+    /// require -- so the window's sentence for it means "update the server",
+    /// never "check your network".
+    IncompatibleServer {
+        message: String,
+    },
     NotFound {
         message: String,
     },
@@ -410,6 +421,7 @@ impl std::fmt::Display for IpcError {
             | Self::Persistence { message }
             | Self::RuntimeBusy { message }
             | Self::RuntimeUnavailable { message }
+            | Self::IncompatibleServer { message }
             | Self::NotFound { message }
             | Self::Device { message }
             | Self::Provider { message }
@@ -432,6 +444,7 @@ impl IpcError {
             Self::Persistence { .. } => "persistence",
             Self::RuntimeBusy { .. } => "runtime-busy",
             Self::RuntimeUnavailable { .. } => "runtime-unavailable",
+            Self::IncompatibleServer { .. } => "incompatible-server",
             Self::NotFound { .. } => "not-found",
             Self::Device { .. } => "device",
             Self::Provider { .. } => "provider",
@@ -450,6 +463,7 @@ impl IpcError {
             | Self::Persistence { message }
             | Self::RuntimeBusy { message }
             | Self::RuntimeUnavailable { message }
+            | Self::IncompatibleServer { message }
             | Self::NotFound { message }
             | Self::Device { message }
             | Self::Provider { message }
@@ -2890,6 +2904,9 @@ pub(crate) mod tests {
             },
             IpcError::RuntimeUnavailable {
                 message: "unavailable".into(),
+            },
+            IpcError::IncompatibleServer {
+                message: "incompatible".into(),
             },
             IpcError::NotFound {
                 message: "missing".into(),

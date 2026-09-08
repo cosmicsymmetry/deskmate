@@ -73,7 +73,9 @@ pub(crate) fn get_server_json<T: DeserializeOwned>(
     if !(200..300).contains(&status) {
         return Err(server_failure(status, &body));
     }
-    serde_json::from_slice(&body).map_err(|_| IpcError::RuntimeUnavailable {
+    // The server was reached and answered; only its shape is wrong. Saying it could
+    // not be reached would be false, and the window's two sentences differ.
+    serde_json::from_slice(&body).map_err(|_| IpcError::IncompatibleServer {
         message: "the server returned a response this app could not read".into(),
     })
 }
@@ -174,6 +176,38 @@ mod tests {
             error,
             IpcError::InvalidPayload { message } if message == "the server rejected the admin token"
         ));
+    }
+
+    /// A body this app cannot read is NOT a server it could not reach, and the two
+    /// must stay distinguishable because the window says a different sentence for
+    /// each. The body here is what a server built before this change actually
+    /// answers `GET /v1/plugins` with -- a catalog entry without the five additive
+    /// keys -- which is the exact window the documented server-then-Mac rollout
+    /// creates. Reporting "couldn't reach the server" for it would be false: the
+    /// server was reached, and it answered.
+    #[test]
+    fn a_body_this_app_cannot_read_is_not_an_unreachable_server() {
+        let (base, server) = serve_once(
+            "200 OK",
+            br#"{"plugins":[{"id":"aqi","name":"aqi","version":"1.0.0","node_count":7,
+                 "assets":[]}],"load_failures":[]}"#
+                .to_vec(),
+        );
+        let url = server_url(&base, &["v1", "plugins"]).unwrap().to_string();
+
+        let error = get_server_json::<app_core::admin::PluginCatalog>(
+            &crate::server_http_agent(),
+            &url,
+            "admin-secret",
+            crate::commands::MAX_SERVER_ERROR_BYTES,
+        )
+        .unwrap_err();
+
+        server.join().unwrap();
+        assert!(
+            matches!(error, IpcError::IncompatibleServer { .. }),
+            "expected an incompatible-server refusal, got {error:?}"
+        );
     }
 
     /// The bound is enforced while reading, so an oversized body is never fully

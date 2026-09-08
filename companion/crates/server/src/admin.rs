@@ -2,7 +2,8 @@
 
 use app_core::{
     AdminConfigErrorBody, AppConfig, AppSnapshot, BakedFontMetrics, ClockCard,
-    MAX_CONFIG_FILE_BYTES, RuntimeError, SaveReceipt, StoreError, ValidationIssue,
+    MAX_CONFIG_FILE_BYTES, PluginCatalog, PluginCatalogAsset, PluginCatalogEntry,
+    PluginTemplateKind, RuntimeError, SaveReceipt, StoreError, ValidationIssue,
     build_digital_clock_scene,
 };
 use axum::Json;
@@ -19,7 +20,7 @@ use serde::{Deserialize, Serialize, Serializer};
 
 use crate::ServerState;
 use crate::auth::bearer_token;
-use crate::plugin_registry::PluginRegistry;
+use crate::plugin_registry::{LoadedPlugin, PluginRegistry};
 
 /// Matches the standard provider response ceiling and stays below Axum's
 /// independent 2 MiB default limit for the complete JSON request body.
@@ -40,79 +41,69 @@ pub(crate) fn routes() -> Router<ServerState> {
 async fn get_plugins(
     State(state): State<ServerState>,
     _admin: AdminAuthenticated,
-) -> Json<PluginCatalogResponse> {
+) -> Json<PluginCatalog> {
     let plugins = state
         .plugins()
         .ids()
         .filter_map(|id| state.plugins().get(id))
-        .map(|plugin| {
-            let mut assets: Vec<_> = plugin
-                .assets
-                .iter()
-                .map(|(file, asset)| PluginAssetResponse {
-                    file: file.to_string(),
-                    kind: asset_kind_name(asset.kind),
-                    byte_length: asset.bytes.len(),
-                    digest: protocol::digest_hex(&asset.digest),
-                })
-                .collect();
-            assets.sort_by(|left, right| left.file.cmp(&right.file));
-            PluginResponse {
-                id: plugin.id.clone(),
-                name: plugin.manifest.name.clone(),
-                version: plugin.manifest.version.clone(),
-                node_count: plugin.manifest.nodes.len()
-                    + plugin
-                        .manifest
-                        .repeats
-                        .iter()
-                        .map(|repeat| repeat.nodes.len())
-                        .sum::<usize>(),
-                assets,
-            }
-        })
+        .map(catalog_entry)
         .collect();
     let load_failures = state
         .plugin_load_failures()
         .iter()
-        .map(|failure| PluginLoadFailureResponse {
+        .map(|failure| app_core::admin::PluginLoadFailure {
             id: failure.id.clone(),
             error: failure.error.to_string(),
         })
         .collect();
-    Json(PluginCatalogResponse {
+    Json(PluginCatalog {
         plugins,
         load_failures,
     })
 }
 
-#[derive(Debug, Serialize)]
-struct PluginCatalogResponse {
-    plugins: Vec<PluginResponse>,
-    load_failures: Vec<PluginLoadFailureResponse>,
-}
-
-#[derive(Debug, Serialize)]
-struct PluginResponse {
-    id: String,
-    name: String,
-    version: String,
-    node_count: usize,
-    assets: Vec<PluginAssetResponse>,
-}
-
-#[derive(Debug, Serialize)]
-struct PluginAssetResponse {
-    file: String,
-    kind: &'static str,
-    byte_length: usize,
-    digest: String,
-}
-
-#[derive(Debug, Serialize)]
-struct PluginLoadFailureResponse {
-    id: String,
-    error: String,
+fn catalog_entry(loaded: &LoadedPlugin) -> PluginCatalogEntry {
+    let mut assets: Vec<_> = loaded
+        .assets
+        .iter()
+        .map(|(file, asset)| PluginCatalogAsset {
+            file: file.to_string(),
+            kind: asset_kind_name(asset.kind).to_owned(),
+            byte_length: asset.bytes.len(),
+            digest: protocol::digest_hex(&asset.digest),
+        })
+        .collect();
+    assets.sort_by(|left, right| left.file.cmp(&right.file));
+    let plugin::Source::Json {
+        refresh_minutes, ..
+    } = &loaded.manifest.source;
+    PluginCatalogEntry {
+        id: loaded.id.clone(),
+        name: loaded.manifest.name.clone(),
+        version: loaded.manifest.version.clone(),
+        node_count: loaded.manifest.nodes.len()
+            + loaded
+                .manifest
+                .repeats
+                .iter()
+                .map(|repeat| repeat.nodes.len())
+                .sum::<usize>(),
+        assets,
+        display_name: loaded.manifest.display_name.clone(),
+        description: loaded.manifest.description.clone(),
+        manifest_version: match loaded.manifest.manifest_version {
+            plugin::ManifestVersion::V1 => 1,
+            plugin::ManifestVersion::V2 => 2,
+        },
+        template: match &loaded.manifest.template {
+            plugin::Template::Scene => PluginTemplateKind::DisplayList,
+            plugin::Template::Svg { .. } => PluginTemplateKind::Svg,
+        },
+        // `parse_manifest` bounds this to `plugin::MAX_REFRESH_MINUTES`
+        // (1440), so the saturating arm is unreachable today; it is here so a
+        // future bound change cannot silently wrap a cadence.
+        refresh_minutes: u16::try_from(*refresh_minutes).unwrap_or(u16::MAX),
+    }
 }
 
 fn asset_kind_name(kind: protocol::AssetKind) -> &'static str {
@@ -1013,6 +1004,133 @@ mod tests {
                 .len()
         );
         assert_eq!(body["load_failures"][0]["id"], "broken");
+    }
+
+    async fn plugin_catalog_json(state: crate::ServerState) -> serde_json::Value {
+        let response = crate::app(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/plugins")
+                    .header("authorization", "Bearer admin-secret")
+                    .body(Body::empty())
+                    .expect("catalog request"),
+            )
+            .await
+            .expect("catalog response");
+        assert_eq!(response.status(), StatusCode::OK);
+        response_json(response).await
+    }
+
+    /// The tempdir is returned, not dropped: `ServerState` keeps the path and
+    /// deleting the directory out from under it would be a different test.
+    fn state_with_registry(
+        registry: Arc<crate::plugin_registry::PluginRegistry>,
+    ) -> (crate::ServerState, tempfile::TempDir) {
+        let config_dir = tempfile::tempdir().expect("config tempdir");
+        let state = crate::ServerState::new_with_plugins(
+            "admin-secret".into(),
+            crate::firmware::FirmwareCatalog::in_memory(),
+            config_dir.path().to_path_buf(),
+            registry,
+            Vec::new(),
+        );
+        (state, config_dir)
+    }
+
+    #[tokio::test]
+    async fn the_catalog_keeps_every_field_the_previous_response_carried() {
+        // The five keys below are additive. A companion built before this
+        // change reads the rest, so a renamed key or a moved value here is a
+        // silent break rather than a compile error. Task 2's app-core test
+        // pins the serialized key ORDER; this pins the values the server puts
+        // in them for the real curated registry.
+        let (state, _device_id, _config_dir) = state_with_curated_plugins();
+        let mut legacy = plugin_catalog_json(state).await;
+        for entry in legacy["plugins"].as_array_mut().expect("plugins array") {
+            let entry = entry.as_object_mut().expect("plugin entry object");
+            for added in [
+                "display_name",
+                "description",
+                "manifest_version",
+                "template",
+                "refresh_minutes",
+            ] {
+                assert!(entry.remove(added).is_some(), "{added} is not in the entry");
+            }
+        }
+
+        assert_eq!(
+            legacy,
+            serde_json::json!({
+                "plugins": [
+                    {"id": "agenda", "name": "agenda", "version": "1.0.0", "node_count": 4,
+                     "assets": [{"file": "badge.rgb565", "kind": "image", "byte_length": 812,
+                                 "digest": "e19db5d47bbdae46bf80e5a7df400795bce84973817c9f124642bc76bf41d33a"}]},
+                    {"id": "aqi", "name": "aqi", "version": "1.0.0", "node_count": 7,
+                     "assets": [{"file": "icons.ttf", "kind": "icon-font", "byte_length": 4320,
+                                 "digest": "40bbbac715465adf7ba539f53a0cb16991a2c1f73a4fb57af209d39e0c62b327"}]},
+                    {"id": "claude-limits", "name": "claude-limits", "version": "1.0.0",
+                     "node_count": 12, "assets": []},
+                    {"id": "svg-aqi", "name": "svg-aqi", "version": "1.0.0", "node_count": 0,
+                     "assets": []}
+                ],
+                "load_failures": []
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn the_catalog_reports_each_manifests_template_kind_and_cadence() {
+        let (state, _device_id, _config_dir) = state_with_curated_plugins();
+        let body = plugin_catalog_json(state).await;
+        let entry = |id: &str| {
+            body["plugins"]
+                .as_array()
+                .expect("plugins array")
+                .iter()
+                .find(|entry| entry["id"] == id)
+                .unwrap_or_else(|| panic!("no catalog entry for {id}"))
+                .clone()
+        };
+
+        // The editor's Plugin field and the picker read these; `svg-aqi` is
+        // the only curated plugin the panel can never render natively.
+        assert_eq!(entry("aqi")["template"], "display-list");
+        assert_eq!(entry("svg-aqi")["template"], "svg");
+        assert_eq!(entry("aqi")["refresh_minutes"], 15);
+        assert_eq!(entry("agenda")["refresh_minutes"], 10);
+    }
+
+    #[tokio::test]
+    async fn a_v2_manifests_own_display_name_and_description_reach_the_catalog() {
+        let (registry, _base) =
+            crate::test_plugins::fixture_registry(crate::test_plugins::V2_NAMED_MANIFEST);
+        let (state, _config_dir) = state_with_registry(registry);
+
+        let body = plugin_catalog_json(state).await;
+
+        assert_eq!(body["plugins"][0]["display_name"], "Fixture plugin");
+        assert_eq!(
+            body["plugins"][0]["description"],
+            "Names and cadence, threaded from the manifest"
+        );
+        assert_eq!(body["plugins"][0]["manifest_version"], 2);
+        assert_eq!(body["plugins"][0]["refresh_minutes"], 7);
+    }
+
+    #[tokio::test]
+    async fn a_v1_manifest_reports_version_one_and_no_names_rather_than_failing() {
+        // v1 stays frozen: absence is the normal case, not a load failure.
+        let (registry, _base) =
+            crate::test_plugins::fixture_registry(crate::test_plugins::V1_MANIFEST);
+        let (state, _config_dir) = state_with_registry(registry);
+
+        let body = plugin_catalog_json(state).await;
+
+        assert_eq!(body["plugins"][0]["manifest_version"], 1);
+        assert!(body["plugins"][0]["display_name"].is_null());
+        assert!(body["plugins"][0]["description"].is_null());
+        assert_eq!(body["load_failures"].as_array().unwrap().len(), 0);
     }
 }
 

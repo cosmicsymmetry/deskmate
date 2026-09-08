@@ -34,6 +34,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -93,6 +94,10 @@ struct StateInner {
     plugins: Arc<PluginRegistry>,
     plugin_load_failures: Arc<[PluginLoadFailure]>,
     configs: store::DeviceConfigStores,
+    /// The OAuth integration runtime, attached at startup by `set_integrations`
+    /// when integrations are configured. `OnceLock` so existing constructors are
+    /// untouched and a deployment without integrations simply never sets it.
+    integrations: OnceLock<Arc<oauth::IntegrationRuntime>>,
     /// Keeps the dedicated config root alive for [`ServerState::in_memory`].
     /// Production paths are operator-owned and leave this as `None`.
     _config_temp_dir: Option<tempfile::TempDir>,
@@ -157,6 +162,7 @@ impl ServerState {
                 plugins,
                 plugin_load_failures: plugin_load_failures.into(),
                 configs: store::DeviceConfigStores::new(config_directory),
+                integrations: OnceLock::new(),
                 _config_temp_dir: config_temp_dir,
                 device_links: Mutex::new(HashMap::new()),
                 link_slots: Arc::new(tokio::sync::Semaphore::new(
@@ -223,6 +229,18 @@ impl ServerState {
 
     pub(crate) fn configs(&self) -> &store::DeviceConfigStores {
         &self.inner.configs
+    }
+
+    /// The OAuth integration runtime, if one was attached at startup.
+    #[must_use]
+    pub fn integrations(&self) -> Option<Arc<oauth::IntegrationRuntime>> {
+        self.inner.integrations.get().map(Arc::clone)
+    }
+
+    /// Attaches the OAuth integration runtime once, at startup. Subsequent calls
+    /// are ignored (the first attachment wins).
+    pub fn set_integrations(&self, runtime: Arc<oauth::IntegrationRuntime>) {
+        let _ = self.inner.integrations.set(runtime);
     }
 
     /// Atomically reserves the one live ownership slot for `device_id`.
@@ -402,6 +420,7 @@ pub fn app(state: ServerState) -> Router {
         .route("/v1/device/firmware", get(firmware::check))
         .route("/v1/firmware/{filename}", get(firmware::download))
         .merge(admin::routes())
+        .merge(oauth::routes::routes())
         .layer(middleware)
         .with_state(state)
 }

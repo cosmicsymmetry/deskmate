@@ -21,6 +21,9 @@ tower = { version = "0.5", features = ["limit", "load-shed", "timeout", "util"] 
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 rand = "0.9"
 sha2 = "0.10"
+# HMAC-SHA256 for signing the short-lived operator session cookie (spec §1.2, §6),
+# keyed by DESKMATE_ADMIN_TOKEN. Pairs with the existing sha2 0.10; pinned exactly.
+hmac = "=0.12.1"
 # The homelab render host permits exactly one in-process SVG engine: `resvg`.
 # Defaults stay off so raster-image loading, system-font discovery, and mmap font
 # access cannot grow ambient filesystem/network authority; only SVG text shaping is on.

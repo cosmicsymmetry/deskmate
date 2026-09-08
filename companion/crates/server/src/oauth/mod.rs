@@ -3,7 +3,10 @@
 //! firmware surface is touched.
 
 pub mod pkce;
+pub mod routes;
+pub mod session;
 pub mod token;
 pub mod transport;
 
+pub use routes::IntegrationRuntime;
 pub use token::{GoogleOAuthConfig, IntegrationHealth, TokenError, TokenManager};

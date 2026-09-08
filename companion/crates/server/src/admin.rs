@@ -457,11 +457,23 @@ async fn get_card_preview(
         .map_err(|_| AdminError::WorkerFailed)?
         .map_err(AdminError::from)?;
 
+    // A frame this server rendered is canonical by construction, so this maps a
+    // fault rather than a caller's mistake -- but it maps it, because a handler
+    // that panics on a wrong length takes the connection with it.
+    let png_base64 = match preview.frame.as_ref() {
+        None => None,
+        Some(frame) => Some(
+            crate::rasterizer::frame_png(&frame.bytes)
+                .map(|png| base64::engine::general_purpose::STANDARD.encode(png))
+                .map_err(|error| AdminError::Runtime {
+                    status: StatusCode::INTERNAL_SERVER_ERROR,
+                    message: error.to_string(),
+                })?,
+        ),
+    };
+
     Ok(Json(CardPreviewResponse {
-        png_base64: preview.frame.as_ref().map(|frame| {
-            base64::engine::general_purpose::STANDARD
-                .encode(crate::rasterizer::frame_png(&frame.bytes))
-        }),
+        png_base64,
         state: preview.state,
         message: preview.message,
         refreshed_at_unix_ms: preview.refreshed_at_unix_ms,

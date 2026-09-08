@@ -107,6 +107,8 @@ pub(crate) enum RasterizeError {
     ExpressionFuelExhausted,
     #[error("the renderer could not allocate the fixed canvas")]
     CanvasAllocation,
+    #[error("frame is not the canonical {expected}-byte RGB565 image")]
+    NonCanonicalFrame { expected: usize },
     #[error("SVG validation or rendering exceeded the {millis} ms budget")]
     RenderDeadlineExceeded { millis: u128 },
 }
@@ -1180,11 +1182,22 @@ fn pack_rgb565(red: u8, green: u8, blue: u8) -> u16 {
 /// preview are the same bytes for the same frame. Takes the canonical
 /// 12-byte-header blob by reference: a preview must not copy 330 KB to
 /// rebuild a `RasterizedFrame` it already holds the bytes of.
-pub(crate) fn frame_png(bytes: &[u8]) -> Vec<u8> {
+///
+/// The length is checked rather than assumed. Today's only production caller
+/// hands over a frame this module built, so the guard cannot fire -- but this
+/// runs inside an axum handler now, where a wrong length used to be a slice
+/// panic and a `Pixmap::from_vec` unwrap, and a named error costs one
+/// comparison.
+pub(crate) fn frame_png(bytes: &[u8]) -> Result<Vec<u8>, RasterizeError> {
     let width = u32::try_from(SCENE_CANVAS_WIDTH).unwrap();
     let height = u32::try_from(SCENE_CANVAS_HEIGHT).unwrap();
+    let expected =
+        LVGL_IMAGE_HEADER_BYTES + usize::try_from(width * height * 2).expect("fixed canvas");
+    if bytes.len() != expected {
+        return Err(RasterizeError::NonCanonicalFrame { expected });
+    }
     let mut rgba = Vec::with_capacity(usize::try_from(width * height * 4).unwrap());
-    for pair in bytes[12..].as_chunks::<2>().0 {
+    for pair in bytes[LVGL_IMAGE_HEADER_BYTES..].as_chunks::<2>().0 {
         let pixel = u16::from_le_bytes(*pair);
         let red = u8::try_from((pixel >> 11) & 0x1f).unwrap();
         let green = u8::try_from((pixel >> 5) & 0x3f).unwrap();
@@ -1197,10 +1210,13 @@ pub(crate) fn frame_png(bytes: &[u8]) -> Vec<u8> {
         ]);
     }
     let size = resvg::tiny_skia::IntSize::from_wh(width, height).unwrap();
-    resvg::tiny_skia::Pixmap::from_vec(rgba, size)
+    // Both unwraps are guarded by the length check above: `rgba` is exactly
+    // `width * height * 4` bytes, which is what `from_vec` requires, and PNG
+    // encoding of a valid pixmap has no failure mode of its own.
+    Ok(resvg::tiny_skia::Pixmap::from_vec(rgba, size)
         .unwrap()
         .encode_png()
-        .unwrap()
+        .unwrap())
 }
 
 #[cfg(test)]
@@ -2072,11 +2088,31 @@ pub(crate) mod tests {
         assert_eq!((pixels.len(), candidate.len()), (329_728, 659_456));
     }
 
+    /// `frame_png` was test-only until the card preview route started calling it
+    /// from an axum handler. Its caller always holds a canonical frame, so this
+    /// cannot fire today -- but a handler that panics takes the connection with it,
+    /// and a length guard is one comparison. Both a short blob (which would have
+    /// panicked on the `bytes[12..]` slice) and a long one (which would have
+    /// panicked in `Pixmap::from_vec`) are refused by name.
+    #[test]
+    fn a_blob_that_is_not_a_canonical_frame_is_refused_rather_than_panicking() {
+        let expected =
+            12 + usize::try_from(SCENE_CANVAS_WIDTH * SCENE_CANVAS_HEIGHT * 2).unwrap();
+        for length in [0, 11, 12, expected - 2, expected + 2] {
+            assert_eq!(
+                frame_png(&vec![0u8; length]),
+                Err(RasterizeError::NonCanonicalFrame { expected }),
+                "a {length}-byte blob was not refused"
+            );
+        }
+        assert!(frame_png(&vec![0u8; expected]).is_ok());
+    }
+
     pub(crate) fn assert_raster_regression(name: &str, frame: &RasterizedFrame) {
         let directory =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/raster-regression");
         let path = directory.join(format!("{name}.png"));
-        let actual = frame_png(&frame.bytes);
+        let actual = frame_png(&frame.bytes).expect("a rendered frame is canonical");
         if std::env::var_os("UPDATE_RASTER_GOLDENS").is_some() {
             std::fs::create_dir_all(&directory).unwrap();
             std::fs::write(&path, &actual).unwrap();

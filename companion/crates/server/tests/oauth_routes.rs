@@ -111,7 +111,8 @@ async fn callback_rejects_a_state_from_another_session_before_exchange() {
     let consent_url = state
         .integrations()
         .expect("integrations")
-        .start_consent("different-session", "google-primary");
+        .start_consent("different-session", "google-primary")
+        .expect("under the pending limit");
     let state_value = url::Url::parse(&consent_url)
         .unwrap()
         .query_pairs()

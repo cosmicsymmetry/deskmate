@@ -8,10 +8,33 @@
 > helper, PKCE/`state` primitives, the OAuth transport seam and Google token-response
 > classifier, `TokenManager`, the operator session cookie and `OperatorAuthenticated`
 > gate, the consent/callback/revoke routes with the `IntegrationRuntime` stash, and the
-> `main.rs` wiring. What the boxes cannot tell you is what remains: this sub-project has
-> had **no whole-branch review**, and the plan's own Task 6 Step 5 route integration test
-> is controller-run — Codex's sandbox denies loopback binds, so a green report from it
-> does not cover those. Verify both before calling sub-project 2 complete.
+> `main.rs` wiring.
+>
+> **REVIEWED 2026-09-09 (whole-branch, adversarial). Verdict was APPROVE-WITH-FIXES, and
+> every fix it named is now applied and tested.** The security core came through clean —
+> no auth bypass, no open redirect, no SSRF, no secret in a `Debug`/log/error body, and
+> zero violations of the `spawn_blocking` rule. What was fixed:
+>
+> | Was | Now |
+> |---|---|
+> | **Refresh stampede** — nothing serialized concurrent `access_token` callers, so N devices sharing one integration meant N simultaneous refreshes, N tokens minted, N-1 orphaned by last-writer-wins, and Google rate-limiting the client. | A per-integration async gate with a re-check under it. The test spawns 8 racing callers against a fake queued with ONE response; before the fix it reproduced the stampede on the first run. |
+> | **PKCE was untested where it counts** — no assertion tied the stashed `code_verifier` to the `code_challenge` actually sent. Swapping in an unrelated verifier passed all 36 other tests; only Google would ever have noticed, as a permanent `invalid_grant`. | One assertion, mutation-probed: it is the only test that fails when PKCE is silently killed. |
+> | **`http://` accepted on all four credential-path URLs** — the egress guard permits `http` for good reason (plugin feeds), so a typo would have POSTed the client secret and refresh token in cleartext with nothing to catch it. | `https` required, one test per variable. |
+> | **Client secret only in an env var**, contradicting spec §6, while the env file eleven lines below warns that env values leak through process inspection. | `DESKMATE_GOOGLE_CLIENT_SECRET_FILE`, `0600` enforced, no silent fallback when the named file is missing. |
+> | **Stored client secret shadowed the configured one**, so rotating it broke every existing integration with health pointing at the wrong cause. | Configured wins; the stored copy is the fallback. |
+> | **`expires_in` absent or zero** cached an already-expired token, so every later call refreshed forever while the token itself worked. | Refused by name. Deliberately not bounded by the skew window — a 30-second token is legitimate. |
+> | **`integration_id` unbounded**, and a key in three maps only one code path removes from. | 1..=64 bytes, restricted charset, plus a cap on simultaneously pending consent flows. |
+> | **Session cookie without `__Host-`**, though it already met every requirement of the prefix. | Adopted; a sibling subdomain can no longer shadow it. |
+> | **Resolve-then-pin untested on the POST path** — `post_form_with_resolver` existed as a seam and had no caller, so swapping in a plain client would have passed. | Driven end to end against a loopback listener; mutation-probed. |
+>
+> **Still owed, and NOT closed by that review:** spec §6 requires a build-time assertion
+> that no Google endpoint resolves into a denied egress range in this deployment — no such
+> test or gate exists. Do not mark that exit item complete. The reviewer also left three
+> low-severity judgement calls open (a failed remote revoke reported as success; provider
+> error bodies reflected into 502s; no audit logging anywhere in the `oauth` module) and
+> two SUSPECTED items it could not verify end to end (handler cancellation burning a
+> consent between Google issuing a code and the store write landing; `secrets.enc` growth
+> eventually exceeding its 256 KiB read cap).
 
 **Goal:** Build the server-side OAuth framework — a `TokenManager` (code exchange, skew-window refresh, revoke, typed health), a provider-agnostic token transport routed through the egress guard, the three consent/callback/revoke routes, and the admin-cookie gate they sit behind — with Google wired as the first (and only) identity.
 

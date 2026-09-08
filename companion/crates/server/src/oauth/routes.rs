@@ -24,6 +24,15 @@ use crate::registry::constant_time_eq;
 const PENDING_TTL: Duration = Duration::seconds(600);
 const SESSION_TTL: Duration = Duration::hours(12);
 const DEFAULT_INTEGRATION_ID: &str = "google-primary";
+/// Longest `integration_id` accepted from a caller. The id is a map key in three
+/// long-lived maps (`pending`, the token cache, and health), and only `revoke`
+/// ever removes an entry, so an unbounded id is an unbounded retention primitive
+/// for anyone holding a session cookie. 64 bytes is far past any real id.
+const MAX_INTEGRATION_ID_LEN: usize = 64;
+/// Most simultaneously pending consent flows. One operator cannot legitimately
+/// have more in flight than this within the 600 s TTL, and the sweep alone does
+/// not bound the map between sweeps.
+const MAX_PENDING_AUTHS: usize = 32;
 
 pub struct PendingAuth {
     pub integration_id: String,
@@ -70,7 +79,9 @@ impl IntegrationRuntime {
 
     /// Generates `state` + PKCE, stashes them bound to `sid`, and returns the
     /// Google authorization URL to redirect the operator to.
-    pub fn start_consent(&self, sid: &str, integration_id: &str) -> String {
+    /// Returns `None` when too many consent flows are already pending, so the
+    /// stash cannot be grown without bound by repeated calls.
+    pub fn start_consent(&self, sid: &str, integration_id: &str) -> Option<String> {
         let state = super::pkce::generate_state();
         let pkce = super::pkce::generate_pkce();
         let now = Utc::now();
@@ -80,6 +91,9 @@ impl IntegrationRuntime {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         pending.retain(|_, stashed| now - stashed.created_at <= PENDING_TTL);
+        if pending.len() >= MAX_PENDING_AUTHS {
+            return None;
+        }
         pending.insert(
             state.clone(),
             StashedAuth {
@@ -104,7 +118,7 @@ impl IntegrationRuntime {
             .append_pair("code_challenge", &pkce.challenge)
             .append_pair("code_challenge_method", "S256")
             .append_pair("state", &state);
-        url.into()
+        Some(url.into())
     }
 
     /// Removes and returns the stash for `state` if it exists and is unexpired.
@@ -198,6 +212,27 @@ async fn login(State(state): State<ServerState>, parts: Parts) -> Response {
     response
 }
 
+/// Bounds the one caller-supplied string that becomes a long-lived map key.
+/// Restricting the charset as well keeps ids printable in logs and URLs and
+/// leaves no room for a value that is technically valid UTF-8 but hostile to
+/// read back.
+fn validate_integration_id(value: &str) -> Result<(), RouteError> {
+    if value.is_empty() || value.len() > MAX_INTEGRATION_ID_LEN {
+        return Err(RouteError::BadRequest(format!(
+            "integration_id must be 1..={MAX_INTEGRATION_ID_LEN} bytes"
+        )));
+    }
+    if !value
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+    {
+        return Err(RouteError::BadRequest(
+            "integration_id may use only ASCII letters, digits, '-' and '_'".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Deserialize)]
 struct StartQuery {
     integration_id: Option<String>,
@@ -213,7 +248,15 @@ async fn start_google(
     let integration_id = query
         .integration_id
         .unwrap_or_else(|| DEFAULT_INTEGRATION_ID.to_string());
-    let url = runtime.start_consent(&operator.sid, &integration_id);
+    validate_integration_id(&integration_id)?;
+    let url = runtime
+        .start_consent(&operator.sid, &integration_id)
+        .ok_or_else(|| {
+            RouteError::BadRequest(format!(
+                "too many consent flows already pending (limit {MAX_PENDING_AUTHS}); \
+                 finish or abandon one and retry"
+            ))
+        })?;
     Ok(Redirect::to(&url))
 }
 
@@ -316,7 +359,9 @@ mod tests {
     #[test]
     fn start_consent_returns_a_google_url_carrying_state_and_challenge() {
         let runtime = runtime();
-        let url = runtime.start_consent("sid-1", "google-primary");
+        let url = runtime
+            .start_consent("sid-1", "google-primary")
+            .expect("under the pending limit");
         let parsed = Url::parse(&url).expect("valid url");
         assert_eq!(parsed.host_str(), Some("accounts.google.com"));
         let query: std::collections::HashMap<_, _> = parsed.query_pairs().into_owned().collect();
@@ -337,10 +382,83 @@ mod tests {
         assert!(query.contains_key("state"));
     }
 
+    /// The single assertion that makes PKCE mean anything: the verifier we stashed
+    /// must be the one whose challenge we sent to Google. Everything else about the
+    /// flow can be correct and PKCE still be dead -- a stash holding an unrelated
+    /// verifier produces a well-formed URL, a valid single-use `state`, and a
+    /// permanent `invalid_grant` that only Google can see, in production.
+    #[test]
+    fn the_stashed_verifier_is_the_one_whose_challenge_was_sent_to_google() {
+        let runtime = runtime();
+        let url = runtime
+            .start_consent("sid-1", "google-primary")
+            .expect("under the pending limit");
+        let parsed = Url::parse(&url).expect("valid url");
+        let query: std::collections::HashMap<_, _> = parsed.query_pairs().into_owned().collect();
+        let state = query.get("state").expect("state is present");
+        let challenge = query
+            .get("code_challenge")
+            .expect("code_challenge is present");
+
+        let stashed = runtime
+            .take_pending(state, Utc::now())
+            .expect("the state we were handed is the state that was stashed");
+        assert_eq!(
+            &super::super::pkce::challenge_for(&stashed.code_verifier),
+            challenge,
+            "the stashed verifier must hash to the challenge sent to Google"
+        );
+    }
+
+    /// `integration_id` is the one caller-supplied string that becomes a key in
+    /// three long-lived maps, only one of which any code path ever removes from.
+    /// It is bounded so a session-cookie holder cannot use it as a retention
+    /// primitive.
+    #[test]
+    fn integration_id_is_bounded_in_length_and_charset() {
+        assert!(validate_integration_id("google-primary").is_ok());
+        assert!(validate_integration_id("a_b-9").is_ok());
+        assert!(validate_integration_id(&"a".repeat(MAX_INTEGRATION_ID_LEN)).is_ok());
+
+        for bad in [
+            String::new(),
+            "a".repeat(MAX_INTEGRATION_ID_LEN + 1),
+            "has space".to_string(),
+            "slash/path".to_string(),
+            "dot.dot".to_string(),
+            "unicode-\u{fffd}".to_string(),
+        ] {
+            assert!(
+                validate_integration_id(&bad).is_err(),
+                "{bad:?} must be refused"
+            );
+        }
+    }
+
+    /// The TTL sweep alone does not bound the pending map between sweeps: every
+    /// stash lives 600 s, so a caller can accumulate them far faster than they
+    /// expire. The count is what actually bounds it.
+    #[test]
+    fn pending_consent_flows_are_capped() {
+        let runtime = runtime();
+        for index in 0..MAX_PENDING_AUTHS {
+            assert!(
+                runtime.start_consent("sid-1", "google-primary").is_some(),
+                "flow {index} should be admitted"
+            );
+        }
+        assert!(
+            runtime.start_consent("sid-1", "google-primary").is_none(),
+            "the flow past the cap must be refused, not stashed"
+        );
+    }
+
     #[test]
     fn a_stashed_state_is_single_use() {
         let runtime = runtime();
-        let url = runtime.start_consent("sid-1", "google-primary");
+        let url = runtime
+            .start_consent("sid-1", "google-primary")
+            .expect("under the pending limit");
         let state = Url::parse(&url)
             .unwrap()
             .query_pairs()
@@ -368,7 +486,9 @@ mod tests {
     #[test]
     fn an_expired_stash_returns_none() {
         let runtime = runtime();
-        let url = runtime.start_consent("sid-1", "google-primary");
+        let url = runtime
+            .start_consent("sid-1", "google-primary")
+            .expect("under the pending limit");
         let state = Url::parse(&url)
             .unwrap()
             .query_pairs()

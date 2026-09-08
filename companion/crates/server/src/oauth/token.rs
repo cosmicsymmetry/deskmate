@@ -107,6 +107,12 @@ pub struct TokenManager {
     now: Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>,
     cache: Mutex<HashMap<String, CachedToken>>,
     health: Mutex<HashMap<String, IntegrationHealth>>,
+    /// One async gate per integration, so concurrent callers that all miss the
+    /// cache take turns instead of each posting its own refresh. The outer lock
+    /// is a std `Mutex` because it is only ever held long enough to clone an
+    /// `Arc`; the inner one is a tokio `Mutex` because it IS held across an
+    /// await.
+    refresh_gates: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 impl TokenManager {
@@ -131,6 +137,7 @@ impl TokenManager {
             now,
             cache: Mutex::new(HashMap::new()),
             health: Mutex::new(HashMap::new()),
+            refresh_gates: Mutex::new(HashMap::new()),
         }
     }
 
@@ -180,13 +187,36 @@ impl TokenManager {
         if let Some(token) = self.cached_valid(integration_id) {
             return Ok(token);
         }
+        // Serialize refreshes per integration. Without this every caller that
+        // missed the cache posts its own `grant_type=refresh_token`: they all
+        // yield together at the `spawn_blocking` store read below, so N devices
+        // sharing one integration means N simultaneous refreshes, N tokens
+        // minted, N-1 of them immediately orphaned by `cache_token`'s
+        // last-writer-wins, and Google rate-limiting the client.
+        let gate = self.refresh_gate(integration_id);
+        let _turn = gate.lock().await;
+        // Re-check under the gate: whoever held it before us has already
+        // refreshed and cached, and their token is the one to return.
+        if let Some(token) = self.cached_valid(integration_id) {
+            return Ok(token);
+        }
         let secret = self
             .store_get(integration_id.to_string())
             .await?
             .ok_or(TokenError::NotFound)?;
-        let client_secret = secret
-            .client_secret
-            .unwrap_or_else(|| self.oauth.client_secret.clone());
+        // The CONFIGURED secret wins over the stored copy. The other way round --
+        // which this was -- makes rotating the Google client secret fail in a way
+        // nothing explains: a new integration authorizes fine while every existing
+        // one keeps sending the retired secret, Google answers `invalid_client`,
+        // and that classifies as `Provider`, not `InvalidGrant`, so health reads
+        // `Error("invalid_client")` rather than `NeedsReconnect` and never tells
+        // the operator that reconnecting is not even the fix. The stored copy
+        // remains a fallback for a deployment with no configured secret.
+        let client_secret = if self.oauth.client_secret.is_empty() {
+            secret.client_secret.unwrap_or_default()
+        } else {
+            self.oauth.client_secret.clone()
+        };
         let form = vec![
             ("grant_type".to_string(), "refresh_token".to_string()),
             ("refresh_token".to_string(), secret.refresh_token),
@@ -257,20 +287,52 @@ impl TokenManager {
                 self.set_health(integration_id, IntegrationHealth::Error(error.0.clone()));
                 TokenError::Transport(error.0)
             })?;
-        classify_token_response(response.status, &response.body).map_err(|error| match error {
-            TokenEndpointError::InvalidGrant => {
-                self.set_health(integration_id, IntegrationHealth::NeedsReconnect);
-                TokenError::NeedsReconnect
-            }
-            TokenEndpointError::Provider { status, detail } => {
-                self.set_health(integration_id, IntegrationHealth::Error(detail.clone()));
-                TokenError::Provider { status, detail }
-            }
-            TokenEndpointError::Malformed(detail) => {
-                self.set_health(integration_id, IntegrationHealth::Error(detail.clone()));
-                TokenError::Malformed(detail)
-            }
-        })
+        let tokens =
+            classify_token_response(response.status, &response.body).map_err(
+                |error| match error {
+                    TokenEndpointError::InvalidGrant => {
+                        self.set_health(integration_id, IntegrationHealth::NeedsReconnect);
+                        TokenError::NeedsReconnect
+                    }
+                    TokenEndpointError::Provider { status, detail } => {
+                        self.set_health(integration_id, IntegrationHealth::Error(detail.clone()));
+                        TokenError::Provider { status, detail }
+                    }
+                    TokenEndpointError::Malformed(detail) => {
+                        self.set_health(integration_id, IntegrationHealth::Error(detail.clone()));
+                        TokenError::Malformed(detail)
+                    }
+                },
+            )?;
+        // `expires_in` is `#[serde(default)]`, so absent and zero arrive here
+        // identically -- and either way the response is asserting a token that
+        // has already expired. Caching it means `cached_valid` misses forever
+        // and every single call refreshes; the token itself is usually fine, so
+        // nothing else would ever surface the fault. Refuse it by name instead.
+        //
+        // Deliberately NOT bounded by `REFRESH_SKEW_SECONDS`: a token with, say,
+        // 30 seconds left is legitimate and refreshing it on next use is the
+        // correct, tested behaviour. Only a zero lifetime is nonsense.
+        if tokens.expires_in == 0 {
+            let detail =
+                "token endpoint returned no usable expires_in (absent or zero)".to_string();
+            self.set_health(integration_id, IntegrationHealth::Error(detail.clone()));
+            return Err(TokenError::Malformed(detail));
+        }
+        Ok(tokens)
+    }
+
+    /// The per-integration refresh gate, created on first use.
+    fn refresh_gate(&self, integration_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+        let mut gates = self
+            .refresh_gates
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Arc::clone(
+            gates
+                .entry(integration_id.to_string())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
+        )
     }
 
     fn cached_valid(&self, integration_id: &str) -> Option<String> {
@@ -480,6 +542,135 @@ mod tests {
 
         // Well before expiry: served from cache, no second transport call.
         assert_eq!(manager.access_token("id").await.expect("cached"), "at");
+    }
+
+    /// A refresh stampede: many callers want the same integration's token at the
+    /// same instant, which is the ordinary case once one provider refresher serves
+    /// several devices. Exactly ONE refresh must reach the token endpoint and every
+    /// caller must get that token.
+    ///
+    /// The fake is queued with a single refresh response, so a second call to the
+    /// endpoint panics the task that makes it -- which is what this asserts against.
+    /// The race is real rather than theoretical: `access_token` awaits `store_get`,
+    /// a `spawn_blocking` hop, so without coalescing every task passes the cache
+    /// check, yields there together, and then posts.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_callers_share_one_refresh_instead_of_stampeding() {
+        let store = store();
+        let transport = FakeTransport::new(vec![
+            ok(r#"{"access_token":"first","expires_in":30,"refresh_token":"rt"}"#),
+            ok(r#"{"access_token":"refreshed","expires_in":3600}"#),
+        ]);
+        let now = Utc::now();
+        let manager = Arc::new(manager(store, transport.clone(), now));
+        manager
+            .exchange_code("id", "code", "v")
+            .await
+            .expect("exchange");
+
+        // Eight callers, all inside the 60s skew window, all racing.
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let manager = Arc::clone(&manager);
+            handles.push(tokio::spawn(
+                async move { manager.access_token("id").await },
+            ));
+        }
+        for handle in handles {
+            let token = handle
+                .await
+                .expect("no caller panicked -- a second refresh would exhaust the fake")
+                .expect("every caller gets a token");
+            assert_eq!(token, "refreshed");
+        }
+
+        // One exchange + exactly one refresh.
+        assert_eq!(
+            transport.calls().len(),
+            2,
+            "expected one exchange and one refresh, got {:?}",
+            transport
+                .calls()
+                .iter()
+                .map(|call| call.0.clone())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// A response with no usable `expires_in` would cache a token that
+    /// `cached_valid` can never accept, so every later call refreshes forever
+    /// while the token itself works fine. Refused by name rather than cached.
+    #[tokio::test]
+    async fn a_token_response_without_a_usable_expires_in_is_refused() {
+        for body in [
+            r#"{"access_token":"at","refresh_token":"rt"}"#,
+            r#"{"access_token":"at","expires_in":0,"refresh_token":"rt"}"#,
+        ] {
+            let store = store();
+            let transport = FakeTransport::new(vec![ok(body)]);
+            let manager = manager(store, transport, Utc::now());
+            let error = manager
+                .exchange_code("id", "code", "v")
+                .await
+                .expect_err("a zero-lifetime token must be refused");
+            assert!(
+                matches!(&error, TokenError::Malformed(detail) if detail.contains("expires_in")),
+                "unexpected error for {body}: {error}"
+            );
+            assert_eq!(
+                manager.health("id"),
+                Some(IntegrationHealth::Error(
+                    "token endpoint returned no usable expires_in (absent or zero)".to_string()
+                ))
+            );
+        }
+    }
+
+    /// Rotating the Google client secret must take effect for integrations that
+    /// already authorized. With the stored copy winning, it did not: the refresh
+    /// kept sending the retired secret, and the resulting health string pointed
+    /// at the wrong cause.
+    #[tokio::test]
+    async fn a_rotated_client_secret_is_used_for_an_existing_integration() {
+        let store = store();
+        let transport = FakeTransport::new(vec![
+            ok(r#"{"access_token":"first","expires_in":30,"refresh_token":"rt"}"#),
+            ok(r#"{"access_token":"second","expires_in":3600}"#),
+        ]);
+        let now = Utc::now();
+
+        let original = GoogleOAuthConfig {
+            client_secret: "original-secret".to_string(),
+            ..GoogleOAuthConfig::default()
+        };
+        let manager = TokenManager::with_clock(
+            Arc::clone(&store),
+            transport.clone(),
+            original,
+            Arc::new(move || now),
+        );
+        manager
+            .exchange_code("id", "code", "v")
+            .await
+            .expect("exchange");
+
+        // A second manager over the SAME store, configured with the rotated
+        // secret: this is what a restart after rotation looks like.
+        let rotated = GoogleOAuthConfig {
+            client_secret: "rotated-secret".to_string(),
+            ..GoogleOAuthConfig::default()
+        };
+        let manager =
+            TokenManager::with_clock(store, transport.clone(), rotated, Arc::new(move || now));
+        manager.access_token("id").await.expect("refresh");
+
+        let refresh_form = &transport.calls()[1].1;
+        assert!(
+            refresh_form
+                .iter()
+                .any(|(key, value)| key == "client_secret" && value == "rotated-secret"),
+            "refresh must use the rotated secret, got {refresh_form:?}"
+        );
     }
 
     #[tokio::test]

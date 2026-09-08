@@ -27,6 +27,7 @@ const DEFAULT_PLUGINS_DIR: &str = "/var/lib/deskmate/plugins";
 
 const ENV_GOOGLE_CLIENT_ID: &str = "DESKMATE_GOOGLE_CLIENT_ID";
 const ENV_GOOGLE_CLIENT_SECRET: &str = "DESKMATE_GOOGLE_CLIENT_SECRET";
+const ENV_GOOGLE_CLIENT_SECRET_FILE: &str = "DESKMATE_GOOGLE_CLIENT_SECRET_FILE";
 const ENV_GOOGLE_REDIRECT_URI: &str = "DESKMATE_GOOGLE_REDIRECT_URI";
 const ENV_GOOGLE_AUTH_URI: &str = "DESKMATE_GOOGLE_AUTH_URI";
 const ENV_GOOGLE_TOKEN_URI: &str = "DESKMATE_GOOGLE_TOKEN_URI";
@@ -38,6 +39,13 @@ const ENV_GOOGLE_REVOKE_URI: &str = "DESKMATE_GOOGLE_REVOKE_URI";
 struct GoogleOAuthEnv {
     client_id: Option<String>,
     client_secret: Option<String>,
+    /// Path form of the client secret, preferred over the inline value for the
+    /// same reason `DESKMATE_SECRETS_KEY_FILE` is preferred over
+    /// `DESKMATE_SECRETS_KEY`: an environment value is readable through
+    /// `systemctl show --property=Environment`, `/proc/<pid>/environ`, and any
+    /// crash dump. Spec section 6 requires the client secret to live in a keyed
+    /// store or a `0600` file, not in a plaintext config.
+    client_secret_file: Option<String>,
     redirect_uri: Option<String>,
     auth_uri: Option<String>,
     token_uri: Option<String>,
@@ -49,6 +57,7 @@ impl GoogleOAuthEnv {
         Ok(Self {
             client_id: read_google_env(ENV_GOOGLE_CLIENT_ID)?,
             client_secret: read_google_env(ENV_GOOGLE_CLIENT_SECRET)?,
+            client_secret_file: read_google_env(ENV_GOOGLE_CLIENT_SECRET_FILE)?,
             redirect_uri: read_google_env(ENV_GOOGLE_REDIRECT_URI)?,
             auth_uri: read_google_env(ENV_GOOGLE_AUTH_URI)?,
             token_uri: read_google_env(ENV_GOOGLE_TOKEN_URI)?,
@@ -59,6 +68,7 @@ impl GoogleOAuthEnv {
     fn is_absent(&self) -> bool {
         self.client_id.is_none()
             && self.client_secret.is_none()
+            && self.client_secret_file.is_none()
             && self.redirect_uri.is_none()
             && self.auth_uri.is_none()
             && self.token_uri.is_none()
@@ -77,8 +87,18 @@ enum GoogleOAuthConfigError {
     Missing { variable: &'static str },
     #[error("{variable} must not be empty")]
     Empty { variable: &'static str },
-    #[error("{variable} must be an absolute HTTP(S) URL")]
+    #[error("{variable} must be an absolute https:// URL")]
     InvalidUrl { variable: &'static str },
+    #[error(
+        "{ENV_GOOGLE_CLIENT_SECRET_FILE} could not be read: {detail}. \
+         It must be an existing file readable only by this service"
+    )]
+    SecretFileUnreadable { detail: String },
+    #[error(
+        "{ENV_GOOGLE_CLIENT_SECRET_FILE} is reachable by group or other (mode {mode:04o}); \
+         it holds an OAuth client secret and must be 0600"
+    )]
+    SecretFilePermissive { mode: u32 },
 }
 
 fn read_google_env(variable: &'static str) -> Result<Option<String>, GoogleOAuthConfigError> {
@@ -110,7 +130,7 @@ fn google_oauth_config_from_values(
 
     let mut config = server::oauth::GoogleOAuthConfig {
         client_id: required_google_value(values.client_id, ENV_GOOGLE_CLIENT_ID)?,
-        client_secret: required_google_value(values.client_secret, ENV_GOOGLE_CLIENT_SECRET)?,
+        client_secret: resolve_client_secret(values.client_secret, values.client_secret_file)?,
         redirect_uri: required_google_value(values.redirect_uri, ENV_GOOGLE_REDIRECT_URI)?,
         ..server::oauth::GoogleOAuthConfig::default()
     };
@@ -127,6 +147,56 @@ fn google_oauth_config_from_values(
     )?;
     validate_google_url(&config.redirect_uri, ENV_GOOGLE_REDIRECT_URI)?;
     Ok(Some(config))
+}
+
+/// Resolves the OAuth client secret from its file form when present, otherwise
+/// from the inline environment value. The file wins, matching how
+/// `secrets::acquire_key` resolves the master key, so a deployment can migrate to
+/// the file without a flag day and the inline value is simply ignored once the
+/// file is set.
+fn resolve_client_secret(
+    inline: Option<String>,
+    file: Option<String>,
+) -> Result<String, GoogleOAuthConfigError> {
+    let Some(path) = file else {
+        return required_google_value(inline, ENV_GOOGLE_CLIENT_SECRET);
+    };
+    if path.trim().is_empty() {
+        return Err(GoogleOAuthConfigError::Empty {
+            variable: ENV_GOOGLE_CLIENT_SECRET_FILE,
+        });
+    }
+    read_secret_file(std::path::Path::new(&path))
+}
+
+fn read_secret_file(path: &std::path::Path) -> Result<String, GoogleOAuthConfigError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let metadata = std::fs::metadata(path).map_err(|error| {
+            GoogleOAuthConfigError::SecretFileUnreadable {
+                detail: error.to_string(),
+            }
+        })?;
+        let mode = metadata.permissions().mode() & 0o777;
+        if mode & 0o077 != 0 {
+            return Err(GoogleOAuthConfigError::SecretFilePermissive { mode });
+        }
+    }
+    let value = std::fs::read_to_string(path).map_err(|error| {
+        GoogleOAuthConfigError::SecretFileUnreadable {
+            detail: error.to_string(),
+        }
+    })?;
+    // A secret written with `printf` or an editor commonly ends in a newline;
+    // trailing whitespace is never part of a Google client secret.
+    let value = value.trim().to_string();
+    if value.is_empty() {
+        return Err(GoogleOAuthConfigError::Empty {
+            variable: ENV_GOOGLE_CLIENT_SECRET_FILE,
+        });
+    }
+    Ok(value)
 }
 
 fn required_google_value(
@@ -155,10 +225,17 @@ fn set_optional_google_url(
     Ok(())
 }
 
+/// Every one of these four variables is on the credential path: the redirect URI
+/// receives an authorization code, and the token and revoke endpoints receive the
+/// client secret and the refresh token as a form body. `http` is therefore refused
+/// outright rather than merely discouraged -- the egress guard permits `http` for
+/// good reason (plugin feeds), so it will not catch a typo here, and nothing else
+/// would. Spec section 6 requires https for the redirect URI; the same reasoning
+/// covers the two endpoint overrides, which carry strictly more secret material.
 fn validate_google_url(value: &str, variable: &'static str) -> Result<(), GoogleOAuthConfigError> {
     let parsed =
         url::Url::parse(value).map_err(|_| GoogleOAuthConfigError::InvalidUrl { variable })?;
-    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+    if parsed.scheme() != "https" || parsed.host_str().is_none() {
         return Err(GoogleOAuthConfigError::InvalidUrl { variable });
     }
     Ok(())
@@ -427,6 +504,107 @@ mod tests {
             }
         ));
         assert!(!error.to_string().contains("must-not-appear-in-errors"));
+    }
+
+    /// `http` on any of the four credential-path URLs would post the client secret
+    /// and refresh token as a plaintext form body over port 80. The egress guard
+    /// allows `http` (plugin feeds need it), so this is the only check between a
+    /// typo and cleartext credentials.
+    #[test]
+    fn a_plaintext_http_url_is_refused_on_every_credential_path_variable() {
+        for (variable, apply) in [
+            (
+                super::ENV_GOOGLE_REDIRECT_URI,
+                (|env: &mut super::GoogleOAuthEnv, value: String| env.redirect_uri = Some(value))
+                    as fn(&mut super::GoogleOAuthEnv, String),
+            ),
+            (super::ENV_GOOGLE_AUTH_URI, |env, value| {
+                env.auth_uri = Some(value);
+            }),
+            (super::ENV_GOOGLE_TOKEN_URI, |env, value| {
+                env.token_uri = Some(value);
+            }),
+            (super::ENV_GOOGLE_REVOKE_URI, |env, value| {
+                env.revoke_uri = Some(value);
+            }),
+        ] {
+            let mut env = complete_google_env();
+            apply(&mut env, "http://oauth2.googleapis.com/token".to_string());
+            let error = super::google_oauth_config_from_values(env)
+                .expect_err("an http URL on a credential path must be refused");
+            assert!(
+                matches!(
+                    error,
+                    super::GoogleOAuthConfigError::InvalidUrl { variable: got } if got == variable
+                ),
+                "{variable} accepted an http:// URL: {error}"
+            );
+        }
+    }
+
+    /// The file form exists so the client secret is not readable through
+    /// `/proc/<pid>/environ`. It must therefore refuse a file anyone else can
+    /// read, or it buys nothing.
+    #[test]
+    fn the_client_secret_file_is_preferred_and_must_not_be_group_or_world_readable() {
+        use std::io::Write as _;
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("google-client-secret");
+        let mut file = std::fs::File::create(&path).expect("create");
+        // A trailing newline is what `printf` or an editor leaves behind.
+        file.write_all(b"secret-from-the-file\n").expect("write");
+        drop(file);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).expect("chmod");
+
+        // The file wins over the inline value, and the newline is trimmed.
+        let mut env = complete_google_env();
+        env.client_secret = Some("inline-value-that-must-lose".to_string());
+        env.client_secret_file = Some(path.to_string_lossy().into_owned());
+        let config = super::google_oauth_config_from_values(env)
+            .expect("valid config")
+            .expect("Google enabled");
+        assert_eq!(config.client_secret, "secret-from-the-file");
+
+        // Group-readable is refused: that is the whole point of the file form.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).expect("chmod");
+        let mut env = complete_google_env();
+        env.client_secret_file = Some(path.to_string_lossy().into_owned());
+        let error = super::google_oauth_config_from_values(env)
+            .expect_err("a group-readable secret file must be refused");
+        assert!(
+            matches!(
+                error,
+                super::GoogleOAuthConfigError::SecretFilePermissive { mode: 0o640 }
+            ),
+            "unexpected error: {error}"
+        );
+        assert!(!error.to_string().contains("secret-from-the-file"));
+    }
+
+    /// A missing file is a hard startup failure, never a silent fall back to the
+    /// inline value -- otherwise a typo in the path quietly reinstates the
+    /// environment-variable exposure the file form exists to remove.
+    #[test]
+    fn a_missing_client_secret_file_does_not_fall_back_to_the_inline_value() {
+        let mut env = complete_google_env();
+        env.client_secret = Some("inline-value-that-must-not-be-used".to_string());
+        env.client_secret_file = Some("/nonexistent/deskmate/google-client-secret".to_string());
+        let error = super::google_oauth_config_from_values(env)
+            .expect_err("a named-but-absent secret file must stop startup");
+        assert!(
+            matches!(
+                error,
+                super::GoogleOAuthConfigError::SecretFileUnreadable { .. }
+            ),
+            "unexpected error: {error}"
+        );
+        assert!(
+            !error
+                .to_string()
+                .contains("inline-value-that-must-not-be-used")
+        );
     }
 
     #[test]

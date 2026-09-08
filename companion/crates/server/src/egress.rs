@@ -1252,6 +1252,48 @@ mod tests {
         assert_eq!(response.body, b"done".to_vec());
     }
 
+    /// The credential-bearing POST path had no test that reached
+    /// `build_pinned_client`: both existing POST tests fail inside
+    /// `egress_guard` first, and `post_form_with_resolver` -- the seam that
+    /// exists so this path can be driven at all -- had no caller.
+    ///
+    /// This drives it end to end against a real loopback server. Replacing
+    /// `build_pinned_client(&host, pinned_addr)?` in `post_form_inner` with a
+    /// plain `reqwest::Client::new()` fails here, because nothing would then
+    /// map `token.invalid` onto the listener. That single substitution would
+    /// also drop `.no_proxy()` and the redirect policy from the one request
+    /// that carries the client secret and the refresh token.
+    #[tokio::test]
+    async fn post_form_resolves_then_pins_and_sends_the_form() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind a loopback listener");
+        let addr = listener.local_addr().expect("listener has a local addr");
+        let router = axum::Router::new().route(
+            "/token",
+            axum::routing::post(|body: String| async move { body }),
+        );
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+        let url = format!("http://token.invalid:{}/token", addr.port());
+
+        let response = post_form_with_resolver(
+            &url,
+            &FixedAddrResolver(addr),
+            &[("grant_type", "refresh_token"), ("refresh_token", "rt")],
+        )
+        .await
+        .expect("the pinned POST reaches the listener");
+
+        assert_eq!(response.status, 200);
+        assert_eq!(
+            String::from_utf8(response.body).expect("utf8 body"),
+            "grant_type=refresh_token&refresh_token=rt",
+            "the form must arrive urlencoded in the request body"
+        );
+    }
+
     #[tokio::test]
     async fn fetch_returns_the_response_status_for_a_non_2xx_response() {
         // Fix round 2, item 1: the status capture at the end of

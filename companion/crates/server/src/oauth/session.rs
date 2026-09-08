@@ -17,7 +17,14 @@ use crate::registry::constant_time_eq;
 
 type HmacSha256 = Hmac<Sha256>;
 
-pub const SESSION_COOKIE: &str = "deskmate_session";
+/// The `__Host-` prefix is not decoration. A browser refuses to accept a cookie
+/// under this name unless it is `Secure`, has `Path=/`, and carries no `Domain`
+/// attribute -- which this cookie already satisfies -- and, crucially, it stops
+/// any sibling host under the registrable domain from setting a `Domain`-scoped
+/// cookie of the same name. Without the prefix such a cookie would be sent
+/// alongside the real one, and `session_cookie_value`'s first-match scan of the
+/// `Cookie` header would happily pick whichever came first.
+pub const SESSION_COOKIE: &str = "__Host-deskmate_session";
 
 pub struct SessionSigner {
     key: Vec<u8>,
@@ -261,7 +268,7 @@ mod tests {
         let header = set_cookie_header("signed-value", Duration::hours(12));
         assert_eq!(
             header,
-            "deskmate_session=signed-value; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=43200"
+            "__Host-deskmate_session=signed-value; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=43200"
         );
     }
 
@@ -373,7 +380,7 @@ mod tests {
         assert!(set_cookie.contains("; Max-Age=43200"));
 
         let value = set_cookie
-            .strip_prefix("deskmate_session=")
+            .strip_prefix("__Host-deskmate_session=")
             .expect("session cookie name")
             .split(';')
             .next()

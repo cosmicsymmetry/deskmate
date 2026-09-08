@@ -19,7 +19,7 @@ export function DevicePreview({
   dataGeneration,
 }: DevicePreviewProps) {
   const widget = cards.find((card) => card.id === selectedWidgetId) ?? cards[0];
-  const [frame, setFrame] = useState<{ pngBase64: string; sample: boolean } | null>(null);
+  const [frame, setFrame] = useState<{ pngBase64: string | null; sample: boolean } | null>(null);
   const [unavailable, setUnavailable] = useState(false);
   const generation = useRef(0);
 
@@ -72,7 +72,7 @@ export function DevicePreview({
             <p className="stage__unavailable">
               {widget ? "Preview unavailable" : "No cards configured"}
             </p>
-          ) : frame ? (
+          ) : frame?.pngBase64 ? (
             <img
               alt={`Device preview of ${widget.id}`}
               width={448}
@@ -80,7 +80,9 @@ export function DevicePreview({
               src={`data:image/png;base64,${frame.pngBase64}`}
             />
           ) : null}
-          {frame?.sample && <span className="stage__badge">No data yet</span>}
+          {/* The badge means "a real frame, drawn from sample data". A frame with no
+              pixels has nothing to badge; Step 14 gives that case its own word. */}
+          {frame?.sample && frame.pngBase64 && <span className="stage__badge">No data yet</span>}
         </div>
       </div>
     </section>

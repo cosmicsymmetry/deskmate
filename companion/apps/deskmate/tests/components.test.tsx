@@ -18,6 +18,20 @@ import {
 } from "../src/lib/configDraft";
 import { formatProviderAge, providerTrouble } from "../src/lib/providers";
 import * as tauriModule from "../src/lib/tauri";
+// The two server reads are the only wrappers this suite proves end to end, so it
+// keeps a reference to the REAL ones before `mock.module` below replaces the
+// module's namespace in place, and mocks the Tauri bridge underneath them instead.
+// A second test file cannot do this: `mock.module` is process-global with no
+// guaranteed file order, so whichever file ran first would win.
+const coreInvocations: { command: string; args?: Record<string, unknown> }[] = [];
+mock.module("@tauri-apps/api/core", () => ({
+  invoke: async (command: string, args?: Record<string, unknown>) => {
+    coreInvocations.push({ command, args });
+    return command === "get_server_plugins" ? { plugins: [], load_failures: [] } : [];
+  },
+}));
+const realGetServerPlugins = tauriModule.getServerPlugins;
+const realGetServerCardState = tauriModule.getServerCardState;
 import type {
   AppConfig,
   AppSnapshot,
@@ -26,8 +40,10 @@ import type {
   ConfigApplyResult,
   DraftValidation,
   NetworkSettings,
+  PluginCatalog,
   PreviewFrame,
   ProvisionDeviceInput,
+  ServerCardState,
   ValidationIssue,
 } from "../src/lib/types";
 import { ipcContractFixtures } from "../src/lib/types.contract";
@@ -43,6 +59,11 @@ const cards = snapshot.config.cards;
 // `useAppState`) stays real.
 let previewImpl: (cardId: string) => Promise<PreviewFrame> = () =>
   Promise.reject(new Error("renderCardPreview not configured for this test"));
+let serverPluginsImpl: () => Promise<PluginCatalog> = async () => ({
+  plugins: [],
+  load_failures: [],
+});
+let serverCardStateImpl: () => Promise<ServerCardState[]> = async () => [];
 let snapshotImpl: () => Promise<AppSnapshot> = async () => snapshot;
 let validateImpl: (config: AppConfig) => Promise<DraftValidation> = async () => ({
   valid: true,
@@ -82,6 +103,8 @@ let useLocalOwnershipImpl: () => Promise<NetworkSettings> = async () => ({
 mock.module("../src/lib/tauri", () => ({
   ...tauriModule,
   renderCardPreview: (cardId: string) => previewImpl(cardId),
+  getServerPlugins: () => serverPluginsImpl(),
+  getServerCardState: () => serverCardStateImpl(),
   getAppSnapshot: () => snapshotImpl(),
   listenToAppState: async () => () => {},
   validateConfigDraft: (config: AppConfig) => validateImpl(config),
@@ -415,7 +438,7 @@ describe("settings accessibility and states", () => {
       serverAccess = [serverUrl, deviceId, adminToken];
       return { server_url: serverUrl, device_id: deviceId, tier: "networked" };
     };
-    previewImpl = async () => ({ png_base64: "cHJldmlldw==", sample: false });
+    previewImpl = async () => ({ png_base64: "cHJldmlldw==", sample: false, state: null });
 
     const container = document.createElement("div");
     document.body.appendChild(container);
@@ -484,7 +507,7 @@ describe("settings accessibility and states", () => {
         tier: "local",
       };
     };
-    previewImpl = async () => ({ png_base64: "cHJldmlldw==", sample: false });
+    previewImpl = async () => ({ png_base64: "cHJldmlldw==", sample: false, state: null });
 
     const container = document.createElement("div");
     document.body.appendChild(container);
@@ -1612,7 +1635,7 @@ describe("settings accessibility and states", () => {
       liveSnapshot = { ...liveSnapshot, config };
       return { save: { generation: 2, warning: null } };
     };
-    previewImpl = async () => ({ png_base64: "cHJldmlldw==", sample: false });
+    previewImpl = async () => ({ png_base64: "cHJldmlldw==", sample: false, state: null });
 
     const container = document.createElement("div");
     document.body.appendChild(container);
@@ -1656,7 +1679,7 @@ describe("settings accessibility and states", () => {
       liveSnapshot = { ...liveSnapshot, config, has_saved_config: true };
       return { save: { generation: 1, warning: null } };
     };
-    previewImpl = async () => ({ png_base64: "cHJldmlldw==", sample: false });
+    previewImpl = async () => ({ png_base64: "cHJldmlldw==", sample: false, state: null });
 
     const container = document.createElement("div");
     document.body.appendChild(container);
@@ -1712,7 +1735,7 @@ describe("settings accessibility and states", () => {
       liveSnapshot = { ...liveSnapshot, config };
       return { save: { generation: 2, warning: null } };
     };
-    previewImpl = async () => ({ png_base64: "cHJldmlldw==", sample: false });
+    previewImpl = async () => ({ png_base64: "cHJldmlldw==", sample: false, state: null });
 
     const container = document.createElement("div");
     document.body.appendChild(container);
@@ -1750,7 +1773,7 @@ describe("settings accessibility and states", () => {
       },
     });
     networkSettingsImpl = () => new Promise<NetworkSettings>(() => {});
-    previewImpl = async () => ({ png_base64: "cHJldmlldw==", sample: false });
+    previewImpl = async () => ({ png_base64: "cHJldmlldw==", sample: false, state: null });
 
     const container = document.createElement("div");
     document.body.appendChild(container);
@@ -1802,7 +1825,7 @@ describe("settings accessibility and states", () => {
         })),
       });
     };
-    previewImpl = async () => ({ png_base64: "cHJldmlldw==", sample: false });
+    previewImpl = async () => ({ png_base64: "cHJldmlldw==", sample: false, state: null });
 
     const container = document.createElement("div");
     document.body.appendChild(container);
@@ -1856,7 +1879,7 @@ describe("settings accessibility and states", () => {
       },
     };
     snapshotImpl = async () => invalidSnapshot;
-    previewImpl = async () => ({ png_base64: "cHJldmlldw==", sample: false });
+    previewImpl = async () => ({ png_base64: "cHJldmlldw==", sample: false, state: null });
 
     const container = document.createElement("div");
     document.body.appendChild(container);
@@ -1886,7 +1909,7 @@ describe("settings accessibility and states", () => {
       ...(structuredClone(snapshot) as AppSnapshot),
       device: { ...snapshot.device, protocol_version: 2 },
     });
-    previewImpl = async () => ({ png_base64: "cHJldmlldw==", sample: false });
+    previewImpl = async () => ({ png_base64: "cHJldmlldw==", sample: false, state: null });
 
     const container = document.createElement("div");
     document.body.appendChild(container);
@@ -1914,7 +1937,7 @@ describe("settings accessibility and states", () => {
         },
       ],
     });
-    previewImpl = async () => ({ png_base64: "cHJldmlldw==", sample: false });
+    previewImpl = async () => ({ png_base64: "cHJldmlldw==", sample: false, state: null });
 
     const container = document.createElement("div");
     document.body.appendChild(container);
@@ -1944,7 +1967,7 @@ describe("settings accessibility and states", () => {
         },
       ],
     });
-    previewImpl = async () => ({ png_base64: "cHJldmlldw==", sample: false });
+    previewImpl = async () => ({ png_base64: "cHJldmlldw==", sample: false, state: null });
 
     const container = document.createElement("div");
     document.body.appendChild(container);
@@ -2064,7 +2087,7 @@ describe("settings accessibility and states", () => {
   test("renders the device's own pixels as an img with a data URL once the IPC resolves", async () => {
     previewImpl = async (cardId) => {
       expect(cardId).toBe("upnext");
-      return { png_base64: "Zmlyc3QtZnJhbWU=", sample: false };
+      return { png_base64: "Zmlyc3QtZnJhbWU=", sample: false, state: null };
     };
     const { container, root } = await mountPreview(calendarCard("upnext"));
     await waitFor(() => {
@@ -2089,7 +2112,7 @@ describe("settings accessibility and states", () => {
   });
 
   test("badges the frame as sample when the card has never published data", async () => {
-    previewImpl = async () => ({ png_base64: "dW5jb25maWd1cmVk", sample: true });
+    previewImpl = async () => ({ png_base64: "dW5jb25maWd1cmVk", sample: true, state: null });
     const { container, root } = await mountPreview(calendarCard("upnext"));
     await waitFor(() => {
       expect(container.querySelector("img")).not.toBeNull();
@@ -2102,7 +2125,7 @@ describe("settings accessibility and states", () => {
     let calls = 0;
     previewImpl = async () => {
       calls += 1;
-      return { png_base64: `frame-${calls}`, sample: false };
+      return { png_base64: `frame-${calls}`, sample: false, state: null };
     };
     const card = calendarCard("upnext");
     const { container, root } = await mountPreview(card, 0);
@@ -2134,7 +2157,7 @@ describe("settings accessibility and states", () => {
     previewImpl = async (cardId) => {
       requestCount += 1;
       if (cardId === "first") {
-        return { png_base64: "first-frame", sample: false };
+        return { png_base64: "first-frame", sample: false, state: null };
       }
       return new Promise((resolve) => {
         resolveSecond = resolve;
@@ -2165,7 +2188,7 @@ describe("settings accessibility and states", () => {
       "data:image/png;base64,first-frame",
     );
 
-    resolveSecond({ png_base64: "second-frame", sample: false });
+    resolveSecond({ png_base64: "second-frame", sample: false, state: null });
     await waitFor(() => {
       expect(container.querySelector("img")?.getAttribute("src")).toBe(
         "data:image/png;base64,second-frame",
@@ -2226,7 +2249,7 @@ describe("settings accessibility and states", () => {
 
       // The newer request succeeds first...
       await act(async () => {
-        resolveSecond({ png_base64: "winning-frame", sample: false });
+        resolveSecond({ png_base64: "winning-frame", sample: false, state: null });
         await new Promise((resolve) => setTimeout(resolve, 0));
       });
       await waitFor(() => {
@@ -2590,5 +2613,15 @@ describe("settings accessibility and states", () => {
     expect(css).toContain("@media (max-width: 430px)");
     expect(css).toContain("@media (prefers-reduced-motion: reduce)");
     expect(css).toContain("animation-duration: 0.001ms");
+  });
+
+  test("each server read names its backend command exactly, and passes no arguments", async () => {
+    coreInvocations.length = 0;
+    expect(await realGetServerPlugins()).toEqual({ plugins: [], load_failures: [] });
+    expect(await realGetServerCardState()).toEqual([]);
+    expect(coreInvocations).toEqual([
+      { command: "get_server_plugins", args: undefined },
+      { command: "get_server_card_state", args: undefined },
+    ]);
   });
 });

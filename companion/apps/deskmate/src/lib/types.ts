@@ -334,6 +334,46 @@ export interface CardDataSnapshot {
   fields: CardField[];
 }
 
+export type PluginTemplateKind = "display-list" | "svg";
+
+export interface PluginCatalogAsset {
+  file: string;
+  kind: string;
+  byte_length: number;
+  digest: string;
+}
+
+export interface PluginCatalogEntry {
+  id: string;
+  name: string;
+  version: string;
+  node_count: number;
+  assets: PluginCatalogAsset[];
+  display_name: string | null;
+  description: string | null;
+  manifest_version: number;
+  template: PluginTemplateKind;
+  refresh_minutes: number;
+}
+
+export interface PluginLoadFailure {
+  id: string;
+  error: string;
+}
+
+export interface PluginCatalog {
+  plugins: PluginCatalogEntry[];
+  load_failures: PluginLoadFailure[];
+}
+
+/** The server's own view of one plugin card, projected onto this window's snapshot. */
+export interface ServerCardState {
+  card_id: string;
+  provider: ProviderState;
+  hero: string | null;
+  errors: CardError[];
+}
+
 export type PersistenceState =
   | { kind: "clean" }
   | { kind: "saving" }
@@ -377,9 +417,16 @@ export interface AutostartStatus {
   preference_enabled: boolean;
 }
 
+/**
+ * `png_base64` is null exactly when the renderer produced no pixels; `state` then
+ * carries the word for why ("Waiting for the first refresh", "Plugin cards render on
+ * the server", the server's own error). Built-in cards keep `png_base64` set and
+ * `state` null, so nothing about them changes.
+ */
 export interface PreviewFrame {
-  png_base64: string;
+  png_base64: string | null;
   sample: boolean;
+  state: string | null;
 }
 
 type MessageError<Category extends string> = {
@@ -436,5 +483,7 @@ export interface IpcContractFixtures {
   draft_validation: DraftValidation;
   config_apply_result: ConfigApplyResult;
   autostart_status: AutostartStatus;
+  plugin_catalog: PluginCatalog;
+  server_card_state: ServerCardState[];
   preview_frame: PreviewFrame;
 }

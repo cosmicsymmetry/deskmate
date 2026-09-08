@@ -1,7 +1,7 @@
 //! Admin-token-protected provisioning, configuration, and status routes.
 
 use app_core::{
-    AdminConfigErrorBody, AppConfig, AppSnapshot, BakedFontMetrics, ClockCard,
+    AdminConfigErrorBody, AppConfig, AppSnapshot, BakedFontMetrics, CardPreviewResponse, ClockCard,
     MAX_CONFIG_FILE_BYTES, PluginCatalog, PluginCatalogAsset, PluginCatalogEntry,
     PluginTemplateKind, RuntimeError, SaveReceipt, StoreError, ValidationIssue,
     build_digital_clock_scene,
@@ -14,6 +14,7 @@ use axum::http::StatusCode;
 use axum::http::request::Parts;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
+use base64::Engine as _;
 use chrono::NaiveDateTime;
 use protocol::{Message, PushScene, validate_message};
 use serde::{Deserialize, Serialize, Serializer};
@@ -36,6 +37,10 @@ pub(crate) fn routes() -> Router<ServerState> {
             put(put_config).layer(DefaultBodyLimit::max(MAX_CONFIG_FILE_BYTES)),
         )
         .route("/v1/devices/{id}/scene", post(post_scene))
+        .route(
+            "/v1/devices/{id}/cards/{card_id}/preview",
+            get(get_card_preview),
+        )
 }
 
 async fn get_plugins(
@@ -428,6 +433,41 @@ async fn get_device(
     }))
 }
 
+/// Renders one plugin card's current face as a PNG, without touching the
+/// device. The runtime builds it from the snapshot the panel is already
+/// showing, at revision 0: nothing is minted, nothing is sent, and the card
+/// is not activated. Rate limiting is the Mac's polling cadence, not ours.
+async fn get_card_preview(
+    State(state): State<ServerState>,
+    _admin: AdminAuthenticated,
+    Path((device_id, card_id)): Path<(String, String)>,
+) -> Result<Json<CardPreviewResponse>, AdminError> {
+    if !state.registry().contains_device(&device_id) {
+        return Err(AdminError::NotFound);
+    }
+    let runtime = state
+        .device_link(&device_id)
+        .and_then(|link| link.runtime())
+        .ok_or_else(|| AdminError::Runtime {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            message: "this device has no runtime yet; it has never connected".into(),
+        })?;
+    let preview = tokio::task::spawn_blocking(move || runtime.render_card_preview(&card_id))
+        .await
+        .map_err(|_| AdminError::WorkerFailed)?
+        .map_err(AdminError::from)?;
+
+    Ok(Json(CardPreviewResponse {
+        png_base64: preview.frame.as_ref().map(|frame| {
+            base64::engine::general_purpose::STANDARD
+                .encode(crate::rasterizer::frame_png(&frame.bytes))
+        }),
+        state: preview.state,
+        message: preview.message,
+        refreshed_at_unix_ms: preview.refreshed_at_unix_ms,
+    }))
+}
+
 #[derive(Debug, Serialize)]
 struct DeviceStatus {
     device_id: String,
@@ -522,6 +562,7 @@ mod tests {
     use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode};
     use axum::response::Response;
+    use base64::Engine as _;
     use tower::ServiceExt as _;
 
     use super::{
@@ -1131,6 +1172,315 @@ mod tests {
         assert!(body["plugins"][0]["display_name"].is_null());
         assert!(body["plugins"][0]["description"].is_null());
         assert_eq!(body["load_failures"].as_array().unwrap().len(), 0);
+    }
+
+    async fn preview_request(
+        state: crate::ServerState,
+        device_id: &str,
+        card_id: &str,
+        authorized: bool,
+    ) -> Response {
+        let mut builder = Request::builder()
+            .method("GET")
+            .uri(format!("/v1/devices/{device_id}/cards/{card_id}/preview"));
+        if authorized {
+            builder = builder.header("authorization", "Bearer admin-secret");
+        }
+        crate::app(state)
+            .oneshot(builder.body(Body::empty()).expect("preview request"))
+            .await
+            .expect("preview response")
+    }
+
+    #[tokio::test]
+    async fn a_preview_for_an_unknown_device_is_a_not_found() {
+        let (state, _device_id, _config_dir) = state_with_curated_plugins();
+
+        let response = preview_request(state, "dev-not-minted", "aqi-card", true).await;
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn a_preview_before_any_runtime_exists_is_service_unavailable() {
+        // A minted device that has never connected has no runtime to ask.
+        // That is temporary and retryable, so it is 503 -- distinct from the
+        // 404 an addressing mistake gets.
+        let (state, device_id, _config_dir) = state_with_curated_plugins();
+
+        let response = preview_request(state, &device_id, "aqi-card", true).await;
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let error = response_json(response).await;
+        assert_eq!(error["kind"], "runtime");
+    }
+
+    #[tokio::test]
+    async fn the_preview_route_requires_admin_authentication() {
+        let (state, device_id, _config_dir) = state_with_curated_plugins();
+
+        let response = preview_request(state, &device_id, "aqi-card", false).await;
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// Serves fixture data to every plugin card except `never-fetched`, which
+    /// yields no value at all. The worker caches a plugin snapshot only when
+    /// `value` is `Some` (`app-core/src/runtime.rs:2056-2073`), so that card
+    /// is permanently pre-first-fetch with no timing assumption.
+    ///
+    /// Payload selection is keyed by plugin id, not one fixed body: `aqi`'s
+    /// curated manifest binds an icon-font glyph node to `icons.ttf`, which
+    /// -- like the committed `Inter-subset.ttf` it is byte-identical to --
+    /// has an empty `name` table (verified directly: `fontdb::Database` finds
+    /// zero faces in it, because `fontdb` requires a Typographic-Family or
+    /// Family name record to register a face at all, and this font has
+    /// none). The device draws it fine by codepoint with no name lookup, but
+    /// the *server's* raster fallback -- exercised for the first time by this
+    /// preview route -- references a scene's fonts by family name in
+    /// generated SVG, which is categorically impossible for a font `fontdb`
+    /// never indexed. `claude-limits` is the display-list exemplar here
+    /// instead: a real curated plugin with no asset fonts at all, so its
+    /// preview exercises the same real compile-and-rasterize path without
+    /// tripping over that pre-existing gap. `svg-aqi` is unaffected -- its
+    /// SVG template declares no font asset either -- so it keeps the
+    /// AQI-shaped payload.
+    struct FixtureRefresher {
+        aqi_payload: serde_json::Value,
+        claude_limits_payload: serde_json::Value,
+    }
+
+    impl app_core::ProviderRefresher for FixtureRefresher {
+        fn refresh(
+            &mut self,
+            request: app_core::ProviderRefreshRequest,
+        ) -> app_core::ProviderRefreshResult {
+            let fetched = request.widget_id != "never-fetched";
+            let payload = match &request.provider {
+                app_core::ProviderRequest::Plugin { plugin_id } if plugin_id == "claude-limits" => {
+                    self.claude_limits_payload.clone()
+                }
+                _ => self.aqi_payload.clone(),
+            };
+            app_core::ProviderRefreshResult {
+                generation: request.generation,
+                widget_id: request.widget_id,
+                fields: vec![protocol::Field {
+                    key: "title".into(),
+                    value: protocol::FieldValue::Text(request.title),
+                }],
+                value: fetched.then_some(payload),
+                refreshed_at: fetched.then(chrono::Utc::now),
+                age: fetched.then(|| std::time::Duration::ZERO),
+                stale: !fetched,
+                error: (!fetched).then(|| "the first refresh has not landed".to_owned()),
+            }
+        }
+    }
+
+    fn claude_limits_payload() -> serde_json::Value {
+        serde_json::json!({
+            "updated": "2026-09-08T12:00:00Z",
+            "plan": "Max 20x",
+            "windows": [
+                {
+                    "name": "session",
+                    "used_pct": 42,
+                    "resets_at_label": "Wed 6:09 PM",
+                    "resets_in_label": "3 hours 48 minutes"
+                },
+                {
+                    "name": "weekly",
+                    "used_pct": 61,
+                    "resets_at_label": "Fri 12:00 AM",
+                    "resets_in_label": "2 days"
+                }
+            ]
+        })
+    }
+
+    fn preview_config() -> app_core::AppConfig {
+        // `AppConfig::default()` already carries the `clock` card, which is
+        // the built-in the preview route must refuse.
+        let mut config = app_core::AppConfig::default();
+        for (id, plugin_id) in [
+            ("aqi-card", "claude-limits"),
+            ("svg-card", "svg-aqi"),
+            ("never-fetched", "aqi"),
+            ("absent-plugin", "not-installed"),
+        ] {
+            config.cards.push(app_core::CardSettings::Plugin {
+                id: id.into(),
+                title: "Air quality".into(),
+                plugin_id: plugin_id.into(),
+                tap_action: app_core::WidgetTapAction::None,
+                refresh: app_core::RefreshPolicy::Interval { minutes: 15 },
+                alert: app_core::CardAlert::None,
+            });
+            config.playlists[0].entries.push(app_core::PlaylistEntry {
+                card_id: id.into(),
+                dwell_seconds: None,
+            });
+        }
+        config
+    }
+
+    fn state_with_preview_runtime() -> (crate::ServerState, String, tempfile::TempDir) {
+        let (state, device_id, config_dir) = state_with_curated_plugins();
+        let (device, connector) =
+            crate::runtime_device::WebSocketRuntimeDevice::channel(device_id.clone());
+        let runtime = Arc::new(
+            app_core::RuntimeHandle::start_with_plugin_host(
+                preview_config(),
+                Box::new(device),
+                Box::new(FixtureRefresher {
+                    aqi_payload: payload_from_envelope(AQI_FIXTURE),
+                    claude_limits_payload: claude_limits_payload(),
+                }),
+                app_core::RuntimeOptions::default(),
+                Some(Box::new(crate::plugin_host::ServerPluginHost::new(
+                    curated_registry(),
+                ))),
+            )
+            .expect("the preview runtime starts"),
+        );
+        // No socket is ever attached, and the lease is released immediately.
+        // A preview must be served by a *retained* runtime, which is exactly
+        // what a device between links leaves behind: `is_live()` is false and
+        // `runtime()` is still `Some`.
+        let lease = state
+            .claim_link(device_id.clone())
+            .expect("claim the link slot");
+        lease.link().set_runtime(runtime, connector);
+        drop(lease);
+        (state, device_id, config_dir)
+    }
+
+    async fn preview_json(
+        state: &crate::ServerState,
+        device_id: &str,
+        card_id: &str,
+    ) -> serde_json::Value {
+        let response = preview_request(state.clone(), device_id, card_id, true).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        response_json(response).await
+    }
+
+    /// Polls until the first provider result has reached the worker. The
+    /// runtime refreshes providers on its own thread, so "waiting" is a real
+    /// transient state here rather than an outcome.
+    async fn preview_once_settled(
+        state: &crate::ServerState,
+        device_id: &str,
+        card_id: &str,
+    ) -> serde_json::Value {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let body = preview_json(state, device_id, card_id).await;
+            if body["state"] != "waiting" {
+                return body;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the first plugin refresh never reached the runtime"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }
+
+    fn assert_preview_png(body: &serde_json::Value) {
+        // §4.2's invariant: a frame and a message are mutually exclusive.
+        assert!(
+            body["message"].is_null(),
+            "a rendered frame carried a message"
+        );
+        let png = base64::engine::general_purpose::STANDARD
+            .decode(body["png_base64"].as_str().expect("preview frame"))
+            .expect("the preview frame is base64");
+        let pixmap = resvg::tiny_skia::Pixmap::decode_png(&png).expect("the preview PNG decodes");
+        assert_eq!((pixmap.width(), pixmap.height()), (448, 368));
+    }
+
+    #[tokio::test]
+    async fn a_display_list_plugin_card_previews_as_a_decodable_448x368_png() {
+        let (state, device_id, _config_dir) = state_with_preview_runtime();
+
+        let body = preview_once_settled(&state, &device_id, "aqi-card").await;
+
+        assert_eq!(body["state"], "fresh");
+        assert_preview_png(&body);
+        state.shutdown();
+    }
+
+    #[tokio::test]
+    async fn an_svg_template_plugin_card_previews_through_the_same_route() {
+        // The SVG arm is the one that is exact by construction: this raster
+        // *is* what the panel shows.
+        let (state, device_id, _config_dir) = state_with_preview_runtime();
+
+        let body = preview_once_settled(&state, &device_id, "svg-card").await;
+
+        assert_eq!(body["state"], "fresh");
+        assert_preview_png(&body);
+        state.shutdown();
+    }
+
+    #[tokio::test]
+    async fn a_card_with_no_cached_snapshot_is_waiting_with_a_message_and_no_frame() {
+        // The normal pre-first-fetch state, kept distinguishable from a fault.
+        let (state, device_id, _config_dir) = state_with_preview_runtime();
+
+        let body = preview_json(&state, &device_id, "never-fetched").await;
+
+        assert_eq!(body["state"], "waiting");
+        assert!(body["png_base64"].is_null());
+        assert!(
+            body["message"].as_str().is_some_and(|m| !m.is_empty()),
+            "a stage with no frame must have a word to print"
+        );
+        state.shutdown();
+    }
+
+    #[tokio::test]
+    async fn a_plugin_absent_from_the_registry_is_an_error_naming_only_that_plugin() {
+        let (state, device_id, _config_dir) = state_with_preview_runtime();
+
+        let body = preview_once_settled(&state, &device_id, "absent-plugin").await;
+
+        assert_eq!(body["state"], "error");
+        assert!(body["png_base64"].is_null());
+        assert!(
+            body["message"]
+                .as_str()
+                .expect("an error state carries a message")
+                .contains("not-installed"),
+            "the message must name the plugin: {}",
+            body["message"]
+        );
+        state.shutdown();
+    }
+
+    #[tokio::test]
+    async fn a_built_in_card_is_not_previewable_here_and_is_a_not_found() {
+        // Built-in cards preview in the Mac's own simulator; this route is
+        // the server-rendered path only. `RuntimeError::NotAPluginCard`.
+        let (state, device_id, _config_dir) = state_with_preview_runtime();
+
+        let response = preview_request(state.clone(), &device_id, "clock", true).await;
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        state.shutdown();
+    }
+
+    #[tokio::test]
+    async fn a_card_absent_from_the_configuration_is_a_not_found() {
+        // `RuntimeError::UnknownCard`.
+        let (state, device_id, _config_dir) = state_with_preview_runtime();
+
+        let response = preview_request(state.clone(), &device_id, "no-such-card", true).await;
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        state.shutdown();
     }
 }
 

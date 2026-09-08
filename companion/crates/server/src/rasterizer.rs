@@ -1175,6 +1175,34 @@ fn pack_rgb565(red: u8, green: u8, blue: u8) -> u16 {
     (red << 11) | (green << 5) | blue
 }
 
+/// The decoded RGB565 blob as a PNG, for the admin API's card preview.
+/// `assert_raster_regression` uses the same encoder, so a golden and a
+/// preview are the same bytes for the same frame. Takes the canonical
+/// 12-byte-header blob by reference: a preview must not copy 330 KB to
+/// rebuild a `RasterizedFrame` it already holds the bytes of.
+pub(crate) fn frame_png(bytes: &[u8]) -> Vec<u8> {
+    let width = u32::try_from(SCENE_CANVAS_WIDTH).unwrap();
+    let height = u32::try_from(SCENE_CANVAS_HEIGHT).unwrap();
+    let mut rgba = Vec::with_capacity(usize::try_from(width * height * 4).unwrap());
+    for pair in bytes[12..].as_chunks::<2>().0 {
+        let pixel = u16::from_le_bytes(*pair);
+        let red = u8::try_from((pixel >> 11) & 0x1f).unwrap();
+        let green = u8::try_from((pixel >> 5) & 0x3f).unwrap();
+        let blue = u8::try_from(pixel & 0x1f).unwrap();
+        rgba.extend_from_slice(&[
+            u8::try_from(u16::from(red) * 255 / 31).unwrap(),
+            u8::try_from(u16::from(green) * 255 / 63).unwrap(),
+            u8::try_from(u16::from(blue) * 255 / 31).unwrap(),
+            255,
+        ]);
+    }
+    let size = resvg::tiny_skia::IntSize::from_wh(width, height).unwrap();
+    resvg::tiny_skia::Pixmap::from_vec(rgba, size)
+        .unwrap()
+        .encode_png()
+        .unwrap()
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use std::sync::Arc;
@@ -2044,34 +2072,11 @@ pub(crate) mod tests {
         assert_eq!((pixels.len(), candidate.len()), (329_728, 659_456));
     }
 
-    pub(crate) fn frame_png(frame: &RasterizedFrame) -> Vec<u8> {
-        let width = u32::try_from(SCENE_CANVAS_WIDTH).unwrap();
-        let height = u32::try_from(SCENE_CANVAS_HEIGHT).unwrap();
-        let mut rgba = Vec::with_capacity(usize::try_from(width * height * 4).unwrap());
-        for pair in frame.bytes[12..].as_chunks::<2>().0 {
-            let pixel = u16::from_le_bytes(*pair);
-            let red = u8::try_from((pixel >> 11) & 0x1f).unwrap();
-            let green = u8::try_from((pixel >> 5) & 0x3f).unwrap();
-            let blue = u8::try_from(pixel & 0x1f).unwrap();
-            rgba.extend_from_slice(&[
-                u8::try_from(u16::from(red) * 255 / 31).unwrap(),
-                u8::try_from(u16::from(green) * 255 / 63).unwrap(),
-                u8::try_from(u16::from(blue) * 255 / 31).unwrap(),
-                255,
-            ]);
-        }
-        let size = resvg::tiny_skia::IntSize::from_wh(width, height).unwrap();
-        resvg::tiny_skia::Pixmap::from_vec(rgba, size)
-            .unwrap()
-            .encode_png()
-            .unwrap()
-    }
-
     pub(crate) fn assert_raster_regression(name: &str, frame: &RasterizedFrame) {
         let directory =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/raster-regression");
         let path = directory.join(format!("{name}.png"));
-        let actual = frame_png(frame);
+        let actual = frame_png(&frame.bytes);
         if std::env::var_os("UPDATE_RASTER_GOLDENS").is_some() {
             std::fs::create_dir_all(&directory).unwrap();
             std::fs::write(&path, &actual).unwrap();

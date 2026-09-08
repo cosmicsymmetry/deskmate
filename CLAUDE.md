@@ -223,10 +223,11 @@ of letting code and documentation diverge.
     state: "Waiting for the first refresh"` and the stage prints that sentence.
   - **The accepted deviation is the preview's fidelity, and PRODUCT.md states it.** A
     display-list plugin's preview comes from `resvg`, not LVGL, so it can differ exactly
-    where `docs/scene/template-parity-ledger.md` says (LVGL ellipsizes an overflowing
-    line; the raster shows it whole). An SVG-template plugin is exact by construction.
-    Byte-exact Mac-side rendering of the server's compiled scene stays available later as
-    an additive extension of the same route.
+    where stage 4's rasterization work already found and pinned it — see this file's
+    stage 4 bullet below, evidence row `digital-clock--date-overflow` (LVGL ellipsizes
+    an overflowing line; the raster shows it whole). An SVG-template plugin is exact by
+    construction. Byte-exact Mac-side rendering of the server's compiled scene stays
+    available later as an additive extension of the same route.
   - **Rollout is server-then-Mac and the order is load-bearing**: a v2 manifest pushed to a
     server built before this change fails `deny_unknown_fields`, so the plugin drops out of
     the registry into `load_failures` and its cards go dark. Redeploy the binary first,

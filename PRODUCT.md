@@ -61,10 +61,12 @@ Three facts a neighbouring "smart display companion" could not truthfully copy:
    card's preview is rendered on the server by `resvg` and returned as a PNG built from
    the same cached snapshot the panel's face is built from. For an SVG-template plugin
    that is exact by construction — the raster *is* what the panel shows. For a
-   display-list plugin it can differ exactly where `docs/scene/template-parity-ledger.md`
-   already records a difference: LVGL ellipsizes an overflowing line where the raster
-   shows it whole. It is a render of the real card from the real data, never a drawing
-   of a card that does not exist. Rendering the server's compiled scene in the Mac's own
+   display-list plugin it can differ exactly where stage 4's rasterization work already
+   found and pinned it (`docs/superpowers/plans/2026-08-29-deskmate-rasterization.md`'s
+   Task 6 evidence row `digital-clock--date-overflow`): LVGL ellipsizes an overflowing
+   line where the raster shows it whole. It is a render of the real card from the real
+   data, never a drawing of a card that does not exist. Rendering the server's compiled
+   scene in the Mac's own
    simulator, byte-exact, remains available later as an additive extension of the same
    route.
 2. **Ownership is a single implementation with two tiers.** In `local` tier the Mac

@@ -45,8 +45,10 @@ needed). A schema change: **v6 stays frozen**, protocol stays v1.
 
 **Accepted deviation (owner's choice of approach 2).** A display-list plugin's preview is
 produced by the server's `resvg` rasterizer, not by the panel's LVGL renderer, so it can
-differ from the panel in the ways the template-parity ledger already records (for
-example LVGL ellipsizes an overflowing line where the raster shows it whole). SVG-template
+differ from the panel in the ways stage 4's rasterization work already found and pinned
+(`docs/superpowers/plans/2026-08-29-deskmate-rasterization.md`'s Task 6 evidence row
+`digital-clock--date-overflow`: LVGL ellipsizes an overflowing line where the raster
+shows it whole). SVG-template
 plugins are exact by construction: the raster *is* what the panel shows. PRODUCT.md's
 "the preview is not a mock" is amended to say so for plugin cards. Approach 1 (the Mac
 renders the server's compiled scene in its own simulator, byte-exact) remains available

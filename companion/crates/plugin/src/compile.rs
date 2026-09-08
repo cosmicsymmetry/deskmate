@@ -1019,6 +1019,9 @@ mod tests {
     fn text_node_manifest(value: &str) -> PluginManifest {
         PluginManifest {
             manifest_version: ManifestVersion::V1,
+            display_name: None,
+            description: None,
+            summary: None,
             template: Template::Scene,
             name: "test".to_string(),
             version: "1.0.0".to_string(),
@@ -1462,6 +1465,9 @@ mod tests {
     fn tiered_text_manifest(tier: ManifestFontTier, value: &str) -> PluginManifest {
         PluginManifest {
             manifest_version: ManifestVersion::V1,
+            display_name: None,
+            description: None,
+            summary: None,
             template: Template::Scene,
             name: "test".to_string(),
             version: "1.0.0".to_string(),
@@ -1513,6 +1519,9 @@ mod tests {
     fn a_numeric_literal_on_the_hero_tier_is_accepted_and_keeps_the_hero_tier() {
         let manifest = PluginManifest {
             manifest_version: ManifestVersion::V1,
+            display_name: None,
+            description: None,
+            summary: None,
             template: Template::Scene,
             name: "test".to_string(),
             version: "1.0.0".to_string(),
@@ -1586,6 +1595,9 @@ mod tests {
     ) {
         let manifest = PluginManifest {
             manifest_version: ManifestVersion::V1,
+            display_name: None,
+            description: None,
+            summary: None,
             template: Template::Scene,
             name: "test".to_string(),
             version: "1.0.0".to_string(),
@@ -1688,6 +1700,9 @@ mod tests {
     fn a_missing_repeat_source_expands_to_zero_rows_not_an_error() {
         let manifest = PluginManifest {
             manifest_version: ManifestVersion::V1,
+            display_name: None,
+            description: None,
+            summary: None,
             template: Template::Scene,
             name: "test".to_string(),
             version: "1.0.0".to_string(),
@@ -1753,6 +1768,9 @@ mod tests {
             .collect();
         let manifest = PluginManifest {
             manifest_version: ManifestVersion::V1,
+            display_name: None,
+            description: None,
+            summary: None,
             template: Template::Scene,
             name: "test".to_string(),
             version: "1.0.0".to_string(),
@@ -1784,6 +1802,9 @@ mod tests {
             .collect();
         let manifest = PluginManifest {
             manifest_version: ManifestVersion::V1,
+            display_name: None,
+            description: None,
+            summary: None,
             template: Template::Scene,
             name: "test".to_string(),
             version: "1.0.0".to_string(),
@@ -1880,6 +1901,9 @@ mod tests {
     fn out_of_canvas_node_geometry_is_refused_as_invalid() {
         let manifest = PluginManifest {
             manifest_version: ManifestVersion::V1,
+            display_name: None,
+            description: None,
+            summary: None,
             template: Template::Scene,
             name: "test".to_string(),
             version: "1.0.0".to_string(),
@@ -1939,6 +1963,9 @@ mod tests {
     fn manifest_with(assets: Vec<Asset>, nodes: Vec<Node>) -> PluginManifest {
         PluginManifest {
             manifest_version: ManifestVersion::V1,
+            display_name: None,
+            description: None,
+            summary: None,
             template: Template::Scene,
             name: "test".to_string(),
             version: "1.0.0".to_string(),

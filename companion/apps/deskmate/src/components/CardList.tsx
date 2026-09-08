@@ -41,12 +41,14 @@ import {
 import { FieldIssues } from "./FieldIssues";
 import { Icon } from "./Icon";
 
-/** Future server-registry rows bring their own add operation. The app passes an
- * empty list today because it has no registry source and must not fabricate one. */
+/** One row in the menu's server group, built by `App` from the plugin catalog. */
 export interface PluginKindOption {
   id: string;
   version: string;
-  description?: string;
+  /** The manifest's `display_name`, or null when it declared none. */
+  displayName: string | null;
+  /** The manifest's `description`, or null when it declared none. */
+  description: string | null;
   onAdd: () => void;
 }
 
@@ -601,7 +603,7 @@ export function CardList({
                         onKeyDown={(event) => onMenuKeyDown(event, index, choose)}
                       >
                         <span>
-                          <strong>{plugin.id}</strong>
+                          <strong>{plugin.displayName ?? plugin.id}</strong>
                           <small>{plugin.description ?? `Plugin · ${plugin.version}`}</small>
                         </span>
                       </button>

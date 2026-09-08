@@ -838,6 +838,70 @@ describe("settings accessibility and states", () => {
     expect(render(catalog, [], "local")).toContain('<span class="flag">needs the server</span>');
   });
 
+  test("the add menu lists server plugins by display name, with description fallbacks", async () => {
+    let added: { pluginId: string; refreshMinutes: number } | null = null;
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <CardList
+            config={cardListConfig([clockCard("clock", "Desk")])}
+            issues={[]}
+            cardData={[]}
+            pomodoros={[]}
+            providers={[]}
+            pluginKinds={[
+              {
+                id: "aqi",
+                version: "1.0.0",
+                displayName: "Air quality",
+                description: "EPA index for a location",
+                onAdd: () => {
+                  added = { pluginId: "aqi", refreshMinutes: 15 };
+                },
+              },
+              {
+                id: "agenda",
+                version: "2.1.0",
+                displayName: null,
+                description: null,
+                onAdd: () => {},
+              },
+            ]}
+            catalog={null}
+            serverCardState={[]}
+            ownershipTier="networked"
+            selectedCardId={null}
+            onSelect={() => {}}
+            onAdd={() => {}}
+            onChange={() => {}}
+            onRemove={() => {}}
+          />,
+        ),
+      );
+      const slot = container.querySelector<HTMLButtonElement>(".card-tile__add");
+      await act(async () => slot?.click());
+      expect(container.textContent).toContain("Plugins on the server");
+      expect(container.textContent).toContain("Air quality");
+      expect(container.textContent).toContain("EPA index for a location");
+      // Both fallbacks: the id names it, "Plugin · <version>" describes it.
+      expect(container.textContent).toContain("agenda");
+      expect(container.textContent).toContain("Plugin · 2.1.0");
+
+      const row = [...container.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find(
+        (button) => button.textContent?.includes("Air quality"),
+      );
+      await act(async () => row?.click());
+      expect(added).toEqual({ pluginId: "aqi", refreshMinutes: 15 });
+      expect(container.querySelector('[role="menu"]')).toBeNull();
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
   test("row-list tiles count only populated title fields from real provider snapshots", () => {
     const calendar = calendarCard("calendar");
     const html = renderToStaticMarkup(
@@ -1413,6 +1477,7 @@ describe("settings accessibility and states", () => {
                   {
                     id: "weather-plus",
                     version: "1",
+                    displayName: null,
                     description: "Plugin weather",
                     onAdd: () => {},
                   },

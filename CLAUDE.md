@@ -545,7 +545,14 @@ of letting code and documentation diverge.
   previous deploy leaves a root-owned `companion/target/` — keep it and replace only the
   sources, which turns a cold build into roughly 40 seconds. Device URL is
   `wss://deskmate.rodi.one/v1/device/link`. Redeploy from a `git archive HEAD` export,
-  never the working tree.
+  never the working tree. **As of 2026-09-08 the live binary is built from `faac9ab`
+  (`origin/main`, the merged V2 + plugin-parity state) and the four curated manifest-v2
+  plugins are deployed**; the previous binary is kept as
+  `/usr/local/bin/deskmate-server.bak-20260908`. `GET /v1/plugins` therefore carries
+  `display_name`/`description`/`manifest_version`/`template`/`refresh_minutes`, and the
+  card-preview route exists — the Mac app no longer meets an older server. The live
+  plugins directory holds **five** ids, not four: the session fixture `svg-live-clock` is
+  not in the repository and a redeploy must not `--delete` it.
 - **Device identities persist as SHA-256 digests, never as tokens.** Minting is the only
   path that needs the plaintext; authentication only compares. Verified on the live
   deployment: the plaintext does not appear in the store file, and a pre-restart token
@@ -968,11 +975,16 @@ of letting code and documentation diverge.
   negotiates Native). **Golden-only by design**: `claude_limits_scene_cases()` is
   deliberately NOT part of `plugin_scene_cases()` (whose 16-row count is a historical
   invariant) and does not join the hardware framebuffer matrix, which is 96/10/86 —
-  the card is content, not machinery. Deployed live: registry loads
-  `[agenda, aqi, claude-limits]` with no failures, and `dev-0005`'s config carries the
-  card in its library and active playlist (generation 1, no warning); it renders when
-  the board next connects. The TRMNL repo's deployed and Mac copies of the sync script
-  were both updated; committing that repo is the owner's call.
+  the card is content, not machinery. Deployed live: the registry loads it with no
+  failures. **The rest of this bullet went STALE and was corrected 2026-09-08:** it used
+  to say `dev-0005`'s config carries the card in its library and active playlist. It does
+  not. Both `/var/lib/deskmate/configs/dev-0005.json` on the server and the Mac's own
+  config store hold the same four built-in cards (clock, pomodoro, weather, rss) at schema
+  v6 and no plugin card at all; the most recent write to both is the 2026-09-06 hardware
+  session. **No card anywhere in the fleet currently names a plugin**, so the plugin
+  render path has nothing live to draw and the plugin-parity surfaces cannot be observed
+  end to end until one is authored again. The TRMNL repo's deployed and Mac copies of the
+  sync script were both updated; committing that repo is the owner's call.
 - **A repository-wide simplification cleanup landed on 2026-09-05** (plan
   `docs/superpowers/plans/2026-09-05-deskmate-simplification-cleanup.md`, from the
   review of 2026-09-03/04): twelve squash commits removed the accidentally tracked

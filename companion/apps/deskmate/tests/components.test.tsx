@@ -968,6 +968,58 @@ describe("settings accessibility and states", () => {
     );
   });
 
+  test("a plugin card states the manifest's cadence and refuses a refresh it cannot do", () => {
+    const plugin = pluginCard();
+    const catalog: PluginCatalog = {
+      plugins: [
+        {
+          id: "com.example.air-quality",
+          name: "aqi",
+          version: "1.0.0",
+          node_count: 7,
+          assets: [],
+          display_name: "Air quality",
+          description: null,
+          manifest_version: 2,
+          template: "display-list",
+          refresh_minutes: 15,
+        },
+      ],
+      load_failures: [],
+    };
+    const html = renderToStaticMarkup(
+      <CardEditor
+        card={plugin}
+        config={cardListConfig([plugin])}
+        issues={[]}
+        entryIssues={[]}
+        cardError={null}
+        pomodoro={null}
+        provider={{
+          widget_id: plugin.id,
+          state: { kind: "stale", message: "Feed timed out after 10s" },
+          last_success_unix_ms: 1,
+          age_seconds: 5400,
+        }}
+        timerBusy={false}
+        filePickerBusy={false}
+        providerRefreshing={false}
+        catalog={catalog}
+        ownershipTier="networked"
+        onChange={() => {}}
+        onConfigChange={() => {}}
+        onRemove={() => {}}
+        onTimerAction={() => {}}
+        onChooseCalendarFile={() => {}}
+        onRefreshProvider={() => {}}
+      />,
+    );
+    expect(html).toContain("Feed timed out after 10s");
+    expect(html).toContain("This card refreshes on the server.");
+    expect(html).toMatch(/<button[^>]*disabled[^>]*>.*?Refresh/s);
+    expect(html).toContain("The server fetches this plugin every 15 minutes.");
+  });
+
   test("row-list tiles count only populated title fields from real provider snapshots", () => {
     const calendar = calendarCard("calendar");
     const html = renderToStaticMarkup(

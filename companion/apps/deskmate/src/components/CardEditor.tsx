@@ -151,6 +151,10 @@ export function CardEditor({
     card.kind === "plugin"
       ? (catalog?.plugins.find((entry) => entry.id === card.plugin_id) ?? null)
       : null;
+  // The server owns a plugin card's fetching, so the Mac has nothing to refresh.
+  // The reason rides the same sentence as the trouble, because a disabled control
+  // with no stated reason is worse than no control.
+  const refreshesOnServer = card.kind === "plugin";
   const setAlert = (alert: CardAlert) => onChange({ ...card, alert });
   const playlist = activePlaylist(config);
   const entryIndex = playlist?.entries.findIndex((entry) => entry.card_id === card.id) ?? -1;
@@ -192,11 +196,13 @@ export function CardEditor({
           feed in the app that was healthy anyway. */}
       {trouble && (
         <p className="data-note" role="status">
-          <span>{trouble}</span>
+          <span>
+            {refreshesOnServer ? `${trouble} This card refreshes on the server.` : trouble}
+          </span>
           <button
             className="text-button"
             type="button"
-            disabled={providerRefreshing}
+            disabled={providerRefreshing || refreshesOnServer}
             onClick={onRefreshProvider}
           >
             <Icon name="refresh" />
@@ -573,6 +579,11 @@ export function CardEditor({
               <option value="30">30 minutes</option>
               <option value="60">1 hour</option>
             </select>
+            {catalogEntry && (
+              <small>
+                {`The server fetches this plugin every ${catalogEntry.refresh_minutes} minutes.`}
+              </small>
+            )}
             <FieldIssues issues={fieldIssues("refresh")} />
           </label>
         )}

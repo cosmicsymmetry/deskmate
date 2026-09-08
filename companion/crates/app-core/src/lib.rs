@@ -11,7 +11,10 @@ mod secure_file;
 pub mod state;
 pub mod store;
 
-pub use admin::AdminConfigErrorBody;
+pub use admin::{
+    AdminConfigErrorBody, CardPreviewResponse, CardPreviewState, PluginCatalog, PluginCatalogAsset,
+    PluginCatalogEntry, PluginTemplateKind,
+};
 pub use asset_sync::DesiredAsset;
 pub use commands::{PomodoroAction, RuntimeError};
 pub use config::{

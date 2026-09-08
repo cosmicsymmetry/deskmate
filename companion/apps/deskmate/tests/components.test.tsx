@@ -589,6 +589,100 @@ describe("settings accessibility and states", () => {
     expect(tier).toBe("networked");
   });
 
+  test("an unreachable server costs the window one notice and no plugin state", async () => {
+    snapshotImpl = async () => ({
+      ...snapshot,
+      device: { ...snapshot.device, tier: "networked" },
+      config: {
+        ...snapshot.config,
+        cards: [pluginCard("air")],
+        playlists: [
+          {
+            id: "workday",
+            name: "Workday",
+            advance: { kind: "timed" as const, default_dwell_seconds: 20 },
+            entries: [{ card_id: "air", dwell_seconds: null }],
+          },
+        ],
+        active_playlist_id: "workday",
+      },
+      providers: [],
+      pomodoros: [],
+      card_data: [],
+      card_errors: [],
+    });
+    networkSettingsImpl = async () => ({
+      server_url: "https://desk.example",
+      device_id: "desk-1",
+      tier: "networked",
+    });
+    previewImpl = async () => ({ png_base64: "cHJldmlldw==", sample: false, state: null });
+    let catalogCalls = 0;
+    serverPluginsImpl = async () => {
+      catalogCalls += 1;
+      if (catalogCalls === 1) {
+        throw { category: "runtime-unavailable", message: "connection refused" };
+      }
+      return {
+        plugins: [
+          {
+            id: "com.example.air-quality",
+            name: "aqi",
+            version: "1.0.0",
+            node_count: 7,
+            assets: [],
+            display_name: "Air quality",
+            description: "EPA index for a location",
+            manifest_version: 2,
+            template: "display-list" as const,
+            refresh_minutes: 15,
+          },
+        ],
+        load_failures: [],
+      };
+    };
+    serverCardStateImpl = async () => [];
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await renderPreviewInto(root, <App />);
+      await waitFor(() => {
+        expect(container.textContent).toContain("Couldn't reach the server for plugin data.");
+      });
+      // A successful card-state poll must not clear a failed catalog read: the two
+      // failures are tracked apart even though they share one sentence.
+      expect(container.textContent).toContain("com.example.air-quality");
+
+      const retry = buttonWithText(container, "Try again");
+      expect(retry).toBeDefined();
+      await act(async () => retry?.click());
+      await waitFor(() => {
+        expect(container.textContent).not.toContain("Couldn't reach the server for plugin data.");
+        expect(container.textContent).toContain("Air quality");
+      });
+      expect(catalogCalls).toBe(2);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      serverPluginsImpl = async () => ({ plugins: [], load_failures: [] });
+      serverCardStateImpl = async () => [];
+      // Also restore what this test overrode beyond the two server impls: leaving
+      // any of these mutated would make a later mounted-`App` test observe a
+      // networked tier or this test's plugin-only config, which is exactly the
+      // cross-test pollution this file's convention exists to avoid.
+      snapshotImpl = async () => snapshot;
+      networkSettingsImpl = async () => ({
+        server_url: "https://desk.example",
+        device_id: "desk-1",
+        tier: "local",
+      });
+      previewImpl = () =>
+        Promise.reject(new Error("renderCardPreview not configured for this test"));
+    }
+  });
+
   test("names the clock card's title field rather than calling it a heading", () => {
     // The clock faces draw no title chip, so the field only names the card in
     // the library. Weather still renders its chip, so "Heading" stays right

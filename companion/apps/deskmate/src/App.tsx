@@ -73,6 +73,10 @@ export function App() {
     dataGeneration,
     networkSettings,
     ownershipTier,
+    pluginCatalog,
+    catalogError,
+    refreshCatalog,
+    serverCardState,
     saveConfig,
     saveServerAccess,
     pairDevice,
@@ -454,6 +458,21 @@ export function App() {
                     ? `${persistenceError}. The unreadable file was left untouched; review the settings shown here before saving a fresh valid configuration.`
                     : "The operating-system setting and saved preference differ. Choose your preference below to reconcile them."}
                 </p>
+              </div>
+            </aside>
+          )}
+
+          {/* One notice for either server read failing. The last projection and the
+              last catalog are kept — a plugin card keeps its name and its value
+              rather than blanking because a poll missed. */}
+          {catalogError && (
+            <aside className="notice notice--warn" role="status">
+              <div>
+                <strong>{catalogError}</strong>
+                <p>Plugin names and previews are the last ones this window received.</p>
+                <button className="button button--quiet" type="button" onClick={refreshCatalog}>
+                  Try again
+                </button>
               </div>
             </aside>
           )}

@@ -191,6 +191,12 @@ export interface AppStateValue {
   dataGeneration: number;
   networkSettings: NetworkSettings;
   ownershipTier: DeviceTier | null;
+  /** The server's plugin registry, or null in local tier and before the first read. */
+  pluginCatalog: PluginCatalog | null;
+  /** One sentence for either server read having failed; null when both are fine. */
+  catalogError: string | null;
+  refreshCatalog: () => void;
+  serverCardState: ServerCardState[];
   saveConfig: (config: AppConfig) => Promise<ConfigApplyResult>;
   saveServerAccess: (serverUrl: string, deviceId: string, adminToken: string) => Promise<void>;
   pairDevice: (input: PairDeviceInput) => Promise<void>;
@@ -251,6 +257,15 @@ export function useAppState(): AppStateValue {
     tier: null,
   });
   const [networkSettingsLoaded, setNetworkSettingsLoaded] = useState(false);
+  const [pluginCatalog, setPluginCatalog] = useState<PluginCatalog | null>(null);
+  const [serverCardState, setServerCardState] = useState<ServerCardState[]>([]);
+  // Two failures, one sentence. Tracked apart because a working card-state poll is
+  // not evidence that the catalog read succeeded, and clearing one on the other's
+  // success would make the notice depend on which promise settled first.
+  const [catalogFailed, setCatalogFailed] = useState(false);
+  const [cardStateFailed, setCardStateFailed] = useState(false);
+  const [catalogGeneration, setCatalogGeneration] = useState(0);
+  const refreshCatalog = useCallback(() => setCatalogGeneration((current) => current + 1), []);
   const lastCardDataRef = useRef<string | null>(null);
   const snapshotRef = useRef<AppSnapshot | null>(null);
   const networkSettingsRef = useRef(networkSettings);
@@ -404,6 +419,52 @@ export function useAppState(): AppStateValue {
     networkSettings.tier ??
     (networkSettingsLoaded ? resolveDeviceTier(null, networkSettings) : null);
 
+  const catalogError = catalogFailed || cardStateFailed ? SERVER_PLUGIN_NOTICE : null;
+
+  useEffect(() => {
+    if (ownershipTier !== "networked") {
+      // Local tier has no server, so a catalog held from a previous pairing would be
+      // a stale promise the app cannot keep. `pluginCardFlag` prints the reason.
+      setPluginCatalog(null);
+      setServerCardState([]);
+      setCatalogFailed(false);
+      setCardStateFailed(false);
+      return;
+    }
+    let active = true;
+    void getServerPlugins()
+      .then((catalog) => {
+        if (active) {
+          setPluginCatalog(catalog);
+          setCatalogFailed(false);
+        }
+      })
+      .catch(() => {
+        if (active) {
+          setCatalogFailed(true);
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [ownershipTier, catalogGeneration]);
+
+  useEffect(() => {
+    if (ownershipTier !== "networked") {
+      return;
+    }
+    return startServerCardStatePoll({
+      fetchCardState: getServerCardState,
+      onCardState: (next) => {
+        setServerCardState(next);
+        setCardStateFailed(false);
+      },
+      onError: () => setCardStateFailed(true),
+      focusTarget: window,
+      visibilityTarget: document,
+    });
+  }, [ownershipTier]);
+
   return {
     snapshot,
     loading,
@@ -412,6 +473,10 @@ export function useAppState(): AppStateValue {
     dataGeneration,
     networkSettings,
     ownershipTier,
+    pluginCatalog,
+    catalogError,
+    refreshCatalog,
+    serverCardState,
     saveConfig,
     saveServerAccess,
     pairDevice,

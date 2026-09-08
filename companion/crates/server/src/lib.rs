@@ -29,6 +29,8 @@ pub mod registry;
 pub mod runtime_device;
 pub mod secrets;
 mod store;
+#[cfg(test)]
+mod test_plugins;
 
 use std::collections::HashMap;
 use std::path::PathBuf;

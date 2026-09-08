@@ -151,7 +151,9 @@ only text naming a value ("LINK", "ADD A CARD", "WORKDAY").
   and no playlist anywhere in the window: the complication tiles in the work column *are*
   the loop, in loop order, and they are where the order changes — drag a tile, use the
   earlier / later buttons that appear on hover, or ⌥ ← → on a focused tile. Adding a card
-  is one dashed slot at the end of the grid; the new card joins the loop at once. A tile
+  is one dashed slot at the end of the grid; the new card joins the loop at once, whether
+  it is one of the six built-in kinds or one of the server's plugins (2026-09-07) — one
+  `addCard` path, one capacity guard, one gesture. A tile
   owns one fact, so dwell is never printed on it: the ring draws the proportion and the
   card's editor edits it ("Stays on the panel for"). A card an older file left outside
   the loop trails the others in the same grid, flagged `not in loop` (and `alerts` when
@@ -164,13 +166,22 @@ only text naming a value ("LINK", "ADD A CARD", "WORKDAY").
   redesign from being slower than what it replaced. The add-card slot's menu
   (2026-09-06) is the one menu: it holds choices, never state, so nothing can hide in
   it — and it exists because a plugin registry that grows must never reshape the
-  window. When that list is long enough to want search, it becomes a picker window.
+  window. Since 2026-09-07 that group is real: in networked tier it lists the server's
+  plugins, each a display name over a description, from `GET /v1/plugins`. When the list
+  is long enough to want search, it becomes a picker window.
 - **One card, one name — and the name says what the card is.** A card is identified by
   its template on every surface: loop tile, ring legend, editor heading, the add-card
   menu. The owner's own title rides beside it in quiet type, and is dropped
   rather than repeated when none was typed. Two names for one object is the failure this
   rule prevents; a label that teaches a first-time reader nothing ("Outside", "Desk") is
-  the failure it prevents second.
+  the failure it prevents second. **A plugin card obeys the same rule** (2026-09-07): its
+  name is the manifest's `display_name` — "Air quality", not `aqi`, and never the word
+  "Plugin" — read from the server's catalog and threaded through the one helper,
+  `cardLabel(card, catalog)`. When the catalog cannot name it, the surface prints the
+  word saying why (`not on the server`, `needs the server`) beside the id, because a bare
+  machine id is a name that teaches nothing and a silent fallback is a state that hides.
+  The editor's Plugin `<select>` is where that id is changed; it is the home of a
+  `cards[i].plugin_id` issue, which is otherwise an issue with no control.
 - **A status bar is not information.** Four permanent complications reading Connected /
   Server / -54 dBm / Live answered questions asked twice in a device's life and charged
   every other session for it. State that is nominal 99% of the time is noise; state worth
@@ -240,8 +251,10 @@ are a 2px `--act` outline with a 2px offset and are never removed.
 
 Every one of these has a designed treatment, and each is reachable in the dev harness
 (`VITE_DESKMATE_MOCK=1 bun run dev`, then `?scenario=…`): `default`, `offline`,
-`standalone`, `local`, `unowned`, `invalid`, `firstrun`, `empty`, `carderror`. Add
-`&theme=dark` or `&theme=light` to pin the scheme.
+`standalone`, `local`, `unowned`, `invalid`, `firstrun`, `empty`, `carderror`, `plugin`,
+`plugin-local` (the only way to see a plugin card's `needs the server` flag and the
+stage's local-tier word).
+Add `&theme=dark` or `&theme=light` to pin the scheme.
 
 A **barred primary action** is drawn as barred — a diagonal hatch on `Save` says a
 condition is holding it — rather than merely faded. Quiet buttons keep plain reduced

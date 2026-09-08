@@ -16,7 +16,9 @@ import type {
   CardAlert,
   CardError,
   CardSettings,
+  DeviceTier,
   JsonFieldMapping,
+  PluginCatalog,
   PomodoroSnapshot,
   ProviderSnapshot,
   ValidationIssue,
@@ -43,6 +45,10 @@ interface CardEditorProps {
   /// The feed behind this card, when it has one. Only ever rendered when it is in
   /// trouble — see `providerTrouble`.
   provider: ProviderSnapshot | null;
+  /// The server's plugin registry, or null in local tier and before the first read.
+  /// The Plugin field is read-only without it, because there is nothing to choose from.
+  catalog: PluginCatalog | null;
+  ownershipTier: DeviceTier | null;
   timerBusy: boolean;
   filePickerBusy: boolean;
   providerRefreshing: boolean;
@@ -111,6 +117,8 @@ export function CardEditor({
   cardError,
   pomodoro,
   provider,
+  catalog,
+  ownershipTier,
   timerBusy,
   filePickerBusy,
   providerRefreshing,
@@ -139,13 +147,28 @@ export function CardEditor({
 
   const fieldIssues = (field: string) => issuesForField(issues, field);
   const trouble = providerTrouble(provider);
+  const catalogEntry =
+    card.kind === "plugin"
+      ? (catalog?.plugins.find((entry) => entry.id === card.plugin_id) ?? null)
+      : null;
+  // What the small line already says when there is no catalog to check against —
+  // shared with the Plugin select's fallback option so the two can never disagree.
+  // It states only what the tier makes true, never whether the plugin is installed.
+  const catalogUnavailableReason =
+    ownershipTier === "local"
+      ? "Needs the server to render"
+      : "The plugin list comes from the server";
+  // The server owns a plugin card's fetching, so the Mac has nothing to refresh.
+  // The reason rides the same sentence as the trouble, because a disabled control
+  // with no stated reason is worse than no control.
+  const refreshesOnServer = card.kind === "plugin";
   const setAlert = (alert: CardAlert) => onChange({ ...card, alert });
   const playlist = activePlaylist(config);
   const entryIndex = playlist?.entries.findIndex((entry) => entry.card_id === card.id) ?? -1;
   const entry = entryIndex >= 0 ? playlist?.entries[entryIndex] : undefined;
   const isTimed = playlist?.advance.kind === "timed";
   const title = cardTitle(card);
-  const controlName = title ? `${cardLabel(card)} — ${title}` : cardLabel(card);
+  const controlName = title ? `${cardLabel(card, catalog)} — ${title}` : cardLabel(card, catalog);
   const dwellIssues = entryIssues.filter((issue) => issue.path.endsWith(".dwell_seconds"));
   const showDwell =
     entry !== undefined && (isTimed || entry.dwell_seconds !== null || dwellIssues.length > 0);
@@ -154,7 +177,7 @@ export function CardEditor({
     <section className="panel" aria-labelledby="editor-heading">
       <div className="panel-heading">
         <div className="editor-title">
-          <h2 id="editor-heading">{cardLabel(card)}</h2>
+          <h2 id="editor-heading">{cardLabel(card, catalog)}</h2>
           {cardTitle(card) && <span className="editor-title__kind">{cardTitle(card)}</span>}
         </div>
         <button className="text-button text-button--danger" type="button" onClick={onRemove}>
@@ -180,11 +203,13 @@ export function CardEditor({
           feed in the app that was healthy anyway. */}
       {trouble && (
         <p className="data-note" role="status">
-          <span>{trouble}</span>
+          <span>
+            {refreshesOnServer ? `${trouble} This card refreshes on the server.` : trouble}
+          </span>
           <button
             className="text-button"
             type="button"
-            disabled={providerRefreshing}
+            disabled={providerRefreshing || refreshesOnServer}
             onClick={onRefreshProvider}
           >
             <Icon name="refresh" />
@@ -492,6 +517,45 @@ export function CardEditor({
           </label>
         )}
 
+        {card.kind === "plugin" && (
+          <label className="field">
+            <span>Plugin</span>
+            <select
+              value={card.plugin_id}
+              disabled={catalog === null}
+              onChange={(event) => onChange({ ...card, plugin_id: event.currentTarget.value })}
+              aria-invalid={fieldIssues("plugin_id").length > 0}
+            >
+              {/* A saved id the registry no longer carries stays selected and says
+                  why. Dropping it would silently rewrite the document on first
+                  render, which is a data loss nobody asked for. When there is no
+                  catalog at all, "not installed" would be a claim the app cannot
+                  back up — it knows only that it cannot check, so it says that
+                  instead, in the same words as the small line below. */}
+              {!catalogEntry && (
+                <option value={card.plugin_id}>
+                  {catalog === null
+                    ? `${card.plugin_id} · ${catalogUnavailableReason}`
+                    : `${card.plugin_id} · Not installed on the server`}
+                </option>
+              )}
+              {catalog?.plugins.map((entry) => (
+                <option key={entry.id} value={entry.id}>
+                  {`${entry.display_name ?? entry.id} · ${entry.version}`}
+                </option>
+              ))}
+            </select>
+            {/* The machine id, quietly — it is the only identity a card has when the
+                catalog is unreachable, so it is never the thing that disappears. */}
+            <small>
+              {catalog === null
+                ? `${card.plugin_id} · ${catalogUnavailableReason}`
+                : card.plugin_id}
+            </small>
+            <FieldIssues issues={fieldIssues("plugin_id")} />
+          </label>
+        )}
+
         {/* Shared across every kind whose refresh policy is an interval — calendar,
             weather, json-feed, and rss. Clock and pomodoro are device-local and never
             reach here. This used to live only inside the calendar block, so weather/
@@ -523,6 +587,11 @@ export function CardEditor({
               <option value="30">30 minutes</option>
               <option value="60">1 hour</option>
             </select>
+            {catalogEntry && (
+              <small>
+                {`The server fetches this plugin every ${catalogEntry.refresh_minutes} minutes.`}
+              </small>
+            )}
             <FieldIssues issues={fieldIssues("refresh")} />
           </label>
         )}

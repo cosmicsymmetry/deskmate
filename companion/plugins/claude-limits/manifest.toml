@@ -20,13 +20,22 @@
 # resets_in_label ("3 hours 48 minutes") because an "in N minutes" string is
 # stale the minute after the ~10-minute producer wrote it, while an "at" label
 # is never wrong -- the same reasoning recorded in the TRMNL design.
+manifest_version = 2
 name = "claude-limits"
 version = "1.0.0"
+# Presentation keys (manifest v2, plugin parity) -- see aqi's manifest for
+# what each one is. The headline is the shortest window's used percentage.
+display_name = "Claude limits"
+description = "Session and weekly Claude Code usage"
+summary = "{{ round(data.windows[0].used_pct, 0) }}"
 
 [source]
 kind = "json"
 url = "https://deskmate.rodi.one/feeds/119fa3cca44bf0b9bb8c33f6/claude-usage.json"
 refresh_minutes = 10
+
+[template]
+kind = "scene"
 
 # Thin divider between the two window tiles.
 [[nodes]]

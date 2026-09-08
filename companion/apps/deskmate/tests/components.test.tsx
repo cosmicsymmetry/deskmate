@@ -18,6 +18,20 @@ import {
 } from "../src/lib/configDraft";
 import { formatProviderAge, providerTrouble } from "../src/lib/providers";
 import * as tauriModule from "../src/lib/tauri";
+// The two server reads are the only wrappers this suite proves end to end, so it
+// keeps a reference to the REAL ones before `mock.module` below replaces the
+// module's namespace in place, and mocks the Tauri bridge underneath them instead.
+// A second test file cannot do this: `mock.module` is process-global with no
+// guaranteed file order, so whichever file ran first would win.
+const coreInvocations: { command: string; args?: Record<string, unknown> }[] = [];
+mock.module("@tauri-apps/api/core", () => ({
+  invoke: async (command: string, args?: Record<string, unknown>) => {
+    coreInvocations.push({ command, args });
+    return command === "get_server_plugins" ? { plugins: [], load_failures: [] } : [];
+  },
+}));
+const realGetServerPlugins = tauriModule.getServerPlugins;
+const realGetServerCardState = tauriModule.getServerCardState;
 import type {
   AppConfig,
   AppSnapshot,
@@ -26,8 +40,10 @@ import type {
   ConfigApplyResult,
   DraftValidation,
   NetworkSettings,
+  PluginCatalog,
   PreviewFrame,
   ProvisionDeviceInput,
+  ServerCardState,
   ValidationIssue,
 } from "../src/lib/types";
 import { ipcContractFixtures } from "../src/lib/types.contract";
@@ -43,6 +59,11 @@ const cards = snapshot.config.cards;
 // `useAppState`) stays real.
 let previewImpl: (cardId: string) => Promise<PreviewFrame> = () =>
   Promise.reject(new Error("renderCardPreview not configured for this test"));
+let serverPluginsImpl: () => Promise<PluginCatalog> = async () => ({
+  plugins: [],
+  load_failures: [],
+});
+let serverCardStateImpl: () => Promise<ServerCardState[]> = async () => [];
 let snapshotImpl: () => Promise<AppSnapshot> = async () => snapshot;
 let validateImpl: (config: AppConfig) => Promise<DraftValidation> = async () => ({
   valid: true,
@@ -82,6 +103,8 @@ let useLocalOwnershipImpl: () => Promise<NetworkSettings> = async () => ({
 mock.module("../src/lib/tauri", () => ({
   ...tauriModule,
   renderCardPreview: (cardId: string) => previewImpl(cardId),
+  getServerPlugins: () => serverPluginsImpl(),
+  getServerCardState: () => serverCardStateImpl(),
   getAppSnapshot: () => snapshotImpl(),
   listenToAppState: async () => () => {},
   validateConfigDraft: (config: AppConfig) => validateImpl(config),
@@ -222,6 +245,8 @@ describe("settings accessibility and states", () => {
     card: CardSettings,
     issues: ValidationIssue[] = [],
     cardError: CardError | null = null,
+    catalog: PluginCatalog | null = null,
+    ownershipTier: "local" | "networked" = "networked",
   ) {
     return renderToStaticMarkup(
       <CardEditor
@@ -235,6 +260,8 @@ describe("settings accessibility and states", () => {
         timerBusy={false}
         filePickerBusy={false}
         providerRefreshing={false}
+        catalog={catalog}
+        ownershipTier={ownershipTier}
         onChange={() => {}}
         onConfigChange={() => {}}
         onRemove={() => {}}
@@ -415,7 +442,7 @@ describe("settings accessibility and states", () => {
       serverAccess = [serverUrl, deviceId, adminToken];
       return { server_url: serverUrl, device_id: deviceId, tier: "networked" };
     };
-    previewImpl = async () => ({ png_base64: "cHJldmlldw==", sample: false });
+    previewImpl = async () => ({ png_base64: "cHJldmlldw==", sample: false, state: null });
 
     const container = document.createElement("div");
     document.body.appendChild(container);
@@ -484,7 +511,7 @@ describe("settings accessibility and states", () => {
         tier: "local",
       };
     };
-    previewImpl = async () => ({ png_base64: "cHJldmlldw==", sample: false });
+    previewImpl = async () => ({ png_base64: "cHJldmlldw==", sample: false, state: null });
 
     const container = document.createElement("div");
     document.body.appendChild(container);
@@ -566,6 +593,290 @@ describe("settings accessibility and states", () => {
     expect(tier).toBe("networked");
   });
 
+  test("an unreachable server costs the window one notice and no plugin state", async () => {
+    snapshotImpl = async () => ({
+      ...snapshot,
+      device: { ...snapshot.device, tier: "networked" },
+      config: {
+        ...snapshot.config,
+        cards: [pluginCard("air")],
+        playlists: [
+          {
+            id: "workday",
+            name: "Workday",
+            advance: { kind: "timed" as const, default_dwell_seconds: 20 },
+            entries: [{ card_id: "air", dwell_seconds: null }],
+          },
+        ],
+        active_playlist_id: "workday",
+      },
+      providers: [],
+      pomodoros: [],
+      card_data: [],
+      card_errors: [],
+    });
+    networkSettingsImpl = async () => ({
+      server_url: "https://desk.example",
+      device_id: "desk-1",
+      tier: "networked",
+    });
+    previewImpl = async () => ({ png_base64: "cHJldmlldw==", sample: false, state: null });
+    let catalogCalls = 0;
+    serverPluginsImpl = async () => {
+      catalogCalls += 1;
+      if (catalogCalls === 1) {
+        throw { category: "runtime-unavailable", message: "connection refused" };
+      }
+      return {
+        plugins: [
+          {
+            id: "com.example.air-quality",
+            name: "aqi",
+            version: "1.0.0",
+            node_count: 7,
+            assets: [],
+            display_name: "Air quality",
+            description: "EPA index for a location",
+            manifest_version: 2,
+            template: "display-list" as const,
+            refresh_minutes: 15,
+          },
+        ],
+        load_failures: [],
+      };
+    };
+    serverCardStateImpl = async () => [];
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await renderPreviewInto(root, <App />);
+      await waitFor(() => {
+        expect(container.textContent).toContain("Couldn't reach the server for plugin data.");
+      });
+      // A successful card-state poll must not clear a failed catalog read: the two
+      // failures are tracked apart even though they share one sentence.
+      expect(container.textContent).toContain("com.example.air-quality");
+
+      const retry = buttonWithText(container, "Try again");
+      expect(retry).toBeDefined();
+      await act(async () => retry?.click());
+      await waitFor(() => {
+        expect(container.textContent).not.toContain("Couldn't reach the server for plugin data.");
+        expect(container.textContent).toContain("Air quality");
+      });
+      expect(catalogCalls).toBe(2);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      serverPluginsImpl = async () => ({ plugins: [], load_failures: [] });
+      serverCardStateImpl = async () => [];
+      // Also restore what this test overrode beyond the two server impls: leaving
+      // any of these mutated would make a later mounted-`App` test observe a
+      // networked tier or this test's plugin-only config, which is exactly the
+      // cross-test pollution this file's convention exists to avoid.
+      snapshotImpl = async () => snapshot;
+      networkSettingsImpl = async () => ({
+        server_url: "https://desk.example",
+        device_id: "desk-1",
+        tier: "local",
+      });
+      previewImpl = () =>
+        Promise.reject(new Error("renderCardPreview not configured for this test"));
+    }
+  });
+
+  /// A server that answers with a shape this app cannot read WAS reached, so
+  /// "Couldn't reach the server" would be a false sentence about it. The reachable
+  /// cause is the documented server-then-Mac rollout, so the notice names the fix
+  /// — and it is still the same one notice, with the same working "Try again".
+  test("a server older than this app gets its own true sentence", async () => {
+    snapshotImpl = async () => ({
+      ...snapshot,
+      device: { ...snapshot.device, tier: "networked" },
+      config: {
+        ...snapshot.config,
+        cards: [pluginCard("air")],
+        playlists: [
+          {
+            id: "workday",
+            name: "Workday",
+            advance: { kind: "timed" as const, default_dwell_seconds: 20 },
+            entries: [{ card_id: "air", dwell_seconds: null }],
+          },
+        ],
+        active_playlist_id: "workday",
+      },
+      providers: [],
+      pomodoros: [],
+      card_data: [],
+      card_errors: [],
+    });
+    networkSettingsImpl = async () => ({
+      server_url: "https://desk.example",
+      device_id: "desk-1",
+      tier: "networked",
+    });
+    previewImpl = async () => ({ png_base64: "cHJldmlldw==", sample: false, state: null });
+    let catalogCalls = 0;
+    serverPluginsImpl = async () => {
+      catalogCalls += 1;
+      if (catalogCalls === 1) {
+        throw {
+          category: "incompatible-server",
+          message: "the server returned a response this app could not read",
+        };
+      }
+      return {
+        plugins: [
+          {
+            id: "com.example.air-quality",
+            name: "aqi",
+            version: "1.0.0",
+            node_count: 7,
+            assets: [],
+            display_name: "Air quality",
+            description: "EPA index for a location",
+            manifest_version: 2,
+            template: "display-list" as const,
+            refresh_minutes: 15,
+          },
+        ],
+        load_failures: [],
+      };
+    };
+    serverCardStateImpl = async () => [];
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await renderPreviewInto(root, <App />);
+      await waitFor(() => {
+        expect(container.textContent).toContain("Update the server to match this app.");
+      });
+      expect(container.textContent).not.toContain("Couldn't reach the server for plugin data.");
+
+      const retry = buttonWithText(container, "Try again");
+      expect(retry).toBeDefined();
+      await act(async () => retry?.click());
+      await waitFor(() => {
+        expect(container.textContent).not.toContain("Update the server to match this app.");
+        expect(container.textContent).toContain("Air quality");
+      });
+      expect(catalogCalls).toBe(2);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      serverPluginsImpl = async () => ({ plugins: [], load_failures: [] });
+      serverCardStateImpl = async () => [];
+      snapshotImpl = async () => snapshot;
+      networkSettingsImpl = async () => ({
+        server_url: "https://desk.example",
+        device_id: "desk-1",
+        tier: "local",
+      });
+      previewImpl = () =>
+        Promise.reject(new Error("renderCardPreview not configured for this test"));
+    }
+  });
+
+  test("Try again re-polls card state, not only the catalog", async () => {
+    snapshotImpl = async () => ({
+      ...snapshot,
+      device: { ...snapshot.device, tier: "networked" },
+      config: {
+        ...snapshot.config,
+        cards: [pluginCard("air")],
+        playlists: [
+          {
+            id: "workday",
+            name: "Workday",
+            advance: { kind: "timed" as const, default_dwell_seconds: 20 },
+            entries: [{ card_id: "air", dwell_seconds: null }],
+          },
+        ],
+        active_playlist_id: "workday",
+      },
+      providers: [],
+      pomodoros: [],
+      card_data: [],
+      card_errors: [],
+    });
+    networkSettingsImpl = async () => ({
+      server_url: "https://desk.example",
+      device_id: "desk-1",
+      tier: "networked",
+    });
+    previewImpl = async () => ({ png_base64: "cHJldmlldw==", sample: false, state: null });
+    // The catalog read succeeds from the start: this test isolates the OTHER
+    // failure source, so a passing catalog can never be what clears the notice.
+    serverPluginsImpl = async () => ({
+      plugins: [
+        {
+          id: "com.example.air-quality",
+          name: "aqi",
+          version: "1.0.0",
+          node_count: 7,
+          assets: [],
+          display_name: "Air quality",
+          description: "EPA index for a location",
+          manifest_version: 2,
+          template: "display-list" as const,
+          refresh_minutes: 15,
+        },
+      ],
+      load_failures: [],
+    });
+    let cardStateCalls = 0;
+    serverCardStateImpl = async () => {
+      cardStateCalls += 1;
+      if (cardStateCalls === 1) {
+        throw { category: "runtime-unavailable", message: "runtime not ready" };
+      }
+      return [{ card_id: "air", provider: { kind: "fresh" as const }, hero: "42", errors: [] }];
+    };
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await renderPreviewInto(root, <App />);
+      await waitFor(() => {
+        expect(container.textContent).toContain("Couldn't reach the server for plugin data.");
+      });
+      // Only the automatic poll on mount has run so far.
+      expect(cardStateCalls).toBe(1);
+
+      const retry = buttonWithText(container, "Try again");
+      expect(retry).toBeDefined();
+      await act(async () => retry?.click());
+      await waitFor(() => {
+        expect(container.textContent).not.toContain("Couldn't reach the server for plugin data.");
+        expect(container.querySelector(".card-tile__body .card-tile__value")?.textContent).toBe(
+          "42",
+        );
+      });
+      // A single click on a control that says "Try again" must retry BOTH server
+      // reads, since the reader cannot tell which one is the reason it is showing.
+      expect(cardStateCalls).toBe(2);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      serverPluginsImpl = async () => ({ plugins: [], load_failures: [] });
+      serverCardStateImpl = async () => [];
+      snapshotImpl = async () => snapshot;
+      networkSettingsImpl = async () => ({
+        server_url: "https://desk.example",
+        device_id: "desk-1",
+        tier: "local",
+      });
+      previewImpl = () =>
+        Promise.reject(new Error("renderCardPreview not configured for this test"));
+    }
+  });
+
   test("names the clock card's title field rather than calling it a heading", () => {
     // The clock faces draw no title chip, so the field only names the card in
     // the library. Weather still renders its chip, so "Heading" stays right
@@ -594,6 +905,9 @@ describe("settings accessibility and states", () => {
         pomodoros={[]}
         providers={[]}
         pluginKinds={[]}
+        catalog={null}
+        serverCardState={[]}
+        ownershipTier="networked"
         selectedCardId="internal-uuid-0001"
         onSelect={() => {}}
         onAdd={() => {}}
@@ -603,6 +917,7 @@ describe("settings accessibility and states", () => {
     );
     const loop = renderToStaticMarkup(
       <LoopRing
+        catalog={null}
         config={config}
         issues={[]}
         selectedCardId={null}
@@ -622,6 +937,38 @@ describe("settings accessibility and states", () => {
     expect(editor).toContain('id="editor-heading">Digital clock<');
   });
 
+  test("the ring legend calls a plugin card what every other surface calls it", () => {
+    const plugin = pluginCard();
+    const html = renderToStaticMarkup(
+      <LoopRing
+        config={cardListConfig([plugin])}
+        issues={[]}
+        catalog={{
+          plugins: [
+            {
+              id: "com.example.air-quality",
+              name: "aqi",
+              version: "1.0.0",
+              node_count: 7,
+              assets: [],
+              display_name: "Air quality",
+              description: null,
+              manifest_version: 2,
+              template: "display-list",
+              refresh_minutes: 15,
+            },
+          ],
+          load_failures: [],
+        }}
+        selectedCardId={plugin.id}
+        onSelect={() => {}}
+        onChange={() => {}}
+      />,
+    );
+    expect(html).toContain('class="loop__entry-name">Air quality<');
+    expect(html).toContain('class="loop__entry-title">Office air<');
+  });
+
   test("an untitled card is not labelled with its template twice", () => {
     // The quiet line is the owner's words, so it is absent rather than a repeat of
     // the label sitting directly above it.
@@ -637,6 +984,9 @@ describe("settings accessibility and states", () => {
         pomodoros={[]}
         providers={[]}
         pluginKinds={[]}
+        catalog={null}
+        serverCardState={[]}
+        ownershipTier="networked"
         selectedCardId={null}
         onSelect={() => {}}
         onAdd={() => {}}
@@ -648,36 +998,460 @@ describe("settings accessibility and states", () => {
     expect(library).not.toContain("card-tile__name");
   });
 
-  test("plugin cards have a lossless tile and title editor but cannot be added", () => {
+  test("a plugin tile is named, valued and flagged like any other complication", () => {
     const plugin = pluginCard();
-    const library = renderToStaticMarkup(
-      <CardList
+    const catalog: PluginCatalog = {
+      plugins: [
+        {
+          id: "com.example.air-quality",
+          name: "aqi",
+          version: "1.0.0",
+          node_count: 7,
+          assets: [],
+          display_name: "Air quality",
+          description: "EPA index for a location",
+          manifest_version: 2,
+          template: "display-list",
+          refresh_minutes: 15,
+        },
+      ],
+      load_failures: [],
+    };
+    const render = (
+      cardCatalog: PluginCatalog | null,
+      serverCardState: ServerCardState[],
+      tier: "local" | "networked",
+    ) =>
+      renderToStaticMarkup(
+        <CardList
+          config={cardListConfig([plugin])}
+          issues={[]}
+          cardData={[]}
+          pomodoros={[]}
+          providers={[]}
+          pluginKinds={[]}
+          catalog={cardCatalog}
+          serverCardState={serverCardState}
+          ownershipTier={tier}
+          selectedCardId={plugin.id}
+          onSelect={() => {}}
+          onAdd={() => {}}
+          onChange={() => {}}
+          onRemove={() => {}}
+        />,
+      );
+
+    const live = render(
+      catalog,
+      [{ card_id: plugin.id, provider: { kind: "fresh" }, hero: "42", errors: [] }],
+      "networked",
+    );
+    expect(live).toContain('class="tile-label">Air quality<');
+    expect(live).toContain('<strong class="card-tile__value numeral">42</strong>');
+    expect(live).toContain('class="card-tile__name">Office air<');
+    expect(live).toContain('aria-label="Remove Air quality — Office air');
+    // Nothing on the tile says "plugin", and the wire id is still never shown.
+    expect(live).not.toContain(">Plugin<");
+    expect(live).not.toContain(plugin.id);
+
+    // No headline yet reads like a weather card with no data, not like a fault.
+    expect(render(catalog, [], "networked")).toContain(
+      '<strong class="card-tile__value numeral">—</strong>',
+    );
+    // The two flags, each beside the bare id it explains.
+    expect(render({ plugins: [], load_failures: [] }, [], "networked")).toContain(
+      '<span class="flag">not on the server</span>',
+    );
+    expect(render(catalog, [], "local")).toContain('<span class="flag">needs the server</span>');
+  });
+
+  test("the add menu lists server plugins by display name, with description fallbacks", async () => {
+    let added: { pluginId: string; refreshMinutes: number } | null = null;
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <CardList
+            config={cardListConfig([clockCard("clock", "Desk")])}
+            issues={[]}
+            cardData={[]}
+            pomodoros={[]}
+            providers={[]}
+            pluginKinds={[
+              {
+                id: "aqi",
+                version: "1.0.0",
+                displayName: "Air quality",
+                description: "EPA index for a location",
+                onAdd: () => {
+                  added = { pluginId: "aqi", refreshMinutes: 15 };
+                },
+              },
+              {
+                id: "agenda",
+                version: "2.1.0",
+                displayName: null,
+                description: null,
+                onAdd: () => {},
+              },
+            ]}
+            catalog={null}
+            serverCardState={[]}
+            ownershipTier="networked"
+            selectedCardId={null}
+            onSelect={() => {}}
+            onAdd={() => {}}
+            onChange={() => {}}
+            onRemove={() => {}}
+          />,
+        ),
+      );
+      const slot = container.querySelector<HTMLButtonElement>(".card-tile__add");
+      await act(async () => slot?.click());
+      expect(container.textContent).toContain("Plugins on the server");
+      expect(container.textContent).toContain("Air quality");
+      expect(container.textContent).toContain("EPA index for a location");
+      // Both fallbacks: the id names it, "Plugin · <version>" describes it.
+      expect(container.textContent).toContain("agenda");
+      expect(container.textContent).toContain("Plugin · 2.1.0");
+
+      const row = [...container.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find(
+        (button) => button.textContent?.includes("Air quality"),
+      );
+      await act(async () => row?.click());
+      expect(added).toEqual({ pluginId: "aqi", refreshMinutes: 15 });
+      expect(container.querySelector('[role="menu"]')).toBeNull();
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("the window names a plugin card from the catalog everywhere at once", async () => {
+    snapshotImpl = async () => ({
+      ...snapshot,
+      config: {
+        ...snapshot.config,
+        cards: [pluginCard("air")],
+        playlists: [
+          {
+            id: "workday",
+            name: "Workday",
+            advance: { kind: "timed" as const, default_dwell_seconds: 20 },
+            entries: [{ card_id: "air", dwell_seconds: null }],
+          },
+        ],
+        active_playlist_id: "workday",
+      },
+      device: { ...snapshot.device, tier: "networked" },
+      providers: [],
+      pomodoros: [],
+      card_data: [],
+      card_errors: [],
+    });
+    networkSettingsImpl = async () => ({
+      server_url: "https://desk.example",
+      device_id: "desk-1",
+      tier: "networked",
+    });
+    serverPluginsImpl = async () => ({
+      plugins: [
+        {
+          id: "com.example.air-quality",
+          name: "aqi",
+          version: "1.0.0",
+          node_count: 7,
+          assets: [],
+          display_name: "Air quality",
+          description: "EPA index for a location",
+          manifest_version: 2,
+          template: "display-list" as const,
+          refresh_minutes: 15,
+        },
+      ],
+      load_failures: [],
+    });
+    serverCardStateImpl = async () => [
+      { card_id: "air", provider: { kind: "fresh" as const }, hero: "42", errors: [] },
+    ];
+    previewImpl = async () => ({ png_base64: null, sample: false, state: null });
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await renderPreviewInto(root, <App />);
+      await waitFor(() => {
+        expect(container.querySelector(".card-tile__value")?.textContent).toBe("42");
+      });
+      // Tile, legend and editor heading all say the same thing.
+      // Scoped to the card's own tile body: `.tile-label` is also the ring's
+      // "The loop" heading and its "Loop length" caption, both of which precede
+      // the card grid in document order.
+      expect(container.querySelector(".card-tile__body .tile-label")?.textContent).toBe(
+        "Air quality",
+      );
+      expect(container.querySelector(".loop__entry-name")?.textContent).toBe("Air quality");
+      expect(container.querySelector("#editor-heading")?.textContent).toBe("Air quality");
+      // And the menu offers it back.
+      const slot = container.querySelector<HTMLButtonElement>(".card-tile__add");
+      await act(async () => slot?.click());
+      expect(container.textContent).toContain("Plugins on the server");
+      const row = [...container.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find(
+        (button) => button.textContent?.includes("Air quality"),
+      );
+      await act(async () => row?.click());
+      await waitFor(() => {
+        expect(container.querySelectorAll(".card-tile__body")).toHaveLength(2);
+      });
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      serverPluginsImpl = async () => ({ plugins: [], load_failures: [] });
+      serverCardStateImpl = async () => [];
+      // Also restore what this test overrode beyond the two server impls — see the
+      // matching comment on the "unreachable server" test above.
+      snapshotImpl = async () => snapshot;
+      networkSettingsImpl = async () => ({
+        server_url: "https://desk.example",
+        device_id: "desk-1",
+        tier: "local",
+      });
+      previewImpl = () =>
+        Promise.reject(new Error("renderCardPreview not configured for this test"));
+    }
+  });
+
+  /// The realistic networked case, and the one every other test here skipped: no
+  /// cable, so `device.tier` is null and the persisted settings are the only
+  /// ownership fact. The Rust projector resolves ownership the same way this hook
+  /// does, so the overlay runs and the window shows a plugin card's freshness --
+  /// the `stale` flag on its tile and the trouble line in its editor -- exactly as
+  /// it does for a built-in card. Before that resolution matched, the hero
+  /// appeared and nothing else about the card's health ever did.
+  test("a plugin card shows its freshness with the cable out", async () => {
+    snapshotImpl = async () => ({
+      ...snapshot,
+      config: {
+        ...snapshot.config,
+        cards: [pluginCard("air")],
+        playlists: [
+          {
+            id: "workday",
+            name: "Workday",
+            advance: { kind: "timed" as const, default_dwell_seconds: 20 },
+            entries: [{ card_id: "air", dwell_seconds: null }],
+          },
+        ],
+        active_playlist_id: "workday",
+      },
+      // No cable: the live tier is unknown, which is the ordinary state of a
+      // networked Mac, not an edge case.
+      device: { ...snapshot.device, tier: null },
+      // What `ServerStateProjection` overlays once it resolves ownership from the
+      // persisted settings: the server's own provider state for this card, with no
+      // timestamps because `ServerCardState` carries none.
+      providers: [
+        {
+          widget_id: "air",
+          state: { kind: "stale" as const, message: "The air quality feed timed out." },
+          last_success_unix_ms: null,
+          age_seconds: null,
+        },
+      ],
+      pomodoros: [],
+      card_data: [],
+      card_errors: [],
+    });
+    networkSettingsImpl = async () => ({
+      server_url: "https://desk.example",
+      device_id: "desk-1",
+      tier: "networked",
+    });
+    serverPluginsImpl = async () => ({
+      plugins: [
+        {
+          id: "com.example.air-quality",
+          name: "aqi",
+          version: "1.0.0",
+          node_count: 7,
+          assets: [],
+          display_name: "Air quality",
+          description: "EPA index for a location",
+          manifest_version: 2,
+          template: "display-list" as const,
+          refresh_minutes: 15,
+        },
+      ],
+      load_failures: [],
+    });
+    serverCardStateImpl = async () => [
+      {
+        card_id: "air",
+        provider: { kind: "stale" as const, message: "The air quality feed timed out." },
+        hero: "42",
+        errors: [],
+      },
+    ];
+    previewImpl = async () => ({ png_base64: null, sample: false, state: null });
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await renderPreviewInto(root, <App />);
+      await waitFor(() => {
+        expect(container.querySelector(".card-tile__value")?.textContent).toBe("42");
+      });
+      expect(container.querySelector(".card-tile__body .tile-label")?.textContent).toBe(
+        "Air quality",
+      );
+      expect(container.querySelector(".flag--stale")?.textContent).toBe("stale");
+      // One data note, in the selected card's editor, carrying the server's own
+      // sentence and the reason its Refresh cannot act.
+      const note = container.querySelector(".data-note")?.textContent;
+      expect(note).toContain("The air quality feed timed out.");
+      expect(note).toContain("This card refreshes on the server.");
+      const refresh = buttonWithText(container, "Refresh");
+      expect(refresh?.disabled).toBe(true);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      serverPluginsImpl = async () => ({ plugins: [], load_failures: [] });
+      serverCardStateImpl = async () => [];
+      snapshotImpl = async () => snapshot;
+      networkSettingsImpl = async () => ({
+        server_url: "https://desk.example",
+        device_id: "desk-1",
+        tier: "local",
+      });
+      previewImpl = () =>
+        Promise.reject(new Error("renderCardPreview not configured for this test"));
+    }
+  });
+
+  test("the editor names the plugin, owns its issue, and says when it cannot change it", () => {
+    const plugin = pluginCard();
+    const catalog: PluginCatalog = {
+      plugins: [
+        {
+          id: "com.example.air-quality",
+          name: "aqi",
+          version: "1.0.0",
+          node_count: 7,
+          assets: [],
+          display_name: "Air quality",
+          description: "EPA index for a location",
+          manifest_version: 2,
+          template: "display-list",
+          refresh_minutes: 15,
+        },
+      ],
+      load_failures: [],
+    };
+
+    const editable = renderCardEditor(plugin, [], null, catalog);
+    expect(editable).toContain('id="editor-heading">Air quality<');
+    expect(editable).toContain("<span>Plugin</span>");
+    expect(editable).toContain("Air quality · 1.0.0");
+    expect(editable).toContain("com.example.air-quality");
+    expect(editable).toContain("<span>Name</span>");
+    expect(editable).not.toMatch(/<select[^>]*disabled/);
+
+    // A validation issue on the id now attaches to the control that can fix it.
+    const flagged = renderCardEditor(
+      plugin,
+      [
+        {
+          path: "cards[0].plugin_id",
+          code: "missing-reference",
+          message: "That plugin is not installed on the server.",
+        },
+      ],
+      null,
+      catalog,
+    );
+    expect(flagged).toContain('aria-invalid="true"');
+    expect(flagged).toContain("That plugin is not installed on the server.");
+
+    // An id the catalog lacks stays selected, and says so rather than resetting.
+    // This is a claim the app can actually back up (the catalog loaded and does
+    // not have it), so it must never appear when the catalog hasn't loaded at all.
+    const unknown = renderCardEditor(
+      { ...plugin, plugin_id: "com.example.gone" },
+      [],
+      null,
+      catalog,
+    );
+    expect(unknown).toContain("Not installed on the server");
+    expect(unknown).not.toContain("Needs the server to render");
+    expect(unknown).not.toContain("The plugin list comes from the server");
+
+    // No catalog: read-only, with the reason the tier makes true. The option and
+    // the small line must agree, and neither may claim the plugin is uninstalled —
+    // the app does not know that; it only knows it cannot check.
+    const localHtml = renderCardEditor(plugin, [], null, null, "local");
+    expect(localHtml).toMatch(/<select[^>]*disabled/);
+    expect(localHtml).toContain("Needs the server to render");
+    expect(localHtml).not.toContain("Not installed on the server");
+
+    const networkedNoCatalogHtml = renderCardEditor(plugin, [], null, null, "networked");
+    expect(networkedNoCatalogHtml).toContain("The plugin list comes from the server");
+    expect(networkedNoCatalogHtml).not.toContain("Not installed on the server");
+  });
+
+  test("a plugin card states the manifest's cadence and refuses a refresh it cannot do", () => {
+    const plugin = pluginCard();
+    const catalog: PluginCatalog = {
+      plugins: [
+        {
+          id: "com.example.air-quality",
+          name: "aqi",
+          version: "1.0.0",
+          node_count: 7,
+          assets: [],
+          display_name: "Air quality",
+          description: null,
+          manifest_version: 2,
+          template: "display-list",
+          refresh_minutes: 15,
+        },
+      ],
+      load_failures: [],
+    };
+    const html = renderToStaticMarkup(
+      <CardEditor
+        card={plugin}
         config={cardListConfig([plugin])}
         issues={[]}
-        cardData={[]}
-        pomodoros={[]}
-        providers={[]}
-        pluginKinds={[]}
-        selectedCardId={plugin.id}
-        onSelect={() => {}}
-        onAdd={() => {}}
+        entryIssues={[]}
+        cardError={null}
+        pomodoro={null}
+        provider={{
+          widget_id: plugin.id,
+          state: { kind: "stale", message: "Feed timed out after 10s" },
+          last_success_unix_ms: 1,
+          age_seconds: 5400,
+        }}
+        timerBusy={false}
+        filePickerBusy={false}
+        providerRefreshing={false}
+        catalog={catalog}
+        ownershipTier="networked"
         onChange={() => {}}
+        onConfigChange={() => {}}
         onRemove={() => {}}
+        onTimerAction={() => {}}
+        onChooseCalendarFile={() => {}}
+        onRefreshProvider={() => {}}
       />,
     );
-    const editor = renderCardEditor(plugin);
-
-    expect(library).toContain('class="tile-label">com.example.air-quality<');
-    expect(library).toContain('<strong class="card-tile__value numeral">Plugin</strong>');
-    expect(library).toContain('class="card-tile__name">Office air<');
-    expect(library).not.toContain(plugin.id);
-    expect(library).toContain("Add a card");
-    expect(library).not.toContain("Plugins on the server");
-    expect(library).not.toContain("<strong>Plugin</strong>");
-    expect(editor).toContain('id="editor-heading">com.example.air-quality<');
-    expect(editor).toContain("<span>Name</span>");
-    expect(editor).toContain("<span>Refresh every</span>");
-    expect(editor).not.toContain("Template");
+    expect(html).toContain("Feed timed out after 10s");
+    expect(html).toContain("This card refreshes on the server.");
+    expect(html).toMatch(/<button[^>]*disabled[^>]*>.*?Refresh/s);
+    expect(html).toContain("The server fetches this plugin every 15 minutes.");
   });
 
   test("row-list tiles count only populated title fields from real provider snapshots", () => {
@@ -706,6 +1480,9 @@ describe("settings accessibility and states", () => {
         pomodoros={[]}
         providers={[]}
         pluginKinds={[]}
+        catalog={null}
+        serverCardState={[]}
+        ownershipTier="networked"
         selectedCardId={calendar.id}
         onSelect={() => {}}
         onAdd={() => {}}
@@ -796,6 +1573,8 @@ describe("settings accessibility and states", () => {
           timerBusy={false}
           filePickerBusy={false}
           providerRefreshing={false}
+          catalog={null}
+          ownershipTier="networked"
           onChange={() => {}}
           onConfigChange={setConfig}
           onRemove={() => {}}
@@ -851,6 +1630,8 @@ describe("settings accessibility and states", () => {
           timerBusy={false}
           filePickerBusy={false}
           providerRefreshing={false}
+          catalog={null}
+          ownershipTier="networked"
           onChange={() => {}}
           onConfigChange={() => {}}
           onRemove={() => {}}
@@ -902,6 +1683,9 @@ describe("settings accessibility and states", () => {
         pomodoros={[]}
         providers={[]}
         pluginKinds={[]}
+        catalog={null}
+        serverCardState={[]}
+        ownershipTier="networked"
         selectedCardId="first-clock-id"
         onSelect={() => {}}
         onAdd={() => {}}
@@ -946,6 +1730,9 @@ describe("settings accessibility and states", () => {
         pomodoros={[]}
         providers={[]}
         pluginKinds={[]}
+        catalog={null}
+        serverCardState={[]}
+        ownershipTier="networked"
         selectedCardId={null}
         onSelect={() => {}}
         onAdd={() => {}}
@@ -979,6 +1766,9 @@ describe("settings accessibility and states", () => {
         pomodoros={[]}
         providers={[]}
         pluginKinds={[]}
+        catalog={null}
+        serverCardState={[]}
+        ownershipTier="networked"
         selectedCardId={null}
         onSelect={() => {}}
         onAdd={() => {}}
@@ -1006,6 +1796,9 @@ describe("settings accessibility and states", () => {
         pomodoros={[]}
         providers={[]}
         pluginKinds={[]}
+        catalog={null}
+        serverCardState={[]}
+        ownershipTier="networked"
         selectedCardId={null}
         onSelect={() => {}}
         onAdd={() => {}}
@@ -1027,6 +1820,9 @@ describe("settings accessibility and states", () => {
         pomodoros={[]}
         providers={[]}
         pluginKinds={[]}
+        catalog={null}
+        serverCardState={[]}
+        ownershipTier="networked"
         selectedCardId={null}
         onSelect={() => {}}
         onAdd={() => {}}
@@ -1059,6 +1855,9 @@ describe("settings accessibility and states", () => {
             pomodoros={[]}
             providers={[]}
             pluginKinds={[]}
+            catalog={null}
+            serverCardState={[]}
+            ownershipTier="networked"
             selectedCardId={null}
             onSelect={() => {}}
             onAdd={() => {}}
@@ -1105,6 +1904,9 @@ describe("settings accessibility and states", () => {
           pomodoros={[]}
           providers={[]}
           pluginKinds={[]}
+          catalog={null}
+          serverCardState={[]}
+          ownershipTier="networked"
           selectedCardId={selectedCardId}
           onSelect={setSelectedCardId}
           onAdd={(kind) => {
@@ -1183,6 +1985,9 @@ describe("settings accessibility and states", () => {
             pomodoros={[]}
             providers={[]}
             pluginKinds={[]}
+            catalog={null}
+            serverCardState={[]}
+            ownershipTier="networked"
             selectedCardId={null}
             onSelect={() => {}}
             onAdd={() => {}}
@@ -1228,12 +2033,16 @@ describe("settings accessibility and states", () => {
                   {
                     id: "weather-plus",
                     version: "1",
+                    displayName: null,
                     description: "Plugin weather",
                     onAdd: () => {},
                   },
                 ]
               : []
           }
+          catalog={null}
+          serverCardState={[]}
+          ownershipTier="networked"
           selectedCardId={null}
           onSelect={() => {}}
           onAdd={() => {}}
@@ -1285,6 +2094,9 @@ describe("settings accessibility and states", () => {
           pomodoros={[]}
           providers={[]}
           pluginKinds={[]}
+          catalog={null}
+          serverCardState={[]}
+          ownershipTier="networked"
           selectedCardId={null}
           onSelect={() => {}}
           onAdd={() => {}}
@@ -1375,6 +2187,9 @@ describe("settings accessibility and states", () => {
         pomodoros={[]}
         providers={[]}
         pluginKinds={[]}
+        catalog={null}
+        serverCardState={[]}
+        ownershipTier="networked"
         selectedCardId={null}
         onSelect={() => {}}
         onAdd={() => {}}
@@ -1413,6 +2228,9 @@ describe("settings accessibility and states", () => {
           pomodoros={[]}
           providers={[]}
           pluginKinds={[]}
+          catalog={null}
+          serverCardState={[]}
+          ownershipTier="networked"
           selectedCardId={null}
           onSelect={() => {}}
           onAdd={() => {}}
@@ -1464,6 +2282,9 @@ describe("settings accessibility and states", () => {
             pomodoros={[]}
             providers={[]}
             pluginKinds={[]}
+            catalog={null}
+            serverCardState={[]}
+            ownershipTier="networked"
             selectedCardId={null}
             onSelect={() => {}}
             onAdd={() => {}}
@@ -1508,6 +2329,9 @@ describe("settings accessibility and states", () => {
           pomodoros={[]}
           providers={[]}
           pluginKinds={[]}
+          catalog={null}
+          serverCardState={[]}
+          ownershipTier="networked"
           selectedCardId={null}
           onSelect={() => {}}
           onAdd={() => {}}
@@ -1569,6 +2393,9 @@ describe("settings accessibility and states", () => {
           pomodoros={[]}
           providers={[]}
           pluginKinds={[]}
+          catalog={null}
+          serverCardState={[]}
+          ownershipTier="networked"
           selectedCardId={null}
           onSelect={() => {}}
           onAdd={() => {}}
@@ -1612,7 +2439,7 @@ describe("settings accessibility and states", () => {
       liveSnapshot = { ...liveSnapshot, config };
       return { save: { generation: 2, warning: null } };
     };
-    previewImpl = async () => ({ png_base64: "cHJldmlldw==", sample: false });
+    previewImpl = async () => ({ png_base64: "cHJldmlldw==", sample: false, state: null });
 
     const container = document.createElement("div");
     document.body.appendChild(container);
@@ -1656,7 +2483,7 @@ describe("settings accessibility and states", () => {
       liveSnapshot = { ...liveSnapshot, config, has_saved_config: true };
       return { save: { generation: 1, warning: null } };
     };
-    previewImpl = async () => ({ png_base64: "cHJldmlldw==", sample: false });
+    previewImpl = async () => ({ png_base64: "cHJldmlldw==", sample: false, state: null });
 
     const container = document.createElement("div");
     document.body.appendChild(container);
@@ -1712,7 +2539,7 @@ describe("settings accessibility and states", () => {
       liveSnapshot = { ...liveSnapshot, config };
       return { save: { generation: 2, warning: null } };
     };
-    previewImpl = async () => ({ png_base64: "cHJldmlldw==", sample: false });
+    previewImpl = async () => ({ png_base64: "cHJldmlldw==", sample: false, state: null });
 
     const container = document.createElement("div");
     document.body.appendChild(container);
@@ -1750,7 +2577,7 @@ describe("settings accessibility and states", () => {
       },
     });
     networkSettingsImpl = () => new Promise<NetworkSettings>(() => {});
-    previewImpl = async () => ({ png_base64: "cHJldmlldw==", sample: false });
+    previewImpl = async () => ({ png_base64: "cHJldmlldw==", sample: false, state: null });
 
     const container = document.createElement("div");
     document.body.appendChild(container);
@@ -1802,7 +2629,7 @@ describe("settings accessibility and states", () => {
         })),
       });
     };
-    previewImpl = async () => ({ png_base64: "cHJldmlldw==", sample: false });
+    previewImpl = async () => ({ png_base64: "cHJldmlldw==", sample: false, state: null });
 
     const container = document.createElement("div");
     document.body.appendChild(container);
@@ -1856,7 +2683,7 @@ describe("settings accessibility and states", () => {
       },
     };
     snapshotImpl = async () => invalidSnapshot;
-    previewImpl = async () => ({ png_base64: "cHJldmlldw==", sample: false });
+    previewImpl = async () => ({ png_base64: "cHJldmlldw==", sample: false, state: null });
 
     const container = document.createElement("div");
     document.body.appendChild(container);
@@ -1886,7 +2713,7 @@ describe("settings accessibility and states", () => {
       ...(structuredClone(snapshot) as AppSnapshot),
       device: { ...snapshot.device, protocol_version: 2 },
     });
-    previewImpl = async () => ({ png_base64: "cHJldmlldw==", sample: false });
+    previewImpl = async () => ({ png_base64: "cHJldmlldw==", sample: false, state: null });
 
     const container = document.createElement("div");
     document.body.appendChild(container);
@@ -1914,7 +2741,7 @@ describe("settings accessibility and states", () => {
         },
       ],
     });
-    previewImpl = async () => ({ png_base64: "cHJldmlldw==", sample: false });
+    previewImpl = async () => ({ png_base64: "cHJldmlldw==", sample: false, state: null });
 
     const container = document.createElement("div");
     document.body.appendChild(container);
@@ -1944,7 +2771,7 @@ describe("settings accessibility and states", () => {
         },
       ],
     });
-    previewImpl = async () => ({ png_base64: "cHJldmlldw==", sample: false });
+    previewImpl = async () => ({ png_base64: "cHJldmlldw==", sample: false, state: null });
 
     const container = document.createElement("div");
     document.body.appendChild(container);
@@ -1983,6 +2810,8 @@ describe("settings accessibility and states", () => {
         timerBusy={false}
         filePickerBusy={false}
         providerRefreshing={false}
+        catalog={null}
+        ownershipTier="networked"
         onChange={() => {}}
         onConfigChange={() => {}}
         onRemove={() => {}}
@@ -2064,7 +2893,7 @@ describe("settings accessibility and states", () => {
   test("renders the device's own pixels as an img with a data URL once the IPC resolves", async () => {
     previewImpl = async (cardId) => {
       expect(cardId).toBe("upnext");
-      return { png_base64: "Zmlyc3QtZnJhbWU=", sample: false };
+      return { png_base64: "Zmlyc3QtZnJhbWU=", sample: false, state: null };
     };
     const { container, root } = await mountPreview(calendarCard("upnext"));
     await waitFor(() => {
@@ -2089,7 +2918,7 @@ describe("settings accessibility and states", () => {
   });
 
   test("badges the frame as sample when the card has never published data", async () => {
-    previewImpl = async () => ({ png_base64: "dW5jb25maWd1cmVk", sample: true });
+    previewImpl = async () => ({ png_base64: "dW5jb25maWd1cmVk", sample: true, state: null });
     const { container, root } = await mountPreview(calendarCard("upnext"));
     await waitFor(() => {
       expect(container.querySelector("img")).not.toBeNull();
@@ -2098,11 +2927,28 @@ describe("settings accessibility and states", () => {
     await act(async () => root.unmount());
   });
 
+  test("a frameless preview prints its state word, never the fault message", async () => {
+    previewImpl = async () => ({
+      png_base64: null,
+      sample: false,
+      state: "Waiting for the first refresh",
+    });
+    const { container, root } = await mountPreview(pluginCard("air"));
+    await waitFor(() => {
+      expect(container.textContent).toContain("Waiting for the first refresh");
+    });
+    expect(container.textContent).not.toContain("Preview unavailable");
+    expect(container.querySelector("img")).toBeNull();
+    // The badge means "a real frame from sample data". There is no frame here.
+    expect(container.querySelector(".stage__badge")).toBeNull();
+    await act(async () => root.unmount());
+  });
+
   test("re-requests the preview when dataGeneration bumps", async () => {
     let calls = 0;
     previewImpl = async () => {
       calls += 1;
-      return { png_base64: `frame-${calls}`, sample: false };
+      return { png_base64: `frame-${calls}`, sample: false, state: null };
     };
     const card = calendarCard("upnext");
     const { container, root } = await mountPreview(card, 0);
@@ -2134,7 +2980,7 @@ describe("settings accessibility and states", () => {
     previewImpl = async (cardId) => {
       requestCount += 1;
       if (cardId === "first") {
-        return { png_base64: "first-frame", sample: false };
+        return { png_base64: "first-frame", sample: false, state: null };
       }
       return new Promise((resolve) => {
         resolveSecond = resolve;
@@ -2165,7 +3011,7 @@ describe("settings accessibility and states", () => {
       "data:image/png;base64,first-frame",
     );
 
-    resolveSecond({ png_base64: "second-frame", sample: false });
+    resolveSecond({ png_base64: "second-frame", sample: false, state: null });
     await waitFor(() => {
       expect(container.querySelector("img")?.getAttribute("src")).toBe(
         "data:image/png;base64,second-frame",
@@ -2226,7 +3072,7 @@ describe("settings accessibility and states", () => {
 
       // The newer request succeeds first...
       await act(async () => {
-        resolveSecond({ png_base64: "winning-frame", sample: false });
+        resolveSecond({ png_base64: "winning-frame", sample: false, state: null });
         await new Promise((resolve) => setTimeout(resolve, 0));
       });
       await waitFor(() => {
@@ -2297,6 +3143,7 @@ describe("settings accessibility and states", () => {
   function renderLoopRing(config: AppConfig): string {
     return renderToStaticMarkup(
       <LoopRing
+        catalog={null}
         config={config}
         issues={[]}
         selectedCardId="first"
@@ -2334,6 +3181,7 @@ describe("settings accessibility and states", () => {
       latest = config;
       return (
         <LoopRing
+          catalog={null}
           config={config}
           issues={[
             {
@@ -2383,6 +3231,7 @@ describe("settings accessibility and states", () => {
       await act(async () =>
         root.render(
           <LoopRing
+            catalog={null}
             config={config}
             issues={[]}
             selectedCardId="first"
@@ -2410,6 +3259,7 @@ describe("settings accessibility and states", () => {
       latest = config;
       return (
         <LoopRing
+          catalog={null}
           config={config}
           issues={[]}
           selectedCardId="first"
@@ -2556,6 +3406,9 @@ describe("settings accessibility and states", () => {
         pomodoros={[]}
         providers={[]}
         pluginKinds={[]}
+        catalog={null}
+        serverCardState={[]}
+        ownershipTier="networked"
         selectedCardId={null}
         onSelect={() => {}}
         onAdd={() => {}}
@@ -2565,6 +3418,7 @@ describe("settings accessibility and states", () => {
     );
     const ring = renderToStaticMarkup(
       <LoopRing
+        catalog={null}
         config={config}
         issues={issues}
         selectedCardId="clock"
@@ -2590,5 +3444,15 @@ describe("settings accessibility and states", () => {
     expect(css).toContain("@media (max-width: 430px)");
     expect(css).toContain("@media (prefers-reduced-motion: reduce)");
     expect(css).toContain("animation-duration: 0.001ms");
+  });
+
+  test("each server read names its backend command exactly, and passes no arguments", async () => {
+    coreInvocations.length = 0;
+    expect(await realGetServerPlugins()).toEqual({ plugins: [], load_failures: [] });
+    expect(await realGetServerCardState()).toEqual([]);
+    expect(coreInvocations).toEqual([
+      { command: "get_server_plugins", args: undefined },
+      { command: "get_server_card_state", args: undefined },
+    ]);
   });
 });

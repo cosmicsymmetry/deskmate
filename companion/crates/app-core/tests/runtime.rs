@@ -6,12 +6,13 @@ use std::time::{Duration, Instant};
 
 use app_core::{
     AlertHold, AppConfig, CalendarRefreshRequest, CalendarRefreshResult, CalendarRefresher,
-    CardAlert, CardErrorKind, CardField, CardFieldValue, CardSettings, CarouselAdvance,
-    ConnectionState, DesiredAsset, DeviceCapability, DeviceConnection, DeviceOtaState, DeviceTier,
-    DeviceWifiState, DisplayOrientation, DisplayTemplate, NetworkConfig, PersistenceState,
-    Playlist, PlaylistEntry, PluginHost, PomodoroAction, PomodoroState, ProviderRequest,
-    ProvisioningTier, RefreshPolicy, RuntimeDevice, RuntimeError, RuntimeHandle, RuntimeOptions,
-    RuntimeState, SceneCandidate, WidgetTapAction,
+    CardAlert, CardErrorKind, CardField, CardFieldValue, CardPreviewState, CardSettings,
+    CarouselAdvance, ConnectionState, DesiredAsset, DeviceCapability, DeviceConnection,
+    DeviceOtaState, DeviceTier, DeviceWifiState, DisplayOrientation, DisplayTemplate,
+    NetworkConfig, PersistenceState, Playlist, PlaylistEntry, PluginHost, PomodoroAction,
+    PomodoroState, ProviderRequest, ProvisioningTier, RasterFrame, RasterRequest, RefreshPolicy,
+    RuntimeDevice, RuntimeError, RuntimeHandle, RuntimeOptions, RuntimeState, SceneCandidate,
+    WidgetTapAction,
 };
 use chrono::{TimeZone as _, Utc};
 use device::{DeviceError, ReceivedEvent, SessionDiagnostics, TransportError};
@@ -670,6 +671,8 @@ struct FakePluginHostState {
     renders: Vec<PluginRenderCall>,
     desired_assets: Vec<DesiredAsset>,
     invalid_scene: bool,
+    frame: Option<RasterFrame>,
+    raster_requests: Vec<RasterRequest>,
 }
 
 #[derive(Clone, Default)]
@@ -698,6 +701,14 @@ impl FakePluginHostControl {
 
     fn return_invalid_scene(&self) {
         self.state.lock().unwrap().invalid_scene = true;
+    }
+
+    fn set_raster_frame(&self, frame: RasterFrame) {
+        self.state.lock().unwrap().frame = Some(frame);
+    }
+
+    fn raster_requests(&self) -> Vec<RasterRequest> {
+        self.state.lock().unwrap().raster_requests.clone()
     }
 }
 
@@ -735,6 +746,15 @@ impl PluginHost for FakePluginHost {
             background: 0x1234,
             nodes,
         }))
+    }
+
+    fn rasterize(&mut self, request: &RasterRequest) -> Result<RasterFrame, String> {
+        let mut state = self.control.state.lock().unwrap();
+        state.raster_requests.push(request.clone());
+        state
+            .frame
+            .clone()
+            .ok_or_else(|| "the fixture host has no frame".to_owned())
     }
 }
 
@@ -1190,6 +1210,126 @@ fn plugin_card_pushes_the_host_scene_unmodified_after_raw_data_arrives() {
 }
 
 #[test]
+fn a_card_preview_answers_without_a_device_push_and_leaves_the_revision_counter_alone() {
+    let control = MockDeviceControl::default();
+    let host = FakePluginHostControl::default();
+    host.set_raster_frame(RasterFrame {
+        digest: [0x77; protocol::ASSET_DIGEST_LEN],
+        bytes: Arc::from(&[0x19, 0x12, 0, 0, 0xc0, 1, 0x70, 1, 0x80, 3, 0, 0, 1, 2][..]),
+    });
+    let runtime = start_plugin_runtime(&control, Some(Box::new(host.host())));
+    wait_for(Duration::from_secs(1), || {
+        control.operations().iter().any(|operation| {
+            matches!(operation, Operation::PushScene(push) if push.card_id == "plugin-card")
+        })
+    });
+
+    let pushed_revision = |operations: &[Operation]| -> Option<u32> {
+        operations
+            .iter()
+            .rev()
+            .find_map(|operation| match operation {
+                Operation::PushScene(push) if push.card_id == "plugin-card" => Some(push.revision),
+                _ => None,
+            })
+    };
+    let scene_pushes = |operations: &[Operation]| -> usize {
+        operations
+            .iter()
+            .filter(|operation| matches!(operation, Operation::PushScene(_)))
+            .count()
+    };
+    let activations = |operations: &[Operation]| -> usize {
+        operations
+            .iter()
+            .filter(|operation| matches!(operation, Operation::Activate(_)))
+            .count()
+    };
+    let before = control.operations();
+    let pushes_before = scene_pushes(&before);
+    let activations_before = activations(&before);
+    let last_revision = pushed_revision(&before).expect("the plugin card was pushed");
+    let active_before = runtime.snapshot().unwrap().device.active_screen_id;
+
+    let preview = runtime.render_card_preview("plugin-card").unwrap();
+
+    assert_eq!(preview.state, CardPreviewState::Stale);
+    assert_eq!(preview.message, None);
+    assert_eq!(
+        preview.refreshed_at_unix_ms,
+        u64::try_from(plugin_refreshed_at().timestamp_millis()).ok()
+    );
+    assert_eq!(
+        preview.frame.expect("a stale card still draws").digest,
+        [0x77; protocol::ASSET_DIGEST_LEN]
+    );
+    assert_eq!(host.raster_requests().len(), 1);
+    assert_eq!(
+        host.renders()
+            .last()
+            .expect("the preview rendered")
+            .revision,
+        0,
+        "a preview builds at the revision the wire refuses"
+    );
+    let after = control.operations();
+    assert_eq!(
+        scene_pushes(&after),
+        pushes_before,
+        "a preview must never reach the device"
+    );
+    assert_eq!(
+        activations(&after),
+        activations_before,
+        "the preview route never activates the card"
+    );
+    assert_eq!(
+        runtime.snapshot().unwrap().device.active_screen_id,
+        active_before,
+        "the preview route never changes which card the panel is showing"
+    );
+
+    runtime
+        .inject_plugin_snapshot(
+            "plugin-card",
+            "test-plugin",
+            providers::ProviderSnapshot {
+                value: serde_json::json!({"after": "preview"}),
+                refreshed_at: None,
+                age: None,
+                stale: false,
+                error: None,
+            },
+        )
+        .unwrap();
+    wait_for(Duration::from_secs(1), || {
+        pushed_revision(&control.operations()).is_some_and(|revision| revision > last_revision)
+    });
+    assert_eq!(
+        pushed_revision(&control.operations()),
+        Some(last_revision + 1),
+        "the preview must not have consumed a revision the next push then skips"
+    );
+    runtime.shutdown().unwrap();
+}
+
+#[test]
+fn a_preview_of_a_card_that_is_not_a_plugin_card_is_typed() {
+    let control = MockDeviceControl::default();
+    let runtime = start_runtime(full_config(), &control, Duration::ZERO);
+
+    assert!(matches!(
+        runtime.render_card_preview("clock"),
+        Err(RuntimeError::NotAPluginCard { ref card_id }) if card_id == "clock"
+    ));
+    assert!(matches!(
+        runtime.render_card_preview("nope"),
+        Err(RuntimeError::UnknownCard { ref card_id }) if card_id == "nope"
+    ));
+    runtime.shutdown().unwrap();
+}
+
+#[test]
 fn operator_plugin_snapshot_uses_the_same_runtime_compiler_and_runtime_minted_revision() {
     let control = MockDeviceControl::default();
     let host = FakePluginHostControl::default();
@@ -1344,6 +1484,52 @@ fn plugin_card_without_an_injected_host_is_refused_visibly() {
         error.kind != CardErrorKind::SceneRefused
             || !error.message.contains("no fetched plugin snapshot")
     }));
+    runtime.shutdown().unwrap();
+}
+
+/// Spec 5.3. A runtime with no plugin host can neither fetch nor draw a plugin
+/// card, so it must say nothing about one rather than faking a refresh. The old
+/// behaviour published a permanent `stale` flag carrying the refresher's own
+/// internal message -- a defect presented as a state, the same shape the V1
+/// validation-mislabeling fix exists to forbid. The Mac projects the server's
+/// real provider state over this gap instead.
+#[test]
+fn a_hostless_runtime_neither_refreshes_nor_reports_a_plugin_card() {
+    let control = MockDeviceControl::default();
+    let refreshes = Arc::new(AtomicU64::new(0));
+    let runtime = RuntimeHandle::start(
+        plugin_config(),
+        Box::new(MockDevice::new(control.clone())),
+        Box::new(CountingRefresher {
+            calls: Arc::clone(&refreshes),
+        }),
+        options(),
+    )
+    .unwrap();
+
+    let snapshot = wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
+        snapshot.device.connection == ConnectionState::Online
+    });
+    assert!(
+        snapshot.providers.is_empty(),
+        "a runtime that cannot fetch a plugin card must not invent a provider state for it"
+    );
+    assert!(
+        !snapshot
+            .card_data
+            .iter()
+            .any(|data| data.card_id == "plugin-card"),
+        "the compiled placeholder fields are not data; do not publish them as a card's value"
+    );
+
+    thread::sleep(Duration::from_millis(80));
+    assert_eq!(
+        refreshes.load(Ordering::Relaxed),
+        0,
+        "no provider deadline may be scheduled for a card this runtime cannot render"
+    );
+    let settled = runtime.snapshot().unwrap();
+    assert!(settled.providers.is_empty());
     runtime.shutdown().unwrap();
 }
 

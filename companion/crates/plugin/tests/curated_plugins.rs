@@ -13,7 +13,7 @@
 
 use std::path::{Path, PathBuf};
 
-use plugin::{compile_scene_with_assets, parse_manifest, resolve_assets};
+use plugin::{compile_scene_with_assets, evaluate_summary, parse_manifest, resolve_assets};
 use protocol::{SceneNode, SceneValue};
 use providers::ProviderSnapshot;
 
@@ -173,4 +173,73 @@ fn the_agenda_manifest_compiles_against_its_real_assets_and_captured_fixture() {
     // fallbacks must render, not panic or propagate a missing value.
     assert_eq!(literal(&scene.nodes[6]), "--:--");
     assert_eq!(literal(&scene.nodes[7]), "(untitled)");
+}
+
+// ---------------------------------------------------------------------------
+// Plugin-parity Task 1: every curated plugin is manifest v2 and presents
+// itself -- a display name, a description, and a summary that evaluates to
+// its headline against its own committed fixture.
+// ---------------------------------------------------------------------------
+
+const CLAUDE_LIMITS_FIXTURE: &str = include_str!("fixtures/claude_limits_response.json");
+
+fn curated_manifest(plugin_name: &str) -> plugin::PluginManifest {
+    let dir = plugins_dir().join(plugin_name);
+    let source = std::fs::read_to_string(dir.join("manifest.toml"))
+        .unwrap_or_else(|error| panic!("read {plugin_name} manifest.toml: {error}"));
+    parse_manifest(&source)
+        .unwrap_or_else(|error| panic!("{plugin_name} manifest must parse: {error:?}"))
+}
+
+#[test]
+fn every_curated_plugin_is_v2_and_declares_all_three_presentation_keys() {
+    for (plugin_name, display_name) in [
+        ("aqi", "Air quality"),
+        ("agenda", "Agenda"),
+        ("claude-limits", "Claude limits"),
+        ("svg-aqi", "Air quality (SVG)"),
+    ] {
+        let manifest = curated_manifest(plugin_name);
+        assert!(
+            manifest.is_manifest_v2(),
+            "{plugin_name} must be manifest v2"
+        );
+        assert_eq!(
+            manifest.display_name.as_deref(),
+            Some(display_name),
+            "{plugin_name}"
+        );
+        assert!(
+            manifest.description.is_some(),
+            "{plugin_name} needs a description"
+        );
+        assert!(manifest.summary.is_some(), "{plugin_name} needs a summary");
+    }
+}
+
+#[test]
+fn every_curated_summary_evaluates_to_its_headline_against_its_fixture() {
+    // `svg-aqi` declares `[source] root = "payload"`, so the provider hands
+    // it the same inner value `payload_from_envelope` extracts here. `aqi`
+    // and `agenda` unwrap the fixture envelope for the reason recorded in
+    // `aqi_fixture.rs:23-26`: the wrapper is a deliberate capture artifact,
+    // not something either manifest binds.
+    let cases = [
+        ("aqi", payload_from_envelope(AQI_FIXTURE), "42"),
+        ("svg-aqi", payload_from_envelope(AQI_FIXTURE), "42"),
+        ("agenda", payload_from_envelope(AGENDA_FIXTURE), "09:00"),
+        (
+            "claude-limits",
+            serde_json::from_str(CLAUDE_LIMITS_FIXTURE).expect("fixture is valid JSON"),
+            "31",
+        ),
+    ];
+    for (plugin_name, data, expected) in cases {
+        let manifest = curated_manifest(plugin_name);
+        assert_eq!(
+            evaluate_summary(&manifest, &snapshot(data)),
+            Ok(Some(expected.to_string())),
+            "{plugin_name}"
+        );
+    }
 }

@@ -9,9 +9,11 @@ import type {
   DraftValidation,
   IpcError,
   NetworkSettings,
+  PluginCatalog,
   PomodoroAction,
   PreviewFrame,
   ProvisionDeviceInput,
+  ServerCardState,
 } from "./types";
 
 export const APP_STATE_EVENT = "app-state";
@@ -24,6 +26,7 @@ const IPC_ERROR_CATEGORIES = new Set<IpcError["category"]>([
   "persistence",
   "runtime-busy",
   "runtime-unavailable",
+  "incompatible-server",
   "not-found",
   "device",
   "provider",
@@ -167,6 +170,14 @@ export function setAutostartEnabled(enabled: boolean): Promise<AutostartStatus> 
 
 export function renderCardPreview(cardId: string): Promise<PreviewFrame> {
   return invokeTyped("render_card_preview", { cardId });
+}
+
+export function getServerPlugins(): Promise<PluginCatalog> {
+  return invokeTyped("get_server_plugins");
+}
+
+export function getServerCardState(): Promise<ServerCardState[]> {
+  return invokeTyped("get_server_card_state");
 }
 
 export function listenToAppState(onSnapshot: (snapshot: AppSnapshot) => void): Promise<UnlistenFn> {

@@ -25,6 +25,8 @@ pub enum RuntimeError {
     DeviceDisconnected,
     UnknownWidget { widget_id: String },
     UnknownScreen { screen_id: String },
+    UnknownCard { card_id: String },
+    NotAPluginCard { card_id: String },
     Device { message: String },
     Provider { message: String },
 }
@@ -43,6 +45,10 @@ impl fmt::Display for RuntimeError {
             Self::DeviceDisconnected => formatter.write_str("device is disconnected"),
             Self::UnknownWidget { widget_id } => write!(formatter, "unknown widget {widget_id:?}"),
             Self::UnknownScreen { screen_id } => write!(formatter, "unknown screen {screen_id:?}"),
+            Self::UnknownCard { card_id } => write!(formatter, "unknown card {card_id:?}"),
+            Self::NotAPluginCard { card_id } => {
+                write!(formatter, "card {card_id:?} is not a plugin card")
+            }
             Self::Device { message } => write!(formatter, "device: {message}"),
             Self::Provider { message } => write!(formatter, "provider: {message}"),
         }
@@ -52,6 +58,10 @@ impl fmt::Display for RuntimeError {
 impl std::error::Error for RuntimeError {}
 
 pub(crate) type CommandReply = SyncSender<Result<(), RuntimeError>>;
+
+/// A preview answers with a rendered frame, so it cannot ride `CommandReply`,
+/// which carries only success or failure.
+pub(crate) type PreviewReply = SyncSender<Result<crate::runtime::CardPreview, RuntimeError>>;
 
 pub(crate) enum RuntimeCommand {
     ApplyConfig {
@@ -85,6 +95,10 @@ pub(crate) enum RuntimeCommand {
         snapshot: providers::ProviderSnapshot<serde_json::Value>,
         reply: CommandReply,
     },
+    RenderCardPreview {
+        card_id: String,
+        reply: PreviewReply,
+    },
     ActivateScreen {
         screen_id: String,
         reply: CommandReply,
@@ -103,4 +117,38 @@ pub(crate) enum RuntimeCommand {
     Shutdown {
         reply: CommandReply,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Two distinct refusals, kept apart on purpose: one card does not exist,
+    /// the other exists and is the wrong kind. Folding them into
+    /// `UnknownWidget` would make a plugin-id typo and a clock card read
+    /// identically in the log and on the wire. What HTTP status each becomes
+    /// is the server's business, not app-core's.
+    #[test]
+    fn the_preview_card_errors_are_typed_and_name_the_card() {
+        let unknown = RuntimeError::UnknownCard {
+            card_id: "aqi".into(),
+        };
+        assert_eq!(unknown.to_string(), "unknown card \"aqi\"");
+        assert_eq!(
+            serde_json::to_string(&unknown).unwrap(),
+            r#"{"kind":"unknown-card","card_id":"aqi"}"#
+        );
+
+        let wrong_kind = RuntimeError::NotAPluginCard {
+            card_id: "clock".into(),
+        };
+        assert_eq!(
+            wrong_kind.to_string(),
+            "card \"clock\" is not a plugin card"
+        );
+        assert_eq!(
+            serde_json::to_string(&wrong_kind).unwrap(),
+            r#"{"kind":"not-a-plugin-card","card_id":"clock"}"#
+        );
+    }
 }

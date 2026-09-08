@@ -15,13 +15,17 @@
 //! task) or compile a manifest into a `Scene` (also a later task); it does
 //! not validate node geometry against the 448x368 canvas, because
 //! `protocol::validate_scene` is where that bound already lives and the
-//! compiler that produces a real `Scene` is what calls it.
+//! compiler that produces a real `Scene` is what calls it. The one
+//! exception is `validate_summary_source`, a lexical token scan that still
+//! parses no grammar.
 
 use std::collections::HashSet;
 use std::fmt;
 use std::path::Component;
 
 use serde::Deserialize;
+
+use crate::compile::{ExpressionSource, classify_expression_source, looks_like_binding_namespace};
 
 // ---------------------------------------------------------------------------
 // Bounds. Each protects a specific untrusted-input hazard; each has a test
@@ -67,6 +71,12 @@ pub const MAX_VERSION_LEN: usize = 32;
 pub const MAX_FILE_NAME_LEN: usize = 128;
 /// Maximum byte length of `source.url`.
 pub const MAX_URL_LEN: usize = 512;
+
+/// Maximum byte length of a v2 `display_name`: the same bound as a card
+/// `title`, because it stands wherever a title would.
+pub const MAX_DISPLAY_NAME_LEN: usize = 64;
+/// Maximum byte length of a v2 `description`: the add-menu's second line.
+pub const MAX_DESCRIPTION_LEN: usize = 160;
 
 /// The only scheme a plugin's data source URL may declare. This is the
 /// lexical half of keeping a plugin off the server's own network; the
@@ -221,6 +231,17 @@ pub enum ManifestError {
     MissingLineGeometry,
     /// A bound line omitted one or more of `pivot_x`/`pivot_y`/`length`/binding.
     IncompleteBoundLineGeometry,
+    /// A bounded string field that must not be empty (`display_name`,
+    /// `description`) was present and empty. Absent is fine -- the field is
+    /// optional and falls back -- but present-and-empty is an authoring
+    /// error, not a fallback request.
+    EmptyString { field: &'static str },
+    /// A v2 `summary` expression referenced the device-binding namespace
+    /// (`time:`, `timer.`, `date`, `field.`) outside a string literal. The
+    /// summary is evaluated on the server at refresh time, where none of
+    /// those resolve, so this is a manifest error rather than a refresh-time
+    /// failure that logs forever.
+    SummaryUsesDeviceBinding { binding: String },
 }
 
 impl fmt::Display for ManifestError {
@@ -250,6 +271,17 @@ pub struct PluginManifest {
     /// with no list content, which is most of them.
     pub repeats: Vec<Repeat>,
     pub template: Template,
+    /// Manifest v2: what the card *is*, on every surface ("Air quality").
+    /// `None` on v1 and on a v2 manifest that omits it; callers fall back to
+    /// `name`, the identity key, which is never repurposed.
+    pub display_name: Option<String>,
+    /// Manifest v2: the add-menu's second line. `None` falls back to
+    /// "Plugin · <version>" on the caller's side.
+    pub description: Option<String>,
+    /// Manifest v2: the tile's live value, held as opaque `{{ ... }}`
+    /// expression source exactly like a text node's `value` -- evaluated by
+    /// `summary::evaluate_summary` at refresh time, never by this module.
+    pub summary: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -306,6 +338,12 @@ struct RawPluginManifest {
     repeats: Vec<Repeat>,
     #[serde(default)]
     template: Option<Template>,
+    #[serde(default)]
+    display_name: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    summary: Option<String>,
 }
 
 /// One `[[repeats]]` block: `source` names the fetched-data array whose
@@ -575,6 +613,65 @@ fn check_len(field: &'static str, value: &str, limit: usize) -> Result<(), Manif
     }
 }
 
+fn check_non_empty(field: &'static str, value: &str) -> Result<(), ManifestError> {
+    if value.is_empty() {
+        Err(ManifestError::EmptyString { field })
+    } else {
+        Ok(())
+    }
+}
+
+/// Refuses a `summary` whose `{{ ... }}` body references the device-binding
+/// namespace anywhere outside a string literal. This is a lexical scan, not
+/// expression parsing (the grammar stays `expr.rs`'s, exactly as this
+/// module's doc promises): it reads identifier-shaped tokens
+/// (`[A-Za-z0-9_.:]`, so `timer.status` and `time:angle:hour` are one token
+/// each), skips `"..."` literals with the same [`skip_string`] the nesting
+/// pre-scan uses, and asks [`looks_like_binding_namespace`] -- the compiler's
+/// own predicate -- about every token that is not a trailing path segment
+/// (one preceded by `.`, such as the `date` in `data.events[0].date`). A
+/// literal summary cannot reference a binding, and a malformed pair is
+/// `summary::evaluate_summary`'s named error, at the same layer a text
+/// node's is.
+fn validate_summary_source(summary: &str) -> Result<(), ManifestError> {
+    match classify_expression_source(summary) {
+        ExpressionSource::Expression(inner) => match summary_device_binding(inner) {
+            Some(binding) => Err(ManifestError::SummaryUsesDeviceBinding { binding }),
+            None => Ok(()),
+        },
+        ExpressionSource::Literal(_) | ExpressionSource::MalformedPartial => Ok(()),
+    }
+}
+
+fn summary_device_binding(inner: &str) -> Option<String> {
+    fn is_token_byte(byte: u8) -> bool {
+        byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b':')
+    }
+    let bytes = inner.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'"' {
+            i = skip_string(bytes, i, b'"');
+        } else if bytes[i].is_ascii_alphabetic() || bytes[i] == b'_' {
+            let start = i;
+            while i < bytes.len() && is_token_byte(bytes[i]) {
+                i += 1;
+            }
+            // Token bytes are ASCII, so both ends of this slice are char
+            // boundaries: `start` is an ASCII letter and `i` stops at the
+            // first non-token byte, which is never a UTF-8 continuation byte.
+            let token = &inner[start..i];
+            let is_path_segment = start > 0 && bytes[start - 1] == b'.';
+            if !is_path_segment && looks_like_binding_namespace(token) {
+                return Some(token.to_string());
+            }
+        } else {
+            i += 1;
+        }
+    }
+    None
+}
+
 /// Refuses any asset `file` that is not a single plain filename component.
 ///
 /// Final whole-stage review finding 1: `assets.rs` used to do a bare
@@ -659,6 +756,18 @@ impl PluginManifest {
     fn validate(&self) -> Result<(), ManifestError> {
         check_len("name", &self.name, MAX_NAME_LEN)?;
         check_len("version", &self.version, MAX_VERSION_LEN)?;
+        if let Some(display_name) = &self.display_name {
+            check_non_empty("display_name", display_name)?;
+            check_len("display_name", display_name, MAX_DISPLAY_NAME_LEN)?;
+        }
+        if let Some(description) = &self.description {
+            check_non_empty("description", description)?;
+            check_len("description", description, MAX_DESCRIPTION_LEN)?;
+        }
+        if let Some(summary) = &self.summary {
+            check_len("summary", summary, MAX_EXPR_SOURCE_LEN)?;
+            validate_summary_source(summary)?;
+        }
         self.source.validate()?;
 
         match &self.template {
@@ -884,6 +993,15 @@ pub fn parse_manifest(source: &str) -> Result<PluginManifest, ManifestError> {
                 field: "source.root",
             });
         }
+        for (field, value) in [
+            ("display_name", &raw.display_name),
+            ("description", &raw.description),
+            ("summary", &raw.summary),
+        ] {
+            if value.is_some() {
+                return Err(ManifestError::V2FieldInV1 { field });
+            }
+        }
         for node in raw
             .nodes
             .iter()
@@ -929,6 +1047,9 @@ pub fn parse_manifest(source: &str) -> Result<PluginManifest, ManifestError> {
         nodes: raw.nodes,
         repeats: raw.repeats,
         template: raw.template.unwrap_or(Template::Scene),
+        display_name: raw.display_name,
+        description: raw.description,
+        summary: raw.summary,
     };
     manifest.validate()?;
     Ok(manifest)
@@ -1617,5 +1738,181 @@ value = "{{ data.rows[item].label }}"
                 ..
             }
         ));
+    }
+
+    // -- Plugin-parity Task 1: the v2 presentation keys. --
+
+    /// A v2 header with `extra` inserted among the top-level keys, where
+    /// TOML requires them to sit: before the first table header.
+    fn v2_manifest_with(extra: &str) -> String {
+        format!(
+            "manifest_version = 2\nname = \"aqi\"\nversion = \"1.0.0\"\n{extra}\n\n\
+             [source]\nkind = \"json\"\nurl = \"https://example.invalid/aqi.json\"\n\
+             refresh_minutes = 15\n\n[template]\nkind = \"scene\"\n"
+        )
+    }
+
+    #[test]
+    fn a_v2_manifest_retains_all_three_presentation_keys() {
+        let manifest = parse_manifest(&v2_manifest_with(
+            "display_name = \"Air quality\"\ndescription = \"EPA index for a location\"\nsummary = \"{{ data.current.aqi }}\"",
+        ))
+        .expect("v2 presentation keys parse");
+        assert_eq!(manifest.display_name.as_deref(), Some("Air quality"));
+        assert_eq!(
+            manifest.description.as_deref(),
+            Some("EPA index for a location")
+        );
+        assert_eq!(manifest.summary.as_deref(), Some("{{ data.current.aqi }}"));
+    }
+
+    #[test]
+    fn a_v2_manifest_may_omit_every_presentation_key() {
+        let manifest = parse_manifest(&v2_manifest_with("")).expect("the keys are optional");
+        assert_eq!(manifest.display_name, None);
+        assert_eq!(manifest.description, None);
+        assert_eq!(manifest.summary, None);
+    }
+
+    #[test]
+    fn a_v1_manifest_rejects_each_presentation_key_by_name() {
+        for (field, line) in [
+            ("display_name", "display_name = \"Air quality\""),
+            ("description", "description = \"EPA index\""),
+            ("summary", "summary = \"{{ data.aqi }}\""),
+        ] {
+            let source = MINIMAL_HEADER.replacen("name =", &format!("{line}\nname ="), 1);
+            assert_eq!(
+                parse_manifest(&source).unwrap_err(),
+                ManifestError::V2FieldInV1 { field },
+                "v1 must refuse {field}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unknown_top_level_key_is_still_rejected_after_the_presentation_keys_exist() {
+        // Spec §3: "Every table remains `deny_unknown_fields`." Adding three
+        // OPTIONAL top-level keys is exactly the change that would tempt
+        // someone to drop `deny_unknown_fields` from `RawPluginManifest`, and
+        // dropping it fails silently -- a mistyped key would simply do
+        // nothing. Each probe below is a near-miss of a real key chosen so it
+        // is NOT a substring of any accepted key, so a message naming the
+        // offender cannot be satisfied by the "expected one of ..." list.
+        for key in ["display_naem", "descriptoin", "sumary", "bogus"] {
+            let err = parse_manifest(&v2_manifest_with(&format!("{key} = \"x\""))).unwrap_err();
+            match err {
+                ManifestError::Toml(message) => assert!(
+                    message.contains(key),
+                    "the {key} rejection must name the offending key; got: {message}"
+                ),
+                other => panic!("{key} must be refused as a TOML unknown field, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_display_name_one_byte_past_its_cap_is_rejected_by_name() {
+        let long = "a".repeat(MAX_DISPLAY_NAME_LEN + 1);
+        let err =
+            parse_manifest(&v2_manifest_with(&format!("display_name = \"{long}\""))).unwrap_err();
+        assert_eq!(
+            err,
+            ManifestError::StringTooLong {
+                field: "display_name",
+                limit: MAX_DISPLAY_NAME_LEN,
+                actual: MAX_DISPLAY_NAME_LEN + 1,
+            }
+        );
+    }
+
+    #[test]
+    fn a_display_name_exactly_at_its_cap_is_accepted() {
+        let exact = "a".repeat(MAX_DISPLAY_NAME_LEN);
+        parse_manifest(&v2_manifest_with(&format!("display_name = \"{exact}\"")))
+            .expect("64 bytes is the cap, not past it");
+    }
+
+    #[test]
+    fn a_description_one_byte_past_its_cap_is_rejected_by_name() {
+        let long = "a".repeat(MAX_DESCRIPTION_LEN + 1);
+        let err =
+            parse_manifest(&v2_manifest_with(&format!("description = \"{long}\""))).unwrap_err();
+        assert_eq!(
+            err,
+            ManifestError::StringTooLong {
+                field: "description",
+                limit: MAX_DESCRIPTION_LEN,
+                actual: MAX_DESCRIPTION_LEN + 1,
+            }
+        );
+    }
+
+    #[test]
+    fn an_empty_display_name_or_description_is_rejected_by_name() {
+        for (field, line) in [
+            ("display_name", "display_name = \"\""),
+            ("description", "description = \"\""),
+        ] {
+            assert_eq!(
+                parse_manifest(&v2_manifest_with(line)).unwrap_err(),
+                ManifestError::EmptyString { field }
+            );
+        }
+    }
+
+    #[test]
+    fn a_summary_source_over_the_expression_source_cap_is_rejected_by_name() {
+        let long = "a".repeat(MAX_EXPR_SOURCE_LEN + 1);
+        let err = parse_manifest(&v2_manifest_with(&format!("summary = \"{long}\""))).unwrap_err();
+        assert_eq!(
+            err,
+            ManifestError::StringTooLong {
+                field: "summary",
+                limit: MAX_EXPR_SOURCE_LEN,
+                actual: MAX_EXPR_SOURCE_LEN + 1,
+            }
+        );
+    }
+
+    #[test]
+    fn a_summary_naming_a_device_binding_is_rejected_by_name() {
+        for (summary, binding) in [
+            ("{{ field.title }}", "field.title"),
+            ("{{ upper(timer.status) }}", "timer.status"),
+            ("{{ time:angle:hour }}", "time:angle:hour"),
+            ("{{ date }}", "date"),
+            ("{{ default(data.x, field.title) }}", "field.title"),
+        ] {
+            let err =
+                parse_manifest(&v2_manifest_with(&format!("summary = \"{summary}\""))).unwrap_err();
+            assert_eq!(
+                err,
+                ManifestError::SummaryUsesDeviceBinding {
+                    binding: binding.to_string()
+                },
+                "{summary}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_summary_reading_data_that_merely_looks_like_a_binding_is_accepted() {
+        // `data.date` and `data.timer.status` are provider paths that read as
+        // one dotted token, `data.events[0].date` is the case where a binding
+        // WORD is a trailing path segment after an array index (agenda's own
+        // shape), `"field.title"` is a string literal, and plain text is a
+        // literal summary.
+        for summary in [
+            "{{ data.date }}",
+            "{{ data.timer.status }}",
+            "{{ data.events[0].date }}",
+            r#"{{ \"field.title\" }}"#,
+            r#"{{ default(data.dates, \"--\") }}"#,
+            "Plain text",
+        ] {
+            parse_manifest(&v2_manifest_with(&format!("summary = \"{summary}\"")))
+                .unwrap_or_else(|err| panic!("{summary} must be accepted: {err:?}"));
+        }
     }
 }

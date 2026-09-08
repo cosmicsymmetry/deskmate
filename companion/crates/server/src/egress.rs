@@ -707,6 +707,72 @@ fn describe_reqwest_error(error: &reqwest::Error) -> String {
     message
 }
 
+/// Builds the reqwest client used for one pinned hop, shared by the GET
+/// ([`fetch`]) and POST ([`fetch_post_form`]) paths so both get identical
+/// resolve-then-pin, no-redirect, timeout and no-proxy behaviour.
+///
+/// DO NOT REMOVE `.no_proxy()`: reqwest's `auto_sys_proxy` defaults to true and
+/// the underlying hyper-util connector reads `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`
+/// from the environment unconditionally. If any were set, the connection would
+/// go to the proxy instead of `pinned_addr`, silently defeating resolve-then-pin
+/// -- the `.resolve()` override would never be consulted. `.no_proxy()` clears
+/// any configured proxy and disables that environment lookup.
+fn build_pinned_client(
+    host: &str,
+    pinned_addr: SocketAddr,
+) -> Result<reqwest::Client, EgressError> {
+    reqwest::Client::builder()
+        .resolve(host, pinned_addr)
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(REQUEST_TIMEOUT)
+        .no_proxy()
+        .build()
+        .map_err(|error| EgressError::Request(describe_reqwest_error(&error)))
+}
+
+/// POSTs `form` as `application/x-www-form-urlencoded` to `url` under the full
+/// egress guard. Used for OAuth token exchange, refresh, and revoke (spec §6:
+/// credential-bearing calls keep resolve-then-pin). Single-hop by design: a
+/// token endpoint answering a POST with a redirect is not a flow to follow, so a
+/// 3xx is returned to the caller as-is (and treated as an error there) rather
+/// than re-issued as a POST or silently downgraded to GET.
+pub async fn fetch_post_form(
+    url: &str,
+    form: &[(&str, &str)],
+) -> Result<FetchResponse, EgressError> {
+    post_form_with_resolver(url, &RealResolver, form).await
+}
+
+async fn post_form_with_resolver(
+    url: &str,
+    resolver: &impl HopResolver,
+    form: &[(&str, &str)],
+) -> Result<FetchResponse, EgressError> {
+    match tokio::time::timeout(TOTAL_FETCH_BUDGET, post_form_inner(url, resolver, form)).await {
+        Ok(result) => result,
+        Err(_elapsed) => Err(EgressError::Timeout),
+    }
+}
+
+async fn post_form_inner(
+    url: &str,
+    resolver: &impl HopResolver,
+    form: &[(&str, &str)],
+) -> Result<FetchResponse, EgressError> {
+    let current = egress_guard(url)?;
+    let (host, pinned_addr) = resolver.resolve(&current).await?;
+    let client = build_pinned_client(&host, pinned_addr)?;
+    let response = client
+        .post(current.clone())
+        .form(form)
+        .send()
+        .await
+        .map_err(|error| EgressError::Request(describe_reqwest_error(&error)))?;
+    let status = response.status().as_u16();
+    let body = read_capped_body(response).await?;
+    Ok(FetchResponse { status, body })
+}
+
 async fn fetch_inner(url: &str, resolver: &impl HopResolver) -> Result<FetchResponse, EgressError> {
     let mut current = egress_guard(url)?;
     let mut redirects = RedirectBudget::new(MAX_REDIRECTS);
@@ -714,21 +780,7 @@ async fn fetch_inner(url: &str, resolver: &impl HopResolver) -> Result<FetchResp
     loop {
         let (host, pinned_addr) = resolver.resolve(&current).await?;
 
-        let client = reqwest::Client::builder()
-            .resolve(&host, pinned_addr)
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(REQUEST_TIMEOUT)
-            // DO NOT REMOVE: reqwest's `auto_sys_proxy` defaults to true,
-            // and the underlying hyper-util connector reads
-            // HTTP_PROXY/HTTPS_PROXY/ALL_PROXY from the environment
-            // unconditionally. If any of those were set, the connection
-            // would go to the proxy instead of `pinned_addr`, silently
-            // defeating resolve-then-pin -- the DNS override above would
-            // simply never be consulted. `.no_proxy()` clears any
-            // configured proxy and disables that environment lookup.
-            .no_proxy()
-            .build()
-            .map_err(|error| EgressError::Request(describe_reqwest_error(&error)))?;
+        let client = build_pinned_client(&host, pinned_addr)?;
 
         let response = client
             .get(current.clone())
@@ -940,6 +992,23 @@ mod tests {
                 "{url}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn post_form_refuses_the_cloud_metadata_address() {
+        // Literal-IP deny check runs before any network I/O, so this is offline.
+        let error = super::fetch_post_form("http://169.254.169.254/token", &[("a", "b")])
+            .await
+            .expect_err("metadata address must be denied");
+        assert!(matches!(error, EgressError::Denied { .. }));
+    }
+
+    #[tokio::test]
+    async fn post_form_rejects_a_non_http_scheme() {
+        let error = super::fetch_post_form("ftp://example.com/token", &[])
+            .await
+            .expect_err("non-http scheme must be rejected");
+        assert!(matches!(error, EgressError::UnsupportedScheme(_)));
     }
 
     #[test]

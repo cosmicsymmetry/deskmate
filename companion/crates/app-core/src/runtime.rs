@@ -3389,6 +3389,21 @@ fn render_card_preview(
         ));
     }
     let Some(snapshot) = state.plugin_snapshots.get(card_id).cloned() else {
+        // No cached snapshot is two different situations that must not share
+        // a message: a provider that has never been asked yet (still
+        // `Idle`) genuinely has a resolution coming, but one that already
+        // came back `Error` -- every curated plugin source points at
+        // `example.invalid`, so this is their ordinary state, not a corner
+        // case -- never will on its own. "Waiting for the first refresh"
+        // promises the second and must not be shown for the first; the same
+        // defect class Task 2 already closed for a hostless runtime.
+        if let Some(ProviderState::Error { message }) = state
+            .providers
+            .get(card_id)
+            .map(|provider| &provider.snapshot.state)
+        {
+            return Ok(preview_failure(message.clone()));
+        }
         return Ok(CardPreview {
             frame: None,
             state: CardPreviewState::Waiting,
@@ -6612,6 +6627,42 @@ mod tests {
         assert!(
             renders.lock().unwrap().is_empty(),
             "the pre-first-fetch state must not be reported as a compile failure"
+        );
+    }
+
+    #[test]
+    fn a_plugin_card_whose_provider_is_in_error_previews_as_error_not_waiting_forever() {
+        // Every curated plugin source points at `example.invalid`, so a
+        // provider that has already reported `Error` -- and therefore never
+        // populated `plugin_snapshots` at all -- is these plugins' ordinary
+        // state, not a corner case. "Waiting for the first refresh" promises
+        // a resolution that will never come for this card; the same defect
+        // class already closed for a hostless runtime just above.
+        let now = Instant::now();
+        let renders = Arc::new(Mutex::new(Vec::new()));
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let (mut state, _scheduler) = preview_state(now, &renders, &requests);
+        state
+            .providers
+            .get_mut("agenda")
+            .expect("agenda has a provider entry")
+            .snapshot
+            .state = ProviderState::Error {
+            message: "plugin \"agenda\" is not loaded".into(),
+        };
+
+        let preview =
+            render_card_preview(&mut state, "agenda").expect("an errored provider still previews");
+
+        assert_eq!(preview.state, CardPreviewState::Error);
+        assert_eq!(
+            preview.message.as_deref(),
+            Some("plugin \"agenda\" is not loaded")
+        );
+        assert!(preview.frame.is_none());
+        assert!(
+            renders.lock().unwrap().is_empty(),
+            "a permanently failed fetch must not be reported as a compile failure either"
         );
     }
 

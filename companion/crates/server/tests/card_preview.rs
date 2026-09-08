@@ -123,13 +123,13 @@ async fn rendering_a_preview_adds_nothing_to_the_device_transcript() {
     // loaded" is `plugin_error_result` (`value: None`, `error: Some(..)`).
     // `apply_provider_result` (`app-core/src/runtime.rs`) only inserts into
     // `state.plugin_snapshots` `if let Some(value) = result.value`, so this
-    // card never gets a cached snapshot at all -- the device-status provider
-    // entry legitimately reports `error` (that is what `settle_first_refresh`
-    // below waits for, as a synchronization point), but the preview route
-    // reads a *different* cache and reports `waiting` forever for a plugin id
-    // that can never be loaded. That gap is real and worth fixing in a future
-    // change; asserting on it here would conflate that question with this
-    // test's actual claim, which is about wire traffic, not preview outcome.
+    // card never gets a cached snapshot at all. `render_card_preview`
+    // (`app-core/src/runtime.rs`) consults the card's own provider state
+    // before falling into "Waiting for the first refresh": a provider that
+    // already reported `Error` previews as `error` with that provider's own
+    // message rather than promising a resolution that can never come, so the
+    // preview below settles on `error`, the same outcome
+    // `settle_first_refresh` waits for on the device-status side.
     let config = std::fs::read_to_string(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/tests/fixtures/one-plugin-card.json"
@@ -203,7 +203,7 @@ async fn rendering_a_preview_adds_nothing_to_the_device_transcript() {
                 &admin_token,
             )
             .await;
-            assert_eq!(body["state"], "waiting", "unexpected preview body: {body}");
+            assert_eq!(body["state"], "error", "unexpected preview body: {body}");
             assert!(body["png_base64"].is_null());
         }
     };

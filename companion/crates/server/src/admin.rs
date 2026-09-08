@@ -1308,6 +1308,7 @@ mod tests {
             ("svg-card", "svg-aqi"),
             ("never-fetched", "aqi"),
             ("absent-plugin", "not-installed"),
+            ("aqi-known-gap", "aqi"),
         ] {
             config.cards.push(app_core::CardSettings::Plugin {
                 id: id.into(),
@@ -1455,6 +1456,46 @@ mod tests {
                 .expect("an error state carries a message")
                 .contains("not-installed"),
             "the message must name the plugin: {}",
+            body["message"]
+        );
+        state.shutdown();
+    }
+
+    /// KNOWN GAP, marked the same way `scene_parity.rs`'s `known_gap` marks a
+    /// case the model provably cannot reproduce yet: closing the gap fails
+    /// this assertion and forces the marker's removal, so the gap cannot rot
+    /// into invisible missing coverage the way an unexplained skip would.
+    ///
+    /// The curated `aqi` plugin's icon-font asset (`icons.ttf`, byte-identical
+    /// to the committed `crates/lvgl-sim/assets/Inter-subset.ttf`) has a
+    /// `name` table with zero name records (verified directly against the
+    /// TTF: the table is a bare 6-byte header, `count = 0`). `fontdb` 0.23.0
+    /// requires at least one Typographic-Family or Family name record to
+    /// register a face at all (`fontdb-0.23.0/src/lib.rs`'s `parse_names`),
+    /// so `Database::load_font_data` on these exact bytes registers zero
+    /// faces. The device draws this font fine -- LVGL resolves glyphs by
+    /// codepoint, no name lookup needed -- but the server's raster fallback
+    /// (this preview route) references a scene's fonts by family name in
+    /// generated SVG, which is categorically impossible for a font `fontdb`
+    /// never indexed. Do NOT edit `plugins/aqi/icons.ttf` to fix this: its
+    /// bytes are digest-addressed and already committed for the device's own
+    /// wire path, and changing them moves asset digests and hardware goldens
+    /// well outside this task. When the rasterizer is changed to handle a
+    /// name-table-less font, THIS TEST WILL FAIL: delete it then, and add
+    /// `aqi` back to the ordinary display-list coverage above instead of
+    /// `claude-limits`.
+    #[tokio::test]
+    async fn aqi_preview_is_a_known_font_name_table_gap_delete_this_test_when_fixed() {
+        let (state, device_id, _config_dir) = state_with_preview_runtime();
+
+        let body = preview_once_settled(&state, &device_id, "aqi-known-gap").await;
+
+        assert_eq!(body["state"], "error");
+        assert!(body["png_base64"].is_null());
+        assert!(
+            body["message"].as_str().is_some_and(|message| message
+                .contains("font family is not in the explicit rasterizer font database")),
+            "expected the known icons.ttf name-table gap, got: {}",
             body["message"]
         );
         state.shutdown();

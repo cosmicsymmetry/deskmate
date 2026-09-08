@@ -239,6 +239,68 @@ describe("configuration draft helpers", () => {
     expect(addCard(entryFull, "weather")).toEqual({ config: entryFull, cardId: null });
   });
 
+  test("a plugin card is added by the same call, with the same two caps, as any other", () => {
+    const { config, cardId } = addCard(initialConfig(), {
+      kind: "plugin",
+      pluginId: "com.example.air-quality",
+      refreshMinutes: 15,
+    });
+    expect(cardId).toBe("plugin");
+    const added = config.cards.at(-1);
+    if (added?.kind !== "plugin") {
+      throw new Error("addCard did not append the plugin card");
+    }
+    expect(added).toEqual({
+      kind: "plugin",
+      id: "plugin",
+      title: "",
+      plugin_id: "com.example.air-quality",
+      tap_action: { kind: "none" },
+      refresh: { kind: "interval", minutes: 15 },
+      alert: { kind: "none" },
+    });
+    // Enrolled in the loop by the same code path as a built-in add.
+    expect(config.playlists[0].entries.at(-1)?.card_id).toBe("plugin");
+
+    // The card id is minted, never derived: a 64-byte plugin id cannot fit the
+    // 32-byte card-id bound, and a second card of the same plugin must not collide.
+    const second = addCard(config, {
+      kind: "plugin",
+      pluginId: "com.example.air-quality",
+      refreshMinutes: 15,
+    });
+    expect(second.cardId).toBe("plugin-2");
+
+    const cardFull: AppConfig = {
+      ...initialConfig(),
+      cards: Array.from({ length: 8 }, (_, index) => ({
+        ...initialConfig().cards[0],
+        id: `c${index}`,
+      })),
+    };
+    expect(addCard(cardFull, { kind: "plugin", pluginId: "aqi", refreshMinutes: 15 })).toEqual({
+      config: cardFull,
+      cardId: null,
+    });
+
+    const entryFull: AppConfig = {
+      ...initialConfig(),
+      playlists: [
+        {
+          ...initialConfig().playlists[0],
+          entries: Array.from({ length: 8 }, (_, index) => ({
+            card_id: `c${index}`,
+            dwell_seconds: null,
+          })),
+        },
+      ],
+    };
+    expect(addCard(entryFull, { kind: "plugin", pluginId: "aqi", refreshMinutes: 15 })).toEqual({
+      config: entryFull,
+      cardId: null,
+    });
+  });
+
   test("adding every kind produces a reachable, addable card", () => {
     const kinds = ["clock", "pomodoro", "calendar", "weather", "json-feed", "rss"] as const;
     let config: AppConfig = { ...initialConfig(), cards: [] };

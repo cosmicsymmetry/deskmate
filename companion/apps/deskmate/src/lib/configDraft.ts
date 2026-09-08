@@ -154,13 +154,23 @@ function nextId(prefix: string, used: Set<string>): string {
   return `${prefix}-${suffix}`;
 }
 
+/**
+ * What the caller is asking to add. A built-in is named by its kind; a plugin is
+ * named by its registry id plus the cadence its manifest declares, because the
+ * catalog is the only thing that knows either.
+ */
+export type AddCardRequest =
+  | AddableCardKind
+  | { kind: "plugin"; pluginId: string; refreshMinutes: number };
+
 /// Appends a new card with sane defaults for its kind and enrols it at the end
-/// of the active loop in the same draft. Supports all six built-in card kinds.
-/// Both v6 limits are checked before either collection changes, so adding is
-/// atomic even when a legacy card outside the loop has filled only one limit.
+/// of the active loop in the same draft. Supports all six built-in card kinds
+/// and a plugin from the server's catalog. Both v6 limits are checked before
+/// either collection changes, so adding is atomic even when a legacy card
+/// outside the loop has filled only one limit.
 export function addCard(
   config: AppConfig,
-  kind: AddableCardKind,
+  request: AddCardRequest,
 ): {
   config: AppConfig;
   cardId: string | null;
@@ -174,7 +184,9 @@ export function addCard(
     return { config, cardId: null };
   }
   const used = new Set(config.cards.map((card) => card.id));
-  const cardId = nextId(kind, used);
+  // "plugin" as the id stem, never the plugin id: `plugin_id` is bounded at 64 bytes
+  // and a card id at 32, and two cards of one plugin are legitimate.
+  const cardId = nextId(typeof request === "string" ? request : "plugin", used);
   const common = {
     id: cardId,
     tap_action: { kind: "none" } as const,
@@ -182,82 +194,94 @@ export function addCard(
   };
 
   let card: CardSettings;
-  switch (kind) {
-    case "clock":
-      card = {
-        kind,
-        ...common,
-        title: "Desk",
-        show_seconds: true,
-        template: { kind: "digital-clock" },
-        refresh: { kind: "device-local" },
-      };
-      break;
-    case "pomodoro":
-      card = {
-        kind,
-        ...common,
-        label: "Focus",
-        duration_seconds: 25 * 60,
-        template: { kind: "progress-ring" },
-        tap_action: { kind: "start-pause" },
-        refresh: { kind: "device-local" },
-        alert: { kind: "on-timer-finish", hold: { kind: "until-dismissed" } },
-      };
-      break;
-    case "calendar":
-      card = {
-        kind,
-        ...common,
-        title: "Up next",
-        source: { kind: "url", value: "" },
-        template: { kind: "row-list" },
-        refresh: { kind: "interval", minutes: 15 },
-      };
-      break;
-    case "weather":
-      card = {
-        kind,
-        ...common,
-        title: "Weather",
-        location: "",
-        units: "metric",
-        // `icon-badge-text` is the template weather's field composition was designed
-        // for (`value`/`label`/`badge`/`icon`/`temperature_tenths`/
-        // `apparent_temperature_tenths`/`unit`), and `wire_config()` now lowers it to
-        // the device — see `companion/crates/app-core/src/config.rs`. `icon_asset_id`
-        // stays unset here: rendering a pushed custom icon needs
-        // `CAPABILITY_ASSET_TRANSFER`, which is a later milestone task; until then the
-        // device renders its built-in icon for the `icon` field.
-        template: { kind: "icon-badge-text", icon_asset_id: null },
-        refresh: { kind: "interval", minutes: 30 },
-      };
-      break;
-    case "json-feed":
-      card = {
-        kind,
-        ...common,
-        title: "Feed",
-        url: "",
-        mappings: [],
-        // `big-number-label` is the template json-feed's single mapped value is
-        // designed for, and `wire_config()` now lowers it to the device — see
-        // `companion/crates/app-core/src/config.rs`.
-        template: { kind: "big-number-label" },
-        refresh: { kind: "interval", minutes: 15 },
-      };
-      break;
-    case "rss":
-      card = {
-        kind,
-        ...common,
-        title: "Headlines",
-        url: "",
-        max_items: 3,
-        template: { kind: "row-list" },
-        refresh: { kind: "interval", minutes: 30 },
-      };
-      break;
+  if (typeof request !== "string") {
+    card = {
+      kind: "plugin",
+      ...common,
+      // Blank on purpose: the display name already says what the card is, and a
+      // pre-filled title would be a second name nobody chose.
+      title: "",
+      plugin_id: request.pluginId,
+      refresh: { kind: "interval", minutes: request.refreshMinutes },
+    };
+  } else {
+    switch (request) {
+      case "clock":
+        card = {
+          kind: request,
+          ...common,
+          title: "Desk",
+          show_seconds: true,
+          template: { kind: "digital-clock" },
+          refresh: { kind: "device-local" },
+        };
+        break;
+      case "pomodoro":
+        card = {
+          kind: request,
+          ...common,
+          label: "Focus",
+          duration_seconds: 25 * 60,
+          template: { kind: "progress-ring" },
+          tap_action: { kind: "start-pause" },
+          refresh: { kind: "device-local" },
+          alert: { kind: "on-timer-finish", hold: { kind: "until-dismissed" } },
+        };
+        break;
+      case "calendar":
+        card = {
+          kind: request,
+          ...common,
+          title: "Up next",
+          source: { kind: "url", value: "" },
+          template: { kind: "row-list" },
+          refresh: { kind: "interval", minutes: 15 },
+        };
+        break;
+      case "weather":
+        card = {
+          kind: request,
+          ...common,
+          title: "Weather",
+          location: "",
+          units: "metric",
+          // `icon-badge-text` is the template weather's field composition was designed
+          // for (`value`/`label`/`badge`/`icon`/`temperature_tenths`/
+          // `apparent_temperature_tenths`/`unit`), and `wire_config()` now lowers it to
+          // the device — see `companion/crates/app-core/src/config.rs`. `icon_asset_id`
+          // stays unset here: rendering a pushed custom icon needs
+          // `CAPABILITY_ASSET_TRANSFER`, which is a later milestone task; until then the
+          // device renders its built-in icon for the `icon` field.
+          template: { kind: "icon-badge-text", icon_asset_id: null },
+          refresh: { kind: "interval", minutes: 30 },
+        };
+        break;
+      case "json-feed":
+        card = {
+          kind: request,
+          ...common,
+          title: "Feed",
+          url: "",
+          mappings: [],
+          // `big-number-label` is the template json-feed's single mapped value is
+          // designed for, and `wire_config()` now lowers it to the device — see
+          // `companion/crates/app-core/src/config.rs`.
+          template: { kind: "big-number-label" },
+          refresh: { kind: "interval", minutes: 15 },
+        };
+        break;
+      case "rss":
+        card = {
+          kind: request,
+          ...common,
+          title: "Headlines",
+          url: "",
+          max_items: 3,
+          template: { kind: "row-list" },
+          refresh: { kind: "interval", minutes: 30 },
+        };
+        break;
+    }
   }
 
   // Spread the COPIED config's own `cards` array, not the original `config.cards` —

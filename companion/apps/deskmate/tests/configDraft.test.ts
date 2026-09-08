@@ -561,6 +561,22 @@ describe("configuration draft helpers", () => {
     expect(segments[1].widthPercent).toBe(50);
   });
 
+  test("filmstripSegments names a plugin segment from the catalog it is given", () => {
+    const config: AppConfig = {
+      ...initialConfig(),
+      cards: [pluginCard()],
+      playlists: [
+        {
+          ...initialConfig().playlists[0],
+          advance: { kind: "timed", default_dwell_seconds: 20 },
+          entries: [{ card_id: "plugin-card", dwell_seconds: 30 }],
+        },
+      ],
+    };
+    expect(filmstripSegments(config, pluginCatalog())[0].name).toBe("Air quality");
+    expect(filmstripSegments(config)[0].name).toBe("com.example.air-quality");
+  });
+
   test("nextFilmstripCardId wraps past the last segment", () => {
     let config = addCard(initialConfig(), "pomodoro").config;
     config = addEntry(config, "workday", "pomodoro");

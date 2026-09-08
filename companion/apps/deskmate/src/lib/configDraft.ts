@@ -510,7 +510,10 @@ export interface FilmstripSegment {
 /// there is no dwell to speak of, so every segment is given equal width
 /// instead of a zero-width one, which is what lets the ribbon still show
 /// order (just not timing) in that mode.
-export function filmstripSegments(config: AppConfig): FilmstripSegment[] {
+export function filmstripSegments(
+  config: AppConfig,
+  catalog?: PluginCatalog | null,
+): FilmstripSegment[] {
   const playlist = activePlaylist(config);
   if (!playlist) {
     return [];
@@ -531,7 +534,7 @@ export function filmstripSegments(config: AppConfig): FilmstripSegment[] {
     const widthPercent = total > 0 ? (dwellSeconds[index] / total) * 100 : equalShare;
     const segment: FilmstripSegment = {
       cardId: card.id,
-      name: cardLabel(card),
+      name: cardLabel(card, catalog),
       title: cardTitle(card),
       dwellSeconds: dwellSeconds[index],
       widthPercent,

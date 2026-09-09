@@ -308,3 +308,14 @@ compiles its own `CURRENT_SCHEMA_VERSION` in, so a schema bump on the app side d
 nothing to a live deployment until the binary is replaced; the symptom is a typed
 "schema version N is not supported; expected M" on the first save, which reads like a
 config problem rather than a deploy problem.
+
+### Picture-card rollout
+
+The order is load-bearing:
+
+1. **Redeploy the server binary first.** It compiles its own
+   `CURRENT_SCHEMA_VERSION`, so until the binary moves every v7 save is refused with the
+   typed `schema version 7 is not supported; expected 6` error.
+2. Mint the image source and capture its plaintext token. It is shown once.
+3. Point the producer at the picture webhook and send its PNG.
+4. Save the v7 config that names the source.

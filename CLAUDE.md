@@ -614,6 +614,26 @@ of letting code and documentation diverge.
   test pinning both mountings; do not "restore fidelity" by passing the mounting through.
   This does not touch `lvgl-sim`'s own orientation support, which the parity gate and
   `framebuffer_diff` still need at both values.
+- **The companion app runs in WKWebView and the dev harness runs in Chrome, and they do
+  not agree about focus (learned the hard way 2026-09-09).** WebKit does not move focus to
+  a `<button>` on mousedown -- a macOS convention Chrome does not share. `CardList`'s
+  add-card slot closed its menu on any blur whose `relatedTarget` fell outside it, and
+  `relatedTarget` is **null** in exactly that case, so pressing the mouse on a menu entry
+  unmounted the menu between mousedown and click. The click never landed and **no card of
+  any kind could be added** -- built-in or plugin. The rule now is that only a blur landing
+  somewhere outside closes it; focus going nowhere is not focus leaving, and a click
+  genuinely outside is caught by the document mousedown listener instead.
+  - **The harness cannot see this class of defect, and neither can an accessibility-driven
+    check.** `VITE_DESKMATE_MOCK=1` runs in Chrome, where the click works. Driving the app
+    with `AXPress` also "worked", because it fires `click` with no `mousedown` at all. Two
+    green reproductions, both wrong. If a report is about clicking, the only honest check
+    is a real pointer event in the real app -- or a unit test that replays the WebKit
+    sequence, which is what `a click inside the menu is not mistaken for focus leaving it`
+    now does in 3 ms with no browser.
+  - Do not chase a layout explanation for "the click does nothing" before ruling out a
+    handler that unmounts the target mid-gesture. The add menu *also* had a real layout
+    defect (its flat 300px cap hid the whole plugin group below its own scroll fold, fixed
+    in `8d467b0`), and that plausible-looking bug masked this one for hours.
 - **A device that disappears from under an open serial fd used to wedge the ENTIRE Mac
   app, and "the app can't save to the server" was the visible symptom (root-caused and
   fixed 2026-09-09).** `SerialTransport::read` can block indefinitely once the USB device

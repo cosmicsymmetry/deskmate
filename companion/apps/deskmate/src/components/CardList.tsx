@@ -558,7 +558,16 @@ export function CardList({
           className="card-tile card-tile--add"
           ref={menuRootRef}
           onBlur={(event) => {
-            if (!menuRootRef.current?.contains(event.relatedTarget)) {
+            // Only a blur that lands somewhere outside closes the menu. WebKit
+            // does not move focus to a `<button>` on mousedown -- a macOS
+            // convention Chrome does not share -- so pressing the mouse on a
+            // menu item blurs the focused item with a null `relatedTarget`.
+            // Treating that as focus leaving unmounted the menu between
+            // mousedown and click, so the click never landed on the item and no
+            // card of any kind could be added. Focus going nowhere is not focus
+            // leaving; a click genuinely outside is caught by the document
+            // mousedown listener above.
+            if (event.relatedTarget && !menuRootRef.current?.contains(event.relatedTarget)) {
               closeMenu(false);
             }
           }}

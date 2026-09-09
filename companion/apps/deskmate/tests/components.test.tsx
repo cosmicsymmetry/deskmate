@@ -1902,6 +1902,68 @@ describe("settings accessibility and states", () => {
    * "I picked a plugin and nothing happened", because by the time the pointer
    * arrived there was nothing under it. It repositions instead.
    */
+  /**
+   * WebKit does not move focus to a `<button>` on mousedown — a macOS
+   * convention Chrome does not share. Opening the menu focuses its first item,
+   * so pressing the mouse on any entry blurred that item with a **null**
+   * `relatedTarget`. Reading that as "focus left the menu" unmounted the menu
+   * between mousedown and click, so the click never landed and no card of any
+   * kind could be added. Focus going nowhere is not focus leaving; a click
+   * genuinely outside is caught by the document mousedown listener instead.
+   *
+   * This is invisible to the browser harness, which runs in Chrome.
+   */
+  test("a click inside the menu is not mistaken for focus leaving it", async () => {
+    const config = cardListConfig([clockCard("clock", "Desk")]);
+    const added: string[] = [];
+    const container = document.createElement("div");
+    container.className = "face__work";
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    try {
+      await act(async () =>
+        root.render(
+          <CardList
+            config={config}
+            issues={[]}
+            cardData={[]}
+            pomodoros={[]}
+            providers={[]}
+            pluginKinds={[]}
+            catalog={null}
+            serverCardState={[]}
+            ownershipTier="networked"
+            selectedCardId={null}
+            onSelect={() => {}}
+            onAdd={(kind) => added.push(kind)}
+            onChange={() => {}}
+            onRemove={() => {}}
+          />,
+        ),
+      );
+      const slot = container.querySelector<HTMLButtonElement>(".card-tile__add");
+      await act(async () => slot?.click());
+      const firstItem = container.querySelector<HTMLButtonElement>('[role="menuitem"]');
+      if (!firstItem) {
+        throw new Error("the add menu rendered no items");
+      }
+
+      // What WebKit does when the mouse goes down on a menu item.
+      await act(async () => {
+        firstItem.dispatchEvent(new FocusEvent("focusout", { bubbles: true, relatedTarget: null }));
+      });
+
+      expect(container.querySelector(".menu")).not.toBeNull();
+
+      await act(async () => firstItem.click());
+      expect(added).toEqual(["clock"]);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
   test("the add menu survives the scroll that opening it causes", async () => {
     const config = cardListConfig([clockCard("clock", "Desk")]);
     const container = document.createElement("div");

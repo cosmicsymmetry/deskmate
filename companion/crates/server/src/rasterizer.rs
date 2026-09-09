@@ -17,7 +17,7 @@ use protocol::{
     SceneFontTier, SceneLabelAnchor, SceneNode, SceneValue,
 };
 
-const LVGL_IMAGE_HEADER_BYTES: usize = 12;
+pub(crate) const LVGL_IMAGE_HEADER_BYTES: usize = 12;
 const LVGL_IMAGE_MAGIC: u32 = 0x19;
 const LVGL_COLOR_FORMAT_RGB565: u32 = 0x12;
 const INTER_REGULAR: &[u8] = include_bytes!("../../../../tools/fonts/Inter-Regular.ttf");
@@ -1142,7 +1142,7 @@ fn expanded_subtree_cost<'a, 'input>(
     Ok(cost)
 }
 
-fn encode_rgb565(
+pub(crate) fn encode_rgb565(
     width: u32,
     height: u32,
     pixmap: &Pixmap,
@@ -1166,6 +1166,11 @@ fn encode_rgb565(
         );
     }
     Ok(bytes)
+}
+
+pub(crate) fn encode_rgb565_unbounded(width: u32, height: u32, pixmap: &Pixmap) -> Vec<u8> {
+    encode_rgb565(width, height, pixmap, &RenderDeadline::start())
+        .expect("encoding one fixed-size canvas must fit the render deadline")
 }
 
 fn pack_rgb565(red: u8, green: u8, blue: u8) -> u16 {

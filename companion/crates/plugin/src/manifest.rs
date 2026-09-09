@@ -242,6 +242,22 @@ pub enum ManifestError {
     /// those resolve, so this is a manifest error rather than a refresh-time
     /// failure that logs forever.
     SummaryUsesDeviceBinding { binding: String },
+    /// A `rect` geometry field held a string that is not expression source.
+    /// A bare `w = "180"` is an authoring slip, not a number: TOML already
+    /// spells a literal `180` without quotes, so the only thing a string can
+    /// usefully mean here is `"{{ ... }}"`.
+    MeasureNotExpression { field: &'static str, text: String },
+    /// A `rect` geometry expression referenced the device-binding namespace
+    /// (`time:`, `timer.`, `date`, `field.`). A measure is evaluated on the
+    /// server at compile time, where none of those resolve -- and even if one
+    /// did, it would be frozen into a literal at push time rather than
+    /// tracking. Rejected at parse time for the same reason `summary` is:
+    /// better a named manifest error than a refresh-time failure that logs
+    /// forever.
+    MeasureUsesDeviceBinding {
+        field: &'static str,
+        binding: String,
+    },
 }
 
 impl fmt::Display for ManifestError {
@@ -445,23 +461,62 @@ pub struct Point {
     pub y: i32,
 }
 
+/// A `rect` geometry field: either a literal number, or a `"{{ ... }}"`
+/// expression evaluated against the plugin's fetched data.
+///
+/// This is what makes a data-driven bar expressible. It is evaluated
+/// **at compile time, on the server**, and lands on the wire as an ordinary
+/// literal `SceneRect` -- so it needs no device binding, no capability bit,
+/// and no firmware change. That is the whole reason a bar is spelled this
+/// way rather than as a `SceneArc::end_binding`-style device binding: the
+/// device's binding vocabulary is a closed ratchet of nine domain tokens
+/// (`time:`, `timer.`, `date`, `field.`), and none of them can say
+/// "this plugin's fetched percentage".
+///
+/// The consequence worth knowing: a bar only moves when the card is
+/// re-pushed, which for a plugin card is its refresh cadence. A value that
+/// must tick between pushes is not a `Measure` -- it is a device binding,
+/// and the device does not have one for plugin data.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(untagged)]
+pub enum Measure {
+    /// A literal coordinate or length, exactly as every other geometry field.
+    Fixed(i32),
+    /// `"{{ ... }}"` expression source, evaluated to a number by the compiler.
+    Expression(String),
+}
+
+impl Measure {
+    /// The expression source, when this measure is one. Kept as a method so
+    /// the compiler and the validator agree on what counts as an expression
+    /// without either matching the variant by hand.
+    #[must_use]
+    pub fn expression(&self) -> Option<&str> {
+        match self {
+            Self::Fixed(_) => None,
+            Self::Expression(source) => Some(source),
+        }
+    }
+}
+
 /// A scene node, in the six-kind vocabulary the design spec names as
 /// plugin-authorable (§2): `rect`, `arc`, `line`, `text`, `image`, `glyph`.
 /// The wire has three more kinds (`scale`, `label`, `rotrect`) used only by
 /// hand-written builder code; the manifest does not expose them.
 ///
 /// Fields are typed and absolute, on the 448x368 canvas -- the manifest is
-/// a display list, not a layout language. `value` (on `text`) and `glyph`
-/// (on `glyph`) are the two fields that may carry `"{{ ... }}"` expression
-/// source; every other field is a literal.
+/// a display list, not a layout language. `value` (on `text`), `glyph` (on
+/// `glyph`) and `rect`'s four geometry fields (see [`Measure`]) are the
+/// fields that may carry `"{{ ... }}"` expression source; every other field
+/// is a literal.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum Node {
     Rect {
-        x: i32,
-        y: i32,
-        w: i32,
-        h: i32,
+        x: Measure,
+        y: Measure,
+        w: Measure,
+        h: Measure,
         radius: i32,
         fill: u32,
         #[serde(default = "default_opacity")]
@@ -640,6 +695,31 @@ fn validate_summary_source(summary: &str) -> Result<(), ManifestError> {
             None => Ok(()),
         },
         ExpressionSource::Literal(_) | ExpressionSource::MalformedPartial => Ok(()),
+    }
+}
+
+/// Bounds and screens one `rect` geometry measure. A literal number needs
+/// nothing; expression source is length-bounded like every other expression
+/// in the manifest, must actually be expression source, and must not reach
+/// for a device binding -- the same three checks `summary` gets, for the
+/// same reasons, reusing the same detector so the two can never disagree
+/// about what a binding looks like.
+fn validate_measure(field: &'static str, measure: &Measure) -> Result<(), ManifestError> {
+    let Some(source) = measure.expression() else {
+        return Ok(());
+    };
+    check_len(field, source, MAX_EXPR_SOURCE_LEN)?;
+    match classify_expression_source(source) {
+        ExpressionSource::Expression(inner) => match summary_device_binding(inner) {
+            Some(binding) => Err(ManifestError::MeasureUsesDeviceBinding { field, binding }),
+            None => Ok(()),
+        },
+        ExpressionSource::Literal(_) | ExpressionSource::MalformedPartial => {
+            Err(ManifestError::MeasureNotExpression {
+                field,
+                text: source.to_string(),
+            })
+        }
     }
 }
 
@@ -952,7 +1032,14 @@ impl Node {
                     (false, _) => Err(ManifestError::IncompleteBoundLineGeometry),
                 }
             }
-            Self::Rect { .. } | Self::Image { .. } => Ok(()),
+            Self::Rect { x, y, w, h, .. } => {
+                for (field, measure) in [("node.x", x), ("node.y", y), ("node.w", w), ("node.h", h)]
+                {
+                    validate_measure(field, measure)?;
+                }
+                Ok(())
+            }
+            Self::Image { .. } => Ok(()),
         }
     }
 }
@@ -1750,6 +1837,71 @@ value = "{{ data.rows[item].label }}"
              [source]\nkind = \"json\"\nurl = \"https://example.invalid/aqi.json\"\n\
              refresh_minutes = 15\n\n[template]\nkind = \"scene\"\n"
         )
+    }
+
+    /// The shape a progress bar is authored in: a literal track, and a fill
+    /// whose width is the data.
+    #[test]
+    fn a_rect_geometry_field_accepts_an_expression() {
+        let manifest = parse_manifest(&v2_manifest_with(
+            "[[nodes]]\nkind = \"rect\"\nx = 24\ny = 200\n\
+             w = \"{{ round(data.current.aqi * 1.8, 0) }}\"\nh = 12\n\
+             radius = 6\nfill = 0xFF8F2E",
+        ))
+        .expect("an expression measure parses");
+        let Node::Rect { x, w, .. } = &manifest.nodes[0] else {
+            panic!("expected a rect");
+        };
+        assert_eq!(x, &Measure::Fixed(24));
+        assert_eq!(
+            w.expression(),
+            Some("{{ round(data.current.aqi * 1.8, 0) }}")
+        );
+    }
+
+    /// TOML spells a literal number without quotes, so a quoted one is a
+    /// slip. Refusing it at parse time is what stops a bar silently pinning
+    /// at a constant width forever.
+    #[test]
+    fn a_quoted_rect_measure_that_is_not_an_expression_is_refused() {
+        let err = parse_manifest(&v2_manifest_with(
+            "[[nodes]]\nkind = \"rect\"\nx = 24\ny = 200\nw = \"180\"\nh = 12\n\
+             radius = 6\nfill = 0xFF8F2E",
+        ))
+        .unwrap_err();
+        assert_eq!(
+            err,
+            ManifestError::MeasureNotExpression {
+                field: "node.w",
+                text: "180".to_owned()
+            }
+        );
+    }
+
+    /// A measure is frozen into a literal at push time, so a device binding
+    /// in one could never tick even if it resolved. Same rejection as
+    /// `summary`, sharing the same detector.
+    #[test]
+    fn a_rect_measure_may_not_reach_for_a_device_binding() {
+        for (source, binding) in [
+            ("{{ timer.permille }}", "timer.permille"),
+            ("{{ field.title }}", "field.title"),
+            ("{{ date }}", "date"),
+        ] {
+            let err = parse_manifest(&v2_manifest_with(&format!(
+                "[[nodes]]\nkind = \"rect\"\nx = 24\ny = 200\nw = \"{source}\"\nh = 12\n\
+                 radius = 6\nfill = 0xFF8F2E"
+            )))
+            .unwrap_err();
+            assert_eq!(
+                err,
+                ManifestError::MeasureUsesDeviceBinding {
+                    field: "node.w",
+                    binding: binding.to_owned()
+                },
+                "{source}"
+            );
+        }
     }
 
     #[test]

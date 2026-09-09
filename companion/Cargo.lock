@@ -912,6 +912,7 @@ dependencies = [
  "app-core",
  "base64 0.22.1",
  "chrono",
+ "chrono-tz",
  "lvgl-sim",
  "serde",
  "serde_json",
@@ -2985,6 +2986,8 @@ name = "plugin"
 version = "0.1.0"
 dependencies = [
  "app-core",
+ "chrono",
+ "chrono-tz",
  "protocol",
  "providers",
  "serde",

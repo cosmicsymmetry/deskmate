@@ -52,8 +52,8 @@ use protocol::{
 use app_core::{BakedFontMetrics, SceneDataState, text_is_numeric, with_scene_data_state};
 
 use crate::assets::AssetSet;
-use crate::expr::{EvalContext, Expr, ExprError, FUEL_BUDGET, Fuel};
-use crate::manifest::{Align, Font, FontTier, Node, PluginManifest, Repeat, Template};
+use crate::expr::{EvalContext, EvalValue, Expr, ExprError, FUEL_BUDGET, Fuel};
+use crate::manifest::{Align, Font, FontTier, Measure, Node, PluginManifest, Repeat, Template};
 
 /// Maximum repetitions the one repeat form expands to, however long the
 /// fetched array actually is. Mirrors `RowListCard`'s five-row precedent
@@ -67,6 +67,18 @@ pub const MAX_REPEAT_ITEMS: usize = 5;
 /// face follows the same convention rather than inventing a second one.
 const PLUGIN_CANVAS_BACKGROUND: u32 = 0x0000_0000;
 
+/// The ceiling an evaluated [`Measure`] is clamped to. It is the canvas's
+/// long edge rather than the per-axis dimension because one clamp cannot
+/// know which axis it is on -- and it does not need to: this only stops a
+/// wild provider value from reaching the wire as something absurd, while
+/// `protocol`'s `rect_within_canvas` still enforces the real per-axis rule
+/// that `x + w` fits 448 and `y + h` fits 368.
+const MEASURE_CLAMP: i32 = if protocol::SCENE_CANVAS_WIDTH > protocol::SCENE_CANVAS_HEIGHT {
+    protocol::SCENE_CANVAS_WIDTH
+} else {
+    protocol::SCENE_CANVAS_HEIGHT
+};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CompileError {
     /// A value contains mustache delimiters but is not exactly one complete
@@ -74,6 +86,11 @@ pub enum CompileError {
     /// prefix/suffix interpolation, nested pairs, multiple pairs, and
     /// unmatched delimiters are authoring errors rather than literals.
     MalformedPartialInterpolation { text: String },
+    /// A `rect` geometry expression evaluated to something that is not a
+    /// finite number -- text, a boolean, or a missing field. Unlike a text
+    /// node, a geometry field has no reasonable rendering for "nothing", so
+    /// this is a fault rather than a blank.
+    MeasureNotNumeric { field: &'static str, value: String },
     /// A `{{ ... }}` value named something in the device-binding namespace
     /// (`timer.*`, `time:*`, `field.*`, `date`) that is not, in fact, one of
     /// the closed bindings the firmware evaluates locally
@@ -415,6 +432,74 @@ fn compile_value_source(
     Ok(bound_literal(&value.to_string()))
 }
 
+/// Resolves one `rect` geometry field to the literal the wire carries.
+///
+/// A `Measure::Fixed` passes straight through. An expression is evaluated
+/// against the plugin's fetched data and must produce a number: this is the
+/// one place in the manifest where a value is arithmetic rather than text,
+/// so `Missing` -- which `compile_value_source` deliberately renders as an
+/// empty string, because an absent datum is not a card fault -- has no
+/// sensible numeric reading and is refused. A manifest that wants an empty
+/// bar from missing data says so with the language's own `default()`, which
+/// keeps the choice with the author instead of guessing here.
+///
+/// The result is rounded to the nearest whole pixel and clamped to the
+/// canvas. Clamping rather than erroring is deliberate: a percentage that
+/// arrives as 103 is a provider being sloppy, not a broken manifest, and a
+/// bar that pins at full width is a better answer than a card that goes
+/// dark. `scene_model_validate` would reject an out-of-canvas rect anyway,
+/// so the clamp is also what keeps a sloppy provider from costing a push.
+fn compile_measure(
+    field: &'static str,
+    measure: &Measure,
+    ctx: &EvalContext<'_>,
+    fuel: &mut Fuel,
+    item_index: Option<usize>,
+) -> Result<i32, CompileError> {
+    let source = match measure {
+        Measure::Fixed(value) => return Ok(*value),
+        Measure::Expression(source) => source,
+    };
+    let inner = match classify_expression_source(source) {
+        ExpressionSource::Expression(inner) => inner,
+        // Both are rejected by `Node::validate` before a manifest can exist,
+        // so reaching either here means a hand-built `Node`, not parsed TOML.
+        ExpressionSource::Literal(_) | ExpressionSource::MalformedPartial => {
+            return Err(CompileError::MalformedPartialInterpolation {
+                text: source.clone(),
+            });
+        }
+    };
+    let mut trimmed = inner.to_string();
+    if let Some(index) = item_index {
+        trimmed = substitute_item_token(&trimmed, index);
+    }
+
+    let expr = Expr::parse(&trimmed).map_err(CompileError::Expression)?;
+    let number = match expr.eval(ctx, fuel).map_err(CompileError::Expression)? {
+        EvalValue::Number(number) if number.is_finite() => number,
+        other => {
+            return Err(CompileError::MeasureNotNumeric {
+                field,
+                value: other.to_string(),
+            });
+        }
+    };
+
+    let rounded = number.round();
+    Ok(if rounded <= 0.0 {
+        0
+    } else if rounded >= f64::from(MEASURE_CLAMP) {
+        MEASURE_CLAMP
+    } else {
+        // In range and finite, so the cast cannot saturate or wrap.
+        #[allow(clippy::cast_possible_truncation)]
+        {
+            rounded as i32
+        }
+    })
+}
+
 fn compile_position_binding(
     source: &str,
     field: &'static str,
@@ -597,16 +682,22 @@ fn compile_node(
             radius,
             fill,
             opacity,
-        } => Ok(SceneNode::Rect(SceneRect {
-            x: x.saturating_add(dx),
-            y: y.saturating_add(dy),
-            w: *w,
-            h: *h,
-            radius: *radius,
-            fill: *fill,
-            opacity: *opacity,
-            clip: None,
-        })),
+        } => {
+            let x = compile_measure("node.x", x, ctx, fuel, item_index)?;
+            let y = compile_measure("node.y", y, ctx, fuel, item_index)?;
+            let w = compile_measure("node.w", w, ctx, fuel, item_index)?;
+            let h = compile_measure("node.h", h, ctx, fuel, item_index)?;
+            Ok(SceneNode::Rect(SceneRect {
+                x: x.saturating_add(dx),
+                y: y.saturating_add(dy),
+                w,
+                h,
+                radius: *radius,
+                fill: *fill,
+                opacity: *opacity,
+                clip: None,
+            }))
+        }
         Node::Arc {
             cx,
             cy,
@@ -848,6 +939,10 @@ fn compile_repeat(
 /// resolve an asset-bearing manifest, and this function is defined in terms
 /// of it rather than duplicating its body.
 ///
+/// Renders `time_at` instants in **UTC**. Production goes through
+/// [`compile_scene_with_assets`], which requires the zone to be named
+/// explicitly precisely so no real card can pick one up by accident.
+///
 /// # Errors
 ///
 /// See [`CompileError`]'s variants.
@@ -857,7 +952,14 @@ pub fn compile_scene(
     metrics: &BakedFontMetrics,
     revision: u32,
 ) -> Result<Scene, CompileError> {
-    compile_scene_with_assets(manifest, snapshot, metrics, revision, &AssetSet::default())
+    compile_scene_with_assets(
+        manifest,
+        snapshot,
+        metrics,
+        revision,
+        &AssetSet::default(),
+        chrono_tz::UTC,
+    )
 }
 
 /// As [`compile_scene`], but resolves `image`/`glyph` nodes and asset-font
@@ -878,6 +980,7 @@ pub fn compile_scene_with_assets(
     metrics: &BakedFontMetrics,
     revision: u32,
     assets: &AssetSet,
+    timezone: chrono_tz::Tz,
 ) -> Result<Scene, CompileError> {
     if !matches!(manifest.template, Template::Scene) {
         return Err(CompileError::TemplateNotScene);
@@ -889,7 +992,7 @@ pub fn compile_scene_with_assets(
     // now exactly one place this table is built (`assets::resolve_assets`),
     // so the two can never disagree about a duplicate name: `resolve_assets`
     // already rejects one before `assets` can exist to be passed in here.
-    let ctx = EvalContext::new(&snapshot.value, assets.icon_codepoints());
+    let ctx = EvalContext::new(&snapshot.value, assets.icon_codepoints()).in_timezone(timezone);
     let mut fuel = Fuel::new(FUEL_BUDGET);
     let mut nodes = Vec::with_capacity(manifest.nodes.len());
 
@@ -1718,10 +1821,10 @@ mod tests {
                 dx: 0,
                 dy: 0,
                 nodes: vec![Node::Rect {
-                    x: 0,
-                    y: 0,
-                    w: 1,
-                    h: 1,
+                    x: Measure::Fixed(0),
+                    y: Measure::Fixed(0),
+                    w: Measure::Fixed(1),
+                    h: Measure::Fixed(1),
                     radius: 0,
                     fill: 0,
                     opacity: 255,
@@ -1757,10 +1860,10 @@ mod tests {
     fn a_manifest_that_exactly_fills_the_node_budget_with_the_footer_reserved_compiles() {
         let nodes: Vec<Node> = (0..protocol::MAX_SCENE_NODES - 1)
             .map(|_| Node::Rect {
-                x: 0,
-                y: 0,
-                w: 1,
-                h: 1,
+                x: Measure::Fixed(0),
+                y: Measure::Fixed(0),
+                w: Measure::Fixed(1),
+                h: Measure::Fixed(1),
                 radius: 0,
                 fill: 0,
                 opacity: 255,
@@ -1791,10 +1894,10 @@ mod tests {
     fn a_manifest_one_node_past_the_reserved_budget_is_refused_by_name() {
         let nodes: Vec<Node> = (0..protocol::MAX_SCENE_NODES)
             .map(|_| Node::Rect {
-                x: 0,
-                y: 0,
-                w: 1,
-                h: 1,
+                x: Measure::Fixed(0),
+                y: Measure::Fixed(0),
+                w: Measure::Fixed(1),
+                h: Measure::Fixed(1),
                 radius: 0,
                 fill: 0,
                 opacity: 255,
@@ -1914,10 +2017,10 @@ mod tests {
             },
             assets: Vec::new(),
             nodes: vec![Node::Rect {
-                x: 1000,
-                y: 0,
-                w: 10,
-                h: 10,
+                x: Measure::Fixed(1000),
+                y: Measure::Fixed(0),
+                w: Measure::Fixed(10),
+                h: Measure::Fixed(10),
                 radius: 0,
                 fill: 0,
                 opacity: 255,
@@ -2005,8 +2108,15 @@ mod tests {
         );
         let assets = resolve_assets(&manifest, dir.path()).expect("resolve");
 
-        let scene =
-            compile_scene_with_assets(&manifest, &snapshot(), &metrics(), 1, &assets).unwrap();
+        let scene = compile_scene_with_assets(
+            &manifest,
+            &snapshot(),
+            &metrics(),
+            1,
+            &assets,
+            chrono_tz::UTC,
+        )
+        .unwrap();
 
         let SceneNode::Image(image) = &scene.nodes[0] else {
             panic!("node 0 is not Image: {:?}", scene.nodes[0]);
@@ -2032,8 +2142,15 @@ mod tests {
         );
         let assets = resolve_assets(&manifest, dir.path()).expect("resolve");
 
-        let err =
-            compile_scene_with_assets(&manifest, &snapshot(), &metrics(), 1, &assets).unwrap_err();
+        let err = compile_scene_with_assets(
+            &manifest,
+            &snapshot(),
+            &metrics(),
+            1,
+            &assets,
+            chrono_tz::UTC,
+        )
+        .unwrap_err();
         assert_eq!(
             err,
             CompileError::AssetKindMismatch {
@@ -2078,8 +2195,15 @@ mod tests {
         let manifest = icon_font_manifest(vec![glyph_node("icons.ttf", r#"{{ icon("warn") }}"#)]);
         let assets = resolve_assets(&manifest, dir.path()).expect("resolve");
 
-        let scene =
-            compile_scene_with_assets(&manifest, &snapshot(), &metrics(), 1, &assets).unwrap();
+        let scene = compile_scene_with_assets(
+            &manifest,
+            &snapshot(),
+            &metrics(),
+            1,
+            &assets,
+            chrono_tz::UTC,
+        )
+        .unwrap();
 
         let SceneNode::Glyph(glyph) = &scene.nodes[0] else {
             panic!("node 0 is not Glyph: {:?}", scene.nodes[0]);
@@ -2114,8 +2238,15 @@ mod tests {
         )]);
         let assets = resolve_assets(&manifest, dir.path()).expect("resolve");
 
-        let scene = compile_scene_with_assets(&manifest, &snapshot(), &metrics(), 1, &assets)
-            .expect("an unknown icon name must not fail the scene");
+        let scene = compile_scene_with_assets(
+            &manifest,
+            &snapshot(),
+            &metrics(),
+            1,
+            &assets,
+            chrono_tz::UTC,
+        )
+        .expect("an unknown icon name must not fail the scene");
 
         let SceneNode::Glyph(glyph) = &scene.nodes[0] else {
             panic!("node 0 is not Glyph: {:?}", scene.nodes[0]);
@@ -2140,8 +2271,15 @@ mod tests {
         );
         let assets = resolve_assets(&manifest, dir.path()).expect("resolve");
 
-        let err =
-            compile_scene_with_assets(&manifest, &snapshot(), &metrics(), 1, &assets).unwrap_err();
+        let err = compile_scene_with_assets(
+            &manifest,
+            &snapshot(),
+            &metrics(),
+            1,
+            &assets,
+            chrono_tz::UTC,
+        )
+        .unwrap_err();
         assert_eq!(
             err,
             CompileError::AssetKindMismatch {
@@ -2165,9 +2303,15 @@ mod tests {
                 glyph: "static".to_string(),
             }],
         );
-        let err =
-            compile_scene_with_assets(&manifest, &snapshot(), &metrics(), 1, &AssetSet::default())
-                .unwrap_err();
+        let err = compile_scene_with_assets(
+            &manifest,
+            &snapshot(),
+            &metrics(),
+            1,
+            &AssetSet::default(),
+            chrono_tz::UTC,
+        )
+        .unwrap_err();
         assert_eq!(err, CompileError::GlyphFontMustBeAsset);
     }
 
@@ -2178,8 +2322,15 @@ mod tests {
         let manifest = icon_font_manifest(vec![glyph_node("icons.ttf", "{{ field.icon }}")]);
         let assets = resolve_assets(&manifest, dir.path()).expect("resolve");
 
-        let err =
-            compile_scene_with_assets(&manifest, &snapshot(), &metrics(), 1, &assets).unwrap_err();
+        let err = compile_scene_with_assets(
+            &manifest,
+            &snapshot(),
+            &metrics(),
+            1,
+            &assets,
+            chrono_tz::UTC,
+        )
+        .unwrap_err();
         assert_eq!(
             err,
             CompileError::GlyphBindingNotSupported {
@@ -2212,8 +2363,15 @@ mod tests {
         );
         let assets = resolve_assets(&manifest, dir.path()).expect("resolve");
 
-        let scene =
-            compile_scene_with_assets(&manifest, &snapshot(), &metrics(), 1, &assets).unwrap();
+        let scene = compile_scene_with_assets(
+            &manifest,
+            &snapshot(),
+            &metrics(),
+            1,
+            &assets,
+            chrono_tz::UTC,
+        )
+        .unwrap();
 
         let SceneFont::Asset { digest, pixel_size } = text_node(&scene, 0).font else {
             panic!(
@@ -2223,5 +2381,105 @@ mod tests {
         };
         assert_eq!(digest, assets.get("font.ttf").unwrap().digest);
         assert_eq!(pixel_size, 24);
+    }
+
+    // -- Bound rect geometry (`Measure`): the progress-bar shape. --
+
+    fn rect_manifest(w: &str) -> String {
+        format!(
+            "manifest_version = 2\nname = \"bar\"\nversion = \"1.0.0\"\n\n\
+             [source]\nkind = \"json\"\nurl = \"https://example.invalid/b.json\"\n\
+             refresh_minutes = 15\n\n[template]\nkind = \"scene\"\n\n\
+             [[nodes]]\nkind = \"rect\"\nx = 24\ny = 200\nw = {w}\nh = 12\n\
+             radius = 6\nfill = 0xFF8F2E\n"
+        )
+    }
+
+    fn compiled_rect_width(w: &str, value: serde_json::Value) -> i32 {
+        let manifest = crate::manifest::parse_manifest(&rect_manifest(w)).expect("manifest parses");
+        let snapshot = providers::ProviderSnapshot {
+            value,
+            refreshed_at: None,
+            age: None,
+            stale: false,
+            error: None,
+        };
+        let scene = compile_scene(&manifest, &snapshot, &metrics(), 1).expect("scene compiles");
+        match &scene.nodes[0] {
+            SceneNode::Rect(rect) => rect.w,
+            other => panic!("expected a rect, got {other:?}"),
+        }
+    }
+
+    /// The whole point of a measure: the fetched number decides the pixels,
+    /// and what reaches the wire is an ordinary literal that needs no
+    /// device binding and no capability bit.
+    #[test]
+    fn a_bound_rect_width_compiles_to_the_evaluated_number() {
+        assert_eq!(
+            compiled_rect_width(
+                "\"{{ scale(data.pct, 100, 176) }}\"",
+                serde_json::json!({ "pct": 28 })
+            ),
+            49
+        );
+    }
+
+    /// A percentage of zero is an empty bar, not a validation failure:
+    /// `rect_within_canvas` accepts a zero-width rect, and it draws nothing.
+    #[test]
+    fn a_measure_of_zero_is_an_empty_bar_rather_than_an_error() {
+        assert_eq!(
+            compiled_rect_width("\"{{ data.pct }}\"", serde_json::json!({ "pct": 0 })),
+            0
+        );
+    }
+
+    /// A provider reporting 103% is sloppy, not broken. `scale` pins the bar
+    /// at its track width rather than costing the card its push -- an
+    /// out-of-canvas rect is refused by `protocol`'s validator and would take
+    /// the whole scene with it.
+    #[test]
+    fn a_measure_beyond_its_track_is_clamped_rather_than_refused() {
+        assert_eq!(
+            compiled_rect_width(
+                "\"{{ scale(data.pct, 100, 176) }}\"",
+                serde_json::json!({ "pct": 103 })
+            ),
+            176
+        );
+    }
+
+    /// Unlike a text node, which renders a missing field as a blank because
+    /// an absent datum is not a card fault, geometry has no reading for
+    /// "nothing".
+    #[test]
+    fn a_measure_that_is_not_a_number_is_a_named_error() {
+        let manifest =
+            crate::manifest::parse_manifest(&rect_manifest("\"{{ data.missing }}\"")).unwrap();
+        let err = compile_scene(&manifest, &snapshot(), &metrics(), 1).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                CompileError::MeasureNotNumeric {
+                    field: "node.w",
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
+    }
+
+    /// And that strictness is a choice the author can decline with the
+    /// language's own `default()`, rather than a wall.
+    #[test]
+    fn a_missing_measure_can_be_defaulted_by_the_manifest_itself() {
+        assert_eq!(
+            compiled_rect_width(
+                "\"{{ default(data.missing, 0) }}\"",
+                serde_json::json!({ "other": 1 })
+            ),
+            0
+        );
     }
 }

@@ -139,6 +139,76 @@ A token that looks live but is not in the closed protocol vocabulary, such as
 Likewise, a valid token in the wrong position (`timer.status` on an arc, for example) is
 rejected.
 
+### Bound `rect` geometry (progress bars)
+
+A `rect`'s `x`, `y`, `w` and `h` each accept **either** a literal number **or** a
+`"{{ ... }}"` expression, evaluated against the plugin's fetched data:
+
+```toml
+[[nodes]]                                    # the track
+kind = "rect"
+x = 24
+y = 182
+w = 400
+h = 16
+radius = 8
+fill = 0x25252b
+
+[[nodes]]                                    # the fill
+kind = "rect"
+x = 24
+y = 182
+w = "{{ default(scale(data.pct, 100, 400), 0) }}"
+h = 16
+radius = 8
+fill = 0xf5f5f7
+```
+
+This is **not** a device binding. The expression is evaluated on the server at compile
+time and lands on the wire as an ordinary literal `SceneRect`, so it needs no capability
+bit and no firmware change. The consequence is that a bar moves only when the card is
+re-pushed — for a plugin card, its refresh cadence. A value that must tick between pushes
+is a device binding, and the device has none for plugin data.
+
+Rules:
+
+- A quoted geometry value that is not expression source (`w = "180"`) is
+  `MeasureNotExpression`. TOML spells a literal without quotes, so a quoted number is a
+  slip, not a number.
+- A geometry expression naming the device-binding namespace (`time:`, `timer.`, `date`,
+  `field.`) is `MeasureUsesDeviceBinding`, for the same reason `summary` rejects one: it
+  is evaluated where none of those resolve, and would be frozen into a literal anyway.
+- An expression that evaluates to something other than a finite number — text, a boolean,
+  or a missing field — is `MeasureNotNumeric`. Geometry has no reading for "nothing", so
+  unlike a text node (which renders a missing value as a blank) this is a fault. An author
+  who wants an empty bar from missing data says so with `default(..., 0)`.
+- The result is rounded to the nearest pixel and clamped to the canvas. Clamping rather
+  than erroring keeps a provider reporting 103% from costing the card its push.
+
+### Expression functions added in v2
+
+V2 adds two functions to v1's `upper`, `lower`, `round`, `truncate`, `default`, `icon`:
+
+| Function | Arity | Result |
+| --- | --- | --- |
+| `scale(value, in_max, out_max)` | 3 | Maps `value` from `[0, in_max]` onto `[0, out_max]`, clamped. A non-positive `in_max` yields `0`; a non-numeric or missing argument yields `Missing`. |
+| `time_at(epoch_seconds)` | 1 | A Unix instant rendered as `Wed 3:00 PM` **in the configuration's display timezone**. A missing, non-numeric, or out-of-range argument yields `Missing`, so `default()` can catch it. |
+
+`scale` exists because the expression language has no arithmetic — `?:` is Elvis, not a
+ternary, and there are no `+ - * /` operators — and a progress bar is the one shape that
+genuinely needs some. One named total function was preferred to an arithmetic grammar,
+which would have brought precedence, associativity, division by zero and overflow into a
+display list.
+
+`time_at` exists because a plugin face otherwise cannot know the user's timezone at all,
+which forces every feed carrying a time to pre-format it and freezes the *producer's*
+zone onto the panel. The zone comes from `preferences.timezone` — the app's "Display
+timezone" setting — and is passed explicitly to `compile_scene_with_assets`; the
+no-assets `compile_scene` renders in UTC and is for tests. The format matches the common
+`%a %-I:%M %p` spelling, so a manifest can fall back to a pre-formatted label with
+`default(time_at(data.at), data.at_label)` and the two are indistinguishable on the
+panel — which lets a feed and a server be updated in either order.
+
 ### SVG
 
 ```toml

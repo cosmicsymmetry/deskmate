@@ -726,6 +726,7 @@ impl PluginHost for FakePluginHost {
         plugin_id: &str,
         snapshot: &providers::ProviderSnapshot<serde_json::Value>,
         revision: u32,
+        _timezone: chrono_tz::Tz,
     ) -> Result<SceneCandidate, String> {
         let mut state = self.control.state.lock().unwrap();
         state.renders.push(PluginRenderCall {

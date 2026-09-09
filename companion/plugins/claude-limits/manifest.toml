@@ -20,6 +20,23 @@
 # resets_in_label ("3 hours 48 minutes") because an "in N minutes" string is
 # stale the minute after the ~10-minute producer wrote it, while an "at" label
 # is never wrong -- the same reasoning recorded in the TRMNL design.
+#
+# TIMEZONE: the face renders `resets_at_epoch` through `time_at`, which uses
+# the timezone from Deskmate's own "Display timezone" preference. It does NOT
+# use `resets_at_label`, which the producer bakes in whatever `PANEL_TZ` the
+# machine running that script happens to carry -- a value that has nothing to
+# do with this device and that nothing on this side could reconcile. The label
+# survives only as `default()`'s fallback, so a feed that predates the epoch
+# still renders something sensible and the two can be rolled out in either
+# order. Both spellings use the identical format, so the fallback is
+# indistinguishable on the panel.
+#
+# LAYOUT: two stacked full-width rows, each an eyebrow + reset time, a big
+# reading, and a bar. This follows the TRMNL panel and CodexBar's own window
+# rather than the two-column tiles this face used to draw: a bar's whole job
+# is to make a magnitude legible at a glance from across a desk, and a bar
+# gets four times the resolution across the full 400px content width than it
+# would in a 188px column. One percent is 4px here; it was under 2px there.
 manifest_version = 2
 name = "claude-limits"
 version = "1.0.0"
@@ -37,22 +54,61 @@ refresh_minutes = 10
 [template]
 kind = "scene"
 
-# Thin divider between the two window tiles.
-[[nodes]]
-kind = "rect"
-x = 223
-y = 96
-w = 2
-h = 176
-radius = 0
-fill = 0x25252B
+# --- Header: identity on the left, plan badge on the right. ----------------
 
-# Left tile: the shortest window (Session, 5 h).
 [[nodes]]
 kind = "text"
 x = 24
-baseline_y = 56
-w = 188
+baseline_y = 42
+w = 200
+align = "left"
+font = { tier = "caption" }
+color = 0x5C5C66
+value = "CLAUDE"
+
+# The Claude accent orange is the one non-monochrome ink on the face. The bars
+# below are deliberately NOT accented: the expression language has no
+# comparisons (`?:` is Elvis, not a ternary), so a coloured bar would have to
+# be coloured unconditionally -- which would shout "warning" at 5% exactly as
+# loudly as at 96%. A neutral bar states a magnitude and nothing more, which
+# is also what the TRMNL panel this face twins does.
+[[nodes]]
+kind = "text"
+x = 224
+baseline_y = 42
+w = 200
+align = "right"
+font = { tier = "caption" }
+color = 0xFF8F2E
+value = "{{ data.plan }}"
+
+[[nodes]]
+kind = "rect"
+x = 24
+y = 58
+w = 400
+h = 2
+radius = 0
+fill = 0x25252B
+
+# --- Row 1: the shortest window (Session, 5 h). ----------------------------
+#
+# Every value here is wholly literal or wholly `{{ ... }}`: a manifest string
+# has no interpolation inside it by design, so "28%" cannot be one node and
+# "RESETS Wed 3:00 PM" cannot be one either. The reading is therefore
+# right-aligned to a fixed edge with the `%` parked just past it -- which is
+# how tabular numerals should be set anyway -- and the word "RESETS" is its
+# own dim caption ahead of the instant.
+#
+# The reading and its unit share a baseline across two tiers. That is correct
+# rather than a compromise: `baseline_y` anchors type by its baseline, so
+# mixed sizes sit on one line the way they would in any typesetting system.
+
+[[nodes]]
+kind = "text"
+x = 24
+baseline_y = 130
+w = 180
 align = "left"
 font = { tier = "caption" }
 color = 0x5C5C66
@@ -60,50 +116,75 @@ value = "{{ upper(data.windows[0].name) }}"
 
 [[nodes]]
 kind = "text"
-x = 24
-baseline_y = 200
-w = 188
-align = "center"
+x = 214
+baseline_y = 130
+w = 150
+align = "right"
 font = { tier = "display" }
 color = 0xF5F5F7
 value = "{{ default(round(data.windows[0].used_pct, 0), \"--\") }}"
 
 [[nodes]]
 kind = "text"
-x = 24
-baseline_y = 232
-w = 188
-align = "center"
-font = { tier = "caption" }
+x = 366
+baseline_y = 130
+w = 58
+align = "left"
+font = { tier = "display" }
 color = 0x5C5C66
-value = "% USED"
+value = "%"
+
+[[nodes]]
+kind = "rect"
+x = 24
+y = 148
+w = 400
+h = 16
+radius = 8
+fill = 0x25252B
+
+[[nodes]]
+kind = "rect"
+x = 24
+y = 148
+w = "{{ default(scale(data.windows[0].used_pct, 100, 400), 0) }}"
+h = 16
+radius = 8
+fill = 0xF5F5F7
 
 [[nodes]]
 kind = "text"
 x = 24
-baseline_y = 264
-w = 188
-align = "center"
+baseline_y = 192
+w = 76
+align = "left"
 font = { tier = "caption" }
 color = 0x5C5C66
 value = "RESETS"
 
 [[nodes]]
 kind = "text"
-x = 24
-baseline_y = 292
-w = 188
-align = "center"
+x = 104
+baseline_y = 192
+w = 200
+align = "left"
 font = { tier = "caption" }
 color = 0xF5F5F7
-value = "{{ data.windows[0].resets_at_label }}"
+value = "{{ default(time_at(data.windows[0].resets_at_epoch), data.windows[0].resets_at_label) }}"
 
-# Right tile: the next window (Weekly, 7 d).
+# The `default(..., 0)` is load-bearing, not defensive noise: a geometry field
+# has no reading for "nothing", so the compiler refuses a missing measure by
+# design rather than guessing zero behind the author's back. This is the author
+# saying what a card with no data yet should draw -- an empty track. Without
+# it, the empty-data state fails to compile, which the golden gate catches.
+
+# --- Row 2: the next window (Weekly, 7 d), one 112px stride below row 1. ---
+
 [[nodes]]
 kind = "text"
-x = 236
-baseline_y = 56
-w = 188
+x = 24
+baseline_y = 242
+w = 180
 align = "left"
 font = { tier = "caption" }
 color = 0x5C5C66
@@ -111,55 +192,58 @@ value = "{{ upper(data.windows[1].name) }}"
 
 [[nodes]]
 kind = "text"
-x = 236
-baseline_y = 200
-w = 188
-align = "center"
+x = 214
+baseline_y = 242
+w = 150
+align = "right"
 font = { tier = "display" }
 color = 0xF5F5F7
 value = "{{ default(round(data.windows[1].used_pct, 0), \"--\") }}"
 
 [[nodes]]
 kind = "text"
-x = 236
-baseline_y = 232
-w = 188
-align = "center"
-font = { tier = "caption" }
+x = 366
+baseline_y = 242
+w = 58
+align = "left"
+font = { tier = "display" }
 color = 0x5C5C66
-value = "% USED"
+value = "%"
+
+[[nodes]]
+kind = "rect"
+x = 24
+y = 260
+w = 400
+h = 16
+radius = 8
+fill = 0x25252B
+
+[[nodes]]
+kind = "rect"
+x = 24
+y = 260
+w = "{{ default(scale(data.windows[1].used_pct, 100, 400), 0) }}"
+h = 16
+radius = 8
+fill = 0xF5F5F7
 
 [[nodes]]
 kind = "text"
-x = 236
-baseline_y = 264
-w = 188
-align = "center"
+x = 24
+baseline_y = 304
+w = 76
+align = "left"
 font = { tier = "caption" }
 color = 0x5C5C66
 value = "RESETS"
 
 [[nodes]]
 kind = "text"
-x = 236
-baseline_y = 292
-w = 188
-align = "center"
+x = 104
+baseline_y = 304
+w = 200
+align = "left"
 font = { tier = "caption" }
 color = 0xF5F5F7
-value = "{{ data.windows[1].resets_at_label }}"
-
-# Plan badge, centred above the shared footer zone. baseline_y = 320 is the
-# deepest a caption row can sit without touching the stale/error footer's
-# box (y=330..352) -- the arithmetic is worked out in the aqi manifest's
-# field.title comment and holds here unchanged. The Claude accent orange is
-# the one non-monochrome ink on the face, matching the aqi hero's accent.
-[[nodes]]
-kind = "text"
-x = 24
-baseline_y = 320
-w = 400
-align = "center"
-font = { tier = "caption" }
-color = 0xFF8F2E
-value = "{{ data.plan }}"
+value = "{{ default(time_at(data.windows[1].resets_at_epoch), data.windows[1].resets_at_label) }}"

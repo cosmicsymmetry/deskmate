@@ -251,6 +251,11 @@ impl Fuel {
 pub struct EvalContext<'a> {
     data: Option<&'a serde_json::Value>,
     icons: Option<&'a HashMap<String, u32>>,
+    /// The zone `time_at` renders an instant in. Defaults to UTC so every
+    /// existing constructor keeps working and no caller can accidentally get
+    /// a *random* zone -- only a wrong-but-obvious one, which shows up as
+    /// visibly shifted times rather than as silent corruption.
+    timezone: chrono_tz::Tz,
 }
 
 impl<'a> EvalContext<'a> {
@@ -261,6 +266,7 @@ impl<'a> EvalContext<'a> {
         Self {
             data: None,
             icons: None,
+            timezone: chrono_tz::UTC,
         }
     }
 
@@ -271,6 +277,7 @@ impl<'a> EvalContext<'a> {
         Self {
             data: Some(data),
             icons: None,
+            timezone: chrono_tz::UTC,
         }
     }
 
@@ -281,7 +288,18 @@ impl<'a> EvalContext<'a> {
         Self {
             data: Some(data),
             icons: Some(icons),
+            timezone: chrono_tz::UTC,
         }
+    }
+
+    /// Renders `time_at` instants in `timezone` instead of UTC. Separate from
+    /// the constructors so adding a zone to the one production call path did
+    /// not have to churn every test and golden case that legitimately does
+    /// not care which zone it is.
+    #[must_use]
+    pub fn in_timezone(mut self, timezone: chrono_tz::Tz) -> Self {
+        self.timezone = timezone;
+        self
     }
 }
 
@@ -311,6 +329,8 @@ enum Function {
     Truncate,
     Default,
     Icon,
+    Scale,
+    TimeAt,
 }
 
 impl Function {
@@ -322,6 +342,8 @@ impl Function {
             "truncate" => Some(Self::Truncate),
             "default" => Some(Self::Default),
             "icon" => Some(Self::Icon),
+            "scale" => Some(Self::Scale),
+            "time_at" => Some(Self::TimeAt),
             _ => None,
         }
     }
@@ -334,13 +356,16 @@ impl Function {
             Self::Truncate => "truncate",
             Self::Default => "default",
             Self::Icon => "icon",
+            Self::Scale => "scale",
+            Self::TimeAt => "time_at",
         }
     }
 
     fn arity(self) -> usize {
         match self {
-            Self::Upper | Self::Lower | Self::Icon => 1,
+            Self::Upper | Self::Lower | Self::Icon | Self::TimeAt => 1,
             Self::Round | Self::Truncate | Self::Default => 2,
+            Self::Scale => 3,
         }
     }
 }
@@ -809,7 +834,92 @@ fn eval_call(
             let name = eval_node(&args[0], ctx, fuel)?;
             Ok(call_icon(&name, ctx.icons))
         }
+        Function::Scale => {
+            let value = eval_node(&args[0], ctx, fuel)?;
+            let in_max = eval_node(&args[1], ctx, fuel)?;
+            let out_max = eval_node(&args[2], ctx, fuel)?;
+            Ok(call_scale(&value, &in_max, &out_max))
+        }
+        Function::TimeAt => {
+            let epoch = eval_node(&args[0], ctx, fuel)?;
+            call_time_at(&epoch, ctx.timezone)
+        }
     }
+}
+
+/// `scale(value, in_max, out_max)` -- maps `value` from `[0, in_max]` onto
+/// `[0, out_max]`, clamped to that range.
+///
+/// This exists because the expression language has no arithmetic, and a
+/// progress bar is the one shape that genuinely needs some: a percentage
+/// has to become a pixel width. Opening up `+ - * /` would mean precedence,
+/// associativity, division by zero and overflow -- a lot of new grammar for
+/// a display list -- where one named, total function does the whole job and
+/// says what it is at the call site.
+///
+/// Total by construction, because every caller is a geometry field that must
+/// produce a number:
+/// - a non-numeric or missing argument yields `Missing`, which the compiler
+///   then reports against the field that asked for it;
+/// - a non-positive `in_max` yields `0`, since no mapping is meaningful and
+///   a provider reporting a zero limit is a data fault, not a manifest one;
+/// - the result is clamped, so a provider reporting 103% pins the bar full
+///   rather than drawing past the canvas.
+fn call_scale(value: &EvalValue, in_max: &EvalValue, out_max: &EvalValue) -> EvalValue {
+    let (EvalValue::Number(value), EvalValue::Number(in_max), EvalValue::Number(out_max)) =
+        (value, in_max, out_max)
+    else {
+        return EvalValue::Missing;
+    };
+    if !value.is_finite() || !in_max.is_finite() || !out_max.is_finite() {
+        return EvalValue::Missing;
+    }
+    if *in_max <= 0.0 {
+        return EvalValue::Number(0.0);
+    }
+    let scaled = value / in_max * out_max;
+    EvalValue::Number(scaled.clamp(0.0_f64.min(*out_max), 0.0_f64.max(*out_max)))
+}
+
+/// `time_at(epoch_seconds)` -- renders a Unix instant as `Wed 3:00 PM`, in
+/// the timezone the *configuration* names, not the one whoever produced the
+/// feed happened to be standing in.
+///
+/// This closes a real hole: a plugin face could not know the user's timezone
+/// at all, so any feed carrying a time had to pre-format it, freezing the
+/// producer's zone into the panel. `claude-limits` is the case that found it
+/// -- its feed is written by a script on a VM whose `PANEL_TZ` is nothing to
+/// do with Deskmate's own "Display timezone" setting, so the two could
+/// disagree and nothing on this side could reconcile them.
+///
+/// The format matches the producer's `_fmt_at` byte for byte, so a manifest
+/// can fall back to a pre-formatted label with `default()` and the two
+/// spellings are indistinguishable on the panel. That is what lets the
+/// server and the feed be updated in either order.
+///
+/// A missing, non-numeric, or out-of-range argument yields `Missing` rather
+/// than an error, so `default()` can catch it -- an epoch that has not been
+/// added to a feed yet is an ordinary rollout state, not a card fault.
+fn call_time_at(epoch: &EvalValue, timezone: chrono_tz::Tz) -> Result<EvalValue, ExprError> {
+    use chrono::TimeZone as _;
+
+    let EvalValue::Number(seconds) = epoch else {
+        return Ok(EvalValue::Missing);
+    };
+    if !seconds.is_finite() {
+        return Ok(EvalValue::Missing);
+    }
+    // `as i64` on a non-finite or out-of-range f64 is a saturating cast in
+    // Rust, but `timestamp_opt` is what actually decides the range, so the
+    // guard above plus its `None` arm covers every input.
+    #[allow(clippy::cast_possible_truncation)]
+    let Some(instant) = chrono::Utc.timestamp_opt(*seconds as i64, 0).single() else {
+        return Ok(EvalValue::Missing);
+    };
+    let local = instant.with_timezone(&timezone);
+    Ok(EvalValue::Text(bound_text(
+        local.format("%a %-I:%M %p").to_string(),
+    )?))
 }
 
 fn call_upper(x: &EvalValue) -> Result<EvalValue, ExprError> {
@@ -1319,5 +1429,156 @@ mod tests {
             .eval(&ctx, &mut fuel)
             .unwrap();
         assert_eq!(rounded, EvalValue::Missing);
+    }
+
+    // -- `scale`: the only arithmetic the language has, and why.
+
+    fn scaled(source: &str, data: &serde_json::Value) -> EvalValue {
+        let ctx = EvalContext::with_data(data);
+        let mut fuel = Fuel::new(FUEL_BUDGET);
+        Expr::parse(source).unwrap().eval(&ctx, &mut fuel).unwrap()
+    }
+
+    #[test]
+    fn scale_maps_a_percentage_onto_a_track_width() {
+        assert_eq!(
+            scaled(
+                "scale(data.pct, 100, 176)",
+                &serde_json::json!({ "pct": 50 })
+            ),
+            EvalValue::Number(88.0)
+        );
+        assert_eq!(
+            scaled(
+                "scale(data.pct, 100, 176)",
+                &serde_json::json!({ "pct": 0 })
+            ),
+            EvalValue::Number(0.0)
+        );
+    }
+
+    /// The clamp is the point: a provider that reports over its own maximum
+    /// must not draw past the track, and one that reports below zero must
+    /// not draw backwards.
+    #[test]
+    fn scale_clamps_to_the_output_range_at_both_ends() {
+        assert_eq!(
+            scaled(
+                "scale(data.pct, 100, 176)",
+                &serde_json::json!({ "pct": 240 })
+            ),
+            EvalValue::Number(176.0)
+        );
+        assert_eq!(
+            scaled(
+                "scale(data.pct, 100, 176)",
+                &serde_json::json!({ "pct": -8 })
+            ),
+            EvalValue::Number(0.0)
+        );
+    }
+
+    /// A zero limit has no meaningful mapping, and it arrives from data
+    /// rather than from the manifest -- so it is an empty bar, not a fault
+    /// that would take the whole card down.
+    #[test]
+    fn scale_of_a_zero_maximum_is_empty_rather_than_infinite() {
+        let value = scaled(
+            "scale(data.used, data.limit, 176)",
+            &serde_json::json!({ "used": 5, "limit": 0 }),
+        );
+        assert_eq!(value, EvalValue::Number(0.0));
+    }
+
+    /// Missing propagates rather than becoming a silent zero, so the
+    /// compiler can name the field that had no number.
+    #[test]
+    fn scale_of_a_missing_or_non_numeric_value_is_missing() {
+        assert_eq!(
+            scaled("scale(data.absent, 100, 176)", &serde_json::json!({})),
+            EvalValue::Missing
+        );
+        assert_eq!(
+            scaled(
+                "scale(data.word, 100, 176)",
+                &serde_json::json!({ "word": "high" })
+            ),
+            EvalValue::Missing
+        );
+    }
+
+    // -- `time_at`: an instant rendered where the user lives.
+
+    /// The same instant, two zones, two readings. This is the whole point:
+    /// before `time_at`, a plugin face could only show whatever string the
+    /// feed's producer had already formatted in its own timezone.
+    #[test]
+    fn time_at_renders_one_instant_differently_per_zone() {
+        // 2026-09-02 14:09:00 UTC.
+        let data = serde_json::json!({ "at": 1_788_358_140 });
+
+        let utc = EvalContext::with_data(&data);
+        let tbilisi = EvalContext::with_data(&data).in_timezone(chrono_tz::Asia::Tbilisi);
+        let mut fuel = Fuel::new(FUEL_BUDGET);
+        let expr = Expr::parse("time_at(data.at)").unwrap();
+
+        assert_eq!(
+            expr.eval(&utc, &mut fuel).unwrap(),
+            EvalValue::Text("Wed 2:09 PM".to_owned())
+        );
+        assert_eq!(
+            expr.eval(&tbilisi, &mut fuel).unwrap(),
+            EvalValue::Text("Wed 6:09 PM".to_owned())
+        );
+    }
+
+    /// The format is byte-identical to the producer's `_fmt_at`, which is
+    /// what lets a manifest fall back to a pre-formatted label with
+    /// `default()` without the two spellings looking different on the panel.
+    #[test]
+    fn time_at_matches_the_producers_own_label_format() {
+        let data = serde_json::json!({ "midnight": 1_788_307_200, "noon": 1_788_350_400 });
+        let ctx = EvalContext::with_data(&data);
+        let mut fuel = Fuel::new(FUEL_BUDGET);
+
+        // Hour 0 must read 12 AM, not 0 AM; hour 12 must read 12 PM.
+        assert_eq!(
+            Expr::parse("time_at(data.midnight)")
+                .unwrap()
+                .eval(&ctx, &mut fuel)
+                .unwrap(),
+            EvalValue::Text("Wed 12:00 AM".to_owned())
+        );
+        assert_eq!(
+            Expr::parse("time_at(data.noon)")
+                .unwrap()
+                .eval(&ctx, &mut fuel)
+                .unwrap(),
+            EvalValue::Text("Wed 12:00 PM".to_owned())
+        );
+    }
+
+    /// A feed that has not gained its epoch field yet is an ordinary rollout
+    /// state, so it must be catchable by `default()` rather than a fault.
+    #[test]
+    fn time_at_of_a_missing_or_non_numeric_argument_is_missing() {
+        let data = serde_json::json!({ "label": "Wed 6:09 PM" });
+        let ctx = EvalContext::with_data(&data);
+        let mut fuel = Fuel::new(FUEL_BUDGET);
+
+        for source in ["time_at(data.absent)", "time_at(data.label)"] {
+            assert_eq!(
+                Expr::parse(source).unwrap().eval(&ctx, &mut fuel).unwrap(),
+                EvalValue::Missing,
+                "{source}"
+            );
+        }
+        assert_eq!(
+            Expr::parse("default(time_at(data.absent), data.label)")
+                .unwrap()
+                .eval(&ctx, &mut fuel)
+                .unwrap(),
+            EvalValue::Text("Wed 6:09 PM".to_owned())
+        );
     }
 }

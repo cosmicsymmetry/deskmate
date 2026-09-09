@@ -44,6 +44,7 @@ impl PluginHost for ServerPluginHost {
         plugin_id: &str,
         snapshot: &ProviderSnapshot<serde_json::Value>,
         revision: u32,
+        timezone: plugin::Tz,
     ) -> Result<SceneCandidate, String> {
         let loaded = self
             .registry
@@ -68,6 +69,7 @@ impl PluginHost for ServerPluginHost {
                 &BakedFontMetrics::SHIPPED,
                 revision,
                 &loaded.assets,
+                timezone,
             )
         }) {
             Ok(Ok(scene)) => Ok(SceneCandidate::DisplayList(scene)),
@@ -204,7 +206,7 @@ mod tests {
     fn real_aqi_plugin_compiles_to_a_protocol_valid_scene() {
         let mut host = ServerPluginHost::new(curated_registry());
         let candidate = host
-            .render_scene("aqi", &aqi_snapshot(), 41)
+            .render_scene("aqi", &aqi_snapshot(), 41, plugin::Tz::UTC)
             .expect("compile AQI scene");
         let SceneCandidate::DisplayList(scene) = candidate else {
             panic!("a display-list plugin must produce a native candidate");
@@ -223,7 +225,7 @@ mod tests {
         let mut host = ServerPluginHost::new(curated_registry());
 
         let candidate = host
-            .render_scene("aqi", &raw_aqi_envelope_snapshot(), 42)
+            .render_scene("aqi", &raw_aqi_envelope_snapshot(), 42, plugin::Tz::UTC)
             .expect("missing expression paths currently degrade to empty text");
         let SceneCandidate::DisplayList(scene) = candidate else {
             panic!("a display-list plugin must produce a native candidate");
@@ -244,7 +246,7 @@ mod tests {
         let mut host = ServerPluginHost::new(curated_registry());
 
         let candidate = host
-            .render_scene("svg-aqi", &aqi_snapshot(), 43)
+            .render_scene("svg-aqi", &aqi_snapshot(), 43, plugin::Tz::UTC)
             .expect("an SVG template must produce a candidate, not an error");
 
         // The curated svg-aqi face binds only provider data (`data.*`), so it
@@ -427,7 +429,7 @@ file = "face.svg"
         let mut host = ServerPluginHost::new(curated_registry());
 
         let error = host
-            .render_scene("not-installed", &aqi_snapshot(), 1)
+            .render_scene("not-installed", &aqi_snapshot(), 1, plugin::Tz::UTC)
             .expect_err("unknown plugin must be refused");
 
         assert!(error.contains("unknown plugin id") && error.contains("not-installed"));

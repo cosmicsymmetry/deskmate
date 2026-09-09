@@ -22,6 +22,11 @@ mod manifest;
 mod summary;
 
 pub use assets::{AssetError, AssetSet, MAX_ASSET_BYTES, ResolvedAsset, resolve_assets};
+/// The timezone type [`compile::compile_scene_with_assets`] takes. Re-exported
+/// so a caller naming a zone does not have to depend on `chrono-tz` directly
+/// -- and so there is one `Tz` in play across the compile boundary, not two
+/// versions that look identical and are not.
+pub use chrono_tz::Tz;
 pub use compile::{
     CompileError, ExpressionSource, MAX_REPEAT_ITEMS, classify_expression_source, compile_scene,
     compile_scene_with_assets, device_binding_requirements,

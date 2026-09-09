@@ -180,11 +180,19 @@ pub trait PluginHost: Send + 'static {
 
     /// Produces this plugin's render candidate against freshly fetched data.
     /// `revision` is minted by the runtime at push time.
+    ///
+    /// `timezone` is the configuration's display timezone, and it is a
+    /// parameter rather than host state on purpose: a plugin face that shows
+    /// an instant must render it in the zone the *user* chose, not the one
+    /// whoever wrote the feed was standing in, and a host that could be left
+    /// holding a stale zone is exactly the silent-wrong shape this codebase
+    /// keeps paying for.
     fn render_scene(
         &mut self,
         plugin_id: &str,
         snapshot: &providers::ProviderSnapshot<serde_json::Value>,
         revision: u32,
+        timezone: chrono_tz::Tz,
     ) -> Result<SceneCandidate, String>;
 
     /// Rasterizes one already-negotiated static candidate. Implementations do
@@ -2778,8 +2786,17 @@ fn build_card_scene(
                 "card {card_id:?} has no fetched plugin snapshot cached yet; wait for its first refresh"
             )
         })?;
+        // The configured display timezone, so a plugin face renders an
+        // instant where the user lives. An unparseable value cannot reach a
+        // saved config (`AppConfig::validate` rejects it), so UTC here is an
+        // unreachable floor rather than a silent fallback.
+        let timezone = config
+            .preferences
+            .timezone
+            .parse::<chrono_tz::Tz>()
+            .unwrap_or(chrono_tz::UTC);
         let candidate = host
-            .render_scene(plugin_id, snapshot, revision)
+            .render_scene(plugin_id, snapshot, revision, timezone)
             .map_err(|error| {
                 format!("plugin {plugin_id:?} could not render card {card_id:?}: {error}")
             })?;
@@ -5625,6 +5642,7 @@ mod tests {
             _plugin_id: &str,
             _snapshot: &providers::ProviderSnapshot<serde_json::Value>,
             _revision: u32,
+            _timezone: chrono_tz::Tz,
         ) -> Result<SceneCandidate, String> {
             self.candidate
                 .clone()
@@ -6012,6 +6030,7 @@ mod tests {
             _plugin_id: &str,
             _snapshot: &providers::ProviderSnapshot<serde_json::Value>,
             _revision: u32,
+            _timezone: chrono_tz::Tz,
         ) -> Result<SceneCandidate, String> {
             unreachable!()
         }
@@ -6371,6 +6390,7 @@ mod tests {
             _plugin_id: &str,
             _snapshot: &providers::ProviderSnapshot<serde_json::Value>,
             _revision: u32,
+            _timezone: chrono_tz::Tz,
         ) -> Result<SceneCandidate, String> {
             unreachable!("this test exercises only full synchronization")
         }
@@ -6433,6 +6453,7 @@ mod tests {
             _plugin_id: &str,
             _snapshot: &providers::ProviderSnapshot<serde_json::Value>,
             _revision: u32,
+            _timezone: chrono_tz::Tz,
         ) -> Result<SceneCandidate, String> {
             unreachable!("this test exercises only full synchronization")
         }
@@ -6506,6 +6527,7 @@ mod tests {
             _plugin_id: &str,
             _snapshot: &providers::ProviderSnapshot<serde_json::Value>,
             revision: u32,
+            _timezone: chrono_tz::Tz,
         ) -> Result<SceneCandidate, String> {
             self.renders.lock().unwrap().push(revision);
             Ok(SceneCandidate::DisplayList(protocol::Scene {

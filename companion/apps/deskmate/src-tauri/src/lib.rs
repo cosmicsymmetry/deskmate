@@ -502,7 +502,22 @@ fn setup_app(app: &mut App) -> Result<(), Box<dyn Error>> {
     // The window is configured hidden, so the single owner is running before any
     // settings UI appears. The explicit Tauri app-data path keeps filesystem policy
     // out of app-core.
-    let runtime = Arc::new(RuntimeHandle::start_serial(loaded.into_config(), None)?);
+    let mut config = loaded.into_config();
+    if first_run {
+        // A companion app on a Mac that knows perfectly well which timezone it
+        // is in should not start life showing UTC. `AppPreferences::default()`
+        // keeps UTC because it is a data default that tests and the server both
+        // depend on being fixed; the host's own zone belongs here instead, on
+        // the one path that mints a config for a person.
+        //
+        // First run only, so no saved configuration is ever rewritten behind
+        // the owner's back -- a timezone change moves the clock on their
+        // physical panel, which is theirs to decide.
+        if let Some(timezone) = host_timezone() {
+            config.preferences.timezone = timezone;
+        }
+    }
+    let runtime = Arc::new(RuntimeHandle::start_serial(config, None)?);
     if let Some(persistence) = persistence {
         runtime.set_persistence_state(persistence)?;
     }
@@ -586,6 +601,19 @@ fn secure_config_directory(path: &Path) -> std::io::Result<()> {
 
 /// Only a clean defaults load means no document existed. Recovery and validation
 /// failures still came from a persisted document, so they must not turn an existing
+/// The host machine's IANA timezone, read from `/etc/localtime`'s symlink --
+/// the standard way to ask macOS this without adding a dependency for one
+/// string. Returns `None` when the link is missing, is not a zoneinfo path,
+/// or names something `chrono-tz` does not recognize, so a machine with an
+/// unusual setup falls back to the `AppPreferences::default()` UTC rather
+/// than to a name that would later fail validation.
+fn host_timezone() -> Option<String> {
+    let target = std::fs::read_link("/etc/localtime").ok()?;
+    let text = target.to_str()?;
+    let name = text.rsplit_once("/zoneinfo/").map(|(_, name)| name)?;
+    name.parse::<chrono_tz::Tz>().ok().map(|_| name.to_owned())
+}
+
 /// installation back into first-run mode.
 fn is_first_run(loaded: &LoadOutcome) -> bool {
     matches!(
@@ -850,6 +878,25 @@ mod tests {
             Some(DeviceTier::Networked)
         );
         std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// Whatever this machine's zone is, the seed must be a name the config
+    /// validator accepts -- otherwise a first run would mint a configuration
+    /// that immediately fails its own validation.
+    #[test]
+    fn the_host_timezone_seed_is_always_a_name_the_config_accepts() {
+        let Some(timezone) = host_timezone() else {
+            // A machine with no /etc/localtime symlink falls back to the
+            // default, which is what this returning None means.
+            return;
+        };
+        let mut config = app_core::AppConfig::default();
+        config.preferences.timezone = timezone.clone();
+        assert!(
+            config.validate().is_ok(),
+            "seeded {timezone:?} must validate: {:?}",
+            config.validate()
+        );
     }
 
     #[test]

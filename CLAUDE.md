@@ -1051,6 +1051,69 @@ of letting code and documentation diverge.
   render path has nothing live to draw and the plugin-parity surfaces cannot be observed
   end to end until one is authored again. The TRMNL repo's deployed and Mac copies of the
   sync script were both updated; committing that repo is the owner's call.
+- **Plugin faces can draw DATA-DRIVEN BARS and render instants in the user's timezone
+  (2026-09-09).** Two additions to the manifest-v2 contract (`docs/plugins/manifest-v2.md`),
+  both compile-time and server-side: **schema stays v6, protocol stays v1,
+  `PROTOCOL_CURRENT_CAPABILITIES` stays 1003, and no firmware change is involved**, so no
+  OTA re-verification is owed.
+  - **A `rect`'s `x`/`y`/`w`/`h` now accept a `"{{ ... }}"` expression as well as a
+    number** (`manifest::Measure`). It is evaluated at compile time and lands on the wire
+    as an ordinary literal `SceneRect` — **it is not a device binding**, needs no
+    capability bit, and the device never learns anything new. The consequence to remember:
+    **a bar only moves when the card is re-pushed**, i.e. at its refresh cadence. Anything
+    that must tick between pushes needs a device binding, and the device has none for
+    plugin data. A quoted non-expression (`w = "180"`) is `MeasureNotExpression`; a device
+    binding in one is `MeasureUsesDeviceBinding`; a non-numeric result is
+    `MeasureNotNumeric` — geometry has no reading for "nothing", unlike a text node, so the
+    author writes `default(..., 0)` when an empty bar is what they mean. Results are
+    rounded and clamped, so a provider reporting 103% pins the bar rather than costing the
+    card its push.
+  - **The expression language has NO arithmetic** — its AST is `Str | Num | Path | Call |
+    Elvis`, there are no `+ - * /`, and **`?:` is Elvis (`a ?: b`), not a ternary**, so
+    there are no comparisons either. That is why a bar is scaled by a named function,
+    `scale(value, in_max, out_max)` (clamped; non-positive `in_max` → 0; non-numeric →
+    `Missing`), rather than by opening an arithmetic grammar with precedence, division by
+    zero and overflow inside a display list. It is also why **threshold-coloured bars are
+    not expressible** — a coloured bar would shout at 5% as loudly as at 96% — so the
+    curated bars are neutral by decision, not by oversight.
+  - **`time_at(epoch_seconds)` renders an instant in `preferences.timezone`**, closing a
+    real hole: a plugin face previously could not know the user's timezone at all, so any
+    feed carrying a time had to pre-format it and froze the *producer's* zone onto the
+    panel. The zone is an explicit parameter on `compile_scene_with_assets` and on
+    `PluginHost::render_scene` — deliberately not host state that could go stale — while
+    the no-assets `compile_scene` renders UTC and is for tests. Format is `%a %-I:%M %p`,
+    byte-identical to the TRMNL producer's `_fmt_at`, so
+    `default(time_at(data.at), data.at_label)` is a seamless fallback and the feed and the
+    server can be updated in either order.
+  - **A manifest value is wholly literal or wholly `{{ ... }}`; there is no interpolation
+    inside a string.** `"RESETS {{ x }}"` and `"{{ x }}%"` are both
+    `MalformedPartialInterpolation`, and there is no concat function, so a label and its
+    datum are always two nodes. Worth knowing before laying out any face.
+  - **`claude-limits` was rebuilt as two stacked full-width rows with bars**, following the
+    TRMNL panel and CodexBar rather than its old two-column tiles: across 400px one percent
+    is 4px, against under 2px in a 188px column. The TRMNL producer
+    (`~/TRMNL/claude_usage_sync.py`) now also emits `resets_at_epoch` beside its
+    `PANEL_TZ`-baked `resets_at_label`; committing and deploying that repo is the owner's
+    call. The golden case compiles in **Asia/Tbilisi on purpose** — a UTC golden cannot
+    tell "the zone is honoured" from "the zone is ignored", since both give identical
+    pixels — and `crates/plugin/tests/curated_plugins.rs` pins the two-zone difference
+    against the real committed manifest.
+  - **ROLLOUT ORDER IS LOAD-BEARING, and it has a trap.** A manifest using `Measure`,
+    `scale` or `time_at` fails to parse on a server built before this change, so the plugin
+    drops into `load_failures` and its cards go dark — **redeploy the server binary before
+    pushing the manifest**, exactly as for the manifest-v2 rollout. The trap is the other
+    direction: with the feed's epoch present the face renders in `preferences.timezone`,
+    so **if that setting is wrong the face gets visibly worse than the baked label it
+    replaces**. Set the timezone first, then deploy the feed.
+- **`preferences.timezone` defaulted to `"UTC"` on a Mac that knows its own zone, which is
+  why every clock on the owner's panel ran four hours behind.** `AppPreferences::default()`
+  still returns UTC — it is a data default the server and a large number of tests depend on
+  being fixed — but the Tauri app now seeds the host's IANA zone from `/etc/localtime` on
+  **first run only** (`host_timezone()` in `apps/deskmate/src-tauri/src/lib.rs`). An existing
+  saved configuration is never rewritten: a timezone change moves the clock on a physical
+  panel, which is the owner's decision. So an install that predates this keeps whatever it
+  has, and the fix for one of those is the "Display timezone" field in the settings sheet.
+
 - **A repository-wide simplification cleanup landed on 2026-09-05** (plan
   `docs/superpowers/plans/2026-09-05-deskmate-simplification-cleanup.md`, from the
   review of 2026-09-03/04): twelve squash commits removed the accidentally tracked

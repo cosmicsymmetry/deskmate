@@ -1,12 +1,17 @@
 # Deskmate plugin manifest v1
 
-Status: frozen. A plugin manifest is a TOML document that describes one card's face as
-a declarative display list: a data source, a set of named assets, and a list of scene
-nodes. The server fetches the source, evaluates the manifest's `{{ ... }}` expressions
-against the fetched data, and compiles the result directly to a `Scene` — the same wire
-shape `PushScene` (protocol v1, message 19) already carries for every other card. There
-is no `DisplayTemplate` selection for a plugin card (`docs/config/v6.md`); the manifest
-**is** the layout.
+Status: frozen. There will be no new manifest features, no new curated manifests, and no
+contract amendments. Picture cards replace this authoring path for new server-side
+faces; see `docs/superpowers/specs/2026-09-09-deskmate-picture-cards-design.md`. The four
+curated plugins keep working and their tests stay. This path is frozen, not removed.
+
+A plugin manifest is a TOML document that describes one card's face as a declarative
+display list: a data source, a set of named assets, and a list of scene nodes. The server
+fetches the source, evaluates the manifest's `{{ ... }}` expressions against the fetched
+data, and compiles the result directly to a `Scene` — the same wire shape `PushScene`
+(protocol v1, message 19) already carries for every other card. There is no
+`DisplayTemplate` selection for a plugin card (`docs/config/v6.md`); the manifest **is**
+the layout.
 
 This document is the authoring contract: every bound below is enforced, by name, in
 `companion/crates/plugin/src/{manifest,expr,compile,assets}.rs`, and violating one is a

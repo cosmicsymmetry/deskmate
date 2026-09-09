@@ -1,6 +1,11 @@
 # Deskmate plugin manifest v2
 
-Status: frozen. Manifest v2 is an additive contract beside the frozen
+Status: frozen. There will be no new manifest features, no new curated manifests, and no
+contract amendments. Picture cards replace this authoring path for new server-side
+faces; see `docs/superpowers/specs/2026-09-09-deskmate-picture-cards-design.md`. The four
+curated plugins keep working and their tests stay. This path is frozen, not removed.
+
+Manifest v2 is an additive contract beside the frozen
 [`manifest-v1.md`](manifest-v1.md); it does not revise v1. A manifest with no
 `manifest_version` is v1. A manifest with `manifest_version = 2` is v2. No other value
 is accepted.

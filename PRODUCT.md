@@ -45,6 +45,12 @@ Success is that the display shows the right thing without the person thinking ab
 it, and that when something is wrong they can see which card, why, and what to do —
 without connecting a console.
 
+## Picture cards
+
+A picture card is for a non-interactive face produced outside this repository and sent
+to Deskmate as a PNG. Anybody who can produce the image can add the card with one line
+of `curl`; it requires no manifest, SDK, or repository access.
+
 ## Positioning
 
 Three facts a neighbouring "smart display companion" could not truthfully copy:

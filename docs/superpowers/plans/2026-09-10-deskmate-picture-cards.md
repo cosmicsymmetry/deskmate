@@ -1575,7 +1575,11 @@ other task that holds `runtime.rs`.
   fn frame_face_scene(revision: u32, digest: [u8; protocol::ASSET_DIGEST_LEN]) -> protocol::Scene;
 
   // runtime.rs — the host seam, with a default so no existing impl changes
-  pub struct ImageSourceFrame { pub digest: [u8; protocol::ASSET_DIGEST_LEN], pub stale: bool }
+  pub struct ImageSourceFrame {
+      pub digest: [u8; protocol::ASSET_DIGEST_LEN],
+      pub bytes: std::sync::Arc<[u8]>,   // the decoded canonical blob
+      pub stale: bool,
+  }
   trait PluginHost {
       fn image_source_frame(&mut self, _source_id: &str) -> Option<ImageSourceFrame> { None }
   }
@@ -1738,9 +1742,15 @@ In `runtime.rs`, beside `PluginHost` (`:174-203`):
 
 ```rust
 /// What the host knows about one image source right now.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// `bytes` is the decoded canonical blob, carried as an `Arc` so passing this
+/// around costs a pointer rather than 330 KB. It is here because the admin
+/// preview route needs the exact stored frame -- see Step 5b -- and re-deriving
+/// it would mean rasterizing an image back into itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImageSourceFrame {
     pub digest: [u8; protocol::ASSET_DIGEST_LEN],
+    pub bytes: std::sync::Arc<[u8]>,
     /// Inferred from the source's own observed push cadence, server-side.
     pub stale: bool,
 }
@@ -1805,6 +1815,73 @@ Convert it to a `match` so the compiler enforces the new kind:
 
 Note the refusal string deliberately says **image source host**, not "plugin host", so the
 two hostless refusals stay distinguishable in a log.
+
+- [ ] **Step 5b: Let a picture card have a preview at all**
+
+`render_card_preview` (`runtime.rs:3398`) opens by rejecting anything that is not a plugin
+card:
+
+```rust
+    if !matches!(card, CardSettings::Plugin { .. }) {
+        return Err(RuntimeError::NotAPluginCard { card_id: card_id.to_owned() });
+    }
+```
+
+Left alone, every picture card's preview returns that error and the window prints "The
+server has no preview for this card" forever. Add a `Picture` arm **before** that guard.
+
+A picture card needs no rasterization: `CardPreview.frame` is an
+`Option<RasterFrame>` and `RasterFrame` is `{ digest, bytes: Arc<[u8]> }` — exactly what
+the host already holds. So the preview is the stored frame handed straight back, and
+`server::admin::get_card_preview` re-encodes it with the existing `frame_png`. That is one
+`Arc` clone, no resvg round trip, and byte-exact by construction rather than by a
+rasterizer agreeing with itself.
+
+```rust
+    if let CardSettings::Picture { source_id, .. } = card {
+        let source_id = source_id.clone();
+        let Some(host) = state.plugin_host.as_deref_mut() else {
+            return Ok(preview_failure(
+                "this card's picture is held by the server, which this host is not".into(),
+            ));
+        };
+        return Ok(match host.image_source_frame(&source_id) {
+            Some(frame) => CardPreview {
+                frame: Some(RasterFrame { digest: frame.digest, bytes: frame.bytes }),
+                state: CardPreviewState::Ok,
+                message: None,
+                refreshed_at_unix_ms: None,
+            },
+            // No frame at all, so `Waiting` rather than `Error` -- the same
+            // distinction a plugin card awaiting its first refresh draws, and
+            // the same words the face itself shows.
+            None => CardPreview {
+                frame: None,
+                state: CardPreviewState::Waiting,
+                message: Some("Waiting for the first picture".into()),
+                refreshed_at_unix_ms: None,
+            },
+        });
+    }
+```
+
+Read `CardPreviewState`'s real variant names before using `Ok`/`Waiting` above; match what
+the enum actually declares.
+
+Add a test:
+
+```rust
+#[test]
+fn a_picture_cards_preview_is_the_stored_frame_not_a_re_render() {
+    // Byte-exact: the preview must be the same bytes the device holds, not a
+    // rasterization of an image back into itself.
+    let preview = /* render_card_preview for a picture card with a known frame */;
+    assert_eq!(preview.frame.expect("a frame").bytes.as_ref(), KNOWN_BLOB);
+}
+
+#[test]
+fn a_picture_card_with_no_frame_previews_as_waiting_not_as_an_error() { }
+```
 
 - [ ] **Step 6: Add the command**
 
@@ -2312,6 +2389,12 @@ Task 8, the bomb row is Task 3, the pinned-digest row is Task 3. §11 hardware -
 Step 5. §12 rollout -> Task 11 Steps 3-4 and Task 10 Step 4. §13 open items -> out of scope
 by the spec's own words.
 
+**Found during self-review and fixed inline.** The first draft of this plan had no
+server-side preview for a picture card at all: `render_card_preview` opens by returning
+`NotAPluginCard` for every other kind, so every picture card's preview would have shown
+"The server has no preview for this card" permanently. Task 7 Step 5b closes it, and
+`ImageSourceFrame` gained its `bytes` field to make the preview byte-exact.
+
 **Known gaps, stated rather than hidden.**
 - The spec's `ImageSourceUpdated { bytes }` field is dropped, with the reason recorded in
   Task 7. It is the one place this plan does not do what the spec says.
@@ -2325,5 +2408,6 @@ by the spec's own words.
 source_id, tap_action, refresh, alert }`, `CanonicalFrame { digest, bytes }`,
 `SourceFrame { digest, bytes, stale }`, `ImageSourceFrame { digest, stale }` and
 `frame_face_scene(revision, digest)` are used with the same names and shapes in every task
-that references them. `ImageSourceFrame` (the runtime seam, no bytes) and `SourceFrame` (the
-store's richer type, with bytes) are deliberately distinct; Task 8 converts between them.
+that references them. `ImageSourceFrame` (the runtime seam) and `SourceFrame` (the store's
+own type) carry the same three things and Task 8 converts between them; they stay distinct
+only because `app-core` cannot name a `server` type.

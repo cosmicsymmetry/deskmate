@@ -19,6 +19,8 @@ mod auth;
 mod device_link;
 pub mod egress;
 pub mod firmware;
+mod image_ingest;
+mod image_staleness;
 pub mod plugin_host;
 pub mod plugin_provider;
 pub mod plugin_refresher;

@@ -21,6 +21,11 @@ tower = { version = "0.5", features = ["limit", "load-shed", "timeout", "util"] 
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 rand = "0.9"
 sha2 = "0.10"
+# Header-first PNG decoding for the image-ingest route. `Pixmap::decode_png` would
+# need no new line here but decodes in one shot; `png::Decoder::read_header_info`
+# reads the IHDR alone, which is what lets a decompression bomb be rejected before
+# anything is allocated. Same version already in the lockfile via tiny-skia.
+png = "0.17"
 # The homelab render host permits exactly one in-process SVG engine: `resvg`.
 # Defaults stay off so raster-image loading, system-font discovery, and mmap font
 # access cannot grow ambient filesystem/network authority; only SVG text shaping is on.

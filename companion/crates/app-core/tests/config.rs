@@ -333,8 +333,16 @@ fn malformed_and_unknown_json_are_rejected_by_serde() {
     assert!(serde_json::from_str::<AppConfig>(MALFORMED_JSON).is_err());
 
     let with_unknown = DEFAULT_JSON.replace(
-        "\"schema_version\": 6,",
-        "\"schema_version\": 6, \"unexpected\": true,",
+        "\"schema_version\": 7,",
+        "\"schema_version\": 7, \"unexpected\": true,",
+    );
+    // A schema bump moves this anchor, and a `replace` that matches nothing
+    // returns the input unchanged -- which would leave the assertion below
+    // parsing a perfectly valid config and reporting a vacuous pass. Fail here
+    // instead, where the message says what actually went wrong.
+    assert_ne!(
+        with_unknown, DEFAULT_JSON,
+        "the unknown-field injection matched nothing; update the schema_version anchor"
     );
     assert!(serde_json::from_str::<AppConfig>(&with_unknown).is_err());
 

@@ -20,6 +20,7 @@ mod device_link;
 pub mod egress;
 pub mod firmware;
 mod image_ingest;
+mod image_sources;
 mod image_staleness;
 pub mod plugin_host;
 pub mod plugin_provider;
@@ -90,6 +91,7 @@ pub struct ServerState {
 
 struct StateInner {
     registry: Registry,
+    image_sources: image_sources::ImageSourceStore,
     admin_token: String,
     firmware: FirmwareCatalog,
     plugins: Arc<PluginRegistry>,
@@ -151,9 +153,12 @@ impl ServerState {
         plugin_load_failures: Vec<PluginLoadFailure>,
         config_temp_dir: Option<tempfile::TempDir>,
     ) -> Self {
+        let image_sources = image_sources::ImageSourceStore::new(config_directory.clone())
+            .expect("failed to load the image-source store");
         Self {
             inner: Arc::new(StateInner {
                 registry,
+                image_sources,
                 admin_token,
                 firmware,
                 plugins,
@@ -191,6 +196,10 @@ impl ServerState {
     #[must_use]
     pub fn registry(&self) -> &Registry {
         &self.inner.registry
+    }
+
+    pub(crate) fn image_sources(&self) -> &image_sources::ImageSourceStore {
+        &self.inner.image_sources
     }
 
     /// Compares `presented` against the admin token in constant time. This

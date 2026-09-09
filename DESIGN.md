@@ -253,7 +253,7 @@ Every one of these has a designed treatment, and each is reachable in the dev ha
 (`VITE_DESKMATE_MOCK=1 bun run dev`, then `?scenario=…`): `default`, `offline`,
 `standalone`, `local`, `unowned`, `invalid`, `firstrun`, `empty`, `carderror`, `plugin`,
 `plugin-local` (the only way to see a plugin card's `needs the server` flag and the
-stage's local-tier word).
+stage's local-tier word), `picture` (a server-rendered PNG card and its source editor).
 Add `&theme=dark` or `&theme=light` to pin the scheme.
 
 A **barred primary action** is drawn as barred — a diagonal hatch on `Save` says a

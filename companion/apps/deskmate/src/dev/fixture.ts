@@ -111,6 +111,7 @@ export function mockConfig(): AppConfig {
         alert: { kind: "none" },
       },
     ],
+    image_sources: [],
     assets: [],
     playlists: [
       {

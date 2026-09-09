@@ -18,6 +18,7 @@ import {
 } from "../src/lib/configDraft";
 import { formatProviderAge, providerTrouble } from "../src/lib/providers";
 import * as tauriModule from "../src/lib/tauri";
+
 // The two server reads are the only wrappers this suite proves end to end, so it
 // keeps a reference to the REAL ones before `mock.module` below replaces the
 // module's namespace in place, and mocks the Tauri bridge underneath them instead.
@@ -27,11 +28,20 @@ const coreInvocations: { command: string; args?: Record<string, unknown> }[] = [
 mock.module("@tauri-apps/api/core", () => ({
   invoke: async (command: string, args?: Record<string, unknown>) => {
     coreInvocations.push({ command, args });
+    if (command === "get_server_plugins" && args?.sourceName) {
+      return {
+        source_id: "picture-source",
+        token: "plaintext-once",
+        push_url: "https://desk.example/v1/images/plaintext-once",
+      };
+    }
     return command === "get_server_plugins" ? { plugins: [], load_failures: [] } : [];
   },
 }));
 const realGetServerPlugins = tauriModule.getServerPlugins;
 const realGetServerCardState = tauriModule.getServerCardState;
+const realMintImageSource = tauriModule.mintImageSource;
+
 import type {
   AppConfig,
   AppSnapshot,
@@ -39,6 +49,7 @@ import type {
   CardSettings,
   ConfigApplyResult,
   DraftValidation,
+  MintedImageSource,
   NetworkSettings,
   PluginCatalog,
   PreviewFrame,
@@ -212,6 +223,18 @@ function pluginCard(id = "internal-plugin-card"): CardSettings {
   };
 }
 
+function pictureCard(id = "picture-card"): CardSettings {
+  return {
+    kind: "picture",
+    id,
+    title: "Limits",
+    source_id: "limits-source",
+    tap_action: { kind: "none" },
+    refresh: { kind: "manual" },
+    alert: { kind: "none" },
+  };
+}
+
 function cardListConfig(
   cardList: CardSettings[],
   entries = cardList.map((card) => ({ card_id: card.id, dwell_seconds: null })),
@@ -220,6 +243,9 @@ function cardListConfig(
     schema_version: snapshot.config.schema_version,
     preferences: { timezone: "UTC", autostart: false, paused: false, orientation: "landscape" },
     cards: cardList,
+    image_sources: cardList.flatMap((card) =>
+      card.kind === "picture" ? [{ id: card.source_id, name: "Claude limits" }] : [],
+    ),
     assets: [],
     playlists: [
       {
@@ -247,6 +273,7 @@ describe("settings accessibility and states", () => {
     cardError: CardError | null = null,
     catalog: PluginCatalog | null = null,
     ownershipTier: "local" | "networked" = "networked",
+    pictureAccess: MintedImageSource | null = null,
   ) {
     return renderToStaticMarkup(
       <CardEditor
@@ -260,6 +287,7 @@ describe("settings accessibility and states", () => {
         timerBusy={false}
         filePickerBusy={false}
         providerRefreshing={false}
+        pictureAccess={pictureAccess}
         catalog={catalog}
         ownershipTier={ownershipTier}
         onChange={() => {}}
@@ -1065,6 +1093,58 @@ describe("settings accessibility and states", () => {
     expect(render(catalog, [], "local")).toContain('<span class="flag">needs the server</span>');
   });
 
+  test("a picture tile leads with its template and names every entry control", () => {
+    const picture = pictureCard();
+    const html = renderToStaticMarkup(
+      <CardList
+        config={cardListConfig([picture])}
+        issues={[]}
+        cardData={[]}
+        pomodoros={[]}
+        providers={[]}
+        pluginKinds={[]}
+        catalog={null}
+        serverCardState={[]}
+        ownershipTier="local"
+        selectedCardId={picture.id}
+        onSelect={() => {}}
+        onAdd={() => {}}
+        onChange={() => {}}
+        onRemove={() => {}}
+      />,
+    );
+
+    expect(html).toContain('class="tile-label">Picture<');
+    expect(html).toContain('<strong class="card-tile__value numeral">PNG</strong>');
+    expect(html).toContain('class="card-tile__name">Limits<');
+    expect(html).toContain('aria-label="Move Picture — Limits earlier"');
+    expect(html).toContain('aria-label="Remove Picture — Limits');
+    expect(html).toContain('<span class="flag">needs the server</span>');
+  });
+
+  test("a picture editor shows source access once, immediately after minting", () => {
+    const picture = pictureCard();
+    const access: MintedImageSource = {
+      source_id: picture.source_id,
+      token: "plaintext-once",
+      push_url: "https://desk.example/v1/images/plaintext-once",
+    };
+    const firstRender = renderCardEditor(picture, [], null, null, "networked", access);
+
+    expect(firstRender).toContain('id="editor-heading">Picture<');
+    expect(firstRender).toContain("Claude limits");
+    expect(firstRender).toContain(picture.source_id);
+    expect(firstRender).toContain(access.push_url);
+    expect(firstRender).toContain(access.token);
+    expect(firstRender).toContain("Copy token");
+    expect(firstRender).toContain("This plaintext token is shown once.");
+
+    const laterRender = renderCardEditor(picture);
+    expect(laterRender).not.toContain(access.token);
+    expect(laterRender).not.toContain("Copy token");
+    expect(laterRender).not.toContain("This plaintext token is shown once.");
+  });
+
   test("the add menu lists server plugins by display name, with description fallbacks", async () => {
     let added: { pluginId: string; refreshMinutes: number } | null = null;
     const container = document.createElement("div");
@@ -1126,6 +1206,116 @@ describe("settings accessibility and states", () => {
     } finally {
       await act(async () => root.unmount());
       container.remove();
+    }
+  });
+
+  test("the add menu creates a picture through its own server action", async () => {
+    let pictureAdds = 0;
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <CardList
+            config={cardListConfig([clockCard("clock", "Desk")])}
+            issues={[]}
+            cardData={[]}
+            pomodoros={[]}
+            providers={[]}
+            pluginKinds={[]}
+            catalog={null}
+            serverCardState={[]}
+            ownershipTier="networked"
+            selectedCardId={null}
+            onSelect={() => {}}
+            onAdd={() => {}}
+            onAddPicture={() => {
+              pictureAdds += 1;
+            }}
+            onChange={() => {}}
+            onRemove={() => {}}
+          />,
+        ),
+      );
+      await act(async () => container.querySelector<HTMLButtonElement>(".card-tile__add")?.click());
+      expect(container.textContent).toContain("Pictures");
+      const items = [...container.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')];
+      const picture = items.find((button) => button.textContent?.includes("A PNG pushed"));
+      expect(picture).toBeDefined();
+
+      items[5]?.focus();
+      await act(async () =>
+        items[5]?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true })),
+      );
+      expect(document.activeElement).toBe(picture);
+
+      await act(async () => picture?.click());
+      expect(pictureAdds).toBe(1);
+      expect(container.querySelector('[role="menu"]')).toBeNull();
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("the window mints and adds a picture while keeping the token ephemeral", async () => {
+    const clock = clockCard("clock", "Desk");
+    snapshotImpl = async () => ({
+      ...snapshot,
+      config: cardListConfig([clock]),
+      device: { ...snapshot.device, tier: "networked" },
+      providers: [],
+      pomodoros: [],
+      card_data: [],
+      card_errors: [],
+    });
+    networkSettingsImpl = async () => ({
+      server_url: "https://desk.example",
+      device_id: "desk-1",
+      tier: "networked",
+    });
+    previewImpl = async () => ({ png_base64: null, sample: false, state: null });
+    coreInvocations.length = 0;
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await renderPreviewInto(root, <App />);
+      await act(async () => container.querySelector<HTMLButtonElement>(".card-tile__add")?.click());
+      const pictureMenuItem = [
+        ...container.querySelectorAll<HTMLButtonElement>('[role="menuitem"]'),
+      ].find((button) => button.textContent?.includes("A PNG pushed"));
+      await act(async () => pictureMenuItem?.click());
+
+      await waitFor(() => {
+        expect(container.querySelectorAll(".card-tile__body")).toHaveLength(2);
+        expect(container.querySelector<HTMLInputElement>("#picture-source-token")?.value).toBe(
+          "plaintext-once",
+        );
+      });
+      expect(coreInvocations).toContainEqual({
+        command: "get_server_plugins",
+        args: { sourceName: "Picture" },
+      });
+
+      const tiles = container.querySelectorAll<HTMLButtonElement>(".card-tile__body");
+      await act(async () => tiles[0]?.click());
+      expect(container.querySelector("#picture-source-token")).toBeNull();
+      await act(async () => tiles[1]?.click());
+      expect(container.querySelector("#picture-source-token")).toBeNull();
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      snapshotImpl = async () => snapshot;
+      networkSettingsImpl = async () => ({
+        server_url: "https://desk.example",
+        device_id: "desk-1",
+        tier: "local",
+      });
+      previewImpl = () =>
+        Promise.reject(new Error("renderCardPreview not configured for this test"));
     }
   });
 
@@ -2178,19 +2368,19 @@ describe("settings accessibility and states", () => {
       await act(async () => root.render(<Harness />));
       const slot = container.querySelector<HTMLButtonElement>(".card-tile__add");
       await act(async () => slot?.click());
-      expect(container.querySelectorAll('[role="menuitem"]')).toHaveLength(7);
+      expect(container.querySelectorAll('[role="menuitem"]')).toHaveLength(8);
       await act(async () => slot?.click());
       await act(async () => hidePlugin());
       await act(async () => slot?.click());
 
       const currentItems = container.querySelectorAll<HTMLButtonElement>('[role="menuitem"]');
-      expect(currentItems).toHaveLength(6);
+      expect(currentItems).toHaveLength(7);
       const firstItem = currentItems[0];
       const lastItem = currentItems[currentItems.length - 1];
       await act(async () =>
         firstItem.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true })),
       );
-      expect(lastItem.textContent).toContain("RSS feed");
+      expect(lastItem.textContent).toContain("Picture");
       expect(document.activeElement === lastItem).toBe(true);
     } finally {
       await act(async () => root.unmount());
@@ -3245,6 +3435,7 @@ describe("settings accessibility and states", () => {
         calendarCard("second", "Up next"),
         calendarCard("third", "Focus"),
       ],
+      image_sources: [],
       assets: [],
       playlists: [
         {
@@ -3575,6 +3766,19 @@ describe("settings accessibility and states", () => {
     expect(coreInvocations).toEqual([
       { command: "get_server_plugins", args: undefined },
       { command: "get_server_card_state", args: undefined },
+    ]);
+  });
+
+  test("minting a picture source makes a server round trip with the source name", async () => {
+    coreInvocations.length = 0;
+
+    expect(await realMintImageSource("Picture")).toEqual({
+      source_id: "picture-source",
+      token: "plaintext-once",
+      push_url: "https://desk.example/v1/images/plaintext-once",
+    });
+    expect(coreInvocations).toEqual([
+      { command: "get_server_plugins", args: { sourceName: "Picture" } },
     ]);
   });
 });

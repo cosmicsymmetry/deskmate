@@ -1,25 +1,22 @@
 import {
+  type CSSProperties,
+  type DragEvent,
+  type KeyboardEvent,
   useCallback,
   useEffect,
   useLayoutEffect,
   useRef,
   useState,
-  type CSSProperties,
-  type DragEvent,
-  type KeyboardEvent,
 } from "react";
-
-import { placeAddMenu } from "../lib/menuPlacement";
-
 import {
   activePlaylist,
   addEntry,
   cardKindName,
   cardLabel,
   cardMoveFromKey,
-  cardTitle,
   cardsContainerIssues,
   cardsOutsideLoop,
+  cardTitle,
   issuesForCard,
   issuesForPath,
   loopEntries,
@@ -28,14 +25,15 @@ import {
   pluginCardFlag,
   removeEntry,
 } from "../lib/configDraft";
+import { placeAddMenu } from "../lib/menuPlacement";
 import { providerTrouble } from "../lib/providers";
 import {
-  MAX_PLAYLIST_ENTRIES,
   type AddableCardKind,
   type AppConfig,
   type CardDataSnapshot,
   type CardSettings,
   type DeviceTier,
+  MAX_PLAYLIST_ENTRIES,
   type PluginCatalog,
   type PomodoroSnapshot,
   type ProviderSnapshot,
@@ -71,6 +69,7 @@ interface CardListProps {
   selectedCardId: string | null;
   onSelect: (cardId: string) => void;
   onAdd: (kind: AddableCardKind) => void;
+  onAddPicture?: () => void;
   onChange: (config: AppConfig) => void;
   onRemove: (cardId: string) => void;
 }
@@ -133,6 +132,8 @@ function tileValue(
       // The server's evaluated `summary`, or the same em dash a weather card shows
       // before its first fetch. A tile owns one fact; it does not narrate.
       return pluginHero ?? "—";
+    case "picture":
+      return "PNG";
   }
 }
 
@@ -155,6 +156,7 @@ export function CardList({
   selectedCardId,
   onSelect,
   onAdd,
+  onAddPicture = () => {},
   onChange,
   onRemove,
 }: CardListProps) {
@@ -313,6 +315,12 @@ export function CardList({
     closeMenu(false);
   };
 
+  const choosePicture = () => {
+    pendingNewCardIdsRef.current = new Set(config.cards.map((card) => card.id));
+    onAddPicture();
+    closeMenu(false);
+  };
+
   const onMenuKeyDown = (
     event: KeyboardEvent<HTMLButtonElement>,
     index: number,
@@ -326,7 +334,7 @@ export function CardList({
     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
       event.preventDefault();
       const direction = event.key === "ArrowDown" ? 1 : -1;
-      const count = addableKinds.length + pluginKinds.length;
+      const count = addableKinds.length + 1 + pluginKinds.length;
       menuItemRefs.current[(index + direction + count) % count]?.focus();
       return;
     }
@@ -594,7 +602,7 @@ export function CardList({
             </span>
             <span>
               <strong>Add a card</strong>
-              <small>Built in, or a plugin</small>
+              <small>Built in, picture, or plugin</small>
             </span>
           </button>
           {capacityDescription && (
@@ -637,11 +645,31 @@ export function CardList({
                   );
                 })}
               </fieldset>
+              <fieldset className="menu__group">
+                <legend className="tile-label menu__label">Pictures</legend>
+                <button
+                  ref={(element) => {
+                    if (element) {
+                      menuItemRefs.current[addableKinds.length] = element;
+                    }
+                  }}
+                  type="button"
+                  className="menu__item"
+                  role="menuitem"
+                  onClick={choosePicture}
+                  onKeyDown={(event) => onMenuKeyDown(event, addableKinds.length, choosePicture)}
+                >
+                  <span>
+                    <strong>Picture</strong>
+                    <small>A PNG pushed from anywhere</small>
+                  </span>
+                </button>
+              </fieldset>
               {pluginKinds.length > 0 && (
                 <fieldset className="menu__group">
                   <legend className="tile-label menu__label">Plugins on the server</legend>
                   {pluginKinds.map((plugin, pluginIndex) => {
-                    const index = addableKinds.length + pluginIndex;
+                    const index = addableKinds.length + 1 + pluginIndex;
                     const choose = () => choosePlugin(plugin);
                     return (
                       <button

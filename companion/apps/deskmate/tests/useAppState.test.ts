@@ -1,12 +1,11 @@
 import { describe, expect, test } from "bun:test";
-
-import {
-  startAppStateSubscription,
-  startServerCardStatePoll,
-  type AppStateSubscriptionOptions,
-} from "../src/lib/useAppState";
 import type { AppSnapshot, IpcError, ServerCardState } from "../src/lib/types";
 import { ipcContractFixtures } from "../src/lib/types.contract";
+import {
+  type AppStateSubscriptionOptions,
+  startAppStateSubscription,
+  startServerCardStatePoll,
+} from "../src/lib/useAppState";
 
 class FakeEventTarget {
   visibilityState = "visible";
@@ -41,8 +40,8 @@ async function flushPromises() {
 }
 
 describe("startAppStateSubscription", () => {
-  test("the subscription fixture carries schema-v6 playlists", () => {
-    expect(snapshot.config.schema_version).toBe(6);
+  test("the subscription fixture carries schema-v7 playlists", () => {
+    expect(snapshot.config.schema_version).toBe(7);
     expect(snapshot.config.playlists.map((playlist) => playlist.id)).toEqual(["workday", "manual"]);
     expect(snapshot.config.active_playlist_id).toBe("workday");
   });

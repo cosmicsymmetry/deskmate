@@ -8,8 +8,6 @@ import {
   tapActionDescription,
 } from "../lib/configDraft";
 import { providerTrouble } from "../lib/providers";
-import { FieldIssues } from "./FieldIssues";
-import { Icon } from "./Icon";
 import type {
   AlertHold,
   AppConfig,
@@ -18,12 +16,15 @@ import type {
   CardSettings,
   DeviceTier,
   JsonFieldMapping,
+  MintedImageSource,
   PluginCatalog,
   PomodoroSnapshot,
   ProviderSnapshot,
   ValidationIssue,
   WeatherUnits,
 } from "../lib/types";
+import { FieldIssues } from "./FieldIssues";
+import { Icon } from "./Icon";
 
 const MAX_JSON_MAPPINGS = 16;
 const MAX_RSS_ITEMS = 5;
@@ -52,6 +53,8 @@ interface CardEditorProps {
   timerBusy: boolean;
   filePickerBusy: boolean;
   providerRefreshing: boolean;
+  /** Present only for the picture card whose source was minted this session. */
+  pictureAccess?: MintedImageSource | null;
   onChange: (card: CardSettings) => void;
   onConfigChange: (config: AppConfig) => void;
   onRemove: () => void;
@@ -122,6 +125,7 @@ export function CardEditor({
   timerBusy,
   filePickerBusy,
   providerRefreshing,
+  pictureAccess = null,
   onChange,
   onConfigChange,
   onRemove,
@@ -158,10 +162,10 @@ export function CardEditor({
     ownershipTier === "local"
       ? "Needs the server to render"
       : "The plugin list comes from the server";
-  // The server owns a plugin card's fetching, so the Mac has nothing to refresh.
+  // The server owns plugin and picture updates, so the Mac has nothing to refresh.
   // The reason rides the same sentence as the trouble, because a disabled control
   // with no stated reason is worse than no control.
-  const refreshesOnServer = card.kind === "plugin";
+  const refreshesOnServer = card.kind === "plugin" || card.kind === "picture";
   const setAlert = (alert: CardAlert) => onChange({ ...card, alert });
   const playlist = activePlaylist(config);
   const entryIndex = playlist?.entries.findIndex((entry) => entry.card_id === card.id) ?? -1;
@@ -221,7 +225,11 @@ export function CardEditor({
       <div className="form-grid">
         {card.kind !== "pomodoro" && (
           <label className="field">
-            <span>{card.kind === "clock" || card.kind === "plugin" ? "Name" : "Heading"}</span>
+            <span>
+              {card.kind === "clock" || card.kind === "plugin" || card.kind === "picture"
+                ? "Name"
+                : "Heading"}
+            </span>
             <input
               value={card.title}
               maxLength={64}
@@ -554,6 +562,51 @@ export function CardEditor({
             </small>
             <FieldIssues issues={fieldIssues("plugin_id")} />
           </label>
+        )}
+
+        {card.kind === "picture" && (
+          <>
+            <label className="field">
+              <span>Picture source</span>
+              <select
+                value={card.source_id}
+                onChange={(event) => onChange({ ...card, source_id: event.currentTarget.value })}
+                aria-invalid={fieldIssues("source_id").length > 0}
+              >
+                {!config.image_sources.some((source) => source.id === card.source_id) && (
+                  <option value={card.source_id}>{`${card.source_id} · Missing source`}</option>
+                )}
+                {config.image_sources.map((source) => (
+                  <option key={source.id} value={source.id}>
+                    {source.name}
+                  </option>
+                ))}
+              </select>
+              <small>{card.source_id}</small>
+              <FieldIssues issues={fieldIssues("source_id")} />
+            </label>
+
+            {pictureAccess?.source_id === card.source_id && (
+              <div className="field" role="status">
+                <label htmlFor="picture-push-url">Push URL</label>
+                <input id="picture-push-url" readOnly value={pictureAccess.push_url} />
+                <label htmlFor="picture-source-token">Source token</label>
+                <div className="file-picker-row">
+                  <input id="picture-source-token" readOnly value={pictureAccess.token} />
+                  <button
+                    className="button button--quiet"
+                    type="button"
+                    onClick={() => void navigator.clipboard.writeText(pictureAccess.token)}
+                  >
+                    Copy token
+                  </button>
+                </div>
+                <small>
+                  This plaintext token is shown once. Copy it now; Deskmate cannot show it again.
+                </small>
+              </div>
+            )}
+          </>
         )}
 
         {/* Shared across every kind whose refresh policy is an interval — calendar,

@@ -11,15 +11,7 @@
  * so every state the UI must handle can be opened, reviewed and screenshotted without
  * hardware. `?scenario=list` prints the set to the console.
  */
-import { mockCardData, mockConfig, mockNetworkSettings, mockSnapshot } from "./fixture";
-import { renderMockFrame } from "./mockPreview";
-import {
-  MOCK_PLUGIN_CATALOG,
-  mockPluginCardData,
-  mockPluginCardState,
-  mockPluginConfig,
-  mockPluginProviders,
-} from "./pluginFixture";
+
 import type {
   AppConfig,
   AppSnapshot,
@@ -27,6 +19,16 @@ import type {
   NetworkSettings,
   ValidationIssue,
 } from "../lib/types";
+import { mockCardData, mockConfig, mockNetworkSettings, mockSnapshot } from "./fixture";
+import { renderMockFrame } from "./mockPreview";
+import { mockPictureCardState, mockPictureConfig, mockPictureProviders } from "./pictureFixture";
+import {
+  MOCK_PLUGIN_CATALOG,
+  mockPluginCardData,
+  mockPluginCardState,
+  mockPluginConfig,
+  mockPluginProviders,
+} from "./pluginFixture";
 
 export const SCENARIOS = [
   "default",
@@ -40,6 +42,7 @@ export const SCENARIOS = [
   "carderror",
   "plugin",
   "plugin-local",
+  "picture",
 ] as const;
 export type Scenario = (typeof SCENARIOS)[number];
 
@@ -145,6 +148,13 @@ function applyScenario() {
         network = { server_url: "", device_id: "", tier: "local" };
       }
       break;
+    case "picture":
+      config = mockPictureConfig();
+      snapshot = mockSnapshot(config);
+      snapshot.providers = mockPictureProviders();
+      snapshot.card_data = [];
+      snapshot.pomodoros = [];
+      break;
     default:
       break;
   }
@@ -202,6 +212,11 @@ function validate(draft: AppConfig): DraftValidation {
         break;
       case "clock":
       case "plugin":
+        break;
+      case "picture":
+        if (!draft.image_sources.some((source) => source.id === card.source_id)) {
+          push(`${at}.source_id`, "missing-reference", "Choose an existing picture source.");
+        }
         break;
     }
     if (card.alert.kind !== "none" && card.alert.hold.kind === "seconds") {
@@ -289,9 +304,24 @@ export async function mockInvoke<T>(command: string, args?: Record<string, unkno
     case "get_autostart_status":
       return delay(autostart) as Promise<T>;
     case "get_server_plugins":
+      if (typeof args?.sourceName === "string") {
+        const sourceNumber = config.image_sources.length + 1;
+        const token = `dev-picture-token-${sourceNumber}`;
+        return delay({
+          source_id: `picture-source-${sourceNumber}`,
+          token,
+          push_url: `${network.server_url.replace(/\/$/, "")}/v1/images/${token}`,
+        }) as Promise<T>;
+      }
       return delay(MOCK_PLUGIN_CATALOG) as Promise<T>;
     case "get_server_card_state":
-      return delay(scenario === "plugin" ? mockPluginCardState() : []) as Promise<T>;
+      return delay(
+        scenario === "plugin"
+          ? mockPluginCardState()
+          : scenario === "picture"
+            ? mockPictureCardState()
+            : [],
+      ) as Promise<T>;
     case "set_autostart_enabled": {
       autostart = { enabled: Boolean(args?.enabled), preference_enabled: Boolean(args?.enabled) };
       return delay(autostart) as Promise<T>;
@@ -372,6 +402,13 @@ export async function mockInvoke<T>(command: string, args?: Record<string, unkno
             state: "Waiting for the first refresh",
           } as T;
         }
+      }
+      if (card.kind === "picture" && snapshot.device.tier === "local") {
+        return {
+          png_base64: null,
+          sample: false,
+          state: "Picture cards render on the server",
+        } as T;
       }
       const timer = snapshot.pomodoros.find((candidate) => candidate.widget_id === cardId);
       return {

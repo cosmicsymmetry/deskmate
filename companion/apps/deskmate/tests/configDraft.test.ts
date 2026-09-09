@@ -4,16 +4,14 @@ import {
   activePlaylist,
   addCard,
   addEntry,
-  cardMoveFromKey,
   cardKindName,
   cardLabel,
+  cardMoveFromKey,
   cardName,
-  cardsOutsideLoop,
-  copyConfig,
   cardsContainerIssues,
-  loopAdvance,
-  loopDeadline,
-  loopSegments,
+  cardsOutsideLoop,
+  cardTitle,
+  copyConfig,
   firstRunSteps,
   firstSelectableCard,
   formatDuration,
@@ -21,8 +19,11 @@ import {
   issuesForField,
   issuesForPath,
   libraryCards,
+  loopAdvance,
+  loopDeadline,
   loopEntries,
   loopSeconds,
+  loopSegments,
   moveCard,
   moveEntry,
   nextLoopCardId,
@@ -66,6 +67,7 @@ function initialConfig(): AppConfig {
         alert: { kind: "none" },
       },
     ],
+    image_sources: [],
     assets: [],
     playlists: [
       {
@@ -134,6 +136,20 @@ test("a plugin card is named by its display name, and falls back to its id twice
   );
 });
 
+test("a picture card is called Picture, with the owner's words beside it", () => {
+  const card: CardSettings = {
+    kind: "picture",
+    id: "shot",
+    title: "Limits",
+    source_id: "limits",
+    tap_action: { kind: "none" },
+    refresh: { kind: "manual" },
+    alert: { kind: "none" },
+  };
+  expect(cardLabel(card, null)).toBe("Picture");
+  expect(cardTitle(card)).toBe("Limits");
+});
+
 test("no card kind is called “Plugin” on any surface", () => {
   const kinds: AddableCardKind[] = ["clock", "pomodoro", "calendar", "weather", "json-feed", "rss"];
   expect(kinds.map(cardKindName)).not.toContain("Plugin");
@@ -160,6 +176,21 @@ test("a bare plugin id always carries the word that explains it", () => {
   expect(pluginCardFlag(missing, null, null)).toBeNull();
   // Built-in cards never carry it.
   expect(pluginCardFlag(initialConfig().cards[0], null, local)).toBeNull();
+});
+
+test("a picture card says when it needs the server", () => {
+  const card: CardSettings = {
+    kind: "picture",
+    id: "shot",
+    title: "Limits",
+    source_id: "limits",
+    tap_action: { kind: "none" },
+    refresh: { kind: "manual" },
+    alert: { kind: "none" },
+  };
+
+  expect(pluginCardFlag(card, null, "local")).toBe("needs the server");
+  expect(pluginCardFlag(card, null, "networked")).toBeNull();
 });
 
 describe("configuration draft helpers", () => {
@@ -292,6 +323,46 @@ describe("configuration draft helpers", () => {
       config: entryFull,
       cardId: null,
     });
+  });
+
+  test("adding a picture card enrols it in the loop", () => {
+    const { config, cardId } = addCard(initialConfig(), {
+      kind: "picture",
+      sourceId: "limits",
+      sourceName: "Claude limits",
+    });
+
+    expect(cardId).toBe("picture");
+    expect(config.cards.at(-1)).toEqual({
+      kind: "picture",
+      id: "picture",
+      title: "",
+      source_id: "limits",
+      tap_action: { kind: "none" },
+      refresh: { kind: "manual" },
+      alert: { kind: "none" },
+    });
+    expect(config.playlists[0].entries.at(-1)).toEqual({
+      card_id: "picture",
+      dwell_seconds: null,
+    });
+    expect(config.image_sources).toEqual([{ id: "limits", name: "Claude limits" }]);
+  });
+
+  test("adding a picture card declares its source exactly once", () => {
+    const first = addCard(initialConfig(), {
+      kind: "picture",
+      sourceId: "shared",
+      sourceName: "Shared picture",
+    });
+    const second = addCard(first.config, {
+      kind: "picture",
+      sourceId: "shared",
+      sourceName: "Shared picture",
+    });
+
+    expect(second.config.cards.filter((card) => card.kind === "picture")).toHaveLength(2);
+    expect(second.config.image_sources).toEqual([{ id: "shared", name: "Shared picture" }]);
   });
 
   test("adding every kind produces a reachable, addable card", () => {
@@ -757,7 +828,7 @@ describe("configuration draft helpers", () => {
 
   test("contract fixtures expose cards, not widgets or screens", () => {
     const config = ipcContractFixtures.snapshot.config;
-    expect(config.schema_version).toBe(6);
+    expect(config.schema_version).toBe(7);
     expect(Array.isArray(config.cards)).toBe(true);
     expect(Array.isArray(config.playlists)).toBe(true);
     expect("widgets" in config).toBe(false);

@@ -22,11 +22,14 @@ export function copyConfig(config: AppConfig): AppConfig {
       ...(card.kind === "json-feed"
         ? { mappings: card.mappings.map((mapping) => ({ ...mapping })) }
         : {}),
-      ...(card.kind === "plugin" ? {} : { template: { ...card.template } }),
+      ...(card.kind === "plugin" || card.kind === "picture"
+        ? {}
+        : { template: { ...card.template } }),
       tap_action: { ...card.tap_action },
       refresh: { ...card.refresh },
       alert: { ...card.alert },
     })) as CardSettings[],
+    image_sources: config.image_sources.map((source) => ({ ...source })),
     assets: config.assets.map((asset) => ({
       ...asset,
       source: { ...asset.source },
@@ -61,6 +64,8 @@ export function cardName(card: CardSettings): string {
       return card.title || cardKindName(card.kind);
     case "plugin":
       return card.title || card.plugin_id;
+    case "picture":
+      return card.title || "Picture";
   }
 }
 
@@ -81,11 +86,14 @@ export function cardName(card: CardSettings): string {
  * showing is `pluginCardFlag`, not this — a name is a name, not a diagnosis.
  */
 export function cardLabel(card: CardSettings, catalog?: PluginCatalog | null): string {
-  if (card.kind !== "plugin") {
-    return cardKindName(card.kind);
+  if (card.kind === "picture") {
+    return "Picture";
   }
-  const entry = catalog?.plugins.find((plugin) => plugin.id === card.plugin_id);
-  return entry?.display_name ?? card.plugin_id;
+  if (card.kind === "plugin") {
+    const entry = catalog?.plugins.find((plugin) => plugin.id === card.plugin_id);
+    return entry?.display_name ?? card.plugin_id;
+  }
+  return cardKindName(card.kind);
 }
 
 export type PluginCardFlag = "not on the server" | "needs the server";
@@ -103,6 +111,9 @@ export function pluginCardFlag(
   catalog: PluginCatalog | null,
   tier: DeviceTier | null,
 ): PluginCardFlag | null {
+  if (card.kind === "picture") {
+    return tier === "local" ? "needs the server" : null;
+  }
   if (card.kind !== "plugin") {
     return null;
   }
@@ -161,7 +172,8 @@ function nextId(prefix: string, used: Set<string>): string {
  */
 export type AddCardRequest =
   | AddableCardKind
-  | { kind: "plugin"; pluginId: string; refreshMinutes: number };
+  | { kind: "plugin"; pluginId: string; refreshMinutes: number }
+  | { kind: "picture"; sourceId: string; sourceName: string };
 
 /// Appends a new card with sane defaults for its kind and enrols it at the end
 /// of the active loop in the same draft. Supports all six built-in card kinds
@@ -184,9 +196,9 @@ export function addCard(
     return { config, cardId: null };
   }
   const used = new Set(config.cards.map((card) => card.id));
-  // "plugin" as the id stem, never the plugin id: `plugin_id` is bounded at 64 bytes
-  // and a card id at 32, and two cards of one plugin are legitimate.
-  const cardId = nextId(typeof request === "string" ? request : "plugin", used);
+  // Server-created cards use their kind as the id stem, never the source/plugin id:
+  // those external ids have different bounds, and two cards may legitimately share one.
+  const cardId = nextId(typeof request === "string" ? request : request.kind, used);
   const common = {
     id: cardId,
     tap_action: { kind: "none" } as const,
@@ -195,15 +207,28 @@ export function addCard(
 
   let card: CardSettings;
   if (typeof request !== "string") {
-    card = {
-      kind: "plugin",
-      ...common,
-      // Blank on purpose: the display name already says what the card is, and a
-      // pre-filled title would be a second name nobody chose.
-      title: "",
-      plugin_id: request.pluginId,
-      refresh: { kind: "interval", minutes: request.refreshMinutes },
-    };
+    switch (request.kind) {
+      case "plugin":
+        card = {
+          kind: request.kind,
+          ...common,
+          // Blank on purpose: the display name already says what the card is, and a
+          // pre-filled title would be a second name nobody chose.
+          title: "",
+          plugin_id: request.pluginId,
+          refresh: { kind: "interval", minutes: request.refreshMinutes },
+        };
+        break;
+      case "picture":
+        card = {
+          kind: request.kind,
+          ...common,
+          title: "",
+          source_id: request.sourceId,
+          refresh: { kind: "manual" },
+        };
+        break;
+    }
   } else {
     switch (request) {
       case "clock":
@@ -290,7 +315,13 @@ export function addCard(
   // path (every pre-existing card in the returned draft would alias the live snapshot's
   // card objects instead of being an independent copy).
   const copied = copyConfig(config);
-  const withCard = { ...copied, cards: [...copied.cards, card] };
+  const image_sources =
+    typeof request !== "string" &&
+    request.kind === "picture" &&
+    !copied.image_sources.some((source) => source.id === request.sourceId)
+      ? [...copied.image_sources, { id: request.sourceId, name: request.sourceName }]
+      : copied.image_sources;
+  const withCard = { ...copied, cards: [...copied.cards, card], image_sources };
   return { config: addEntry(withCard, playlist.id, cardId), cardId };
 }
 

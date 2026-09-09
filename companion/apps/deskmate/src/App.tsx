@@ -1,17 +1,18 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { CardEditor } from "./components/CardEditor";
 import { CardList, type PluginKindOption } from "./components/CardList";
+import { DevicePreview } from "./components/DevicePreview";
 import { Icon } from "./components/Icon";
 import { LoopRing } from "./components/LoopRing";
-import { DevicePreview } from "./components/DevicePreview";
 import { NetworkPanel, ownershipLabel } from "./components/NetworkPanel";
-import { type SaveState, SaveBar, type ValidationState } from "./components/SaveBar";
+import { SaveBar, type SaveState, type ValidationState } from "./components/SaveBar";
 import { SettingsSheet } from "./components/SettingsSheet";
 import { TopBar } from "./components/TopBar";
 import {
-  addCard,
+  type AddCardRequest,
   activePlaylist,
+  addCard,
   cardLabel,
   copyConfig,
   firstRunSteps,
@@ -21,15 +22,15 @@ import {
   removeCard,
   unclaimedIssues,
   updateWidget,
-  type AddCardRequest,
 } from "./lib/configDraft";
 import {
   chooseIcsFile,
   controlPomodoro,
   getAutostartStatus,
+  mintImageSource,
   refreshProvider,
-  setAutostartEnabled,
   resumePushing,
+  setAutostartEnabled,
   toIpcError,
   validateConfigDraft,
 } from "./lib/tauri";
@@ -40,6 +41,7 @@ import type {
   DisplayOrientation,
   DraftValidation,
   IpcError,
+  MintedImageSource,
   PomodoroAction,
 } from "./lib/types";
 import { useAppState } from "./lib/useAppState";
@@ -85,6 +87,8 @@ export function App() {
     chooseLocalMode,
   } = useAppState();
   const [draft, setDraft] = useState<AppConfig | null>(null);
+  const draftRef = useRef<AppConfig | null>(draft);
+  draftRef.current = draft;
   const [selectedCardId, setSelectedCardId] = useState<string | null>(null);
   const [dirty, setDirty] = useState(false);
   const [validation, setValidation] = useState<ValidationState>({
@@ -98,6 +102,10 @@ export function App() {
   const [autostartEnabled, setAutostartValue] = useState(false);
   const [autostartMismatch, setAutostartMismatch] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [mintedPicture, setMintedPicture] = useState<{
+    cardId: string;
+    access: MintedImageSource;
+  } | null>(null);
 
   useEffect(() => {
     if (!snapshot || dirty) {
@@ -244,17 +252,48 @@ export function App() {
     snapshot.device.last_network_error !== null;
 
   const replaceDraft = (next: AppConfig) => {
+    draftRef.current = next;
     setDraft(next);
     setDirty(true);
     setSaveState({ kind: "idle" });
   };
-  const handleAdd = (request: AddCardRequest) => {
-    const result = addCard(draft, request);
+  const handleAdd = (request: AddCardRequest): string | null => {
+    // Source minting is asynchronous. Read the latest draft here so settings edited
+    // while the server responds are not replaced by the render that began the mint.
+    const currentDraft = draftRef.current;
+    if (!currentDraft) {
+      return null;
+    }
+    const result = addCard(currentDraft, request);
     if (!result.cardId) {
-      return;
+      return null;
     }
     replaceDraft(result.config);
     setSelectedCardId(result.cardId);
+    return result.cardId;
+  };
+  const handleSelectCard = (cardId: string) => {
+    setMintedPicture((current) => (current?.cardId === cardId ? current : null));
+    setSelectedCardId(cardId);
+  };
+  const handleAddPicture = () => {
+    const sourceNumber = draft.image_sources.length + 1;
+    const sourceName = sourceNumber === 1 ? "Picture" : `Picture ${sourceNumber}`;
+    setBusyAction("picture-source");
+    setCommandError(null);
+    void mintImageSource(sourceName)
+      .then((access) => {
+        const cardId = handleAdd({
+          kind: "picture",
+          sourceId: access.source_id,
+          sourceName,
+        });
+        if (cardId) {
+          setMintedPicture({ cardId, access });
+        }
+      })
+      .catch((nextError) => setCommandError(toIpcError(nextError)))
+      .finally(() => setBusyAction(null));
   };
 
   // The add menu's server group, built from the catalog and nothing else. It is
@@ -272,10 +311,18 @@ export function App() {
     if (!selectedCardId) {
       return;
     }
+    if (
+      mintedPicture?.cardId === widget.id &&
+      widget.kind === "picture" &&
+      mintedPicture.access.source_id !== widget.source_id
+    ) {
+      setMintedPicture(null);
+    }
     replaceDraft(updateWidget(draft, selectedCardId, widget));
   };
   const handleRemoveCard = (cardId: string) => {
     const next = removeCard(draft, cardId);
+    setMintedPicture((current) => (current?.cardId === cardId ? null : current));
     replaceDraft(next);
     setSelectedCardId((current) => (current === cardId ? firstSelectableCard(next) : current));
   };
@@ -401,7 +448,7 @@ export function App() {
             issues={issues}
             catalog={pluginCatalog}
             selectedCardId={selectedCardId}
-            onSelect={setSelectedCardId}
+            onSelect={handleSelectCard}
             onChange={replaceDraft}
           />
         </aside>
@@ -575,8 +622,9 @@ export function App() {
             serverCardState={serverCardState}
             ownershipTier={ownershipTier}
             selectedCardId={selectedCardId}
-            onSelect={setSelectedCardId}
+            onSelect={handleSelectCard}
             onAdd={handleAdd}
+            onAddPicture={handleAddPicture}
             onChange={replaceDraft}
             onRemove={handleRemoveCard}
           />
@@ -592,6 +640,7 @@ export function App() {
             timerBusy={busyAction === "timer"}
             filePickerBusy={busyAction === "calendar-file"}
             providerRefreshing={refreshingProviderId === selectedCardId}
+            pictureAccess={mintedPicture?.cardId === selectedCardId ? mintedPicture.access : null}
             catalog={pluginCatalog}
             ownershipTier={ownershipTier}
             onChange={handleWidgetChange}

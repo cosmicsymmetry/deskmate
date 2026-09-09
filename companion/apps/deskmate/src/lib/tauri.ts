@@ -8,6 +8,7 @@ import type {
   ConfigApplyResult,
   DraftValidation,
   IpcError,
+  MintedImageSource,
   NetworkSettings,
   PluginCatalog,
   PomodoroAction,
@@ -174,6 +175,10 @@ export function renderCardPreview(cardId: string): Promise<PreviewFrame> {
 
 export function getServerPlugins(): Promise<PluginCatalog> {
   return invokeTyped("get_server_plugins");
+}
+
+export function mintImageSource(name: string): Promise<MintedImageSource> {
+  return invokeTyped("get_server_plugins", { sourceName: name });
 }
 
 export function getServerCardState(): Promise<ServerCardState[]> {

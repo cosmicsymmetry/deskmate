@@ -215,11 +215,27 @@ impl SerialRuntimeDevice {
 impl RuntimeDevice for SerialRuntimeDevice {
     fn connect(&mut self) -> Result<DeviceConnection, DeviceError> {
         if let Some(connected) = self.connected.as_mut() {
-            connected.reconnect(self.explicit_port.as_deref())?;
-            return Ok(DeviceConnection {
-                port_name: connected.port_name.clone(),
-                status: connected.initial_status.clone(),
-            });
+            match connected.reconnect(self.explicit_port.as_deref()) {
+                Ok(()) => {
+                    return Ok(DeviceConnection {
+                        port_name: connected.port_name.clone(),
+                        status: connected.initial_status.clone(),
+                    });
+                }
+                Err(error) => {
+                    // A stalled session's worker is blocked inside a transport
+                    // read the operating system will not interrupt, and
+                    // `reconnect` hands the new transport to that same worker, so
+                    // this session can never come back. Discard it and open a
+                    // fresh one below; keeping it would leave the display
+                    // unreachable for the rest of the run after a single cable
+                    // pull. Every other failure keeps the session, as before.
+                    if !connected.session.is_stalled() {
+                        return Err(error);
+                    }
+                    self.connected = None;
+                }
+            }
         }
         let connected = connect_session(self.explicit_port.as_deref())?;
         let result = DeviceConnection {

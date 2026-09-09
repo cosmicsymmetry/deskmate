@@ -614,6 +614,40 @@ of letting code and documentation diverge.
   test pinning both mountings; do not "restore fidelity" by passing the mounting through.
   This does not touch `lvgl-sim`'s own orientation support, which the parity gate and
   `framebuffer_diff` still need at both values.
+- **A device that disappears from under an open serial fd used to wedge the ENTIRE Mac
+  app, and "the app can't save to the server" was the visible symptom (root-caused and
+  fixed 2026-09-09).** `SerialTransport::read` can block indefinitely once the USB device
+  behind its fd is gone; the port's 100 ms timeout does not help, because the block is in
+  the kernel rather than a deadline the port owns. `SessionConnection::transact` checks
+  its 2 s `request_timeout` only *between* reads, so a read that never returns makes that
+  deadline unreachable — and `DeviceSession::request` then waited on an **untimed
+  `recv()`**. The app-core runtime worker therefore sat inside
+  `SerialRuntimeDevice::status` forever, every `RuntimeCommand` failed with
+  `ResponseTimeout` after 5 s, and because `prepare_server_save` calls
+  `set_persistence_state` **before** the HTTP request, **no save ever reached the
+  server** — the window showed a bare "runtime command response timed out" and the server
+  logged nothing, because nothing was sent. `Drop`'s `join()` on that same thread is why
+  the app also would not quit.
+  - **It was diagnosed with `sample <pid>`, not by reading code.** Four samples showed one
+    identical stack (`run_runtime` -> `status` -> `request` -> `recv`), which is what
+    turned a vague report into a located defect. Reach for it first next time: the
+    settings preview keeps ticking while the worker is dead (it is a lock read plus a
+    separate preview thread, and never sends a runtime command), so the UI looks alive.
+  - The fix is one rule: **no caller waits unboundedly on a thread that can block in an OS
+    read.** `request` and `reconnect` both wait `request_timeout * REPLY_TIMEOUT_FACTOR`
+    (2 — 4 s at the default, inside app-core's 5 s command timeout), and `Drop` waits on a
+    `finished` channel the worker closes rather than joining. A session that misses that
+    deadline is marked `stalled`: later calls fail at once and `Drop` detaches the thread.
+  - **A stalled session reports `Transport(Disconnected)`, never `Timeout`, on purpose.**
+    `app-core`'s `is_disconnect` is `NoDevice | Transport(_)`, so a `Timeout` would leave
+    the runtime holding a dead session and never reconnecting.
+  - **`reconnect` hands the new transport to the SAME worker**, so a stalled session can
+    never be revived. `SerialRuntimeDevice::connect` therefore discards a stalled session
+    and opens a fresh one; without that, one cable pull left the display unreachable for
+    the rest of the run.
+  - Four regression tests pin this, each mutation-probed. They arm a watchdog thread that
+    releases the blocked read on a timer **before** the call under test, so a regression
+    fails an assertion instead of hanging the suite — write any future test here that way.
 - **Clock faces carry no title chip and no `DATE` eyebrow** (delivered 2026-08-17; spec
   `docs/superpowers/specs/2026-08-17-deskmate-clock-title-removal-design.md`, plan
   `docs/superpowers/plans/2026-08-17-deskmate-clock-title-removal.md`). All three clock

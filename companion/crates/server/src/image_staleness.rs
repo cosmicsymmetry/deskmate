@@ -17,10 +17,10 @@ pub(crate) const PUSH_TIME_RING: usize = 8;
 pub(crate) const STALE_MULTIPLE: u32 = 3;
 
 /// No source is flagged sooner than this, however fast it normally pushes.
-pub(crate) const STALE_FLOOR: Duration = Duration::from_secs(15 * 60);
+pub(crate) const STALE_FLOOR: Duration = Duration::from_mins(15);
 
 /// No source is given more rope than this, however slowly it normally pushes.
-pub(crate) const STALE_CEILING: Duration = Duration::from_secs(48 * 60 * 60);
+pub(crate) const STALE_CEILING: Duration = Duration::from_hours(48);
 
 /// The smallest number of *intervals* an inference needs. Three intervals means
 /// four pushes: one gap is not a cadence, and two cannot outvote an outlier.
@@ -39,8 +39,8 @@ pub(crate) fn stale_deadline(recent_pushes: &[DateTime<Utc>]) -> Option<Duration
     intervals.sort_unstable();
     // Median, not mean: one late push must not inflate the deadline for good.
     let middle = intervals.len() / 2;
-    let baseline = if intervals.len() % 2 == 0 {
-        (intervals[middle - 1] + intervals[middle]) / 2
+    let baseline = if intervals.len().is_multiple_of(2) {
+        i64::midpoint(intervals[middle - 1], intervals[middle])
     } else {
         intervals[middle]
     };
@@ -76,7 +76,7 @@ mod tests {
     /// Pushes every `interval` seconds, oldest first, `count` of them.
     fn cadence(count: usize, interval: i64) -> Vec<DateTime<Utc>> {
         (0..count)
-            .map(|index| at(index as i64 * interval))
+            .map(|index| at(i64::try_from(index).expect("test index fits i64") * interval))
             .collect()
     }
 
@@ -119,7 +119,7 @@ mod tests {
     fn a_ten_minute_producer_gets_three_times_its_baseline() {
         // 10 min baseline -> 30 min, inside both bounds, so neither clamp applies.
         let ring = cadence(8, 10 * 60);
-        assert_eq!(stale_deadline(&ring), Some(Duration::from_secs(30 * 60)));
+        assert_eq!(stale_deadline(&ring), Some(Duration::from_mins(30)));
     }
 
     #[test]
@@ -130,7 +130,7 @@ mod tests {
         let last = *ring.last().unwrap();
         ring.push(last + chrono::Duration::hours(6));
         let deadline = stale_deadline(&ring).expect("enough samples");
-        assert_eq!(deadline, Duration::from_secs(30 * 60));
+        assert_eq!(deadline, Duration::from_mins(30));
     }
 
     #[test]

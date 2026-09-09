@@ -3983,6 +3983,7 @@ dependencies = [
  "futures-util",
  "http",
  "plugin",
+ "png 0.17.16",
  "protocol",
  "providers",
  "rand 0.9.5",

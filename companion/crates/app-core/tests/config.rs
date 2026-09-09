@@ -963,11 +963,13 @@ fn picture_card(id: &str, source_id: &str) -> CardSettings {
 
 #[test]
 fn a_picture_card_naming_a_known_source_validates() {
-    let mut config = AppConfig::default();
-    config.image_sources = vec![ImageSource {
-        id: "limits".into(),
-        name: "Claude limits".into(),
-    }];
+    let mut config = AppConfig {
+        image_sources: vec![ImageSource {
+            id: "limits".into(),
+            name: "Claude limits".into(),
+        }],
+        ..AppConfig::default()
+    };
     config.cards.push(picture_card("shot", "limits"));
     config.playlists[0].entries.push(PlaylistEntry {
         card_id: "shot".into(),
@@ -1005,11 +1007,13 @@ fn a_picture_card_naming_an_unknown_source_is_a_typed_missing_reference() {
 #[test]
 fn a_picture_card_compiles_to_the_digital_clock_wire_template() {
     // The device learns nothing new: same byte every plugin card sends.
-    let mut config = AppConfig::default();
-    config.image_sources = vec![ImageSource {
-        id: "limits".into(),
-        name: "L".into(),
-    }];
+    let mut config = AppConfig {
+        image_sources: vec![ImageSource {
+            id: "limits".into(),
+            name: "L".into(),
+        }],
+        ..AppConfig::default()
+    };
     config.cards = vec![picture_card("shot", "limits")];
     config.playlists[0].entries = vec![PlaylistEntry {
         card_id: "shot".into(),
@@ -1044,17 +1048,19 @@ fn more_than_the_maximum_image_sources_is_rejected() {
 
 #[test]
 fn two_image_sources_may_not_share_an_id() {
-    let mut config = AppConfig::default();
-    config.image_sources = vec![
-        ImageSource {
-            id: "same".into(),
-            name: "One".into(),
-        },
-        ImageSource {
-            id: "same".into(),
-            name: "Two".into(),
-        },
-    ];
+    let config = AppConfig {
+        image_sources: vec![
+            ImageSource {
+                id: "same".into(),
+                name: "One".into(),
+            },
+            ImageSource {
+                id: "same".into(),
+                name: "Two".into(),
+            },
+        ],
+        ..AppConfig::default()
+    };
 
     let issues = config.validate().expect_err("duplicate id").issues;
     assert!(

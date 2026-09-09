@@ -175,8 +175,7 @@ mod tests {
             encoder.set_depth(png::BitDepth::Eight);
             let mut writer = encoder.write_header().expect("header");
             // Opaque white pixels at zero alpha.
-            let data: Vec<u8> = std::iter::repeat([255u8, 255, 255, 0])
-                .take((W * H) as usize)
+            let data: Vec<u8> = std::iter::repeat_n([255u8, 255, 255, 0], (W * H) as usize)
                 .flatten()
                 .collect();
             writer.write_image_data(&data).expect("data");

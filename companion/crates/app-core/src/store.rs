@@ -961,7 +961,7 @@ fn decode_config(bytes: &[u8]) -> Result<(AppConfig, ConfigOrigin), StoreError> 
     let header: VersionHeader = parse_json(text)?;
     let (config, origin) = match header.schema_version {
         CURRENT_SCHEMA_VERSION => (parse_json(text)?, ConfigOrigin::Current),
-        version @ (4 | 5 | 6) => {
+        version @ (4..=6) => {
             // v4's asset variants (`icon { width, height }`, `font { pixel_size,
             // glyph_ranges }`) encoded the pre-tiny_ttf design where glyphs were
             // baked at a fixed size. `config.rs`'s compile step has always

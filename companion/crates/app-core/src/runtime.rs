@@ -1211,6 +1211,20 @@ impl WorkerState {
                         now,
                     );
                 }
+                CardSettings::Picture { id, .. } => {
+                    // A picture card has no provider to poll. Its frames arrive
+                    // by webhook, pushed by an external producer, so there is no
+                    // fetch loop here to schedule and no deadline to arm --
+                    // which is also why rotating onto one costs nothing.
+                    //
+                    // With no host there is additionally nothing holding a
+                    // frame, so the compiled placeholder fields are a stand-in
+                    // for data rather than data, and reporting them would be the
+                    // same defect the plugin arm below documents.
+                    if self.plugin_host.is_none() {
+                        self.latest_fields.remove(id);
+                    }
+                }
                 CardSettings::Plugin { id, refresh, .. } => {
                     // Spec 5.3: with no plugin host this runtime can neither
                     // fetch nor draw the card, so it schedules nothing and
@@ -3871,6 +3885,20 @@ fn initial_snapshot(
                 duration_seconds: *duration_seconds,
                 remaining_seconds: *duration_seconds,
             }),
+            // A picture card's "provider" is the external producer pushing to
+            // its source, and its freshness is inferred server-side from that
+            // producer's own cadence. It therefore reports a provider entry on
+            // exactly the same condition a plugin card does -- a host exists to
+            // know the answer -- and none at all otherwise, rather than showing
+            // a permanent stale flag nobody can clear.
+            CardSettings::Picture { id, .. } if renders_plugin_cards => {
+                providers.push(ProviderSnapshot {
+                    widget_id: id.clone(),
+                    state: ProviderState::Idle,
+                    last_success_unix_ms: None,
+                    age_seconds: None,
+                });
+            }
             CardSettings::Plugin { id, .. } if renders_plugin_cards => {
                 providers.push(ProviderSnapshot {
                     widget_id: id.clone(),
@@ -3889,9 +3917,11 @@ fn initial_snapshot(
                 age_seconds: None,
             }),
             // Matches the worker: a runtime with no host says nothing at all
-            // about a plugin card, not even "idle" -- the same nothing an
-            // unrendered clock reports.
-            CardSettings::Plugin { .. } | CardSettings::Clock { .. } => {}
+            // about a plugin or picture card, not even "idle" -- the same
+            // nothing an unrendered clock reports.
+            CardSettings::Plugin { .. }
+            | CardSettings::Picture { .. }
+            | CardSettings::Clock { .. } => {}
         }
     }
     AppSnapshot {

@@ -1,11 +1,13 @@
+use app_core::config::ImageSource;
 use app_core::{
-    AlertHold, AppConfig, AppSnapshot, AssetKind, AssetSettings, AssetSource, CalendarSource,
-    CardAlert, CardDataSnapshot, CardError, CardErrorKind, CardField, CardFieldValue, CardSettings,
-    CarouselAdvance, ConnectionState, DeviceCounters, DeviceSnapshot, DisplayTemplate,
-    JsonFieldMapping, MAX_ASSET_BYTES, MAX_PLAYLIST_ENTRIES, MAX_PLAYLIST_NAME_LEN, MAX_PLAYLISTS,
-    MAX_PLUGIN_ID_LEN, MAX_PROVIDER_URL_LEN, PersistenceState, Playlist, PlaylistEntry,
-    PomodoroSnapshot, PomodoroState, ProviderSnapshot, ProviderState, RefreshPolicy,
-    RuntimeDiagnostics, RuntimeState, ValidationCode, WeatherUnits, WidgetTapAction,
+    AlertHold, AppConfig, AppSnapshot, AssetKind, AssetSettings, AssetSource,
+    CURRENT_SCHEMA_VERSION, CalendarSource, CardAlert, CardDataSnapshot, CardError, CardErrorKind,
+    CardField, CardFieldValue, CardSettings, CarouselAdvance, ConnectionState, DeviceCounters,
+    DeviceSnapshot, DisplayTemplate, JsonFieldMapping, MAX_ASSET_BYTES, MAX_PLAYLIST_ENTRIES,
+    MAX_PLAYLIST_NAME_LEN, MAX_PLAYLISTS, MAX_PLUGIN_ID_LEN, MAX_PROVIDER_URL_LEN,
+    PersistenceState, Playlist, PlaylistEntry, PomodoroSnapshot, PomodoroState, ProviderSnapshot,
+    ProviderState, RefreshPolicy, RuntimeDiagnostics, RuntimeState, ValidationCode, WeatherUnits,
+    WidgetTapAction,
 };
 use protocol::{
     CAPABILITY_ASSET_TRANSFER, CAPABILITY_CONFIG_ROTATION, CAPABILITY_CORE_WIDGETS,
@@ -21,9 +23,18 @@ const MALFORMED_JSON: &str = include_str!("fixtures/malformed.json");
 const CARD_SURFACE_JSON: &str = include_str!("fixtures/card-surface.json");
 const PLUGIN_CARD_JSON: &str = include_str!("fixtures/plugin-card.json");
 
+// These frozen pre-v7 fixtures intentionally have no `image_sources` key. Parse
+// them through the new default, then move only the version to the contract under
+// test rather than rewriting fixtures outside this task's ownership.
+fn current_config(json: &str) -> AppConfig {
+    let mut config: AppConfig = serde_json::from_str(json).unwrap();
+    config.schema_version = CURRENT_SCHEMA_VERSION;
+    config
+}
+
 #[test]
 fn default_fixture_is_the_canonical_default() {
-    let from_fixture: AppConfig = serde_json::from_str(DEFAULT_JSON).unwrap();
+    let from_fixture = current_config(DEFAULT_JSON);
     assert_eq!(from_fixture, AppConfig::default());
     from_fixture.validate().unwrap();
 
@@ -34,7 +45,7 @@ fn default_fixture_is_the_canonical_default() {
 
 #[test]
 fn full_fixture_compiles_deterministically_to_m2_contract() {
-    let config: AppConfig = serde_json::from_str(FULL_JSON).unwrap();
+    let config = current_config(FULL_JSON);
     let first = config.compile(42).unwrap();
     let second = config.compile(42).unwrap();
     assert_eq!(first, second);
@@ -83,7 +94,7 @@ fn v4_playlist_compiles_byte_identically_to_the_v3_full_fixture() {
     // `full.json` is the schema-v4 form of the frozen schema-v3 full fixture:
     // the active playlist contains its three former InRotation cards in the
     // same order, and the pomodoro alert keeps the same interrupt policy.
-    let config: AppConfig = serde_json::from_str(FULL_JSON).unwrap();
+    let config = current_config(FULL_JSON);
     let compiled = config.compile(42).unwrap();
 
     let actual = encode_message(1, &Message::ApplyConfig(compiled.layout)).unwrap();
@@ -102,7 +113,7 @@ fn v4_playlist_compiles_byte_identically_to_the_v3_full_fixture() {
 
 #[test]
 fn invalid_fixture_reports_all_domain_boundaries_before_compile() {
-    let config: AppConfig = serde_json::from_str(INVALID_JSON).unwrap();
+    let config = current_config(INVALID_JSON);
     let error = config.compile(1).unwrap_err();
 
     // Match on (path, code) pairs, not code membership: several of these codes
@@ -154,7 +165,8 @@ fn invalid_fixture_reports_all_domain_boundaries_before_compile() {
 
 #[test]
 fn future_schema_establishes_a_clean_migration_boundary() {
-    let config: AppConfig = serde_json::from_str(FUTURE_JSON).unwrap();
+    let future = FUTURE_JSON.replacen("\"schema_version\": 7", "\"schema_version\": 8", 1);
+    let config: AppConfig = serde_json::from_str(&future).unwrap();
     let error = config.validate().unwrap_err();
     assert!(error.issues.iter().any(|issue| {
         issue.path == "schema_version" && issue.code == ValidationCode::UnsupportedVersion
@@ -163,7 +175,7 @@ fn future_schema_establishes_a_clean_migration_boundary() {
 
 #[test]
 fn card_surface_is_closed_bounded_and_capability_gated() {
-    let config: AppConfig = serde_json::from_str(CARD_SURFACE_JSON).unwrap();
+    let config = current_config(CARD_SURFACE_JSON);
     config.validate().unwrap();
     assert_eq!(
         serde_json::from_str::<AppConfig>(&serde_json::to_string(&config).unwrap()).unwrap(),
@@ -195,7 +207,7 @@ fn card_surface_is_closed_bounded_and_capability_gated() {
 
 #[test]
 fn card_surface_rejects_oversized_sources_and_asset_budgets() {
-    let mut config: AppConfig = serde_json::from_str(CARD_SURFACE_JSON).unwrap();
+    let mut config = current_config(CARD_SURFACE_JSON);
     if let CardSettings::JsonFeed { url, .. } = &mut config.cards[4] {
         *url = format!("https://example.test/{}", "x".repeat(MAX_PROVIDER_URL_LEN));
     }
@@ -278,7 +290,7 @@ fn a_font_asset_compiles_and_requires_the_asset_transfer_capability() {
 
 #[test]
 fn network_provider_urls_cannot_embed_credentials_and_weather_has_a_refresh_floor() {
-    let mut config: AppConfig = serde_json::from_str(CARD_SURFACE_JSON).unwrap();
+    let mut config = current_config(CARD_SURFACE_JSON);
     for card in &mut config.cards {
         match card {
             CardSettings::Calendar { source, .. } => {
@@ -930,6 +942,120 @@ fn timer_tap_actions_require_the_progress_ring_template() {
     config.validate().expect("progress-ring timers stay valid");
 }
 
+fn picture_card(id: &str, source_id: &str) -> CardSettings {
+    CardSettings::Picture {
+        id: id.to_owned(),
+        title: "Limits".to_owned(),
+        source_id: source_id.to_owned(),
+        tap_action: WidgetTapAction::None,
+        refresh: RefreshPolicy::Manual,
+        alert: CardAlert::None,
+    }
+}
+
+#[test]
+fn a_picture_card_naming_a_known_source_validates() {
+    let mut config = AppConfig::default();
+    config.image_sources = vec![ImageSource {
+        id: "limits".into(),
+        name: "Claude limits".into(),
+    }];
+    config.cards.push(picture_card("shot", "limits"));
+    config.playlists[0].entries.push(PlaylistEntry {
+        card_id: "shot".into(),
+        dwell_seconds: None,
+    });
+
+    assert!(config.validate().is_ok(), "{:?}", config.validate());
+    let encoded = serde_json::to_string(&config).expect("serialize picture card");
+    let decoded: AppConfig = serde_json::from_str(&encoded).expect("deserialize picture card");
+    assert_eq!(decoded, config);
+}
+
+#[test]
+fn a_picture_card_naming_an_unknown_source_is_a_typed_missing_reference() {
+    let mut config = AppConfig::default();
+    config.cards.push(picture_card("shot", "nope"));
+    config.playlists[0].entries.push(PlaylistEntry {
+        card_id: "shot".into(),
+        dwell_seconds: None,
+    });
+
+    let issues = config
+        .validate()
+        .expect_err("unknown source must not validate")
+        .issues;
+    let issue = issues
+        .iter()
+        .find(|issue| issue.path.ends_with("source_id"))
+        .expect("an issue naming source_id");
+    // Typed, never a silently blank card.
+    assert_eq!(issue.code, ValidationCode::MissingReference);
+    assert!(issue.message.contains("nope"));
+}
+
+#[test]
+fn a_picture_card_compiles_to_the_digital_clock_wire_template() {
+    // The device learns nothing new: same byte every plugin card sends.
+    let mut config = AppConfig::default();
+    config.image_sources = vec![ImageSource {
+        id: "limits".into(),
+        name: "L".into(),
+    }];
+    config.cards = vec![picture_card("shot", "limits")];
+    config.playlists[0].entries = vec![PlaylistEntry {
+        card_id: "shot".into(),
+        dwell_seconds: None,
+    }];
+
+    let compiled = config.compile(1).expect("compiles");
+    assert_eq!(
+        compiled.layout.widgets[0].template,
+        protocol::TemplateKind::DigitalClock
+    );
+}
+
+#[test]
+fn more_than_the_maximum_image_sources_is_rejected() {
+    assert_eq!(app_core::config::MAX_IMAGE_SOURCES, 8);
+    let mut config = AppConfig::default();
+    config.image_sources = (0..=app_core::config::MAX_IMAGE_SOURCES)
+        .map(|index| ImageSource {
+            id: format!("source-{index}"),
+            name: format!("Source {index}"),
+        })
+        .collect();
+
+    let issues = config.validate().expect_err("over capacity").issues;
+    assert!(
+        issues
+            .iter()
+            .any(|issue| issue.code == ValidationCode::TooMany)
+    );
+}
+
+#[test]
+fn two_image_sources_may_not_share_an_id() {
+    let mut config = AppConfig::default();
+    config.image_sources = vec![
+        ImageSource {
+            id: "same".into(),
+            name: "One".into(),
+        },
+        ImageSource {
+            id: "same".into(),
+            name: "Two".into(),
+        },
+    ];
+
+    let issues = config.validate().expect_err("duplicate id").issues;
+    assert!(
+        issues
+            .iter()
+            .any(|issue| issue.code == ValidationCode::DuplicateId)
+    );
+}
+
 // -- Task 6: the plugin card kind -------------------------------------------------
 
 fn plugin_card(tap_action: WidgetTapAction, refresh: RefreshPolicy) -> CardSettings {
@@ -945,7 +1071,7 @@ fn plugin_card(tap_action: WidgetTapAction, refresh: RefreshPolicy) -> CardSetti
 
 #[test]
 fn plugin_card_fixture_deserializes_validates_and_round_trips() {
-    let config: AppConfig = serde_json::from_str(PLUGIN_CARD_JSON).unwrap();
+    let config = current_config(PLUGIN_CARD_JSON);
     config.validate().unwrap();
     assert_eq!(
         config.cards[0],
@@ -1393,13 +1519,13 @@ fn entry(card_id: &str) -> PlaylistEntry {
 }
 
 #[test]
-fn default_config_is_v6_with_one_playlist() {
+fn default_config_is_v7_with_one_playlist() {
     let config = AppConfig::default();
     // A literal, not `CURRENT_SCHEMA_VERSION`: this test exists to catch a bump that
     // forgot to update `AppConfig::default()`, and comparing the constant to itself
-    // could never fail that way. The boundary tests in `tests/store.rs` (`found: 7,
-    // supported: 6`) keep the same literal discipline for the same reason.
-    assert_eq!(config.schema_version, 6);
+    // could never fail that way. The boundary tests in `tests/store.rs` (`found: 8,
+    // supported: 7`) keep the same literal discipline for the same reason.
+    assert_eq!(config.schema_version, 7);
     assert_eq!(config.playlists.len(), 1);
     assert_eq!(config.active_playlist_id, config.playlists[0].id);
     assert_eq!(config.playlists[0].entries.len(), 1);

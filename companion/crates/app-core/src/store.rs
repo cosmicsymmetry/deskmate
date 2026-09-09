@@ -127,6 +127,7 @@ pub enum ConfigOrigin {
     MigratedV3,
     MigratedV4,
     MigratedV5,
+    MigratedV6,
     LastGood,
 }
 
@@ -742,6 +743,7 @@ fn migrate_v2(legacy: LegacyConfigV2) -> AppConfig {
         schema_version: CURRENT_SCHEMA_VERSION,
         preferences: legacy.preferences,
         cards,
+        image_sources: Vec::new(),
         assets: legacy.assets,
         playlists: vec![playlist],
         active_playlist_id: DEFAULT_PLAYLIST_ID.into(),
@@ -918,6 +920,7 @@ fn migrate_v3(legacy: LegacyConfigV3) -> AppConfig {
             entries,
         )],
         cards,
+        image_sources: Vec::new(),
         assets: legacy.assets,
         active_playlist_id: DEFAULT_PLAYLIST_ID.into(),
         updater: legacy.updater,
@@ -958,7 +961,7 @@ fn decode_config(bytes: &[u8]) -> Result<(AppConfig, ConfigOrigin), StoreError> 
     let header: VersionHeader = parse_json(text)?;
     let (config, origin) = match header.schema_version {
         CURRENT_SCHEMA_VERSION => (parse_json(text)?, ConfigOrigin::Current),
-        version @ (4 | 5) => {
+        version @ (4 | 5 | 6) => {
             // v4's asset variants (`icon { width, height }`, `font { pixel_size,
             // glyph_ranges }`) encoded the pre-tiny_ttf design where glyphs were
             // baked at a fixed size. `config.rs`'s compile step has always
@@ -969,11 +972,15 @@ fn decode_config(bytes: &[u8]) -> Result<(AppConfig, ConfigOrigin), StoreError> 
             // change (a new card kind no v4 document could contain either) adds
             // nothing that shape lacks. v4 therefore migrates directly to the
             // current schema in one step, not chained through v5. v5 likewise differs
-            // only by adding the plugin card kind, so both paths are version bumps.
+            // only by adding the plugin card kind, so both paths are version bumps,
+            // and the v6->v7 change adds only `image_sources`, which every older
+            // document lacks and `#[serde(default)]` supplies as empty, so this
+            // stays a version bump with no data transformation.
             let legacy: AppConfig = parse_json(text)?;
             let origin = match version {
                 4 => ConfigOrigin::MigratedV4,
                 5 => ConfigOrigin::MigratedV5,
+                6 => ConfigOrigin::MigratedV6,
                 _ => unreachable!(),
             };
             (
@@ -1122,6 +1129,7 @@ fn migrate_legacy(
         schema_version: CURRENT_SCHEMA_VERSION,
         preferences,
         cards,
+        image_sources: Vec::new(),
         assets: Vec::new(),
         playlists: vec![playlist],
         active_playlist_id: DEFAULT_PLAYLIST_ID.into(),

@@ -1837,11 +1837,16 @@ describe("settings accessibility and states", () => {
     ).toBe(true);
   });
 
-  test("the add menu aligns to the slot end only when its measured width would overflow", async () => {
+  test("the add menu aligns to the slot end only when it would overflow the viewport", async () => {
     const config = cardListConfig([clockCard("clock", "Desk")]);
     const container = document.createElement("div");
     container.className = "face__work";
-    Object.defineProperty(container, "clientWidth", { configurable: true, value: 1000 });
+    // Measured against the viewport, not this column: the menu is `position:
+    // fixed` precisely so the column's `overflow-y` cannot clip it.
+    Object.defineProperty(document.documentElement, "clientWidth", {
+      configurable: true,
+      value: 1000,
+    });
     document.body.appendChild(container);
     const root = createRoot(container);
 
@@ -1872,14 +1877,69 @@ describe("settings accessibility and states", () => {
         throw new Error("add-card slot root was not rendered");
       }
 
-      slotRoot.getBoundingClientRect = () => ({ right: 800 }) as DOMRect;
+      const slotAt = (left: number) =>
+        ({ top: 300, bottom: 407, left, right: left + 148 }) as DOMRect;
+
+      // 800 + 272 overflows 1000, so the menu hangs off its right edge instead.
+      slotRoot.getBoundingClientRect = () => slotAt(800);
       await act(async () => slot?.click());
       expect(container.querySelector(".menu")?.classList.contains("menu--end")).toBe(true);
 
       await act(async () => slot?.click());
-      slotRoot.getBoundingClientRect = () => ({ right: 100 }) as DOMRect;
+      slotRoot.getBoundingClientRect = () => slotAt(100);
       await act(async () => slot?.click());
       expect(container.querySelector(".menu")?.classList.contains("menu--end")).toBe(false);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  /**
+   * Opening the menu focuses its first item, and focusing something inside a
+   * scrolling column makes the browser scroll it into view. A menu that closed
+   * on scroll therefore closed itself the instant it opened — visible only as
+   * "I picked a plugin and nothing happened", because by the time the pointer
+   * arrived there was nothing under it. It repositions instead.
+   */
+  test("the add menu survives the scroll that opening it causes", async () => {
+    const config = cardListConfig([clockCard("clock", "Desk")]);
+    const container = document.createElement("div");
+    container.className = "face__work";
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    try {
+      await act(async () =>
+        root.render(
+          <CardList
+            config={config}
+            issues={[]}
+            cardData={[]}
+            pomodoros={[]}
+            providers={[]}
+            pluginKinds={[]}
+            catalog={null}
+            serverCardState={[]}
+            ownershipTier="networked"
+            selectedCardId={null}
+            onSelect={() => {}}
+            onAdd={() => {}}
+            onChange={() => {}}
+            onRemove={() => {}}
+          />,
+        ),
+      );
+      const slot = container.querySelector<HTMLButtonElement>(".card-tile__add");
+      await act(async () => slot?.click());
+      expect(container.querySelector(".menu")).not.toBeNull();
+
+      await act(async () => {
+        container.dispatchEvent(new Event("scroll", { bubbles: false }));
+        window.dispatchEvent(new Event("scroll"));
+      });
+
+      expect(container.querySelector(".menu")).not.toBeNull();
     } finally {
       await act(async () => root.unmount());
       container.remove();

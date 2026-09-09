@@ -1,11 +1,15 @@
 import {
+  useCallback,
   useEffect,
   useLayoutEffect,
   useRef,
   useState,
+  type CSSProperties,
   type DragEvent,
   type KeyboardEvent,
 } from "react";
+
+import { placeAddMenu } from "../lib/menuPlacement";
 
 import {
   activePlaylist,
@@ -180,6 +184,10 @@ export function CardList({
   const [draggedCardId, setDraggedCardId] = useState<string | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
   const [menuAlignEnd, setMenuAlignEnd] = useState(false);
+  // Viewport coordinates, because the menu is `position: fixed` — see
+  // `menuPlacement.ts` for why it cannot be positioned within the work column.
+  const [menuStyle, setMenuStyle] = useState<CSSProperties>({});
+  const menuRef = useRef<HTMLDivElement>(null);
   const menuRootRef = useRef<HTMLLIElement>(null);
   const addButtonRef = useRef<HTMLButtonElement>(null);
   const menuItemRefs = useRef<HTMLButtonElement[]>([]);
@@ -213,15 +221,51 @@ export function CardList({
     return () => document.removeEventListener("mousedown", closeOnOutsideClick);
   }, [menuOpen]);
 
-  useLayoutEffect(() => {
-    if (!menuOpen || !menuRootRef.current) {
+  const positionMenu = useCallback(() => {
+    if (!menuRootRef.current) {
       return;
     }
-    const menuRoot = menuRootRef.current;
-    const scrollContainer = menuRoot.closest(".face__work") as HTMLElement | null;
-    const availableWidth = scrollContainer?.clientWidth ?? document.documentElement.clientWidth;
-    setMenuAlignEnd(menuRoot.getBoundingClientRect().right + 272 > availableWidth);
-  }, [menuOpen]);
+    const trigger = menuRootRef.current.getBoundingClientRect();
+    const viewport = {
+      width: document.documentElement.clientWidth,
+      height: window.innerHeight,
+    };
+    // `scrollHeight` is the menu's content height whether or not a cap is
+    // already clipping it, so this stays correct on every repositioning.
+    const contentHeight = menuRef.current?.scrollHeight ?? 0;
+    const placement = placeAddMenu(trigger, viewport, contentHeight);
+    setMenuAlignEnd(placement.alignEnd);
+    setMenuStyle({
+      top: placement.top,
+      maxHeight: placement.maxHeight,
+      ...(placement.alignEnd ? { right: viewport.width - trigger.right } : { left: trigger.left }),
+    });
+  }, []);
+
+  useLayoutEffect(() => {
+    if (menuOpen) {
+      positionMenu();
+    }
+  }, [menuOpen, positionMenu]);
+
+  // A fixed menu keeps the coordinates it was given, so it would drift away from
+  // its trigger when the column scrolls or the window resizes underneath it.
+  // It is repositioned rather than closed: closing looks right until you notice
+  // that opening the menu focuses its first item, which scrolls that item into
+  // view — a scroll the menu itself caused, which would then close it again the
+  // instant it opened.
+  useEffect(() => {
+    if (!menuOpen) {
+      return;
+    }
+    const reposition = () => positionMenu();
+    window.addEventListener("resize", reposition);
+    window.addEventListener("scroll", reposition, true);
+    return () => {
+      window.removeEventListener("resize", reposition);
+      window.removeEventListener("scroll", reposition, true);
+    };
+  }, [menuOpen, positionMenu]);
 
   useLayoutEffect(() => {
     const previousCardIds = pendingNewCardIdsRef.current;
@@ -551,10 +595,12 @@ export function CardList({
           )}
           {menuOpen && (
             <div
+              ref={menuRef}
               className={`menu${menuAlignEnd ? " menu--end" : ""}`}
               id="add-card-menu"
               role="menu"
               aria-label="Add a card"
+              style={menuStyle}
             >
               <fieldset className="menu__group">
                 <legend className="tile-label menu__label">Built in</legend>

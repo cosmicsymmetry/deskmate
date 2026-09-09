@@ -4,15 +4,16 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use app_core::runtime::ImageSourceFrame;
 use app_core::{
     AlertHold, AppConfig, CalendarRefreshRequest, CalendarRefreshResult, CalendarRefresher,
     CardAlert, CardErrorKind, CardField, CardFieldValue, CardPreviewState, CardSettings,
     CarouselAdvance, ConnectionState, DesiredAsset, DeviceCapability, DeviceConnection,
-    DeviceOtaState, DeviceTier, DeviceWifiState, DisplayOrientation, DisplayTemplate,
-    NetworkConfig, PersistenceState, Playlist, PlaylistEntry, PluginHost, PomodoroAction,
-    PomodoroState, ProviderRequest, ProvisioningTier, RasterFrame, RasterRequest, RefreshPolicy,
-    RuntimeDevice, RuntimeError, RuntimeHandle, RuntimeOptions, RuntimeState, SceneCandidate,
-    WidgetTapAction,
+    DeviceOtaState, DeviceRenderProfile, DeviceTier, DeviceWifiState, DisplayOrientation,
+    DisplayTemplate, NetworkConfig, PersistenceState, Playlist, PlaylistEntry, PluginHost,
+    PomodoroAction, PomodoroState, ProviderRequest, ProvisioningTier, RasterFrame, RasterRequest,
+    RefreshPolicy, RenderDecision, RuntimeDevice, RuntimeError, RuntimeHandle, RuntimeOptions,
+    RuntimeState, SceneCandidate, WidgetTapAction, analyze_scene, negotiate,
 };
 use chrono::{TimeZone as _, Utc};
 use device::{DeviceError, ReceivedEvent, SessionDiagnostics, TransportError};
@@ -35,6 +36,8 @@ enum Operation {
     Push(String),
     PushScene(PushScene),
     AssetBegin([u8; protocol::ASSET_DIGEST_LEN]),
+    AssetChunk([u8; protocol::ASSET_DIGEST_LEN], u32),
+    AssetCommit([u8; protocol::ASSET_DIGEST_LEN]),
     AssetRelease(Vec<[u8; protocol::ASSET_DIGEST_LEN]>),
     Activate(String),
     Interrupt(u32),
@@ -89,6 +92,9 @@ struct MockState {
     refused_pushes: BTreeSet<String>,
     /// Cards whose scene the device understands but cannot render exactly.
     refused_scenes: BTreeSet<String>,
+    /// Durable assets whose transfer fails after `AssetBegin`, proving an
+    /// incomplete pass sends neither a scene nor its closing keep-set.
+    refused_asset_chunks: BTreeSet<[u8; protocol::ASSET_DIGEST_LEN]>,
     /// Simulates the tier changing between the last status response and a host sync.
     /// The rejection also changes later status responses to Networked, as hardware
     /// does after accepting provisioning and rebooting into server ownership.
@@ -216,6 +222,14 @@ impl MockDeviceControl {
             .unwrap()
             .refused_scenes
             .insert(card_id.to_owned());
+    }
+
+    fn refuse_asset_chunks_for(&self, digest: [u8; protocol::ASSET_DIGEST_LEN]) {
+        self.state
+            .lock()
+            .unwrap()
+            .refused_asset_chunks
+            .insert(digest);
     }
 
     fn reject_time_sync_as_wrong_tier(&self) {
@@ -450,12 +464,25 @@ impl RuntimeDevice for MockDevice {
         })
     }
 
-    fn send_asset_chunk(&mut self, _chunk: AssetChunk) -> Result<(), DeviceError> {
-        self.with_connected(|_state| ())
+    fn send_asset_chunk(&mut self, chunk: AssetChunk) -> Result<(), DeviceError> {
+        self.with_connected(|state| {
+            state
+                .operations
+                .push(Operation::AssetChunk(chunk.digest, chunk.offset));
+            if state.refused_asset_chunks.contains(&chunk.digest) {
+                return Err(DeviceError::Rejected(ErrorResponse {
+                    code: ErrorCode::InvalidPayload,
+                    diagnostic: "fixture asset chunk failure".into(),
+                }));
+            }
+            Ok(())
+        })?
     }
 
-    fn send_asset_commit(&mut self, _commit: AssetCommit) -> Result<(), DeviceError> {
-        self.with_connected(|_state| ())
+    fn send_asset_commit(&mut self, commit: AssetCommit) -> Result<(), DeviceError> {
+        self.with_connected(|state| {
+            state.operations.push(Operation::AssetCommit(commit.digest));
+        })
     }
 
     fn send_asset_release(&mut self, release: AssetRelease) -> Result<(), DeviceError> {
@@ -673,6 +700,8 @@ struct FakePluginHostState {
     invalid_scene: bool,
     frame: Option<RasterFrame>,
     raster_requests: Vec<RasterRequest>,
+    picture_frames: BTreeMap<String, ImageSourceFrame>,
+    pending_picture_frames: BTreeMap<String, ImageSourceFrame>,
 }
 
 #[derive(Clone, Default)]
@@ -710,6 +739,37 @@ impl FakePluginHostControl {
     fn raster_requests(&self) -> Vec<RasterRequest> {
         self.state.lock().unwrap().raster_requests.clone()
     }
+
+    /// Stages a source update exactly as the server does: the desired asset is
+    /// visible to the reconciliation pass that adopts it, and only then does
+    /// scene construction observe the new digest. This keeps the ordering
+    /// assertions deterministic even while the runtime worker is ticking.
+    fn stage_picture_frame(
+        &self,
+        source_id: &str,
+        digest: [u8; protocol::ASSET_DIGEST_LEN],
+        bytes: &[u8],
+        stale: bool,
+    ) {
+        self.state.lock().unwrap().pending_picture_frames.insert(
+            source_id.to_owned(),
+            ImageSourceFrame {
+                digest,
+                bytes: Arc::from(bytes),
+                stale,
+            },
+        );
+    }
+
+    fn set_picture_stale(&self, source_id: &str, stale: bool) {
+        self.state
+            .lock()
+            .unwrap()
+            .picture_frames
+            .get_mut(source_id)
+            .expect("the fixture source has a frame")
+            .stale = stale;
+    }
 }
 
 struct FakePluginHost {
@@ -718,7 +778,20 @@ struct FakePluginHost {
 
 impl PluginHost for FakePluginHost {
     fn desired_assets(&mut self) -> Vec<DesiredAsset> {
-        self.control.state.lock().unwrap().desired_assets.clone()
+        let mut state = self.control.state.lock().unwrap();
+        let pending = std::mem::take(&mut state.pending_picture_frames);
+        state.picture_frames.extend(pending);
+        let mut desired = state.desired_assets.clone();
+        for frame in state.picture_frames.values() {
+            if !desired.iter().any(|asset| asset.digest == frame.digest) {
+                desired.push(DesiredAsset {
+                    digest: frame.digest,
+                    kind: protocol::AssetKind::Image,
+                    bytes: Arc::clone(&frame.bytes),
+                });
+            }
+        }
+        desired
     }
 
     fn render_scene(
@@ -756,6 +829,16 @@ impl PluginHost for FakePluginHost {
             .frame
             .clone()
             .ok_or_else(|| "the fixture host has no frame".to_owned())
+    }
+
+    fn image_source_frame(&mut self, source_id: &str) -> Option<ImageSourceFrame> {
+        self.control
+            .state
+            .lock()
+            .unwrap()
+            .picture_frames
+            .get(source_id)
+            .cloned()
     }
 }
 
@@ -811,7 +894,12 @@ fn options() -> RuntimeOptions {
 }
 
 fn full_config() -> AppConfig {
-    serde_json::from_str(FULL_JSON).unwrap()
+    let mut config: AppConfig = serde_json::from_str(FULL_JSON).unwrap();
+    // Task 2 moved the schema contract to v7, while this broad runtime fixture
+    // intentionally remains the historical v6 document. Runtime tests exercise
+    // runtime behavior, not migration, so install it at the current version.
+    config.schema_version = app_core::CURRENT_SCHEMA_VERSION;
+    config
 }
 
 fn multi_provider_config() -> AppConfig {
@@ -875,6 +963,53 @@ fn plugin_config() -> AppConfig {
         dwell_seconds: None,
     }];
     config
+}
+
+fn picture_config(picture_is_active: bool) -> AppConfig {
+    let mut config = AppConfig::default();
+    let picture = CardSettings::Picture {
+        id: "picture-card".into(),
+        title: "Picture card".into(),
+        source_id: "camera".into(),
+        tap_action: WidgetTapAction::None,
+        refresh: RefreshPolicy::Manual,
+        alert: CardAlert::None,
+    };
+    config.image_sources = vec![app_core::config::ImageSource {
+        id: "camera".into(),
+        name: "Camera".into(),
+    }];
+    if picture_is_active {
+        config.cards = vec![picture];
+        config.playlists[0].entries = vec![PlaylistEntry {
+            card_id: "picture-card".into(),
+            dwell_seconds: None,
+        }];
+    } else {
+        config.cards.push(picture);
+        config.playlists[0].entries.push(PlaylistEntry {
+            card_id: "picture-card".into(),
+            dwell_seconds: None,
+        });
+    }
+    config
+}
+
+fn start_picture_runtime(
+    config: AppConfig,
+    control: &MockDeviceControl,
+    host: Option<Box<dyn PluginHost>>,
+) -> RuntimeHandle {
+    RuntimeHandle::start_with_plugin_host(
+        config,
+        Box::new(MockDevice::new(control.clone())),
+        Box::new(FixedRefresher {
+            delay: Duration::ZERO,
+        }),
+        options(),
+        host,
+    )
+    .unwrap()
 }
 
 fn plugin_refresher() -> PluginRefresher {
@@ -2967,8 +3102,9 @@ fn invalid_commands_do_not_mutate_runtime_state() {
         runtime.control_pomodoro("missing", PomodoroAction::Reset),
         Err(RuntimeError::UnknownWidget { .. })
     ));
-    let unsupported: AppConfig =
+    let mut unsupported: AppConfig =
         serde_json::from_str(include_str!("fixtures/card-surface.json")).unwrap();
+    unsupported.schema_version = app_core::CURRENT_SCHEMA_VERSION;
     assert!(matches!(
         runtime.apply_config(unsupported),
         Err(RuntimeError::InvalidConfig { issues })
@@ -3792,6 +3928,411 @@ fn a_tap_on_a_completed_pomodoro_still_pushes_authoritative_state() {
             .map(|pomodoro| pomodoro.state),
         Some(PomodoroState::Completed),
         "the tap must remain a no-op on host state"
+    );
+    runtime.shutdown().unwrap();
+}
+
+const PICTURE_BLOB: &[u8] = &[0x19, 0x12, 0, 0, 0xc0, 1, 0x70, 1, 0x80, 3, 0, 0, 1, 2];
+
+fn latest_picture_push(operations: &[Operation]) -> Option<PushScene> {
+    operations
+        .iter()
+        .rev()
+        .find_map(|operation| match operation {
+            Operation::PushScene(push) if push.card_id == "picture-card" => Some(push.clone()),
+            _ => None,
+        })
+}
+
+#[test]
+fn a_picture_card_builds_a_single_full_canvas_image_scene() {
+    let control = MockDeviceControl::default();
+    let host = FakePluginHostControl::default();
+    let digest = [0x41; protocol::ASSET_DIGEST_LEN];
+    host.stage_picture_frame("camera", digest, PICTURE_BLOB, false);
+    let runtime =
+        start_picture_runtime(picture_config(true), &control, Some(Box::new(host.host())));
+
+    wait_for(Duration::from_secs(1), || {
+        latest_picture_push(&control.operations()).is_some_and(|push| {
+            matches!(push.scene.nodes.first(), Some(SceneNode::Image(image)) if image.digest == digest)
+        })
+    });
+    let push = latest_picture_push(&control.operations()).expect("the picture scene was pushed");
+    assert_eq!(push.scene.nodes.len(), 1);
+    let SceneNode::Image(image) = &push.scene.nodes[0] else {
+        panic!("a picture card's face is one image node");
+    };
+    assert_eq!(image.x, 0);
+    assert_eq!(image.y, 0);
+    assert_eq!(image.w, protocol::SCENE_CANVAS_WIDTH);
+    assert_eq!(image.h, protocol::SCENE_CANVAS_HEIGHT);
+    assert_eq!(image.digest, digest);
+    assert!(!image.recolor);
+    runtime.shutdown().unwrap();
+}
+
+#[test]
+fn a_stale_picture_card_adds_the_shared_footer_and_nothing_else() {
+    let control = MockDeviceControl::default();
+    let host = FakePluginHostControl::default();
+    host.stage_picture_frame(
+        "camera",
+        [0x42; protocol::ASSET_DIGEST_LEN],
+        PICTURE_BLOB,
+        true,
+    );
+    let runtime =
+        start_picture_runtime(picture_config(true), &control, Some(Box::new(host.host())));
+
+    wait_for(Duration::from_secs(1), || {
+        latest_picture_push(&control.operations()).is_some_and(|push| push.scene.nodes.len() == 2)
+    });
+    let push = latest_picture_push(&control.operations()).expect("the stale picture was pushed");
+    assert_eq!(push.scene.nodes.len(), 2);
+    assert!(matches!(push.scene.nodes[0], SceneNode::Image(_)));
+    assert!(matches!(push.scene.nodes[1], SceneNode::Text(_)));
+    runtime.shutdown().unwrap();
+}
+
+#[test]
+fn a_picture_source_with_no_frame_yet_says_so_in_words() {
+    let control = MockDeviceControl::default();
+    let host = FakePluginHostControl::default();
+    let runtime =
+        start_picture_runtime(picture_config(true), &control, Some(Box::new(host.host())));
+
+    wait_for(Duration::from_secs(1), || {
+        latest_picture_push(&control.operations()).is_some()
+    });
+    let push = latest_picture_push(&control.operations()).expect("the waiting face was pushed");
+    assert_eq!(push.scene.nodes.len(), 1);
+    let SceneNode::Text(text) = &push.scene.nodes[0] else {
+        panic!("a source with no frame draws one state word");
+    };
+    assert_eq!(
+        text.value,
+        SceneValue::Literal("Waiting for the first picture".into())
+    );
+    assert!(
+        !push
+            .scene
+            .nodes
+            .iter()
+            .any(|node| matches!(node, SceneNode::Image(_)))
+    );
+    runtime.shutdown().unwrap();
+}
+
+#[test]
+fn a_picture_card_with_no_host_refuses_distinguishably() {
+    let control = MockDeviceControl::default();
+    let runtime = start_picture_runtime(picture_config(true), &control, None);
+
+    let snapshot = wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
+        snapshot.card_errors.iter().any(|error| {
+            error.card_id == "picture-card" && error.message.contains("no image source host")
+        })
+    });
+    let refusal = snapshot
+        .card_errors
+        .iter()
+        .find(|error| error.card_id == "picture-card")
+        .expect("the picture refusal is visible");
+    assert!(refusal.message.contains("no image source host"));
+    assert!(!refusal.message.contains("no plugin host"));
+    runtime.shutdown().unwrap();
+}
+
+#[test]
+fn a_picture_card_negotiates_native_once_its_frame_is_installable() {
+    let control = MockDeviceControl::default();
+    let host = FakePluginHostControl::default();
+    let digest = [0x43; protocol::ASSET_DIGEST_LEN];
+    host.stage_picture_frame("camera", digest, PICTURE_BLOB, false);
+    let runtime =
+        start_picture_runtime(picture_config(true), &control, Some(Box::new(host.host())));
+
+    wait_for(Duration::from_secs(1), || {
+        latest_picture_push(&control.operations()).is_some()
+    });
+    let push = latest_picture_push(&control.operations()).expect("the picture scene was pushed");
+    let requirements = analyze_scene(&push.scene).unwrap();
+    assert!(requirements.bindings.live.is_empty());
+    let profile = DeviceRenderProfile {
+        capabilities: protocol::CURRENT_CAPABILITIES,
+        confirmed_assets: BTreeSet::new(),
+        installable_assets: BTreeSet::from([digest]),
+    };
+    assert_eq!(negotiate(&requirements, &profile), RenderDecision::Native);
+    runtime.shutdown().unwrap();
+}
+
+#[test]
+fn an_image_source_update_for_a_card_that_is_not_on_screen_pushes_no_scene() {
+    let control = MockDeviceControl::default();
+    let host = FakePluginHostControl::default();
+    let plugin_digest = [0x50; protocol::ASSET_DIGEST_LEN];
+    let picture_digest = [0x51; protocol::ASSET_DIGEST_LEN];
+    host.set_desired_assets(vec![DesiredAsset {
+        digest: plugin_digest,
+        kind: protocol::AssetKind::Font,
+        bytes: Arc::from(&b"durable plugin font"[..]),
+    }]);
+    let runtime =
+        start_picture_runtime(picture_config(false), &control, Some(Box::new(host.host())));
+    wait_for(Duration::from_secs(1), || {
+        control.operations().iter().any(
+            |operation| matches!(operation, Operation::PushScene(push) if push.card_id == "clock"),
+        ) && control.operations().iter().any(
+            |operation| matches!(operation, Operation::AssetRelease(digests) if digests == &vec![plugin_digest]),
+        )
+    });
+    let before = control.operations().len();
+
+    host.stage_picture_frame("camera", picture_digest, PICTURE_BLOB, false);
+    runtime
+        .image_source_updated("camera", picture_digest)
+        .unwrap();
+    wait_for(Duration::from_secs(1), || {
+        control.operations()[before..].iter().any(|operation| {
+            matches!(operation, Operation::AssetRelease(digests) if digests == &vec![plugin_digest, picture_digest])
+        })
+    });
+    thread::sleep(Duration::from_millis(30));
+
+    let operations = control.operations();
+    let relevant: Vec<&Operation> = operations[before..]
+        .iter()
+        .filter(|operation| {
+            matches!(
+                operation,
+                Operation::AssetBegin(_)
+                    | Operation::AssetChunk(_, _)
+                    | Operation::AssetCommit(_)
+                    | Operation::AssetRelease(_)
+                    | Operation::PushScene(_)
+            )
+        })
+        .collect();
+    assert_eq!(
+        relevant.len(),
+        7,
+        "unexpected update transcript: {relevant:?}"
+    );
+    assert_eq!(relevant[0], &Operation::AssetBegin(plugin_digest));
+    assert_eq!(relevant[1], &Operation::AssetChunk(plugin_digest, 0));
+    assert_eq!(relevant[2], &Operation::AssetCommit(plugin_digest));
+    assert_eq!(relevant[3], &Operation::AssetBegin(picture_digest));
+    assert_eq!(relevant[4], &Operation::AssetChunk(picture_digest, 0));
+    assert_eq!(relevant[5], &Operation::AssetCommit(picture_digest));
+    assert_eq!(
+        relevant[6],
+        &Operation::AssetRelease(vec![plugin_digest, picture_digest])
+    );
+    assert!(
+        relevant
+            .iter()
+            .all(|operation| !matches!(operation, Operation::PushScene(_))),
+        "an off-screen frame becomes resident without rebuilding the visible face"
+    );
+    runtime.shutdown().unwrap();
+}
+
+#[test]
+fn an_image_source_update_for_the_visible_card_pushes_a_scene_after_the_bytes() {
+    let control = MockDeviceControl::default();
+    let host = FakePluginHostControl::default();
+    let plugin_digest = [0x52; protocol::ASSET_DIGEST_LEN];
+    let picture_digest = [0x53; protocol::ASSET_DIGEST_LEN];
+    host.set_desired_assets(vec![DesiredAsset {
+        digest: plugin_digest,
+        kind: protocol::AssetKind::Font,
+        bytes: Arc::from(&b"durable plugin font"[..]),
+    }]);
+    let runtime =
+        start_picture_runtime(picture_config(true), &control, Some(Box::new(host.host())));
+    wait_for(Duration::from_secs(1), || {
+        latest_picture_push(&control.operations()).is_some()
+            && control.operations().iter().any(|operation| {
+                matches!(operation, Operation::AssetRelease(digests) if digests == &vec![plugin_digest])
+            })
+    });
+    let before = control.operations().len();
+
+    host.stage_picture_frame("camera", picture_digest, PICTURE_BLOB, false);
+    runtime
+        .image_source_updated("camera", picture_digest)
+        .unwrap();
+    wait_for(Duration::from_secs(1), || {
+        control.operations()[before..].iter().any(|operation| {
+            matches!(operation, Operation::PushScene(push) if push.scene.nodes.iter().any(
+                |node| matches!(node, SceneNode::Image(image) if image.digest == picture_digest)
+            ))
+        })
+    });
+
+    let operations = control.operations();
+    let relevant: Vec<&Operation> = operations[before..]
+        .iter()
+        .filter(|operation| {
+            matches!(
+                operation,
+                Operation::AssetBegin(_)
+                    | Operation::AssetChunk(_, _)
+                    | Operation::AssetCommit(_)
+                    | Operation::AssetRelease(_)
+                    | Operation::PushScene(_)
+            )
+        })
+        .collect();
+    assert_eq!(
+        relevant.len(),
+        8,
+        "unexpected update transcript: {relevant:?}"
+    );
+    assert_eq!(relevant[0], &Operation::AssetBegin(plugin_digest));
+    assert_eq!(relevant[1], &Operation::AssetChunk(plugin_digest, 0));
+    assert_eq!(relevant[2], &Operation::AssetCommit(plugin_digest));
+    assert_eq!(relevant[3], &Operation::AssetBegin(picture_digest));
+    assert_eq!(relevant[4], &Operation::AssetChunk(picture_digest, 0));
+    assert_eq!(relevant[5], &Operation::AssetCommit(picture_digest));
+    assert_eq!(
+        relevant[6],
+        &Operation::AssetRelease(vec![plugin_digest, picture_digest])
+    );
+    assert!(
+        matches!(relevant[7], Operation::PushScene(push) if push.scene.nodes.iter().any(
+            |node| matches!(node, SceneNode::Image(image) if image.digest == picture_digest)
+        ))
+    );
+    runtime.shutdown().unwrap();
+}
+
+#[test]
+fn a_failed_asset_transfer_pushes_no_scene_and_releases_nothing() {
+    let control = MockDeviceControl::default();
+    let host = FakePluginHostControl::default();
+    let previous_digest = [0x54; protocol::ASSET_DIGEST_LEN];
+    let failed_digest = [0x55; protocol::ASSET_DIGEST_LEN];
+    host.stage_picture_frame("camera", previous_digest, PICTURE_BLOB, false);
+    let runtime =
+        start_picture_runtime(picture_config(true), &control, Some(Box::new(host.host())));
+    wait_for(Duration::from_secs(1), || {
+        latest_picture_push(&control.operations()).is_some_and(|push| {
+            push.scene.nodes.iter().any(
+                |node| matches!(node, SceneNode::Image(image) if image.digest == previous_digest),
+            )
+        })
+    });
+    let before = control.operations().len();
+
+    control.refuse_asset_chunks_for(failed_digest);
+    host.stage_picture_frame("camera", failed_digest, PICTURE_BLOB, false);
+    runtime
+        .image_source_updated("camera", failed_digest)
+        .expect_err("the failed durable transfer reaches the command caller");
+    wait_for(Duration::from_secs(1), || {
+        control.operations()[before..].iter().any(
+            |operation| matches!(operation, Operation::AssetChunk(digest, _) if digest == &failed_digest),
+        )
+    });
+    thread::sleep(Duration::from_millis(30));
+
+    let operations = control.operations();
+    let after = &operations[before..];
+    assert!(
+        after
+            .iter()
+            .all(|operation| !matches!(operation, Operation::AssetRelease(_))),
+        "an incomplete desired-set pass must release nothing: {after:?}"
+    );
+    assert!(
+        after
+            .iter()
+            .all(|operation| !matches!(operation, Operation::PushScene(_))),
+        "a failed transfer must leave the last good face active: {after:?}"
+    );
+    let last_good = latest_picture_push(&operations).expect("the old face remains recorded");
+    assert!(
+        last_good
+            .scene
+            .nodes
+            .iter()
+            .any(|node| matches!(node, SceneNode::Image(image) if image.digest == previous_digest))
+    );
+    runtime.shutdown().unwrap();
+}
+
+#[test]
+fn a_staleness_flip_on_the_visible_card_rebuilds_its_scene() {
+    let control = MockDeviceControl::default();
+    let host = FakePluginHostControl::default();
+    let digest = [0x56; protocol::ASSET_DIGEST_LEN];
+    host.stage_picture_frame("camera", digest, PICTURE_BLOB, false);
+    let runtime =
+        start_picture_runtime(picture_config(true), &control, Some(Box::new(host.host())));
+    wait_for(Duration::from_secs(1), || {
+        latest_picture_push(&control.operations()).is_some_and(|push| push.scene.nodes.len() == 1)
+    });
+    let pushes_before = control
+        .operations()
+        .iter()
+        .filter(|operation| matches!(operation, Operation::PushScene(push) if push.card_id == "picture-card"))
+        .count();
+
+    host.set_picture_stale("camera", true);
+    wait_for(Duration::from_secs(1), || {
+        control
+            .operations()
+            .iter()
+            .filter(|operation| matches!(operation, Operation::PushScene(push) if push.card_id == "picture-card"))
+            .count()
+            > pushes_before
+    });
+    let push = latest_picture_push(&control.operations()).expect("the stale face was rebuilt");
+    assert_eq!(push.scene.nodes.len(), 2);
+    assert!(matches!(push.scene.nodes[0], SceneNode::Image(_)));
+    assert!(matches!(push.scene.nodes[1], SceneNode::Text(_)));
+    runtime.shutdown().unwrap();
+}
+
+#[test]
+fn a_picture_cards_preview_is_the_stored_frame_not_a_re_render() {
+    let control = MockDeviceControl::default();
+    let host = FakePluginHostControl::default();
+    let digest = [0x57; protocol::ASSET_DIGEST_LEN];
+    host.stage_picture_frame("camera", digest, PICTURE_BLOB, false);
+    let runtime =
+        start_picture_runtime(picture_config(true), &control, Some(Box::new(host.host())));
+    wait_for(Duration::from_secs(1), || {
+        latest_picture_push(&control.operations()).is_some()
+    });
+
+    let preview = runtime.render_card_preview("picture-card").unwrap();
+
+    assert_eq!(preview.state, CardPreviewState::Fresh);
+    assert_eq!(preview.message, None);
+    let frame = preview.frame.expect("the stored picture is previewable");
+    assert_eq!(frame.digest, digest);
+    assert_eq!(frame.bytes.as_ref(), PICTURE_BLOB);
+    runtime.shutdown().unwrap();
+}
+
+#[test]
+fn a_picture_card_with_no_frame_previews_as_waiting_not_as_an_error() {
+    let control = MockDeviceControl::default();
+    let host = FakePluginHostControl::default();
+    let runtime =
+        start_picture_runtime(picture_config(true), &control, Some(Box::new(host.host())));
+
+    let preview = runtime.render_card_preview("picture-card").unwrap();
+
+    assert_eq!(preview.state, CardPreviewState::Waiting);
+    assert!(preview.frame.is_none());
+    assert_eq!(
+        preview.message.as_deref(),
+        Some("Waiting for the first picture")
     );
     runtime.shutdown().unwrap();
 }

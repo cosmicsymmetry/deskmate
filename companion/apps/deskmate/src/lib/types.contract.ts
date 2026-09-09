@@ -4,7 +4,7 @@ import type { IpcContractFixtures } from "./types";
 export const ipcContractFixtures = {
   "snapshot": {
     "config": {
-      "schema_version": 6,
+      "schema_version": 7,
       "preferences": {
         "timezone": "Asia/Tbilisi",
         "autostart": true,
@@ -77,6 +77,12 @@ export const ipcContractFixtures = {
               "value": 60
             }
           }
+        }
+      ],
+      "image_sources": [
+        {
+          "id": "limits",
+          "name": "Claude limits"
         }
       ],
       "assets": [],
@@ -244,7 +250,7 @@ export const ipcContractFixtures = {
   },
   "configs": [
     {
-      "schema_version": 6,
+      "schema_version": 7,
       "preferences": {
         "timezone": "Asia/Tbilisi",
         "autostart": true,
@@ -317,6 +323,12 @@ export const ipcContractFixtures = {
               "value": 60
             }
           }
+        }
+      ],
+      "image_sources": [
+        {
+          "id": "limits",
+          "name": "Claude limits"
         }
       ],
       "assets": [],
@@ -509,6 +521,21 @@ export const ipcContractFixtures = {
       "refresh": {
         "kind": "interval",
         "minutes": 15
+      },
+      "alert": {
+        "kind": "none"
+      }
+    },
+    {
+      "kind": "picture",
+      "id": "limits-picture",
+      "title": "Limits",
+      "source_id": "limits",
+      "tap_action": {
+        "kind": "none"
+      },
+      "refresh": {
+        "kind": "manual"
       },
       "alert": {
         "kind": "none"

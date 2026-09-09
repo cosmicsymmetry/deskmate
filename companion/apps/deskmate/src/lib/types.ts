@@ -2,6 +2,7 @@ export interface AppConfig {
   schema_version: number;
   preferences: AppPreferences;
   cards: CardSettings[];
+  image_sources: ImageSource[];
   assets: AssetSettings[];
   playlists: Playlist[];
   active_playlist_id: string;
@@ -128,10 +129,31 @@ export type CardSettings =
       tap_action: WidgetTapAction;
       refresh: RefreshPolicy;
       alert: CardAlert;
+    }
+  | {
+      kind: "picture";
+      id: string;
+      title: string;
+      source_id: string;
+      tap_action: WidgetTapAction;
+      refresh: RefreshPolicy;
+      alert: CardAlert;
     };
 
 export type CardKind = CardSettings["kind"];
-export type AddableCardKind = Exclude<CardKind, "plugin">;
+export type AddableCardKind = Exclude<CardKind, "plugin" | "picture">;
+
+export interface ImageSource {
+  id: string;
+  name: string;
+}
+
+/** Secret-bearing result returned once when the server creates an image source. */
+export interface MintedImageSource {
+  source_id: string;
+  token: string;
+  push_url: string;
+}
 
 export type CalendarSource = { kind: "file"; value: string } | { kind: "url"; value: string };
 
@@ -366,7 +388,7 @@ export interface PluginCatalog {
   load_failures: PluginLoadFailure[];
 }
 
-/** The server's own view of one plugin card, projected onto this window's snapshot. */
+/** The server's own view of one plugin or picture card, projected onto this window's snapshot. */
 export interface ServerCardState {
   card_id: string;
   provider: ProviderState;

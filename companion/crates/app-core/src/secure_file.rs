@@ -109,7 +109,28 @@ pub fn create_directory(path: &Path) -> Result<(), FileIoError> {
     })
 }
 
+/// Atomically replaces `target` with `bytes` followed by a trailing newline, at
+/// mode 0600.
+///
+/// This is the text path. Every configuration writer in this crate expects the
+/// newline, so it is part of the contract rather than an accident; binary
+/// payloads want [`write_and_replace_binary`] instead.
 pub fn write_and_replace(target: &Path, bytes: &[u8]) -> Result<(), FileIoError> {
+    write_atomic(target, bytes, true)
+}
+
+/// Atomically replaces `target` with exactly `bytes` -- no trailing newline --
+/// at mode 0600.
+///
+/// A canonical RGB565 frame is 329,740 bytes and its reader checks that length
+/// exactly (`server::rasterizer::frame_png`). Writing one through the text path
+/// above yields 329,741 bytes on disk, which reads back as a corrupt frame
+/// rather than as an error, so binary payloads must not use it.
+pub fn write_and_replace_binary(target: &Path, bytes: &[u8]) -> Result<(), FileIoError> {
+    write_atomic(target, bytes, false)
+}
+
+fn write_atomic(target: &Path, bytes: &[u8], trailing_newline: bool) -> Result<(), FileIoError> {
     let mut options = AtomicWriteFile::options();
     secure_atomic_options(&mut options);
     let mut file = options.open(target).map_err(|source| FileIoError {
@@ -120,10 +141,12 @@ pub fn write_and_replace(target: &Path, bytes: &[u8]) -> Result<(), FileIoError>
         operation: FileOperation::WriteTemporary,
         source,
     })?;
-    file.write_all(b"\n").map_err(|source| FileIoError {
-        operation: FileOperation::FinishTemporary,
-        source,
-    })?;
+    if trailing_newline {
+        file.write_all(b"\n").map_err(|source| FileIoError {
+            operation: FileOperation::FinishTemporary,
+            source,
+        })?;
+    }
     file.commit().map_err(|source| FileIoError {
         operation: FileOperation::SyncAndReplace,
         source,

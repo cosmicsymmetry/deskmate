@@ -4738,3 +4738,41 @@ attempts) — likely internal-RAM churn on repeated TLS setup; worth a follow-up
 distinct from the normal outage path; (2) the device briefly displayed an apparently
 wrong wall-clock time during the outage (standalone clock ~6 h off real local) — the VM
 clock is NTP-synced and correct now, so glance at the TimeSync/offset path later.
+
+## Cable pull with the Mac app running — PASSED 2026-09-09
+
+Verification for `f976f42` ("bound every wait on the device session worker"), the fix
+for the defect where a device that disappeared from under an open serial fd wedged the
+whole companion app and made saving to the server impossible. Host-side change only —
+no firmware was rebuilt or flashed, so no OTA re-verification is owed. Board `dev-0005`
+on `v2.0.0-raster1`, networked tier, server `deskmate.rodi.one`.
+
+**Method.** Attach the board over USB with the app running; save a config change to the
+server; pull the cable; then re-check the app. The runtime worker was sampled with
+`sample <pid>` throughout, because the failure signature is a stack, not a log line: the
+broken build parks 100% of samples at one `run_runtime` offset inside
+`SerialRuntimeDevice::status -> DeviceSession::request -> recv`, while a healthy worker
+shows several distinct offsets as it cycles.
+
+| Check | Observed | Result |
+| --- | --- | --- |
+| App connects over USB in networked tier | tray "Device: Connected" | PASS |
+| Save to server, cable attached | `dev-0005.json` 09:56:04Z, `show_seconds: true` | PASS |
+| Cable pulled 13:57:04 local | node `/dev/cu.usbmodem1101` gone | — |
+| Worker at t+3/6/9 s after the pull | 4 distinct `run_runtime` offsets, **0** frames in `status` | PASS |
+| Runtime notices the disconnection | tray "Device: Standalone" | PASS |
+| Save to server, cable pulled | `dev-0005.json` 09:58:15Z, `show_seconds: false`, UI "Saved to the server" | PASS |
+| Quit with the cable pulled | **0.1 s** | PASS |
+| Config left as found | byte-identical to the pre-test copy | PASS |
+
+**Why the last two rows matter.** Before the fix the same quit hung for over 30 s and
+only completed when macOS finished tearing the device node down, because `Drop` joined a
+thread blocked in an uninterruptible read. And "Device: Standalone" is the visible proof
+that a stalled session reports `Transport(Disconnected)` rather than `Timeout`:
+app-core's `is_disconnect` does not count `Timeout`, so the wrong classification would
+have left the runtime holding a dead session and silently never reconnecting.
+
+**Not covered here.** Re-attaching the cable and confirming the app picks the device up
+again on a fresh session was not exercised; `SerialRuntimeDevice::connect` discards a
+stalled session and opens a new one, and that path has unit coverage but no board
+observation yet.

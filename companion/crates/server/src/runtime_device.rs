@@ -30,11 +30,50 @@ use tokio::time::{Instant, MissedTickBehavior, interval, timeout};
 /// both implementations the same device-facing failure threshold.
 const REQUEST_TIMEOUT: Duration = device::DEFAULT_REQUEST_TIMEOUT;
 
+/// `AssetRelease` is not like the other requests. Its handler runs the
+/// mark-dead scan and then COMPACTS the flash blob region, moving every
+/// surviving asset's bytes, and flash erase-and-write is slow enough that the
+/// ordinary two-second budget is simply the wrong number for it.
+///
+/// This was observed rather than reasoned about. A picture card's 329,740-byte
+/// frame made compaction move far more than the curated fonts ever did, and
+/// `AssetRelease` began timing out while the device reported `dropped_responses`,
+/// `malformed_frames` and `crc_errors` all at zero -- the reply was late, not
+/// lost. The many-round-trip chunk phase, which does no bulk flash work,
+/// succeeded in the same pass.
+///
+/// It stays comfortably under [`IDLE_TIMEOUT`], so a slow compaction cannot be
+/// mistaken for a dead peer, and a test pins that ordering.
+const ASSET_RELEASE_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// How long this particular request may take. Everything except the one
+/// message with a bulk-flash handler keeps the ordinary budget.
+fn request_timeout(message: &protocol::Message) -> Duration {
+    match message {
+        protocol::Message::AssetRelease(_) => ASSET_RELEASE_TIMEOUT,
+        _ => REQUEST_TIMEOUT,
+    }
+}
+
 /// How long the blocking [`RuntimeDevice`] caller waits for the socket actor.
 /// This must stay strictly greater than [`REQUEST_TIMEOUT`]: the actor must
 /// expire and remove its pending request before the caller can submit another,
 /// or a late response could be attributed to the next command.
 const RESPONSE_WAIT_TIMEOUT: Duration = Duration::from_secs(4);
+
+/// How much longer the blocking caller waits than the actor does, for the same
+/// request. The ordering above is what stops a late response being attributed
+/// to the next command, so it has to hold for EVERY message -- including the
+/// one with its own longer budget, which is why this is a margin rather than a
+/// second fixed number that could drift out of order.
+const RESPONSE_WAIT_MARGIN: Duration =
+    Duration::from_secs(RESPONSE_WAIT_TIMEOUT.as_secs() - REQUEST_TIMEOUT.as_secs());
+
+/// The blocking caller's budget for this request, always strictly greater than
+/// [`request_timeout`] for the same message.
+fn response_wait_timeout(message: &protocol::Message) -> Duration {
+    request_timeout(message) + RESPONSE_WAIT_MARGIN
+}
 
 /// Bounds every WebSocket send, including requests, keepalives, and close
 /// frames. A peer that stops reading would otherwise park the socket actor and
@@ -401,13 +440,16 @@ impl WebSocketRuntimeDevice {
             return Err(DeviceError::NoDevice);
         }
         let (response_sender, response_receiver) = mpsc::sync_channel(1);
+        // Computed before the message is moved into the request, and always
+        // strictly longer than the actor's own deadline for it.
+        let wait_timeout = response_wait_timeout(&message);
         commands
             .send(DeviceRequest {
                 message,
                 response: response_sender,
             })
             .map_err(|_| DeviceError::Transport(TransportError::Disconnected))?;
-        match response_receiver.recv_timeout(RESPONSE_WAIT_TIMEOUT) {
+        match response_receiver.recv_timeout(wait_timeout) {
             Ok(response) => response.map(|message| (generation, message)),
             Err(RecvTimeoutError::Timeout) => Err(DeviceError::Timeout),
             Err(RecvTimeoutError::Disconnected) => {
@@ -873,7 +915,7 @@ impl SocketPeer {
                     pending = Some(PendingRequest {
                         request_id,
                         expected_type,
-                        deadline: Instant::now() + REQUEST_TIMEOUT,
+                        deadline: Instant::now() + request_timeout(&command.message),
                         response: command.response,
                     });
                 }
@@ -1093,6 +1135,52 @@ mod tests {
         assert!(
             super::RESPONSE_WAIT_TIMEOUT > super::REQUEST_TIMEOUT,
             "the actor must clear a pending request before its caller can time out"
+        );
+    }
+
+    #[test]
+    fn every_message_lets_the_actor_expire_before_the_caller_gives_up() {
+        use protocol::{AssetRelease, Message};
+
+        // The invariant that stops a late reply being attributed to the NEXT
+        // command has to hold for the long-budget message too, not just the
+        // default one -- a 20 s actor deadline behind a 4 s caller wait is
+        // exactly the cascade `95ed9eb` fixed.
+        for message in [
+            Message::StatusRequest,
+            Message::AssetRelease(AssetRelease {
+                digests: Vec::new(),
+            }),
+        ] {
+            assert!(
+                super::response_wait_timeout(&message) > super::request_timeout(&message),
+                "actor must expire first for {message:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn asset_release_gets_longer_than_a_normal_request_but_less_than_the_idle_reap() {
+        // Its handler compacts the flash blob region, so two seconds is the
+        // wrong budget -- but a value past the idle timeout would have the
+        // server reap the link while waiting for its own request.
+        assert!(super::ASSET_RELEASE_TIMEOUT > super::REQUEST_TIMEOUT);
+        assert!(super::ASSET_RELEASE_TIMEOUT < super::IDLE_TIMEOUT);
+    }
+
+    #[test]
+    fn only_asset_release_gets_the_longer_budget() {
+        use protocol::{AssetRelease, Message};
+
+        assert_eq!(
+            super::request_timeout(&Message::AssetRelease(AssetRelease {
+                digests: Vec::new()
+            })),
+            super::ASSET_RELEASE_TIMEOUT
+        );
+        assert_eq!(
+            super::request_timeout(&Message::StatusRequest),
+            super::REQUEST_TIMEOUT
         );
     }
 

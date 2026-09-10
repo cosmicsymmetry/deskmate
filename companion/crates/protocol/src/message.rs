@@ -2230,10 +2230,10 @@ mod tests {
         // (capabilities) are still encoded contiguously and in this order
         // because keys are canonical; locate and drop them regardless of
         // what now follows them on the wire. The tail is
-        // CURRENT_CAPABILITIES; bit 8 took it from 235 to 491 and bit 9 now
-        // takes it to 1003 (0x03eb). It moves whenever a capability bit is
-        // added to the constant.
-        let pattern = [0x15, 0x09, 0x16, 0x01, 0x17, 0x19, 0x03, 0xeb];
+        // CURRENT_CAPABILITIES; bit 8 took it from 235 to 491, bit 9 took it
+        // to 1003, and bit 10 now takes it to 2027 (0x07eb). It moves whenever
+        // a capability bit is added to the constant.
+        let pattern = [0x15, 0x09, 0x16, 0x01, 0x17, 0x19, 0x07, 0xeb];
         let offset = payload
             .windows(pattern.len())
             .position(|window| window == pattern)

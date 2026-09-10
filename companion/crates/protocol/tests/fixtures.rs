@@ -178,6 +178,7 @@ fn extended_template_kinds_round_trip() {
 fn current_capabilities_advertise_implemented_features() {
     assert_eq!(protocol::CAPABILITY_SCENE_RENDER, 256);
     assert_eq!(protocol::CAPABILITY_VOLATILE_ASSETS, 512);
+    assert_eq!(protocol::CAPABILITY_DURABLE_ASSET_ENCODING, 1024);
     assert_eq!(
         protocol::CURRENT_CAPABILITIES,
         protocol::CAPABILITY_CORE_WIDGETS
@@ -187,11 +188,12 @@ fn current_capabilities_advertise_implemented_features() {
             | protocol::CAPABILITY_FIRMWARE_UPDATE
             | protocol::CAPABILITY_NETWORKING
             | protocol::CAPABILITY_SCENE_RENDER
-            | protocol::CAPABILITY_VOLATILE_ASSETS,
+            | protocol::CAPABILITY_VOLATILE_ASSETS
+            | protocol::CAPABILITY_DURABLE_ASSET_ENCODING,
         "implemented asset transfer, firmware update, networking, scene \
-         rendering, and volatile-asset features must be advertised"
+         rendering, volatile-asset, and durable-asset encoding features must be advertised"
     );
-    assert_eq!(protocol::CURRENT_CAPABILITIES, 1003);
+    assert_eq!(protocol::CURRENT_CAPABILITIES, 2027);
 }
 
 fn assert_rot_rect_clip_is_pinned(nodes: &[protocol::SceneNode]) {

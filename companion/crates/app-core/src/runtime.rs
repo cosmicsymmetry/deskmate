@@ -1920,6 +1920,7 @@ fn apply_image_source_update(
         device,
         &desired,
         state.active_volatile_digest,
+        state.device.capability_bits(),
     ) {
         Ok(keep_set) => keep_set,
         Err(error) => {
@@ -2775,6 +2776,7 @@ fn synchronize_full(
                 device,
                 &desired,
                 state.active_volatile_digest,
+                state.device.capability_bits(),
             ),
         ))
     });
@@ -3625,8 +3627,12 @@ fn ensure_durable_assets_for_scene(
     }) {
         return Err(AssetSyncError::MissingRequiredAsset { digest: *digest });
     }
-    let keep_set =
-        AssetSync::reconcile_with_active_volatile(device, &desired, state.active_volatile_digest)?;
+    let keep_set = AssetSync::reconcile_with_active_volatile(
+        device,
+        &desired,
+        state.active_volatile_digest,
+        state.device.capability_bits(),
+    )?;
     state.confirmed_durable_assets = keep_set
         .into_iter()
         .filter(|digest| Some(*digest) != state.active_volatile_digest)

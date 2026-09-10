@@ -22,6 +22,7 @@ pub mod firmware;
 mod image_ingest;
 mod image_sources;
 mod image_staleness;
+mod images;
 pub mod plugin_host;
 pub mod plugin_provider;
 pub mod plugin_refresher;
@@ -413,6 +414,7 @@ pub fn app(state: ServerState) -> Router {
         .route("/v1/device/firmware", get(firmware::check))
         .route("/v1/firmware/{filename}", get(firmware::download))
         .merge(admin::routes())
+        .merge(images::routes())
         .layer(middleware)
         .with_state(state)
 }

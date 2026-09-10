@@ -801,17 +801,16 @@ static protocol_message_result_t decode_asset_begin_fixture(
 {
     uint8_t payload[64];
     size_t offset = 0U;
-    payload[offset++] = volatile_tier ? 0xa4U : 0xa3U;
+    /* Four pairs always: key 3 is emitted even when false, matching the wire. */
+    payload[offset++] = 0xa4U;
     offset = append_uint_cbor(payload, offset, 0U);
     offset = append_bstr_cbor(payload, offset, digest, ASSET_DIGEST_BYTES);
     offset = append_uint_cbor(payload, offset, 1U);
     offset = append_uint_cbor(payload, offset, (uint64_t)kind);
     offset = append_uint_cbor(payload, offset, 2U);
     offset = append_uint_cbor(payload, offset, total_length);
-    if (volatile_tier) {
-        offset = append_uint_cbor(payload, offset, 3U);
-        offset = append_bool_cbor(payload, offset, true);
-    }
+    offset = append_uint_cbor(payload, offset, 3U);
+    offset = append_bool_cbor(payload, offset, volatile_tier);
 
     protocol_frame_t frame = {
         .version = PROTOCOL_VERSION,
@@ -831,8 +830,11 @@ static protocol_message_result_t decode_asset_begin_encoding_fixture(
     uint8_t digest[ASSET_DIGEST_BYTES];
     memset(digest, 0x6b, sizeof digest);
     uint8_t payload[80];
-    size_t pair_count = 4U + (volatile_tier ? 1U : 0U) +
-                        (has_decoded_length ? 1U : 0U);
+    /* Key 3 is ALWAYS emitted on the real wire, false included -- every
+     * deployed decoder has REQUIRED_BIT(3). Omitting it when false made the
+     * durable cases below decode as a missing field rather than as the durable
+     * transfers they were meant to be, which hid the tier rule entirely. */
+    size_t pair_count = 5U + (has_decoded_length ? 1U : 0U);
     size_t offset = 0U;
     payload[offset++] = (uint8_t)(0xa0U | pair_count);
     offset = append_uint_cbor(payload, offset, 0U);
@@ -841,10 +843,8 @@ static protocol_message_result_t decode_asset_begin_encoding_fixture(
     offset = append_uint_cbor(payload, offset, ASSET_KIND_IMAGE);
     offset = append_uint_cbor(payload, offset, 2U);
     offset = append_uint_cbor(payload, offset, total_length);
-    if (volatile_tier) {
-        offset = append_uint_cbor(payload, offset, 3U);
-        offset = append_bool_cbor(payload, offset, true);
-    }
+    offset = append_uint_cbor(payload, offset, 3U);
+    offset = append_bool_cbor(payload, offset, volatile_tier);
     offset = append_uint_cbor(payload, offset, 4U);
     offset = append_uint_cbor(payload, offset, encoding);
     if (has_decoded_length) {
@@ -1010,10 +1010,19 @@ static void test_asset_begin_rle_relationships_are_validated(void)
     assert(decode_asset_begin_encoding_fixture(
                true, 10032U, PROTOCOL_ASSET_ENCODING_RLE565, false, 0U,
                &message) == PROTOCOL_MESSAGE_ERR_MISSING_FIELD);
+    /* Durable + encoded: rejected outright until bit 10, and rejecting it is
+     * what made a picture card's frame cross as 172 raw chunks. */
     assert(decode_asset_begin_encoding_fixture(
                false, 10032U, PROTOCOL_ASSET_ENCODING_RLE565, true,
                PROTOCOL_VOLATILE_IMAGE_DECODED_LENGTH, &message) ==
-           PROTOCOL_MESSAGE_ERR_INVALID_VALUE);
+           PROTOCOL_MESSAGE_OK);
+    /* A durable image may be any bounded size; a volatile one may not. */
+    assert(decode_asset_begin_encoding_fixture(
+               false, 1000U, PROTOCOL_ASSET_ENCODING_RLE565, true, 4096U,
+               &message) == PROTOCOL_MESSAGE_OK);
+    assert(decode_asset_begin_encoding_fixture(
+               true, 1000U, PROTOCOL_ASSET_ENCODING_RLE565, true, 4096U,
+               &message) == PROTOCOL_MESSAGE_ERR_INVALID_VALUE);
     assert(decode_asset_begin_encoding_fixture(
                true, 10032U, PROTOCOL_ASSET_ENCODING_RLE565, true, 0U,
                &message) == PROTOCOL_MESSAGE_ERR_TOO_LARGE);

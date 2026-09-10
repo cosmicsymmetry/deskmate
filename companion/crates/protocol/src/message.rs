@@ -683,16 +683,24 @@ fn validate_asset_begin(begin: &AssetBegin) -> Result<(), MessageError> {
             }
         }
         ASSET_ENCODING_RLE565 => {
-            if !begin.volatile {
-                return Err(MessageError::InvalidValue("encoded durable asset"));
-            }
+            // Encoding was volatile-only when this rule was written, because
+            // the durable tier could not decode. Bit 10 changed that, and a
+            // durable picture frame is exactly the case it was blocking.
             let decoded_length = begin
                 .decoded_length
                 .ok_or(MessageError::InvalidValue("missing decoded length"))?;
             if decoded_length == 0 || decoded_length > MAX_ASSET_TOTAL_LENGTH {
                 return Err(MessageError::InvalidValue("asset decoded length"));
             }
-            if begin.kind == AssetKind::Image && decoded_length != VOLATILE_IMAGE_DECODED_LENGTH {
+            // A VOLATILE image is a full-canvas frame by construction -- it
+            // lands in a fixed-size PSRAM slot -- so its decoded length is
+            // pinned. A durable image is an ordinary stored asset and may be
+            // any bounded size, so pinning it there would reject every plugin
+            // image that is not a whole screen.
+            if begin.volatile
+                && begin.kind == AssetKind::Image
+                && decoded_length != VOLATILE_IMAGE_DECODED_LENGTH
+            {
                 return Err(MessageError::InvalidValue("volatile image decoded length"));
             }
             if begin.total_length >= decoded_length {
@@ -2652,6 +2660,46 @@ mod tests {
     }
 
     #[test]
+    fn an_encoded_durable_asset_is_accepted_now_that_the_durable_tier_decodes() {
+        // This was rejected outright until bit 10, and rejecting it is what
+        // made a picture card's frame cross the wire as 172 raw chunks.
+        let begin = AssetBegin {
+            digest: [0x5a; 32],
+            kind: AssetKind::Image,
+            total_length: 10_032,
+            volatile: false,
+            encoding: ASSET_ENCODING_RLE565,
+            decoded_length: Some(VOLATILE_IMAGE_DECODED_LENGTH),
+        };
+        assert!(validate_message(&Message::AssetBegin(begin.clone())).is_ok());
+        // And it has to survive encoding, which is where the device-facing
+        // failure actually surfaced.
+        assert!(encode_message(1, &Message::AssetBegin(begin)).is_ok());
+    }
+
+    #[test]
+    fn a_durable_encoded_image_may_be_any_bounded_size_but_a_volatile_one_may_not() {
+        // A volatile image lands in a fixed-size PSRAM slot, so its decoded
+        // length is pinned. A durable image is an ordinary stored asset, and
+        // pinning it would reject every plugin image that is not a whole
+        // screen.
+        let partial = AssetBegin {
+            digest: [0x5a; 32],
+            kind: AssetKind::Image,
+            total_length: 1_000,
+            volatile: false,
+            encoding: ASSET_ENCODING_RLE565,
+            decoded_length: Some(4_096),
+        };
+        assert!(validate_message(&Message::AssetBegin(partial.clone())).is_ok());
+        assert!(validate_message(&Message::AssetBegin(AssetBegin {
+            volatile: true,
+            ..partial
+        }))
+        .is_err());
+    }
+
+    #[test]
     fn asset_begin_rejects_invalid_encoding_relationships() {
         let base = AssetBegin {
             digest: [0x5a; 32],
@@ -2672,10 +2720,6 @@ mod tests {
             },
             AssetBegin {
                 decoded_length: None,
-                ..base
-            },
-            AssetBegin {
-                volatile: false,
                 ..base
             },
             AssetBegin {

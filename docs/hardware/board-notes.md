@@ -4776,3 +4776,64 @@ have left the runtime holding a dead session and silently never reconnecting.
 again on a fresh session was not exercised; `SerialRuntimeDevice::connect` discards a
 stalled session and opens a new one, and that path has unit coverage but no board
 observation yet.
+
+## Picture cards on the panel — 2026-09-10
+
+First picture card drawn on `dev-0005`. Observed, not inferred: the loop rotated
+`clock -> plugin -> picture` at 50 s dwell across two full cycles with
+`card_errors: 0`, the picture holding its dwell each time.
+
+Getting there took five defects, each hidden behind the last, plus one stale
+binary. Recorded because four of them are the kind that recur.
+
+1. **A durable asset could not be compressed, in BOTH halves.** A 448x368 frame is
+   329,740 bytes, and at `MAX_ASSET_CHUNK_BYTES` (1920) that is 172 sequential
+   chunk round trips. It died at offset 161,280 -- exactly chunk 84. The host
+   hard-coded `ASSET_ENCODING_RAW` on the durable path and the firmware's durable
+   `AssetBegin` ignored `encoding` outright; only the volatile tier ever
+   compressed. Picture cards chose durable for lifetime reasons (two PSRAM slots
+   cannot serve a loop) and nobody noticed durable also forfeited the compression
+   stage 4 added for exactly this cost.
+2. **The failure named the wrong card.** `record_plugin_asset_sync_refusals`
+   iterated plugin cards only, so a picture card's own transfer failure was
+   recorded against `plugin-2` -- a card that was fine -- and the picture card
+   reported nothing. That is why this presented as silence rather than a fault,
+   and it is what cost the session.
+3. **`AssetRelease` was budgeted like a message.** Its handler runs the mark-dead
+   scan and compacts the flash blob region, and a 330 KB frame makes that move far
+   more than the curated fonts ever did. It timed out at 2 s while the device
+   reported `dropped_responses`, `malformed_frames` and `crc_errors` all ZERO --
+   the reply was late, not lost. The many-round-trip chunk phase, which does no
+   bulk flash work, succeeded in the same pass; that is what ruled out a flaky
+   link.
+4. **The volatile-only rule was written in THREE places** -- `protocol`'s
+   `validate_asset_begin`, and the firmware's decode AND validate paths -- so
+   fixing one shipped `v2.0.0-durable1`, an image that ADVERTISED capability bit
+   10 while still refusing the transfers the bit promises. Same failure as bit 7
+   sitting defined-but-dark. The firmware test that looked like it pinned the rule
+   was decoding a fixture that omitted `AssetBegin` key 3, so the durable case
+   never reached the tier check at all.
+5. **The durable decode fed the passthrough header to the decoder.** The host
+   copies the 12-byte LVGL header verbatim and encodes only the pixel body; the
+   volatile path mirrors that by initialising the decoder at `bytes + 12`. The new
+   durable path did neither, and said so: `asset chunk decode failed`.
+
+**And the companion app is a third deployment boundary.** `/Applications/Deskmate.app`
+was a build from the previous day, so it compiled `CURRENT_SCHEMA_VERSION = 6`,
+could not read the v7 config the redeployed server held, and rendered no cards at
+all. That reads as a broken window rather than a stale binary. `docs/config/v7.md`
+now lists all three boundaries in order.
+
+**OTA and memory.** Three OTA downloads (`durable1`, `2`, `3`) each installed and
+rebooted in ~30 seconds, on a device that only re-checks firmware at boot.
+Internal RAM stayed BYTE-FLAT across every build -- DIRAM 203,867, `.bss` 87,104,
+`.data` 23,128, IRAM 16,384/16,384 with 0 remaining -- verified before and after
+on the same tree rather than against a remembered number. That is because the
+protocol context is `heap_caps_calloc`'d from PSRAM, so the decoder state it
+gained costs no static RAM. Flat memory has now predicted a clean download five
+times; it is still not a law, and the check stays.
+
+**`PROTOCOL_CURRENT_CAPABILITIES` is now 2027** (bit 10, `DurableAssetEncoding`,
+`+1024`). Bit 9 could not carry the promise: a deployed bit-9 build writes durable
+wire bytes to flash verbatim, so compressing without a new bit would have stored
+compressed bytes as pixels on every device in the fleet.

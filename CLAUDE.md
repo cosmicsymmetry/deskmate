@@ -159,6 +159,41 @@ of letting code and documentation diverge.
     M3's Task 10a implementer did: the store was unreachable from the host, and
     `desired_assets()` returns `Vec<DesiredAsset>` and so cannot report the named error the
     brief demanded. The plan records the amendment above that task.
+  - **DRAWN ON THE PANEL 2026-09-10**, recorded in `docs/hardware/board-notes.md`
+    under "Picture cards on the panel". Getting there needed a **capability bit 10**
+    (`DurableAssetEncoding`, `PROTOCOL_CURRENT_CAPABILITIES` 1003 -> **2027**),
+    because a 448x368 frame is 329,740 bytes = **172 sequential chunk round trips**
+    at `MAX_ASSET_CHUNK_BYTES`, which the tunnel does not survive. Durable assets
+    could not be compressed in EITHER half -- the host hard-coded
+    `ASSET_ENCODING_RAW` and the firmware's durable `AssetBegin` ignored `encoding`
+    -- so picture cards walked straight back into the cost stage 4 added RLE565 to
+    remove. Four things worth not relearning: the volatile-only rule was written in
+    **three** places (Rust `validate_asset_begin`, firmware decode AND validate), so
+    fixing one shipped an image that advertised bit 10 while refusing what it
+    promises; `AssetRelease`'s handler **compacts flash**, so it needs a budget of
+    its own, and every rung of the timeout ladder must contain the one below it
+    (device 20 s < runtime command 25 s < HTTP 30 s); the durable decode must copy
+    the **12-byte header verbatim** and feed only the body to the decoder, as the
+    volatile path already does; and asset-failure attribution must name **every**
+    card whose face needs a transferred asset, not only plugin ones, or a picture
+    card fails silently while a healthy card is blamed.
+  - **The companion app is a THIRD deployment boundary for a schema bump**, and the
+    easiest to forget because nothing about it is deployed. `Deskmate.app` compiles
+    its own `CURRENT_SCHEMA_VERSION`; a build older than the bump cannot read the
+    config the server holds, renders no cards, and reads as a broken window rather
+    than a stale binary. Order is: redeploy the server, rebuild and reinstall the
+    app, then save at the new version. `docs/config/v7.md` says so.
+  - **A recurring producer runs on docker-vm**: `deskmate-claude-limits.timer`
+    every 10 minutes, units in `tools/picture-producers/deploy/`, token at
+    `/etc/deskmate/producers/claude-limits.token` (0600). Deliberately separate from
+    TRMNL's sync script, which belongs to another repository. Note Cloudflare fronts
+    both the feed and the ingest endpoint and answers urllib's default User-Agent
+    with a 403 (error 1010) -- curl gets through on its own, which is why hand-run
+    pushes worked while the timer's first run did not.
+  - **The picture ingest route does NOT wait for device delivery.** The producer's
+    durable outcome is that the frame is stored; awaiting delivery made a successful
+    push answer 504 through Cloudflare. A delivery failure is logged and surfaces as
+    a card error on the device snapshot, and the next full synchronize reconciles it.
   - **STILL OWED, and nothing else:** a real-pointer check of the add-card menu in the
     actual app (the Chrome harness and `AXPress` both structurally cannot see the WKWebView
     focus defect that once made no card addable); the server redeploy, binary first; the

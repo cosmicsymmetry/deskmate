@@ -260,9 +260,16 @@ ssh rodion@100.93.166.123
 cd ~/deskmate-build
 sudo -n docker run --rm -v "$PWD":/work -w /work/companion rust:1.98-bookworm \
   cargo build --release -p server
-sudo -n cp -a /usr/local/bin/deskmate-server "/usr/local/bin/deskmate-server.bak-$(date +%Y%m%d)"
+sudo -n cp -a /usr/local/bin/deskmate-server "/usr/local/bin/deskmate-server.bak-$(date -u +%Y%m%dT%H%M%SZ)"
 sudo -n install -m 0755 companion/target/release/server /usr/local/bin/deskmate-server
 ```
+
+The backup name carries a **UTC timestamp, not just a date**, because more than one
+redeploy a day is now normal and `cp -a` overwrites silently: a date-only name meant the
+second deploy of a day destroyed the first one's rollback target while reporting success.
+It also stamps UTC deliberately — the VM runs UTC while the Mac driving the deploy may not,
+so a local date can name a backup for the wrong day. Note the two same-day names already on
+the box (`.bak-20260910`, `.bak-20260910-rle`) are the scar from that.
 
 **Deploy plugin content after the binary, never before.** Every manifest table is
 `deny_unknown_fields`, so a manifest using keys the running binary does not know fails to

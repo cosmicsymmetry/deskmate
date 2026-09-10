@@ -1140,6 +1140,11 @@ of letting code and documentation diverge.
   Pomodoro alerts stay. Firmware, protocol v1, the complete renderer/template vocabulary,
   and `PROTOCOL_CURRENT_CAPABILITIES` are untouched. Plugin identity is now read-only in
   the editor; the plugin refresh control and picture-source selector deliberately remain.
+  **Deployed to `deskmate.rodi.one` the same day** (registry 5 plugins, 0 failures); the
+  live `dev-0005` config was already `clock` + `picture` at v7, so the retirement dropped
+  no card from the fleet. The owner's standing instruction, given here, is that a new
+  build ships to the server **without being asked**: "we don't need a stale server build
+  at all".
 - **A third curated plugin exists: `claude-limits`** (2026-09-03), the Deskmate twin of
   the owner's TRMNL "Claude - Usage" panel — Session/Weekly subscription usage as two
   complication tiles. Its data path reuses the TRMNL pipeline end to end with zero new
@@ -1155,14 +1160,16 @@ of letting code and documentation diverge.
   deliberately NOT part of `plugin_scene_cases()` (whose 16-row count is a historical
   invariant) and does not join the hardware framebuffer matrix, which is 96/10/86 —
   the card is content, not machinery. Deployed live: the registry loads it with no
-  failures. **The rest of this bullet went STALE and was corrected 2026-09-08:** it used
-  to say `dev-0005`'s config carries the card in its library and active playlist. It does
-  not. Both `/var/lib/deskmate/configs/dev-0005.json` on the server and the Mac's own
-  config store hold the same four built-in cards (clock, pomodoro, weather, rss) at schema
-  v6 and no plugin card at all; the most recent write to both is the 2026-09-06 hardware
-  session. **No card anywhere in the fleet currently names a plugin**, so the plugin
-  render path has nothing live to draw and the plugin-parity surfaces cannot be observed
-  end to end until one is authored again. The TRMNL repo's deployed and Mac copies of the
+  failures. **The rest of this bullet went STALE and was corrected 2026-09-08, then went
+  stale AGAIN and was re-checked 2026-09-11:** it used to say `dev-0005`'s config carries
+  the card in its library and active playlist, then that both configs held clock, pomodoro,
+  weather and rss at v6. Neither is true now. Both
+  `/var/lib/deskmate/configs/dev-0005.json` and the Mac's own store hold **`clock` +
+  `picture` at schema v7**, written during the 2026-09-10 picture-card session — so the v8
+  retirement dropped **nothing** from the live fleet. **No card anywhere in the fleet
+  currently names a plugin**, so the plugin render path has nothing live to draw and the
+  plugin-parity surfaces cannot be observed end to end until one is authored again. This
+  line has now been wrong twice; read the two files before quoting it a third time. The TRMNL repo's deployed and Mac copies of the
   sync script were both updated; committing that repo is the owner's call.
 - **Plugin faces can draw DATA-DRIVEN BARS and render instants in the user's timezone
   (2026-09-09).** Two additions to the manifest-v2 contract (`docs/plugins/manifest-v2.md`),

@@ -19,6 +19,10 @@ from PIL import Image, ImageDraw, ImageFont
 # Fixed canvas. Anything else is refused at ingest with a 422.
 WIDTH, HEIGHT = 448, 368
 
+# Cloudflare fronts both the feed and the push endpoint, and blocks urllib's
+# default User-Agent outright. One name, used for both requests.
+PRODUCER_USER_AGENT = "deskmate-picture-producer/1"
+
 # DESIGN.md stages on true black in both colour schemes, and an AMOLED pixel
 # costs nothing to leave off.
 BLACK = (0, 0, 0)
@@ -63,7 +67,7 @@ def fetch(url):
     # 403, so identify ourselves. This is not a workaround for a control; the
     # feed is deliberately public because the egress guard forbids the server
     # fetching a private address.
-    request = urllib.request.Request(url, headers={"User-Agent": "deskmate-picture-producer/1"})
+    request = urllib.request.Request(url, headers={"User-Agent": PRODUCER_USER_AGENT})
     with urllib.request.urlopen(request, timeout=20) as response:
         return json.loads(response.read().decode("utf-8"))
 
@@ -149,7 +153,17 @@ def main():
     body = buffer.getvalue()
 
     request = urllib.request.Request(
-        args.push, data=body, method="POST", headers={"Content-Type": "image/png"}
+        args.push,
+        data=body,
+        method="POST",
+        headers={
+            "Content-Type": "image/png",
+            # Same reason the feed fetch sets one: Cloudflare fronts this host
+            # and answers urllib's default User-Agent with a 403 (error 1010).
+            # curl gets through on its own UA, which is why a hand-run push
+            # worked while the timer's first run did not.
+            "User-Agent": PRODUCER_USER_AGENT,
+        },
     )
     try:
         with urllib.request.urlopen(request, timeout=30) as response:

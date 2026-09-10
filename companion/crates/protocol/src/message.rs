@@ -2671,7 +2671,7 @@ mod tests {
             encoding: ASSET_ENCODING_RLE565,
             decoded_length: Some(VOLATILE_IMAGE_DECODED_LENGTH),
         };
-        assert!(validate_message(&Message::AssetBegin(begin.clone())).is_ok());
+        assert!(validate_message(&Message::AssetBegin(begin)).is_ok());
         // And it has to survive encoding, which is where the device-facing
         // failure actually surfaced.
         assert!(encode_message(1, &Message::AssetBegin(begin)).is_ok());
@@ -2691,7 +2691,7 @@ mod tests {
             encoding: ASSET_ENCODING_RLE565,
             decoded_length: Some(4_096),
         };
-        assert!(validate_message(&Message::AssetBegin(partial.clone())).is_ok());
+        assert!(validate_message(&Message::AssetBegin(partial)).is_ok());
         assert!(
             validate_message(&Message::AssetBegin(AssetBegin {
                 volatile: true,

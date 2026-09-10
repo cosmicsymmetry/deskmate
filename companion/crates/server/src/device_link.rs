@@ -78,6 +78,9 @@ async fn run(
         let (device, connector) = WebSocketRuntimeDevice::channel(device_id.clone());
         let peer = connector.attach();
         let plugins = std::sync::Arc::clone(state.plugins());
+        // The runtime's desired-asset set is the union of these two, so the
+        // store travels with the registry rather than being looked up later.
+        let image_sources = std::sync::Arc::clone(state.image_sources());
         let runtime = tokio::task::spawn_blocking(move || {
             RuntimeHandle::start_with_plugin_host(
                 config,
@@ -86,7 +89,10 @@ async fn run(
                     &plugins,
                 ))),
                 RuntimeOptions::default(),
-                Some(Box::new(ServerPluginHost::new(plugins))),
+                Some(Box::new(ServerPluginHost::new(
+                    plugins,
+                    Some(image_sources),
+                ))),
             )
         })
         .await;

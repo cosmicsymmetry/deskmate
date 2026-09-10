@@ -2,6 +2,13 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **STATUS (recorded 2026-09-09): Tasks 1-5 DELIVERED; Task 6's rollout was EXECUTED on
+> 2026-09-08. None of the 107 boxes were ever ticked and they are NOT a progress signal —
+> read the "Rollout record" section at the end of this file, which carries the real
+> evidence.** Rollout A-C passed against the live server; Rollout D is recorded as
+> partly observed, because no card in the fleet currently names a plugin and the board
+> has been offline since 2026-09-07.
+
 **Goal:** A server-rendered plugin card looks and behaves like a built-in card on every
 surface of the Mac app — name, live tile value, freshness, preview, add gesture, editor —
 without a schema or protocol change.
@@ -8682,19 +8689,41 @@ owner to run and fill in.
 
 | Step | When | Result |
 |---|---|---|
-| Server binary redeployed (§6 recipe) | not run | — |
-| Curated v2 manifests deployed | not run | — |
-| `GET /v1/plugins` on the live server | not run | — |
-| Public `GET /v1/plugins` unauthenticated | not run | — |
-| Mac app against the live server | not run | — |
+| Server binary redeployed (§6 recipe) | 2026-09-08 | Built in `rust:1.98-bookworm` from a `git archive origin/main` export (`faac9ab`); previous binary kept as `/usr/local/bin/deskmate-server.bak-20260908`. Restart logged `plugin registry loaded path=/var/lib/deskmate/plugins plugin_count=5 failure_count=0` — the new binary against the **old v1** manifests, which is manifest v1 staying frozen |
+| Curated v2 manifests deployed | 2026-09-08 | `rsync` without `--delete` into `/var/lib/deskmate/plugins/`; restart logged `plugin_count=5 failure_count=0` again. Count is 5, not 4: the live directory also holds the session fixture `svg-live-clock`, which is not in the repository and was deliberately not deleted |
+| `GET /v1/plugins` on the live server | 2026-09-08 | `200`. All four curated ids carry non-null `display_name`/`description`, `manifest_version: 2`, `template`, and `refresh_minutes`; `load_failures: []`. `svg-live-clock` returns `display_name: null` / `description: null`, which is the absent-key case reaching the wire as a null rather than falling back to its id |
+| Public `GET /v1/plugins` unauthenticated | 2026-09-08 | `401` from `https://deskmate.rodi.one/v1/plugins` |
+| Mac app against the live server | 2026-09-08 | **Partly observed.** A release bundle built from `faac9ab` (`Deskmate_1.0.0_aarch64.dmg`) is installed at `/Applications/Deskmate.app`; it launches, is tray-resident, and its settings window renders the loop, the ring, the dashed add-card slot ("Built in, or a plugin") and the `not in loop` / `alerts` flags against the live server with no error notice. The catalog contract was verified directly rather than by eye: the live `GET /v1/plugins` body through the public tunnel deserializes cleanly into `app_core::admin::PluginCatalog`, the same type the app uses — 5 plugins, 0 load failures. **Not observed:** the add-menu display names, a live `hero` value, and the preview PNG / state word, because `dev-0005` has been disconnected since 2026-09-07 (`GET .../preview` correctly returns the typed 503 "this device has no runtime yet; it has never connected") **and** because `dev-0005`'s config no longer contains any plugin card — see the note below |
 
 **Not observed, and not to be described as observed: anything past what Tasks 1-5 already
 verified in software and the dev harness.** This change sends nothing new to the device;
 the panel's faces are unchanged by it. Task 6 verified, in this worktree, without touching
 the live server: the doc-contract test (`cargo test -p plugin --test manifest_v2_doc`, 5
 passed) and its two mutation probes, all four Rust workspace gates, all four frontend
-gates, and a full walk of `?scenario=plugin` in the dev harness. Rollout A-D (Steps 10-13)
-remain owed. To execute them, the owner runs, in order:
+gates, and a full walk of `?scenario=plugin` in the dev harness.
+
+**Rollout A-C were executed on 2026-09-08 and passed; Rollout D is partly observed** (see
+the table above). Two facts found while executing it, neither caused by this change:
+
+1. **`dev-0005` carries no plugin card any more.** Both the server's
+   `/var/lib/deskmate/configs/dev-0005.json` and the Mac's own config store hold the same
+   four built-in cards (clock, pomodoro, weather, rss) at schema v6, with no
+   `claude-limits` entry. CLAUDE.md's claim that `dev-0005`'s config carries that card is
+   therefore stale as written; it was true when the plugin was deployed on 2026-09-03 and
+   stopped being true no later than the 2026-09-06 hardware session, whose save is the
+   most recent write to both files. Nothing in the fleet currently authors a plugin card,
+   so the parity surface has nothing live to draw.
+2. **The preview renders the device's framebuffer, not the viewer's view.** With
+   `preferences.orientation: "landscape-flipped"`, `render_card_preview`
+   (`companion/apps/deskmate/src-tauri/src/commands.rs:1031-1035`) passes
+   `SimOrientation::LandscapeFlipped` straight through, so the settings window shows the
+   clock upside down. That is faithful to the bytes the panel receives and unfaithful to
+   what a person standing at the panel sees, since the 270 degree mounting is exactly what
+   cancels the flip. It is undocumented and unpinned by any test, and it predates this
+   change. Recorded as a finding, not fixed: which of the two the preview should show is a
+   design decision, not a cleanup.
+
+The original commands, for reference:
 
 1. **Rollout A — redeploy the server binary**, from the worktree root:
 

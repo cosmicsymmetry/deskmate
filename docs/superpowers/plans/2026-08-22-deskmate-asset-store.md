@@ -2,6 +2,13 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **STATUS (recorded 2026-09-09): DELIVERED and hardware-verified. 77 boxes were never
+> ticked and are NOT a progress signal.** The asset store shipped and its wire path was
+> exercised end to end on the board on 2026-08-30 (stage 3b Task 9: a runtime glyph at
+> 72 px from an uploaded font, an image node at both orientations). One durable trap this
+> plan's boxes do not record: `AssetRelease.digests` is a KEEP-set, not a delete-list, so
+> an empty desired set wipes every asset the device holds — see CLAUDE.md.
+
 **Goal:** A font pushed from the host is stored in the device's 6 MB `assets`
 partition, survives reboot and OTA, and renders text at any pixel size — lifting the
 four-baked-size ceiling.

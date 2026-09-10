@@ -1123,7 +1123,7 @@ mod tests {
                      "assets": [{"file": "icons.ttf", "kind": "icon-font", "byte_length": 4320,
                                  "digest": "40bbbac715465adf7ba539f53a0cb16991a2c1f73a4fb57af209d39e0c62b327"}]},
                     {"id": "claude-limits", "name": "claude-limits", "version": "1.0.0",
-                     "node_count": 12, "assets": []},
+                     "node_count": 17, "assets": []},
                     {"id": "svg-aqi", "name": "svg-aqi", "version": "1.0.0", "node_count": 0,
                      "assets": []}
                 ],
@@ -1353,6 +1353,8 @@ mod tests {
                 app_core::RuntimeOptions::default(),
                 Some(Box::new(crate::plugin_host::ServerPluginHost::new(
                     curated_registry(),
+                    // The preview runtime is fixture-backed and owns no store.
+                    None,
                 ))),
             )
             .expect("the preview runtime starts"),

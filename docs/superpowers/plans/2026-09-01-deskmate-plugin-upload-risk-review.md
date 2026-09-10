@@ -97,15 +97,30 @@ vectors were caught only by the second containment layer.
 
 ## Review mechanics
 
-- [ ] **Step 1:** For each of R1-R5, write the verdict section: threat, existing
+- [x] **Step 1:** For each of R1-R5, write the verdict section: threat, existing
       mitigation, gap, decision options with a recommendation, and the evidence that
-      would close it. No code.
-- [ ] **Step 2:** Produce the go/no-go summary: the minimal safe first iteration (likely:
+      would close it. No code. — **DONE 2026-09-09**, in
+      `docs/security/stage5-plugin-upload-risk-review.md`.
+- [x] **Step 2:** Produce the go/no-go summary: the minimal safe first iteration (likely:
       owner-approved uploads only, no user fonts, re-encoded images, per-uploader device
       quarantine, process-isolated rendering, dedicated isolation decision), and what is
-      deferred with reasons.
+      deferred with reasons. — **DONE 2026-09-09.** The verdict is **NO-GO for public
+      uploads as scoped**, and it disagrees with two of the six proposals this step
+      anticipated: the upload endpoint itself is judged net-negative while no principal
+      exists, and process isolation plus dedicated isolation are raised from
+      "decide whether" to preconditions. It adds one constraint this plan did not
+      contain — no durable assets from public plugins at all.
 - [ ] **Step 3:** Present to the owner for explicit approval. Implementation planning
-      starts only from the approved scope, as its own plan.
+      starts only from the approved scope, as its own plan. — **The review is written and
+      awaiting the owner; nothing here is approved.**
+
+**This plan's premise was corrected by the review it commissioned.** R1 asks "is stage 5
+even meaningful before V3?" and assumes V3 supplies identity. It does not: the V3 design
+being executed (`2026-09-06-deskmate-v3-server-host-design.md:31-32`, and its §7
+"Where multi-tenancy slots in — deferred, not built") explicitly excludes user accounts
+and per-user isolation, and the delivered operator cookie is HMAC'd with the single
+`DESKMATE_ADMIN_TOKEN`. Stage 5 therefore depends on the multi-tenancy step V3 defers,
+not on V3.
 
 ## What this review does not do
 

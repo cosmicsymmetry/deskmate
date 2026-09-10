@@ -666,10 +666,11 @@ static protocol_message_result_t decode_asset_begin(
     if (!begin->has_decoded_length) {
         return PROTOCOL_MESSAGE_ERR_MISSING_FIELD;
     }
-    if (!begin->volatile_tier) {
-        return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
-    }
-    if (begin->kind == ASSET_KIND_IMAGE &&
+    /* The tier is no longer part of this rule: bit 10 means the durable tier
+     * decodes too. A VOLATILE image is still pinned to the full canvas, because
+     * it lands in a fixed-size PSRAM slot; a durable image is an ordinary
+     * stored asset of any bounded size. */
+    if (begin->volatile_tier && begin->kind == ASSET_KIND_IMAGE &&
         begin->decoded_length != PROTOCOL_VOLATILE_IMAGE_DECODED_LENGTH) {
         return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
     }
@@ -2015,13 +2016,19 @@ static protocol_message_result_t validate_message(
                        ? PROTOCOL_MESSAGE_ERR_INVALID_VALUE
                        : PROTOCOL_MESSAGE_OK;
         }
-        if (!begin->volatile_tier || !begin->has_decoded_length ||
-            begin->decoded_length == 0U ||
+        /* Encoding was volatile-only until bit 10; the durable tier decodes
+         * now, so the tier is no longer part of this rule. */
+        if (!begin->has_decoded_length || begin->decoded_length == 0U ||
             begin->decoded_length > (uint32_t)ASSET_MAX_BYTES ||
-            (begin->kind == ASSET_KIND_IMAGE &&
-             begin->decoded_length !=
-                 PROTOCOL_VOLATILE_IMAGE_DECODED_LENGTH) ||
             begin->total_length >= begin->decoded_length) {
+            return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
+        }
+        /* A VOLATILE image is a full-canvas frame by construction: it lands in
+         * a fixed-size PSRAM slot, so its decoded length is pinned. A durable
+         * image is an ordinary stored asset of any bounded size, and pinning it
+         * would reject every plugin image that is not a whole screen. */
+        if (begin->volatile_tier && begin->kind == ASSET_KIND_IMAGE &&
+            begin->decoded_length != PROTOCOL_VOLATILE_IMAGE_DECODED_LENGTH) {
             return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
         }
         return PROTOCOL_MESSAGE_OK;

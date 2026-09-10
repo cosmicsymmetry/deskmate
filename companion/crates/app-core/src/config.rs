@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt;
 
 use chrono::{DateTime, Offset, Utc};
@@ -167,6 +167,14 @@ mod strict_tagged_enum {
             refresh: super::RefreshPolicy,
             alert: super::CardAlert,
         },
+        Picture {
+            id: String,
+            title: String,
+            source_id: String,
+            tap_action: super::WidgetTapAction,
+            refresh: super::RefreshPolicy,
+            alert: super::CardAlert,
+        },
     }
 
     /// Type-aware validation of allowed fields for each enum type.
@@ -323,6 +331,15 @@ mod strict_tagged_enum {
                     "refresh",
                     "alert",
                 ]),
+                "picture" => Some(&[
+                    "kind",
+                    "id",
+                    "title",
+                    "source_id",
+                    "tap_action",
+                    "refresh",
+                    "alert",
+                ]),
                 _ => None,
             }
         }
@@ -352,7 +369,7 @@ mod strict_tagged_enum {
     }
 }
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 6;
+pub const CURRENT_SCHEMA_VERSION: u32 = 7;
 pub(crate) const DEFAULT_PLAYLIST_ID: &str = "my-playlist";
 pub(crate) const DEFAULT_PLAYLIST_NAME: &str = "My playlist";
 pub const MAX_WIDGET_TITLE_LEN: usize = 64;
@@ -388,6 +405,14 @@ pub const MAX_CONFIG_CARDS: usize = 8;
 pub const MAX_PLAYLISTS: usize = 8;
 pub const MAX_PLAYLIST_ENTRIES: usize = 8;
 pub const MAX_PLAYLIST_NAME_LEN: usize = 48;
+/// How many named image sources one configuration may declare.
+///
+/// Eight frames is about 2.6 MB of the 6 MB `assets` partition and eight of the
+/// thirty-one durable digests (`MAX_DURABLE_REGISTRY_ASSETS`), leaving the rest
+/// for the curated plugins. Raising it needs both budgets re-checked, not just
+/// this number.
+pub const MAX_IMAGE_SOURCES: usize = 8;
+pub const MAX_IMAGE_SOURCE_NAME_LEN: usize = 48;
 // Every compiled card can lower to one wire widget, so the card cap must never exceed
 // what the protocol's `ApplyConfig` encoder accepts.
 const _: () = assert!(MAX_CONFIG_CARDS <= protocol::MAX_CONFIG_WIDGETS);
@@ -482,6 +507,12 @@ pub struct AppConfig {
     pub schema_version: u32,
     pub preferences: AppPreferences,
     pub cards: Vec<CardSettings>,
+    /// Named image sources. `#[serde(default)]` is load-bearing: the migration
+    /// path parses a v4/v5/v6 document straight into this struct, and those
+    /// documents have no such key. Without the default every saved config on
+    /// earth fails to parse and the user is told their settings are invalid.
+    #[serde(default)]
+    pub image_sources: Vec<ImageSource>,
     pub assets: Vec<AssetSettings>,
     pub playlists: Vec<Playlist>,
     pub active_playlist_id: String,
@@ -502,6 +533,7 @@ impl Default for AppConfig {
                 refresh: RefreshPolicy::DeviceLocal,
                 alert: CardAlert::None,
             }],
+            image_sources: Vec::new(),
             assets: Vec::new(),
             playlists: vec![Playlist {
                 id: DEFAULT_PLAYLIST_ID.into(),
@@ -560,6 +592,49 @@ impl AppConfig {
             }
             card.validate(&path, &mut issues);
             validate_card_behaviour(&path, card, &mut issues);
+        }
+
+        if self.image_sources.len() > MAX_IMAGE_SOURCES {
+            issues.push(ValidationIssue::new(
+                "image_sources",
+                ValidationCode::TooMany,
+                format!("at most {MAX_IMAGE_SOURCES} image_sources entries are supported"),
+            ));
+        }
+        let mut seen_source_ids: BTreeSet<&str> = BTreeSet::new();
+        for (index, source) in self.image_sources.iter().enumerate() {
+            let path = format!("image_sources[{index}]");
+            validate_identifier(
+                &format!("{path}.id"),
+                &source.id,
+                MAX_WIDGET_ID_LEN,
+                &mut issues,
+            );
+            validate_text(
+                &format!("{path}.name"),
+                &source.name,
+                MAX_IMAGE_SOURCE_NAME_LEN,
+                true,
+                &mut issues,
+            );
+            if !seen_source_ids.insert(source.id.as_str()) {
+                issues.push(ValidationIssue::new(
+                    format!("{path}.id"),
+                    ValidationCode::DuplicateId,
+                    format!("image source {:?} is declared more than once", source.id),
+                ));
+            }
+        }
+        for (index, card) in self.cards.iter().enumerate() {
+            if let CardSettings::Picture { source_id, .. } = card
+                && !seen_source_ids.contains(source_id.as_str())
+            {
+                issues.push(ValidationIssue::new(
+                    format!("cards[{index}].source_id"),
+                    ValidationCode::MissingReference,
+                    format!("image source {source_id:?} does not exist"),
+                ));
+            }
         }
 
         validate_collection_bounds(
@@ -901,9 +976,9 @@ impl AppConfig {
             required |= protocol::CAPABILITY_CONFIG_ROTATION;
         }
         if self.cards.iter().any(|card| {
-            // A plugin card's `template()` is `None`: it does not use any built-in
-            // template, extended or otherwise, so it does not itself require this
-            // capability (see `wire_config`'s comment for what it puts on the wire).
+            // Plugin and picture cards have `template() == None`: neither uses a
+            // built-in template, extended or otherwise, so neither itself requires
+            // this capability (see `wire_config`'s comment for their wire value).
             matches!(
                 card.template(),
                 Some(t) if !matches!(
@@ -1285,6 +1360,19 @@ pub enum CardSettings {
         refresh: RefreshPolicy,
         alert: CardAlert,
     },
+    /// A card whose face is a PNG an external producer pushed to a named image
+    /// source. Like `Plugin`, it carries no `template` field: the picture *is*
+    /// the layout, so there is nothing to select among. `source_id` names the
+    /// source; the server resolves it to a resident asset digest and pushes a
+    /// single full-canvas image scene.
+    Picture {
+        id: String,
+        title: String,
+        source_id: String,
+        tap_action: WidgetTapAction,
+        refresh: RefreshPolicy,
+        alert: CardAlert,
+    },
 }
 
 impl<'de> Deserialize<'de> for CardSettings {
@@ -1421,6 +1509,21 @@ impl<'de> Deserialize<'de> for CardSettings {
                 refresh,
                 alert,
             },
+            strict_tagged_enum::CardSettingsInner::Picture {
+                id,
+                title,
+                source_id,
+                tap_action,
+                refresh,
+                alert,
+            } => CardSettings::Picture {
+                id,
+                title,
+                source_id,
+                tap_action,
+                refresh,
+                alert,
+            },
         })
     }
 }
@@ -1434,7 +1537,8 @@ impl CardSettings {
             | Self::Weather { id, .. }
             | Self::JsonFeed { id, .. }
             | Self::Rss { id, .. }
-            | Self::Plugin { id, .. } => id,
+            | Self::Plugin { id, .. }
+            | Self::Picture { id, .. } => id,
         }
     }
 
@@ -1446,7 +1550,8 @@ impl CardSettings {
             | Self::Weather { alert, .. }
             | Self::JsonFeed { alert, .. }
             | Self::Rss { alert, .. }
-            | Self::Plugin { alert, .. } => *alert,
+            | Self::Plugin { alert, .. }
+            | Self::Picture { alert, .. } => *alert,
         }
     }
 
@@ -1458,13 +1563,14 @@ impl CardSettings {
             | Self::Weather { refresh, .. }
             | Self::JsonFeed { refresh, .. }
             | Self::Rss { refresh, .. }
-            | Self::Plugin { refresh, .. } => *refresh,
+            | Self::Plugin { refresh, .. }
+            | Self::Picture { refresh, .. } => *refresh,
         }
     }
 
-    /// `None` for a plugin card: it has no `DisplayTemplate` to select among
-    /// because it renders from its manifest-compiled scene, not one of the six
-    /// built-in templates. Callers that only care about the built-in surface
+    /// `None` for plugin and picture cards: neither has a `DisplayTemplate` to
+    /// select among because each renders from a host-built scene, not one of the
+    /// six built-in templates. Callers that only care about the built-in surface
     /// (the `IconBadgeText` asset check, the extended-templates capability
     /// gate) already treat `None` as "nothing to check here"; callers that
     /// need a wire `TemplateKind` regardless (`wire_config`) pick an inert
@@ -1477,7 +1583,7 @@ impl CardSettings {
             | Self::Weather { template, .. }
             | Self::JsonFeed { template, .. }
             | Self::Rss { template, .. } => Some(template),
-            Self::Plugin { .. } => None,
+            Self::Plugin { .. } | Self::Picture { .. } => None,
         }
     }
 
@@ -1489,7 +1595,8 @@ impl CardSettings {
             | Self::Weather { tap_action, .. }
             | Self::JsonFeed { tap_action, .. }
             | Self::Rss { tap_action, .. }
-            | Self::Plugin { tap_action, .. } => tap_action,
+            | Self::Plugin { tap_action, .. }
+            | Self::Picture { tap_action, .. } => tap_action,
         }
     }
 
@@ -1744,6 +1851,35 @@ impl CardSettings {
                     issues,
                 );
             }
+            Self::Picture {
+                title,
+                source_id,
+                tap_action,
+                refresh,
+                ..
+            } => {
+                validate_text(
+                    &format!("{path}.title"),
+                    title,
+                    MAX_WIDGET_TITLE_LEN,
+                    false,
+                    issues,
+                );
+                validate_identifier(
+                    &format!("{path}.source_id"),
+                    source_id,
+                    MAX_WIDGET_ID_LEN,
+                    issues,
+                );
+                validate_composition(
+                    path,
+                    ProviderKind::Picture,
+                    None,
+                    tap_action,
+                    *refresh,
+                    issues,
+                );
+            }
         }
         self.tap_action()
             .validate(&format!("{path}.tap_action"), issues);
@@ -1762,14 +1898,14 @@ impl CardSettings {
 
     fn wire_config(&self) -> Option<WidgetConfig> {
         let template = match self.template() {
-            // A plugin card (`None`) carries no `DisplayTemplate`: it renders from a
-            // host-pushed scene (`PushScene`), not any of the six built-in C
-            // templates. Firmware no longer switches on this field to choose a
-            // renderer at all (stage 3a retired every built-in template in favour of
-            // scenes for every card), so this byte is inert for a plugin card;
+            // Plugin and picture cards (`None`) carry no `DisplayTemplate`: each
+            // renders from a host-pushed scene (`PushScene`), not any of the six
+            // built-in C templates. Firmware no longer switches on this field to
+            // choose a renderer at all (stage 3a retired every built-in template in
+            // favour of scenes for every card), so this byte is inert for both;
             // `DigitalClock` is picked arbitrarily to keep `WidgetConfig` fully
             // populated for older tooling that still reads it. Do not read rendering
-            // meaning into it for a plugin card, and do not read the merge with the
+            // meaning into it for either card, and do not read the merge with the
             // real digital-clock arm below as anything but that shared byte value.
             Some(DisplayTemplate::DigitalClock) | None => TemplateKind::DigitalClock,
             Some(DisplayTemplate::ProgressRing) => TemplateKind::ProgressRing,
@@ -1840,8 +1976,11 @@ impl CardSettings {
             // housekeeping fields every provider-backed card carries are known here
             // (the same set weather uses); the server pushes the plugin's real
             // fields once it resolves the manifest and fetches the first snapshot
-            // (Task 7).
-            Self::Weather { title, .. } | Self::Plugin { title, .. } => vec![
+            // (Task 7). Picture uses the same initial placeholder shape until its
+            // frame scene is available.
+            Self::Weather { title, .. }
+            | Self::Plugin { title, .. }
+            | Self::Picture { title, .. } => vec![
                 text_field("title", title),
                 bool_field("stale", true),
                 text_field("error", "Waiting for provider refresh"),
@@ -1913,6 +2052,19 @@ pub struct AssetSettings {
     pub source: AssetSource,
     pub kind: AssetKind,
     pub maximum_bytes: u32,
+}
+
+/// A named destination an external producer pushes pictures to.
+///
+/// Authoring identity and nothing else. The credential that authorizes a push
+/// is **not** here and never enters a configuration: the server keeps a SHA-256
+/// digest keyed by `id`, exactly as it does for device identities, and the
+/// plaintext token is returned once at mint and never persisted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ImageSource {
+    pub id: String,
+    pub name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2146,6 +2298,7 @@ enum ProviderKind {
     JsonFeed,
     Rss,
     Plugin,
+    Picture,
 }
 
 fn validate_composition(
@@ -2156,12 +2309,11 @@ fn validate_composition(
     refresh: RefreshPolicy,
     issues: &mut Vec<ValidationIssue>,
 ) {
-    // `template` is `None` only for `ProviderKind::Plugin`: a plugin card renders
-    // from its manifest-compiled scene, not one of the six built-in
-    // `DisplayTemplate`s, so there is no template/provider field-compatibility
-    // pairing to check and no template-gated tap-action rule to enforce here. The
-    // provider-gated tap-action check and the refresh-policy checks below still
-    // apply to every provider, plugin included.
+    // `template` is `None` only for plugin and picture providers: both render from
+    // host-built scenes, not one of the six built-in `DisplayTemplate`s, so there
+    // is no template/provider field-compatibility pairing to check and no
+    // template-gated tap-action rule to enforce here. The provider-gated
+    // tap-action and refresh-policy checks below still apply to every provider.
     if let Some(template) = template {
         // A pairing is allowed only when the provider actually populates the fields
         // the template declares (`firmware/main/core/template_fields.c`). A template
@@ -2216,12 +2368,11 @@ fn validate_composition(
                     | DisplayTemplate::IconBadgeText { .. }
                     | DisplayTemplate::RowList
             ),
-            // A plugin card never passes `Some(template)` — see the comment above. This
-            // arm is unreachable by construction today, but the function validates
-            // untrusted config content, so it returns a safe `false` (an
-            // `InvalidComposition` issue) rather than panicking if that ever stops
-            // being true.
-            ProviderKind::Plugin => false,
+            // Plugin and picture cards never pass `Some(template)` — see the comment
+            // above. This arm is unreachable by construction today, but the function
+            // validates untrusted config content, so it returns a safe `false` (an
+            // `InvalidComposition` issue) rather than panicking if that ever changes.
+            ProviderKind::Plugin | ProviderKind::Picture => false,
         };
         if !template_supported {
             issues.push(ValidationIssue::new(
@@ -2269,7 +2420,8 @@ fn validate_composition(
         | ProviderKind::Weather
         | ProviderKind::JsonFeed
         | ProviderKind::Rss
-        | ProviderKind::Plugin => matches!(
+        | ProviderKind::Plugin
+        | ProviderKind::Picture => matches!(
             refresh,
             RefreshPolicy::Manual | RefreshPolicy::Interval { .. }
         ),

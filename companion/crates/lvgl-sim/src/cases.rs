@@ -1739,6 +1739,7 @@ fn compile_plugin_scene(
     data: serde_json::Value,
     stale: bool,
     error: Option<&str>,
+    timezone: plugin::Tz,
 ) -> (Scene, Vec<SceneAsset>) {
     let dir = plugins_dir().join(plugin_name);
     let source = std::fs::read_to_string(dir.join("manifest.toml"))
@@ -1756,7 +1757,7 @@ fn compile_plugin_scene(
         error: error.map(str::to_string),
     };
 
-    let scene = compile_scene_with_assets(&manifest, &snapshot, &metrics, 1, &assets)
+    let scene = compile_scene_with_assets(&manifest, &snapshot, &metrics, 1, &assets, timezone)
         .unwrap_or_else(|error| panic!("{plugin_name} manifest must compile: {error:?}"));
 
     let scene_assets = assets
@@ -1778,6 +1779,12 @@ fn plugin_case(
     // `plugin_scene_cases`'s doc for why only `aqi`'s fresh/stale/error rows
     // populate this and its `empty` row deliberately does not.
     fields_by_state: [&[(&str, &str)]; 4],
+    // The configured display timezone these rows compile under. Fixed per
+    // case rather than always UTC so a face that renders an instant has a
+    // golden that would *change* if the zone stopped being applied -- a
+    // UTC golden cannot tell "the zone is honoured" from "the zone is
+    // ignored", since those produce identical pixels.
+    timezone: plugin::Tz,
 ) {
     let states: [(&str, serde_json::Value, bool, Option<&str>); 4] = [
         ("fresh", fixture_payload.clone(), false, None),
@@ -1797,7 +1804,7 @@ fn plugin_case(
     ];
 
     for ((state_slug, data, stale, error), fields) in states.into_iter().zip(fields_by_state) {
-        let (scene, assets) = compile_plugin_scene(plugin_name, data, stale, error);
+        let (scene, assets) = compile_plugin_scene(plugin_name, data, stale, error, timezone);
         let fields: Vec<(String, String)> = fields
             .iter()
             .map(|(name, value)| ((*name).to_string(), (*value).to_string()))
@@ -1842,12 +1849,17 @@ pub fn plugin_scene_cases() -> Vec<(String, SceneRenderRequest)> {
         "aqi",
         plugin_payload(AQI_FIXTURE),
         [live_title, live_title, live_title, no_fields],
+        // Neither curated v1 plugin renders an instant, so their pixels do
+        // not depend on the zone; UTC keeps these 16 historical rows exactly
+        // as they were.
+        plugin::Tz::UTC,
     );
     plugin_case(
         &mut cases,
         "agenda",
         plugin_payload(AGENDA_FIXTURE),
         [no_fields, no_fields, no_fields, no_fields],
+        plugin::Tz::UTC,
     );
     cases
 }
@@ -1867,6 +1879,12 @@ pub fn claude_limits_scene_cases() -> Vec<(String, SceneRenderRequest)> {
         "claude-limits",
         serde_json::from_str(CLAUDE_LIMITS_FIXTURE).expect("fixture is valid JSON"),
         [no_fields, no_fields, no_fields, no_fields],
+        // Deliberately NOT UTC. This face renders its reset instants with
+        // `time_at`, and the fixture's own `resets_at_epoch` values are four
+        // hours behind their Tbilisi labels -- so if the configured zone ever
+        // stopped reaching the compiler, these goldens would shift by four
+        // hours and say so. Under UTC they could not.
+        plugin::Tz::Asia__Tbilisi,
     );
     cases
 }
@@ -1923,6 +1941,7 @@ fn compile_timer_v2_scene() -> Scene {
         &app_core::BakedFontMetrics::SHIPPED,
         1,
         &plugin::AssetSet::default(),
+        plugin::Tz::UTC,
     )
     .expect("the committed timer manifest-v2 fixture must compile")
 }

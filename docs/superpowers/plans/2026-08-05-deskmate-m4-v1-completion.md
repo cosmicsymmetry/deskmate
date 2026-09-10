@@ -1,13 +1,21 @@
 # Deskmate M4 - v1 Completion Implementation Plan
 
-**Status:** Active at Task 3. Tasks 1-2 froze the compatibility boundary and delivered
-the bounded v1 provider runtime. Task 2B replaced the widget/screen authoring model
-with the card model (schema v3): `cards[]`, `presence`, `alert`, host-driven timed
-rotation, and bounded alert triggers, compiling to the unchanged wire contract. No
-physical verification has been performed for Task 2B; it is outstanding.
-M3's physical exit is complete; the user explicitly
-accepted the completed morning soak and waived repeating it after the focused
-orientation/clean-canvas regression passed.
+**Status (corrected 2026-09-09): SUPERSEDED. Tasks 1-4 were delivered; the remainder was
+redistributed by the 2026-08-11 reset spec §7 and is not owed from this plan.** The line
+that stood here — "Active at Task 3 ... no physical verification has been performed for
+Task 2B; it is outstanding" — went stale within days and stayed for a month. The card
+model WAS physically verified on 2026-08-06 (eight of nine checks,
+`docs/hardware/board-notes.md`), Task 3's extended templates on 2026-08-11, and the
+roadmap has carried this plan as superseded since. Its 35 still-open boxes are Tasks 5-10,
+which were redistributed, not left undone. Schema has since moved v3 -> v4 -> v5 -> v6, and
+the six C templates this plan targeted no longer ship at all.
+
+Historical context, still accurate: Tasks 1-2 froze the compatibility boundary and
+delivered the bounded v1 provider runtime; Task 2B replaced the widget/screen authoring
+model with the card model (schema v3): `cards[]`, `presence`, `alert`, host-driven timed
+rotation, and bounded alert triggers, compiling to the unchanged wire contract. M3's
+physical exit is complete; the user explicitly accepted the completed morning soak and
+waived repeating it after the focused orientation/clean-canvas regression passed.
 
 **Goal:** Complete the approved v1 breadth on top of the proven single-owner companion
 runtime: weather/JSON-feed/RSS data, the remaining templates, the card model

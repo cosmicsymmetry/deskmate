@@ -156,6 +156,19 @@ pub struct RasterFrame {
     pub bytes: Arc<[u8]>,
 }
 
+/// What the host knows about one image source right now.
+///
+/// `bytes` is the decoded canonical blob, carried as an `Arc` so passing this
+/// around costs a pointer rather than 330 KB. The admin preview route returns
+/// these exact stored bytes instead of rasterizing an image back into itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageSourceFrame {
+    pub digest: [u8; protocol::ASSET_DIGEST_LEN],
+    pub bytes: Arc<[u8]>,
+    /// Inferred from the source's own observed push cadence, server-side.
+    pub stale: bool,
+}
+
 /// The revision every preview build carries. `protocol::validate_message`
 /// rejects `PushScene` revision 0, so a preview candidate cannot reach a
 /// device even by mistake -- which is exactly the property the route needs.
@@ -180,17 +193,37 @@ pub trait PluginHost: Send + 'static {
 
     /// Produces this plugin's render candidate against freshly fetched data.
     /// `revision` is minted by the runtime at push time.
+    ///
+    /// `timezone` is the configuration's display timezone, and it is a
+    /// parameter rather than host state on purpose: a plugin face that shows
+    /// an instant must render it in the zone the *user* chose, not the one
+    /// whoever wrote the feed was standing in, and a host that could be left
+    /// holding a stale zone is exactly the silent-wrong shape this codebase
+    /// keeps paying for.
     fn render_scene(
         &mut self,
         plugin_id: &str,
         snapshot: &providers::ProviderSnapshot<serde_json::Value>,
         revision: u32,
+        timezone: chrono_tz::Tz,
     ) -> Result<SceneCandidate, String>;
 
     /// Rasterizes one already-negotiated static candidate. Implementations do
     /// not repeat the negotiation table; they only execute the selected source.
     fn rasterize(&mut self, _request: &RasterRequest) -> Result<RasterFrame, String> {
         Err("server-side rasterization is unavailable from this plugin host".into())
+    }
+
+    /// The frame this image source currently holds, or `None` when nothing has
+    /// ever been pushed to it.
+    ///
+    /// A default of `None` is deliberate: every existing implementation,
+    /// including the Tauri app's hostless runtime and existing test hosts,
+    /// keeps compiling and answers honestly when it owns no image sources.
+    /// This stays on the plugin-host seam because `desired_assets` must expose
+    /// one device-wide union for the keep-set reconciliation.
+    fn image_source_frame(&mut self, _source_id: &str) -> Option<ImageSourceFrame> {
+        None
     }
 }
 
@@ -215,11 +248,27 @@ impl SerialRuntimeDevice {
 impl RuntimeDevice for SerialRuntimeDevice {
     fn connect(&mut self) -> Result<DeviceConnection, DeviceError> {
         if let Some(connected) = self.connected.as_mut() {
-            connected.reconnect(self.explicit_port.as_deref())?;
-            return Ok(DeviceConnection {
-                port_name: connected.port_name.clone(),
-                status: connected.initial_status.clone(),
-            });
+            match connected.reconnect(self.explicit_port.as_deref()) {
+                Ok(()) => {
+                    return Ok(DeviceConnection {
+                        port_name: connected.port_name.clone(),
+                        status: connected.initial_status.clone(),
+                    });
+                }
+                Err(error) => {
+                    // A stalled session's worker is blocked inside a transport
+                    // read the operating system will not interrupt, and
+                    // `reconnect` hands the new transport to that same worker, so
+                    // this session can never come back. Discard it and open a
+                    // fresh one below; keeping it would leave the display
+                    // unreachable for the rest of the run after a single cable
+                    // pull. Every other failure keeps the session, as before.
+                    if !connected.session.is_stalled() {
+                        return Err(error);
+                    }
+                    self.connected = None;
+                }
+            }
         }
         let connected = connect_session(self.explicit_port.as_deref())?;
         let result = DeviceConnection {
@@ -925,6 +974,20 @@ impl RuntimeHandle {
         })
     }
 
+    /// Reconciles the host's complete desired asset set after one image source
+    /// changes, then queues a face rebuild only when that source is visible.
+    pub fn image_source_updated(
+        &self,
+        source_id: &str,
+        digest: [u8; protocol::ASSET_DIGEST_LEN],
+    ) -> Result<(), RuntimeError> {
+        self.request(|reply| RuntimeCommand::ImageSourceUpdated {
+            source_id: source_id.to_owned(),
+            digest,
+            reply,
+        })
+    }
+
     /// Renders one plugin card's face for an admin preview. It runs on the
     /// worker beside every other command, and the worker's single-threading is
     /// the whole of the route's rate limiting: nothing here touches the device,
@@ -988,7 +1051,15 @@ impl RuntimeHandle {
         command: impl FnOnce(SyncSender<Result<T, RuntimeError>>) -> RuntimeCommand,
     ) -> Result<T, RuntimeError> {
         let (reply_sender, reply_receiver) = mpsc::sync_channel(1);
-        match self.sender.try_send(command(reply_sender)) {
+        let command = command(reply_sender);
+        // Chosen before the command is moved into the channel, so the budget
+        // always matches the work the command actually performs.
+        let budget = if command_drives_a_full_sync(&command) {
+            SYNCHRONIZING_COMMAND_TIMEOUT.max(self.command_timeout)
+        } else {
+            self.command_timeout
+        };
+        match self.sender.try_send(command) {
             Ok(()) => {}
             Err(mpsc::TrySendError::Full(_)) => {
                 self.diagnostics
@@ -1000,12 +1071,36 @@ impl RuntimeHandle {
                 return Err(RuntimeError::WorkerStopped);
             }
         }
-        match reply_receiver.recv_timeout(self.command_timeout) {
+        match reply_receiver.recv_timeout(budget) {
             Ok(result) => result,
             Err(RecvTimeoutError::Timeout) => Err(RuntimeError::ResponseTimeout),
             Err(RecvTimeoutError::Disconnected) => Err(RuntimeError::WorkerStopped),
         }
     }
+}
+
+/// How much longer than the ordinary command budget a synchronizing command
+/// gets.
+///
+/// A command is normally a message or two, and the default budget exists mostly
+/// to notice a wedged worker quickly -- the serial-read hang of 2026-09-09 is
+/// why it is short. But `ApplyConfig` and `ImageSourceUpdated` drive a full
+/// device synchronize, which contains an asset reconcile, which now contains
+/// `AssetRelease`'s own twenty-second budget. Five seconds cannot contain
+/// twenty, so those two commands reported a timeout for work that was still
+/// legitimately in progress and would go on to succeed.
+///
+/// It stays under the server's 30 s HTTP timeout so the caller above still
+/// bounds it; a test pins both ends of that ordering.
+pub(crate) const SYNCHRONIZING_COMMAND_TIMEOUT: Duration = Duration::from_secs(25);
+
+/// Whether this command drives a full device synchronize, and therefore needs
+/// the longer budget above.
+fn command_drives_a_full_sync(command: &RuntimeCommand) -> bool {
+    matches!(
+        command,
+        RuntimeCommand::ApplyConfig { .. } | RuntimeCommand::ImageSourceUpdated { .. }
+    )
 }
 
 impl Drop for RuntimeHandle {
@@ -1028,6 +1123,10 @@ struct WorkerState {
     persistence: PersistenceState,
     latest_fields: BTreeMap<String, Vec<Field>>,
     plugin_snapshots: BTreeMap<String, providers::ProviderSnapshot<serde_json::Value>>,
+    /// Card ID -> the exact durable picture face most recently accepted by
+    /// the device. Comparing this pair with the host detects cadence-driven
+    /// stale/fresh flips without a scheduler deadline per source.
+    last_picture_face: BTreeMap<String, ([u8; protocol::ASSET_DIGEST_LEN], bool)>,
     plugin_host: Option<Box<dyn PluginHost>>,
     dirty_widgets: BTreeSet<String>,
     /// Card ID -> the most recent typed refusal for that card. There is deliberately
@@ -1047,7 +1146,8 @@ struct WorkerState {
     active_screen: Option<String>,
     active_screen_dirty: bool,
     /// The active card needs rebuilding as a scene because a host-owned fact
-    /// changed. Consumed once by `push_active_scene`; scheduled ticks never set it.
+    /// changed. Consumed once by `push_active_scene`; the only scheduled check
+    /// that sets it is an active picture's digest/staleness comparison.
     active_scene_dirty: bool,
     connected: bool,
     ever_connected: bool,
@@ -1098,6 +1198,7 @@ impl WorkerState {
             persistence: PersistenceState::Clean,
             latest_fields: BTreeMap::new(),
             plugin_snapshots: BTreeMap::new(),
+            last_picture_face: BTreeMap::new(),
             plugin_host,
             dirty_widgets: BTreeSet::new(),
             push_rejections: BTreeMap::new(),
@@ -1152,6 +1253,10 @@ impl WorkerState {
             .map(str::to_owned)
             .collect();
         self.prune_alert_state_for_live_widgets(&live_widget_ids, scheduler, now);
+        let configured_card_ids: BTreeSet<&str> =
+            self.config.cards.iter().map(CardSettings::id).collect();
+        self.last_picture_face
+            .retain(|card_id, _| configured_card_ids.contains(card_id.as_str()));
 
         let compiled = self
             .config
@@ -1186,6 +1291,20 @@ impl WorkerState {
                         &mut previous_pomodoros,
                         now,
                     );
+                }
+                CardSettings::Picture { id, .. } => {
+                    // A picture card has no provider to poll. Its frames arrive
+                    // by webhook, pushed by an external producer, so there is no
+                    // fetch loop here to schedule and no deadline to arm --
+                    // which is also why rotating onto one costs nothing.
+                    //
+                    // With no host there is additionally nothing holding a
+                    // frame, so the compiled placeholder fields are a stand-in
+                    // for data rather than data, and reporting them would be the
+                    // same defect the plugin arm below documents.
+                    if self.plugin_host.is_none() {
+                        self.latest_fields.remove(id);
+                    }
                 }
                 CardSettings::Plugin { id, refresh, .. } => {
                     // Spec 5.3: with no plugin host this runtime can neither
@@ -1661,6 +1780,21 @@ fn process_command(
             );
             let _ = reply.send(result);
         }
+        RuntimeCommand::ImageSourceUpdated {
+            source_id,
+            digest,
+            reply,
+        } => {
+            let result = apply_image_source_update(
+                state,
+                scheduler,
+                device,
+                &source_id,
+                digest,
+                reconnect_interval,
+            );
+            let _ = reply.send(result);
+        }
         RuntimeCommand::RenderCardPreview { card_id, reply } => {
             let _ = reply.send(render_card_preview(state, &card_id));
         }
@@ -1752,6 +1886,103 @@ fn apply_operator_plugin_injection(
     activate_screen_command(state, scheduler, device, card_id)
 }
 
+fn apply_image_source_update(
+    state: &mut WorkerState,
+    scheduler: &mut Scheduler,
+    device: &mut dyn RuntimeDevice,
+    source_id: &str,
+    digest: [u8; protocol::ASSET_DIGEST_LEN],
+    reconnect_interval: Duration,
+) -> Result<(), RuntimeError> {
+    if !state.connected {
+        return Err(RuntimeError::DeviceDisconnected);
+    }
+    let visible_uses_source = state.active_screen.as_deref().is_some_and(|active_id| {
+        state.config.cards.iter().any(|card| {
+            matches!(
+                card,
+                CardSettings::Picture {
+                    id,
+                    source_id: configured_source,
+                    ..
+                } if id == active_id && configured_source == source_id
+            )
+        })
+    });
+
+    // Read one authoritative host snapshot before touching the device. A stale
+    // queued notification must not reconcile a set that no longer contains
+    // the digest it names, and an empty/partial set would make AssetRelease
+    // delete unrelated device-wide assets.
+    let desired = {
+        let host = state
+            .plugin_host
+            .as_deref_mut()
+            .ok_or_else(|| RuntimeError::Provider {
+                message: "cannot apply an image update because no image source host is configured"
+                    .into(),
+            })?;
+        let desired = host.desired_assets();
+        if !desired.iter().any(|asset| asset.digest == digest) {
+            return Err(RuntimeError::Provider {
+                message: format!(
+                    "image source {source_id:?} is missing from the host's complete desired asset set"
+                ),
+            });
+        }
+        let frame = host
+            .image_source_frame(source_id)
+            .ok_or_else(|| RuntimeError::Provider {
+                message: format!("image source {source_id:?} has no frame to install"),
+            })?;
+        if frame.digest != digest {
+            return Err(RuntimeError::Provider {
+                message: format!(
+                    "image source {source_id:?} now holds a different frame than this update"
+                ),
+            });
+        }
+        desired
+    };
+
+    // This is deliberately the entire host-owned set. AssetRelease is a
+    // device-wide KEEP-SET, so reconciling only this source would delete every
+    // plugin and picture digest omitted from the partial list.
+    let keep_set = match AssetSync::reconcile_with_active_volatile(
+        device,
+        &desired,
+        state.active_volatile_digest,
+        state.device.capability_bits(),
+    ) {
+        Ok(keep_set) => keep_set,
+        Err(error) => {
+            if visible_uses_source {
+                // The render phase follows command processing. Consume any
+                // speculative dirty mark so a failed transfer cannot push a
+                // scene naming bytes this pass did not finish installing.
+                state.active_scene_dirty = false;
+            }
+            return Err(RuntimeError::Device {
+                message: error.to_string(),
+            });
+        }
+    };
+    state.confirmed_durable_assets = keep_set
+        .into_iter()
+        .filter(|candidate| Some(*candidate) != state.active_volatile_digest)
+        .collect();
+    clear_plugin_asset_sync_refusals(state);
+
+    // Rebuilding an unrelated visible face would turn every background image
+    // update into panel traffic. Off-screen frames simply remain resident for
+    // the next ordinary rotation onto their card.
+    if visible_uses_source {
+        state.active_scene_dirty = true;
+        push_active_scene(state, scheduler, device, Instant::now(), reconnect_interval);
+    }
+    Ok(())
+}
+
 fn activate_screen_command(
     state: &mut WorkerState,
     scheduler: &mut Scheduler,
@@ -1828,6 +2059,7 @@ fn run_scheduled_work(
     now: Instant,
     options: &RuntimeOptions,
 ) {
+    detect_active_picture_face_change(state);
     if scheduler.pomodoro_due(now) {
         update_pomodoros(state, now);
     }
@@ -1915,6 +2147,28 @@ fn run_scheduled_work(
         state.runtime = RuntimeState::Error {
             message: error.to_string(),
         };
+    }
+}
+
+fn detect_active_picture_face_change(state: &mut WorkerState) {
+    let Some((card_id, source_id)) = state.active_screen.as_deref().and_then(|active_id| {
+        state.config.cards.iter().find_map(|card| match card {
+            CardSettings::Picture { id, source_id, .. } if id == active_id => {
+                Some((id.clone(), source_id.clone()))
+            }
+            _ => None,
+        })
+    }) else {
+        return;
+    };
+    let current = state
+        .plugin_host
+        .as_deref_mut()
+        .and_then(|host| host.image_source_frame(&source_id))
+        .map(|frame| (frame.digest, frame.stale));
+    let displayed = state.last_picture_face.get(&card_id).copied();
+    if current != displayed {
+        state.active_scene_dirty = true;
     }
 }
 
@@ -2554,6 +2808,7 @@ fn synchronize_full(
                 device,
                 &desired,
                 state.active_volatile_digest,
+                state.device.capability_bits(),
             ),
         ))
     });
@@ -2589,7 +2844,13 @@ fn synchronize_full(
     Ok(())
 }
 
-const PLUGIN_ASSET_SYNC_REFUSAL_PREFIX: &str = "plugin asset reconciliation failed: ";
+/// Both plugin assets and picture frames travel in the same device-wide
+/// reconcile pass, so the prefix no longer says "plugin". The wording is load
+/// bearing: a picture card whose frame failed to transfer used to be recorded
+/// against every *plugin* card and none of its own, so the panel showed a stale
+/// face and the only visible error named a card that was fine. That cost a
+/// hardware session.
+const PLUGIN_ASSET_SYNC_REFUSAL_PREFIX: &str = "asset reconciliation failed: ";
 
 fn record_plugin_asset_sync_refusals(state: &mut WorkerState, message: &str) {
     let card_ids: Vec<String> = state
@@ -2597,7 +2858,11 @@ fn record_plugin_asset_sync_refusals(state: &mut WorkerState, message: &str) {
         .cards
         .iter()
         .filter_map(|card| match card {
-            CardSettings::Plugin { id, .. } => Some(id.clone()),
+            // Every card whose face depends on a transferred asset, not only
+            // the plugin ones. A reconcile failure is device-wide; attributing
+            // it to a subset of the cards it actually broke is worse than
+            // saying nothing, because it points the reader at the wrong card.
+            CardSettings::Plugin { id, .. } | CardSettings::Picture { id, .. } => Some(id.clone()),
             _ => None,
         })
         .collect();
@@ -2753,46 +3018,78 @@ fn build_card_scene(
         .find(|card| card.id() == card_id)
         .ok_or_else(|| format!("card {card_id:?} is not present in the active configuration"))?;
     let metrics = &BakedFontMetrics::SHIPPED;
-    let scene = if let CardSettings::Plugin { plugin_id, .. } = card {
-        let host = plugin_host.ok_or_else(|| {
-            format!("card {card_id:?} cannot render because no plugin host is configured")
-        })?;
-        let snapshot = plugin_snapshot.ok_or_else(|| {
-            format!(
-                "card {card_id:?} has no fetched plugin snapshot cached yet; wait for its first refresh"
-            )
-        })?;
-        let candidate = host
-            .render_scene(plugin_id, snapshot, revision)
-            .map_err(|error| {
-                format!("plugin {plugin_id:?} could not render card {card_id:?}: {error}")
+    let scene = match card {
+        CardSettings::Plugin { plugin_id, .. } => {
+            let host = plugin_host.ok_or_else(|| {
+                format!("card {card_id:?} cannot render because no plugin host is configured")
             })?;
-        match candidate {
-            // The plugin compiler already applies `with_scene_data_state`. Do
-            // not stamp it here too, or stale/error footers would be
-            // duplicated.
-            SceneCandidate::DisplayList(scene) => scene,
-            // Nothing to validate or push: negotiation decides whether this
-            // becomes a rasterized frame (Task 5) or a typed refusal.
-            SceneCandidate::RasterOnly { bindings } => {
-                return Ok(CardCandidate::RasterOnly {
-                    plugin_id: plugin_id.clone(),
-                    snapshot: snapshot.clone(),
-                    bindings,
-                });
+            let snapshot = plugin_snapshot.ok_or_else(|| {
+                format!(
+                    "card {card_id:?} has no fetched plugin snapshot cached yet; wait for its first refresh"
+                )
+            })?;
+            // The configured display timezone, so a plugin face renders an
+            // instant where the user lives. An unparseable value cannot reach
+            // a saved config (`AppConfig::validate` rejects it), so UTC here
+            // is an unreachable floor rather than a silent fallback.
+            let timezone = config
+                .preferences
+                .timezone
+                .parse::<chrono_tz::Tz>()
+                .unwrap_or(chrono_tz::UTC);
+            let candidate = host
+                .render_scene(plugin_id, snapshot, revision, timezone)
+                .map_err(|error| {
+                    format!("plugin {plugin_id:?} could not render card {card_id:?}: {error}")
+                })?;
+            match candidate {
+                // The plugin compiler already applies
+                // `with_scene_data_state`. Do not stamp it here too, or
+                // stale/error footers would be duplicated.
+                SceneCandidate::DisplayList(scene) => scene,
+                // Nothing to validate or push: negotiation decides whether
+                // this becomes a rasterized frame or a typed refusal.
+                SceneCandidate::RasterOnly { bindings } => {
+                    return Ok(CardCandidate::RasterOnly {
+                        plugin_id: plugin_id.clone(),
+                        snapshot: snapshot.clone(),
+                        bindings,
+                    });
+                }
             }
         }
-    } else {
-        let scene = build_template_card_scene(config, card, card_id, fields, revision, metrics)?;
-        let error = field_text(fields, "error");
-        with_scene_data_state(
-            scene,
-            SceneDataState {
-                stale: field_boolean(fields, "stale"),
-                error: (!error.is_empty()).then_some(error),
-            },
-            metrics,
-        )
+        CardSettings::Picture { source_id, .. } => {
+            let host = plugin_host.ok_or_else(|| {
+                format!("card {card_id:?} cannot render because no image source host is configured")
+            })?;
+            match host.image_source_frame(source_id) {
+                Some(frame) => with_scene_data_state(
+                    frame_face_scene(revision, frame.digest),
+                    SceneDataState {
+                        stale: frame.stale,
+                        error: None,
+                    },
+                    metrics,
+                ),
+                // No frame at all, so there is nothing to badge. This state
+                // word is the same distinction a plugin card awaiting its
+                // first refresh already draws.
+                None => waiting_for_first_picture_scene(revision, metrics),
+            }
+        }
+        _ => {
+            let scene =
+                build_template_card_scene(config, card, card_id, fields, revision, metrics)?;
+            let error = field_text(fields, "error");
+            with_scene_data_state(
+                scene,
+                SceneDataState {
+                    stale: field_boolean(fields, "stale"),
+                    error: (!error.is_empty()).then_some(error),
+                },
+                metrics,
+            )
+        }
     };
     let push = PushScene {
         card_id: card_id.to_owned(),
@@ -2812,6 +3109,27 @@ fn build_card_scene(
             .map_err(|error| format!("the host-built scene is invalid: {error}"))?;
     }
     Ok(CardCandidate::Push(push))
+}
+
+fn waiting_for_first_picture_scene(revision: u32, metrics: &BakedFontMetrics) -> protocol::Scene {
+    let tier = protocol::SceneFontTier::Caption;
+    let caption = metrics.tier(tier);
+    let top = (protocol::SCENE_CANVAS_HEIGHT - caption.line_height) / 2;
+    protocol::Scene {
+        revision,
+        background: 0,
+        nodes: vec![protocol::SceneNode::Text(protocol::SceneText {
+            x: 0,
+            baseline_y: top + metrics.baseline_offset(tier),
+            w: protocol::SCENE_CANVAS_WIDTH,
+            align: protocol::SceneAlign::Center,
+            font: protocol::SceneFont::Baked(tier),
+            color: 0x00f5_f5f7,
+            running_color: None,
+            value: protocol::SceneValue::Literal("Waiting for the first picture".into()),
+            ellipsize: false,
+        })],
+    }
 }
 
 fn build_template_card_scene(
@@ -3080,7 +3398,6 @@ fn push_active_scene(
             return;
         }
     };
-
     // Spec §3: negotiate this candidate against this device before any push.
     // The old binary shortcut -- bit 8 present, push; absent, silently do
     // nothing -- is gone: silence was the exact defect shape the V1
@@ -3140,6 +3457,7 @@ fn execute_native_push(
     requirements: &render_negotiation::RenderRequirements,
     reconnect_interval: Duration,
 ) {
+    let (is_picture_card, picture_face) = built_picture_face(&state.config, &card_id, &candidate);
     let push = match candidate {
         CardCandidate::Push(push) => push,
         CardCandidate::RasterOnly { .. } => {
@@ -3168,6 +3486,16 @@ fn execute_native_push(
     state.active_scene_dirty = false;
     match device.push_scene(push) {
         Ok(()) => {
+            if is_picture_card {
+                match picture_face {
+                    Some(face) => {
+                        state.last_picture_face.insert(card_id.clone(), face);
+                    }
+                    None => {
+                        state.last_picture_face.remove(&card_id);
+                    }
+                }
+            }
             clear_scene_refusal(state, &card_id);
             if state.active_volatile_digest.is_some() {
                 let keep = durable_asset_digests(state);
@@ -3190,6 +3518,28 @@ fn execute_native_push(
             handle_automatic_scene_error(state, card_id, error, reconnect_interval);
         }
     }
+}
+
+fn built_picture_face(
+    config: &AppConfig,
+    card_id: &str,
+    candidate: &CardCandidate,
+) -> (bool, Option<([u8; protocol::ASSET_DIGEST_LEN], bool)>) {
+    let is_picture = config
+        .cards
+        .iter()
+        .any(|card| matches!(card, CardSettings::Picture { id, .. } if id == card_id));
+    if !is_picture {
+        return (false, None);
+    }
+    let face = match candidate {
+        CardCandidate::Push(push) => push.scene.nodes.iter().find_map(|node| match node {
+            protocol::SceneNode::Image(image) => Some((image.digest, push.scene.nodes.len() > 1)),
+            _ => None,
+        }),
+        CardCandidate::RasterOnly { .. } => None,
+    };
+    (true, face)
 }
 
 /// The `Rasterize` row's executor: honour the 30-second floor, render through
@@ -3319,8 +3669,12 @@ fn ensure_durable_assets_for_scene(
     }) {
         return Err(AssetSyncError::MissingRequiredAsset { digest: *digest });
     }
-    let keep_set =
-        AssetSync::reconcile_with_active_volatile(device, &desired, state.active_volatile_digest)?;
+    let keep_set = AssetSync::reconcile_with_active_volatile(
+        device,
+        &desired,
+        state.active_volatile_digest,
+        state.device.capability_bits(),
+    )?;
     state.confirmed_durable_assets = keep_set
         .into_iter()
         .filter(|digest| Some(*digest) != state.active_volatile_digest)
@@ -3371,6 +3725,35 @@ fn render_card_preview(
             card_id: card_id.to_owned(),
         });
     };
+    if let CardSettings::Picture { source_id, .. } = card {
+        let source_id = source_id.clone();
+        let Some(host) = state.plugin_host.as_deref_mut() else {
+            return Ok(preview_failure(
+                "this card's picture is held by the server, which this host is not".into(),
+            ));
+        };
+        return Ok(match host.image_source_frame(&source_id) {
+            Some(frame) => CardPreview {
+                state: if frame.stale {
+                    CardPreviewState::Stale
+                } else {
+                    CardPreviewState::Fresh
+                },
+                frame: Some(RasterFrame {
+                    digest: frame.digest,
+                    bytes: frame.bytes,
+                }),
+                message: None,
+                refreshed_at_unix_ms: None,
+            },
+            None => CardPreview {
+                frame: None,
+                state: CardPreviewState::Waiting,
+                message: Some("Waiting for the first picture".into()),
+                refreshed_at_unix_ms: None,
+            },
+        });
+    }
     if !matches!(card, CardSettings::Plugin { .. }) {
         return Err(RuntimeError::NotAPluginCard {
             card_id: card_id.to_owned(),
@@ -3466,9 +3849,25 @@ fn preview_failure(message: String) -> CardPreview {
     }
 }
 
-/// App-core is the one production owner of the full-bleed image scene. That
-/// keeps revision minting and protocol validation beside every other runtime
-/// push; the server rasterizer owns bytes only.
+/// The one definition of "a frame as a face": a single full-canvas image node
+/// naming a digest the device holds. Both the raster path and a picture card
+/// draw this, and they must never drift apart.
+fn frame_face_scene(revision: u32, digest: [u8; protocol::ASSET_DIGEST_LEN]) -> protocol::Scene {
+    protocol::Scene {
+        revision,
+        background: 0,
+        nodes: vec![protocol::SceneNode::Image(protocol::SceneImage {
+            x: 0,
+            y: 0,
+            w: protocol::SCENE_CANVAS_WIDTH,
+            h: protocol::SCENE_CANVAS_HEIGHT,
+            digest,
+            recolor: false,
+            color: 0,
+        })],
+    }
+}
+
 fn raster_frame_push(
     card_id: &str,
     revision: u32,
@@ -3477,19 +3876,7 @@ fn raster_frame_push(
     let push = PushScene {
         card_id: card_id.to_owned(),
         revision,
-        scene: protocol::Scene {
-            revision,
-            background: 0,
-            nodes: vec![protocol::SceneNode::Image(protocol::SceneImage {
-                x: 0,
-                y: 0,
-                w: protocol::SCENE_CANVAS_WIDTH,
-                h: protocol::SCENE_CANVAS_HEIGHT,
-                digest,
-                recolor: false,
-                color: 0,
-            })],
-        },
+        scene: frame_face_scene(revision, digest),
     };
     validate_message(&Message::PushScene(push.clone()))
         .map_err(|error| format!("the raster frame scene is invalid: {error}"))?;
@@ -3838,6 +4225,20 @@ fn initial_snapshot(
                 duration_seconds: *duration_seconds,
                 remaining_seconds: *duration_seconds,
             }),
+            // A picture card's "provider" is the external producer pushing to
+            // its source, and its freshness is inferred server-side from that
+            // producer's own cadence. It therefore reports a provider entry on
+            // exactly the same condition a plugin card does -- a host exists to
+            // know the answer -- and none at all otherwise, rather than showing
+            // a permanent stale flag nobody can clear.
+            CardSettings::Picture { id, .. } if renders_plugin_cards => {
+                providers.push(ProviderSnapshot {
+                    widget_id: id.clone(),
+                    state: ProviderState::Idle,
+                    last_success_unix_ms: None,
+                    age_seconds: None,
+                });
+            }
             CardSettings::Plugin { id, .. } if renders_plugin_cards => {
                 providers.push(ProviderSnapshot {
                     widget_id: id.clone(),
@@ -3856,9 +4257,11 @@ fn initial_snapshot(
                 age_seconds: None,
             }),
             // Matches the worker: a runtime with no host says nothing at all
-            // about a plugin card, not even "idle" -- the same nothing an
-            // unrendered clock reports.
-            CardSettings::Plugin { .. } | CardSettings::Clock { .. } => {}
+            // about a plugin or picture card, not even "idle" -- the same
+            // nothing an unrendered clock reports.
+            CardSettings::Plugin { .. }
+            | CardSettings::Picture { .. }
+            | CardSettings::Clock { .. } => {}
         }
     }
     AppSnapshot {
@@ -3905,6 +4308,57 @@ fn empty_device(connection: ConnectionState) -> DeviceSnapshot {
 
 #[cfg(test)]
 mod tests {
+
+    /// The budgets form a ladder, and every rung has to contain the one below.
+    /// `AssetRelease` is 20 s at the device layer, a synchronizing command
+    /// contains that, and the server's HTTP timeout contains the command. When
+    /// the middle rung was 5 s, `ApplyConfig` reported "runtime command
+    /// response timed out" for a save that had already persisted and a sync
+    /// that went on to succeed.
+    #[test]
+    fn a_synchronizing_command_can_contain_an_asset_release() {
+        // Mirrors server::runtime_device::ASSET_RELEASE_TIMEOUT. Restated here
+        // rather than imported because app-core must not depend on the server;
+        // the comment is the link, and this assertion is what notices drift.
+        const DEVICE_ASSET_RELEASE_TIMEOUT: Duration = Duration::from_secs(20);
+        const SERVER_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
+
+        assert!(
+            super::SYNCHRONIZING_COMMAND_TIMEOUT > DEVICE_ASSET_RELEASE_TIMEOUT,
+            "a command that performs an asset reconcile must outlast it"
+        );
+        assert!(
+            super::SYNCHRONIZING_COMMAND_TIMEOUT < SERVER_HTTP_TIMEOUT,
+            "and must still be bounded by the caller above it"
+        );
+        assert!(super::SYNCHRONIZING_COMMAND_TIMEOUT > RuntimeOptions::default().command_timeout);
+    }
+
+    #[test]
+    fn only_the_commands_that_synchronize_get_the_longer_budget() {
+        let (reply, _receiver) = std::sync::mpsc::sync_channel(1);
+        assert!(super::command_drives_a_full_sync(
+            &RuntimeCommand::ApplyConfig {
+                config: AppConfig::default(),
+                reply: reply.clone(),
+            }
+        ));
+        assert!(super::command_drives_a_full_sync(
+            &RuntimeCommand::ImageSourceUpdated {
+                source_id: "s".into(),
+                digest: [0u8; 32],
+                reply: reply.clone(),
+            }
+        ));
+        // A status poll is a message or two; giving it 25 s would slow down
+        // noticing a wedged worker, which is what the short budget is for.
+        assert!(!super::command_drives_a_full_sync(
+            &RuntimeCommand::SetPaused {
+                paused: true,
+                reply,
+            }
+        ));
+    }
     use super::*;
     use crate::{
         AlertHold, CardAlert, CarouselAdvance, DisplayTemplate, Playlist, PlaylistEntry,
@@ -5609,6 +6063,7 @@ mod tests {
             _plugin_id: &str,
             _snapshot: &providers::ProviderSnapshot<serde_json::Value>,
             _revision: u32,
+            _timezone: chrono_tz::Tz,
         ) -> Result<SceneCandidate, String> {
             self.candidate
                 .clone()
@@ -5996,6 +6451,7 @@ mod tests {
             _plugin_id: &str,
             _snapshot: &providers::ProviderSnapshot<serde_json::Value>,
             _revision: u32,
+            _timezone: chrono_tz::Tz,
         ) -> Result<SceneCandidate, String> {
             unreachable!()
         }
@@ -6355,6 +6811,7 @@ mod tests {
             _plugin_id: &str,
             _snapshot: &providers::ProviderSnapshot<serde_json::Value>,
             _revision: u32,
+            _timezone: chrono_tz::Tz,
         ) -> Result<SceneCandidate, String> {
             unreachable!("this test exercises only full synchronization")
         }
@@ -6379,7 +6836,7 @@ mod tests {
         assert!(!state.needs_full_sync);
         assert!(state.push_rejections.get("aqi").is_some_and(|error| {
             error.kind == CardErrorKind::SceneRefused
-                && error.message.contains("plugin asset reconciliation failed")
+                && error.message.contains("asset reconciliation failed")
         }));
     }
 
@@ -6417,6 +6874,7 @@ mod tests {
             _plugin_id: &str,
             _snapshot: &providers::ProviderSnapshot<serde_json::Value>,
             _revision: u32,
+            _timezone: chrono_tz::Tz,
         ) -> Result<SceneCandidate, String> {
             unreachable!("this test exercises only full synchronization")
         }
@@ -6490,6 +6948,7 @@ mod tests {
             _plugin_id: &str,
             _snapshot: &providers::ProviderSnapshot<serde_json::Value>,
             revision: u32,
+            _timezone: chrono_tz::Tz,
         ) -> Result<SceneCandidate, String> {
             self.renders.lock().unwrap().push(revision);
             Ok(SceneCandidate::DisplayList(protocol::Scene {

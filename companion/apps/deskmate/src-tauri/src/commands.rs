@@ -23,6 +23,7 @@ use tauri_plugin_dialog::DialogExt;
 use crate::{DesktopSnapshot, DesktopState, NetworkedConfigProjection};
 
 pub(crate) const MAX_SERVER_ERROR_BYTES: usize = 64 * 1_024;
+const MAX_IMAGE_SOURCE_MINT_BYTES: usize = 16 * 1_024;
 
 /// The device-status read's own bound, which must EXCEED
 /// [`app_core::MAX_CONFIG_FILE_BYTES`] rather than match it: `GET
@@ -143,6 +144,94 @@ fn fetch_server_plugins(
     })
 }
 
+#[derive(Serialize)]
+#[serde(deny_unknown_fields)]
+struct MintImageSourceRequest<'a> {
+    name: &'a str,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ServerMintedImageSource {
+    id: String,
+    token: String,
+}
+
+/// The one serialization boundary for the plaintext source credential. This value
+/// lives only long enough to cross IPC once; neither the Rust state nor the config
+/// retains it.
+#[derive(Serialize)]
+pub struct MintedImageSource {
+    source_id: String,
+    token: String,
+    push_url: String,
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+pub enum PluginCatalogOrMintedImageSource {
+    Catalog(app_core::admin::PluginCatalog),
+    Minted(MintedImageSource),
+}
+
+fn mint_server_image_source(
+    context: &ServerQueryContext,
+    name: &str,
+) -> Result<MintedImageSource, IpcError> {
+    validate_target(
+        name,
+        app_core::config::MAX_IMAGE_SOURCE_NAME_LEN,
+        "picture source name",
+    )?;
+    let settings = context.network_store.load().settings().clone();
+    let url = crate::server_client::server_url(&settings.server_url, &["v1", "images"])?;
+    let body =
+        serde_json::to_vec(&MintImageSourceRequest { name }).map_err(|_| IpcError::Internal {
+            message: "the picture source request could not be encoded".into(),
+        })?;
+    let minted: ServerMintedImageSource = context.with_admin_token(|token| {
+        let mut response = context
+            .agent
+            .post(url.as_str())
+            .header("Authorization", format!("Bearer {token}"))
+            .content_type("application/json")
+            .send(&body)
+            .map_err(|_| IpcError::RuntimeUnavailable {
+                message: "the configured server could not be reached".into(),
+            })?;
+        let status = response.status().as_u16();
+        let response_body = response
+            .body_mut()
+            .with_config()
+            .limit(MAX_IMAGE_SOURCE_MINT_BYTES.saturating_add(1) as u64)
+            .read_to_vec()
+            .map_err(|error| match error {
+                ureq::Error::BodyExceedsLimit(_) => IpcError::RuntimeUnavailable {
+                    message: "the server returned an oversized response".into(),
+                },
+                _ => IpcError::RuntimeUnavailable {
+                    message: "the server returned an unreadable response".into(),
+                },
+            })?;
+        if !(200..300).contains(&status) {
+            return Err(server_failure(status, &response_body));
+        }
+        serde_json::from_slice(&response_body).map_err(|_| IpcError::IncompatibleServer {
+            message: "the server returned a picture source this app could not read".into(),
+        })
+    })?;
+    validate_target(&minted.id, MAX_WIDGET_ID_LEN, "picture source ID")?;
+    validate_secret(&minted.token, MAX_DEVICE_TOKEN_LEN, "picture source token")?;
+    let push_url =
+        crate::server_client::server_url(&settings.server_url, &["v1", "images", &minted.token])?
+            .to_string();
+    Ok(MintedImageSource {
+        source_id: minted.id,
+        token: minted.token,
+        push_url,
+    })
+}
+
 fn fetch_server_card_state(context: &ServerQueryContext) -> Result<Vec<ServerCardState>, IpcError> {
     let settings = context.network_store.load().settings().clone();
     validate_target(&settings.device_id, MAX_DEVICE_ID_LEN, "device ID")?;
@@ -162,19 +251,20 @@ fn fetch_server_card_state(context: &ServerQueryContext) -> Result<Vec<ServerCar
     Ok(project_server_card_state(&status))
 }
 
-/// The tier decides where a plugin card's face comes from, and it decides first:
-/// in local tier there is no server and no plugin host, so this returns the
+/// The tier decides where a server-rendered card's face comes from, and it decides
+/// first: in local tier there is no server host, so this returns the kind-specific
 /// sentence without opening a socket. Only in networked tier is a request made,
-/// and only then can a 404 be read as `PLUGIN_PREVIEW_UNAVAILABLE`.
-fn plugin_card_preview(
+/// and only then can a 404 be read as `SERVER_PREVIEW_UNAVAILABLE`.
+fn server_card_preview(
     context: &ServerQueryContext,
     tier: Option<app_core::DeviceTier>,
     card_id: &str,
+    local_state: &str,
 ) -> Result<PreviewFrame, IpcError> {
     validate_target(card_id, MAX_WIDGET_ID_LEN, "card ID")?;
     let settings = context.network_store.load().settings().clone();
     if save_destination(tier, &settings) != SaveDestination::Server {
-        return Ok(unrendered_plugin_frame(PLUGIN_RENDERS_ON_THE_SERVER));
+        return Ok(unrendered_server_frame(local_state));
     }
     validate_target(&settings.device_id, MAX_DEVICE_ID_LEN, "device ID")?;
     let url = crate::server_client::server_url(
@@ -198,11 +288,11 @@ fn plugin_card_preview(
         )
     });
     match response {
-        Ok(response) => Ok(plugin_preview_frame(response)),
+        Ok(response) => Ok(server_preview_frame(response)),
         // Spec section 10: additive routes fail closed. What a 404 means beyond
         // "no preview came back" is not knowable here, so the sentence does not
-        // guess -- see `PLUGIN_PREVIEW_UNAVAILABLE`.
-        Err(IpcError::NotFound { .. }) => Ok(unrendered_plugin_frame(PLUGIN_PREVIEW_UNAVAILABLE)),
+        // guess -- see `SERVER_PREVIEW_UNAVAILABLE`.
+        Err(IpcError::NotFound { .. }) => Ok(unrendered_server_frame(SERVER_PREVIEW_UNAVAILABLE)),
         Err(error) => Err(error),
     }
 }
@@ -220,9 +310,16 @@ async fn on_server_worker<T: Send + 'static>(
 #[tauri::command]
 pub async fn get_server_plugins(
     state: State<'_, DesktopState>,
-) -> Result<app_core::admin::PluginCatalog, IpcError> {
+    source_name: Option<String>,
+) -> Result<PluginCatalogOrMintedImageSource, IpcError> {
     let context = ServerQueryContext::from_desktop(&state);
-    on_server_worker(move || fetch_server_plugins(&context)).await
+    on_server_worker(move || match source_name {
+        Some(name) => {
+            mint_server_image_source(&context, &name).map(PluginCatalogOrMintedImageSource::Minted)
+        }
+        None => fetch_server_plugins(&context).map(PluginCatalogOrMintedImageSource::Catalog),
+    })
+    .await
 }
 
 #[tauri::command]
@@ -292,8 +389,8 @@ pub struct PreviewFrame {
     pub state: Option<String>,
 }
 
-/// The server's view of one plugin card, projected onto the Mac's snapshot so a
-/// plugin tile carries the same value, freshness and error copy a built-in does.
+/// The server's view of one server-rendered card, projected onto the Mac's snapshot
+/// so its tile carries the same value, freshness and error copy a built-in does.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServerCardState {
     pub card_id: String,
@@ -305,7 +402,7 @@ pub struct ServerCardState {
 /// Deliberately partial. `AdminSnapshot` injects `last_ota_error` and
 /// `observed_age_seconds` into `device` after serialization, so parsing the whole
 /// `AppSnapshot` back would couple this app to a shape only the server writes.
-/// These four collections are all a plugin tile needs.
+/// These four collections are all a server-rendered tile needs.
 #[derive(Deserialize)]
 pub(crate) struct ServerDeviceStatus {
     snapshot: Option<ServerRuntimeSnapshot>,
@@ -332,7 +429,12 @@ fn project_server_card_state(status: &ServerDeviceStatus) -> Vec<ServerCardState
         .config
         .cards
         .iter()
-        .filter(|card| matches!(card, CardSettings::Plugin { .. }))
+        .filter(|card| {
+            matches!(
+                card,
+                CardSettings::Plugin { .. } | CardSettings::Picture { .. }
+            )
+        })
         .map(|card| {
             let card_id = card.id();
             ServerCardState {
@@ -984,11 +1086,11 @@ pub fn set_autostart_enabled(
 /// so the settings UI can badge it, without the renderer itself lying about what it
 /// drew.
 ///
-/// A plugin card is the one kind this simulator cannot draw: it has no
-/// `DisplayTemplate`, and its face was compiled from a manifest and rasterized by
-/// the server. That card's preview is fetched rather than rendered, which is why
-/// this command is `async` -- the fetch runs on a blocking worker, never on the
-/// thread that would otherwise stall the settings window for the agent's timeout.
+/// Plugin and picture cards are the two kinds this simulator cannot draw: neither has
+/// a `DisplayTemplate`. One comes from a manifest-compiled scene and the other from
+/// a pushed frame; the server rasterizes both. Those previews are fetched rather than
+/// rendered, which is why this command is `async` -- the fetch runs on a blocking worker,
+/// never on the thread that would otherwise stall the settings window for the agent's timeout.
 #[tauri::command]
 pub async fn render_card_preview(
     state: State<'_, DesktopState>,
@@ -1005,11 +1107,24 @@ pub async fn render_card_preview(
             message: format!("no card with id {card_id:?}"),
         })?;
 
-    if matches!(card, CardSettings::Plugin { .. }) {
+    let server_rendered_state = match card {
+        CardSettings::Clock { .. }
+        | CardSettings::Pomodoro { .. }
+        | CardSettings::Calendar { .. }
+        | CardSettings::Weather { .. }
+        | CardSettings::JsonFeed { .. }
+        | CardSettings::Rss { .. } => None,
+        CardSettings::Plugin { .. } => Some(PLUGIN_RENDERS_ON_THE_SERVER),
+        CardSettings::Picture { .. } => Some(PICTURE_RENDERS_ON_THE_SERVER),
+    };
+    if let Some(local_state) = server_rendered_state {
         let context = ServerQueryContext::from_desktop(&state);
         let tier = snapshot.device.tier;
         let requested = card_id.clone();
-        return on_server_worker(move || plugin_card_preview(&context, tier, &requested)).await;
+        return on_server_worker(move || {
+            server_card_preview(&context, tier, &requested, local_state)
+        })
+        .await;
     }
 
     let template = preview_template_for(card, &card_id)?;
@@ -1028,10 +1143,7 @@ pub async fn render_card_preview(
     let now = chrono::Utc::now();
     let utc_offset_minutes = utc_offset_minutes(&snapshot.config.preferences.timezone, now)
         .map_err(|message| IpcError::Internal { message })?;
-    let orientation = match snapshot.config.preferences.orientation {
-        DisplayOrientation::Landscape => lvgl_sim::SimOrientation::Landscape,
-        DisplayOrientation::LandscapeFlipped => lvgl_sim::SimOrientation::LandscapeFlipped,
-    };
+    let orientation = preview_orientation(snapshot.config.preferences.orientation);
 
     let request = lvgl_sim::RenderRequest {
         template,
@@ -1051,16 +1163,37 @@ pub async fn render_card_preview(
     })
 }
 
+/// The orientation the settings-window preview renders at.
+///
+/// Deliberately NOT the configured mounting. `LandscapeFlipped` is the 180 degree
+/// mount, and the simulator reproduces it by reversing the finished frame
+/// index-by-index (`lvgl-sim/csrc/sim_shim.c`'s `copy_frame_out`) exactly as the
+/// firmware's `LV_DISPLAY_ROTATION_270` does. On the panel that flip is cancelled by
+/// the physical mounting, so a person always sees an upright face; rendered into a
+/// window that is not itself upside down, it is just upside down. The preview's job is
+/// to show what the person will see, so it renders upright for both mountings.
+///
+/// Because the flip is a pure 180 degree rotation of identical content, nothing is
+/// lost by this: the upright frame IS the flipped frame, read the way the viewer
+/// reads it.
+fn preview_orientation(configured: DisplayOrientation) -> lvgl_sim::SimOrientation {
+    match configured {
+        DisplayOrientation::Landscape | DisplayOrientation::LandscapeFlipped => {
+            lvgl_sim::SimOrientation::Landscape
+        }
+    }
+}
+
 /// Mirrors the wire mapping `CardSettings::wire_config` uses for `TemplateKind`
 /// (`app-core`'s `config.rs`), except targeting `lvgl_sim::SimTemplate` — the two
 /// enums are exhaustively 1:1, so this can never fail to map a `DisplayTemplate` the
 /// rest of the app accepts; there is no "unknown template" branch to fall back from.
 /// Resolves the preview simulator's `SimTemplate` for one card, or a typed refusal.
 ///
-/// A plugin card has no `DisplayTemplate`: it renders from its manifest-compiled
-/// scene, on the server, not from any of the six built-in templates this preview
-/// simulator knows how to draw. `render_card_preview` sends a plugin card to
-/// `plugin_card_preview` before reaching here, so this arm is a GUARD, not a path
+/// A plugin or picture card has no `DisplayTemplate`: it renders on the server,
+/// not from any of the six built-in templates this preview simulator knows how to
+/// draw. `render_card_preview` sends both kinds to `server_card_preview` before
+/// reaching here, so this arm is a GUARD, not a path
 /// -- kept, and typed, so a future caller that forgets that routing is refused
 /// visibly (mirroring `runtime.rs`'s `SceneRefused` handling for the same absence)
 /// instead of silently drawing a plugin card as some unrelated built-in face.
@@ -1071,7 +1204,7 @@ fn preview_template_for(
     let Some(template) = card.template() else {
         return Err(IpcError::Unsupported {
             message: format!(
-                "card {card_id:?} is a plugin card; its preview is rendered by the server, not by this simulator"
+                "card {card_id:?} is server-rendered; its preview is not drawn by this simulator"
             ),
         });
     };
@@ -1105,6 +1238,10 @@ fn sim_field(field: &CardField) -> lvgl_sim::SimField {
 /// local tier there is no server to render on and this app has no plugin host.
 pub(crate) const PLUGIN_RENDERS_ON_THE_SERVER: &str = "Plugin cards render on the server";
 
+/// The picture-specific local-tier sentence. Reusing the plugin sentence would make
+/// the stage call this card something it is not.
+pub(crate) const PICTURE_RENDERS_ON_THE_SERVER: &str = "Picture cards render on the server";
+
 /// Chosen only after a networked-tier request came back 404.
 ///
 /// Four different things answer 404 on this route -- a server built before it
@@ -1113,9 +1250,9 @@ pub(crate) const PLUGIN_RENDERS_ON_THE_SERVER: &str = "Plugin cards render on th
 /// sentence states what was observed and asserts no cause. It said "Plugin
 /// previews need a newer server" until the whole-branch review, which was a
 /// guess three quarters of the time.
-pub(crate) const PLUGIN_PREVIEW_UNAVAILABLE: &str = "The server has no preview for this card";
+pub(crate) const SERVER_PREVIEW_UNAVAILABLE: &str = "The server has no preview for this card";
 
-fn unrendered_plugin_frame(state: &str) -> PreviewFrame {
+fn unrendered_server_frame(state: &str) -> PreviewFrame {
     PreviewFrame {
         png_base64: None,
         sample: false,
@@ -1127,7 +1264,7 @@ fn unrendered_plugin_frame(state: &str) -> PreviewFrame {
 /// and `message` exactly when it is `error` or `waiting`. This keys off the frame
 /// rather than the word, so a server that breaks that invariant still produces a
 /// stage that is either an image or a sentence, never a blank black rectangle.
-fn plugin_preview_frame(response: app_core::admin::CardPreviewResponse) -> PreviewFrame {
+fn server_preview_frame(response: app_core::admin::CardPreviewResponse) -> PreviewFrame {
     match response.png_base64 {
         Some(png_base64) => PreviewFrame {
             png_base64: Some(png_base64),
@@ -1718,6 +1855,25 @@ pub(crate) mod tests {
         );
     }
 
+    /// The preview shows what a person standing at the panel sees, which is upright
+    /// at BOTH mountings -- the 180 degree mount is cancelled by the mounting itself.
+    /// Restoring the pass-through this replaced (returning `LandscapeFlipped` for the
+    /// flipped mounting) puts an upside-down clock in the settings window, and fails
+    /// here.
+    #[test]
+    fn the_preview_renders_upright_whichever_way_the_panel_is_mounted() {
+        for configured in [
+            DisplayOrientation::Landscape,
+            DisplayOrientation::LandscapeFlipped,
+        ] {
+            assert_eq!(
+                preview_orientation(configured),
+                lvgl_sim::SimOrientation::Landscape,
+                "preview orientation for {configured:?} must be upright"
+            );
+        }
+    }
+
     #[test]
     fn preview_template_for_resolves_every_built_in_template() {
         let card = CardSettings::Clock {
@@ -1736,11 +1892,11 @@ pub(crate) mod tests {
     }
 
     /// The guard behind the routing, not the routing itself:
-    /// `render_card_preview` never reaches this arm for a plugin card. It stays
+    /// `render_card_preview` never reaches this arm for a server-rendered card. It stays
     /// because a caller that forgets that must be refused, not served a built-in
     /// face at random.
     #[test]
-    fn preview_template_for_a_plugin_card_is_a_typed_unsupported_refusal() {
+    fn preview_template_for_a_server_rendered_card_is_a_typed_unsupported_refusal() {
         let card = CardSettings::Plugin {
             id: "aqi".into(),
             title: "Air quality".into(),
@@ -1751,8 +1907,8 @@ pub(crate) mod tests {
         };
         let error = preview_template_for(&card, "aqi").unwrap_err();
         assert!(
-            matches!(error, IpcError::Unsupported { ref message } if message.contains("plugin")),
-            "expected IpcError::Unsupported naming the plugin card, got {error:?}"
+            matches!(error, IpcError::Unsupported { ref message } if message.contains("server-rendered")),
+            "expected IpcError::Unsupported naming the server-rendered card, got {error:?}"
         );
     }
 
@@ -2607,6 +2763,7 @@ pub(crate) mod tests {
             CardSettings::JsonFeed { .. } => "json-feed",
             CardSettings::Rss { .. } => "rss",
             CardSettings::Plugin { .. } => "plugin",
+            CardSettings::Picture { .. } => "picture",
         }
     }
 
@@ -2702,6 +2859,14 @@ pub(crate) mod tests {
                 refresh: RefreshPolicy::Interval { minutes: 15 },
                 alert: CardAlert::None,
             },
+            CardSettings::Picture {
+                id: "limits-picture".into(),
+                title: "Limits".into(),
+                source_id: "limits".into(),
+                tap_action: WidgetTapAction::None,
+                refresh: RefreshPolicy::Manual,
+                alert: CardAlert::None,
+            },
         ]);
         let playlist_entries = vec![
             PlaylistEntry {
@@ -2742,6 +2907,10 @@ pub(crate) mod tests {
                 orientation: DisplayOrientation::LandscapeFlipped,
             },
             cards: cards.clone(),
+            image_sources: vec![app_core::config::ImageSource {
+                id: "limits".into(),
+                name: "Claude limits".into(),
+            }],
             assets: Vec::new(),
             playlists: playlists.clone(),
             active_playlist_id: "workday".into(),
@@ -3115,6 +3284,7 @@ pub(crate) mod tests {
                 "json-feed",
                 "rss",
                 "plugin",
+                "picture",
             ]
         );
     }
@@ -3123,7 +3293,7 @@ pub(crate) mod tests {
     fn every_server_preview_outcome_maps_to_one_stage_state() {
         use app_core::admin::{CardPreviewResponse, CardPreviewState};
 
-        let rendered = plugin_preview_frame(CardPreviewResponse {
+        let rendered = server_preview_frame(CardPreviewResponse {
             png_base64: Some("iVBORw0KGgo=".into()),
             state: CardPreviewState::Stale,
             message: None,
@@ -3141,7 +3311,7 @@ pub(crate) mod tests {
         // `sample` means "a real frame rendered, from an empty field set" -- it is
         // what puts the "No data yet" badge on a drawn image. A waiting plugin card
         // has no frame at all, so it is NOT sample: it prints the state sentence.
-        let waiting = plugin_preview_frame(CardPreviewResponse {
+        let waiting = server_preview_frame(CardPreviewResponse {
             png_base64: None,
             state: CardPreviewState::Waiting,
             message: Some("Waiting for the first refresh".into()),
@@ -3156,7 +3326,7 @@ pub(crate) mod tests {
             }
         );
 
-        let failed = plugin_preview_frame(CardPreviewResponse {
+        let failed = server_preview_frame(CardPreviewResponse {
             png_base64: None,
             state: CardPreviewState::Error,
             message: Some("Plugin \"x\" is not loaded on the server".into()),
@@ -3172,7 +3342,7 @@ pub(crate) mod tests {
         );
 
         // A server that says nothing still says something on the stage.
-        let mute = plugin_preview_frame(CardPreviewResponse {
+        let mute = server_preview_frame(CardPreviewResponse {
             png_base64: None,
             state: CardPreviewState::Error,
             message: None,
@@ -3184,7 +3354,7 @@ pub(crate) mod tests {
     #[test]
     fn a_plugin_card_the_mac_cannot_render_says_where_it_renders() {
         assert_eq!(
-            unrendered_plugin_frame(PLUGIN_RENDERS_ON_THE_SERVER),
+            unrendered_server_frame(PLUGIN_RENDERS_ON_THE_SERVER),
             PreviewFrame {
                 png_base64: None,
                 sample: false,
@@ -3192,13 +3362,26 @@ pub(crate) mod tests {
             }
         );
         assert_eq!(
-            unrendered_plugin_frame(PLUGIN_PREVIEW_UNAVAILABLE).state,
+            unrendered_server_frame(SERVER_PREVIEW_UNAVAILABLE).state,
             Some("The server has no preview for this card".into())
         );
     }
 
     #[test]
-    fn server_card_state_covers_plugin_cards_only_and_reads_the_hero_field() {
+    fn a_picture_card_the_mac_cannot_render_says_where_it_renders_without_calling_it_a_plugin() {
+        assert_eq!(
+            unrendered_server_frame(PICTURE_RENDERS_ON_THE_SERVER),
+            PreviewFrame {
+                png_base64: None,
+                sample: false,
+                state: Some("Picture cards render on the server".into()),
+            }
+        );
+        assert!(!PICTURE_RENDERS_ON_THE_SERVER.contains("Plugin"));
+    }
+
+    #[test]
+    fn server_card_state_covers_plugin_and_picture_cards_and_reads_the_hero_field() {
         let body = serde_json::json!({
             "device_id": "desk-1",
             "connected": true,
@@ -3218,6 +3401,10 @@ pub(crate) mod tests {
                         { "kind": "plugin", "id": "news", "title": "", "plugin_id": "agenda",
                           "tap_action": { "kind": "none" },
                           "refresh": { "kind": "interval", "minutes": 30 },
+                          "alert": { "kind": "none" } },
+                        { "kind": "picture", "id": "limits", "title": "Usage",
+                          "source_id": "limits-source", "tap_action": { "kind": "none" },
+                          "refresh": { "kind": "manual" },
                           "alert": { "kind": "none" } }
                     ]
                 },
@@ -3226,7 +3413,9 @@ pub(crate) mod tests {
                     { "widget_id": "air", "state": { "kind": "fresh" },
                       "last_success_unix_ms": 1_787_000_000_000_i64, "age_seconds": 30 },
                     { "widget_id": "clock", "state": { "kind": "idle" },
-                      "last_success_unix_ms": null, "age_seconds": null }
+                      "last_success_unix_ms": null, "age_seconds": null },
+                    { "widget_id": "limits", "state": { "kind": "stale", "message": "late" },
+                      "last_success_unix_ms": 1_787_000_000_000_i64, "age_seconds": 1800 }
                 ],
                 "card_data": [
                     { "card_id": "air", "fields": [
@@ -3237,6 +3426,8 @@ pub(crate) mod tests {
                 "card_errors": [
                     { "kind": "scene-refused", "card_id": "news",
                       "message": "no snapshot cached yet" },
+                    { "kind": "scene-refused", "card_id": "limits",
+                      "message": "waiting for the first picture" },
                     { "kind": "data-refused", "card_id": "clock", "message": "ignored" }
                 ]
             }
@@ -3264,12 +3455,24 @@ pub(crate) mod tests {
                         message: "no snapshot cached yet".into(),
                     }],
                 },
+                ServerCardState {
+                    card_id: "limits".into(),
+                    provider: ProviderState::Stale {
+                        message: "late".into(),
+                    },
+                    hero: None,
+                    errors: vec![CardError {
+                        kind: CardErrorKind::SceneRefused,
+                        card_id: "limits".into(),
+                        message: "waiting for the first picture".into(),
+                    }],
+                },
             ]
         );
     }
 
     #[test]
-    fn a_device_with_no_runtime_projects_no_plugin_state() {
+    fn a_device_with_no_runtime_projects_no_server_card_state() {
         let body = serde_json::json!({
             "device_id": "desk-1", "connected": false, "last_seen_unix_ms": null,
             "config": { "origin": "defaults", "using_fallback": false, "fallback_reason": null },
@@ -3363,7 +3566,36 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn the_card_state_command_asks_for_this_device_and_keeps_only_plugin_cards() {
+    fn minting_a_picture_source_posts_its_name_and_returns_one_time_access() {
+        let (context, listener, directory) =
+            server_query_fixture("mint-picture-source", app_core::DeviceTier::Networked);
+        let token = "11".repeat(32);
+        let server = answer_once(
+            listener,
+            "200 OK",
+            format!(r#"{{"id":"picture-source","token":"{token}"}}"#),
+        );
+
+        let minted = mint_server_image_source(&context, "Picture").unwrap();
+
+        let request = server.join().unwrap();
+        let normalized = request.to_ascii_lowercase();
+        assert!(request.starts_with("POST /v1/images "));
+        assert!(normalized.contains("authorization: bearer admin-secret\r\n"));
+        assert!(normalized.contains("content-type: application/json\r\n"));
+        assert!(request.ends_with(r#"{"name":"Picture"}"#));
+        assert_eq!(minted.source_id, "picture-source");
+        assert_eq!(minted.token, token);
+        assert!(
+            minted
+                .push_url
+                .ends_with(&format!("/v1/images/{}", minted.token))
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn the_card_state_command_asks_for_this_device_and_keeps_server_rendered_cards() {
         let (context, listener, directory) =
             server_query_fixture("card-state", app_core::DeviceTier::Networked);
         let server = answer_once(
@@ -3374,8 +3606,13 @@ pub(crate) mod tests {
                 "snapshot":{"config":{"cards":[
                     {"kind":"plugin","id":"air","title":"","plugin_id":"aqi",
                      "tap_action":{"kind":"none"},"refresh":{"kind":"interval","minutes":15},
+                     "alert":{"kind":"none"}},
+                    {"kind":"picture","id":"limits","title":"Usage","source_id":"source",
+                     "tap_action":{"kind":"none"},"refresh":{"kind":"manual"},
                      "alert":{"kind":"none"}}]},
                   "providers":[{"widget_id":"air","state":{"kind":"fresh"},
+                    "last_success_unix_ms":null,"age_seconds":null},
+                    {"widget_id":"limits","state":{"kind":"idle"},
                     "last_success_unix_ms":null,"age_seconds":null}],
                   "card_data":[{"card_id":"air","fields":[
                     {"key":"hero","value":{"kind":"text","value":"42"}}]}],
@@ -3386,8 +3623,9 @@ pub(crate) mod tests {
 
         let request = server.join().unwrap();
         assert!(request.starts_with("GET /v1/devices/desk-1 "));
-        assert_eq!(states.len(), 1);
+        assert_eq!(states.len(), 2);
         assert_eq!(states[0].hero.as_deref(), Some("42"));
+        assert_eq!(states[1].card_id, "limits");
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -3444,8 +3682,13 @@ pub(crate) mod tests {
                 "refreshed_at_unix_ms":1787000000000}"#,
         );
 
-        let frame =
-            plugin_card_preview(&context, Some(app_core::DeviceTier::Networked), "air").unwrap();
+        let frame = server_card_preview(
+            &context,
+            Some(app_core::DeviceTier::Networked),
+            "air",
+            PLUGIN_RENDERS_ON_THE_SERVER,
+        )
+        .unwrap();
 
         let request = server.join().unwrap();
         assert!(request.starts_with("GET /v1/devices/desk-1/cards/air/preview "));
@@ -3460,7 +3703,7 @@ pub(crate) mod tests {
     /// fault, and it is not the local-tier sentence, which is chosen before any
     /// request is made.
     ///
-    /// An unknown device, an unknown card and a non-plugin card also 404, and the
+    /// An unknown device, an unknown card and a built-in card also 404, and the
     /// status code cannot tell any of the four apart -- so the sentence claims only
     /// that no preview came back. An earlier version said "Plugin previews need a
     /// newer server", which asserted a cause this code cannot know.
@@ -3470,11 +3713,16 @@ pub(crate) mod tests {
             server_query_fixture("preview-404", app_core::DeviceTier::Networked);
         let server = answer_once(listener, "404 Not Found", "");
 
-        let frame =
-            plugin_card_preview(&context, Some(app_core::DeviceTier::Networked), "air").unwrap();
+        let frame = server_card_preview(
+            &context,
+            Some(app_core::DeviceTier::Networked),
+            "air",
+            PLUGIN_RENDERS_ON_THE_SERVER,
+        )
+        .unwrap();
 
         server.join().unwrap();
-        assert_eq!(frame.state.as_deref(), Some(PLUGIN_PREVIEW_UNAVAILABLE));
+        assert_eq!(frame.state.as_deref(), Some(SERVER_PREVIEW_UNAVAILABLE));
         assert_eq!(frame.png_base64, None);
         fs::remove_dir_all(directory).unwrap();
     }
@@ -3486,8 +3734,13 @@ pub(crate) mod tests {
         let (context, listener, directory) =
             server_query_fixture("preview-local", app_core::DeviceTier::Local);
 
-        let frame =
-            plugin_card_preview(&context, Some(app_core::DeviceTier::Local), "air").unwrap();
+        let frame = server_card_preview(
+            &context,
+            Some(app_core::DeviceTier::Local),
+            "air",
+            PLUGIN_RENDERS_ON_THE_SERVER,
+        )
+        .unwrap();
 
         assert_eq!(frame.state.as_deref(), Some(PLUGIN_RENDERS_ON_THE_SERVER));
         assert_eq!(frame.png_base64, None);

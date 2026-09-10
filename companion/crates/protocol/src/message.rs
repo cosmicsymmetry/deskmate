@@ -27,6 +27,19 @@ pub const CAPABILITY_SCENE_RENDER: u64 = 1 << 8;
 /// separate from bit 5 because deployed asset-transfer builds reject that
 /// tier explicitly.
 pub const CAPABILITY_VOLATILE_ASSETS: u64 = 1 << 9;
+/// Honours `AssetBegin`'s `encoding` and `decoded_length` on the **durable**
+/// tier, not only the volatile one.
+///
+/// Bit 9 cannot carry this promise, for exactly the reason bit 5 could not
+/// carry bit 9's: a deployed bit-9 build's durable `AssetBegin` branch ignores
+/// `encoding` entirely and writes the wire bytes to flash verbatim, so sending
+/// it an RLE565 durable asset stores compressed bytes as if they were pixels.
+/// A host must see THIS bit before compressing a durable transfer.
+///
+/// Picture cards are why it exists. A 448x368 frame is 329,740 raw bytes, which
+/// is 172 sequential chunk round trips at `MAX_ASSET_CHUNK_BYTES`, and the
+/// tunnel does not survive that. The same frame RLE565-encoded is a handful.
+pub const CAPABILITY_DURABLE_ASSET_ENCODING: u64 = 1 << 10;
 pub const LEGACY_CAPABILITIES: u64 = CAPABILITY_CORE_WIDGETS;
 pub const CURRENT_CAPABILITIES: u64 = CAPABILITY_CORE_WIDGETS
     | CAPABILITY_CONFIG_ROTATION
@@ -35,7 +48,8 @@ pub const CURRENT_CAPABILITIES: u64 = CAPABILITY_CORE_WIDGETS
     | CAPABILITY_FIRMWARE_UPDATE
     | CAPABILITY_NETWORKING
     | CAPABILITY_SCENE_RENDER
-    | CAPABILITY_VOLATILE_ASSETS;
+    | CAPABILITY_VOLATILE_ASSETS
+    | CAPABILITY_DURABLE_ASSET_ENCODING;
 pub const LINK_TIMEOUT_MS: u64 = 10_000;
 pub const MAX_WIDGET_ID_LEN: usize = 32;
 pub const MAX_SCREEN_ID_LEN: usize = 32;
@@ -669,16 +683,24 @@ fn validate_asset_begin(begin: &AssetBegin) -> Result<(), MessageError> {
             }
         }
         ASSET_ENCODING_RLE565 => {
-            if !begin.volatile {
-                return Err(MessageError::InvalidValue("encoded durable asset"));
-            }
+            // Encoding was volatile-only when this rule was written, because
+            // the durable tier could not decode. Bit 10 changed that, and a
+            // durable picture frame is exactly the case it was blocking.
             let decoded_length = begin
                 .decoded_length
                 .ok_or(MessageError::InvalidValue("missing decoded length"))?;
             if decoded_length == 0 || decoded_length > MAX_ASSET_TOTAL_LENGTH {
                 return Err(MessageError::InvalidValue("asset decoded length"));
             }
-            if begin.kind == AssetKind::Image && decoded_length != VOLATILE_IMAGE_DECODED_LENGTH {
+            // A VOLATILE image is a full-canvas frame by construction -- it
+            // lands in a fixed-size PSRAM slot -- so its decoded length is
+            // pinned. A durable image is an ordinary stored asset and may be
+            // any bounded size, so pinning it there would reject every plugin
+            // image that is not a whole screen.
+            if begin.volatile
+                && begin.kind == AssetKind::Image
+                && decoded_length != VOLATILE_IMAGE_DECODED_LENGTH
+            {
                 return Err(MessageError::InvalidValue("volatile image decoded length"));
             }
             if begin.total_length >= decoded_length {
@@ -2216,10 +2238,10 @@ mod tests {
         // (capabilities) are still encoded contiguously and in this order
         // because keys are canonical; locate and drop them regardless of
         // what now follows them on the wire. The tail is
-        // CURRENT_CAPABILITIES; bit 8 took it from 235 to 491 and bit 9 now
-        // takes it to 1003 (0x03eb). It moves whenever a capability bit is
-        // added to the constant.
-        let pattern = [0x15, 0x09, 0x16, 0x01, 0x17, 0x19, 0x03, 0xeb];
+        // CURRENT_CAPABILITIES; bit 8 took it from 235 to 491, bit 9 took it
+        // to 1003, and bit 10 now takes it to 2027 (0x07eb). It moves whenever
+        // a capability bit is added to the constant.
+        let pattern = [0x15, 0x09, 0x16, 0x01, 0x17, 0x19, 0x07, 0xeb];
         let offset = payload
             .windows(pattern.len())
             .position(|window| window == pattern)
@@ -2638,6 +2660,48 @@ mod tests {
     }
 
     #[test]
+    fn an_encoded_durable_asset_is_accepted_now_that_the_durable_tier_decodes() {
+        // This was rejected outright until bit 10, and rejecting it is what
+        // made a picture card's frame cross the wire as 172 raw chunks.
+        let begin = AssetBegin {
+            digest: [0x5a; 32],
+            kind: AssetKind::Image,
+            total_length: 10_032,
+            volatile: false,
+            encoding: ASSET_ENCODING_RLE565,
+            decoded_length: Some(VOLATILE_IMAGE_DECODED_LENGTH),
+        };
+        assert!(validate_message(&Message::AssetBegin(begin)).is_ok());
+        // And it has to survive encoding, which is where the device-facing
+        // failure actually surfaced.
+        assert!(encode_message(1, &Message::AssetBegin(begin)).is_ok());
+    }
+
+    #[test]
+    fn a_durable_encoded_image_may_be_any_bounded_size_but_a_volatile_one_may_not() {
+        // A volatile image lands in a fixed-size PSRAM slot, so its decoded
+        // length is pinned. A durable image is an ordinary stored asset, and
+        // pinning it would reject every plugin image that is not a whole
+        // screen.
+        let partial = AssetBegin {
+            digest: [0x5a; 32],
+            kind: AssetKind::Image,
+            total_length: 1_000,
+            volatile: false,
+            encoding: ASSET_ENCODING_RLE565,
+            decoded_length: Some(4_096),
+        };
+        assert!(validate_message(&Message::AssetBegin(partial)).is_ok());
+        assert!(
+            validate_message(&Message::AssetBegin(AssetBegin {
+                volatile: true,
+                ..partial
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
     fn asset_begin_rejects_invalid_encoding_relationships() {
         let base = AssetBegin {
             digest: [0x5a; 32],
@@ -2658,10 +2722,6 @@ mod tests {
             },
             AssetBegin {
                 decoded_length: None,
-                ..base
-            },
-            AssetBegin {
-                volatile: false,
                 ..base
             },
             AssetBegin {

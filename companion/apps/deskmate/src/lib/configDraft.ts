@@ -22,11 +22,14 @@ export function copyConfig(config: AppConfig): AppConfig {
       ...(card.kind === "json-feed"
         ? { mappings: card.mappings.map((mapping) => ({ ...mapping })) }
         : {}),
-      ...(card.kind === "plugin" ? {} : { template: { ...card.template } }),
+      ...(card.kind === "plugin" || card.kind === "picture"
+        ? {}
+        : { template: { ...card.template } }),
       tap_action: { ...card.tap_action },
       refresh: { ...card.refresh },
       alert: { ...card.alert },
     })) as CardSettings[],
+    image_sources: config.image_sources.map((source) => ({ ...source })),
     assets: config.assets.map((asset) => ({
       ...asset,
       source: { ...asset.source },
@@ -61,6 +64,8 @@ export function cardName(card: CardSettings): string {
       return card.title || cardKindName(card.kind);
     case "plugin":
       return card.title || card.plugin_id;
+    case "picture":
+      return card.title || "Picture";
   }
 }
 
@@ -81,11 +86,14 @@ export function cardName(card: CardSettings): string {
  * showing is `pluginCardFlag`, not this — a name is a name, not a diagnosis.
  */
 export function cardLabel(card: CardSettings, catalog?: PluginCatalog | null): string {
-  if (card.kind !== "plugin") {
-    return cardKindName(card.kind);
+  if (card.kind === "picture") {
+    return "Picture";
   }
-  const entry = catalog?.plugins.find((plugin) => plugin.id === card.plugin_id);
-  return entry?.display_name ?? card.plugin_id;
+  if (card.kind === "plugin") {
+    const entry = catalog?.plugins.find((plugin) => plugin.id === card.plugin_id);
+    return entry?.display_name ?? card.plugin_id;
+  }
+  return cardKindName(card.kind);
 }
 
 export type PluginCardFlag = "not on the server" | "needs the server";
@@ -103,6 +111,9 @@ export function pluginCardFlag(
   catalog: PluginCatalog | null,
   tier: DeviceTier | null,
 ): PluginCardFlag | null {
+  if (card.kind === "picture") {
+    return tier === "local" ? "needs the server" : null;
+  }
   if (card.kind !== "plugin") {
     return null;
   }
@@ -161,7 +172,8 @@ function nextId(prefix: string, used: Set<string>): string {
  */
 export type AddCardRequest =
   | AddableCardKind
-  | { kind: "plugin"; pluginId: string; refreshMinutes: number };
+  | { kind: "plugin"; pluginId: string; refreshMinutes: number }
+  | { kind: "picture"; sourceId: string; sourceName: string };
 
 /// Appends a new card with sane defaults for its kind and enrols it at the end
 /// of the active loop in the same draft. Supports all six built-in card kinds
@@ -184,9 +196,9 @@ export function addCard(
     return { config, cardId: null };
   }
   const used = new Set(config.cards.map((card) => card.id));
-  // "plugin" as the id stem, never the plugin id: `plugin_id` is bounded at 64 bytes
-  // and a card id at 32, and two cards of one plugin are legitimate.
-  const cardId = nextId(typeof request === "string" ? request : "plugin", used);
+  // Server-created cards use their kind as the id stem, never the source/plugin id:
+  // those external ids have different bounds, and two cards may legitimately share one.
+  const cardId = nextId(typeof request === "string" ? request : request.kind, used);
   const common = {
     id: cardId,
     tap_action: { kind: "none" } as const,
@@ -195,15 +207,28 @@ export function addCard(
 
   let card: CardSettings;
   if (typeof request !== "string") {
-    card = {
-      kind: "plugin",
-      ...common,
-      // Blank on purpose: the display name already says what the card is, and a
-      // pre-filled title would be a second name nobody chose.
-      title: "",
-      plugin_id: request.pluginId,
-      refresh: { kind: "interval", minutes: request.refreshMinutes },
-    };
+    switch (request.kind) {
+      case "plugin":
+        card = {
+          kind: request.kind,
+          ...common,
+          // Blank on purpose: the display name already says what the card is, and a
+          // pre-filled title would be a second name nobody chose.
+          title: "",
+          plugin_id: request.pluginId,
+          refresh: { kind: "interval", minutes: request.refreshMinutes },
+        };
+        break;
+      case "picture":
+        card = {
+          kind: request.kind,
+          ...common,
+          title: "",
+          source_id: request.sourceId,
+          refresh: { kind: "manual" },
+        };
+        break;
+    }
   } else {
     switch (request) {
       case "clock":
@@ -290,7 +315,13 @@ export function addCard(
   // path (every pre-existing card in the returned draft would alias the live snapshot's
   // card objects instead of being an independent copy).
   const copied = copyConfig(config);
-  const withCard = { ...copied, cards: [...copied.cards, card] };
+  const image_sources =
+    typeof request !== "string" &&
+    request.kind === "picture" &&
+    !copied.image_sources.some((source) => source.id === request.sourceId)
+      ? [...copied.image_sources, { id: request.sourceId, name: request.sourceName }]
+      : copied.image_sources;
+  const withCard = { ...copied, cards: [...copied.cards, card], image_sources };
   return { config: addEntry(withCard, playlist.id, cardId), cardId };
 }
 
@@ -493,7 +524,7 @@ export function loopSeconds(config: AppConfig, playlistId: string): number | nul
 /// ribbon. Pure and independent of any DOM/flex mechanics so the width math
 /// — the whole point of the ribbon — can be unit-tested without rendering
 /// anything.
-export interface FilmstripSegment {
+export interface LoopSegment {
   cardId: string;
   name: string;
   /// The owner's own words for this card, or null when they typed none. Two cards
@@ -510,10 +541,7 @@ export interface FilmstripSegment {
 /// there is no dwell to speak of, so every segment is given equal width
 /// instead of a zero-width one, which is what lets the ribbon still show
 /// order (just not timing) in that mode.
-export function filmstripSegments(
-  config: AppConfig,
-  catalog?: PluginCatalog | null,
-): FilmstripSegment[] {
+export function loopSegments(config: AppConfig, catalog?: PluginCatalog | null): LoopSegment[] {
   const playlist = activePlaylist(config);
   if (!playlist) {
     return [];
@@ -532,7 +560,7 @@ export function filmstripSegments(
   let offset = 0;
   return entries.map(({ card }, index) => {
     const widthPercent = total > 0 ? (dwellSeconds[index] / total) * 100 : equalShare;
-    const segment: FilmstripSegment = {
+    const segment: LoopSegment = {
       cardId: card.id,
       name: cardLabel(card, catalog),
       title: cardTitle(card),
@@ -547,8 +575,8 @@ export function filmstripSegments(
 
 /// The segment the ribbon's play control should move to next, wrapping past
 /// the end. Returns `null` only when there is nothing to advance to.
-export function nextFilmstripCardId(
-  segments: FilmstripSegment[],
+export function nextLoopCardId(
+  segments: LoopSegment[],
   currentCardId: string | null,
 ): string | null {
   if (segments.length === 0) {
@@ -567,11 +595,11 @@ export function nextFilmstripCardId(
 /// from a relative duration on every check, which is what let the ribbon's
 /// old relative `setTimeout` get silently re-armed by unrelated re-renders
 /// before it ever had a chance to fire.
-export function filmstripDeadline(startedAtMs: number, dwellSeconds: number): number {
+export function loopDeadline(startedAtMs: number, dwellSeconds: number): number {
   return startedAtMs + Math.max(1, dwellSeconds) * 1000;
 }
 
-export interface FilmstripAdvance {
+export interface LoopAdvance {
   cardId: string;
   deadlineMs: number;
 }
@@ -583,23 +611,23 @@ export interface FilmstripAdvance {
 /// next card in the active playlist together with the deadline for THAT card's own
 /// dwell, so a caller can just feed the previous result's `deadlineMs`
 /// back in on every tick without tracking anything else.
-export function filmstripAdvance(
-  segments: FilmstripSegment[],
+export function loopAdvance(
+  segments: LoopSegment[],
   activeCardId: string | null,
   deadlineMs: number,
   nowMs: number,
-): FilmstripAdvance | null {
+): LoopAdvance | null {
   if (nowMs < deadlineMs) {
     return null;
   }
-  const nextCardId = nextFilmstripCardId(segments, activeCardId);
+  const nextCardId = nextLoopCardId(segments, activeCardId);
   if (!nextCardId) {
     return null;
   }
   const nextSegment = segments.find((segment) => segment.cardId === nextCardId);
   return {
     cardId: nextCardId,
-    deadlineMs: filmstripDeadline(nowMs, nextSegment?.dwellSeconds ?? 0),
+    deadlineMs: loopDeadline(nowMs, nextSegment?.dwellSeconds ?? 0),
   };
 }
 

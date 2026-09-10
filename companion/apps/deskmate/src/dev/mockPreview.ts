@@ -145,6 +145,23 @@ function heroCaption(ctx: CanvasRenderingContext2D, title: string, hero: string,
   ctx.fillText(caption, PANEL_WIDTH / 2, 288);
 }
 
+function pictureFrame(ctx: CanvasRenderingContext2D, title: string) {
+  ctx.fillStyle = "#16162A";
+  ctx.fillRect(0, 0, PANEL_WIDTH, PANEL_HEIGHT);
+  ctx.fillStyle = "#8D8DFF";
+  ctx.fillRect(24, 86, 400, 74);
+  ctx.fillStyle = "#5B5BC8";
+  ctx.fillRect(24, 218, 288, 74);
+  ctx.textAlign = "left";
+  ctx.textBaseline = "middle";
+  ctx.fillStyle = INK;
+  ctx.font = "600 25px ui-sans-serif, system-ui, sans-serif";
+  ctx.fillText(title || "Pushed picture", 38, 48);
+  ctx.font = "500 34px ui-rounded, ui-sans-serif, system-ui, sans-serif";
+  ctx.fillText("72%", 42, 123);
+  ctx.fillText("48%", 42, 255);
+}
+
 export function renderMockFrame(
   card: CardSettings,
   data: CardDataSnapshot | undefined,
@@ -207,6 +224,9 @@ export function renderMockFrame(
         fieldValue(data, "hero") ?? "--",
         "Rendered on the server",
       );
+      break;
+    case "picture":
+      pictureFrame(ctx, card.title);
       break;
   }
 

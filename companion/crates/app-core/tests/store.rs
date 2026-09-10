@@ -365,11 +365,11 @@ fn v3_all_alert_only_migrates_to_valid_config() {
 }
 
 #[test]
-fn v4_config_migrates_to_v6_unchanged() {
+fn v4_config_migrates_to_v7_unchanged() {
     // config.rs's compile step has always rejected a non-empty `assets` array, so no
     // saved v4 config has ever contained one: migration to the current schema is a
-    // version bump with no data transformation (v4 -> v6 directly, not chained
-    // through v5).
+    // version bump with no data transformation (v4 -> v7 directly, not chained
+    // through intermediate schemas).
     let directory = test_directory("v4-migration");
     let path = directory.path().join("config.json");
     let store = ConfigStore::new(&path);
@@ -381,6 +381,7 @@ fn v4_config_migrates_to_v6_unchanged() {
 
     let config = outcome.config();
     assert_eq!(config.schema_version, CURRENT_SCHEMA_VERSION);
+    assert!(config.image_sources.is_empty());
     assert!(config.assets.is_empty());
     assert_eq!(config.preferences.timezone, "Asia/Tbilisi");
     assert_eq!(config.active_playlist_id, "workday");
@@ -390,11 +391,11 @@ fn v4_config_migrates_to_v6_unchanged() {
 }
 
 #[test]
-fn v5_config_migrates_to_v6_unchanged() {
+fn v5_config_migrates_to_v7_unchanged() {
     // v6 adds exactly one thing to the schema: a `plugin` card kind no v5 document
     // could ever contain (it did not exist yet). Every other type is byte-for-byte
-    // the same shape, so migration is a version bump with no data transformation --
-    // the same pattern as v4 -> v5 before it.
+    // the same shape, and v7's additive `image_sources` field defaults empty, so
+    // migration is a version bump with no data transformation.
     let directory = test_directory("v5-migration");
     let path = directory.path().join("config.json");
     let store = ConfigStore::new(&path);
@@ -408,17 +409,17 @@ fn v5_config_migrates_to_v6_unchanged() {
     assert_eq!(migrated.schema_version, CURRENT_SCHEMA_VERSION);
 
     // Independently parse the identical source bytes as the current `AppConfig`
-    // shape and bump only the version field by hand. Because v6 does not change
-    // any existing type, this independently-derived value is what a truly lossless
-    // migration must produce; comparing whole sections (not just scalar summaries)
-    // is what proves "everything a v5 config could express" survived, not just the
-    // few fields a hand-picked spot check would have covered.
+    // shape and bump only the version field by hand. Because v6/v7 change no
+    // existing type and the one new field defaults empty, this independently-derived
+    // value is what a truly lossless migration must produce; comparing whole sections
+    // (not just scalar summaries) proves everything a v5 config could express survived.
     let mut expected: AppConfig =
         serde_json::from_str(include_str!("fixtures/v5-roundtrip.json")).unwrap();
     expected.schema_version = CURRENT_SCHEMA_VERSION;
 
     assert_eq!(migrated.preferences, expected.preferences);
     assert_eq!(migrated.cards, expected.cards);
+    assert!(migrated.image_sources.is_empty());
     assert_eq!(migrated.assets, expected.assets);
     assert_eq!(migrated.playlists, expected.playlists);
     assert_eq!(migrated.active_playlist_id, expected.active_playlist_id);
@@ -429,8 +430,53 @@ fn v5_config_migrates_to_v6_unchanged() {
 }
 
 #[test]
-fn v0_v1_v2_migrate_directly_to_v6() {
-    let directory = test_directory("legacy-direct-to-v6");
+fn a_v6_document_migrates_to_v7_with_no_image_sources_and_loses_nothing() {
+    // A real v6 document: no `image_sources` key at all. It must parse, not fail.
+    let v6 = serde_json::json!({
+        "schema_version": 6,
+        "preferences": { "timezone": "UTC", "autostart": false, "paused": false },
+        "cards": [{
+            "kind": "clock",
+            "id": "clock",
+            "title": "Desk",
+            "show_seconds": true,
+            "template": { "kind": "digital-clock" },
+            "tap_action": { "kind": "none" },
+            "refresh": { "kind": "device-local" },
+            "alert": { "kind": "none" }
+        }],
+        "assets": [],
+        "playlists": [{
+            "id": "my-playlist",
+            "name": "My playlist",
+            "advance": { "kind": "manual" },
+            "entries": [{ "card_id": "clock", "dwell_seconds": null }]
+        }],
+        "active_playlist_id": "my-playlist",
+        "updater": { "channel": "stable", "checks": "notify" }
+    });
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("config.json");
+    std::fs::write(&path, serde_json::to_vec_pretty(&v6).expect("encode")).expect("write");
+
+    let store = app_core::ConfigStore::new(path);
+    let loaded = store.load();
+    let config = loaded.config();
+
+    assert_eq!(loaded.origin(), ConfigOrigin::MigratedV6);
+    assert_eq!(config.schema_version, app_core::CURRENT_SCHEMA_VERSION);
+    assert_eq!(config.schema_version, 7);
+    assert!(config.image_sources.is_empty(), "v6 knew no sources");
+    // Lossless: everything else survived untouched.
+    assert_eq!(config.cards.len(), 1);
+    assert_eq!(config.active_playlist_id, "my-playlist");
+    assert_eq!(config.playlists[0].entries[0].card_id, "clock");
+}
+
+#[test]
+fn v0_v1_v2_migrate_directly_to_v7() {
+    let directory = test_directory("legacy-direct-to-v7");
     let path = directory.path().join("config.json");
     let store = ConfigStore::new(&path);
 
@@ -564,6 +610,7 @@ fn calendar_persistence_contains_source_metadata_but_no_fetched_payload() {
     let path = directory.path().join("config.json");
     let store = ConfigStore::new(&path);
     let mut config: AppConfig = serde_json::from_str(include_str!("fixtures/full.json")).unwrap();
+    config.schema_version = CURRENT_SCHEMA_VERSION;
     let calendar = config
         .cards
         .iter_mut()
@@ -648,7 +695,7 @@ fn migrated_v2_documents_always_satisfy_the_rotation_rule() {
 }
 
 #[test]
-fn future_v7_is_a_recoverable_error_preserving_bytes() {
+fn future_v8_is_a_recoverable_error_preserving_bytes() {
     let directory = test_directory("future-version");
     let path = directory.path().join("config.json");
     let store = ConfigStore::new(&path);
@@ -657,8 +704,12 @@ fn future_v7_is_a_recoverable_error_preserving_bytes() {
     last_good.preferences.autostart = true;
     store.save(&last_good).unwrap();
 
-    let future = include_bytes!("fixtures/future-v7.json");
-    fs::write(&path, future).unwrap();
+    let future = include_str!("fixtures/future-v7.json").replacen(
+        "\"schema_version\": 7",
+        "\"schema_version\": 8",
+        1,
+    );
+    fs::write(&path, &future).unwrap();
 
     let outcome = store.load();
     assert_eq!(outcome.origin(), ConfigOrigin::LastGood);
@@ -666,12 +717,12 @@ fn future_v7_is_a_recoverable_error_preserving_bytes() {
     assert!(matches!(
         outcome.recovery(),
         Some(StoreError::UnsupportedVersion {
-            found: 7,
-            supported: 6
+            found: 8,
+            supported: 7
         })
     ));
     // The unreadable source bytes are never rewritten.
-    assert_eq!(fs::read(&path).unwrap(), future);
+    assert_eq!(fs::read_to_string(&path).unwrap(), future);
 }
 
 #[test]

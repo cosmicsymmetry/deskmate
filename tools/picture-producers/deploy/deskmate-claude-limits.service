@@ -1,0 +1,9 @@
+[Unit]
+Description=Deskmate picture card — Claude usage panel
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Environment=DESKMATE_CLAUDE_FEED_URL=https://deskmate.rodi.one/feeds/119fa3cca44bf0b9bb8c33f6/claude-usage.json
+ExecStart=/opt/deskmate-producers/deskmate-claude-limits.sh

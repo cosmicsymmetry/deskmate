@@ -13,6 +13,7 @@ pub use frame::{
     Deframer, Frame, FrameError, MAX_DECODED_FRAME, MAX_PAYLOAD_SIZE, MAX_WIRE_FRAME, crc32c,
     decode_wire_frame, encode_frame,
 };
+pub use message::CAPABILITY_DURABLE_ASSET_ENCODING;
 pub use message::{
     ASSET_DIGEST_LEN, ASSET_ENCODING_RAW, ASSET_ENCODING_RLE565, Ack, ActivateScreen, ApplyConfig,
     AssetBegin, AssetChunk, AssetCommit, AssetKind, AssetRelease, CAPABILITY_ASSET_TRANSFER,

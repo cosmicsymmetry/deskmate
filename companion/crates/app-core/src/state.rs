@@ -155,10 +155,11 @@ pub enum DeviceCapability {
     Networking,
     SceneRender,
     VolatileAssets,
+    DurableAssetEncoding,
 }
 
 impl DeviceCapability {
-    const ALL: [Self; 10] = [
+    const ALL: [Self; 11] = [
         Self::CoreWidgets,
         Self::ConfigRotation,
         Self::DashboardLayouts,
@@ -169,6 +170,7 @@ impl DeviceCapability {
         Self::Networking,
         Self::SceneRender,
         Self::VolatileAssets,
+        Self::DurableAssetEncoding,
     ];
 
     pub const fn bit(self) -> u64 {
@@ -183,6 +185,7 @@ impl DeviceCapability {
             Self::Networking => protocol::CAPABILITY_NETWORKING,
             Self::SceneRender => protocol::CAPABILITY_SCENE_RENDER,
             Self::VolatileAssets => protocol::CAPABILITY_VOLATILE_ASSETS,
+            Self::DurableAssetEncoding => protocol::CAPABILITY_DURABLE_ASSET_ENCODING,
         }
     }
 
@@ -201,6 +204,7 @@ impl DeviceCapability {
             Self::Networking => "networking",
             Self::SceneRender => "declarative scene rendering",
             Self::VolatileAssets => "volatile raster assets",
+            Self::DurableAssetEncoding => "durable raster asset encoding",
         }
     }
 

@@ -2,6 +2,16 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **STATUS (recorded 2026-09-09): DELIVERED, and partly OVERTAKEN. Zero of its 76 boxes
+> were ticked; they are NOT a progress signal.** `AnalogClock`, `BigNumberLabel` and
+> `IconBadgeText` shipped as wire kinds 4-6 (`protocol/src/message.rs:102-104`) and were
+> physically verified 2026-08-11. Two of its checklist items can never be closed as
+> written: `unknown_field_count` is not observable on hardware (the counter and its
+> getter were removed in the 2026-09-05 cleanup), and the `show_seconds`-false analog
+> clock discrepancy was closed instead by V1 acceptance's framebuffer diff on 2026-08-14.
+> Note also that the six C templates this plan wrote no longer ship at all — stage 3a
+> moved them to `lvgl-sim/reference-oracle/` and every face is now a host-pushed scene.
+
 **Goal:** Implement the `analog-clock`, `big-number-label`, and `icon-badge-text` display templates end to end — wire contract, firmware rendering, host lowering, and app preview — so weather and JSON-feed cards render real content instead of a title over five empty rows.
 
 **Architecture:** The scaffolding already exists and this task fills it in. `DisplayTemplate` in `config.rs` already has all six variants; firmware already reserves `PROTOCOL_CAPABILITY_EXTENDED_TEMPLATES (1 << 3)` and `PROTOCOL_ERROR_UNSUPPORTED_TEMPLATE`. The three new templates become wire values 4/5/6, gated behind the extended-templates capability bit so an older image degrades deterministically rather than rendering garbage. Firmware keeps its existing shape: one declarative field registry per template in `core/template_fields.c` (plain C, host-tested) and one view file per template in `ui/templates/`.

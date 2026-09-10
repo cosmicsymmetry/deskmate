@@ -95,6 +95,13 @@ pub(crate) enum RuntimeCommand {
         snapshot: providers::ProviderSnapshot<serde_json::Value>,
         reply: CommandReply,
     },
+    /// One image source received a new picture. Carries no bytes: the handler
+    /// reconciles the whole desired set from the host, which already owns them.
+    ImageSourceUpdated {
+        source_id: String,
+        digest: [u8; 32],
+        reply: CommandReply,
+    },
     RenderCardPreview {
         card_id: String,
         reply: PreviewReply,

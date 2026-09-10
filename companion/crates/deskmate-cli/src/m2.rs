@@ -485,6 +485,10 @@ fn build_demo_config(layout: ApplyConfig, options: &DemoOptions) -> Result<AppCo
             paused: false,
             orientation: app_core::DisplayOrientation::Landscape,
         },
+        // The M2 demo layout names only the three fixed built-in cards, and a
+        // picture card's frames come from a producer this CLI has no way to
+        // reach, so the demo declares no image sources.
+        image_sources: Vec::new(),
         // The card model has no separate screen identity: a card's own id is its
         // screen id. The demo layout's screen order becomes the card order, and
         // each screen's widget_id selects which of the three fixed M3 cards it

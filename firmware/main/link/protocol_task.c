@@ -13,6 +13,7 @@
 #include "board/display.h"
 #include "core/asset_store.h"
 #include "core/asset_transfer.h"
+#include "core/rle565.h"
 #include "core/volatile_asset_store.h"
 #include "core/device_event_queue.h"
 #include "core/interrupt_state.h"
@@ -94,6 +95,21 @@ typedef struct {
     // this flag is what still remembers it needs reclaiming. See
     // abandon_pending_reservation().
     bool asset_reservation_pending;
+    // Durable RLE565 state. The whole context is heap_caps_calloc'd from
+    // PSRAM (see protocol_task_start), so these cost no static RAM -- which
+    // matters on this board, where shifting .bss has twice broken OTA
+    // downloads with every test green.
+    //
+    // A durable encoded transfer decodes into `asset_decode_buffer` and is
+    // written to flash in one pass at commit, rather than streamed. The
+    // decoder writes into a single contiguous buffer of exactly the promised
+    // decoded length, and a single RLE run can expand to 128 KiB, so no small
+    // sliding window is safe; buying one transient PSRAM allocation is the
+    // honest trade.
+    bool asset_decoding;
+    uint32_t asset_decoded_length;
+    uint8_t *asset_decode_buffer;
+    rle565_decoder_t asset_decoder;
     // Metadata only. This whole context is allocated from PSRAM, and the two
     // possible 329,740-byte frame buffers come from the explicit PSRAM
     // callbacks installed at start. No volatile slot or byte buffer lands in
@@ -1007,12 +1023,25 @@ static void abandon_pending_reservation(protocol_context_t *context)
     context->asset_reservation_pending = false;
 }
 
+/* Releases a durable encoded transfer's decode buffer. Idempotent, so every
+ * failure exit can call it without tracking whether it already ran. */
+static void release_asset_decode_buffer(protocol_context_t *context)
+{
+    if (context->asset_decode_buffer != NULL) {
+        heap_caps_free(context->asset_decode_buffer);
+        context->asset_decode_buffer = NULL;
+    }
+    context->asset_decoding = false;
+    context->asset_decoded_length = 0U;
+}
+
 static void abort_asset_transfers(protocol_context_t *context)
 {
     volatile_asset_store_abort_incoming(&context->volatile_assets);
     if (context->asset_transfer.active) {
         asset_transfer_abort(&context->asset_transfer);
     }
+    release_asset_decode_buffer(context);
     abandon_pending_reservation(context);
 }
 
@@ -1054,10 +1083,42 @@ static void dispatch_asset_begin(protocol_context_t *context,
         transmit_asset_begin_ack(context, request_id, true);
         return;
     }
+    // `total_length` is always the WIRE length, so the transfer's chunk
+    // bookkeeping uses it unchanged. What lands in flash is the DECODED
+    // stream, so the reservation uses that length instead -- for a raw
+    // transfer the two are the same number.
+    uint32_t stored_length = begin->total_length;
+    bool decoding = false;
+    if (begin->encoding == PROTOCOL_ASSET_ENCODING_RLE565) {
+        if (!begin->has_decoded_length ||
+            begin->decoded_length <= VOLATILE_ASSET_HEADER_BYTES ||
+            begin->decoded_length > ASSET_MAX_BYTES ||
+            // A wire stream no longer than the passthrough header cannot
+            // deliver a complete one, which would leave the head of the buffer
+            // never written.
+            begin->total_length <= VOLATILE_ASSET_HEADER_BYTES ||
+            begin->total_length >= begin->decoded_length) {
+            transmit_error(context, request_id, PROTOCOL_ERROR_INVALID_PAYLOAD,
+                           "invalid durable asset encoding");
+            return;
+        }
+        stored_length = begin->decoded_length;
+        decoding = true;
+    } else if (begin->encoding != PROTOCOL_ASSET_ENCODING_RAW) {
+        transmit_error(context, request_id, PROTOCOL_ERROR_INVALID_PAYLOAD,
+                       "unsupported durable asset encoding");
+        return;
+    } else if (begin->has_decoded_length) {
+        // A raw transfer that also promises a decoded length is contradicting
+        // itself; the volatile tier rejects the same shape.
+        transmit_error(context, request_id, PROTOCOL_ERROR_INVALID_PAYLOAD,
+                       "raw durable asset carries a decoded length");
+        return;
+    }
     uint32_t index = 0U;
     uint32_t blob_offset = 0U;
     if (asset_store_reserve(asset_flash_store(), begin->digest,
-                            (uint8_t)begin->kind, begin->total_length, &index,
+                            (uint8_t)begin->kind, stored_length, &index,
                             &blob_offset) != ASSET_STORE_OK) {
         transmit_error(context, request_id, PROTOCOL_ERROR_INVALID_PAYLOAD,
                        "asset store reserve failed");
@@ -1077,6 +1138,30 @@ static void dispatch_asset_begin(protocol_context_t *context,
     context->asset_transfer_record_index = index;
     context->asset_transfer_blob_offset = blob_offset;
     context->asset_reservation_pending = true;
+    if (decoding) {
+        // calloc, not malloc: the decoder bounds its own writes and the
+        // header copy is bounded too, but a truncated stream would otherwise
+        // leave un-written bytes holding heap residue, and commit writes the
+        // whole buffer to flash. Zeroed bytes are a blank image; heap residue
+        // is whatever was there before.
+        context->asset_decode_buffer = heap_caps_calloc(
+            1, stored_length, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (context->asset_decode_buffer == NULL ||
+            rle565_decoder_init(
+                &context->asset_decoder,
+                context->asset_decode_buffer + VOLATILE_ASSET_HEADER_BYTES,
+                stored_length - VOLATILE_ASSET_HEADER_BYTES) != RLE565_OK) {
+            release_asset_decode_buffer(context);
+            asset_transfer_abort(&context->asset_transfer);
+            asset_store_mark_dead(asset_flash_store(), index);
+            context->asset_reservation_pending = false;
+            transmit_error(context, request_id, PROTOCOL_ERROR_INTERNAL,
+                           "asset decode buffer unavailable");
+            return;
+        }
+        context->asset_decoding = true;
+        context->asset_decoded_length = stored_length;
+    }
     transmit_asset_begin_ack(context, request_id, false);
 }
 
@@ -1115,6 +1200,40 @@ static void dispatch_asset_chunk(protocol_context_t *context,
                        "asset chunk rejected");
         return;
     }
+    if (context->asset_decoding) {
+        // Encoded transfers accumulate in PSRAM and reach flash in one pass at
+        // commit: the wire offset is a position in the COMPRESSED stream and
+        // says nothing about where those pixels land, so there is no flash
+        // offset to write at yet.
+        // The host copies the 12-byte image header verbatim and encodes only
+        // the pixel body, so the head of the WIRE stream is not RLE runs.
+        // Feeding it to the decoder is what "asset chunk decode failed" meant.
+        // This mirrors volatile_asset_store_write() exactly.
+        uint32_t consumed = 0U;
+        if (chunk->offset < VOLATILE_ASSET_HEADER_BYTES) {
+            uint32_t header_length =
+                VOLATILE_ASSET_HEADER_BYTES - chunk->offset;
+            if (header_length > (uint32_t)chunk->data_length) {
+                header_length = (uint32_t)chunk->data_length;
+            }
+            memcpy(context->asset_decode_buffer + chunk->offset, chunk->data,
+                   header_length);
+            consumed = header_length;
+        }
+        if (consumed < (uint32_t)chunk->data_length &&
+            rle565_decoder_feed(
+                &context->asset_decoder, chunk->data + consumed,
+                (size_t)((uint32_t)chunk->data_length - consumed)) !=
+                RLE565_OK) {
+            release_asset_decode_buffer(context);
+            asset_transfer_abort(&context->asset_transfer);
+            transmit_error(context, request_id, PROTOCOL_ERROR_INVALID_PAYLOAD,
+                           "asset chunk decode failed");
+            return;
+        }
+        transmit_ack(context, request_id, PROTOCOL_TYPE_ASSET_CHUNK, false, 0U);
+        return;
+    }
     if (asset_flash_write_blob(
             context->asset_transfer_blob_offset + chunk->offset, chunk->data,
             chunk->data_length) != ESP_OK) {
@@ -1151,6 +1270,25 @@ static void dispatch_asset_commit(protocol_context_t *context,
         transmit_error(context, request_id, PROTOCOL_ERROR_INVALID_PAYLOAD,
                        "asset transfer not complete");
         return;
+    }
+    if (context->asset_decoding) {
+        if (rle565_decoder_finish(&context->asset_decoder) != RLE565_OK) {
+            release_asset_decode_buffer(context);
+            abort_asset_transfers(context);
+            transmit_error(context, request_id, PROTOCOL_ERROR_INVALID_PAYLOAD,
+                           "asset decode incomplete");
+            return;
+        }
+        if (asset_flash_write_blob(context->asset_transfer_blob_offset,
+                                   context->asset_decode_buffer,
+                                   context->asset_decoded_length) != ESP_OK) {
+            release_asset_decode_buffer(context);
+            abort_asset_transfers(context);
+            transmit_error(context, request_id, PROTOCOL_ERROR_INTERNAL,
+                           "asset blob write failed");
+            return;
+        }
+        release_asset_decode_buffer(context);
     }
     if (asset_store_commit(asset_flash_store(),
                            context->asset_transfer_record_index) !=

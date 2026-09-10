@@ -10,13 +10,13 @@ use atomic_write_file::unix::OpenOptionsExt as AtomicOpenOptionsExt;
 use std::os::unix::fs::{OpenOptionsExt as UnixOpenOptionsExt, PermissionsExt};
 
 #[derive(Debug)]
-pub(crate) enum BoundedReadError {
+pub enum BoundedReadError {
     Io(FileIoError),
     TooLarge { maximum: usize },
 }
 
 #[derive(Debug)]
-pub(crate) struct FileIoError {
+pub struct FileIoError {
     pub operation: FileOperation,
     pub source: io::Error,
 }
@@ -28,7 +28,7 @@ impl FileIoError {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(crate) enum FileOperation {
+pub enum FileOperation {
     CreateDirectory,
     Open,
     Read,
@@ -55,10 +55,7 @@ impl FileOperation {
     }
 }
 
-pub(crate) fn read_bounded(
-    path: &Path,
-    maximum: usize,
-) -> Result<Option<Vec<u8>>, BoundedReadError> {
+pub fn read_bounded(path: &Path, maximum: usize) -> Result<Option<Vec<u8>>, BoundedReadError> {
     read_bounded_with_mode_repair(path, maximum, secure_open)
 }
 
@@ -96,7 +93,7 @@ pub(crate) fn read_bounded_with_mode_repair(
     }
 }
 
-pub(crate) fn usable_parent(path: &Path) -> Option<&Path> {
+pub fn usable_parent(path: &Path) -> Option<&Path> {
     let parent = path.parent()?;
     if parent.as_os_str().is_empty() {
         Some(Path::new("."))
@@ -105,14 +102,35 @@ pub(crate) fn usable_parent(path: &Path) -> Option<&Path> {
     }
 }
 
-pub(crate) fn create_directory(path: &Path) -> Result<(), FileIoError> {
+pub fn create_directory(path: &Path) -> Result<(), FileIoError> {
     fs::create_dir_all(path).map_err(|source| FileIoError {
         operation: FileOperation::CreateDirectory,
         source,
     })
 }
 
-pub(crate) fn write_and_replace(target: &Path, bytes: &[u8]) -> Result<(), FileIoError> {
+/// Atomically replaces `target` with `bytes` followed by a trailing newline, at
+/// mode 0600.
+///
+/// This is the text path. Every configuration writer in this crate expects the
+/// newline, so it is part of the contract rather than an accident; binary
+/// payloads want [`write_and_replace_binary`] instead.
+pub fn write_and_replace(target: &Path, bytes: &[u8]) -> Result<(), FileIoError> {
+    write_atomic(target, bytes, true)
+}
+
+/// Atomically replaces `target` with exactly `bytes` -- no trailing newline --
+/// at mode 0600.
+///
+/// A canonical RGB565 frame is 329,740 bytes and its reader checks that length
+/// exactly (`server::rasterizer::frame_png`). Writing one through the text path
+/// above yields 329,741 bytes on disk, which reads back as a corrupt frame
+/// rather than as an error, so binary payloads must not use it.
+pub fn write_and_replace_binary(target: &Path, bytes: &[u8]) -> Result<(), FileIoError> {
+    write_atomic(target, bytes, false)
+}
+
+fn write_atomic(target: &Path, bytes: &[u8], trailing_newline: bool) -> Result<(), FileIoError> {
     let mut options = AtomicWriteFile::options();
     secure_atomic_options(&mut options);
     let mut file = options.open(target).map_err(|source| FileIoError {
@@ -123,10 +141,12 @@ pub(crate) fn write_and_replace(target: &Path, bytes: &[u8]) -> Result<(), FileI
         operation: FileOperation::WriteTemporary,
         source,
     })?;
-    file.write_all(b"\n").map_err(|source| FileIoError {
-        operation: FileOperation::FinishTemporary,
-        source,
-    })?;
+    if trailing_newline {
+        file.write_all(b"\n").map_err(|source| FileIoError {
+            operation: FileOperation::FinishTemporary,
+            source,
+        })?;
+    }
     file.commit().map_err(|source| FileIoError {
         operation: FileOperation::SyncAndReplace,
         source,
@@ -153,7 +173,7 @@ fn secure_atomic_options(options: &mut atomic_write_file::OpenOptions) {
 fn secure_atomic_options(_options: &mut atomic_write_file::OpenOptions) {}
 
 #[cfg(unix)]
-pub(crate) fn sync_parent(parent: &Path) -> Result<(), FileIoError> {
+pub fn sync_parent(parent: &Path) -> Result<(), FileIoError> {
     File::open(parent)
         .and_then(|directory| directory.sync_all())
         .map_err(|source| FileIoError {
@@ -163,6 +183,6 @@ pub(crate) fn sync_parent(parent: &Path) -> Result<(), FileIoError> {
 }
 
 #[cfg(not(unix))]
-pub(crate) fn sync_parent(_parent: &Path) -> Result<(), FileIoError> {
+pub fn sync_parent(_parent: &Path) -> Result<(), FileIoError> {
     Ok(())
 }

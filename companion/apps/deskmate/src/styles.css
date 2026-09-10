@@ -1133,13 +1133,16 @@ fieldset legend {
   font-size: 0.8rem;
 }
 
+/*
+ * Fixed, not absolute: the add slot sits inside `.face__work`, which scrolls and
+ * therefore clips its descendants. Its position and height are measured when it
+ * opens (`menuPlacement.ts`) and applied inline, so the placement rules live in
+ * one testable place instead of being split between here and the component.
+ */
 .menu {
-  position: absolute;
+  position: fixed;
   z-index: 6;
-  top: calc(100% + 6px);
-  left: 0;
   width: 272px;
-  max-height: 300px;
   padding: 6px;
   overflow-y: auto;
   border: 1px solid var(--hairline);
@@ -1147,11 +1150,6 @@ fieldset legend {
   background: var(--tile);
   scrollbar-color: var(--tile-3) transparent;
   scrollbar-width: thin;
-}
-
-.menu--end {
-  right: 0;
-  left: auto;
 }
 
 .menu__group {

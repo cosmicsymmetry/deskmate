@@ -2,6 +2,13 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **STATUS (recorded 2026-09-09): DELIVERED and PHYSICALLY ACCEPTED 2026-08-14. 51 boxes
+> were never ticked and are NOT a progress signal.** Evidence is in
+> `docs/hardware/board-notes.md` under "V1 physical acceptance — 2026-08-13" (the
+> original failure, preserved) and "— 2026-08-14" (the passing run). One thing genuinely
+> did not happen: the 30-minute mixed soak was interrupted at 27 minutes by owner
+> direction and is **waived, not completed**. Do not describe a full soak as observed.
+
 **Goal:** Make the app preview pixel-exact by running the firmware's own LVGL
 templates on the host, land the irreversible partition table, bake a real typeface,
 and redesign the six built-in widgets against golden frames.

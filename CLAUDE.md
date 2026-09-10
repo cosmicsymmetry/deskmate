@@ -95,6 +95,111 @@ of letting code and documentation diverge.
   Three UX findings from that session are recorded in board-notes (takeover face
   indistinguishable from the completed card; sticky unreconciled optimistic red flash
   on tapping a completed pomodoro; host silently ignores stale-token dismissals).
+- **PICTURE CARDS ARE DELIVERED IN SOFTWARE, SCHEMA IS NOW v7, AND NOTHING HAS BEEN
+  DEPLOYED OR SEEN ON THE PANEL (2026-09-10; branch `feat/picture-cards`, spec
+  `docs/superpowers/specs/2026-09-09-deskmate-picture-cards-design.md`, plan
+  `docs/superpowers/plans/2026-09-10-deskmate-picture-cards.md`).** A picture card's face
+  is a 448x368 PNG an arbitrary external producer pushes to a token-addressed webhook —
+  one line of `curl`, no manifest, no SDK, no access to this repository. **No firmware
+  change, no protocol change, no capability bit**: protocol stays v1,
+  `PROTOCOL_CURRENT_CAPABILITIES` stays **1003**, and a picture card compiles to
+  `TemplateKind::DigitalClock` on the wire exactly as a plugin card does, so the device
+  learns nothing new. All four workspace gates pass (1035 Rust tests, 149 frontend tests,
+  clean `clippy -D warnings`).
+  - **Schema v7 adds document-level `image_sources` and a `Picture` card kind**
+    (`docs/config/v7.md`). `#[serde(default)]` on that field is **load-bearing, not
+    decorative**: the migration arm parses a v4/v5/v6 document straight into the current
+    struct and `AppConfig` is `deny_unknown_fields` with every other field required, so
+    without it every saved configuration fails to parse and its owner is told the settings
+    are invalid. **Redeploy the server before saving a v7 config** — it compiles its own
+    `CURRENT_SCHEMA_VERSION`.
+  - **A schema bump breaks three things and the compiler finds only one.** Enum matches it
+    catches. Struct literals it catches only if some task owns that file — `deskmate-cli`
+    builds an `AppConfig{}` and no plan task owned it. **Fixtures it cannot catch at all**:
+    eight are loaded with `serde_json::from_str::<AppConfig>`, which bypasses migration
+    entirely, so `#[serde(default)]` does not save them and 56 tests failed on that one
+    cause. `full.json` was copied to `v6-roundtrip.json` before bumping, because bumping in
+    place would have destroyed the only real v6 document in the tree and broken the
+    one-fixture-per-migrated-version convention v3/v4/v5 follow.
+  - **A `.replace()` whose anchor stops matching returns its input unchanged**, which
+    turned `malformed_and_unknown_json_are_rejected_by_serde` into a test asserting that a
+    *valid* config fails to parse. It failed loudly only because the assertion is negative;
+    a positive one would have passed vacuously and silently stopped testing. It now asserts
+    the injection actually happened.
+  - **The desired-asset set is the UNION of plugin-registry assets and image-source frames,
+    and getting it wrong deletes frames off the device.** `AssetRelease` is a device-wide
+    keep-set where omission means delete, the runtime rebuilds a release from
+    `desired_assets()` alone after every native push, and `ensure_durable_assets_for_scene`
+    refuses a push whose digest is in neither `confirmed_assets` nor that function.
+    `ServerPluginHost` takes the `ImageSourceStore` as a **required** constructor parameter
+    for that reason. The ceiling is deliberately **not** re-enforced there —
+    `desired_assets()` cannot fail and `compose_asset_keep_set` already refuses an
+    over-ceiling set by name — so the budget a *person* can exhaust is checked in `mint`
+    instead. That budget was real and unguarded: `MAX_DURABLE_REGISTRY_ASSETS` is 31 and is
+    enforced over plugin assets **alone**, while `MAX_IMAGE_SOURCES` is 8.
+  - **Ingest is header-before-decode, and that is what stops a decompression bomb** — not
+    the 1 MiB body cap, which bounds compressed bytes and says nothing about what they
+    expand to. `png::Decoder::read_header_info()` reads the IHDR alone and the exact
+    448x368 check runs before any pixel buffer is allocated. `png` is a direct dependency
+    of `server` for this reason: `Pixmap::decode_png` needs no new dependency but decodes
+    in one shot. The digest is over the **decoded** blob, never the PNG.
+  - **`secure_file::write_and_replace` appends a trailing newline** and always did. It is
+    the text path. A 329,740-byte canonical frame written through it lands as 329,741 bytes
+    and reads back as a corrupt frame rather than an error, so binary payloads use the new
+    `write_and_replace_binary`. `secure_file` is also now `pub` on this branch, via a
+    cherry-pick of V3's `994a422`, so the eventual V3 merge sees identical content.
+  - **Staleness is inferred, never declared**: the last 8 accepted push times, median of
+    consecutive intervals, times three, clamped to 15 min and 48 h, and never stale below
+    three intervals. An identical picture is a no-op that still counts as liveness. The
+    clamp is what makes inference predictable rather than guesswork.
+  - **Manifests are frozen, not removed** (`docs/plugins/manifest-v{1,2}.md` say so): no new
+    manifest features, no new curated manifests, no contract amendments. The four curated
+    plugins keep working and their tests stay.
+  - **Task 8's first implementer refused the task as written and was right**, exactly as
+    M3's Task 10a implementer did: the store was unreachable from the host, and
+    `desired_assets()` returns `Vec<DesiredAsset>` and so cannot report the named error the
+    brief demanded. The plan records the amendment above that task.
+  - **DRAWN ON THE PANEL 2026-09-10**, recorded in `docs/hardware/board-notes.md`
+    under "Picture cards on the panel". Getting there needed a **capability bit 10**
+    (`DurableAssetEncoding`, `PROTOCOL_CURRENT_CAPABILITIES` 1003 -> **2027**),
+    because a 448x368 frame is 329,740 bytes = **172 sequential chunk round trips**
+    at `MAX_ASSET_CHUNK_BYTES`, which the tunnel does not survive. Durable assets
+    could not be compressed in EITHER half -- the host hard-coded
+    `ASSET_ENCODING_RAW` and the firmware's durable `AssetBegin` ignored `encoding`
+    -- so picture cards walked straight back into the cost stage 4 added RLE565 to
+    remove. Four things worth not relearning: the volatile-only rule was written in
+    **three** places (Rust `validate_asset_begin`, firmware decode AND validate), so
+    fixing one shipped an image that advertised bit 10 while refusing what it
+    promises; `AssetRelease`'s handler **compacts flash**, so it needs a budget of
+    its own, and every rung of the timeout ladder must contain the one below it
+    (device 20 s < runtime command 25 s < HTTP 30 s); the durable decode must copy
+    the **12-byte header verbatim** and feed only the body to the decoder, as the
+    volatile path already does; and asset-failure attribution must name **every**
+    card whose face needs a transferred asset, not only plugin ones, or a picture
+    card fails silently while a healthy card is blamed.
+  - **The companion app is a THIRD deployment boundary for a schema bump**, and the
+    easiest to forget because nothing about it is deployed. `Deskmate.app` compiles
+    its own `CURRENT_SCHEMA_VERSION`; a build older than the bump cannot read the
+    config the server holds, renders no cards, and reads as a broken window rather
+    than a stale binary. Order is: redeploy the server, rebuild and reinstall the
+    app, then save at the new version. `docs/config/v7.md` says so.
+  - **A recurring producer runs on docker-vm**: `deskmate-claude-limits.timer`
+    every 10 minutes, units in `tools/picture-producers/deploy/`, token at
+    `/etc/deskmate/producers/claude-limits.token` (0600). Deliberately separate from
+    TRMNL's sync script, which belongs to another repository. Note Cloudflare fronts
+    both the feed and the ingest endpoint and answers urllib's default User-Agent
+    with a 403 (error 1010) -- curl gets through on its own, which is why hand-run
+    pushes worked while the timer's first run did not.
+  - **The picture ingest route does NOT wait for device delivery.** The producer's
+    durable outcome is that the frame is stored; awaiting delivery made a successful
+    push answer 504 through Cloudflare. A delivery failure is logged and surfaces as
+    a card error on the device snapshot, and the next full synchronize reconciles it.
+  - **STILL OWED, and nothing else:** a real-pointer check of the add-card menu in the
+    actual app (the Chrome harness and `AXPress` both structurally cannot see the WKWebView
+    focus defect that once made no card addable); the server redeploy, binary first; the
+    `claude-limits` producer change, which lives in the TRMNL repository and is the owner's
+    to commit; and the three hardware observations in the plan's Task 11 Step 5. **Nothing
+    here has been deployed or seen on the panel.**
 - **The companion app's visual language is now `DESIGN.md` (The Modular Face), at the
   repository root.** Delivered 2026-08-19 on explicit owner direction to replace the
   previous world rather than refine it; the owner pinned the reference ("somewhat
@@ -545,7 +650,14 @@ of letting code and documentation diverge.
   previous deploy leaves a root-owned `companion/target/` — keep it and replace only the
   sources, which turns a cold build into roughly 40 seconds. Device URL is
   `wss://deskmate.rodi.one/v1/device/link`. Redeploy from a `git archive HEAD` export,
-  never the working tree.
+  never the working tree. **As of 2026-09-08 the live binary is built from `faac9ab`
+  (`origin/main`, the merged V2 + plugin-parity state) and the four curated manifest-v2
+  plugins are deployed**; the previous binary is kept as
+  `/usr/local/bin/deskmate-server.bak-20260908`. `GET /v1/plugins` therefore carries
+  `display_name`/`description`/`manifest_version`/`template`/`refresh_minutes`, and the
+  card-preview route exists — the Mac app no longer meets an older server. The live
+  plugins directory holds **five** ids, not four: the session fixture `svg-live-clock` is
+  not in the repository and a redeploy must not `--delete` it.
 - **Device identities persist as SHA-256 digests, never as tokens.** Minting is the only
   path that needs the plaintext; authentication only compares. Verified on the live
   deployment: the plaintext does not appear in the store file, and a pre-restart token
@@ -595,6 +707,72 @@ of letting code and documentation diverge.
   test-hook), and the §6 96 px glyph-cache timing (internal LVGL-task timing, needs
   instrumentation). Tags `m0`/`m1`/`v1`/`v2` now exist; later milestones remain untagged
   without that authorization. Next milestone is V3 (server host).
+- **The card preview shows what a PERSON SEES, never the framebuffer the device
+  receives** (owner direction, 2026-09-09: "the preview should always show unflipped
+  image, otherwise it's bad UI"). `render_card_preview` used to pass
+  `preferences.orientation` straight through, so a `landscape-flipped` mounting drew the
+  clock upside down in the settings window. It is upright on the panel at both mountings —
+  the 270 degree mount is what cancels the flip — so the preview renders upright at both
+  too. Nothing is lost: `sim_shim.c`'s `copy_frame_out` builds the flipped frame by
+  reversing the finished buffer index-by-index, so the flip is a pure 180 degree rotation
+  of identical content. The choice lives in `commands.rs`'s `preview_orientation` with a
+  test pinning both mountings; do not "restore fidelity" by passing the mounting through.
+  This does not touch `lvgl-sim`'s own orientation support, which the parity gate and
+  `framebuffer_diff` still need at both values.
+- **The companion app runs in WKWebView and the dev harness runs in Chrome, and they do
+  not agree about focus (learned the hard way 2026-09-09).** WebKit does not move focus to
+  a `<button>` on mousedown -- a macOS convention Chrome does not share. `CardList`'s
+  add-card slot closed its menu on any blur whose `relatedTarget` fell outside it, and
+  `relatedTarget` is **null** in exactly that case, so pressing the mouse on a menu entry
+  unmounted the menu between mousedown and click. The click never landed and **no card of
+  any kind could be added** -- built-in or plugin. The rule now is that only a blur landing
+  somewhere outside closes it; focus going nowhere is not focus leaving, and a click
+  genuinely outside is caught by the document mousedown listener instead.
+  - **The harness cannot see this class of defect, and neither can an accessibility-driven
+    check.** `VITE_DESKMATE_MOCK=1` runs in Chrome, where the click works. Driving the app
+    with `AXPress` also "worked", because it fires `click` with no `mousedown` at all. Two
+    green reproductions, both wrong. If a report is about clicking, the only honest check
+    is a real pointer event in the real app -- or a unit test that replays the WebKit
+    sequence, which is what `a click inside the menu is not mistaken for focus leaving it`
+    now does in 3 ms with no browser.
+  - Do not chase a layout explanation for "the click does nothing" before ruling out a
+    handler that unmounts the target mid-gesture. The add menu *also* had a real layout
+    defect (its flat 300px cap hid the whole plugin group below its own scroll fold, fixed
+    in `8d467b0`), and that plausible-looking bug masked this one for hours.
+- **A device that disappears from under an open serial fd used to wedge the ENTIRE Mac
+  app, and "the app can't save to the server" was the visible symptom (root-caused and
+  fixed 2026-09-09).** `SerialTransport::read` can block indefinitely once the USB device
+  behind its fd is gone; the port's 100 ms timeout does not help, because the block is in
+  the kernel rather than a deadline the port owns. `SessionConnection::transact` checks
+  its 2 s `request_timeout` only *between* reads, so a read that never returns makes that
+  deadline unreachable — and `DeviceSession::request` then waited on an **untimed
+  `recv()`**. The app-core runtime worker therefore sat inside
+  `SerialRuntimeDevice::status` forever, every `RuntimeCommand` failed with
+  `ResponseTimeout` after 5 s, and because `prepare_server_save` calls
+  `set_persistence_state` **before** the HTTP request, **no save ever reached the
+  server** — the window showed a bare "runtime command response timed out" and the server
+  logged nothing, because nothing was sent. `Drop`'s `join()` on that same thread is why
+  the app also would not quit.
+  - **It was diagnosed with `sample <pid>`, not by reading code.** Four samples showed one
+    identical stack (`run_runtime` -> `status` -> `request` -> `recv`), which is what
+    turned a vague report into a located defect. Reach for it first next time: the
+    settings preview keeps ticking while the worker is dead (it is a lock read plus a
+    separate preview thread, and never sends a runtime command), so the UI looks alive.
+  - The fix is one rule: **no caller waits unboundedly on a thread that can block in an OS
+    read.** `request` and `reconnect` both wait `request_timeout * REPLY_TIMEOUT_FACTOR`
+    (2 — 4 s at the default, inside app-core's 5 s command timeout), and `Drop` waits on a
+    `finished` channel the worker closes rather than joining. A session that misses that
+    deadline is marked `stalled`: later calls fail at once and `Drop` detaches the thread.
+  - **A stalled session reports `Transport(Disconnected)`, never `Timeout`, on purpose.**
+    `app-core`'s `is_disconnect` is `NoDevice | Transport(_)`, so a `Timeout` would leave
+    the runtime holding a dead session and never reconnecting.
+  - **`reconnect` hands the new transport to the SAME worker**, so a stalled session can
+    never be revived. `SerialRuntimeDevice::connect` therefore discards a stalled session
+    and opens a fresh one; without that, one cable pull left the display unreachable for
+    the rest of the run.
+  - Four regression tests pin this, each mutation-probed. They arm a watchdog thread that
+    releases the blocked read on a timer **before** the call under test, so a regression
+    fails an assertion instead of hanging the suite — write any future test here that way.
 - **Clock faces carry no title chip and no `DATE` eyebrow** (delivered 2026-08-17; spec
   `docs/superpowers/specs/2026-08-17-deskmate-clock-title-removal-design.md`, plan
   `docs/superpowers/plans/2026-08-17-deskmate-clock-title-removal.md`). All three clock
@@ -968,11 +1146,79 @@ of letting code and documentation diverge.
   negotiates Native). **Golden-only by design**: `claude_limits_scene_cases()` is
   deliberately NOT part of `plugin_scene_cases()` (whose 16-row count is a historical
   invariant) and does not join the hardware framebuffer matrix, which is 96/10/86 —
-  the card is content, not machinery. Deployed live: registry loads
-  `[agenda, aqi, claude-limits]` with no failures, and `dev-0005`'s config carries the
-  card in its library and active playlist (generation 1, no warning); it renders when
-  the board next connects. The TRMNL repo's deployed and Mac copies of the sync script
-  were both updated; committing that repo is the owner's call.
+  the card is content, not machinery. Deployed live: the registry loads it with no
+  failures. **The rest of this bullet went STALE and was corrected 2026-09-08:** it used
+  to say `dev-0005`'s config carries the card in its library and active playlist. It does
+  not. Both `/var/lib/deskmate/configs/dev-0005.json` on the server and the Mac's own
+  config store hold the same four built-in cards (clock, pomodoro, weather, rss) at schema
+  v6 and no plugin card at all; the most recent write to both is the 2026-09-06 hardware
+  session. **No card anywhere in the fleet currently names a plugin**, so the plugin
+  render path has nothing live to draw and the plugin-parity surfaces cannot be observed
+  end to end until one is authored again. The TRMNL repo's deployed and Mac copies of the
+  sync script were both updated; committing that repo is the owner's call.
+- **Plugin faces can draw DATA-DRIVEN BARS and render instants in the user's timezone
+  (2026-09-09).** Two additions to the manifest-v2 contract (`docs/plugins/manifest-v2.md`),
+  both compile-time and server-side: **schema stays v6, protocol stays v1,
+  `PROTOCOL_CURRENT_CAPABILITIES` stays 1003, and no firmware change is involved**, so no
+  OTA re-verification is owed.
+  - **A `rect`'s `x`/`y`/`w`/`h` now accept a `"{{ ... }}"` expression as well as a
+    number** (`manifest::Measure`). It is evaluated at compile time and lands on the wire
+    as an ordinary literal `SceneRect` — **it is not a device binding**, needs no
+    capability bit, and the device never learns anything new. The consequence to remember:
+    **a bar only moves when the card is re-pushed**, i.e. at its refresh cadence. Anything
+    that must tick between pushes needs a device binding, and the device has none for
+    plugin data. A quoted non-expression (`w = "180"`) is `MeasureNotExpression`; a device
+    binding in one is `MeasureUsesDeviceBinding`; a non-numeric result is
+    `MeasureNotNumeric` — geometry has no reading for "nothing", unlike a text node, so the
+    author writes `default(..., 0)` when an empty bar is what they mean. Results are
+    rounded and clamped, so a provider reporting 103% pins the bar rather than costing the
+    card its push.
+  - **The expression language has NO arithmetic** — its AST is `Str | Num | Path | Call |
+    Elvis`, there are no `+ - * /`, and **`?:` is Elvis (`a ?: b`), not a ternary**, so
+    there are no comparisons either. That is why a bar is scaled by a named function,
+    `scale(value, in_max, out_max)` (clamped; non-positive `in_max` → 0; non-numeric →
+    `Missing`), rather than by opening an arithmetic grammar with precedence, division by
+    zero and overflow inside a display list. It is also why **threshold-coloured bars are
+    not expressible** — a coloured bar would shout at 5% as loudly as at 96% — so the
+    curated bars are neutral by decision, not by oversight.
+  - **`time_at(epoch_seconds)` renders an instant in `preferences.timezone`**, closing a
+    real hole: a plugin face previously could not know the user's timezone at all, so any
+    feed carrying a time had to pre-format it and froze the *producer's* zone onto the
+    panel. The zone is an explicit parameter on `compile_scene_with_assets` and on
+    `PluginHost::render_scene` — deliberately not host state that could go stale — while
+    the no-assets `compile_scene` renders UTC and is for tests. Format is `%a %-I:%M %p`,
+    byte-identical to the TRMNL producer's `_fmt_at`, so
+    `default(time_at(data.at), data.at_label)` is a seamless fallback and the feed and the
+    server can be updated in either order.
+  - **A manifest value is wholly literal or wholly `{{ ... }}`; there is no interpolation
+    inside a string.** `"RESETS {{ x }}"` and `"{{ x }}%"` are both
+    `MalformedPartialInterpolation`, and there is no concat function, so a label and its
+    datum are always two nodes. Worth knowing before laying out any face.
+  - **`claude-limits` was rebuilt as two stacked full-width rows with bars**, following the
+    TRMNL panel and CodexBar rather than its old two-column tiles: across 400px one percent
+    is 4px, against under 2px in a 188px column. The TRMNL producer
+    (`~/TRMNL/claude_usage_sync.py`) now also emits `resets_at_epoch` beside its
+    `PANEL_TZ`-baked `resets_at_label`; committing and deploying that repo is the owner's
+    call. The golden case compiles in **Asia/Tbilisi on purpose** — a UTC golden cannot
+    tell "the zone is honoured" from "the zone is ignored", since both give identical
+    pixels — and `crates/plugin/tests/curated_plugins.rs` pins the two-zone difference
+    against the real committed manifest.
+  - **ROLLOUT ORDER IS LOAD-BEARING, and it has a trap.** A manifest using `Measure`,
+    `scale` or `time_at` fails to parse on a server built before this change, so the plugin
+    drops into `load_failures` and its cards go dark — **redeploy the server binary before
+    pushing the manifest**, exactly as for the manifest-v2 rollout. The trap is the other
+    direction: with the feed's epoch present the face renders in `preferences.timezone`,
+    so **if that setting is wrong the face gets visibly worse than the baked label it
+    replaces**. Set the timezone first, then deploy the feed.
+- **`preferences.timezone` defaulted to `"UTC"` on a Mac that knows its own zone, which is
+  why every clock on the owner's panel ran four hours behind.** `AppPreferences::default()`
+  still returns UTC — it is a data default the server and a large number of tests depend on
+  being fixed — but the Tauri app now seeds the host's IANA zone from `/etc/localtime` on
+  **first run only** (`host_timezone()` in `apps/deskmate/src-tauri/src/lib.rs`). An existing
+  saved configuration is never rewritten: a timezone change moves the clock on a physical
+  panel, which is the owner's decision. So an install that predates this keeps whatever it
+  has, and the fix for one of those is the "Display timezone" field in the settings sheet.
+
 - **A repository-wide simplification cleanup landed on 2026-09-05** (plan
   `docs/superpowers/plans/2026-09-05-deskmate-simplification-cleanup.md`, from the
   review of 2026-09-03/04): twelve squash commits removed the accidentally tracked
@@ -1043,6 +1289,17 @@ of letting code and documentation diverge.
   the `esp_lvgl_port` display config, including for 90°/270° software rotation.
 - Firmware is ESP-IDF 5.x/C with LVGL 9. Host tooling is Rust per the design spec.
 
+- **`feat/display-brightness` is a DEAD BRANCH kept only for reference; do not rebase it.**
+  Two commits (`fb159f3`, `dd248c6`, 2026-08-23) add a display-brightness setting: a config
+  bump its own commit message calls "schema v6", a `brightness` field on the `ApplyConfig`
+  wire contract, firmware decode, and regenerated protocol fixtures. The name collides
+  with the **real** v6, which is the plugin card kind and shipped instead. Reviving the
+  feature therefore is not a rebase: it needs a fresh schema bump (v7), a wire change,
+  a firmware change, and — because it moves firmware statics — an on-board OTA download
+  re-verification. Treat the branch as a design sketch of what brightness would cost, and
+  plan it as new work if it is ever wanted. Its worktree was removed 2026-09-09; the
+  branch itself is retained.
+
 ## Working agreement
 
 - Start by reading this file, checking `git status`, and reading the roadmap, active
@@ -1053,6 +1310,14 @@ of letting code and documentation diverge.
 - Keep plans live: record material decisions, deviations, exact verification results,
   and blockers as they are discovered. Never claim hardware verification that was not
   observed on the physical board.
+- **An unticked `- [ ]` in a plan is NOT evidence that work is outstanding.** Most
+  executors here have never ticked a box: as of the 2026-09-08 audit, roughly 380 open
+  boxes across eight delivered plans describe work that shipped, which makes
+  `grep -c '^- \[ \]'` worthless as a progress signal and, worse, invites planning around
+  phantom debt. Trust the commits, the plan's own prose/status headers, and
+  `docs/hardware/board-notes.md` instead. If you execute a plan, tick as you go; if you
+  find a plan whose boxes lie, put a STATUS header at its top saying so rather than
+  back-filling ticks you did not verify.
 - Write the next milestone plan at the current milestone's exit, using what was learned
   during implementation. Do not start later-milestone breadth early.
 - Use conventional commit prefixes (`feat:`, `fix:`, `test:`, `docs:`, `chore:`) when

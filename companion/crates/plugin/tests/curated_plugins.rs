@@ -82,8 +82,15 @@ fn the_aqi_manifest_compiles_against_its_real_assets_and_captured_fixture() {
     let assets = resolve_assets(&manifest, &dir).expect("aqi assets must resolve");
     let data = payload_from_envelope(AQI_FIXTURE);
 
-    let scene = compile_scene_with_assets(&manifest, &snapshot(data), &metrics(), 1, &assets)
-        .expect("aqi manifest must compile against its real fixture and assets");
+    let scene = compile_scene_with_assets(
+        &manifest,
+        &snapshot(data),
+        &metrics(),
+        1,
+        &assets,
+        plugin::Tz::UTC,
+    )
+    .expect("aqi manifest must compile against its real fixture and assets");
 
     // Hero: the numeric AQI reading, unrounded because it is already whole.
     assert_eq!(literal(&scene.nodes[2]), "42");
@@ -126,8 +133,15 @@ fn the_agenda_manifest_compiles_against_its_real_assets_and_captured_fixture() {
     let assets = resolve_assets(&manifest, &dir).expect("agenda assets must resolve");
     let data = payload_from_envelope(AGENDA_FIXTURE);
 
-    let scene = compile_scene_with_assets(&manifest, &snapshot(data), &metrics(), 1, &assets)
-        .expect("agenda manifest must compile against its real fixture and assets");
+    let scene = compile_scene_with_assets(
+        &manifest,
+        &snapshot(data),
+        &metrics(),
+        1,
+        &assets,
+        plugin::Tz::UTC,
+    )
+    .expect("agenda manifest must compile against its real fixture and assets");
 
     // header text + image badge + 5 rows * 2 nodes = 12. The shared
     // stale/error footer `with_scene_data_state` appends nothing at all
@@ -242,4 +256,89 @@ fn every_curated_summary_evaluates_to_its_headline_against_its_fixture() {
             "{plugin_name}"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// claude-limits: the bars, and the timezone the reset instants render in.
+// ---------------------------------------------------------------------------
+
+fn claude_limits_scene(timezone: plugin::Tz) -> protocol::Scene {
+    let dir = plugins_dir().join("claude-limits");
+    let source = std::fs::read_to_string(dir.join("manifest.toml")).expect("read manifest");
+    let manifest = parse_manifest(&source).expect("claude-limits manifest parses");
+    let assets = resolve_assets(&manifest, &dir).expect("assets resolve");
+    let data: serde_json::Value =
+        serde_json::from_str(CLAUDE_LIMITS_FIXTURE).expect("fixture is valid JSON");
+    compile_scene_with_assets(&manifest, &snapshot(data), &metrics(), 1, &assets, timezone)
+        .expect("claude-limits compiles")
+}
+
+/// Every literal string on the face, in node order.
+fn literals(scene: &protocol::Scene) -> Vec<String> {
+    scene
+        .nodes
+        .iter()
+        .filter_map(|node| match node {
+            SceneNode::Text(text) => match &text.value {
+                SceneValue::Literal(literal) => Some(literal.clone()),
+                SceneValue::Binding(_) => None,
+            },
+            _ => None,
+        })
+        .collect()
+}
+
+/// The reason `time_at` exists. The feed's producer bakes `resets_at_label`
+/// in whatever `PANEL_TZ` the machine running it carries; this proves the
+/// face ignores that and renders the instant where the *configuration* says
+/// the user is. A golden can only ever show one zone, so this is the only
+/// artifact that can tell "the zone is honoured" from "the zone is ignored".
+#[test]
+fn claude_limits_renders_its_reset_instants_in_the_configured_timezone() {
+    let tbilisi = literals(&claude_limits_scene(plugin::Tz::Asia__Tbilisi));
+    let utc = literals(&claude_limits_scene(plugin::Tz::UTC));
+
+    assert!(
+        tbilisi.contains(&"Wed 6:09 PM".to_owned()),
+        "UTC+4 reading missing from {tbilisi:?}"
+    );
+    assert!(
+        utc.contains(&"Wed 2:09 PM".to_owned()),
+        "UTC reading missing from {utc:?}"
+    );
+}
+
+/// And the computed reading is byte-identical to the label the producer
+/// bakes, which is what makes `default(time_at(...), ...)` a seamless
+/// fallback rather than a visible mode switch during a rollout.
+#[test]
+fn the_computed_reset_reading_matches_the_producers_own_label() {
+    let data: serde_json::Value =
+        serde_json::from_str(CLAUDE_LIMITS_FIXTURE).expect("fixture is valid JSON");
+    let baked = data["windows"][0]["resets_at_label"]
+        .as_str()
+        .expect("the fixture still carries the producer's label");
+
+    assert!(
+        literals(&claude_limits_scene(plugin::Tz::Asia__Tbilisi)).contains(&baked.to_owned()),
+        "computed reading must match the producer's {baked:?}"
+    );
+}
+
+/// The bars: a fetched percentage becomes a literal pixel width on the wire,
+/// with no device binding and no capability bit involved.
+#[test]
+fn claude_limits_bars_are_literal_widths_scaled_from_the_fetched_percentages() {
+    let scene = claude_limits_scene(plugin::Tz::Asia__Tbilisi);
+    let widths: Vec<i32> = scene
+        .nodes
+        .iter()
+        .filter_map(|node| match node {
+            SceneNode::Rect(rect) if rect.h == 16 && rect.fill != 0x0025_252B => Some(rect.w),
+            _ => None,
+        })
+        .collect();
+
+    // The fixture reads 31% and 5% across a 400px track.
+    assert_eq!(widths, vec![124, 20], "bar widths for 31% and 5% of 400px");
 }

@@ -1,21 +1,22 @@
 import {
+  type CSSProperties,
+  type DragEvent,
+  type KeyboardEvent,
+  useCallback,
   useEffect,
   useLayoutEffect,
   useRef,
   useState,
-  type DragEvent,
-  type KeyboardEvent,
 } from "react";
-
 import {
   activePlaylist,
   addEntry,
   cardKindName,
   cardLabel,
   cardMoveFromKey,
-  cardTitle,
   cardsContainerIssues,
   cardsOutsideLoop,
+  cardTitle,
   issuesForCard,
   issuesForPath,
   loopEntries,
@@ -24,14 +25,15 @@ import {
   pluginCardFlag,
   removeEntry,
 } from "../lib/configDraft";
+import { placeAddMenu } from "../lib/menuPlacement";
 import { providerTrouble } from "../lib/providers";
 import {
-  MAX_PLAYLIST_ENTRIES,
   type AddableCardKind,
   type AppConfig,
   type CardDataSnapshot,
   type CardSettings,
   type DeviceTier,
+  MAX_PLAYLIST_ENTRIES,
   type PluginCatalog,
   type PomodoroSnapshot,
   type ProviderSnapshot,
@@ -67,6 +69,7 @@ interface CardListProps {
   selectedCardId: string | null;
   onSelect: (cardId: string) => void;
   onAdd: (kind: AddableCardKind) => void;
+  onAddPicture?: () => void;
   onChange: (config: AppConfig) => void;
   onRemove: (cardId: string) => void;
 }
@@ -129,6 +132,8 @@ function tileValue(
       // The server's evaluated `summary`, or the same em dash a weather card shows
       // before its first fetch. A tile owns one fact; it does not narrate.
       return pluginHero ?? "—";
+    case "picture":
+      return "PNG";
   }
 }
 
@@ -151,6 +156,7 @@ export function CardList({
   selectedCardId,
   onSelect,
   onAdd,
+  onAddPicture = () => {},
   onChange,
   onRemove,
 }: CardListProps) {
@@ -180,6 +186,10 @@ export function CardList({
   const [draggedCardId, setDraggedCardId] = useState<string | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
   const [menuAlignEnd, setMenuAlignEnd] = useState(false);
+  // Viewport coordinates, because the menu is `position: fixed` — see
+  // `menuPlacement.ts` for why it cannot be positioned within the work column.
+  const [menuStyle, setMenuStyle] = useState<CSSProperties>({});
+  const menuRef = useRef<HTMLDivElement>(null);
   const menuRootRef = useRef<HTMLLIElement>(null);
   const addButtonRef = useRef<HTMLButtonElement>(null);
   const menuItemRefs = useRef<HTMLButtonElement[]>([]);
@@ -213,15 +223,51 @@ export function CardList({
     return () => document.removeEventListener("mousedown", closeOnOutsideClick);
   }, [menuOpen]);
 
-  useLayoutEffect(() => {
-    if (!menuOpen || !menuRootRef.current) {
+  const positionMenu = useCallback(() => {
+    if (!menuRootRef.current) {
       return;
     }
-    const menuRoot = menuRootRef.current;
-    const scrollContainer = menuRoot.closest(".face__work") as HTMLElement | null;
-    const availableWidth = scrollContainer?.clientWidth ?? document.documentElement.clientWidth;
-    setMenuAlignEnd(menuRoot.getBoundingClientRect().right + 272 > availableWidth);
-  }, [menuOpen]);
+    const trigger = menuRootRef.current.getBoundingClientRect();
+    const viewport = {
+      width: document.documentElement.clientWidth,
+      height: window.innerHeight,
+    };
+    // `scrollHeight` is the menu's content height whether or not a cap is
+    // already clipping it, so this stays correct on every repositioning.
+    const contentHeight = menuRef.current?.scrollHeight ?? 0;
+    const placement = placeAddMenu(trigger, viewport, contentHeight);
+    setMenuAlignEnd(placement.alignEnd);
+    setMenuStyle({
+      top: placement.top,
+      maxHeight: placement.maxHeight,
+      ...(placement.alignEnd ? { right: viewport.width - trigger.right } : { left: trigger.left }),
+    });
+  }, []);
+
+  useLayoutEffect(() => {
+    if (menuOpen) {
+      positionMenu();
+    }
+  }, [menuOpen, positionMenu]);
+
+  // A fixed menu keeps the coordinates it was given, so it would drift away from
+  // its trigger when the column scrolls or the window resizes underneath it.
+  // It is repositioned rather than closed: closing looks right until you notice
+  // that opening the menu focuses its first item, which scrolls that item into
+  // view — a scroll the menu itself caused, which would then close it again the
+  // instant it opened.
+  useEffect(() => {
+    if (!menuOpen) {
+      return;
+    }
+    const reposition = () => positionMenu();
+    window.addEventListener("resize", reposition);
+    window.addEventListener("scroll", reposition, true);
+    return () => {
+      window.removeEventListener("resize", reposition);
+      window.removeEventListener("scroll", reposition, true);
+    };
+  }, [menuOpen, positionMenu]);
 
   useLayoutEffect(() => {
     const previousCardIds = pendingNewCardIdsRef.current;
@@ -269,6 +315,12 @@ export function CardList({
     closeMenu(false);
   };
 
+  const choosePicture = () => {
+    pendingNewCardIdsRef.current = new Set(config.cards.map((card) => card.id));
+    onAddPicture();
+    closeMenu(false);
+  };
+
   const onMenuKeyDown = (
     event: KeyboardEvent<HTMLButtonElement>,
     index: number,
@@ -282,7 +334,7 @@ export function CardList({
     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
       event.preventDefault();
       const direction = event.key === "ArrowDown" ? 1 : -1;
-      const count = addableKinds.length + pluginKinds.length;
+      const count = addableKinds.length + 1 + pluginKinds.length;
       menuItemRefs.current[(index + direction + count) % count]?.focus();
       return;
     }
@@ -514,7 +566,16 @@ export function CardList({
           className="card-tile card-tile--add"
           ref={menuRootRef}
           onBlur={(event) => {
-            if (!menuRootRef.current?.contains(event.relatedTarget)) {
+            // Only a blur that lands somewhere outside closes the menu. WebKit
+            // does not move focus to a `<button>` on mousedown -- a macOS
+            // convention Chrome does not share -- so pressing the mouse on a
+            // menu item blurs the focused item with a null `relatedTarget`.
+            // Treating that as focus leaving unmounted the menu between
+            // mousedown and click, so the click never landed on the item and no
+            // card of any kind could be added. Focus going nowhere is not focus
+            // leaving; a click genuinely outside is caught by the document
+            // mousedown listener above.
+            if (event.relatedTarget && !menuRootRef.current?.contains(event.relatedTarget)) {
               closeMenu(false);
             }
           }}
@@ -541,7 +602,7 @@ export function CardList({
             </span>
             <span>
               <strong>Add a card</strong>
-              <small>Built in, or a plugin</small>
+              <small>Built in, picture, or plugin</small>
             </span>
           </button>
           {capacityDescription && (
@@ -551,10 +612,12 @@ export function CardList({
           )}
           {menuOpen && (
             <div
+              ref={menuRef}
               className={`menu${menuAlignEnd ? " menu--end" : ""}`}
               id="add-card-menu"
               role="menu"
               aria-label="Add a card"
+              style={menuStyle}
             >
               <fieldset className="menu__group">
                 <legend className="tile-label menu__label">Built in</legend>
@@ -582,11 +645,31 @@ export function CardList({
                   );
                 })}
               </fieldset>
+              <fieldset className="menu__group">
+                <legend className="tile-label menu__label">Pictures</legend>
+                <button
+                  ref={(element) => {
+                    if (element) {
+                      menuItemRefs.current[addableKinds.length] = element;
+                    }
+                  }}
+                  type="button"
+                  className="menu__item"
+                  role="menuitem"
+                  onClick={choosePicture}
+                  onKeyDown={(event) => onMenuKeyDown(event, addableKinds.length, choosePicture)}
+                >
+                  <span>
+                    <strong>Picture</strong>
+                    <small>A PNG pushed from anywhere</small>
+                  </span>
+                </button>
+              </fieldset>
               {pluginKinds.length > 0 && (
                 <fieldset className="menu__group">
                   <legend className="tile-label menu__label">Plugins on the server</legend>
                   {pluginKinds.map((plugin, pluginIndex) => {
-                    const index = addableKinds.length + pluginIndex;
+                    const index = addableKinds.length + 1 + pluginIndex;
                     const choose = () => choosePlugin(plugin);
                     return (
                       <button

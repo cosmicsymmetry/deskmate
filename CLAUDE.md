@@ -95,6 +95,76 @@ of letting code and documentation diverge.
   Three UX findings from that session are recorded in board-notes (takeover face
   indistinguishable from the completed card; sticky unreconciled optimistic red flash
   on tapping a completed pomodoro; host silently ignores stale-token dismissals).
+- **PICTURE CARDS ARE DELIVERED IN SOFTWARE, SCHEMA IS NOW v7, AND NOTHING HAS BEEN
+  DEPLOYED OR SEEN ON THE PANEL (2026-09-10; branch `feat/picture-cards`, spec
+  `docs/superpowers/specs/2026-09-09-deskmate-picture-cards-design.md`, plan
+  `docs/superpowers/plans/2026-09-10-deskmate-picture-cards.md`).** A picture card's face
+  is a 448x368 PNG an arbitrary external producer pushes to a token-addressed webhook —
+  one line of `curl`, no manifest, no SDK, no access to this repository. **No firmware
+  change, no protocol change, no capability bit**: protocol stays v1,
+  `PROTOCOL_CURRENT_CAPABILITIES` stays **1003**, and a picture card compiles to
+  `TemplateKind::DigitalClock` on the wire exactly as a plugin card does, so the device
+  learns nothing new. All four workspace gates pass (1035 Rust tests, 149 frontend tests,
+  clean `clippy -D warnings`).
+  - **Schema v7 adds document-level `image_sources` and a `Picture` card kind**
+    (`docs/config/v7.md`). `#[serde(default)]` on that field is **load-bearing, not
+    decorative**: the migration arm parses a v4/v5/v6 document straight into the current
+    struct and `AppConfig` is `deny_unknown_fields` with every other field required, so
+    without it every saved configuration fails to parse and its owner is told the settings
+    are invalid. **Redeploy the server before saving a v7 config** — it compiles its own
+    `CURRENT_SCHEMA_VERSION`.
+  - **A schema bump breaks three things and the compiler finds only one.** Enum matches it
+    catches. Struct literals it catches only if some task owns that file — `deskmate-cli`
+    builds an `AppConfig{}` and no plan task owned it. **Fixtures it cannot catch at all**:
+    eight are loaded with `serde_json::from_str::<AppConfig>`, which bypasses migration
+    entirely, so `#[serde(default)]` does not save them and 56 tests failed on that one
+    cause. `full.json` was copied to `v6-roundtrip.json` before bumping, because bumping in
+    place would have destroyed the only real v6 document in the tree and broken the
+    one-fixture-per-migrated-version convention v3/v4/v5 follow.
+  - **A `.replace()` whose anchor stops matching returns its input unchanged**, which
+    turned `malformed_and_unknown_json_are_rejected_by_serde` into a test asserting that a
+    *valid* config fails to parse. It failed loudly only because the assertion is negative;
+    a positive one would have passed vacuously and silently stopped testing. It now asserts
+    the injection actually happened.
+  - **The desired-asset set is the UNION of plugin-registry assets and image-source frames,
+    and getting it wrong deletes frames off the device.** `AssetRelease` is a device-wide
+    keep-set where omission means delete, the runtime rebuilds a release from
+    `desired_assets()` alone after every native push, and `ensure_durable_assets_for_scene`
+    refuses a push whose digest is in neither `confirmed_assets` nor that function.
+    `ServerPluginHost` takes the `ImageSourceStore` as a **required** constructor parameter
+    for that reason. The ceiling is deliberately **not** re-enforced there —
+    `desired_assets()` cannot fail and `compose_asset_keep_set` already refuses an
+    over-ceiling set by name — so the budget a *person* can exhaust is checked in `mint`
+    instead. That budget was real and unguarded: `MAX_DURABLE_REGISTRY_ASSETS` is 31 and is
+    enforced over plugin assets **alone**, while `MAX_IMAGE_SOURCES` is 8.
+  - **Ingest is header-before-decode, and that is what stops a decompression bomb** — not
+    the 1 MiB body cap, which bounds compressed bytes and says nothing about what they
+    expand to. `png::Decoder::read_header_info()` reads the IHDR alone and the exact
+    448x368 check runs before any pixel buffer is allocated. `png` is a direct dependency
+    of `server` for this reason: `Pixmap::decode_png` needs no new dependency but decodes
+    in one shot. The digest is over the **decoded** blob, never the PNG.
+  - **`secure_file::write_and_replace` appends a trailing newline** and always did. It is
+    the text path. A 329,740-byte canonical frame written through it lands as 329,741 bytes
+    and reads back as a corrupt frame rather than an error, so binary payloads use the new
+    `write_and_replace_binary`. `secure_file` is also now `pub` on this branch, via a
+    cherry-pick of V3's `994a422`, so the eventual V3 merge sees identical content.
+  - **Staleness is inferred, never declared**: the last 8 accepted push times, median of
+    consecutive intervals, times three, clamped to 15 min and 48 h, and never stale below
+    three intervals. An identical picture is a no-op that still counts as liveness. The
+    clamp is what makes inference predictable rather than guesswork.
+  - **Manifests are frozen, not removed** (`docs/plugins/manifest-v{1,2}.md` say so): no new
+    manifest features, no new curated manifests, no contract amendments. The four curated
+    plugins keep working and their tests stay.
+  - **Task 8's first implementer refused the task as written and was right**, exactly as
+    M3's Task 10a implementer did: the store was unreachable from the host, and
+    `desired_assets()` returns `Vec<DesiredAsset>` and so cannot report the named error the
+    brief demanded. The plan records the amendment above that task.
+  - **STILL OWED, and nothing else:** a real-pointer check of the add-card menu in the
+    actual app (the Chrome harness and `AXPress` both structurally cannot see the WKWebView
+    focus defect that once made no card addable); the server redeploy, binary first; the
+    `claude-limits` producer change, which lives in the TRMNL repository and is the owner's
+    to commit; and the three hardware observations in the plan's Task 11 Step 5. **Nothing
+    here has been deployed or seen on the panel.**
 - **The companion app's visual language is now `DESIGN.md` (The Modular Face), at the
   repository root.** Delivered 2026-08-19 on explicit owner direction to replace the
   previous world rather than refine it; the owner pinned the reference ("somewhat

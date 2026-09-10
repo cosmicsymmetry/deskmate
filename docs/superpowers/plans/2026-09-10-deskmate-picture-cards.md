@@ -1,5 +1,29 @@
 # Picture Cards Implementation Plan
 
+> **STATUS (2026-09-10): ALL ELEVEN TASKS ARE IMPLEMENTED AND MERGED on
+> `feat/picture-cards`. The checkboxes below were NOT ticked during execution —
+> do not read an unticked `- [ ]` here as outstanding work.** All four workspace
+> gates pass (`fmt`, `clippy --workspace --all-targets -D warnings`,
+> `test --workspace --all-targets` at **1035 passed / 0 failed**, and
+> `test --workspace --doc`), plus the frontend at **149 passed / 0 failed** and a
+> clean `bun run build`.
+>
+> **What is genuinely still owed, and nothing else:**
+> 1. A real-pointer check of the add-card menu **in the actual app**, not the
+>    Chrome harness. The harness cannot see the WKWebView focus behaviour that
+>    once made no card of any kind addable, and neither can an `AXPress`-driven
+>    check.
+> 2. The server redeploy, in the order §12 gives — **binary first**, because it
+>    compiles its own `CURRENT_SCHEMA_VERSION` and until it moves every v7 save is
+>    refused.
+> 3. The `claude-limits` producer change, which lives in the TRMNL repository and
+>    is the owner's to commit.
+> 4. Task 11 Step 5's three hardware observations.
+>
+> Task 8 was amended during execution; the amendment is recorded immediately
+> above its task section.
+
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add a card kind whose face is a 448x368 PNG that an arbitrary external producer pushes to a token-addressed webhook, rendered on the device as a durable, digest-addressed full-canvas image.

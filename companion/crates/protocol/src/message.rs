@@ -2692,11 +2692,13 @@ mod tests {
             decoded_length: Some(4_096),
         };
         assert!(validate_message(&Message::AssetBegin(partial.clone())).is_ok());
-        assert!(validate_message(&Message::AssetBegin(AssetBegin {
-            volatile: true,
-            ..partial
-        }))
-        .is_err());
+        assert!(
+            validate_message(&Message::AssetBegin(AssetBegin {
+                volatile: true,
+                ..partial
+            }))
+            .is_err()
+        );
     }
 
     #[test]

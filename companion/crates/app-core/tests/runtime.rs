@@ -86,6 +86,9 @@ struct MockState {
     next_push_gate: Option<Arc<PushGate>>,
     next_scene_gate: Option<Arc<PushGate>>,
     next_apply_layout_error: Option<DeviceError>,
+    /// Makes every device call take this long, so a command whose budget is
+    /// too small to contain a real synchronize can be observed timing out.
+    call_delay: Duration,
     scene_errors: VecDeque<DeviceError>,
     /// Widgets whose pushes the device understands and refuses, exactly as real
     /// firmware does for a field the widget's template does not declare.
@@ -143,6 +146,11 @@ impl MockDeviceControl {
         let mut state = self.state.lock().unwrap();
         state.injected_disconnect = Some(InjectedDisconnect::Status);
         state.reset_on_connect = power_reset;
+    }
+
+    /// Makes every device call take `delay`, so a synchronize costs real time.
+    fn set_call_delay(&self, delay: Duration) {
+        self.state.lock().unwrap().call_delay = delay;
     }
 
     fn power_off(&self) {
@@ -386,6 +394,9 @@ impl RuntimeDevice for MockDevice {
         _widgets: Vec<WidgetConfig>,
         _screens: Vec<ScreenConfig>,
     ) -> Result<(), DeviceError> {
+        // Simulates a real synchronize's cost: an asset reconcile can take
+        // far longer than a bare message exchange.
+        std::thread::sleep(self.control.state.lock().unwrap().call_delay);
         if let Some(error) = self.with_connected(|state| state.next_apply_layout_error.take())? {
             return Err(error);
         }
@@ -4335,4 +4346,36 @@ fn a_picture_card_with_no_frame_previews_as_waiting_not_as_an_error() {
         Some("Waiting for the first picture")
     );
     runtime.shutdown().unwrap();
+}
+
+/// `ApplyConfig` drives a full device synchronize, and a synchronize contains an
+/// asset reconcile that can legitimately outlast the ordinary command budget.
+/// When it did not get its own budget, a config that saved correctly and synced
+/// correctly still answered "runtime command response timed out" -- reporting a
+/// failure for work that succeeded.
+///
+/// The delay here is far shorter than a real reconcile; what matters is that it
+/// exceeds `options().command_timeout`, so the ordinary budget cannot contain it
+/// and only the synchronizing budget can.
+#[test]
+fn applying_a_config_outlasts_the_ordinary_command_budget() {
+    let control = MockDeviceControl::default();
+    let runtime = start_runtime(AppConfig::default(), &control, Duration::from_millis(0));
+    wait_for_snapshot(&runtime, Duration::from_secs(5), |snapshot| {
+        matches!(snapshot.device.connection, ConnectionState::Online)
+    });
+
+    // Longer than options()'s one-second command_timeout, so the default budget
+    // would report a timeout here.
+    control.set_call_delay(Duration::from_millis(1_500));
+
+    let mut config = AppConfig::default();
+    config.preferences.autostart = true;
+    let result = runtime.apply_config(config);
+
+    control.set_call_delay(Duration::from_millis(0));
+    assert!(
+        result.is_ok(),
+        "a slow but successful synchronize must not be reported as a timeout: {result:?}"
+    );
 }

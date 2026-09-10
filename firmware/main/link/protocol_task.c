@@ -1090,8 +1090,13 @@ static void dispatch_asset_begin(protocol_context_t *context,
     uint32_t stored_length = begin->total_length;
     bool decoding = false;
     if (begin->encoding == PROTOCOL_ASSET_ENCODING_RLE565) {
-        if (!begin->has_decoded_length || begin->decoded_length == 0U ||
+        if (!begin->has_decoded_length ||
+            begin->decoded_length <= VOLATILE_ASSET_HEADER_BYTES ||
             begin->decoded_length > ASSET_MAX_BYTES ||
+            // A wire stream no longer than the passthrough header cannot
+            // deliver a complete one, which would leave the head of the buffer
+            // never written.
+            begin->total_length <= VOLATILE_ASSET_HEADER_BYTES ||
             begin->total_length >= begin->decoded_length) {
             transmit_error(context, request_id, PROTOCOL_ERROR_INVALID_PAYLOAD,
                            "invalid durable asset encoding");
@@ -1134,12 +1139,18 @@ static void dispatch_asset_begin(protocol_context_t *context,
     context->asset_transfer_blob_offset = blob_offset;
     context->asset_reservation_pending = true;
     if (decoding) {
-        context->asset_decode_buffer =
-            heap_caps_malloc(stored_length, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        // calloc, not malloc: the decoder bounds its own writes and the
+        // header copy is bounded too, but a truncated stream would otherwise
+        // leave un-written bytes holding heap residue, and commit writes the
+        // whole buffer to flash. Zeroed bytes are a blank image; heap residue
+        // is whatever was there before.
+        context->asset_decode_buffer = heap_caps_calloc(
+            1, stored_length, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
         if (context->asset_decode_buffer == NULL ||
-            rle565_decoder_init(&context->asset_decoder,
-                                context->asset_decode_buffer,
-                                stored_length) != RLE565_OK) {
+            rle565_decoder_init(
+                &context->asset_decoder,
+                context->asset_decode_buffer + VOLATILE_ASSET_HEADER_BYTES,
+                stored_length - VOLATILE_ASSET_HEADER_BYTES) != RLE565_OK) {
             release_asset_decode_buffer(context);
             asset_transfer_abort(&context->asset_transfer);
             asset_store_mark_dead(asset_flash_store(), index);
@@ -1194,8 +1205,26 @@ static void dispatch_asset_chunk(protocol_context_t *context,
         // commit: the wire offset is a position in the COMPRESSED stream and
         // says nothing about where those pixels land, so there is no flash
         // offset to write at yet.
-        if (rle565_decoder_feed(&context->asset_decoder, chunk->data,
-                                chunk->data_length) != RLE565_OK) {
+        // The host copies the 12-byte image header verbatim and encodes only
+        // the pixel body, so the head of the WIRE stream is not RLE runs.
+        // Feeding it to the decoder is what "asset chunk decode failed" meant.
+        // This mirrors volatile_asset_store_write() exactly.
+        uint32_t consumed = 0U;
+        if (chunk->offset < VOLATILE_ASSET_HEADER_BYTES) {
+            uint32_t header_length =
+                VOLATILE_ASSET_HEADER_BYTES - chunk->offset;
+            if (header_length > (uint32_t)chunk->data_length) {
+                header_length = (uint32_t)chunk->data_length;
+            }
+            memcpy(context->asset_decode_buffer + chunk->offset, chunk->data,
+                   header_length);
+            consumed = header_length;
+        }
+        if (consumed < (uint32_t)chunk->data_length &&
+            rle565_decoder_feed(
+                &context->asset_decoder, chunk->data + consumed,
+                (size_t)((uint32_t)chunk->data_length - consumed)) !=
+                RLE565_OK) {
             release_asset_decode_buffer(context);
             asset_transfer_abort(&context->asset_transfer);
             transmit_error(context, request_id, PROTOCOL_ERROR_INVALID_PAYLOAD,

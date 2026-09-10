@@ -1051,7 +1051,15 @@ impl RuntimeHandle {
         command: impl FnOnce(SyncSender<Result<T, RuntimeError>>) -> RuntimeCommand,
     ) -> Result<T, RuntimeError> {
         let (reply_sender, reply_receiver) = mpsc::sync_channel(1);
-        match self.sender.try_send(command(reply_sender)) {
+        let command = command(reply_sender);
+        // Chosen before the command is moved into the channel, so the budget
+        // always matches the work the command actually performs.
+        let budget = if command_drives_a_full_sync(&command) {
+            SYNCHRONIZING_COMMAND_TIMEOUT.max(self.command_timeout)
+        } else {
+            self.command_timeout
+        };
+        match self.sender.try_send(command) {
             Ok(()) => {}
             Err(mpsc::TrySendError::Full(_)) => {
                 self.diagnostics
@@ -1063,12 +1071,36 @@ impl RuntimeHandle {
                 return Err(RuntimeError::WorkerStopped);
             }
         }
-        match reply_receiver.recv_timeout(self.command_timeout) {
+        match reply_receiver.recv_timeout(budget) {
             Ok(result) => result,
             Err(RecvTimeoutError::Timeout) => Err(RuntimeError::ResponseTimeout),
             Err(RecvTimeoutError::Disconnected) => Err(RuntimeError::WorkerStopped),
         }
     }
+}
+
+/// How much longer than the ordinary command budget a synchronizing command
+/// gets.
+///
+/// A command is normally a message or two, and the default budget exists mostly
+/// to notice a wedged worker quickly -- the serial-read hang of 2026-09-09 is
+/// why it is short. But `ApplyConfig` and `ImageSourceUpdated` drive a full
+/// device synchronize, which contains an asset reconcile, which now contains
+/// `AssetRelease`'s own twenty-second budget. Five seconds cannot contain
+/// twenty, so those two commands reported a timeout for work that was still
+/// legitimately in progress and would go on to succeed.
+///
+/// It stays under the server's 30 s HTTP timeout so the caller above still
+/// bounds it; a test pins both ends of that ordering.
+pub(crate) const SYNCHRONIZING_COMMAND_TIMEOUT: Duration = Duration::from_secs(25);
+
+/// Whether this command drives a full device synchronize, and therefore needs
+/// the longer budget above.
+fn command_drives_a_full_sync(command: &RuntimeCommand) -> bool {
+    matches!(
+        command,
+        RuntimeCommand::ApplyConfig { .. } | RuntimeCommand::ImageSourceUpdated { .. }
+    )
 }
 
 impl Drop for RuntimeHandle {
@@ -4276,6 +4308,57 @@ fn empty_device(connection: ConnectionState) -> DeviceSnapshot {
 
 #[cfg(test)]
 mod tests {
+
+    /// The budgets form a ladder, and every rung has to contain the one below.
+    /// `AssetRelease` is 20 s at the device layer, a synchronizing command
+    /// contains that, and the server's HTTP timeout contains the command. When
+    /// the middle rung was 5 s, `ApplyConfig` reported "runtime command
+    /// response timed out" for a save that had already persisted and a sync
+    /// that went on to succeed.
+    #[test]
+    fn a_synchronizing_command_can_contain_an_asset_release() {
+        // Mirrors server::runtime_device::ASSET_RELEASE_TIMEOUT. Restated here
+        // rather than imported because app-core must not depend on the server;
+        // the comment is the link, and this assertion is what notices drift.
+        const DEVICE_ASSET_RELEASE_TIMEOUT: Duration = Duration::from_secs(20);
+        const SERVER_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
+
+        assert!(
+            super::SYNCHRONIZING_COMMAND_TIMEOUT > DEVICE_ASSET_RELEASE_TIMEOUT,
+            "a command that performs an asset reconcile must outlast it"
+        );
+        assert!(
+            super::SYNCHRONIZING_COMMAND_TIMEOUT < SERVER_HTTP_TIMEOUT,
+            "and must still be bounded by the caller above it"
+        );
+        assert!(super::SYNCHRONIZING_COMMAND_TIMEOUT > RuntimeOptions::default().command_timeout);
+    }
+
+    #[test]
+    fn only_the_commands_that_synchronize_get_the_longer_budget() {
+        let (reply, _receiver) = std::sync::mpsc::sync_channel(1);
+        assert!(super::command_drives_a_full_sync(
+            &RuntimeCommand::ApplyConfig {
+                config: AppConfig::default(),
+                reply: reply.clone(),
+            }
+        ));
+        assert!(super::command_drives_a_full_sync(
+            &RuntimeCommand::ImageSourceUpdated {
+                source_id: "s".into(),
+                digest: [0u8; 32],
+                reply: reply.clone(),
+            }
+        ));
+        // A status poll is a message or two; giving it 25 s would slow down
+        // noticing a wedged worker, which is what the short budget is for.
+        assert!(!super::command_drives_a_full_sync(
+            &RuntimeCommand::SetPaused {
+                paused: true,
+                reply,
+            }
+        ));
+    }
     use super::*;
     use crate::{
         AlertHold, CardAlert, CarouselAdvance, DisplayTemplate, Playlist, PlaylistEntry,

@@ -8,17 +8,16 @@ use std::sync::{Arc, Mutex};
 use app_core::{
     AdminConfigErrorBody, AppConfig, CardField, CardFieldValue, CardSettings, ConfigStore,
     DisplayOrientation, DisplayTemplate, MAX_CONFIG_FILE_BYTES, MAX_DEVICE_ID_LEN,
-    MAX_DEVICE_TOKEN_LEN, MAX_ICS_BYTES, MAX_ICS_SOURCE_LEN, MAX_PSK_LEN, MAX_SERVER_URL_LEN,
-    MAX_SSID_LEN, MAX_WIDGET_ID_LEN, NetworkConfig, NetworkSettings, NetworkSettingsStore,
-    NetworkSettingsStoreError, NetworkSettingsUpdate, PomodoroAction, ProvisioningTier,
-    RuntimeError, RuntimeHandle, SaveReceipt, StoreError, ValidationIssue, utc_offset_minutes,
+    MAX_DEVICE_TOKEN_LEN, MAX_PSK_LEN, MAX_SERVER_URL_LEN, MAX_SSID_LEN, MAX_WIDGET_ID_LEN,
+    NetworkConfig, NetworkSettings, NetworkSettingsStore, NetworkSettingsStoreError,
+    NetworkSettingsUpdate, PomodoroAction, ProvisioningTier, RuntimeError, RuntimeHandle,
+    SaveReceipt, StoreError, ValidationIssue, utc_offset_minutes,
 };
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, State};
 use tauri_plugin_autostart::ManagerExt;
-use tauri_plugin_dialog::DialogExt;
 
 use crate::{DesktopSnapshot, DesktopState, NetworkedConfigProjection};
 
@@ -1015,49 +1014,6 @@ pub fn refresh_provider(
 }
 
 #[tauri::command]
-pub async fn choose_ics_file(app: AppHandle) -> Result<Option<String>, IpcError> {
-    let Some(file) = app
-        .dialog()
-        .file()
-        .set_title("Choose an iCalendar file")
-        .add_filter("iCalendar", &["ics", "ical"])
-        .blocking_pick_file()
-    else {
-        return Ok(None);
-    };
-    let path = file.into_path().map_err(|error| IpcError::InvalidPayload {
-        message: format!("the selected calendar source is not a local file: {error}"),
-    })?;
-    let metadata = std::fs::metadata(&path).map_err(|error| IpcError::Provider {
-        message: format!("cannot read the selected calendar file: {error}"),
-    })?;
-    if !metadata.is_file() {
-        return Err(IpcError::InvalidPayload {
-            message: "the selected calendar source is not a file".into(),
-        });
-    }
-    validate_ics_file_size(metadata.len())?;
-    let value = path
-        .to_str()
-        .ok_or_else(|| IpcError::InvalidPayload {
-            message: "the selected calendar path is not valid UTF-8".into(),
-        })?
-        .to_owned();
-    validate_target(&value, MAX_ICS_SOURCE_LEN, "ICS file path")?;
-    Ok(Some(value))
-}
-
-fn validate_ics_file_size(length: u64) -> Result<(), IpcError> {
-    if length > MAX_ICS_BYTES as u64 {
-        return Err(IpcError::PayloadTooLarge {
-            message: "the selected calendar file exceeds the 1 MB limit".into(),
-            maximum_bytes: MAX_ICS_BYTES,
-        });
-    }
-    Ok(())
-}
-
-#[tauri::command]
 pub fn get_autostart_status(
     app: AppHandle,
     state: State<'_, DesktopState>,
@@ -1108,12 +1064,7 @@ pub async fn render_card_preview(
         })?;
 
     let server_rendered_state = match card {
-        CardSettings::Clock { .. }
-        | CardSettings::Pomodoro { .. }
-        | CardSettings::Calendar { .. }
-        | CardSettings::Weather { .. }
-        | CardSettings::JsonFeed { .. }
-        | CardSettings::Rss { .. } => None,
+        CardSettings::Clock { .. } | CardSettings::Pomodoro { .. } => None,
         CardSettings::Plugin { .. } => Some(PLUGIN_RENDERS_ON_THE_SERVER),
         CardSettings::Picture { .. } => Some(PICTURE_RENDERS_ON_THE_SERVER),
     };
@@ -1780,14 +1731,13 @@ pub(crate) mod tests {
 
     use app_core::{
         AlertHold, AppConfig, AppPreferences, AppSnapshot, AssetKind, AssetSource,
-        CURRENT_SCHEMA_VERSION, CalendarSource, CardAlert, CardDataSnapshot, CardError,
-        CardErrorKind, CardField, CardFieldValue, CardSettings, CarouselAdvance, ConnectionState,
-        DeviceCapability, DeviceCounters, DeviceSnapshot, DisplayOrientation, DisplayTemplate,
-        IconGlyphMapping, PersistenceState, Playlist, PlaylistEntry, PomodoroSnapshot,
-        PomodoroState, ProviderSnapshot, ProviderState, RefreshPolicy, RuntimeDiagnostics,
-        RuntimeError, RuntimeState, SAVED_SETTINGS_VALIDATION_FAILURE_MESSAGE, StoreWarning,
-        UpdateChannel, UpdateCheckPolicy, UpdaterSettings, ValidationCode, WeatherUnits,
-        WidgetTapAction,
+        CURRENT_SCHEMA_VERSION, CardAlert, CardDataSnapshot, CardError, CardErrorKind, CardField,
+        CardFieldValue, CardSettings, CarouselAdvance, ConnectionState, DeviceCapability,
+        DeviceCounters, DeviceSnapshot, DisplayOrientation, DisplayTemplate, IconGlyphMapping,
+        PersistenceState, Playlist, PlaylistEntry, PomodoroSnapshot, PomodoroState,
+        ProviderSnapshot, ProviderState, RefreshPolicy, RuntimeDiagnostics, RuntimeError,
+        RuntimeState, SAVED_SETTINGS_VALIDATION_FAILURE_MESSAGE, StoreWarning, UpdateChannel,
+        UpdateCheckPolicy, UpdaterSettings, ValidationCode, WidgetTapAction,
     };
     use serde::Serialize;
 
@@ -2001,17 +1951,15 @@ pub(crate) mod tests {
     #[test]
     fn draft_validation_catches_a_field_with_no_wire_mapping_like_save_does() {
         let mut config = AppConfig::default();
-        config.cards[0] = CardSettings::Weather {
-            id: "weather".into(),
-            title: "Weather".into(),
-            location: "Tbilisi".into(),
-            units: WeatherUnits::Metric,
-            template: DisplayTemplate::RowList,
+        config.cards[0] = CardSettings::Clock {
+            id: "clock".into(),
+            title: "Desk".into(),
+            show_seconds: true,
+            template: DisplayTemplate::DigitalClock,
             tap_action: WidgetTapAction::Dismiss,
-            refresh: RefreshPolicy::Interval { minutes: 30 },
+            refresh: RefreshPolicy::DeviceLocal,
             alert: CardAlert::None,
         };
-        config.playlists[0].entries[0].card_id = "weather".into();
         assert!(config.validate().is_ok(), "fixture must validate cleanly");
 
         let result = validate_draft_for_device(
@@ -2136,16 +2084,6 @@ pub(crate) mod tests {
                 "widget ID"
             ),
             Err(IpcError::InvalidPayload { .. })
-        ));
-    }
-
-    #[test]
-    fn calendar_file_picker_enforces_the_provider_size_limit() {
-        assert!(validate_ics_file_size(MAX_ICS_BYTES as u64).is_ok());
-        assert!(matches!(
-            validate_ics_file_size(MAX_ICS_BYTES as u64 + 1),
-            Err(IpcError::PayloadTooLarge { maximum_bytes, .. })
-                if maximum_bytes == MAX_ICS_BYTES
         ));
     }
 
@@ -2726,11 +2664,9 @@ pub(crate) mod tests {
         card_alerts: Vec<CardAlert>,
         alert_holds: Vec<AlertHold>,
         carousel_advances: Vec<CarouselAdvance>,
-        calendar_sources: Vec<CalendarSource>,
         display_templates: Vec<DisplayTemplate>,
         tap_actions: Vec<WidgetTapAction>,
         refresh_policies: Vec<RefreshPolicy>,
-        weather_units: Vec<WeatherUnits>,
         asset_sources: Vec<AssetSource>,
         asset_kinds: Vec<AssetKind>,
         update_channels: Vec<UpdateChannel>,
@@ -2758,10 +2694,6 @@ pub(crate) mod tests {
         match card {
             CardSettings::Clock { .. } => "clock",
             CardSettings::Pomodoro { .. } => "pomodoro",
-            CardSettings::Calendar { .. } => "calendar",
-            CardSettings::Weather { .. } => "weather",
-            CardSettings::JsonFeed { .. } => "json-feed",
-            CardSettings::Rss { .. } => "rss",
             CardSettings::Plugin { .. } => "plugin",
             CardSettings::Picture { .. } => "picture",
         }
@@ -2774,8 +2706,6 @@ pub(crate) mod tests {
             code: ValidationCode::MissingReference,
             message: "active playlist does not exist".into(),
         };
-        let file_source = CalendarSource::File("/tmp/calendar.ics".into());
-        let url_source = CalendarSource::Url("https://example.test/calendar.ics".into());
         let cards = vec![
             CardSettings::Clock {
                 id: "clock".into(),
@@ -2797,60 +2727,6 @@ pub(crate) mod tests {
                     hold: AlertHold::UntilDismissed,
                 },
             },
-            CardSettings::Calendar {
-                id: "calendar".into(),
-                title: "Next".into(),
-                source: file_source.clone(),
-                template: DisplayTemplate::RowList,
-                tap_action: WidgetTapAction::None,
-                refresh: RefreshPolicy::Interval { minutes: 15 },
-                alert: CardAlert::BeforeEvent {
-                    lead_minutes: 5,
-                    hold: AlertHold::Seconds { value: 60 },
-                },
-            },
-        ];
-        let mut all_card_settings = cards.clone();
-        all_card_settings.extend([
-            CardSettings::Weather {
-                id: "weather".into(),
-                title: "Weather".into(),
-                location: "Tbilisi".into(),
-                units: WeatherUnits::Metric,
-                template: DisplayTemplate::IconBadgeText {
-                    icon_asset_id: Some("weather-icons".into()),
-                },
-                tap_action: WidgetTapAction::OpenUrl {
-                    url: "https://example.test/weather".into(),
-                },
-                refresh: RefreshPolicy::Interval { minutes: 30 },
-                alert: CardAlert::None,
-            },
-            CardSettings::JsonFeed {
-                id: "json".into(),
-                title: "Metric".into(),
-                url: "https://example.test/metric.json".into(),
-                mappings: vec![app_core::JsonFieldMapping {
-                    field: "value".into(),
-                    path: "$.current.value".into(),
-                }],
-                template: DisplayTemplate::BigNumberLabel,
-                tap_action: WidgetTapAction::OpenApplication {
-                    application_id: "com.example.metrics".into(),
-                },
-                refresh: RefreshPolicy::Manual,
-                alert: CardAlert::None,
-            },
-            CardSettings::Rss {
-                id: "news".into(),
-                title: "News".into(),
-                url: "https://example.test/feed.xml".into(),
-                max_items: 3,
-                template: DisplayTemplate::RowList,
-                tap_action: WidgetTapAction::Dismiss,
-                refresh: RefreshPolicy::Interval { minutes: 15 },
-                alert: CardAlert::None,
-            },
             CardSettings::Plugin {
                 id: "air-quality".into(),
                 title: "Office air".into(),
@@ -2867,7 +2743,8 @@ pub(crate) mod tests {
                 refresh: RefreshPolicy::Manual,
                 alert: CardAlert::None,
             },
-        ]);
+        ];
+        let all_card_settings = cards.clone();
         let playlist_entries = vec![
             PlaylistEntry {
                 card_id: "clock".into(),
@@ -2878,7 +2755,7 @@ pub(crate) mod tests {
                 dwell_seconds: Some(20),
             },
             PlaylistEntry {
-                card_id: "calendar".into(),
+                card_id: "air-quality".into(),
                 dwell_seconds: None,
             },
         ];
@@ -2917,18 +2794,12 @@ pub(crate) mod tests {
             updater: UpdaterSettings::default(),
         };
         let card_data = vec![CardDataSnapshot {
-            card_id: "calendar".into(),
+            card_id: "air-quality".into(),
             fields: vec![
                 CardField {
-                    key: "row0_title".into(),
+                    key: "summary".into(),
                     value: CardFieldValue::Text {
-                        value: "Design review".into(),
-                    },
-                },
-                CardField {
-                    key: "next_start_unix_ms".into(),
-                    value: CardFieldValue::Integer {
-                        value: 1_787_000_000_000,
+                        value: "42 · Good".into(),
                     },
                 },
                 CardField {
@@ -2981,7 +2852,7 @@ pub(crate) mod tests {
                     },
                 },
                 providers: vec![ProviderSnapshot {
-                    widget_id: "calendar".into(),
+                    widget_id: "air-quality".into(),
                     state: ProviderState::Stale {
                         message: "offline".into(),
                     },
@@ -2997,7 +2868,7 @@ pub(crate) mod tests {
                 card_data: card_data.clone(),
                 card_errors: vec![CardError {
                     kind: CardErrorKind::DataRefused,
-                    card_id: "json".into(),
+                    card_id: "air-quality".into(),
                     message:
                         "the display refused this card's data (InvalidPayload): invalid push data"
                             .into(),
@@ -3137,10 +3008,6 @@ pub(crate) mod tests {
                 CardAlert::OnTimerFinish {
                     hold: AlertHold::UntilDismissed,
                 },
-                CardAlert::BeforeEvent {
-                    lead_minutes: 5,
-                    hold: AlertHold::Seconds { value: 60 },
-                },
             ],
             alert_holds: vec![AlertHold::UntilDismissed, AlertHold::Seconds { value: 60 }],
             carousel_advances: vec![
@@ -3149,7 +3016,6 @@ pub(crate) mod tests {
                     default_dwell_seconds: 20,
                 },
             ],
-            calendar_sources: vec![file_source, url_source],
             display_templates: vec![
                 DisplayTemplate::DigitalClock,
                 DisplayTemplate::AnalogClock,
@@ -3177,8 +3043,7 @@ pub(crate) mod tests {
                 RefreshPolicy::Manual,
                 RefreshPolicy::Interval { minutes: 15 },
             ],
-            weather_units: vec![WeatherUnits::Metric, WeatherUnits::Imperial],
-            asset_sources: vec![AssetSource::File("/tmp/weather-icons.ttf".into())],
+            asset_sources: vec![AssetSource::File("/tmp/status-icons.ttf".into())],
             asset_kinds: vec![
                 AssetKind::Font,
                 AssetKind::IconFont {
@@ -3274,19 +3139,7 @@ pub(crate) mod tests {
             .iter()
             .map(contract_card_kind)
             .collect::<Vec<_>>();
-        assert_eq!(
-            kinds,
-            [
-                "clock",
-                "pomodoro",
-                "calendar",
-                "weather",
-                "json-feed",
-                "rss",
-                "plugin",
-                "picture",
-            ]
-        );
+        assert_eq!(kinds, ["clock", "pomodoro", "plugin", "picture"]);
     }
 
     #[test]

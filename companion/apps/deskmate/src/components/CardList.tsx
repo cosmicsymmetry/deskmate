@@ -77,10 +77,6 @@ interface CardListProps {
 const addableKinds: { kind: AddableCardKind; description: string }[] = [
   { kind: "clock", description: "Time and date" },
   { kind: "pomodoro", description: "Focus timer" },
-  { kind: "calendar", description: "Upcoming events" },
-  { kind: "weather", description: "Local conditions" },
-  { kind: "json-feed", description: "Custom JSON data" },
-  { kind: "rss", description: "Headlines feed" },
 ];
 
 function fieldText(data: CardDataSnapshot | undefined, key: string): string | null {
@@ -115,22 +111,9 @@ function tileValue(
       const seconds = pomodoro?.remaining_seconds ?? card.duration_seconds;
       return `${Math.floor(seconds / 60)}:${String(Math.floor(seconds % 60)).padStart(2, "0")}`;
     }
-    case "weather":
-    case "json-feed":
-      return fieldText(data, "hero") ?? "—";
-    case "calendar":
-    case "rss": {
-      const rowCount = (data?.fields ?? []).filter(
-        (field) =>
-          /^row\d+_title$/.test(field.key) &&
-          field.value.kind === "text" &&
-          field.value.value.trim() !== "",
-      ).length;
-      return rowCount > 0 ? String(rowCount) : "—";
-    }
     case "plugin":
-      // The server's evaluated `summary`, or the same em dash a weather card shows
-      // before its first fetch. A tile owns one fact; it does not narrate.
+      // The server's evaluated `summary`, or an em dash before its first fetch.
+      // A tile owns one fact; it does not narrate.
       return pluginHero ?? "—";
     case "picture":
       return "PNG";

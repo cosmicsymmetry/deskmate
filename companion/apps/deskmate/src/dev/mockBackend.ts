@@ -83,7 +83,6 @@ function applyScenario() {
       network = { server_url: "", device_id: "", tier: null };
       break;
     case "invalid":
-      if (config.cards[2]?.kind === "weather") config.cards[2].location = "";
       config.preferences.timezone = "Mars/Olympus";
       snapshot.persistence = {
         kind: "validation-failed",
@@ -129,7 +128,7 @@ function applyScenario() {
       snapshot.card_errors = [
         {
           kind: "scene-refused",
-          card_id: "json-feed",
+          card_id: "air-quality",
           message: "the display could not render this card's complete scene",
         },
       ];
@@ -188,28 +187,6 @@ function validate(draft: AppConfig): DraftValidation {
           push(`${at}.duration_seconds`, "out-of-range", "Use between 1 and 1440 minutes.");
         }
         break;
-      case "weather":
-        if (!card.location.trim()) push(`${at}.location`, "empty", "Enter a location.");
-        break;
-      case "calendar":
-        if (!card.source.value.trim()) {
-          push(`${at}.source`, "invalid-source", "Choose a file or enter a web address.");
-        }
-        break;
-      case "rss":
-        if (!card.url.trim()) push(`${at}.url`, "empty", "Enter a feed address.");
-        if (card.max_items < 1 || card.max_items > 5) {
-          push(`${at}.max_items`, "out-of-range", "Show between 1 and 5 headlines.");
-        }
-        break;
-      case "json-feed":
-        if (!card.url.trim()) push(`${at}.url`, "empty", "Enter a feed address.");
-        card.mappings.forEach((mapping, m) => {
-          if (!mapping.field.trim()) push(`${at}.mappings[${m}].field`, "empty", "Name the field.");
-          if (!mapping.path.trim())
-            push(`${at}.mappings[${m}].path`, "empty", "Enter a JSON path.");
-        });
-        break;
       case "clock":
       case "plugin":
         break;
@@ -223,11 +200,6 @@ function validate(draft: AppConfig): DraftValidation {
       const held = card.alert.hold.value;
       if (held < 5 || held > 600) {
         push(`${at}.alert.hold.value`, "out-of-range", "Hold for between 5 and 600 seconds.");
-      }
-    }
-    if (card.alert.kind === "before-event") {
-      if (card.alert.lead_minutes < 1 || card.alert.lead_minutes > 60) {
-        push(`${at}.alert.lead_minutes`, "out-of-range", "Lead by 1 to 60 minutes.");
       }
     }
   });
@@ -422,8 +394,6 @@ export async function mockInvoke<T>(command: string, args?: Record<string, unkno
         state: null,
       } as T;
     }
-    case "choose_ics_file":
-      return delay("/Users/you/Calendars/work.ics") as Promise<T>;
     case "set_server_endpoint": {
       const request = requireArgs(args).request as { server_url: string; device_id: string };
       network = {

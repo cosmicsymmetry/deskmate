@@ -1132,6 +1132,14 @@ of letting code and documentation diverge.
     `framebuffer_diff` byte comparison then also PASSED on 2026-09-06 (**96/10/86**, see the
     headline). **Still owed:** only the BUSY/OTA-owner variant (needs a pending OTA); Phase
     A's asset-GC teardown was only partially observable on dev-0005's card set.
+- **Schema v8 retires the four device-rendered data card kinds** (2026-09-10):
+  `calendar`, `weather`, `json-feed`, and `rss` are deleted because data that does not
+  need device-local fast refresh belongs in server-rendered plugins. A v0-v7 document
+  loses those cards and their playlist entries on load; an emptied active playlist is
+  repaired with the canonical default clock. `before-event` went with calendar, while
+  Pomodoro alerts stay. Firmware, protocol v1, the complete renderer/template vocabulary,
+  and `PROTOCOL_CURRENT_CAPABILITIES` are untouched. Plugin identity is now read-only in
+  the editor; the plugin refresh control and picture-source selector deliberately remain.
 - **A third curated plugin exists: `claude-limits`** (2026-09-03), the Deskmate twin of
   the owner's TRMNL "Claude - Usage" panel — Session/Weekly subscription usage as two
   complication tiles. Its data path reuses the TRMNL pipeline end to end with zero new

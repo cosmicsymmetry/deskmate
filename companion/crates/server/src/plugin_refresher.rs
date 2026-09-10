@@ -3,19 +3,15 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use app_core::{
-    ProviderRefreshRequest, ProviderRefreshResult, ProviderRefresher, ProviderRequest,
-    SystemProviderRefresher,
-};
+use app_core::{ProviderRefreshRequest, ProviderRefreshResult, ProviderRefresher, ProviderRequest};
 use protocol::{Field, FieldValue};
 use providers::Provider as _;
 
 use crate::plugin_provider::{PluginDataProvider, PluginFetcher, SystemPluginFetcher};
 use crate::plugin_registry::PluginRegistry;
 
-/// Delegates built-in providers unchanged and serves plugin providers from a registry.
+/// Serves plugin providers from the curated registry.
 pub struct ServerProviderRefresher<F: PluginFetcher = SystemPluginFetcher> {
-    system: SystemProviderRefresher,
     registry: Arc<PluginRegistry>,
     plugins: HashMap<String, PluginProviderEntry<F>>,
     fetcher_factory: Box<dyn FnMut() -> F + Send>,
@@ -46,7 +42,6 @@ where
         fetcher_factory: impl FnMut() -> F + Send + 'static,
     ) -> Self {
         Self {
-            system: SystemProviderRefresher::default(),
             registry,
             plugins: HashMap::new(),
             fetcher_factory: Box::new(fetcher_factory),
@@ -85,10 +80,8 @@ where
     F: PluginFetcher + Send + 'static,
 {
     fn refresh(&mut self, request: ProviderRefreshRequest) -> ProviderRefreshResult {
-        let plugin_id = match &request.provider {
-            ProviderRequest::Plugin { plugin_id, .. } => plugin_id.clone(),
-            _ => return self.system.refresh(request),
-        };
+        let ProviderRequest::Plugin { plugin_id } = &request.provider;
+        let plugin_id = plugin_id.clone();
 
         self.plugins
             .retain(|widget_id, _| request.active_provider_ids.contains(widget_id));
@@ -183,14 +176,11 @@ fn plugin_error_result(request: ProviderRefreshRequest, error: String) -> Provid
 
 #[cfg(test)]
 mod tests {
+    use chrono::{TimeZone as _, Utc};
     use std::collections::VecDeque;
     use std::path::{Path, PathBuf};
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::time::Duration;
-
-    use app_core::CalendarSource;
-    use chrono::{TimeZone as _, Utc};
 
     use super::*;
     use crate::egress::{EgressError, FetchResponse};
@@ -317,36 +307,6 @@ mod tests {
     }
 
     #[test]
-    fn non_plugin_request_is_delegated_unchanged() {
-        let request = ProviderRefreshRequest {
-            generation: 11,
-            widget_id: "calendar".into(),
-            title: "Agenda".into(),
-            provider: ProviderRequest::Calendar {
-                source: CalendarSource::File("/definitely/not/a/real/deskmate-calendar.ics".into()),
-                timezone: "UTC".parse().expect("UTC timezone"),
-                refresh_interval: Duration::from_mins(5),
-            },
-            active_provider_ids: vec!["calendar".into()],
-            now: Utc.with_ymd_and_hms(2026, 8, 29, 12, 0, 0).unwrap(),
-        };
-        let mut direct = SystemProviderRefresher::default();
-        let expected = direct.refresh(request.clone());
-        let mut wrapped = refresher_with(Vec::new());
-
-        let actual = wrapped.refresh(request);
-
-        assert_eq!(actual.generation, expected.generation);
-        assert_eq!(actual.widget_id, expected.widget_id);
-        assert_eq!(actual.fields, expected.fields);
-        assert_eq!(actual.value, expected.value);
-        assert_eq!(actual.refreshed_at, expected.refreshed_at);
-        assert_eq!(actual.age, expected.age);
-        assert_eq!(actual.stale, expected.stale);
-        assert_eq!(actual.error, expected.error);
-    }
-
-    #[test]
     fn plugin_provider_entries_are_pruned_by_active_widget_ids() {
         let mut refresher = refresher_with(vec![
             Ok(ok_response(br#"{"current":{"aqi":42}}"#)),
@@ -462,7 +422,7 @@ mod tests {
 
     #[test]
     fn a_manifest_without_a_summary_publishes_the_title_alone() {
-        // The tile then shows "—", like a weather card with no data.
+        // The tile then shows "—": an absent optional summary is not a fault.
         let (registry, _base) =
             crate::test_plugins::fixture_registry(crate::test_plugins::V2_UNNAMED_MANIFEST);
         let mut refresher = refresher_with_registry(

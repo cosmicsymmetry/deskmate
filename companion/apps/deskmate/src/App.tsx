@@ -24,7 +24,6 @@ import {
   updateWidget,
 } from "./lib/configDraft";
 import {
-  chooseIcsFile,
   controlPomodoro,
   getAutostartStatus,
   mintImageSource,
@@ -332,24 +331,6 @@ export function App() {
     }
     handleRemoveCard(selectedCardId);
   };
-  const handleChooseCalendarFile = () => {
-    if (selectedWidget?.kind !== "calendar") {
-      return;
-    }
-    setBusyAction("calendar-file");
-    setCommandError(null);
-    void chooseIcsFile()
-      .then((path) => {
-        if (path) {
-          handleWidgetChange({
-            ...selectedWidget,
-            source: { kind: "file", value: path },
-          });
-        }
-      })
-      .catch((nextError) => setCommandError(toIpcError(nextError)))
-      .finally(() => setBusyAction(null));
-  };
   const runAction = async (name: string, operation: () => Promise<void>) => {
     setBusyAction(name);
     setCommandError(null);
@@ -638,7 +619,6 @@ export function App() {
             pomodoro={pomodoro}
             provider={selectedProvider}
             timerBusy={busyAction === "timer"}
-            filePickerBusy={busyAction === "calendar-file"}
             providerRefreshing={refreshingProviderId === selectedCardId}
             pictureAccess={mintedPicture?.cardId === selectedCardId ? mintedPicture.access : null}
             catalog={pluginCatalog}
@@ -647,7 +627,6 @@ export function App() {
             onConfigChange={replaceDraft}
             onRemove={handleRemove}
             onTimerAction={handleTimerAction}
-            onChooseCalendarFile={handleChooseCalendarFile}
             onRefreshProvider={() => selectedCardId && handleProviderRefresh(selectedCardId)}
           />
         </main>

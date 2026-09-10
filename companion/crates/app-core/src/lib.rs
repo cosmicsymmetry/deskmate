@@ -19,19 +19,17 @@ pub use asset_sync::DesiredAsset;
 pub use commands::{PomodoroAction, RuntimeError};
 pub use config::{
     AlertHold, AppConfig, AppPreferences, AssetKind, AssetSettings, AssetSource,
-    CURRENT_SCHEMA_VERSION, CalendarSource, CardAlert, CardSettings, CarouselAdvance,
-    CompiledAppConfig, ConfigValidationError, DisplayOrientation, DisplayTemplate,
-    IconGlyphMapping, JsonFieldMapping, MAX_ALERT_HOLD_SECONDS, MAX_ALERT_LEAD_MINUTES,
-    MAX_ASSET_BYTES, MAX_ASSET_SOURCE_LEN, MAX_ASSETS, MAX_CONFIG_CARDS, MAX_DWELL_SECONDS,
-    MAX_HOST_ACTION_TARGET_LEN, MAX_ICON_GLYPH_NAME_LEN, MAX_ICON_GLYPHS, MAX_ICS_SOURCE_LEN,
-    MAX_JSON_MAPPINGS, MAX_JSON_PATH_LEN, MAX_LOCATION_LEN, MAX_PLAYLIST_ENTRIES,
-    MAX_PLAYLIST_NAME_LEN, MAX_PLAYLISTS, MAX_PLUGIN_ID_LEN, MAX_PROVIDER_REDIRECTS,
-    MAX_PROVIDER_RESPONSE_BYTES, MAX_PROVIDER_URL_LEN, MAX_RSS_ITEMS, MAX_TIMEZONE_LEN,
-    MAX_TOTAL_ASSET_BYTES, MAX_WIDGET_ID_LEN, MAX_WIDGET_TITLE_LEN, MIN_ALERT_HOLD_SECONDS,
-    MIN_ALERT_LEAD_MINUTES, MIN_DWELL_SECONDS, MIN_WEATHER_REFRESH_MINUTES,
+    CURRENT_SCHEMA_VERSION, CardAlert, CardSettings, CarouselAdvance, CompiledAppConfig,
+    ConfigValidationError, DisplayOrientation, DisplayTemplate, IconGlyphMapping,
+    MAX_ALERT_HOLD_SECONDS, MAX_ASSET_BYTES, MAX_ASSET_SOURCE_LEN, MAX_ASSETS,
+    MAX_CARD_REFRESH_MINUTES, MAX_CONFIG_CARDS, MAX_DWELL_SECONDS, MAX_HOST_ACTION_TARGET_LEN,
+    MAX_ICON_GLYPH_NAME_LEN, MAX_ICON_GLYPHS, MAX_PLAYLIST_ENTRIES, MAX_PLAYLIST_NAME_LEN,
+    MAX_PLAYLISTS, MAX_PLUGIN_ID_LEN, MAX_PROVIDER_REDIRECTS, MAX_PROVIDER_RESPONSE_BYTES,
+    MAX_PROVIDER_URL_LEN, MAX_TIMEZONE_LEN, MAX_TOTAL_ASSET_BYTES, MAX_WIDGET_ID_LEN,
+    MAX_WIDGET_TITLE_LEN, MIN_ALERT_HOLD_SECONDS, MIN_CARD_REFRESH_MINUTES, MIN_DWELL_SECONDS,
     PROVIDER_REQUEST_TIMEOUT_SECONDS, Playlist, PlaylistEntry, RefreshPolicy, UpdateChannel,
-    UpdateCheckPolicy, UpdaterSettings, ValidationCode, ValidationIssue, WeatherUnits,
-    WidgetTapAction, utc_offset_minutes,
+    UpdateCheckPolicy, UpdaterSettings, ValidationCode, ValidationIssue, WidgetTapAction,
+    utc_offset_minutes,
 };
 pub use network_settings::{
     MAX_NETWORK_SETTINGS_FILE_BYTES, NETWORK_SETTINGS_FORMAT_VERSION, NetworkSettings,
@@ -42,18 +40,16 @@ pub use protocol::{
     MAX_DEVICE_ID_LEN, MAX_DEVICE_TOKEN_LEN, MAX_PSK_LEN, MAX_SERVER_URL_LEN, MAX_SSID_LEN,
     NetworkConfig, Tier as ProvisioningTier,
 };
-pub use providers::ics::MAX_ICS_BYTES;
 pub use render_negotiation::{
     BindingClass, BindingRequirements, DeviceRenderProfile, NativeSource, RenderDecision,
     RenderRequirements, RequirementsError, SceneNodeKind, analyze_raster_only, analyze_scene,
     classify_binding, negotiate,
 };
 pub use runtime::{
-    CalendarRefreshRequest, CalendarRefreshResult, CalendarRefresher, CardPreview,
-    DeviceConnection, ImageSourceFrame, PREVIEW_SCENE_REVISION, PluginHost, ProviderRefreshRequest,
-    ProviderRefreshResult, ProviderRefresher, ProviderRequest, RasterFrame, RasterRequest,
-    RuntimeDevice, RuntimeHandle, RuntimeOptions, RuntimeSubscription, SceneCandidate,
-    SerialRuntimeDevice, SystemCalendarRefresher, SystemProviderRefresher,
+    CardPreview, DeviceConnection, ImageSourceFrame, PREVIEW_SCENE_REVISION, PluginHost,
+    ProviderRefreshRequest, ProviderRefreshResult, ProviderRefresher, ProviderRequest, RasterFrame,
+    RasterRequest, RuntimeDevice, RuntimeHandle, RuntimeOptions, RuntimeSubscription,
+    SceneCandidate, SerialRuntimeDevice, SystemProviderRefresher,
 };
 pub use scene_build::{
     AnalogClockCard, BakedFontMetrics, BigNumberCard, ClockCard, IconBadgeCard, NumericAdvances,

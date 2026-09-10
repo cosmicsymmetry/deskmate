@@ -157,10 +157,6 @@ export function refreshProvider(widgetId: string): Promise<void> {
   return invokeTyped("refresh_provider", { target: { widget_id: widgetId } });
 }
 
-export function chooseIcsFile(): Promise<string | null> {
-  return invokeTyped("choose_ics_file");
-}
-
 export function getAutostartStatus(): Promise<AutostartStatus> {
   return invokeTyped("get_autostart_status");
 }

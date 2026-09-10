@@ -18,10 +18,6 @@ export function copyConfig(config: AppConfig): AppConfig {
     preferences: { ...config.preferences },
     cards: config.cards.map((card) => ({
       ...card,
-      ...(card.kind === "calendar" ? { source: { ...card.source } } : {}),
-      ...(card.kind === "json-feed"
-        ? { mappings: card.mappings.map((mapping) => ({ ...mapping })) }
-        : {}),
       ...(card.kind === "plugin" || card.kind === "picture"
         ? {}
         : { template: { ...card.template } }),
@@ -56,12 +52,6 @@ export function cardName(card: CardSettings): string {
       return card.title || "Digital clock";
     case "pomodoro":
       return card.label || "Pomodoro";
-    case "calendar":
-      return card.title || "Calendar";
-    case "weather":
-    case "json-feed":
-    case "rss":
-      return card.title || cardKindName(card.kind);
     case "plugin":
       return card.title || card.plugin_id;
     case "picture":
@@ -74,8 +64,8 @@ export function cardName(card: CardSettings): string {
  * ring legend, the editor heading, the picker.
  *
  * It is the template's name, not the owner's title, by explicit owner direction: a
- * person meeting a card called "Outside" or "Desk" for the first time learns nothing
- * from it, where "Weather" and "Digital clock" say what the thing is. The owner's own
+ * person meeting a card called "Office" or "Desk" for the first time learns nothing
+ * from it, where "Air quality" and "Digital clock" say what the thing is. The owner's own
  * words survive as `cardTitle` — a quiet second line beside the label, never the
  * thing that names the card.
  *
@@ -143,14 +133,6 @@ export function cardKindName(kind: AddableCardKind): string {
       return "Digital clock";
     case "pomodoro":
       return "Pomodoro";
-    case "calendar":
-      return "ICS calendar";
-    case "weather":
-      return "Weather";
-    case "json-feed":
-      return "JSON feed";
-    case "rss":
-      return "RSS feed";
   }
 }
 
@@ -176,8 +158,8 @@ export type AddCardRequest =
   | { kind: "picture"; sourceId: string; sourceName: string };
 
 /// Appends a new card with sane defaults for its kind and enrols it at the end
-/// of the active loop in the same draft. Supports all six built-in card kinds
-/// and a plugin from the server's catalog. Both v6 limits are checked before
+/// of the active loop in the same draft. Supports both built-in card kinds
+/// and a plugin from the server's catalog. Both card-library limits are checked before
 /// either collection changes, so adding is atomic even when a legacy card
 /// outside the loop has filled only one limit.
 export function addCard(
@@ -251,59 +233,6 @@ export function addCard(
           tap_action: { kind: "start-pause" },
           refresh: { kind: "device-local" },
           alert: { kind: "on-timer-finish", hold: { kind: "until-dismissed" } },
-        };
-        break;
-      case "calendar":
-        card = {
-          kind: request,
-          ...common,
-          title: "Up next",
-          source: { kind: "url", value: "" },
-          template: { kind: "row-list" },
-          refresh: { kind: "interval", minutes: 15 },
-        };
-        break;
-      case "weather":
-        card = {
-          kind: request,
-          ...common,
-          title: "Weather",
-          location: "",
-          units: "metric",
-          // `icon-badge-text` is the template weather's field composition was designed
-          // for (`value`/`label`/`badge`/`icon`/`temperature_tenths`/
-          // `apparent_temperature_tenths`/`unit`), and `wire_config()` now lowers it to
-          // the device — see `companion/crates/app-core/src/config.rs`. `icon_asset_id`
-          // stays unset here: rendering a pushed custom icon needs
-          // `CAPABILITY_ASSET_TRANSFER`, which is a later milestone task; until then the
-          // device renders its built-in icon for the `icon` field.
-          template: { kind: "icon-badge-text", icon_asset_id: null },
-          refresh: { kind: "interval", minutes: 30 },
-        };
-        break;
-      case "json-feed":
-        card = {
-          kind: request,
-          ...common,
-          title: "Feed",
-          url: "",
-          mappings: [],
-          // `big-number-label` is the template json-feed's single mapped value is
-          // designed for, and `wire_config()` now lowers it to the device — see
-          // `companion/crates/app-core/src/config.rs`.
-          template: { kind: "big-number-label" },
-          refresh: { kind: "interval", minutes: 15 },
-        };
-        break;
-      case "rss":
-        card = {
-          kind: request,
-          ...common,
-          title: "Headlines",
-          url: "",
-          max_items: 3,
-          template: { kind: "row-list" },
-          refresh: { kind: "interval", minutes: 30 },
         };
         break;
     }
@@ -528,8 +457,8 @@ export interface LoopSegment {
   cardId: string;
   name: string;
   /// The owner's own words for this card, or null when they typed none. Two cards
-  /// can share a template, so the loop needs something besides `name` to tell an
-  /// "ICS calendar" from the other "ICS calendar" sitting two rows below it.
+  /// can share a plugin, so the loop needs something besides `name` to tell one
+  /// "Air quality" card from another using the same plugin.
   title: string | null;
   dwellSeconds: number;
   widthPercent: number;

@@ -1,14 +1,10 @@
 pub mod http;
-pub mod ics;
-pub mod json_feed;
-pub mod rss;
-pub mod weather;
 
 use std::fmt;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use protocol::{Field, FieldValue, truncate_utf8_to_bytes};
+use protocol::truncate_utf8_to_bytes;
 
 pub const MAX_PROVIDER_RESPONSE_BYTES: usize = 1_048_576;
 pub const MAX_PROVIDER_REDIRECTS: u8 = 3;
@@ -148,10 +144,3 @@ impl fmt::Display for ProviderError {
 }
 
 impl std::error::Error for ProviderError {}
-
-pub(crate) fn text_field(key: impl Into<String>, value: impl Into<String>) -> Field {
-    Field {
-        key: key.into(),
-        value: FieldValue::Text(value.into()),
-    }
-}

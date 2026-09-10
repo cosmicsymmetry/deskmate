@@ -1,5 +1,5 @@
 {
-  "schema_version": 8,
+  "schema_version": 7,
   "preferences": {
     "timezone": "Asia/Tbilisi",
     "autostart": true,
@@ -28,10 +28,14 @@
       "alert": { "kind": "on-timer-finish", "hold": { "kind": "until-dismissed" } }
     },
     {
-      "kind": "plugin",
-      "id": "plugin",
-      "title": "Status",
-      "plugin_id": "com.example.status",
+      "kind": "calendar",
+      "id": "calendar",
+      "title": "Calendar",
+      "source": {
+        "kind": "url",
+        "value": "https://example.com/calendar.ics"
+      },
+      "template": { "kind": "row-list" },
       "tap_action": { "kind": "none" },
       "refresh": { "kind": "interval", "minutes": 15 },
       "alert": { "kind": "none" }
@@ -46,7 +50,7 @@
       "entries": [
         { "card_id": "clock", "dwell_seconds": null },
         { "card_id": "pomodoro", "dwell_seconds": null },
-        { "card_id": "plugin", "dwell_seconds": null }
+        { "card_id": "calendar", "dwell_seconds": null }
       ]
     }
   ],

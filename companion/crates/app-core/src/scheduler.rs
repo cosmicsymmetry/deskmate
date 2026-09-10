@@ -27,13 +27,6 @@ pub(crate) struct Scheduler {
     /// whichever interrupt is actually `Active`, makes those two interrupts
     /// independent regardless of arrival order.
     alert_hold: Option<(u32, Instant)>,
-    /// Per-card wake time for re-evaluating a `CardAlert::BeforeEvent`
-    /// trigger even when no fresh provider data has landed. See
-    /// `runtime::refresh_calendar_alert`: relying solely on provider refresh
-    /// landings to observe the lead window missed most windows in practice
-    /// (a 15-minute refresh interval trivially skips past a 5-minute lead
-    /// window entirely).
-    event_alert_checks: BTreeMap<String, Instant>,
     last_raster_push: Option<Instant>,
     raster_deadline: Option<Instant>,
 }
@@ -61,7 +54,6 @@ impl Scheduler {
             providers: BTreeMap::new(),
             rotation: None,
             alert_hold: None,
-            event_alert_checks: BTreeMap::new(),
             last_raster_push: None,
             raster_deadline: None,
         }
@@ -203,43 +195,6 @@ impl Scheduler {
         Some(token)
     }
 
-    /// Per-card wake time for re-evaluating a `CardAlert::BeforeEvent`
-    /// trigger. `None` clears it (nothing left to wait for: no known future
-    /// event, or the window is already open/past and was handled
-    /// synchronously by the same call that set this).
-    pub(crate) fn set_event_alert_deadline(&mut self, card_id: &str, deadline: Option<Instant>) {
-        match deadline {
-            Some(deadline) => {
-                self.event_alert_checks.insert(card_id.to_owned(), deadline);
-            }
-            None => {
-                self.event_alert_checks.remove(card_id);
-            }
-        }
-    }
-
-    /// Card IDs whose event-alert deadline has passed, removing them (the
-    /// caller re-establishes a deadline, if still relevant, via
-    /// `set_event_alert_deadline` after re-evaluating).
-    pub(crate) fn due_event_alert_cards(&mut self, now: Instant) -> Vec<String> {
-        let due: Vec<String> = self
-            .event_alert_checks
-            .iter()
-            .filter(|(_, deadline)| now >= **deadline)
-            .map(|(card_id, _)| card_id.clone())
-            .collect();
-        for card_id in &due {
-            self.event_alert_checks.remove(card_id);
-        }
-        due
-    }
-
-    /// Drops event-alert deadlines for cards no longer live, mirroring
-    /// `InterruptArbiter::retain_widgets`.
-    pub(crate) fn retain_event_alert_checks(&mut self, mut retain: impl FnMut(&str) -> bool) {
-        self.event_alert_checks.retain(|card_id, _| retain(card_id));
-    }
-
     /// Marks a static raster candidate dirty. The first activation is eligible
     /// immediately; after a successful push, every invalidation shares the one
     /// `last_push + floor` deadline, so newer snapshots replace pending work
@@ -281,7 +236,6 @@ impl Scheduler {
             .filter_map(|deadline| deadline.next)
             .chain(self.rotation.iter().copied())
             .chain(self.alert_hold.map(|(_, deadline)| deadline))
-            .chain(self.event_alert_checks.values().copied())
             .chain(self.raster_deadline)
             .chain([self.next_pomodoro, self.next_status, self.next_time_sync])
             .min()
@@ -303,7 +257,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn calendar_deadlines_are_replaced_and_manual_refresh_moves_only_one() {
+    fn provider_deadlines_are_replaced_and_manual_refresh_moves_only_one() {
         let now = Instant::now();
         let mut scheduler = Scheduler::new(
             now,
@@ -488,61 +442,6 @@ mod tests {
         assert_eq!(
             scheduler.wait_duration(now, Duration::from_millis(5)),
             Duration::from_millis(5)
-        );
-    }
-
-    #[test]
-    fn event_alert_deadlines_fire_once_bound_the_wait_and_are_pruned_with_their_card() {
-        let now = Instant::now();
-        let mut scheduler = Scheduler::new(
-            now,
-            Duration::from_hours(1),
-            Duration::from_hours(1),
-            Duration::from_hours(1),
-        );
-        assert!(scheduler.pomodoro_due(now));
-        assert!(scheduler.status_due(now));
-        assert!(scheduler.time_sync_due(now));
-
-        // No deadlines: nothing due, no effect on the wait.
-        assert!(
-            scheduler
-                .due_event_alert_cards(now + Duration::from_hours(1))
-                .is_empty()
-        );
-
-        scheduler.set_event_alert_deadline("upnext", Some(now + Duration::from_mins(3)));
-        scheduler.set_event_alert_deadline("later", Some(now + Duration::from_mins(10)));
-        assert!(
-            scheduler
-                .due_event_alert_cards(now + Duration::from_mins(2))
-                .is_empty()
-        );
-        assert_eq!(
-            scheduler.due_event_alert_cards(now + Duration::from_mins(3)),
-            ["upnext"]
-        );
-        // Consumed: "upnext" does not fire again on a later check, before
-        // "later"'s own (still-armed, separate) deadline arrives.
-        assert!(
-            scheduler
-                .due_event_alert_cards(now + Duration::from_mins(4))
-                .is_empty()
-        );
-
-        // The loop cannot sleep past the surviving "later" deadline.
-        assert_eq!(
-            scheduler.wait_duration(now, Duration::from_hours(1)),
-            Duration::from_mins(10)
-        );
-
-        // A card no longer in the live config is pruned, even with a deadline
-        // still armed.
-        scheduler.set_event_alert_deadline("later", Some(now + Duration::from_mins(10)));
-        scheduler.retain_event_alert_checks(|card_id| card_id != "later");
-        assert_eq!(
-            scheduler.wait_duration(now, Duration::from_hours(1)),
-            Duration::from_hours(1)
         );
     }
 }

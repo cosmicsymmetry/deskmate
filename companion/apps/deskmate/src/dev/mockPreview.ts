@@ -188,35 +188,6 @@ export function renderMockFrame(
         card.duration_seconds,
       );
       break;
-    case "weather":
-      heroCaption(
-        ctx,
-        card.title || "Weather",
-        fieldValue(data, "hero") ?? "--",
-        fieldValue(data, "caption") ?? "No data yet",
-      );
-      break;
-    case "json-feed":
-      heroCaption(
-        ctx,
-        card.title || "JSON feed",
-        fieldValue(data, "hero") ?? "--",
-        fieldValue(data, "caption") ?? "No data yet",
-      );
-      break;
-    case "calendar":
-    case "rss": {
-      const rows = (data?.fields ?? []).flatMap((field) => {
-        const match = /^row(\d+)_title$/.exec(field.key);
-        if (!match || field.value.kind !== "text" || field.value.value.trim() === "") {
-          return [];
-        }
-        const time = fieldValue(data, `row${match[1]}_time`);
-        return [time ? `${time}  ${field.value.value}` : field.value.value];
-      });
-      rowList(ctx, card.title || (card.kind === "rss" ? "Headlines" : "Calendar"), rows);
-      break;
-    }
     case "plugin":
       heroCaption(
         ctx,

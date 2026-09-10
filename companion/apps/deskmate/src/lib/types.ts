@@ -43,19 +43,9 @@ export type RefreshPolicy =
   | { kind: "manual" }
   | { kind: "interval"; minutes: number };
 
-export type WeatherUnits = "metric" | "imperial";
-
-export interface JsonFieldMapping {
-  field: string;
-  path: string;
-}
-
 export type AlertHold = { kind: "until-dismissed" } | { kind: "seconds"; value: number };
 
-export type CardAlert =
-  | { kind: "none" }
-  | { kind: "on-timer-finish"; hold: AlertHold }
-  | { kind: "before-event"; lead_minutes: number; hold: AlertHold };
+export type CardAlert = { kind: "none" } | { kind: "on-timer-finish"; hold: AlertHold };
 
 export type CardSettings =
   | {
@@ -73,49 +63,6 @@ export type CardSettings =
       id: string;
       label: string;
       duration_seconds: number;
-      template: DisplayTemplate;
-      tap_action: WidgetTapAction;
-      refresh: RefreshPolicy;
-      alert: CardAlert;
-    }
-  | {
-      kind: "calendar";
-      id: string;
-      title: string;
-      source: CalendarSource;
-      template: DisplayTemplate;
-      tap_action: WidgetTapAction;
-      refresh: RefreshPolicy;
-      alert: CardAlert;
-    }
-  | {
-      kind: "weather";
-      id: string;
-      title: string;
-      location: string;
-      units: WeatherUnits;
-      template: DisplayTemplate;
-      tap_action: WidgetTapAction;
-      refresh: RefreshPolicy;
-      alert: CardAlert;
-    }
-  | {
-      kind: "json-feed";
-      id: string;
-      title: string;
-      url: string;
-      mappings: JsonFieldMapping[];
-      template: DisplayTemplate;
-      tap_action: WidgetTapAction;
-      refresh: RefreshPolicy;
-      alert: CardAlert;
-    }
-  | {
-      kind: "rss";
-      id: string;
-      title: string;
-      url: string;
-      max_items: number;
       template: DisplayTemplate;
       tap_action: WidgetTapAction;
       refresh: RefreshPolicy;
@@ -154,8 +101,6 @@ export interface MintedImageSource {
   token: string;
   push_url: string;
 }
-
-export type CalendarSource = { kind: "file"; value: string } | { kind: "url"; value: string };
 
 export interface AssetSettings {
   id: string;
@@ -484,11 +429,9 @@ export interface IpcContractFixtures {
   card_alerts: CardAlert[];
   alert_holds: AlertHold[];
   carousel_advances: CarouselAdvance[];
-  calendar_sources: CalendarSource[];
   display_templates: DisplayTemplate[];
   tap_actions: WidgetTapAction[];
   refresh_policies: RefreshPolicy[];
-  weather_units: WeatherUnits[];
   asset_sources: AssetSettings["source"][];
   asset_kinds: AssetSettings["kind"][];
   update_channels: UpdaterSettings["channel"][];

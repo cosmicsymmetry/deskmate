@@ -1272,7 +1272,7 @@ mod tests {
                 app_core::ProviderRequest::Plugin { plugin_id } if plugin_id == "claude-limits" => {
                     self.claude_limits_payload.clone()
                 }
-                _ => self.aqi_payload.clone(),
+                app_core::ProviderRequest::Plugin { .. } => self.aqi_payload.clone(),
             };
             app_core::ProviderRefreshResult {
                 generation: request.generation,

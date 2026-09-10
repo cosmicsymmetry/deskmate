@@ -151,7 +151,7 @@ test("a picture card is called Picture, with the owner's words beside it", () =>
 });
 
 test("no card kind is called “Plugin” on any surface", () => {
-  const kinds: AddableCardKind[] = ["clock", "pomodoro", "calendar", "weather", "json-feed", "rss"];
+  const kinds: AddableCardKind[] = ["clock", "pomodoro"];
   expect(kinds.map(cardKindName)).not.toContain("Plugin");
   expect(cardName(pluginCard())).toBe("Office air");
   expect(cardName({ ...pluginCard(), title: "" })).toBe("com.example.air-quality");
@@ -199,12 +199,13 @@ describe("configuration draft helpers", () => {
     expect(withSecondClock.cardId).toBe("clock-2");
 
     const withPomodoro = addCard(withSecondClock.config, "pomodoro");
-    const complete = addCard(withPomodoro.config, "calendar");
+    const complete = addCard(withPomodoro.config, "clock");
+    expect(complete.cardId).toBe("clock-3");
     expect(complete.config.cards.map((card) => card.kind)).toEqual([
       "clock",
       "clock",
       "pomodoro",
-      "calendar",
+      "clock",
     ]);
     expect(new Set(complete.config.cards.map((card) => card.id)).size).toBe(4);
   });
@@ -227,17 +228,17 @@ describe("configuration draft helpers", () => {
     };
     expect(firstRunSteps(empty, false).map((step) => step.done)).toEqual([false, false]);
 
-    const withWeather = addCard(empty, "weather").config;
-    expect(firstRunSteps(withWeather, false).map((step) => step.done)).toEqual([true, false]);
-    expect(firstRunSteps(withWeather, true).every((step) => step.done)).toBe(true);
+    const withPomodoro = addCard(empty, "pomodoro").config;
+    expect(firstRunSteps(withPomodoro, false).map((step) => step.done)).toEqual([true, false]);
+    expect(firstRunSteps(withPomodoro, true).every((step) => step.done)).toBe(true);
   });
 
   test("adding a card appends it to the library and enrols it at the end of the active loop", () => {
-    const { config, cardId } = addCard(initialConfig(), "weather");
-    expect(config.cards.map((card) => card.kind)).toContain("weather");
-    expect(cardId).toBe("weather");
+    const { config, cardId } = addCard(initialConfig(), "pomodoro");
+    expect(config.cards.map((card) => card.kind)).toContain("pomodoro");
+    expect(cardId).toBe("pomodoro");
     expect(config.playlists[0].entries.at(-1)).toEqual({
-      card_id: "weather",
+      card_id: "pomodoro",
       dwell_seconds: null,
     });
     expect("screens" in config).toBe(false);
@@ -245,7 +246,7 @@ describe("configuration draft helpers", () => {
 
   test("adding a card is gated by both the card and active-loop entry limits", () => {
     const cardFull = cardsConfig(["a", "b", "c", "d", "e", "f", "g", "h"]);
-    expect(addCard(cardFull, "weather")).toEqual({ config: cardFull, cardId: null });
+    expect(addCard(cardFull, "clock")).toEqual({ config: cardFull, cardId: null });
 
     const entryFullBase = cardsConfig(["a", "b", "c", "d", "e", "f", "g"]);
     const entryFull: AppConfig = {
@@ -260,7 +261,7 @@ describe("configuration draft helpers", () => {
         },
       ],
     };
-    expect(addCard(entryFull, "weather")).toEqual({ config: entryFull, cardId: null });
+    expect(addCard(entryFull, "clock")).toEqual({ config: entryFull, cardId: null });
   });
 
   test("a plugin card is added by the same call, with the same two caps, as any other", () => {
@@ -366,7 +367,7 @@ describe("configuration draft helpers", () => {
   });
 
   test("adding every kind produces a reachable, addable card", () => {
-    const kinds = ["clock", "pomodoro", "calendar", "weather", "json-feed", "rss"] as const;
+    const kinds = ["clock", "pomodoro"] as const;
     let config: AppConfig = { ...initialConfig(), cards: [] };
     for (const kind of kinds) {
       config = addCard(config, kind).config;
@@ -374,35 +375,17 @@ describe("configuration draft helpers", () => {
     expect(config.cards.map((card) => card.kind)).toEqual([...kinds]);
   });
 
-  // Regression test for the final-review finding: `addCard` defaulted weather and
-  // json-feed to `big-number-label`, a template `validate()` accepted but
-  // `wire_config()` (in `config.rs`) could not yet lower, so a freshly-added card of
-  // either kind validated cleanly yet always failed to save. `wire_config()` now lowers
-  // all six templates (see `companion/crates/app-core/src/config.rs`), so weather and
-  // json-feed default to the templates their field composition was actually designed
-  // for — `icon-badge-text` and `big-number-label` — instead of the `row-list`
-  // placeholder that rendered a title over empty rows. See
-  // `companion/crates/app-core/tests/config.rs`'s
-  // `every_freshly_added_card_kind_validates_and_compiles` for the Rust-side proof that
-  // every one of these defaults both validates AND compiles.
   test("every freshly-added card kind defaults to a template the wire actually implements", () => {
     const compilableTemplates = new Set([
       "digital-clock",
       "analog-clock",
       "progress-ring",
-      "row-list",
-      "big-number-label",
-      "icon-badge-text",
     ]);
     const expectedTemplateKind: Record<string, string> = {
       clock: "digital-clock",
       pomodoro: "progress-ring",
-      calendar: "row-list",
-      weather: "icon-badge-text",
-      "json-feed": "big-number-label",
-      rss: "row-list",
     };
-    const kinds = ["clock", "pomodoro", "calendar", "weather", "json-feed", "rss"] as const;
+    const kinds = ["clock", "pomodoro"] as const;
     let config: AppConfig = { ...initialConfig(), cards: [] };
     for (const kind of kinds) {
       const { config: next, cardId } = addCard(config, kind);
@@ -435,21 +418,21 @@ describe("configuration draft helpers", () => {
   });
 
   test("resolves active-loop entries without dropping missing references, then finds active-loop outsiders", () => {
-    const withCards = addCard(addCard(initialConfig(), "pomodoro").config, "weather").config;
+    const withCards = addCard(addCard(initialConfig(), "pomodoro").config, "clock").config;
     const config = {
       ...withCards,
       playlists: [
         {
           ...withCards.playlists[0],
           entries: [
-            { card_id: "weather", dwell_seconds: 15 },
+            { card_id: "clock-2", dwell_seconds: 15 },
             { card_id: "missing-card", dwell_seconds: null },
             { card_id: "clock", dwell_seconds: null },
           ],
         },
       ],
     };
-    expect(libraryCards(config).map((card) => card.id)).toEqual(["clock", "pomodoro", "weather"]);
+    expect(libraryCards(config).map((card) => card.id)).toEqual(["clock", "pomodoro", "clock-2"]);
     expect(loopEntries(config)).toEqual([
       { index: 0, entry: config.playlists[0].entries[0], card: config.cards[2] },
       { index: 1, entry: config.playlists[0].entries[1], card: null },
@@ -488,20 +471,20 @@ describe("configuration draft helpers", () => {
 
   test("moves playlist entries with clamped targets and index-safe source boundaries", () => {
     let config = addCard(initialConfig(), "pomodoro").config;
-    config = addCard(config, "weather").config;
-    config = addEntry(addEntry(config, "workday", "pomodoro"), "workday", "weather");
+    config = addCard(config, "clock").config;
+    config = addEntry(addEntry(config, "workday", "pomodoro"), "workday", "clock-2");
 
     const toEnd = moveEntry(config, "workday", 0, 99);
     expect(toEnd.playlists[0].entries.map((entry) => entry.card_id)).toEqual([
       "pomodoro",
-      "weather",
+      "clock-2",
       "clock",
     ]);
     const toStart = moveEntry(toEnd, "workday", 2, -99);
     expect(toStart.playlists[0].entries.map((entry) => entry.card_id)).toEqual([
       "clock",
       "pomodoro",
-      "weather",
+      "clock-2",
     ]);
     expect(moveEntry(config, "workday", -1, 1)).toBe(config);
     expect(moveEntry(config, "workday", 3, 1)).toBe(config);
@@ -589,13 +572,13 @@ describe("configuration draft helpers", () => {
 
   test("loopSegments proportions active-playlist entries by resolved dwell and excludes library-only cards", () => {
     let config = addCard(initialConfig(), "pomodoro").config;
-    config = addCard(config, "weather").config;
+    config = addCard(config, "clock").config;
     config = {
       ...config,
       playlists: [
         {
           ...config.playlists[0],
-          entries: config.playlists[0].entries.filter((entry) => entry.card_id !== "weather"),
+          entries: config.playlists[0].entries.filter((entry) => entry.card_id !== "clock-2"),
         },
       ],
     };
@@ -698,10 +681,10 @@ describe("configuration draft helpers", () => {
 
   test("loopAdvance wraps past the last segment and resolves against whatever segments it is given, so a mid-play reorder is honoured on the next check", () => {
     let config = addCard(initialConfig(), "pomodoro").config;
-    config = addCard(config, "weather").config;
-    config = addEntry(addEntry(config, "workday", "pomodoro"), "workday", "weather");
+    config = addCard(config, "clock").config;
+    config = addEntry(addEntry(config, "workday", "pomodoro"), "workday", "clock-2");
     const segments = loopSegments(config);
-    // pomodoro and weather swapped, leaving clock (the active/current card) exactly where
+    // pomodoro and the second clock swapped, leaving clock (the active/current card) exactly where
     // it was — isolating the reorder's effect to "what comes after a".
     const reordered = loopSegments(moveEntry(config, "workday", 1, 2));
 
@@ -712,10 +695,10 @@ describe("configuration draft helpers", () => {
     // NEW order instead of a stale one — because the caller passes the
     // latest segments in on every check rather than one captured once at
     // play-start.
-    expect(loopAdvance(reordered, "clock", 1_000, 1_000)?.cardId).toBe("weather");
+    expect(loopAdvance(reordered, "clock", 1_000, 1_000)?.cardId).toBe("clock-2");
 
     // Wrapping past the last segment still returns to the first.
-    expect(loopAdvance(segments, "weather", 1_000, 1_000)?.cardId).toBe("clock");
+    expect(loopAdvance(segments, "clock-2", 1_000, 1_000)?.cardId).toBe("clock");
   });
 
   test("loopAdvance returns null with no segments or nothing to advance to", () => {
@@ -744,11 +727,11 @@ describe("configuration draft helpers", () => {
       ...base,
       cards: [
         { ...addCard(base, "clock").config.cards[0], id: "a" },
-        { ...addCard(base, "calendar").config.cards[0], id: "b" },
+        { ...addCard(base, "clock").config.cards[0], id: "b" },
       ],
     };
     const issues: ValidationIssue[] = [
-      { path: "cards[1].source", code: "out-of-range", message: "calendar source is required" },
+      { path: "cards[1].title", code: "out-of-range", message: "card title is required" },
     ];
 
     expect(issuesForCard(issues, config, "b")).toHaveLength(1);
@@ -757,7 +740,7 @@ describe("configuration draft helpers", () => {
     // After dragging "b" to the front, the SAME issue list must still attach to "b".
     const reordered = moveCard(config, "b", 0);
     const rebased: ValidationIssue[] = [
-      { path: "cards[0].source", code: "out-of-range", message: "calendar source is required" },
+      { path: "cards[0].title", code: "out-of-range", message: "card title is required" },
     ];
     expect(issuesForCard(rebased, reordered, "b")).toHaveLength(1);
     expect(issuesForCard(rebased, reordered, "a")).toHaveLength(0);
@@ -828,7 +811,7 @@ describe("configuration draft helpers", () => {
 
   test("contract fixtures expose cards, not widgets or screens", () => {
     const config = ipcContractFixtures.snapshot.config;
-    expect(config.schema_version).toBe(7);
+    expect(config.schema_version).toBe(8);
     expect(Array.isArray(config.cards)).toBe(true);
     expect(Array.isArray(config.playlists)).toBe(true);
     expect("widgets" in config).toBe(false);
@@ -841,7 +824,7 @@ describe("configuration draft helpers", () => {
 
   test("every alert and playlist advance variant is represented in the contract", () => {
     const alertKinds = ipcContractFixtures.card_alerts.map((a) => a.kind).sort();
-    expect(alertKinds).toEqual(["before-event", "none", "on-timer-finish"]);
+    expect(alertKinds).toEqual(["none", "on-timer-finish"]);
 
     const advanceKinds = ipcContractFixtures.carousel_advances.map((a) => a.kind).sort();
     expect(advanceKinds).toEqual(["manual", "timed"]);

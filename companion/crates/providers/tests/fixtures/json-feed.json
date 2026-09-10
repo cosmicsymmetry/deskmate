@@ -1,9 +1,0 @@
-{
-  "metrics": [
-    {
-      "value": 42,
-      "label": "Builds"
-    }
-  ],
-  "ready": true
-}

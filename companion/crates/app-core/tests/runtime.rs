@@ -6,12 +6,12 @@ use std::time::{Duration, Instant};
 
 use app_core::runtime::ImageSourceFrame;
 use app_core::{
-    AlertHold, AppConfig, CalendarRefreshRequest, CalendarRefreshResult, CalendarRefresher,
-    CardAlert, CardErrorKind, CardField, CardFieldValue, CardPreviewState, CardSettings,
-    CarouselAdvance, ConnectionState, DesiredAsset, DeviceCapability, DeviceConnection,
-    DeviceOtaState, DeviceRenderProfile, DeviceTier, DeviceWifiState, DisplayOrientation,
-    DisplayTemplate, NetworkConfig, PersistenceState, Playlist, PlaylistEntry, PluginHost,
-    PomodoroAction, PomodoroState, ProviderRequest, ProvisioningTier, RasterFrame, RasterRequest,
+    AlertHold, AppConfig, CardAlert, CardErrorKind, CardField, CardFieldValue, CardPreviewState,
+    CardSettings, CarouselAdvance, ConnectionState, DesiredAsset, DeviceCapability,
+    DeviceConnection, DeviceOtaState, DeviceRenderProfile, DeviceTier, DeviceWifiState,
+    DisplayOrientation, DisplayTemplate, NetworkConfig, PersistenceState, Playlist, PlaylistEntry,
+    PluginHost, PomodoroAction, PomodoroState, ProviderRefreshRequest, ProviderRefreshResult,
+    ProviderRefresher, ProviderRequest, ProvisioningTier, RasterFrame, RasterRequest,
     RefreshPolicy, RenderDecision, RuntimeDevice, RuntimeError, RuntimeHandle, RuntimeOptions,
     RuntimeState, SceneCandidate, WidgetTapAction, analyze_scene, negotiate,
 };
@@ -536,23 +536,23 @@ struct FixedRefresher {
     delay: Duration,
 }
 
-impl CalendarRefresher for FixedRefresher {
-    fn refresh(&mut self, request: CalendarRefreshRequest) -> CalendarRefreshResult {
+impl ProviderRefresher for FixedRefresher {
+    fn refresh(&mut self, request: ProviderRefreshRequest) -> ProviderRefreshResult {
         thread::sleep(self.delay);
-        CalendarRefreshResult {
+        ProviderRefreshResult {
             generation: request.generation,
             widget_id: request.widget_id,
             fields: vec![
                 Field {
                     key: "title".into(),
-                    value: FieldValue::Text(request.title),
+                    value: FieldValue::Text(request.title.clone()),
                 },
                 Field {
                     key: "stale".into(),
                     value: FieldValue::Boolean(false),
                 },
             ],
-            value: None,
+            value: Some(serde_json::json!({ "summary": request.title })),
             refreshed_at: Some(request.now),
             age: Some(Duration::ZERO),
             stale: false,
@@ -565,50 +565,9 @@ struct CountingRefresher {
     calls: Arc<AtomicU64>,
 }
 
-impl CalendarRefresher for CountingRefresher {
-    fn refresh(&mut self, request: CalendarRefreshRequest) -> CalendarRefreshResult {
+impl ProviderRefresher for CountingRefresher {
+    fn refresh(&mut self, request: ProviderRefreshRequest) -> ProviderRefreshResult {
         self.calls.fetch_add(1, Ordering::Relaxed);
-        FixedRefresher {
-            delay: Duration::ZERO,
-        }
-        .refresh(request)
-    }
-}
-
-struct MultiProviderRefresher {
-    calls: Arc<Mutex<Vec<(String, &'static str)>>>,
-    delay: Duration,
-}
-
-impl CalendarRefresher for MultiProviderRefresher {
-    fn refresh(&mut self, request: CalendarRefreshRequest) -> CalendarRefreshResult {
-        let kind = match &request.provider {
-            ProviderRequest::Calendar { .. } => "calendar",
-            ProviderRequest::Weather { .. } => "weather",
-            ProviderRequest::JsonFeed { .. } => "json-feed",
-            ProviderRequest::Rss { .. } => "rss",
-            ProviderRequest::Plugin { .. } => "plugin",
-        };
-        self.calls
-            .lock()
-            .unwrap()
-            .push((request.widget_id.clone(), kind));
-        thread::sleep(self.delay);
-        if kind == "rss" {
-            return CalendarRefreshResult {
-                generation: request.generation,
-                widget_id: request.widget_id,
-                fields: vec![Field {
-                    key: "title".into(),
-                    value: FieldValue::Text(request.title),
-                }],
-                value: None,
-                refreshed_at: None,
-                age: None,
-                stale: true,
-                error: Some("malformed provider data: fixture failure".into()),
-            };
-        }
         FixedRefresher {
             delay: Duration::ZERO,
         }
@@ -622,8 +581,8 @@ struct LastGoodRefresher {
     calls: u64,
 }
 
-impl CalendarRefresher for LastGoodRefresher {
-    fn refresh(&mut self, request: CalendarRefreshRequest) -> CalendarRefreshResult {
+impl ProviderRefresher for LastGoodRefresher {
+    fn refresh(&mut self, request: ProviderRefreshRequest) -> ProviderRefreshResult {
         self.calls += 1;
         if self.calls == 1 {
             self.last_success = Some(request.now);
@@ -632,7 +591,7 @@ impl CalendarRefresher for LastGoodRefresher {
             }
             .refresh(request);
         }
-        CalendarRefreshResult {
+        ProviderRefreshResult {
             generation: request.generation,
             widget_id: request.widget_id,
             fields: vec![
@@ -668,13 +627,13 @@ fn plugin_refreshed_at() -> chrono::DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 9, 5, 12, 34, 56).unwrap()
 }
 
-impl CalendarRefresher for PluginRefresher {
-    fn refresh(&mut self, request: CalendarRefreshRequest) -> CalendarRefreshResult {
+impl ProviderRefresher for PluginRefresher {
+    fn refresh(&mut self, request: ProviderRefreshRequest) -> ProviderRefreshResult {
         assert!(
             matches!(request.provider, ProviderRequest::Plugin { .. }),
             "plugin cards must be scheduled as plugin provider requests"
         );
-        CalendarRefreshResult {
+        ProviderRefreshResult {
             generation: request.generation,
             widget_id: request.widget_id,
             fields: vec![
@@ -913,52 +872,6 @@ fn full_config() -> AppConfig {
     config
 }
 
-fn multi_provider_config() -> AppConfig {
-    let mut config = full_config();
-    config.cards.push(
-        serde_json::from_value(serde_json::json!({
-            "kind": "json-feed",
-            "id": "json",
-            "title": "JSON",
-            "url": "https://example.test/metrics.json",
-            "mappings": [
-                { "field": "row0_title", "path": "$.headline" },
-                { "field": "row0_time", "path": "$.time" }
-            ],
-            "template": { "kind": "row-list" },
-            "tap_action": { "kind": "none" },
-            "refresh": { "kind": "manual" },
-            "alert": { "kind": "none" }
-        }))
-        .unwrap(),
-    );
-    config.cards.push(
-        serde_json::from_value(serde_json::json!({
-            "kind": "rss",
-            "id": "rss",
-            "title": "News",
-            "url": "https://example.test/feed.xml",
-            "max_items": 5,
-            "template": { "kind": "row-list" },
-            "tap_action": { "kind": "none" },
-            "refresh": { "kind": "manual" },
-            "alert": { "kind": "none" }
-        }))
-        .unwrap(),
-    );
-    config.playlists[0].entries.extend([
-        PlaylistEntry {
-            card_id: "json".into(),
-            dwell_seconds: None,
-        },
-        PlaylistEntry {
-            card_id: "rss".into(),
-            dwell_seconds: None,
-        },
-    ]);
-    config
-}
-
 fn plugin_config() -> AppConfig {
     let mut config = full_config();
     config.cards = vec![CardSettings::Plugin {
@@ -1045,12 +958,19 @@ fn start_plugin_runtime(
     .unwrap()
 }
 
+fn test_plugin_host() -> Box<dyn PluginHost> {
+    let host = FakePluginHostControl::default();
+    Box::new(host.host())
+}
+
 fn start_runtime(config: AppConfig, control: &MockDeviceControl, delay: Duration) -> RuntimeHandle {
-    RuntimeHandle::start(
+    let host = FakePluginHostControl::default();
+    RuntimeHandle::start_with_plugin_host(
         config,
         Box::new(MockDevice::new(control.clone())),
         Box::new(FixedRefresher { delay }),
         options(),
+        Some(Box::new(host.host())),
     )
     .unwrap()
 }
@@ -2179,80 +2099,18 @@ fn scenes_push_on_host_events_and_never_on_clock_or_pomodoro_ticks() {
         "pomodoro scheduler ticks update bindings through PushData, not scene rebuilds"
     );
 
-    runtime.activate_screen("calendar").unwrap();
+    runtime.activate_screen("plugin").unwrap();
     wait_for(Duration::from_secs(1), || {
         control.operations().iter().rev().any(
-            |operation| matches!(operation, Operation::PushScene(push) if push.card_id == "calendar"),
+            |operation| matches!(operation, Operation::PushScene(push) if push.card_id == "plugin"),
         )
     });
     let before_provider = scene_count();
-    runtime.refresh_provider("calendar").unwrap();
+    runtime.refresh_provider("plugin").unwrap();
     wait_for(Duration::from_secs(1), || scene_count() > before_provider);
     assert!(control.operations().iter().rev().any(
-        |operation| matches!(operation, Operation::PushScene(push) if push.card_id == "calendar"),
+        |operation| matches!(operation, Operation::PushScene(push) if push.card_id == "plugin"),
     ));
-    runtime.shutdown().unwrap();
-}
-
-#[test]
-fn stale_error_transition_rebuilds_the_active_scene_with_its_footer() {
-    let control = MockDeviceControl::default();
-    let runtime = RuntimeHandle::start(
-        full_config(),
-        Box::new(MockDevice::new(control.clone())),
-        Box::<LastGoodRefresher>::default(),
-        options(),
-    )
-    .unwrap();
-    wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
-        snapshot
-            .providers
-            .first()
-            .is_some_and(|provider| matches!(provider.state, app_core::ProviderState::Fresh))
-    });
-    runtime.activate_screen("calendar").unwrap();
-    wait_for(Duration::from_secs(1), || {
-        control.operations().iter().any(
-            |operation| matches!(operation, Operation::PushScene(push) if push.card_id == "calendar"),
-        )
-    });
-    let before_stale = control
-        .operations()
-        .iter()
-        .filter(|operation| matches!(operation, Operation::PushScene(_)))
-        .count();
-
-    runtime.refresh_provider("calendar").unwrap();
-    wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
-        snapshot
-            .providers
-            .first()
-            .is_some_and(|provider| matches!(provider.state, app_core::ProviderState::Stale { .. }))
-    });
-    wait_for(Duration::from_secs(1), || {
-        control
-            .operations()
-            .iter()
-            .filter(|operation| matches!(operation, Operation::PushScene(_)))
-            .count()
-            > before_stale
-    });
-    let latest = control
-        .operations()
-        .into_iter()
-        .rev()
-        .find_map(|operation| match operation {
-            Operation::PushScene(push) if push.card_id == "calendar" => Some(push),
-            _ => None,
-        })
-        .expect("stale provider result rebuilt the calendar scene");
-    assert!(latest.scene.nodes.iter().any(|node| {
-        matches!(
-            node,
-            SceneNode::Text(text)
-                if text.value == SceneValue::Literal("offline".into())
-        )
-    }));
     runtime.shutdown().unwrap();
 }
 
@@ -2415,13 +2273,13 @@ fn local_navigation_becomes_the_authoritative_screen_for_reset_replay() {
     control.push_event(DeviceEvent {
         sequence: 1,
         kind: EventKind::Navigation,
-        widget_id: "calendar".into(),
-        screen_id: "calendar".into(),
+        widget_id: "plugin".into(),
+        screen_id: "plugin".into(),
         action: EventAction::NavigateNext,
         interrupt_token: None,
     });
     wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
-        snapshot.device.active_screen_id.as_deref() == Some("calendar")
+        snapshot.device.active_screen_id.as_deref() == Some("plugin")
     });
 
     control.force_disconnect(true);
@@ -2431,7 +2289,7 @@ fn local_navigation_becomes_the_authoritative_screen_for_reset_replay() {
             .operations()
             .iter()
             .rev()
-            .any(|operation| *operation == Operation::ReplayActivate("calendar".into()))
+            .any(|operation| *operation == Operation::ReplayActivate("plugin".into()))
     });
     let last_replay_activation = control
         .operations()
@@ -2441,7 +2299,7 @@ fn local_navigation_becomes_the_authoritative_screen_for_reset_replay() {
         .unwrap();
     assert_eq!(
         last_replay_activation,
-        Operation::ReplayActivate("calendar".into())
+        Operation::ReplayActivate("plugin".into())
     );
     runtime.shutdown().unwrap();
 }
@@ -2914,13 +2772,14 @@ fn lagging_subscriber_does_not_cause_a_diagnostic_only_second_snapshot() {
 fn pause_defers_timer_pushes_and_provider_refresh_until_resume() {
     let control = MockDeviceControl::default();
     let calls = Arc::new(AtomicU64::new(0));
-    let runtime = RuntimeHandle::start(
+    let runtime = RuntimeHandle::start_with_plugin_host(
         full_config(),
         Box::new(MockDevice::new(control.clone())),
         Box::new(CountingRefresher {
             calls: Arc::clone(&calls),
         }),
         options(),
+        Some(test_plugin_host()),
     )
     .unwrap();
     wait_for(Duration::from_secs(1), || {
@@ -2936,7 +2795,7 @@ fn pause_defers_timer_pushes_and_provider_refresh_until_resume() {
     runtime
         .control_pomodoro("pomodoro", PomodoroAction::Start)
         .unwrap();
-    runtime.refresh_provider("calendar").unwrap();
+    runtime.refresh_provider("plugin").unwrap();
     thread::sleep(Duration::from_millis(40));
     assert_eq!(calls.load(Ordering::Relaxed), 1);
     assert_eq!(
@@ -2967,11 +2826,12 @@ fn pause_defers_timer_pushes_and_provider_refresh_until_resume() {
 #[test]
 fn provider_failure_keeps_last_success_and_projects_stale_state() {
     let control = MockDeviceControl::default();
-    let runtime = RuntimeHandle::start(
+    let runtime = RuntimeHandle::start_with_plugin_host(
         full_config(),
         Box::new(MockDevice::new(control)),
         Box::<LastGoodRefresher>::default(),
         options(),
+        Some(test_plugin_host()),
     )
     .unwrap();
     let fresh = wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
@@ -2981,7 +2841,7 @@ fn provider_failure_keeps_last_success_and_projects_stale_state() {
             .is_some_and(|provider| matches!(provider.state, app_core::ProviderState::Fresh))
     });
     let last_success = fresh.providers[0].last_success_unix_ms;
-    runtime.refresh_provider("calendar").unwrap();
+    runtime.refresh_provider("plugin").unwrap();
     let stale = wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
         snapshot
             .providers
@@ -3144,8 +3004,8 @@ fn manual_refresh_during_in_flight_work_is_coalesced() {
             .is_some_and(|provider| matches!(provider.state, app_core::ProviderState::Refreshing))
     });
 
-    runtime.refresh_provider("calendar").unwrap();
-    runtime.refresh_provider("calendar").unwrap();
+    runtime.refresh_provider("plugin").unwrap();
+    runtime.refresh_provider("plugin").unwrap();
     let fresh = wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
         snapshot
             .providers
@@ -3166,68 +3026,6 @@ fn manual_refresh_during_in_flight_work_is_coalesced() {
 }
 
 #[test]
-fn all_provider_kinds_share_bounded_scheduling_and_fail_independently() {
-    let control = MockDeviceControl::default();
-    let calls = Arc::new(Mutex::new(Vec::new()));
-    let runtime = RuntimeHandle::start(
-        multi_provider_config(),
-        Box::new(MockDevice::new(control.clone())),
-        Box::new(MultiProviderRefresher {
-            calls: Arc::clone(&calls),
-            delay: Duration::from_millis(40),
-        }),
-        options(),
-    )
-    .unwrap();
-
-    let snapshot = wait_for_snapshot(&runtime, Duration::from_secs(2), |snapshot| {
-        snapshot.providers.len() == 3
-            && snapshot.providers.iter().all(|provider| {
-                matches!(
-                    provider.state,
-                    app_core::ProviderState::Fresh | app_core::ProviderState::Error { .. }
-                )
-            })
-    });
-    assert!(snapshot.providers.iter().any(|provider| {
-        provider.widget_id == "rss"
-            && matches!(provider.state, app_core::ProviderState::Error { .. })
-    }));
-    assert!(
-        snapshot
-            .providers
-            .iter()
-            .filter(|provider| { matches!(provider.state, app_core::ProviderState::Fresh) })
-            .count()
-            >= 2
-    );
-    assert!(snapshot.diagnostics.provider_queue_full >= 1);
-    assert!(
-        control
-            .operations()
-            .iter()
-            .filter(|operation| **operation == Operation::Status)
-            .count()
-            >= 2,
-        "provider work blocked device keepalives"
-    );
-
-    let initial_calls = calls.lock().unwrap().clone();
-    assert!(initial_calls.contains(&("calendar".into(), "calendar")));
-    assert!(initial_calls.contains(&("json".into(), "json-feed")));
-    assert!(initial_calls.contains(&("rss".into(), "rss")));
-    assert_eq!(initial_calls.len(), 3);
-
-    runtime.refresh_provider("json").unwrap();
-    runtime.refresh_provider("json").unwrap();
-    wait_for(Duration::from_secs(1), || calls.lock().unwrap().len() == 4);
-    thread::sleep(Duration::from_millis(80));
-    assert_eq!(calls.lock().unwrap().len(), 4);
-    assert_eq!(calls.lock().unwrap()[3], ("json".into(), "json-feed"));
-    runtime.shutdown().unwrap();
-}
-
-#[test]
 fn unrelated_config_and_preference_edits_preserve_live_timer_and_screen() {
     let control = MockDeviceControl::default();
     let runtime = start_runtime(full_config(), &control, Duration::ZERO);
@@ -3237,14 +3035,14 @@ fn unrelated_config_and_preference_edits_preserve_live_timer_and_screen() {
     runtime
         .control_pomodoro("pomodoro", PomodoroAction::Start)
         .unwrap();
-    runtime.activate_screen("calendar").unwrap();
+    runtime.activate_screen("plugin").unwrap();
     runtime.set_autostart_preference(false).unwrap();
     let before = wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
         snapshot
             .pomodoros
             .first()
             .is_some_and(|timer| timer.state == PomodoroState::Running)
-            && snapshot.device.active_screen_id.as_deref() == Some("calendar")
+            && snapshot.device.active_screen_id.as_deref() == Some("plugin")
     });
 
     let mut edited = before.config;
@@ -3271,7 +3069,7 @@ fn unrelated_config_and_preference_edits_preserve_live_timer_and_screen() {
             .first()
             .is_some_and(|timer| timer.state == PomodoroState::Running)
     );
-    assert_eq!(after.device.active_screen_id.as_deref(), Some("calendar"));
+    assert_eq!(after.device.active_screen_id.as_deref(), Some("plugin"));
     assert!(control.operations().contains(&Operation::ApplyLayout(90)));
     runtime.shutdown().unwrap();
 }

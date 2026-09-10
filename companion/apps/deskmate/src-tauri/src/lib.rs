@@ -659,7 +659,6 @@ pub fn run() {
             MacosLauncher::LaunchAgent,
             None,
         ))
-        .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             commands::get_app_snapshot,
             commands::validate_config_draft,
@@ -673,7 +672,6 @@ pub fn run() {
             commands::resume_pushing,
             commands::control_pomodoro,
             commands::refresh_provider,
-            commands::choose_ics_file,
             commands::get_autostart_status,
             commands::set_autostart_enabled,
             commands::render_card_preview,

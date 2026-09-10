@@ -4,7 +4,7 @@ import type { IpcContractFixtures } from "./types";
 export const ipcContractFixtures = {
   "snapshot": {
     "config": {
-      "schema_version": 7,
+      "schema_version": 8,
       "preferences": {
         "timezone": "Asia/Tbilisi",
         "autostart": true,
@@ -52,16 +52,10 @@ export const ipcContractFixtures = {
           }
         },
         {
-          "kind": "calendar",
-          "id": "calendar",
-          "title": "Next",
-          "source": {
-            "kind": "file",
-            "value": "/tmp/calendar.ics"
-          },
-          "template": {
-            "kind": "row-list"
-          },
+          "kind": "plugin",
+          "id": "air-quality",
+          "title": "Office air",
+          "plugin_id": "com.example.air-quality",
           "tap_action": {
             "kind": "none"
           },
@@ -70,12 +64,22 @@ export const ipcContractFixtures = {
             "minutes": 15
           },
           "alert": {
-            "kind": "before-event",
-            "lead_minutes": 5,
-            "hold": {
-              "kind": "seconds",
-              "value": 60
-            }
+            "kind": "none"
+          }
+        },
+        {
+          "kind": "picture",
+          "id": "limits-picture",
+          "title": "Limits",
+          "source_id": "limits",
+          "tap_action": {
+            "kind": "none"
+          },
+          "refresh": {
+            "kind": "manual"
+          },
+          "alert": {
+            "kind": "none"
           }
         }
       ],
@@ -104,7 +108,7 @@ export const ipcContractFixtures = {
               "dwell_seconds": 20
             },
             {
-              "card_id": "calendar",
+              "card_id": "air-quality",
               "dwell_seconds": null
             }
           ]
@@ -174,7 +178,7 @@ export const ipcContractFixtures = {
     },
     "providers": [
       {
-        "widget_id": "calendar",
+        "widget_id": "air-quality",
         "state": {
           "kind": "stale",
           "message": "offline"
@@ -193,20 +197,13 @@ export const ipcContractFixtures = {
     ],
     "card_data": [
       {
-        "card_id": "calendar",
+        "card_id": "air-quality",
         "fields": [
           {
-            "key": "row0_title",
+            "key": "summary",
             "value": {
               "kind": "text",
-              "value": "Design review"
-            }
-          },
-          {
-            "key": "next_start_unix_ms",
-            "value": {
-              "kind": "integer",
-              "value": 1787000000000
+              "value": "42 · Good"
             }
           },
           {
@@ -222,7 +219,7 @@ export const ipcContractFixtures = {
     "card_errors": [
       {
         "kind": "data-refused",
-        "card_id": "json",
+        "card_id": "air-quality",
         "message": "the display refused this card's data (InvalidPayload): invalid push data"
       }
     ],
@@ -250,7 +247,7 @@ export const ipcContractFixtures = {
   },
   "configs": [
     {
-      "schema_version": 7,
+      "schema_version": 8,
       "preferences": {
         "timezone": "Asia/Tbilisi",
         "autostart": true,
@@ -298,16 +295,10 @@ export const ipcContractFixtures = {
           }
         },
         {
-          "kind": "calendar",
-          "id": "calendar",
-          "title": "Next",
-          "source": {
-            "kind": "file",
-            "value": "/tmp/calendar.ics"
-          },
-          "template": {
-            "kind": "row-list"
-          },
+          "kind": "plugin",
+          "id": "air-quality",
+          "title": "Office air",
+          "plugin_id": "com.example.air-quality",
           "tap_action": {
             "kind": "none"
           },
@@ -316,12 +307,22 @@ export const ipcContractFixtures = {
             "minutes": 15
           },
           "alert": {
-            "kind": "before-event",
-            "lead_minutes": 5,
-            "hold": {
-              "kind": "seconds",
-              "value": 60
-            }
+            "kind": "none"
+          }
+        },
+        {
+          "kind": "picture",
+          "id": "limits-picture",
+          "title": "Limits",
+          "source_id": "limits",
+          "tap_action": {
+            "kind": "none"
+          },
+          "refresh": {
+            "kind": "manual"
+          },
+          "alert": {
+            "kind": "none"
           }
         }
       ],
@@ -350,7 +351,7 @@ export const ipcContractFixtures = {
               "dwell_seconds": 20
             },
             {
-              "card_id": "calendar",
+              "card_id": "air-quality",
               "dwell_seconds": null
             }
           ]
@@ -417,100 +418,6 @@ export const ipcContractFixtures = {
       }
     },
     {
-      "kind": "calendar",
-      "id": "calendar",
-      "title": "Next",
-      "source": {
-        "kind": "file",
-        "value": "/tmp/calendar.ics"
-      },
-      "template": {
-        "kind": "row-list"
-      },
-      "tap_action": {
-        "kind": "none"
-      },
-      "refresh": {
-        "kind": "interval",
-        "minutes": 15
-      },
-      "alert": {
-        "kind": "before-event",
-        "lead_minutes": 5,
-        "hold": {
-          "kind": "seconds",
-          "value": 60
-        }
-      }
-    },
-    {
-      "kind": "weather",
-      "id": "weather",
-      "title": "Weather",
-      "location": "Tbilisi",
-      "units": "metric",
-      "template": {
-        "kind": "icon-badge-text",
-        "icon_asset_id": "weather-icons"
-      },
-      "tap_action": {
-        "kind": "open-url",
-        "url": "https://example.test/weather"
-      },
-      "refresh": {
-        "kind": "interval",
-        "minutes": 30
-      },
-      "alert": {
-        "kind": "none"
-      }
-    },
-    {
-      "kind": "json-feed",
-      "id": "json",
-      "title": "Metric",
-      "url": "https://example.test/metric.json",
-      "mappings": [
-        {
-          "field": "value",
-          "path": "$.current.value"
-        }
-      ],
-      "template": {
-        "kind": "big-number-label"
-      },
-      "tap_action": {
-        "kind": "open-application",
-        "application_id": "com.example.metrics"
-      },
-      "refresh": {
-        "kind": "manual"
-      },
-      "alert": {
-        "kind": "none"
-      }
-    },
-    {
-      "kind": "rss",
-      "id": "news",
-      "title": "News",
-      "url": "https://example.test/feed.xml",
-      "max_items": 3,
-      "template": {
-        "kind": "row-list"
-      },
-      "tap_action": {
-        "kind": "dismiss"
-      },
-      "refresh": {
-        "kind": "interval",
-        "minutes": 15
-      },
-      "alert": {
-        "kind": "none"
-      }
-    },
-    {
       "kind": "plugin",
       "id": "air-quality",
       "title": "Office air",
@@ -560,7 +467,7 @@ export const ipcContractFixtures = {
           "dwell_seconds": 20
         },
         {
-          "card_id": "calendar",
+          "card_id": "air-quality",
           "dwell_seconds": null
         }
       ]
@@ -589,7 +496,7 @@ export const ipcContractFixtures = {
       "dwell_seconds": 20
     },
     {
-      "card_id": "calendar",
+      "card_id": "air-quality",
       "dwell_seconds": null
     }
   ],
@@ -601,14 +508,6 @@ export const ipcContractFixtures = {
       "kind": "on-timer-finish",
       "hold": {
         "kind": "until-dismissed"
-      }
-    },
-    {
-      "kind": "before-event",
-      "lead_minutes": 5,
-      "hold": {
-        "kind": "seconds",
-        "value": 60
       }
     }
   ],
@@ -628,16 +527,6 @@ export const ipcContractFixtures = {
     {
       "kind": "timed",
       "default_dwell_seconds": 20
-    }
-  ],
-  "calendar_sources": [
-    {
-      "kind": "file",
-      "value": "/tmp/calendar.ics"
-    },
-    {
-      "kind": "url",
-      "value": "https://example.test/calendar.ics"
     }
   ],
   "display_templates": [
@@ -695,14 +584,10 @@ export const ipcContractFixtures = {
       "minutes": 15
     }
   ],
-  "weather_units": [
-    "metric",
-    "imperial"
-  ],
   "asset_sources": [
     {
       "kind": "file",
-      "value": "/tmp/weather-icons.ttf"
+      "value": "/tmp/status-icons.ttf"
     }
   ],
   "asset_kinds": [
@@ -805,20 +690,13 @@ export const ipcContractFixtures = {
   ],
   "card_data": [
     {
-      "card_id": "calendar",
+      "card_id": "air-quality",
       "fields": [
         {
-          "key": "row0_title",
+          "key": "summary",
           "value": {
             "kind": "text",
-            "value": "Design review"
-          }
-        },
-        {
-          "key": "next_start_unix_ms",
-          "value": {
-            "kind": "integer",
-            "value": 1787000000000
+            "value": "42 · Good"
           }
         },
         {

@@ -13,18 +13,10 @@
       "size": "standard",
       "tap_action": "start-pause",
       "interrupts": true
-    },
-    {
-      "id": "calendar",
-      "template": "row-list",
-      "size": "standard",
-      "tap_action": "none",
-      "interrupts": true
     }
   ],
   "screens": [
     { "id": "clock-screen", "widget": "clock" },
-    { "id": "pomodoro-screen", "widget": "pomodoro" },
-    { "id": "calendar-screen", "widget": "calendar" }
+    { "id": "pomodoro-screen", "widget": "pomodoro" }
   ]
 }

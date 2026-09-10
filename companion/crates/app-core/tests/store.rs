@@ -8,8 +8,8 @@ use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
 use app_core::{
-    AlertHold, AppConfig, CURRENT_SCHEMA_VERSION, CalendarSource, CardAlert, CardSettings,
-    CarouselAdvance, ConfigOrigin, ConfigStore, DisplayOrientation, DisplayTemplate, LoadOutcome,
+    AlertHold, AppConfig, CURRENT_SCHEMA_VERSION, CardAlert, CardSettings, CarouselAdvance,
+    ConfigOrigin, ConfigStore, DisplayOrientation, DisplayTemplate, LoadOutcome,
     MAX_CONFIG_FILE_BYTES, RefreshPolicy, SAVED_SETTINGS_VALIDATION_FAILURE_MESSAGE, StoreError,
     WidgetTapAction,
 };
@@ -120,13 +120,13 @@ fn save_round_trips_and_migration_is_explicit() {
     assert_eq!(migrated.origin(), ConfigOrigin::MigratedV1);
     assert_eq!(migrated.config().schema_version, CURRENT_SCHEMA_VERSION);
     assert_eq!(migrated.config().preferences.timezone, "Asia/Tbilisi");
-    assert_eq!(migrated.config().cards.len(), 3);
+    assert_eq!(migrated.config().cards.len(), 2);
     assert_eq!(
         migrated.config().preferences.orientation,
         DisplayOrientation::LandscapeFlipped
     );
-    // The legacy fixture's `screens` list orders pomodoro, clock, calendar; the card
-    // model's rotation order is now the card order, so migration preserves that order.
+    // The retired calendar is dropped; the surviving screen order remains pomodoro,
+    // then clock.
     assert!(matches!(
         &migrated.config().cards[0],
         CardSettings::Pomodoro {
@@ -152,19 +152,6 @@ fn save_round_trips_and_migration_is_explicit() {
             alert: CardAlert::None,
             ..
         } if id == "clock" && title == "Desk"
-    ));
-    // The legacy migration's calendar default is `interrupt_policy: disabled`, so this
-    // must migrate to `alert: none`, not `before-event` — a calendar card only gets
-    // `before-event` when it is derived from a legacy `interrupt_policy: enabled`.
-    assert!(matches!(
-        &migrated.config().cards[2],
-        CardSettings::Calendar {
-            id,
-            source: CalendarSource::Url(source),
-            refresh: RefreshPolicy::Interval { minutes: 15 },
-            alert: CardAlert::None,
-            ..
-        } if id == "calendar" && source == "https://example.com/calendar.ics"
     ));
     assert!(migrated.config().assets.is_empty());
     assert_eq!(
@@ -240,14 +227,12 @@ fn v3_migrates_to_one_playlist_preserving_rotation_order_and_dwell() {
             default_dwell_seconds: 30
         }
     );
-    assert_eq!(playlist.entries.len(), 2);
+    assert_eq!(playlist.entries.len(), 1);
     assert_eq!(playlist.entries[0].card_id, "a");
     assert_eq!(playlist.entries[0].dwell_seconds, Some(20));
-    assert_eq!(playlist.entries[1].card_id, "d");
-    assert_eq!(playlist.entries[1].dwell_seconds, None);
 
     let ids: Vec<&str> = config.cards.iter().map(CardSettings::id).collect();
-    assert_eq!(ids, ["a", "b", "c", "d"]);
+    assert_eq!(ids, ["a", "b"]);
     assert!(matches!(
         &config.cards[0],
         CardSettings::Clock {
@@ -273,31 +258,6 @@ fn v3_migrates_to_one_playlist_preserving_rotation_order_and_dwell() {
             },
             ..
         } if label == "Deep work"
-    ));
-    assert!(matches!(
-        &config.cards[2],
-        CardSettings::Calendar {
-            title,
-            source: CalendarSource::Url(source),
-            template: DisplayTemplate::RowList,
-            tap_action: WidgetTapAction::Dismiss,
-            refresh: RefreshPolicy::Interval { minutes: 20 },
-            alert: CardAlert::None,
-            ..
-        } if title == "Meetings" && source == "https://example.test/calendar.ics"
-    ));
-    assert!(matches!(
-        &config.cards[3],
-        CardSettings::Weather {
-            title,
-            location,
-            units: app_core::WeatherUnits::Metric,
-            template: DisplayTemplate::BigNumberLabel,
-            tap_action: WidgetTapAction::OpenUrl { url },
-            refresh: RefreshPolicy::Interval { minutes: 30 },
-            alert: CardAlert::None,
-            ..
-        } if title == "Outside" && location == "Tbilisi" && url == "https://example.test/weather"
     ));
     assert_eq!(config.preferences.timezone, "Asia/Tbilisi");
     assert!(config.preferences.autostart);
@@ -352,7 +312,7 @@ fn v3_all_alert_only_migrates_to_valid_config() {
     let outcome = store.load();
     assert_eq!(outcome.origin(), ConfigOrigin::MigratedV3);
     assert!(outcome.recovery().is_none());
-    assert_eq!(outcome.config().cards.len(), 2);
+    assert_eq!(outcome.config().cards.len(), 1);
     assert_eq!(outcome.config().playlists[0].entries.len(), 1);
     assert_eq!(outcome.config().playlists[0].entries[0].card_id, "focus");
     assert_eq!(
@@ -365,7 +325,7 @@ fn v3_all_alert_only_migrates_to_valid_config() {
 }
 
 #[test]
-fn v4_config_migrates_to_v7_unchanged() {
+fn v4_config_migrates_to_v8_with_surviving_cards_unchanged() {
     // config.rs's compile step has always rejected a non-empty `assets` array, so no
     // saved v4 config has ever contained one: migration to the current schema is a
     // version bump with no data transformation (v4 -> v7 directly, not chained
@@ -391,11 +351,7 @@ fn v4_config_migrates_to_v7_unchanged() {
 }
 
 #[test]
-fn v5_config_migrates_to_v7_unchanged() {
-    // v6 adds exactly one thing to the schema: a `plugin` card kind no v5 document
-    // could ever contain (it did not exist yet). Every other type is byte-for-byte
-    // the same shape, and v7's additive `image_sources` field defaults empty, so
-    // migration is a version bump with no data transformation.
+fn v5_config_migrates_to_v8_dropping_retired_cards() {
     let directory = test_directory("v5-migration");
     let path = directory.path().join("config.json");
     let store = ConfigStore::new(&path);
@@ -408,29 +364,21 @@ fn v5_config_migrates_to_v7_unchanged() {
     let migrated = outcome.config();
     assert_eq!(migrated.schema_version, CURRENT_SCHEMA_VERSION);
 
-    // Independently parse the identical source bytes as the current `AppConfig`
-    // shape and bump only the version field by hand. Because v6/v7 change no
-    // existing type and the one new field defaults empty, this independently-derived
-    // value is what a truly lossless migration must produce; comparing whole sections
-    // (not just scalar summaries) proves everything a v5 config could express survived.
-    let mut expected: AppConfig =
-        serde_json::from_str(include_str!("fixtures/v5-roundtrip.json")).unwrap();
-    expected.schema_version = CURRENT_SCHEMA_VERSION;
-
-    assert_eq!(migrated.preferences, expected.preferences);
-    assert_eq!(migrated.cards, expected.cards);
+    assert_eq!(
+        migrated
+            .cards
+            .iter()
+            .map(CardSettings::id)
+            .collect::<Vec<_>>(),
+        ["analog", "focus"]
+    );
     assert!(migrated.image_sources.is_empty());
-    assert_eq!(migrated.assets, expected.assets);
-    assert_eq!(migrated.playlists, expected.playlists);
-    assert_eq!(migrated.active_playlist_id, expected.active_playlist_id);
-    assert_eq!(migrated.updater, expected.updater);
-    assert_eq!(migrated, &expected);
-
+    assert_eq!(migrated.playlists[0].entries.len(), 2);
     assert!(migrated.validate().is_ok());
 }
 
 #[test]
-fn a_v6_document_migrates_to_v7_with_no_image_sources_and_loses_nothing() {
+fn a_v6_document_migrates_to_v8_with_no_image_sources_and_loses_nothing() {
     // A real v6 document: no `image_sources` key at all. It must parse, not fail.
     let v6 = serde_json::json!({
         "schema_version": 6,
@@ -466,7 +414,7 @@ fn a_v6_document_migrates_to_v7_with_no_image_sources_and_loses_nothing() {
 
     assert_eq!(loaded.origin(), ConfigOrigin::MigratedV6);
     assert_eq!(config.schema_version, app_core::CURRENT_SCHEMA_VERSION);
-    assert_eq!(config.schema_version, 7);
+    assert_eq!(config.schema_version, 8);
     assert!(config.image_sources.is_empty(), "v6 knew no sources");
     // Lossless: everything else survived untouched.
     assert_eq!(config.cards.len(), 1);
@@ -475,8 +423,74 @@ fn a_v6_document_migrates_to_v7_with_no_image_sources_and_loses_nothing() {
 }
 
 #[test]
-fn v0_v1_v2_migrate_directly_to_v7() {
-    let directory = test_directory("legacy-direct-to-v7");
+fn v7_document_migrates_to_v8_dropping_retired_cards_and_entries() {
+    let directory = test_directory("v7-migration");
+    let path = directory.path().join("config.json");
+    let store = ConfigStore::new(&path);
+    fs::write(&path, include_bytes!("fixtures/v7-roundtrip.json")).unwrap();
+
+    let outcome = store.load();
+    assert_eq!(outcome.origin(), ConfigOrigin::MigratedV7);
+    assert!(outcome.recovery().is_none());
+    let config = outcome.config();
+    assert_eq!(config.schema_version, CURRENT_SCHEMA_VERSION);
+    assert_eq!(
+        config
+            .cards
+            .iter()
+            .map(CardSettings::id)
+            .collect::<Vec<_>>(),
+        ["clock", "pomodoro"]
+    );
+    assert_eq!(
+        config.playlists[0]
+            .entries
+            .iter()
+            .map(|entry| entry.card_id.as_str())
+            .collect::<Vec<_>>(),
+        ["clock", "pomodoro"]
+    );
+    config.validate().unwrap();
+}
+
+#[test]
+fn an_all_retired_v7_document_gets_the_default_clock_and_loses_empty_inactive_playlists() {
+    let directory = test_directory("v7-all-retired");
+    let path = directory.path().join("config.json");
+    let store = ConfigStore::new(&path);
+    let document = br#"{
+      "schema_version": 7,
+      "preferences": { "timezone": "UTC", "autostart": false, "paused": false, "orientation": "landscape" },
+      "cards": [
+        { "kind": "calendar", "id": "agenda", "title": "Agenda", "source": { "kind": "url", "value": "https://example.test/a.ics" }, "template": { "kind": "row-list" }, "tap_action": { "kind": "none" }, "refresh": { "kind": "interval", "minutes": 15 }, "alert": { "kind": "none" } },
+        { "kind": "weather", "id": "outside", "title": "Outside", "location": "Tbilisi", "units": "metric", "template": { "kind": "icon-badge-text", "icon_asset_id": null }, "tap_action": { "kind": "none" }, "refresh": { "kind": "interval", "minutes": 30 }, "alert": { "kind": "none" } },
+        { "kind": "json-feed", "id": "metric", "title": "Metric", "url": "https://example.test/data.json", "mappings": [], "template": { "kind": "big-number-label" }, "tap_action": { "kind": "none" }, "refresh": { "kind": "manual" }, "alert": { "kind": "none" } },
+        { "kind": "rss", "id": "news", "title": "News", "url": "https://example.test/feed.xml", "max_items": 3, "template": { "kind": "row-list" }, "tap_action": { "kind": "none" }, "refresh": { "kind": "interval", "minutes": 30 }, "alert": { "kind": "none" } }
+      ],
+      "assets": [],
+      "playlists": [
+        { "id": "active", "name": "Active", "advance": { "kind": "manual" }, "entries": [{ "card_id": "agenda", "dwell_seconds": null }, { "card_id": "outside", "dwell_seconds": null }] },
+        { "id": "inactive", "name": "Inactive", "advance": { "kind": "manual" }, "entries": [{ "card_id": "metric", "dwell_seconds": null }, { "card_id": "news", "dwell_seconds": null }] }
+      ],
+      "active_playlist_id": "active",
+      "updater": { "channel": "stable", "checks": "notify" }
+    }"#;
+    fs::write(&path, document).unwrap();
+
+    let outcome = store.load();
+    assert_eq!(outcome.origin(), ConfigOrigin::MigratedV7);
+    let config = outcome.config();
+    let defaults = AppConfig::default();
+    assert_eq!(config.cards, defaults.cards);
+    assert_eq!(config.playlists.len(), 1);
+    assert_eq!(config.playlists[0].id, "active");
+    assert_eq!(config.playlists[0].entries, defaults.playlists[0].entries);
+    config.validate().unwrap();
+}
+
+#[test]
+fn v0_v1_v2_migrate_directly_to_v8() {
+    let directory = test_directory("legacy-direct-to-v8");
     let path = directory.path().join("config.json");
     let store = ConfigStore::new(&path);
 
@@ -489,7 +503,7 @@ fn v0_v1_v2_migrate_directly_to_v7() {
         (
             include_bytes!("fixtures/released-m3-v1.json").as_slice(),
             ConfigOrigin::MigratedV1,
-            &["pomodoro", "clock", "calendar"][..],
+            &["pomodoro", "clock"][..],
         ),
         (
             include_bytes!("fixtures/v2-legacy.json").as_slice(),
@@ -605,30 +619,6 @@ fn concurrent_saves_are_serialized_and_disk_matches_latest_generation() {
 }
 
 #[test]
-fn calendar_persistence_contains_source_metadata_but_no_fetched_payload() {
-    let directory = test_directory("calendar-metadata");
-    let path = directory.path().join("config.json");
-    let store = ConfigStore::new(&path);
-    let mut config: AppConfig = serde_json::from_str(include_str!("fixtures/full.json")).unwrap();
-    config.schema_version = CURRENT_SCHEMA_VERSION;
-    let calendar = config
-        .cards
-        .iter_mut()
-        .find(|card| matches!(card, CardSettings::Calendar { .. }))
-        .unwrap();
-    if let CardSettings::Calendar { source, .. } = calendar {
-        *source = CalendarSource::File("/tmp/work.ics".into());
-    }
-
-    store.save(&config).unwrap();
-    let json = fs::read_to_string(path).unwrap();
-    assert!(json.contains("/tmp/work.ics"));
-    assert!(!json.contains("remaining_seconds"));
-    assert!(!json.contains("last_success"));
-    assert!(!json.contains("Design review"));
-}
-
-#[test]
 fn v2_documents_migrate_to_cards_in_screen_order() {
     let directory = test_directory("v2-migration");
     let path = directory.path().join("config.json");
@@ -695,7 +685,7 @@ fn migrated_v2_documents_always_satisfy_the_rotation_rule() {
 }
 
 #[test]
-fn future_v8_is_a_recoverable_error_preserving_bytes() {
+fn future_v9_is_a_recoverable_error_preserving_bytes() {
     let directory = test_directory("future-version");
     let path = directory.path().join("config.json");
     let store = ConfigStore::new(&path);
@@ -705,8 +695,8 @@ fn future_v8_is_a_recoverable_error_preserving_bytes() {
     store.save(&last_good).unwrap();
 
     let future = include_str!("fixtures/future-v7.json").replacen(
-        "\"schema_version\": 7",
         "\"schema_version\": 8",
+        "\"schema_version\": 9",
         1,
     );
     fs::write(&path, &future).unwrap();
@@ -717,8 +707,8 @@ fn future_v8_is_a_recoverable_error_preserving_bytes() {
     assert!(matches!(
         outcome.recovery(),
         Some(StoreError::UnsupportedVersion {
-            found: 8,
-            supported: 7
+            found: 9,
+            supported: 8
         })
     ));
     // The unreadable source bytes are never rewritten.

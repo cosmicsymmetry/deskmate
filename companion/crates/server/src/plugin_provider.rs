@@ -7,9 +7,9 @@
 //! flag apply to plugins with no new machinery.")
 //!
 //! This module therefore adds **no** new machinery to `Provider` itself:
-//! [`PluginDataProvider`] is a `Provider` impl shaped exactly like
-//! `providers::json_feed::JsonFeedProvider`, backed by the egress guard
-//! (`crate::egress`) instead of a bare HTTP client.
+//! [`PluginDataProvider`] is the server-side `Provider` implementation for curated
+//! plugin data, backed by the egress guard (`crate::egress`) instead of a bare HTTP
+//! client.
 //!
 //! # Transient vs permanent (Step 5)
 //!

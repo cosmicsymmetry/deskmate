@@ -7,13 +7,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use app_core::{
-    AlertHold, AppConfig, AppPreferences, CalendarSource, CardAlert, CardSettings, CarouselAdvance,
-    ConnectionState, DisplayTemplate, Playlist, PlaylistEntry, RefreshPolicy, RuntimeHandle,
-    RuntimeState, UpdaterSettings, WidgetTapAction,
-};
-use chrono::Utc;
-use chrono_tz::Tz;
 use device::{ConnectedSession, DeviceError, connect_session};
 use engine::interrupts::InterruptArbiter;
 use engine::pomodoro::Pomodoro;
@@ -22,8 +15,6 @@ use protocol::{
     InterruptPolicy, Message, PushData, ScreenConfig, SizeClass, TapAction, TemplateKind,
     TriggerInterrupt, WidgetConfig, encode_message,
 };
-use providers::ics::{CalendarOptions, IcsProvider, IcsSource};
-use providers::{Provider, ProviderSnapshot};
 use serde::Deserialize;
 
 use crate::{AppError, json_string};
@@ -34,9 +25,7 @@ M2 commands:
   deskmate-cli apply-config --config PATH [--port PATH] [--json]
   deskmate-cli select-screen --screen ID [--port PATH] [--json]
   deskmate-cli push-clock --widget ID [--title TEXT] [--show-seconds BOOL] [--port PATH] [--json]
-  deskmate-cli push-calendar --widget ID --ics FILE_OR_URL [--timezone TZ] [--title TEXT] [--port PATH] [--json]
   deskmate-cli pomodoro --widget ID [--duration-seconds N] [--label TEXT] [--port PATH] [--json]
-  deskmate-cli demo --config PATH --ics FILE_OR_URL [--timezone TZ] [--duration-seconds N] [--port PATH] [--json]
   deskmate-cli trigger-interrupt --widget ID --token N --reason TEXT [--port PATH] [--json]
   deskmate-cli events [--count N] [--port PATH] [--json]";
 
@@ -45,9 +34,7 @@ const M2_COMMANDS: &[&str] = &[
     "apply-config",
     "select-screen",
     "push-clock",
-    "push-calendar",
     "pomodoro",
-    "demo",
     "trigger-interrupt",
     "events",
 ];
@@ -80,16 +67,6 @@ struct LayoutScreen {
 struct CommonOptions {
     port: Option<String>,
     json: bool,
-}
-
-struct DemoOptions {
-    config: PathBuf,
-    source: String,
-    timezone: Tz,
-    clock_widget: String,
-    pomodoro_widget: String,
-    calendar_widget: String,
-    duration_seconds: u32,
 }
 
 struct Arguments {
@@ -143,9 +120,7 @@ pub fn run_if_requested() -> Result<bool, AppError> {
         "apply-config" => apply_config(&mut arguments)?,
         "select-screen" => select_screen(&mut arguments)?,
         "push-clock" => push_clock(&mut arguments)?,
-        "push-calendar" => push_calendar(&mut arguments)?,
         "pomodoro" => run_pomodoro(&mut arguments)?,
-        "demo" => run_demo(&mut arguments)?,
         "trigger-interrupt" => trigger_interrupt(&mut arguments)?,
         "events" => print_events(&mut arguments)?,
         _ => unreachable!(),
@@ -254,72 +229,6 @@ fn push_clock(arguments: &mut Arguments) -> Result<(), AppError> {
     let ack = connected.session.push_fields(widget.clone(), fields)?;
     let revision = ack.revision.ok_or(DeviceError::UnexpectedMessage)?;
     print_push(arguments.common.json, &widget, revision);
-    Ok(())
-}
-
-fn push_calendar(arguments: &mut Arguments) -> Result<(), AppError> {
-    let mut widget = None;
-    let mut source = None;
-    let mut timezone = chrono_tz::UTC;
-    let mut title = "Calendar".to_owned();
-    while let Some(option) = arguments.next() {
-        if arguments.common(&option)? {
-            continue;
-        }
-        match option.as_str() {
-            "--widget" => widget = Some(arguments.value("--widget")?),
-            "--ics" => source = Some(arguments.value("--ics")?),
-            "--timezone" => {
-                let raw = arguments.value("--timezone")?;
-                timezone = raw
-                    .parse::<Tz>()
-                    .map_err(|_| AppError::Config(format!("unknown IANA timezone: {raw}")))?;
-            }
-            "--title" => title = arguments.value("--title")?,
-            _ => return unknown_option(&option),
-        }
-    }
-    let widget = widget.ok_or_else(|| AppError::Usage("push-calendar requires --widget".into()))?;
-    let source = source.ok_or_else(|| AppError::Usage("push-calendar requires --ics".into()))?;
-    let source = if source.starts_with("https://") || source.starts_with("http://") {
-        IcsSource::Url(source)
-    } else {
-        IcsSource::File(PathBuf::from(source))
-    };
-    let options = CalendarOptions {
-        default_timezone: timezone,
-        display_timezone: timezone,
-        title,
-        ..CalendarOptions::default()
-    };
-    let now = Utc::now();
-    let mut provider = IcsProvider::system(source, options);
-    let snapshot = provider.refresh(now);
-    require_fresh(&snapshot)?;
-    let fields = provider.fields(&snapshot, now);
-    validate_push(&widget, &fields)?;
-    let connected = connect_session(arguments.common.port.as_deref())?;
-    let ack = connected.session.push_fields(widget.clone(), fields)?;
-    let revision = ack.revision.ok_or(DeviceError::UnexpectedMessage)?;
-    if arguments.common.json {
-        println!(
-            "{{\"ok\":true,\"widget_id\":{},\"revision\":{},\"events\":{},\"unsupported_recurrences\":{},\"malformed_events\":{},\"duplicate_uids\":{}}}",
-            json_string(&widget),
-            revision,
-            snapshot.value.events.len(),
-            snapshot.value.counters.unsupported_recurrences,
-            snapshot.value.counters.malformed_events,
-            snapshot.value.counters.duplicate_uids
-        );
-    } else {
-        println!(
-            "pushed {widget} revision {revision}: {} events, {} unsupported recurrence rules, {} malformed events, {} duplicate UIDs",
-            snapshot.value.events.len(),
-            snapshot.value.counters.unsupported_recurrences,
-            snapshot.value.counters.malformed_events,
-            snapshot.value.counters.duplicate_uids
-        );
-    }
     Ok(())
 }
 
@@ -432,163 +341,6 @@ fn run_pomodoro(arguments: &mut Arguments) -> Result<(), AppError> {
     )
 }
 
-fn run_demo(arguments: &mut Arguments) -> Result<(), AppError> {
-    let options = parse_demo_options(arguments)?;
-    let layout = load_config(&options.config)?;
-    let config = build_demo_config(layout, &options)?;
-    let runtime = RuntimeHandle::start_serial(config, arguments.common.port.clone())
-        .map_err(|error| AppError::Host(error.to_string()))?;
-    run_runtime_harness(&runtime, arguments.common.json)
-}
-
-fn build_demo_config(layout: ApplyConfig, options: &DemoOptions) -> Result<AppConfig, AppError> {
-    require_widget_template(&layout, &options.clock_widget, TemplateKind::DigitalClock)?;
-    require_widget_template(
-        &layout,
-        &options.pomodoro_widget,
-        TemplateKind::ProgressRing,
-    )?;
-    require_widget_template(&layout, &options.calendar_widget, TemplateKind::RowList)?;
-    let allowed_widgets = [
-        options.clock_widget.as_str(),
-        options.pomodoro_widget.as_str(),
-        options.calendar_widget.as_str(),
-    ];
-    if layout
-        .screens
-        .iter()
-        .any(|screen| !allowed_widgets.contains(&screen.widget_id.as_str()))
-    {
-        return Err(AppError::Config(
-            "demo layout contains a screen outside the three M3 widgets".into(),
-        ));
-    }
-    let source = if options.source.starts_with("https://") || options.source.starts_with("http://")
-    {
-        CalendarSource::Url(options.source.clone())
-    } else {
-        CalendarSource::File(options.source.clone())
-    };
-    let playlist_entries = layout
-        .screens
-        .iter()
-        .map(|screen| PlaylistEntry {
-            card_id: screen.widget_id.clone(),
-            dwell_seconds: None,
-        })
-        .collect();
-    let config = AppConfig {
-        schema_version: app_core::CURRENT_SCHEMA_VERSION,
-        preferences: AppPreferences {
-            timezone: options.timezone.to_string(),
-            autostart: false,
-            paused: false,
-            orientation: app_core::DisplayOrientation::Landscape,
-        },
-        // The M2 demo layout names only the three fixed built-in cards, and a
-        // picture card's frames come from a producer this CLI has no way to
-        // reach, so the demo declares no image sources.
-        image_sources: Vec::new(),
-        // The card model has no separate screen identity: a card's own id is its
-        // screen id. The demo layout's screen order becomes the card order, and
-        // each screen's widget_id selects which of the three fixed M3 cards it
-        // names (validated above to be one of the three).
-        cards: layout
-            .screens
-            .into_iter()
-            .map(|screen| {
-                if screen.widget_id == options.clock_widget {
-                    CardSettings::Clock {
-                        id: screen.widget_id,
-                        title: "Desk".into(),
-                        show_seconds: true,
-                        template: DisplayTemplate::DigitalClock,
-                        tap_action: WidgetTapAction::None,
-                        refresh: RefreshPolicy::DeviceLocal,
-                        alert: CardAlert::None,
-                    }
-                } else if screen.widget_id == options.pomodoro_widget {
-                    CardSettings::Pomodoro {
-                        id: screen.widget_id,
-                        label: "Pomodoro".into(),
-                        duration_seconds: options.duration_seconds,
-                        template: DisplayTemplate::ProgressRing,
-                        tap_action: WidgetTapAction::StartPause,
-                        refresh: RefreshPolicy::DeviceLocal,
-                        alert: CardAlert::OnTimerFinish {
-                            hold: AlertHold::UntilDismissed,
-                        },
-                    }
-                } else {
-                    CardSettings::Calendar {
-                        id: screen.widget_id,
-                        title: "Calendar".into(),
-                        source: source.clone(),
-                        template: DisplayTemplate::RowList,
-                        tap_action: WidgetTapAction::None,
-                        refresh: RefreshPolicy::Interval { minutes: 15 },
-                        alert: CardAlert::BeforeEvent {
-                            lead_minutes: 5,
-                            hold: AlertHold::Seconds { value: 60 },
-                        },
-                    }
-                }
-            })
-            .collect(),
-        assets: Vec::new(),
-        playlists: vec![Playlist {
-            id: "demo".into(),
-            name: "Demo".into(),
-            advance: CarouselAdvance::Manual,
-            entries: playlist_entries,
-        }],
-        active_playlist_id: "demo".into(),
-        updater: UpdaterSettings::default(),
-    };
-    config
-        .validate()
-        .map_err(|error| AppError::Config(error.to_string()))?;
-    Ok(config)
-}
-
-fn run_runtime_harness(runtime: &RuntimeHandle, json: bool) -> Result<(), AppError> {
-    let subscription = runtime
-        .subscribe()
-        .map_err(|error| AppError::Host(error.to_string()))?;
-    let running = shutdown_flag()?;
-    let mut previous = None;
-    if !json {
-        println!("M3 runtime started; tap the device to control the timer, Ctrl-C to stop");
-    }
-    while running.load(Ordering::Relaxed) {
-        let Some(snapshot) = subscription
-            .recv_timeout(Duration::from_millis(500))
-            .map_err(|error| AppError::Host(error.to_string()))?
-        else {
-            continue;
-        };
-        let state = (snapshot.runtime.clone(), snapshot.device.connection.clone());
-        if previous.as_ref() == Some(&state) {
-            continue;
-        }
-        if json {
-            let encoded = serde_json::to_string(&snapshot)
-                .map_err(|error| AppError::Host(error.to_string()))?;
-            println!("{{\"event\":\"snapshot\",\"value\":{encoded}}}");
-        } else {
-            print_runtime_state(&state.0, &state.1);
-        }
-        previous = Some(state);
-    }
-    runtime
-        .shutdown()
-        .map_err(|error| AppError::Host(error.to_string()))
-}
-
-fn print_runtime_state(runtime: &RuntimeState, connection: &ConnectionState) {
-    println!("runtime {runtime:?}; device {connection:?}");
-}
-
 fn run_pomodoro_loop(
     mut connected: ConnectedSession,
     mut timer: Pomodoro,
@@ -673,68 +425,6 @@ fn parse_pomodoro_options(arguments: &mut Arguments) -> Result<(String, String, 
     }
     let widget = widget.ok_or_else(|| AppError::Usage("pomodoro requires --widget".into()))?;
     Ok((widget, label, duration_seconds))
-}
-
-fn parse_demo_options(arguments: &mut Arguments) -> Result<DemoOptions, AppError> {
-    let mut config = None;
-    let mut source = None;
-    let mut timezone = chrono_tz::UTC;
-    let mut clock_widget = "clock".to_owned();
-    let mut pomodoro_widget = "pomodoro".to_owned();
-    let mut calendar_widget = "calendar".to_owned();
-    let mut duration_seconds = 25 * 60;
-    while let Some(option) = arguments.next() {
-        if arguments.common(&option)? {
-            continue;
-        }
-        match option.as_str() {
-            "--config" => config = Some(PathBuf::from(arguments.value("--config")?)),
-            "--ics" => source = Some(arguments.value("--ics")?),
-            "--timezone" => {
-                let raw = arguments.value("--timezone")?;
-                timezone = raw
-                    .parse::<Tz>()
-                    .map_err(|_| AppError::Config(format!("unknown IANA timezone: {raw}")))?;
-            }
-            "--clock-widget" => clock_widget = arguments.value("--clock-widget")?,
-            "--pomodoro-widget" => pomodoro_widget = arguments.value("--pomodoro-widget")?,
-            "--calendar-widget" => calendar_widget = arguments.value("--calendar-widget")?,
-            "--duration-seconds" => {
-                duration_seconds = arguments
-                    .value("--duration-seconds")?
-                    .parse()
-                    .map_err(|_| AppError::Config("invalid pomodoro duration".into()))?;
-            }
-            _ => return unknown_option(&option),
-        }
-    }
-    Ok(DemoOptions {
-        config: config.ok_or_else(|| AppError::Usage("demo requires --config".into()))?,
-        source: source.ok_or_else(|| AppError::Usage("demo requires --ics".into()))?,
-        timezone,
-        clock_widget,
-        pomodoro_widget,
-        calendar_widget,
-        duration_seconds,
-    })
-}
-
-fn require_widget_template(
-    config: &ApplyConfig,
-    widget_id: &str,
-    template: TemplateKind,
-) -> Result<(), AppError> {
-    if config
-        .widgets
-        .iter()
-        .any(|widget| widget.widget_id == widget_id && widget.template == template)
-    {
-        Ok(())
-    } else {
-        Err(AppError::Config(format!(
-            "demo widget {widget_id} is missing or uses the wrong template"
-        )))
-    }
 }
 
 fn handle_pomodoro_event(
@@ -921,19 +611,6 @@ fn validate_request(message: &Message) -> Result<(), AppError> {
         .map_err(|error| AppError::Config(format!("invalid request: {error}")))
 }
 
-fn require_fresh<T>(snapshot: &ProviderSnapshot<T>) -> Result<(), AppError> {
-    if snapshot.stale {
-        Err(AppError::Provider(
-            snapshot
-                .error
-                .clone()
-                .unwrap_or_else(|| "calendar provider failed".into()),
-        ))
-    } else {
-        Ok(())
-    }
-}
-
 fn print_event(event: &device::ReceivedEvent, json: bool) {
     if json {
         println!(
@@ -1047,17 +724,14 @@ mod tests {
     fn checked_sample_layout_exercises_all_templates_and_legacy_size_classes() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/m2-carousel.json");
         let config = load_config(&path).unwrap();
-        assert_eq!(config.widgets.len(), 3);
-        assert_eq!(config.screens.len(), 3);
+        assert_eq!(config.widgets.len(), 2);
+        assert_eq!(config.screens.len(), 2);
         assert!(config.widgets.iter().any(|widget| {
             widget.template == TemplateKind::DigitalClock && widget.size_class == SizeClass::Full
         }));
         assert!(config.widgets.iter().any(|widget| {
             widget.template == TemplateKind::ProgressRing
                 && widget.size_class == SizeClass::Standard
-        }));
-        assert!(config.widgets.iter().any(|widget| {
-            widget.template == TemplateKind::RowList && widget.size_class == SizeClass::Standard
         }));
     }
 

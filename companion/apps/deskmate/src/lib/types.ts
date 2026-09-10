@@ -300,7 +300,8 @@ export type DeviceCapability =
   | "firmware-update"
   | "networking"
   | "scene-render"
-  | "volatile-assets";
+  | "volatile-assets"
+  | "durable-asset-encoding";
 
 export interface DeviceCounters {
   host_reconnects: number;

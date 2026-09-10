@@ -2812,7 +2812,13 @@ fn synchronize_full(
     Ok(())
 }
 
-const PLUGIN_ASSET_SYNC_REFUSAL_PREFIX: &str = "plugin asset reconciliation failed: ";
+/// Both plugin assets and picture frames travel in the same device-wide
+/// reconcile pass, so the prefix no longer says "plugin". The wording is load
+/// bearing: a picture card whose frame failed to transfer used to be recorded
+/// against every *plugin* card and none of its own, so the panel showed a stale
+/// face and the only visible error named a card that was fine. That cost a
+/// hardware session.
+const PLUGIN_ASSET_SYNC_REFUSAL_PREFIX: &str = "asset reconciliation failed: ";
 
 fn record_plugin_asset_sync_refusals(state: &mut WorkerState, message: &str) {
     let card_ids: Vec<String> = state
@@ -2820,7 +2826,11 @@ fn record_plugin_asset_sync_refusals(state: &mut WorkerState, message: &str) {
         .cards
         .iter()
         .filter_map(|card| match card {
-            CardSettings::Plugin { id, .. } => Some(id.clone()),
+            // Every card whose face depends on a transferred asset, not only
+            // the plugin ones. A reconcile failure is device-wide; attributing
+            // it to a subset of the cards it actually broke is worse than
+            // saying nothing, because it points the reader at the wrong card.
+            CardSettings::Plugin { id, .. } | CardSettings::Picture { id, .. } => Some(id.clone()),
             _ => None,
         })
         .collect();
@@ -6743,7 +6753,7 @@ mod tests {
         assert!(!state.needs_full_sync);
         assert!(state.push_rejections.get("aqi").is_some_and(|error| {
             error.kind == CardErrorKind::SceneRefused
-                && error.message.contains("plugin asset reconciliation failed")
+                && error.message.contains("asset reconciliation failed")
         }));
     }
 

@@ -745,7 +745,8 @@ export const ipcContractFixtures = {
     "firmware-update",
     "networking",
     "scene-render",
-    "volatile-assets"
+    "volatile-assets",
+    "durable-asset-encoding"
   ],
   "runtime_states": [
     {

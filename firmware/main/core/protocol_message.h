@@ -42,6 +42,13 @@
  * resolves committed volatile image bytes. Bit 5 cannot carry that promise:
  * deployed bit-5 builds explicitly reject volatile begins. */
 #define PROTOCOL_CAPABILITY_VOLATILE_ASSETS (UINT64_C(1) << 9)
+/* A build advertising this bit honours AssetBegin's `encoding` and
+ * `decoded_length` on the DURABLE tier too, not only the volatile one. Bit 9
+ * cannot carry that promise for the same reason bit 5 could not carry bit 9's:
+ * a deployed bit-9 build's durable branch ignores `encoding` and writes wire
+ * bytes to flash verbatim, so an RLE565 durable asset would be stored as if the
+ * compressed bytes were pixels. */
+#define PROTOCOL_CAPABILITY_DURABLE_ASSET_ENCODING (UINT64_C(1) << 10)
 #define PROTOCOL_LEGACY_CAPABILITIES PROTOCOL_CAPABILITY_CORE_WIDGETS
 #define PROTOCOL_CURRENT_CAPABILITIES                            \
     (PROTOCOL_CAPABILITY_CORE_WIDGETS |                          \
@@ -51,7 +58,8 @@
      PROTOCOL_CAPABILITY_FIRMWARE_UPDATE |                       \
      PROTOCOL_CAPABILITY_NETWORKING |                            \
      PROTOCOL_CAPABILITY_SCENE_RENDER |                          \
-     PROTOCOL_CAPABILITY_VOLATILE_ASSETS)
+     PROTOCOL_CAPABILITY_VOLATILE_ASSETS |                       \
+     PROTOCOL_CAPABILITY_DURABLE_ASSET_ENCODING)
 #define PROTOCOL_MAX_SSID_LENGTH 32U
 #define PROTOCOL_MAX_PSK_LENGTH 64U
 #define PROTOCOL_MAX_SERVER_URL_LENGTH 128U

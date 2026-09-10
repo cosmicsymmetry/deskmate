@@ -27,6 +27,19 @@ pub const CAPABILITY_SCENE_RENDER: u64 = 1 << 8;
 /// separate from bit 5 because deployed asset-transfer builds reject that
 /// tier explicitly.
 pub const CAPABILITY_VOLATILE_ASSETS: u64 = 1 << 9;
+/// Honours `AssetBegin`'s `encoding` and `decoded_length` on the **durable**
+/// tier, not only the volatile one.
+///
+/// Bit 9 cannot carry this promise, for exactly the reason bit 5 could not
+/// carry bit 9's: a deployed bit-9 build's durable `AssetBegin` branch ignores
+/// `encoding` entirely and writes the wire bytes to flash verbatim, so sending
+/// it an RLE565 durable asset stores compressed bytes as if they were pixels.
+/// A host must see THIS bit before compressing a durable transfer.
+///
+/// Picture cards are why it exists. A 448x368 frame is 329,740 raw bytes, which
+/// is 172 sequential chunk round trips at `MAX_ASSET_CHUNK_BYTES`, and the
+/// tunnel does not survive that. The same frame RLE565-encoded is a handful.
+pub const CAPABILITY_DURABLE_ASSET_ENCODING: u64 = 1 << 10;
 pub const LEGACY_CAPABILITIES: u64 = CAPABILITY_CORE_WIDGETS;
 pub const CURRENT_CAPABILITIES: u64 = CAPABILITY_CORE_WIDGETS
     | CAPABILITY_CONFIG_ROTATION
@@ -35,7 +48,8 @@ pub const CURRENT_CAPABILITIES: u64 = CAPABILITY_CORE_WIDGETS
     | CAPABILITY_FIRMWARE_UPDATE
     | CAPABILITY_NETWORKING
     | CAPABILITY_SCENE_RENDER
-    | CAPABILITY_VOLATILE_ASSETS;
+    | CAPABILITY_VOLATILE_ASSETS
+    | CAPABILITY_DURABLE_ASSET_ENCODING;
 pub const LINK_TIMEOUT_MS: u64 = 10_000;
 pub const MAX_WIDGET_ID_LEN: usize = 32;
 pub const MAX_SCREEN_ID_LEN: usize = 32;
@@ -2216,10 +2230,10 @@ mod tests {
         // (capabilities) are still encoded contiguously and in this order
         // because keys are canonical; locate and drop them regardless of
         // what now follows them on the wire. The tail is
-        // CURRENT_CAPABILITIES; bit 8 took it from 235 to 491 and bit 9 now
-        // takes it to 1003 (0x03eb). It moves whenever a capability bit is
-        // added to the constant.
-        let pattern = [0x15, 0x09, 0x16, 0x01, 0x17, 0x19, 0x03, 0xeb];
+        // CURRENT_CAPABILITIES; bit 8 took it from 235 to 491, bit 9 took it
+        // to 1003, and bit 10 now takes it to 2027 (0x07eb). It moves whenever
+        // a capability bit is added to the constant.
+        let pattern = [0x15, 0x09, 0x16, 0x01, 0x17, 0x19, 0x07, 0xeb];
         let offset = payload
             .windows(pattern.len())
             .position(|window| window == pattern)

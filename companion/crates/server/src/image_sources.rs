@@ -34,7 +34,7 @@ const CANONICAL_FRAME_BYTES: usize = LVGL_IMAGE_HEADER_BYTES
     + protocol::SCENE_CANVAS_WIDTH as usize * protocol::SCENE_CANVAS_HEIGHT as usize * 2;
 const SOURCE_ID_RANDOM_HEX_LEN: usize = 24;
 
-pub(crate) struct ImageSourceStore {
+pub struct ImageSourceStore {
     root: PathBuf,
     state: Mutex<ImageSourceState>,
 }
@@ -98,6 +98,8 @@ pub(crate) enum ImageSourceError {
     Io { message: String },
     #[error("the image source was pushed too recently")]
     TooSoon,
+    #[error("the display has room for {available} more picture frames")]
+    DigestBudget { available: usize },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -127,10 +129,32 @@ impl ImageSourceStore {
 
     /// Mints a source id and a random 32-byte bearer token. The token's digest
     /// is committed before the one plaintext copy is returned.
-    pub(crate) fn mint(&self, name: &str) -> Result<MintedSource, ImageSourceError> {
+    ///
+    /// `durable_digests_available` is how many of the device's durable asset
+    /// slots are not already spoken for by the plugin registry. Two ceilings
+    /// therefore apply: this store's own `MAX_IMAGE_SOURCES`, and the device's
+    /// shared digest budget, which plugins and picture frames draw from
+    /// together. Checking the second one HERE is deliberate -- the wire's copy
+    /// of the rule lives in `compose_asset_keep_set` and refuses an
+    /// over-ceiling set by name, but that fires during a device sync, long
+    /// after the person who minted one source too many has walked away. This is
+    /// the guard that tells them at the moment they act.
+    pub(crate) fn mint(
+        &self,
+        name: &str,
+        durable_digests_available: usize,
+    ) -> Result<MintedSource, ImageSourceError> {
         let mut state = self.lock();
         if state.sources.len() >= MAX_IMAGE_SOURCES {
             return Err(ImageSourceError::Capacity);
+        }
+        // Sources that have never been pushed to hold no frame and so occupy no
+        // digest yet, but they will the moment a producer reaches them; budget
+        // for every source rather than only the ones already carrying bytes.
+        if state.sources.len() >= durable_digests_available {
+            return Err(ImageSourceError::DigestBudget {
+                available: durable_digests_available,
+            });
         }
 
         let id = loop {
@@ -556,7 +580,9 @@ mod tests {
     fn a_minted_token_authenticates_and_a_wrong_one_does_not() {
         let temp = tempfile::tempdir().expect("temp dir");
         let store = ImageSourceStore::new(temp.path().to_path_buf()).expect("store");
-        let source = store.mint("Status panel").expect("mint source");
+        let source = store
+            .mint("Status panel", MAX_IMAGE_SOURCES)
+            .expect("mint source");
 
         assert_eq!(store.authenticate(&source.token), Some(source.id));
         assert_eq!(store.authenticate(&"00".repeat(32)), None);
@@ -566,7 +592,9 @@ mod tests {
     fn a_revoked_token_stops_authenticating() {
         let temp = tempfile::tempdir().expect("temp dir");
         let store = ImageSourceStore::new(temp.path().to_path_buf()).expect("store");
-        let source = store.mint("Status panel").expect("mint source");
+        let source = store
+            .mint("Status panel", MAX_IMAGE_SOURCES)
+            .expect("mint source");
 
         store.revoke(&source.id).expect("revoke source");
 
@@ -577,7 +605,9 @@ mod tests {
     fn the_plaintext_token_never_appears_in_the_store_file() {
         let temp = tempfile::tempdir().expect("temp dir");
         let store = ImageSourceStore::new(temp.path().to_path_buf()).expect("store");
-        let source = store.mint("Status panel").expect("mint source");
+        let source = store
+            .mint("Status panel", MAX_IMAGE_SOURCES)
+            .expect("mint source");
 
         let persisted = fs::read_to_string(temp.path().join(IMAGE_SOURCE_STORE_FILE))
             .expect("read image source store");
@@ -589,7 +619,9 @@ mod tests {
         let temp = tempfile::tempdir().expect("temp dir");
         let source = {
             let store = ImageSourceStore::new(temp.path().to_path_buf()).expect("first store");
-            store.mint("Status panel").expect("mint source")
+            store
+                .mint("Status panel", MAX_IMAGE_SOURCES)
+                .expect("mint source")
         };
 
         let reloaded = ImageSourceStore::new(temp.path().to_path_buf()).expect("reloaded store");
@@ -600,7 +632,9 @@ mod tests {
     fn the_same_picture_twice_is_accepted_once_but_counted_twice() {
         let temp = tempfile::tempdir().expect("temp dir");
         let store = ImageSourceStore::new(temp.path().to_path_buf()).expect("store");
-        let source = store.mint("Status panel").expect("mint source");
+        let source = store
+            .mint("Status panel", MAX_IMAGE_SOURCES)
+            .expect("mint source");
         let frame = canonical_frame(0x2a);
 
         assert!(matches!(
@@ -618,7 +652,9 @@ mod tests {
     fn a_second_push_inside_the_minimum_interval_is_refused() {
         let temp = tempfile::tempdir().expect("temp dir");
         let store = ImageSourceStore::new(temp.path().to_path_buf()).expect("store");
-        let source = store.mint("Status panel").expect("mint source");
+        let source = store
+            .mint("Status panel", MAX_IMAGE_SOURCES)
+            .expect("mint source");
 
         store
             .accept(&source.id, canonical_frame(1), at(0))
@@ -637,12 +673,52 @@ mod tests {
 
         for index in 0..MAX_IMAGE_SOURCES {
             store
-                .mint(&format!("Source {index}"))
+                .mint(&format!("Source {index}"), MAX_IMAGE_SOURCES)
                 .expect("mint within capacity");
         }
         assert!(matches!(
-            store.mint("One too many"),
+            store.mint("One too many", MAX_IMAGE_SOURCES),
             Err(ImageSourceError::Capacity)
+        ));
+    }
+
+    #[test]
+    fn minting_past_the_devices_shared_digest_budget_is_refused_by_name() {
+        // Plugin assets and picture frames draw from ONE device-wide digest
+        // budget, and the registry's share is already spent. This ceiling is
+        // separate from `MAX_IMAGE_SOURCES` and is the one a loaded plugin
+        // registry can move, so it gets its own error rather than being folded
+        // into `Capacity` -- a person told "capacity reached" after minting two
+        // of eight sources would reasonably think the store was broken.
+        let temp = tempfile::tempdir().expect("temp dir");
+        let store = ImageSourceStore::new(temp.path().to_path_buf()).expect("store");
+        let budget = 2;
+
+        store.mint("First", budget).expect("within budget");
+        store.mint("Second", budget).expect("within budget");
+
+        let error = store
+            .mint("Third", budget)
+            .expect_err("over the digest budget");
+        assert!(
+            matches!(error, ImageSourceError::DigestBudget { available } if available == budget),
+            "expected a named digest-budget refusal, got {error:?}"
+        );
+        // And it must not masquerade as the store's own capacity, which is
+        // nowhere near reached.
+        assert!(!matches!(error, ImageSourceError::Capacity));
+    }
+
+    #[test]
+    fn a_zero_digest_budget_refuses_the_very_first_source() {
+        // A registry that has spent every durable slot leaves no room at all,
+        // and `saturating_sub` can hand this function a zero.
+        let temp = tempfile::tempdir().expect("temp dir");
+        let store = ImageSourceStore::new(temp.path().to_path_buf()).expect("store");
+
+        assert!(matches!(
+            store.mint("First", 0),
+            Err(ImageSourceError::DigestBudget { available: 0 })
         ));
     }
 
@@ -651,7 +727,9 @@ mod tests {
         let temp = tempfile::tempdir().expect("temp dir");
         let source = {
             let store = ImageSourceStore::new(temp.path().to_path_buf()).expect("first store");
-            let source = store.mint("Status panel").expect("mint source");
+            let source = store
+                .mint("Status panel", MAX_IMAGE_SOURCES)
+                .expect("mint source");
             for index in 0..PUSH_TIME_RING + 3 {
                 let fill = u8::try_from(index).expect("small bounded ring index");
                 let seconds = i64::try_from(index).expect("small bounded ring index") * 5;
@@ -675,7 +753,9 @@ mod tests {
         let expected = canonical_frame(0xa5);
         let source = {
             let store = ImageSourceStore::new(temp.path().to_path_buf()).expect("first store");
-            let source = store.mint("Status panel").expect("mint source");
+            let source = store
+                .mint("Status panel", MAX_IMAGE_SOURCES)
+                .expect("mint source");
             store
                 .accept(&source.id, expected.clone(), at(0))
                 .expect("accept frame");
@@ -693,7 +773,9 @@ mod tests {
         let temp = tempfile::tempdir().expect("temp dir");
         let source = {
             let store = ImageSourceStore::new(temp.path().to_path_buf()).expect("first store");
-            let source = store.mint("Status panel").expect("mint source");
+            let source = store
+                .mint("Status panel", MAX_IMAGE_SOURCES)
+                .expect("mint source");
             for index in 0..4 {
                 store
                     .accept(
@@ -717,7 +799,9 @@ mod tests {
     fn revoking_a_source_drops_its_frame_from_the_desired_set() {
         let temp = tempfile::tempdir().expect("temp dir");
         let store = ImageSourceStore::new(temp.path().to_path_buf()).expect("store");
-        let source = store.mint("Status panel").expect("mint source");
+        let source = store
+            .mint("Status panel", MAX_IMAGE_SOURCES)
+            .expect("mint source");
         store
             .accept(&source.id, canonical_frame(0x5a), at(0))
             .expect("accept frame");

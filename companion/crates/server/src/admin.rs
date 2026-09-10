@@ -1353,6 +1353,8 @@ mod tests {
                 app_core::RuntimeOptions::default(),
                 Some(Box::new(crate::plugin_host::ServerPluginHost::new(
                     curated_registry(),
+                    // The preview runtime is fixture-backed and owns no store.
+                    None,
                 ))),
             )
             .expect("the preview runtime starts"),

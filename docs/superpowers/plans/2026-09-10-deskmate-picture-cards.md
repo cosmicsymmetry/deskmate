@@ -1957,6 +1957,53 @@ git commit -m "feat: draw a picture card, and take a pushed frame into the runti
 
 ---
 
+### Task 8 — AMENDED DURING EXECUTION (2026-09-10)
+
+Task 8's first implementer **refused to implement it as written**, and was right to.
+Two seams it named:
+
+1. `ServerPluginHost` receives only `Arc<PluginRegistry>`. The `ImageSourceStore` lives on
+   `ServerState`, and `device_link.rs:89` and `admin.rs:1354` build the host without it. The
+   implementer declined to work around this by re-reading frames from disk, because that
+   would break the byte-provenance rule this plan states twice.
+2. **`PluginHost::desired_assets()` returns `Vec<DesiredAsset>` and cannot fail**, so the
+   plan's instruction that exceeding the ceiling "must be a NAMED error, never a silent
+   truncation" is not implementable at that seam.
+
+This is the same shape as M3's Task 10a, where an implementer refused to open a second
+`device::Session` from a Tauri command rather than write something that would compile, pass
+its tests, and put two processes on one cable.
+
+**Resolution, and it does not require a fallible trait.**
+
+The named error already exists one layer down: `AssetSyncError::TooManyDesiredAssets`
+(`asset_sync.rs:57`), raised by `compose_asset_keep_set` (`:111`) and by
+`reconcile_with_active_volatile_yielding` (`:283`). `compose_asset_keep_set` is already the
+one place the wire's digest ceiling lives, and making `desired_assets()` fallible would
+restate a bound the sync layer already states — the same reason this codebase calls
+`protocol::validate_message` rather than re-encoding its rules at each caller.
+
+So:
+
+- **Do not make `desired_assets()` fallible.** Let the union flow through
+  `compose_asset_keep_set`, which already refuses an over-ceiling set by name.
+- **Add a mint-time guard** in `ImageSourceStore::mint`, so a person minting one source too
+  many is refused at the moment they act, with a message naming the budget, rather than
+  discovering it later as a failed device sync. That is the guard that actually protects a
+  human; the sync-layer one protects the wire.
+- **Ownership expands** to `server/src/lib.rs`, `server/src/device_link.rs` and
+  `server/src/admin.rs`, purely to inject the store into the host at its construction sites.
+
+**The arithmetic that made this urgent, checked rather than assumed.**
+`MAX_DURABLE_REGISTRY_ASSETS` is 31 and is enforced at registry load **over plugin assets
+alone**; `MAX_IMAGE_SOURCES` is 8. 31 + 8 = 39, so the union can exceed what the device can
+hold and nothing in the tree caught it. In practice the curated plugins declare **two**
+assets between them (`agenda` 1, `aqi` 1, `claude-limits` and `svg-aqi` none), so the real
+union is at most 10 — but "cannot happen today" is not a bound, and the budget is now
+checked where sources are created.
+
+---
+
 ### Task 8: The desired-asset union — one function, one caller
 
 Needs Tasks 4 and 7. **This is the task that can wipe a panel if it is wrong**, so its

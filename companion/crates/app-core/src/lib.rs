@@ -50,7 +50,7 @@ pub use render_negotiation::{
 };
 pub use runtime::{
     CalendarRefreshRequest, CalendarRefreshResult, CalendarRefresher, CardPreview,
-    DeviceConnection, PREVIEW_SCENE_REVISION, PluginHost, ProviderRefreshRequest,
+    DeviceConnection, ImageSourceFrame, PREVIEW_SCENE_REVISION, PluginHost, ProviderRefreshRequest,
     ProviderRefreshResult, ProviderRefresher, ProviderRequest, RasterFrame, RasterRequest,
     RuntimeDevice, RuntimeHandle, RuntimeOptions, RuntimeSubscription, SceneCandidate,
     SerialRuntimeDevice, SystemCalendarRefresher, SystemProviderRefresher,

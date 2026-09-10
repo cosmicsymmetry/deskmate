@@ -121,10 +121,16 @@ async fn mint_source(
         status: rejection.status(),
         message: rejection.body_text(),
     })?;
-    let minted = tokio::task::spawn_blocking(move || state.image_sources().mint(&request.name))
-        .await
-        .map_err(|_| ImageRouteError::WorkerFailed)?
-        .map_err(map_mint_error)?;
+    // Plugin assets and picture frames draw from one device-wide digest budget,
+    // and the registry's share is already committed, so what is left is what a
+    // new source may claim.
+    let available = crate::plugin_registry::MAX_DURABLE_REGISTRY_ASSETS
+        .saturating_sub(state.plugins().all_assets().len());
+    let minted =
+        tokio::task::spawn_blocking(move || state.image_sources().mint(&request.name, available))
+            .await
+            .map_err(|_| ImageRouteError::WorkerFailed)?
+            .map_err(|error| map_mint_error(&error))?;
     Ok(Json(MintSourceResponse {
         id: minted.id,
         token: minted.token,
@@ -139,7 +145,7 @@ async fn revoke_source(
     tokio::task::spawn_blocking(move || state.image_sources().revoke(&source_id))
         .await
         .map_err(|_| ImageRouteError::WorkerFailed)?
-        .map_err(map_revoke_error)?;
+        .map_err(|error| map_revoke_error(&error))?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -164,14 +170,14 @@ async fn push_image(
     })
     .await
     .map_err(|_| ImageRouteError::WorkerFailed)?
-    .map_err(map_accept_error)?;
+    .map_err(|error| map_accept_error(&error))?;
 
     if let AcceptOutcome::Changed { digest } = outcome {
         let runtimes = live_runtimes(&state);
         tokio::task::spawn_blocking(move || notify_runtimes(runtimes, &source_id, digest))
             .await
             .map_err(|_| ImageRouteError::WorkerFailed)?
-            .map_err(map_runtime_error)?;
+            .map_err(|error| map_runtime_error(&error))?;
     }
 
     Ok(StatusCode::OK)
@@ -228,32 +234,45 @@ fn map_ingest_error(error: ImageIngestError) -> ImageRouteError {
     }
 }
 
-fn map_mint_error(error: ImageSourceError) -> ImageRouteError {
+fn map_mint_error(error: &ImageSourceError) -> ImageRouteError {
     match error {
-        ImageSourceError::Capacity => ImageRouteError::Capacity,
-        ImageSourceError::Io { .. } => ImageRouteError::Internal,
-        ImageSourceError::UnknownToken | ImageSourceError::TooSoon => ImageRouteError::Internal,
+        // Both ceilings read the same way to the caller -- there is no room for
+        // another source -- and differ only in which budget ran out, which the
+        // error's own message says.
+        ImageSourceError::Capacity | ImageSourceError::DigestBudget { .. } => {
+            ImageRouteError::Capacity
+        }
+        // Neither of these can reach a mint; they are folded in so the match
+        // stays exhaustive without a wildcard that would hide a new variant.
+        ImageSourceError::Io { .. }
+        | ImageSourceError::UnknownToken
+        | ImageSourceError::TooSoon => ImageRouteError::Internal,
     }
 }
 
-fn map_revoke_error(error: ImageSourceError) -> ImageRouteError {
+fn map_revoke_error(error: &ImageSourceError) -> ImageRouteError {
     match error {
         ImageSourceError::UnknownToken => ImageRouteError::NotFound,
-        ImageSourceError::Io { .. } => ImageRouteError::Internal,
-        ImageSourceError::Capacity | ImageSourceError::TooSoon => ImageRouteError::Internal,
+        ImageSourceError::Io { .. }
+        | ImageSourceError::Capacity
+        | ImageSourceError::DigestBudget { .. }
+        | ImageSourceError::TooSoon => ImageRouteError::Internal,
     }
 }
 
-fn map_accept_error(error: ImageSourceError) -> ImageRouteError {
+fn map_accept_error(error: &ImageSourceError) -> ImageRouteError {
     match error {
         ImageSourceError::UnknownToken => ImageRouteError::ProducerUnauthorized,
         ImageSourceError::TooSoon => ImageRouteError::RateLimited,
-        ImageSourceError::Io { .. } => ImageRouteError::Internal,
-        ImageSourceError::Capacity => ImageRouteError::Internal,
+        // Neither ceiling is reachable on an accept: minting already refused
+        // the source that would have exceeded one.
+        ImageSourceError::Io { .. }
+        | ImageSourceError::Capacity
+        | ImageSourceError::DigestBudget { .. } => ImageRouteError::Internal,
     }
 }
 
-fn map_runtime_error(error: RuntimeError) -> ImageRouteError {
+fn map_runtime_error(error: &RuntimeError) -> ImageRouteError {
     let status = match error {
         RuntimeError::QueueFull | RuntimeError::WorkerStopped => StatusCode::SERVICE_UNAVAILABLE,
         RuntimeError::ResponseTimeout => StatusCode::GATEWAY_TIMEOUT,

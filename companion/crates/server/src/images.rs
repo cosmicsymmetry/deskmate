@@ -173,11 +173,31 @@ async fn push_image(
     .map_err(|error| map_accept_error(&error))?;
 
     if let AcceptOutcome::Changed { digest } = outcome {
+        // Deliberately not awaited. The producer's durable outcome is "the
+        // frame is stored", and it is stored by the time we get here: delivery
+        // to the device is this server's business, over a link the producer has
+        // no relationship with and cannot act on.
+        //
+        // Awaiting it made a successful push answer 504. The reconcile drives a
+        // full device synchronize -- chunk transfers plus AssetRelease's own
+        // twenty-second budget -- so a slow or flapping link turned a stored
+        // frame into an error for somebody holding a curl command, who would
+        // then reasonably retry a push that had already succeeded.
+        //
+        // A failure here is not lost: it surfaces as a card error on the
+        // device's own snapshot, which is where a device-delivery problem
+        // belongs, and the next full synchronize reconciles the frame anyway.
         let runtimes = live_runtimes(&state);
-        tokio::task::spawn_blocking(move || notify_runtimes(runtimes, &source_id, digest))
-            .await
-            .map_err(|_| ImageRouteError::WorkerFailed)?
-            .map_err(|error| map_runtime_error(&error))?;
+        let notified_source_id = source_id.clone();
+        tokio::task::spawn_blocking(move || {
+            if let Err(error) = notify_runtimes(runtimes, &notified_source_id, digest) {
+                tracing::warn!(
+                    source_id = %notified_source_id,
+                    %error,
+                    "image source stored but the device was not notified; the next                      synchronize will reconcile it"
+                );
+            }
+        });
     }
 
     Ok(StatusCode::OK)
@@ -272,15 +292,6 @@ fn map_accept_error(error: &ImageSourceError) -> ImageRouteError {
     }
 }
 
-fn map_runtime_error(error: &RuntimeError) -> ImageRouteError {
-    let status = match error {
-        RuntimeError::QueueFull | RuntimeError::WorkerStopped => StatusCode::SERVICE_UNAVAILABLE,
-        RuntimeError::ResponseTimeout => StatusCode::GATEWAY_TIMEOUT,
-        _ => StatusCode::BAD_GATEWAY,
-    };
-    ImageRouteError::Runtime { status }
-}
-
 #[derive(Debug)]
 enum ImageRouteError {
     AdminUnauthorized,
@@ -294,7 +305,6 @@ enum ImageRouteError {
     InvalidImage(String),
     RateLimited,
     Capacity,
-    Runtime { status: StatusCode },
     Internal,
     WorkerFailed,
 }
@@ -310,7 +320,6 @@ enum ErrorBody<'a> {
     InvalidImage { message: &'a str },
     RateLimited { message: &'a str },
     Capacity { message: &'a str },
-    Runtime { message: &'a str },
     Internal,
 }
 
@@ -373,13 +382,6 @@ impl IntoResponse for ImageRouteError {
                 StatusCode::CONFLICT,
                 Json(ErrorBody::Capacity {
                     message: "the image-source capacity has been reached",
-                }),
-            )
-                .into_response(),
-            Self::Runtime { status } => (
-                status,
-                Json(ErrorBody::Runtime {
-                    message: "the picture was stored, but the display update could not be queued",
                 }),
             )
                 .into_response(),

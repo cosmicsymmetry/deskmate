@@ -1,14 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import {
-  activePlaylist,
   loopAdvance,
   loopDeadline,
   loopSegments,
   formatDuration,
   issuesForPath,
   loopSeconds,
-  setPlaylistAdvance,
+  setAdvance,
 } from "../lib/configDraft";
 import type { AppConfig, ValidationIssue } from "../lib/types";
 import { FieldIssues } from "./FieldIssues";
@@ -30,7 +29,7 @@ const GAP_DEGREES = 2.4;
 /**
  * A segment's position along the `--arc-a` → `--arc-b` ramp, as 0–1.
  *
- * This used to be `index % 4`, which repeated every fifth entry — and a playlist holds
+ * This used to be `index % 4`, which repeated every fifth entry — and the loop holds
  * up to eight. Two arcs sharing a colour breaks the only mapping there is from an arc
  * back to its name in the legend.
  */
@@ -52,7 +51,7 @@ function compactDuration(totalSeconds: number): string {
 }
 
 /**
- * The loop ring: one arc per active-playlist entry, its sweep proportional to that
+ * The loop ring: one arc per card, its sweep proportional to that
  * entry's resolved dwell, with the on-panel entry at full luminance and a marker
  * riding it. It carries the one truth no other control shows: a card's share of
  * the loop.
@@ -71,17 +70,13 @@ export function LoopRing({
   onSelect,
   onChange,
 }: LoopRingProps) {
-  const playlist = activePlaylist(config);
-  const playlistIndex = config.playlists.findIndex(
-    (candidate) => candidate.id === config.active_playlist_id,
-  );
-  const isTimed = playlist?.advance.kind === "timed";
+  const isTimed = config.advance.kind === "timed";
   const segments = useMemo(() => loopSegments(config), [config]);
-  const total = playlist ? loopSeconds(config, playlist.id) : null;
+  const total = loopSeconds(config);
   const [isPlaying, setIsPlaying] = useState(false);
   const [reducedMotion, setReducedMotion] = useState(false);
   const configuredDefaultDwell =
-    playlist?.advance.kind === "timed" ? String(playlist.advance.default_dwell_seconds) : "";
+    config.advance.kind === "timed" ? String(config.advance.default_dwell_seconds) : "";
   const [defaultDwellInput, setDefaultDwellInput] = useState(configuredDefaultDwell);
 
   useEffect(() => {
@@ -154,10 +149,9 @@ export function LoopRing({
     onSelect,
   ]);
 
-  const advanceIssues =
-    playlistIndex < 0 ? [] : issuesForPath(issues, `playlists[${playlistIndex}].advance`);
-  const defaultDwellPath = `playlists[${playlistIndex}].advance.default_dwell_seconds`;
-  const pacing = playlist && (
+  const advanceIssues = issuesForPath(issues, "advance");
+  const defaultDwellPath = "advance.default_dwell_seconds";
+  const pacing = (
     <>
       <fieldset className="loop__pacing">
         <legend className="sr-only">Pacing</legend>
@@ -168,7 +162,7 @@ export function LoopRing({
           onClick={() => {
             if (!isTimed) {
               onChange(
-                setPlaylistAdvance(config, playlist.id, {
+                setAdvance(config, {
                   kind: "timed",
                   default_dwell_seconds: DEFAULT_DWELL_SECONDS,
                 }),
@@ -184,14 +178,14 @@ export function LoopRing({
           aria-pressed={!isTimed}
           onClick={() => {
             if (isTimed) {
-              onChange(setPlaylistAdvance(config, playlist.id, { kind: "manual" }));
+              onChange(setAdvance(config, { kind: "manual" }));
             }
           }}
         >
           Manual
         </button>
       </fieldset>
-      {playlist.advance.kind === "timed" && (
+      {config.advance.kind === "timed" && (
         <label className="loop__dwell">
           <span className="sr-only">Default dwell in seconds</span>
           <input
@@ -211,7 +205,7 @@ export function LoopRing({
               const parsed = Number(raw);
               if (Number.isFinite(parsed)) {
                 onChange(
-                  setPlaylistAdvance(config, playlist.id, {
+                  setAdvance(config, {
                     kind: "timed",
                     default_dwell_seconds: parsed,
                   }),

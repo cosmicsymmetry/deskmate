@@ -4,7 +4,7 @@ import type { IpcContractFixtures } from "./types";
 export const ipcContractFixtures = {
   "snapshot": {
     "config": {
-      "schema_version": 9,
+      "schema_version": 10,
       "preferences": {
         "timezone": "Asia/Tbilisi",
         "autostart": true,
@@ -28,7 +28,8 @@ export const ipcContractFixtures = {
           },
           "alert": {
             "kind": "none"
-          }
+          },
+          "dwell_seconds": null
         },
         {
           "kind": "pomodoro",
@@ -49,7 +50,8 @@ export const ipcContractFixtures = {
             "hold": {
               "kind": "until-dismissed"
             }
-          }
+          },
+          "dwell_seconds": null
         },
         {
           "kind": "picture",
@@ -64,7 +66,8 @@ export const ipcContractFixtures = {
           },
           "alert": {
             "kind": "none"
-          }
+          },
+          "dwell_seconds": null
         }
       ],
       "image_sources": [
@@ -74,44 +77,10 @@ export const ipcContractFixtures = {
         }
       ],
       "assets": [],
-      "playlists": [
-        {
-          "id": "workday",
-          "name": "Workday",
-          "advance": {
-            "kind": "timed",
-            "default_dwell_seconds": 30
-          },
-          "entries": [
-            {
-              "card_id": "clock",
-              "dwell_seconds": null
-            },
-            {
-              "card_id": "pomodoro",
-              "dwell_seconds": 20
-            },
-            {
-              "card_id": "limits-picture",
-              "dwell_seconds": null
-            }
-          ]
-        },
-        {
-          "id": "manual",
-          "name": "Manual",
-          "advance": {
-            "kind": "manual"
-          },
-          "entries": [
-            {
-              "card_id": "clock",
-              "dwell_seconds": null
-            }
-          ]
-        }
-      ],
-      "active_playlist_id": "workday",
+      "advance": {
+        "kind": "timed",
+        "default_dwell_seconds": 30
+      },
       "updater": {
         "channel": "stable",
         "checks": "notify"
@@ -217,7 +186,7 @@ export const ipcContractFixtures = {
   },
   "configs": [
     {
-      "schema_version": 9,
+      "schema_version": 10,
       "preferences": {
         "timezone": "Asia/Tbilisi",
         "autostart": true,
@@ -241,7 +210,8 @@ export const ipcContractFixtures = {
           },
           "alert": {
             "kind": "none"
-          }
+          },
+          "dwell_seconds": null
         },
         {
           "kind": "pomodoro",
@@ -262,7 +232,8 @@ export const ipcContractFixtures = {
             "hold": {
               "kind": "until-dismissed"
             }
-          }
+          },
+          "dwell_seconds": null
         },
         {
           "kind": "picture",
@@ -277,7 +248,8 @@ export const ipcContractFixtures = {
           },
           "alert": {
             "kind": "none"
-          }
+          },
+          "dwell_seconds": null
         }
       ],
       "image_sources": [
@@ -287,44 +259,10 @@ export const ipcContractFixtures = {
         }
       ],
       "assets": [],
-      "playlists": [
-        {
-          "id": "workday",
-          "name": "Workday",
-          "advance": {
-            "kind": "timed",
-            "default_dwell_seconds": 30
-          },
-          "entries": [
-            {
-              "card_id": "clock",
-              "dwell_seconds": null
-            },
-            {
-              "card_id": "pomodoro",
-              "dwell_seconds": 20
-            },
-            {
-              "card_id": "limits-picture",
-              "dwell_seconds": null
-            }
-          ]
-        },
-        {
-          "id": "manual",
-          "name": "Manual",
-          "advance": {
-            "kind": "manual"
-          },
-          "entries": [
-            {
-              "card_id": "clock",
-              "dwell_seconds": null
-            }
-          ]
-        }
-      ],
-      "active_playlist_id": "workday",
+      "advance": {
+        "kind": "timed",
+        "default_dwell_seconds": 30
+      },
       "updater": {
         "channel": "stable",
         "checks": "notify"
@@ -348,7 +286,8 @@ export const ipcContractFixtures = {
       },
       "alert": {
         "kind": "none"
-      }
+      },
+      "dwell_seconds": null
     },
     {
       "kind": "pomodoro",
@@ -369,7 +308,8 @@ export const ipcContractFixtures = {
         "hold": {
           "kind": "until-dismissed"
         }
-      }
+      },
+      "dwell_seconds": null
     },
     {
       "kind": "picture",
@@ -384,57 +324,7 @@ export const ipcContractFixtures = {
       },
       "alert": {
         "kind": "none"
-      }
-    }
-  ],
-  "playlists": [
-    {
-      "id": "workday",
-      "name": "Workday",
-      "advance": {
-        "kind": "timed",
-        "default_dwell_seconds": 30
       },
-      "entries": [
-        {
-          "card_id": "clock",
-          "dwell_seconds": null
-        },
-        {
-          "card_id": "pomodoro",
-          "dwell_seconds": 20
-        },
-        {
-          "card_id": "limits-picture",
-          "dwell_seconds": null
-        }
-      ]
-    },
-    {
-      "id": "manual",
-      "name": "Manual",
-      "advance": {
-        "kind": "manual"
-      },
-      "entries": [
-        {
-          "card_id": "clock",
-          "dwell_seconds": null
-        }
-      ]
-    }
-  ],
-  "playlist_entries": [
-    {
-      "card_id": "clock",
-      "dwell_seconds": null
-    },
-    {
-      "card_id": "pomodoro",
-      "dwell_seconds": 20
-    },
-    {
-      "card_id": "limits-picture",
       "dwell_seconds": null
     }
   ],

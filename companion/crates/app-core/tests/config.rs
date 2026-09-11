@@ -3,9 +3,8 @@ use app_core::{
     AlertHold, AppConfig, AppSnapshot, AssetKind, AssetSettings, AssetSource,
     CURRENT_SCHEMA_VERSION, CardAlert, CardDataSnapshot, CardError, CardErrorKind, CardField,
     CardFieldValue, CardSettings, CarouselAdvance, ConnectionState, DeviceCounters, DeviceSnapshot,
-    DisplayTemplate, MAX_ASSET_BYTES, MAX_PLAYLIST_ENTRIES, MAX_PLAYLIST_NAME_LEN, MAX_PLAYLISTS,
-    PersistenceState, Playlist, PlaylistEntry, PomodoroSnapshot, PomodoroState, RefreshPolicy,
-    RuntimeDiagnostics, RuntimeState, ValidationCode, WidgetTapAction,
+    DisplayTemplate, MAX_ASSET_BYTES, PersistenceState, PomodoroSnapshot, PomodoroState,
+    RefreshPolicy, RuntimeDiagnostics, RuntimeState, ValidationCode, WidgetTapAction,
 };
 use protocol::{
     CAPABILITY_ASSET_TRANSFER, CAPABILITY_CONFIG_ROTATION, CAPABILITY_CORE_WIDGETS,
@@ -16,7 +15,7 @@ use protocol::{
 const DEFAULT_JSON: &str = include_str!("fixtures/default.json");
 const FULL_JSON: &str = include_str!("fixtures/full.json");
 const INVALID_JSON: &str = include_str!("fixtures/invalid.json");
-const FUTURE_JSON: &str = include_str!("fixtures/future-v7.json");
+const FUTURE_JSON: &str = include_str!("fixtures/future-version.json");
 const MALFORMED_JSON: &str = include_str!("fixtures/malformed.json");
 const CARD_SURFACE_JSON: &str = include_str!("fixtures/card-surface.json");
 
@@ -99,27 +98,17 @@ fn invalid_fixture_reports_all_domain_boundaries_before_compile() {
         ("preferences.timezone", ValidationCode::InvalidTimezone),
         // Two cards share id "duplicate"; the second occurrence is flagged.
         ("cards[2].id", ValidationCode::DuplicateId),
-        // playlist entry dwell_seconds: 4 is below MIN_DWELL_SECONDS (5).
-        (
-            "playlists[0].entries[1].dwell_seconds",
-            ValidationCode::OutOfRange,
-        ),
+        // A card's own dwell_seconds: 4 is below MIN_DWELL_SECONDS (5). Since
+        // schema v10 dwell is a card field, so the four playlist-shaped rules
+        // this table used to check -- an entry's dwell, an entry naming a card
+        // that does not exist, the same card twice in one playlist, two
+        // playlists sharing a name -- are all unrepresentable rather than
+        // merely unchecked.
+        ("cards[1].dwell_seconds", ValidationCode::OutOfRange),
         // on-timer-finish hold.value: 4 is below MIN_ALERT_HOLD_SECONDS (5).
         ("cards[3].alert.hold.value", ValidationCode::OutOfRange),
         // on-timer-finish alerts are only valid on pomodoro cards; cards[0] is clock.
         ("cards[0].alert", ValidationCode::OutOfRange),
-        // a playlist entry referencing a card id that does not exist.
-        (
-            "playlists[0].entries[3].card_id",
-            ValidationCode::MissingReference,
-        ),
-        // "on-timer-mismatch" appears twice in playlist "p1"'s entries.
-        (
-            "playlists[0].entries[4].card_id",
-            ValidationCode::DuplicateId,
-        ),
-        // Playlists "p1" and "p2" share the name "Main".
-        ("playlists[1].name", ValidationCode::DuplicateId),
         ("cards[4].source_id", ValidationCode::MissingReference),
     ] {
         assert!(
@@ -222,8 +211,8 @@ fn malformed_and_unknown_json_are_rejected_by_serde() {
     assert!(serde_json::from_str::<AppConfig>(MALFORMED_JSON).is_err());
 
     let with_unknown = DEFAULT_JSON.replace(
-        "\"schema_version\": 9,",
-        "\"schema_version\": 9, \"unexpected\": true,",
+        "\"schema_version\": 10,",
+        "\"schema_version\": 10, \"unexpected\": true,",
     );
     // A schema bump moves this anchor, and a `replace` that matches nothing
     // returns the input unchanged -- which would leave the assertion below
@@ -538,6 +527,7 @@ fn clock_card(id: &str) -> CardSettings {
         tap_action: WidgetTapAction::None,
         refresh: RefreshPolicy::DeviceLocal,
         alert: CardAlert::None,
+        dwell_seconds: None,
     }
 }
 
@@ -550,27 +540,16 @@ fn pomodoro_card(id: &str, alert: CardAlert) -> CardSettings {
         tap_action: WidgetTapAction::StartPause,
         refresh: RefreshPolicy::DeviceLocal,
         alert,
+        dwell_seconds: None,
     }
 }
 
-/// A single card, wrapped in a playlist that contains exactly that card (so
-/// `active_playlist_id` always resolves and the active playlist is never
-/// empty) — the v4 stand-in for the pre-Task-1 "just make this one card
-/// in-rotation" pattern most single-card tests need.
+/// A configuration holding exactly one card. Since schema v10 `cards` IS the
+/// loop, so there is nothing to enrol it in.
 fn single_card_config(card: CardSettings) -> AppConfig {
-    let id = card.id().to_owned();
     AppConfig {
         cards: vec![card],
-        playlists: vec![Playlist {
-            id: "p1".into(),
-            name: "P1".into(),
-            advance: CarouselAdvance::Manual,
-            entries: vec![PlaylistEntry {
-                card_id: id,
-                dwell_seconds: None,
-            }],
-        }],
-        active_playlist_id: "p1".into(),
+        advance: CarouselAdvance::Manual,
         ..AppConfig::default()
     }
 }
@@ -588,39 +567,34 @@ fn compilation_lowers_cards_to_the_frozen_wire_shape() {
             ),
             clock_card("muted"),
         ],
-        playlists: vec![Playlist {
-            id: "p1".into(),
-            name: "P1".into(),
-            advance: CarouselAdvance::Manual,
-            entries: vec![PlaylistEntry {
-                card_id: "clock".into(),
-                dwell_seconds: Some(10),
-            }],
-        }],
-        active_playlist_id: "p1".into(),
+        advance: CarouselAdvance::Manual,
         ..AppConfig::default()
     };
 
     let compiled = config.compile(7).unwrap();
 
     // A card outside the playlist with no alert vanishes entirely; a card
-    // outside the playlist with an alert is a screenless widget.
+    // Since v10 every card compiles to a widget AND a screen: `cards` is the
+    // loop, so a widget without a screen is no longer representable.
     let widget_ids: Vec<&str> = compiled
         .layout
         .widgets
         .iter()
         .map(|widget| widget.widget_id.as_str())
         .collect();
-    assert_eq!(widget_ids, ["clock", "focus"]);
+    assert_eq!(widget_ids, ["clock", "focus", "muted"]);
 
-    // Screen ID is the card ID, for playlist entries only.
+    // Screen ID is the card ID.
     let screens: Vec<(&str, &str)> = compiled
         .layout
         .screens
         .iter()
         .map(|screen| (screen.screen_id.as_str(), screen.widget_id.as_str()))
         .collect();
-    assert_eq!(screens, [("clock", "clock")]);
+    assert_eq!(
+        screens,
+        [("clock", "clock"), ("focus", "focus"), ("muted", "muted")]
+    );
 
     // Size class is pinned to Full for every emitted widget, forever.
     assert!(
@@ -631,13 +605,12 @@ fn compilation_lowers_cards_to_the_frozen_wire_shape() {
             .all(|widget| widget.size_class == protocol::SizeClass::Full)
     );
 
-    // A card compiled out entirely receives no initial push.
     let pushed: Vec<&str> = compiled
         .initial_pushes
         .iter()
         .map(|push| push.widget_id.as_str())
         .collect();
-    assert_eq!(pushed, ["clock", "focus"]);
+    assert_eq!(pushed, ["clock", "focus", "muted"]);
 }
 
 /// Final-review finding: `wire_config()` lowering every template removed the only
@@ -659,6 +632,7 @@ fn compositions_the_card_cannot_populate_are_rejected() {
             tap_action: WidgetTapAction::None,
             refresh: RefreshPolicy::DeviceLocal,
             alert: CardAlert::None,
+            dwell_seconds: None,
         },
         // A pomodoro on a clock face would draw the time and never its timer.
         // `tap_action` is None here so the failure can only be the template --
@@ -671,6 +645,7 @@ fn compositions_the_card_cannot_populate_are_rejected() {
             tap_action: WidgetTapAction::None,
             refresh: RefreshPolicy::DeviceLocal,
             alert: CardAlert::None,
+            dwell_seconds: None,
         },
         // And the analog face is the same mistake with the other clock template.
         CardSettings::Pomodoro {
@@ -681,6 +656,7 @@ fn compositions_the_card_cannot_populate_are_rejected() {
             tap_action: WidgetTapAction::None,
             refresh: RefreshPolicy::DeviceLocal,
             alert: CardAlert::None,
+            dwell_seconds: None,
         },
     ];
 
@@ -722,6 +698,7 @@ fn timer_tap_actions_require_the_progress_ring_template() {
             tap_action: tap_action.clone(),
             refresh: RefreshPolicy::DeviceLocal,
             alert: CardAlert::None,
+            dwell_seconds: None,
         });
         let error = config.validate().expect_err(&format!(
             "{tap_action:?} off progress-ring must not validate"
@@ -749,6 +726,7 @@ fn picture_card(id: &str, source_id: &str) -> CardSettings {
         tap_action: WidgetTapAction::None,
         refresh: RefreshPolicy::Manual,
         alert: CardAlert::None,
+        dwell_seconds: None,
     }
 }
 
@@ -762,10 +740,6 @@ fn a_picture_card_naming_a_known_source_validates() {
         ..AppConfig::default()
     };
     config.cards.push(picture_card("shot", "limits"));
-    config.playlists[0].entries.push(PlaylistEntry {
-        card_id: "shot".into(),
-        dwell_seconds: None,
-    });
 
     assert!(config.validate().is_ok(), "{:?}", config.validate());
     let encoded = serde_json::to_string(&config).expect("serialize picture card");
@@ -777,10 +751,6 @@ fn a_picture_card_naming_a_known_source_validates() {
 fn a_picture_card_naming_an_unknown_source_is_a_typed_missing_reference() {
     let mut config = AppConfig::default();
     config.cards.push(picture_card("shot", "nope"));
-    config.playlists[0].entries.push(PlaylistEntry {
-        card_id: "shot".into(),
-        dwell_seconds: None,
-    });
 
     let issues = config
         .validate()
@@ -806,10 +776,6 @@ fn a_picture_card_compiles_to_the_digital_clock_wire_template() {
         ..AppConfig::default()
     };
     config.cards = vec![picture_card("shot", "limits")];
-    config.playlists[0].entries = vec![PlaylistEntry {
-        card_id: "shot".into(),
-        dwell_seconds: None,
-    }];
 
     let compiled = config.compile(1).expect("compiles");
     assert_eq!(
@@ -869,9 +835,11 @@ fn compilation_is_deterministic_for_identical_input() {
 
 #[test]
 fn timed_advance_no_longer_requires_an_unimplemented_capability() {
-    let mut config = AppConfig::default();
-    config.playlists[0].advance = CarouselAdvance::Timed {
-        default_dwell_seconds: 20,
+    let config = AppConfig {
+        advance: CarouselAdvance::Timed {
+            default_dwell_seconds: 20,
+        },
+        ..AppConfig::default()
     };
     assert!(config.compile(1).is_ok());
 }
@@ -893,6 +861,7 @@ fn every_freshly_added_card_kind_validates_and_compiles() {
             tap_action: WidgetTapAction::None,
             refresh: RefreshPolicy::Manual,
             alert: CardAlert::None,
+            dwell_seconds: None,
         },
     ];
 
@@ -949,206 +918,52 @@ fn card_data_serializes_as_tagged_values_for_the_preview() {
     );
 }
 
-// -- Schema v4: playlists replace presence and the global carousel ---------
-
-/// Two clock cards ("clock-a"/"clock-b"), the given playlists, and the given
-/// active playlist id — the shared shape most of the playlist tests below
-/// need.
-fn v4_config_with(playlists: Vec<Playlist>, active: &str) -> AppConfig {
-    AppConfig {
-        cards: vec![clock_card("clock-a"), clock_card("clock-b")],
-        playlists,
-        active_playlist_id: active.into(),
-        ..AppConfig::default()
-    }
-}
-
-fn manual_playlist(id: &str, name: &str, entries: Vec<PlaylistEntry>) -> Playlist {
-    Playlist {
-        id: id.into(),
-        name: name.into(),
-        advance: CarouselAdvance::Manual,
-        entries,
-    }
-}
-
-fn entry(card_id: &str) -> PlaylistEntry {
-    PlaylistEntry {
-        card_id: card_id.into(),
-        dwell_seconds: None,
-    }
-}
+// -- Schema v10: the card list is the loop ---------------------------------
 
 #[test]
-fn default_config_is_v9_with_one_playlist() {
+fn default_config_is_v10_with_one_card() {
     let config = AppConfig::default();
     // A literal, not `CURRENT_SCHEMA_VERSION`: this test exists to catch a bump that
     // forgot to update `AppConfig::default()`, and comparing the constant to itself
     // could never fail that way. The boundary tests in `tests/store.rs` keep the
     // same literal discipline for the same reason.
-    assert_eq!(config.schema_version, 9);
-    assert_eq!(config.playlists.len(), 1);
-    assert_eq!(config.active_playlist_id, config.playlists[0].id);
-    assert_eq!(config.playlists[0].entries.len(), 1);
+    assert_eq!(config.schema_version, 10);
+    assert_eq!(config.cards.len(), 1);
+    assert_eq!(config.advance, CarouselAdvance::Manual);
     assert!(config.validate().is_ok());
 }
 
 #[test]
-fn active_playlist_id_must_resolve() {
-    let config = v4_config_with(
-        vec![manual_playlist("p1", "P1", vec![entry("clock-a")])],
-        "nope",
-    );
+fn timed_advance_default_dwell_bounds_are_enforced() {
+    let config = AppConfig {
+        advance: CarouselAdvance::Timed {
+            default_dwell_seconds: 1,
+        },
+        ..AppConfig::default()
+    };
     let error = config.validate().unwrap_err();
     assert!(error.issues.iter().any(|issue| {
-        issue.path == "active_playlist_id" && issue.code == ValidationCode::MissingReference
+        issue.path == "advance.default_dwell_seconds" && issue.code == ValidationCode::OutOfRange
     }));
 }
 
 #[test]
-fn playlist_entry_must_reference_existing_card() {
-    let config = v4_config_with(
-        vec![manual_playlist("p1", "P1", vec![entry("ghost")])],
-        "p1",
-    );
+fn a_cards_own_dwell_bounds_are_enforced() {
+    let config = AppConfig {
+        cards: vec![set_card_dwell(clock_card("clock-a"), Some(1))],
+        ..AppConfig::default()
+    };
     let error = config.validate().unwrap_err();
     assert!(error.issues.iter().any(|issue| {
-        issue.path == "playlists[0].entries[0].card_id"
-            && issue.code == ValidationCode::MissingReference
+        issue.path == "cards[0].dwell_seconds" && issue.code == ValidationCode::OutOfRange
     }));
 }
 
+/// Since v10 every card is in the loop, so the compiled set is simply the card
+/// order -- there is no longer a set inside the loop and a set of alert-capable
+/// cards outside it to concatenate.
 #[test]
-fn card_twice_in_one_playlist_rejected() {
-    let config = v4_config_with(
-        vec![manual_playlist(
-            "p1",
-            "P1",
-            vec![entry("clock-a"), entry("clock-a")],
-        )],
-        "p1",
-    );
-    let error = config.validate().unwrap_err();
-    assert!(error.issues.iter().any(|issue| {
-        issue.path == "playlists[0].entries[1].card_id" && issue.code == ValidationCode::DuplicateId
-    }));
-}
-
-#[test]
-fn same_card_in_two_playlists_is_allowed() {
-    let config = v4_config_with(
-        vec![
-            manual_playlist("p1", "P1", vec![entry("clock-a")]),
-            manual_playlist("p2", "P2", vec![entry("clock-a")]),
-        ],
-        "p1",
-    );
-    config
-        .validate()
-        .expect("the same card in two playlists must validate");
-}
-
-#[test]
-fn playlist_name_bounds_enforced() {
-    let empty_name = v4_config_with(
-        vec![manual_playlist("p1", "", vec![entry("clock-a")])],
-        "p1",
-    );
-    let error = empty_name.validate().unwrap_err();
-    assert!(
-        error
-            .issues
-            .iter()
-            .any(|issue| issue.path == "playlists[0].name" && issue.code == ValidationCode::Empty)
-    );
-
-    let too_long_name = v4_config_with(
-        vec![manual_playlist(
-            "p1",
-            &"x".repeat(MAX_PLAYLIST_NAME_LEN + 1),
-            vec![entry("clock-a")],
-        )],
-        "p1",
-    );
-    let error = too_long_name.validate().unwrap_err();
-    assert!(error.issues.iter().any(|issue| {
-        issue.path == "playlists[0].name" && issue.code == ValidationCode::TooLong
-    }));
-}
-
-#[test]
-fn duplicate_playlist_names_rejected() {
-    let config = v4_config_with(
-        vec![
-            manual_playlist("p1", "Work", vec![entry("clock-a")]),
-            manual_playlist("p2", "Work", vec![entry("clock-b")]),
-        ],
-        "p1",
-    );
-    let error = config.validate().unwrap_err();
-    assert!(error.issues.iter().any(|issue| {
-        issue.path == "playlists[1].name" && issue.code == ValidationCode::DuplicateId
-    }));
-}
-
-#[test]
-fn playlist_names_are_trimmed_for_uniqueness() {
-    let config = v4_config_with(
-        vec![
-            manual_playlist("p1", "Work", vec![entry("clock-a")]),
-            manual_playlist("p2", "Work ", vec![entry("clock-b")]),
-        ],
-        "p1",
-    );
-    let error = config.validate().unwrap_err();
-    assert!(error.issues.iter().any(|issue| {
-        issue.path == "playlists[1].name" && issue.code == ValidationCode::DuplicateId
-    }));
-}
-
-#[test]
-fn empty_active_playlist_rejected_when_cards_exist() {
-    let config = v4_config_with(vec![manual_playlist("p1", "P1", vec![])], "p1");
-    let error = config.validate().unwrap_err();
-    assert!(error.issues.iter().any(|issue| {
-        issue.path == "playlists[0].entries" && issue.code == ValidationCode::OutOfRange
-    }));
-}
-
-#[test]
-fn per_playlist_timed_advance_bounds() {
-    let config = v4_config_with(
-        vec![Playlist {
-            id: "p1".into(),
-            name: "P1".into(),
-            advance: CarouselAdvance::Timed {
-                default_dwell_seconds: 1,
-            },
-            entries: vec![entry("clock-a")],
-        }],
-        "p1",
-    );
-    let error = config.validate().unwrap_err();
-    assert!(error.issues.iter().any(|issue| {
-        issue.path == "playlists[0].advance.default_dwell_seconds"
-            && issue.code == ValidationCode::OutOfRange
-    }));
-}
-
-#[test]
-fn unknown_field_in_playlist_rejected() {
-    let json = r#"{"id":"p1","name":"Work","advance":{"kind":"manual"},"entries":[],"extra":1}"#;
-    assert!(serde_json::from_str::<Playlist>(json).is_err());
-}
-
-#[test]
-fn unknown_field_in_playlist_entry_rejected() {
-    let json = r#"{"card_id":"x","extra":1}"#;
-    assert!(serde_json::from_str::<PlaylistEntry>(json).is_err());
-}
-
-#[test]
-fn compiled_card_ids_are_entries_then_alert_outsiders() {
+fn compiled_card_ids_are_the_card_order() {
     let config = AppConfig {
         cards: vec![
             clock_card("b"),
@@ -1161,40 +976,33 @@ fn compiled_card_ids_are_entries_then_alert_outsiders() {
             ),
             clock_card("d"),
         ],
-        playlists: vec![manual_playlist("p1", "P1", vec![entry("b"), entry("a")])],
-        active_playlist_id: "p1".into(),
+        advance: CarouselAdvance::Manual,
         ..AppConfig::default()
     };
-    assert_eq!(config.compiled_card_ids(), vec!["b", "a", "c"]);
+    assert_eq!(config.compiled_card_ids(), vec!["b", "a", "c", "d"]);
 }
 
-#[test]
-fn too_many_playlists_rejected() {
-    let playlists = (0..=MAX_PLAYLISTS)
-        .map(|index| {
-            manual_playlist(
-                &format!("p{index}"),
-                &format!("P{index}"),
-                vec![entry("clock-a")],
-            )
-        })
-        .collect();
-    let config = v4_config_with(playlists, "p0");
-    let error = config.validate().unwrap_err();
-    assert!(
-        error
-            .issues
-            .iter()
-            .any(|issue| issue.path == "playlists" && issue.code == ValidationCode::TooMany)
-    );
-}
-
-#[test]
-fn too_many_entries_in_one_playlist_rejected() {
-    let entries = vec![entry("clock-a"); MAX_PLAYLIST_ENTRIES + 1];
-    let config = v4_config_with(vec![manual_playlist("p1", "P1", entries)], "p1");
-    let error = config.validate().unwrap_err();
-    assert!(error.issues.iter().any(|issue| {
-        issue.path == "playlists[0].entries" && issue.code == ValidationCode::TooMany
-    }));
+fn set_card_dwell(card: CardSettings, dwell_seconds: Option<u16>) -> CardSettings {
+    match card {
+        CardSettings::Clock {
+            id,
+            title,
+            show_seconds,
+            template,
+            tap_action,
+            refresh,
+            alert,
+            ..
+        } => CardSettings::Clock {
+            id,
+            title,
+            show_seconds,
+            template,
+            tap_action,
+            refresh,
+            alert,
+            dwell_seconds,
+        },
+        other => other,
+    }
 }

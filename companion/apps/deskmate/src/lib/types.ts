@@ -4,14 +4,9 @@ export interface AppConfig {
   cards: CardSettings[];
   image_sources: ImageSource[];
   assets: AssetSettings[];
-  playlists: Playlist[];
-  active_playlist_id: string;
+  advance: CarouselAdvance;
   updater: UpdaterSettings;
 }
-
-export const MAX_PLAYLISTS = 8;
-export const MAX_PLAYLIST_ENTRIES = 8;
-export const MAX_PLAYLIST_NAME_LEN = 48;
 
 export interface AppPreferences {
   timezone: string;
@@ -25,10 +20,7 @@ export type DisplayOrientation = "landscape" | "landscape-flipped";
 export type DisplayTemplate =
   | { kind: "digital-clock" }
   | { kind: "analog-clock" }
-  | { kind: "progress-ring" }
-  | { kind: "row-list" }
-  | { kind: "big-number-label" }
-  | { kind: "icon-badge-text"; icon_asset_id: string | null };
+  | { kind: "progress-ring" };
 
 export type WidgetTapAction =
   | { kind: "none" }
@@ -57,6 +49,7 @@ export type CardSettings =
       tap_action: WidgetTapAction;
       refresh: RefreshPolicy;
       alert: CardAlert;
+      dwell_seconds: number | null;
     }
   | {
       kind: "pomodoro";
@@ -67,6 +60,7 @@ export type CardSettings =
       tap_action: WidgetTapAction;
       refresh: RefreshPolicy;
       alert: CardAlert;
+      dwell_seconds: number | null;
     }
   | {
       kind: "picture";
@@ -76,6 +70,7 @@ export type CardSettings =
       tap_action: WidgetTapAction;
       refresh: RefreshPolicy;
       alert: CardAlert;
+      dwell_seconds: number | null;
     };
 
 export type CardKind = CardSettings["kind"];
@@ -107,17 +102,6 @@ export interface IconGlyphMapping {
 
 export type CarouselAdvance = { kind: "manual" } | { kind: "timed"; default_dwell_seconds: number };
 
-export interface Playlist {
-  id: string;
-  name: string;
-  advance: CarouselAdvance;
-  entries: PlaylistEntry[];
-}
-
-export interface PlaylistEntry {
-  card_id: string;
-  dwell_seconds: number | null;
-}
 
 export interface UpdaterSettings {
   channel: "stable" | "beta" | "manual";
@@ -355,8 +339,6 @@ export interface IpcContractFixtures {
   snapshot: AppSnapshot;
   configs: AppConfig[];
   card_settings: CardSettings[];
-  playlists: Playlist[];
-  playlist_entries: PlaylistEntry[];
   card_alerts: CardAlert[];
   alert_holds: AlertHold[];
   carousel_advances: CarouselAdvance[];

@@ -1,10 +1,9 @@
 import {
-  activePlaylist,
   cardLabel,
   cardTitle,
   issuesForField,
   numberValue,
-  setEntryDwell,
+  setCardDwell,
   tapActionDescription,
 } from "../lib/configDraft";
 import type {
@@ -28,8 +27,6 @@ interface CardEditorProps {
   /// reorder to invalidate.
   issues: ValidationIssue[];
   /// Issues scoped to this card's active-loop entry. Empty for a card outside
-  /// the loop, where no dwell field is rendered.
-  entryIssues: ValidationIssue[];
   /// A typed device refusal for this card's last data or scene update.
   cardError: CardError | null;
   pomodoro: PomodoroSnapshot | null;
@@ -95,7 +92,6 @@ export function CardEditor({
   card,
   config,
   issues,
-  entryIssues,
   cardError,
   pomodoro,
   timerBusy,
@@ -123,15 +119,13 @@ export function CardEditor({
 
   const fieldIssues = (field: string) => issuesForField(issues, field);
   const setAlert = (alert: CardAlert) => onChange({ ...card, alert });
-  const playlist = activePlaylist(config);
-  const entryIndex = playlist?.entries.findIndex((entry) => entry.card_id === card.id) ?? -1;
-  const entry = entryIndex >= 0 ? playlist?.entries[entryIndex] : undefined;
-  const isTimed = playlist?.advance.kind === "timed";
+  const isTimed = config.advance.kind === "timed";
   const title = cardTitle(card);
   const controlName = title ? `${cardLabel(card)} — ${title}` : cardLabel(card);
-  const dwellIssues = entryIssues.filter((issue) => issue.path.endsWith(".dwell_seconds"));
-  const showDwell =
-    entry !== undefined && (isTimed || entry.dwell_seconds !== null || dwellIssues.length > 0);
+  // Dwell is a field of the card since schema v10, so its issues arrive with
+  // the card's own rather than through a separate playlist-entry path.
+  const dwellIssues = fieldIssues("dwell_seconds");
+  const showDwell = isTimed || card.dwell_seconds !== null || dwellIssues.length > 0;
 
   return (
     <section className="panel" aria-labelledby="editor-heading">
@@ -345,7 +339,7 @@ export function CardEditor({
           </fieldset>
         )}
 
-        {showDwell && playlist && entry && (
+        {showDwell && (
           <label className="field">
             <span>Stays on the panel for</span>
             <input
@@ -355,20 +349,19 @@ export function CardEditor({
               min={5}
               max={3600}
               step={1}
-              value={entry.dwell_seconds ?? ""}
+              value={card.dwell_seconds ?? ""}
               placeholder={
-                playlist.advance.kind === "timed"
-                  ? `${playlist.advance.default_dwell_seconds} s, the loop's default`
+                config.advance.kind === "timed"
+                  ? `${config.advance.default_dwell_seconds} s, the loop's default`
                   : undefined
               }
               aria-label={`Stays on the panel for ${controlName}`}
               aria-invalid={dwellIssues.length > 0}
               onChange={(event) =>
                 onConfigChange(
-                  setEntryDwell(
+                  setCardDwell(
                     config,
-                    playlist.id,
-                    entryIndex,
+                    card.id,
                     event.currentTarget.value === ""
                       ? null
                       : numberValue(event.currentTarget.value),

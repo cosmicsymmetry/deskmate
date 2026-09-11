@@ -1,5 +1,5 @@
 {
-  "schema_version": 9,
+  "schema_version": 10,
   "preferences": {
     "timezone": "UTC",
     "autostart": false,
@@ -15,20 +15,11 @@
       "template": { "kind": "progress-ring" },
       "tap_action": { "kind": "start-pause" },
       "refresh": { "kind": "device-local" },
-      "alert": { "kind": "none" }
+      "alert": { "kind": "none" },
+      "dwell_seconds": null
     }
   ],
   "assets": [],
-  "playlists": [
-    {
-      "id": "main",
-      "name": "Main",
-      "advance": { "kind": "manual" },
-      "entries": [
-        { "card_id": "pomodoro", "dwell_seconds": null }
-      ]
-    }
-  ],
-  "active_playlist_id": "main",
+  "advance": { "kind": "manual" },
   "updater": { "channel": "stable", "checks": "notify" }
 }

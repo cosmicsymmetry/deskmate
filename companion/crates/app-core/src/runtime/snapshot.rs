@@ -170,10 +170,7 @@ pub(super) fn initial_snapshot(config: &AppConfig, diagnostics: RuntimeDiagnosti
         config: config.clone(),
         runtime: RuntimeState::Starting,
         device: DeviceSnapshot {
-            active_screen_id: config
-                .active_playlist()
-                .and_then(|playlist| playlist.entries.first())
-                .map(|entry| entry.card_id.clone()),
+            active_screen_id: config.cards.first().map(|card| card.id().to_owned()),
             ..empty_device(ConnectionState::Connecting)
         },
         pomodoros,

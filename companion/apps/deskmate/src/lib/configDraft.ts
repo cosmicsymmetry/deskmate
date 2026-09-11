@@ -3,10 +3,9 @@ import type {
   AppConfig,
   CardSettings,
   CarouselAdvance,
-  Playlist,
   ValidationIssue,
 } from "./types";
-import { MAX_PLAYLIST_ENTRIES } from "./types";
+
 
 export const MAX_CARDS = 8;
 
@@ -30,11 +29,7 @@ export function copyConfig(config: AppConfig): AppConfig {
           ? { ...asset.kind, glyphs: asset.kind.glyphs.map((glyph) => ({ ...glyph })) }
           : { ...asset.kind },
     })),
-    playlists: config.playlists.map((playlist) => ({
-      ...playlist,
-      advance: { ...playlist.advance },
-      entries: playlist.entries.map((entry) => ({ ...entry })),
-    })),
+    advance: { ...config.advance },
     updater: { ...config.updater },
   };
 }
@@ -119,12 +114,8 @@ export function addCard(
   config: AppConfig;
   cardId: string | null;
 } {
-  const playlist = activePlaylist(config);
-  if (
-    config.cards.length >= MAX_CARDS ||
-    !playlist ||
-    playlist.entries.length >= MAX_PLAYLIST_ENTRIES
-  ) {
+  // One bound, because there is one list: `cards` IS the loop.
+  if (config.cards.length >= MAX_CARDS) {
     return { config, cardId: null };
   }
   const used = new Set(config.cards.map((card) => card.id));
@@ -135,6 +126,7 @@ export function addCard(
     id: cardId,
     tap_action: { kind: "none" } as const,
     alert: { kind: "none" } as const,
+    dwell_seconds: null,
   };
 
   let card: CardSettings;
@@ -185,8 +177,11 @@ export function addCard(
     !copied.image_sources.some((source) => source.id === request.sourceId)
       ? [...copied.image_sources, { id: request.sourceId, name: request.sourceName }]
       : copied.image_sources;
-  const withCard = { ...copied, cards: [...copied.cards, card], image_sources };
-  return { config: addEntry(withCard, playlist.id, cardId), cardId };
+  // Appending to `cards` IS joining the loop.
+  return {
+    config: { ...copied, cards: [...copied.cards, card], image_sources },
+    cardId,
+  };
 }
 
 export function updateWidget(
@@ -207,183 +202,88 @@ export function removeCard(config: AppConfig, cardId: string): AppConfig {
   return {
     ...config,
     cards: config.cards.filter((card) => card.id !== cardId),
-    playlists: config.playlists.map((playlist) => ({
-      ...playlist,
-      entries: playlist.entries.filter((entry) => entry.card_id !== cardId),
-    })),
   };
-}
-
-export function activePlaylist(config: AppConfig): Playlist | null {
-  return config.playlists.find((playlist) => playlist.id === config.active_playlist_id) ?? null;
-}
-
-export function libraryCards(config: AppConfig): CardSettings[] {
-  return config.cards;
 }
 
 export interface LoopEntry {
   index: number;
-  entry: Playlist["entries"][number];
-  card: CardSettings | null;
+  card: CardSettings;
 }
 
-/** Active-loop entries in document order, including unresolved card references. */
+/// The loop, in order. Since schema v10 that is simply the card list: there is
+/// no separate playlist, so a loop position with no card behind it -- the
+/// "Missing card" tile this window used to render -- is unrepresentable.
 export function loopEntries(config: AppConfig): LoopEntry[] {
-  const playlist = activePlaylist(config);
-  if (!playlist) {
-    return [];
-  }
-  const cards = new Map(config.cards.map((card) => [card.id, card]));
-  return playlist.entries.map((entry, index) => ({
-    index,
-    entry,
-    card: cards.get(entry.card_id) ?? null,
-  }));
+  return config.cards.map((card, index) => ({ index, card }));
 }
 
-/** Library cards with no entry in the active loop. Inactive playlists do not count. */
-export function cardsOutsideLoop(config: AppConfig): CardSettings[] {
-  const playlist = activePlaylist(config);
-  const used = new Set(playlist?.entries.map((entry) => entry.card_id) ?? []);
-  return config.cards.filter((card) => !used.has(card.id));
-}
-
-function replacePlaylist(
-  config: AppConfig,
-  playlistId: string,
-  update: (playlist: Playlist) => Playlist,
-): AppConfig {
-  const index = config.playlists.findIndex((playlist) => playlist.id === playlistId);
-  if (index < 0) {
+export function moveEntry(config: AppConfig, from: number, to: number): AppConfig {
+  const cards = config.cards;
+  if (
+    !Number.isInteger(from) ||
+    from < 0 ||
+    from >= cards.length ||
+    !Number.isFinite(to) ||
+    cards.length < 2
+  ) {
     return config;
   }
-  const playlist = config.playlists[index];
-  const next = update(playlist);
-  if (next === playlist) {
+  const target = Math.max(0, Math.min(Math.trunc(to), cards.length - 1));
+  if (from === target) {
+    return config;
+  }
+  const next = [...cards];
+  const [moved] = next.splice(from, 1);
+  next.splice(target, 0, moved);
+  return { ...copyConfig(config), cards: next };
+}
+
+export function setCardDwell(
+  config: AppConfig,
+  cardId: string,
+  dwell: number | null,
+): AppConfig {
+  const index = config.cards.findIndex((card) => card.id === cardId);
+  if (index < 0 || config.cards[index].dwell_seconds === dwell) {
     return config;
   }
   return {
-    ...config,
-    playlists: config.playlists.map((candidate, playlistIndex) =>
-      playlistIndex === index ? next : candidate,
+    ...copyConfig(config),
+    cards: config.cards.map((card, cardIndex) =>
+      cardIndex === index ? { ...card, dwell_seconds: dwell } : card,
     ),
   };
 }
 
-export function addEntry(config: AppConfig, playlistId: string, cardId: string): AppConfig {
-  if (!config.cards.some((card) => card.id === cardId)) {
+export function setAdvance(config: AppConfig, advance: CarouselAdvance): AppConfig {
+  if (config.advance.kind === "manual" && advance.kind === "manual") {
     return config;
   }
-  return replacePlaylist(config, playlistId, (playlist) => {
-    if (
-      playlist.entries.length >= MAX_PLAYLIST_ENTRIES ||
-      playlist.entries.some((entry) => entry.card_id === cardId)
-    ) {
-      return playlist;
-    }
-    return {
-      ...playlist,
-      entries: [...playlist.entries, { card_id: cardId, dwell_seconds: null }],
-    };
-  });
+  if (
+    config.advance.kind === "timed" &&
+    advance.kind === "timed" &&
+    config.advance.default_dwell_seconds === advance.default_dwell_seconds
+  ) {
+    return config;
+  }
+  return { ...copyConfig(config), advance };
 }
 
-export function removeEntry(config: AppConfig, playlistId: string, index: number): AppConfig {
-  return replacePlaylist(config, playlistId, (playlist) => {
-    if (!Number.isInteger(index) || index < 0 || index >= playlist.entries.length) {
-      return playlist;
-    }
-    return {
-      ...playlist,
-      entries: playlist.entries.filter((_, entryIndex) => entryIndex !== index),
-    };
-  });
-}
-
-export function moveEntry(
-  config: AppConfig,
-  playlistId: string,
-  from: number,
-  to: number,
-): AppConfig {
-  return replacePlaylist(config, playlistId, (playlist) => {
-    if (
-      !Number.isInteger(from) ||
-      from < 0 ||
-      from >= playlist.entries.length ||
-      !Number.isFinite(to) ||
-      playlist.entries.length < 2
-    ) {
-      return playlist;
-    }
-    const target = Math.max(0, Math.min(Math.trunc(to), playlist.entries.length - 1));
-    if (from === target) {
-      return playlist;
-    }
-    const entries = [...playlist.entries];
-    const [moved] = entries.splice(from, 1);
-    entries.splice(target, 0, moved);
-    return { ...playlist, entries };
-  });
-}
-
-export function setEntryDwell(
-  config: AppConfig,
-  playlistId: string,
-  index: number,
-  dwell: number | null,
-): AppConfig {
-  return replacePlaylist(config, playlistId, (playlist) => {
-    if (!Number.isInteger(index) || index < 0 || index >= playlist.entries.length) {
-      return playlist;
-    }
-    const current = playlist.entries[index];
-    if (current.dwell_seconds === dwell) {
-      return playlist;
-    }
-    return {
-      ...playlist,
-      entries: playlist.entries.map((entry, entryIndex) =>
-        entryIndex === index ? { ...entry, dwell_seconds: dwell } : entry,
-      ),
-    };
-  });
-}
-
-export function setPlaylistAdvance(
-  config: AppConfig,
-  playlistId: string,
-  advance: CarouselAdvance,
-): AppConfig {
-  return replacePlaylist(config, playlistId, (playlist) => {
-    if (playlist.advance.kind === "manual" && advance.kind === "manual") {
-      return playlist;
-    }
-    if (
-      playlist.advance.kind === "timed" &&
-      advance.kind === "timed" &&
-      playlist.advance.default_dwell_seconds === advance.default_dwell_seconds
-    ) {
-      return playlist;
-    }
-    return { ...playlist, advance };
-  });
-}
-
-/// Total time for one pass through a playlist, in seconds, inheriting that
-/// playlist's default dwell for entries that don't override it. `null` under
+/// Total time for one pass through the loop, in seconds, inheriting the
+/// document's default dwell for cards that do not override it. `null` under
 /// manual advance, where there is no loop length to speak of.
-export function loopSeconds(config: AppConfig, playlistId: string): number | null {
-  const playlist = config.playlists.find((candidate) => candidate.id === playlistId);
-  if (playlist?.advance.kind !== "timed") {
+export function loopSeconds(config: AppConfig): number | null {
+  if (config.advance.kind !== "timed") {
     return null;
   }
-  const fallback = playlist.advance.default_dwell_seconds;
-  return playlist.entries.reduce((total, entry) => total + (entry.dwell_seconds ?? fallback), 0);
+  const advance = config.advance;
+  return config.cards.reduce(
+    (total, card) => total + (card.dwell_seconds ?? advance.default_dwell_seconds),
+    0,
+  );
 }
 
-/// One ribbon segment: an active-playlist card plus its resolved dwell and the
+/// One ribbon segment: a card plus its resolved dwell and the
 /// proportional width/offset (both 0-100) that dwell earns in the loop
 /// ribbon. Pure and independent of any DOM/flex mechanics so the width math
 /// — the whole point of the ribbon — can be unit-tested without rendering
@@ -399,29 +299,19 @@ export interface LoopSegment {
   offsetPercent: number;
 }
 
-/// Builds the ribbon's segments from the active playlist's entries only —
-/// library cards outside that playlist have no position in this loop. Under manual advance
-/// there is no dwell to speak of, so every segment is given equal width
-/// instead of a zero-width one, which is what lets the ribbon still show
-/// order (just not timing) in that mode.
+/// Builds the ribbon's segments from the card list, which IS the loop. Under
+/// manual advance there is no dwell to speak of, so every segment is given
+/// equal width instead of a zero-width one, which is what lets the ribbon
+/// still show order (just not timing) in that mode.
 export function loopSegments(config: AppConfig): LoopSegment[] {
-  const playlist = activePlaylist(config);
-  if (!playlist) {
-    return [];
-  }
-  const fallback = playlist.advance.kind === "timed" ? playlist.advance.default_dwell_seconds : 0;
-  const cards = new Map(config.cards.map((card) => [card.id, card]));
-  const entries = playlist.entries.flatMap((entry) => {
-    const card = cards.get(entry.card_id);
-    return card ? [{ card, entry }] : [];
-  });
-  const dwellSeconds = entries.map(({ entry }) =>
-    playlist.advance.kind === "timed" ? (entry.dwell_seconds ?? fallback) : 0,
+  const advance = config.advance;
+  const dwellSeconds = config.cards.map((card) =>
+    advance.kind === "timed" ? (card.dwell_seconds ?? advance.default_dwell_seconds) : 0,
   );
   const total = dwellSeconds.reduce((sum, seconds) => sum + seconds, 0);
-  const equalShare = entries.length > 0 ? 100 / entries.length : 0;
+  const equalShare = config.cards.length > 0 ? 100 / config.cards.length : 0;
   let offset = 0;
-  return entries.map(({ card }, index) => {
+  return config.cards.map((card, index) => {
     const widthPercent = total > 0 ? (dwellSeconds[index] / total) * 100 : equalShare;
     const segment: LoopSegment = {
       cardId: card.id,
@@ -471,7 +361,7 @@ export interface LoopAdvance {
 /// pure function of `deadlineMs` and `nowMs` alone, never of how many times
 /// a caller has re-rendered or re-checked it. Returns `null` before the
 /// deadline (nothing to do yet). Once `nowMs` has reached it, returns the
-/// next card in the active playlist together with the deadline for THAT card's own
+/// next card in the loop together with the deadline for THAT card's own
 /// dwell, so a caller can just feed the previous result's `deadlineMs`
 /// back in on every tick without tracking anything else.
 export function loopAdvance(
@@ -551,15 +441,8 @@ function claimedIssues(issues: ValidationIssue[], config: AppConfig): Validation
   for (const card of config.cards) {
     claim(issuesForCard(issues, config, card.id));
   }
-  const activeIndex = config.playlists.findIndex(
-    (playlist) => playlist.id === config.active_playlist_id,
-  );
-  // An unresolved `active_playlist_id` has no in-app recovery and is unreachable
-  // through this UI: the store rejects such a file before the app can load it.
-  if (activeIndex >= 0) {
-    claim(issuesForPath(issues, `playlists[${activeIndex}].entries`));
-    claim(issuesForPath(issues, `playlists[${activeIndex}].advance`));
-  }
+  claim(issuesForPath(issues, "advance"));
+  claim(issuesForPath(issues, "advance.default_dwell_seconds"));
   claim(issuesForPath(issues, "preferences.timezone"));
   return [...claimed];
 }

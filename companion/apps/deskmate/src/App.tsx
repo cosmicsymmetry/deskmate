@@ -11,7 +11,6 @@ import { SettingsSheet } from "./components/SettingsSheet";
 import { TopBar } from "./components/TopBar";
 import {
   type AddCardRequest,
-  activePlaylist,
   addCard,
   cardLabel,
   copyConfig,
@@ -191,18 +190,6 @@ export function App() {
     snapshot.pomodoros.find((candidate) => candidate.widget_id === selectedCardId) ?? null;
   const issues = validation.result.issues;
   const cardIssues = selectedCardId ? issuesForCard(issues, draft, selectedCardId) : [];
-  const active = activePlaylist(draft);
-  const activeIndex = draft.playlists.findIndex(
-    (playlist) => playlist.id === draft.active_playlist_id,
-  );
-  const selectedEntryIndex =
-    selectedCardId && active
-      ? active.entries.findIndex((entry) => entry.card_id === selectedCardId)
-      : -1;
-  const selectedEntryIssues =
-    activeIndex >= 0 && selectedEntryIndex >= 0
-      ? issuesForPath(issues, `playlists[${activeIndex}].entries[${selectedEntryIndex}]`)
-      : [];
   const selectedCardError =
     snapshot.card_errors.find((error) => error.card_id === selectedCardId) ?? null;
   const cardErrorCount = snapshot.card_errors.length;
@@ -566,7 +553,6 @@ export function App() {
             card={selectedWidget}
             config={draft}
             issues={cardIssues}
-            entryIssues={selectedEntryIssues}
             cardError={selectedCardError}
             pomodoro={pomodoro}
             timerBusy={busyAction === "timer"}

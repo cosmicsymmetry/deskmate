@@ -5,7 +5,7 @@ use std::sync::Mutex;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::secure_file::{self, BoundedReadError, FileIoError};
-use crate::{AppConfig, CURRENT_SCHEMA_VERSION, PlaylistEntry, ValidationIssue};
+use crate::{AppConfig, CURRENT_SCHEMA_VERSION, ValidationIssue};
 
 pub const MAX_CONFIG_FILE_BYTES: usize = 64 * 1_024;
 pub const SAVED_SETTINGS_VALIDATION_FAILURE_MESSAGE: &str =
@@ -120,6 +120,7 @@ pub enum ConfigOrigin {
     MigratedV6,
     MigratedV7,
     MigratedV8,
+    MigratedV9,
     LastGood,
 }
 
@@ -233,34 +234,17 @@ struct VersionHeader {
 }
 
 fn finish_migration(mut config: AppConfig) -> AppConfig {
-    config.playlists.retain(|playlist| {
-        playlist.id == config.active_playlist_id || !playlist.entries.is_empty()
-    });
-    let Some(active_index) = config
-        .playlists
-        .iter()
-        .position(|playlist| playlist.id == config.active_playlist_id)
-    else {
-        return config;
-    };
-    if config.playlists[active_index].entries.is_empty() {
-        // Retiring a card kind is the first subtractive migration in this
-        // product. An empty active playlist is not merely sparse: it makes the
-        // document invalid and leaves the panel with no face. Reuse an existing
-        // `clock` identity when one survived elsewhere in the library; otherwise
-        // add the exact fallback card `AppConfig::default()` ships.
-        if !config.cards.iter().any(|card| card.id() == "clock") {
-            let fallback = AppConfig::default()
-                .cards
-                .into_iter()
-                .next()
-                .expect("the default configuration has one clock card");
-            config.cards.push(fallback);
-        }
-        config.playlists[active_index].entries.push(PlaylistEntry {
-            card_id: "clock".into(),
-            dwell_seconds: None,
-        });
+    // Retiring card kinds can empty the loop, and `cards` IS the loop since
+    // schema v10. An empty one is not merely sparse: it makes the document
+    // invalid and leaves the panel with no face, so it gets the exact fallback
+    // card `AppConfig::default()` ships.
+    if config.cards.is_empty() {
+        let fallback = AppConfig::default()
+            .cards
+            .into_iter()
+            .next()
+            .expect("the default configuration has one clock card");
+        config.cards.push(fallback);
     }
     config
 }
@@ -309,9 +293,105 @@ fn drop_retired_cards_from_json(text: &str) -> Result<AppConfig, StoreError> {
             }
         }
     }
+    fold_playlists_into_the_card_order(&mut value);
     serde_json::from_value(value).map_err(|error| StoreError::InvalidJson {
         message: error.to_string(),
     })
+}
+
+/// Schema v10: `cards` IS the loop, so the active playlist's order becomes the
+/// card order and its `advance` becomes the document's.
+///
+/// Runs on `Value` for the same reason the retired-kind strip above does: the
+/// current `AppConfig` has no `playlists` key, so a stored one would fail
+/// `deny_unknown_fields` before any Rust-side filter could run, and the owner
+/// would be told their settings are unreadable.
+///
+/// **A card is never dropped.** Cards the active playlist did not name are
+/// appended after the ones it did, in their original order, which is what a
+/// v4-v9 document's "card library outside the loop" becomes. What IS lost, on
+/// purpose, is the grouping: playlist names and every inactive playlist. The
+/// product has had no way to create a second playlist since the one-loop
+/// change, so nothing reachable through the window is losing a feature.
+fn fold_playlists_into_the_card_order(value: &mut serde_json::Value) {
+    let Some(object) = value.as_object_mut() else {
+        return;
+    };
+    let playlists = object.remove("playlists");
+    let active_id = object
+        .remove("active_playlist_id")
+        .and_then(|id| id.as_str().map(str::to_owned));
+    let Some(active) = playlists
+        .and_then(|playlists| match playlists {
+            serde_json::Value::Array(playlists) => Some(playlists),
+            _ => None,
+        })
+        .and_then(|playlists| {
+            let active_id = active_id?;
+            playlists.into_iter().find(|playlist| {
+                playlist.get("id").and_then(serde_json::Value::as_str) == Some(active_id.as_str())
+            })
+        })
+    else {
+        // No active playlist to fold: leave the card order alone and let
+        // validation speak if the document is short of a card.
+        object
+            .entry("advance")
+            .or_insert(serde_json::json!({ "kind": "manual" }));
+        return;
+    };
+
+    if let Some(advance) = active.get("advance") {
+        object.insert("advance".into(), advance.clone());
+    } else {
+        object.insert("advance".into(), serde_json::json!({ "kind": "manual" }));
+    }
+
+    let entries: Vec<(String, serde_json::Value)> = active
+        .get("entries")
+        .and_then(serde_json::Value::as_array)
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(|entry| {
+                    let card_id = entry.get("card_id")?.as_str()?.to_owned();
+                    let dwell = entry
+                        .get("dwell_seconds")
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null);
+                    Some((card_id, dwell))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let Some(cards) = object
+        .get_mut("cards")
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return;
+    };
+    let mut ordered: Vec<serde_json::Value> = Vec::with_capacity(cards.len());
+    for (card_id, dwell) in &entries {
+        if let Some(position) = cards.iter().position(|card| {
+            card.get("id").and_then(serde_json::Value::as_str) == Some(card_id.as_str())
+        }) {
+            let mut card = cards.remove(position);
+            if let Some(card_object) = card.as_object_mut() {
+                card_object.insert("dwell_seconds".into(), dwell.clone());
+            }
+            ordered.push(card);
+        }
+    }
+    // Whatever the active playlist did not name keeps its original order and
+    // joins the end of the loop rather than disappearing.
+    for mut card in cards.drain(..) {
+        if let Some(card_object) = card.as_object_mut() {
+            card_object.insert("dwell_seconds".into(), serde_json::Value::Null);
+        }
+        ordered.push(card);
+    }
+    *cards = ordered;
 }
 
 fn parse_json<T: DeserializeOwned>(text: &str) -> Result<T, StoreError> {
@@ -326,7 +406,7 @@ fn decode_config(bytes: &[u8]) -> Result<(AppConfig, ConfigOrigin), StoreError> 
     let header: VersionHeader = parse_json(text)?;
     let (config, origin) = match header.schema_version {
         CURRENT_SCHEMA_VERSION => (parse_json(text)?, ConfigOrigin::Current),
-        version @ (4..=8) => {
+        version @ (4..=9) => {
             // v4's asset variants (`icon { width, height }`, `font { pixel_size,
             // glyph_ranges }`) encoded the pre-tiny_ttf design where glyphs were
             // baked at a fixed size. `config.rs`'s compile step has always
@@ -349,6 +429,7 @@ fn decode_config(bytes: &[u8]) -> Result<(AppConfig, ConfigOrigin), StoreError> 
                 6 => ConfigOrigin::MigratedV6,
                 7 => ConfigOrigin::MigratedV7,
                 8 => ConfigOrigin::MigratedV8,
+                9 => ConfigOrigin::MigratedV9,
                 _ => unreachable!(),
             };
             (

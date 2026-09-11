@@ -53,6 +53,7 @@ export function mockConfig(): AppConfig {
         tap_action: { kind: "none" },
         refresh: { kind: "device-local" },
         alert: { kind: "none" },
+        dwell_seconds: null,
       },
       {
         kind: "pomodoro",
@@ -63,6 +64,7 @@ export function mockConfig(): AppConfig {
         tap_action: { kind: "start-pause" },
         refresh: { kind: "device-local" },
         alert: { kind: "on-timer-finish", hold: { kind: "until-dismissed" } },
+        dwell_seconds: null,
       },
       {
         kind: "picture",
@@ -72,29 +74,12 @@ export function mockConfig(): AppConfig {
         tap_action: { kind: "none" },
         refresh: { kind: "manual" },
         alert: { kind: "none" },
+        dwell_seconds: null,
       },
     ],
     image_sources: [{ id: "studio", name: "Studio" }],
     assets: [],
-    playlists: [
-      {
-        id: "day",
-        name: "Workday",
-        advance: { kind: "timed", default_dwell_seconds: 20 },
-        entries: [
-          { card_id: "clock", dwell_seconds: 45 },
-          { card_id: "pomodoro", dwell_seconds: null },
-          { card_id: "picture", dwell_seconds: 30 },
-        ],
-      },
-      {
-        id: "evening",
-        name: "Evening",
-        advance: { kind: "manual" },
-        entries: [{ card_id: "clock", dwell_seconds: null }],
-      },
-    ],
-    active_playlist_id: "day",
+    advance: { kind: "timed", default_dwell_seconds: 30 },
     updater: { channel: "stable", checks: "notify" },
   };
 }

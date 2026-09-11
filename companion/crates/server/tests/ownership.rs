@@ -1057,8 +1057,9 @@ async fn invalid_config_is_typed_and_does_not_replace_last_good() {
 
     let mut invalid: serde_json::Value = serde_json::from_str(&valid).unwrap();
     invalid["cards"][0]["id"] = "not-last-good".into();
-    invalid["playlists"][0]["entries"][0]["card_id"] = "not-last-good".into();
-    invalid["active_playlist_id"] = "missing-playlist".into();
+    // A dwell below MIN_DWELL_SECONDS: since schema v10 dwell is a card field,
+    // so this is the invalid document a playlist reference used to be.
+    invalid["cards"][0]["dwell_seconds"] = 1.into();
     let rejected = client
         .put(format!(
             "http://{host}/v1/devices/{}/config",
@@ -1078,7 +1079,7 @@ async fn invalid_config_is_typed_and_does_not_replace_last_good() {
     assert!(error["issues"].as_array().is_some_and(|issues| {
         issues
             .iter()
-            .any(|issue| issue["path"] == "active_playlist_id")
+            .any(|issue| issue["path"] == "cards[0].dwell_seconds")
     }));
 
     let mut socket = connect_device(&host, &identity.token)
@@ -1184,7 +1185,7 @@ async fn admin_status_reports_defaults_used_after_stored_config_validation_failu
         .expect("fixture"),
     )
     .expect("fixture JSON");
-    invalid["active_playlist_id"] = "missing-playlist".into();
+    invalid["cards"][0]["dwell_seconds"] = 1.into();
     std::fs::write(
         config_root.join(format!("{}.json", identity.device_id)),
         serde_json::to_vec(&invalid).expect("invalid config JSON"),

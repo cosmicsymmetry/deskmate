@@ -44,6 +44,45 @@ fn a_pre_v4_document_is_refused_as_an_unsupported_version() {
     );
 }
 
+#[test]
+fn v9_folds_the_active_playlist_into_the_card_order_and_loses_no_card() {
+    // The whole point of v10: one list. The active playlist's order becomes the
+    // card order and its dwells ride along; cards it never named are appended
+    // rather than dropped, which is what a v4-v9 "library outside the loop"
+    // becomes. Playlist names and the inactive playlist itself are the only
+    // things lost, on purpose.
+    let directory = test_directory("v9-two-playlists");
+    let path = directory.path().join("config.json");
+    fs::write(&path, include_bytes!("fixtures/v9-two-playlists.json")).unwrap();
+
+    let outcome = ConfigStore::new(&path).load();
+    assert_eq!(outcome.origin(), ConfigOrigin::MigratedV9);
+    let config = outcome.config();
+    assert_eq!(config.schema_version, CURRENT_SCHEMA_VERSION);
+
+    // Entry order first, then everything the active playlist did not name, in
+    // the order the card library had them.
+    let ids: Vec<&str> = config.cards.iter().map(CardSettings::id).collect();
+    assert_eq!(ids, ["desk", "focus", "library-only", "evening-only"]);
+
+    // Dwell rode across from the entry, and an unnamed card gets none.
+    assert_eq!(config.cards[0].dwell_seconds(), Some(20));
+    assert_eq!(config.cards[1].dwell_seconds(), None);
+    assert_eq!(config.cards[2].dwell_seconds(), None);
+    assert_eq!(config.cards[3].dwell_seconds(), None);
+
+    // The active playlist's advance became the document's; the inactive
+    // playlist's `manual` did not win.
+    assert_eq!(
+        config.advance,
+        CarouselAdvance::Timed {
+            default_dwell_seconds: 30
+        }
+    );
+
+    config.compile(7).unwrap();
+}
+
 fn test_directory(name: &str) -> tempfile::TempDir {
     tempfile::Builder::new()
         .prefix(&format!("deskmate-app-core-{name}-"))
@@ -74,7 +113,7 @@ fn invalid_persisted_config_keeps_last_good_and_reports_typed_error() {
     store.save(&last_good).unwrap();
 
     let mut invalid = serde_json::to_value(AppConfig::default()).unwrap();
-    invalid["active_playlist_id"] = serde_json::json!("ghost");
+    invalid["cards"][0]["dwell_seconds"] = serde_json::json!(1);
     let invalid_bytes = serde_json::to_vec_pretty(&invalid).unwrap();
     fs::write(&path, &invalid_bytes).unwrap();
 
@@ -91,7 +130,7 @@ fn invalid_persisted_config_keeps_last_good_and_reports_typed_error() {
     assert!(
         issues
             .iter()
-            .any(|issue| issue.path == "active_playlist_id")
+            .any(|issue| issue.path == "cards[0].dwell_seconds")
     );
     assert_eq!(
         StoreError::Validation { issues }.to_string(),
@@ -107,7 +146,7 @@ fn invalid_persisted_config_without_last_good_labels_fallback_as_defaults() {
     let path = directory.path().join("config.json");
     let store = ConfigStore::new(&path);
     let mut invalid = serde_json::to_value(AppConfig::default()).unwrap();
-    invalid["active_playlist_id"] = serde_json::json!("ghost");
+    invalid["cards"][0]["dwell_seconds"] = serde_json::json!(1);
     fs::write(&path, serde_json::to_vec_pretty(&invalid).unwrap()).unwrap();
 
     let LoadOutcome::ValidationFailed {
@@ -180,7 +219,7 @@ fn save_round_trips_and_migration_is_explicit() {
     ));
     assert!(migrated.config().assets.is_empty());
     assert_eq!(
-        migrated.config().playlists[0].advance,
+        migrated.config().advance,
         CarouselAdvance::Timed {
             default_dwell_seconds: 30
         }
@@ -250,8 +289,6 @@ fn v4_config_migrates_to_v9_with_surviving_cards_unchanged() {
     assert!(config.image_sources.is_empty());
     assert!(config.assets.is_empty());
     assert_eq!(config.preferences.timezone, "Asia/Tbilisi");
-    assert_eq!(config.active_playlist_id, "workday");
-    assert_eq!(config.playlists[0].entries.len(), 2);
     assert_eq!(config.cards.len(), 2);
     assert!(config.validate().is_ok());
 }
@@ -279,7 +316,7 @@ fn v5_config_migrates_to_v9_dropping_retired_cards() {
         ["analog", "focus"]
     );
     assert!(migrated.image_sources.is_empty());
-    assert_eq!(migrated.playlists[0].entries.len(), 2);
+
     assert!(migrated.validate().is_ok());
 }
 
@@ -320,12 +357,11 @@ fn a_v6_document_migrates_to_v9_with_no_image_sources_and_loses_nothing() {
 
     assert_eq!(loaded.origin(), ConfigOrigin::MigratedV6);
     assert_eq!(config.schema_version, app_core::CURRENT_SCHEMA_VERSION);
-    assert_eq!(config.schema_version, 9);
+    assert_eq!(config.schema_version, 10);
     assert!(config.image_sources.is_empty(), "v6 knew no sources");
     // Lossless: everything else survived untouched.
     assert_eq!(config.cards.len(), 1);
-    assert_eq!(config.active_playlist_id, "my-playlist");
-    assert_eq!(config.playlists[0].entries[0].card_id, "clock");
+    assert_eq!(config.cards[0].id(), "clock");
 }
 
 #[test]
@@ -345,14 +381,6 @@ fn v7_document_migrates_to_v9_dropping_retired_cards_and_entries() {
             .cards
             .iter()
             .map(CardSettings::id)
-            .collect::<Vec<_>>(),
-        ["clock", "pomodoro"]
-    );
-    assert_eq!(
-        config.playlists[0]
-            .entries
-            .iter()
-            .map(|entry| entry.card_id.as_str())
             .collect::<Vec<_>>(),
         ["clock", "pomodoro"]
     );
@@ -376,14 +404,6 @@ fn v8_document_migrates_to_v9_dropping_plugin_cards_and_entries() {
             .cards
             .iter()
             .map(CardSettings::id)
-            .collect::<Vec<_>>(),
-        ["clock"]
-    );
-    assert_eq!(
-        config.playlists[0]
-            .entries
-            .iter()
-            .map(|entry| entry.card_id.as_str())
             .collect::<Vec<_>>(),
         ["clock"]
     );
@@ -411,7 +431,7 @@ fn v8_roundtrip_fixture_preserves_every_surviving_card() {
 }
 
 #[test]
-fn an_all_retired_v7_document_gets_the_default_clock_and_loses_empty_inactive_playlists() {
+fn an_all_retired_v7_document_gets_the_default_clock() {
     let directory = test_directory("v7-all-retired");
     let path = directory.path().join("config.json");
     let store = ConfigStore::new(&path);
@@ -438,10 +458,10 @@ fn an_all_retired_v7_document_gets_the_default_clock_and_loses_empty_inactive_pl
     assert_eq!(outcome.origin(), ConfigOrigin::MigratedV7);
     let config = outcome.config();
     let defaults = AppConfig::default();
+    // Every card was a retired kind, so the loop would have been empty. It
+    // gets exactly the fallback card `AppConfig::default()` ships, never an
+    // empty panel.
     assert_eq!(config.cards, defaults.cards);
-    assert_eq!(config.playlists.len(), 1);
-    assert_eq!(config.playlists[0].id, "active");
-    assert_eq!(config.playlists[0].entries, defaults.playlists[0].entries);
     config.validate().unwrap();
 }
 
@@ -537,7 +557,7 @@ fn concurrent_saves_are_serialized_and_disk_matches_latest_generation() {
 }
 
 #[test]
-fn future_v10_is_a_recoverable_error_preserving_bytes() {
+fn a_future_schema_is_a_recoverable_error_preserving_bytes() {
     let directory = test_directory("future-version");
     let path = directory.path().join("config.json");
     let store = ConfigStore::new(&path);
@@ -546,7 +566,7 @@ fn future_v10_is_a_recoverable_error_preserving_bytes() {
     last_good.preferences.autostart = true;
     store.save(&last_good).unwrap();
 
-    let future = include_str!("fixtures/future-v7.json");
+    let future = include_str!("fixtures/future-version.json");
     fs::write(&path, future).unwrap();
 
     let outcome = store.load();
@@ -555,8 +575,8 @@ fn future_v10_is_a_recoverable_error_preserving_bytes() {
     assert!(matches!(
         outcome.recovery(),
         Some(StoreError::UnsupportedVersion {
-            found: 10,
-            supported: 9
+            found: 11,
+            supported: CURRENT_SCHEMA_VERSION
         })
     ));
     // The unreadable source bytes are never rewritten.

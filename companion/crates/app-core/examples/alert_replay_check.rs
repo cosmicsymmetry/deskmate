@@ -13,7 +13,7 @@
 use std::time::{Duration, Instant};
 
 use app_core::{
-    AlertHold, AppConfig, CardAlert, CardSettings, ConnectionState, DisplayTemplate, PlaylistEntry,
+    AlertHold, AppConfig, CardAlert, CardSettings, ConnectionState, DisplayTemplate,
     PomodoroAction, PomodoroState, RefreshPolicy, RuntimeHandle, WidgetTapAction,
 };
 
@@ -44,9 +44,6 @@ fn main() {
                 value: HOLD_SECONDS,
             },
         },
-    });
-    config.playlists[0].entries.push(PlaylistEntry {
-        card_id: "focus".into(),
         dwell_seconds: None,
     });
     config.validate().expect("harness config must validate");

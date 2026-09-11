@@ -55,6 +55,7 @@ fn request(now_unix_seconds: i64) -> SceneRenderRequest {
             tap_action: WidgetTapAction::None,
             refresh: RefreshPolicy::DeviceLocal,
             alert: CardAlert::None,
+            dwell_seconds: None,
         }],
         ..AppConfig::default()
     };

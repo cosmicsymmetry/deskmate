@@ -9,20 +9,16 @@ import {
   useState,
 } from "react";
 import {
-  activePlaylist,
-  addEntry,
   cardKindName,
   cardLabel,
   cardMoveFromKey,
   cardsContainerIssues,
-  cardsOutsideLoop,
   cardTitle,
   issuesForCard,
   issuesForPath,
   loopEntries,
   MAX_CARDS,
   moveEntry,
-  removeEntry,
 } from "../lib/configDraft";
 import { placeAddMenu } from "../lib/menuPlacement";
 import {
@@ -30,7 +26,6 @@ import {
   type AppConfig,
   type CardSettings,
   type DeviceTier,
-  MAX_PLAYLIST_ENTRIES,
   type PomodoroSnapshot,
   type ValidationIssue,
 } from "../lib/types";
@@ -100,28 +95,11 @@ export function CardList({
   onChange,
   onRemove,
 }: CardListProps) {
-  const playlist = activePlaylist(config);
   const entries = loopEntries(config);
-  const outsideCards = cardsOutsideLoop(config);
-  const playlistIndex = config.playlists.findIndex(
-    (candidate) => candidate.id === config.active_playlist_id,
-  );
-  const cardsFull = config.cards.length >= MAX_CARDS;
-  const loopFull = (playlist?.entries.length ?? 0) >= MAX_PLAYLIST_ENTRIES;
-  const atCapacity = cardsFull || loopFull || !playlist;
-  const capacityDescription = cardsFull
-    ? `The limit is ${MAX_CARDS} cards.`
-    : loopFull
-      ? `The limit is ${MAX_PLAYLIST_ENTRIES} in the loop.`
-      : !playlist
-        ? "An active loop is required."
-        : null;
-  const containerIssues = [
-    ...cardsContainerIssues(issues),
-    ...(playlistIndex < 0
-      ? []
-      : issues.filter((issue) => issue.path === `playlists[${playlistIndex}].entries`)),
-  ];
+  // One list, one bound: adding a card IS joining the loop.
+  const atCapacity = config.cards.length >= MAX_CARDS;
+  const capacityDescription = atCapacity ? `The limit is ${MAX_CARDS} cards.` : null;
+  const containerIssues = cardsContainerIssues(issues);
   const [now, setNow] = useState(() => new Date());
   const [draggedCardId, setDraggedCardId] = useState<string | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -137,7 +115,7 @@ export function CardList({
   const pendingFocusCardIdRef = useRef<string | null>(null);
   const pendingNewCardIdsRef = useRef<Set<string> | null>(null);
   const hasClock = config.cards.some((card) => card.kind === "clock");
-  const entryOrder = entries.map(({ entry }) => entry.card_id).join("\u0000");
+  const entryOrder = entries.map(({ card }) => card.id).join("\u0000");
   const pendingNewCardId = pendingNewCardIdsRef.current
     ? (config.cards.find((card) => !pendingNewCardIdsRef.current?.has(card.id))?.id ?? null)
     : null;
@@ -280,14 +258,10 @@ export function CardList({
 
   /** Resolve both indexes from the current draft at the moment an action fires. */
   const moveTo = (cardId: string, targetCardId: string) => {
-    const current = activePlaylist(config);
-    if (!current) {
-      return;
-    }
-    const from = current.entries.findIndex((entry) => entry.card_id === cardId);
-    const to = current.entries.findIndex((entry) => entry.card_id === targetCardId);
+    const from = config.cards.findIndex((card) => card.id === cardId);
+    const to = config.cards.findIndex((card) => card.id === targetCardId);
     if (from >= 0 && to >= 0) {
-      const next = moveEntry(config, current.id, from, to);
+      const next = moveEntry(config, from, to);
       if (next !== config) {
         pendingFocusCardIdRef.current = cardId;
         onChange(next);
@@ -296,11 +270,10 @@ export function CardList({
   };
 
   const moveBy = (cardId: string, delta: -1 | 1) => {
-    const current = activePlaylist(config);
-    const from = current?.entries.findIndex((entry) => entry.card_id === cardId) ?? -1;
-    const target = current?.entries[from + delta];
+    const from = config.cards.findIndex((card) => card.id === cardId);
+    const target = from >= 0 ? config.cards[from + delta] : undefined;
     if (target) {
-      moveTo(cardId, target.card_id);
+      moveTo(cardId, target.id);
     }
   };
 
@@ -328,31 +301,27 @@ export function CardList({
     setDraggedCardId(null);
   };
 
-  const renderCardTile = (card: CardSettings, inLoop: boolean, entryIndex?: number) => {
-    const cardIssues = issuesForCard(issues, config, card.id);
-    const entryIssues =
-      inLoop && playlistIndex >= 0 && entryIndex !== undefined
-        ? issuesForPath(issues, `playlists[${playlistIndex}].entries[${entryIndex}]`)
-        : [];
-    const tileIssues = [...cardIssues, ...entryIssues];
+  // Every card is in the loop since schema v10, so there is no longer a tile
+  // state for one that is not, and a card's own issues already cover its dwell.
+  const renderCardTile = (card: CardSettings, index: number) => {
+    const tileIssues = issuesForCard(issues, config, card.id);
     const hasAlert = card.alert.kind !== "none";
     const pomodoro = pomodoros.find((candidate) => candidate.widget_id === card.id);
-    const index = inLoop ? (entryIndex ?? -1) : -1;
     const label = controlLabel(card);
     const pictureFlag = card.kind === "picture" && ownershipTier === "local" ? "needs the server" : null;
     return (
       <li
-        key={inLoop ? `loop:${entryIndex}:${card.id}` : `outside:${card.id}`}
-        draggable={inLoop}
-        className={`card-tile${inLoop ? "" : " card-tile--outside"}${
+        key={`loop:${index}:${card.id}`}
+        draggable
+        className={`card-tile${
           selectedCardId === card.id ? " is-selected" : ""
         }${tileIssues.length > 0 ? " has-issue" : ""}${
           draggedCardId === card.id ? " is-dragging" : ""
         }`}
-        onDragStart={inLoop ? (event) => onDragStart(event, card.id) : undefined}
-        onDragEnd={inLoop ? () => setDraggedCardId(null) : undefined}
-        onDragOver={inLoop ? (event) => event.preventDefault() : undefined}
-        onDrop={inLoop ? (event) => onDrop(event, card.id) : undefined}
+        onDragStart={(event) => onDragStart(event, card.id)}
+        onDragEnd={() => setDraggedCardId(null)}
+        onDragOver={(event) => event.preventDefault()}
+        onDrop={(event) => onDrop(event, card.id)}
       >
         <button
           ref={(element) => {
@@ -366,7 +335,7 @@ export function CardList({
           className="card-tile__body"
           aria-pressed={selectedCardId === card.id}
           onClick={() => onSelect(card.id)}
-          onKeyDown={inLoop ? (event) => onTileKeyDown(event, card.id) : undefined}
+          onKeyDown={(event) => onTileKeyDown(event, card.id)}
         >
           <span className="tile-label">{cardLabel(card)}</span>
           <strong className="card-tile__value numeral">
@@ -375,25 +344,8 @@ export function CardList({
           {cardTitle(card) && <span className="card-tile__name">{cardTitle(card)}</span>}
         </button>
         <span className="card-tile__flags">
-          {!inLoop && <span className="flag">not in loop</span>}
           {pictureFlag && <span className="flag">{pictureFlag}</span>}
           {hasAlert && <span className="flag flag--alert">alerts</span>}
-          {!inLoop && (
-            <button
-              type="button"
-              className="text-button card-tile__join"
-              aria-label={`Add ${label} to the loop`}
-              disabled={loopFull || !playlist}
-              onClick={() => {
-                if (playlist) {
-                  pendingFocusCardIdRef.current = card.id;
-                  onChange(addEntry(config, playlist.id, card.id));
-                }
-              }}
-            >
-              Add to loop
-            </button>
-          )}
         </span>
         <button
           type="button"
@@ -409,8 +361,7 @@ export function CardList({
         >
           <Icon name="close" />
         </button>
-        {inLoop && (
-          <span className="card-tile__moves">
+        <span className="card-tile__moves">
             <button
               type="button"
               aria-label={`Move ${label} earlier`}
@@ -428,7 +379,6 @@ export function CardList({
               <Icon name="right" />
             </button>
           </span>
-        )}
         <FieldIssues issues={tileIssues} className="card-tile__issues" />
       </li>
     );
@@ -451,37 +401,7 @@ export function CardList({
       <FieldIssues issues={containerIssues} />
 
       <ul className="card-grid" aria-label="Cards, loop order first">
-        {entries.map(({ index, entry, card }) => {
-          if (card) {
-            return renderCardTile(card, true, index);
-          }
-          const entryIssues =
-            playlistIndex < 0
-              ? []
-              : issuesForPath(issues, `playlists[${playlistIndex}].entries[${index}]`);
-          return (
-            <li
-              key={`missing:${entry.card_id}:${index}`}
-              className={`card-tile${entryIssues.length > 0 ? " has-issue" : ""}`}
-            >
-              <div className="card-tile__body">
-                <span className="tile-label">Missing card</span>
-                <strong className="card-tile__value numeral">—</strong>
-              </div>
-              <button
-                type="button"
-                className="card-tile__remove"
-                aria-label="Remove Missing card"
-                title="Remove"
-                onClick={() => playlist && onChange(removeEntry(config, playlist.id, index))}
-              >
-                <Icon name="close" />
-              </button>
-              <FieldIssues issues={entryIssues} className="card-tile__issues" />
-            </li>
-          );
-        })}
-        {outsideCards.map((card) => renderCardTile(card, false))}
+        {entries.map(({ index, card }) => renderCardTile(card, index))}
         <li
           className="card-tile card-tile--add"
           ref={menuRootRef}

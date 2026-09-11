@@ -15,8 +15,11 @@ the shapes seven schema versions and four rendering approaches left behind:
 - **Wave A** (plan `2026-09-11-deskmate-legacy-subtraction-wave-a.md`) is complete: the
   pre-v4 migration chain, the retired-template oracle and its parity gate, the M2 demo
   tooling, and the module boundaries inside `runtime.rs` and `commands.rs`.
-- **Wave B** (schema v10, removing playlists) and **Wave C** (protocol v2, removing the
-  pre-scene wire) remain. Wave C is the only one that spends a hardware session.
+- **Wave B** (schema v10) is complete: `playlists[]` and `active_playlist_id` are gone,
+  `cards` is ordered and IS the loop, dwell is a card field and `advance` is one
+  document-level setting.
+- **Wave C** (protocol v2, removing the pre-scene wire) remains, and is the only one
+  that spends a hardware session.
 
 Scene stages 2a, 2b, 3a, 3b and 4 are delivered and confirmed on the board as of the
 2026-09-06 session (board-notes, "Stage 4 Task 7"). Stage 5 remains a risk review only;

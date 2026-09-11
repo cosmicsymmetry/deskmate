@@ -57,6 +57,7 @@ fn a_pomodoro_card_preview_renders_a_drawn_frame() {
         tap_action: WidgetTapAction::StartPause,
         refresh: RefreshPolicy::DeviceLocal,
         alert: CardAlert::None,
+        dwell_seconds: None,
     });
     let scene = app_core::preview_card_scene(&config, "focus", &[]).expect("pomodoro previews");
 

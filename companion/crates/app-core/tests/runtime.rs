@@ -8,9 +8,9 @@ use app_core::{
     AlertHold, AppConfig, CardAlert, CardErrorKind, CardField, CardFieldValue, CardSettings,
     CarouselAdvance, ConnectionState, DesiredAsset, DeviceCapability, DeviceConnection,
     DeviceOtaState, DeviceRenderProfile, DeviceTier, DeviceWifiState, DisplayOrientation,
-    DisplayTemplate, NetworkConfig, PersistenceState, Playlist, PlaylistEntry, PomodoroAction,
-    PomodoroState, ProvisioningTier, RefreshPolicy, RuntimeDevice, RuntimeError, RuntimeHandle,
-    RuntimeOptions, RuntimeState, WidgetTapAction, analyze_scene, validate_native_scene,
+    DisplayTemplate, NetworkConfig, PersistenceState, PomodoroAction, PomodoroState,
+    ProvisioningTier, RefreshPolicy, RuntimeDevice, RuntimeError, RuntimeHandle, RuntimeOptions,
+    RuntimeState, WidgetTapAction, analyze_scene, validate_native_scene,
 };
 use device::{DeviceError, ReceivedEvent, SessionDiagnostics, TransportError};
 use protocol::{
@@ -88,6 +88,7 @@ fn preview_card_scene_builds_the_same_face_the_device_would_receive() {
         tap_action: WidgetTapAction::None,
         refresh: RefreshPolicy::DeviceLocal,
         alert: CardAlert::None,
+        dwell_seconds: None,
     });
     let picture = app_core::preview_card_scene(&config, "picture", &[]);
     assert!(
@@ -757,23 +758,17 @@ fn picture_config(picture_is_active: bool) -> AppConfig {
         tap_action: WidgetTapAction::None,
         refresh: RefreshPolicy::Manual,
         alert: CardAlert::None,
+        dwell_seconds: None,
     };
     config.image_sources = vec![app_core::config::ImageSource {
         id: "camera".into(),
         name: "Camera".into(),
     }];
     if picture_is_active {
+        // The active card is simply the first in the loop now.
         config.cards = vec![picture];
-        config.playlists[0].entries = vec![PlaylistEntry {
-            card_id: "picture-card".into(),
-            dwell_seconds: None,
-        }];
     } else {
         config.cards.push(picture);
-        config.playlists[0].entries.push(PlaylistEntry {
-            card_id: "picture-card".into(),
-            dwell_seconds: None,
-        });
     }
     config
 }
@@ -2421,6 +2416,34 @@ fn clock_card(id: &str) -> CardSettings {
         tap_action: WidgetTapAction::None,
         refresh: RefreshPolicy::DeviceLocal,
         alert: CardAlert::None,
+        dwell_seconds: None,
+    }
+}
+
+/// A copy of `card` that stays on the panel for `seconds` instead of taking
+/// the document's default dwell.
+fn with_dwell(card: CardSettings, seconds: u16) -> CardSettings {
+    match card {
+        CardSettings::Clock {
+            id,
+            title,
+            show_seconds,
+            template,
+            tap_action,
+            refresh,
+            alert,
+            ..
+        } => CardSettings::Clock {
+            id,
+            title,
+            show_seconds,
+            template,
+            tap_action,
+            refresh,
+            alert,
+            dwell_seconds: Some(seconds),
+        },
+        other => other,
     }
 }
 
@@ -2433,6 +2456,7 @@ fn pomodoro_card(id: &str, alert: CardAlert) -> CardSettings {
         tap_action: WidgetTapAction::None,
         refresh: RefreshPolicy::DeviceLocal,
         alert,
+        dwell_seconds: None,
     }
 }
 
@@ -2452,28 +2476,15 @@ fn activated_screen_ids(control: &MockDeviceControl) -> Vec<String> {
 }
 
 #[test]
-fn rotation_follows_active_playlist_entry_order_and_dwell() {
+fn rotation_follows_card_order_and_each_cards_own_dwell() {
     let control = MockDeviceControl::default();
+    // "b" first with an explicit 5s dwell, then "a" taking the 10s default:
+    // since schema v10 the card order IS the loop order.
     let config = AppConfig {
-        cards: vec![clock_card("a"), clock_card("b")],
-        playlists: vec![Playlist {
-            id: "p1".into(),
-            name: "P1".into(),
-            advance: CarouselAdvance::Timed {
-                default_dwell_seconds: 10,
-            },
-            entries: vec![
-                PlaylistEntry {
-                    card_id: "b".into(),
-                    dwell_seconds: Some(5),
-                },
-                PlaylistEntry {
-                    card_id: "a".into(),
-                    dwell_seconds: None,
-                },
-            ],
-        }],
-        active_playlist_id: "p1".into(),
+        cards: vec![with_dwell(clock_card("b"), 5), clock_card("a")],
+        advance: CarouselAdvance::Timed {
+            default_dwell_seconds: 10,
+        },
         ..AppConfig::default()
     };
     let runtime = start_runtime(config, &control, Duration::ZERO);
@@ -2493,39 +2504,15 @@ fn rotation_follows_active_playlist_entry_order_and_dwell() {
 }
 
 #[test]
-fn switching_active_playlist_is_a_config_apply_that_replays() {
+fn reordering_the_loop_replays_and_keeps_the_card_on_the_panel() {
+    // Since schema v10 there is one loop and no playlist to switch, so what
+    // replaces the old playlist-switch case is the edit that can actually
+    // happen: reordering. The panel must stay on the card it is showing --
+    // an unrelated edit jumping the loop is the behaviour this pins against.
     let control = MockDeviceControl::default();
     let mut config = AppConfig {
         cards: vec![clock_card("shared"), clock_card("new-first")],
-        playlists: vec![
-            Playlist {
-                id: "p1".into(),
-                name: "P1".into(),
-                advance: CarouselAdvance::Manual,
-                entries: vec![PlaylistEntry {
-                    card_id: "shared".into(),
-                    dwell_seconds: None,
-                }],
-            },
-            Playlist {
-                id: "p2".into(),
-                name: "P2".into(),
-                advance: CarouselAdvance::Timed {
-                    default_dwell_seconds: 10,
-                },
-                entries: vec![
-                    PlaylistEntry {
-                        card_id: "new-first".into(),
-                        dwell_seconds: Some(5),
-                    },
-                    PlaylistEntry {
-                        card_id: "shared".into(),
-                        dwell_seconds: None,
-                    },
-                ],
-            },
-        ],
-        active_playlist_id: "p1".into(),
+        advance: CarouselAdvance::Manual,
         ..AppConfig::default()
     };
     let runtime = start_runtime(config.clone(), &control, Duration::ZERO);
@@ -2538,12 +2525,8 @@ fn switching_active_playlist_is_a_config_apply_that_replays() {
         .filter(|operation| matches!(operation, Operation::ApplyLayout(_)))
         .count();
 
-    config.active_playlist_id = "p2".into();
-    runtime.apply_config(config).unwrap();
-    wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
-        snapshot.config.active_playlist_id == "p2"
-            && snapshot.device.active_screen_id.as_deref() == Some("new-first")
-    });
+    config.cards.reverse();
+    runtime.apply_config(config.clone()).unwrap();
     wait_for(Duration::from_secs(1), || {
         control
             .operations()
@@ -2551,13 +2534,17 @@ fn switching_active_playlist_is_a_config_apply_that_replays() {
             .filter(|operation| matches!(operation, Operation::ApplyLayout(_)))
             .count()
             == apply_count_before + 1
-            && activated_screen_ids(&control).get(1).map(String::as_str) == Some("new-first")
+    });
+    wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
+        snapshot.device.active_screen_id.as_deref() == Some("shared")
     });
 
-    thread::sleep(Duration::from_secs(4));
-    assert_eq!(activated_screen_ids(&control), ["shared", "new-first"]);
-    wait_for(Duration::from_secs(3), || {
-        activated_screen_ids(&control).get(2).map(String::as_str) == Some("shared")
+    // But a card that leaves the loop cannot stay on the panel: the first card
+    // of the new loop takes over.
+    config.cards.retain(|card| card.id() != "shared");
+    runtime.apply_config(config).unwrap();
+    wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
+        snapshot.device.active_screen_id.as_deref() == Some("new-first")
     });
     runtime.shutdown().unwrap();
 }
@@ -2578,18 +2565,10 @@ fn alert_outside_active_playlist_still_fires() {
                 alert: CardAlert::OnTimerFinish {
                     hold: AlertHold::UntilDismissed,
                 },
+                dwell_seconds: None,
             },
         ],
-        playlists: vec![Playlist {
-            id: "p1".into(),
-            name: "P1".into(),
-            advance: CarouselAdvance::Manual,
-            entries: vec![PlaylistEntry {
-                card_id: "visible".into(),
-                dwell_seconds: None,
-            }],
-        }],
-        active_playlist_id: "p1".into(),
+        advance: CarouselAdvance::Manual,
         ..AppConfig::default()
     };
     let runtime = start_runtime(config, &control, Duration::ZERO);
@@ -2628,22 +2607,7 @@ fn manual_advance_playlist_has_no_rotation_deadline() {
     let control = MockDeviceControl::default();
     let config = AppConfig {
         cards: vec![clock_card("first"), clock_card("second")],
-        playlists: vec![Playlist {
-            id: "p1".into(),
-            name: "P1".into(),
-            advance: CarouselAdvance::Manual,
-            entries: vec![
-                PlaylistEntry {
-                    card_id: "first".into(),
-                    dwell_seconds: None,
-                },
-                PlaylistEntry {
-                    card_id: "second".into(),
-                    dwell_seconds: None,
-                },
-            ],
-        }],
-        active_playlist_id: "p1".into(),
+        advance: CarouselAdvance::Manual,
         ..AppConfig::default()
     };
     let runtime = start_runtime(config, &control, Duration::ZERO);
@@ -2671,24 +2635,9 @@ fn manual_advance_playlist_has_no_rotation_deadline() {
 fn timed_advance_wiring_reaches_the_device_after_one_dwell() {
     let control = MockDeviceControl::default();
     let config = AppConfig {
-        playlists: vec![Playlist {
-            id: "p1".into(),
-            name: "P1".into(),
-            advance: CarouselAdvance::Timed {
-                default_dwell_seconds: 5,
-            },
-            entries: vec![
-                PlaylistEntry {
-                    card_id: "first".into(),
-                    dwell_seconds: Some(5),
-                },
-                PlaylistEntry {
-                    card_id: "second".into(),
-                    dwell_seconds: Some(5),
-                },
-            ],
-        }],
-        active_playlist_id: "p1".into(),
+        advance: CarouselAdvance::Timed {
+            default_dwell_seconds: 5,
+        },
         cards: vec![
             clock_card("first"),
             pomodoro_card(
@@ -2712,10 +2661,11 @@ fn timed_advance_wiring_reaches_the_device_after_one_dwell() {
         activated_screen_ids(&control) == ["first"]
     });
 
-    // One dwell later, rotation has walked to "second" (skipping the alert-only and
-    // off cards) and the activation reached the mock device.
+    // One dwell later, rotation has walked to the next card in the loop and the
+    // activation reached the mock device. Since schema v10 that is simply the
+    // next card -- there are no cards for the loop to skip any more.
     wait_for(Duration::from_secs(8), || {
-        activated_screen_ids(&control) == ["first", "second"]
+        activated_screen_ids(&control) == ["first", "alerting"]
     });
     runtime.shutdown().unwrap();
 }
@@ -2726,24 +2676,17 @@ fn timed_advance_wiring_reaches_the_device_after_one_dwell() {
 /// pushes its fields into
 /// `latest_fields` synchronously at config-install time (no device
 /// connection round trip needed), which makes the live card's
-/// exact field values available on the very first snapshot. A second,
-/// otherwise-identical pomodoro card outside the playlist is included to prove
-/// a non-alerting library-only card contributes no entry at all — a stale entry
-/// would otherwise render in the settings preview as if it were live.
+/// exact field values available on the very first snapshot.
+///
+/// A second otherwise-identical pomodoro card is included because since schema
+/// v10 both are in the loop -- a card that contributes no entry at all is no
+/// longer representable, so what this now pins is that BOTH get their live
+/// fields rather than only the active one.
 #[test]
-fn card_data_carries_live_fields_and_excludes_library_only_cards() {
+fn card_data_carries_live_fields_for_every_card_in_the_loop() {
     let control = MockDeviceControl::default();
     let config = AppConfig {
-        playlists: vec![Playlist {
-            id: "p1".into(),
-            name: "P1".into(),
-            advance: CarouselAdvance::Manual,
-            entries: vec![PlaylistEntry {
-                card_id: "on".into(),
-                dwell_seconds: None,
-            }],
-        }],
-        active_playlist_id: "p1".into(),
+        advance: CarouselAdvance::Manual,
         cards: vec![
             pomodoro_card("on", CardAlert::None),
             pomodoro_card("library-only", CardAlert::None),
@@ -2779,11 +2722,11 @@ fn card_data_carries_live_fields_and_excludes_library_only_cards() {
     );
 
     assert!(
-        !snapshot
+        snapshot
             .card_data
             .iter()
             .any(|card| card.card_id == "library-only"),
-        "a non-alerting card outside the playlist must not contribute an entry to card_data"
+        "every card is in the loop since v10, so every card contributes card_data"
     );
 
     runtime.shutdown().unwrap();

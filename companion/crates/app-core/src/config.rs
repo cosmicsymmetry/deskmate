@@ -97,6 +97,7 @@ mod strict_tagged_enum {
             tap_action: super::WidgetTapAction,
             refresh: super::RefreshPolicy,
             alert: super::CardAlert,
+            dwell_seconds: Option<u16>,
         },
         Pomodoro {
             id: String,
@@ -106,6 +107,7 @@ mod strict_tagged_enum {
             tap_action: super::WidgetTapAction,
             refresh: super::RefreshPolicy,
             alert: super::CardAlert,
+            dwell_seconds: Option<u16>,
         },
         Picture {
             id: String,
@@ -114,6 +116,7 @@ mod strict_tagged_enum {
             tap_action: super::WidgetTapAction,
             refresh: super::RefreshPolicy,
             alert: super::CardAlert,
+            dwell_seconds: Option<u16>,
         },
     }
 
@@ -205,6 +208,7 @@ mod strict_tagged_enum {
                     "tap_action",
                     "refresh",
                     "alert",
+                    "dwell_seconds",
                 ]),
                 "pomodoro" => Some(&[
                     "kind",
@@ -215,6 +219,7 @@ mod strict_tagged_enum {
                     "tap_action",
                     "refresh",
                     "alert",
+                    "dwell_seconds",
                 ]),
                 "picture" => Some(&[
                     "kind",
@@ -224,6 +229,7 @@ mod strict_tagged_enum {
                     "tap_action",
                     "refresh",
                     "alert",
+                    "dwell_seconds",
                 ]),
                 _ => None,
             }
@@ -254,9 +260,7 @@ mod strict_tagged_enum {
     }
 }
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 9;
-pub(crate) const DEFAULT_PLAYLIST_ID: &str = "my-playlist";
-pub(crate) const DEFAULT_PLAYLIST_NAME: &str = "My playlist";
+pub const CURRENT_SCHEMA_VERSION: u32 = 10;
 pub const MAX_WIDGET_TITLE_LEN: usize = 64;
 pub const MAX_TIMEZONE_LEN: usize = 64;
 pub const MAX_ACTION_URL_LEN: usize = 2_048;
@@ -272,8 +276,6 @@ pub const MAX_POMODORO_SECONDS: u32 = 86_400;
 pub const MIN_CARD_REFRESH_MINUTES: u16 = 1;
 pub const MAX_CARD_REFRESH_MINUTES: u16 = 1_440;
 pub const MAX_CONFIG_CARDS: usize = 8;
-pub const MAX_PLAYLISTS: usize = 8;
-pub const MAX_PLAYLIST_ENTRIES: usize = 8;
 pub const MAX_PLAYLIST_NAME_LEN: usize = 48;
 /// How many named image sources one configuration may declare.
 ///
@@ -290,84 +292,6 @@ pub const MAX_DWELL_SECONDS: u16 = 3_600;
 pub const MIN_ALERT_HOLD_SECONDS: u16 = 5;
 pub const MAX_ALERT_HOLD_SECONDS: u16 = 600;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct Playlist {
-    pub id: String,
-    pub name: String,
-    pub advance: CarouselAdvance,
-    pub entries: Vec<PlaylistEntry>,
-}
-
-impl<'de> Deserialize<'de> for Playlist {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        struct Fields {
-            id: String,
-            name: String,
-            advance: CarouselAdvance,
-            entries: Vec<PlaylistEntry>,
-        }
-
-        let value = serde_json::Value::deserialize(deserializer)?;
-        let object = value
-            .as_object()
-            .ok_or_else(|| serde::de::Error::custom("playlist must be an object"))?;
-        for key in object.keys() {
-            if !["id", "name", "advance", "entries"].contains(&key.as_str()) {
-                return Err(serde::de::Error::custom(format!(
-                    "unknown playlist field: {key}"
-                )));
-            }
-        }
-        let fields: Fields = serde_json::from_value(value).map_err(serde::de::Error::custom)?;
-        Ok(Self {
-            id: fields.id,
-            name: fields.name,
-            advance: fields.advance,
-            entries: fields.entries,
-        })
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct PlaylistEntry {
-    pub card_id: String,
-    pub dwell_seconds: Option<u16>,
-}
-
-impl<'de> Deserialize<'de> for PlaylistEntry {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        struct Fields {
-            card_id: String,
-            dwell_seconds: Option<u16>,
-        }
-
-        let value = serde_json::Value::deserialize(deserializer)?;
-        let object = value
-            .as_object()
-            .ok_or_else(|| serde::de::Error::custom("playlist entry must be an object"))?;
-        for key in object.keys() {
-            if !["card_id", "dwell_seconds"].contains(&key.as_str()) {
-                return Err(serde::de::Error::custom(format!(
-                    "unknown playlist entry field: {key}"
-                )));
-            }
-        }
-        let fields: Fields = serde_json::from_value(value).map_err(serde::de::Error::custom)?;
-        Ok(Self {
-            card_id: fields.card_id,
-            dwell_seconds: fields.dwell_seconds,
-        })
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AppConfig {
@@ -381,8 +305,11 @@ pub struct AppConfig {
     #[serde(default)]
     pub image_sources: Vec<ImageSource>,
     pub assets: Vec<AssetSettings>,
-    pub playlists: Vec<Playlist>,
-    pub active_playlist_id: String,
+    /// How the loop advances. `cards` IS the loop, in order, so this is one
+    /// setting for the whole document rather than a property of a named
+    /// grouping -- schema v10 removed `playlists`, which the product never
+    /// let anyone create more than one of.
+    pub advance: CarouselAdvance,
     pub updater: UpdaterSettings,
 }
 
@@ -399,19 +326,11 @@ impl Default for AppConfig {
                 tap_action: WidgetTapAction::None,
                 refresh: RefreshPolicy::DeviceLocal,
                 alert: CardAlert::None,
+                dwell_seconds: None,
             }],
             image_sources: Vec::new(),
             assets: Vec::new(),
-            playlists: vec![Playlist {
-                id: DEFAULT_PLAYLIST_ID.into(),
-                name: DEFAULT_PLAYLIST_NAME.into(),
-                advance: CarouselAdvance::Manual,
-                entries: vec![PlaylistEntry {
-                    card_id: "clock".into(),
-                    dwell_seconds: None,
-                }],
-            }],
-            active_playlist_id: DEFAULT_PLAYLIST_ID.into(),
+            advance: CarouselAdvance::Manual,
             updater: UpdaterSettings::default(),
         }
     }
@@ -504,158 +423,30 @@ impl AppConfig {
             }
         }
 
-        validate_collection_bounds(
-            "playlists",
-            self.playlists.len(),
-            MAX_PLAYLISTS,
-            &mut issues,
-        );
-        let mut playlist_ids = HashSet::with_capacity(self.playlists.len());
-        let mut playlist_names = HashSet::with_capacity(self.playlists.len());
-        for (index, playlist) in self.playlists.iter().enumerate() {
-            let path = format!("playlists[{index}]");
-            validate_identifier_with_context(
-                &format!("{path}.id"),
-                &playlist.id,
-                MAX_WIDGET_ID_LEN,
-                &format!("playlist ID {:?}", playlist.id),
-                &mut issues,
-            );
-            if !playlist_ids.insert(playlist.id.as_str()) {
-                issues.push(ValidationIssue::new(
-                    format!("{path}.id"),
-                    ValidationCode::DuplicateId,
-                    format!("playlist ID {:?} is duplicated", playlist.id),
-                ));
-            }
-            if playlist.name.trim().is_empty() {
-                issues.push(ValidationIssue::new(
-                    format!("{path}.name"),
-                    ValidationCode::Empty,
-                    format!("playlist {:?} name must not be empty", playlist.id),
-                ));
-            }
-            if playlist.name.chars().count() > MAX_PLAYLIST_NAME_LEN {
-                issues.push(ValidationIssue::new(
-                    format!("{path}.name"),
-                    ValidationCode::TooLong,
-                    format!(
-                        "playlist {:?} name must be at most {MAX_PLAYLIST_NAME_LEN} characters",
-                        playlist.id
-                    ),
-                ));
-            }
-            if !playlist_names.insert(playlist.name.trim()) {
-                issues.push(ValidationIssue::new(
-                    format!("{path}.name"),
-                    ValidationCode::DuplicateId,
-                    format!(
-                        "playlist {:?} duplicates the name {:?}",
-                        playlist.id, playlist.name
-                    ),
-                ));
-            }
-
-            if playlist.entries.is_empty() {
-                let (code, message) =
-                    if playlist.id == self.active_playlist_id && !self.cards.is_empty() {
-                        (
-                            ValidationCode::OutOfRange,
-                            format!(
-                                "active playlist {:?} must contain at least one card",
-                                playlist.id
-                            ),
-                        )
-                    } else {
-                        (
-                            ValidationCode::Empty,
-                            format!("playlist {:?} must contain at least one entry", playlist.id),
-                        )
-                    };
-                issues.push(ValidationIssue::new(
-                    format!("{path}.entries"),
-                    code,
-                    message,
-                ));
-            } else if playlist.entries.len() > MAX_PLAYLIST_ENTRIES {
-                issues.push(ValidationIssue::new(
-                    format!("{path}.entries"),
-                    ValidationCode::TooMany,
-                    format!(
-                        "playlist {:?} supports at most {MAX_PLAYLIST_ENTRIES} entries",
-                        playlist.id
-                    ),
-                ));
-            }
-
-            if let CarouselAdvance::Timed {
-                default_dwell_seconds,
-            } = playlist.advance
-                && !(MIN_DWELL_SECONDS..=MAX_DWELL_SECONDS).contains(&default_dwell_seconds)
+        if let CarouselAdvance::Timed {
+            default_dwell_seconds,
+        } = self.advance
+            && !(MIN_DWELL_SECONDS..=MAX_DWELL_SECONDS).contains(&default_dwell_seconds)
+        {
+            issues.push(ValidationIssue::new(
+                "advance.default_dwell_seconds",
+                ValidationCode::OutOfRange,
+                format!("default dwell must be {MIN_DWELL_SECONDS}..={MAX_DWELL_SECONDS} seconds"),
+            ));
+        }
+        for (index, card) in self.cards.iter().enumerate() {
+            if let Some(dwell_seconds) = card.dwell_seconds()
+                && !(MIN_DWELL_SECONDS..=MAX_DWELL_SECONDS).contains(&dwell_seconds)
             {
                 issues.push(ValidationIssue::new(
-                    format!("{path}.advance.default_dwell_seconds"),
+                    format!("cards[{index}].dwell_seconds"),
                     ValidationCode::OutOfRange,
                     format!(
-                        "playlist {:?} default dwell must be {MIN_DWELL_SECONDS}..={MAX_DWELL_SECONDS} seconds",
-                        playlist.id
+                        "card {:?} must dwell for {MIN_DWELL_SECONDS}..={MAX_DWELL_SECONDS} seconds",
+                        card.id()
                     ),
                 ));
             }
-
-            let mut entry_card_ids = HashSet::with_capacity(playlist.entries.len());
-            for (entry_index, entry) in playlist.entries.iter().enumerate() {
-                let entry_path = format!("{path}.entries[{entry_index}]");
-                validate_identifier_with_context(
-                    &format!("{entry_path}.card_id"),
-                    &entry.card_id,
-                    MAX_WIDGET_ID_LEN,
-                    &format!("card ID {:?} in playlist {:?}", entry.card_id, playlist.id),
-                    &mut issues,
-                );
-                if !card_ids.contains(entry.card_id.as_str()) {
-                    issues.push(ValidationIssue::new(
-                        format!("{entry_path}.card_id"),
-                        ValidationCode::MissingReference,
-                        format!(
-                            "card {:?} referenced by playlist {:?} does not exist",
-                            entry.card_id, playlist.id
-                        ),
-                    ));
-                }
-                if !entry_card_ids.insert(entry.card_id.as_str()) {
-                    issues.push(ValidationIssue::new(
-                        format!("{entry_path}.card_id"),
-                        ValidationCode::DuplicateId,
-                        format!(
-                            "card {:?} appears more than once in playlist {:?}",
-                            entry.card_id, playlist.id
-                        ),
-                    ));
-                }
-                if let Some(dwell_seconds) = entry.dwell_seconds
-                    && !(MIN_DWELL_SECONDS..=MAX_DWELL_SECONDS).contains(&dwell_seconds)
-                {
-                    issues.push(ValidationIssue::new(
-                        format!("{entry_path}.dwell_seconds"),
-                        ValidationCode::OutOfRange,
-                        format!(
-                            "card {:?} in playlist {:?} must dwell for {MIN_DWELL_SECONDS}..={MAX_DWELL_SECONDS} seconds",
-                            entry.card_id, playlist.id
-                        ),
-                    ));
-                }
-            }
-        }
-        if self.active_playlist().is_none() {
-            issues.push(ValidationIssue::new(
-                "active_playlist_id",
-                ValidationCode::MissingReference,
-                format!(
-                    "active playlist {:?} does not exist",
-                    self.active_playlist_id
-                ),
-            ));
         }
         if self.compiled_card_ids().len() > MAX_CONFIG_CARDS {
             issues.push(ValidationIssue::new(
@@ -703,32 +494,13 @@ impl AppConfig {
         }
     }
 
-    pub fn active_playlist(&self) -> Option<&Playlist> {
-        self.playlists
-            .iter()
-            .find(|playlist| playlist.id == self.active_playlist_id)
-    }
-
-    /// Card ids the compiled widget set will contain: active-playlist entries
-    /// (in entry order) followed by alert-capable cards outside it (by id).
+    /// Card ids the compiled widget set will contain, in loop order.
+    ///
+    /// Since schema v10 that is simply the card order: `cards` IS the loop, so
+    /// there is no longer a set of cards inside it and a set of alert-capable
+    /// cards outside it to concatenate.
     pub fn compiled_card_ids(&self) -> Vec<&str> {
-        let mut card_ids = Vec::with_capacity(self.cards.len());
-        let mut active_card_ids = HashSet::new();
-        if let Some(playlist) = self.active_playlist() {
-            for entry in &playlist.entries {
-                card_ids.push(entry.card_id.as_str());
-                active_card_ids.insert(entry.card_id.as_str());
-            }
-        }
-
-        let mut alert_outsiders: Vec<&CardSettings> = self
-            .cards
-            .iter()
-            .filter(|card| !card.alert().is_none() && !active_card_ids.contains(card.id()))
-            .collect();
-        alert_outsiders.sort_by(|left, right| left.id().cmp(right.id()));
-        card_ids.extend(alert_outsiders.into_iter().map(CardSettings::id));
-        card_ids
+        self.cards.iter().map(CardSettings::id).collect()
     }
 
     pub fn compile(&self, revision: u32) -> Result<CompiledAppConfig, ConfigValidationError> {
@@ -746,14 +518,6 @@ impl AppConfig {
         let mut compatibility_issues = Vec::new();
         let mut widgets = Vec::with_capacity(self.cards.len());
         let mut screens = Vec::with_capacity(self.cards.len());
-        let active_playlist = self
-            .active_playlist()
-            .expect("validated active playlist must exist");
-        let active_card_ids: HashSet<&str> = active_playlist
-            .entries
-            .iter()
-            .map(|entry| entry.card_id.as_str())
-            .collect();
         let compiled_card_ids = self.compiled_card_ids();
         for card_id in &compiled_card_ids {
             let (index, card) = self
@@ -770,15 +534,13 @@ impl AppConfig {
                 ));
                 continue;
             };
-            if active_card_ids.contains(*card_id) {
-                // The screen ID is the card ID. The protocol treats widget and screen
-                // IDs as distinct namespaces, so reuse is legal, and compilation still
-                // invents no identifiers.
-                screens.push(ScreenConfig {
-                    screen_id: card.id().to_owned(),
-                    widget_id: card.id().to_owned(),
-                });
-            }
+            // The screen ID is the card ID. The protocol treats widget and screen
+            // IDs as distinct namespaces, so reuse is legal, and compilation still
+            // invents no identifiers.
+            screens.push(ScreenConfig {
+                screen_id: card.id().to_owned(),
+                widget_id: card.id().to_owned(),
+            });
             widgets.push(widget);
         }
         if !compatibility_issues.is_empty() {
@@ -1113,6 +875,7 @@ pub enum CardSettings {
         tap_action: WidgetTapAction,
         refresh: RefreshPolicy,
         alert: CardAlert,
+        dwell_seconds: Option<u16>,
     },
     Pomodoro {
         id: String,
@@ -1122,6 +885,7 @@ pub enum CardSettings {
         tap_action: WidgetTapAction,
         refresh: RefreshPolicy,
         alert: CardAlert,
+        dwell_seconds: Option<u16>,
     },
     /// A card whose face is a PNG an external producer pushed to a named image
     /// source. It carries no `template` field: the picture *is*
@@ -1135,6 +899,7 @@ pub enum CardSettings {
         tap_action: WidgetTapAction,
         refresh: RefreshPolicy,
         alert: CardAlert,
+        dwell_seconds: Option<u16>,
     },
 }
 
@@ -1157,6 +922,7 @@ impl<'de> Deserialize<'de> for CardSettings {
                 tap_action,
                 refresh,
                 alert,
+                dwell_seconds,
             } => CardSettings::Clock {
                 id,
                 title,
@@ -1165,6 +931,7 @@ impl<'de> Deserialize<'de> for CardSettings {
                 tap_action,
                 refresh,
                 alert,
+                dwell_seconds,
             },
             strict_tagged_enum::CardSettingsInner::Pomodoro {
                 id,
@@ -1174,6 +941,7 @@ impl<'de> Deserialize<'de> for CardSettings {
                 tap_action,
                 refresh,
                 alert,
+                dwell_seconds,
             } => CardSettings::Pomodoro {
                 id,
                 label,
@@ -1182,6 +950,7 @@ impl<'de> Deserialize<'de> for CardSettings {
                 tap_action,
                 refresh,
                 alert,
+                dwell_seconds,
             },
             strict_tagged_enum::CardSettingsInner::Picture {
                 id,
@@ -1190,6 +959,7 @@ impl<'de> Deserialize<'de> for CardSettings {
                 tap_action,
                 refresh,
                 alert,
+                dwell_seconds,
             } => CardSettings::Picture {
                 id,
                 title,
@@ -1197,6 +967,7 @@ impl<'de> Deserialize<'de> for CardSettings {
                 tap_action,
                 refresh,
                 alert,
+                dwell_seconds,
             },
         })
     }
@@ -1235,6 +1006,16 @@ impl CardSettings {
         match self {
             Self::Clock { template, .. } | Self::Pomodoro { template, .. } => Some(template),
             Self::Picture { .. } => None,
+        }
+    }
+
+    /// How long this card stays on the panel before the loop advances, or
+    /// `None` to use `AppConfig::advance`'s default.
+    pub const fn dwell_seconds(&self) -> Option<u16> {
+        match self {
+            Self::Clock { dwell_seconds, .. }
+            | Self::Pomodoro { dwell_seconds, .. }
+            | Self::Picture { dwell_seconds, .. } => *dwell_seconds,
         }
     }
 
@@ -1595,29 +1376,6 @@ fn validate_collection_bounds(
 
 fn validate_identifier(path: &str, value: &str, maximum: usize, issues: &mut Vec<ValidationIssue>) {
     validate_text(path, value, maximum, true, issues);
-}
-
-fn validate_identifier_with_context(
-    path: &str,
-    value: &str,
-    maximum: usize,
-    context: &str,
-    issues: &mut Vec<ValidationIssue>,
-) {
-    if value.trim().is_empty() {
-        issues.push(ValidationIssue::new(
-            path,
-            ValidationCode::Empty,
-            format!("{context} must not be empty"),
-        ));
-    }
-    if value.len() > maximum {
-        issues.push(ValidationIssue::new(
-            path,
-            ValidationCode::TooLong,
-            format!("{context} must be at most {maximum} UTF-8 bytes"),
-        ));
-    }
 }
 
 fn validate_text(

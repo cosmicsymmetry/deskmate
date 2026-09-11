@@ -425,7 +425,6 @@ impl WorkerState {
 
     #[allow(clippy::too_many_lines)] // one linear config swap; splitting would scatter its invariants
     fn replace_config(&mut self, config: AppConfig, now: Instant, scheduler: &mut Scheduler) {
-        let previous_config = self.config.clone();
         let previous_active_screen = self.active_screen.clone();
         let _previous_fields = std::mem::take(&mut self.latest_fields);
         let mut previous_pomodoros = std::mem::take(&mut self.pomodoros);
@@ -498,15 +497,11 @@ impl WorkerState {
             }
         }
         let rotation_card_ids = rotation_card_ids(&self.config);
-        // A playlist-ID change deliberately resets to its first entry, even when both playlists share the old card, per the acceptance test.
-        self.active_screen = if previous_config.active_playlist_id == self.config.active_playlist_id
-        {
-            previous_active_screen
-                .filter(|active| rotation_card_ids.contains(active))
-                .or_else(|| rotation_card_ids.first().cloned())
-        } else {
-            rotation_card_ids.first().cloned()
-        };
+        // Stay on the card the panel is showing when it survives the new
+        // configuration, so an unrelated edit does not jump the loop.
+        self.active_screen = previous_active_screen
+            .filter(|active| rotation_card_ids.contains(active))
+            .or_else(|| rotation_card_ids.first().cloned());
         self.active_screen_dirty = self.active_screen.is_some();
         self.active_scene_dirty = self.active_screen.is_some();
         self.rearm_rotation_for_active_screen(scheduler, now);
@@ -632,29 +627,23 @@ impl WorkerState {
 /// `AppConfig::compile`), so this doubles as the rotation's screen order.
 fn rotation_card_ids(config: &AppConfig) -> Vec<String> {
     config
-        .active_playlist()
-        .map(|playlist| {
-            playlist
-                .entries
-                .iter()
-                .map(|entry| entry.card_id.clone())
-                .collect()
-        })
-        .unwrap_or_default()
+        .cards
+        .iter()
+        .map(|card| card.id().to_owned())
+        .collect()
 }
 
-/// The dwell for the active-playlist entry at `index`, resolved against the
-/// playlist's default. Returns `None` under `CarouselAdvance::Manual` or when
-/// fewer than two entries exist, keeping no-op rotation deadlines disarmed.
+/// The dwell for the card at `index`, resolved against the document's default.
+/// Returns `None` under `CarouselAdvance::Manual` or when fewer than two cards
+/// exist, keeping no-op rotation deadlines disarmed.
 fn current_dwell(config: &AppConfig, index: usize) -> Option<Duration> {
-    let playlist = config.active_playlist()?;
-    if playlist.entries.len() < 2 {
+    if config.cards.len() < 2 {
         return None;
     }
-    let default = playlist.advance.default_dwell_seconds()?;
-    let entry = playlist.entries.get(index)?;
+    let default = config.advance.default_dwell_seconds()?;
+    let card = config.cards.get(index)?;
     Some(Duration::from_secs(u64::from(
-        entry.dwell_seconds.unwrap_or(default),
+        card.dwell_seconds().unwrap_or(default),
     )))
 }
 
@@ -1260,8 +1249,7 @@ mod tests {
     }
     use super::*;
     use crate::{
-        AlertHold, CardAlert, CarouselAdvance, DisplayTemplate, Playlist, PlaylistEntry,
-        RefreshPolicy, WidgetTapAction,
+        AlertHold, CardAlert, CarouselAdvance, DisplayTemplate, RefreshPolicy, WidgetTapAction,
     };
 
     #[test]
@@ -1315,6 +1303,7 @@ mod tests {
             tap_action: WidgetTapAction::None,
             refresh: RefreshPolicy::DeviceLocal,
             alert: CardAlert::None,
+            dwell_seconds: None,
         }
     }
 
@@ -1327,30 +1316,75 @@ mod tests {
             tap_action: WidgetTapAction::None,
             refresh: RefreshPolicy::DeviceLocal,
             alert,
+            dwell_seconds: None,
         }
     }
 
+    /// The loop, in `entries` order, with each card's own dwell.
+    ///
+    /// `cards` supplies the card bodies by id; `entries` names the loop order,
+    /// which since schema v10 IS the card order, so this reorders `cards` to
+    /// match rather than building a separate list.
     fn rotation_config(
-        cards: Vec<CardSettings>,
+        cards: &[CardSettings],
         advance: CarouselAdvance,
         entries: &[(&str, Option<u16>)],
     ) -> AppConfig {
+        let ordered = entries
+            .iter()
+            .filter_map(|(card_id, dwell_seconds)| {
+                let card = cards.iter().find(|card| card.id() == *card_id)?;
+                Some(set_dwell(card.clone(), *dwell_seconds))
+            })
+            .collect();
         AppConfig {
-            cards,
-            playlists: vec![Playlist {
-                id: "p1".into(),
-                name: "P1".into(),
-                advance,
-                entries: entries
-                    .iter()
-                    .map(|(card_id, dwell_seconds)| PlaylistEntry {
-                        card_id: (*card_id).into(),
-                        dwell_seconds: *dwell_seconds,
-                    })
-                    .collect(),
-            }],
-            active_playlist_id: "p1".into(),
+            cards: ordered,
+            advance,
             ..AppConfig::default()
+        }
+    }
+
+    fn set_dwell(card: CardSettings, dwell_seconds: Option<u16>) -> CardSettings {
+        match card {
+            CardSettings::Clock {
+                id,
+                title,
+                show_seconds,
+                template,
+                tap_action,
+                refresh,
+                alert,
+                ..
+            } => CardSettings::Clock {
+                id,
+                title,
+                show_seconds,
+                template,
+                tap_action,
+                refresh,
+                alert,
+                dwell_seconds,
+            },
+            CardSettings::Pomodoro {
+                id,
+                label,
+                duration_seconds,
+                template,
+                tap_action,
+                refresh,
+                alert,
+                ..
+            } => CardSettings::Pomodoro {
+                id,
+                label,
+                duration_seconds,
+                template,
+                tap_action,
+                refresh,
+                alert,
+                dwell_seconds,
+            },
+            other @ CardSettings::Picture { .. } => other,
         }
     }
 
@@ -1358,7 +1392,7 @@ mod tests {
     /// neither card should ever need (both set an explicit dwell).
     fn timed_two_card_config() -> AppConfig {
         rotation_config(
-            vec![rotation_clock_card("a"), rotation_clock_card("b")],
+            &[rotation_clock_card("a"), rotation_clock_card("b")],
             CarouselAdvance::Timed {
                 default_dwell_seconds: 45,
             },
@@ -1372,7 +1406,7 @@ mod tests {
     /// is `["a", "c"]`; card "c" sits at list position 2 but rotation index 1.
     fn timed_config_with_alert_only_between_two_in_rotation_cards() -> AppConfig {
         rotation_config(
-            vec![
+            &[
                 rotation_clock_card("a"),
                 rotation_pomodoro_card(
                     "b",
@@ -1626,7 +1660,7 @@ mod tests {
     fn paused_scheduled_work_leaves_a_real_wait() {
         let now = Instant::now();
         let mut config = rotation_config(
-            vec![rotation_clock_card("clock")],
+            &[rotation_clock_card("clock")],
             CarouselAdvance::Manual,
             &[("clock", None)],
         );
@@ -1728,16 +1762,18 @@ mod tests {
         // Manual disarms regardless of which in-rotation card index is asked about.
         let two_card = timed_two_card_config();
         let mut manual_two_card = two_card;
-        manual_two_card.playlists[0].advance = CarouselAdvance::Manual;
+        manual_two_card.advance = CarouselAdvance::Manual;
         assert!(current_dwell(&manual_two_card, 0).is_none());
         assert!(current_dwell(&manual_two_card, 1).is_none());
     }
 
     #[test]
-    fn current_dwell_is_none_for_a_one_card_timed_playlist() {
-        let mut config = AppConfig::default();
-        config.playlists[0].advance = CarouselAdvance::Timed {
-            default_dwell_seconds: 5,
+    fn current_dwell_is_none_for_a_one_card_timed_loop() {
+        let config = AppConfig {
+            advance: CarouselAdvance::Timed {
+                default_dwell_seconds: 5,
+            },
+            ..AppConfig::default()
         };
         assert!(current_dwell(&config, 0).is_none());
     }
@@ -1750,7 +1786,7 @@ mod tests {
     #[test]
     fn current_dwell_resolves_each_cards_own_value_before_falling_back_to_the_default() {
         let config = rotation_config(
-            vec![
+            &[
                 rotation_clock_card("explicit"),
                 rotation_clock_card("defaulted"),
             ],
@@ -1763,20 +1799,25 @@ mod tests {
         assert_eq!(current_dwell(&config, 1), Some(Duration::from_secs(45)));
     }
 
-    // F2 (continued): `advance_rotation` walks `rotation_card_ids` in order, wraps at
-    // the end, and skips alert-only/off cards. Also exercises re-arming with each
-    // card's own dwell as the index moves.
+    // `advance_rotation` walks `rotation_card_ids` in order and wraps at the end.
+    //
+    // Since schema v10 it walks EVERY card: `cards` is the loop, so there is no
+    // longer such a thing as a card that raises alerts without ever being shown.
+    // That state was only ever expressible because a card could sit in the
+    // library outside the playlist, and nothing in the window could put one
+    // there. Also exercises re-arming with each card's own dwell as the index
+    // moves.
     #[test]
-    fn advance_rotation_walks_in_rotation_cards_in_order_and_wraps() {
+    fn advance_rotation_walks_every_card_in_order_and_wraps() {
         let now = Instant::now();
         let mut config = timed_two_card_config();
         config.cards.push(rotation_pomodoro_card(
-            "alert-only",
+            "alerting",
             CardAlert::OnTimerFinish {
                 hold: AlertHold::UntilDismissed,
             },
         ));
-        config.cards.push(rotation_clock_card("off"));
+        config.cards.push(rotation_clock_card("last"));
         let mut scheduler = Scheduler::new(
             now,
             Duration::from_hours(1),
@@ -1786,14 +1827,16 @@ mod tests {
         let mut state = WorkerState::new(config, now, &mut scheduler);
         assert_eq!(state.active_screen.as_deref(), Some("a"));
 
-        advance_rotation(&mut state, &mut scheduler, now);
-        assert_eq!(state.active_screen.as_deref(), Some("b"));
-        assert!(state.active_screen_dirty);
-
-        state.active_screen_dirty = false;
-        advance_rotation(&mut state, &mut scheduler, now);
-        assert_eq!(state.active_screen.as_deref(), Some("a"));
-        assert!(state.active_screen_dirty);
+        for expected in ["b", "alerting", "last", "a"] {
+            state.active_screen_dirty = false;
+            advance_rotation(&mut state, &mut scheduler, now);
+            assert_eq!(
+                state.active_screen.as_deref(),
+                Some(expected),
+                "the loop must reach every card and wrap"
+            );
+            assert!(state.active_screen_dirty);
+        }
     }
 
     // F2 (continued): with fewer than two in-rotation cards there is nothing to
@@ -1802,9 +1845,11 @@ mod tests {
     #[test]
     fn advance_rotation_disarms_with_fewer_than_two_in_rotation_cards() {
         let now = Instant::now();
-        let mut config = AppConfig::default();
-        config.playlists[0].advance = CarouselAdvance::Timed {
-            default_dwell_seconds: 5,
+        let config = AppConfig {
+            advance: CarouselAdvance::Timed {
+                default_dwell_seconds: 5,
+            },
+            ..AppConfig::default()
         };
         let mut scheduler = Scheduler::new(
             now,
@@ -1955,7 +2000,7 @@ mod tests {
     fn mixed_pomodoro_completion_batch_queues_only_the_alerting_timer() {
         let now = Instant::now();
         let config = rotation_config(
-            vec![
+            &[
                 rotation_pomodoro_card("quiet", CardAlert::None),
                 rotation_pomodoro_card(
                     "loud",
@@ -1994,7 +2039,7 @@ mod tests {
     fn a_bounded_alert_hold_auto_dismisses_the_active_interrupt_when_it_expires() {
         let now = Instant::now();
         let config = rotation_config(
-            vec![rotation_pomodoro_card(
+            &[rotation_pomodoro_card(
                 "loud",
                 CardAlert::OnTimerFinish {
                     hold: AlertHold::Seconds { value: 30 },
@@ -2056,7 +2101,7 @@ mod tests {
     fn an_until_dismissed_alert_hold_never_auto_dismisses() {
         let now = Instant::now();
         let config = rotation_config(
-            vec![rotation_pomodoro_card(
+            &[rotation_pomodoro_card(
                 "loud",
                 CardAlert::OnTimerFinish {
                     hold: AlertHold::UntilDismissed,
@@ -2094,7 +2139,7 @@ mod tests {
     // alert queued Pending behind it (the arbiter's Active slot is occupied).
     fn sticky_active_and_bounded_pending_alert(now: Instant) -> (WorkerState, Scheduler) {
         let config = rotation_config(
-            vec![
+            &[
                 rotation_pomodoro_card(
                     "sticky",
                     CardAlert::OnTimerFinish {

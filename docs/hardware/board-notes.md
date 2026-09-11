@@ -4884,11 +4884,18 @@ device must be flashed **first**, over the cable, and the server redeployed seco
 Between the two the device is unreachable from the live server — that window is expected,
 not a fault.
 
-1. `idf.py -C firmware flash` the v2 image over USB. Move
-   `DESKMATE_FIRMWARE_VERSION`/`firmware/version.txt` to match, or the catalog reverts the
-   board within a minute (a downgrade path exists by design).
-2. Merge and redeploy the server. A server built before this change speaks v1 and cannot
-   talk to the flashed device at all.
+1. `idf.py -C firmware flash` the v2 image over USB. **The version string is
+   `v2.1.0-proto2`**, bumped from `v2.0.0-durable3` on 2026-09-12 precisely so this image
+   is not published under a string an earlier, different image already used — the OTA
+   refusal keys on the string, not on image content, so a reused one can never be
+   corrected. `FirmwareCatalog::check` is string equality and offers its version in either
+   direction, so the catalog will revert the board within a minute unless step 2 moves
+   `DESKMATE_FIRMWARE_VERSION` to `v2.1.0-proto2` as well.
+2. Redeploy the server (the merge already happened, 2026-09-12), with
+   `DESKMATE_FIRMWARE_VERSION=v2.1.0-proto2` and the matching image in the firmware
+   directory. A server built before this change speaks v1 and cannot talk to the flashed
+   device at all -- which is also why the live binary must stay on its pre-v2 build until
+   step 1 is done.
 3. Verify the link comes back, then run the checks below.
 
 ### What the session must observe

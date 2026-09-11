@@ -182,15 +182,18 @@ move is what makes the rewrite reviewable later.
 Deletion before splitting, not after — v9 already took `runtime.rs` from 6,771
 to 3,768, and A2 takes more.
 
-**`config.rs`'s shadow enums.** `mod strict_tagged_enum` (lines 13–260) mirrors
-every tagged enum a second time, plus a hand-written variant-by-variant
-`Deserialize` for each, because serde's `deny_unknown_fields` is a no-op on
-internally tagged enums. The workaround is correct; its shape is the problem —
-every card kind is written twice and mapped once by hand. Replace the mirror
-with a per-variant allowed-key table checked against the `Value` before the
-real deserialize: one enum plus one data row per variant, instead of two enums
-plus a mapping arm. This is the single biggest change to what a new card kind
-costs.
+**`config.rs`'s shadow enums stay — an earlier draft of this spec said
+otherwise and was wrong.** `mod strict_tagged_enum` looks like a duplicate of
+the allowed-key table it sits beside, and the proposal was to collapse the two.
+Reading it, the table already exists (`ValidatingDeserialize::allowed_fields`,
+`config.rs:124`) and the shadow enums are not a second copy of it: they are a
+**recursion breaker**, because the real enum's hand-written `Deserialize`
+cannot deserialize into itself and needs a derived twin to land in. That is a
+serde workaround for `deny_unknown_fields` being a no-op on internally tagged
+enums, not legacy. It is verbosity, and by this spec's own test — every item
+removes a concept, not an indirection — it does not qualify. Rewriting a
+mechanism whose job is silently rejecting unknown fields, for about 165 lines,
+is the worst risk-to-reward trade in the wave.
 
 **`commands.rs`** (1,600 implementation lines) splits by the same method, and
 A2 removes its preview-template dispatch outright.

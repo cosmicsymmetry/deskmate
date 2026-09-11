@@ -304,30 +304,6 @@ static bool ensure_font_registry(void)
  * one caller at a time. */
 static scene_t s_scene;
 
-typedef struct {
-    const sim_scene_field_t *fields;
-    size_t count;
-} sim_scene_field_table_t;
-
-/* scene_binding.h's scene_field_fn. Returning NULL for an unknown name is
- * not an error: scene_binding_evaluate() renders the "--" placeholder for
- * it, which is exactly what the device does for a source that has not
- * reported yet, and a golden that pins that state is worth having. */
-static const char *sim_scene_field_lookup(void *ctx, const char *name)
-{
-    const sim_scene_field_table_t *table = (const sim_scene_field_table_t *)ctx;
-    if (table == NULL || name == NULL) {
-        return NULL;
-    }
-    for (size_t i = 0; i < table->count; ++i) {
-        if (table->fields[i].name != NULL &&
-            strcmp(table->fields[i].name, name) == 0) {
-            return table->fields[i].value;
-        }
-    }
-    return NULL;
-}
-
 /* Maps scene_decode()'s scene_model_result_t onto the SIM_SCENE_ERR_DECODE_*
  * subrange, in the same order the two enums are declared in -- see
  * sim_scene_result_t's own comment in sim_shim.h for why this is not folded
@@ -374,8 +350,7 @@ sim_scene_result_t sim_render_scene(const uint8_t *payload, size_t payload_lengt
                                     int16_t utc_offset_minutes, int64_t now_unix_seconds,
                                     bool timer_active, uint32_t timer_total_ms,
                                     uint32_t timer_remaining_ms, bool timer_running,
-                                    const sim_scene_field_t *fields,
-                                    size_t field_count, bool orientation_flipped,
+                                    bool orientation_flipped,
                                     uint16_t *out_pixels)
 {
     if (payload == NULL || payload_length == 0U || out_pixels == NULL) {
@@ -405,20 +380,14 @@ sim_scene_result_t sim_render_scene(const uint8_t *payload, size_t payload_lengt
         return map_decode_result(decode_result);
     }
 
-    sim_scene_field_table_t table = {
-        .fields = fields,
-        .count = (fields == NULL) ? 0U : field_count,
-    };
     scene_binding_context_t context = {
         .unix_seconds = now_unix_seconds,
         .utc_offset_minutes = utc_offset_minutes,
-        .field = sim_scene_field_lookup,
-        .field_ctx = &table,
     };
     fill_scene_timer_context(&context, timer_active, timer_total_ms,
                              timer_remaining_ms, timer_running);
-    /* Every binding is evaluated inside this call, so `context` and the
-     * table it points at only have to outlive it. */
+    /* Every binding is evaluated inside this call, so `context` only has to
+     * outlive it. */
     if (!scene_view_show(&s_scene, &context)) {
         return SIM_SCENE_ERR_SHOW;
     }

@@ -5,14 +5,12 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use protocol::{
-    Ack, ActivateScreen, ApplyConfig, AssetBegin, AssetChunk, AssetCommit, AssetRelease,
-    CAPABILITY_CONFIG_ROTATION, CAPABILITY_CORE_WIDGETS, Deframer, DeviceEvent, EventAction,
-    EventKind, Field, HeartbeatAck, Message, NetworkConfig, PushData, PushScene,
-    RequestIdAllocator, ScreenConfig, StatusResponse, TYPE_ACTIVATE_SCREEN, TYPE_APPLY_CONFIG,
+    Ack, ActivateCard, ApplyConfig, AssetBegin, AssetChunk, AssetCommit, AssetRelease, CardConfig,
+    Deframer, DeviceEvent, EventAction, EventKind, HeartbeatAck, Message, NetworkConfig, PushScene,
+    PushTimer, RequestIdAllocator, StatusResponse, TYPE_ACTIVATE_CARD, TYPE_APPLY_CONFIG,
     TYPE_ASSET_BEGIN, TYPE_ASSET_CHUNK, TYPE_ASSET_COMMIT, TYPE_ASSET_RELEASE, TYPE_FACTORY_RESET,
-    TYPE_NETWORK_CONFIG, TYPE_PUSH_DATA, TYPE_PUSH_SCENE, TYPE_TIME_SYNC, TYPE_TRIGGER_INTERRUPT,
-    TimeSync, TriggerInterrupt, WidgetConfig, decode_message, encode_message,
-    expected_response_type,
+    TYPE_NETWORK_CONFIG, TYPE_PUSH_SCENE, TYPE_PUSH_TIMER, TYPE_TIME_SYNC, TYPE_TRIGGER_INTERRUPT,
+    TimeSync, TriggerInterrupt, decode_message, encode_message, expected_response_type,
 };
 
 use crate::{
@@ -115,8 +113,8 @@ enum WorkerCommand<T> {
 struct ReplayState {
     time_sync: Option<(TimeSync, Instant)>,
     config: Option<ApplyConfig>,
-    pushes: Vec<PushData>,
-    active_screen: Option<ActivateScreen>,
+    pushes: Vec<PushTimer>,
+    active_card: Option<ActivateCard>,
     interrupts: Vec<TriggerInterrupt>,
 }
 
@@ -274,11 +272,11 @@ impl<T: Transport + Send + 'static> DeviceSession<T> {
         }
     }
 
-    pub fn push_data(&self, push: PushData) -> Result<Ack, DeviceError> {
+    pub fn push_timer(&self, push: PushTimer) -> Result<Ack, DeviceError> {
         let revision = push.revision;
-        match self.request(Message::PushData(push))? {
+        match self.request(Message::PushTimer(push))? {
             Message::Ack(ack)
-                if ack.acknowledged_type == TYPE_PUSH_DATA && ack.revision == Some(revision) =>
+                if ack.acknowledged_type == TYPE_PUSH_TIMER && ack.revision == Some(revision) =>
             {
                 self.latest_data_revision
                     .fetch_max(revision, Ordering::AcqRel);
@@ -288,23 +286,29 @@ impl<T: Transport + Send + 'static> DeviceSession<T> {
         }
     }
 
-    pub fn push_fields(
+    pub fn push_next_timer(
         &self,
-        widget_id: impl Into<String>,
-        fields: Vec<Field>,
+        card_id: impl Into<String>,
+        total_ms: u32,
+        remaining_ms: u32,
+        running: bool,
     ) -> Result<Ack, DeviceError> {
         let revision = Self::allocate_revision(&self.latest_data_revision)?;
-        self.push_data(PushData {
-            widget_id: widget_id.into(),
+        self.push_timer(PushTimer {
+            card_id: card_id.into(),
             revision,
-            fields,
+            total_ms,
+            remaining_ms,
+            running,
         })
     }
 
     pub fn apply_config(&self, config: ApplyConfig) -> Result<Ack, DeviceError> {
-        let required = required_config_capabilities(&config);
-        let available = self.capabilities();
-        ensure_capabilities(required, available)?;
+        // Protocol v2 has no capability a card list can require. The v1 bits
+        // that gated this -- "core widgets" and a separate one for a
+        // 270-degree rotation -- both described a device that rendered
+        // templates; a v2 device renders scenes and accepts either mounting
+        // unconditionally.
         let revision = config.revision;
         match self.request(Message::ApplyConfig(config))? {
             Message::Ack(ack)
@@ -321,22 +325,20 @@ impl<T: Transport + Send + 'static> DeviceSession<T> {
     pub fn apply_next_config(
         &self,
         rotation: u16,
-        widgets: Vec<WidgetConfig>,
-        screens: Vec<ScreenConfig>,
+        cards: Vec<CardConfig>,
     ) -> Result<Ack, DeviceError> {
         let revision = Self::allocate_revision(&self.latest_config_revision)?;
         self.apply_config(ApplyConfig {
             revision,
             rotation,
-            widgets,
-            screens,
+            cards,
         })
     }
 
-    pub fn activate_screen(&self, activation: ActivateScreen) -> Result<Ack, DeviceError> {
-        match self.request(Message::ActivateScreen(activation))? {
+    pub fn activate_card(&self, activation: ActivateCard) -> Result<Ack, DeviceError> {
+        match self.request(Message::ActivateCard(activation))? {
             Message::Ack(ack)
-                if ack.acknowledged_type == TYPE_ACTIVATE_SCREEN && ack.revision.is_none() =>
+                if ack.acknowledged_type == TYPE_ACTIVATE_CARD && ack.revision.is_none() =>
             {
                 Ok(ack)
             }
@@ -738,13 +740,13 @@ impl<T: Transport> SessionConnection<T> {
             )
             && self.replay.config.as_ref().is_some_and(|config| {
                 config
-                    .screens
+                    .cards
                     .iter()
-                    .any(|screen| screen.screen_id == event.screen_id)
+                    .any(|card| card.card_id == event.card_id)
             })
         {
-            self.replay.active_screen = Some(ActivateScreen {
-                screen_id: event.screen_id.clone(),
+            self.replay.active_card = Some(ActivateCard {
+                card_id: event.card_id.clone(),
             });
         }
         if event.kind == EventKind::InterruptDismissed
@@ -786,22 +788,22 @@ impl<T: Transport> SessionConnection<T> {
                 if changes_live_model {
                     self.replay.pushes.clear();
                     self.replay.interrupts.clear();
-                    if self.replay.active_screen.as_ref().is_some_and(|active| {
+                    if self.replay.active_card.as_ref().is_some_and(|active| {
                         !config
-                            .screens
+                            .cards
                             .iter()
-                            .any(|screen| screen.screen_id == active.screen_id)
+                            .any(|card| card.card_id == active.card_id)
                     }) {
-                        self.replay.active_screen = None;
+                        self.replay.active_card = None;
                     }
                 }
                 self.latest_config_revision
                     .fetch_max(config.revision, Ordering::AcqRel);
             }
-            Message::PushData(push) => {
+            Message::PushTimer(push) => {
                 self.replay
                     .pushes
-                    .retain(|cached| cached.widget_id != push.widget_id);
+                    .retain(|cached| cached.card_id != push.card_id);
                 self.replay.pushes.push(push.clone());
                 self.replay
                     .pushes
@@ -809,8 +811,8 @@ impl<T: Transport> SessionConnection<T> {
                 self.latest_data_revision
                     .fetch_max(push.revision, Ordering::AcqRel);
             }
-            Message::ActivateScreen(activation) => {
-                self.replay.active_screen = Some(activation.clone());
+            Message::ActivateCard(activation) => {
+                self.replay.active_card = Some(activation.clone());
             }
             Message::TriggerInterrupt(interrupt) => {
                 self.replay
@@ -827,9 +829,6 @@ impl<T: Transport> SessionConnection<T> {
 
     fn replay_after_reconnect(&mut self, status: &StatusResponse) -> Result<(), DeviceError> {
         let mut replay = self.replay.clone();
-        if let Some(config) = &replay.config {
-            ensure_capabilities(required_config_capabilities(config), status.capabilities)?;
-        }
         let powered_session_reset = status.uptime_ms < self.last_device_uptime_ms
             || (status.latest_revision == 0
                 && status.config_revision == 0
@@ -889,8 +888,8 @@ impl<T: Transport> SessionConnection<T> {
                     .ok_or(DeviceError::RevisionExhausted)?;
             }
             Self::require_ack(
-                &self.transact(&Message::PushData(push.clone()))?,
-                TYPE_PUSH_DATA,
+                &self.transact(&Message::PushTimer(push.clone()))?,
+                TYPE_PUSH_TIMER,
                 Some(push.revision),
             )?;
             data_revision = push.revision;
@@ -898,10 +897,10 @@ impl<T: Transport> SessionConnection<T> {
         self.latest_data_revision
             .store(data_revision, Ordering::Release);
 
-        if let Some(activation) = &replay.active_screen {
+        if let Some(activation) = &replay.active_card {
             Self::require_ack(
-                &self.transact(&Message::ActivateScreen(activation.clone()))?,
-                TYPE_ACTIVATE_SCREEN,
+                &self.transact(&Message::ActivateCard(activation.clone()))?,
+                TYPE_ACTIVATE_CARD,
                 None,
             )?;
         }
@@ -930,15 +929,6 @@ impl<T: Transport> SessionConnection<T> {
             _ => Err(DeviceError::UnexpectedMessage),
         }
     }
-}
-
-fn required_config_capabilities(config: &ApplyConfig) -> u64 {
-    CAPABILITY_CORE_WIDGETS
-        | if config.rotation == 270 {
-            CAPABILITY_CONFIG_ROTATION
-        } else {
-            0
-        }
 }
 
 fn ensure_capabilities(required: u64, available: u64) -> Result<(), DeviceError> {
@@ -1056,10 +1046,7 @@ mod tests {
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
 
-    use protocol::{
-        EventAction, InterruptPolicy, PROTOCOL_VERSION, SizeClass, TapAction, TemplateKind,
-        decode_wire_frame,
-    };
+    use protocol::{EventAction, PROTOCOL_VERSION, TapAction, decode_wire_frame};
 
     use super::*;
 
@@ -1217,8 +1204,8 @@ mod tests {
                 revision: None,
                 already_present: None,
             }),
-            Message::PushData(push) => Message::Ack(Ack {
-                acknowledged_type: TYPE_PUSH_DATA,
+            Message::PushTimer(push) => Message::Ack(Ack {
+                acknowledged_type: TYPE_PUSH_TIMER,
                 revision: Some(push.revision),
                 already_present: None,
             }),
@@ -1227,8 +1214,8 @@ mod tests {
                 revision: Some(config.revision),
                 already_present: None,
             }),
-            Message::ActivateScreen(_) => Message::Ack(Ack {
-                acknowledged_type: TYPE_ACTIVATE_SCREEN,
+            Message::ActivateCard(_) => Message::Ack(Ack {
+                acknowledged_type: TYPE_ACTIVATE_CARD,
                 revision: None,
                 already_present: None,
             }),
@@ -1272,8 +1259,7 @@ mod tests {
         DeviceEvent {
             sequence,
             kind,
-            widget_id: "timer".into(),
-            screen_id: "timer-screen".into(),
+            card_id: "timer".into(),
             action: if kind == EventKind::InterruptDismissed {
                 EventAction::DismissInterrupt
             } else {
@@ -1287,16 +1273,9 @@ mod tests {
         ApplyConfig {
             revision,
             rotation: 90,
-            widgets: vec![WidgetConfig {
-                widget_id: "timer".into(),
-                template: TemplateKind::ProgressRing,
-                size_class: SizeClass::Standard,
+            cards: vec![CardConfig {
+                card_id: "timer".into(),
                 tap_action: TapAction::StartPause,
-                interrupt_policy: InterruptPolicy::Enabled,
-            }],
-            screens: vec![ScreenConfig {
-                screen_id: "timer-screen".into(),
-                widget_id: "timer".into(),
             }],
         }
     }
@@ -1471,11 +1450,13 @@ mod tests {
             &status(41, 0, 100),
             options(Duration::from_mins(1), 8),
         );
-        let ack = session.push_fields("timer", Vec::new()).unwrap();
+        let ack = session
+            .push_next_timer("timer", 60_000, 60_000, false)
+            .unwrap();
         assert_eq!(ack.revision, Some(42));
         assert!(matches!(
             state.lock().unwrap().requests.last(),
-            Some(Message::PushData(PushData { revision: 42, .. }))
+            Some(Message::PushTimer(PushTimer { revision: 42, .. }))
         ));
     }
 
@@ -1515,7 +1496,7 @@ mod tests {
             .unwrap()
             .reply_modes
             .push_back(ReplyMode::Response(Message::Ack(Ack {
-                acknowledged_type: TYPE_PUSH_DATA,
+                acknowledged_type: TYPE_PUSH_TIMER,
                 revision: Some(7),
                 already_present: None,
             })));
@@ -1548,61 +1529,6 @@ mod tests {
                 .iter()
                 .all(|request| !matches!(request, Message::PushScene(_)))
         );
-    }
-
-    #[test]
-    fn legacy_firmware_rejects_rotated_config_before_any_wire_mutation() {
-        let mut legacy = status(0, 0, 100);
-        legacy.capabilities = protocol::LEGACY_CAPABILITIES;
-        let (transport, state) = FakeTransport::new(legacy.clone());
-        let session =
-            DeviceSession::with_options(transport, &legacy, options(Duration::from_mins(1), 8));
-        let mut rotated = config(1);
-        rotated.rotation = 270;
-
-        assert_eq!(
-            session.apply_config(rotated),
-            Err(DeviceError::MissingCapabilities {
-                required: protocol::CAPABILITY_CORE_WIDGETS | protocol::CAPABILITY_CONFIG_ROTATION,
-                available: protocol::LEGACY_CAPABILITIES,
-            })
-        );
-        assert!(state.lock().unwrap().requests.is_empty());
-        assert_eq!(session.latest_config_revision(), 0);
-    }
-
-    #[test]
-    fn reconnect_preflights_replay_before_time_or_config_mutation() {
-        let (transport, _) = FakeTransport::new(status(0, 0, 100));
-        let session = DeviceSession::with_options(
-            transport,
-            &status(0, 0, 100),
-            options(Duration::from_mins(1), 8),
-        );
-        session
-            .time_sync(TimeSync {
-                unix_seconds: 1_800_000_000,
-                utc_offset_minutes: 240,
-            })
-            .unwrap();
-        let mut rotated = config(1);
-        rotated.rotation = 270;
-        session.apply_config(rotated).unwrap();
-
-        let mut legacy = status(0, 0, 10);
-        legacy.capabilities = protocol::LEGACY_CAPABILITIES;
-        let (legacy_transport, legacy_state) = FakeTransport::new(legacy.clone());
-        assert!(matches!(
-            session.reconnect(legacy_transport, legacy),
-            Err(DeviceError::MissingCapabilities {
-                required,
-                available: protocol::LEGACY_CAPABILITIES,
-            }) if required
-                == protocol::CAPABILITY_CORE_WIDGETS | protocol::CAPABILITY_CONFIG_ROTATION
-        ));
-        assert!(legacy_state.lock().unwrap().requests.is_empty());
-        assert_eq!(session.latest_config_revision(), 1);
-        assert_eq!(session.capabilities(), protocol::LEGACY_CAPABILITIES);
     }
 
     #[test]
@@ -1650,15 +1576,17 @@ mod tests {
             options(Duration::from_mins(1), 8),
         );
         session.apply_config(config(4)).unwrap();
-        session.push_fields("timer", Vec::new()).unwrap();
         session
-            .activate_screen(ActivateScreen {
-                screen_id: "timer-screen".into(),
+            .push_next_timer("timer", 60_000, 60_000, false)
+            .unwrap();
+        session
+            .activate_card(ActivateCard {
+                card_id: "timer".into(),
             })
             .unwrap();
         session
             .trigger_interrupt(TriggerInterrupt {
-                widget_id: "timer".into(),
+                card_id: "timer".into(),
                 token: 1,
                 reason: "done".into(),
             })
@@ -1679,8 +1607,8 @@ mod tests {
             .unwrap();
         let replayed = second_state.lock().unwrap().requests.clone();
         assert!(matches!(replayed.first(), Some(Message::ApplyConfig(_))));
-        assert!(matches!(replayed.get(1), Some(Message::PushData(_))));
-        assert!(matches!(replayed.get(2), Some(Message::ActivateScreen(_))));
+        assert!(matches!(replayed.get(1), Some(Message::PushTimer(_))));
+        assert!(matches!(replayed.get(2), Some(Message::ActivateCard(_))));
         assert!(matches!(
             replayed.get(3),
             Some(Message::TriggerInterrupt(_))
@@ -1691,7 +1619,7 @@ mod tests {
     }
 
     #[test]
-    fn local_navigation_updates_the_screen_replayed_after_power_reset() {
+    fn local_navigation_updates_the_card_replayed_after_power_reset() {
         let (first_transport, first_state) = FakeTransport::new(status(0, 0, 1_000));
         let session = DeviceSession::with_options(
             first_transport,
@@ -1699,21 +1627,14 @@ mod tests {
             options(Duration::from_mins(1), 8),
         );
         let mut layout = config(1);
-        layout.widgets.push(WidgetConfig {
-            widget_id: "calendar".into(),
-            template: TemplateKind::RowList,
-            size_class: SizeClass::Standard,
+        layout.cards.push(CardConfig {
+            card_id: "calendar".into(),
             tap_action: TapAction::None,
-            interrupt_policy: InterruptPolicy::Disabled,
-        });
-        layout.screens.push(ScreenConfig {
-            screen_id: "calendar-screen".into(),
-            widget_id: "calendar".into(),
         });
         session.apply_config(layout).unwrap();
         session
-            .activate_screen(ActivateScreen {
-                screen_id: "timer-screen".into(),
+            .activate_card(ActivateCard {
+                card_id: "timer".into(),
             })
             .unwrap();
 
@@ -1722,8 +1643,7 @@ mod tests {
             [DeviceEvent {
                 sequence: 1,
                 kind: EventKind::Navigation,
-                widget_id: "calendar".into(),
-                screen_id: "calendar-screen".into(),
+                card_id: "calendar".into(),
                 action: EventAction::NavigateNext,
                 interrupt_token: None,
             }],
@@ -1735,8 +1655,8 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .event
-                .screen_id,
-            "calendar-screen"
+                .card_id,
+            "calendar"
         );
 
         first_state
@@ -1756,8 +1676,8 @@ mod tests {
         assert!(second_state.lock().unwrap().requests.iter().any(|request| {
             matches!(
                 request,
-                Message::ActivateScreen(ActivateScreen { screen_id })
-                    if screen_id == "calendar-screen"
+                Message::ActivateCard(ActivateCard { card_id })
+                    if card_id == "calendar"
             )
         }));
     }
@@ -1771,7 +1691,9 @@ mod tests {
             options(Duration::from_mins(1), 8),
         );
         session.apply_config(config(4)).unwrap();
-        session.push_fields("timer", Vec::new()).unwrap();
+        session
+            .push_next_timer("timer", 60_000, 60_000, false)
+            .unwrap();
 
         let (second_transport, second_state) = FakeTransport::new(status(8, 4, 2_000));
         session

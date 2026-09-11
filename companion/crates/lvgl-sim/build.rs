@@ -11,7 +11,6 @@ fn main() {
     for core in [
         "timefmt.c",
         "clock_source.c",
-        "template_fields.c",
         // Task 12: the runtime asset store, compiled unmodified so the
         // simulator's digest -> bytes lookup uses the identical format and
         // logic the device's link/asset_flash.c backs with real flash

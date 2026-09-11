@@ -127,8 +127,7 @@ async fn hostile_device_frames_are_bounded_and_concatenated_frames_decode() {
         Message::DeviceEvent(DeviceEvent {
             sequence,
             kind: EventKind::Tap,
-            widget_id: "clock".to_string(),
-            screen_id: "clock".to_string(),
+            card_id: "clock".to_string(),
             action: EventAction::StartPause,
             interrupt_token: None,
         })

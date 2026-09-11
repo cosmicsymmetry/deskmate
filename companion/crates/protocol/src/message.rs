@@ -53,10 +53,13 @@ pub const CURRENT_CAPABILITIES: u64 = CAPABILITY_ASSET_TRANSFER
     | CAPABILITY_VOLATILE_ASSETS
     | CAPABILITY_DURABLE_ASSET_ENCODING;
 pub const LINK_TIMEOUT_MS: u64 = 10_000;
-pub const MAX_WIDGET_ID_LEN: usize = 32;
-pub const MAX_SCREEN_ID_LEN: usize = 32;
-pub const MAX_CONFIG_WIDGETS: usize = 8;
-pub const MAX_CONFIG_SCREENS: usize = 8;
+/// A card id is an identifier the host chose, not free text.
+///
+/// Protocol v1 had three of these -- one for a widget id, one for a screen id
+/// and one for a card id -- all 32, because a widget, a screen and a card were
+/// three names for the thing config schema v10 settled as one card.
+pub const MAX_CARD_ID_LEN: usize = 32;
+pub const MAX_CONFIG_CARDS: usize = 8;
 pub const MAX_DIAGNOSTIC_LEN: usize = 96;
 pub const MAX_INTERRUPT_REASON_LEN: usize = 96;
 pub const MAX_FIRMWARE_VERSION_LEN: usize = 32;
@@ -101,10 +104,6 @@ pub const TYPE_ASSET_CHUNK: u8 = 16;
 pub const TYPE_ASSET_COMMIT: u8 = 17;
 pub const TYPE_ASSET_RELEASE: u8 = 18;
 pub const TYPE_PUSH_SCENE: u8 = 19;
-
-/// Same 32 bytes as a widget id, and for the same reason: a card id is an
-/// identifier the host chose, not free text.
-pub const MAX_CARD_ID_LEN: usize = 32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -208,7 +207,7 @@ pub struct AssetRelease {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PushScene {
     pub card_id: String,
-    /// Required and nonzero, like `PushData`'s and `ApplyConfig`'s: a scene
+    /// Required and nonzero, like `PushTimer`'s and `ApplyConfig`'s: a scene
     /// the host cannot pin a revision to is one it cannot tell apart from the
     /// scene already on the panel.
     pub revision: u32,
@@ -242,17 +241,21 @@ pub struct ActivateCard {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TriggerInterrupt {
-    pub widget_id: String,
+    pub card_id: String,
     pub token: u32,
     pub reason: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Something the person at the panel did, reported upward.
+///
+/// Protocol v1 carried two identifiers here, `card_id` and `card_id`, and
+/// every producer and consumer set them to the same card. v2 states the one
+/// card id (key 2); key 3 is retired rather than reused.
 pub struct DeviceEvent {
     pub sequence: u64,
     pub kind: EventKind,
-    pub widget_id: String,
-    pub screen_id: String,
+    pub card_id: String,
     pub action: EventAction,
     pub interrupt_token: Option<u32>,
 }
@@ -341,7 +344,7 @@ pub enum ErrorCode {
     StaleRevision = 7,
     Busy = 8,
     Internal = 9,
-    UnknownWidget = 10,
+    UnknownCard = 10,
     ConfigTooLarge = 14,
     WrongTier = 15,
 }
@@ -360,7 +363,7 @@ impl TryFrom<u16> for ErrorCode {
             7 => Ok(Self::StaleRevision),
             8 => Ok(Self::Busy),
             9 => Ok(Self::Internal),
-            10 => Ok(Self::UnknownWidget),
+            10 => Ok(Self::UnknownCard),
             14 => Ok(Self::ConfigTooLarge),
             15 => Ok(Self::WrongTier),
             _ => Err(MessageError::InvalidValue("error code")),
@@ -657,14 +660,14 @@ fn validate_apply_config(config: &ApplyConfig) -> Result<(), MessageError> {
     if config.cards.is_empty() {
         return Err(MessageError::InvalidValue("config count"));
     }
-    if config.cards.len() > MAX_CONFIG_WIDGETS {
+    if config.cards.len() > MAX_CONFIG_CARDS {
         return Err(MessageError::ConfigTooLarge);
     }
     if !matches!(config.rotation, 90 | 270) {
         return Err(MessageError::InvalidValue("config rotation"));
     }
     for (index, card) in config.cards.iter().enumerate() {
-        checked_text(&card.card_id, 1, MAX_WIDGET_ID_LEN, "card_id")?;
+        checked_text(&card.card_id, 1, MAX_CARD_ID_LEN, "card_id")?;
         if config.cards[..index]
             .iter()
             .any(|other| other.card_id == card.card_id)
@@ -679,8 +682,7 @@ fn validate_device_event(event: &DeviceEvent) -> Result<(), MessageError> {
     if event.sequence == 0 {
         return Err(MessageError::InvalidValue("event sequence"));
     }
-    checked_text(&event.widget_id, 1, MAX_WIDGET_ID_LEN, "widget_id")?;
-    checked_text(&event.screen_id, 1, MAX_SCREEN_ID_LEN, "screen_id")?;
+    checked_text(&event.card_id, 1, MAX_CARD_ID_LEN, "card_id")?;
     let valid = match event.kind {
         EventKind::Tap => {
             matches!(event.action, EventAction::StartPause | EventAction::Reset)
@@ -705,7 +707,7 @@ fn validate_device_event(event: &DeviceEvent) -> Result<(), MessageError> {
 }
 
 fn validate_push(push: &PushTimer) -> Result<(), MessageError> {
-    checked_text(&push.card_id, 1, MAX_WIDGET_ID_LEN, "card_id")?;
+    checked_text(&push.card_id, 1, MAX_CARD_ID_LEN, "card_id")?;
     if push.revision == 0 {
         return Err(MessageError::InvalidValue("revision"));
     }
@@ -790,10 +792,10 @@ pub fn validate_message(message: &Message) -> Result<(), MessageError> {
         }
         Message::ApplyConfig(config) => validate_apply_config(config),
         Message::ActivateCard(activate) => {
-            checked_text(&activate.card_id, 1, MAX_WIDGET_ID_LEN, "card_id")
+            checked_text(&activate.card_id, 1, MAX_CARD_ID_LEN, "card_id")
         }
         Message::TriggerInterrupt(interrupt) => {
-            checked_text(&interrupt.widget_id, 1, MAX_WIDGET_ID_LEN, "widget_id")?;
+            checked_text(&interrupt.card_id, 1, MAX_CARD_ID_LEN, "card_id")?;
             checked_text(
                 &interrupt.reason,
                 0,
@@ -841,18 +843,16 @@ fn encode_config_payload(encoder: &mut Encoder, config: &ApplyConfig) {
 
 fn encode_device_event_payload(encoder: &mut Encoder, event: &DeviceEvent) {
     encoder.map(if event.interrupt_token.is_some() {
-        6
-    } else {
         5
+    } else {
+        4
     });
     encoder.unsigned(0);
     encoder.unsigned(event.sequence);
     encoder.unsigned(1);
     encoder.unsigned(u64::from(event.kind as u8));
     encoder.unsigned(2);
-    encoder.text(&event.widget_id);
-    encoder.unsigned(3);
-    encoder.text(&event.screen_id);
+    encoder.text(&event.card_id);
     encoder.unsigned(4);
     encoder.unsigned(u64::from(event.action as u8));
     if let Some(token) = event.interrupt_token {
@@ -972,7 +972,7 @@ fn encode_payload(message: &Message) -> Result<Vec<u8>, MessageError> {
         Message::TriggerInterrupt(interrupt) => {
             encoder.map(3);
             encoder.unsigned(0);
-            encoder.text(&interrupt.widget_id);
+            encoder.text(&interrupt.card_id);
             encoder.unsigned(1);
             encoder.unsigned(u64::from(interrupt.token));
             encoder.unsigned(2);
@@ -1179,7 +1179,7 @@ fn decode_push(payload: &[u8]) -> Result<PushTimer, MessageError> {
 
 fn decode_cards(decoder: &mut Decoder<'_>) -> Result<Vec<CardConfig>, MessageError> {
     let count = decoder.array_len()?;
-    if count > MAX_CONFIG_WIDGETS {
+    if count > MAX_CONFIG_CARDS {
         return Err(MessageError::ConfigTooLarge);
     }
     let mut cards = Vec::with_capacity(count);
@@ -1296,12 +1296,12 @@ fn decode_trigger_interrupt(payload: &[u8]) -> Result<TriggerInterrupt, MessageE
     let mut decoder = Decoder::new(payload);
     let len = decoder.map_len()?;
     let mut previous = None;
-    let mut widget_id = None;
+    let mut card_id = None;
     let mut token = None;
     let mut reason = None;
     for _ in 0..len {
         match next_numeric_key(&mut decoder, &mut previous)? {
-            0 => widget_id = Some(decoder.text()?.to_owned()),
+            0 => card_id = Some(decoder.text()?.to_owned()),
             1 => token = Some(read_u32(&mut decoder, "interrupt token")?),
             2 => reason = Some(decoder.text()?.to_owned()),
             _ => decoder.skip()?,
@@ -1309,7 +1309,7 @@ fn decode_trigger_interrupt(payload: &[u8]) -> Result<TriggerInterrupt, MessageE
     }
     decoder.finish()?;
     let interrupt = TriggerInterrupt {
-        widget_id: widget_id.ok_or(MessageError::MissingField(0))?,
+        card_id: card_id.ok_or(MessageError::MissingField(0))?,
         token: token.ok_or(MessageError::MissingField(1))?,
         reason: reason.ok_or(MessageError::MissingField(2))?,
     };
@@ -1323,16 +1323,14 @@ fn decode_device_event(payload: &[u8]) -> Result<DeviceEvent, MessageError> {
     let mut previous = None;
     let mut sequence = None;
     let mut kind = None;
-    let mut widget_id = None;
-    let mut screen_id = None;
+    let mut card_id = None;
     let mut action = None;
     let mut interrupt_token = None;
     for _ in 0..len {
         match next_numeric_key(&mut decoder, &mut previous)? {
             0 => sequence = Some(decoder.unsigned()?),
             1 => kind = Some(event_kind(read_u8(&mut decoder, "event kind")?)?),
-            2 => widget_id = Some(decoder.text()?.to_owned()),
-            3 => screen_id = Some(decoder.text()?.to_owned()),
+            2 => card_id = Some(decoder.text()?.to_owned()),
             4 => action = Some(event_action(read_u8(&mut decoder, "event action")?)?),
             5 => interrupt_token = Some(read_u32(&mut decoder, "interrupt token")?),
             _ => decoder.skip()?,
@@ -1342,8 +1340,7 @@ fn decode_device_event(payload: &[u8]) -> Result<DeviceEvent, MessageError> {
     let event = DeviceEvent {
         sequence: sequence.ok_or(MessageError::MissingField(0))?,
         kind: kind.ok_or(MessageError::MissingField(1))?,
-        widget_id: widget_id.ok_or(MessageError::MissingField(2))?,
-        screen_id: screen_id.ok_or(MessageError::MissingField(3))?,
+        card_id: card_id.ok_or(MessageError::MissingField(2))?,
         action: action.ok_or(MessageError::MissingField(4))?,
         interrupt_token,
     };
@@ -1830,15 +1827,14 @@ mod tests {
             card_id: "focus".into(),
         }));
         round_trip(&Message::TriggerInterrupt(TriggerInterrupt {
-            widget_id: "timer".into(),
+            card_id: "timer".into(),
             token: 4,
             reason: "done".into(),
         }));
         round_trip(&Message::DeviceEvent(DeviceEvent {
             sequence: 5,
             kind: EventKind::InterruptDismissed,
-            widget_id: "timer".into(),
-            screen_id: "focus".into(),
+            card_id: "timer".into(),
             action: EventAction::DismissInterrupt,
             interrupt_token: Some(4),
         }));
@@ -2106,7 +2102,7 @@ mod tests {
             encode_message(
                 1,
                 &Message::PushTimer(PushTimer {
-                    card_id: "x".repeat(MAX_WIDGET_ID_LEN + 1),
+                    card_id: "x".repeat(MAX_CARD_ID_LEN + 1),
                     revision: 1,
                     total_ms: 0,
                     remaining_ms: 0,

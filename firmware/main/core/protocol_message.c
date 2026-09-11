@@ -359,7 +359,7 @@ static protocol_message_result_t decode_push_timer(
         if (key == 0U) {
             result = read_text(&contents, push->card_id,
                                sizeof(push->card_id), 1U,
-                               PROTOCOL_MAX_WIDGET_ID_LENGTH);
+                               PROTOCOL_MAX_CARD_ID_LENGTH);
             present |= REQUIRED_BIT(0);
         } else if (key == 1U) {
             uint64_t revision = 0U;
@@ -913,7 +913,7 @@ static protocol_message_result_t decode_card(CborValue *value,
         if (key == 0U) {
             result = read_text(&fields, card->card_id,
                                sizeof(card->card_id), 1U,
-                               PROTOCOL_MAX_WIDGET_ID_LENGTH);
+                               PROTOCOL_MAX_CARD_ID_LENGTH);
             present |= REQUIRED_BIT(0);
         } else if (key == 1U) {
             uint64_t raw = 0U;
@@ -953,7 +953,7 @@ static protocol_message_result_t decode_cards(CborValue *value,
     if (error != CborNoError) {
         return cbor_result(error);
     }
-    if (count > PROTOCOL_MAX_CONFIG_WIDGETS) {
+    if (count > PROTOCOL_MAX_CONFIG_CARDS) {
         return PROTOCOL_MESSAGE_ERR_CONFIG_TOO_LARGE;
     }
     CborValue items;
@@ -1054,7 +1054,7 @@ static protocol_message_result_t decode_activate_card(
         if (key == 0U) {
             result = read_text(&contents, activate->card_id,
                                sizeof(activate->card_id), 1U,
-                               PROTOCOL_MAX_WIDGET_ID_LENGTH);
+                               PROTOCOL_MAX_CARD_ID_LENGTH);
             present = true;
         } else {
             result = skip_value(&contents);
@@ -1088,9 +1088,9 @@ static protocol_message_result_t decode_trigger_interrupt(
             return result;
         }
         if (key == 0U) {
-            result = read_text(&contents, interrupt->widget_id,
-                               sizeof(interrupt->widget_id), 1U,
-                               PROTOCOL_MAX_WIDGET_ID_LENGTH);
+            result = read_text(&contents, interrupt->card_id,
+                               sizeof(interrupt->card_id), 1U,
+                               PROTOCOL_MAX_CARD_ID_LENGTH);
             present |= REQUIRED_BIT(0);
         } else if (key == 1U) {
             uint64_t token = 0U;
@@ -1123,9 +1123,7 @@ static protocol_message_result_t validate_device_event(
 {
     size_t length = 0U;
     if (event->sequence == 0U ||
-        !bounded_length(event->widget_id, sizeof(event->widget_id), &length) ||
-        length == 0U ||
-        !bounded_length(event->screen_id, sizeof(event->screen_id), &length) ||
+        !bounded_length(event->card_id, sizeof(event->card_id), &length) ||
         length == 0U) {
         return PROTOCOL_MESSAGE_ERR_INVALID_VALUE;
     }
@@ -1194,15 +1192,10 @@ static protocol_message_result_t decode_device_event(
             }
             present |= REQUIRED_BIT((uint32_t)key);
         } else if (key == 2U) {
-            result = read_text(&contents, event->widget_id,
-                               sizeof(event->widget_id), 1U,
-                               PROTOCOL_MAX_WIDGET_ID_LENGTH);
+            result = read_text(&contents, event->card_id,
+                               sizeof(event->card_id), 1U,
+                               PROTOCOL_MAX_CARD_ID_LENGTH);
             present |= REQUIRED_BIT(2);
-        } else if (key == 3U) {
-            result = read_text(&contents, event->screen_id,
-                               sizeof(event->screen_id), 1U,
-                               PROTOCOL_MAX_SCREEN_ID_LENGTH);
-            present |= REQUIRED_BIT(3);
         } else {
             result = skip_value(&contents);
         }
@@ -1210,7 +1203,9 @@ static protocol_message_result_t decode_device_event(
             return result;
         }
     }
-    if ((present & UINT32_C(0x1f)) != UINT32_C(0x1f)) {
+    /* Keys 0, 1, 2 and 4 are required; key 3 was retired with v1's second
+     * identifier and key 5 is the optional interrupt token. */
+    if ((present & UINT32_C(0x17)) != UINT32_C(0x17)) {
         return PROTOCOL_MESSAGE_ERR_MISSING_FIELD;
     }
     return validate_device_event(event);
@@ -1817,8 +1812,8 @@ static protocol_message_result_t validate_message(
         }
         return PROTOCOL_MESSAGE_OK;
     case PROTOCOL_TYPE_TRIGGER_INTERRUPT:
-        if (!bounded_length(message->value.trigger_interrupt.widget_id,
-                            sizeof(message->value.trigger_interrupt.widget_id),
+        if (!bounded_length(message->value.trigger_interrupt.card_id,
+                            sizeof(message->value.trigger_interrupt.card_id),
                             &length) ||
             length == 0U || message->value.trigger_interrupt.token == 0U ||
             !bounded_length(message->value.trigger_interrupt.reason,
@@ -2850,7 +2845,7 @@ static protocol_message_result_t encode_payload(
     case PROTOCOL_TYPE_TRIGGER_INTERRUPT:
         result = begin_map(&root, &map, 3U);
         if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 0U);
-        if (result == PROTOCOL_MESSAGE_OK) result = encode_text(&map, message->value.trigger_interrupt.widget_id);
+        if (result == PROTOCOL_MESSAGE_OK) result = encode_text(&map, message->value.trigger_interrupt.card_id);
         if (result == PROTOCOL_MESSAGE_OK) result = encode_pair_uint(&map, 1U, message->value.trigger_interrupt.token);
         if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 2U);
         if (result == PROTOCOL_MESSAGE_OK) result = encode_text(&map, message->value.trigger_interrupt.reason);
@@ -2859,14 +2854,12 @@ static protocol_message_result_t encode_payload(
     case PROTOCOL_TYPE_DEVICE_EVENT:
         result = begin_map(&root, &map,
                            message->value.device_event.has_interrupt_token
-                               ? 6U
-                               : 5U);
+                               ? 5U
+                               : 4U);
         if (result == PROTOCOL_MESSAGE_OK) result = encode_pair_uint(&map, 0U, message->value.device_event.sequence);
         if (result == PROTOCOL_MESSAGE_OK) result = encode_pair_uint(&map, 1U, message->value.device_event.kind);
         if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 2U);
-        if (result == PROTOCOL_MESSAGE_OK) result = encode_text(&map, message->value.device_event.widget_id);
-        if (result == PROTOCOL_MESSAGE_OK) result = encode_uint(&map, 3U);
-        if (result == PROTOCOL_MESSAGE_OK) result = encode_text(&map, message->value.device_event.screen_id);
+        if (result == PROTOCOL_MESSAGE_OK) result = encode_text(&map, message->value.device_event.card_id);
         if (result == PROTOCOL_MESSAGE_OK) result = encode_pair_uint(&map, 4U, message->value.device_event.action);
         if (result == PROTOCOL_MESSAGE_OK && message->value.device_event.has_interrupt_token) {
             result = encode_pair_uint(&map, 5U, message->value.device_event.interrupt_token);

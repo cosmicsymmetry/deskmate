@@ -1,7 +1,7 @@
 use std::fmt;
 use std::time::{Duration, Instant};
 
-use protocol::{Field, FieldValue, truncate_utf8_to_bytes};
+use protocol::truncate_utf8_to_bytes;
 
 pub const MIN_POMODORO_SECONDS: u32 = 1;
 pub const MAX_POMODORO_SECONDS: u32 = 86_400;
@@ -20,7 +20,6 @@ pub struct PomodoroUpdate {
     pub duration_seconds: u32,
     pub remaining_seconds: u32,
     pub completion_interrupt: bool,
-    pub fields: Vec<Field>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,6 +69,12 @@ impl Pomodoro {
 
     pub fn state(&self) -> PomodoroState {
         self.state
+    }
+
+    /// The truncated label this timer was created with. A host builds the
+    /// card's face from it; protocol v2's device never sees it.
+    pub fn label(&self) -> &str {
+        &self.label
     }
 
     pub fn matches_settings(&self, label: &str, duration_seconds: u32) -> bool {
@@ -129,20 +134,6 @@ impl Pomodoro {
             duration_seconds,
             remaining_seconds,
             completion_interrupt,
-            fields: vec![
-                text_field("label", self.label.clone()),
-                integer_field("duration_seconds", duration_seconds),
-                integer_field("remaining_seconds", remaining_seconds),
-                Field {
-                    key: "running".into(),
-                    value: FieldValue::Boolean(self.state == PomodoroState::Running),
-                },
-                Field {
-                    key: "stale".into(),
-                    value: FieldValue::Boolean(false),
-                },
-                text_field("error", String::new()),
-            ],
         }
     }
 
@@ -170,20 +161,6 @@ fn ceil_seconds(duration: Duration) -> u32 {
         seconds.saturating_add(1)
     };
     u32::try_from(rounded).unwrap_or(u32::MAX)
-}
-
-fn text_field(key: &str, value: String) -> Field {
-    Field {
-        key: key.into(),
-        value: FieldValue::Text(value),
-    }
-}
-
-fn integer_field(key: &str, value: u32) -> Field {
-    Field {
-        key: key.into(),
-        value: FieldValue::Integer(i64::from(value)),
-    }
 }
 
 #[cfg(test)]
@@ -242,19 +219,19 @@ mod tests {
         );
     }
 
+    /// An update carries everything a face and a `PushTimer` are built from.
+    /// Protocol v1 had this method emit a wire field bag; v2 states the timer
+    /// itself, and the label stays on the timer rather than being copied into
+    /// every tick.
     #[test]
-    fn output_is_a_complete_progress_ring_snapshot() {
+    fn output_is_a_complete_timer_snapshot() {
         let mut timer = Pomodoro::new("Focus", 25 * 60).unwrap();
         let update = timer.update(Instant::now());
-        assert_eq!(update.fields.len(), 6);
-        assert!(update.fields.iter().any(|field| {
-            field.key == "duration_seconds" && field.value == FieldValue::Integer(25 * 60)
-        }));
-        assert!(
-            update.fields.iter().any(|field| {
-                field.key == "running" && field.value == FieldValue::Boolean(false)
-            })
-        );
+        assert_eq!(timer.label(), "Focus");
+        assert_eq!(update.duration_seconds, 25 * 60);
+        assert_eq!(update.remaining_seconds, 25 * 60);
+        assert_eq!(update.state, PomodoroState::Idle);
+        assert!(!update.completion_interrupt);
     }
 
     #[test]

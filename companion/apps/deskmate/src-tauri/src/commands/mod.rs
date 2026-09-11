@@ -7,8 +7,8 @@ use std::sync::{Arc, Mutex};
 
 use app_core::{
     AdminConfigErrorBody, AppConfig, CardField, CardFieldValue, CardSettings, ConfigStore,
-    DisplayOrientation, MAX_CONFIG_FILE_BYTES, MAX_DEVICE_ID_LEN, MAX_DEVICE_TOKEN_LEN,
-    MAX_PSK_LEN, MAX_SERVER_URL_LEN, MAX_SSID_LEN, MAX_WIDGET_ID_LEN, NetworkConfig,
+    DisplayOrientation, MAX_CARD_ID_LEN, MAX_CONFIG_FILE_BYTES, MAX_DEVICE_ID_LEN,
+    MAX_DEVICE_TOKEN_LEN, MAX_PSK_LEN, MAX_SERVER_URL_LEN, MAX_SSID_LEN, NetworkConfig,
     NetworkSettings, NetworkSettingsStore, NetworkSettingsStoreError, NetworkSettingsUpdate,
     PomodoroAction, ProvisioningTier, RuntimeError, RuntimeHandle, SaveReceipt, StoreError,
     ValidationIssue, utc_offset_minutes,
@@ -42,8 +42,8 @@ pub struct DraftPayload {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct WidgetTarget {
-    pub widget_id: String,
+pub struct CardTarget {
+    pub card_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -295,13 +295,13 @@ pub fn resume_pushing(state: State<'_, DesktopState>) -> Result<(), IpcError> {
 #[tauri::command]
 pub fn control_pomodoro(
     state: State<'_, DesktopState>,
-    target: WidgetTarget,
+    target: CardTarget,
     action: PomodoroAction,
 ) -> Result<(), IpcError> {
-    validate_target(&target.widget_id, MAX_WIDGET_ID_LEN, "widget ID")?;
+    validate_target(&target.card_id, MAX_CARD_ID_LEN, "card ID")?;
     state
         .runtime
-        .control_pomodoro(target.widget_id, action)
+        .control_pomodoro(target.card_id, action)
         .map_err(IpcError::from)
 }
 
@@ -397,11 +397,9 @@ impl From<RuntimeError> for IpcError {
                     message: error.to_string(),
                 }
             }
-            RuntimeError::UnknownWidget { .. } | RuntimeError::UnknownScreen { .. } => {
-                Self::NotFound {
-                    message: error.to_string(),
-                }
-            }
+            RuntimeError::UnknownCard { .. } => Self::NotFound {
+                message: error.to_string(),
+            },
             RuntimeError::DeviceDisconnected => Self::Device {
                 message: "device is disconnected".into(),
             },
@@ -646,25 +644,26 @@ pub(crate) mod tests {
     /// validation must report the same issue Save would, on the same path.
     #[test]
     fn draft_validation_reports_the_capability_gap_save_would_reject() {
-        let mut config = AppConfig::default();
-        config.cards[0] = CardSettings::Clock {
-            id: "clock".into(),
-            title: "Desk".into(),
-            show_seconds: true,
-            template: DisplayTemplate::AnalogClock,
-            tap_action: WidgetTapAction::None,
-            refresh: RefreshPolicy::DeviceLocal,
-            alert: CardAlert::None,
-            dwell_seconds: None,
+        // Asset transfer is the one capability a configuration can still
+        // require of a device: protocol v2 retired every bit that described
+        // rendering a template.
+        let config = AppConfig {
+            assets: vec![app_core::AssetSettings {
+                id: "face".into(),
+                source: app_core::AssetSource::File("/tmp/face.ttf".into()),
+                kind: app_core::AssetKind::Font,
+                maximum_bytes: 1_024,
+            }],
+            ..AppConfig::default()
         };
         let draft = DraftPayload {
             json: serde_json::to_string(&config).unwrap(),
         };
         let required = config.compile(1).unwrap().required_capabilities;
         assert_ne!(
-            required & DeviceCapability::ExtendedTemplates.bit(),
+            required & DeviceCapability::AssetTransfer.bit(),
             0,
-            "fixture must need the extended-templates capability"
+            "fixture must need the asset-transfer capability"
         );
 
         // Offline: nothing to gate against, so the draft is reported as valid.
@@ -673,8 +672,8 @@ pub(crate) mod tests {
 
         // Online, but on firmware without the capability: the same issue Save raises.
         device.connection = ConnectionState::Online;
-        device.protocol_version = Some(1);
-        device.capabilities = vec![DeviceCapability::CoreWidgets];
+        device.protocol_version = Some(2);
+        device.capabilities = vec![DeviceCapability::SceneRender];
         device.unknown_capability_bits = 0;
 
         let result = validate_draft_for_device(&draft, &device).unwrap();
@@ -700,31 +699,31 @@ pub(crate) mod tests {
     #[test]
     fn capability_gaps_are_named_in_plain_language() {
         assert_eq!(
-            describe_capabilities(DeviceCapability::ExtendedTemplates.bit()),
-            "extended display templates"
+            describe_capabilities(DeviceCapability::AssetTransfer.bit()),
+            describe_capabilities(DeviceCapability::AssetTransfer.bit())
         );
         assert_eq!(
             describe_capabilities(
-                DeviceCapability::ConfigRotation.bit() | DeviceCapability::AssetTransfer.bit()
+                DeviceCapability::SceneRender.bit() | DeviceCapability::AssetTransfer.bit()
             ),
-            "display rotation and icon and font asset transfer"
+            "icon and font asset transfer and declarative scene rendering"
         );
         assert_eq!(
-            describe_capabilities(DeviceCapability::ExtendedTemplates.bit() | 1 << 63),
-            "extended display templates and an unrecognized device feature"
+            describe_capabilities(DeviceCapability::SceneRender.bit() | 1 << 63),
+            "declarative scene rendering and an unrecognized device feature"
         );
 
         let mut device = offline_device().device;
         device.connection = ConnectionState::Online;
-        device.protocol_version = Some(1);
-        device.capabilities = vec![DeviceCapability::CoreWidgets];
+        device.protocol_version = Some(2);
+        device.capabilities = vec![DeviceCapability::SceneRender];
         device.unknown_capability_bits = 0;
         let issues = missing_capability_issues(
             &device,
-            DeviceCapability::CoreWidgets.bit() | DeviceCapability::ExtendedTemplates.bit(),
+            DeviceCapability::SceneRender.bit() | DeviceCapability::AssetTransfer.bit(),
         );
         assert!(
-            issues[0].message.contains("extended display templates"),
+            issues[0].message.contains("asset transfer"),
             "got {:?}",
             issues[0].message
         );
@@ -737,17 +736,13 @@ pub(crate) mod tests {
 
     #[test]
     fn action_targets_are_bounded_before_runtime_dispatch() {
-        assert!(validate_target("clock", MAX_WIDGET_ID_LEN, "widget ID").is_ok());
+        assert!(validate_target("clock", MAX_CARD_ID_LEN, "card ID").is_ok());
         assert!(matches!(
-            validate_target(" ", MAX_WIDGET_ID_LEN, "widget ID"),
+            validate_target(" ", MAX_CARD_ID_LEN, "card ID"),
             Err(IpcError::InvalidPayload { .. })
         ));
         assert!(matches!(
-            validate_target(
-                &"x".repeat(MAX_WIDGET_ID_LEN + 1),
-                MAX_WIDGET_ID_LEN,
-                "widget ID"
-            ),
+            validate_target(&"x".repeat(MAX_CARD_ID_LEN + 1), MAX_CARD_ID_LEN, "card ID"),
             Err(IpcError::InvalidPayload { .. })
         ));
     }
@@ -763,8 +758,8 @@ pub(crate) mod tests {
             IpcError::RuntimeUnavailable { .. }
         ));
         assert!(matches!(
-            IpcError::from(RuntimeError::UnknownWidget {
-                widget_id: "missing".into()
+            IpcError::from(RuntimeError::UnknownCard {
+                card_id: "missing".into()
             }),
             IpcError::NotFound { .. }
         ));
@@ -1301,10 +1296,10 @@ pub(crate) mod tests {
     fn connected_legacy_firmware_is_rejected_during_persistence_preflight() {
         let mut device = contract_fixtures().snapshot.app.device;
         device.connection = ConnectionState::Online;
-        device.protocol_version = Some(1);
-        device.capabilities = vec![DeviceCapability::CoreWidgets];
+        device.protocol_version = Some(2);
+        device.capabilities = vec![DeviceCapability::SceneRender];
         device.unknown_capability_bits = 0;
-        let required = DeviceCapability::CoreWidgets.bit() | DeviceCapability::ConfigRotation.bit();
+        let required = DeviceCapability::SceneRender.bit() | DeviceCapability::AssetTransfer.bit();
 
         let error = ensure_device_compatibility(&device, required).unwrap_err();
         assert!(matches!(
@@ -1446,9 +1441,9 @@ pub(crate) mod tests {
                     },
                     port_name: Some("/dev/cu.usbmodem1".into()),
                     firmware_version: Some("1.0.0".into()),
-                    protocol_version: Some(1),
-                    max_protocol_version: Some(1),
-                    capabilities: vec![DeviceCapability::CoreWidgets],
+                    protocol_version: Some(2),
+                    max_protocol_version: Some(2),
+                    capabilities: vec![DeviceCapability::SceneRender],
                     unknown_capability_bits: 0,
                     uptime_ms: Some(42),
                     free_heap: Some(123_456),
@@ -1459,7 +1454,7 @@ pub(crate) mod tests {
                     ip: None,
                     last_network_error: None,
                     ota_state: None,
-                    active_screen_id: Some("clock".into()),
+                    active_card_id: Some("clock".into()),
                     counters: DeviceCounters {
                         host_reconnects: 1,
                         valid_frames: 2,
@@ -1477,7 +1472,7 @@ pub(crate) mod tests {
                     },
                 },
                 pomodoros: vec![PomodoroSnapshot {
-                    widget_id: "pomodoro".into(),
+                    card_id: "pomodoro".into(),
                     state: PomodoroState::Running,
                     duration_seconds: 1_500,
                     remaining_seconds: 900,

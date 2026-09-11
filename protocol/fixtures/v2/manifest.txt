@@ -17,15 +17,15 @@ Valid frames:
 - apply_config_min.bin: request_id=10, type=9, payload=18, wire=03020901020a0101021202a305010181a20865636c6f636b010803185a8962652d00
 - ack_config.bin: request_id=10, type=4, payload=5, wire=03020401020a0101020502a208090101c110c1fa00
 - apply_config_max.bin: request_id=11, type=9, payload=317, wire=03020901020b0101043d01a3091affffffff0188a2247820636172642d302d787878787878787878787878787878787878787878787878780102a2267820636172642d312d787878787878787878787878787878787878787878787878780101a2247820636172642d322d787878787878787878787878787878787878787878787878780102a2247820636172642d332d787878787878787878787878787878787878787878787878780102a2267820636172642d342d787878787878787878787878787878787878787878787878780101a2247820636172642d352d787878787878787878787878787878787878787878787878780102a2247820636172642d362d787878787878787878787878787878787878787878787878780102a22d7820636172642d372d7878787878787878787878787878787878787878787878787801010319010e8cd0e8a500
-- activate_screen.bin: request_id=12, type=10, payload=7, wire=03020a01020c0101020702a10a64686f6d6562923a1200
+- activate_card.bin: request_id=12, type=10, payload=7, wire=03020a01020c0101020702a10a64686f6d6562923a1200
 - ack_activate.bin: request_id=12, type=4, payload=3, wire=03020401020c0101020302a1060aaf33779200
 - trigger_interrupt.bin: request_id=13, type=11, payload=30, wire=03020b01020d0101021e02a3216574696d657201182a0271506f6d6f646f726f20636f6d706c65746543b3c5c500
 - ack_interrupt.bin: request_id=13, type=4, payload=3, wire=03020401020d0101020302a1060be466229400
-- device_event_tap.bin: request_id=0, type=12, payload=21, wire=03020c0101010101021502a518010101026574696d65720365666f637573040196afcd7800
-- device_event_previous.bin: request_id=0, type=12, payload=20, wire=03020c0101010101021402a5170201020265636c6f636b0364686f6d650403e2f7458200
-- device_event_next.bin: request_id=0, type=12, payload=21, wire=03020c0101010101021502a518030102026574696d65720365666f637573040454308bda00
-- device_event_dismissed.bin: request_id=0, type=12, payload=24, wire=03020c0101010101021802a61b040103026574696d65720365666f637573040505182ab38b6e8300
-- error_unknown_widget.bin: request_id=14, type=8, payload=19, wire=03020801020e0101021302a2160a016e756e6b6e6f776e207769646765742de84e8a00
+- device_event_tap.bin: request_id=0, type=12, payload=14, wire=03020c0101010101020e02a411010101026574696d65720401cb9efe8900
+- device_event_previous.bin: request_id=0, type=12, payload=14, wire=03020c0101010101020e02a4110201020265636c6f636b04032862efe600
+- device_event_next.bin: request_id=0, type=12, payload=14, wire=03020c0101010101020e02a411030102026574696d65720404a9d8fa8600
+- device_event_dismissed.bin: request_id=0, type=12, payload=17, wire=03020c0101010101021102a514040103026574696d6572040505182a16f648b200
+- error_unknown_card.bin: request_id=14, type=8, payload=17, wire=03020801020e0101021102a2140a016c756e6b6e6f776e2063617264bd7dcb2400
 - error_config_too_large.bin: request_id=18, type=8, payload=21, wire=0302080102120101021502a2180e0170636f6e66696720746f6f206c6172676524fd1a4300
 - push_timer_paused.bin: request_id=19, type=5, payload=24, wire=0302050102130101021802a50b65666f6375730108021a0616e360031a0a16e36004f480c3483600
 - asset_begin.bin: request_id=20, type=15, payload=46, wire=03020f0102140101022e02a4275820101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f0103021a0210010703f572ff309f00
@@ -46,15 +46,10 @@ Invalid inputs:
 - unsupported_type.bin: UnsupportedType(99) after valid framing
 - invalid_cbor.bin: invalid/indefinite CBOR
 - duplicate_keys.bin: duplicate numeric map key
-- duplicate_widget_ids.bin: duplicate widget identifiers
-- duplicate_screen_ids.bin: duplicate screen identifiers
-- missing_widget_reference.bin: screen references an unknown widget
-- unsupported_template_config.bin: unknown template enum
-- unsupported_size_config.bin: reserved tile size in M2
-- config_too_many_widgets.bin: configuration capacity exceeded
-- config_too_many_screens.bin: configuration capacity exceeded
+- duplicate_card_ids.bin: duplicate card identifiers
+- unsupported_tap_action_config.bin: unknown tap-action enum
+- config_too_many_cards.bin: configuration capacity exceeded
 - invalid_config_utf8.bin: invalid UTF-8 identifier
-- duplicate_field_names.bin: duplicate PushData field name
 - zero_request_config.bin: host request uses request ID zero
 - nonzero_request_event.bin: DeviceEvent uses a nonzero request ID
 - overlong.bin: encoded frame overflow then delimiter

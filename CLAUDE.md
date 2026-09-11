@@ -18,7 +18,7 @@ Read these before changing code:
    acceptance criteria.
 4. `docs/hardware/board-notes.md` - verified board facts, component versions, and
    hardware quirks.
-5. The frozen contracts: `docs/config/v9.md` (config) and `docs/protocol/v1.md` (wire).
+5. The frozen contracts: `docs/config/v10.md` (config) and `docs/protocol/v2.md` (wire).
    These state the contracts; nothing else does, including this file.
 
 `docs/history.md` is the narrative record. It is not normative and several of its
@@ -33,8 +33,18 @@ of letting code and documentation diverge.
 The narrative of how the project got here is `docs/history.md`, which nothing loads by
 default. This section states only what is true now.
 
-- **Config schema v10** (`docs/config/v10.md`), **protocol v1**,
-  `PROTOCOL_CURRENT_CAPABILITIES` **2027**. A `docs/config/vN.md` exists if and only if
+- **Config schema v10** (`docs/config/v10.md`), **protocol v2** (`docs/protocol/v2.md`,
+  frozen; v1 is marked superseded and kept as the record of what flashed firmware
+  speaks), `PROTOCOL_CURRENT_CAPABILITIES` **2016**. Protocol v2 is **NOT additive**: it
+  removes `PushData` (type 5 is now `PushTimer`), the template/size-class/
+  interrupt-policy registry, `ApplyConfig.screens`, `DeviceEvent`'s second identifier,
+  the `field.*` scene binding, error codes 11-13 and capability bits 0-4. A v1 host and a
+  v2 device do not half-work -- every frame is `VersionMismatch` -- so **flash the device
+  first, then redeploy the server**, and expect the board to be unreachable between the
+  two. Retired message-type, error-code and capability-bit numbers are never re-issued.
+  The device models three things per card and nothing else: its id and tap meaning
+  (`ApplyConfig`), its timer (`PushTimer`), and its face (`PushScene`).
+  A `docs/config/vN.md` exists if and only if
   the store can still read vN, so the set shrinks as migrations retire; v4 is the oldest
   readable version and a pre-v4 document is a typed `UnsupportedVersion` refusal.
 - **Three card kinds: clock, pomodoro, picture.** Clock and pomodoro tick on the device
@@ -58,8 +68,14 @@ default. This section states only what is true now.
   authorization; `m0`/`m1`/`v1`/`v2` exist and later milestones do not.
 - **The legacy subtraction** (spec
   `docs/superpowers/specs/2026-09-11-deskmate-legacy-subtraction-design.md`): Waves A and
-  B are complete. Wave C (protocol v2, removing the pre-scene wire) remains, and is the
-  only one that spends a hardware session.
+  B are complete and merged. **Wave C is software-complete on `refactor/wave-c-protocol-v2`
+  and deliberately NOT merged and NOT deployed** -- it is the one wave that spends a
+  hardware session, and the branch is the deliverable until that session runs. What it
+  owes, and the rollout order it must follow, is the "Protocol v2 -- OWED" section at the
+  end of `docs/hardware/board-notes.md`. Firmware `.bss` moved **-104 bytes** (87,104 ->
+  87,000; `.data` and IRAM byte-flat), which is within one byte of the shift that broke
+  OTA downloads in `3f2aa03`, so the on-board OTA check is mandatory rather than a
+  formality.
 
 ### Traps that still bite
 

@@ -47,7 +47,7 @@ widget_model_config_result_t widget_model_check_config(
         }
     }
     if (config->card_count == 0U ||
-        config->card_count > PROTOCOL_MAX_CONFIG_WIDGETS) {
+        config->card_count > PROTOCOL_MAX_CONFIG_CARDS) {
         return WIDGET_MODEL_CONFIG_TOO_LARGE;
     }
     for (size_t i = 0U; i < config->card_count; ++i) {

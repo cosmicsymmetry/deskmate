@@ -306,7 +306,7 @@ export function CardList({
   const renderCardTile = (card: CardSettings, index: number) => {
     const tileIssues = issuesForCard(issues, config, card.id);
     const hasAlert = card.alert.kind !== "none";
-    const pomodoro = pomodoros.find((candidate) => candidate.widget_id === card.id);
+    const pomodoro = pomodoros.find((candidate) => candidate.card_id === card.id);
     const label = controlLabel(card);
     const pictureFlag = card.kind === "picture" && ownershipTier === "local" ? "needs the server" : null;
     return (

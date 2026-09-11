@@ -186,12 +186,12 @@ export function addCard(
 
 export function updateWidget(
   config: AppConfig,
-  widgetId: string,
+  cardId: string,
   replacement: CardSettings,
 ): AppConfig {
   return {
     ...config,
-    cards: config.cards.map((card) => (card.id === widgetId ? replacement : card)),
+    cards: config.cards.map((card) => (card.id === cardId ? replacement : card)),
   };
 }
 

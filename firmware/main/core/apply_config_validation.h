@@ -39,7 +39,7 @@ static inline apply_config_validation_result_t apply_config_validate(
     if (config->revision == 0U || config->card_count == 0U) {
         return APPLY_CONFIG_INVALID_VALUE;
     }
-    if (config->card_count > PROTOCOL_MAX_CONFIG_WIDGETS) {
+    if (config->card_count > PROTOCOL_MAX_CONFIG_CARDS) {
         return APPLY_CONFIG_TOO_LARGE;
     }
     if (config->rotation != 90U && config->rotation != 270U) {

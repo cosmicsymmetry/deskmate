@@ -10,14 +10,6 @@ bool sim_init(void);
  * Task 8 (stage 2a): scene rendering.
  * ------------------------------------------------------------------ */
 
-/* One `field.<name>` binding's current value, as an upstream source would have
- * reported it. Looked up by name, exactly as the device's
- * scene_field_fn does. */
-typedef struct {
-    const char *name;
-    const char *value;
-} sim_scene_field_t;
-
 /* Registers an asset blob under `digest` in the RAM-backed asset store,
  * idempotently per digest (a second registration of the same digest is a
  * no-op, not an error, so a case may register on every render). `kind` is
@@ -78,9 +70,8 @@ typedef enum {
  * same code, so the parity gate compares two renders of one decode path,
  * not a render of the wire against a render of a hand-built struct.
  *
- * The binding context is assembled from the remaining arguments;
- * `fields` resolves `field.<name>` bindings and may be NULL when
- * `field_count` is 0. `orientation_flipped` selects the 270° mount.
+ * The binding context is assembled from the remaining arguments.
+ * `orientation_flipped` selects the 270° mount.
  * Writes 448*368 RGB565 pixels (logical landscape) into out_pixels.
  *
  * Returns SIM_SCENE_OK, or the reason it failed -- see sim_scene_result_t
@@ -94,7 +85,5 @@ sim_scene_result_t sim_render_scene(const uint8_t *payload,
                                     uint32_t timer_total_ms,
                                     uint32_t timer_remaining_ms,
                                     bool timer_running,
-                                    const sim_scene_field_t *fields,
-                                    size_t field_count,
                                     bool orientation_flipped,
                                     uint16_t *out_pixels);

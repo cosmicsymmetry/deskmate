@@ -272,7 +272,7 @@ export async function mockInvoke<T>(command: string, args?: Record<string, unkno
           state: "Picture cards render on the server",
         } as T;
       }
-      const timer = snapshot.pomodoros.find((candidate) => candidate.widget_id === cardId);
+      const timer = snapshot.pomodoros.find((candidate) => candidate.card_id === cardId);
       return {
         png_base64: renderMockFrame(
           card,

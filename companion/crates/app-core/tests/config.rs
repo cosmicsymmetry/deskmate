@@ -6,11 +6,7 @@ use app_core::{
     DisplayTemplate, MAX_ASSET_BYTES, PersistenceState, PomodoroSnapshot, PomodoroState,
     RefreshPolicy, RuntimeDiagnostics, RuntimeState, ValidationCode, WidgetTapAction,
 };
-use protocol::{
-    CAPABILITY_ASSET_TRANSFER, CAPABILITY_CONFIG_ROTATION, CAPABILITY_CORE_WIDGETS,
-    CAPABILITY_EXTENDED_TEMPLATES, InterruptPolicy, Message, SizeClass, TapAction, TemplateKind,
-    encode_message,
-};
+use protocol::{CAPABILITY_ASSET_TRANSFER, Message, TapAction, encode_message};
 
 const DEFAULT_JSON: &str = include_str!("fixtures/default.json");
 const FULL_JSON: &str = include_str!("fixtures/full.json");
@@ -48,38 +44,32 @@ fn full_fixture_compiles_deterministically_to_m2_contract() {
 
     assert_eq!(first.layout.revision, 42);
     assert_eq!(first.layout.rotation, 270);
-    assert_eq!(first.layout.widgets.len(), 3);
-    assert_eq!(first.layout.screens[0].screen_id, "clock");
-    assert_eq!(first.layout.screens[1].screen_id, "pomodoro");
-    assert_eq!(first.layout.screens[2].screen_id, "picture");
+    // The whole wire model of a card in protocol v2: its id and what a tap
+    // means. Template, size class and interrupt policy all described a device
+    // that rendered the face, and it has not done that since stage 3a.
+    assert_eq!(first.layout.cards.len(), 3);
+    assert_eq!(first.layout.cards[0].card_id, "clock");
+    assert_eq!(first.layout.cards[0].tap_action, TapAction::None);
+    assert_eq!(first.layout.cards[1].card_id, "pomodoro");
+    assert_eq!(first.layout.cards[1].tap_action, TapAction::StartPause);
+    assert_eq!(first.layout.cards[2].card_id, "picture");
+    assert_eq!(first.layout.cards[2].tap_action, TapAction::None);
 
-    let clock = &first.layout.widgets[0];
-    assert_eq!(clock.template, TemplateKind::DigitalClock);
-    assert_eq!(clock.size_class, SizeClass::Full);
-    assert_eq!(clock.tap_action, TapAction::None);
-    assert_eq!(clock.interrupt_policy, InterruptPolicy::Disabled);
-
-    let pomodoro = &first.layout.widgets[1];
-    assert_eq!(pomodoro.template, TemplateKind::ProgressRing);
-    assert_eq!(pomodoro.size_class, SizeClass::Full);
-    assert_eq!(pomodoro.tap_action, TapAction::StartPause);
-    assert_eq!(pomodoro.interrupt_policy, InterruptPolicy::Enabled);
-
-    let picture = &first.layout.widgets[2];
-    assert_eq!(picture.template, TemplateKind::DigitalClock);
-    assert_eq!(picture.size_class, SizeClass::Full);
-    assert_eq!(picture.interrupt_policy, InterruptPolicy::Disabled);
-
-    assert_eq!(first.initial_pushes.len(), 3);
-    assert_eq!(first.initial_pushes[0].fields.len(), 4);
-    assert_eq!(first.initial_pushes[1].fields.len(), 6);
-    assert_eq!(first.initial_pushes[2].fields.len(), 3);
+    // Only a card that has a timer contributes one; a clock and a picture do
+    // not, where protocol v1 sent all three a field bag.
+    assert_eq!(first.initial_timers.len(), 1);
+    assert_eq!(first.initial_timers[0].card_id, "pomodoro");
+    assert!(!first.initial_timers[0].running);
+    assert_eq!(
+        first.initial_timers[0].remaining_ms,
+        first.initial_timers[0].total_ms
+    );
 
     encode_message(1, &Message::ApplyConfig(first.layout)).unwrap();
-    for (request_id, push) in first.initial_pushes.into_iter().enumerate() {
+    for (request_id, push) in first.initial_timers.into_iter().enumerate() {
         encode_message(
             u32::try_from(request_id + 2).unwrap(),
-            &Message::PushData(push),
+            &Message::PushTimer(push),
         )
         .unwrap();
     }
@@ -139,16 +129,18 @@ fn card_surface_is_closed_bounded_and_capability_gated() {
         config
     );
 
-    let expected_capabilities = CAPABILITY_CORE_WIDGETS
-        | CAPABILITY_CONFIG_ROTATION
-        | CAPABILITY_EXTENDED_TEMPLATES
-        | CAPABILITY_ASSET_TRANSFER;
-    assert_eq!(config.required_device_capabilities(), expected_capabilities);
+    // Asset transfer is the only thing a configuration can still require of a
+    // device. Protocol v2 retired the bits for core widgets, config rotation
+    // and extended templates, which all described template rendering.
+    assert_eq!(
+        config.required_device_capabilities(),
+        CAPABILITY_ASSET_TRANSFER
+    );
 
     let first = config.compile(9).unwrap();
     let second = config.compile(9).unwrap();
     assert_eq!(first, second);
-    assert_eq!(first.layout.widgets.len(), 3);
+    assert_eq!(first.layout.cards.len(), 3);
 }
 
 #[test]
@@ -370,11 +362,11 @@ fn runtime_snapshot_uses_tagged_states_for_frontend_contract() {
             ip: None,
             last_network_error: None,
             ota_state: None,
-            active_screen_id: Some("clock".into()),
+            active_card_id: Some("clock".into()),
             counters: DeviceCounters::default(),
         },
         pomodoros: vec![PomodoroSnapshot {
-            widget_id: "pomodoro".into(),
+            card_id: "pomodoro".into(),
             state: PomodoroState::Paused,
             duration_seconds: 1_500,
             remaining_seconds: 900,
@@ -573,44 +565,25 @@ fn compilation_lowers_cards_to_the_frozen_wire_shape() {
 
     let compiled = config.compile(7).unwrap();
 
-    // A card outside the playlist with no alert vanishes entirely; a card
-    // Since v10 every card compiles to a widget AND a screen: `cards` is the
-    // loop, so a widget without a screen is no longer representable.
-    let widget_ids: Vec<&str> = compiled
+    // `cards` is the loop, and since protocol v2 it is also the whole wire
+    // model -- there is no second array restating it.
+    let card_ids: Vec<&str> = compiled
         .layout
-        .widgets
+        .cards
         .iter()
-        .map(|widget| widget.widget_id.as_str())
+        .map(|card| card.card_id.as_str())
         .collect();
-    assert_eq!(widget_ids, ["clock", "focus", "muted"]);
+    assert_eq!(card_ids, ["clock", "focus", "muted"]);
 
-    // Screen ID is the card ID.
-    let screens: Vec<(&str, &str)> = compiled
-        .layout
-        .screens
+    // Only the pomodoro carries device-side state: a timer. The two clocks
+    // contribute nothing, where protocol v1 sent all three a field bag.
+    let timer_ids: Vec<&str> = compiled
+        .initial_timers
         .iter()
-        .map(|screen| (screen.screen_id.as_str(), screen.widget_id.as_str()))
+        .map(|timer| timer.card_id.as_str())
         .collect();
-    assert_eq!(
-        screens,
-        [("clock", "clock"), ("focus", "focus"), ("muted", "muted")]
-    );
-
-    // Size class is pinned to Full for every emitted widget, forever.
-    assert!(
-        compiled
-            .layout
-            .widgets
-            .iter()
-            .all(|widget| widget.size_class == protocol::SizeClass::Full)
-    );
-
-    let pushed: Vec<&str> = compiled
-        .initial_pushes
-        .iter()
-        .map(|push| push.widget_id.as_str())
-        .collect();
-    assert_eq!(pushed, ["clock", "focus", "muted"]);
+    assert_eq!(timer_ids, ["focus"]);
+    assert_eq!(compiled.initial_timers[0].total_ms, 1_500_000);
 }
 
 /// Final-review finding: `wire_config()` lowering every template removed the only
@@ -778,10 +751,8 @@ fn a_picture_card_compiles_to_the_digital_clock_wire_template() {
     config.cards = vec![picture_card("shot", "limits")];
 
     let compiled = config.compile(1).expect("compiles");
-    assert_eq!(
-        compiled.layout.widgets[0].template,
-        protocol::TemplateKind::DigitalClock
-    );
+    assert_eq!(compiled.layout.cards[0].card_id, "shot");
+    assert_eq!(compiled.layout.cards[0].tap_action, TapAction::None);
 }
 
 #[test]

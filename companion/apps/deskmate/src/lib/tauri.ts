@@ -143,9 +143,9 @@ export function resumePushing(): Promise<void> {
   return invokeTyped("resume_pushing");
 }
 
-export function controlPomodoro(widgetId: string, action: PomodoroAction): Promise<void> {
+export function controlPomodoro(cardId: string, action: PomodoroAction): Promise<void> {
   return invokeTyped("control_pomodoro", {
-    target: { widget_id: widgetId },
+    target: { card_id: cardId },
     action,
   });
 }

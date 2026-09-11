@@ -521,12 +521,10 @@ impl From<RuntimeError> for AdminError {
                 status: StatusCode::BAD_GATEWAY,
                 message: error.to_string(),
             },
-            RuntimeError::UnknownWidget { .. } | RuntimeError::UnknownScreen { .. } => {
-                Self::Runtime {
-                    status: StatusCode::UNPROCESSABLE_ENTITY,
-                    message: error.to_string(),
-                }
-            }
+            RuntimeError::UnknownCard { .. } => Self::Runtime {
+                status: StatusCode::UNPROCESSABLE_ENTITY,
+                message: error.to_string(),
+            },
         }
     }
 }

@@ -1,12 +1,10 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt;
 
+use crate::state::{CardField, CardFieldValue};
 use chrono::{DateTime, Offset, Utc};
-pub use protocol::MAX_WIDGET_ID_LEN;
-use protocol::{
-    ApplyConfig, Field, FieldValue, InterruptPolicy, PushData, ScreenConfig, TapAction,
-    TemplateKind, WidgetConfig,
-};
+pub use protocol::MAX_CARD_ID_LEN;
+use protocol::{ApplyConfig, CardConfig, PushTimer, TapAction};
 use serde::{Deserialize, Deserializer, Serialize};
 
 // Helper module for strict deserialization of internally tagged enums
@@ -286,7 +284,7 @@ pub const MAX_IMAGE_SOURCES: usize = 8;
 pub const MAX_IMAGE_SOURCE_NAME_LEN: usize = 48;
 // Every compiled card can lower to one wire widget, so the card cap must never exceed
 // what the protocol's `ApplyConfig` encoder accepts.
-const _: () = assert!(MAX_CONFIG_CARDS <= protocol::MAX_CONFIG_WIDGETS);
+const _: () = assert!(MAX_CONFIG_CARDS <= protocol::MAX_CONFIG_CARDS);
 pub const MIN_DWELL_SECONDS: u16 = 5;
 pub const MAX_DWELL_SECONDS: u16 = 3_600;
 pub const MIN_ALERT_HOLD_SECONDS: u16 = 5;
@@ -366,7 +364,7 @@ impl AppConfig {
             validate_identifier(
                 &format!("{path}.id"),
                 card.id(),
-                MAX_WIDGET_ID_LEN,
+                MAX_CARD_ID_LEN,
                 &mut issues,
             );
             if !card_ids.insert(card.id()) {
@@ -393,7 +391,7 @@ impl AppConfig {
             validate_identifier(
                 &format!("{path}.id"),
                 &source.id,
-                MAX_WIDGET_ID_LEN,
+                MAX_CARD_ID_LEN,
                 &mut issues,
             );
             validate_text(
@@ -516,99 +514,55 @@ impl AppConfig {
         }
 
         let mut compatibility_issues = Vec::new();
-        let mut widgets = Vec::with_capacity(self.cards.len());
-        let mut screens = Vec::with_capacity(self.cards.len());
-        let compiled_card_ids = self.compiled_card_ids();
-        for card_id in &compiled_card_ids {
-            let (index, card) = self
-                .cards
-                .iter()
-                .enumerate()
-                .find(|(_, card)| card.id() == *card_id)
-                .expect("validated compiled card must exist");
-            let Some(widget) = card.wire_config() else {
+        let mut cards = Vec::with_capacity(self.cards.len());
+        for (index, card) in self.cards.iter().enumerate() {
+            let Some(wire) = card.wire_config() else {
                 compatibility_issues.push(ValidationIssue::new(
                     format!("cards[{index}]"),
                     ValidationCode::RequiresCapability,
-                    "card kind/template/action is not implemented by this build",
+                    "card kind/action is not implemented by this build",
                 ));
                 continue;
             };
-            // The screen ID is the card ID. The protocol treats widget and screen
-            // IDs as distinct namespaces, so reuse is legal, and compilation still
-            // invents no identifiers.
-            screens.push(ScreenConfig {
-                screen_id: card.id().to_owned(),
-                widget_id: card.id().to_owned(),
-            });
-            widgets.push(widget);
+            cards.push(wire);
         }
         if !compatibility_issues.is_empty() {
             return Err(ConfigValidationError {
                 issues: compatibility_issues,
             });
         }
-        let initial_pushes = compiled_card_ids
-            .into_iter()
-            .map(|card_id| {
-                self.cards
-                    .iter()
-                    .find(|card| card.id() == card_id)
-                    .expect("validated compiled card must exist")
-            })
-            .map(|card| PushData {
-                widget_id: card.id().into(),
-                revision,
-                fields: card.initial_fields(),
-            })
+        // Protocol v2 replaced the initial field bag with a timer, which only a
+        // pomodoro has. Everything else a face shows arrives as a scene.
+        let initial_timers = self
+            .cards
+            .iter()
+            .filter_map(|card| card.initial_timer(revision))
             .collect();
 
         Ok(CompiledAppConfig {
             layout: ApplyConfig {
                 revision,
                 rotation: self.preferences.orientation.rotation_degrees(),
-                widgets,
-                screens,
+                cards,
             },
-            initial_pushes,
+            initial_timers,
             assets: self.assets.clone(),
             required_capabilities: self.required_device_capabilities(),
         })
     }
 
+    /// Capability bits this configuration needs from the device.
+    ///
+    /// Protocol v2 retired the bits that described template rendering, so what
+    /// is left is asset transfer -- the only thing a configuration can still
+    /// ask a device to be able to do. Rotation, tap actions and templates all
+    /// went with the concepts behind them.
     pub fn required_device_capabilities(&self) -> u64 {
-        let mut required = protocol::CAPABILITY_CORE_WIDGETS;
-        if self.preferences.orientation == DisplayOrientation::LandscapeFlipped {
-            required |= protocol::CAPABILITY_CONFIG_ROTATION;
+        if self.assets.is_empty() {
+            0
+        } else {
+            protocol::CAPABILITY_ASSET_TRANSFER
         }
-        if self.cards.iter().any(|card| {
-            // Picture cards have `template() == None`: they use no built-in
-            // template, extended or otherwise, so they do not require
-            // this capability (see `wire_config`'s comment for their wire value).
-            matches!(
-                card.template(),
-                Some(t) if !matches!(
-                    t,
-                    DisplayTemplate::DigitalClock | DisplayTemplate::ProgressRing
-                )
-            )
-        }) {
-            required |= protocol::CAPABILITY_EXTENDED_TEMPLATES;
-        }
-        if self.cards.iter().any(|card| {
-            matches!(
-                card.tap_action(),
-                WidgetTapAction::Dismiss
-                    | WidgetTapAction::OpenUrl { .. }
-                    | WidgetTapAction::OpenApplication { .. }
-            )
-        }) {
-            required |= protocol::CAPABILITY_HOST_TAP_ACTIONS;
-        }
-        if !self.assets.is_empty() {
-            required |= protocol::CAPABILITY_ASSET_TRANSFER;
-        }
-        required
     }
 }
 
@@ -997,11 +951,10 @@ impl CardSettings {
     }
 
     /// `None` for picture cards: the picture is already the complete face, so
-    /// there is no `DisplayTemplate` to select. Callers that only care about the built-in surface
-    /// (the `IconBadgeText` asset check, the extended-templates capability
-    /// gate) already treat `None` as "nothing to check here"; callers that
-    /// need a wire `TemplateKind` regardless (`wire_config`) pick an inert
-    /// placeholder explicitly, with their own comment.
+    /// there is no `DisplayTemplate` to select.
+    ///
+    /// Since protocol v2 this is purely host state -- it selects which scene
+    /// builder draws the card -- and the wire carries no template at all.
     pub fn template(&self) -> Option<&DisplayTemplate> {
         match self {
             Self::Clock { template, .. } | Self::Pomodoro { template, .. } => Some(template),
@@ -1103,7 +1056,7 @@ impl CardSettings {
                 validate_identifier(
                     &format!("{path}.source_id"),
                     source_id,
-                    MAX_WIDGET_ID_LEN,
+                    MAX_CARD_ID_LEN,
                     issues,
                 );
                 validate_composition(
@@ -1120,21 +1073,13 @@ impl CardSettings {
             .validate(&format!("{path}.tap_action"), issues);
     }
 
-    fn wire_config(&self) -> Option<WidgetConfig> {
-        let template = match self.template() {
-            // Picture cards (`None`) carry no `DisplayTemplate`: each renders
-            // from a host-pushed scene (`PushScene`), not any of the six
-            // built-in C templates. Firmware no longer switches on this field to
-            // choose a renderer at all (stage 3a retired every built-in template in
-            // favour of scenes for every card), so this byte is inert for pictures;
-            // `DigitalClock` is picked arbitrarily to keep `WidgetConfig` fully
-            // populated for older tooling that still reads it. Do not read rendering
-            // meaning into it, and do not read the merge with the
-            // real digital-clock arm below as anything but that shared byte value.
-            Some(DisplayTemplate::DigitalClock) | None => TemplateKind::DigitalClock,
-            Some(DisplayTemplate::ProgressRing) => TemplateKind::ProgressRing,
-            Some(DisplayTemplate::AnalogClock) => TemplateKind::AnalogClock,
-        };
+    /// This card as protocol v2's `CardConfig`.
+    ///
+    /// v2 carries only what the device decides for itself. The template, the
+    /// size class and the interrupt policy all described a device that
+    /// rendered the face; it has drawn only host-pushed scenes since stage 3a,
+    /// and the host decides which cards can alert.
+    fn wire_config(&self) -> Option<CardConfig> {
         let tap_action = match self.tap_action() {
             WidgetTapAction::None => TapAction::None,
             WidgetTapAction::StartPause => TapAction::StartPause,
@@ -1143,20 +1088,20 @@ impl CardSettings {
             | WidgetTapAction::OpenUrl { .. }
             | WidgetTapAction::OpenApplication { .. } => return None,
         };
-        Some(WidgetConfig {
-            widget_id: self.id().into(),
-            template,
-            size_class: protocol::SizeClass::Full,
+        Some(CardConfig {
+            card_id: self.id().into(),
             tap_action,
-            interrupt_policy: if self.alert().is_none() {
-                InterruptPolicy::Disabled
-            } else {
-                InterruptPolicy::Enabled
-            },
         })
     }
 
-    fn initial_fields(&self) -> Vec<Field> {
+    /// The host-side data a card's face starts from, before any provider or
+    /// timer has run.
+    ///
+    /// Protocol v1 sent this bag to the device as `PushData` and seeded the
+    /// host's own copy from the same value. Protocol v2's device has no field
+    /// model, so this is now purely host state: the input the scene builders
+    /// read, and what the settings window shows as the card's data.
+    pub(crate) fn initial_fields(&self) -> Vec<CardField> {
         match self {
             Self::Clock {
                 title,
@@ -1186,6 +1131,25 @@ impl CardSettings {
                 bool_field("stale", true),
                 text_field("error", "Waiting for picture"),
             ],
+        }
+    }
+
+    /// The timer this card's `timer.*` scene bindings start from, or `None`
+    /// for a card that has no timer. Replaces protocol v1's initial field bag.
+    fn initial_timer(&self, revision: u32) -> Option<PushTimer> {
+        match self {
+            Self::Pomodoro {
+                id,
+                duration_seconds,
+                ..
+            } => Some(PushTimer {
+                card_id: id.clone(),
+                revision,
+                total_ms: duration_seconds.saturating_mul(1_000),
+                remaining_ms: duration_seconds.saturating_mul(1_000),
+                running: false,
+            }),
+            Self::Clock { .. } | Self::Picture { .. } => None,
         }
     }
 }
@@ -1297,7 +1261,7 @@ pub enum UpdateCheckPolicy {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompiledAppConfig {
     pub layout: ApplyConfig,
-    pub initial_pushes: Vec<PushData>,
+    pub initial_timers: Vec<PushTimer>,
     pub assets: Vec<AssetSettings>,
     pub required_capabilities: u64,
 }
@@ -1626,7 +1590,7 @@ fn validate_alert_hold(path: &str, hold: AlertHold, issues: &mut Vec<ValidationI
 
 impl AssetSettings {
     fn validate(&self, path: &str, issues: &mut Vec<ValidationIssue>) {
-        validate_identifier(&format!("{path}.id"), &self.id, MAX_WIDGET_ID_LEN, issues);
+        validate_identifier(&format!("{path}.id"), &self.id, MAX_CARD_ID_LEN, issues);
         let AssetSource::File(source) = &self.source;
         validate_text(
             &format!("{path}.source"),
@@ -1681,23 +1645,27 @@ impl AssetSettings {
     }
 }
 
-fn text_field(key: &str, value: &str) -> Field {
-    Field {
+fn text_field(key: &str, value: &str) -> CardField {
+    CardField {
         key: key.into(),
-        value: FieldValue::Text(value.into()),
+        value: CardFieldValue::Text {
+            value: value.into(),
+        },
     }
 }
 
-fn int_field(key: &str, value: u32) -> Field {
-    Field {
+fn int_field(key: &str, value: u32) -> CardField {
+    CardField {
         key: key.into(),
-        value: FieldValue::Integer(i64::from(value)),
+        value: CardFieldValue::Integer {
+            value: i64::from(value),
+        },
     }
 }
 
-fn bool_field(key: &str, value: bool) -> Field {
-    Field {
+fn bool_field(key: &str, value: bool) -> CardField {
+    CardField {
         key: key.into(),
-        value: FieldValue::Boolean(value),
+        value: CardFieldValue::Boolean { value },
     }
 }

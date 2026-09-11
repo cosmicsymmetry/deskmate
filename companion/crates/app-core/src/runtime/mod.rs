@@ -11,9 +11,9 @@ use device::{ConnectedSession, DeviceError, ReceivedEvent, SessionDiagnostics, c
 use engine::interrupts::InterruptArbiter;
 use engine::pomodoro::{Pomodoro, PomodoroState as EnginePomodoroState};
 use protocol::{
-    Ack, ActivateScreen, AssetBegin, AssetChunk, AssetCommit, AssetRelease, EventAction, EventKind,
-    Field, FieldValue, Message, NetworkConfig, PushScene, ScreenConfig, StatusResponse, TimeSync,
-    TriggerInterrupt, WidgetConfig, validate_message,
+    Ack, ActivateCard, AssetBegin, AssetChunk, AssetCommit, AssetRelease, CardConfig, EventAction,
+    EventKind, Message, NetworkConfig, PushScene, StatusResponse, TimeSync, TriggerInterrupt,
+    validate_message,
 };
 
 use crate::asset_sync::{AssetSync, AssetSyncError};
@@ -22,11 +22,11 @@ use crate::render_negotiation;
 use crate::scheduler::Scheduler;
 use crate::{
     AlertHold, AnalogClockCard, AppConfig, AppSnapshot, BakedFontMetrics, CardAlert,
-    CardDataSnapshot, CardError, CardErrorKind, CardSettings, ClockCard, ConnectionState,
-    DesiredAsset, DeviceCounters, DeviceSnapshot, DeviceTier, DisplayTemplate, PersistenceState,
-    PomodoroSnapshot, PomodoroState, ProgressRingCard, RuntimeDiagnostics, RuntimeState,
-    SceneDataState, build_analog_clock_scene, build_digital_clock_scene, build_progress_ring_scene,
-    with_scene_data_state,
+    CardDataSnapshot, CardError, CardErrorKind, CardField, CardFieldValue, CardSettings, ClockCard,
+    ConnectionState, DesiredAsset, DeviceCounters, DeviceSnapshot, DeviceTier, DisplayTemplate,
+    PersistenceState, PomodoroSnapshot, PomodoroState, ProgressRingCard, RuntimeDiagnostics,
+    RuntimeState, SceneDataState, build_analog_clock_scene, build_digital_clock_scene,
+    build_progress_ring_scene, with_scene_data_state,
 };
 
 mod link;
@@ -44,7 +44,7 @@ use sync::{
     synchronize_pending,
 };
 use timers::{
-    control_pomodoro, flush_interrupts, record_pomodoro_update,
+    control_pomodoro, flush_interrupts, pomodoro_fields, record_pomodoro_update,
     sync_alert_hold_to_active_interrupt, update_pomodoros,
 };
 
@@ -192,19 +192,19 @@ impl RuntimeHandle {
 
     pub fn control_pomodoro(
         &self,
-        widget_id: impl Into<String>,
+        card_id: impl Into<String>,
         action: PomodoroAction,
     ) -> Result<(), RuntimeError> {
         self.request(|reply| RuntimeCommand::Pomodoro {
-            widget_id: widget_id.into(),
+            card_id: card_id.into(),
             action,
             reply,
         })
     }
 
-    pub fn activate_screen(&self, screen_id: impl Into<String>) -> Result<(), RuntimeError> {
-        self.request(|reply| RuntimeCommand::ActivateScreen {
-            screen_id: screen_id.into(),
+    pub fn activate_card(&self, card_id: impl Into<String>) -> Result<(), RuntimeError> {
+        self.request(|reply| RuntimeCommand::ActivateCard {
+            card_id: card_id.into(),
             reply,
         })
     }
@@ -343,13 +343,13 @@ struct WorkerState {
     runtime: RuntimeState,
     device: DeviceSnapshot,
     persistence: PersistenceState,
-    latest_fields: BTreeMap<String, Vec<Field>>,
+    latest_fields: BTreeMap<String, Vec<CardField>>,
     /// Card ID -> the exact durable picture face most recently accepted by
     /// the device. Comparing this pair with the host detects cadence-driven
     /// stale/fresh flips without a scheduler deadline per source.
     last_picture_face: BTreeMap<String, ([u8; protocol::ASSET_DIGEST_LEN], bool)>,
     image_source_host: Option<Box<dyn ImageSourceHost>>,
-    dirty_widgets: BTreeSet<String>,
+    dirty_cards: BTreeSet<String>,
     /// Card ID -> the most recent typed refusal for that card. There is deliberately
     /// one editor-visible slot per card: if data and scene refusals happen before
     /// either recovers, the later refusal replaces the earlier one. A later accepted
@@ -359,8 +359,8 @@ struct WorkerState {
     pomodoros: BTreeMap<String, Pomodoro>,
     pomodoro_snapshots: BTreeMap<String, PomodoroSnapshot>,
     interrupts: InterruptArbiter,
-    active_screen: Option<String>,
-    active_screen_dirty: bool,
+    active_card: Option<String>,
+    active_card_dirty: bool,
     /// The active card needs rebuilding as a scene because a host-owned fact
     /// changed. Consumed once by `push_active_scene`; the only scheduled check
     /// that sets it is an active picture's digest/staleness comparison.
@@ -401,13 +401,13 @@ impl WorkerState {
             latest_fields: BTreeMap::new(),
             last_picture_face: BTreeMap::new(),
             image_source_host,
-            dirty_widgets: BTreeSet::new(),
+            dirty_cards: BTreeSet::new(),
             push_rejections: BTreeMap::new(),
             pomodoros: BTreeMap::new(),
             pomodoro_snapshots: BTreeMap::new(),
             interrupts: InterruptArbiter::default(),
-            active_screen: None,
-            active_screen_dirty: false,
+            active_card: None,
+            active_card_dirty: false,
             active_scene_dirty: false,
             connected: false,
             ever_connected: false,
@@ -425,11 +425,11 @@ impl WorkerState {
 
     #[allow(clippy::too_many_lines)] // one linear config swap; splitting would scatter its invariants
     fn replace_config(&mut self, config: AppConfig, now: Instant, scheduler: &mut Scheduler) {
-        let previous_active_screen = self.active_screen.clone();
+        let previous_active_card = self.active_card.clone();
         let _previous_fields = std::mem::take(&mut self.latest_fields);
         let mut previous_pomodoros = std::mem::take(&mut self.pomodoros);
         self.config = config;
-        self.dirty_widgets.clear();
+        self.dirty_cards.clear();
         self.push_rejections.clear();
         self.pomodoro_snapshots.clear();
         // Owned, not borrowed: `prune_alert_state_for_live_widgets` needs
@@ -447,12 +447,9 @@ impl WorkerState {
         self.last_picture_face
             .retain(|card_id, _| configured_card_ids.contains(card_id.as_str()));
 
-        let compiled = self
-            .config
-            .compile(1)
-            .expect("worker accepts only prevalidated configurations");
-        for push in compiled.initial_pushes {
-            self.latest_fields.insert(push.widget_id, push.fields);
+        for card in &self.config.cards {
+            self.latest_fields
+                .insert(card.id().to_owned(), card.initial_fields());
         }
 
         let compiled_card_ids: BTreeSet<&str> =
@@ -499,11 +496,11 @@ impl WorkerState {
         let rotation_card_ids = rotation_card_ids(&self.config);
         // Stay on the card the panel is showing when it survives the new
         // configuration, so an unrelated edit does not jump the loop.
-        self.active_screen = previous_active_screen
+        self.active_card = previous_active_card
             .filter(|active| rotation_card_ids.contains(active))
             .or_else(|| rotation_card_ids.first().cloned());
-        self.active_screen_dirty = self.active_screen.is_some();
-        self.active_scene_dirty = self.active_screen.is_some();
+        self.active_card_dirty = self.active_card.is_some();
+        self.active_scene_dirty = self.active_card.is_some();
         self.rearm_rotation_for_active_screen(scheduler, now);
         self.needs_full_sync = true;
         self.runtime = if self.config.preferences.paused {
@@ -531,7 +528,7 @@ impl WorkerState {
             .active()
             .map(|tracked| tracked.message.token);
         self.interrupts
-            .retain_widgets(|widget_id| live_widget_ids.contains(widget_id));
+            .retain_widgets(|card_id| live_widget_ids.contains(card_id));
         let active_token_after_prune = self
             .interrupts
             .active()
@@ -554,7 +551,7 @@ impl WorkerState {
     fn rearm_rotation_for_active_screen(&mut self, scheduler: &mut Scheduler, now: Instant) {
         let rotation_ids = rotation_card_ids(&self.config);
         let active_rotation_index = self
-            .active_screen
+            .active_card
             .as_ref()
             .and_then(|active| rotation_ids.iter().position(|id| id == active))
             .unwrap_or(0);
@@ -576,7 +573,8 @@ impl WorkerState {
                 Pomodoro::new(label, duration_seconds).expect("validated pomodoro duration")
             });
         let update = timer.update(now);
-        if record_pomodoro_update(self, id, update) {
+        let fields = pomodoro_fields(timer.label(), &update);
+        if record_pomodoro_update(self, id, &update, fields) {
             let _ = self.interrupts.schedule(id, "Timer finished");
         }
         self.pomodoros.insert(id.into(), timer);
@@ -584,7 +582,7 @@ impl WorkerState {
 
     fn snapshot(&self, diagnostics: &RuntimeDiagnosticCounters) -> AppSnapshot {
         let mut device = self.device.clone();
-        device.active_screen_id.clone_from(&self.active_screen);
+        device.active_card_id.clone_from(&self.active_card);
         AppSnapshot {
             config: self.config.clone(),
             runtime: self.runtime.clone(),
@@ -593,7 +591,7 @@ impl WorkerState {
             card_data: self
                 .latest_fields
                 .iter()
-                .map(|(card_id, fields)| CardDataSnapshot::from_protocol(card_id, fields))
+                .map(|(card_id, fields)| CardDataSnapshot::new(card_id, fields))
                 .collect(),
             card_errors: self.push_rejections.values().cloned().collect(),
             persistence: self.persistence.clone(),
@@ -648,7 +646,7 @@ fn current_dwell(config: &AppConfig, index: usize) -> Option<Duration> {
 }
 
 /// Advances the rotation by one step (wrapping) and queues the resulting
-/// screen through the existing `active_screen_dirty` flush path, then
+/// screen through the existing `active_card_dirty` flush path, then
 /// re-arms the deadline from the card just moved to, since dwell is per-card.
 /// With fewer than two in-rotation cards there is nothing to rotate to, so the
 /// deadline is disarmed instead of waking the loop again for a no-op; the next
@@ -657,13 +655,13 @@ fn advance_rotation(state: &mut WorkerState, scheduler: &mut Scheduler, now: Ins
     let ids = rotation_card_ids(&state.config);
     if ids.len() > 1 {
         let current_index = state
-            .active_screen
+            .active_card
             .as_ref()
             .and_then(|active| ids.iter().position(|id| id == active))
             .unwrap_or(0);
         let next_index = (current_index + 1) % ids.len();
-        state.active_screen = Some(ids[next_index].clone());
-        state.active_screen_dirty = true;
+        state.active_card = Some(ids[next_index].clone());
+        state.active_card_dirty = true;
         state.active_scene_dirty = true;
         scheduler.set_rotation(current_dwell(&state.config, next_index), now);
     } else {
@@ -816,12 +814,12 @@ fn process_command(
             let _ = reply.send(Ok(()));
         }
         RuntimeCommand::Pomodoro {
-            widget_id,
+            card_id,
             action,
             reply,
         } => {
             let result =
-                control_pomodoro(state, scheduler, device, &widget_id, action, Instant::now());
+                control_pomodoro(state, scheduler, device, &card_id, action, Instant::now());
             let _ = reply.send(result);
         }
         RuntimeCommand::ImageSourceUpdated {
@@ -839,8 +837,8 @@ fn process_command(
             );
             let _ = reply.send(result);
         }
-        RuntimeCommand::ActivateScreen { screen_id, reply } => {
-            let result = activate_screen_command(state, scheduler, device, screen_id);
+        RuntimeCommand::ActivateCard { card_id, reply } => {
+            let result = activate_card_command(state, scheduler, device, card_id);
             let _ = reply.send(result);
         }
         RuntimeCommand::PushScene { push, reply } => {
@@ -877,7 +875,7 @@ fn apply_image_source_update(
     if !state.connected {
         return Err(RuntimeError::DeviceDisconnected);
     }
-    let visible_uses_source = state.active_screen.as_deref().is_some_and(|active_id| {
+    let visible_uses_source = state.active_card.as_deref().is_some_and(|active_id| {
         state.config.cards.iter().any(|card| {
             matches!(
                 card,
@@ -962,18 +960,18 @@ fn apply_image_source_update(
     Ok(())
 }
 
-fn activate_screen_command(
+fn activate_card_command(
     state: &mut WorkerState,
     scheduler: &mut Scheduler,
     device: &mut dyn RuntimeDevice,
-    screen_id: String,
+    card_id: String,
 ) -> Result<(), RuntimeError> {
     let ids = rotation_card_ids(&state.config);
-    let Some(index) = ids.iter().position(|id| *id == screen_id) else {
-        return Err(RuntimeError::UnknownScreen { screen_id });
+    let Some(index) = ids.iter().position(|id| *id == card_id) else {
+        return Err(RuntimeError::UnknownCard { card_id });
     };
-    state.active_screen = Some(screen_id.clone());
-    state.active_screen_dirty = true;
+    state.active_card = Some(card_id.clone());
+    state.active_card_dirty = true;
     state.active_scene_dirty = true;
     // An explicit activation is a manual override, same as a physical
     // swipe: restart the dwell from the card just landed on instead of
@@ -1053,7 +1051,7 @@ fn run_scheduled_work(
     // local deadline on the arbiter's active interrupt, independent of device
     // connectivity or pause. Dismissing it just changes local state; the actual
     // device push (if connected) happens through the normal sync path below via
-    // `active_screen_dirty` and `flush_interrupts`.
+    // `active_card_dirty` and `flush_interrupts`.
     //
     // BY DESIGN (decided 2026-08-06): this only frees the host's arbiter slot
     // and re-sends the saved screen id (see `send_screen` below); the device
@@ -1063,7 +1061,7 @@ fn run_scheduled_work(
     if let Some(token) = scheduler.alert_hold_due(now)
         && state.interrupts.dismiss(token).is_ok()
     {
-        state.active_screen_dirty = true;
+        state.active_card_dirty = true;
         sync_alert_hold_to_active_interrupt(state, scheduler, now);
     }
     // A deadline in `wait_duration` must be consumed whenever this tick examines
@@ -1102,7 +1100,7 @@ fn run_scheduled_work(
 }
 
 fn detect_active_picture_face_change(state: &mut WorkerState) {
-    let Some((card_id, source_id)) = state.active_screen.as_deref().and_then(|active_id| {
+    let Some((card_id, source_id)) = state.active_card.as_deref().and_then(|active_id| {
         state.config.cards.iter().find_map(|card| match card {
             CardSettings::Picture { id, source_id, .. } if id == active_id => {
                 Some((id.clone(), source_id.clone()))
@@ -1134,11 +1132,11 @@ fn drain_device_events(
         match (received.event.kind, received.event.action) {
             (EventKind::Navigation, EventAction::NavigatePrevious | EventAction::NavigateNext) => {
                 let ids = rotation_card_ids(&state.config);
-                if let Some(index) = ids.iter().position(|id| *id == received.event.screen_id) {
-                    state.active_screen = Some(received.event.screen_id.clone());
+                if let Some(index) = ids.iter().position(|id| *id == received.event.card_id) {
+                    state.active_card = Some(received.event.card_id.clone());
                     // The gesture already changed the physical display. Remember it for
                     // future replay without issuing a redundant activation now.
-                    state.active_screen_dirty = false;
+                    state.active_card_dirty = false;
                     // The gesture selected the device model already, but the new
                     // card still needs its host-built scene laid over that model.
                     state.active_scene_dirty = true;
@@ -1152,7 +1150,7 @@ fn drain_device_events(
                     state,
                     scheduler,
                     device,
-                    &received.event.widget_id,
+                    &received.event.card_id,
                     PomodoroAction::Toggle,
                     now,
                 );
@@ -1162,7 +1160,7 @@ fn drain_device_events(
                     state,
                     scheduler,
                     device,
-                    &received.event.widget_id,
+                    &received.event.card_id,
                     PomodoroAction::Reset,
                     now,
                 );
@@ -1453,19 +1451,20 @@ mod tests {
         fn apply_layout(
             &mut self,
             _rotation: u16,
-            _widgets: Vec<WidgetConfig>,
-            _screens: Vec<ScreenConfig>,
+            _cards: Vec<CardConfig>,
         ) -> Result<(), DeviceError> {
             unreachable!("stub device is never connected in these unit tests")
         }
-        fn push_fields(
+        fn push_timer(
             &mut self,
-            _widget_id: String,
-            _fields: Vec<Field>,
+            _card_id: String,
+            _total_ms: u32,
+            _remaining_ms: u32,
+            _running: bool,
         ) -> Result<(), DeviceError> {
             unreachable!("stub device is never connected in these unit tests")
         }
-        fn activate_screen(&mut self, _screen_id: String) -> Result<(), DeviceError> {
+        fn activate_card(&mut self, _screen_id: String) -> Result<(), DeviceError> {
             unreachable!("stub device is never connected in these unit tests")
         }
         fn push_scene(&mut self, _push: PushScene) -> Result<(), DeviceError> {
@@ -1539,22 +1538,23 @@ mod tests {
         fn apply_layout(
             &mut self,
             _rotation: u16,
-            _widgets: Vec<WidgetConfig>,
-            _screens: Vec<ScreenConfig>,
+            _cards: Vec<CardConfig>,
         ) -> Result<(), DeviceError> {
             self.layout_calls += 1;
             Ok(())
         }
 
-        fn push_fields(
+        fn push_timer(
             &mut self,
-            _widget_id: String,
-            _fields: Vec<Field>,
+            _card_id: String,
+            _total_ms: u32,
+            _remaining_ms: u32,
+            _running: bool,
         ) -> Result<(), DeviceError> {
             Ok(())
         }
 
-        fn activate_screen(&mut self, _screen_id: String) -> Result<(), DeviceError> {
+        fn activate_card(&mut self, _screen_id: String) -> Result<(), DeviceError> {
             Ok(())
         }
 
@@ -1723,13 +1723,12 @@ mod tests {
         );
     }
 
-    fn navigation_event(screen_id: &str) -> ReceivedEvent {
+    fn navigation_event(card_id: &str) -> ReceivedEvent {
         ReceivedEvent {
             event: protocol::DeviceEvent {
                 sequence: 1,
                 kind: EventKind::Navigation,
-                widget_id: screen_id.into(),
-                screen_id: screen_id.into(),
+                card_id: card_id.into(),
                 action: EventAction::NavigateNext,
                 interrupt_token: None,
             },
@@ -1737,13 +1736,12 @@ mod tests {
         }
     }
 
-    fn interrupt_dismissed_event(widget_id: &str, token: u32) -> ReceivedEvent {
+    fn interrupt_dismissed_event(card_id: &str, token: u32) -> ReceivedEvent {
         ReceivedEvent {
             event: protocol::DeviceEvent {
                 sequence: 1,
                 kind: EventKind::InterruptDismissed,
-                widget_id: widget_id.into(),
-                screen_id: widget_id.into(),
+                card_id: card_id.into(),
                 action: EventAction::DismissInterrupt,
                 interrupt_token: Some(token),
             },
@@ -1825,17 +1823,17 @@ mod tests {
             Duration::from_hours(1),
         );
         let mut state = WorkerState::new(config, now, &mut scheduler);
-        assert_eq!(state.active_screen.as_deref(), Some("a"));
+        assert_eq!(state.active_card.as_deref(), Some("a"));
 
         for expected in ["b", "alerting", "last", "a"] {
-            state.active_screen_dirty = false;
+            state.active_card_dirty = false;
             advance_rotation(&mut state, &mut scheduler, now);
             assert_eq!(
-                state.active_screen.as_deref(),
+                state.active_card.as_deref(),
                 Some(expected),
                 "the loop must reach every card and wrap"
             );
-            assert!(state.active_screen_dirty);
+            assert!(state.active_card_dirty);
         }
     }
 
@@ -1858,9 +1856,9 @@ mod tests {
             Duration::from_hours(1),
         );
         let mut state = WorkerState::new(config, now, &mut scheduler);
-        state.active_screen_dirty = false;
+        state.active_card_dirty = false;
         advance_rotation(&mut state, &mut scheduler, now);
-        assert!(!state.active_screen_dirty, "nothing to rotate to");
+        assert!(!state.active_card_dirty, "nothing to rotate to");
         assert!(!scheduler.rotation_due(now + Duration::from_hours(1)));
     }
 
@@ -1893,14 +1891,14 @@ mod tests {
             now,
         );
 
-        assert_eq!(state.active_screen.as_deref(), Some("c"));
+        assert_eq!(state.active_card.as_deref(), Some("c"));
         // Re-armed from "c"'s own 5s dwell, not left over from "a".
         assert!(!scheduler.rotation_due(now + Duration::from_secs(4)));
         assert!(scheduler.rotation_due(now + Duration::from_secs(5)));
     }
 
     // F3b: the same index-resolution and re-arm behavior applies to an explicit
-    // `RuntimeCommand::ActivateScreen` (the IPC-driven manual activation), which is a
+    // `RuntimeCommand::ActivateCard` (the IPC-driven manual activation), which is a
     // manual override just like a swipe.
     #[test]
     fn explicit_activate_command_resolves_the_index_within_rotation_ids_and_rearms_the_dwell() {
@@ -1919,8 +1917,8 @@ mod tests {
         let before = Instant::now();
 
         let shutting_down = process_command(
-            RuntimeCommand::ActivateScreen {
-                screen_id: "c".into(),
+            RuntimeCommand::ActivateCard {
+                card_id: "c".into(),
                 reply: reply_sender,
             },
             &mut state,
@@ -1932,8 +1930,8 @@ mod tests {
 
         assert!(!shutting_down);
         reply_receiver.recv().unwrap().unwrap();
-        assert_eq!(state.active_screen.as_deref(), Some("c"));
-        // `process_command`'s `ActivateScreen` arm uses `Instant::now()` internally
+        assert_eq!(state.active_card.as_deref(), Some("c"));
+        // `process_command`'s `ActivateCard` arm uses `Instant::now()` internally
         // (there is no injectable clock in this runtime), so assert with a margin
         // around the 5s dwell rather than pinning it to `before` exactly.
         assert!(!scheduler.rotation_due(before + Duration::from_millis(4_500)));
@@ -1971,9 +1969,9 @@ mod tests {
             &options,
         );
 
-        assert_eq!(state.active_screen.as_deref(), Some("b"));
+        assert_eq!(state.active_card.as_deref(), Some("b"));
         assert!(
-            state.active_screen_dirty,
+            state.active_card_dirty,
             "queued for the device, not yet sent"
         );
     }
@@ -2023,7 +2021,7 @@ mod tests {
             state
                 .interrupts
                 .active()
-                .map(|tracked| tracked.message.widget_id.as_str()),
+                .map(|tracked| tracked.message.card_id.as_str()),
             Some("loud"),
             "only the OnTimerFinish card's completion schedules an interrupt"
         );
@@ -2061,7 +2059,7 @@ mod tests {
         let mut device = StubDevice::default();
         flush_interrupts(&mut state, &mut scheduler, &mut device, delivery_time).unwrap();
         let options = RuntimeOptions::default();
-        state.active_screen_dirty = false;
+        state.active_card_dirty = false;
 
         // Hold armed at delivery time (60s) + 30s = 90s from `now`. One second
         // before that, the interrupt survives.
@@ -2089,7 +2087,7 @@ mod tests {
             "hold expired and auto-dismissed the interrupt"
         );
         assert!(
-            state.active_screen_dirty,
+            state.active_card_dirty,
             "queued the saved carousel screen for resync"
         );
     }
@@ -2168,7 +2166,7 @@ mod tests {
             state
                 .interrupts
                 .active()
-                .map(|tracked| tracked.message.widget_id.as_str()),
+                .map(|tracked| tracked.message.card_id.as_str()),
             Some("sticky")
         );
 
@@ -2178,7 +2176,7 @@ mod tests {
             state
                 .interrupts
                 .pending()
-                .map(|tracked| tracked.message.widget_id.as_str()),
+                .map(|tracked| tracked.message.card_id.as_str()),
             Some("upnext"),
             "the Active slot is occupied, so the second timer alert queues Pending"
         );
@@ -2216,7 +2214,7 @@ mod tests {
             state
                 .interrupts
                 .active()
-                .map(|tracked| tracked.message.widget_id.as_str()),
+                .map(|tracked| tracked.message.card_id.as_str()),
             Some("sticky"),
             "UntilDismissed must not be auto-dismissed by an unrelated Pending interrupt's hold"
         );
@@ -2224,7 +2222,7 @@ mod tests {
             state
                 .interrupts
                 .pending()
-                .map(|tracked| tracked.message.widget_id.as_str()),
+                .map(|tracked| tracked.message.card_id.as_str()),
             Some("upnext"),
             "the timer interrupt is still queued, unharmed"
         );
@@ -2256,7 +2254,7 @@ mod tests {
             state
                 .interrupts
                 .active()
-                .map(|tracked| tracked.message.widget_id.as_str()),
+                .map(|tracked| tracked.message.card_id.as_str()),
             Some("upnext"),
             "dismissing the sticky interrupt promotes the queued timer alert"
         );

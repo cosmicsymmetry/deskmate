@@ -158,7 +158,7 @@ pub(super) fn initial_snapshot(config: &AppConfig, diagnostics: RuntimeDiagnosti
                 duration_seconds,
                 ..
             } => pomodoros.push(PomodoroSnapshot {
-                widget_id: id.clone(),
+                card_id: id.clone(),
                 state: PomodoroState::Idle,
                 duration_seconds: *duration_seconds,
                 remaining_seconds: *duration_seconds,
@@ -170,7 +170,7 @@ pub(super) fn initial_snapshot(config: &AppConfig, diagnostics: RuntimeDiagnosti
         config: config.clone(),
         runtime: RuntimeState::Starting,
         device: DeviceSnapshot {
-            active_screen_id: config.cards.first().map(|card| card.id().to_owned()),
+            active_card_id: config.cards.first().map(|card| card.id().to_owned()),
             ..empty_device(ConnectionState::Connecting)
         },
         pomodoros,
@@ -199,7 +199,7 @@ pub(super) fn empty_device(connection: ConnectionState) -> DeviceSnapshot {
         ip: None,
         last_network_error: None,
         ota_state: None,
-        active_screen_id: None,
+        active_card_id: None,
         counters: DeviceCounters::default(),
     }
 }

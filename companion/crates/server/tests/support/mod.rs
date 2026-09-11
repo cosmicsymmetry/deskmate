@@ -11,7 +11,7 @@ pub type DeviceSocket =
 
 pub const IN_MEMORY_ADMIN_TOKEN: &str = "in-memory-admin-token";
 
-pub async fn drive_until_config(socket: &mut DeviceSocket, widget_id: &str) -> ApplyConfig {
+pub async fn drive_until_config(socket: &mut DeviceSocket, card_id: &str) -> ApplyConfig {
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         let mut target_config = None;
         loop {
@@ -22,14 +22,13 @@ pub async fn drive_until_config(socket: &mut DeviceSocket, widget_id: &str) -> A
                     let message = protocol::decode_message(&frame)
                         .expect("device received an undecodable message");
                     let target = match &message {
-                        Message::ApplyConfig(config) => config
-                            .widgets
-                            .iter()
-                            .any(|widget| widget.widget_id == widget_id),
+                        Message::ApplyConfig(config) => {
+                            config.cards.iter().any(|card| card.card_id == card_id)
+                        }
                         _ => false,
                     };
                     let completes_target_sync =
-                        target_config.is_some() && matches!(&message, Message::ActivateScreen(_));
+                        target_config.is_some() && matches!(&message, Message::ActivateCard(_));
                     reply(socket, frame.request_id, &message).await;
                     if target {
                         let Message::ApplyConfig(config) = message else {
@@ -55,7 +54,7 @@ pub async fn drive_until_config(socket: &mut DeviceSocket, widget_id: &str) -> A
     .expect("timed out waiting for the expected config")
 }
 
-pub async fn drive_until_push(socket: &mut DeviceSocket, widget_id: &str) -> protocol::PushData {
+pub async fn drive_until_push(socket: &mut DeviceSocket, card_id: &str) -> protocol::PushTimer {
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
             match socket.next().await {
@@ -66,12 +65,12 @@ pub async fn drive_until_push(socket: &mut DeviceSocket, widget_id: &str) -> pro
                         .expect("device received an undecodable message");
                     let target = matches!(
                         &message,
-                        Message::PushData(push) if push.widget_id == widget_id
+                        Message::PushTimer(push) if push.card_id == card_id
                     );
                     reply(socket, frame.request_id, &message).await;
                     if target {
-                        let Message::PushData(push) = message else {
-                            unreachable!("target is true only for PushData");
+                        let Message::PushTimer(push) = message else {
+                            unreachable!("target is true only for PushTimer");
                         };
                         return push;
                     }
@@ -81,12 +80,12 @@ pub async fn drive_until_push(socket: &mut DeviceSocket, widget_id: &str) -> pro
                 }
                 Some(Ok(other)) => panic!("unexpected WebSocket message: {other:?}"),
                 Some(Err(error)) => panic!("WebSocket read failed: {error}"),
-                None => panic!("socket closed before the expected data push arrived"),
+                None => panic!("socket closed before the expected timer push arrived"),
             }
         }
     })
     .await
-    .expect("timed out waiting for the expected data push")
+    .expect("timed out waiting for the expected timer push")
 }
 
 pub async fn drive_until_scene(socket: &mut DeviceSocket) -> protocol::PushScene {
@@ -133,7 +132,7 @@ pub async fn bootstrap_runtime(socket: &mut DeviceSocket) {
                         .expect("device received a malformed frame during bootstrap");
                     let message = protocol::decode_message(&frame)
                         .expect("device received an undecodable message during bootstrap");
-                    let complete = matches!(message, Message::ActivateScreen(_));
+                    let complete = matches!(message, Message::ActivateCard(_));
                     reply(socket, frame.request_id, &message).await;
                     if complete {
                         finish_initial_schedule(socket).await;
@@ -155,7 +154,7 @@ pub async fn bootstrap_runtime(socket: &mut DeviceSocket) {
 }
 
 /// Drives a retained runtime's reconnect replay. Replay restores the cached
-/// device model through `ActivateScreen`, and is then followed by the same
+/// device model through `ActivateCard`, and is then followed by the same
 /// status and time sync a first connection performs.
 ///
 /// That last part changed when the runtime worker's busy-loop was fixed. The
@@ -173,7 +172,7 @@ pub async fn reattach_runtime(socket: &mut DeviceSocket) {
                         .expect("device received a malformed frame during reattach");
                     let message = protocol::decode_message(&frame)
                         .expect("device received an undecodable message during reattach");
-                    let complete = matches!(message, Message::ActivateScreen(_));
+                    let complete = matches!(message, Message::ActivateCard(_));
                     reply(socket, frame.request_id, &message).await;
                     if complete {
                         finish_initial_schedule(socket).await;
@@ -308,9 +307,9 @@ pub async fn card_messages_during(
 fn card_message_name(message: &Message) -> Option<&'static str> {
     match message {
         Message::ApplyConfig(_) => Some("ApplyConfig"),
-        Message::PushData(_) => Some("PushData"),
+        Message::PushTimer(_) => Some("PushTimer"),
         Message::PushScene(_) => Some("PushScene"),
-        Message::ActivateScreen(_) => Some("ActivateScreen"),
+        Message::ActivateCard(_) => Some("ActivateCard"),
         Message::TriggerInterrupt(_) => Some("TriggerInterrupt"),
         _ => None,
     }
@@ -329,13 +328,13 @@ async fn reply(socket: &mut DeviceSocket, request_id: u32, request: &Message) {
             revision: Some(config.revision),
             already_present: None,
         }),
-        Message::PushData(push) => Message::Ack(Ack {
-            acknowledged_type: protocol::TYPE_PUSH_DATA,
+        Message::PushTimer(push) => Message::Ack(Ack {
+            acknowledged_type: protocol::TYPE_PUSH_TIMER,
             revision: Some(push.revision),
             already_present: None,
         }),
-        Message::ActivateScreen(_) => Message::Ack(Ack {
-            acknowledged_type: protocol::TYPE_ACTIVATE_SCREEN,
+        Message::ActivateCard(_) => Message::Ack(Ack {
+            acknowledged_type: protocol::TYPE_ACTIVATE_CARD,
             revision: None,
             already_present: None,
         }),

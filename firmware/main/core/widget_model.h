@@ -38,7 +38,7 @@ typedef enum {
 
 /** The timer snapshot one card's `timer.*` bindings resolve against. */
 typedef struct {
-    char card_id[PROTOCOL_MAX_WIDGET_ID_LENGTH + 1U];
+    char card_id[PROTOCOL_MAX_CARD_ID_LENGTH + 1U];
     bool present;
     uint32_t total_ms;
     uint32_t remaining_ms;

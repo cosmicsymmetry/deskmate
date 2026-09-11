@@ -52,7 +52,6 @@ fn render(
         utc_offset_minutes: OFFSET,
         now_unix_seconds: NOW,
         timer: None,
-        fields: Vec::new(),
         orientation,
     })
     .expect("render the clock scene")

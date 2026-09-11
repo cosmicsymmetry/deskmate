@@ -187,7 +187,7 @@ export function App() {
 
   const selectedWidget = draft.cards.find((card) => card.id === selectedCardId) ?? null;
   const pomodoro =
-    snapshot.pomodoros.find((candidate) => candidate.widget_id === selectedCardId) ?? null;
+    snapshot.pomodoros.find((candidate) => candidate.card_id === selectedCardId) ?? null;
   const issues = validation.result.issues;
   const cardIssues = selectedCardId ? issuesForCard(issues, draft, selectedCardId) : [];
   const selectedCardError =

@@ -123,7 +123,7 @@ static void test_valid_fixtures(void)
     assert_valid_fixture("ack_config.bin", PROTOCOL_TYPE_ACK, 10U);
     assert_valid_fixture("apply_config_max.bin", PROTOCOL_TYPE_APPLY_CONFIG,
                          11U);
-    assert_valid_fixture("activate_screen.bin",
+    assert_valid_fixture("activate_card.bin",
                          PROTOCOL_TYPE_ACTIVATE_CARD, 12U);
     assert_valid_fixture("ack_activate.bin", PROTOCOL_TYPE_ACK, 12U);
     assert_valid_fixture("trigger_interrupt.bin",
@@ -137,7 +137,7 @@ static void test_valid_fixtures(void)
                          0U);
     assert_valid_fixture("device_event_dismissed.bin",
                          PROTOCOL_TYPE_DEVICE_EVENT, 0U);
-    assert_valid_fixture("error_unknown_widget.bin", PROTOCOL_TYPE_ERROR,
+    assert_valid_fixture("error_unknown_card.bin", PROTOCOL_TYPE_ERROR,
                          14U);
     assert_valid_fixture("error_config_too_large.bin", PROTOCOL_TYPE_ERROR,
                          18U);

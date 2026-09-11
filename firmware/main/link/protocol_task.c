@@ -255,7 +255,7 @@ static bool fill_carousel_binding(protocol_context_t *context,
     const protocol_card_config_t *active = widget_model_active_card(
         &context->model);
     const char *card_id = interrupt != NULL
-        ? interrupt->widget_id
+        ? interrupt->card_id
         : (active != NULL ? active->card_id : NULL);
     const protocol_card_config_t *card = find_card(config, card_id);
     if (config == NULL || card == NULL || card_id == NULL) {
@@ -263,11 +263,14 @@ static bool fill_carousel_binding(protocol_context_t *context,
     }
 
     memset(binding, 0, sizeof(*binding));
-    strcpy(binding->widget_id, card_id);
+    strcpy(binding->card_id, card_id);
     binding->tap_action = card->tap_action;
     binding->interrupt = interrupt != NULL;
     if (interrupt != NULL) {
-        strcpy(binding->screen_id, context->interrupts.saved_screen_id);
+        /* The id stays the interrupt's own card: it is what the dismissal
+         * event correlates against in apply_dismissal_event(). The card to
+         * restore afterwards is interrupt_state's saved_card_id, which that
+         * function reads directly. */
         binding->interrupt_token = interrupt->token;
         return true;
     }
@@ -278,11 +281,8 @@ static bool fill_carousel_binding(protocol_context_t *context,
     size_t index = active_card_index(&context->model);
     size_t previous = index == 0U ? config->card_count - 1U : index - 1U;
     size_t next = (index + 1U) % config->card_count;
-    strcpy(binding->screen_id, active->card_id);
-    strcpy(binding->previous_screen_id, config->cards[previous].card_id);
-    strcpy(binding->previous_widget_id, config->cards[previous].card_id);
-    strcpy(binding->next_screen_id, config->cards[next].card_id);
-    strcpy(binding->next_widget_id, config->cards[next].card_id);
+    strcpy(binding->previous_card_id, config->cards[previous].card_id);
+    strcpy(binding->next_card_id, config->cards[next].card_id);
     return true;
 }
 
@@ -372,7 +372,7 @@ static void bind_scene_carousel(protocol_context_t *context)
 {
     carousel_binding_t binding;
     if (!fill_carousel_binding(context, &binding) ||
-        strcmp(binding.widget_id, context->scene_card_id) != 0) {
+        strcmp(binding.card_id, context->scene_card_id) != 0) {
         carousel_unbind();
         return;
     }
@@ -758,7 +758,7 @@ static void dispatch_activate_card(protocol_context_t *context,
         return;
     }
     if (interrupt_state_active(&context->interrupts) != NULL) {
-        (void)interrupt_state_set_saved_screen(&context->interrupts,
+        (void)interrupt_state_set_saved_card(&context->interrupts,
                                                card_id);
     } else if (!show_carousel_fallback(context)) {
         transmit_error(context, request_id, PROTOCOL_ERROR_INTERNAL,
@@ -775,7 +775,7 @@ static void dispatch_trigger_interrupt(protocol_context_t *context,
     const protocol_trigger_interrupt_t *trigger =
         &context->message.value.trigger_interrupt;
     const protocol_apply_config_t *config = widget_model_config(&context->model);
-    const protocol_card_config_t *card = find_card(config, trigger->widget_id);
+    const protocol_card_config_t *card = find_card(config, trigger->card_id);
     if (card == NULL) {
         transmit_error(context, request_id, PROTOCOL_ERROR_UNKNOWN_WIDGET,
                        "unknown widget");
@@ -1742,25 +1742,23 @@ static bool validate_tap_event(protocol_context_t *context,
         expected = PROTOCOL_EVENT_ACTION_RESET;
     }
     return card != NULL && event->action == expected &&
-           strcmp(event->screen_id, card->card_id) == 0 &&
-           strcmp(event->widget_id, card->card_id) == 0;
+           strcmp(event->card_id, card->card_id) == 0;
 }
 
 static bool apply_navigation_event(protocol_context_t *context,
                                    protocol_device_event_t *event)
 {
     if (interrupt_state_active(&context->interrupts) != NULL ||
-        !widget_model_activate_card(&context->model, event->screen_id)) {
+        !widget_model_activate_card(&context->model, event->card_id)) {
         return false;
     }
     const protocol_card_config_t *card = widget_model_active_card(
         &context->model);
-    if (card == NULL || strcmp(card->card_id, event->widget_id) != 0 ||
+    if (card == NULL || strcmp(card->card_id, event->card_id) != 0 ||
         !show_carousel_fallback(context)) {
         return false;
     }
-    strcpy(event->screen_id, card->card_id);
-    strcpy(event->widget_id, card->card_id);
+    strcpy(event->card_id, card->card_id);
     return true;
 }
 
@@ -1771,20 +1769,20 @@ static bool apply_dismissal_event(protocol_context_t *context,
         &context->interrupts);
     if (active == NULL || !event->has_interrupt_token ||
         event->interrupt_token != active->token ||
-        strcmp(event->widget_id, active->widget_id) != 0) {
+        strcmp(event->card_id, active->card_id) != 0) {
         return false;
     }
     interrupt_dismissal_t dismissal;
     if (!interrupt_state_dismiss(&context->interrupts, &dismissal)) {
         return false;
     }
-    strcpy(event->screen_id, dismissal.saved_screen_id);
+    strcpy(event->card_id, dismissal.saved_card_id);
     bool shown = false;
     if (dismissal.promoted_pending) {
         shown = show_interrupt_fallback(context);
-    } else if (dismissal.restore_saved_screen &&
+    } else if (dismissal.restore_saved_card &&
                widget_model_activate_card(&context->model,
-                                             dismissal.saved_screen_id)) {
+                                             dismissal.saved_card_id)) {
         shown = show_carousel_fallback(context);
     }
     return shown;

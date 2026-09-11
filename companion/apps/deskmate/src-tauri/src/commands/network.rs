@@ -77,7 +77,7 @@ pub(super) fn mint_server_image_source(
             message: "the server returned a picture source this app could not read".into(),
         })
     })?;
-    validate_target(&minted.id, MAX_WIDGET_ID_LEN, "picture source ID")?;
+    validate_target(&minted.id, MAX_CARD_ID_LEN, "picture source ID")?;
     validate_secret(&minted.token, MAX_DEVICE_TOKEN_LEN, "picture source token")?;
     let push_url =
         crate::server_client::server_url(&settings.server_url, &["v1", "images", &minted.token])?

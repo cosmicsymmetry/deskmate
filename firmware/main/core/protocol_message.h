@@ -9,13 +9,11 @@
 #include "protocol_frame.h"
 
 #define PROTOCOL_LINK_TIMEOUT_MS 10000U
-#define PROTOCOL_MAX_WIDGET_ID_LENGTH 32U
-#define PROTOCOL_MAX_SCREEN_ID_LENGTH 32U
-#define PROTOCOL_MAX_CONFIG_WIDGETS 8U
-#define PROTOCOL_MAX_CONFIG_SCREENS 8U
-#define PROTOCOL_MAX_FIELD_COUNT 16U
-#define PROTOCOL_MAX_FIELD_KEY_LENGTH 32U
-#define PROTOCOL_MAX_FIELD_TEXT_LENGTH 128U
+/* A card id is an identifier the host chose, not free text. Protocol v1 had
+ * one of these per name for the same thing -- a widget, a screen and a card --
+ * all 32; config schema v10 settled them as one card. */
+#define PROTOCOL_MAX_CARD_ID_LENGTH 32U
+#define PROTOCOL_MAX_CONFIG_CARDS 8U
 #define PROTOCOL_MAX_DIAGNOSTIC_LENGTH 96U
 #define PROTOCOL_MAX_INTERRUPT_REASON_LENGTH 96U
 #define PROTOCOL_MAX_FIRMWARE_VERSION_LENGTH 32U
@@ -73,10 +71,6 @@
 #define PROTOCOL_ASSET_ENCODING_RAW 0U
 #define PROTOCOL_ASSET_ENCODING_RLE565 1U
 #define PROTOCOL_VOLATILE_IMAGE_DECODED_LENGTH 329740U
-/* Same 32 bytes as a widget id, and for the same reason: a card id is an
- * identifier the host chose, not free text. */
-#define PROTOCOL_MAX_CARD_ID_LENGTH 32U
-
 typedef enum {
     PROTOCOL_TYPE_STATUS_REQUEST = 1,
     PROTOCOL_TYPE_STATUS_RESPONSE = 2,
@@ -201,7 +195,7 @@ typedef struct {
 /* One card in the loop. Protocol v2 carries only what the device decides for
  * itself: which card this is, and what a tap does. */
 typedef struct {
-    char card_id[PROTOCOL_MAX_WIDGET_ID_LENGTH + 1U];
+    char card_id[PROTOCOL_MAX_CARD_ID_LENGTH + 1U];
     protocol_tap_action_t tap_action;
 } protocol_card_config_t;
 
@@ -209,24 +203,27 @@ typedef struct {
     uint32_t revision;
     uint16_t rotation;
     size_t card_count;
-    protocol_card_config_t cards[PROTOCOL_MAX_CONFIG_WIDGETS];
+    protocol_card_config_t cards[PROTOCOL_MAX_CONFIG_CARDS];
 } protocol_apply_config_t;
 
 typedef struct {
-    char card_id[PROTOCOL_MAX_WIDGET_ID_LENGTH + 1U];
+    char card_id[PROTOCOL_MAX_CARD_ID_LENGTH + 1U];
 } protocol_activate_card_t;
 
 typedef struct {
-    char widget_id[PROTOCOL_MAX_WIDGET_ID_LENGTH + 1U];
+    char card_id[PROTOCOL_MAX_CARD_ID_LENGTH + 1U];
     uint32_t token;
     char reason[PROTOCOL_MAX_INTERRUPT_REASON_LENGTH + 1U];
 } protocol_trigger_interrupt_t;
 
+/* Something the person at the panel did, reported upward. Protocol v1 carried
+ * two identifiers, widget_id (key 2) and screen_id (key 3), and every producer
+ * set them to the same card. v2 states the one card id in key 2; key 3 is
+ * retired rather than reused. */
 typedef struct {
     uint64_t sequence;
     protocol_event_kind_t kind;
-    char widget_id[PROTOCOL_MAX_WIDGET_ID_LENGTH + 1U];
-    char screen_id[PROTOCOL_MAX_SCREEN_ID_LENGTH + 1U];
+    char card_id[PROTOCOL_MAX_CARD_ID_LENGTH + 1U];
     protocol_event_action_t action;
     bool has_interrupt_token;
     uint32_t interrupt_token;
@@ -237,7 +234,7 @@ typedef struct {
  * three keys out of that bag by name, and nothing has bound `field.*` since
  * config schema v9. */
 typedef struct {
-    char card_id[PROTOCOL_MAX_WIDGET_ID_LENGTH + 1U];
+    char card_id[PROTOCOL_MAX_CARD_ID_LENGTH + 1U];
     uint32_t revision;
     uint32_t total_ms;
     uint32_t remaining_ms;

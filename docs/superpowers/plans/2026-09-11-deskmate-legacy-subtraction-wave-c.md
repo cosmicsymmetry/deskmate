@@ -1,5 +1,46 @@
 # Legacy Subtraction — Wave C: the device stops modelling templates (protocol v2)
 
+> ## STATUS — software-complete on `refactor/wave-c-protocol-v2`, NOT merged, NOT deployed
+>
+> All four tasks are done and every software gate is green: the full companion workspace
+> set (`fmt --check`, `clippy -D warnings`, `test --all-targets`, `test --doc`),
+> `make -C firmware/host_tests clean test` and `sanitize`, `idf.py -C firmware build`,
+> and the frontend typecheck. **The branch is the deliverable.** What it owes is the
+> hardware session described below and stubbed at the end of
+> `docs/hardware/board-notes.md`.
+>
+> **Three deviations from the plan as written, all widenings:**
+>
+> 1. **`DeviceEvent` lost its second identifier too.** The plan renamed `ActivateScreen`
+>    to `ActivateCard` "to stop pretending there are two identifier spaces", but
+>    `DeviceEvent` carried both `widget_id` (key 2) and `screen_id` (key 3), always set
+>    to the same card by every producer. Key 2 is now `card_id` and key 3 is retired.
+>    `TriggerInterrupt.widget_id`, `carousel_binding_t`'s three parallel id pairs,
+>    `interrupt_state`'s `saved_screen_id`, and the host's `active_screen`/`dirty_widgets`
+>    /`UnknownWidget`/`UnknownScreen` all followed. Leaving them would have kept the two
+>    spaces alive under a renamed message.
+> 2. **The three id-length constants collapsed to one.** `MAX_WIDGET_ID_LEN`,
+>    `MAX_SCREEN_ID_LEN` and `MAX_CARD_ID_LEN` were all 32 for the same thing; likewise
+>    `PROTOCOL_MAX_CONFIG_WIDGETS`/`_SCREENS`. One space, one constant.
+> 3. **`field.` was removed from the scene binding grammar, not just from the device.**
+>    The plan retired `SCENE_BINDING_FIELD` in firmware. `protocol::binding_is_valid`
+>    still accepted the prefix, so a host could have minted a scene the device now refuses
+>    — a mismatch no host test could see, because no host test asks the C parser. Both
+>    sides refuse it now, and the two `lvgl-sim` cases that bound `field.status` were
+>    rewritten to bind `date` and `timer.status` instead, preserving both pixel behaviours
+>    (a value that resolves, and one that renders the `--` placeholder).
+>
+> **The measured `.bss` delta is −104 bytes** (87,104 → 87,000; `.data` and IRAM
+> byte-flat, DIRAM total 203,891 → 203,763), which is within one byte of the shift that
+> broke OTA downloads in `3f2aa03`. The on-board OTA check is mandatory, not a formality.
+>
+> One prediction the hardware session must verify rather than trust: the
+> `framebuffer_diff` matrix is now **44 rows** (Wave A's oracle retirement took 34, v9's
+> plugin removal 18), and with the four `field.*` exclusions closed the only one left is
+> the `progress-ring--running-mid-countdown` timing race — so the expected split is
+> `44 total / 2 excluded / 42 identical / 0 differing`, against the last observed
+> `96 / 10 / 86`.
+
 **Spec:** `docs/superpowers/specs/2026-09-11-deskmate-legacy-subtraction-design.md`
 
 **Goal:** Remove the pre-scene wire. The device has drawn only host-pushed scenes since
@@ -69,43 +110,43 @@ networking, volatile assets, durable asset encoding.
 
 ### Task 1 — the protocol crate
 
-- [ ] `PROTOCOL_VERSION` 1 → 2; re-base `PROTOCOL_CURRENT_CAPABILITIES`.
-- [ ] `ApplyConfig`/`WidgetConfig` lose template, size class, interrupt policy, screens.
-- [ ] `PushData` → `PushTimer`; delete `Field`, `FieldValue`, `TemplateKind`,
+- [x] `PROTOCOL_VERSION` 1 → 2; re-base `PROTOCOL_CURRENT_CAPABILITIES`.
+- [x] `ApplyConfig`/`WidgetConfig` lose template, size class, interrupt policy, screens.
+- [x] `PushData` → `PushTimer`; delete `Field`, `FieldValue`, `TemplateKind`,
       `SizeClass`, `InterruptPolicy`, `ScreenConfig` and the three error codes.
-- [ ] `ActivateScreen` → `ActivateCard`.
-- [ ] Regenerate the fixtures; `docs/protocol/v2.md` frozen from v1.
+- [x] `ActivateScreen` → `ActivateCard`.
+- [x] Regenerate the fixtures; `docs/protocol/v2.md` frozen from v1.
 
 ### Task 2 — firmware
 
-- [ ] Delete `core/template_fields.{c,h}` and its host test.
-- [ ] `core/widget_model.c` keeps revisions and the card list; the field state,
+- [x] Delete `core/template_fields.{c,h}` and its host test.
+- [x] `core/widget_model.c` keeps revisions and the card list; the field state,
       template registry and per-template validation go.
-- [ ] `core/scene_binding.c` loses `SCENE_BINDING_FIELD` and the `scene_field_fn` seam.
-- [ ] `link/protocol_task.c`: decode `PushTimer` into the binding context directly;
+- [x] `core/scene_binding.c` loses `SCENE_BINDING_FIELD` and the `scene_field_fn` seam.
+- [x] `link/protocol_task.c`: decode `PushTimer` into the binding context directly;
       `fill_timer_bindings` reads it instead of a field bag; `show_carousel_fallback`
       loses the binding it computes and discards.
-- [ ] `ui/carousel.c` navigates the card list rather than a screens array.
-- [ ] Record `idf.py size` before and after: **the `.bss` delta is the number that
+- [x] `ui/carousel.c` navigates the card list rather than a screens array.
+- [x] Record `idf.py size` before and after: **the `.bss` delta is the number that
       justifies the on-board OTA check.**
 
 ### Task 3 — the host
 
-- [ ] `app-core`: `wire_config` stops emitting a template; `push_fields` becomes
+- [x] `app-core`: `wire_config` stops emitting a template; `push_fields` becomes
       `push_timer`; the scene builders keep their inputs (they are host-side).
-- [ ] `lvgl-sim`: the simulator's binding context loses its field table.
-- [ ] `framebuffer_diff`: the four `field.*` exclusions go — they exist only because no
+- [x] `lvgl-sim`: the simulator's binding context loses its field table.
+- [x] `framebuffer_diff`: the four `field.*` exclusions go — they exist only because no
       registry accepts a field name, and there is no registry.
 
 ### Task 4 — documentation
 
-- [ ] `docs/protocol/v2.md`; mark v1 superseded.
-- [ ] CLAUDE.md: protocol v2, new capabilities, and the rollout order above.
-- [ ] `docs/hardware/board-notes.md`: a stub naming what the session must observe.
+- [x] `docs/protocol/v2.md`; mark v1 superseded.
+- [x] CLAUDE.md: protocol v2, new capabilities, and the rollout order above.
+- [x] `docs/hardware/board-notes.md`: a stub naming what the session must observe.
 
 ## Exit
 
-- [ ] Full host gate set green.
-- [ ] `idf.py -C firmware build` succeeds; size delta recorded.
-- [ ] `make -C firmware/host_tests clean test` and `sanitize` green.
-- [ ] **NOT merged, NOT deployed.** The branch is the deliverable.
+- [x] Full host gate set green.
+- [x] `idf.py -C firmware build` succeeds; size delta recorded.
+- [x] `make -C firmware/host_tests clean test` and `sanitize` green.
+- [x] **NOT merged, NOT deployed.** The branch is the deliverable.

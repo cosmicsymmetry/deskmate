@@ -65,7 +65,6 @@ fn request(now_unix_seconds: i64) -> SceneRenderRequest {
         utc_offset_minutes: 0,
         now_unix_seconds,
         timer: None,
-        fields: Vec::new(),
         orientation: SimOrientation::Landscape,
     }
 }

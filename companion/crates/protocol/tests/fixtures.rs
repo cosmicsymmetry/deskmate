@@ -23,7 +23,7 @@ fn valid_golden_frames_decode() {
         "apply_config_min.bin",
         "ack_config.bin",
         "apply_config_max.bin",
-        "activate_screen.bin",
+        "activate_card.bin",
         "ack_activate.bin",
         "trigger_interrupt.bin",
         "ack_interrupt.bin",
@@ -31,7 +31,7 @@ fn valid_golden_frames_decode() {
         "device_event_previous.bin",
         "device_event_next.bin",
         "device_event_dismissed.bin",
-        "error_unknown_widget.bin",
+        "error_unknown_card.bin",
         "error_config_too_large.bin",
         "push_timer_paused.bin",
         "network_config.bin",
@@ -96,14 +96,11 @@ fn invalid_golden_inputs_have_stable_classes() {
         decode_message(&duplicate),
         Err(MessageError::DuplicateOrUnsortedKey)
     );
-    for name in ["duplicate_card_ids.bin"] {
-        let frame = decode_wire_frame(&fixture(name)).unwrap();
-        assert_eq!(
-            decode_message(&frame),
-            Err(MessageError::DuplicateOrUnsortedKey),
-            "{name}"
-        );
-    }
+    let duplicate_cards = decode_wire_frame(&fixture("duplicate_card_ids.bin")).unwrap();
+    assert_eq!(
+        decode_message(&duplicate_cards),
+        Err(MessageError::DuplicateOrUnsortedKey)
+    );
     // A card's tap action is the only enumerated value left on the wire, so it
     // is the only one that can be unsupported. Templates and size classes went
     // with protocol v2.
@@ -112,14 +109,11 @@ fn invalid_golden_inputs_have_stable_classes() {
         decode_message(&action),
         Err(MessageError::InvalidValue("tap action"))
     );
-    for name in ["config_too_many_cards.bin"] {
-        let excessive = decode_wire_frame(&fixture(name)).unwrap();
-        assert_eq!(
-            decode_message(&excessive),
-            Err(MessageError::ConfigTooLarge),
-            "{name}"
-        );
-    }
+    let excessive = decode_wire_frame(&fixture("config_too_many_cards.bin")).unwrap();
+    assert_eq!(
+        decode_message(&excessive),
+        Err(MessageError::ConfigTooLarge)
+    );
     let utf8 = decode_wire_frame(&fixture("invalid_config_utf8.bin")).unwrap();
     assert!(matches!(decode_message(&utf8), Err(MessageError::Cbor(_))));
     for name in ["zero_request_config.bin", "nonzero_request_event.bin"] {

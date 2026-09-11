@@ -69,9 +69,9 @@ bool net_config_usb_message_allowed(protocol_tier_t tier,
         case PROTOCOL_TYPE_FACTORY_RESET:
             return true;
         case PROTOCOL_TYPE_TIME_SYNC:
-        case PROTOCOL_TYPE_PUSH_DATA:
+        case PROTOCOL_TYPE_PUSH_TIMER:
         case PROTOCOL_TYPE_APPLY_CONFIG:
-        case PROTOCOL_TYPE_ACTIVATE_SCREEN:
+        case PROTOCOL_TYPE_ACTIVATE_CARD:
         case PROTOCOL_TYPE_TRIGGER_INTERRUPT:
         default:
             return false;

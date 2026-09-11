@@ -32,9 +32,6 @@ fn valid_golden_frames_decode() {
         "device_event_next.bin",
         "device_event_dismissed.bin",
         "error_unknown_widget.bin",
-        "error_unknown_screen.bin",
-        "error_unsupported_template.bin",
-        "error_unsupported_size.bin",
         "error_config_too_large.bin",
         "push_timer_paused.bin",
         "network_config.bin",
@@ -83,7 +80,7 @@ fn invalid_golden_inputs_have_stable_classes() {
         Err(FrameError::Checksum)
     );
     let version = decode_wire_frame(&fixture("unsupported_version.bin")).unwrap();
-    assert_eq!(decode_message(&version), Err(MessageError::Version(2)));
+    assert_eq!(decode_message(&version), Err(MessageError::Version(1)));
     let kind = decode_wire_frame(&fixture("unsupported_type.bin")).unwrap();
     assert_eq!(
         decode_message(&kind),

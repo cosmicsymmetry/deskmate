@@ -342,9 +342,6 @@ pub enum ErrorCode {
     Busy = 8,
     Internal = 9,
     UnknownWidget = 10,
-    UnknownScreen = 11,
-    UnsupportedTemplate = 12,
-    UnsupportedSizeClass = 13,
     ConfigTooLarge = 14,
     WrongTier = 15,
 }
@@ -364,9 +361,6 @@ impl TryFrom<u16> for ErrorCode {
             8 => Ok(Self::Busy),
             9 => Ok(Self::Internal),
             10 => Ok(Self::UnknownWidget),
-            11 => Ok(Self::UnknownScreen),
-            12 => Ok(Self::UnsupportedTemplate),
-            13 => Ok(Self::UnsupportedSizeClass),
             14 => Ok(Self::ConfigTooLarge),
             15 => Ok(Self::WrongTier),
             _ => Err(MessageError::InvalidValue("error code")),
@@ -463,8 +457,6 @@ pub enum MessageError {
     DuplicateOrUnsortedKey,
     PayloadTooLarge,
     InvalidRequestId,
-    UnsupportedTemplate(u8),
-    UnsupportedSizeClass(u8),
     ConfigTooLarge,
     UnknownWidgetReference,
 }
@@ -1755,7 +1747,7 @@ mod tests {
 
     fn status() -> StatusResponse {
         StatusResponse {
-            protocol_version: 1,
+            protocol_version: PROTOCOL_VERSION,
             max_protocol_version: MAX_PROTOCOL_VERSION,
             capabilities: CURRENT_CAPABILITIES,
             firmware_version: "m1-test".into(),
@@ -2141,9 +2133,11 @@ mod tests {
     #[test]
     fn version_and_unknown_type_are_explicit() {
         let mut frame = Frame::new(TYPE_STATUS_REQUEST, 1, vec![0xa0]);
-        frame.version = 2;
-        assert_eq!(decode_message(&frame), Err(MessageError::Version(2)));
+        // A version this build does not speak -- v1 is exactly that now, and a
+        // v1 device is what the fleet runs until the rollout session.
         frame.version = 1;
+        assert_eq!(decode_message(&frame), Err(MessageError::Version(1)));
+        frame.version = PROTOCOL_VERSION;
         frame.message_type = 99;
         assert_eq!(
             decode_message(&frame),

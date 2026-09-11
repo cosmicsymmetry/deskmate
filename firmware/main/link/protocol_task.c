@@ -141,8 +141,6 @@ typedef struct {
     // binding counts down between pushes instead of freezing.
     uint64_t scene_timer_anchor_ms;
     // One slot, for rendering an integer field into text; see
-    // scene_field_lookup() for why one is enough.
-    char scene_field_text[24];
     uint8_t wire[PROTOCOL_MAX_WIRE_FRAME];
     uint32_t valid_frames;
     uint32_t malformed_frames;
@@ -219,68 +217,72 @@ static uint32_t saturating_add(uint32_t left, uint32_t right)
     return right > UINT32_MAX - left ? UINT32_MAX : left + right;
 }
 
-static const protocol_widget_config_t *find_widget(
+static const protocol_card_config_t *find_card(
     const protocol_apply_config_t *config,
-    const char *widget_id)
+    const char *card_id)
 {
-    if (config == NULL || widget_id == NULL) {
+    if (config == NULL || card_id == NULL) {
         return NULL;
     }
-    for (size_t i = 0U; i < config->widget_count; ++i) {
-        if (strcmp(config->widgets[i].widget_id, widget_id) == 0) {
-            return &config->widgets[i];
+    for (size_t i = 0U; i < config->card_count; ++i) {
+        if (strcmp(config->cards[i].card_id, card_id) == 0) {
+            return &config->cards[i];
         }
     }
     return NULL;
 }
 
-static size_t active_screen_index(const widget_model_t *model)
+static size_t active_card_index(const widget_model_t *model)
 {
     const protocol_apply_config_t *config = widget_model_config(model);
-    const protocol_screen_config_t *screen = widget_model_active_screen(model);
-    if (config == NULL || screen == NULL) {
+    const protocol_card_config_t *card = widget_model_active_card(model);
+    if (config == NULL || card == NULL) {
         return 0U;
     }
-    return (size_t)(screen - config->screens);
+    return (size_t)(card - config->cards);
 }
 
+/* Protocol v2 has one identifier space: a screen id IS a card id. The
+ * carousel binding keeps both field names because ui/carousel.c and the
+ * device-event wire still speak of screens, but they now always carry the
+ * same string. */
 static bool fill_carousel_binding(protocol_context_t *context,
                                   carousel_binding_t *binding)
 {
     const protocol_apply_config_t *config = widget_model_config(&context->model);
     const interrupt_slot_t *interrupt = interrupt_state_active(
         &context->interrupts);
-    const protocol_screen_config_t *screen = widget_model_active_screen(
+    const protocol_card_config_t *active = widget_model_active_card(
         &context->model);
-    const char *widget_id = interrupt != NULL
+    const char *card_id = interrupt != NULL
         ? interrupt->widget_id
-        : (screen != NULL ? screen->widget_id : NULL);
-    const protocol_widget_config_t *widget = find_widget(config, widget_id);
-    if (config == NULL || widget == NULL || widget_id == NULL) {
+        : (active != NULL ? active->card_id : NULL);
+    const protocol_card_config_t *card = find_card(config, card_id);
+    if (config == NULL || card == NULL || card_id == NULL) {
         return false;
     }
 
     memset(binding, 0, sizeof(*binding));
-    strcpy(binding->widget_id, widget_id);
-    binding->tap_action = widget->tap_action;
+    strcpy(binding->widget_id, card_id);
+    binding->tap_action = card->tap_action;
     binding->interrupt = interrupt != NULL;
     if (interrupt != NULL) {
         strcpy(binding->screen_id, context->interrupts.saved_screen_id);
         binding->interrupt_token = interrupt->token;
         return true;
     }
-    if (screen == NULL || config->screen_count == 0U) {
+    if (active == NULL || config->card_count == 0U) {
         return false;
     }
 
-    size_t index = active_screen_index(&context->model);
-    size_t previous = index == 0U ? config->screen_count - 1U : index - 1U;
-    size_t next = (index + 1U) % config->screen_count;
-    strcpy(binding->screen_id, screen->screen_id);
-    strcpy(binding->previous_screen_id, config->screens[previous].screen_id);
-    strcpy(binding->previous_widget_id, config->screens[previous].widget_id);
-    strcpy(binding->next_screen_id, config->screens[next].screen_id);
-    strcpy(binding->next_widget_id, config->screens[next].widget_id);
+    size_t index = active_card_index(&context->model);
+    size_t previous = index == 0U ? config->card_count - 1U : index - 1U;
+    size_t next = (index + 1U) % config->card_count;
+    strcpy(binding->screen_id, active->card_id);
+    strcpy(binding->previous_screen_id, config->cards[previous].card_id);
+    strcpy(binding->previous_widget_id, config->cards[previous].card_id);
+    strcpy(binding->next_screen_id, config->cards[next].card_id);
+    strcpy(binding->next_widget_id, config->cards[next].card_id);
     return true;
 }
 
@@ -311,79 +313,26 @@ static bool show_current_content(protocol_context_t *context)
 
 // ------------------------------------------------------------------ scenes
 
-/* scene_binding.h's scene_field_fn: resolves `field.<name>` against the
- * pushed provider data for the widget whose id matches the live scene's card
- * id. Card ids and widget ids are the same 32-byte identifier space (see
- * PROTOCOL_MAX_CARD_ID_LENGTH) and PushData is still the only message that
- * carries provider values, so the widget model IS the field source -- there
- * is no second store to keep in step with it.
+/* Fills the timer half of the binding context from the snapshot the host
+ * pushed, counted down locally between pushes so a `timer.remaining:` binding
+ * does not freeze on a device whose whole reason for evaluating bindings
+ * itself is that the face keeps moving when the link does not.
  *
- * NULL for an unknown name is not an error: scene_binding_evaluate() renders
- * the "--" placeholder for it, which is exactly the state of a provider that
- * has not reported yet. */
-static const char *scene_field_lookup(void *ctx, const char *name)
-{
-    protocol_context_t *context = ctx;
-    if (context == NULL || name == NULL) {
-        return NULL;
-    }
-    const template_field_state_t *fields = widget_model_widget_fields(
-        &context->model, context->scene_card_id);
-    if (fields == NULL) {
-        return NULL;
-    }
-    const template_field_value_t *value = template_fields_get(fields, name);
-    if (value == NULL) {
-        return NULL;
-    }
-    if (value->type == PROTOCOL_FIELD_TEXT) {
-        return value->value.text;
-    }
-    if (value->type == PROTOCOL_FIELD_BOOLEAN) {
-        return value->value.boolean ? "true" : "false";
-    }
-    // One scratch slot is enough because scene_binding_evaluate() copies the
-    // returned string into the caller's buffer before scene_view asks for
-    // the next binding; two integer-valued fields in one scene never hold
-    // this at the same time.
-    snprintf(context->scene_field_text, sizeof(context->scene_field_text),
-             "%lld", (long long)value->value.integer);
-    return context->scene_field_text;
-}
-
-/* Fills the timer half of the binding context from the same ProgressRing
- * snapshot the reference oracle draws from, counted down locally between
- * pushes exactly as its current_remaining_ms() does.
- * Without the local countdown a `timer.remaining:` binding would freeze
- * between host pushes, on a device whose whole reason for evaluating
- * bindings itself is that the face keeps moving when the link does not.
- *
- * A card that is not a progress ring leaves timer_active false, which
- * renders the "--" placeholder -- the same thing an absent field renders.
- * `timer_active` means a timer snapshot exists, not that it is running: a
- * paused pomodoro must still show its remaining time. */
+ * A card with no pushed timer leaves timer_active false, which renders the
+ * "--" placeholder. `timer_active` means a snapshot exists, not that it is
+ * running: a paused pomodoro must still show its remaining time. */
 static void fill_timer_bindings(const protocol_context_t *context,
                                 scene_binding_context_t *binding)
 {
-    const template_field_state_t *fields = widget_model_widget_fields(
+    const widget_model_timer_t *timer = widget_model_timer(
         &context->model, context->scene_card_id);
-    if (fields == NULL ||
-        fields->template_kind != PROTOCOL_TEMPLATE_PROGRESS_RING) {
-        return;
-    }
-    const template_field_value_t *duration =
-        template_fields_get(fields, "duration_seconds");
-    const template_field_value_t *remaining =
-        template_fields_get(fields, "remaining_seconds");
-    const template_field_value_t *running =
-        template_fields_get(fields, "running");
-    if (duration == NULL || remaining == NULL || running == NULL ||
-        duration->value.integer <= 0) {
+    if (timer == NULL || timer->total_ms == 0U) {
         return;
     }
     scene_timer_snapshot_t snapshot = scene_timer_snapshot(
-        duration->value.integer, remaining->value.integer,
-        running->value.boolean, context->scene_timer_anchor_ms, uptime_ms());
+        (int64_t)(timer->total_ms / 1000U),
+        (int64_t)(timer->remaining_ms / 1000U), timer->running,
+        context->scene_timer_anchor_ms, uptime_ms());
     binding->timer_active = true;
     binding->timer_running = snapshot.running;
     binding->timer_total_ms = snapshot.total_ms;
@@ -400,8 +349,6 @@ static void fill_scene_binding_context(protocol_context_t *context,
     // so a `time:` binding and the standalone clock can never disagree.
     binding->unix_seconds = (int64_t)time(NULL);
     binding->utc_offset_minutes = context->link.utc_offset_minutes;
-    binding->field = scene_field_lookup;
-    binding->field_ctx = context;
     fill_timer_bindings(context, binding);
 }
 
@@ -651,11 +598,11 @@ static void dispatch_time_sync(protocol_context_t *context,
     transmit_ack(context, request_id, PROTOCOL_TYPE_TIME_SYNC, false, 0U);
 }
 
-static void dispatch_push_data(protocol_context_t *context,
-                               uint32_t request_id)
+static void dispatch_push_timer(protocol_context_t *context,
+                                uint32_t request_id)
 {
-    const protocol_push_data_t *push = &context->message.value.push_data;
-    widget_model_push_result_t result = widget_model_apply_push(
+    const protocol_push_timer_t *push = &context->message.value.push_timer;
+    widget_model_push_result_t result = widget_model_apply_timer(
         &context->model, push);
     if (result == WIDGET_MODEL_PUSH_STALE_REVISION) {
         transmit_error(context, request_id, PROTOCOL_ERROR_STALE_REVISION,
@@ -672,17 +619,17 @@ static void dispatch_push_data(protocol_context_t *context,
                        "invalid push data");
         return;
     }
-    // The scene's binding context reads its `field.` values straight out of
-    // the widget model updated above, so there is nothing further to copy:
-    // re-evaluating the bindings in place is the whole update. Deliberately
-    // NOT a rebuild -- a rebuild would re-acquire every asset face and
-    // reload the screen to change one label.
+    // The scene's binding context reads the timer straight out of the widget
+    // model updated above, so there is nothing further to copy: re-evaluating
+    // the bindings in place is the whole update. Deliberately NOT a rebuild --
+    // a rebuild would re-acquire every asset face and reload the screen to
+    // change one label.
     if (context->scene_live &&
-        strcmp(context->scene_card_id, push->widget_id) == 0) {
+        strcmp(context->scene_card_id, push->card_id) == 0) {
         context->scene_timer_anchor_ms = uptime_ms();
         context->scene_live = refresh_scene_bindings(context, true);
     }
-    transmit_ack(context, request_id, PROTOCOL_TYPE_PUSH_DATA, true,
+    transmit_ack(context, request_id, PROTOCOL_TYPE_PUSH_TIMER, true,
                  widget_model_latest_data_revision(&context->model));
 }
 
@@ -753,12 +700,6 @@ static protocol_error_code_t config_error_code(
     if (result == WIDGET_MODEL_CONFIG_UNKNOWN_WIDGET) {
         return PROTOCOL_ERROR_UNKNOWN_WIDGET;
     }
-    if (result == WIDGET_MODEL_CONFIG_UNSUPPORTED_TEMPLATE) {
-        return PROTOCOL_ERROR_UNSUPPORTED_TEMPLATE;
-    }
-    if (result == WIDGET_MODEL_CONFIG_UNSUPPORTED_SIZE_CLASS) {
-        return PROTOCOL_ERROR_UNSUPPORTED_SIZE_CLASS;
-    }
     return PROTOCOL_ERROR_INVALID_PAYLOAD;
 }
 
@@ -807,24 +748,24 @@ static void dispatch_apply_config(protocol_context_t *context,
                  widget_model_config_revision(&context->model));
 }
 
-static void dispatch_activate_screen(protocol_context_t *context,
+static void dispatch_activate_card(protocol_context_t *context,
                                      uint32_t request_id)
 {
-    const char *screen_id = context->message.value.activate_screen.screen_id;
-    if (!widget_model_activate_screen(&context->model, screen_id)) {
-        transmit_error(context, request_id, PROTOCOL_ERROR_UNKNOWN_SCREEN,
-                       "unknown screen");
+    const char *card_id = context->message.value.activate_card.card_id;
+    if (!widget_model_activate_card(&context->model, card_id)) {
+        transmit_error(context, request_id, PROTOCOL_ERROR_UNKNOWN_WIDGET,
+                       "unknown card");
         return;
     }
     if (interrupt_state_active(&context->interrupts) != NULL) {
         (void)interrupt_state_set_saved_screen(&context->interrupts,
-                                               screen_id);
+                                               card_id);
     } else if (!show_carousel_fallback(context)) {
         transmit_error(context, request_id, PROTOCOL_ERROR_INTERNAL,
                        "UI command rejected");
         return;
     }
-    transmit_ack(context, request_id, PROTOCOL_TYPE_ACTIVATE_SCREEN,
+    transmit_ack(context, request_id, PROTOCOL_TYPE_ACTIVATE_CARD,
                  false, 0U);
 }
 
@@ -834,27 +775,24 @@ static void dispatch_trigger_interrupt(protocol_context_t *context,
     const protocol_trigger_interrupt_t *trigger =
         &context->message.value.trigger_interrupt;
     const protocol_apply_config_t *config = widget_model_config(&context->model);
-    const protocol_widget_config_t *widget = find_widget(config,
-                                                          trigger->widget_id);
-    if (widget == NULL) {
+    const protocol_card_config_t *card = find_card(config, trigger->widget_id);
+    if (card == NULL) {
         transmit_error(context, request_id, PROTOCOL_ERROR_UNKNOWN_WIDGET,
                        "unknown widget");
         return;
     }
-    if (widget->interrupt_policy != PROTOCOL_INTERRUPT_ENABLED) {
-        transmit_error(context, request_id, PROTOCOL_ERROR_INVALID_PAYLOAD,
-                       "interrupt disabled");
-        return;
-    }
-    const protocol_screen_config_t *screen = widget_model_active_screen(
+    /* Protocol v1 gated this on a per-widget interrupt policy. v2 has none:
+     * the host decides which cards can alert, and a host that sends a
+     * TriggerInterrupt has already made that decision. */
+    const protocol_card_config_t *active = widget_model_active_card(
         &context->model);
-    if (screen == NULL) {
+    if (active == NULL) {
         transmit_error(context, request_id, PROTOCOL_ERROR_INTERNAL,
-                       "no active carousel screen");
+                       "no active card");
         return;
     }
     interrupt_trigger_result_t result = interrupt_state_trigger(
-        &context->interrupts, trigger, screen->screen_id);
+        &context->interrupts, trigger, active->card_id);
     if (result == INTERRUPT_TRIGGER_STALE_TOKEN) {
         transmit_error(context, request_id, PROTOCOL_ERROR_STALE_REVISION,
                        "stale interrupt token");
@@ -1675,14 +1613,14 @@ static void dispatch_request(protocol_context_t *context,
     case PROTOCOL_TYPE_TIME_SYNC:
         dispatch_time_sync(context, frame->request_id);
         break;
-    case PROTOCOL_TYPE_PUSH_DATA:
-        dispatch_push_data(context, frame->request_id);
+    case PROTOCOL_TYPE_PUSH_TIMER:
+        dispatch_push_timer(context, frame->request_id);
         break;
     case PROTOCOL_TYPE_APPLY_CONFIG:
         dispatch_apply_config(context, frame->request_id);
         break;
-    case PROTOCOL_TYPE_ACTIVATE_SCREEN:
-        dispatch_activate_screen(context, frame->request_id);
+    case PROTOCOL_TYPE_ACTIVATE_CARD:
+        dispatch_activate_card(context, frame->request_id);
         break;
     case PROTOCOL_TYPE_TRIGGER_INTERRUPT:
         dispatch_trigger_interrupt(context, frame->request_id);
@@ -1795,37 +1733,34 @@ static bool validate_tap_event(protocol_context_t *context,
     if (interrupt_state_active(&context->interrupts) != NULL) {
         return false;
     }
-    const protocol_screen_config_t *screen = widget_model_active_screen(
+    const protocol_card_config_t *card = widget_model_active_card(
         &context->model);
-    const protocol_apply_config_t *config = widget_model_config(&context->model);
-    const protocol_widget_config_t *widget = screen != NULL
-        ? find_widget(config, screen->widget_id) : NULL;
     protocol_event_action_t expected = PROTOCOL_EVENT_ACTION_NONE;
-    if (widget != NULL && widget->tap_action == PROTOCOL_TAP_START_PAUSE) {
+    if (card != NULL && card->tap_action == PROTOCOL_TAP_START_PAUSE) {
         expected = PROTOCOL_EVENT_ACTION_START_PAUSE;
-    } else if (widget != NULL && widget->tap_action == PROTOCOL_TAP_RESET) {
+    } else if (card != NULL && card->tap_action == PROTOCOL_TAP_RESET) {
         expected = PROTOCOL_EVENT_ACTION_RESET;
     }
-    return screen != NULL && widget != NULL && event->action == expected &&
-           strcmp(event->screen_id, screen->screen_id) == 0 &&
-           strcmp(event->widget_id, widget->widget_id) == 0;
+    return card != NULL && event->action == expected &&
+           strcmp(event->screen_id, card->card_id) == 0 &&
+           strcmp(event->widget_id, card->card_id) == 0;
 }
 
 static bool apply_navigation_event(protocol_context_t *context,
                                    protocol_device_event_t *event)
 {
     if (interrupt_state_active(&context->interrupts) != NULL ||
-        !widget_model_activate_screen(&context->model, event->screen_id)) {
+        !widget_model_activate_card(&context->model, event->screen_id)) {
         return false;
     }
-    const protocol_screen_config_t *screen = widget_model_active_screen(
+    const protocol_card_config_t *card = widget_model_active_card(
         &context->model);
-    if (screen == NULL || strcmp(screen->widget_id, event->widget_id) != 0 ||
+    if (card == NULL || strcmp(card->card_id, event->widget_id) != 0 ||
         !show_carousel_fallback(context)) {
         return false;
     }
-    strcpy(event->screen_id, screen->screen_id);
-    strcpy(event->widget_id, screen->widget_id);
+    strcpy(event->screen_id, card->card_id);
+    strcpy(event->widget_id, card->card_id);
     return true;
 }
 
@@ -1848,7 +1783,7 @@ static bool apply_dismissal_event(protocol_context_t *context,
     if (dismissal.promoted_pending) {
         shown = show_interrupt_fallback(context);
     } else if (dismissal.restore_saved_screen &&
-               widget_model_activate_screen(&context->model,
+               widget_model_activate_card(&context->model,
                                              dismissal.saved_screen_id)) {
         shown = show_carousel_fallback(context);
     }

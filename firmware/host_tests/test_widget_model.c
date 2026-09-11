@@ -1,343 +1,223 @@
+/* Host tests for the device's model of the loop.
+ *
+ * Protocol v2 reduced this to what the device still decides for itself: which
+ * cards exist, which one is live, and the timer a pomodoro's `timer.*` scene
+ * bindings resolve against. The template/size-class/field-registry tests this
+ * file used to carry went with the concepts they checked -- the device does not
+ * render a face and so cannot have an opinion about one.
+ */
+
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
 
-#include "../main/core/link_state.h"
-#include "../main/core/widget_model.h"
+#include "core/widget_model.h"
 
-static widget_model_t s_model;
-
-static protocol_apply_config_t config_two_screens(uint32_t revision)
+static protocol_apply_config_t config_with(uint32_t revision,
+                                           const char *const *card_ids,
+                                           size_t count)
 {
-    protocol_apply_config_t config = {
-        .revision = revision,
-        .rotation = 90U,
-        .widget_count = 2U,
-        .widgets = {
-            {
-                .widget_id = "clock",
-                .template_kind = PROTOCOL_TEMPLATE_DIGITAL_CLOCK,
-                .size_class = PROTOCOL_SIZE_FULL,
-                .tap_action = PROTOCOL_TAP_NONE,
-                .interrupt_policy = PROTOCOL_INTERRUPT_DISABLED,
-            },
-            {
-                .widget_id = "timer",
-                .template_kind = PROTOCOL_TEMPLATE_PROGRESS_RING,
-                .size_class = PROTOCOL_SIZE_STANDARD,
-                .tap_action = PROTOCOL_TAP_START_PAUSE,
-                .interrupt_policy = PROTOCOL_INTERRUPT_ENABLED,
-            },
-        },
-        .screen_count = 2U,
-        .screens = {
-            {.screen_id = "home", .widget_id = "clock"},
-            {.screen_id = "focus", .widget_id = "timer"},
-        },
-    };
+    protocol_apply_config_t config;
+    memset(&config, 0, sizeof(config));
+    config.revision = revision;
+    config.rotation = 90U;
+    config.card_count = count;
+    for (size_t i = 0U; i < count; ++i) {
+        snprintf(config.cards[i].card_id, sizeof(config.cards[i].card_id), "%s",
+                 card_ids[i]);
+        config.cards[i].tap_action = PROTOCOL_TAP_NONE;
+    }
     return config;
 }
 
-static protocol_push_data_t clock_push(uint32_t revision)
+static protocol_push_timer_t timer_push(const char *card_id, uint32_t revision,
+                                        uint32_t total_ms,
+                                        uint32_t remaining_ms, bool running)
 {
-    protocol_push_data_t push = {
-        .widget_id = "clock",
-        .revision = revision,
-        .field_count = 1U,
-        .fields = {{
-            .key = "show_seconds",
-            .type = PROTOCOL_FIELD_BOOLEAN,
-            .value.boolean = false,
-        }},
-    };
+    protocol_push_timer_t push;
+    memset(&push, 0, sizeof(push));
+    snprintf(push.card_id, sizeof(push.card_id), "%s", card_id);
+    push.revision = revision;
+    push.total_ms = total_ms;
+    push.remaining_ms = remaining_ms;
+    push.running = running;
     return push;
 }
 
-static protocol_push_data_t timer_push(uint32_t revision)
-{
-    protocol_push_data_t push = {
-        .widget_id = "timer",
-        .revision = revision,
-        .field_count = 3U,
-        .fields = {
-            {.key = "duration_seconds", .type = PROTOCOL_FIELD_INTEGER,
-             .value.integer = 1500},
-            {.key = "remaining_seconds", .type = PROTOCOL_FIELD_INTEGER,
-             .value.integer = 900},
-            {.key = "running", .type = PROTOCOL_FIELD_BOOLEAN,
-             .value.boolean = true},
-        },
-    };
-    return push;
-}
-
-static void test_atomic_config_and_activation(void)
-{
-    widget_model_init(&s_model);
-    assert(widget_model_config(&s_model) == NULL);
-    assert(widget_model_active_screen(&s_model) == NULL);
-    protocol_apply_config_t config = config_two_screens(1U);
-    assert(widget_model_apply_config(&s_model, &config) ==
-           WIDGET_MODEL_CONFIG_APPLIED);
-    assert(widget_model_config(&s_model)->revision == 1U);
-    assert(strcmp(widget_model_active_screen(&s_model)->screen_id, "home") ==
-           0);
-
-    assert(widget_model_activate_screen(&s_model, "focus"));
-    assert(!widget_model_activate_screen(&s_model, "missing"));
-    assert(strcmp(widget_model_active_screen(&s_model)->screen_id, "focus") ==
-           0);
-
-    protocol_apply_config_t invalid = config_two_screens(2U);
-    strcpy(invalid.widgets[1].widget_id, "clock");
-    assert(widget_model_apply_config(&s_model, &invalid) ==
-           WIDGET_MODEL_CONFIG_DUPLICATE_ID);
-    assert(widget_model_config(&s_model)->revision == 1U);
-    assert(strcmp(widget_model_active_screen(&s_model)->screen_id, "focus") ==
-           0);
-
-    invalid = config_two_screens(2U);
-    strcpy(invalid.screens[1].widget_id, "missing");
-    assert(widget_model_apply_config(&s_model, &invalid) ==
-           WIDGET_MODEL_CONFIG_UNKNOWN_WIDGET);
-    assert(widget_model_config(&s_model)->revision == 1U);
-
-    invalid = config_two_screens(2U);
-    invalid.widgets[0].template_kind = (protocol_template_kind_t)99;
-    assert(widget_model_apply_config(&s_model, &invalid) ==
-           WIDGET_MODEL_CONFIG_UNSUPPORTED_TEMPLATE);
-    invalid = config_two_screens(2U);
-    invalid.widgets[0].size_class = PROTOCOL_SIZE_TILE;
-    assert(widget_model_apply_config(&s_model, &invalid) ==
-           WIDGET_MODEL_CONFIG_UNSUPPORTED_SIZE_CLASS);
-    invalid = config_two_screens(2U);
-    invalid.widget_count = PROTOCOL_MAX_CONFIG_WIDGETS + 1U;
-    assert(widget_model_apply_config(&s_model, &invalid) ==
-           WIDGET_MODEL_CONFIG_TOO_LARGE);
-    invalid = config_two_screens(2U);
-    invalid.rotation = 180U;
-    assert(widget_model_apply_config(&s_model, &invalid) ==
-           WIDGET_MODEL_CONFIG_INVALID_VALUE);
-    assert(widget_model_config(&s_model)->revision == 1U);
-
-    protocol_apply_config_t replacement = config_two_screens(2U);
-    replacement.screens[0] = config.screens[1];
-    replacement.screens[1] = config.screens[0];
-    assert(widget_model_apply_config(&s_model, &replacement) ==
-           WIDGET_MODEL_CONFIG_APPLIED);
-    assert(strcmp(widget_model_active_screen(&s_model)->screen_id, "focus") ==
-           0);
-    assert(widget_model_apply_config(&s_model, &config) ==
-           WIDGET_MODEL_CONFIG_STALE_REVISION);
-}
-
-static void test_replay_and_global_data_revisions(void)
-{
-    widget_model_init(&s_model);
-    protocol_apply_config_t config = config_two_screens(4U);
-    assert(widget_model_apply_config(&s_model, &config) ==
-           WIDGET_MODEL_CONFIG_APPLIED);
-    protocol_push_data_t push = clock_push(10U);
-    assert(widget_model_apply_push(&s_model, &push) ==
-           WIDGET_MODEL_PUSH_ACCEPTED);
-    assert(widget_model_latest_data_revision(&s_model) == 10U);
-    assert(!template_fields_get(widget_model_widget_fields(&s_model, "clock"),
-                                "show_seconds")->value.boolean);
-
-    assert(widget_model_apply_config(&s_model, &config) ==
-           WIDGET_MODEL_CONFIG_REPLAYED);
-    assert(!template_fields_get(widget_model_widget_fields(&s_model, "clock"),
-                                "show_seconds")->value.boolean);
-
-    push = timer_push(11U);
-    assert(widget_model_apply_push(&s_model, &push) ==
-           WIDGET_MODEL_PUSH_ACCEPTED);
-    push = clock_push(11U);
-    assert(widget_model_apply_push(&s_model, &push) ==
-           WIDGET_MODEL_PUSH_STALE_REVISION);
-
-    push = timer_push(12U);
-    push.fields[1].value.integer = 1600;
-    assert(widget_model_apply_push(&s_model, &push) ==
-           WIDGET_MODEL_PUSH_INVALID_FIELDS);
-    assert(widget_model_latest_data_revision(&s_model) == 11U);
-
-    push = clock_push(12U);
-    strcpy(push.widget_id, "missing");
-    assert(widget_model_apply_push(&s_model, &push) ==
-           WIDGET_MODEL_PUSH_UNKNOWN_WIDGET);
-    assert(widget_model_latest_data_revision(&s_model) == 11U);
-
-    push = clock_push(12U);
-    push.field_count = 2U;
-    strcpy(push.fields[1].key, "future_field");
-    push.fields[1].type = PROTOCOL_FIELD_BOOLEAN;
-    push.fields[1].value.boolean = true;
-    assert(widget_model_apply_push(&s_model, &push) ==
-           WIDGET_MODEL_PUSH_ACCEPTED);
-    assert(!template_fields_get(widget_model_widget_fields(&s_model, "clock"),
-                                "show_seconds")->value.boolean);
-    assert(widget_model_latest_data_revision(&s_model) == 12U);
-
-    protocol_apply_config_t changed_same_revision = config;
-    changed_same_revision.rotation = 270U;
-    assert(widget_model_apply_config(&s_model, &changed_same_revision) ==
-           WIDGET_MODEL_CONFIG_STALE_REVISION);
-    assert(!template_fields_get(widget_model_widget_fields(&s_model, "clock"),
-                                "show_seconds")->value.boolean);
-
-    protocol_apply_config_t replacement = config_two_screens(5U);
-    assert(widget_model_apply_config(&s_model, &replacement) ==
-           WIDGET_MODEL_CONFIG_APPLIED);
-    assert(template_fields_get(widget_model_widget_fields(&s_model, "clock"),
-                               "show_seconds")->value.boolean);
-    assert(widget_model_latest_data_revision(&s_model) == 12U);
-}
-
-static void test_config_preflight_does_not_mutate_model(void)
-{
-    widget_model_init(&s_model);
-    protocol_apply_config_t config = config_two_screens(1U);
-    assert(widget_model_check_config(&s_model, &config) ==
-           WIDGET_MODEL_CONFIG_APPLIED);
-    assert(widget_model_config(&s_model) == NULL);
-
-    assert(widget_model_apply_config(&s_model, &config) ==
-           WIDGET_MODEL_CONFIG_APPLIED);
-    assert(widget_model_activate_screen(&s_model, "focus"));
-    assert(widget_model_check_config(&s_model, &config) ==
-           WIDGET_MODEL_CONFIG_REPLAYED);
-    assert(strcmp(widget_model_active_screen(&s_model)->screen_id, "focus") ==
-           0);
-
-    protocol_apply_config_t invalid = config_two_screens(2U);
-    strcpy(invalid.widgets[1].widget_id, "clock");
-    assert(widget_model_check_config(&s_model, &invalid) ==
-           WIDGET_MODEL_CONFIG_DUPLICATE_ID);
-    assert(widget_model_config_revision(&s_model) == 1U);
-
-    protocol_apply_config_t changed_same_revision = config;
-    changed_same_revision.rotation = 270U;
-    assert(widget_model_check_config(&s_model, &changed_same_revision) ==
-           WIDGET_MODEL_CONFIG_STALE_REVISION);
-    assert(widget_model_config(&s_model)->rotation == 90U);
-
-    protocol_apply_config_t replacement = config_two_screens(2U);
-    assert(widget_model_check_config(&s_model, &replacement) ==
-           WIDGET_MODEL_CONFIG_APPLIED);
-    assert(widget_model_config_revision(&s_model) == 1U);
-    assert(strcmp(widget_model_active_screen(&s_model)->screen_id, "focus") ==
-           0);
-}
-
-static void build_single_widget_config(protocol_apply_config_t *config,
-                                       const char *id,
-                                       protocol_template_kind_t template_kind,
-                                       uint32_t revision)
-{
-    memset(config, 0, sizeof(*config));
-    config->revision = revision;
-    config->rotation = 90U;
-    config->widget_count = 1U;
-    strcpy(config->widgets[0].widget_id, id);
-    config->widgets[0].template_kind = template_kind;
-    config->widgets[0].size_class = PROTOCOL_SIZE_FULL;
-    config->widgets[0].tap_action = PROTOCOL_TAP_NONE;
-    config->widgets[0].interrupt_policy = PROTOCOL_INTERRUPT_DISABLED;
-    config->screen_count = 1U;
-    strcpy(config->screens[0].screen_id, id);
-    strcpy(config->screens[0].widget_id, id);
-}
-
-static void test_extended_templates_are_accepted(void)
+static void test_config_applies_and_activates(void)
 {
     widget_model_t model;
     widget_model_init(&model);
+    assert(widget_model_config(&model) == NULL);
+    assert(widget_model_active_card(&model) == NULL);
 
-    const protocol_template_kind_t kinds[] = {
-        PROTOCOL_TEMPLATE_ANALOG_CLOCK,
-        PROTOCOL_TEMPLATE_BIG_NUMBER_LABEL,
-        PROTOCOL_TEMPLATE_ICON_BADGE_TEXT,
-    };
-    for (size_t i = 0U; i < sizeof(kinds) / sizeof(kinds[0]); ++i) {
-        protocol_apply_config_t config;
-        build_single_widget_config(&config, "card", kinds[i],
-                                   (uint32_t)(i + 1U));
-        assert(widget_model_apply_config(&model, &config) ==
-               WIDGET_MODEL_CONFIG_APPLIED);
-    }
+    const char *ids[] = {"clock", "focus"};
+    protocol_apply_config_t config = config_with(1U, ids, 2U);
+    assert(widget_model_apply_config(&model, &config) ==
+           WIDGET_MODEL_CONFIG_APPLIED);
+    assert(widget_model_config_revision(&model) == 1U);
+    /* The first card leads the loop until something activates another. */
+    assert(strcmp(widget_model_active_card(&model)->card_id, "clock") == 0);
 
-    /* An out-of-range kind must still be refused. */
-    protocol_apply_config_t bad;
-    build_single_widget_config(&bad, "card", (protocol_template_kind_t)7,
-                               99U);
-    assert(widget_model_apply_config(&model, &bad) ==
-           WIDGET_MODEL_CONFIG_UNSUPPORTED_TEMPLATE);
+    assert(widget_model_activate_card(&model, "focus"));
+    assert(strcmp(widget_model_active_card(&model)->card_id, "focus") == 0);
+    assert(!widget_model_activate_card(&model, "absent"));
+    assert(strcmp(widget_model_active_card(&model)->card_id, "focus") == 0);
 }
 
-static void test_timeout_retains_replay_state(void)
+static void test_replace_keeps_the_live_card_when_it_survives(void)
 {
-    widget_model_init(&s_model);
-    link_state_t link;
-    link_state_init(&link);
-    protocol_apply_config_t config = config_two_screens(1U);
-    assert(widget_model_apply_config(&s_model, &config) ==
+    widget_model_t model;
+    widget_model_init(&model);
+    const char *first[] = {"clock", "focus"};
+    protocol_apply_config_t config = config_with(1U, first, 2U);
+    assert(widget_model_apply_config(&model, &config) ==
            WIDGET_MODEL_CONFIG_APPLIED);
-    protocol_push_data_t push = clock_push(7U);
-    assert(widget_model_apply_push(&s_model, &push) ==
-           WIDGET_MODEL_PUSH_ACCEPTED);
+    assert(widget_model_activate_card(&model, "focus"));
 
-    assert(link_state_note_valid_request(&link, 100U));
-    assert(link_state_poll(&link, 10100U));
-    assert(!link.online);
-    assert(widget_model_config(&s_model)->revision == 1U);
-    assert(widget_model_latest_data_revision(&s_model) == 7U);
-    assert(strcmp(widget_model_active_screen(&s_model)->screen_id, "home") ==
-           0);
+    /* Reordering must not jump the loop off the card on the panel. */
+    const char *reordered[] = {"focus", "clock"};
+    protocol_apply_config_t next = config_with(2U, reordered, 2U);
+    assert(widget_model_apply_config(&model, &next) ==
+           WIDGET_MODEL_CONFIG_APPLIED);
+    assert(strcmp(widget_model_active_card(&model)->card_id, "focus") == 0);
 
-    assert(link_state_note_valid_request(&link, 12000U));
-    assert(widget_model_apply_config(&s_model, &config) ==
+    /* But a card that leaves cannot stay on the panel. */
+    const char *without[] = {"clock"};
+    protocol_apply_config_t third = config_with(3U, without, 1U);
+    assert(widget_model_apply_config(&model, &third) ==
+           WIDGET_MODEL_CONFIG_APPLIED);
+    assert(strcmp(widget_model_active_card(&model)->card_id, "clock") == 0);
+}
+
+static void test_revision_rules(void)
+{
+    widget_model_t model;
+    widget_model_init(&model);
+    const char *ids[] = {"clock"};
+    protocol_apply_config_t config = config_with(5U, ids, 1U);
+    assert(widget_model_apply_config(&model, &config) ==
+           WIDGET_MODEL_CONFIG_APPLIED);
+
+    protocol_apply_config_t replay = config_with(5U, ids, 1U);
+    assert(widget_model_apply_config(&model, &replay) ==
            WIDGET_MODEL_CONFIG_REPLAYED);
-    push = clock_push(8U);
-    assert(widget_model_apply_push(&s_model, &push) ==
-           WIDGET_MODEL_PUSH_ACCEPTED);
 
-    widget_model_init(&s_model);
-    assert(widget_model_config_revision(&s_model) == 0U);
-    assert(widget_model_latest_data_revision(&s_model) == 0U);
-    assert(widget_model_apply_push(&s_model, &push) ==
+    protocol_apply_config_t stale = config_with(4U, ids, 1U);
+    assert(widget_model_apply_config(&model, &stale) ==
+           WIDGET_MODEL_CONFIG_STALE_REVISION);
+
+    protocol_apply_config_t zero = config_with(0U, ids, 1U);
+    assert(widget_model_apply_config(&model, &zero) ==
+           WIDGET_MODEL_CONFIG_INVALID_VALUE);
+
+    const char *duplicate[] = {"clock", "clock"};
+    protocol_apply_config_t dup = config_with(6U, duplicate, 2U);
+    assert(widget_model_apply_config(&model, &dup) ==
+           WIDGET_MODEL_CONFIG_DUPLICATE_ID);
+}
+
+static void test_preflight_does_not_mutate(void)
+{
+    widget_model_t model;
+    widget_model_init(&model);
+    const char *ids[] = {"clock"};
+    protocol_apply_config_t config = config_with(1U, ids, 1U);
+    assert(widget_model_check_config(&model, &config) ==
+           WIDGET_MODEL_CONFIG_APPLIED);
+    /* Checking is not applying. */
+    assert(widget_model_config(&model) == NULL);
+    assert(widget_model_config_revision(&model) == 0U);
+}
+
+static void test_timer_push_rules(void)
+{
+    widget_model_t model;
+    widget_model_init(&model);
+    const char *ids[] = {"clock", "focus"};
+    protocol_apply_config_t config = config_with(1U, ids, 2U);
+    assert(widget_model_apply_config(&model, &config) ==
+           WIDGET_MODEL_CONFIG_APPLIED);
+
+    protocol_push_timer_t unknown = timer_push("ghost", 1U, 10U, 5U, true);
+    assert(widget_model_apply_timer(&model, &unknown) ==
            WIDGET_MODEL_PUSH_UNKNOWN_WIDGET);
+
+    protocol_push_timer_t push = timer_push("focus", 4U, 1500U, 900U, true);
+    assert(widget_model_apply_timer(&model, &push) ==
+           WIDGET_MODEL_PUSH_ACCEPTED);
+    assert(widget_model_latest_data_revision(&model) == 4U);
+
+    const widget_model_timer_t *timer = widget_model_timer(&model, "focus");
+    assert(timer != NULL);
+    assert(timer->total_ms == 1500U);
+    assert(timer->remaining_ms == 900U);
+    assert(timer->running);
+    /* The timer belongs to one card; another card has none. */
+    assert(widget_model_timer(&model, "clock") == NULL);
+
+    protocol_push_timer_t stale = timer_push("focus", 3U, 1500U, 800U, true);
+    assert(widget_model_apply_timer(&model, &stale) ==
+           WIDGET_MODEL_PUSH_STALE_REVISION);
+
+    protocol_push_timer_t zero = timer_push("focus", 0U, 1500U, 800U, true);
+    assert(widget_model_apply_timer(&model, &zero) ==
+           WIDGET_MODEL_PUSH_INVALID_ARGUMENT);
+}
+
+static void test_timer_is_dropped_when_its_card_leaves(void)
+{
+    widget_model_t model;
+    widget_model_init(&model);
+    const char *ids[] = {"clock", "focus"};
+    protocol_apply_config_t config = config_with(1U, ids, 2U);
+    assert(widget_model_apply_config(&model, &config) ==
+           WIDGET_MODEL_CONFIG_APPLIED);
+    protocol_push_timer_t push = timer_push("focus", 1U, 1500U, 900U, true);
+    assert(widget_model_apply_timer(&model, &push) ==
+           WIDGET_MODEL_PUSH_ACCEPTED);
+    assert(widget_model_has_running_progress(&model));
+
+    const char *without[] = {"clock"};
+    protocol_apply_config_t next = config_with(2U, without, 1U);
+    assert(widget_model_apply_config(&model, &next) ==
+           WIDGET_MODEL_CONFIG_APPLIED);
+    /* A timer with no card cannot be resolved against, and must not keep the
+     * OTA deferral gate held open. */
+    assert(widget_model_timer(&model, "focus") == NULL);
+    assert(!widget_model_has_running_progress(&model));
 }
 
 static void test_running_progress_is_visible_to_ota_policy(void)
 {
-    widget_model_init(&s_model);
-    assert(!widget_model_has_running_progress(&s_model));
-    protocol_apply_config_t config = config_two_screens(1U);
-    assert(widget_model_apply_config(&s_model, &config) ==
+    widget_model_t model;
+    widget_model_init(&model);
+    const char *ids[] = {"focus"};
+    protocol_apply_config_t config = config_with(1U, ids, 1U);
+    assert(widget_model_apply_config(&model, &config) ==
            WIDGET_MODEL_CONFIG_APPLIED);
-    assert(!widget_model_has_running_progress(&s_model));
+    assert(!widget_model_has_running_progress(&model));
 
-    protocol_push_data_t push = timer_push(1U);
-    assert(widget_model_apply_push(&s_model, &push) ==
+    protocol_push_timer_t running = timer_push("focus", 1U, 1500U, 900U, true);
+    assert(widget_model_apply_timer(&model, &running) ==
            WIDGET_MODEL_PUSH_ACCEPTED);
-    assert(widget_model_has_running_progress(&s_model));
+    assert(widget_model_has_running_progress(&model));
 
-    push = timer_push(2U);
-    push.fields[2].value.boolean = false;
-    assert(widget_model_apply_push(&s_model, &push) ==
+    protocol_push_timer_t paused = timer_push("focus", 2U, 1500U, 900U, false);
+    assert(widget_model_apply_timer(&model, &paused) ==
            WIDGET_MODEL_PUSH_ACCEPTED);
-    assert(!widget_model_has_running_progress(&s_model));
+    assert(!widget_model_has_running_progress(&model));
 }
 
 int main(void)
 {
-    test_atomic_config_and_activation();
-    test_replay_and_global_data_revisions();
-    test_config_preflight_does_not_mutate_model();
-    test_extended_templates_are_accepted();
-    test_timeout_retains_replay_state();
+    test_config_applies_and_activates();
+    test_replace_keeps_the_live_card_when_it_survives();
+    test_revision_rules();
+    test_preflight_does_not_mutate();
+    test_timer_push_rules();
+    test_timer_is_dropped_when_its_card_leaves();
     test_running_progress_is_visible_to_ota_policy();
-    printf("test_widget_model: OK (%zu-byte fixed model)\n", sizeof(s_model));
+    printf("test_widget_model: OK\n");
     return 0;
 }

@@ -14,7 +14,6 @@
 #define TIMER_PERMILLE_TOKEN "timer.permille"
 #define TIMER_STATUS_TOKEN "timer.status"
 #define DATE_TOKEN "date"
-#define FIELD_PREFIX "field."
 #define TIMER_SECONDS_MAX INT64_C(86400)
 #define TIMER_MS_MAX (UINT64_C(86400) * UINT64_C(1000))
 #define CLOCK_DIAL_ROTATION 270
@@ -240,14 +239,6 @@ scene_binding_result_t scene_binding_parse(const char *text,
     if (strncmp(text, TIME_PREFIX, strlen(TIME_PREFIX)) == 0) {
         return parse_time_like(text + strlen(TIME_PREFIX),
                                 SCENE_BINDING_TIME, out);
-    }
-
-    if (strncmp(text, FIELD_PREFIX, strlen(FIELD_PREFIX)) == 0) {
-        const char *argument = text + strlen(FIELD_PREFIX);
-        if (argument[0] == '\0') {
-            return SCENE_BINDING_ERR_FORMAT;
-        }
-        return store_argument(argument, SCENE_BINDING_FIELD, out);
     }
 
     return SCENE_BINDING_ERR_UNKNOWN;
@@ -533,15 +524,6 @@ scene_binding_result_t scene_binding_evaluate(
         snprintf(piece, sizeof piece, "%u",
                  (unsigned)context->timer_remaining_permille);
         return write_bounded(out, out_capacity, piece);
-    }
-    case SCENE_BINDING_FIELD: {
-        const char *value = (context->field != NULL)
-            ? context->field(context->field_ctx, binding->argument)
-            : NULL;
-        if (value == NULL) {
-            return write_placeholder(out, out_capacity, binding->argument);
-        }
-        return write_bounded(out, out_capacity, value);
     }
     default:
         return SCENE_BINDING_ERR_ARGUMENT;

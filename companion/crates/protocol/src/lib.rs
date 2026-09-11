@@ -7,7 +7,7 @@ mod scene;
 pub mod test_support;
 mod util;
 
-pub const PROTOCOL_VERSION: u8 = 1;
+pub const PROTOCOL_VERSION: u8 = 2;
 
 pub use frame::{
     Deframer, Frame, FrameError, MAX_DECODED_FRAME, MAX_PAYLOAD_SIZE, MAX_WIRE_FRAME, crc32c,

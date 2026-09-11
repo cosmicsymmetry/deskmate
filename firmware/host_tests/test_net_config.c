@@ -161,11 +161,11 @@ static void test_usb_message_gate_in_networked_tier(void)
     assert(!net_config_usb_message_allowed(PROTOCOL_TIER_NETWORKED,
                                            PROTOCOL_TYPE_APPLY_CONFIG));
     assert(!net_config_usb_message_allowed(PROTOCOL_TIER_NETWORKED,
-                                           PROTOCOL_TYPE_PUSH_DATA));
+                                           PROTOCOL_TYPE_PUSH_TIMER));
     assert(!net_config_usb_message_allowed(PROTOCOL_TIER_NETWORKED,
                                            PROTOCOL_TYPE_TIME_SYNC));
     assert(!net_config_usb_message_allowed(PROTOCOL_TIER_NETWORKED,
-                                           PROTOCOL_TYPE_ACTIVATE_SCREEN));
+                                           PROTOCOL_TYPE_ACTIVATE_CARD));
     assert(!net_config_usb_message_allowed(PROTOCOL_TIER_NETWORKED,
                                            PROTOCOL_TYPE_TRIGGER_INTERRUPT));
 }
@@ -176,7 +176,7 @@ static void test_usb_message_gate_in_local_tier_allows_everything(void)
     assert(net_config_usb_message_allowed(PROTOCOL_TIER_LOCAL,
                                           PROTOCOL_TYPE_APPLY_CONFIG));
     assert(net_config_usb_message_allowed(PROTOCOL_TIER_LOCAL,
-                                          PROTOCOL_TYPE_PUSH_DATA));
+                                          PROTOCOL_TYPE_PUSH_TIMER));
     assert(net_config_usb_message_allowed(PROTOCOL_TIER_LOCAL,
                                           PROTOCOL_TYPE_TIME_SYNC));
 }

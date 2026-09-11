@@ -319,7 +319,7 @@ fn fixture_messages() -> Vec<(&'static str, u32, Message)> {
             "status_response.bin",
             1,
             Message::StatusResponse(StatusResponse {
-                protocol_version: 1,
+                protocol_version: protocol::PROTOCOL_VERSION,
                 max_protocol_version: MAX_PROTOCOL_VERSION,
                 capabilities: CURRENT_CAPABILITIES,
                 firmware_version: "deskmate-m1".into(),
@@ -373,7 +373,7 @@ fn fixture_messages() -> Vec<(&'static str, u32, Message)> {
             "status_response_networked.bin",
             3,
             Message::StatusResponse(StatusResponse {
-                protocol_version: 1,
+                protocol_version: protocol::PROTOCOL_VERSION,
                 max_protocol_version: MAX_PROTOCOL_VERSION,
                 capabilities: CURRENT_CAPABILITIES,
                 firmware_version: "deskmate-m1".into(),
@@ -410,7 +410,7 @@ fn fixture_messages() -> Vec<(&'static str, u32, Message)> {
             "status_response_ota_failed.bin",
             32,
             Message::StatusResponse(StatusResponse {
-                protocol_version: 1,
+                protocol_version: protocol::PROTOCOL_VERSION,
                 max_protocol_version: MAX_PROTOCOL_VERSION,
                 capabilities: CURRENT_CAPABILITIES,
                 firmware_version: "deskmate-m1".into(),
@@ -604,30 +604,6 @@ fn fixture_messages() -> Vec<(&'static str, u32, Message)> {
             }),
         ),
         (
-            "error_unknown_screen.bin",
-            15,
-            Message::Error(ErrorResponse {
-                code: ErrorCode::UnknownScreen,
-                diagnostic: "unknown screen".into(),
-            }),
-        ),
-        (
-            "error_unsupported_template.bin",
-            16,
-            Message::Error(ErrorResponse {
-                code: ErrorCode::UnsupportedTemplate,
-                diagnostic: "unsupported template".into(),
-            }),
-        ),
-        (
-            "error_unsupported_size.bin",
-            17,
-            Message::Error(ErrorResponse {
-                code: ErrorCode::UnsupportedSizeClass,
-                diagnostic: "unsupported size class".into(),
-            }),
-        ),
-        (
             "error_config_too_large.bin",
             18,
             Message::Error(ErrorResponse {
@@ -789,7 +765,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     fs::write(output.join("bad_crc.bin"), &bad_crc)?;
 
     let mut version_frame = Frame::new(1, 6, vec![0xa0]);
-    version_frame.version = 2;
+    // v1 is the version this build does NOT speak: it is what the fleet runs
+    // until the rollout session flashes v2.
+    version_frame.version = 1;
     let unsupported_version = protocol::encode_frame(&version_frame)?;
     fs::write(output.join("unsupported_version.bin"), &unsupported_version)?;
 
@@ -871,7 +849,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     manifest.push_str(
         "\nInvalid inputs:\n\
          - bad_crc.bin: Checksum\n\
-         - unsupported_version.bin: Version(2) after valid framing\n\
+         - unsupported_version.bin: Version(1) after valid framing\n\
          - unsupported_type.bin: UnsupportedType(99) after valid framing\n\
          - invalid_cbor.bin: invalid/indefinite CBOR\n\
          - duplicate_keys.bin: duplicate numeric map key\n\

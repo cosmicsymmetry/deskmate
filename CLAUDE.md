@@ -33,7 +33,7 @@ of letting code and documentation diverge.
 The narrative of how the project got here is `docs/history.md`, which nothing loads by
 default. This section states only what is true now.
 
-- **Config schema v9** (`docs/config/v9.md`), **protocol v1**,
+- **Config schema v10** (`docs/config/v10.md`), **protocol v1**,
   `PROTOCOL_CURRENT_CAPABILITIES` **2027**. A `docs/config/vN.md` exists if and only if
   the store can still read vN, so the set shrinks as migrations retire; v4 is the oldest
   readable version and a pre-v4 document is a typed `UnsupportedVersion` refusal.
@@ -57,9 +57,9 @@ default. This section states only what is true now.
   V3 (server host) is in progress on `feat/v3-server-host`. Tags require explicit owner
   authorization; `m0`/`m1`/`v1`/`v2` exist and later milestones do not.
 - **The legacy subtraction** (spec
-  `docs/superpowers/specs/2026-09-11-deskmate-legacy-subtraction-design.md`): Wave A is
-  complete. Wave B (schema v10, removing playlists) and Wave C (protocol v2, removing
-  the pre-scene wire) remain.
+  `docs/superpowers/specs/2026-09-11-deskmate-legacy-subtraction-design.md`): Waves A and
+  B are complete. Wave C (protocol v2, removing the pre-scene wire) remains, and is the
+  only one that spends a hardware session.
 
 ### Traps that still bite
 
@@ -127,12 +127,19 @@ Each of these cost this project real time at least once.
 
 These are decisions, not defaults. Changing one needs the owner, not a judgement call.
 
-- **The window has ONE LOOP.** The card library and named playlists are gone from the
-  UI: the complication tile grid *is* the loop, in loop order, and it is where the order
-  changes. Adding a card is one dashed slot at the end of the grid. Schema v9 still
-  carries `playlists[]` and `active_playlist_id`, the app exposes exactly one and never
-  creates another, and extra playlists in older files round-trip unchanged. Do not move
-  creation or deletion into the rail: the rail is the face and has a fixed height budget.
+- **The window has ONE LOOP, and since schema v10 so does the document.** The
+  complication tile grid *is* the loop, in loop order, and it is where the order changes.
+  Adding a card is one dashed slot at the end of the grid, and appending to `cards` IS
+  joining the loop. `playlists[]` and `active_playlist_id` are gone; `cards` is ordered,
+  dwell is a card field, and `advance` is one document-level setting. Two tile states
+  went with them and must not come back, because neither is representable: a card
+  outside the loop ("not in loop" / "Add to loop"), and a loop position whose card id
+  does not resolve ("Missing card"). Do not move creation or deletion into the rail: the
+  rail is the face and has a fixed height budget.
+- **A card that alerts but is never shown is not expressible.** That needed a card in
+  the library but outside the playlist, which nothing in the window could arrange. Every
+  card is in the loop, so every card is shown and every card compiles to both a widget
+  and a screen.
 - **A card is called the same thing on every surface, and that thing is its TEMPLATE.**
   `cardLabel()` (the template name, "Digital clock") identifies a card everywhere;
   `cardTitle()` (the owner's words, null when never typed) is a quiet second line beside

@@ -1,5 +1,5 @@
 {
-  "schema_version": 9,
+  "schema_version": 10,
   "preferences": {
     "timezone": "Asia/Tbilisi",
     "autostart": true,
@@ -15,7 +15,8 @@
       "template": { "kind": "digital-clock" },
       "tap_action": { "kind": "none" },
       "refresh": { "kind": "device-local" },
-      "alert": { "kind": "none" }
+      "alert": { "kind": "none" },
+      "dwell_seconds": null
     },
     {
       "kind": "pomodoro",
@@ -25,7 +26,8 @@
       "template": { "kind": "progress-ring" },
       "tap_action": { "kind": "start-pause" },
       "refresh": { "kind": "device-local" },
-      "alert": { "kind": "on-timer-finish", "hold": { "kind": "until-dismissed" } }
+      "alert": { "kind": "on-timer-finish", "hold": { "kind": "until-dismissed" } },
+      "dwell_seconds": null
     },
     {
       "kind": "picture",
@@ -34,25 +36,14 @@
       "source_id": "status",
       "tap_action": { "kind": "none" },
       "refresh": { "kind": "manual" },
-      "alert": { "kind": "none" }
+      "alert": { "kind": "none" },
+      "dwell_seconds": null
     }
   ],
   "image_sources": [
     { "id": "status", "name": "Status" }
   ],
   "assets": [],
-  "playlists": [
-    {
-      "id": "p1",
-      "name": "Screens",
-      "advance": { "kind": "manual" },
-      "entries": [
-        { "card_id": "clock", "dwell_seconds": null },
-        { "card_id": "pomodoro", "dwell_seconds": null },
-        { "card_id": "picture", "dwell_seconds": null }
-      ]
-    }
-  ],
-  "active_playlist_id": "p1",
+  "advance": { "kind": "manual" },
   "updater": { "channel": "stable", "checks": "notify" }
 }

@@ -459,10 +459,9 @@ pub(crate) mod tests {
         CURRENT_SCHEMA_VERSION, CardAlert, CardDataSnapshot, CardError, CardErrorKind, CardField,
         CardFieldValue, CardSettings, CarouselAdvance, ConnectionState, DeviceCapability,
         DeviceCounters, DeviceSnapshot, DisplayOrientation, DisplayTemplate, IconGlyphMapping,
-        PersistenceState, Playlist, PlaylistEntry, PomodoroSnapshot, PomodoroState, RefreshPolicy,
-        RuntimeDiagnostics, RuntimeError, RuntimeState, SAVED_SETTINGS_VALIDATION_FAILURE_MESSAGE,
-        StoreWarning, UpdateChannel, UpdateCheckPolicy, UpdaterSettings, ValidationCode,
-        WidgetTapAction,
+        PersistenceState, PomodoroSnapshot, PomodoroState, RefreshPolicy, RuntimeDiagnostics,
+        RuntimeError, RuntimeState, SAVED_SETTINGS_VALIDATION_FAILURE_MESSAGE, StoreWarning,
+        UpdateChannel, UpdateCheckPolicy, UpdaterSettings, ValidationCode, WidgetTapAction,
     };
     use serde::Serialize;
 
@@ -623,6 +622,7 @@ pub(crate) mod tests {
             tap_action: WidgetTapAction::Dismiss,
             refresh: RefreshPolicy::DeviceLocal,
             alert: CardAlert::None,
+            dwell_seconds: None,
         };
         assert!(config.validate().is_ok(), "fixture must validate cleanly");
 
@@ -655,6 +655,7 @@ pub(crate) mod tests {
             tap_action: WidgetTapAction::None,
             refresh: RefreshPolicy::DeviceLocal,
             alert: CardAlert::None,
+            dwell_seconds: None,
         };
         let draft = DraftPayload {
             json: serde_json::to_string(&config).unwrap(),
@@ -1323,8 +1324,6 @@ pub(crate) mod tests {
         snapshot: DesktopSnapshot,
         configs: Vec<AppConfig>,
         card_settings: Vec<CardSettings>,
-        playlists: Vec<Playlist>,
-        playlist_entries: Vec<PlaylistEntry>,
         card_alerts: Vec<CardAlert>,
         alert_holds: Vec<AlertHold>,
         carousel_advances: Vec<CarouselAdvance>,
@@ -1375,6 +1374,7 @@ pub(crate) mod tests {
                 tap_action: WidgetTapAction::None,
                 refresh: RefreshPolicy::DeviceLocal,
                 alert: CardAlert::None,
+                dwell_seconds: None,
             },
             CardSettings::Pomodoro {
                 id: "pomodoro".into(),
@@ -1386,6 +1386,7 @@ pub(crate) mod tests {
                 alert: CardAlert::OnTimerFinish {
                     hold: AlertHold::UntilDismissed,
                 },
+                dwell_seconds: None,
             },
             CardSettings::Picture {
                 id: "limits-picture".into(),
@@ -1394,39 +1395,10 @@ pub(crate) mod tests {
                 tap_action: WidgetTapAction::None,
                 refresh: RefreshPolicy::Manual,
                 alert: CardAlert::None,
+                dwell_seconds: None,
             },
         ];
         let all_card_settings = cards.clone();
-        let playlist_entries = vec![
-            PlaylistEntry {
-                card_id: "clock".into(),
-                dwell_seconds: None,
-            },
-            PlaylistEntry {
-                card_id: "pomodoro".into(),
-                dwell_seconds: Some(20),
-            },
-            PlaylistEntry {
-                card_id: "limits-picture".into(),
-                dwell_seconds: None,
-            },
-        ];
-        let playlists = vec![
-            Playlist {
-                id: "workday".into(),
-                name: "Workday".into(),
-                advance: CarouselAdvance::Timed {
-                    default_dwell_seconds: 30,
-                },
-                entries: playlist_entries.clone(),
-            },
-            Playlist {
-                id: "manual".into(),
-                name: "Manual".into(),
-                advance: CarouselAdvance::Manual,
-                entries: vec![playlist_entries[0].clone()],
-            },
-        ];
         let config = AppConfig {
             schema_version: CURRENT_SCHEMA_VERSION,
             preferences: AppPreferences {
@@ -1441,8 +1413,9 @@ pub(crate) mod tests {
                 name: "Claude limits".into(),
             }],
             assets: Vec::new(),
-            playlists: playlists.clone(),
-            active_playlist_id: "workday".into(),
+            advance: CarouselAdvance::Timed {
+                default_dwell_seconds: 30,
+            },
             updater: UpdaterSettings::default(),
         };
         let card_data = vec![CardDataSnapshot {
@@ -1628,8 +1601,6 @@ pub(crate) mod tests {
             snapshot,
             configs: vec![config],
             card_settings: all_card_settings,
-            playlists,
-            playlist_entries,
             card_alerts: vec![
                 CardAlert::None,
                 CardAlert::OnTimerFinish {

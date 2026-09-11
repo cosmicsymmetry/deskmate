@@ -15,6 +15,7 @@ function pictureCard(): CardSettings {
     tap_action: { kind: "none" },
     refresh: { kind: "manual" },
     alert: { kind: "none" },
+    dwell_seconds: null,
   };
 }
 
@@ -23,14 +24,5 @@ export function mockPictureConfig(): AppConfig {
     ...mockConfig(),
     cards: [pictureCard()],
     image_sources: [{ id: "claude-limits", name: "Claude usage" }],
-    playlists: [
-      {
-        id: "day",
-        name: "Workday",
-        advance: { kind: "timed", default_dwell_seconds: 20 },
-        entries: [{ card_id: "usage-picture", dwell_seconds: null }],
-      },
-    ],
-    active_playlist_id: "day",
   };
 }

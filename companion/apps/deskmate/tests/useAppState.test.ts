@@ -39,10 +39,9 @@ async function flushPromises() {
 }
 
 describe("startAppStateSubscription", () => {
-  test("the subscription fixture carries schema-v9 playlists", () => {
-    expect(snapshot.config.schema_version).toBe(9);
-    expect(snapshot.config.playlists.map((playlist) => playlist.id)).toEqual(["workday", "manual"]);
-    expect(snapshot.config.active_playlist_id).toBe("workday");
+  test("the subscription fixture is the current schema with one loop", () => {
+    expect(snapshot.config.schema_version).toBe(10);
+    expect(snapshot.config.advance).toEqual({ kind: "timed", default_dwell_seconds: 30 });
   });
 
   test("cleans up when the Tauri listener resolves after unmount", async () => {

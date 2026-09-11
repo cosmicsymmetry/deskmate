@@ -1,13 +1,10 @@
 import { describe, expect, test } from "bun:test";
 
 import {
-  activePlaylist,
   addCard,
-  addEntry,
   cardLabel,
   cardMoveFromKey,
   cardsContainerIssues,
-  cardsOutsideLoop,
   cardTitle,
   copyConfig,
   firstRunSteps,
@@ -16,7 +13,6 @@ import {
   issuesForCard,
   issuesForField,
   issuesForPath,
-  libraryCards,
   loopAdvance,
   loopDeadline,
   loopEntries,
@@ -27,9 +23,8 @@ import {
   nextLoopCardId,
   numberValue,
   removeCard,
-  removeEntry,
-  setEntryDwell,
-  setPlaylistAdvance,
+  setAdvance,
+  setCardDwell,
   tapActionDescription,
   unclaimedIssues,
 } from "../src/lib/configDraft";
@@ -59,19 +54,12 @@ function initialConfig(): AppConfig {
         tap_action: { kind: "none" },
         refresh: { kind: "device-local" },
         alert: { kind: "none" },
+        dwell_seconds: null,
       },
     ],
     image_sources: [],
     assets: [],
-    playlists: [
-      {
-        id: "workday",
-        name: "Workday",
-        advance: { kind: "manual" },
-        entries: [{ card_id: "clock", dwell_seconds: null }],
-      },
-    ],
-    active_playlist_id: "workday",
+    advance: { kind: "manual" },
     updater: { channel: "stable", checks: "notify" },
   };
 }
@@ -93,6 +81,7 @@ test("a picture card is called Picture, with the owner's words beside it", () =>
     tap_action: { kind: "none" },
     refresh: { kind: "manual" },
     alert: { kind: "none" },
+    dwell_seconds: null,
   };
   expect(cardLabel(card)).toBe("Picture");
   expect(cardTitle(card)).toBe("Limits");
@@ -119,7 +108,7 @@ describe("configuration draft helpers", () => {
     const empty: AppConfig = {
       ...initialConfig(),
       cards: [],
-      playlists: [{ ...initialConfig().playlists[0], entries: [] }],
+      advance: { kind: "manual" },
     };
     expect(firstRunSteps(empty, false).map((step) => step.done)).toEqual([false, false]);
 
@@ -128,35 +117,19 @@ describe("configuration draft helpers", () => {
     expect(firstRunSteps(withPomodoro, true).every((step) => step.done)).toBe(true);
   });
 
-  test("adding a card appends it to the library and enrols it at the end of the active loop", () => {
+  test("adding a card appends it to the loop, because the card list IS the loop", () => {
     const { config, cardId } = addCard(initialConfig(), "pomodoro");
     expect(config.cards.map((card) => card.kind)).toContain("pomodoro");
     expect(cardId).toBe("pomodoro");
-    expect(config.playlists[0].entries.at(-1)).toEqual({
-      card_id: "pomodoro",
-      dwell_seconds: null,
-    });
+    expect(config.cards.at(-1)?.id).toBe("pomodoro");
+    expect(config.cards.at(-1)?.dwell_seconds).toBeNull();
     expect("screens" in config).toBe(false);
+    expect("playlists" in config).toBe(false);
   });
 
-  test("adding a card is gated by both the card and active-loop entry limits", () => {
+  test("adding a card is gated by one bound, because there is one list", () => {
     const cardFull = cardsConfig(["a", "b", "c", "d", "e", "f", "g", "h"]);
     expect(addCard(cardFull, "clock")).toEqual({ config: cardFull, cardId: null });
-
-    const entryFullBase = cardsConfig(["a", "b", "c", "d", "e", "f", "g"]);
-    const entryFull: AppConfig = {
-      ...entryFullBase,
-      playlists: [
-        {
-          ...entryFullBase.playlists[0],
-          entries: Array.from({ length: 8 }, (_, index) => ({
-            card_id: index < 7 ? entryFullBase.cards[index].id : "missing-card",
-            dwell_seconds: null,
-          })),
-        },
-      ],
-    };
-    expect(addCard(entryFull, "clock")).toEqual({ config: entryFull, cardId: null });
   });
 
   test("adding a picture card enrols it in the loop", () => {
@@ -175,9 +148,6 @@ describe("configuration draft helpers", () => {
       tap_action: { kind: "none" },
       refresh: { kind: "manual" },
       alert: { kind: "none" },
-    });
-    expect(config.playlists[0].entries.at(-1)).toEqual({
-      card_id: "picture",
       dwell_seconds: null,
     });
     expect(config.image_sources).toEqual([{ id: "limits", name: "Claude limits" }]);
@@ -244,182 +214,63 @@ describe("configuration draft helpers", () => {
     expect(next.cards[0]).toEqual(original);
   });
 
-  test("resolves the active playlist and returns null when its id does not resolve", () => {
-    const config = initialConfig();
-    expect(activePlaylist(config)?.id).toBe("workday");
-    expect(activePlaylist({ ...config, active_playlist_id: "missing" })).toBeNull();
-  });
-
-  test("resolves active-loop entries without dropping missing references, then finds active-loop outsiders", () => {
+  test("the loop is the card list, in order", () => {
     const withCards = addCard(addCard(initialConfig(), "pomodoro").config, "clock").config;
-    const config = {
-      ...withCards,
-      playlists: [
-        {
-          ...withCards.playlists[0],
-          entries: [
-            { card_id: "clock-2", dwell_seconds: 15 },
-            { card_id: "missing-card", dwell_seconds: null },
-            { card_id: "clock", dwell_seconds: null },
-          ],
-        },
-      ],
-    };
-    expect(libraryCards(config).map((card) => card.id)).toEqual(["clock", "pomodoro", "clock-2"]);
-    expect(loopEntries(config)).toEqual([
-      { index: 0, entry: config.playlists[0].entries[0], card: config.cards[2] },
-      { index: 1, entry: config.playlists[0].entries[1], card: null },
-      { index: 2, entry: config.playlists[0].entries[2], card: config.cards[0] },
-    ]);
-    expect(cardsOutsideLoop(config).map((card) => card.id)).toEqual(["pomodoro"]);
-  });
-
-  test("adds a playlist entry but refuses duplicates and a ninth entry", () => {
-    const withTimer = addCard(initialConfig(), "pomodoro").config;
-    const added = addEntry(withTimer, "workday", "pomodoro");
-    expect(added.playlists[0].entries.map((entry) => entry.card_id)).toEqual(["clock", "pomodoro"]);
-    expect(addEntry(added, "workday", "pomodoro")).toBe(added);
-
-    const full = cardsConfig(["a", "b", "c", "d", "e", "f", "g", "h", "i"]);
-    const fullPlaylist: AppConfig = {
-      ...full,
-      playlists: [
-        {
-          ...full.playlists[0],
-          entries: full.cards
-            .slice(0, 8)
-            .map((card) => ({ card_id: card.id, dwell_seconds: null })),
-        },
-      ],
-    };
-    expect(addEntry(fullPlaylist, "workday", "i")).toBe(fullPlaylist);
-  });
-
-  test("removes a playlist entry by index and ignores an out-of-range index", () => {
-    const config = addCard(initialConfig(), "pomodoro").config;
-    const next = removeEntry(config, "workday", 0);
-    expect(next.playlists[0].entries.map((entry) => entry.card_id)).toEqual(["pomodoro"]);
-    expect(removeEntry(next, "workday", 4)).toBe(next);
-  });
-
-  test("moves playlist entries with clamped targets and index-safe source boundaries", () => {
-    let config = addCard(initialConfig(), "pomodoro").config;
-    config = addCard(config, "clock").config;
-    config = addEntry(addEntry(config, "workday", "pomodoro"), "workday", "clock-2");
-
-    const toEnd = moveEntry(config, "workday", 0, 99);
-    expect(toEnd.playlists[0].entries.map((entry) => entry.card_id)).toEqual([
-      "pomodoro",
-      "clock-2",
-      "clock",
-    ]);
-    const toStart = moveEntry(toEnd, "workday", 2, -99);
-    expect(toStart.playlists[0].entries.map((entry) => entry.card_id)).toEqual([
-      "clock",
-      "pomodoro",
-      "clock-2",
-    ]);
-    expect(moveEntry(config, "workday", -1, 1)).toBe(config);
-    expect(moveEntry(config, "workday", 3, 1)).toBe(config);
-  });
-
-  test("sets an entry dwell by index without disturbing the other entries", () => {
-    const config = addEntry(addCard(initialConfig(), "pomodoro").config, "workday", "pomodoro");
-    const next = setEntryDwell(config, "workday", 1, 45);
-    expect(next.playlists[0].entries).toEqual([
-      { card_id: "clock", dwell_seconds: null },
-      { card_id: "pomodoro", dwell_seconds: 45 },
-    ]);
-    expect(setEntryDwell(next, "workday", 5, null)).toBe(next);
-  });
-
-  test("sets one playlist's advance mode", () => {
-    const config: AppConfig = {
-      ...initialConfig(),
-      playlists: [
-        initialConfig().playlists[0],
-        { id: "evening", name: "Evening", advance: { kind: "manual" }, entries: [] },
-      ],
-    };
-    const next = setPlaylistAdvance(config, "evening", {
-      kind: "timed",
-      default_dwell_seconds: 30,
-    });
-    expect(next.playlists[0].advance).toEqual({ kind: "manual" });
-    expect(next.playlists[1].advance).toEqual({
-      kind: "timed",
-      default_dwell_seconds: 30,
-    });
-  });
-
-  test("keeps the draft reference when the playlist advance is deep-equal", () => {
-    const manual = initialConfig();
-    expect(setPlaylistAdvance(manual, "workday", { kind: "manual" })).toBe(manual);
-
-    const timed = setPlaylistAdvance(manual, "workday", {
-      kind: "timed",
-      default_dwell_seconds: 30,
-    });
-    expect(setPlaylistAdvance(timed, "workday", { kind: "timed", default_dwell_seconds: 30 })).toBe(
-      timed,
+    expect(loopEntries(withCards)).toEqual(
+      withCards.cards.map((card, index) => ({ index, card })),
     );
   });
 
-  test("loop length sums playlist entry dwell with the timed default and is null for manual", () => {
+  test("moves cards with clamped targets and index-safe source boundaries", () => {
     let config = addCard(initialConfig(), "pomodoro").config;
-    config = addEntry(config, "workday", "pomodoro");
-    config = setEntryDwell(config, "workday", 1, 45);
-    config = setPlaylistAdvance(config, "workday", {
-      kind: "timed",
-      default_dwell_seconds: 20,
-    });
-    expect(loopSeconds(config, "workday")).toBe(65);
-    expect(
-      loopSeconds(setPlaylistAdvance(config, "workday", { kind: "manual" }), "workday"),
-    ).toBeNull();
-    expect(loopSeconds(config, "missing")).toBeNull();
+    config = addCard(config, "clock").config;
+    expect(config.cards.map((card) => card.id)).toEqual(["clock", "pomodoro", "clock-2"]);
+
+    const toEnd = moveEntry(config, 0, 99);
+    expect(toEnd.cards.map((card) => card.id)).toEqual(["pomodoro", "clock-2", "clock"]);
+    const toStart = moveEntry(toEnd, 2, -99);
+    expect(toStart.cards.map((card) => card.id)).toEqual(["clock", "pomodoro", "clock-2"]);
+    expect(moveEntry(config, -1, 1)).toBe(config);
+    expect(moveEntry(config, 3, 1)).toBe(config);
   });
 
-  test("removing a card strips its entries from every playlist", () => {
+  test("sets one card's dwell without disturbing the others", () => {
+    const config = addCard(initialConfig(), "pomodoro").config;
+    const next = setCardDwell(config, "pomodoro", 45);
+    expect(next.cards.map((card) => card.dwell_seconds)).toEqual([null, 45]);
+    expect(setCardDwell(next, "no-such-card", 30)).toBe(next);
+    expect(setCardDwell(next, "pomodoro", 45)).toBe(next);
+  });
+
+  test("sets the loop's advance mode", () => {
+    const config: AppConfig = { ...initialConfig(), advance: { kind: "manual" } };
+    const next = setAdvance(config, { kind: "timed", default_dwell_seconds: 30 });
+    expect(next.advance).toEqual({ kind: "timed", default_dwell_seconds: 30 });
+    // An identical write is a no-op, so a redundant edit cannot dirty the draft.
+    expect(setAdvance(next, { kind: "timed", default_dwell_seconds: 30 })).toBe(next);
+    expect(setAdvance(config, { kind: "manual" })).toBe(config);
+  });
+
+  test("loop length sums each card's dwell with the timed default, and is null for manual", () => {
     let config = addCard(initialConfig(), "pomodoro").config;
-    config = {
-      ...config,
-      playlists: [
-        config.playlists[0],
-        {
-          id: "evening",
-          name: "Evening",
-          advance: { kind: "manual" },
-          entries: [{ card_id: "pomodoro", dwell_seconds: null }],
-        },
-      ],
-    };
+    config = setCardDwell(config, "pomodoro", 45);
+    config = setAdvance(config, { kind: "timed", default_dwell_seconds: 20 });
+    // The clock takes the 20 s default; the pomodoro overrides it with 45.
+    expect(loopSeconds(config)).toBe(65);
+    expect(loopSeconds(setAdvance(config, { kind: "manual" }))).toBeNull();
+  });
+
+  test("removing a card removes it from the loop, because they are one list", () => {
+    const config = addCard(initialConfig(), "pomodoro").config;
     const next = removeCard(config, "pomodoro");
     expect(next.cards.map((card) => card.id)).toEqual(["clock"]);
-    expect(next.playlists.map((playlist) => playlist.entries)).toEqual([
-      [{ card_id: "clock", dwell_seconds: null }],
-      [],
-    ]);
     expect(firstSelectableCard(next)).toBe("clock");
   });
 
-  test("loopSegments proportions active-playlist entries by resolved dwell and excludes library-only cards", () => {
+  test("loopSegments proportions every card by its resolved dwell", () => {
     let config = addCard(initialConfig(), "pomodoro").config;
-    config = addCard(config, "clock").config;
-    config = {
-      ...config,
-      playlists: [
-        {
-          ...config.playlists[0],
-          entries: config.playlists[0].entries.filter((entry) => entry.card_id !== "clock-2"),
-        },
-      ],
-    };
-    config = setEntryDwell(config, "workday", 0, 45);
-    config = setPlaylistAdvance(config, "workday", {
-      kind: "timed",
-      default_dwell_seconds: 20,
-    });
+    config = setCardDwell(config, "clock", 45);
+    config = setAdvance(config, { kind: "timed", default_dwell_seconds: 20 });
     const segments = loopSegments(config);
     expect(segments.map((segment) => segment.cardId)).toEqual(["clock", "pomodoro"]);
     expect(segments[0].dwellSeconds).toBe(45);
@@ -433,8 +284,7 @@ describe("configuration draft helpers", () => {
 
   test("loopSegments gives every card an equal share under manual advance, where there is no dwell to encode", () => {
     let config = addCard(initialConfig(), "pomodoro").config;
-    config = addEntry(config, "workday", "pomodoro");
-    config = setEntryDwell(config, "workday", 0, 45);
+    config = setCardDwell(config, "clock", 45);
     const segments = loopSegments(config);
     expect(segments.map((segment) => segment.dwellSeconds)).toEqual([0, 0]);
     expect(segments[0].widthPercent).toBe(50);
@@ -443,7 +293,6 @@ describe("configuration draft helpers", () => {
 
   test("nextLoopCardId wraps past the last segment", () => {
     let config = addCard(initialConfig(), "pomodoro").config;
-    config = addEntry(config, "workday", "pomodoro");
     const segments = loopSegments(config);
     expect(nextLoopCardId(segments, "clock")).toBe("pomodoro");
     expect(nextLoopCardId(segments, "pomodoro")).toBe("clock");
@@ -459,10 +308,9 @@ describe("configuration draft helpers", () => {
 
   test("loopAdvance's due/not-due decision is a pure function of elapsed time, not of how many times it is checked", () => {
     let config = addCard(initialConfig(), "pomodoro").config;
-    config = addEntry(config, "workday", "pomodoro");
-    config = setEntryDwell(config, "workday", 0, 45);
-    config = setEntryDwell(config, "workday", 1, 20);
-    config = setPlaylistAdvance(config, "workday", {
+    config = setCardDwell(config, "clock", 45);
+    config = setCardDwell(config, "pomodoro", 20);
+    config = setAdvance(config, {
       kind: "timed",
       default_dwell_seconds: 20,
     });
@@ -499,11 +347,11 @@ describe("configuration draft helpers", () => {
   test("loopAdvance wraps past the last segment and resolves against whatever segments it is given, so a mid-play reorder is honoured on the next check", () => {
     let config = addCard(initialConfig(), "pomodoro").config;
     config = addCard(config, "clock").config;
-    config = addEntry(addEntry(config, "workday", "pomodoro"), "workday", "clock-2");
+
     const segments = loopSegments(config);
     // pomodoro and the second clock swapped, leaving clock (the active/current card) exactly where
     // it was — isolating the reorder's effect to "what comes after a".
-    const reordered = loopSegments(moveEntry(config, "workday", 1, 2));
+    const reordered = loopSegments(moveEntry(config, 1, 2));
 
     // In the original order, clock advances to pomodoro...
     expect(loopAdvance(segments, "clock", 1_000, 1_000)?.cardId).toBe("pomodoro");
@@ -567,7 +415,7 @@ describe("configuration draft helpers", () => {
     const issues: ValidationIssue[] = [
       { path: "cards", code: "out-of-range", message: "at least one card is required" },
       { path: "cards[0].title", code: "empty", message: "required" },
-      { path: "playlists[0].entries", code: "out-of-range", message: "add an entry" },
+      { path: "advance.default_dwell_seconds", code: "out-of-range", message: "bad dwell" },
     ];
     expect(cardsContainerIssues(issues)).toEqual([issues[0]]);
     expect(cardsContainerIssues([])).toEqual([]);
@@ -613,10 +461,7 @@ describe("configuration draft helpers", () => {
     const base = initialConfig();
     const config: AppConfig = {
       ...base,
-      playlists: [
-        base.playlists[0],
-        { id: "evening", name: "Evening", advance: { kind: "manual" }, entries: [] },
-      ],
+      advance: { kind: "manual" },
     };
     const issue: ValidationIssue = {
       path: "playlists[1].name",
@@ -628,9 +473,9 @@ describe("configuration draft helpers", () => {
 
   test("contract fixtures expose cards, not widgets or screens", () => {
     const config = ipcContractFixtures.snapshot.config;
-    expect(config.schema_version).toBe(9);
+    expect(config.schema_version).toBe(10);
     expect(Array.isArray(config.cards)).toBe(true);
-    expect(Array.isArray(config.playlists)).toBe(true);
+    expect("playlists" in config).toBe(false);
     expect("widgets" in config).toBe(false);
     expect("screens" in config).toBe(false);
     expect("carousel" in config).toBe(false);

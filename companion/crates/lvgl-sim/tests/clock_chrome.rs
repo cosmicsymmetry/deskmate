@@ -32,6 +32,7 @@ fn clock_config(template: &DisplayTemplate, title: &str) -> AppConfig {
             tap_action: WidgetTapAction::None,
             refresh: RefreshPolicy::DeviceLocal,
             alert: CardAlert::None,
+            dwell_seconds: None,
         }],
         ..AppConfig::default()
     }

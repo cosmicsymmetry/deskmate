@@ -89,14 +89,6 @@ function applyScenario() {
       config = {
         ...mockConfig(),
         cards: [mockConfig().cards[0]],
-        playlists: [
-          {
-            id: "day",
-            name: "Workday",
-            advance: { kind: "manual" },
-            entries: [{ card_id: mockConfig().cards[0].id, dwell_seconds: null }],
-          },
-        ],
       };
       snapshot = mockSnapshot(config);
       snapshot.has_saved_config = false;
@@ -107,7 +99,6 @@ function applyScenario() {
       config = {
         ...mockConfig(),
         cards: [],
-        playlists: [{ id: "day", name: "Workday", advance: { kind: "manual" }, entries: [] }],
       };
       snapshot = mockSnapshot(config);
       snapshot.pomodoros = [];
@@ -177,27 +168,11 @@ function validate(draft: AppConfig): DraftValidation {
     }
   });
 
-  draft.playlists.forEach((playlist, index) => {
-    const at = `playlists[${index}]`;
-    if (!playlist.name.trim()) push(`${at}.name`, "empty", "Name this playlist.");
-    if (playlist.advance.kind === "timed") {
-      const dwell = playlist.advance.default_dwell_seconds;
-      if (dwell < 5 || dwell > 3600) {
-        push(`${at}.advance.default_dwell_seconds`, "out-of-range", "Use 5 to 3600 seconds.");
-      }
+  if (draft.advance.kind === "timed") {
+    const dwell = draft.advance.default_dwell_seconds;
+    if (dwell < 5 || dwell > 3600) {
+      push("advance.default_dwell_seconds", "out-of-range", "Use 5 to 3600 seconds.");
     }
-    playlist.entries.forEach((entry, e) => {
-      if (!draft.cards.some((card) => card.id === entry.card_id)) {
-        push(`${at}.entries[${e}]`, "missing-reference", "This card is no longer in the library.");
-      }
-      if (entry.dwell_seconds !== null && (entry.dwell_seconds < 5 || entry.dwell_seconds > 3600)) {
-        push(`${at}.entries[${e}].dwell_seconds`, "out-of-range", "Use 5 to 3600 seconds.");
-      }
-    });
-  });
-
-  if (!draft.playlists.some((playlist) => playlist.id === draft.active_playlist_id)) {
-    push("active_playlist_id", "missing-reference", "No playlist is active.");
   }
 
   return { valid: issues.length === 0, issues };

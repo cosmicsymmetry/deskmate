@@ -166,6 +166,7 @@ function clockCard(
     tap_action: { kind: "none" },
     refresh: { kind: "device-local" },
     alert,
+    dwell_seconds: null,
   };
 }
 
@@ -179,6 +180,7 @@ function pomodoroCard(id: string, label = `Card ${id}`): CardSettings {
     tap_action: { kind: "start-pause" },
     refresh: { kind: "device-local" },
     alert: { kind: "on-timer-finish", hold: { kind: "until-dismissed" } },
+    dwell_seconds: null,
   };
 }
 
@@ -191,13 +193,13 @@ function pictureCard(id = "picture-card"): CardSettings {
     tap_action: { kind: "none" },
     refresh: { kind: "manual" },
     alert: { kind: "none" },
+    dwell_seconds: null,
   };
 }
 
-function cardListConfig(
-  cardList: CardSettings[],
-  entries = cardList.map((card) => ({ card_id: card.id, dwell_seconds: null })),
-): AppConfig {
+/// `cards` IS the loop since schema v10, so there is no second argument: a card's
+/// position in this list is its position in the loop.
+function cardListConfig(cardList: CardSettings[]): AppConfig {
   return {
     schema_version: snapshot.config.schema_version,
     preferences: { timezone: "UTC", autostart: false, paused: false, orientation: "landscape" },
@@ -206,15 +208,7 @@ function cardListConfig(
       card.kind === "picture" ? [{ id: card.source_id, name: "Claude limits" }] : [],
     ),
     assets: [],
-    playlists: [
-      {
-        id: "workday",
-        name: "Workday",
-        advance: { kind: "timed", default_dwell_seconds: 20 },
-        entries,
-      },
-    ],
-    active_playlist_id: "workday",
+    advance: { kind: "timed", default_dwell_seconds: 20 },
     updater: { channel: "stable", checks: "notify" },
   };
 }
@@ -829,7 +823,7 @@ describe("settings accessibility and states", () => {
     expect(html).toContain("a tap dismisses it");
   });
 
-  test("the selected card's timed-loop dwell field writes its active entry", async () => {
+  test("the selected card's timed-loop dwell field writes the card's own dwell", async () => {
     const card = clockCard("clock-1", "Desk");
     const initial = cardListConfig([card]);
     let latest = initial;
@@ -841,10 +835,9 @@ describe("settings accessibility and states", () => {
         <CardEditor
           card={card}
           config={config}
-          issues={[]}
-          entryIssues={[
+          issues={[
             {
-              path: "playlists[0].entries[0].dwell_seconds",
+              path: "cards[0].dwell_seconds",
               code: "out-of-range",
               message: "Entry dwell is out of range.",
             },
@@ -878,27 +871,26 @@ describe("settings accessibility and states", () => {
         );
         dwell?.dispatchEvent(new Event("input", { bubbles: true }));
       });
-      expect(latest.playlists[0].entries[0].dwell_seconds).toBe(45);
+      expect(latest.cards[0].dwell_seconds).toBe(45);
     } finally {
       await act(async () => root.unmount());
       container.remove();
     }
   });
 
-  test("the dwell field is shown only when an enrolled card can use it or must repair it", () => {
+  test("the dwell field is shown when the loop is timed or the value must be repaired", () => {
     const card = clockCard("clock-1", "Desk");
     const issue: ValidationIssue = {
-      path: "playlists[0].entries[0].dwell_seconds",
+      path: "cards[0].dwell_seconds",
       code: "out-of-range",
       message: "Entry dwell is out of range.",
     };
-    const renderDwell = (config: AppConfig, entryIssues: ValidationIssue[] = []) =>
+    const renderDwell = (config: AppConfig, issues: ValidationIssue[] = []) =>
       renderToStaticMarkup(
         <CardEditor
-          card={card}
+          card={config.cards[0]}
           config={config}
-          issues={[]}
-          entryIssues={entryIssues}
+          issues={issues}
           cardError={null}
           pomodoro={null}
           timerBusy={false}
@@ -909,16 +901,14 @@ describe("settings accessibility and states", () => {
         />,
       );
 
-    const outside = renderDwell(cardListConfig([card], []));
-    expect(outside).not.toContain("Stays on the panel for");
-
+    // Manual advance with no value set: nothing to show.
     const manualNullConfig = cardListConfig([card]);
-    manualNullConfig.playlists[0].advance = { kind: "manual" };
-    const manualNull = renderDwell(manualNullConfig);
-    expect(manualNull).not.toContain("Stays on the panel for");
+    manualNullConfig.advance = { kind: "manual" };
+    expect(renderDwell(manualNullConfig)).not.toContain("Stays on the panel for");
 
+    // Manual advance with an out-of-range value: shown so it can be repaired.
     const manualInvalidConfig = structuredClone(manualNullConfig);
-    manualInvalidConfig.playlists[0].entries[0].dwell_seconds = 2;
+    manualInvalidConfig.cards[0].dwell_seconds = 2;
     const manualInvalid = renderDwell(manualInvalidConfig, [issue]);
     expect(manualInvalid).toContain("Stays on the panel for");
     expect(manualInvalid).toContain('aria-invalid="true"');
@@ -928,58 +918,15 @@ describe("settings accessibility and states", () => {
     expect(timed).toContain("Stays on the panel for");
   });
 
-  test("the grid renders loop entries first, then outsiders with consequence flags", () => {
-    const config = cardListConfig(
-      [
-        clockCard("internal-uuid-0001", "Desk"),
-        clockCard("internal-uuid-0002", "Focus", {
-          kind: "on-timer-finish",
-          hold: { kind: "until-dismissed" },
-        }),
-        clockCard("internal-uuid-0003", "Spare"),
-      ],
-      [
-        { card_id: "internal-uuid-0001", dwell_seconds: null },
-        { card_id: "internal-uuid-0002", dwell_seconds: null },
-      ],
-    );
-    const html = renderToStaticMarkup(
-      <CardList
-        config={config}
-        issues={[]}
-        pomodoros={[]}
-        selectedCardId="first-clock-id"
-        onSelect={() => {}}
-        onAdd={() => {}}
-        onChange={() => {}}
-        onRemove={() => {}}
-      />,
-    );
-    expect(html).toContain('aria-label="Cards, loop order first"');
-    expect(html).toContain("Desk");
-    expect(html).toContain("Focus");
-    expect(html).toContain("Spare");
-    expect(html).toContain(">alerts<");
-    expect(html).toContain(">not in loop<");
-    expect(html).toContain(">Add to loop<");
-    expect(html.indexOf("Desk")).toBeLessThan(html.indexOf("Focus"));
-    expect(html.indexOf("Focus")).toBeLessThan(html.indexOf("Spare"));
-    expect(html).not.toContain(">unused<");
-    // Internal identifiers never reach the user — only their titles do.
-    expect(html).not.toContain("internal-uuid-0001");
-    expect(html).not.toContain("internal-uuid-0002");
-    expect(html).not.toContain("internal-uuid-0003");
-  });
-
-  test("the grid renders active entries container issues and scopes resolved entry issues", () => {
+  test("the grid renders container issues and scopes a card's own issues to its tile", () => {
     const config = cardListConfig([clockCard("first", "Desk"), clockCard("second", "Up next")]);
     const containerIssue: ValidationIssue = {
-      path: "playlists[0].entries",
+      path: "cards",
       code: "out-of-range",
       message: "The loop entries need attention.",
     };
     const secondDwellIssue: ValidationIssue = {
-      path: "playlists[0].entries[1].dwell_seconds",
+      path: "cards[1].dwell_seconds",
       code: "out-of-range",
       message: "The second dwell is out of range.",
     };
@@ -1030,49 +977,6 @@ describe("settings accessibility and states", () => {
     expect(html).toContain('aria-describedby="add-card-capacity"');
     expect(html).toContain('disabled=""');
     expect(html).toContain("The limit is 8 cards.");
-  });
-
-  test("the add slot distinguishes a full loop from a full card library", () => {
-    const cards = Array.from({ length: 7 }, (_, index) => clockCard(`card-${index}`));
-    const config = cardListConfig(cards, [
-      ...cards.map((card) => ({ card_id: card.id, dwell_seconds: null })),
-      { card_id: "missing-card", dwell_seconds: null },
-    ]);
-    const html = renderToStaticMarkup(
-      <CardList
-        config={config}
-        issues={[]}
-        pomodoros={[]}
-        selectedCardId={null}
-        onSelect={() => {}}
-        onAdd={() => {}}
-        onChange={() => {}}
-        onRemove={() => {}}
-      />,
-    );
-    expect(html).toContain('aria-describedby="add-card-capacity"');
-    expect(html).toContain("The limit is 8 in the loop.");
-
-    const outsider = clockCard("outside", "Spare");
-    const fullLoopWithOutsider = { ...config, cards: [...config.cards, outsider] };
-    const container = document.createElement("div");
-    container.innerHTML = renderToStaticMarkup(
-      <CardList
-        config={fullLoopWithOutsider}
-        issues={[]}
-        pomodoros={[]}
-        selectedCardId={null}
-        onSelect={() => {}}
-        onAdd={() => {}}
-        onChange={() => {}}
-        onRemove={() => {}}
-      />,
-    );
-    expect(
-      container.querySelector<HTMLButtonElement>(
-        'button[aria-label="Add Digital clock — Spare to the loop"]',
-      )?.disabled,
-    ).toBe(true);
   });
 
   test("the add menu aligns to the slot end only when it would overflow the viewport", async () => {
@@ -1296,7 +1200,7 @@ describe("settings accessibility and states", () => {
       );
       await act(async () => pomodoro?.click());
       expect(latest.cards.at(-1)?.kind).toBe("pomodoro");
-      expect(latest.playlists[0].entries.at(-1)?.card_id).toBe("pomodoro");
+      expect(latest.cards.at(-1)?.id).toBe("pomodoro");
       expect(selected).toBe("pomodoro");
       expect(container.querySelector('[role="menu"]')).toBeNull();
       expect(document.activeElement !== document.body).toBe(true);
@@ -1386,7 +1290,7 @@ describe("settings accessibility and states", () => {
       );
       expect(earlier).not.toBeNull();
       await act(async () => earlier?.click());
-      expect(latest.playlists[0].entries.map((entry) => entry.card_id)).toEqual([
+      expect(latest.cards.map((card) => card.id)).toEqual([
         "second",
         "first",
       ]);
@@ -1395,7 +1299,7 @@ describe("settings accessibility and states", () => {
         'button[aria-label="Move Digital clock — Up next later"]',
       );
       await act(async () => later?.click());
-      expect(latest.playlists[0].entries.map((entry) => entry.card_id)).toEqual([
+      expect(latest.cards.map((card) => card.id)).toEqual([
         "first",
         "second",
       ]);
@@ -1409,7 +1313,7 @@ describe("settings accessibility and states", () => {
           new KeyboardEvent("keydown", { key: "ArrowRight", altKey: true, bubbles: true }),
         );
       });
-      expect(latest.playlists[0].entries.map((entry) => entry.card_id)).toEqual([
+      expect(latest.cards.map((card) => card.id)).toEqual([
         "second",
         "first",
       ]);
@@ -1422,7 +1326,7 @@ describe("settings accessibility and states", () => {
           new KeyboardEvent("keydown", { key: "ArrowLeft", altKey: true, bubbles: true }),
         );
       });
-      expect(latest.playlists[0].entries.map((entry) => entry.card_id)).toEqual([
+      expect(latest.cards.map((card) => card.id)).toEqual([
         "first",
         "second",
       ]);
@@ -1430,43 +1334,6 @@ describe("settings accessibility and states", () => {
       await act(async () => root.unmount());
       container.remove();
     }
-  });
-
-  test("duplicate loop entries use their rendered index for move boundaries", () => {
-    const card = clockCard("duplicate", "Desk");
-    const config = cardListConfig(
-      [card],
-      [
-        { card_id: card.id, dwell_seconds: null },
-        { card_id: card.id, dwell_seconds: 45 },
-      ],
-    );
-    const container = document.createElement("div");
-    container.innerHTML = renderToStaticMarkup(
-      <CardList
-        config={config}
-        issues={[]}
-        pomodoros={[]}
-        selectedCardId={null}
-        onSelect={() => {}}
-        onAdd={() => {}}
-        onChange={() => {}}
-        onRemove={() => {}}
-      />,
-    );
-
-    const earlier = container.querySelectorAll<HTMLButtonElement>(
-      'button[aria-label="Move Digital clock — Desk earlier"]',
-    );
-    const later = container.querySelectorAll<HTMLButtonElement>(
-      'button[aria-label="Move Digital clock — Desk later"]',
-    );
-    expect(earlier).toHaveLength(2);
-    expect(later).toHaveLength(2);
-    expect(earlier[0].disabled).toBe(true);
-    expect(later[0].disabled).toBe(false);
-    expect(earlier[1].disabled).toBe(false);
-    expect(later[1].disabled).toBe(true);
   });
 
   test("keyboard reorder restores focus to the moved tile body", async () => {
@@ -1555,110 +1422,6 @@ describe("settings accessibility and states", () => {
     }
   });
 
-  test("an outside tile says why it is outside and enrols directly into the loop", async () => {
-    const outside = pomodoroCard("outside", "Spare");
-    const initial = cardListConfig(
-      [clockCard("inside", "Desk"), outside],
-      [{ card_id: "inside", dwell_seconds: null }],
-    );
-    let latest = initial;
-
-    function Harness() {
-      const [config, setConfig] = useState(initial);
-      latest = config;
-      return (
-        <CardList
-          config={config}
-          issues={[]}
-          pomodoros={[]}
-          selectedCardId={null}
-          onSelect={() => {}}
-          onAdd={() => {}}
-          onChange={setConfig}
-          onRemove={() => {}}
-        />
-      );
-    }
-
-    const container = document.createElement("div");
-    document.body.appendChild(container);
-    const root = createRoot(container);
-    try {
-      await act(async () => root.render(<Harness />));
-      expect(container.textContent).toContain("not in loop");
-      expect(container.textContent).toContain("alerts");
-      const join = container.querySelector<HTMLButtonElement>(
-        'button[aria-label="Add Pomodoro — Spare to the loop"]',
-      );
-      await act(async () => join?.click());
-      expect(latest.playlists[0].entries.at(-1)?.card_id).toBe("outside");
-      expect(container.textContent).not.toContain("not in loop");
-      expect(document.activeElement !== document.body).toBe(true);
-      expect(document.activeElement?.classList.contains("card-tile__body")).toBe(true);
-      expect(document.activeElement?.textContent).toContain("Spare");
-    } finally {
-      await act(async () => root.unmount());
-      container.remove();
-    }
-  });
-
-  test("a missing-card entry remains visible with all of its entry issues and can be removed", async () => {
-    const initial = cardListConfig(
-      [clockCard("first", "Desk")],
-      [{ card_id: "missing-card", dwell_seconds: null }],
-    );
-    const issues: ValidationIssue[] = [
-      {
-        path: "playlists[0].entries[0].card_id",
-        code: "missing-reference",
-        message: "This loop entry references a missing card.",
-      },
-      {
-        path: "playlists[0].entries[0].dwell_seconds",
-        code: "out-of-range",
-        message: "Dwell time is out of range.",
-      },
-    ];
-    let latest = initial;
-
-    function Harness() {
-      const [config, setConfig] = useState(initial);
-      latest = config;
-      return (
-        <CardList
-          config={config}
-          issues={issues}
-          pomodoros={[]}
-          selectedCardId={null}
-          onSelect={() => {}}
-          onAdd={() => {}}
-          onChange={setConfig}
-          onRemove={() => {}}
-        />
-      );
-    }
-
-    const container = document.createElement("div");
-    document.body.appendChild(container);
-    const root = createRoot(container);
-    try {
-      await act(async () => root.render(<Harness />));
-      expect(container.textContent).toContain("Missing card");
-      expect(container.textContent).toContain("This loop entry references a missing card.");
-      expect(container.textContent).toContain("Dwell time is out of range.");
-      expect(container.querySelector(".card-tile.has-issue")).not.toBeNull();
-      await act(async () =>
-        container
-          .querySelector<HTMLButtonElement>('button[aria-label="Remove Missing card"]')
-          ?.click(),
-      );
-      expect(latest.playlists[0].entries).toEqual([]);
-    } finally {
-      await act(async () => root.unmount());
-      container.remove();
-    }
-  });
-
   test("editing an already-saved config does not resurface first-run guidance", async () => {
     let liveSnapshot = {
       ...(structuredClone(snapshot) as AppSnapshot),
@@ -1695,8 +1458,7 @@ describe("settings accessibility and states", () => {
       });
       await act(async () => buttonWithText(container, "Save & apply")?.click());
       await waitFor(() => expect(saved).toHaveLength(1));
-      expect(saved[0].active_playlist_id).toBe(snapshot.config.active_playlist_id);
-      expect(saved[0].playlists[0].advance).toEqual({ kind: "manual" });
+      expect(saved[0].advance).toEqual({ kind: "manual" });
     } finally {
       await act(async () => root.unmount());
       container.remove();
@@ -2283,24 +2045,13 @@ describe("settings accessibility and states", () => {
       schema_version: snapshot.config.schema_version,
       preferences: { timezone: "UTC", autostart: false, paused: false, orientation: "landscape" },
       cards: [
-        clockCard("first", "Desk"),
+        { ...clockCard("first", "Desk"), dwell_seconds: 45 },
         clockCard("second", "Up next"),
         clockCard("third", "Focus"),
       ],
       image_sources: [],
       assets: [],
-      playlists: [
-        {
-          id: "workday",
-          name: "Workday",
-          advance: { kind: "timed", default_dwell_seconds: 20 },
-          entries: [
-            { card_id: "first", dwell_seconds: 45 },
-            { card_id: "second", dwell_seconds: null },
-          ],
-        },
-      ],
-      active_playlist_id: "workday",
+      advance: { kind: "timed", default_dwell_seconds: 20 },
       updater: { channel: "stable", checks: "notify" },
     };
   }
@@ -2317,19 +2068,21 @@ describe("settings accessibility and states", () => {
     );
   }
 
-  test("the loop ring shows the loop length and only in-rotation cards", () => {
+  test("the loop ring shows the loop length and every card in it", () => {
+    // 45 + 20 + 20: the first card overrides the 20 s default, the other two take it.
+    // Since schema v10 every card is in the loop, so there is no card to leave out.
     const html = renderLoopRing(loopConfig());
-    expect(html).toMatch(/1 min 5 s/);
+    expect(html).toMatch(/1 min 25 s/);
     expect(html).toContain("Desk");
     expect(html).toContain("Up next");
-    expect(html).not.toContain("Focus");
+    expect(html).toContain("Focus");
   });
 
   test("the loop ring hides timings and the play control under manual advance", () => {
     const config = loopConfig();
     const html = renderLoopRing({
       ...config,
-      playlists: [{ ...config.playlists[0], advance: { kind: "manual" } }],
+      advance: { kind: "manual" },
     });
     expect(html).not.toMatch(/\d+s</);
     expect(html).not.toContain("Play the loop");
@@ -2348,7 +2101,7 @@ describe("settings accessibility and states", () => {
           config={config}
           issues={[
             {
-              path: "playlists[0].advance.default_dwell_seconds",
+              path: "advance.default_dwell_seconds",
               code: "out-of-range",
               message: "Default dwell is out of range.",
             },
@@ -2375,7 +2128,7 @@ describe("settings accessibility and states", () => {
       const manual = buttonWithText(container, "Manual");
       expect(manual?.getAttribute("aria-pressed")).toBe("false");
       await act(async () => manual?.click());
-      expect(latest.playlists[0].advance).toEqual({ kind: "manual" });
+      expect(latest.advance).toEqual({ kind: "manual" });
       expect(buttonWithText(container, "Manual")?.getAttribute("aria-pressed")).toBe("true");
     } finally {
       await act(async () => root.unmount());
@@ -2441,7 +2194,7 @@ describe("settings accessibility and states", () => {
         dwell?.dispatchEvent(new Event("input", { bubbles: true }));
       });
       expect(dwell?.value).toBe("");
-      expect(latest.playlists[0].advance).toEqual({
+      expect(latest.advance).toEqual({
         kind: "timed",
         default_dwell_seconds: 20,
       });
@@ -2452,13 +2205,7 @@ describe("settings accessibility and states", () => {
   });
 
   test("the loop legend only displays and selects; it has no reorder affordance", () => {
-    const initial = loopConfig();
-    initial.playlists[0].entries = [
-      { card_id: "first", dwell_seconds: 45 },
-      { card_id: "missing-card", dwell_seconds: null },
-      { card_id: "second", dwell_seconds: null },
-    ];
-    const html = renderLoopRing(initial);
+    const html = renderLoopRing(loopConfig());
     expect(html).not.toContain("draggable");
     expect(html).not.toContain("loop__moves");
     expect(html).not.toContain("Move Digital clock");
@@ -2475,7 +2222,7 @@ describe("settings accessibility and states", () => {
     expect(unclaimedIssues([capabilityIssue], config)).toEqual([capabilityIssue]);
   });
 
-  test("every issue is claimed by exactly one surface — the cards container, a card, a playlist, a preference field, or the unclaimed fallback", () => {
+  test("every issue is claimed by exactly one surface — the cards container, a card, the loop advance, a preference field, or the unclaimed fallback", () => {
     const config = cardListConfig([clockCard("first"), clockCard("second")]);
     const issues: ValidationIssue[] = [
       { path: "cards", code: "empty", message: "At least one card is required." },
@@ -2483,7 +2230,7 @@ describe("settings accessibility and states", () => {
       { path: "cards[1]", code: "invalid-composition", message: "This card is misconfigured." },
       { path: "preferences.timezone", code: "invalid-timezone", message: "Unknown timezone." },
       {
-        path: "playlists[0].advance.default_dwell_seconds",
+        path: "advance.default_dwell_seconds",
         code: "out-of-range",
         message: "Dwell time is out of range.",
       },
@@ -2505,85 +2252,13 @@ describe("settings accessibility and states", () => {
       ...cardsContainerIssues(issues),
       ...config.cards.flatMap((card) => issuesForCard(issues, config, card.id)),
       ...issuesForPath(issues, "playlists[0].entries"),
-      ...issuesForPath(issues, "playlists[0].advance"),
+      ...issuesForPath(issues, "advance"),
       ...issuesForPath(issues, "preferences.timezone"),
       ...unclaimedIssues(issues, config),
     ];
 
     expect(union).toHaveLength(issues.length);
     expect(new Set(union)).toEqual(new Set(issues));
-  });
-
-  test("active playlist index one claims and renders only its entries and advance issues", () => {
-    const base = cardListConfig([clockCard("clock", "Desk")]);
-    const active = base.playlists[0];
-    const config: AppConfig = {
-      ...base,
-      playlists: [
-        { id: "inactive", name: "Inactive", advance: { kind: "manual" }, entries: [] },
-        active,
-      ],
-      active_playlist_id: active.id,
-    };
-    const issues: ValidationIssue[] = [
-      { path: "playlists[1].entries", code: "entries", message: "Active entries issue." },
-      {
-        path: "playlists[1].entries[0].dwell_seconds",
-        code: "dwell",
-        message: "Active dwell issue.",
-      },
-      { path: "playlists[1].advance", code: "advance", message: "Active advance issue." },
-      {
-        path: "playlists[1].advance.default_dwell_seconds",
-        code: "default-dwell",
-        message: "Active default dwell issue.",
-      },
-      { path: "playlists", code: "root", message: "Playlists root issue." },
-      { path: "playlists[0].id", code: "inactive-id", message: "Inactive id issue." },
-      {
-        path: "playlists[0].entries",
-        code: "inactive-entries",
-        message: "Inactive entries issue.",
-      },
-      {
-        path: "active_playlist_id",
-        code: "active-id",
-        message: "Active playlist id issue.",
-      },
-    ];
-
-    const grid = renderToStaticMarkup(
-      <CardList
-        config={config}
-        issues={issues}
-        pomodoros={[]}
-        selectedCardId={null}
-        onSelect={() => {}}
-        onAdd={() => {}}
-        onChange={() => {}}
-        onRemove={() => {}}
-      />,
-    );
-    const ring = renderToStaticMarkup(
-      <LoopRing
-        config={config}
-        issues={issues}
-        selectedCardId="clock"
-        onSelect={() => {}}
-        onChange={() => {}}
-      />,
-    );
-
-    expect(grid).toContain("Active entries issue.");
-    expect(grid).toContain("Active dwell issue.");
-    expect(ring).toContain("Active advance issue.");
-    expect(ring).toContain("Active default dwell issue.");
-    expect(unclaimedIssues(issues, config).map((issue) => issue.path)).toEqual([
-      "playlists",
-      "playlists[0].id",
-      "playlists[0].entries",
-      "active_playlist_id",
-    ]);
   });
 
   test("includes narrow-window and reduced-motion fallbacks", async () => {

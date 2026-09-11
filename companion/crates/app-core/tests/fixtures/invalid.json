@@ -1,5 +1,5 @@
 {
-  "schema_version": 9,
+  "schema_version": 10,
   "preferences": {
     "timezone": "Not/A_Timezone",
     "autostart": false,
@@ -15,7 +15,8 @@
       "template": { "kind": "digital-clock" },
       "tap_action": { "kind": "none" },
       "refresh": { "kind": "device-local" },
-      "alert": { "kind": "on-timer-finish", "hold": { "kind": "until-dismissed" } }
+      "alert": { "kind": "on-timer-finish", "hold": { "kind": "until-dismissed" } },
+      "dwell_seconds": null
     },
     {
       "kind": "clock",
@@ -25,7 +26,8 @@
       "template": { "kind": "digital-clock" },
       "tap_action": { "kind": "none" },
       "refresh": { "kind": "device-local" },
-      "alert": { "kind": "none" }
+      "alert": { "kind": "none" },
+      "dwell_seconds": 4
     },
     {
       "kind": "pomodoro",
@@ -35,7 +37,8 @@
       "template": { "kind": "progress-ring" },
       "tap_action": { "kind": "start-pause" },
       "refresh": { "kind": "device-local" },
-      "alert": { "kind": "none" }
+      "alert": { "kind": "none" },
+      "dwell_seconds": 4
     },
     {
       "kind": "pomodoro",
@@ -48,7 +51,8 @@
       "alert": {
         "kind": "on-timer-finish",
         "hold": { "kind": "seconds", "value": 4 }
-      }
+      },
+      "dwell_seconds": null
     },
     {
       "kind": "picture",
@@ -57,32 +61,11 @@
       "source_id": "missing-source",
       "tap_action": { "kind": "none" },
       "refresh": { "kind": "manual" },
-      "alert": { "kind": "none" }
+      "alert": { "kind": "none" },
+      "dwell_seconds": null
     }
   ],
   "assets": [],
-  "playlists": [
-    {
-      "id": "p1",
-      "name": "Main",
-      "advance": { "kind": "manual" },
-      "entries": [
-        { "card_id": "on-timer-mismatch", "dwell_seconds": null },
-        { "card_id": "duplicate", "dwell_seconds": 4 },
-        { "card_id": "pomodoro-b", "dwell_seconds": null },
-        { "card_id": "ghost", "dwell_seconds": null },
-        { "card_id": "on-timer-mismatch", "dwell_seconds": null }
-      ]
-    },
-    {
-      "id": "p2",
-      "name": "Main",
-      "advance": { "kind": "manual" },
-      "entries": [
-        { "card_id": "orphan", "dwell_seconds": null }
-      ]
-    }
-  ],
-  "active_playlist_id": "p1",
+  "advance": { "kind": "manual" },
   "updater": { "channel": "stable", "checks": "notify" }
 }

@@ -69,14 +69,15 @@ default. This section states only what is true now.
 - **The legacy subtraction** (spec
   `docs/superpowers/specs/2026-09-11-deskmate-legacy-subtraction-design.md`): all three
   waves are complete and merged, Wave C on explicit owner direction 2026-09-12.
-- **`main` NOW HOLDS A PROTOCOL-v2 SERVER AND `dev-0005` IS STILL FLASHED WITH v1.
-  DO NOT REDEPLOY THE SERVER UNTIL THE BOARD IS FLASHED.** This is the one standing rule
-  that overrides "redeploy whenever you build": protocol v2 is not additive, so a v2
-  server and a v1 device answer every frame with `VersionMismatch` and the panel goes
-  dark until the board is flashed over USB. The order is **flash first, redeploy second**,
-  and the board is unreachable between the two. Until that session runs, the live
-  deployment must keep running its pre-v2 binary. What the session owes is the
-  "Protocol v2 -- OWED" section at the end of `docs/hardware/board-notes.md`. Firmware
+- **THE LIVE SERVER SPEAKS PROTOCOL v2 AND `dev-0005` IS STILL FLASHED WITH v1, SO THE
+  FLEET IS DOWN UNTIL THE BOARD IS FLASHED.** Deployed 2026-09-11 21:36 UTC by owner
+  direction, ahead of the flash. This is not a fault to debug: protocol v2 is not
+  additive, so a v2 server and a v1 device answer every frame with `VersionMismatch`.
+  The board needs `v2.1.0-proto2` flashed over USB (`idf.py -C firmware flash`), which is
+  also the version the catalog now publishes. Rollback is both halves together -- binary
+  **and** env file -- and the exact commands are in the "The server half is DEPLOYED"
+  block at the end of `docs/hardware/board-notes.md`, which is also where the rest of what
+  the flash session owes lives. Firmware
   `.bss` moved **-104 bytes** (87,104 -> 87,000; `.data` and IRAM byte-flat), which is
   within one byte of the shift that broke OTA downloads in `3f2aa03`, so the on-board OTA
   check is mandatory rather than a formality.

@@ -4925,3 +4925,44 @@ Software gates that are green on this branch, and what they do not cover: the fu
 companion workspace set, `make -C firmware/host_tests clean test` and `sanitize`, and
 `idf.py -C firmware build`. None of them can see an OTA layout failure. That is the whole
 lesson of `3f2aa03`.
+
+### The server half is DEPLOYED as of 2026-09-11 21:36 UTC — the board is now the missing half
+
+Deployed by owner direction (*"deploy as well"*), ahead of the flash, which inverts the
+order the section above prescribes. The consequence is the documented one and it is now
+the live state: **`deskmate.rodi.one` speaks protocol v2 and `dev-0005` is still flashed
+with v1, so the two cannot talk at all.**
+
+What was deployed, from `31e9042` via `git archive HEAD` (never the working tree):
+
+| | |
+|---|---|
+| binary | built in `rust:1.98-bookworm` on docker-vm, 17.4 s against the retained `target/` |
+| rollback target | `/usr/local/bin/deskmate-server.bak-20260911T213610Z` |
+| env backup | `/etc/deskmate/server.env.bak-20260911T213610Z` |
+| `DESKMATE_FIRMWARE_VERSION` | `v2.0.0-durable3` → **`v2.1.0-proto2`** |
+| published image | `/var/lib/deskmate/firmware/v2.1.0-proto2.bin`, sha256 `34484a79e8a9e8ae…`, byte-identical to the local build |
+| verified | `GET /v1/firmware/v2.1.0-proto2.bin` → 200, 1,593,984 bytes through the tunnel; `/v1/device/link` → 401 unauthenticated |
+
+**Observed, not inferred:** `dev-0005` was connected and reporting
+`current=v2.0.0-durable3` at 21:26:04, the restart closed its link at 21:36:18, and it has
+not reconnected since. Whether that is the protocol mismatch, a widening backoff, or the
+board simply being powered off **cannot be told apart from the server side** — the log
+records no link attempt at all, and a board at rest looks identical. Do not write this up
+as a confirmed mismatch observation; confirm it at the board.
+
+**Rollback, if the panel is needed before the flash session** — both halves, together:
+
+```sh
+ssh rodion@100.93.166.123
+sudo -n cp -a /usr/local/bin/deskmate-server.bak-20260911T213610Z /usr/local/bin/deskmate-server
+sudo -n cp -a /etc/deskmate/server.env.bak-20260911T213610Z /etc/deskmate/server.env
+sudo -n systemctl restart deskmate-server
+```
+
+The env file must go back too: a pre-v2 binary with `DESKMATE_FIRMWARE_VERSION=v2.1.0-proto2`
+would offer a v1 device an image it cannot run.
+
+**What the flash session still owes is unchanged** — every checkbox above, with the OTA
+download the one that matters. Step 2 of the rollout order is already done; the session is
+now step 1 and steps 3-5.

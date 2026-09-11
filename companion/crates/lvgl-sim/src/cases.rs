@@ -1096,10 +1096,9 @@ fn scene_rot_rect_nodes() -> Vec<SceneNode> {
 /// One case per `scene_node_kind_t`, each at both mount orientations, pinned
 /// by `tests/scene.rs` against `tests/golden/scene/`.
 ///
-/// A separate table from [`golden_cases`]: these are `SceneRenderRequest`s rendered through
-/// `Simulator::render_scene_png`, not `RenderRequest`s through the reference
-/// template oracle. The physical harness drives these with `PushScene`, the
-/// same message shipping firmware renders.
+/// A separate table from [`face_scene_cases`]: one case per scene node kind,
+/// rather than per shipped card face. The physical harness drives both with
+/// `PushScene`, the same message shipping firmware renders.
 pub fn scene_cases() -> Vec<(String, SceneRenderRequest)> {
     let mut cases = Vec::new();
     scene_case(&mut cases, "rect", &scene_rect_nodes(), &[], None, &[]);

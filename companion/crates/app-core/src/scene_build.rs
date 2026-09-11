@@ -1,12 +1,12 @@
-//! Host-side scene builders for Deskmate's six built-in card faces.
+//! Host-side scene builders for Deskmate's card faces: `DigitalClock`,
+//! `AnalogClock` and `ProgressRing`.
 //!
-//! The builders cover `DigitalClock`, `AnalogClock`, `BigNumberLabel`,
-//! `IconBadgeText`, `RowList`, and `ProgressRing`. The byte-exact parity gate
-//! renders them beside the retired C templates in
-//! `companion/crates/lvgl-sim/reference-oracle/ui/templates/`.
-//! `DigitalClock`'s numeric and coordinate provenance is the `digital_clock.c`
-//! file in that directory; the other five builders use their correspondingly
-//! named sibling templates. These oracle files do not ship in firmware.
+//! Every numeric and coordinate constant here originated in a hand-written C
+//! template that the device used to compile in. Those templates stopped
+//! shipping at stage 3a and their reference copies were deleted on 2026-09-11
+//! with the parity gate that compared against them; what pins these builders
+//! now is `crates/lvgl-sim/tests/golden/`, which renders the same faces
+//! through the real firmware scene interpreter.
 //!
 //! # What the host decides, and what the device still decides
 //!

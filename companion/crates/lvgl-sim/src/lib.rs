@@ -1,10 +1,14 @@
 //! Headless renderer for Deskmate's LVGL surfaces.
 //!
-//! This crate links the shipping scene interpreter and hardware-independent
-//! firmware core, plus the retired C templates from its clearly isolated
-//! `reference-oracle/`. Rust can therefore produce exact device pixels and
-//! keep comparing scenes against the live historical oracle. See `build.rs`
-//! for the source list and `csrc/sim_shim.c` for the C-side glue.
+//! This crate links the shipping scene interpreter and the hardware-independent
+//! firmware core, so Rust can produce exact device pixels: the goldens, the
+//! settings-window preview and the on-board framebuffer diff all render through
+//! the same C the device runs. See `build.rs` for the source list and
+//! `csrc/sim_shim.c` for the C-side glue.
+//!
+//! It used to compile the retired C templates too, as an oracle for a parity
+//! gate. That went on 2026-09-11 along with the second renderer it existed to
+//! check.
 
 use std::ffi::CString;
 use std::fmt;

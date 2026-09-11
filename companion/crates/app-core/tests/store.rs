@@ -14,6 +14,36 @@ use app_core::{
     WidgetTapAction,
 };
 
+#[test]
+fn a_pre_v4_document_is_refused_as_an_unsupported_version() {
+    // v0-v3 predate M4 (2026-08-05) and no document at those versions exists in
+    // the fleet, on the Mac, or on the server. Refusing one is a typed, legible
+    // outcome -- NOT a validation failure, which would be presented to the owner
+    // as their settings being broken.
+    let directory = test_directory("pre-v4-refused");
+    let path = directory.path().join("config.json");
+    fs::write(
+        &path,
+        br#"{"schema_version":3,"preferences":{},"cards":[]}"#,
+    )
+    .expect("write v3 document");
+
+    let store = ConfigStore::new(&path);
+    let outcome = store.load();
+
+    let recovery = outcome.recovery().expect("a v3 document must be refused");
+    assert!(
+        matches!(
+            recovery,
+            StoreError::UnsupportedVersion {
+                found: 3,
+                supported: CURRENT_SCHEMA_VERSION
+            }
+        ),
+        "a v3 document must be an UnsupportedVersion refusal, got {recovery:?}"
+    );
+}
+
 fn test_directory(name: &str) -> tempfile::TempDir {
     tempfile::Builder::new()
         .prefix(&format!("deskmate-app-core-{name}-"))
@@ -108,40 +138,22 @@ fn save_round_trips_and_migration_is_explicit() {
     assert_eq!(loaded.origin(), ConfigOrigin::Current);
     assert_eq!(loaded.config(), &config);
 
-    fs::write(&path, include_bytes!("fixtures/legacy-v0.json")).unwrap();
+    // A migration is never silent: the outcome names the version it came from,
+    // which is what lets a caller tell "this is what you saved" from "this is
+    // what we made of what you saved".
+    fs::write(&path, include_bytes!("fixtures/v4-roundtrip.json")).unwrap();
     let migrated = store.load();
-    assert_eq!(migrated.origin(), ConfigOrigin::MigratedV0);
-    assert_eq!(migrated.config().schema_version, CURRENT_SCHEMA_VERSION);
-    assert_eq!(migrated.config().preferences.timezone, "Europe/Paris");
-    assert!(!migrated.config().preferences.autostart);
-
-    fs::write(&path, include_bytes!("fixtures/released-m3-v1.json")).unwrap();
-    let migrated = store.load();
-    assert_eq!(migrated.origin(), ConfigOrigin::MigratedV1);
+    assert_eq!(migrated.origin(), ConfigOrigin::MigratedV4);
     assert_eq!(migrated.config().schema_version, CURRENT_SCHEMA_VERSION);
     assert_eq!(migrated.config().preferences.timezone, "Asia/Tbilisi");
-    assert_eq!(migrated.config().cards.len(), 2);
+    assert!(migrated.config().preferences.autostart);
     assert_eq!(
         migrated.config().preferences.orientation,
         DisplayOrientation::LandscapeFlipped
     );
-    // The retired calendar is dropped; the surviving screen order remains pomodoro,
-    // then clock.
+    assert_eq!(migrated.config().cards.len(), 2);
     assert!(matches!(
         &migrated.config().cards[0],
-        CardSettings::Pomodoro {
-            id,
-            label,
-            duration_seconds: 1_500,
-            template: DisplayTemplate::ProgressRing,
-            tap_action: WidgetTapAction::StartPause,
-            refresh: RefreshPolicy::DeviceLocal,
-            alert: CardAlert::OnTimerFinish { hold: AlertHold::UntilDismissed },
-            ..
-        } if id == "pomodoro" && label == "Focus"
-    ));
-    assert!(matches!(
-        &migrated.config().cards[1],
         CardSettings::Clock {
             id,
             title,
@@ -153,10 +165,25 @@ fn save_round_trips_and_migration_is_explicit() {
             ..
         } if id == "clock" && title == "Desk"
     ));
+    assert!(matches!(
+        &migrated.config().cards[1],
+        CardSettings::Pomodoro {
+            id,
+            label,
+            duration_seconds: 1_500,
+            template: DisplayTemplate::ProgressRing,
+            tap_action: WidgetTapAction::StartPause,
+            refresh: RefreshPolicy::DeviceLocal,
+            alert: CardAlert::OnTimerFinish { hold: AlertHold::UntilDismissed },
+            ..
+        } if id == "focus" && label == "Focus"
+    ));
     assert!(migrated.config().assets.is_empty());
     assert_eq!(
         migrated.config().playlists[0].advance,
-        app_core::CarouselAdvance::Manual
+        CarouselAdvance::Timed {
+            default_dwell_seconds: 30
+        }
     );
     migrated.config().compile(7).unwrap();
 }
@@ -201,127 +228,6 @@ fn loading_repairs_a_permissive_existing_config_mode() {
         fs::metadata(path).unwrap().permissions().mode() & 0o777,
         0o600
     );
-}
-
-#[test]
-fn v3_migrates_to_one_playlist_preserving_rotation_order_and_dwell() {
-    let directory = test_directory("v3-migration");
-    let path = directory.path().join("config.json");
-    let store = ConfigStore::new(&path);
-    fs::write(&path, include_bytes!("fixtures/v3-roundtrip.json")).unwrap();
-
-    let outcome = store.load();
-    assert_eq!(outcome.origin(), ConfigOrigin::MigratedV3);
-    assert!(outcome.recovery().is_none());
-
-    let config = outcome.config();
-    assert_eq!(config.schema_version, CURRENT_SCHEMA_VERSION);
-    assert_eq!(config.active_playlist_id, "my-playlist");
-    assert_eq!(config.playlists.len(), 1);
-    let playlist = &config.playlists[0];
-    assert_eq!(playlist.id, "my-playlist");
-    assert_eq!(playlist.name, "My playlist");
-    assert_eq!(
-        playlist.advance,
-        CarouselAdvance::Timed {
-            default_dwell_seconds: 30
-        }
-    );
-    assert_eq!(playlist.entries.len(), 1);
-    assert_eq!(playlist.entries[0].card_id, "a");
-    assert_eq!(playlist.entries[0].dwell_seconds, Some(20));
-
-    let ids: Vec<&str> = config.cards.iter().map(CardSettings::id).collect();
-    assert_eq!(ids, ["a", "b"]);
-    assert!(matches!(
-        &config.cards[0],
-        CardSettings::Clock {
-            title,
-            show_seconds: true,
-            template: DisplayTemplate::AnalogClock,
-            tap_action: WidgetTapAction::None,
-            refresh: RefreshPolicy::DeviceLocal,
-            alert: CardAlert::None,
-            ..
-        } if title == "Desk"
-    ));
-    assert!(matches!(
-        &config.cards[1],
-        CardSettings::Pomodoro {
-            label,
-            duration_seconds: 1_200,
-            template: DisplayTemplate::ProgressRing,
-            tap_action: WidgetTapAction::Reset,
-            refresh: RefreshPolicy::DeviceLocal,
-            alert: CardAlert::OnTimerFinish {
-                hold: AlertHold::UntilDismissed
-            },
-            ..
-        } if label == "Deep work"
-    ));
-    assert_eq!(config.preferences.timezone, "Asia/Tbilisi");
-    assert!(config.preferences.autostart);
-    assert!(config.assets.is_empty());
-    assert_eq!(config.updater.channel, app_core::UpdateChannel::Beta);
-    assert!(config.validate().is_ok());
-}
-
-#[test]
-fn v3_all_alert_only_migrates_to_valid_config() {
-    let directory = test_directory("v3-alert-only");
-    let path = directory.path().join("config.json");
-    let store = ConfigStore::new(&path);
-    let alert_only = br#"{
-      "schema_version": 3,
-      "preferences": {
-        "timezone": "UTC",
-        "autostart": false,
-        "paused": false,
-        "orientation": "landscape"
-      },
-      "cards": [
-        {
-          "kind": "pomodoro",
-          "id": "focus",
-          "label": "Focus",
-          "duration_seconds": 1500,
-          "template": { "kind": "progress-ring" },
-          "tap_action": { "kind": "start-pause" },
-          "refresh": { "kind": "device-local" },
-          "presence": { "kind": "alert-only" },
-          "alert": { "kind": "on-timer-finish", "hold": { "kind": "until-dismissed" } }
-        },
-        {
-          "kind": "calendar",
-          "id": "agenda",
-          "title": "Agenda",
-          "source": { "kind": "url", "value": "https://example.test/agenda.ics" },
-          "template": { "kind": "row-list" },
-          "tap_action": { "kind": "none" },
-          "refresh": { "kind": "interval", "minutes": 15 },
-          "presence": { "kind": "alert-only" },
-          "alert": { "kind": "before-event", "lead_minutes": 5, "hold": { "kind": "seconds", "value": 60 } }
-        }
-      ],
-      "assets": [],
-      "carousel": { "advance": { "kind": "manual" } },
-      "updater": { "channel": "stable", "checks": "notify" }
-    }"#;
-    fs::write(&path, alert_only).unwrap();
-
-    let outcome = store.load();
-    assert_eq!(outcome.origin(), ConfigOrigin::MigratedV3);
-    assert!(outcome.recovery().is_none());
-    assert_eq!(outcome.config().cards.len(), 1);
-    assert_eq!(outcome.config().playlists[0].entries.len(), 1);
-    assert_eq!(outcome.config().playlists[0].entries[0].card_id, "focus");
-    assert_eq!(
-        outcome.config().cards[0].alert(),
-        CardAlert::OnTimerFinish {
-            hold: AlertHold::UntilDismissed
-        }
-    );
-    assert!(outcome.config().validate().is_ok());
 }
 
 #[test]
@@ -540,45 +446,6 @@ fn an_all_retired_v7_document_gets_the_default_clock_and_loses_empty_inactive_pl
 }
 
 #[test]
-fn v0_v1_v2_migrate_directly_to_v9() {
-    let directory = test_directory("legacy-direct-to-v9");
-    let path = directory.path().join("config.json");
-    let store = ConfigStore::new(&path);
-
-    for (fixture, origin, expected_ids) in [
-        (
-            include_bytes!("fixtures/legacy-v0.json").as_slice(),
-            ConfigOrigin::MigratedV0,
-            &["clock"][..],
-        ),
-        (
-            include_bytes!("fixtures/released-m3-v1.json").as_slice(),
-            ConfigOrigin::MigratedV1,
-            &["pomodoro", "clock"][..],
-        ),
-        (
-            include_bytes!("fixtures/v2-legacy.json").as_slice(),
-            ConfigOrigin::MigratedV2,
-            &["clock", "focus"][..],
-        ),
-    ] {
-        fs::write(&path, fixture).unwrap();
-        let outcome = store.load();
-        assert_eq!(outcome.origin(), origin);
-        assert!(outcome.recovery().is_none());
-        assert_eq!(outcome.config().schema_version, CURRENT_SCHEMA_VERSION);
-        assert_eq!(outcome.config().playlists.len(), 1);
-        let entry_ids: Vec<&str> = outcome.config().playlists[0]
-            .entries
-            .iter()
-            .map(|entry| entry.card_id.as_str())
-            .collect();
-        assert_eq!(entry_ids, expected_ids);
-        assert!(outcome.config().validate().is_ok());
-    }
-}
-
-#[test]
 fn malformed_truncated_and_oversized_files_preserve_bytes_and_last_good() {
     let directory = test_directory("recovery");
     let path = directory.path().join("config.json");
@@ -670,72 +537,6 @@ fn concurrent_saves_are_serialized_and_disk_matches_latest_generation() {
 }
 
 #[test]
-fn v2_documents_migrate_to_cards_in_screen_order() {
-    let directory = test_directory("v2-migration");
-    let path = directory.path().join("config.json");
-    let store = ConfigStore::new(&path);
-    fs::write(&path, include_bytes!("fixtures/v2-legacy.json")).unwrap();
-
-    let outcome = store.load();
-    assert_eq!(outcome.origin(), ConfigOrigin::MigratedV2);
-    assert!(outcome.recovery().is_none());
-
-    let config = outcome.config();
-    assert_eq!(config.schema_version, CURRENT_SCHEMA_VERSION);
-
-    // Order follows screens[], not widgets[] (the fixture deliberately lists the
-    // pomodoro widget before the clock widget, but the clock screen comes first).
-    let ids: Vec<&str> = config.cards.iter().map(CardSettings::id).collect();
-    assert_eq!(ids, ["clock", "focus"]);
-
-    // Every migrated card is in the playlist, inheriting its default dwell.
-    assert_eq!(
-        config.compiled_card_ids(),
-        config
-            .cards
-            .iter()
-            .map(CardSettings::id)
-            .collect::<Vec<_>>()
-    );
-
-    // interrupt_policy: enabled becomes the kind-appropriate alert.
-    assert_eq!(
-        config.cards[1].alert(),
-        CardAlert::OnTimerFinish {
-            hold: AlertHold::UntilDismissed
-        }
-    );
-    assert_eq!(config.cards[0].alert(), CardAlert::None);
-
-    // auto_advance_seconds becomes timed advance.
-    assert_eq!(
-        config.playlists[0].advance,
-        CarouselAdvance::Timed {
-            default_dwell_seconds: 30
-        }
-    );
-
-    // Preferences survive untouched.
-    assert_eq!(config.preferences.timezone, "Asia/Tbilisi");
-    assert_eq!(
-        config.preferences.orientation,
-        DisplayOrientation::LandscapeFlipped
-    );
-}
-
-#[test]
-fn migrated_v2_documents_always_satisfy_the_rotation_rule() {
-    let directory = test_directory("v2-rotation-rule");
-    let path = directory.path().join("config.json");
-    let store = ConfigStore::new(&path);
-    fs::write(&path, include_bytes!("fixtures/v2-legacy.json")).unwrap();
-
-    let loaded = store.load();
-    let config = loaded.config();
-    assert!(config.validate().is_ok());
-}
-
-#[test]
 fn future_v10_is_a_recoverable_error_preserving_bytes() {
     let directory = test_directory("future-version");
     let path = directory.path().join("config.json");
@@ -760,202 +561,4 @@ fn future_v10_is_a_recoverable_error_preserving_bytes() {
     ));
     // The unreadable source bytes are never rewritten.
     assert_eq!(fs::read_to_string(&path).unwrap(), future);
-}
-
-#[test]
-fn v2_dashboard_layout_document_fails_to_deserialize_as_a_recoverable_error() {
-    // A dashboard layout could never appear in a persisted v2 file: v2's `compile()`
-    // rejected `ScreenLayout::Dashboard` with `requires-capability`, and
-    // `ConfigStore::save` validates/compiles before writing to disk. `LegacyLayoutV2`
-    // therefore has only a `Single` variant, so a document like this one — which could
-    // only have been produced by bypassing the app entirely — fails to deserialize as
-    // an unknown `kind` variant, surfacing as a recoverable `StoreError::InvalidJson`.
-    // This fresh store has no last-good document, so the fallback is explicitly
-    // labeled as defaults rather than inventing a dashboard-to-card mapping.
-    let directory = test_directory("v2-dashboard");
-    let path = directory.path().join("config.json");
-    let store = ConfigStore::new(&path);
-
-    let dashboard_v2 = br#"{
-      "schema_version": 2,
-      "preferences": {
-        "timezone": "UTC",
-        "autostart": false,
-        "paused": false,
-        "orientation": "landscape"
-      },
-      "widgets": [
-        {
-          "kind": "clock",
-          "id": "clock",
-          "size": "full",
-          "title": "Desk",
-          "show_seconds": true,
-          "template": { "kind": "digital-clock" },
-          "tap_action": { "kind": "none" },
-          "refresh": { "kind": "device-local" },
-          "interrupt_policy": "disabled"
-        }
-      ],
-      "screens": [
-        {
-          "id": "dash",
-          "layout": {
-            "kind": "dashboard",
-            "columns": 2,
-            "rows": 2,
-            "tiles": [
-              { "widget_id": "clock", "column": 0, "row": 0, "column_span": 1, "row_span": 1 }
-            ]
-          }
-        }
-      ]
-    }"#;
-    fs::write(&path, dashboard_v2).unwrap();
-
-    let outcome = store.load();
-    assert_eq!(outcome.origin(), ConfigOrigin::Defaults);
-    assert_eq!(outcome.config(), &AppConfig::default());
-    assert!(matches!(
-        outcome.recovery(),
-        Some(StoreError::InvalidJson { .. })
-    ));
-    // The unreadable source bytes are never rewritten.
-    assert_eq!(fs::read(&path).unwrap(), dashboard_v2);
-}
-
-#[test]
-fn v2_orphan_widgets_become_alert_only_or_off_instead_of_being_dropped() {
-    // A widget referenced by no screen was already impossible under v2's own
-    // validation, but the on-disk format does not enforce that; migration must not
-    // silently discard configuration the user actually wrote to disk. The
-    // pomodoro-kind orphan's historical `interrupt_policy: enabled` means it becomes
-    // alert-only (its alert can still fire); the clock-kind orphan's `disabled`
-    // becomes off.
-    let directory = test_directory("v2-orphans");
-    let path = directory.path().join("config.json");
-    let store = ConfigStore::new(&path);
-
-    let with_orphans = br#"{
-      "schema_version": 2,
-      "preferences": {
-        "timezone": "UTC",
-        "autostart": false,
-        "paused": false,
-        "orientation": "landscape"
-      },
-      "widgets": [
-        {
-          "kind": "clock",
-          "id": "clock",
-          "size": "full",
-          "title": "Desk",
-          "show_seconds": true,
-          "template": { "kind": "digital-clock" },
-          "tap_action": { "kind": "none" },
-          "refresh": { "kind": "device-local" },
-          "interrupt_policy": "disabled"
-        },
-        {
-          "kind": "clock",
-          "id": "zeta-orphan",
-          "size": "full",
-          "title": "Unreferenced",
-          "show_seconds": false,
-          "template": { "kind": "digital-clock" },
-          "tap_action": { "kind": "none" },
-          "refresh": { "kind": "device-local" },
-          "interrupt_policy": "disabled"
-        },
-        {
-          "kind": "pomodoro",
-          "id": "alpha-orphan",
-          "size": "standard",
-          "label": "Focus",
-          "duration_seconds": 1500,
-          "template": { "kind": "progress-ring" },
-          "tap_action": { "kind": "start-pause" },
-          "refresh": { "kind": "device-local" },
-          "interrupt_policy": "enabled"
-        }
-      ],
-      "screens": [
-        { "id": "clock-screen", "layout": { "kind": "single", "widget_id": "clock" } }
-      ]
-    }"#;
-    fs::write(&path, with_orphans).unwrap();
-
-    let outcome = store.load();
-    assert_eq!(outcome.origin(), ConfigOrigin::MigratedV2);
-    assert!(outcome.recovery().is_none());
-
-    let config = outcome.config();
-    // Card order: screens[] first ("clock"), then orphans sorted by ID
-    // ("alpha-orphan" before "zeta-orphan").
-    let ids: Vec<&str> = config.cards.iter().map(CardSettings::id).collect();
-    assert_eq!(ids, ["clock", "alpha-orphan", "zeta-orphan"]);
-
-    assert_eq!(config.playlists[0].entries[0].card_id, "clock");
-    assert_eq!(config.compiled_card_ids(), ["clock", "alpha-orphan"]);
-    assert_eq!(
-        config.cards[1].alert(),
-        CardAlert::OnTimerFinish {
-            hold: AlertHold::UntilDismissed
-        }
-    );
-    assert_eq!(config.cards[2].alert(), CardAlert::None);
-
-    config.validate().unwrap();
-}
-
-#[test]
-fn v1_orphan_widgets_become_alert_only_or_off_instead_of_being_dropped() {
-    // Same rule as the v2 path, exercised against v1: a widget referenced by no
-    // screen must not be silently dropped. Pomodoro widgets are historically
-    // `interrupt_policy: enabled` (per the design spec's migration rule), so the
-    // orphaned pomodoro becomes alert-only; the orphaned clock becomes off.
-    let directory = test_directory("v1-orphans");
-    let path = directory.path().join("config.json");
-    let store = ConfigStore::new(&path);
-
-    let with_orphans = br#"{
-      "schema_version": 1,
-      "preferences": {
-        "timezone": "UTC",
-        "autostart": false,
-        "paused": false,
-        "orientation": "landscape"
-      },
-      "widgets": [
-        { "kind": "clock", "id": "clock", "size": "full", "title": "Desk", "show_seconds": true },
-        { "kind": "clock", "id": "zeta-orphan", "size": "full", "title": "Unreferenced", "show_seconds": false },
-        { "kind": "pomodoro", "id": "alpha-orphan", "size": "standard", "label": "Focus", "duration_seconds": 1500 }
-      ],
-      "screens": [
-        { "id": "clock-screen", "widget_id": "clock" }
-      ]
-    }"#;
-    fs::write(&path, with_orphans).unwrap();
-
-    let outcome = store.load();
-    assert_eq!(outcome.origin(), ConfigOrigin::MigratedV1);
-    assert!(outcome.recovery().is_none());
-
-    let config = outcome.config();
-    // Card order: screens[] first ("clock"), then orphans sorted by ID
-    // ("alpha-orphan" before "zeta-orphan").
-    let ids: Vec<&str> = config.cards.iter().map(CardSettings::id).collect();
-    assert_eq!(ids, ["clock", "alpha-orphan", "zeta-orphan"]);
-
-    assert_eq!(config.playlists[0].entries[0].card_id, "clock");
-    assert_eq!(config.compiled_card_ids(), ["clock", "alpha-orphan"]);
-    assert_eq!(
-        config.cards[1].alert(),
-        CardAlert::OnTimerFinish {
-            hold: AlertHold::UntilDismissed
-        }
-    );
-    assert_eq!(config.cards[2].alert(), CardAlert::None);
-
-    config.validate().unwrap();
 }

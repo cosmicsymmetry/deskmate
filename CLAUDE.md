@@ -67,15 +67,19 @@ default. This section states only what is true now.
   V3 (server host) is in progress on `feat/v3-server-host`. Tags require explicit owner
   authorization; `m0`/`m1`/`v1`/`v2` exist and later milestones do not.
 - **The legacy subtraction** (spec
-  `docs/superpowers/specs/2026-09-11-deskmate-legacy-subtraction-design.md`): Waves A and
-  B are complete and merged. **Wave C is software-complete on `refactor/wave-c-protocol-v2`
-  and deliberately NOT merged and NOT deployed** -- it is the one wave that spends a
-  hardware session, and the branch is the deliverable until that session runs. What it
-  owes, and the rollout order it must follow, is the "Protocol v2 -- OWED" section at the
-  end of `docs/hardware/board-notes.md`. Firmware `.bss` moved **-104 bytes** (87,104 ->
-  87,000; `.data` and IRAM byte-flat), which is within one byte of the shift that broke
-  OTA downloads in `3f2aa03`, so the on-board OTA check is mandatory rather than a
-  formality.
+  `docs/superpowers/specs/2026-09-11-deskmate-legacy-subtraction-design.md`): all three
+  waves are complete and merged, Wave C on explicit owner direction 2026-09-12.
+- **`main` NOW HOLDS A PROTOCOL-v2 SERVER AND `dev-0005` IS STILL FLASHED WITH v1.
+  DO NOT REDEPLOY THE SERVER UNTIL THE BOARD IS FLASHED.** This is the one standing rule
+  that overrides "redeploy whenever you build": protocol v2 is not additive, so a v2
+  server and a v1 device answer every frame with `VersionMismatch` and the panel goes
+  dark until the board is flashed over USB. The order is **flash first, redeploy second**,
+  and the board is unreachable between the two. Until that session runs, the live
+  deployment must keep running its pre-v2 binary. What the session owes is the
+  "Protocol v2 -- OWED" section at the end of `docs/hardware/board-notes.md`. Firmware
+  `.bss` moved **-104 bytes** (87,104 -> 87,000; `.data` and IRAM byte-flat), which is
+  within one byte of the shift that broke OTA downloads in `3f2aa03`, so the on-board OTA
+  check is mandatory rather than a formality.
 
 ### Traps that still bite
 
@@ -197,9 +201,14 @@ These are decisions, not defaults. Changing one needs the owner, not a judgement
 - V2 Task 9's tap latency.
 - The BUSY/OTA-owner refusal variant (needs a pending OTA in flight).
 - Stage 3b's asset-GC teardown, only partially observable on dev-0005's card set.
-- The framebuffer matrix has not been run since Wave A moved it to **44 rows / 6
-  excluded / 38 comparable** (from 78/8/70, itself never observed). The last observed
-  result is **96/10/86 on 2026-09-06**, which predates both v9 and Wave A.
+- The whole of protocol v2: the OTA download (mandatory, see above), capabilities
+  reading 2016 by name, a face at both mountings, a pomodoro counting down between
+  pushes, and a tap reporting one card id.
+- The framebuffer matrix has not been run since Wave A moved it to 44 rows and Wave C
+  closed the four `field.*` exclusions, leaving **44 rows / 2 excluded / 42 comparable**
+  (the one exclusion is the `progress-ring--running-mid-countdown` push-to-capture timing
+  race, which no wire change can fix). The last observed result is **96/10/86 on
+  2026-09-06**, which predates v9, Wave A and Wave C alike.
 
 ## Working agreement
 

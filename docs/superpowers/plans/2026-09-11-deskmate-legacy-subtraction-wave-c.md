@@ -1,13 +1,20 @@
 # Legacy Subtraction — Wave C: the device stops modelling templates (protocol v2)
 
-> ## STATUS — software-complete on `refactor/wave-c-protocol-v2`, NOT merged, NOT deployed
+> ## STATUS — complete and MERGED to `main` 2026-09-12; the server is NOT deployed
 >
 > All four tasks are done and every software gate is green: the full companion workspace
 > set (`fmt --check`, `clippy -D warnings`, `test --all-targets`, `test --doc`),
 > `make -C firmware/host_tests clean test` and `sanitize`, `idf.py -C firmware build`,
-> and the frontend typecheck. **The branch is the deliverable.** What it owes is the
-> hardware session described below and stubbed at the end of
-> `docs/hardware/board-notes.md`.
+> and the frontend typecheck.
+>
+> **The plan below says this wave must not be merged until the hardware session. The
+> owner directed otherwise on 2026-09-12 and it was merged.** That moves the safety
+> property rather than removing it: it used to be "the branch is unmerged", and it is now
+> **"do not redeploy the server until the board is flashed"**. `main` holds a v2 server
+> and `dev-0005` still runs v1 firmware; a redeploy before the flash answers every frame
+> with `VersionMismatch` and darkens the panel. The rollout order in "Why this one lands
+> differently" is unchanged and still binding -- only step 2's merge has already happened.
+> What the session owes is stubbed at the end of `docs/hardware/board-notes.md`.
 >
 > **Three deviations from the plan as written, all widenings:**
 >
@@ -149,4 +156,6 @@ networking, volatile assets, durable asset encoding.
 - [x] Full host gate set green.
 - [x] `idf.py -C firmware build` succeeds; size delta recorded.
 - [x] `make -C firmware/host_tests clean test` and `sanitize` green.
-- [x] **NOT merged, NOT deployed.** The branch is the deliverable.
+- [x] ~~**NOT merged, NOT deployed.** The branch is the deliverable.~~ Merged to `main`
+      on 2026-09-12 by owner direction; **not deployed**, and the server must not be
+      redeployed until the board is flashed. See the STATUS header.

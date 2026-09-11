@@ -4847,7 +4847,12 @@ compressed bytes as pixels on every device in the fleet.
 
 **Nothing in this section has been run on hardware.** It is the stub the Wave C plan asks
 for: what a session must observe before protocol v2 is trusted, written down while the
-reasons are fresh. The branch is the deliverable; it is **not merged and not deployed**.
+reasons are fresh.
+
+`refactor/wave-c-protocol-v2` was **merged to `main` on 2026-09-12** by owner direction,
+ahead of this session. **It is not deployed, and the server must not be redeployed until
+the board is flashed** -- the live binary must keep running its pre-v2 build until then,
+because a v2 server cannot talk to the v1 firmware on `dev-0005` at all.
 
 ### Why an on-board check is mandatory here
 

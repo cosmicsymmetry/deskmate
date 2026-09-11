@@ -1964,6 +1964,37 @@ fn build_card_scene(
     Ok(push)
 }
 
+/// The scene the device would receive for one card, built for display rather
+/// than for pushing: the revision is fixed at 1 and nothing is minted, marked
+/// dirty, or sent.
+///
+/// This exists so the settings window is not a second renderer. It used to draw
+/// through the retired C templates while the device drew scenes, and a parity
+/// gate kept the two agreeing; there is now one renderer and the preview shows
+/// what the panel shows by construction.
+///
+/// A `Picture` card has no locally renderable face -- its frames live on the
+/// server, where producers push them, and this process has no
+/// [`ImageSourceHost`] -- so it is refused rather than drawn blank.
+pub fn preview_card_scene(
+    config: &AppConfig,
+    card_id: &str,
+    fields: &[crate::CardField],
+) -> Result<protocol::Scene, String> {
+    let card = config
+        .cards
+        .iter()
+        .find(|card| card.id() == card_id)
+        .ok_or_else(|| format!("card {card_id:?} is not present in the active configuration"))?;
+    if matches!(card, CardSettings::Picture { .. }) {
+        return Err(format!(
+            "card {card_id:?} is a picture card; its frame lives on the server"
+        ));
+    }
+    let fields: Vec<Field> = fields.iter().map(crate::CardField::to_protocol).collect();
+    build_card_scene(config, card_id, &fields, None, 1).map(|push| push.scene)
+}
+
 fn waiting_for_first_picture_scene(revision: u32, metrics: &BakedFontMetrics) -> protocol::Scene {
     let tier = protocol::SceneFontTier::Caption;
     let caption = metrics.tier(tier);

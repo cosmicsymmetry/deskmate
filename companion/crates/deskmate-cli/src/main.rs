@@ -10,7 +10,6 @@ use protocol::{
     NetworkConfig, OtaState, PushData, StatusResponse, Tier, TimeSync, WifiState,
 };
 
-
 const USAGE: &str = "\
 Usage:
   deskmate-cli status [--port PATH] [--json]

@@ -7,11 +7,11 @@ use std::sync::{Arc, Mutex};
 
 use app_core::{
     AdminConfigErrorBody, AppConfig, CardField, CardFieldValue, CardSettings, ConfigStore,
-    DisplayOrientation, DisplayTemplate, MAX_CONFIG_FILE_BYTES, MAX_DEVICE_ID_LEN,
-    MAX_DEVICE_TOKEN_LEN, MAX_PSK_LEN, MAX_SERVER_URL_LEN, MAX_SSID_LEN, MAX_WIDGET_ID_LEN,
-    NetworkConfig, NetworkSettings, NetworkSettingsStore, NetworkSettingsStoreError,
-    NetworkSettingsUpdate, PomodoroAction, ProvisioningTier, RuntimeError, RuntimeHandle,
-    SaveReceipt, StoreError, ValidationIssue, utc_offset_minutes,
+    DisplayOrientation, MAX_CONFIG_FILE_BYTES, MAX_DEVICE_ID_LEN, MAX_DEVICE_TOKEN_LEN,
+    MAX_PSK_LEN, MAX_SERVER_URL_LEN, MAX_SSID_LEN, MAX_WIDGET_ID_LEN, NetworkConfig,
+    NetworkSettings, NetworkSettingsStore, NetworkSettingsStoreError, NetworkSettingsUpdate,
+    PomodoroAction, ProvisioningTier, RuntimeError, RuntimeHandle, SaveReceipt, StoreError,
+    ValidationIssue, utc_offset_minutes,
 };
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
@@ -854,30 +854,31 @@ pub async fn render_card_preview(
         return Ok(unrendered_server_frame(PICTURE_PREVIEW_IS_PUSH_ONLY));
     }
 
-    let template = preview_template_for(card, &card_id)?;
-
     let data = snapshot
         .card_data
         .iter()
         .find(|data| data.card_id == card_id);
     let (fields, sample) = match data {
-        Some(data) if !data.fields.is_empty() => {
-            (data.fields.iter().map(sim_field).collect(), false)
-        }
+        Some(data) if !data.fields.is_empty() => (data.fields.clone(), false),
         _ => (Vec::new(), true),
     };
+
+    // One renderer: this is the scene the device would be pushed for this card.
+    let scene = app_core::preview_card_scene(&snapshot.config, &card_id, &fields)
+        .map_err(|message| IpcError::Internal { message })?;
 
     let now = chrono::Utc::now();
     let utc_offset_minutes = utc_offset_minutes(&snapshot.config.preferences.timezone, now)
         .map_err(|message| IpcError::Internal { message })?;
-    let orientation = preview_orientation(snapshot.config.preferences.orientation);
 
-    let request = lvgl_sim::RenderRequest {
-        template,
-        fields,
+    let request = lvgl_sim::scene::SceneRenderRequest {
+        scene,
+        assets: Vec::new(),
         utc_offset_minutes,
         now_unix_seconds: now.timestamp(),
-        orientation,
+        timer: preview_timer(&fields),
+        fields: Vec::new(),
+        orientation: preview_orientation(snapshot.config.preferences.orientation),
     };
     let png = state
         .preview
@@ -915,49 +916,41 @@ fn preview_orientation(configured: DisplayOrientation) -> lvgl_sim::SimOrientati
 /// (`app-core`'s `config.rs`), except targeting `lvgl_sim::SimTemplate` — the two
 /// enums are exhaustively 1:1, so this can never fail to map a `DisplayTemplate` the
 /// rest of the app accepts; there is no "unknown template" branch to fall back from.
-/// Resolves the preview simulator's `SimTemplate` for one card, or a typed refusal.
+/// The timer a pomodoro scene's `timer.*` bindings resolve against.
 ///
-/// A picture card has no `DisplayTemplate`: it is a pushed frame, not one of the
-/// six built-in templates this preview simulator knows how to draw.
-/// `render_card_preview` handles it before reaching here, so this arm is a GUARD
-/// -- kept, and typed, so a future caller that forgets that routing is refused
-/// visibly (mirroring `runtime.rs`'s `SceneRefused` handling for the same absence)
-/// instead of silently drawing a picture card as some unrelated built-in face.
-fn preview_template_for(
-    card: &CardSettings,
-    card_id: &str,
-) -> Result<lvgl_sim::SimTemplate, IpcError> {
-    let Some(template) = card.template() else {
-        return Err(IpcError::Unsupported {
-            message: format!(
-                "card {card_id:?} is server-rendered; its preview is not drawn by this simulator"
-            ),
-        });
-    };
-    Ok(sim_template(template))
+/// `None` for a card that pushes no timer fields, which is what the simulator
+/// expects for a face with no timer binding. The three keys are the ones
+/// `firmware/main/link/protocol_task.c` reads by name to build its own snapshot,
+/// so the preview and the panel derive the timer from the same inputs.
+fn preview_timer(fields: &[CardField]) -> Option<lvgl_sim::scene::SceneTimer> {
+    let total = preview_field_integer(fields, "duration_seconds")?;
+    let remaining = preview_field_integer(fields, "remaining_seconds").unwrap_or(total);
+    Some(lvgl_sim::scene::SceneTimer {
+        total_ms: preview_seconds_to_ms(total),
+        remaining_ms: preview_seconds_to_ms(remaining),
+        running: matches!(
+            fields
+                .iter()
+                .find(|field| field.key == "running")
+                .map(|field| &field.value),
+            Some(CardFieldValue::Boolean { value: true })
+        ),
+    })
 }
 
-fn sim_template(template: &DisplayTemplate) -> lvgl_sim::SimTemplate {
-    match template {
-        DisplayTemplate::DigitalClock => lvgl_sim::SimTemplate::DigitalClock,
-        DisplayTemplate::ProgressRing => lvgl_sim::SimTemplate::ProgressRing,
-        DisplayTemplate::RowList => lvgl_sim::SimTemplate::RowList,
-        DisplayTemplate::AnalogClock => lvgl_sim::SimTemplate::AnalogClock,
-        DisplayTemplate::BigNumberLabel => lvgl_sim::SimTemplate::BigNumberLabel,
-        DisplayTemplate::IconBadgeText { .. } => lvgl_sim::SimTemplate::IconBadgeText,
-    }
+fn preview_field_integer(fields: &[CardField], key: &str) -> Option<i64> {
+    fields
+        .iter()
+        .find_map(|field| match (&*field.key, &field.value) {
+            (candidate, CardFieldValue::Integer { value }) if candidate == key => Some(*value),
+            _ => None,
+        })
 }
 
-fn sim_field(field: &CardField) -> lvgl_sim::SimField {
-    let value = match &field.value {
-        CardFieldValue::Text { value } => lvgl_sim::SimFieldValue::Text(value.clone()),
-        CardFieldValue::Integer { value } => lvgl_sim::SimFieldValue::Integer(*value),
-        CardFieldValue::Boolean { value } => lvgl_sim::SimFieldValue::Boolean(*value),
-    };
-    lvgl_sim::SimField {
-        name: field.key.clone(),
-        value,
-    }
+fn preview_seconds_to_ms(seconds: i64) -> u32 {
+    u32::try_from(seconds.max(0))
+        .unwrap_or(u32::MAX)
+        .saturating_mul(1_000)
 }
 
 pub(crate) const PICTURE_PREVIEW_IS_PUSH_ONLY: &str =
@@ -1507,45 +1500,48 @@ pub(crate) mod tests {
         request
     }
 
-    /// Mirrors `CardSettings::wire_config`'s `TemplateKind` mapping (`app-core`'s
-    /// `config.rs`) 1:1, for every `DisplayTemplate` variant the app can construct.
-    /// A future template variant that forgets to extend this match is a compile
-    /// error, not a silent "unknown template" fallback — see `sim_template`'s docs.
-    #[test]
-    fn sim_template_mirrors_the_wire_mapping_for_every_display_template() {
-        assert_eq!(
-            sim_template(&DisplayTemplate::DigitalClock),
-            lvgl_sim::SimTemplate::DigitalClock
-        );
-        assert_eq!(
-            sim_template(&DisplayTemplate::ProgressRing),
-            lvgl_sim::SimTemplate::ProgressRing
-        );
-        assert_eq!(
-            sim_template(&DisplayTemplate::RowList),
-            lvgl_sim::SimTemplate::RowList
-        );
-        assert_eq!(
-            sim_template(&DisplayTemplate::AnalogClock),
-            lvgl_sim::SimTemplate::AnalogClock
-        );
-        assert_eq!(
-            sim_template(&DisplayTemplate::BigNumberLabel),
-            lvgl_sim::SimTemplate::BigNumberLabel
-        );
-        assert_eq!(
-            sim_template(&DisplayTemplate::IconBadgeText {
-                icon_asset_id: Some("weather-icons".into())
-            }),
-            lvgl_sim::SimTemplate::IconBadgeText
-        );
-    }
-
     /// The preview shows what a person standing at the panel sees, which is upright
     /// at BOTH mountings -- the 180 degree mount is cancelled by the mounting itself.
     /// Restoring the pass-through this replaced (returning `LandscapeFlipped` for the
     /// flipped mounting) puts an upside-down clock in the settings window, and fails
     /// here.
+    /// The preview's timer comes from the same three pushed keys
+    /// `firmware/main/link/protocol_task.c` reads to build the device's own
+    /// snapshot, so a pomodoro face is posed identically in both places.
+    #[test]
+    fn preview_timer_is_derived_from_the_keys_the_device_reads() {
+        let integer = |key: &str, value: i64| CardField {
+            key: key.to_owned(),
+            value: CardFieldValue::Integer { value },
+        };
+
+        assert_eq!(preview_timer(&[]), None, "no timer fields means no timer");
+
+        let timer = preview_timer(&[
+            integer("duration_seconds", 1_500),
+            integer("remaining_seconds", 300),
+            CardField {
+                key: "running".into(),
+                value: CardFieldValue::Boolean { value: true },
+            },
+        ])
+        .expect("a pomodoro pushes a timer");
+        assert_eq!(timer.total_ms, 1_500_000);
+        assert_eq!(timer.remaining_ms, 300_000);
+        assert!(timer.running);
+
+        // remaining_seconds absent means "not started", i.e. a full timer,
+        // never a zero one -- a zero would draw a finished ring.
+        let unstarted =
+            preview_timer(&[integer("duration_seconds", 60)]).expect("duration alone is a timer");
+        assert_eq!(unstarted.remaining_ms, 60_000);
+        assert!(!unstarted.running);
+
+        // A negative value cannot reach the wire, but must not wrap if it does.
+        let negative = preview_timer(&[integer("duration_seconds", -5)]).expect("still a timer");
+        assert_eq!(negative.total_ms, 0);
+    }
+
     #[test]
     fn the_preview_renders_upright_whichever_way_the_panel_is_mounted() {
         for configured in [
@@ -1558,70 +1554,6 @@ pub(crate) mod tests {
                 "preview orientation for {configured:?} must be upright"
             );
         }
-    }
-
-    #[test]
-    fn preview_template_for_resolves_every_built_in_template() {
-        let card = CardSettings::Clock {
-            id: "clock".into(),
-            title: "Desk".into(),
-            show_seconds: true,
-            template: DisplayTemplate::DigitalClock,
-            tap_action: WidgetTapAction::None,
-            refresh: RefreshPolicy::DeviceLocal,
-            alert: CardAlert::None,
-        };
-        assert_eq!(
-            preview_template_for(&card, "clock").unwrap(),
-            lvgl_sim::SimTemplate::DigitalClock
-        );
-    }
-
-    /// The guard behind the routing, not the routing itself:
-    /// `render_card_preview` never reaches this arm for a server-rendered card. It stays
-    /// because a caller that forgets that must be refused, not served a built-in
-    /// face at random.
-    #[test]
-    fn preview_template_for_a_server_rendered_card_is_a_typed_unsupported_refusal() {
-        let card = CardSettings::Picture {
-            id: "picture".into(),
-            title: "Picture".into(),
-            source_id: "source".into(),
-            tap_action: WidgetTapAction::None,
-            refresh: RefreshPolicy::Manual,
-            alert: CardAlert::None,
-        };
-        let error = preview_template_for(&card, "picture").unwrap_err();
-        assert!(
-            matches!(error, IpcError::Unsupported { ref message } if message.contains("server-rendered")),
-            "expected IpcError::Unsupported naming the server-rendered card, got {error:?}"
-        );
-    }
-
-    #[test]
-    fn sim_field_carries_the_key_and_maps_every_value_kind() {
-        let text = sim_field(&CardField {
-            key: "title".into(),
-            value: CardFieldValue::Text {
-                value: "Desk".into(),
-            },
-        });
-        assert_eq!(text.name, "title");
-        assert_eq!(text.value, lvgl_sim::SimFieldValue::Text("Desk".into()));
-
-        let integer = sim_field(&CardField {
-            key: "remaining_seconds".into(),
-            value: CardFieldValue::Integer { value: 900 },
-        });
-        assert_eq!(integer.name, "remaining_seconds");
-        assert_eq!(integer.value, lvgl_sim::SimFieldValue::Integer(900));
-
-        let boolean = sim_field(&CardField {
-            key: "stale".into(),
-            value: CardFieldValue::Boolean { value: true },
-        });
-        assert_eq!(boolean.name, "stale");
-        assert_eq!(boolean.value, lvgl_sim::SimFieldValue::Boolean(true));
     }
 
     #[test]

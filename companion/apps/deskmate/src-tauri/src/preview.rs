@@ -15,7 +15,7 @@ pub struct PreviewHandle {
 }
 
 struct PreviewJob {
-    request: lvgl_sim::RenderRequest,
+    request: lvgl_sim::scene::SceneRenderRequest,
     reply: mpsc::Sender<Result<Vec<u8>, String>>,
 }
 
@@ -44,7 +44,7 @@ pub fn spawn() -> PreviewHandle {
                     job = newer;
                 }
                 let result = simulator
-                    .render_png(&job.request)
+                    .render_scene_png(&job.request)
                     .map_err(|error| format!("render failed: {error:?}"));
                 let _ = job.reply.send(result);
             }
@@ -54,7 +54,7 @@ pub fn spawn() -> PreviewHandle {
 }
 
 impl PreviewHandle {
-    pub fn render(&self, request: lvgl_sim::RenderRequest) -> Result<Vec<u8>, String> {
+    pub fn render(&self, request: lvgl_sim::scene::SceneRenderRequest) -> Result<Vec<u8>, String> {
         let (reply, receive) = mpsc::channel();
         self.sender
             .send(PreviewJob { request, reply })

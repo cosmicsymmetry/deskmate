@@ -40,7 +40,7 @@ pub use render_negotiation::{
 };
 pub use runtime::{
     DeviceConnection, ImageSourceFrame, ImageSourceHost, RuntimeDevice, RuntimeHandle,
-    RuntimeOptions, RuntimeSubscription, SerialRuntimeDevice,
+    RuntimeOptions, RuntimeSubscription, SerialRuntimeDevice, preview_card_scene,
 };
 pub use scene_build::{
     AnalogClockCard, BakedFontMetrics, BigNumberCard, ClockCard, IconBadgeCard, NumericAdvances,

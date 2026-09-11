@@ -1,11 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TryRecvError};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
 use std::sync::{Arc, Condvar, Mutex, RwLock, Weak};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use chrono_tz::Tz;
 use device::{ConnectedSession, DeviceError, ReceivedEvent, SessionDiagnostics, connect_session};
 use engine::interrupts::InterruptArbiter;
@@ -22,23 +22,21 @@ use crate::render_negotiation;
 use crate::scheduler::Scheduler;
 use crate::{
     AlertHold, AnalogClockCard, AppConfig, AppSnapshot, BakedFontMetrics, BigNumberCard, CardAlert,
-    CardDataSnapshot, CardError, CardErrorKind, CardPreviewState, CardSettings, ClockCard,
-    ConnectionState, DesiredAsset, DeviceCounters, DeviceSnapshot, DeviceTier, DisplayTemplate,
-    IconBadgeCard, PersistenceState, PomodoroSnapshot, PomodoroState, ProgressRingCard,
-    ProviderSnapshot, ProviderState, RowListCard, RuntimeDiagnostics, RuntimeState,
-    SHIPPED_SCENE_SURFACE_COLOR, SceneDataState, build_analog_clock_scene,
-    build_big_number_label_scene, build_digital_clock_scene, build_icon_badge_text_scene,
-    build_progress_ring_scene, build_row_list_scene, with_scene_data_state,
+    CardDataSnapshot, CardError, CardErrorKind, CardSettings, ClockCard, ConnectionState,
+    DesiredAsset, DeviceCounters, DeviceSnapshot, DeviceTier, DisplayTemplate, IconBadgeCard,
+    PersistenceState, PomodoroSnapshot, PomodoroState, ProgressRingCard, RowListCard,
+    RuntimeDiagnostics, RuntimeState, SHIPPED_SCENE_SURFACE_COLOR, SceneDataState,
+    build_analog_clock_scene, build_big_number_label_scene, build_digital_clock_scene,
+    build_icon_badge_text_scene, build_progress_ring_scene, build_row_list_scene,
+    with_scene_data_state,
 };
 
 pub const DEFAULT_RUNTIME_COMMAND_CAPACITY: usize = 16;
-pub const DEFAULT_PROVIDER_JOB_CAPACITY: usize = 8;
 pub const DEFAULT_MAX_SUBSCRIBERS: usize = 8;
 
 #[derive(Debug, Clone, Copy)]
 pub struct RuntimeOptions {
     pub command_capacity: usize,
-    pub provider_job_capacity: usize,
     pub maximum_subscribers: usize,
     pub command_timeout: Duration,
     pub loop_maximum_wait: Duration,
@@ -46,14 +44,12 @@ pub struct RuntimeOptions {
     pub pomodoro_interval: Duration,
     pub status_interval: Duration,
     pub time_sync_interval: Duration,
-    pub provider_queue_retry: Duration,
 }
 
 impl Default for RuntimeOptions {
     fn default() -> Self {
         Self {
             command_capacity: DEFAULT_RUNTIME_COMMAND_CAPACITY,
-            provider_job_capacity: DEFAULT_PROVIDER_JOB_CAPACITY,
             maximum_subscribers: DEFAULT_MAX_SUBSCRIBERS,
             command_timeout: Duration::from_secs(5),
             loop_maximum_wait: Duration::from_millis(25),
@@ -61,7 +57,6 @@ impl Default for RuntimeOptions {
             pomodoro_interval: Duration::from_secs(1),
             status_interval: Duration::from_secs(2),
             time_sync_interval: Duration::from_hours(1),
-            provider_queue_retry: Duration::from_millis(250),
         }
     }
 }
@@ -107,47 +102,6 @@ pub trait RuntimeDevice: Send + 'static {
     fn diagnostics(&self) -> SessionDiagnostics;
 }
 
-/// What a plugin host can offer the runtime for one card: a display-list
-/// scene the device may render natively, or notice that only rasterization
-/// can draw it. The host states facts; `render_negotiation` decides policy.
-/// A host that decided on its own would be a second copy of spec §3's table
-/// waiting to disagree with the first.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SceneCandidate {
-    /// A protocol display-list scene, subject to per-device negotiation.
-    DisplayList(protocol::Scene),
-    /// An SVG template: no device node kind draws SVG, so only a
-    /// server-rendered raster can produce pixels. Carries the device-binding
-    /// tokens the template names, verbatim, for negotiation to classify --
-    /// a live one makes the card refusable, never freezable.
-    RasterOnly { bindings: BTreeSet<String> },
-}
-
-/// App-core-owned input to the server rasterizer. Keeping this value on the
-/// `PluginHost` boundary preserves the dependency direction: app-core owns the
-/// execution policy, while the server alone can call `resvg` and inspect the
-/// curated plugin registry.
-#[derive(Debug, Clone, PartialEq)]
-pub enum RasterRequest {
-    DisplayList {
-        scene: protocol::Scene,
-        fields: Vec<Field>,
-    },
-    PluginSvg {
-        plugin_id: String,
-        snapshot: providers::ProviderSnapshot<serde_json::Value>,
-        fields: Vec<Field>,
-    },
-}
-
-/// Canonical decoded LVGL image bytes returned through the host boundary.
-/// The digest addresses these decoded bytes even when transfer chooses RLE565.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RasterFrame {
-    pub digest: [u8; protocol::ASSET_DIGEST_LEN],
-    pub bytes: Arc<[u8]>,
-}
-
 /// What the host knows about one image source right now.
 ///
 /// `bytes` is the decoded canonical blob, carried as an `Arc` so passing this
@@ -161,62 +115,16 @@ pub struct ImageSourceFrame {
     pub stale: bool,
 }
 
-/// The revision every preview build carries. `protocol::validate_message`
-/// rejects `PushScene` revision 0, so a preview candidate cannot reach a
-/// device even by mistake -- which is exactly the property the route needs.
-pub const PREVIEW_SCENE_REVISION: u32 = 0;
-
-/// One rendered card face for the admin preview route. Never pushed, never
-/// minted, never cached.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CardPreview {
-    pub frame: Option<RasterFrame>,
-    pub state: CardPreviewState,
-    pub message: Option<String>,
-    pub refreshed_at_unix_ms: Option<u64>,
-}
-
-/// Host boundary used by the background runtime for plugin-owned assets and
-/// manifest scene compilation.
-pub trait PluginHost: Send + 'static {
-    /// Every asset any loaded plugin needs resident on the device,
+/// Host boundary used by the background runtime for durable picture frames.
+pub trait ImageSourceHost: Send + 'static {
+    /// Every image source frame that should remain resident on the device,
     /// deduplicated by digest. Called during a full synchronize.
     fn desired_assets(&mut self) -> Vec<DesiredAsset>;
-
-    /// Produces this plugin's render candidate against freshly fetched data.
-    /// `revision` is minted by the runtime at push time.
-    ///
-    /// `timezone` is the configuration's display timezone, and it is a
-    /// parameter rather than host state on purpose: a plugin face that shows
-    /// an instant must render it in the zone the *user* chose, not the one
-    /// whoever wrote the feed was standing in, and a host that could be left
-    /// holding a stale zone is exactly the silent-wrong shape this codebase
-    /// keeps paying for.
-    fn render_scene(
-        &mut self,
-        plugin_id: &str,
-        snapshot: &providers::ProviderSnapshot<serde_json::Value>,
-        revision: u32,
-        timezone: chrono_tz::Tz,
-    ) -> Result<SceneCandidate, String>;
-
-    /// Rasterizes one already-negotiated static candidate. Implementations do
-    /// not repeat the negotiation table; they only execute the selected source.
-    fn rasterize(&mut self, _request: &RasterRequest) -> Result<RasterFrame, String> {
-        Err("server-side rasterization is unavailable from this plugin host".into())
-    }
 
     /// The frame this image source currently holds, or `None` when nothing has
     /// ever been pushed to it.
     ///
-    /// A default of `None` is deliberate: every existing implementation,
-    /// including the Tauri app's hostless runtime and existing test hosts,
-    /// keeps compiling and answers honestly when it owns no image sources.
-    /// This stays on the plugin-host seam because `desired_assets` must expose
-    /// one device-wide union for the keep-set reconciliation.
-    fn image_source_frame(&mut self, _source_id: &str) -> Option<ImageSourceFrame> {
-        None
-    }
+    fn image_source_frame(&mut self, source_id: &str) -> Option<ImageSourceFrame>;
 }
 
 pub struct SerialRuntimeDevice {
@@ -355,138 +263,10 @@ impl RuntimeDevice for SerialRuntimeDevice {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct ProviderRefreshRequest {
-    pub generation: u64,
-    pub widget_id: String,
-    pub title: String,
-    pub provider: ProviderRequest,
-    pub active_provider_ids: Vec<String>,
-    pub now: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ProviderRequest {
-    Plugin { plugin_id: String },
-}
-
-#[derive(Debug, Clone)]
-pub struct ProviderRefreshResult {
-    pub generation: u64,
-    pub widget_id: String,
-    pub fields: Vec<Field>,
-    pub value: Option<serde_json::Value>,
-    pub refreshed_at: Option<DateTime<Utc>>,
-    pub age: Option<Duration>,
-    pub stale: bool,
-    pub error: Option<String>,
-}
-
-pub trait ProviderRefresher: Send + 'static {
-    fn refresh(&mut self, request: ProviderRefreshRequest) -> ProviderRefreshResult;
-}
-
-/// Hostless refresher used by the Mac runtime. Plugin cards are skipped before
-/// a request is built there; if a request nevertheless reaches this boundary,
-/// the typed result makes the missing server host explicit.
-#[derive(Default)]
-pub struct SystemProviderRefresher;
-
-impl ProviderRefresher for SystemProviderRefresher {
-    fn refresh(&mut self, request: ProviderRefreshRequest) -> ProviderRefreshResult {
-        ProviderRefreshResult {
-            generation: request.generation,
-            widget_id: request.widget_id,
-            fields: Vec::new(),
-            value: None,
-            refreshed_at: None,
-            age: None,
-            stale: true,
-            error: Some(format!(
-                "the hostless provider refresher does not serve plugin card {:?}",
-                request.provider
-            )),
-        }
-    }
-}
-
-struct ProviderWorker {
-    sender: Option<SyncSender<ProviderRefreshRequest>>,
-    receiver: Receiver<ProviderRefreshResult>,
-    stopping: Arc<AtomicBool>,
-    worker: Option<JoinHandle<()>>,
-}
-
-#[derive(Debug)]
-enum ProviderSubmitError {
-    Full,
-    Disconnected,
-}
-
-impl ProviderWorker {
-    fn new(mut refresher: Box<dyn ProviderRefresher>, capacity: usize) -> Self {
-        let (sender, request_receiver) = mpsc::sync_channel(capacity.max(1));
-        // At most one result can exist per in-flight provider, so this channel is
-        // already logically bounded by the configured provider count. Dropping a
-        // completed result would otherwise leave that provider marked in-flight.
-        let (result_sender, receiver) = mpsc::channel();
-        let stopping = Arc::new(AtomicBool::new(false));
-        let worker_stopping = Arc::clone(&stopping);
-        let worker = thread::Builder::new()
-            .name("deskmate-provider".into())
-            .spawn(move || {
-                while let Ok(request) = request_receiver.recv() {
-                    if worker_stopping.load(Ordering::Acquire) {
-                        break;
-                    }
-                    let result = refresher.refresh(request);
-                    if result_sender.send(result).is_err() {
-                        break;
-                    }
-                }
-            })
-            .expect("failed to spawn Deskmate provider worker");
-        Self {
-            sender: Some(sender),
-            receiver,
-            stopping,
-            worker: Some(worker),
-        }
-    }
-
-    fn try_submit(&self, request: ProviderRefreshRequest) -> Result<(), ProviderSubmitError> {
-        self.sender
-            .as_ref()
-            .expect("provider sender is present while running")
-            .try_send(request)
-            .map_err(|error| match error {
-                mpsc::TrySendError::Full(_) => ProviderSubmitError::Full,
-                mpsc::TrySendError::Disconnected(_) => ProviderSubmitError::Disconnected,
-            })
-    }
-
-    fn try_recv(&self) -> Result<ProviderRefreshResult, TryRecvError> {
-        self.receiver.try_recv()
-    }
-}
-
-impl Drop for ProviderWorker {
-    fn drop(&mut self) {
-        self.stopping.store(true, Ordering::Release);
-        self.sender.take();
-        if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
-        }
-    }
-}
-
 #[derive(Default)]
 struct RuntimeDiagnosticCounters {
     commands_processed: AtomicU64,
     command_queue_full: AtomicU64,
-    provider_jobs_started: AtomicU64,
-    provider_queue_full: AtomicU64,
-    provider_results_discarded: AtomicU64,
     subscriber_snapshots_overwritten: AtomicU64,
     interrupt_dismissals_ignored: AtomicU64,
 }
@@ -496,9 +276,6 @@ impl RuntimeDiagnosticCounters {
         RuntimeDiagnostics {
             commands_processed: self.commands_processed.load(Ordering::Relaxed),
             command_queue_full: self.command_queue_full.load(Ordering::Relaxed),
-            provider_jobs_started: self.provider_jobs_started.load(Ordering::Relaxed),
-            provider_queue_full: self.provider_queue_full.load(Ordering::Relaxed),
-            provider_results_discarded: self.provider_results_discarded.load(Ordering::Relaxed),
             subscriber_snapshots_overwritten: self
                 .subscriber_snapshots_overwritten
                 .load(Ordering::Relaxed),
@@ -635,7 +412,6 @@ impl RuntimeHandle {
         Self::start(
             config,
             Box::new(SerialRuntimeDevice::new(explicit_port)),
-            Box::<SystemProviderRefresher>::default(),
             RuntimeOptions::default(),
         )
     }
@@ -643,27 +419,24 @@ impl RuntimeHandle {
     pub fn start(
         config: AppConfig,
         device: Box<dyn RuntimeDevice>,
-        refresher: Box<dyn ProviderRefresher>,
         options: RuntimeOptions,
     ) -> Result<Self, RuntimeError> {
-        Self::start_with_plugin_host(config, device, refresher, options, None)
+        Self::start_with_image_source_host(config, device, options, None)
     }
 
-    pub fn start_with_plugin_host(
+    pub fn start_with_image_source_host(
         config: AppConfig,
         device: Box<dyn RuntimeDevice>,
-        refresher: Box<dyn ProviderRefresher>,
         options: RuntimeOptions,
-        plugin_host: Option<Box<dyn PluginHost>>,
+        image_source_host: Option<Box<dyn ImageSourceHost>>,
     ) -> Result<Self, RuntimeError> {
         config
             .compile(1)
             .map_err(|error| RuntimeError::InvalidConfig {
                 issues: error.issues,
             })?;
-        let renders_plugin_cards = plugin_host.is_some();
         let diagnostics = Arc::new(RuntimeDiagnosticCounters::default());
-        let initial = initial_snapshot(&config, diagnostics.snapshot(), renders_plugin_cards);
+        let initial = initial_snapshot(&config, diagnostics.snapshot());
         let latest = Arc::new(RwLock::new(initial));
         let publisher = Arc::new(SnapshotPublisher {
             latest,
@@ -677,8 +450,7 @@ impl RuntimeHandle {
         let worker_inputs = RuntimeWorkerInputs {
             config,
             device,
-            refresher,
-            plugin_host,
+            image_source_host,
         };
         let worker = thread::Builder::new()
             .name("deskmate-runtime".into())
@@ -748,13 +520,6 @@ impl RuntimeHandle {
         })
     }
 
-    pub fn refresh_provider(&self, widget_id: impl Into<String>) -> Result<(), RuntimeError> {
-        self.request(|reply| RuntimeCommand::RefreshProvider {
-            widget_id: widget_id.into(),
-            reply,
-        })
-    }
-
     pub fn activate_screen(&self, screen_id: impl Into<String>) -> Result<(), RuntimeError> {
         self.request(|reply| RuntimeCommand::ActivateScreen {
             screen_id: screen_id.into(),
@@ -764,22 +529,6 @@ impl RuntimeHandle {
 
     pub fn push_scene(&self, push: PushScene) -> Result<(), RuntimeError> {
         self.request(|reply| RuntimeCommand::PushScene { push, reply })
-    }
-
-    /// Replaces one configured plugin card's cached snapshot through the
-    /// ordinary bounded worker command channel.
-    pub fn inject_plugin_snapshot(
-        &self,
-        card_id: impl Into<String>,
-        plugin_id: impl Into<String>,
-        snapshot: providers::ProviderSnapshot<serde_json::Value>,
-    ) -> Result<(), RuntimeError> {
-        self.request(|reply| RuntimeCommand::InjectPluginSnapshot {
-            card_id: card_id.into(),
-            plugin_id: plugin_id.into(),
-            snapshot,
-            reply,
-        })
     }
 
     /// Reconciles the host's complete desired asset set after one image source
@@ -792,17 +541,6 @@ impl RuntimeHandle {
         self.request(|reply| RuntimeCommand::ImageSourceUpdated {
             source_id: source_id.to_owned(),
             digest,
-            reply,
-        })
-    }
-
-    /// Renders one plugin card's face for an admin preview. It runs on the
-    /// worker beside every other command, and the worker's single-threading is
-    /// the whole of the route's rate limiting: nothing here touches the device,
-    /// mints a revision, activates a card, or marks the active scene dirty.
-    pub fn render_card_preview(&self, card_id: &str) -> Result<CardPreview, RuntimeError> {
-        self.request(|reply| RuntimeCommand::RenderCardPreview {
-            card_id: card_id.to_owned(),
             reply,
         })
     }
@@ -917,12 +655,6 @@ impl Drop for RuntimeHandle {
     }
 }
 
-struct ProviderRuntimeState {
-    generation: u64,
-    in_flight: bool,
-    snapshot: ProviderSnapshot,
-}
-
 #[allow(clippy::struct_excessive_bools)]
 struct WorkerState {
     config: AppConfig,
@@ -930,12 +662,11 @@ struct WorkerState {
     device: DeviceSnapshot,
     persistence: PersistenceState,
     latest_fields: BTreeMap<String, Vec<Field>>,
-    plugin_snapshots: BTreeMap<String, providers::ProviderSnapshot<serde_json::Value>>,
     /// Card ID -> the exact durable picture face most recently accepted by
     /// the device. Comparing this pair with the host detects cadence-driven
     /// stale/fresh flips without a scheduler deadline per source.
     last_picture_face: BTreeMap<String, ([u8; protocol::ASSET_DIGEST_LEN], bool)>,
-    plugin_host: Option<Box<dyn PluginHost>>,
+    image_source_host: Option<Box<dyn ImageSourceHost>>,
     dirty_widgets: BTreeSet<String>,
     /// Card ID -> the most recent typed refusal for that card. There is deliberately
     /// one editor-visible slot per card: if data and scene refusals happen before
@@ -945,7 +676,6 @@ struct WorkerState {
     push_rejections: BTreeMap<String, CardError>,
     pomodoros: BTreeMap<String, Pomodoro>,
     pomodoro_snapshots: BTreeMap<String, PomodoroSnapshot>,
-    providers: BTreeMap<String, ProviderRuntimeState>,
     interrupts: InterruptArbiter,
     active_screen: Option<String>,
     active_screen_dirty: bool,
@@ -960,40 +690,26 @@ struct WorkerState {
     /// A Networked status alone cannot establish non-ownership because the server's
     /// WebSocket runtime legitimately drives devices that report that tier.
     ownership_refused: bool,
-    generation: u64,
     next_scene_revision: u32,
     /// Digests observed through AssetBegin(already-present) or a successful
-    /// commit on this device runtime. Durable bytes may survive reconnects;
-    /// volatile bytes are tracked separately because a reboot loses PSRAM.
+    /// commit on this device runtime. Durable bytes may survive reconnects.
     confirmed_durable_assets: BTreeSet<[u8; protocol::ASSET_DIGEST_LEN]>,
-    confirmed_volatile_assets: BTreeSet<[u8; protocol::ASSET_DIGEST_LEN]>,
-    /// The volatile frame referenced by the last accepted raster `PushScene`.
-    active_volatile_digest: Option<[u8; protocol::ASSET_DIGEST_LEN]>,
-    /// A static raster invalidation waiting on the scheduler's single floor
-    /// deadline. The snapshot itself remains in the ordinary per-card cache.
-    pending_raster_card: Option<String>,
     next_connect: Instant,
     last_published: Option<AppSnapshot>,
 }
 
 impl WorkerState {
-    /// A hostless worker for tests that don't care about plugin behaviour. The
-    /// only production caller (`run_runtime`) always has a `plugin_host` to
-    /// thread through, even when it is `None`, so it calls
-    /// `new_with_plugin_host` directly and this wrapper is test-only.
+    /// A hostless worker for tests that do not exercise picture delivery.
     #[cfg(test)]
     fn new(config: AppConfig, now: Instant, scheduler: &mut Scheduler) -> Self {
-        Self::new_with_plugin_host(config, now, scheduler, None)
+        Self::new_with_image_source_host(config, now, scheduler, None)
     }
 
-    /// The host must be installed before the first `replace_config`: whether
-    /// this runtime schedules and reports a plugin card at all is decided
-    /// there, and a host assigned afterwards would arrive one config too late.
-    fn new_with_plugin_host(
+    fn new_with_image_source_host(
         config: AppConfig,
         now: Instant,
         scheduler: &mut Scheduler,
-        plugin_host: Option<Box<dyn PluginHost>>,
+        image_source_host: Option<Box<dyn ImageSourceHost>>,
     ) -> Self {
         let mut state = Self {
             config: config.clone(),
@@ -1001,14 +717,12 @@ impl WorkerState {
             device: empty_device(ConnectionState::Connecting),
             persistence: PersistenceState::Clean,
             latest_fields: BTreeMap::new(),
-            plugin_snapshots: BTreeMap::new(),
             last_picture_face: BTreeMap::new(),
-            plugin_host,
+            image_source_host,
             dirty_widgets: BTreeSet::new(),
             push_rejections: BTreeMap::new(),
             pomodoros: BTreeMap::new(),
             pomodoro_snapshots: BTreeMap::new(),
-            providers: BTreeMap::new(),
             interrupts: InterruptArbiter::default(),
             active_screen: None,
             active_screen_dirty: false,
@@ -1017,12 +731,8 @@ impl WorkerState {
             ever_connected: false,
             needs_full_sync: true,
             ownership_refused: false,
-            generation: 0,
             next_scene_revision: 0,
             confirmed_durable_assets: BTreeSet::new(),
-            confirmed_volatile_assets: BTreeSet::new(),
-            active_volatile_digest: None,
-            pending_raster_card: None,
             next_connect: now,
             last_published: None,
         };
@@ -1035,16 +745,11 @@ impl WorkerState {
     fn replace_config(&mut self, config: AppConfig, now: Instant, scheduler: &mut Scheduler) {
         let previous_config = self.config.clone();
         let previous_active_screen = self.active_screen.clone();
-        let mut previous_fields = std::mem::take(&mut self.latest_fields);
-        let mut previous_plugin_snapshots = std::mem::take(&mut self.plugin_snapshots);
+        let _previous_fields = std::mem::take(&mut self.latest_fields);
         let mut previous_pomodoros = std::mem::take(&mut self.pomodoros);
-        let mut previous_providers = std::mem::take(&mut self.providers);
-        self.generation = self.generation.saturating_add(1);
         self.config = config;
         self.dirty_widgets.clear();
         self.push_rejections.clear();
-        self.pending_raster_card = None;
-        scheduler.clear_raster_invalidation();
         self.pomodoro_snapshots.clear();
         // Owned, not borrowed: `prune_alert_state_for_live_widgets` needs
         // `&mut self`, which cannot coexist with a set still borrowing from
@@ -1069,7 +774,6 @@ impl WorkerState {
             self.latest_fields.insert(push.widget_id, push.fields);
         }
 
-        let mut provider_deadlines = Vec::new();
         let compiled_card_ids: BTreeSet<&str> =
             self.config.compiled_card_ids().into_iter().collect();
         let cards: Vec<CardSettings> = self
@@ -1096,52 +800,21 @@ impl WorkerState {
                     );
                 }
                 CardSettings::Picture { id, .. } => {
-                    // A picture card has no provider to poll. Its frames arrive
+                    // A picture card has no fetcher to poll. Its frames arrive
                     // by webhook, pushed by an external producer, so there is no
                     // fetch loop here to schedule and no deadline to arm --
                     // which is also why rotating onto one costs nothing.
                     //
                     // With no host there is additionally nothing holding a
                     // frame, so the compiled placeholder fields are a stand-in
-                    // for data rather than data, and reporting them would be the
-                    // same defect the plugin arm below documents.
-                    if self.plugin_host.is_none() {
+                    // for data rather than data.
+                    if self.image_source_host.is_none() {
                         self.latest_fields.remove(id);
-                    }
-                }
-                CardSettings::Plugin { id, refresh, .. } => {
-                    // Spec 5.3: with no plugin host this runtime can neither
-                    // fetch nor draw the card, so it schedules nothing and
-                    // reports nothing about it -- including the compiled
-                    // placeholder fields, which are a stand-in for data, not
-                    // data. Dropping the carried-over snapshot with them is
-                    // correct: there is no one here to render it.
-                    if self.plugin_host.is_none() {
-                        self.latest_fields.remove(id);
-                        continue;
-                    }
-                    let interval = refresh
-                        .interval_minutes()
-                        .map(|minutes| Duration::from_secs(u64::from(minutes) * 60));
-                    provider_deadlines.push((id.clone(), interval));
-                    let unchanged = previous_config
-                        .cards
-                        .iter()
-                        .any(|previous| previous == card);
-                    self.restore_provider(
-                        id,
-                        unchanged,
-                        &mut previous_fields,
-                        &mut previous_providers,
-                    );
-                    if unchanged && let Some(snapshot) = previous_plugin_snapshots.remove(id) {
-                        self.plugin_snapshots.insert(id.clone(), snapshot);
                     }
                 }
                 CardSettings::Clock { .. } => {}
             }
         }
-        scheduler.replace_providers(provider_deadlines, now);
         let rotation_card_ids = rotation_card_ids(&self.config);
         // A playlist-ID change deliberately resets to its first entry, even when both playlists share the old card, per the acceptance test.
         self.active_screen = if previous_config.active_playlist_id == self.config.active_playlist_id
@@ -1232,44 +905,6 @@ impl WorkerState {
         self.pomodoros.insert(id.into(), timer);
     }
 
-    fn restore_provider(
-        &mut self,
-        id: &str,
-        unchanged: bool,
-        previous_fields: &mut BTreeMap<String, Vec<Field>>,
-        previous_providers: &mut BTreeMap<String, ProviderRuntimeState>,
-    ) {
-        let provider = if unchanged {
-            if let Some(fields) = previous_fields.remove(id) {
-                self.latest_fields.insert(id.into(), fields);
-            }
-            previous_providers.remove(id).map_or_else(
-                || self.empty_provider(id),
-                |mut provider| {
-                    provider.generation = self.generation;
-                    provider.in_flight = false;
-                    provider
-                },
-            )
-        } else {
-            self.empty_provider(id)
-        };
-        self.providers.insert(id.into(), provider);
-    }
-
-    fn empty_provider(&self, id: &str) -> ProviderRuntimeState {
-        ProviderRuntimeState {
-            generation: self.generation,
-            in_flight: false,
-            snapshot: ProviderSnapshot {
-                widget_id: id.into(),
-                state: ProviderState::Idle,
-                last_success_unix_ms: None,
-                age_seconds: None,
-            },
-        }
-    }
-
     fn snapshot(&self, diagnostics: &RuntimeDiagnosticCounters) -> AppSnapshot {
         let mut device = self.device.clone();
         device.active_screen_id.clone_from(&self.active_screen);
@@ -1277,11 +912,6 @@ impl WorkerState {
             config: self.config.clone(),
             runtime: self.runtime.clone(),
             device,
-            providers: self
-                .providers
-                .values()
-                .map(|provider| provider.snapshot.clone())
-                .collect(),
             pomodoros: self.pomodoro_snapshots.values().cloned().collect(),
             card_data: self
                 .latest_fields
@@ -1373,8 +1003,7 @@ fn advance_rotation(state: &mut WorkerState, scheduler: &mut Scheduler, now: Ins
 struct RuntimeWorkerInputs {
     config: AppConfig,
     device: Box<dyn RuntimeDevice>,
-    refresher: Box<dyn ProviderRefresher>,
-    plugin_host: Option<Box<dyn PluginHost>>,
+    image_source_host: Option<Box<dyn ImageSourceHost>>,
 }
 
 fn run_runtime(
@@ -1387,8 +1016,7 @@ fn run_runtime(
     let RuntimeWorkerInputs {
         config,
         mut device,
-        refresher,
-        plugin_host,
+        image_source_host,
     } = inputs;
     let now = Instant::now();
     let mut scheduler = Scheduler::new(
@@ -1397,8 +1025,8 @@ fn run_runtime(
         options.status_interval,
         options.time_sync_interval,
     );
-    let mut state = WorkerState::new_with_plugin_host(config, now, &mut scheduler, plugin_host);
-    let provider = ProviderWorker::new(refresher, options.provider_job_capacity);
+    let mut state =
+        WorkerState::new_with_image_source_host(config, now, &mut scheduler, image_source_host);
     state.publish_if_changed(publisher, diagnostics);
 
     let mut shutting_down = false;
@@ -1436,7 +1064,6 @@ fn run_runtime(
         }
 
         let now = Instant::now();
-        drain_provider_results(&mut state, &provider, diagnostics);
         if !state.connected && now >= state.next_connect {
             attempt_connect(&mut state, &mut scheduler, device.as_mut(), now, &options);
         }
@@ -1460,19 +1087,10 @@ fn run_runtime(
                 options.reconnect_interval,
             );
         }
-        run_scheduled_work(
-            &mut state,
-            &mut scheduler,
-            device.as_mut(),
-            &provider,
-            diagnostics,
-            now,
-            &options,
-        );
+        run_scheduled_work(&mut state, &mut scheduler, device.as_mut(), now, &options);
         state.publish_if_changed(publisher, diagnostics);
     }
 
-    drop(provider);
     publisher.close();
 }
 
@@ -1510,7 +1128,6 @@ fn process_command(
             if was_paused && !paused {
                 let now = Instant::now();
                 scheduler.schedule_time_sync_now(now);
-                scheduler.schedule_skipped_providers_now(now);
             }
             let result = if !paused && state.connected {
                 synchronize_pending(state, scheduler, device, Instant::now())
@@ -1536,28 +1153,6 @@ fn process_command(
                 control_pomodoro(state, scheduler, device, &widget_id, action, Instant::now());
             let _ = reply.send(result);
         }
-        RuntimeCommand::RefreshProvider { widget_id, reply } => {
-            let result = if let Some(provider) = state.providers.get(&widget_id) {
-                if !provider.in_flight {
-                    scheduler.schedule_provider_now(&widget_id, Instant::now());
-                }
-                Ok(())
-            } else {
-                Err(RuntimeError::UnknownWidget { widget_id })
-            };
-            let _ = reply.send(result);
-        }
-        RuntimeCommand::InjectPluginSnapshot {
-            card_id,
-            plugin_id,
-            snapshot,
-            reply,
-        } => {
-            let result = apply_operator_plugin_injection(
-                state, scheduler, device, card_id, &plugin_id, snapshot,
-            );
-            let _ = reply.send(result);
-        }
         RuntimeCommand::ImageSourceUpdated {
             source_id,
             digest,
@@ -1572,9 +1167,6 @@ fn process_command(
                 reconnect_interval,
             );
             let _ = reply.send(result);
-        }
-        RuntimeCommand::RenderCardPreview { card_id, reply } => {
-            let _ = reply.send(render_card_preview(state, &card_id));
         }
         RuntimeCommand::ActivateScreen { screen_id, reply } => {
             let result = activate_screen_command(state, scheduler, device, screen_id);
@@ -1601,67 +1193,6 @@ fn process_command(
         }
     }
     false
-}
-
-fn apply_operator_plugin_injection(
-    state: &mut WorkerState,
-    scheduler: &mut Scheduler,
-    device: &mut dyn RuntimeDevice,
-    card_id: String,
-    plugin_id: &str,
-    snapshot: providers::ProviderSnapshot<serde_json::Value>,
-) -> Result<(), RuntimeError> {
-    if !state.connected {
-        return Err(RuntimeError::DeviceDisconnected);
-    }
-    let (title, configured_plugin_id) = state
-        .config
-        .cards
-        .iter()
-        .find_map(|card| match card {
-            CardSettings::Plugin {
-                id,
-                title,
-                plugin_id,
-                ..
-            } if id == &card_id => Some((title.clone(), plugin_id.clone())),
-            _ => None,
-        })
-        .ok_or_else(|| RuntimeError::Provider {
-            message: format!(
-                "operator-plugin-mismatch: card {card_id:?} is not a configured plugin card"
-            ),
-        })?;
-    if configured_plugin_id != plugin_id {
-        return Err(RuntimeError::Provider {
-            message: format!(
-                "operator-plugin-mismatch: card {card_id:?} is configured for plugin \
-                 {configured_plugin_id:?}, not {plugin_id:?}"
-            ),
-        });
-    }
-
-    let snapshot_stale = snapshot.stale;
-    let error = snapshot.error.clone().unwrap_or_default();
-    state.plugin_snapshots.insert(card_id.clone(), snapshot);
-    state.latest_fields.insert(
-        card_id.clone(),
-        vec![
-            Field {
-                key: "title".into(),
-                value: FieldValue::Text(title),
-            },
-            Field {
-                key: "stale".into(),
-                value: FieldValue::Boolean(snapshot_stale),
-            },
-            Field {
-                key: "error".into(),
-                value: FieldValue::Text(error),
-            },
-        ],
-    );
-    activate_screen_command(state, scheduler, device, card_id)
 }
 
 fn apply_image_source_update(
@@ -1693,28 +1224,30 @@ fn apply_image_source_update(
     // the digest it names, and an empty/partial set would make AssetRelease
     // delete unrelated device-wide assets.
     let desired = {
-        let host = state
-            .plugin_host
-            .as_deref_mut()
-            .ok_or_else(|| RuntimeError::Provider {
-                message: "cannot apply an image update because no image source host is configured"
-                    .into(),
-            })?;
+        let host =
+            state
+                .image_source_host
+                .as_deref_mut()
+                .ok_or_else(|| RuntimeError::ImageSource {
+                    message:
+                        "cannot apply an image update because no image source host is configured"
+                            .into(),
+                })?;
         let desired = host.desired_assets();
         if !desired.iter().any(|asset| asset.digest == digest) {
-            return Err(RuntimeError::Provider {
+            return Err(RuntimeError::ImageSource {
                 message: format!(
                     "image source {source_id:?} is missing from the host's complete desired asset set"
                 ),
             });
         }
-        let frame = host
-            .image_source_frame(source_id)
-            .ok_or_else(|| RuntimeError::Provider {
-                message: format!("image source {source_id:?} has no frame to install"),
-            })?;
+        let frame =
+            host.image_source_frame(source_id)
+                .ok_or_else(|| RuntimeError::ImageSource {
+                    message: format!("image source {source_id:?} has no frame to install"),
+                })?;
         if frame.digest != digest {
-            return Err(RuntimeError::Provider {
+            return Err(RuntimeError::ImageSource {
                 message: format!(
                     "image source {source_id:?} now holds a different frame than this update"
                 ),
@@ -1725,11 +1258,11 @@ fn apply_image_source_update(
 
     // This is deliberately the entire host-owned set. AssetRelease is a
     // device-wide KEEP-SET, so reconciling only this source would delete every
-    // plugin and picture digest omitted from the partial list.
+    // other picture digest omitted from the partial list.
     let keep_set = match AssetSync::reconcile_with_active_volatile(
         device,
         &desired,
-        state.active_volatile_digest,
+        None,
         state.device.capability_bits(),
     ) {
         Ok(keep_set) => keep_set,
@@ -1745,11 +1278,8 @@ fn apply_image_source_update(
             });
         }
     };
-    state.confirmed_durable_assets = keep_set
-        .into_iter()
-        .filter(|candidate| Some(*candidate) != state.active_volatile_digest)
-        .collect();
-    clear_plugin_asset_sync_refusals(state);
+    state.confirmed_durable_assets = keep_set.into_iter().collect();
+    clear_asset_sync_refusals(state);
 
     // Rebuilding an unrelated visible face would turn every background image
     // update into panel traffic. Off-screen frames simply remain resident for
@@ -1827,13 +1357,10 @@ fn attempt_connect(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn run_scheduled_work(
     state: &mut WorkerState,
     scheduler: &mut Scheduler,
     device: &mut dyn RuntimeDevice,
-    provider: &ProviderWorker,
-    diagnostics: &RuntimeDiagnosticCounters,
     now: Instant,
     options: &RuntimeOptions,
 ) {
@@ -1867,18 +1394,6 @@ fn run_scheduled_work(
     {
         state.active_screen_dirty = true;
         sync_alert_hold_to_active_interrupt(state, scheduler, now);
-    }
-    if state.config.preferences.paused {
-        scheduler.skip_due_providers(now);
-    } else {
-        submit_due_providers(
-            state,
-            scheduler,
-            provider,
-            diagnostics,
-            now,
-            options.provider_queue_retry,
-        );
     }
     // A deadline in `wait_duration` must be consumed whenever this tick examines
     // it, even if connectivity or pause gates the actual I/O below. Otherwise a
@@ -1927,155 +1442,12 @@ fn detect_active_picture_face_change(state: &mut WorkerState) {
         return;
     };
     let current = state
-        .plugin_host
+        .image_source_host
         .as_deref_mut()
         .and_then(|host| host.image_source_frame(&source_id))
         .map(|frame| (frame.digest, frame.stale));
     let displayed = state.last_picture_face.get(&card_id).copied();
     if current != displayed {
-        state.active_scene_dirty = true;
-    }
-}
-
-fn submit_due_providers(
-    state: &mut WorkerState,
-    scheduler: &mut Scheduler,
-    provider: &ProviderWorker,
-    diagnostics: &RuntimeDiagnosticCounters,
-    now: Instant,
-    retry: Duration,
-) {
-    for widget_id in scheduler.take_due_providers(now) {
-        if state
-            .providers
-            .get(&widget_id)
-            .is_none_or(|provider| provider.in_flight)
-        {
-            continue;
-        }
-        let Some(request) = provider_request(state, &widget_id) else {
-            continue;
-        };
-        match provider.try_submit(request) {
-            Ok(()) => {
-                if let Some(provider) = state.providers.get_mut(&widget_id) {
-                    provider.in_flight = true;
-                    provider.snapshot.state = ProviderState::Refreshing;
-                }
-                diagnostics
-                    .provider_jobs_started
-                    .fetch_add(1, Ordering::Relaxed);
-            }
-            Err(ProviderSubmitError::Full) => {
-                diagnostics
-                    .provider_queue_full
-                    .fetch_add(1, Ordering::Relaxed);
-                scheduler.provider_retry(&widget_id, now, retry);
-            }
-            Err(ProviderSubmitError::Disconnected) => {
-                if let Some(provider) = state.providers.get_mut(&widget_id) {
-                    provider.snapshot.state = ProviderState::Error {
-                        message: "provider worker stopped".into(),
-                    };
-                }
-            }
-        }
-    }
-}
-
-fn provider_request(state: &WorkerState, widget_id: &str) -> Option<ProviderRefreshRequest> {
-    let active_provider_ids: Vec<String> = state.providers.keys().cloned().collect();
-    state.config.cards.iter().find_map(|widget| match widget {
-        CardSettings::Plugin {
-            id,
-            title,
-            plugin_id,
-            ..
-        } if id == widget_id => Some(ProviderRefreshRequest {
-            generation: state.generation,
-            widget_id: id.clone(),
-            title: title.clone(),
-            provider: ProviderRequest::Plugin {
-                plugin_id: plugin_id.clone(),
-            },
-            active_provider_ids: active_provider_ids.clone(),
-            now: Utc::now(),
-        }),
-        _ => None,
-    })
-}
-
-fn drain_provider_results(
-    state: &mut WorkerState,
-    provider: &ProviderWorker,
-    diagnostics: &RuntimeDiagnosticCounters,
-) {
-    while let Ok(result) = provider.try_recv() {
-        apply_provider_result(state, diagnostics, result);
-    }
-}
-
-/// Applies one completed provider refresh and projects it into the provider's
-/// snapshot and card fields.
-fn apply_provider_result(
-    state: &mut WorkerState,
-    diagnostics: &RuntimeDiagnosticCounters,
-    result: ProviderRefreshResult,
-) {
-    let Some(provider_state) = state.providers.get_mut(&result.widget_id) else {
-        diagnostics
-            .provider_results_discarded
-            .fetch_add(1, Ordering::Relaxed);
-        return;
-    };
-    if result.generation != provider_state.generation || result.generation != state.generation {
-        diagnostics
-            .provider_results_discarded
-            .fetch_add(1, Ordering::Relaxed);
-        return;
-    }
-    provider_state.in_flight = false;
-    provider_state.snapshot = ProviderSnapshot {
-        widget_id: result.widget_id.clone(),
-        state: match (result.stale, &result.error, result.refreshed_at) {
-            (false, None, _) => ProviderState::Fresh,
-            (true, Some(message), Some(_)) => ProviderState::Stale {
-                message: message.clone(),
-            },
-            (true, None, _) => ProviderState::Stale {
-                message: "provider data is stale".into(),
-            },
-            (_, Some(message), None) | (false, Some(message), Some(_)) => ProviderState::Error {
-                message: message.clone(),
-            },
-        },
-        last_success_unix_ms: result.refreshed_at.map(|time| time.timestamp_millis()),
-        age_seconds: result.age.map(|age| age.as_secs()),
-    };
-    if state
-        .config
-        .cards
-        .iter()
-        .any(|card| matches!(card, CardSettings::Plugin { id, .. } if id == &result.widget_id))
-        && let Some(value) = result.value
-    {
-        state.plugin_snapshots.insert(
-            result.widget_id.clone(),
-            providers::ProviderSnapshot {
-                value,
-                refreshed_at: result.refreshed_at,
-                age: result.age,
-                stale: result.stale,
-                error: result.error.clone(),
-            },
-        );
-    }
-    let widget_id = result.widget_id;
-    state.latest_fields.insert(widget_id.clone(), result.fields);
-    state.dirty_widgets.insert(widget_id.clone());
-    if state.active_screen.as_deref() == Some(widget_id.as_str()) {
-        // Provider completion is a host fact, including a stale/error-only
-        // transition. Rebuild once now; do not infer a refresh cadence here.
         state.active_scene_dirty = true;
     }
 }
@@ -2344,19 +1716,19 @@ fn synchronize_full(
         .compile(1)
         .expect("runtime config remains validated");
     // Config-declared assets (`CompiledAppConfig.assets` / `AssetSettings`)
-    // remain deliberately unwired. `desired_assets()` currently covers plugin
-    // assets only, and AssetRelease is authoritative over the whole device.
+    // remain deliberately unwired. `desired_assets()` covers image-source
+    // frames only, and AssetRelease is authoritative over the whole device.
     // Mixing the two before config assets have an owner would delete them.
     // An empty desired set is NOT an empty-op reconcile. `AssetRelease`
     // carries the full keep-set, so the device marks every committed record
     // whose digest is absent from it DEAD and compacts it away
     // (`firmware/main/core/asset_store.c`'s `plan_compaction`). An empty list
     // therefore means "wipe every asset you hold", and a server that simply
-    // has no plugins loaded -- the default when no plugins directory is
-    // configured, which is a valid deployment -- would issue that wipe on
-    // every full synchronize. Skip the pass entirely instead: having nothing
-    // to say is not the same as asking for everything to be dropped.
-    let asset_result = state.plugin_host.as_mut().and_then(|host| {
+    // has no picture yet -- a normal state before the first producer push --
+    // would issue that wipe on every full synchronize. Skip the pass entirely
+    // instead: having nothing to say is not the same as asking for everything
+    // to be dropped.
+    let asset_result = state.image_source_host.as_mut().and_then(|host| {
         let desired = host.desired_assets();
         if desired.is_empty() {
             return None;
@@ -2367,7 +1739,7 @@ fn synchronize_full(
             AssetSync::reconcile_with_active_volatile(
                 device,
                 &desired,
-                state.active_volatile_digest,
+                None,
                 state.device.capability_bits(),
             ),
         ))
@@ -2375,9 +1747,9 @@ fn synchronize_full(
     match asset_result {
         Some((digests, Ok(_))) => {
             state.confirmed_durable_assets = digests.into_iter().collect();
-            clear_plugin_asset_sync_refusals(state);
+            clear_asset_sync_refusals(state);
         }
-        Some((_, Err(error))) => record_plugin_asset_sync_refusals(state, &error.to_string()),
+        Some((_, Err(error))) => record_asset_sync_refusals(state, &error.to_string()),
         None => {}
     }
     if !sync_device_result(
@@ -2404,25 +1776,15 @@ fn synchronize_full(
     Ok(())
 }
 
-/// Both plugin assets and picture frames travel in the same device-wide
-/// reconcile pass, so the prefix no longer says "plugin". The wording is load
-/// bearing: a picture card whose frame failed to transfer used to be recorded
-/// against every *plugin* card and none of its own, so the panel showed a stale
-/// face and the only visible error named a card that was fine. That cost a
-/// hardware session.
-const PLUGIN_ASSET_SYNC_REFUSAL_PREFIX: &str = "asset reconciliation failed: ";
+const ASSET_SYNC_REFUSAL_PREFIX: &str = "asset reconciliation failed: ";
 
-fn record_plugin_asset_sync_refusals(state: &mut WorkerState, message: &str) {
+fn record_asset_sync_refusals(state: &mut WorkerState, message: &str) {
     let card_ids: Vec<String> = state
         .config
         .cards
         .iter()
         .filter_map(|card| match card {
-            // Every card whose face depends on a transferred asset, not only
-            // the plugin ones. A reconcile failure is device-wide; attributing
-            // it to a subset of the cards it actually broke is worse than
-            // saying nothing, because it points the reader at the wrong card.
-            CardSettings::Plugin { id, .. } | CardSettings::Picture { id, .. } => Some(id.clone()),
+            CardSettings::Picture { id, .. } => Some(id.clone()),
             _ => None,
         })
         .collect();
@@ -2430,15 +1792,15 @@ fn record_plugin_asset_sync_refusals(state: &mut WorkerState, message: &str) {
         record_scene_refusal(
             state,
             card_id,
-            format!("{PLUGIN_ASSET_SYNC_REFUSAL_PREFIX}{message}"),
+            format!("{ASSET_SYNC_REFUSAL_PREFIX}{message}"),
         );
     }
 }
 
-fn clear_plugin_asset_sync_refusals(state: &mut WorkerState) {
+fn clear_asset_sync_refusals(state: &mut WorkerState) {
     state.push_rejections.retain(|_, error| {
         error.kind != CardErrorKind::SceneRefused
-            || !error.message.starts_with(PLUGIN_ASSET_SYNC_REFUSAL_PREFIX)
+            || !error.message.starts_with(ASSET_SYNC_REFUSAL_PREFIX)
     });
 }
 
@@ -2551,124 +1913,55 @@ fn field_boolean(fields: &[Field], key: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// One built card candidate, ready for negotiation. `Push` is a validated
-/// display-list push; `RasterOnly` is an SVG card that only a server-rendered
-/// frame can draw, carrying its device-binding tokens for classification.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum CardCandidate {
-    Push(PushScene),
-    RasterOnly {
-        plugin_id: String,
-        snapshot: providers::ProviderSnapshot<serde_json::Value>,
-        bindings: BTreeSet<String>,
-    },
-}
-
 fn build_card_scene(
     config: &AppConfig,
     card_id: &str,
     fields: &[Field],
-    plugin_snapshot: Option<&providers::ProviderSnapshot<serde_json::Value>>,
-    plugin_host: Option<&mut dyn PluginHost>,
+    image_source_host: Option<&mut dyn ImageSourceHost>,
     revision: u32,
-) -> Result<CardCandidate, String> {
+) -> Result<PushScene, String> {
     let card = config
         .cards
         .iter()
         .find(|card| card.id() == card_id)
         .ok_or_else(|| format!("card {card_id:?} is not present in the active configuration"))?;
     let metrics = &BakedFontMetrics::SHIPPED;
-    let scene = match card {
-        CardSettings::Plugin { plugin_id, .. } => {
-            let host = plugin_host.ok_or_else(|| {
-                format!("card {card_id:?} cannot render because no plugin host is configured")
-            })?;
-            let snapshot = plugin_snapshot.ok_or_else(|| {
-                format!(
-                    "card {card_id:?} has no fetched plugin snapshot cached yet; wait for its first refresh"
-                )
-            })?;
-            // The configured display timezone, so a plugin face renders an
-            // instant where the user lives. An unparseable value cannot reach
-            // a saved config (`AppConfig::validate` rejects it), so UTC here
-            // is an unreachable floor rather than a silent fallback.
-            let timezone = config
-                .preferences
-                .timezone
-                .parse::<chrono_tz::Tz>()
-                .unwrap_or(chrono_tz::UTC);
-            let candidate = host
-                .render_scene(plugin_id, snapshot, revision, timezone)
-                .map_err(|error| {
-                    format!("plugin {plugin_id:?} could not render card {card_id:?}: {error}")
-                })?;
-            match candidate {
-                // The plugin compiler already applies
-                // `with_scene_data_state`. Do not stamp it here too, or
-                // stale/error footers would be duplicated.
-                SceneCandidate::DisplayList(scene) => scene,
-                // Nothing to validate or push: negotiation decides whether
-                // this becomes a rasterized frame or a typed refusal.
-                SceneCandidate::RasterOnly { bindings } => {
-                    return Ok(CardCandidate::RasterOnly {
-                        plugin_id: plugin_id.clone(),
-                        snapshot: snapshot.clone(),
-                        bindings,
-                    });
-                }
-            }
-        }
-        CardSettings::Picture { source_id, .. } => {
-            let host = plugin_host.ok_or_else(|| {
-                format!("card {card_id:?} cannot render because no image source host is configured")
-            })?;
-            match host.image_source_frame(source_id) {
-                Some(frame) => with_scene_data_state(
-                    frame_face_scene(revision, frame.digest),
-                    SceneDataState {
-                        stale: frame.stale,
-                        error: None,
-                    },
-                    metrics,
-                ),
-                // No frame at all, so there is nothing to badge. This state
-                // word is the same distinction a plugin card awaiting its
-                // first refresh already draws.
-                None => waiting_for_first_picture_scene(revision, metrics),
-            }
-        }
-        _ => {
-            let scene =
-                build_template_card_scene(config, card, card_id, fields, revision, metrics)?;
-            let error = field_text(fields, "error");
-            with_scene_data_state(
-                scene,
+    let scene = if let CardSettings::Picture { source_id, .. } = card {
+        let host = image_source_host.ok_or_else(|| {
+            format!("card {card_id:?} cannot render because no image source host is configured")
+        })?;
+        match host.image_source_frame(source_id) {
+            Some(frame) => with_scene_data_state(
+                frame_face_scene(revision, frame.digest),
                 SceneDataState {
-                    stale: field_boolean(fields, "stale"),
-                    error: (!error.is_empty()).then_some(error),
+                    stale: frame.stale,
+                    error: None,
                 },
                 metrics,
-            )
+            ),
+            // No frame at all, so there is nothing to badge.
+            None => waiting_for_first_picture_scene(revision, metrics),
         }
+    } else {
+        let scene = build_template_card_scene(config, card, card_id, fields, revision, metrics)?;
+        let error = field_text(fields, "error");
+        with_scene_data_state(
+            scene,
+            SceneDataState {
+                stale: field_boolean(fields, "stale"),
+                error: (!error.is_empty()).then_some(error),
+            },
+            metrics,
+        )
     };
     let push = PushScene {
         card_id: card_id.to_owned(),
         revision,
         scene,
     };
-    if push.revision == PREVIEW_SCENE_REVISION {
-        // A preview never becomes a frame on the wire, so validate the scene's
-        // own bounds and leave the message rule -- including the nonzero
-        // revision that makes a preview unpushable -- to the one path that
-        // actually sends messages. Card-id length is already bounded by config
-        // validation (`MAX_WIDGET_ID_LEN`).
-        protocol::validate_scene(&push.scene)
-            .map_err(|error| format!("the host-built scene is invalid: {error}"))?;
-    } else {
-        validate_message(&Message::PushScene(push.clone()))
-            .map_err(|error| format!("the host-built scene is invalid: {error}"))?;
-    }
-    Ok(CardCandidate::Push(push))
+    validate_message(&Message::PushScene(push.clone()))
+        .map_err(|error| format!("the host-built scene is invalid: {error}"))?;
+    Ok(push)
 }
 
 fn waiting_for_first_picture_scene(revision: u32, metrics: &BakedFontMetrics) -> protocol::Scene {
@@ -2767,9 +2060,7 @@ fn build_template_card_scene(
             metrics,
         ),
         None => {
-            return Err(format!(
-                "card {card_id:?} has no display template and is not a plugin card"
-            ));
+            return Err(format!("card {card_id:?} has no display template"));
         }
     };
     Ok(scene)
@@ -2849,45 +2140,21 @@ fn handle_automatic_scene_error(
 }
 
 /// Rebuilds the active card only after a host-owned event marks it dirty.
-///
-/// The worker calls this in its render phase after publishing ownership state.
-/// The dirty bit is consumed before any request and no clock, pomodoro, status, or
-/// provider deadline sets it. Device-side bindings keep clock/timer facts moving
-/// between these event-driven pushes.
-/// Analyzes one built candidate and negotiates it against the connected
-/// device. `Err` is an analysis failure -- a binding outside the closed
-/// vocabulary -- which is a defect in the candidate, not a compatibility
-/// fact; either way the message becomes the card's typed refusal.
-fn negotiate_candidate(
+/// Device-side bindings keep clock and pomodoro facts moving between these
+/// event-driven pushes; picture faces change only when their producer pushes.
+fn native_requirements(
     state: &mut WorkerState,
-    candidate: &CardCandidate,
-) -> Result<
-    (
-        render_negotiation::RenderDecision,
-        render_negotiation::RenderRequirements,
-    ),
-    String,
-> {
-    let requirements = match candidate {
-        CardCandidate::Push(push) => render_negotiation::analyze_scene(&push.scene),
-        CardCandidate::RasterOnly { bindings, .. } => {
-            render_negotiation::analyze_raster_only(bindings.iter().cloned())
-        }
-    }
-    .map_err(|error| error.to_string())?;
+    scene: &protocol::Scene,
+) -> Result<render_negotiation::RenderRequirements, String> {
+    let requirements = render_negotiation::analyze_scene(scene);
     let profile = render_negotiation::DeviceRenderProfile {
         capabilities: state.device.capability_bits(),
-        confirmed_assets: state
-            .confirmed_durable_assets
-            .iter()
-            .chain(&state.confirmed_volatile_assets)
-            .copied()
-            .collect(),
+        confirmed_assets: state.confirmed_durable_assets.clone(),
         installable_assets: if requirements.asset_digests.is_empty() {
             BTreeSet::new()
         } else {
             state
-                .plugin_host
+                .image_source_host
                 .as_mut()
                 .map(|host| {
                     host.desired_assets()
@@ -2898,17 +2165,15 @@ fn negotiate_candidate(
                 .unwrap_or_default()
         },
     };
-    Ok((
-        render_negotiation::negotiate(&requirements, &profile),
-        requirements,
-    ))
+    render_negotiation::validate_native_scene(&requirements, &profile)?;
+    Ok(requirements)
 }
 
 fn push_active_scene(
     state: &mut WorkerState,
-    scheduler: &mut Scheduler,
+    _scheduler: &mut Scheduler,
     device: &mut dyn RuntimeDevice,
-    now: Instant,
+    _now: Instant,
     reconnect_interval: Duration,
 ) {
     if ownership_was_refused(state) || state.needs_full_sync || !state.active_scene_dirty {
@@ -2918,16 +2183,6 @@ fn push_active_scene(
         state.active_scene_dirty = false;
         return;
     };
-
-    if state.pending_raster_card.as_deref() == Some(card_id.as_str()) {
-        if !scheduler.raster_due(now) {
-            return;
-        }
-        state.pending_raster_card = None;
-    } else if state.pending_raster_card.is_some() {
-        state.pending_raster_card = None;
-        scheduler.clear_raster_invalidation();
-    }
 
     let Some(revision) = state.next_scene_revision.checked_add(1) else {
         state.active_scene_dirty = false;
@@ -2943,12 +2198,11 @@ fn push_active_scene(
         .get(&card_id)
         .cloned()
         .unwrap_or_default();
-    let candidate = match build_card_scene(
+    let push = match build_card_scene(
         &state.config,
         &card_id,
         &fields,
-        state.plugin_snapshots.get(&card_id),
-        state.plugin_host.as_deref_mut(),
+        state.image_source_host.as_deref_mut(),
         revision,
     ) {
         Ok(candidate) => candidate,
@@ -2958,82 +2212,38 @@ fn push_active_scene(
             return;
         }
     };
-    // Spec §3: negotiate this candidate against this device before any push.
-    // The old binary shortcut -- bit 8 present, push; absent, silently do
-    // nothing -- is gone: silence was the exact defect shape the V1
-    // validation-mislabeling fix exists to forbid. Every decision below is
-    // recomputed per (scene, device, revision); nothing is cached.
-    let (decision, requirements) = match negotiate_candidate(state, &candidate) {
-        Ok(negotiated) => negotiated,
+    // Analyze every freshly-built scene against this device. In particular,
+    // a picture digest must be confirmed or installable before its scene can
+    // name it; otherwise the panel would accept a face it cannot draw.
+    let requirements = match native_requirements(state, &push.scene) {
+        Ok(requirements) => requirements,
         Err(message) => {
             state.active_scene_dirty = false;
             record_scene_refusal(state, card_id, message);
             return;
         }
     };
-    match decision {
-        render_negotiation::RenderDecision::Native => {
-            scheduler.clear_raster_invalidation();
-            execute_native_push(
-                state,
-                device,
-                card_id,
-                revision,
-                candidate,
-                &requirements,
-                reconnect_interval,
-            );
-        }
-        render_negotiation::RenderDecision::RefuseLive { reason } => {
-            scheduler.clear_raster_invalidation();
-            state.active_scene_dirty = false;
-            record_scene_refusal(state, card_id, reason);
-        }
-        render_negotiation::RenderDecision::Rasterize => {
-            execute_raster_render(
-                state,
-                scheduler,
-                device,
-                card_id,
-                revision,
-                &candidate,
-                &fields,
-                now,
-                reconnect_interval,
-            );
-        }
-    }
+    execute_native_push(
+        state,
+        device,
+        card_id,
+        revision,
+        push,
+        &requirements,
+        reconnect_interval,
+    );
 }
 
-/// The `Native` row's executor: confirm required durable assets, push the
-/// display-list scene, and drop a now-unreferenced volatile frame. Extracted
-/// from `push_active_scene` so the dispatch reads as the spec table.
 fn execute_native_push(
     state: &mut WorkerState,
     device: &mut dyn RuntimeDevice,
     card_id: String,
     revision: u32,
-    candidate: CardCandidate,
+    push: PushScene,
     requirements: &render_negotiation::RenderRequirements,
     reconnect_interval: Duration,
 ) {
-    let (is_picture_card, picture_face) = built_picture_face(&state.config, &card_id, &candidate);
-    let push = match candidate {
-        CardCandidate::Push(push) => push,
-        CardCandidate::RasterOnly { .. } => {
-            // Unreachable by construction (`RasterOnly` sets a
-            // native_source no profile satisfies), but a policy bug here
-            // must surface as a typed card error, not a panic in the
-            // worker thread.
-            state.active_scene_dirty = false;
-            record_scene_refusal(
-                state,
-                card_id,
-                "internal error: a raster-only candidate negotiated a native render".into(),
-            );
-            return;
-        }
-    };
+    let (is_picture_card, picture_face) = built_picture_face(&state.config, &card_id, &push);
     state.next_scene_revision = revision;
     if !requirements.asset_digests.is_empty()
         && let Err(error) =
@@ -3057,22 +2267,6 @@ fn execute_native_push(
                 }
             }
             clear_scene_refusal(state, &card_id);
-            if state.active_volatile_digest.is_some() {
-                let keep = durable_asset_digests(state);
-                match keep.and_then(|digests| {
-                    device
-                        .send_asset_release(AssetRelease { digests })
-                        .map_err(|source| AssetSyncError::Release { source })
-                }) {
-                    Ok(()) => {
-                        state.active_volatile_digest = None;
-                        state.confirmed_volatile_assets.clear();
-                    }
-                    Err(error) => {
-                        handle_automatic_asset_error(state, card_id, error, reconnect_interval);
-                    }
-                }
-            }
         }
         Err(error) => {
             handle_automatic_scene_error(state, card_id, error, reconnect_interval);
@@ -3083,7 +2277,7 @@ fn execute_native_push(
 fn built_picture_face(
     config: &AppConfig,
     card_id: &str,
-    candidate: &CardCandidate,
+    push: &PushScene,
 ) -> (bool, Option<([u8; protocol::ASSET_DIGEST_LEN], bool)>) {
     let is_picture = config
         .cards
@@ -3092,108 +2286,11 @@ fn built_picture_face(
     if !is_picture {
         return (false, None);
     }
-    let face = match candidate {
-        CardCandidate::Push(push) => push.scene.nodes.iter().find_map(|node| match node {
-            protocol::SceneNode::Image(image) => Some((image.digest, push.scene.nodes.len() > 1)),
-            _ => None,
-        }),
-        CardCandidate::RasterOnly { .. } => None,
-    };
+    let face = push.scene.nodes.iter().find_map(|node| match node {
+        protocol::SceneNode::Image(image) => Some((image.digest, push.scene.nodes.len() > 1)),
+        _ => None,
+    });
     (true, face)
-}
-
-/// The `Rasterize` row's executor: honour the 30-second floor, render through
-/// the plugin-host boundary, run the atomic volatile transcript
-/// (begin -> chunks -> commit -> one-image push -> keep-set release), and keep
-/// the old frame until the new push succeeds.
-// too_many_arguments: this is `push_active_scene`'s execution context handed
-// through whole; bundling it into a struct would name a thing with no other use.
-#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
-fn execute_raster_render(
-    state: &mut WorkerState,
-    scheduler: &mut Scheduler,
-    device: &mut dyn RuntimeDevice,
-    card_id: String,
-    revision: u32,
-    candidate: &CardCandidate,
-    fields: &[Field],
-    now: Instant,
-    reconnect_interval: Duration,
-) {
-    scheduler.invalidate_raster(now);
-    if !scheduler.raster_due(now) {
-        state.pending_raster_card = Some(card_id);
-        return;
-    }
-    state.next_scene_revision = revision;
-    state.active_scene_dirty = false;
-    let request = raster_request(candidate, fields);
-    let Some(host) = state.plugin_host.as_deref_mut() else {
-        record_scene_refusal(
-            state,
-            card_id,
-            "this card needs server-side rasterization, which this host does not yet \
-             perform"
-                .into(),
-        );
-        return;
-    };
-    let frame = match host.rasterize(&request) {
-        Ok(frame) => frame,
-        Err(message) => {
-            record_scene_refusal(
-                state,
-                card_id,
-                format!("this host was present, but could not rasterize the card: {message}"),
-            );
-            return;
-        }
-    };
-    let asset = DesiredAsset {
-        digest: frame.digest,
-        kind: protocol::AssetKind::Image,
-        bytes: frame.bytes,
-    };
-    if let Err(error) = AssetSync::transfer_volatile(device, &asset, state.device.capability_bits())
-    {
-        handle_automatic_asset_error(state, card_id, error, reconnect_interval);
-        return;
-    }
-    state.confirmed_volatile_assets.insert(asset.digest);
-    let push = match raster_frame_push(&card_id, revision, asset.digest) {
-        Ok(push) => push,
-        Err(message) => {
-            record_scene_refusal(state, card_id, message);
-            return;
-        }
-    };
-    match device.push_scene(push) {
-        Ok(()) => {
-            state.active_volatile_digest = Some(asset.digest);
-            scheduler.note_raster_pushed(now);
-            clear_scene_refusal(state, &card_id);
-            let release = durable_asset_digests(state).and_then(|durable| {
-                crate::asset_sync::compose_asset_keep_set(&durable, Some(asset.digest))
-            });
-            match release.and_then(|digests| {
-                device
-                    .send_asset_release(AssetRelease { digests })
-                    .map_err(|source| AssetSyncError::Release { source })
-            }) {
-                Ok(()) => {
-                    state
-                        .confirmed_volatile_assets
-                        .retain(|digest| *digest == asset.digest);
-                }
-                Err(error) => {
-                    handle_automatic_asset_error(state, card_id, error, reconnect_interval);
-                }
-            }
-        }
-        Err(error) => {
-            handle_automatic_scene_error(state, card_id, error, reconnect_interval);
-        }
-    }
 }
 
 fn clear_scene_refusal(state: &mut WorkerState, card_id: &str) {
@@ -3211,20 +2308,19 @@ fn ensure_durable_assets_for_scene(
     device: &mut dyn RuntimeDevice,
     required: &BTreeSet<[u8; protocol::ASSET_DIGEST_LEN]>,
 ) -> Result<(), AssetSyncError> {
-    if required.iter().all(|digest| {
-        state.confirmed_durable_assets.contains(digest)
-            || state.confirmed_volatile_assets.contains(digest)
-    }) {
+    if required
+        .iter()
+        .all(|digest| state.confirmed_durable_assets.contains(digest))
+    {
         return Ok(());
     }
     let desired = state
-        .plugin_host
+        .image_source_host
         .as_deref_mut()
-        .map(PluginHost::desired_assets)
+        .map(ImageSourceHost::desired_assets)
         .unwrap_or_default();
     if let Some(digest) = required.iter().find(|digest| {
         !state.confirmed_durable_assets.contains(*digest)
-            && !state.confirmed_volatile_assets.contains(*digest)
             && !desired.iter().any(|asset| asset.digest == **digest)
     }) {
         return Err(AssetSyncError::MissingRequiredAsset { digest: *digest });
@@ -3232,186 +2328,15 @@ fn ensure_durable_assets_for_scene(
     let keep_set = AssetSync::reconcile_with_active_volatile(
         device,
         &desired,
-        state.active_volatile_digest,
+        None,
         state.device.capability_bits(),
     )?;
-    state.confirmed_durable_assets = keep_set
-        .into_iter()
-        .filter(|digest| Some(*digest) != state.active_volatile_digest)
-        .collect();
+    state.confirmed_durable_assets = keep_set.into_iter().collect();
     Ok(())
 }
 
-fn durable_asset_digests(
-    state: &mut WorkerState,
-) -> Result<Vec<[u8; protocol::ASSET_DIGEST_LEN]>, AssetSyncError> {
-    let desired = state
-        .plugin_host
-        .as_deref_mut()
-        .map(PluginHost::desired_assets)
-        .unwrap_or_default();
-    crate::asset_sync::compose_asset_keep_set(
-        &desired.iter().map(|asset| asset.digest).collect::<Vec<_>>(),
-        None,
-    )
-}
-
-fn raster_request(candidate: &CardCandidate, fields: &[Field]) -> RasterRequest {
-    match candidate {
-        CardCandidate::Push(push) => RasterRequest::DisplayList {
-            scene: push.scene.clone(),
-            fields: fields.to_vec(),
-        },
-        CardCandidate::RasterOnly {
-            plugin_id,
-            snapshot,
-            ..
-        } => RasterRequest::PluginSvg {
-            plugin_id: plugin_id.clone(),
-            snapshot: snapshot.clone(),
-            fields: fields.to_vec(),
-        },
-    }
-}
-
-/// Builds and rasterizes one plugin card's face without sending it. Takes no
-/// device: the absence of that parameter is the guarantee, not a comment.
-fn render_card_preview(
-    state: &mut WorkerState,
-    card_id: &str,
-) -> Result<CardPreview, RuntimeError> {
-    let Some(card) = state.config.cards.iter().find(|card| card.id() == card_id) else {
-        return Err(RuntimeError::UnknownCard {
-            card_id: card_id.to_owned(),
-        });
-    };
-    if let CardSettings::Picture { source_id, .. } = card {
-        let source_id = source_id.clone();
-        let Some(host) = state.plugin_host.as_deref_mut() else {
-            return Ok(preview_failure(
-                "this card's picture is held by the server, which this host is not".into(),
-            ));
-        };
-        return Ok(match host.image_source_frame(&source_id) {
-            Some(frame) => CardPreview {
-                state: if frame.stale {
-                    CardPreviewState::Stale
-                } else {
-                    CardPreviewState::Fresh
-                },
-                frame: Some(RasterFrame {
-                    digest: frame.digest,
-                    bytes: frame.bytes,
-                }),
-                message: None,
-                refreshed_at_unix_ms: None,
-            },
-            None => CardPreview {
-                frame: None,
-                state: CardPreviewState::Waiting,
-                message: Some("Waiting for the first picture".into()),
-                refreshed_at_unix_ms: None,
-            },
-        });
-    }
-    if !matches!(card, CardSettings::Plugin { .. }) {
-        return Err(RuntimeError::NotAPluginCard {
-            card_id: card_id.to_owned(),
-        });
-    }
-    // A hostless runtime can neither fetch nor draw a plugin card at all, so
-    // this must be checked before the snapshot lookup below: without a host,
-    // `plugin_snapshots` is never populated for this card (see
-    // `replace_config`'s `CardSettings::Plugin` arm), so a check ordered the
-    // other way would always fall into "Waiting for the first refresh" --
-    // promising an eventual resolution that can never happen. PRODUCT.md's
-    // "show state, not reassurance" forbids exactly that message here.
-    if state.plugin_host.is_none() {
-        return Ok(preview_failure(
-            "this card needs server-side rasterization, which this host does not perform".into(),
-        ));
-    }
-    let Some(snapshot) = state.plugin_snapshots.get(card_id).cloned() else {
-        // No cached snapshot is two different situations that must not share
-        // a message: a provider that has never been asked yet (still
-        // `Idle`) genuinely has a resolution coming, but one that already
-        // came back `Error` -- every curated plugin source points at
-        // `example.invalid`, so this is their ordinary state, not a corner
-        // case -- never will on its own. "Waiting for the first refresh"
-        // promises the second and must not be shown for the first; the same
-        // defect class Task 2 already closed for a hostless runtime.
-        if let Some(ProviderState::Error { message }) = state
-            .providers
-            .get(card_id)
-            .map(|provider| &provider.snapshot.state)
-        {
-            return Ok(preview_failure(message.clone()));
-        }
-        return Ok(CardPreview {
-            frame: None,
-            state: CardPreviewState::Waiting,
-            message: Some("Waiting for the first refresh".into()),
-            refreshed_at_unix_ms: None,
-        });
-    };
-    let refreshed_at_unix_ms = snapshot
-        .refreshed_at
-        .and_then(|time| u64::try_from(time.timestamp_millis()).ok());
-    let fields = state
-        .latest_fields
-        .get(card_id)
-        .cloned()
-        .unwrap_or_default();
-    let candidate = match build_card_scene(
-        &state.config,
-        card_id,
-        &fields,
-        Some(&snapshot),
-        state.plugin_host.as_deref_mut(),
-        PREVIEW_SCENE_REVISION,
-    ) {
-        Ok(candidate) => candidate,
-        Err(message) => return Ok(preview_failure(message)),
-    };
-    let request = raster_request(&candidate, &fields);
-    // `build_card_scene` already refuses a plugin card with no host, so this is
-    // a policy bug rather than a state -- and a policy bug must surface as a
-    // typed outcome, not a panic on the worker thread.
-    let Some(host) = state.plugin_host.as_deref_mut() else {
-        return Ok(preview_failure(
-            "this card needs server-side rasterization, which this host does not perform".into(),
-        ));
-    };
-    match host.rasterize(&request) {
-        Ok(frame) => Ok(CardPreview {
-            frame: Some(frame),
-            // A fetched-but-troubled snapshot still draws: the face carries the
-            // stale/error footer the panel shows. `Error` is reserved for "no
-            // frame at all", which keeps spec 4.2's invariant true.
-            state: if snapshot.stale || snapshot.error.is_some() {
-                CardPreviewState::Stale
-            } else {
-                CardPreviewState::Fresh
-            },
-            message: None,
-            refreshed_at_unix_ms,
-        }),
-        Err(message) => Ok(preview_failure(message)),
-    }
-}
-
-fn preview_failure(message: String) -> CardPreview {
-    CardPreview {
-        frame: None,
-        state: CardPreviewState::Error,
-        message: Some(message),
-        refreshed_at_unix_ms: None,
-    }
-}
-
 /// The one definition of "a frame as a face": a single full-canvas image node
-/// naming a digest the device holds. Both the raster path and a picture card
-/// draw this, and they must never drift apart.
+/// naming a digest the device holds.
 fn frame_face_scene(revision: u32, digest: [u8; protocol::ASSET_DIGEST_LEN]) -> protocol::Scene {
     protocol::Scene {
         revision,
@@ -3426,21 +2351,6 @@ fn frame_face_scene(revision: u32, digest: [u8; protocol::ASSET_DIGEST_LEN]) -> 
             color: 0,
         })],
     }
-}
-
-fn raster_frame_push(
-    card_id: &str,
-    revision: u32,
-    digest: [u8; protocol::ASSET_DIGEST_LEN],
-) -> Result<PushScene, String> {
-    let push = PushScene {
-        card_id: card_id.to_owned(),
-        revision,
-        scene: frame_face_scene(revision, digest),
-    };
-    validate_message(&Message::PushScene(push.clone()))
-        .map_err(|error| format!("the raster frame scene is invalid: {error}"))?;
-    Ok(push)
 }
 
 fn handle_automatic_asset_error(
@@ -3621,11 +2531,6 @@ fn mark_disconnected(
     reconnect_interval: Duration,
 ) {
     state.connected = false;
-    // Volatile inventory lives in PSRAM and is therefore a fact about one
-    // attachment/boot epoch only. Keep the active digest as a desired
-    // reference for an atomic reconnect pass, but never claim its bytes are
-    // still confirmed until AssetBegin observes them again.
-    state.confirmed_volatile_assets.clear();
     // Capabilities belong to the new attachment, not the retained runtime. A
     // reconnect may follow an OTA in either direction, so force one render-policy
     // decision from the fresh StatusResponse even when all data is otherwise clean.
@@ -3761,12 +2666,7 @@ fn pomodoro_state(state: EnginePomodoroState) -> PomodoroState {
     }
 }
 
-fn initial_snapshot(
-    config: &AppConfig,
-    diagnostics: RuntimeDiagnostics,
-    renders_plugin_cards: bool,
-) -> AppSnapshot {
-    let mut providers = Vec::new();
+fn initial_snapshot(config: &AppConfig, diagnostics: RuntimeDiagnostics) -> AppSnapshot {
     let mut pomodoros = Vec::new();
     let compiled_card_ids: BTreeSet<&str> = config.compiled_card_ids().into_iter().collect();
     for card in config
@@ -3785,34 +2685,7 @@ fn initial_snapshot(
                 duration_seconds: *duration_seconds,
                 remaining_seconds: *duration_seconds,
             }),
-            // A picture card's "provider" is the external producer pushing to
-            // its source, and its freshness is inferred server-side from that
-            // producer's own cadence. It therefore reports a provider entry on
-            // exactly the same condition a plugin card does -- a host exists to
-            // know the answer -- and none at all otherwise, rather than showing
-            // a permanent stale flag nobody can clear.
-            CardSettings::Picture { id, .. } if renders_plugin_cards => {
-                providers.push(ProviderSnapshot {
-                    widget_id: id.clone(),
-                    state: ProviderState::Idle,
-                    last_success_unix_ms: None,
-                    age_seconds: None,
-                });
-            }
-            CardSettings::Plugin { id, .. } if renders_plugin_cards => {
-                providers.push(ProviderSnapshot {
-                    widget_id: id.clone(),
-                    state: ProviderState::Idle,
-                    last_success_unix_ms: None,
-                    age_seconds: None,
-                });
-            }
-            // Matches the worker: a runtime with no host says nothing at all
-            // about a plugin or picture card, not even "idle" -- the same
-            // nothing an unrendered clock reports.
-            CardSettings::Plugin { .. }
-            | CardSettings::Picture { .. }
-            | CardSettings::Clock { .. } => {}
+            CardSettings::Picture { .. } | CardSettings::Clock { .. } => {}
         }
     }
     AppSnapshot {
@@ -3825,7 +2698,6 @@ fn initial_snapshot(
                 .map(|entry| entry.card_id.clone()),
             ..empty_device(ConnectionState::Connecting)
         },
-        providers,
         pomodoros,
         card_data: Vec::new(),
         card_errors: Vec::new(),
@@ -3916,68 +2788,6 @@ mod tests {
         RefreshPolicy, WidgetTapAction,
     };
 
-    struct ImmediateRefresher {
-        completed: mpsc::Sender<()>,
-    }
-
-    impl ProviderRefresher for ImmediateRefresher {
-        fn refresh(&mut self, request: ProviderRefreshRequest) -> ProviderRefreshResult {
-            self.completed.send(()).unwrap();
-            ProviderRefreshResult {
-                generation: request.generation,
-                widget_id: request.widget_id,
-                fields: Vec::new(),
-                value: None,
-                refreshed_at: Some(request.now),
-                age: Some(Duration::ZERO),
-                stale: false,
-                error: None,
-            }
-        }
-    }
-
-    fn provider_request(widget_id: &str) -> ProviderRefreshRequest {
-        ProviderRefreshRequest {
-            generation: 1,
-            widget_id: widget_id.into(),
-            title: widget_id.into(),
-            provider: ProviderRequest::Plugin {
-                plugin_id: "test-plugin".into(),
-            },
-            active_provider_ids: Vec::new(),
-            now: Utc::now(),
-        }
-    }
-
-    #[test]
-    fn completed_provider_results_are_never_dropped_under_backpressure() {
-        let (completed_sender, completed_receiver) = mpsc::channel();
-        let worker = ProviderWorker::new(
-            Box::new(ImmediateRefresher {
-                completed: completed_sender,
-            }),
-            1,
-        );
-
-        for widget_id in ["one", "two", "three"] {
-            worker.try_submit(provider_request(widget_id)).unwrap();
-            completed_receiver
-                .recv_timeout(Duration::from_secs(1))
-                .unwrap();
-        }
-
-        let deadline = Instant::now() + Duration::from_secs(1);
-        let mut completed_ids = Vec::new();
-        while completed_ids.len() < 3 && Instant::now() < deadline {
-            match worker.try_recv() {
-                Ok(result) => completed_ids.push(result.widget_id),
-                Err(TryRecvError::Empty) => thread::yield_now(),
-                Err(TryRecvError::Disconnected) => break,
-            }
-        }
-        assert_eq!(completed_ids, ["one", "two", "three"]);
-    }
-
     #[test]
     fn wrong_tier_sync_result_latches_non_ownership_without_an_error() {
         let now = Instant::now();
@@ -4041,17 +2851,6 @@ mod tests {
             tap_action: WidgetTapAction::None,
             refresh: RefreshPolicy::DeviceLocal,
             alert,
-        }
-    }
-
-    fn plugin_card(id: &str, title: &str, plugin_id: &str, refresh: RefreshPolicy) -> CardSettings {
-        CardSettings::Plugin {
-            id: id.into(),
-            title: title.into(),
-            plugin_id: plugin_id.into(),
-            tap_action: WidgetTapAction::None,
-            refresh,
-            alert: CardAlert::None,
         }
     }
 
@@ -4327,29 +3126,16 @@ mod tests {
         }
     }
 
-    fn scheduled_work_provider() -> ProviderWorker {
-        ProviderWorker::new(
-            Box::new(ImmediateRefresher {
-                completed: mpsc::channel().0,
-            }),
-            1,
-        )
-    }
-
     #[test]
     fn disconnected_scheduled_work_leaves_a_real_wait() {
         let now = Instant::now();
         let mut scheduler = fresh_scheduler(now);
         let mut state = WorkerState::new(AppConfig::default(), now, &mut scheduler);
         let mut device = ScheduledWorkDevice::default();
-        let provider = scheduled_work_provider();
-
         run_scheduled_work(
             &mut state,
             &mut scheduler,
             &mut device,
-            &provider,
-            &RuntimeDiagnosticCounters::default(),
             now,
             &RuntimeOptions::default(),
         );
@@ -4364,35 +3150,26 @@ mod tests {
     fn paused_scheduled_work_leaves_a_real_wait() {
         let now = Instant::now();
         let mut config = rotation_config(
-            vec![plugin_card(
-                "plugin",
-                "Plugin",
-                "test-plugin",
-                RefreshPolicy::Manual,
-            )],
+            vec![rotation_clock_card("clock")],
             CarouselAdvance::Manual,
-            &[("plugin", None)],
+            &[("clock", None)],
         );
         config.preferences.paused = true;
         let mut scheduler = fresh_scheduler(now);
         let mut state = WorkerState::new(config, now, &mut scheduler);
         state.connected = true;
         let mut device = ScheduledWorkDevice::default();
-        let provider = scheduled_work_provider();
-
         run_scheduled_work(
             &mut state,
             &mut scheduler,
             &mut device,
-            &provider,
-            &RuntimeDiagnosticCounters::default(),
             now,
             &RuntimeOptions::default(),
         );
 
         assert!(
             scheduler.wait_duration(now, Duration::from_hours(1)) > Duration::ZERO,
-            "a paused worker must block instead of spinning on skipped sync or provider deadlines"
+            "a paused worker must block instead of spinning on skipped sync deadlines"
         );
     }
 
@@ -4403,15 +3180,12 @@ mod tests {
         let mut state = WorkerState::new(AppConfig::default(), disconnected_at, &mut scheduler);
         state.needs_full_sync = false;
         let mut device = ScheduledWorkDevice::default();
-        let provider = scheduled_work_provider();
         let options = RuntimeOptions::default();
 
         run_scheduled_work(
             &mut state,
             &mut scheduler,
             &mut device,
-            &provider,
-            &RuntimeDiagnosticCounters::default(),
             disconnected_at,
             &options,
         );
@@ -4428,8 +3202,6 @@ mod tests {
             &mut state,
             &mut scheduler,
             &mut device,
-            &provider,
-            &RuntimeDiagnosticCounters::default(),
             reconnected_at,
             &options,
         );
@@ -4668,21 +3440,12 @@ mod tests {
         assert!(!state.connected);
 
         let mut device = StubDevice::default();
-        let diagnostics = RuntimeDiagnosticCounters::default();
-        let provider = ProviderWorker::new(
-            Box::new(ImmediateRefresher {
-                completed: mpsc::channel().0,
-            }),
-            1,
-        );
         let options = RuntimeOptions::default();
 
         run_scheduled_work(
             &mut state,
             &mut scheduler,
             &mut device,
-            &provider,
-            &diagnostics,
             now + Duration::from_secs(5),
             &options,
         );
@@ -4776,13 +3539,6 @@ mod tests {
 
         let mut device = StubDevice::default();
         flush_interrupts(&mut state, &mut scheduler, &mut device, delivery_time).unwrap();
-        let diagnostics = RuntimeDiagnosticCounters::default();
-        let provider = ProviderWorker::new(
-            Box::new(ImmediateRefresher {
-                completed: mpsc::channel().0,
-            }),
-            1,
-        );
         let options = RuntimeOptions::default();
         state.active_screen_dirty = false;
 
@@ -4792,8 +3548,6 @@ mod tests {
             &mut state,
             &mut scheduler,
             &mut device,
-            &provider,
-            &diagnostics,
             now + Duration::from_secs(89),
             &options,
         );
@@ -4806,8 +3560,6 @@ mod tests {
             &mut state,
             &mut scheduler,
             &mut device,
-            &provider,
-            &diagnostics,
             now + Duration::from_secs(90),
             &options,
         );
@@ -4846,21 +3598,12 @@ mod tests {
 
         let mut device = StubDevice::default();
         flush_interrupts(&mut state, &mut scheduler, &mut device, delivery_time).unwrap();
-        let diagnostics = RuntimeDiagnosticCounters::default();
-        let provider = ProviderWorker::new(
-            Box::new(ImmediateRefresher {
-                completed: mpsc::channel().0,
-            }),
-            1,
-        );
         let options = RuntimeOptions::default();
 
         run_scheduled_work(
             &mut state,
             &mut scheduler,
             &mut device,
-            &provider,
-            &diagnostics,
             now + Duration::from_hours(1),
             &options,
         );
@@ -4922,23 +3665,8 @@ mod tests {
         (state, scheduler)
     }
 
-    fn stub_work_harness() -> (
-        StubDevice,
-        RuntimeDiagnosticCounters,
-        ProviderWorker,
-        RuntimeOptions,
-    ) {
-        (
-            StubDevice::default(),
-            RuntimeDiagnosticCounters::default(),
-            ProviderWorker::new(
-                Box::new(ImmediateRefresher {
-                    completed: mpsc::channel().0,
-                }),
-                1,
-            ),
-            RuntimeOptions::default(),
-        )
+    fn stub_work_harness() -> (StubDevice, RuntimeOptions) {
+        (StubDevice::default(), RuntimeOptions::default())
     }
 
     // Task 6 review Critical-1's reproduction: before the fix, a single
@@ -4954,14 +3682,12 @@ mod tests {
     fn a_pending_alerts_hold_does_not_cross_talk_with_the_active_interrupt() {
         let now = Instant::now();
         let (mut state, mut scheduler) = sticky_active_and_bounded_pending_alert(now);
-        let (mut device, diagnostics, provider, options) = stub_work_harness();
+        let (mut device, options) = stub_work_harness();
 
         run_scheduled_work(
             &mut state,
             &mut scheduler,
             &mut device,
-            &provider,
-            &diagnostics,
             now + Duration::from_hours(1),
             &options,
         );
@@ -4992,7 +3718,7 @@ mod tests {
     fn a_promoted_alert_gets_a_fresh_hold_from_its_own_card() {
         let now = Instant::now();
         let (mut state, mut scheduler) = sticky_active_and_bounded_pending_alert(now);
-        let (mut device, diagnostics, provider, options) = stub_work_harness();
+        let (mut device, options) = stub_work_harness();
 
         let sticky_token = state.interrupts.active().unwrap().message.token;
         let promotion_time = now + Duration::from_hours(1);
@@ -5019,8 +3745,6 @@ mod tests {
             &mut state,
             &mut scheduler,
             &mut device,
-            &provider,
-            &diagnostics,
             promotion_time + Duration::from_secs(59),
             &options,
         );
@@ -5033,8 +3757,6 @@ mod tests {
             &mut state,
             &mut scheduler,
             &mut device,
-            &provider,
-            &diagnostics,
             promotion_time + Duration::from_mins(1),
             &options,
         );
@@ -5042,1235 +3764,5 @@ mod tests {
             state.interrupts.active().is_none(),
             "the promoted alert's own 60s hold now auto-dismisses it"
         );
-    }
-
-    // -- Task 6: the plugin card kind ------------------------------------------
-
-    // -- Stage 4 Task 2: render negotiation in the push path -------------------
-
-    #[derive(Debug, Clone, PartialEq, Eq)]
-    enum RenderTranscript {
-        Begin { digest: [u8; 32], volatile: bool },
-        Chunk { digest: [u8; 32], offset: u32 },
-        Commit([u8; 32]),
-        Push(PushScene),
-        Release(Vec<[u8; 32]>),
-    }
-
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    enum RenderFailurePoint {
-        Begin,
-        Chunk,
-        Commit,
-        Push,
-        Release,
-    }
-
-    #[derive(Default)]
-    struct RenderTranscriptDevice {
-        transcript: Vec<RenderTranscript>,
-        failure: Option<(RenderFailurePoint, DeviceError)>,
-    }
-
-    impl RenderTranscriptDevice {
-        fn failing(point: RenderFailurePoint, error: DeviceError) -> Self {
-            Self {
-                transcript: Vec::new(),
-                failure: Some((point, error)),
-            }
-        }
-
-        fn fail(&mut self, point: RenderFailurePoint) -> Result<(), DeviceError> {
-            if self.failure.as_ref().is_some_and(|(at, _)| *at == point) {
-                return Err(self.failure.take().unwrap().1);
-            }
-            Ok(())
-        }
-    }
-
-    impl RuntimeDevice for RenderTranscriptDevice {
-        fn connect(&mut self) -> Result<DeviceConnection, DeviceError> {
-            unreachable!()
-        }
-        fn status(&mut self) -> Result<StatusResponse, DeviceError> {
-            unreachable!()
-        }
-        fn provision(&mut self, _config: &NetworkConfig) -> Result<(), DeviceError> {
-            unreachable!()
-        }
-        fn factory_reset(&mut self) -> Result<(), DeviceError> {
-            unreachable!()
-        }
-        fn time_sync(&mut self, _sync: TimeSync) -> Result<(), DeviceError> {
-            unreachable!()
-        }
-        fn apply_layout(
-            &mut self,
-            _rotation: u16,
-            _widgets: Vec<WidgetConfig>,
-            _screens: Vec<ScreenConfig>,
-        ) -> Result<(), DeviceError> {
-            unreachable!()
-        }
-        fn push_fields(
-            &mut self,
-            _widget_id: String,
-            _fields: Vec<Field>,
-        ) -> Result<(), DeviceError> {
-            unreachable!()
-        }
-        fn push_scene(&mut self, push: PushScene) -> Result<(), DeviceError> {
-            self.transcript.push(RenderTranscript::Push(push));
-            self.fail(RenderFailurePoint::Push)
-        }
-        fn activate_screen(&mut self, _screen_id: String) -> Result<(), DeviceError> {
-            unreachable!()
-        }
-        fn trigger_interrupt(&mut self, _interrupt: TriggerInterrupt) -> Result<(), DeviceError> {
-            unreachable!()
-        }
-        fn send_asset_begin(&mut self, begin: AssetBegin) -> Result<Ack, DeviceError> {
-            self.transcript.push(RenderTranscript::Begin {
-                digest: begin.digest,
-                volatile: begin.volatile,
-            });
-            self.fail(RenderFailurePoint::Begin)?;
-            Ok(Ack {
-                acknowledged_type: protocol::TYPE_ASSET_BEGIN,
-                revision: None,
-                already_present: Some(false),
-            })
-        }
-        fn send_asset_chunk(&mut self, chunk: AssetChunk) -> Result<(), DeviceError> {
-            self.transcript.push(RenderTranscript::Chunk {
-                digest: chunk.digest,
-                offset: chunk.offset,
-            });
-            self.fail(RenderFailurePoint::Chunk)
-        }
-        fn send_asset_commit(&mut self, commit: AssetCommit) -> Result<(), DeviceError> {
-            self.transcript
-                .push(RenderTranscript::Commit(commit.digest));
-            self.fail(RenderFailurePoint::Commit)
-        }
-        fn send_asset_release(&mut self, release: AssetRelease) -> Result<(), DeviceError> {
-            self.transcript
-                .push(RenderTranscript::Release(release.digests));
-            self.fail(RenderFailurePoint::Release)
-        }
-        fn try_recv_event(&mut self) -> Option<ReceivedEvent> {
-            None
-        }
-        fn diagnostics(&self) -> SessionDiagnostics {
-            SessionDiagnostics::default()
-        }
-    }
-
-    struct ExecutorPluginHost {
-        desired: Vec<DesiredAsset>,
-        candidate: Option<SceneCandidate>,
-        frame: RasterFrame,
-    }
-
-    impl PluginHost for ExecutorPluginHost {
-        fn desired_assets(&mut self) -> Vec<DesiredAsset> {
-            self.desired.clone()
-        }
-
-        fn render_scene(
-            &mut self,
-            _plugin_id: &str,
-            _snapshot: &providers::ProviderSnapshot<serde_json::Value>,
-            _revision: u32,
-            _timezone: chrono_tz::Tz,
-        ) -> Result<SceneCandidate, String> {
-            Ok(self.candidate.clone().unwrap_or_else(|| {
-                SceneCandidate::DisplayList(protocol::Scene {
-                    revision: 1,
-                    background: 0,
-                    nodes: Vec::new(),
-                })
-            }))
-        }
-
-        fn rasterize(&mut self, _request: &RasterRequest) -> Result<RasterFrame, String> {
-            Ok(self.frame.clone())
-        }
-    }
-
-    fn static_raster_card() -> CardSettings {
-        CardSettings::Plugin {
-            id: "big".into(),
-            title: "Steps".into(),
-            plugin_id: "steps".into(),
-            tap_action: WidgetTapAction::None,
-            refresh: RefreshPolicy::Manual,
-            alert: CardAlert::None,
-        }
-    }
-
-    fn raster_executor_state(now: Instant) -> (WorkerState, Scheduler) {
-        let config = rotation_config(
-            vec![static_raster_card()],
-            CarouselAdvance::Manual,
-            &[("big", None)],
-        );
-        let mut scheduler = fresh_scheduler(now);
-        let mut state = WorkerState::new(config, now, &mut scheduler);
-        state.needs_full_sync = false;
-        state.active_screen = Some("big".into());
-        state.active_scene_dirty = true;
-        state.device.capabilities = crate::DeviceCapability::from_bits(
-            protocol::CURRENT_CAPABILITIES & !protocol::CAPABILITY_SCENE_RENDER,
-        );
-        state.plugin_snapshots.insert(
-            "big".into(),
-            providers::ProviderSnapshot {
-                value: serde_json::json!({}),
-                refreshed_at: None,
-                age: None,
-                stale: false,
-                error: None,
-            },
-        );
-        state.plugin_host = Some(Box::new(ExecutorPluginHost {
-            desired: Vec::new(),
-            candidate: None,
-            frame: RasterFrame {
-                digest: [0x22; 32],
-                bytes: Arc::from(&[0x19, 0x12, 0, 0, 0xc0, 1, 0x70, 1, 0x80, 3, 0, 0, 1, 2][..]),
-            },
-        }));
-        (state, scheduler)
-    }
-
-    #[test]
-    fn native_asset_transcript_confirms_durable_before_push_without_volatile_transfer() {
-        let now = Instant::now();
-        let digest = [0x11; 32];
-        let card = plugin_card("asset-card", "Asset", "asset-plugin", RefreshPolicy::Manual);
-        let config = rotation_config(vec![card], CarouselAdvance::Manual, &[("asset-card", None)]);
-        let mut scheduler = fresh_scheduler(now);
-        let mut state = WorkerState::new(config, now, &mut scheduler);
-        state.needs_full_sync = false;
-        state.active_screen = Some("asset-card".into());
-        state.active_scene_dirty = true;
-        state.device.capabilities =
-            crate::DeviceCapability::from_bits(protocol::CURRENT_CAPABILITIES);
-        state.plugin_snapshots.insert(
-            "asset-card".into(),
-            providers::ProviderSnapshot {
-                value: serde_json::json!({}),
-                refreshed_at: None,
-                age: None,
-                stale: false,
-                error: None,
-            },
-        );
-        state.plugin_host = Some(Box::new(ExecutorPluginHost {
-            desired: vec![DesiredAsset {
-                digest,
-                kind: protocol::AssetKind::Image,
-                bytes: Arc::from(&b"durable-image"[..]),
-            }],
-            candidate: Some(SceneCandidate::DisplayList(protocol::Scene {
-                revision: 1,
-                background: 0,
-                nodes: vec![protocol::SceneNode::Image(protocol::SceneImage {
-                    x: 0,
-                    y: 0,
-                    w: 1,
-                    h: 1,
-                    digest,
-                    recolor: false,
-                    color: 0,
-                })],
-            })),
-            frame: RasterFrame {
-                digest: [0; 32],
-                bytes: Arc::from(&[][..]),
-            },
-        }));
-        let mut device = RenderTranscriptDevice::default();
-
-        push_active_scene(
-            &mut state,
-            &mut scheduler,
-            &mut device,
-            now,
-            Duration::from_secs(1),
-        );
-
-        assert!(
-            matches!(device.transcript[0], RenderTranscript::Begin { digest: seen, volatile: false } if seen == digest)
-        );
-        assert!(
-            matches!(device.transcript[1], RenderTranscript::Chunk { digest: seen, offset: 0 } if seen == digest)
-        );
-        assert_eq!(device.transcript[2], RenderTranscript::Commit(digest));
-        assert_eq!(
-            device.transcript[3],
-            RenderTranscript::Release(vec![digest])
-        );
-        assert!(matches!(device.transcript[4], RenderTranscript::Push(_)));
-        assert!(
-            !device
-                .transcript
-                .iter()
-                .any(|entry| matches!(entry, RenderTranscript::Begin { volatile: true, .. }))
-        );
-        assert_eq!(state.confirmed_durable_assets, BTreeSet::from([digest]));
-    }
-
-    #[test]
-    fn raster_transcript_is_begin_chunks_commit_push_then_release_with_durable_and_new_volatile() {
-        let now = Instant::now();
-        let (mut state, mut scheduler) = raster_executor_state(now);
-        let old = [0x33; 32];
-        let new = [0x22; 32];
-        let durable = [0x44; 32];
-        state.active_volatile_digest = Some(old);
-        state.confirmed_volatile_assets.insert(old);
-        state.plugin_host = Some(Box::new(ExecutorPluginHost {
-            desired: vec![DesiredAsset {
-                digest: durable,
-                kind: protocol::AssetKind::Font,
-                bytes: Arc::from(&b"font"[..]),
-            }],
-            candidate: None,
-            frame: RasterFrame {
-                digest: new,
-                bytes: Arc::from(&[0x19, 0x12, 0, 0, 0xc0, 1, 0x70, 1, 0x80, 3, 0, 0, 1, 2][..]),
-            },
-        }));
-        let mut device = RenderTranscriptDevice::default();
-
-        push_active_scene(
-            &mut state,
-            &mut scheduler,
-            &mut device,
-            now,
-            Duration::from_secs(1),
-        );
-
-        assert!(
-            matches!(device.transcript[0], RenderTranscript::Begin { digest, volatile: true } if digest == new)
-        );
-        assert!(
-            matches!(device.transcript[1], RenderTranscript::Chunk { digest, offset: 0 } if digest == new)
-        );
-        assert_eq!(device.transcript[2], RenderTranscript::Commit(new));
-        let RenderTranscript::Push(push) = &device.transcript[3] else {
-            panic!("fourth request must be PushScene")
-        };
-        assert!(
-            matches!(push.scene.nodes.as_slice(), [protocol::SceneNode::Image(image)] if image.digest == new && image.x == 0 && image.y == 0 && image.w == protocol::SCENE_CANVAS_WIDTH && image.h == protocol::SCENE_CANVAS_HEIGHT)
-        );
-        assert_eq!(
-            device.transcript[4],
-            RenderTranscript::Release(vec![durable, new])
-        );
-        assert!(
-            !device.transcript.iter().any(
-                |entry| matches!(entry, RenderTranscript::Release(keep) if keep.contains(&old))
-            ),
-            "old is retained by sending no release until after PushScene; the successful release may now drop it"
-        );
-    }
-
-    #[test]
-    fn raster_failure_transcripts_never_release_before_successful_push() {
-        for point in [
-            RenderFailurePoint::Begin,
-            RenderFailurePoint::Chunk,
-            RenderFailurePoint::Commit,
-            RenderFailurePoint::Push,
-        ] {
-            let now = Instant::now();
-            let (mut state, mut scheduler) = raster_executor_state(now);
-            let old = [0x33; 32];
-            state.active_volatile_digest = Some(old);
-            let mut device = RenderTranscriptDevice::failing(point, DeviceError::Timeout);
-
-            push_active_scene(
-                &mut state,
-                &mut scheduler,
-                &mut device,
-                now,
-                Duration::from_secs(1),
-            );
-
-            assert!(
-                !device
-                    .transcript
-                    .iter()
-                    .any(|entry| matches!(entry, RenderTranscript::Release(_))),
-                "{point:?} failure sent a destructive keep-set: {:?}",
-                device.transcript
-            );
-            assert_eq!(state.active_volatile_digest, Some(old));
-        }
-
-        let now = Instant::now();
-        let (mut state, mut scheduler) = raster_executor_state(now);
-        let mut device =
-            RenderTranscriptDevice::failing(RenderFailurePoint::Release, DeviceError::Timeout);
-        push_active_scene(
-            &mut state,
-            &mut scheduler,
-            &mut device,
-            now,
-            Duration::from_secs(1),
-        );
-        assert!(
-            matches!(device.transcript.as_slice(), [RenderTranscript::Begin { .. }, RenderTranscript::Chunk { .. }, RenderTranscript::Commit(_), RenderTranscript::Push(_), RenderTranscript::Release(keep)] if keep == &vec![[0x22; 32]])
-        );
-    }
-
-    #[test]
-    fn refuse_live_transcript_has_no_device_frames_and_one_card_refusal() {
-        let now = Instant::now();
-        let config = rotation_config(
-            vec![rotation_clock_card("clock")],
-            CarouselAdvance::Manual,
-            &[("clock", None)],
-        );
-        let mut scheduler = fresh_scheduler(now);
-        let mut state = WorkerState::new(config, now, &mut scheduler);
-        state.needs_full_sync = false;
-        state.active_screen = Some("clock".into());
-        state.active_scene_dirty = true;
-        state.device.capabilities = crate::DeviceCapability::from_bits(
-            protocol::CURRENT_CAPABILITIES & !protocol::CAPABILITY_SCENE_RENDER,
-        );
-        let mut device = RenderTranscriptDevice::default();
-
-        push_active_scene(
-            &mut state,
-            &mut scheduler,
-            &mut device,
-            now,
-            Duration::from_secs(1),
-        );
-
-        assert!(device.transcript.is_empty());
-        assert_eq!(state.push_rejections.len(), 1);
-        assert!(
-            state
-                .push_rejections
-                .get("clock")
-                .is_some_and(|error| error.kind == CardErrorKind::SceneRefused)
-        );
-    }
-
-    #[test]
-    fn raster_busy_retries_permanent_rejection_is_card_scoped_and_link_failure_is_not() {
-        let busy = DeviceError::Rejected(protocol::ErrorResponse {
-            code: protocol::ErrorCode::Busy,
-            diagnostic: "display lock busy".into(),
-        });
-        let now = Instant::now();
-        let (mut state, mut scheduler) = raster_executor_state(now);
-        let mut device = RenderTranscriptDevice::failing(RenderFailurePoint::Push, busy);
-        push_active_scene(
-            &mut state,
-            &mut scheduler,
-            &mut device,
-            now,
-            Duration::from_secs(1),
-        );
-        assert!(
-            state.active_scene_dirty,
-            "Busy must retain the render event"
-        );
-        push_active_scene(
-            &mut state,
-            &mut scheduler,
-            &mut device,
-            now,
-            Duration::from_secs(1),
-        );
-        assert_eq!(
-            device
-                .transcript
-                .iter()
-                .filter(|entry| matches!(entry, RenderTranscript::Push(_)))
-                .count(),
-            2
-        );
-        assert!(!state.push_rejections.contains_key("big"));
-
-        let permanent = DeviceError::Rejected(protocol::ErrorResponse {
-            code: protocol::ErrorCode::InvalidPayload,
-            diagnostic: "volatile image refused".into(),
-        });
-        let (mut state, mut scheduler) = raster_executor_state(now);
-        let mut device = RenderTranscriptDevice::failing(RenderFailurePoint::Commit, permanent);
-        push_active_scene(
-            &mut state,
-            &mut scheduler,
-            &mut device,
-            now,
-            Duration::from_secs(1),
-        );
-        assert!(state.push_rejections.get("big").is_some_and(|error| {
-            error.kind == CardErrorKind::SceneRefused && error.message.contains("InvalidPayload")
-        }));
-
-        let (mut state, mut scheduler) = raster_executor_state(now);
-        let mut device = RenderTranscriptDevice::failing(
-            RenderFailurePoint::Chunk,
-            DeviceError::Transport(device::TransportError::Disconnected),
-        );
-        push_active_scene(
-            &mut state,
-            &mut scheduler,
-            &mut device,
-            now,
-            Duration::from_secs(1),
-        );
-        assert!(
-            state.active_scene_dirty,
-            "link failure remains retryable link work"
-        );
-        assert!(
-            !state.push_rejections.contains_key("big"),
-            "a link failure must not be mislabeled as a card fault"
-        );
-    }
-
-    #[test]
-    fn disconnect_resets_only_connection_scoped_volatile_confirmations() {
-        let now = Instant::now();
-        let (mut state, _) = raster_executor_state(now);
-        let durable = [0x44; 32];
-        let volatile = [0x22; 32];
-        state.confirmed_durable_assets.insert(durable);
-        state.confirmed_volatile_assets.insert(volatile);
-        state.active_volatile_digest = Some(volatile);
-
-        mark_disconnected(
-            &mut state,
-            &DeviceError::Transport(device::TransportError::Disconnected),
-            now,
-            Duration::from_secs(1),
-        );
-
-        assert_eq!(state.confirmed_durable_assets, BTreeSet::from([durable]));
-        assert!(state.confirmed_volatile_assets.is_empty());
-        assert_eq!(
-            state.active_volatile_digest,
-            Some(volatile),
-            "the old digest remains desired until reconnect proves whether PSRAM survived"
-        );
-    }
-
-    struct SnapshotRasterHost {
-        seen_values: Arc<Mutex<Vec<String>>>,
-    }
-
-    impl PluginHost for SnapshotRasterHost {
-        fn desired_assets(&mut self) -> Vec<DesiredAsset> {
-            Vec::new()
-        }
-
-        fn render_scene(
-            &mut self,
-            _plugin_id: &str,
-            _snapshot: &providers::ProviderSnapshot<serde_json::Value>,
-            _revision: u32,
-            _timezone: chrono_tz::Tz,
-        ) -> Result<SceneCandidate, String> {
-            Ok(SceneCandidate::DisplayList(protocol::Scene {
-                revision: 1,
-                background: 0,
-                nodes: Vec::new(),
-            }))
-        }
-
-        fn rasterize(&mut self, request: &RasterRequest) -> Result<RasterFrame, String> {
-            let RasterRequest::DisplayList { fields, .. } = request else {
-                unreachable!()
-            };
-            let value = fields
-                .iter()
-                .find_map(|field| {
-                    (field.key == "value").then(|| match &field.value {
-                        FieldValue::Text(value) => value.clone(),
-                        value => format!("{value:?}"),
-                    })
-                })
-                .unwrap_or_default();
-            self.seen_values.lock().unwrap().push(value.clone());
-            let marker = value.parse::<u8>().unwrap_or(0);
-            Ok(RasterFrame {
-                digest: [marker; 32],
-                bytes: Arc::from(&[0x19, 0x12, 0, 0, 0xc0, 1, 0x70, 1, 0x80, 3, 0, 0, 1, 2][..]),
-            })
-        }
-    }
-
-    #[test]
-    fn raster_floor_uses_t0_and_t30_and_second_frame_contains_newest_snapshot() {
-        let start = Instant::now();
-        let (mut state, mut scheduler) = raster_executor_state(start);
-        let seen_values = Arc::new(Mutex::new(Vec::new()));
-        state.plugin_host = Some(Box::new(SnapshotRasterHost {
-            seen_values: Arc::clone(&seen_values),
-        }));
-        state.latest_fields.insert(
-            "big".into(),
-            vec![Field {
-                key: "value".into(),
-                value: FieldValue::Text("0".into()),
-            }],
-        );
-        let mut device = RenderTranscriptDevice::default();
-
-        push_active_scene(
-            &mut state,
-            &mut scheduler,
-            &mut device,
-            start,
-            Duration::from_secs(1),
-        );
-        state.latest_fields.insert(
-            "big".into(),
-            vec![Field {
-                key: "value".into(),
-                value: FieldValue::Text("5".into()),
-            }],
-        );
-        state.active_scene_dirty = true;
-        push_active_scene(
-            &mut state,
-            &mut scheduler,
-            &mut device,
-            start + Duration::from_secs(5),
-            Duration::from_secs(1),
-        );
-        state.latest_fields.insert(
-            "big".into(),
-            vec![Field {
-                key: "value".into(),
-                value: FieldValue::Text("30".into()),
-            }],
-        );
-        state.active_scene_dirty = true;
-        push_active_scene(
-            &mut state,
-            &mut scheduler,
-            &mut device,
-            start + Duration::from_millis(29_999),
-            Duration::from_secs(1),
-        );
-        assert_eq!(seen_values.lock().unwrap().as_slice(), ["0"]);
-
-        push_active_scene(
-            &mut state,
-            &mut scheduler,
-            &mut device,
-            start + Duration::from_secs(30),
-            Duration::from_secs(1),
-        );
-
-        assert_eq!(seen_values.lock().unwrap().as_slice(), ["0", "30"]);
-        let pushed_digests: Vec<_> = device
-            .transcript
-            .iter()
-            .filter_map(|entry| match entry {
-                RenderTranscript::Push(push) => match push.scene.nodes.as_slice() {
-                    [protocol::SceneNode::Image(image)] => Some(image.digest),
-                    _ => None,
-                },
-                _ => None,
-            })
-            .collect();
-        assert_eq!(pushed_digests, vec![[0; 32], [30; 32]]);
-    }
-
-    #[test]
-    fn native_scene_is_event_driven_even_while_raster_floor_is_pending() {
-        let start = Instant::now();
-        let config = rotation_config(
-            vec![rotation_clock_card("clock")],
-            CarouselAdvance::Manual,
-            &[("clock", None)],
-        );
-        let mut scheduler = fresh_scheduler(start);
-        let mut state = WorkerState::new(config, start, &mut scheduler);
-        scheduler.note_raster_pushed(start);
-        scheduler.invalidate_raster(start + Duration::from_secs(5));
-        state.needs_full_sync = false;
-        state.active_screen = Some("clock".into());
-        state.active_scene_dirty = true;
-        state.device.capabilities =
-            crate::DeviceCapability::from_bits(protocol::CURRENT_CAPABILITIES);
-        let mut device = RenderTranscriptDevice::default();
-
-        push_active_scene(
-            &mut state,
-            &mut scheduler,
-            &mut device,
-            start + Duration::from_secs(5),
-            Duration::from_secs(1),
-        );
-
-        assert!(matches!(
-            device.transcript.as_slice(),
-            [RenderTranscript::Push(_)]
-        ));
-    }
-
-    /// A `WorkerState` posed one step before `push_active_scene`: online-ish,
-    /// synced, one dirty active card, advertising `capabilities`.
-    fn negotiation_state(config: AppConfig, card_id: &str, capabilities: u64) -> WorkerState {
-        let now = Instant::now();
-        let mut scheduler = fresh_scheduler(now);
-        let mut state = WorkerState::new(config, now, &mut scheduler);
-        state.needs_full_sync = false;
-        state.active_screen = Some(card_id.to_owned());
-        state.active_scene_dirty = true;
-        state.device.capabilities = crate::DeviceCapability::from_bits(capabilities);
-        state
-    }
-
-    #[test]
-    fn a_live_card_on_a_device_without_scene_support_is_refused_not_skipped() {
-        // The pre-stage-4 shortcut silently did nothing here. Spec §3 row 2:
-        // a clock's time bindings are live, so rasterizing would freeze it --
-        // the card must say so in its editor instead.
-        let config = rotation_config(
-            vec![rotation_clock_card("clock")],
-            CarouselAdvance::Manual,
-            &[("clock", None)],
-        );
-        let mut state = negotiation_state(
-            config,
-            "clock",
-            protocol::CURRENT_CAPABILITIES & !protocol::CAPABILITY_SCENE_RENDER,
-        );
-        let mut device = ScheduledWorkDevice::default();
-
-        let mut scheduler = fresh_scheduler(Instant::now());
-        push_active_scene(
-            &mut state,
-            &mut scheduler,
-            &mut device,
-            Instant::now(),
-            Duration::from_secs(1),
-        );
-
-        assert!(device.scene_pushes.is_empty(), "nothing may reach the wire");
-        assert!(!state.active_scene_dirty, "the event must be consumed");
-        let error = state
-            .push_rejections
-            .get("clock")
-            .expect("the refusal must be recorded against the card");
-        assert_eq!(error.kind, CardErrorKind::SceneRefused);
-        assert!(
-            error.message.contains("time:") && error.message.contains("firmware"),
-            "the reason names the live binding and the fix: {:?}",
-            error.message
-        );
-    }
-
-    #[test]
-    fn a_native_push_on_a_current_device_clears_a_prior_refusal() {
-        let config = rotation_config(
-            vec![rotation_clock_card("clock")],
-            CarouselAdvance::Manual,
-            &[("clock", None)],
-        );
-        let mut state = negotiation_state(config, "clock", protocol::CURRENT_CAPABILITIES);
-        record_scene_refusal(
-            &mut state,
-            "clock".to_owned(),
-            "stale refusal from a previous, lesser connection".to_owned(),
-        );
-        let mut device = ScheduledWorkDevice::default();
-
-        let mut scheduler = fresh_scheduler(Instant::now());
-        push_active_scene(
-            &mut state,
-            &mut scheduler,
-            &mut device,
-            Instant::now(),
-            Duration::from_secs(1),
-        );
-
-        assert_eq!(device.scene_pushes.len(), 1, "the scene must be pushed");
-        assert!(
-            !state.push_rejections.contains_key("clock"),
-            "an accepted render clears that card's refusal"
-        );
-    }
-
-    #[test]
-    fn plugin_provider_request_preserves_card_and_plugin_identity() {
-        let card = plugin_card(
-            "aqi",
-            "Air quality",
-            "curated-aqi",
-            RefreshPolicy::Interval { minutes: 15 },
-        );
-        let config = rotation_config(vec![card], CarouselAdvance::Manual, &[("aqi", None)]);
-        let now = Instant::now();
-        let mut scheduler = fresh_scheduler(now);
-        let state = WorkerState::new(config, now, &mut scheduler);
-
-        let request = super::provider_request(&state, "aqi").expect("plugin provider request");
-
-        assert_eq!(request.widget_id, "aqi");
-        assert_eq!(request.title, "Air quality");
-        assert!(matches!(
-            request.provider,
-            ProviderRequest::Plugin { plugin_id } if plugin_id == "curated-aqi"
-        ));
-    }
-
-    #[test]
-    fn plugin_snapshot_is_evicted_when_its_card_leaves_the_config() {
-        let card = plugin_card("aqi", "Air quality", "aqi", RefreshPolicy::Manual);
-        let config = rotation_config(vec![card], CarouselAdvance::Manual, &[("aqi", None)]);
-        let now = Instant::now();
-        let mut scheduler = fresh_scheduler(now);
-        let mut state = WorkerState::new(config, now, &mut scheduler);
-        state.plugin_snapshots.insert(
-            "aqi".into(),
-            providers::ProviderSnapshot {
-                value: serde_json::json!({"aqi": 1}),
-                refreshed_at: Some(Utc::now()),
-                age: Some(Duration::ZERO),
-                stale: false,
-                error: None,
-            },
-        );
-
-        state.replace_config(AppConfig::default(), now, &mut scheduler);
-
-        assert!(!state.plugin_snapshots.contains_key("aqi"));
-    }
-
-    #[test]
-    fn system_provider_refresher_returns_a_typed_plugin_error() {
-        let mut refresher = SystemProviderRefresher;
-
-        let result = refresher.refresh(ProviderRefreshRequest {
-            generation: 7,
-            widget_id: "aqi".into(),
-            title: "Air quality".into(),
-            provider: ProviderRequest::Plugin {
-                plugin_id: "aqi".into(),
-            },
-            active_provider_ids: vec!["aqi".into()],
-            now: Utc::now(),
-        });
-
-        assert_eq!(result.generation, 7);
-        assert_eq!(result.widget_id, "aqi");
-        assert!(result.value.is_none());
-        assert!(result.stale);
-        assert!(
-            result
-                .error
-                .as_deref()
-                .is_some_and(|error| error.contains("does not serve plugin card"))
-        );
-    }
-
-    struct AssetOnlyPluginHost;
-
-    impl PluginHost for AssetOnlyPluginHost {
-        fn desired_assets(&mut self) -> Vec<DesiredAsset> {
-            vec![DesiredAsset {
-                digest: [0x5a; protocol::ASSET_DIGEST_LEN],
-                kind: protocol::AssetKind::Font,
-                bytes: Arc::from(&b"fixture font bytes"[..]),
-            }]
-        }
-
-        fn render_scene(
-            &mut self,
-            _plugin_id: &str,
-            _snapshot: &providers::ProviderSnapshot<serde_json::Value>,
-            _revision: u32,
-            _timezone: chrono_tz::Tz,
-        ) -> Result<SceneCandidate, String> {
-            unreachable!("this test exercises only full synchronization")
-        }
-    }
-
-    #[test]
-    fn asset_sync_failure_is_card_scoped_and_full_sync_continues() {
-        let card = plugin_card("aqi", "Air quality", "aqi", RefreshPolicy::Manual);
-        let config = rotation_config(vec![card], CarouselAdvance::Manual, &[("aqi", None)]);
-        let now = Instant::now();
-        let mut scheduler = fresh_scheduler(now);
-        let mut state = WorkerState::new(config, now, &mut scheduler);
-        state.plugin_host = Some(Box::new(AssetOnlyPluginHost));
-        let mut device = ScheduledWorkDevice {
-            fail_asset_begin: true,
-            ..ScheduledWorkDevice::default()
-        };
-
-        synchronize_full(&mut state, &mut scheduler, &mut device, now).unwrap();
-
-        assert_eq!(device.layout_calls, 1, "layout sync must continue");
-        assert!(!state.needs_full_sync);
-        assert!(state.push_rejections.get("aqi").is_some_and(|error| {
-            error.kind == CardErrorKind::SceneRefused
-                && error.message.contains("asset reconciliation failed")
-        }));
-    }
-
-    #[test]
-    fn full_sync_keep_set_retains_old_volatile_until_its_replacement_scene_succeeds() {
-        let card = plugin_card("aqi", "Air quality", "aqi", RefreshPolicy::Manual);
-        let config = rotation_config(vec![card], CarouselAdvance::Manual, &[("aqi", None)]);
-        let now = Instant::now();
-        let mut scheduler = fresh_scheduler(now);
-        let mut state = WorkerState::new(config, now, &mut scheduler);
-        let durable = [0x5a; protocol::ASSET_DIGEST_LEN];
-        let old_volatile = [0x7b; protocol::ASSET_DIGEST_LEN];
-        state.active_volatile_digest = Some(old_volatile);
-        state.plugin_host = Some(Box::new(AssetOnlyPluginHost));
-        let mut device = ScheduledWorkDevice::default();
-
-        synchronize_full(&mut state, &mut scheduler, &mut device, now).unwrap();
-
-        assert_eq!(
-            device.asset_releases,
-            vec![vec![durable, old_volatile]],
-            "any pre-push keep-set must retain the digest the displayed scene still reads"
-        );
-    }
-
-    struct NoAssetPluginHost;
-
-    impl PluginHost for NoAssetPluginHost {
-        fn desired_assets(&mut self) -> Vec<DesiredAsset> {
-            Vec::new()
-        }
-
-        fn render_scene(
-            &mut self,
-            _plugin_id: &str,
-            _snapshot: &providers::ProviderSnapshot<serde_json::Value>,
-            _revision: u32,
-            _timezone: chrono_tz::Tz,
-        ) -> Result<SceneCandidate, String> {
-            unreachable!("this test exercises only full synchronization")
-        }
-    }
-
-    /// A host with nothing to provision must send no `AssetRelease` at all.
-    ///
-    /// `AssetRelease` carries the full keep-set, so an empty one instructs the
-    /// device to mark every asset it holds DEAD. A server whose plugin
-    /// registry is empty -- the default when no plugins directory is
-    /// configured, which is a supported deployment -- would otherwise wipe the
-    /// device's assets on every full synchronize. Deleting the emptiness guard
-    /// in `synchronize_full` makes this fail.
-    #[test]
-    fn an_empty_desired_asset_set_sends_no_release_rather_than_wiping_the_device() {
-        let card = plugin_card("aqi", "Air quality", "aqi", RefreshPolicy::Manual);
-        let config = rotation_config(vec![card], CarouselAdvance::Manual, &[("aqi", None)]);
-        let now = Instant::now();
-        let mut scheduler = fresh_scheduler(now);
-        let mut state = WorkerState::new(config, now, &mut scheduler);
-        state.plugin_host = Some(Box::new(NoAssetPluginHost));
-        let mut device = ScheduledWorkDevice::default();
-
-        synchronize_full(&mut state, &mut scheduler, &mut device, now).unwrap();
-
-        assert!(
-            device.asset_releases.is_empty(),
-            "an empty keep-set is a full wipe, so no AssetRelease may be sent: {:?}",
-            device.asset_releases
-        );
-        assert_eq!(device.layout_calls, 1, "layout sync still runs");
-        assert!(
-            state.push_rejections.is_empty(),
-            "skipping an empty pass is not a failure"
-        );
-    }
-
-    /// The complement: a host that DOES want assets still sends the keep-set,
-    /// so the guard above cannot be satisfied by never reconciling at all.
-    #[test]
-    fn a_non_empty_desired_asset_set_still_sends_its_keep_set() {
-        let card = plugin_card("aqi", "Air quality", "aqi", RefreshPolicy::Manual);
-        let config = rotation_config(vec![card], CarouselAdvance::Manual, &[("aqi", None)]);
-        let now = Instant::now();
-        let mut scheduler = fresh_scheduler(now);
-        let mut state = WorkerState::new(config, now, &mut scheduler);
-        state.plugin_host = Some(Box::new(AssetOnlyPluginHost));
-        let mut device = ScheduledWorkDevice::default();
-
-        synchronize_full(&mut state, &mut scheduler, &mut device, now).unwrap();
-
-        assert_eq!(
-            device.asset_releases,
-            vec![vec![[0x5a; protocol::ASSET_DIGEST_LEN]]],
-            "the desired digest must be named in the keep-set"
-        );
-    }
-
-    struct PreviewPluginHost {
-        renders: Arc<Mutex<Vec<u32>>>,
-        requests: Arc<Mutex<Vec<RasterRequest>>>,
-    }
-
-    impl PluginHost for PreviewPluginHost {
-        fn desired_assets(&mut self) -> Vec<DesiredAsset> {
-            Vec::new()
-        }
-
-        fn render_scene(
-            &mut self,
-            _plugin_id: &str,
-            _snapshot: &providers::ProviderSnapshot<serde_json::Value>,
-            revision: u32,
-            _timezone: chrono_tz::Tz,
-        ) -> Result<SceneCandidate, String> {
-            self.renders.lock().unwrap().push(revision);
-            Ok(SceneCandidate::DisplayList(protocol::Scene {
-                revision,
-                background: 0x1234,
-                nodes: Vec::new(),
-            }))
-        }
-
-        fn rasterize(&mut self, request: &RasterRequest) -> Result<RasterFrame, String> {
-            self.requests.lock().unwrap().push(request.clone());
-            Ok(RasterFrame {
-                digest: [0x55; protocol::ASSET_DIGEST_LEN],
-                bytes: Arc::from(&[0x19, 0x12, 0, 0, 0xc0, 1, 0x70, 1, 0x80, 3, 0, 0, 1, 2][..]),
-            })
-        }
-    }
-
-    /// Two plugin cards, the FIRST one active. Every preview here targets the
-    /// second, so "the active screen did not move" is an assertion about the
-    /// route rather than a tautology about a one-card config.
-    fn preview_state(
-        now: Instant,
-        renders: &Arc<Mutex<Vec<u32>>>,
-        requests: &Arc<Mutex<Vec<RasterRequest>>>,
-    ) -> (WorkerState, Scheduler) {
-        let config = rotation_config(
-            vec![
-                plugin_card("aqi", "Air quality", "aqi", RefreshPolicy::Manual),
-                plugin_card("agenda", "Agenda", "agenda", RefreshPolicy::Manual),
-            ],
-            CarouselAdvance::Manual,
-            &[("aqi", None), ("agenda", None)],
-        );
-        let mut scheduler = fresh_scheduler(now);
-        let mut state = WorkerState::new_with_plugin_host(
-            config,
-            now,
-            &mut scheduler,
-            Some(Box::new(PreviewPluginHost {
-                renders: Arc::clone(renders),
-                requests: Arc::clone(requests),
-            })),
-        );
-        state.next_scene_revision = 41;
-        state.active_scene_dirty = false;
-        state.active_screen_dirty = false;
-        (state, scheduler)
-    }
-
-    /// The whole safety property of the preview route, in one place: it builds
-    /// at a revision the wire refuses, so the frame it produces is unpushable
-    /// by construction rather than by a caller remembering not to send it.
-    #[test]
-    fn the_preview_revision_is_one_the_wire_refuses() {
-        assert_eq!(
-            validate_message(&Message::PushScene(PushScene {
-                card_id: "aqi".into(),
-                revision: PREVIEW_SCENE_REVISION,
-                scene: protocol::Scene {
-                    revision: PREVIEW_SCENE_REVISION,
-                    background: 0,
-                    nodes: Vec::new(),
-                },
-            })),
-            Err(protocol::MessageError::InvalidValue("scene revision"))
-        );
-    }
-
-    #[test]
-    fn a_card_preview_renders_at_revision_zero_and_never_mints_a_push_revision() {
-        let now = Instant::now();
-        let renders = Arc::new(Mutex::new(Vec::new()));
-        let requests = Arc::new(Mutex::new(Vec::new()));
-        let (mut state, _scheduler) = preview_state(now, &renders, &requests);
-        state.plugin_snapshots.insert(
-            "agenda".into(),
-            providers::ProviderSnapshot {
-                value: serde_json::json!({"events": []}),
-                refreshed_at: DateTime::from_timestamp_millis(1_725_600_000_000),
-                age: None,
-                stale: false,
-                error: None,
-            },
-        );
-
-        let preview = render_card_preview(&mut state, "agenda").expect("a plugin card previews");
-
-        assert_eq!(*renders.lock().unwrap(), vec![PREVIEW_SCENE_REVISION]);
-        assert_eq!(requests.lock().unwrap().len(), 1);
-        assert_eq!(preview.state, CardPreviewState::Fresh);
-        assert_eq!(preview.message, None);
-        assert_eq!(preview.refreshed_at_unix_ms, Some(1_725_600_000_000));
-        assert_eq!(
-            preview
-                .frame
-                .expect("a fresh preview carries a frame")
-                .digest,
-            [0x55; protocol::ASSET_DIGEST_LEN]
-        );
-        assert_eq!(
-            state.next_scene_revision, 41,
-            "a preview is never sent, so it must not consume a wire revision"
-        );
-        assert!(
-            !state.active_scene_dirty,
-            "a preview must not schedule a device push"
-        );
-        assert_eq!(
-            state.active_screen.as_deref(),
-            Some("aqi"),
-            "the preview route never activates the card it renders"
-        );
-        assert!(
-            !state.active_screen_dirty,
-            "a preview must not schedule an activation either"
-        );
-    }
-
-    #[test]
-    fn a_plugin_card_with_no_cached_snapshot_previews_as_waiting_without_a_frame() {
-        let now = Instant::now();
-        let renders = Arc::new(Mutex::new(Vec::new()));
-        let requests = Arc::new(Mutex::new(Vec::new()));
-        let (mut state, _scheduler) = preview_state(now, &renders, &requests);
-
-        let preview = render_card_preview(&mut state, "agenda").expect("waiting is an outcome");
-
-        assert_eq!(preview.state, CardPreviewState::Waiting);
-        assert_eq!(
-            preview.message.as_deref(),
-            Some("Waiting for the first refresh")
-        );
-        assert!(preview.frame.is_none());
-        assert!(
-            renders.lock().unwrap().is_empty(),
-            "the pre-first-fetch state must not be reported as a compile failure"
-        );
-    }
-
-    #[test]
-    fn a_plugin_card_whose_provider_is_in_error_previews_as_error_not_waiting_forever() {
-        // Every curated plugin source points at `example.invalid`, so a
-        // provider that has already reported `Error` -- and therefore never
-        // populated `plugin_snapshots` at all -- is these plugins' ordinary
-        // state, not a corner case. "Waiting for the first refresh" promises
-        // a resolution that will never come for this card; the same defect
-        // class already closed for a hostless runtime just above.
-        let now = Instant::now();
-        let renders = Arc::new(Mutex::new(Vec::new()));
-        let requests = Arc::new(Mutex::new(Vec::new()));
-        let (mut state, _scheduler) = preview_state(now, &renders, &requests);
-        state
-            .providers
-            .get_mut("agenda")
-            .expect("agenda has a provider entry")
-            .snapshot
-            .state = ProviderState::Error {
-            message: "plugin \"agenda\" is not loaded".into(),
-        };
-
-        let preview =
-            render_card_preview(&mut state, "agenda").expect("an errored provider still previews");
-
-        assert_eq!(preview.state, CardPreviewState::Error);
-        assert_eq!(
-            preview.message.as_deref(),
-            Some("plugin \"agenda\" is not loaded")
-        );
-        assert!(preview.frame.is_none());
-        assert!(
-            renders.lock().unwrap().is_empty(),
-            "a permanently failed fetch must not be reported as a compile failure either"
-        );
-    }
-
-    #[test]
-    fn a_stale_or_errored_snapshot_still_draws_its_face() {
-        let now = Instant::now();
-        let renders = Arc::new(Mutex::new(Vec::new()));
-        let requests = Arc::new(Mutex::new(Vec::new()));
-        let (mut state, _scheduler) = preview_state(now, &renders, &requests);
-        state.plugin_snapshots.insert(
-            "agenda".into(),
-            providers::ProviderSnapshot {
-                value: serde_json::json!({"events": []}),
-                refreshed_at: None,
-                age: None,
-                stale: true,
-                error: Some("upstream is stale".into()),
-            },
-        );
-
-        let preview = render_card_preview(&mut state, "agenda").expect("a stale card still draws");
-
-        assert_eq!(preview.state, CardPreviewState::Stale);
-        assert_eq!(preview.message, None);
-        assert!(
-            preview.frame.is_some(),
-            "the scene carries the same stale footer the panel shows; the state word is not the fault"
-        );
-    }
-
-    #[test]
-    fn a_card_preview_names_the_wrong_kind_and_the_missing_card_separately() {
-        let now = Instant::now();
-        let config = rotation_config(
-            vec![
-                rotation_clock_card("clock"),
-                plugin_card("aqi", "Air quality", "aqi", RefreshPolicy::Manual),
-            ],
-            CarouselAdvance::Manual,
-            &[("clock", None), ("aqi", None)],
-        );
-        let mut scheduler = fresh_scheduler(now);
-        let mut state = WorkerState::new(config, now, &mut scheduler);
-
-        assert!(matches!(
-            render_card_preview(&mut state, "clock"),
-            Err(RuntimeError::NotAPluginCard { ref card_id }) if card_id == "clock"
-        ));
-        assert!(matches!(
-            render_card_preview(&mut state, "absent"),
-            Err(RuntimeError::UnknownCard { ref card_id }) if card_id == "absent"
-        ));
-
-        // A hostless runtime's `replace_config` never populates
-        // `plugin_snapshots` for a plugin card (spec 5.3), so a genuine
-        // plugin card must surface the "needs server-side rasterization"
-        // error here rather than "Waiting for the first refresh" -- a message
-        // promising a resolution that can never happen on this runtime.
-        let preview =
-            render_card_preview(&mut state, "aqi").expect("a hostless preview is an Ok outcome");
-        assert_eq!(preview.state, CardPreviewState::Error);
-        assert_eq!(
-            preview.message.as_deref(),
-            Some("this card needs server-side rasterization, which this host does not perform")
-        );
-        assert!(preview.frame.is_none());
     }
 }

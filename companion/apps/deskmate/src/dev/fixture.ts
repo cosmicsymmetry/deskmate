@@ -65,15 +65,6 @@ export function mockConfig(): AppConfig {
         alert: { kind: "on-timer-finish", hold: { kind: "until-dismissed" } },
       },
       {
-        kind: "plugin",
-        id: "air-quality",
-        title: "Outside",
-        plugin_id: "air-quality",
-        tap_action: { kind: "none" },
-        refresh: { kind: "interval", minutes: 30 },
-        alert: { kind: "none" },
-      },
-      {
         kind: "picture",
         id: "picture",
         title: "Studio",
@@ -93,7 +84,6 @@ export function mockConfig(): AppConfig {
         entries: [
           { card_id: "clock", dwell_seconds: 45 },
           { card_id: "pomodoro", dwell_seconds: null },
-          { card_id: "air-quality", dwell_seconds: 15 },
           { card_id: "picture", dwell_seconds: 30 },
         ],
       },
@@ -110,14 +100,7 @@ export function mockConfig(): AppConfig {
 }
 
 export function mockCardData(): CardDataSnapshot[] {
-  return [
-    {
-      card_id: "air-quality",
-      fields: [
-        { key: "summary", value: { kind: "text", value: "18° · Clear" } },
-      ],
-    },
-  ];
+  return [];
 }
 
 export function mockNetworkSettings(): NetworkSettings {
@@ -155,14 +138,6 @@ export function mockSnapshot(config: AppConfig): AppSnapshot {
       active_screen_id: "clock",
       counters: MOCK_COUNTERS,
     },
-    providers: [
-      {
-        widget_id: "air-quality",
-        state: { kind: "fresh" },
-        last_success_unix_ms: 1,
-        age_seconds: 120,
-      },
-    ],
     pomodoros: [
       {
         widget_id: "pomodoro",
@@ -177,9 +152,6 @@ export function mockSnapshot(config: AppConfig): AppSnapshot {
     diagnostics: {
       commands_processed: 1284,
       command_queue_full: 0,
-      provider_jobs_started: 96,
-      provider_queue_full: 0,
-      provider_results_discarded: 0,
       subscriber_snapshots_overwritten: 2,
       interrupt_dismissals_ignored: 0,
     },

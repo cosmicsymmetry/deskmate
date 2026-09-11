@@ -9,7 +9,9 @@
 use protocol::{SCENE_CANVAS_HEIGHT, SCENE_CANVAS_WIDTH};
 use sha2::{Digest, Sha256};
 
-use crate::rasterizer;
+const LVGL_IMAGE_HEADER_BYTES: usize = 12;
+const LVGL_IMAGE_MAGIC: u32 = 0x19;
+const LVGL_COLOR_FORMAT_RGB565: u32 = 0x12;
 
 /// One accepted picture, in the exact form the asset store and the wire use.
 ///
@@ -95,8 +97,8 @@ pub(crate) fn canonical_frame_from_png(bytes: &[u8]) -> Result<CanonicalFrame, I
     let mut rgba = Vec::with_capacity((width * height * 4) as usize);
     for chunk in pixels.chunks_exact(samples) {
         // The panel has no alpha. Composite over black, matching the
-        // rasterizer's `pixmap.fill(Color::BLACK)`, so a transparent producer
-        // pixel lands on the same ground a transparent SVG pixel does.
+        // established `pixmap.fill(Color::BLACK)` behavior, so a transparent
+        // producer pixel lands on the panel's black ground.
         let alpha = if samples == 4 {
             u32::from(chunk[3])
         } else {
@@ -113,15 +115,41 @@ pub(crate) fn canonical_frame_from_png(bytes: &[u8]) -> Result<CanonicalFrame, I
         ]);
     }
 
-    let size = resvg::tiny_skia::IntSize::from_wh(width, height).expect("fixed canvas");
-    let pixmap = resvg::tiny_skia::Pixmap::from_vec(rgba, size).ok_or(ImageIngestError::Decode)?;
-    let canonical_bytes = rasterizer::encode_rgb565_unbounded(width, height, &pixmap);
+    let size = tiny_skia::IntSize::from_wh(width, height).expect("fixed canvas");
+    let pixmap = tiny_skia::Pixmap::from_vec(rgba, size).ok_or(ImageIngestError::Decode)?;
+    let canonical_bytes = encode_rgb565(width, height, &pixmap);
     let digest = Sha256::digest(&canonical_bytes).into();
 
     Ok(CanonicalFrame {
         digest,
         bytes: canonical_bytes,
     })
+}
+
+fn encode_rgb565(width: u32, height: u32, pixmap: &tiny_skia::Pixmap) -> Vec<u8> {
+    let pixel_count = usize::try_from(width * height).expect("fixed canvas fits usize");
+    let mut bytes = Vec::with_capacity(LVGL_IMAGE_HEADER_BYTES + pixel_count * 2);
+    let stride = width * 2;
+    let word0 = LVGL_IMAGE_MAGIC | (LVGL_COLOR_FORMAT_RGB565 << 8);
+    let word1 = (width & 0xffff) | ((height & 0xffff) << 16);
+    let word2 = stride & 0xffff;
+    bytes.extend_from_slice(&word0.to_le_bytes());
+    bytes.extend_from_slice(&word1.to_le_bytes());
+    bytes.extend_from_slice(&word2.to_le_bytes());
+    for pixel in pixmap.pixels() {
+        bytes.extend_from_slice(
+            &pack_rgb565(pixel.red(), pixel.green(), pixel.blue()).to_le_bytes(),
+        );
+    }
+    bytes
+}
+
+fn pack_rgb565(red: u8, green: u8, blue: u8) -> u16 {
+    // Round each 8-bit channel to the nearest endpoint-inclusive RGB565 value.
+    let red = (u16::from(red) * 31 + 127) / 255;
+    let green = (u16::from(green) * 63 + 127) / 255;
+    let blue = (u16::from(blue) * 31 + 127) / 255;
+    (red << 11) | (green << 5) | blue
 }
 
 #[cfg(test)]

@@ -3,9 +3,7 @@ import type {
   AppConfig,
   CardSettings,
   CarouselAdvance,
-  DeviceTier,
   Playlist,
-  PluginCatalog,
   ValidationIssue,
 } from "./types";
 import { MAX_PLAYLIST_ENTRIES } from "./types";
@@ -18,9 +16,7 @@ export function copyConfig(config: AppConfig): AppConfig {
     preferences: { ...config.preferences },
     cards: config.cards.map((card) => ({
       ...card,
-      ...(card.kind === "plugin" || card.kind === "picture"
-        ? {}
-        : { template: { ...card.template } }),
+      ...(card.kind === "picture" ? {} : { template: { ...card.template } }),
       tap_action: { ...card.tap_action },
       refresh: { ...card.refresh },
       alert: { ...card.alert },
@@ -52,8 +48,6 @@ export function cardName(card: CardSettings): string {
       return card.title || "Digital clock";
     case "pomodoro":
       return card.label || "Pomodoro";
-    case "plugin":
-      return card.title || card.plugin_id;
     case "picture":
       return card.title || "Picture";
   }
@@ -69,53 +63,12 @@ export function cardName(card: CardSettings): string {
  * words survive as `cardTitle` — a quiet second line beside the label, never the
  * thing that names the card.
  *
- * A plugin card's template is its plugin, so its display name is whatever the
- * server's catalog declares for it. Both fallbacks land on the plugin id rather than
- * the word "Plugin": an id at least identifies the thing, where a category name
- * identified every plugin card identically. The word that says *why* a bare id is
- * showing is `pluginCardFlag`, not this — a name is a name, not a diagnosis.
  */
-export function cardLabel(card: CardSettings, catalog?: PluginCatalog | null): string {
+export function cardLabel(card: CardSettings): string {
   if (card.kind === "picture") {
     return "Picture";
   }
-  if (card.kind === "plugin") {
-    const entry = catalog?.plugins.find((plugin) => plugin.id === card.plugin_id);
-    return entry?.display_name ?? card.plugin_id;
-  }
   return cardKindName(card.kind);
-}
-
-export type PluginCardFlag = "not on the server" | "needs the server";
-
-/**
- * The word beside a plugin card whose name could not be resolved. Order matters:
- * local tier is the reason that outranks every other, because no catalog, however
- * complete, can make a plugin render on a Mac that owns the display itself. A
- * missing catalog in networked tier is deliberately silent — the window has not
- * heard from the server yet, and "not on the server" would be an accusation the
- * app cannot support.
- */
-export function pluginCardFlag(
-  card: CardSettings,
-  catalog: PluginCatalog | null,
-  tier: DeviceTier | null,
-): PluginCardFlag | null {
-  if (card.kind === "picture") {
-    return tier === "local" ? "needs the server" : null;
-  }
-  if (card.kind !== "plugin") {
-    return null;
-  }
-  if (tier === "local") {
-    return "needs the server";
-  }
-  if (!catalog) {
-    return null;
-  }
-  return catalog.plugins.some((plugin) => plugin.id === card.plugin_id)
-    ? null
-    : "not on the server";
 }
 
 /**
@@ -148,18 +101,15 @@ function nextId(prefix: string, used: Set<string>): string {
 }
 
 /**
- * What the caller is asking to add. A built-in is named by its kind; a plugin is
- * named by its registry id plus the cadence its manifest declares, because the
- * catalog is the only thing that knows either.
+ * What the caller is asking to add. Picture sources are minted asynchronously,
+ * while built-ins need only their kind.
  */
 export type AddCardRequest =
   | AddableCardKind
-  | { kind: "plugin"; pluginId: string; refreshMinutes: number }
   | { kind: "picture"; sourceId: string; sourceName: string };
 
 /// Appends a new card with sane defaults for its kind and enrols it at the end
-/// of the active loop in the same draft. Supports both built-in card kinds
-/// and a plugin from the server's catalog. Both card-library limits are checked before
+/// of the active loop in the same draft. Both card-library limits are checked before
 /// either collection changes, so adding is atomic even when a legacy card
 /// outside the loop has filled only one limit.
 export function addCard(
@@ -178,8 +128,8 @@ export function addCard(
     return { config, cardId: null };
   }
   const used = new Set(config.cards.map((card) => card.id));
-  // Server-created cards use their kind as the id stem, never the source/plugin id:
-  // those external ids have different bounds, and two cards may legitimately share one.
+  // Server-created cards use their kind as the id stem, never the source id: that
+  // external id has different bounds, and two cards may legitimately share one.
   const cardId = nextId(typeof request === "string" ? request : request.kind, used);
   const common = {
     id: cardId,
@@ -189,28 +139,13 @@ export function addCard(
 
   let card: CardSettings;
   if (typeof request !== "string") {
-    switch (request.kind) {
-      case "plugin":
-        card = {
-          kind: request.kind,
-          ...common,
-          // Blank on purpose: the display name already says what the card is, and a
-          // pre-filled title would be a second name nobody chose.
-          title: "",
-          plugin_id: request.pluginId,
-          refresh: { kind: "interval", minutes: request.refreshMinutes },
-        };
-        break;
-      case "picture":
-        card = {
-          kind: request.kind,
-          ...common,
-          title: "",
-          source_id: request.sourceId,
-          refresh: { kind: "manual" },
-        };
-        break;
-    }
+    card = {
+      kind: request.kind,
+      ...common,
+      title: "",
+      source_id: request.sourceId,
+      refresh: { kind: "manual" },
+    };
   } else {
     switch (request) {
       case "clock":
@@ -457,8 +392,7 @@ export interface LoopSegment {
   cardId: string;
   name: string;
   /// The owner's own words for this card, or null when they typed none. Two cards
-  /// can share a plugin, so the loop needs something besides `name` to tell one
-  /// "Air quality" card from another using the same plugin.
+  /// can share a kind, so the loop needs something besides `name` to tell them apart.
   title: string | null;
   dwellSeconds: number;
   widthPercent: number;
@@ -470,7 +404,7 @@ export interface LoopSegment {
 /// there is no dwell to speak of, so every segment is given equal width
 /// instead of a zero-width one, which is what lets the ribbon still show
 /// order (just not timing) in that mode.
-export function loopSegments(config: AppConfig, catalog?: PluginCatalog | null): LoopSegment[] {
+export function loopSegments(config: AppConfig): LoopSegment[] {
   const playlist = activePlaylist(config);
   if (!playlist) {
     return [];
@@ -491,7 +425,7 @@ export function loopSegments(config: AppConfig, catalog?: PluginCatalog | null):
     const widthPercent = total > 0 ? (dwellSeconds[index] / total) * 100 : equalShare;
     const segment: LoopSegment = {
       cardId: card.id,
-      name: cardLabel(card, catalog),
+      name: cardLabel(card),
       title: cardTitle(card),
       dwellSeconds: dwellSeconds[index],
       widthPercent,

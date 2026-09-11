@@ -1,5 +1,5 @@
 {
-  "schema_version": 8,
+  "schema_version": 9,
   "preferences": {
     "timezone": "Asia/Tbilisi",
     "autostart": true,
@@ -26,15 +26,6 @@
       "tap_action": { "kind": "reset" },
       "refresh": { "kind": "device-local" },
       "alert": { "kind": "on-timer-finish", "hold": { "kind": "until-dismissed" } }
-    },
-    {
-      "kind": "plugin",
-      "id": "metric",
-      "title": "Metric",
-      "plugin_id": "com.example.metrics",
-      "tap_action": { "kind": "open-application", "application_id": "com.example.metrics" },
-      "refresh": { "kind": "interval", "minutes": 15 },
-      "alert": { "kind": "none" }
     },
     {
       "kind": "picture",
@@ -75,7 +66,6 @@
       "entries": [
         { "card_id": "analog", "dwell_seconds": null },
         { "card_id": "focus", "dwell_seconds": null },
-        { "card_id": "metric", "dwell_seconds": null },
         { "card_id": "picture", "dwell_seconds": null }
       ]
     }

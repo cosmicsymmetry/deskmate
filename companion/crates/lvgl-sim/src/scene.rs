@@ -148,21 +148,10 @@ pub struct SceneTimer {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SceneAsset {
     pub digest: [u8; 32],
-    /// The exact wire kind resolved from the manifest. `AssetKind` is
-    /// `repr(u8)`, matching `asset_kind_t` in the firmware.
+    /// `AssetKind` is `repr(u8)`, matching `asset_kind_t` in the firmware.
     pub kind: AssetKind,
     /// The exact bytes hashed by the resolver and transferred to the device.
     pub bytes: Arc<[u8]>,
-}
-
-impl From<&plugin::ResolvedAsset> for SceneAsset {
-    fn from(asset: &plugin::ResolvedAsset) -> Self {
-        Self {
-            digest: asset.digest,
-            kind: asset.kind,
-            bytes: Arc::clone(&asset.bytes),
-        }
-    }
 }
 
 /// One scene render. Mirrors [`crate::RenderRequest`]'s shape: everything the

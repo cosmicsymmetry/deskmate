@@ -695,7 +695,7 @@ fn validate_asset_begin(begin: &AssetBegin) -> Result<(), MessageError> {
             // A VOLATILE image is a full-canvas frame by construction -- it
             // lands in a fixed-size PSRAM slot -- so its decoded length is
             // pinned. A durable image is an ordinary stored asset and may be
-            // any bounded size, so pinning it there would reject every plugin
+            // any bounded size, so pinning it there would reject every scene
             // image that is not a whole screen.
             if begin.volatile
                 && begin.kind == AssetKind::Image
@@ -2681,7 +2681,7 @@ mod tests {
     fn a_durable_encoded_image_may_be_any_bounded_size_but_a_volatile_one_may_not() {
         // A volatile image lands in a fixed-size PSRAM slot, so its decoded
         // length is pinned. A durable image is an ordinary stored asset, and
-        // pinning it would reject every plugin image that is not a whole
+        // pinning it would reject every scene image that is not a whole
         // screen.
         let partial = AssetBegin {
             digest: [0x5a; 32],

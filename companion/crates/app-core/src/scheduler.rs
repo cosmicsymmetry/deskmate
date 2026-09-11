@@ -1,11 +1,4 @@
-use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
-
-/// A raster is a full-frame transfer: about five RLE chunks for a curated face and
-/// about 161 raw chunks over the protocol's one-outstanding-request link. Spec §3
-/// also rules any sub-30-second raster cadence dishonest for live faces (those are
-/// refused instead of frozen), so static invalidations are coalesced at this floor.
-pub(crate) const RASTER_MIN_INTERVAL: Duration = Duration::from_secs(30);
 
 pub(crate) struct Scheduler {
     pomodoro_interval: Duration,
@@ -14,7 +7,6 @@ pub(crate) struct Scheduler {
     next_pomodoro: Instant,
     next_status: Instant,
     next_time_sync: Instant,
-    providers: BTreeMap<String, ProviderDeadline>,
     rotation: Option<Instant>,
     /// Keyed to the specific interrupt token the hold belongs to. A code
     /// review of the first version of this feature found that a single
@@ -27,14 +19,6 @@ pub(crate) struct Scheduler {
     /// whichever interrupt is actually `Active`, makes those two interrupts
     /// independent regardless of arrival order.
     alert_hold: Option<(u32, Instant)>,
-    last_raster_push: Option<Instant>,
-    raster_deadline: Option<Instant>,
-}
-
-struct ProviderDeadline {
-    interval: Option<Duration>,
-    next: Option<Instant>,
-    skipped_while_paused: bool,
 }
 
 impl Scheduler {
@@ -51,71 +35,8 @@ impl Scheduler {
             next_pomodoro: now,
             next_status: now,
             next_time_sync: now,
-            providers: BTreeMap::new(),
             rotation: None,
             alert_hold: None,
-            last_raster_push: None,
-            raster_deadline: None,
-        }
-    }
-
-    pub(crate) fn replace_providers(
-        &mut self,
-        providers: impl IntoIterator<Item = (String, Option<Duration>)>,
-        now: Instant,
-    ) {
-        self.providers = providers
-            .into_iter()
-            .map(|(widget_id, interval)| {
-                (
-                    widget_id,
-                    ProviderDeadline {
-                        interval,
-                        next: Some(now),
-                        skipped_while_paused: false,
-                    },
-                )
-            })
-            .collect();
-    }
-
-    pub(crate) fn schedule_provider_now(&mut self, widget_id: &str, now: Instant) -> bool {
-        let Some(deadline) = self.providers.get_mut(widget_id) else {
-            return false;
-        };
-        deadline.next = Some(now);
-        true
-    }
-
-    /// Returns due provider jobs and advances each deadline before the caller
-    /// decides whether that job can be submitted. A long-running in-flight job
-    /// must not leave its next deadline in the past and pin the runtime loop.
-    pub(crate) fn take_due_providers(&mut self, now: Instant) -> Vec<String> {
-        let mut due = Vec::new();
-        for (widget_id, deadline) in &mut self.providers {
-            if deadline.next.is_some_and(|next| now >= next) {
-                deadline.next = deadline.interval.map(|interval| now + interval);
-                deadline.skipped_while_paused = false;
-                due.push(widget_id.clone());
-            }
-        }
-        due
-    }
-
-    /// Advances provider deadlines whose work is gated by pause, remembering
-    /// only those skipped jobs so resume can run them promptly.
-    pub(crate) fn skip_due_providers(&mut self, now: Instant) {
-        for deadline in self.providers.values_mut() {
-            if deadline.next.is_some_and(|next| now >= next) {
-                deadline.next = deadline.interval.map(|interval| now + interval);
-                deadline.skipped_while_paused = true;
-            }
-        }
-    }
-
-    pub(crate) fn provider_retry(&mut self, widget_id: &str, now: Instant, delay: Duration) {
-        if let Some(deadline) = self.providers.get_mut(widget_id) {
-            deadline.next = Some(now + delay);
         }
     }
 
@@ -137,16 +58,6 @@ impl Scheduler {
 
     pub(crate) fn schedule_time_sync_now(&mut self, now: Instant) {
         self.next_time_sync = now;
-    }
-
-    /// Re-arms only work that actually became due while paused; manual providers
-    /// that were never requested remain disarmed.
-    pub(crate) fn schedule_skipped_providers_now(&mut self, now: Instant) {
-        for deadline in self.providers.values_mut() {
-            if deadline.skipped_while_paused {
-                deadline.next = Some(now);
-            }
-        }
     }
 
     /// Dwell is per-card, so the caller re-arms with a (possibly different)
@@ -195,48 +106,12 @@ impl Scheduler {
         Some(token)
     }
 
-    /// Marks a static raster candidate dirty. The first activation is eligible
-    /// immediately; after a successful push, every invalidation shares the one
-    /// `last_push + floor` deadline, so newer snapshots replace pending work
-    /// without extending it or queueing frames.
-    pub(crate) fn invalidate_raster(&mut self, now: Instant) {
-        let deadline = self
-            .last_raster_push
-            .map_or(now, |last| last + RASTER_MIN_INTERVAL);
-        self.raster_deadline = Some(deadline);
-    }
-
-    pub(crate) fn raster_due(&mut self, now: Instant) -> bool {
-        let Some(deadline) = self.raster_deadline else {
-            return self.last_raster_push.is_none();
-        };
-        if now < deadline {
-            return false;
-        }
-        self.raster_deadline = None;
-        true
-    }
-
-    pub(crate) fn note_raster_pushed(&mut self, now: Instant) {
-        self.last_raster_push = Some(now);
-        self.raster_deadline = None;
-    }
-
-    /// Drops only the pending wake when the active candidate changes to a
-    /// native/refused card. The last successful raster time remains the device's
-    /// cadence floor if a raster card becomes active again.
-    pub(crate) fn clear_raster_invalidation(&mut self) {
-        self.raster_deadline = None;
-    }
-
     pub(crate) fn wait_duration(&self, now: Instant, maximum: Duration) -> Duration {
         let next = self
-            .providers
-            .values()
-            .filter_map(|deadline| deadline.next)
-            .chain(self.rotation.iter().copied())
+            .rotation
+            .iter()
+            .copied()
             .chain(self.alert_hold.map(|(_, deadline)| deadline))
-            .chain(self.raster_deadline)
             .chain([self.next_pomodoro, self.next_status, self.next_time_sync])
             .min()
             .unwrap_or(now + maximum);
@@ -255,32 +130,6 @@ fn take_deadline(deadline: &mut Instant, interval: Duration, now: Instant) -> bo
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn provider_deadlines_are_replaced_and_manual_refresh_moves_only_one() {
-        let now = Instant::now();
-        let mut scheduler = Scheduler::new(
-            now,
-            Duration::from_secs(1),
-            Duration::from_secs(2),
-            Duration::from_secs(3),
-        );
-        scheduler.replace_providers(
-            [
-                ("work".into(), Some(Duration::from_mins(1))),
-                ("home".into(), Some(Duration::from_mins(2))),
-                ("manual".into(), None),
-            ],
-            now,
-        );
-        assert_eq!(
-            scheduler.take_due_providers(now),
-            ["home", "manual", "work"]
-        );
-        assert!(scheduler.take_due_providers(now).is_empty());
-        assert!(scheduler.schedule_provider_now("manual", now));
-        assert_eq!(scheduler.take_due_providers(now), ["manual"]);
-    }
 
     #[test]
     fn overdue_periodic_deadlines_fire_once_then_move_past_wake_time() {
@@ -336,53 +185,6 @@ mod tests {
 
         scheduler.clear_rotation();
         assert!(!scheduler.rotation_due(now + Duration::from_hours(1)));
-    }
-
-    #[test]
-    fn raster_floor_matrix_is_immediate_then_coalesces_until_exactly_thirty_seconds() {
-        let start = Instant::now();
-        let mut scheduler = Scheduler::new(
-            start,
-            Duration::from_hours(1),
-            Duration::from_hours(1),
-            Duration::from_hours(1),
-        );
-
-        assert!(
-            scheduler.raster_due(start),
-            "t=0 initial activation is immediate"
-        );
-        scheduler.note_raster_pushed(start);
-        scheduler.invalidate_raster(start + Duration::from_secs(5));
-        scheduler.invalidate_raster(start + Duration::from_millis(29_999));
-
-        assert!(!scheduler.raster_due(start + Duration::from_secs(5)));
-        assert!(!scheduler.raster_due(start + Duration::from_millis(29_999)));
-        assert!(scheduler.raster_due(start + Duration::from_secs(30)));
-        assert!(!scheduler.raster_due(start + Duration::from_secs(30)));
-    }
-
-    #[test]
-    fn raster_floor_raises_five_seconds_but_does_not_shorten_two_minutes() {
-        let start = Instant::now();
-        let mut scheduler = Scheduler::new(
-            start,
-            Duration::from_hours(1),
-            Duration::from_hours(1),
-            Duration::from_hours(1),
-        );
-        scheduler.note_raster_pushed(start);
-
-        scheduler.invalidate_raster(start + Duration::from_secs(5));
-        assert!(!scheduler.raster_due(start + Duration::from_secs(5)));
-        assert!(scheduler.raster_due(start + Duration::from_secs(30)));
-
-        scheduler.note_raster_pushed(start);
-        scheduler.invalidate_raster(start + Duration::from_mins(2));
-        assert!(
-            scheduler.raster_due(start + Duration::from_mins(2)),
-            "a two-minute provider event stays eligible at two minutes"
-        );
     }
 
     #[test]

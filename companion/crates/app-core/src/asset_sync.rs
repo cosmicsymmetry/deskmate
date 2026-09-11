@@ -35,7 +35,7 @@ use protocol::{
 /// `digest` hashes those decoded bytes. Volatile transfer encoding is chosen
 /// inside [`AssetSync`], never by the caller constructing this value.
 ///
-/// Plugin and raster hosts build these from bytes they already own; tests
+/// Image-source hosts build these from bytes they already own; tests
 /// build them directly.
 #[derive(Debug, Clone)]
 pub struct DesiredAsset {

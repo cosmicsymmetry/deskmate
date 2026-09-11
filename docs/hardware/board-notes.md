@@ -4626,6 +4626,10 @@ rebuilt too and **reproduces the shipping image byte-identically** (sha
 includable case is byte-identical, both orientations, no tolerance. The log is at
 `docs/hardware/media/2026-09-06-task7/framebuffer_diff-2026-09-06.log`.
 
+Post-manifest-removal update (2026-09-11): that remains the historical observation. The
+current inventory's unobserved software prediction is **78 total / 8 excluded / 70
+identical**; the next hardware session must run the matrix fresh.
+
 **The predicted split was 96/8/88; the first hardware run corrected it to 96/10/86 by
 surfacing three test-harness fidelity issues — none a firmware or renderer defect:**
 
@@ -4668,7 +4672,8 @@ surfacing three test-harness fidelity issues — none a firmware or renderer def
 
 The three fixes are test-only (`cases.rs`, `examples/framebuffer_diff.rs`) — no firmware,
 protocol, or config change — so no OTA re-verification is owed. The harness unit test now
-pins the 96/10/86 split with the per-reason exclusion breakdown.
+pins the historical 96/10/86 split with the per-reason exclusion breakdown; the current
+post-removal test pins the unobserved 78/8/70 inventory instead.
 
 **Restore.** Re-provisioned networked (`dev-0005`, WiFi `Slate7Legacy`, offset 240,
 plaintext token from `pass`), then full-flashed the verified release image (sha

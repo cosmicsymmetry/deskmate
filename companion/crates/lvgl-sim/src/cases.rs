@@ -17,6 +17,7 @@
 use std::sync::{Arc, LazyLock};
 
 use crate::{RenderRequest, SimField, SimFieldValue, SimOrientation, SimTemplate};
+use protocol::AssetKind;
 
 /// The wire's absolute per-field text ceiling
 /// (`PROTOCOL_MAX_FIELD_TEXT_LENGTH` in
@@ -863,7 +864,7 @@ fn quadrant_image_pixels() -> Vec<u16> {
 
 /// Builds the LVGL binary image blob once: its 12-byte little-endian header
 /// followed by the raw RGB565 pixel bytes. This is the same canonical form a
-/// plugin resolver hashes and the device receives.
+/// asset resolver hashes and the device receives.
 static SCENE_IMAGE_BYTES: LazyLock<Arc<[u8]>> = LazyLock::new(|| {
     const MAGIC: u32 = 0x19;
     const COLOR_FORMAT_RGB565: u32 = 0x12;
@@ -1249,7 +1250,7 @@ fn scene_text_nodes() -> Vec<SceneNode> {
             value: binding("field.status"),
             ellipsize: false,
         }),
-        // No provider has reported `absent`, so this renders the device's
+        // No upstream source has reported `absent`, so this renders the device's
         // "--" placeholder rather than nothing and rather than failing.
         SceneNode::Text(SceneText {
             x: 288,
@@ -1695,223 +1696,8 @@ pub fn scene_cases() -> Vec<(String, SceneRenderRequest)> {
 }
 
 // ---------------------------------------------------------------------------
-// Task 8 (plugin-manifest stage): the two curated plugins' golden cases.
-//
-// Unlike every case above, these compile through the REAL production path
-// -- `plugin::parse_manifest` + `plugin::resolve_assets` +
-// `plugin::compile_scene_with_assets` against the real, committed
-// `companion/plugins/{aqi,agenda}/manifest.toml` and its real committed
-// assets -- rather than hand-building an equivalent `Scene`. Hand-building
-// one here would risk it silently drifting from what the real compiler
-// actually produces, which is exactly the kind of gap this stage has
-// repeatedly found.
+// Native date-overflow evidence.
 // ---------------------------------------------------------------------------
-
-use std::path::{Path, PathBuf};
-
-use plugin::{compile_scene_with_assets, parse_manifest, resolve_assets};
-use protocol::AssetKind;
-
-const AQI_FIXTURE: &str = include_str!("../../plugin/tests/fixtures/aqi_response.json");
-const AGENDA_FIXTURE: &str = include_str!("../../plugin/tests/fixtures/agenda_response.json");
-
-/// `companion/plugins/`, resolved from `lvgl-sim`'s own compile-time
-/// `CARGO_MANIFEST_DIR` rather than the process's runtime working
-/// directory -- this must work identically whether `cases::plugin_scene_cases`
-/// is called from `cargo test -p lvgl-sim` or from the `framebuffer_diff`
-/// example in a different crate entirely.
-fn plugins_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plugins")
-}
-
-fn plugin_payload(raw: &str) -> serde_json::Value {
-    let root: serde_json::Value = serde_json::from_str(raw).expect("fixture is valid JSON");
-    assert_eq!(root["status"], "ok");
-    root["payload"].clone()
-}
-
-/// Compiles `plugin_name`'s real manifest against `data`/`stale`/`error`,
-/// returning the compiled [`Scene`] and the [`SceneAsset`]s a render
-/// request must register for it -- resolved from the plugin's own real,
-/// committed asset files, never hand-typed digests.
-fn compile_plugin_scene(
-    plugin_name: &str,
-    data: serde_json::Value,
-    stale: bool,
-    error: Option<&str>,
-    timezone: plugin::Tz,
-) -> (Scene, Vec<SceneAsset>) {
-    let dir = plugins_dir().join(plugin_name);
-    let source = std::fs::read_to_string(dir.join("manifest.toml"))
-        .unwrap_or_else(|error| panic!("read {plugin_name} manifest.toml: {error}"));
-    let manifest = parse_manifest(&source)
-        .unwrap_or_else(|error| panic!("{plugin_name} manifest must parse: {error:?}"));
-    let assets = resolve_assets(&manifest, &dir)
-        .unwrap_or_else(|error| panic!("{plugin_name} assets must resolve: {error:?}"));
-    let metrics = app_core::BakedFontMetrics::SHIPPED;
-    let snapshot = providers::ProviderSnapshot {
-        value: data,
-        refreshed_at: None,
-        age: None,
-        stale,
-        error: error.map(str::to_string),
-    };
-
-    let scene = compile_scene_with_assets(&manifest, &snapshot, &metrics, 1, &assets, timezone)
-        .unwrap_or_else(|error| panic!("{plugin_name} manifest must compile: {error:?}"));
-
-    let scene_assets = assets
-        .iter()
-        .map(|(_, resolved)| SceneAsset::from(resolved))
-        .collect();
-
-    (scene, scene_assets)
-}
-
-/// Appends one plugin's four data states (fresh, stale, error,
-/// empty/missing-data) at both orientations -- 8 rows, name format
-/// `plugin-{plugin_name}--{state_slug}--{orientation_slug}`.
-fn plugin_case(
-    cases: &mut Vec<(String, SceneRenderRequest)>,
-    plugin_name: &str,
-    fixture_payload: serde_json::Value,
-    // `field.*` binding values to resolve against, per state -- see
-    // `plugin_scene_cases`'s doc for why only `aqi`'s fresh/stale/error rows
-    // populate this and its `empty` row deliberately does not.
-    fields_by_state: [&[(&str, &str)]; 4],
-    // The configured display timezone these rows compile under. Fixed per
-    // case rather than always UTC so a face that renders an instant has a
-    // golden that would *change* if the zone stopped being applied -- a
-    // UTC golden cannot tell "the zone is honoured" from "the zone is
-    // ignored", since those produce identical pixels.
-    timezone: plugin::Tz,
-) {
-    let states: [(&str, serde_json::Value, bool, Option<&str>); 4] = [
-        ("fresh", fixture_payload.clone(), false, None),
-        ("stale", fixture_payload.clone(), true, None),
-        (
-            "error",
-            fixture_payload,
-            true,
-            Some("upstream request timed out"),
-        ),
-        // Missing entirely, not merely stale -- every `data.*` path
-        // resolves to `Missing`, and (aqi only) so does `icon()`'s
-        // argument. This is deliberately not "stale with no error": it is
-        // what a provider that has *never* successfully fetched anything
-        // looks like, which is a different, real state.
-        ("empty", serde_json::json!({}), false, None),
-    ];
-
-    for ((state_slug, data, stale, error), fields) in states.into_iter().zip(fields_by_state) {
-        let (scene, assets) = compile_plugin_scene(plugin_name, data, stale, error, timezone);
-        let fields: Vec<(String, String)> = fields
-            .iter()
-            .map(|(name, value)| ((*name).to_string(), (*value).to_string()))
-            .collect();
-        for (orientation_slug, orientation) in orientations() {
-            cases.push((
-                format!("plugin-{plugin_name}--{state_slug}--{orientation_slug}"),
-                SceneRenderRequest {
-                    scene: scene.clone(),
-                    assets: assets.clone(),
-                    utc_offset_minutes: SCENE_OFFSET,
-                    now_unix_seconds: SCENE_NOW,
-                    timer: None,
-                    fields: fields.clone(),
-                    orientation,
-                },
-            ));
-        }
-    }
-}
-
-/// The two curated plugins' golden cases: `aqi` (a JSON object source, the
-/// icon-font path, `field.*`) and `agenda` (a JSON source that is a list,
-/// the bounded repeat form, a real truncation case, an image asset). Four
-/// data states each, both orientations -- 16 rows, pinned by `tests/scene.rs`
-/// against `tests/golden/scene/` exactly like [`scene_cases`], and pushed to
-/// real hardware by `framebuffer_diff`, which is what finally exercises the
-/// device's asset-transfer path (`AssetBegin`/`AssetChunk`/`AssetCommit`)
-/// for the first time in this repo's test suite.
-///
-/// `aqi`'s three non-empty states inject a deterministic `field.title` value
-/// independently of `ServerProviderRefresher`, which emits the real card
-/// title in production. The `empty` state deliberately supplies no fields at
-/// all, so the matrix also keeps the placeholder case. `agenda` never binds
-/// `field.*`, so its fields are always empty.
-pub fn plugin_scene_cases() -> Vec<(String, SceneRenderRequest)> {
-    let mut cases = Vec::new();
-    let live_title: &[(&str, &str)] = &[("title", "Downtown Monitoring")];
-    let no_fields: &[(&str, &str)] = &[];
-    plugin_case(
-        &mut cases,
-        "aqi",
-        plugin_payload(AQI_FIXTURE),
-        [live_title, live_title, live_title, no_fields],
-        // Neither curated v1 plugin renders an instant, so their pixels do
-        // not depend on the zone; UTC keeps these 16 historical rows exactly
-        // as they were.
-        plugin::Tz::UTC,
-    );
-    plugin_case(
-        &mut cases,
-        "agenda",
-        plugin_payload(AGENDA_FIXTURE),
-        [no_fields, no_fields, no_fields, no_fields],
-        plugin::Tz::UTC,
-    );
-    cases
-}
-
-/// The claude-limits curated plugin (the Deskmate twin of the TRMNL
-/// "Claude - Usage" panel), golden-only: deliberately NOT part of
-/// [`plugin_scene_cases`], whose 16-row count is a historical invariant and
-/// whose rows exist to cover plugin MACHINERY on hardware -- this card adds
-/// content, not machinery, so it gets simulator goldens without growing the
-/// hardware matrix. The fixture is the live feed's real payload, captured
-/// 2026-09-02 from the docker-vm producer.
-pub fn claude_limits_scene_cases() -> Vec<(String, SceneRenderRequest)> {
-    let mut cases = Vec::new();
-    let no_fields: &[(&str, &str)] = &[];
-    plugin_case(
-        &mut cases,
-        "claude-limits",
-        serde_json::from_str(CLAUDE_LIMITS_FIXTURE).expect("fixture is valid JSON"),
-        [no_fields, no_fields, no_fields, no_fields],
-        // Deliberately NOT UTC. This face renders its reset instants with
-        // `time_at`, and the fixture's own `resets_at_epoch` values are four
-        // hours behind their Tbilisi labels -- so if the configured zone ever
-        // stopped reaching the compiler, these goldens would shift by four
-        // hours and say so. Under UTC they could not.
-        plugin::Tz::Asia__Tbilisi,
-    );
-    cases
-}
-
-const CLAUDE_LIMITS_FIXTURE: &str =
-    include_str!("../../plugin/tests/fixtures/claude_limits_response.json");
-
-// ---------------------------------------------------------------------------
-// Stage 4 Task 6: producer-to-pixel and real date-overflow evidence.
-//
-// The pre-change inventory is recorded in docs/scene/template-parity-ledger.md.
-// Keep these rows separate from `plugin_scene_cases`: those are the two curated
-// v1 cards and their 16-row count is a historical invariant, while the timer
-// row below is deliberately a committed v2 contract fixture.
-// ---------------------------------------------------------------------------
-
-const TIMER_V2_MANIFEST: &str = include_str!("../fixtures/timer-v2/manifest.toml");
-
-/// The producer-shaped snapshot for the v2 timer fixture. C, not this case
-/// table, derives `remaining_pct = 35` and `remaining_permille = 357` from
-/// these three domain facts. Supplying either final ratio here would reduce
-/// this back to the injected-input evidence gap Task 6 exists to close.
-pub const TIMER_V2_SNAPSHOT: SceneTimer = SceneTimer {
-    total_ms: 1_000_000,
-    remaining_ms: 357_000,
-    running: false,
-};
 
 /// 2026-05-13 08:34:56 UTC, which becomes Wednesday 12:34:56 at UTC+04:00.
 pub const DATE_OVERFLOW_NOW_UNIX_SECONDS: i64 = 1_778_661_296;
@@ -1919,66 +1705,10 @@ pub const DATE_OVERFLOW_NOW_UNIX_SECONDS: i64 = 1_778_661_296;
 /// breaking the instant down into `Wed, May 13`.
 pub const DATE_OVERFLOW_UTC_OFFSET_MINUTES: i16 = 240;
 /// The exact LVGL BODY-font width of the produced date. Derived from the
-/// shipped generated font in `tests/evidence_scene.rs`, not from resvg.
+/// shipped generated font in `tests/evidence_scene.rs`.
 pub const DATE_OVERFLOW_BODY_WIDTH: i32 = 178;
 /// `build_digital_clock_scene()`'s date content box.
 pub const DATE_CONTENT_WIDTH: i32 = 176;
-
-fn compile_timer_v2_scene() -> Scene {
-    let manifest = parse_manifest(TIMER_V2_MANIFEST)
-        .expect("the committed timer manifest-v2 fixture must parse");
-    assert!(manifest.is_manifest_v2());
-    let snapshot = providers::ProviderSnapshot {
-        value: serde_json::json!({}),
-        refreshed_at: None,
-        age: None,
-        stale: false,
-        error: None,
-    };
-    compile_scene_with_assets(
-        &manifest,
-        &snapshot,
-        &app_core::BakedFontMetrics::SHIPPED,
-        1,
-        &plugin::AssetSet::default(),
-        plugin::Tz::UTC,
-    )
-    .expect("the committed timer manifest-v2 fixture must compile")
-}
-
-/// A real manifest-v2 authoring row at both orientations. The manifest emits
-/// `timer.permille` on its arc and `timer.remaining:mm:ss` on text through
-/// `plugin::compile_scene_with_assets`; the request carries the real timer
-/// producer shape, never an injected final percentage or formatted string.
-pub fn timer_producer_scene_cases() -> Vec<(String, SceneRenderRequest)> {
-    let scene = compile_timer_v2_scene();
-    orientations()
-        .into_iter()
-        .map(|(orientation_slug, orientation)| {
-            (
-                format!("plugin-v2-timer--remaining-357-of-1000--{orientation_slug}"),
-                SceneRenderRequest {
-                    scene: scene.clone(),
-                    assets: Vec::new(),
-                    utc_offset_minutes: 0,
-                    // A valid instant (>= the wire's PROTOCOL_MIN_UNIX_SECONDS
-                    // 2020-01-01 floor), not 0. This scene binds only
-                    // timer.permille / timer.remaining, never time:/date, so
-                    // the produced frame is identical for any instant -- but
-                    // the framebuffer_diff harness time-syncs every case, and
-                    // a device rejects unix_seconds 0 as InvalidValue, which
-                    // made this case un-runnable on hardware (found on the
-                    // board 2026-09-06, Task 6 Step 5).
-                    now_unix_seconds: SCENE_NOW,
-                    timer: Some(TIMER_V2_SNAPSHOT),
-                    fields: Vec::new(),
-                    orientation,
-                },
-            )
-        })
-        .collect()
-}
-
 /// The local date text selected by the native `date` producer fixture.
 /// Constructed from the chosen UTC instant and offset rather than written as
 /// a test literal; the simulator independently evaluates the C producer.

@@ -16,30 +16,24 @@ import {
   issuesForPath,
   unclaimedIssues,
 } from "../src/lib/configDraft";
-import { formatProviderAge, providerTrouble } from "../src/lib/providers";
 import * as tauriModule from "../src/lib/tauri";
 
-// The two server reads are the only wrappers this suite proves end to end, so it
-// keeps a reference to the REAL ones before `mock.module` below replaces the
-// module's namespace in place, and mocks the Tauri bridge underneath them instead.
-// A second test file cannot do this: `mock.module` is process-global with no
-// guaranteed file order, so whichever file ran first would win.
+// Keep a reference to the real picture-source wrapper before `mock.module`
+// replaces the module namespace in place, then mock the Tauri bridge beneath it.
 const coreInvocations: { command: string; args?: Record<string, unknown> }[] = [];
 mock.module("@tauri-apps/api/core", () => ({
   invoke: async (command: string, args?: Record<string, unknown>) => {
     coreInvocations.push({ command, args });
-    if (command === "get_server_plugins" && args?.sourceName) {
+    if (command === "mint_image_source" && args?.sourceName) {
       return {
         source_id: "picture-source",
         token: "plaintext-once",
         push_url: "https://desk.example/v1/images/plaintext-once",
       };
     }
-    return command === "get_server_plugins" ? { plugins: [], load_failures: [] } : [];
+    return [];
   },
 }));
-const realGetServerPlugins = tauriModule.getServerPlugins;
-const realGetServerCardState = tauriModule.getServerCardState;
 const realMintImageSource = tauriModule.mintImageSource;
 
 import type {
@@ -51,10 +45,8 @@ import type {
   DraftValidation,
   MintedImageSource,
   NetworkSettings,
-  PluginCatalog,
   PreviewFrame,
   ProvisionDeviceInput,
-  ServerCardState,
   ValidationIssue,
 } from "../src/lib/types";
 import { ipcContractFixtures } from "../src/lib/types.contract";
@@ -70,11 +62,6 @@ const cards = snapshot.config.cards;
 // `useAppState`) stays real.
 let previewImpl: (cardId: string) => Promise<PreviewFrame> = () =>
   Promise.reject(new Error("renderCardPreview not configured for this test"));
-let serverPluginsImpl: () => Promise<PluginCatalog> = async () => ({
-  plugins: [],
-  load_failures: [],
-});
-let serverCardStateImpl: () => Promise<ServerCardState[]> = async () => [];
 let snapshotImpl: () => Promise<AppSnapshot> = async () => snapshot;
 let validateImpl: (config: AppConfig) => Promise<DraftValidation> = async () => ({
   valid: true,
@@ -114,8 +101,6 @@ let useLocalOwnershipImpl: () => Promise<NetworkSettings> = async () => ({
 mock.module("../src/lib/tauri", () => ({
   ...tauriModule,
   renderCardPreview: (cardId: string) => previewImpl(cardId),
-  getServerPlugins: () => serverPluginsImpl(),
-  getServerCardState: () => serverCardStateImpl(),
   getAppSnapshot: () => snapshotImpl(),
   listenToAppState: async () => () => {},
   validateConfigDraft: (config: AppConfig) => validateImpl(config),
@@ -197,18 +182,6 @@ function pomodoroCard(id: string, label = `Card ${id}`): CardSettings {
   };
 }
 
-function pluginCard(id = "internal-plugin-card"): CardSettings {
-  return {
-    kind: "plugin",
-    id,
-    title: "Office air",
-    plugin_id: "com.example.air-quality",
-    tap_action: { kind: "none" },
-    refresh: { kind: "interval", minutes: 15 },
-    alert: { kind: "none" },
-  };
-}
-
 function pictureCard(id = "picture-card"): CardSettings {
   return {
     kind: "picture",
@@ -257,8 +230,6 @@ describe("settings accessibility and states", () => {
     card: CardSettings,
     issues: ValidationIssue[] = [],
     cardError: CardError | null = null,
-    catalog: PluginCatalog | null = null,
-    ownershipTier: "local" | "networked" = "networked",
     pictureAccess: MintedImageSource | null = null,
   ) {
     return renderToStaticMarkup(
@@ -269,17 +240,12 @@ describe("settings accessibility and states", () => {
         entryIssues={[]}
         cardError={cardError}
         pomodoro={null}
-        provider={null}
         timerBusy={false}
-        providerRefreshing={false}
         pictureAccess={pictureAccess}
-        catalog={catalog}
-        ownershipTier={ownershipTier}
         onChange={() => {}}
         onConfigChange={() => {}}
         onRemove={() => {}}
         onTimerAction={() => {}}
-        onRefreshProvider={() => {}}
       />,
     );
   }
@@ -605,295 +571,10 @@ describe("settings accessibility and states", () => {
     expect(tier).toBe("networked");
   });
 
-  test("an unreachable server costs the window one notice and no plugin state", async () => {
-    snapshotImpl = async () => ({
-      ...snapshot,
-      device: { ...snapshot.device, tier: "networked" },
-      config: {
-        ...snapshot.config,
-        cards: [pluginCard("air")],
-        playlists: [
-          {
-            id: "workday",
-            name: "Workday",
-            advance: { kind: "timed" as const, default_dwell_seconds: 20 },
-            entries: [{ card_id: "air", dwell_seconds: null }],
-          },
-        ],
-        active_playlist_id: "workday",
-      },
-      providers: [],
-      pomodoros: [],
-      card_data: [],
-      card_errors: [],
-    });
-    networkSettingsImpl = async () => ({
-      server_url: "https://desk.example",
-      device_id: "desk-1",
-      tier: "networked",
-    });
-    previewImpl = async () => ({ png_base64: "cHJldmlldw==", sample: false, state: null });
-    let catalogCalls = 0;
-    serverPluginsImpl = async () => {
-      catalogCalls += 1;
-      if (catalogCalls === 1) {
-        throw { category: "runtime-unavailable", message: "connection refused" };
-      }
-      return {
-        plugins: [
-          {
-            id: "com.example.air-quality",
-            name: "aqi",
-            version: "1.0.0",
-            node_count: 7,
-            assets: [],
-            display_name: "Air quality",
-            description: "EPA index for a location",
-            manifest_version: 2,
-            template: "display-list" as const,
-            refresh_minutes: 15,
-          },
-        ],
-        load_failures: [],
-      };
-    };
-    serverCardStateImpl = async () => [];
-
-    const container = document.createElement("div");
-    document.body.appendChild(container);
-    const root = createRoot(container);
-    try {
-      await renderPreviewInto(root, <App />);
-      await waitFor(() => {
-        expect(container.textContent).toContain("Couldn't reach the server for plugin data.");
-      });
-      // A successful card-state poll must not clear a failed catalog read: the two
-      // failures are tracked apart even though they share one sentence.
-      expect(container.textContent).toContain("com.example.air-quality");
-
-      const retry = buttonWithText(container, "Try again");
-      expect(retry).toBeDefined();
-      await act(async () => retry?.click());
-      await waitFor(() => {
-        expect(container.textContent).not.toContain("Couldn't reach the server for plugin data.");
-        expect(container.textContent).toContain("Air quality");
-      });
-      expect(catalogCalls).toBe(2);
-    } finally {
-      await act(async () => root.unmount());
-      container.remove();
-      serverPluginsImpl = async () => ({ plugins: [], load_failures: [] });
-      serverCardStateImpl = async () => [];
-      // Also restore what this test overrode beyond the two server impls: leaving
-      // any of these mutated would make a later mounted-`App` test observe a
-      // networked tier or this test's plugin-only config, which is exactly the
-      // cross-test pollution this file's convention exists to avoid.
-      snapshotImpl = async () => snapshot;
-      networkSettingsImpl = async () => ({
-        server_url: "https://desk.example",
-        device_id: "desk-1",
-        tier: "local",
-      });
-      previewImpl = () =>
-        Promise.reject(new Error("renderCardPreview not configured for this test"));
-    }
-  });
-
-  /// A server that answers with a shape this app cannot read WAS reached, so
-  /// "Couldn't reach the server" would be a false sentence about it. The reachable
-  /// cause is the documented server-then-Mac rollout, so the notice names the fix
-  /// — and it is still the same one notice, with the same working "Try again".
-  test("a server older than this app gets its own true sentence", async () => {
-    snapshotImpl = async () => ({
-      ...snapshot,
-      device: { ...snapshot.device, tier: "networked" },
-      config: {
-        ...snapshot.config,
-        cards: [pluginCard("air")],
-        playlists: [
-          {
-            id: "workday",
-            name: "Workday",
-            advance: { kind: "timed" as const, default_dwell_seconds: 20 },
-            entries: [{ card_id: "air", dwell_seconds: null }],
-          },
-        ],
-        active_playlist_id: "workday",
-      },
-      providers: [],
-      pomodoros: [],
-      card_data: [],
-      card_errors: [],
-    });
-    networkSettingsImpl = async () => ({
-      server_url: "https://desk.example",
-      device_id: "desk-1",
-      tier: "networked",
-    });
-    previewImpl = async () => ({ png_base64: "cHJldmlldw==", sample: false, state: null });
-    let catalogCalls = 0;
-    serverPluginsImpl = async () => {
-      catalogCalls += 1;
-      if (catalogCalls === 1) {
-        throw {
-          category: "incompatible-server",
-          message: "the server returned a response this app could not read",
-        };
-      }
-      return {
-        plugins: [
-          {
-            id: "com.example.air-quality",
-            name: "aqi",
-            version: "1.0.0",
-            node_count: 7,
-            assets: [],
-            display_name: "Air quality",
-            description: "EPA index for a location",
-            manifest_version: 2,
-            template: "display-list" as const,
-            refresh_minutes: 15,
-          },
-        ],
-        load_failures: [],
-      };
-    };
-    serverCardStateImpl = async () => [];
-
-    const container = document.createElement("div");
-    document.body.appendChild(container);
-    const root = createRoot(container);
-    try {
-      await renderPreviewInto(root, <App />);
-      await waitFor(() => {
-        expect(container.textContent).toContain("Update the server to match this app.");
-      });
-      expect(container.textContent).not.toContain("Couldn't reach the server for plugin data.");
-
-      const retry = buttonWithText(container, "Try again");
-      expect(retry).toBeDefined();
-      await act(async () => retry?.click());
-      await waitFor(() => {
-        expect(container.textContent).not.toContain("Update the server to match this app.");
-        expect(container.textContent).toContain("Air quality");
-      });
-      expect(catalogCalls).toBe(2);
-    } finally {
-      await act(async () => root.unmount());
-      container.remove();
-      serverPluginsImpl = async () => ({ plugins: [], load_failures: [] });
-      serverCardStateImpl = async () => [];
-      snapshotImpl = async () => snapshot;
-      networkSettingsImpl = async () => ({
-        server_url: "https://desk.example",
-        device_id: "desk-1",
-        tier: "local",
-      });
-      previewImpl = () =>
-        Promise.reject(new Error("renderCardPreview not configured for this test"));
-    }
-  });
-
-  test("Try again re-polls card state, not only the catalog", async () => {
-    snapshotImpl = async () => ({
-      ...snapshot,
-      device: { ...snapshot.device, tier: "networked" },
-      config: {
-        ...snapshot.config,
-        cards: [pluginCard("air")],
-        playlists: [
-          {
-            id: "workday",
-            name: "Workday",
-            advance: { kind: "timed" as const, default_dwell_seconds: 20 },
-            entries: [{ card_id: "air", dwell_seconds: null }],
-          },
-        ],
-        active_playlist_id: "workday",
-      },
-      providers: [],
-      pomodoros: [],
-      card_data: [],
-      card_errors: [],
-    });
-    networkSettingsImpl = async () => ({
-      server_url: "https://desk.example",
-      device_id: "desk-1",
-      tier: "networked",
-    });
-    previewImpl = async () => ({ png_base64: "cHJldmlldw==", sample: false, state: null });
-    // The catalog read succeeds from the start: this test isolates the OTHER
-    // failure source, so a passing catalog can never be what clears the notice.
-    serverPluginsImpl = async () => ({
-      plugins: [
-        {
-          id: "com.example.air-quality",
-          name: "aqi",
-          version: "1.0.0",
-          node_count: 7,
-          assets: [],
-          display_name: "Air quality",
-          description: "EPA index for a location",
-          manifest_version: 2,
-          template: "display-list" as const,
-          refresh_minutes: 15,
-        },
-      ],
-      load_failures: [],
-    });
-    let cardStateCalls = 0;
-    serverCardStateImpl = async () => {
-      cardStateCalls += 1;
-      if (cardStateCalls === 1) {
-        throw { category: "runtime-unavailable", message: "runtime not ready" };
-      }
-      return [{ card_id: "air", provider: { kind: "fresh" as const }, hero: "42", errors: [] }];
-    };
-
-    const container = document.createElement("div");
-    document.body.appendChild(container);
-    const root = createRoot(container);
-    try {
-      await renderPreviewInto(root, <App />);
-      await waitFor(() => {
-        expect(container.textContent).toContain("Couldn't reach the server for plugin data.");
-      });
-      // Only the automatic poll on mount has run so far.
-      expect(cardStateCalls).toBe(1);
-
-      const retry = buttonWithText(container, "Try again");
-      expect(retry).toBeDefined();
-      await act(async () => retry?.click());
-      await waitFor(() => {
-        expect(container.textContent).not.toContain("Couldn't reach the server for plugin data.");
-        expect(container.querySelector(".card-tile__body .card-tile__value")?.textContent).toBe(
-          "42",
-        );
-      });
-      // A single click on a control that says "Try again" must retry BOTH server
-      // reads, since the reader cannot tell which one is the reason it is showing.
-      expect(cardStateCalls).toBe(2);
-    } finally {
-      await act(async () => root.unmount());
-      container.remove();
-      serverPluginsImpl = async () => ({ plugins: [], load_failures: [] });
-      serverCardStateImpl = async () => [];
-      snapshotImpl = async () => snapshot;
-      networkSettingsImpl = async () => ({
-        server_url: "https://desk.example",
-        device_id: "desk-1",
-        tier: "local",
-      });
-      previewImpl = () =>
-        Promise.reject(new Error("renderCardPreview not configured for this test"));
-    }
-  });
-
   test("names the editable title consistently across surviving card kinds", () => {
     const clockHtml = renderCardEditor(clockCard("clock-1", "Desk"));
     expect(clockHtml).toContain("<span>Name</span>");
     expect(clockHtml).not.toContain("<span>Heading</span>");
-    expect(renderCardEditor(pluginCard())).toContain("<span>Name</span>");
     expect(renderCardEditor(pictureCard())).toContain("<span>Name</span>");
   });
 
@@ -909,13 +590,7 @@ describe("settings accessibility and states", () => {
       <CardList
         config={config}
         issues={[]}
-        cardData={[]}
         pomodoros={[]}
-        providers={[]}
-        pluginKinds={[]}
-        catalog={null}
-        serverCardState={[]}
-        ownershipTier="networked"
         selectedCardId="internal-uuid-0001"
         onSelect={() => {}}
         onAdd={() => {}}
@@ -925,7 +600,6 @@ describe("settings accessibility and states", () => {
     );
     const loop = renderToStaticMarkup(
       <LoopRing
-        catalog={null}
         config={config}
         issues={[]}
         selectedCardId={null}
@@ -945,38 +619,6 @@ describe("settings accessibility and states", () => {
     expect(editor).toContain('id="editor-heading">Digital clock<');
   });
 
-  test("the ring legend calls a plugin card what every other surface calls it", () => {
-    const plugin = pluginCard();
-    const html = renderToStaticMarkup(
-      <LoopRing
-        config={cardListConfig([plugin])}
-        issues={[]}
-        catalog={{
-          plugins: [
-            {
-              id: "com.example.air-quality",
-              name: "aqi",
-              version: "1.0.0",
-              node_count: 7,
-              assets: [],
-              display_name: "Air quality",
-              description: null,
-              manifest_version: 2,
-              template: "display-list",
-              refresh_minutes: 15,
-            },
-          ],
-          load_failures: [],
-        }}
-        selectedCardId={plugin.id}
-        onSelect={() => {}}
-        onChange={() => {}}
-      />,
-    );
-    expect(html).toContain('class="loop__entry-name">Air quality<');
-    expect(html).toContain('class="loop__entry-title">Office air<');
-  });
-
   test("an untitled card is not labelled with its template twice", () => {
     // The quiet line is the owner's words, so it is absent rather than a repeat of
     // the label sitting directly above it.
@@ -988,13 +630,7 @@ describe("settings accessibility and states", () => {
       <CardList
         config={config}
         issues={[]}
-        cardData={[]}
         pomodoros={[]}
-        providers={[]}
-        pluginKinds={[]}
-        catalog={null}
-        serverCardState={[]}
-        ownershipTier="networked"
         selectedCardId={null}
         onSelect={() => {}}
         onAdd={() => {}}
@@ -1006,85 +642,13 @@ describe("settings accessibility and states", () => {
     expect(library).not.toContain("card-tile__name");
   });
 
-  test("a plugin tile is named, valued and flagged like any other complication", () => {
-    const plugin = pluginCard();
-    const catalog: PluginCatalog = {
-      plugins: [
-        {
-          id: "com.example.air-quality",
-          name: "aqi",
-          version: "1.0.0",
-          node_count: 7,
-          assets: [],
-          display_name: "Air quality",
-          description: "EPA index for a location",
-          manifest_version: 2,
-          template: "display-list",
-          refresh_minutes: 15,
-        },
-      ],
-      load_failures: [],
-    };
-    const render = (
-      cardCatalog: PluginCatalog | null,
-      serverCardState: ServerCardState[],
-      tier: "local" | "networked",
-    ) =>
-      renderToStaticMarkup(
-        <CardList
-          config={cardListConfig([plugin])}
-          issues={[]}
-          cardData={[]}
-          pomodoros={[]}
-          providers={[]}
-          pluginKinds={[]}
-          catalog={cardCatalog}
-          serverCardState={serverCardState}
-          ownershipTier={tier}
-          selectedCardId={plugin.id}
-          onSelect={() => {}}
-          onAdd={() => {}}
-          onChange={() => {}}
-          onRemove={() => {}}
-        />,
-      );
-
-    const live = render(
-      catalog,
-      [{ card_id: plugin.id, provider: { kind: "fresh" }, hero: "42", errors: [] }],
-      "networked",
-    );
-    expect(live).toContain('class="tile-label">Air quality<');
-    expect(live).toContain('<strong class="card-tile__value numeral">42</strong>');
-    expect(live).toContain('class="card-tile__name">Office air<');
-    expect(live).toContain('aria-label="Remove Air quality — Office air');
-    // Nothing on the tile says "plugin", and the wire id is still never shown.
-    expect(live).not.toContain(">Plugin<");
-    expect(live).not.toContain(plugin.id);
-
-    // No headline yet is an empty value, not a fault.
-    expect(render(catalog, [], "networked")).toContain(
-      '<strong class="card-tile__value numeral">—</strong>',
-    );
-    // The two flags, each beside the bare id it explains.
-    expect(render({ plugins: [], load_failures: [] }, [], "networked")).toContain(
-      '<span class="flag">not on the server</span>',
-    );
-    expect(render(catalog, [], "local")).toContain('<span class="flag">needs the server</span>');
-  });
-
   test("a picture tile leads with its template and names every entry control", () => {
     const picture = pictureCard();
     const html = renderToStaticMarkup(
       <CardList
         config={cardListConfig([picture])}
         issues={[]}
-        cardData={[]}
         pomodoros={[]}
-        providers={[]}
-        pluginKinds={[]}
-        catalog={null}
-        serverCardState={[]}
         ownershipTier="local"
         selectedCardId={picture.id}
         onSelect={() => {}}
@@ -1109,7 +673,7 @@ describe("settings accessibility and states", () => {
       token: "plaintext-once",
       push_url: "https://desk.example/v1/images/plaintext-once",
     };
-    const firstRender = renderCardEditor(picture, [], null, null, "networked", access);
+    const firstRender = renderCardEditor(picture, [], null, access);
 
     expect(firstRender).toContain('id="editor-heading">Picture<');
     expect(firstRender).toContain("Claude limits");
@@ -1125,70 +689,6 @@ describe("settings accessibility and states", () => {
     expect(laterRender).not.toContain("This plaintext token is shown once.");
   });
 
-  test("the add menu lists server plugins by display name, with description fallbacks", async () => {
-    let added: { pluginId: string; refreshMinutes: number } | null = null;
-    const container = document.createElement("div");
-    document.body.appendChild(container);
-    const root = createRoot(container);
-    try {
-      await act(async () =>
-        root.render(
-          <CardList
-            config={cardListConfig([clockCard("clock", "Desk")])}
-            issues={[]}
-            cardData={[]}
-            pomodoros={[]}
-            providers={[]}
-            pluginKinds={[
-              {
-                id: "aqi",
-                version: "1.0.0",
-                displayName: "Air quality",
-                description: "EPA index for a location",
-                onAdd: () => {
-                  added = { pluginId: "aqi", refreshMinutes: 15 };
-                },
-              },
-              {
-                id: "agenda",
-                version: "2.1.0",
-                displayName: null,
-                description: null,
-                onAdd: () => {},
-              },
-            ]}
-            catalog={null}
-            serverCardState={[]}
-            ownershipTier="networked"
-            selectedCardId={null}
-            onSelect={() => {}}
-            onAdd={() => {}}
-            onChange={() => {}}
-            onRemove={() => {}}
-          />,
-        ),
-      );
-      const slot = container.querySelector<HTMLButtonElement>(".card-tile__add");
-      await act(async () => slot?.click());
-      expect(container.textContent).toContain("Plugins on the server");
-      expect(container.textContent).toContain("Air quality");
-      expect(container.textContent).toContain("EPA index for a location");
-      // Both fallbacks: the id names it, "Plugin · <version>" describes it.
-      expect(container.textContent).toContain("agenda");
-      expect(container.textContent).toContain("Plugin · 2.1.0");
-
-      const row = [...container.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find(
-        (button) => button.textContent?.includes("Air quality"),
-      );
-      await act(async () => row?.click());
-      expect(added).toEqual({ pluginId: "aqi", refreshMinutes: 15 });
-      expect(container.querySelector('[role="menu"]')).toBeNull();
-    } finally {
-      await act(async () => root.unmount());
-      container.remove();
-    }
-  });
-
   test("the add menu creates a picture through its own server action", async () => {
     let pictureAdds = 0;
     const container = document.createElement("div");
@@ -1200,13 +700,7 @@ describe("settings accessibility and states", () => {
           <CardList
             config={cardListConfig([clockCard("clock", "Desk")])}
             issues={[]}
-            cardData={[]}
             pomodoros={[]}
-            providers={[]}
-            pluginKinds={[]}
-            catalog={null}
-            serverCardState={[]}
-            ownershipTier="networked"
             selectedCardId={null}
             onSelect={() => {}}
             onAdd={() => {}}
@@ -1248,7 +742,6 @@ describe("settings accessibility and states", () => {
       ...snapshot,
       config: cardListConfig([clock]),
       device: { ...snapshot.device, tier: "networked" },
-      providers: [],
       pomodoros: [],
       card_data: [],
       card_errors: [],
@@ -1279,7 +772,7 @@ describe("settings accessibility and states", () => {
         );
       });
       expect(coreInvocations).toContainEqual({
-        command: "get_server_plugins",
+        command: "mint_image_source",
         args: { sourceName: "Picture" },
       });
 
@@ -1300,335 +793,6 @@ describe("settings accessibility and states", () => {
       previewImpl = () =>
         Promise.reject(new Error("renderCardPreview not configured for this test"));
     }
-  });
-
-  test("the window names a plugin card from the catalog everywhere at once", async () => {
-    snapshotImpl = async () => ({
-      ...snapshot,
-      config: {
-        ...snapshot.config,
-        cards: [pluginCard("air")],
-        playlists: [
-          {
-            id: "workday",
-            name: "Workday",
-            advance: { kind: "timed" as const, default_dwell_seconds: 20 },
-            entries: [{ card_id: "air", dwell_seconds: null }],
-          },
-        ],
-        active_playlist_id: "workday",
-      },
-      device: { ...snapshot.device, tier: "networked" },
-      providers: [],
-      pomodoros: [],
-      card_data: [],
-      card_errors: [],
-    });
-    networkSettingsImpl = async () => ({
-      server_url: "https://desk.example",
-      device_id: "desk-1",
-      tier: "networked",
-    });
-    serverPluginsImpl = async () => ({
-      plugins: [
-        {
-          id: "com.example.air-quality",
-          name: "aqi",
-          version: "1.0.0",
-          node_count: 7,
-          assets: [],
-          display_name: "Air quality",
-          description: "EPA index for a location",
-          manifest_version: 2,
-          template: "display-list" as const,
-          refresh_minutes: 15,
-        },
-      ],
-      load_failures: [],
-    });
-    serverCardStateImpl = async () => [
-      { card_id: "air", provider: { kind: "fresh" as const }, hero: "42", errors: [] },
-    ];
-    previewImpl = async () => ({ png_base64: null, sample: false, state: null });
-
-    const container = document.createElement("div");
-    document.body.appendChild(container);
-    const root = createRoot(container);
-    try {
-      await renderPreviewInto(root, <App />);
-      await waitFor(() => {
-        expect(container.querySelector(".card-tile__value")?.textContent).toBe("42");
-      });
-      // Tile, legend and editor heading all say the same thing.
-      // Scoped to the card's own tile body: `.tile-label` is also the ring's
-      // "The loop" heading and its "Loop length" caption, both of which precede
-      // the card grid in document order.
-      expect(container.querySelector(".card-tile__body .tile-label")?.textContent).toBe(
-        "Air quality",
-      );
-      expect(container.querySelector(".loop__entry-name")?.textContent).toBe("Air quality");
-      expect(container.querySelector("#editor-heading")?.textContent).toBe("Air quality");
-      // And the menu offers it back.
-      const slot = container.querySelector<HTMLButtonElement>(".card-tile__add");
-      await act(async () => slot?.click());
-      expect(container.textContent).toContain("Plugins on the server");
-      const row = [...container.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find(
-        (button) => button.textContent?.includes("Air quality"),
-      );
-      await act(async () => row?.click());
-      await waitFor(() => {
-        expect(container.querySelectorAll(".card-tile__body")).toHaveLength(2);
-      });
-    } finally {
-      await act(async () => root.unmount());
-      container.remove();
-      serverPluginsImpl = async () => ({ plugins: [], load_failures: [] });
-      serverCardStateImpl = async () => [];
-      // Also restore what this test overrode beyond the two server impls — see the
-      // matching comment on the "unreachable server" test above.
-      snapshotImpl = async () => snapshot;
-      networkSettingsImpl = async () => ({
-        server_url: "https://desk.example",
-        device_id: "desk-1",
-        tier: "local",
-      });
-      previewImpl = () =>
-        Promise.reject(new Error("renderCardPreview not configured for this test"));
-    }
-  });
-
-  /// The realistic networked case, and the one every other test here skipped: no
-  /// cable, so `device.tier` is null and the persisted settings are the only
-  /// ownership fact. The Rust projector resolves ownership the same way this hook
-  /// does, so the overlay runs and the window shows a plugin card's freshness --
-  /// the `stale` flag on its tile and the trouble line in its editor -- exactly as
-  /// it does for a built-in card. Before that resolution matched, the hero
-  /// appeared and nothing else about the card's health ever did.
-  test("a plugin card shows its freshness with the cable out", async () => {
-    snapshotImpl = async () => ({
-      ...snapshot,
-      config: {
-        ...snapshot.config,
-        cards: [pluginCard("air")],
-        playlists: [
-          {
-            id: "workday",
-            name: "Workday",
-            advance: { kind: "timed" as const, default_dwell_seconds: 20 },
-            entries: [{ card_id: "air", dwell_seconds: null }],
-          },
-        ],
-        active_playlist_id: "workday",
-      },
-      // No cable: the live tier is unknown, which is the ordinary state of a
-      // networked Mac, not an edge case.
-      device: { ...snapshot.device, tier: null },
-      // What `ServerStateProjection` overlays once it resolves ownership from the
-      // persisted settings: the server's own provider state for this card, with no
-      // timestamps because `ServerCardState` carries none.
-      providers: [
-        {
-          widget_id: "air",
-          state: { kind: "stale" as const, message: "The air quality feed timed out." },
-          last_success_unix_ms: null,
-          age_seconds: null,
-        },
-      ],
-      pomodoros: [],
-      card_data: [],
-      card_errors: [],
-    });
-    networkSettingsImpl = async () => ({
-      server_url: "https://desk.example",
-      device_id: "desk-1",
-      tier: "networked",
-    });
-    serverPluginsImpl = async () => ({
-      plugins: [
-        {
-          id: "com.example.air-quality",
-          name: "aqi",
-          version: "1.0.0",
-          node_count: 7,
-          assets: [],
-          display_name: "Air quality",
-          description: "EPA index for a location",
-          manifest_version: 2,
-          template: "display-list" as const,
-          refresh_minutes: 15,
-        },
-      ],
-      load_failures: [],
-    });
-    serverCardStateImpl = async () => [
-      {
-        card_id: "air",
-        provider: { kind: "stale" as const, message: "The air quality feed timed out." },
-        hero: "42",
-        errors: [],
-      },
-    ];
-    previewImpl = async () => ({ png_base64: null, sample: false, state: null });
-
-    const container = document.createElement("div");
-    document.body.appendChild(container);
-    const root = createRoot(container);
-    try {
-      await renderPreviewInto(root, <App />);
-      await waitFor(() => {
-        expect(container.querySelector(".card-tile__value")?.textContent).toBe("42");
-      });
-      expect(container.querySelector(".card-tile__body .tile-label")?.textContent).toBe(
-        "Air quality",
-      );
-      expect(container.querySelector(".flag--stale")?.textContent).toBe("stale");
-      // One data note, in the selected card's editor, carrying the server's own
-      // sentence and the reason its Refresh cannot act.
-      const note = container.querySelector(".data-note")?.textContent;
-      expect(note).toContain("The air quality feed timed out.");
-      expect(note).toContain("This card refreshes on the server.");
-      const refresh = buttonWithText(container, "Refresh");
-      expect(refresh?.disabled).toBe(true);
-    } finally {
-      await act(async () => root.unmount());
-      container.remove();
-      serverPluginsImpl = async () => ({ plugins: [], load_failures: [] });
-      serverCardStateImpl = async () => [];
-      snapshotImpl = async () => snapshot;
-      networkSettingsImpl = async () => ({
-        server_url: "https://desk.example",
-        device_id: "desk-1",
-        tier: "local",
-      });
-      previewImpl = () =>
-        Promise.reject(new Error("renderCardPreview not configured for this test"));
-    }
-  });
-
-  test("the editor states immutable plugin identity, owns its issue, and is honest without a catalog", () => {
-    const plugin = pluginCard();
-    const catalog: PluginCatalog = {
-      plugins: [
-        {
-          id: "com.example.air-quality",
-          name: "aqi",
-          version: "1.0.0",
-          node_count: 7,
-          assets: [],
-          display_name: "Air quality",
-          description: "EPA index for a location",
-          manifest_version: 2,
-          template: "display-list",
-          refresh_minutes: 15,
-        },
-      ],
-      load_failures: [],
-    };
-
-    const editable = renderCardEditor(plugin, [], null, catalog);
-    expect(editable).toContain('id="editor-heading">Air quality<');
-    expect(editable).toContain("<span>Plugin</span>");
-    expect(editable).toContain("Air quality · 1.0.0");
-    expect(editable).toContain("com.example.air-quality");
-    expect(editable).toContain("<span>Name</span>");
-    const identity = editable.match(/<div class="field"><span>Plugin<\/span>(.*?)<\/div>/s)?.[1];
-    expect(identity).toBeDefined();
-    expect(identity).not.toContain("<select");
-    expect(identity).not.toContain("<input");
-    expect(identity).not.toContain("<button");
-
-    // A validation issue on the id stays attached to the identity row even though
-    // changing identity means adding a different card, not mutating this one.
-    const flagged = renderCardEditor(
-      plugin,
-      [
-        {
-          path: "cards[0].plugin_id",
-          code: "missing-reference",
-          message: "That plugin is not installed on the server.",
-        },
-      ],
-      null,
-      catalog,
-    );
-    expect(flagged).toContain("That plugin is not installed on the server.");
-
-    // An id the catalog lacks stays selected, and says so rather than resetting.
-    // This is a claim the app can actually back up (the catalog loaded and does
-    // not have it), so it must never appear when the catalog hasn't loaded at all.
-    const unknown = renderCardEditor(
-      { ...plugin, plugin_id: "com.example.gone" },
-      [],
-      null,
-      catalog,
-    );
-    expect(unknown).toContain("Not installed on the server");
-    expect(unknown).not.toContain("Needs the server to render");
-    expect(unknown).not.toContain("The plugin list comes from the server");
-
-    // No catalog: the reason says what the tier makes true and never claims the
-    // plugin is uninstalled — the app does not know that; it only cannot check.
-    const localHtml = renderCardEditor(plugin, [], null, null, "local");
-    const localIdentity = localHtml.match(
-      /<div class="field"><span>Plugin<\/span>(.*?)<\/div>/s,
-    )?.[1];
-    expect(localIdentity).not.toContain("<select");
-    expect(localHtml).toContain("Needs the server to render");
-    expect(localHtml).not.toContain("Not installed on the server");
-
-    const networkedNoCatalogHtml = renderCardEditor(plugin, [], null, null, "networked");
-    expect(networkedNoCatalogHtml).toContain("The plugin list comes from the server");
-    expect(networkedNoCatalogHtml).not.toContain("Not installed on the server");
-  });
-
-  test("a plugin card states the manifest's cadence and refuses a refresh it cannot do", () => {
-    const plugin = pluginCard();
-    const catalog: PluginCatalog = {
-      plugins: [
-        {
-          id: "com.example.air-quality",
-          name: "aqi",
-          version: "1.0.0",
-          node_count: 7,
-          assets: [],
-          display_name: "Air quality",
-          description: null,
-          manifest_version: 2,
-          template: "display-list",
-          refresh_minutes: 15,
-        },
-      ],
-      load_failures: [],
-    };
-    const html = renderToStaticMarkup(
-      <CardEditor
-        card={plugin}
-        config={cardListConfig([plugin])}
-        issues={[]}
-        entryIssues={[]}
-        cardError={null}
-        pomodoro={null}
-        provider={{
-          widget_id: plugin.id,
-          state: { kind: "stale", message: "Feed timed out after 10s" },
-          last_success_unix_ms: 1,
-          age_seconds: 5400,
-        }}
-        timerBusy={false}
-        providerRefreshing={false}
-        catalog={catalog}
-        ownershipTier="networked"
-        onChange={() => {}}
-        onConfigChange={() => {}}
-        onRemove={() => {}}
-        onTimerAction={() => {}}
-        onRefreshProvider={() => {}}
-      />,
-    );
-    expect(html).toContain("Feed timed out after 10s");
-    expect(html).toContain("This card refreshes on the server.");
-    expect(html).toMatch(/<button[^>]*disabled[^>]*>.*?Refresh/s);
-    expect(html).toContain("The server fetches this plugin every 15 minutes.");
   });
 
   test("never shows the wire id", () => {
@@ -1687,16 +851,11 @@ describe("settings accessibility and states", () => {
           ]}
           cardError={null}
           pomodoro={null}
-          provider={null}
           timerBusy={false}
-          providerRefreshing={false}
-          catalog={null}
-          ownershipTier="networked"
           onChange={() => {}}
           onConfigChange={setConfig}
           onRemove={() => {}}
           onTimerAction={() => {}}
-          onRefreshProvider={() => {}}
         />
       );
     }
@@ -1742,16 +901,11 @@ describe("settings accessibility and states", () => {
           entryIssues={entryIssues}
           cardError={null}
           pomodoro={null}
-          provider={null}
           timerBusy={false}
-          providerRefreshing={false}
-          catalog={null}
-          ownershipTier="networked"
           onChange={() => {}}
           onConfigChange={() => {}}
           onRemove={() => {}}
           onTimerAction={() => {}}
-          onRefreshProvider={() => {}}
         />,
       );
 
@@ -1793,13 +947,7 @@ describe("settings accessibility and states", () => {
       <CardList
         config={config}
         issues={[]}
-        cardData={[]}
         pomodoros={[]}
-        providers={[]}
-        pluginKinds={[]}
-        catalog={null}
-        serverCardState={[]}
-        ownershipTier="networked"
         selectedCardId="first-clock-id"
         onSelect={() => {}}
         onAdd={() => {}}
@@ -1840,13 +988,7 @@ describe("settings accessibility and states", () => {
       <CardList
         config={config}
         issues={[containerIssue, secondDwellIssue]}
-        cardData={[]}
         pomodoros={[]}
-        providers={[]}
-        pluginKinds={[]}
-        catalog={null}
-        serverCardState={[]}
-        ownershipTier="networked"
         selectedCardId={null}
         onSelect={() => {}}
         onAdd={() => {}}
@@ -1876,13 +1018,7 @@ describe("settings accessibility and states", () => {
       <CardList
         config={config}
         issues={[]}
-        cardData={[]}
         pomodoros={[]}
-        providers={[]}
-        pluginKinds={[]}
-        catalog={null}
-        serverCardState={[]}
-        ownershipTier="networked"
         selectedCardId={null}
         onSelect={() => {}}
         onAdd={() => {}}
@@ -1906,13 +1042,7 @@ describe("settings accessibility and states", () => {
       <CardList
         config={config}
         issues={[]}
-        cardData={[]}
         pomodoros={[]}
-        providers={[]}
-        pluginKinds={[]}
-        catalog={null}
-        serverCardState={[]}
-        ownershipTier="networked"
         selectedCardId={null}
         onSelect={() => {}}
         onAdd={() => {}}
@@ -1930,13 +1060,7 @@ describe("settings accessibility and states", () => {
       <CardList
         config={fullLoopWithOutsider}
         issues={[]}
-        cardData={[]}
         pomodoros={[]}
-        providers={[]}
-        pluginKinds={[]}
-        catalog={null}
-        serverCardState={[]}
-        ownershipTier="networked"
         selectedCardId={null}
         onSelect={() => {}}
         onAdd={() => {}}
@@ -1970,13 +1094,7 @@ describe("settings accessibility and states", () => {
           <CardList
             config={config}
             issues={[]}
-            cardData={[]}
             pomodoros={[]}
-            providers={[]}
-            pluginKinds={[]}
-            catalog={null}
-            serverCardState={[]}
-            ownershipTier="networked"
             selectedCardId={null}
             onSelect={() => {}}
             onAdd={() => {}}
@@ -2013,7 +1131,7 @@ describe("settings accessibility and states", () => {
    * Opening the menu focuses its first item, and focusing something inside a
    * scrolling column makes the browser scroll it into view. A menu that closed
    * on scroll therefore closed itself the instant it opened — visible only as
-   * "I picked a plugin and nothing happened", because by the time the pointer
+   * "I picked a card and nothing happened", because by the time the pointer
    * arrived there was nothing under it. It repositions instead.
    */
   /**
@@ -2041,13 +1159,7 @@ describe("settings accessibility and states", () => {
           <CardList
             config={config}
             issues={[]}
-            cardData={[]}
             pomodoros={[]}
-            providers={[]}
-            pluginKinds={[]}
-            catalog={null}
-            serverCardState={[]}
-            ownershipTier="networked"
             selectedCardId={null}
             onSelect={() => {}}
             onAdd={(kind) => added.push(kind)}
@@ -2091,13 +1203,7 @@ describe("settings accessibility and states", () => {
           <CardList
             config={config}
             issues={[]}
-            cardData={[]}
             pomodoros={[]}
-            providers={[]}
-            pluginKinds={[]}
-            catalog={null}
-            serverCardState={[]}
-            ownershipTier="networked"
             selectedCardId={null}
             onSelect={() => {}}
             onAdd={() => {}}
@@ -2136,13 +1242,7 @@ describe("settings accessibility and states", () => {
         <CardList
           config={config}
           issues={[]}
-          cardData={[]}
           pomodoros={[]}
-          providers={[]}
-          pluginKinds={[]}
-          catalog={null}
-          serverCardState={[]}
-          ownershipTier="networked"
           selectedCardId={selectedCardId}
           onSelect={setSelectedCardId}
           onAdd={(kind) => {
@@ -2165,7 +1265,6 @@ describe("settings accessibility and states", () => {
       await act(async () => slot?.click());
       expect(slot?.getAttribute("aria-expanded")).toBe("true");
       expect(container.querySelector('[role="menu"]')).not.toBeNull();
-      expect(container.textContent).not.toContain("Plugins on the server");
       const menuText = container.querySelector('[role="menu"]')?.textContent;
       expect(menuText).toContain("Digital clock");
       expect(menuText).toContain("Pomodoro");
@@ -2223,13 +1322,7 @@ describe("settings accessibility and states", () => {
           <CardList
             config={config}
             issues={[]}
-            cardData={[]}
             pomodoros={[]}
-            providers={[]}
-            pluginKinds={[]}
-            catalog={null}
-            serverCardState={[]}
-            ownershipTier="networked"
             selectedCardId={null}
             onSelect={() => {}}
             onAdd={() => {}}
@@ -2252,72 +1345,6 @@ describe("settings accessibility and states", () => {
     }
   });
 
-  test("menu arrow wrapping ignores stale refs after the option list shrinks", async () => {
-    const config = cardListConfig([clockCard("clock", "Desk")]);
-    let hidePlugin = () => {};
-    const container = document.createElement("div");
-    document.body.appendChild(container);
-    const root = createRoot(container);
-
-    function Harness() {
-      const [showPlugin, setShowPlugin] = useState(true);
-      hidePlugin = () => setShowPlugin(false);
-      return (
-        <CardList
-          config={config}
-          issues={[]}
-          cardData={[]}
-          pomodoros={[]}
-          providers={[]}
-          pluginKinds={
-            showPlugin
-              ? [
-                  {
-                    id: "status-plus",
-                    version: "1",
-                    displayName: null,
-                    description: "Plugin status",
-                    onAdd: () => {},
-                  },
-                ]
-              : []
-          }
-          catalog={null}
-          serverCardState={[]}
-          ownershipTier="networked"
-          selectedCardId={null}
-          onSelect={() => {}}
-          onAdd={() => {}}
-          onChange={() => {}}
-          onRemove={() => {}}
-        />
-      );
-    }
-
-    try {
-      await act(async () => root.render(<Harness />));
-      const slot = container.querySelector<HTMLButtonElement>(".card-tile__add");
-      await act(async () => slot?.click());
-      expect(container.querySelectorAll('[role="menuitem"]')).toHaveLength(4);
-      await act(async () => slot?.click());
-      await act(async () => hidePlugin());
-      await act(async () => slot?.click());
-
-      const currentItems = container.querySelectorAll<HTMLButtonElement>('[role="menuitem"]');
-      expect(currentItems).toHaveLength(3);
-      const firstItem = currentItems[0];
-      const lastItem = currentItems[currentItems.length - 1];
-      await act(async () =>
-        firstItem.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true })),
-      );
-      expect(lastItem.textContent).toContain("Picture");
-      expect(document.activeElement === lastItem).toBe(true);
-    } finally {
-      await act(async () => root.unmount());
-      container.remove();
-    }
-  });
-
   test("grid move buttons and Alt arrows update active-loop order", async () => {
     const config = cardListConfig([clockCard("first", "Desk"), clockCard("second", "Up next")]);
     let latest = config;
@@ -2332,13 +1359,7 @@ describe("settings accessibility and states", () => {
         <CardList
           config={value}
           issues={[]}
-          cardData={[]}
           pomodoros={[]}
-          providers={[]}
-          pluginKinds={[]}
-          catalog={null}
-          serverCardState={[]}
-          ownershipTier="networked"
           selectedCardId={null}
           onSelect={() => {}}
           onAdd={() => {}}
@@ -2425,13 +1446,7 @@ describe("settings accessibility and states", () => {
       <CardList
         config={config}
         issues={[]}
-        cardData={[]}
         pomodoros={[]}
-        providers={[]}
-        pluginKinds={[]}
-        catalog={null}
-        serverCardState={[]}
-        ownershipTier="networked"
         selectedCardId={null}
         onSelect={() => {}}
         onAdd={() => {}}
@@ -2466,13 +1481,7 @@ describe("settings accessibility and states", () => {
         <CardList
           config={value}
           issues={[]}
-          cardData={[]}
           pomodoros={[]}
-          providers={[]}
-          pluginKinds={[]}
-          catalog={null}
-          serverCardState={[]}
-          ownershipTier="networked"
           selectedCardId={null}
           onSelect={() => {}}
           onAdd={() => {}}
@@ -2520,13 +1529,7 @@ describe("settings accessibility and states", () => {
           <CardList
             config={config}
             issues={[]}
-            cardData={[]}
             pomodoros={[]}
-            providers={[]}
-            pluginKinds={[]}
-            catalog={null}
-            serverCardState={[]}
-            ownershipTier="networked"
             selectedCardId={null}
             onSelect={() => {}}
             onAdd={() => {}}
@@ -2567,13 +1570,7 @@ describe("settings accessibility and states", () => {
         <CardList
           config={config}
           issues={[]}
-          cardData={[]}
           pomodoros={[]}
-          providers={[]}
-          pluginKinds={[]}
-          catalog={null}
-          serverCardState={[]}
-          ownershipTier="networked"
           selectedCardId={null}
           onSelect={() => {}}
           onAdd={() => {}}
@@ -2631,13 +1628,7 @@ describe("settings accessibility and states", () => {
         <CardList
           config={config}
           issues={issues}
-          cardData={[]}
           pomodoros={[]}
-          providers={[]}
-          pluginKinds={[]}
-          catalog={null}
-          serverCardState={[]}
-          ownershipTier="networked"
           selectedCardId={null}
           onSelect={() => {}}
           onAdd={() => {}}
@@ -3031,60 +2022,6 @@ describe("settings accessibility and states", () => {
     }
   });
 
-  test("a feed in trouble is reported on its own card, not in a list of every feed", () => {
-    const troubled = snapshot.providers.find((provider) => provider.state.kind === "stale");
-    if (!troubled) {
-      throw new Error("fixture no longer carries a provider in trouble");
-    }
-    expect(providerTrouble(troubled)).toContain("Showing the last good data");
-    // A healthy provider is not news and says nothing at all.
-    expect(providerTrouble({ ...troubled, state: { kind: "fresh" } })).toBeNull();
-
-    const editor = renderToStaticMarkup(
-      <CardEditor
-        card={cards[0]}
-        config={cardListConfig([cards[0]])}
-        issues={[]}
-        entryIssues={[]}
-        cardError={null}
-        pomodoro={null}
-        provider={troubled}
-        timerBusy={false}
-        providerRefreshing={false}
-        catalog={null}
-        ownershipTier="networked"
-        onChange={() => {}}
-        onConfigChange={() => {}}
-        onRemove={() => {}}
-        onTimerAction={() => {}}
-        onRefreshProvider={() => {}}
-      />,
-    );
-    expect(editor).toContain("Showing the last good data");
-    expect(editor).toContain("Refresh");
-  });
-
-  test("a live SVG refusal is visible in the affected card editor, not mislabeled globally or stale", () => {
-    const refusal =
-      "this card needs the display to keep time:HH:mm moving between pushes, but the card is an SVG template, which no device draws natively; a server-rendered image of it would freeze, so it is refused instead — update the display’s firmware to show this card";
-    const editor = renderCardEditor(clockCard("clock-1", "Desk"), [], {
-      kind: "scene-refused",
-      card_id: "clock-1",
-      message: refusal,
-    });
-
-    expect(editor).toContain('class="panel"');
-    expect(editor).toContain("This card could not be rendered.");
-    expect(editor).toContain(refusal);
-    expect(editor).toContain("time:HH:mm");
-    expect(editor).toContain("would freeze");
-    expect(editor).toContain("Adjust the card and save to try again.");
-    expect(editor).toContain('role="alert"');
-    expect(editor).not.toContain("stale");
-    expect(editor).not.toContain("last working settings");
-    expect(editor).not.toContain("Transport error");
-  });
-
   test("the settings sheet carries the link and ownership facts the header used to", () => {
     const html = renderNetworkPanel({
       tier: "networked",
@@ -3160,7 +2097,7 @@ describe("settings accessibility and states", () => {
       sample: false,
       state: "Waiting for the first refresh",
     });
-    const { container, root } = await mountPreview(pluginCard("air"));
+    const { container, root } = await mountPreview(pictureCard());
     await waitFor(() => {
       expect(container.textContent).toContain("Waiting for the first refresh");
     });
@@ -3371,7 +2308,6 @@ describe("settings accessibility and states", () => {
   function renderLoopRing(config: AppConfig): string {
     return renderToStaticMarkup(
       <LoopRing
-        catalog={null}
         config={config}
         issues={[]}
         selectedCardId="first"
@@ -3409,7 +2345,6 @@ describe("settings accessibility and states", () => {
       latest = config;
       return (
         <LoopRing
-          catalog={null}
           config={config}
           issues={[
             {
@@ -3459,7 +2394,6 @@ describe("settings accessibility and states", () => {
       await act(async () =>
         root.render(
           <LoopRing
-            catalog={null}
             config={config}
             issues={[]}
             selectedCardId="first"
@@ -3487,7 +2421,6 @@ describe("settings accessibility and states", () => {
       latest = config;
       return (
         <LoopRing
-          catalog={null}
           config={config}
           issues={[]}
           selectedCardId="first"
@@ -3529,13 +2462,6 @@ describe("settings accessibility and states", () => {
     expect(html).not.toContain("draggable");
     expect(html).not.toContain("loop__moves");
     expect(html).not.toContain("Move Digital clock");
-  });
-
-  test("formats provider staleness without exposing raw timestamps", () => {
-    expect(formatProviderAge(null)).toBe("No successful refresh yet");
-    expect(formatProviderAge(30)).toBe("Updated just now");
-    expect(formatProviderAge(120)).toBe("Updated 2 min ago");
-    expect(formatProviderAge(7200)).toBe("Updated 2 hr ago");
   });
 
   test("an issue on a path no card, playlist, or preference surface claims (e.g. a missing-capability issue) is not silently dropped", () => {
@@ -3630,13 +2556,7 @@ describe("settings accessibility and states", () => {
       <CardList
         config={config}
         issues={issues}
-        cardData={[]}
         pomodoros={[]}
-        providers={[]}
-        pluginKinds={[]}
-        catalog={null}
-        serverCardState={[]}
-        ownershipTier="networked"
         selectedCardId={null}
         onSelect={() => {}}
         onAdd={() => {}}
@@ -3646,7 +2566,6 @@ describe("settings accessibility and states", () => {
     );
     const ring = renderToStaticMarkup(
       <LoopRing
-        catalog={null}
         config={config}
         issues={issues}
         selectedCardId="clock"
@@ -3674,16 +2593,6 @@ describe("settings accessibility and states", () => {
     expect(css).toContain("animation-duration: 0.001ms");
   });
 
-  test("each server read names its backend command exactly, and passes no arguments", async () => {
-    coreInvocations.length = 0;
-    expect(await realGetServerPlugins()).toEqual({ plugins: [], load_failures: [] });
-    expect(await realGetServerCardState()).toEqual([]);
-    expect(coreInvocations).toEqual([
-      { command: "get_server_plugins", args: undefined },
-      { command: "get_server_card_state", args: undefined },
-    ]);
-  });
-
   test("minting a picture source makes a server round trip with the source name", async () => {
     coreInvocations.length = 0;
 
@@ -3693,7 +2602,7 @@ describe("settings accessibility and states", () => {
       push_url: "https://desk.example/v1/images/plaintext-once",
     });
     expect(coreInvocations).toEqual([
-      { command: "get_server_plugins", args: { sourceName: "Picture" } },
+      { command: "mint_image_source", args: { sourceName: "Picture" } },
     ]);
   });
 });

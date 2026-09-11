@@ -24,16 +24,6 @@ use crate::{DesktopSnapshot, DesktopState, NetworkedConfigProjection};
 pub(crate) const MAX_SERVER_ERROR_BYTES: usize = 64 * 1_024;
 const MAX_IMAGE_SOURCE_MINT_BYTES: usize = 16 * 1_024;
 
-/// The device-status read's own bound, which must EXCEED
-/// [`app_core::MAX_CONFIG_FILE_BYTES`] rather than match it: `GET
-/// /v1/devices/{id}` embeds the device's whole `AppConfig`, itself legal right up
-/// to that limit, and then wraps it in a snapshot of providers, card data and card
-/// errors. Sharing the 64 KiB error-body bound made a near-maximal config a
-/// permanent "oversized response" -- a card-state poll that could never succeed,
-/// reported with the same notice an unreachable server gets. Expressed as a
-/// multiple so the relationship survives someone editing either number.
-pub(crate) const MAX_SERVER_DEVICE_STATUS_BYTES: usize = 8 * MAX_CONFIG_FILE_BYTES;
-
 /// The draft travels as a bounded JSON envelope so an IPC caller cannot make serde
 /// allocate an arbitrarily deep application document before domain validation runs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -132,17 +122,6 @@ impl ServerQueryContext {
     }
 }
 
-fn fetch_server_plugins(
-    context: &ServerQueryContext,
-) -> Result<app_core::admin::PluginCatalog, IpcError> {
-    let settings = context.network_store.load().settings().clone();
-    let url =
-        crate::server_client::server_url(&settings.server_url, &["v1", "plugins"])?.to_string();
-    context.with_admin_token(|token| {
-        crate::server_client::get_server_json(&context.agent, &url, token, MAX_SERVER_ERROR_BYTES)
-    })
-}
-
 #[derive(Serialize)]
 #[serde(deny_unknown_fields)]
 struct MintImageSourceRequest<'a> {
@@ -164,13 +143,6 @@ pub struct MintedImageSource {
     source_id: String,
     token: String,
     push_url: String,
-}
-
-#[derive(Serialize)]
-#[serde(untagged)]
-pub enum PluginCatalogOrMintedImageSource {
-    Catalog(app_core::admin::PluginCatalog),
-    Minted(MintedImageSource),
 }
 
 fn mint_server_image_source(
@@ -231,71 +203,6 @@ fn mint_server_image_source(
     })
 }
 
-fn fetch_server_card_state(context: &ServerQueryContext) -> Result<Vec<ServerCardState>, IpcError> {
-    let settings = context.network_store.load().settings().clone();
-    validate_target(&settings.device_id, MAX_DEVICE_ID_LEN, "device ID")?;
-    let url = crate::server_client::server_url(
-        &settings.server_url,
-        &["v1", "devices", &settings.device_id],
-    )?
-    .to_string();
-    let status: ServerDeviceStatus = context.with_admin_token(|token| {
-        crate::server_client::get_server_json(
-            &context.agent,
-            &url,
-            token,
-            MAX_SERVER_DEVICE_STATUS_BYTES,
-        )
-    })?;
-    Ok(project_server_card_state(&status))
-}
-
-/// The tier decides where a server-rendered card's face comes from, and it decides
-/// first: in local tier there is no server host, so this returns the kind-specific
-/// sentence without opening a socket. Only in networked tier is a request made,
-/// and only then can a 404 be read as `SERVER_PREVIEW_UNAVAILABLE`.
-fn server_card_preview(
-    context: &ServerQueryContext,
-    tier: Option<app_core::DeviceTier>,
-    card_id: &str,
-    local_state: &str,
-) -> Result<PreviewFrame, IpcError> {
-    validate_target(card_id, MAX_WIDGET_ID_LEN, "card ID")?;
-    let settings = context.network_store.load().settings().clone();
-    if save_destination(tier, &settings) != SaveDestination::Server {
-        return Ok(unrendered_server_frame(local_state));
-    }
-    validate_target(&settings.device_id, MAX_DEVICE_ID_LEN, "device ID")?;
-    let url = crate::server_client::server_url(
-        &settings.server_url,
-        &[
-            "v1",
-            "devices",
-            &settings.device_id,
-            "cards",
-            card_id,
-            "preview",
-        ],
-    )?
-    .to_string();
-    let response = context.with_admin_token(|token| {
-        crate::server_client::get_server_json::<app_core::admin::CardPreviewResponse>(
-            &context.agent,
-            &url,
-            token,
-            crate::server_client::MAX_SERVER_PREVIEW_BYTES,
-        )
-    });
-    match response {
-        Ok(response) => Ok(server_preview_frame(response)),
-        // Spec section 10: additive routes fail closed. What a 404 means beyond
-        // "no preview came back" is not knowable here, so the sentence does not
-        // guess -- see `SERVER_PREVIEW_UNAVAILABLE`.
-        Err(IpcError::NotFound { .. }) => Ok(unrendered_server_frame(SERVER_PREVIEW_UNAVAILABLE)),
-        Err(error) => Err(error),
-    }
-}
-
 async fn on_server_worker<T: Send + 'static>(
     work: impl FnOnce() -> Result<T, IpcError> + Send + 'static,
 ) -> Result<T, IpcError> {
@@ -307,30 +214,12 @@ async fn on_server_worker<T: Send + 'static>(
 }
 
 #[tauri::command]
-pub async fn get_server_plugins(
+pub async fn mint_image_source(
     state: State<'_, DesktopState>,
-    source_name: Option<String>,
-) -> Result<PluginCatalogOrMintedImageSource, IpcError> {
+    source_name: String,
+) -> Result<MintedImageSource, IpcError> {
     let context = ServerQueryContext::from_desktop(&state);
-    on_server_worker(move || match source_name {
-        Some(name) => {
-            mint_server_image_source(&context, &name).map(PluginCatalogOrMintedImageSource::Minted)
-        }
-        None => fetch_server_plugins(&context).map(PluginCatalogOrMintedImageSource::Catalog),
-    })
-    .await
-}
-
-#[tauri::command]
-pub async fn get_server_card_state(
-    state: State<'_, DesktopState>,
-) -> Result<Vec<ServerCardState>, IpcError> {
-    let context = ServerQueryContext::from_desktop(&state);
-    let states = on_server_worker(move || fetch_server_card_state(&context)).await?;
-    // The snapshot stream is what a tile actually reads, so a successful poll
-    // updates the projection before it answers the caller.
-    state.server_card_state.replace(states.clone())?;
-    Ok(states)
+    on_server_worker(move || mint_server_image_source(&context, &source_name)).await
 }
 
 struct ServerSaveContext {
@@ -388,85 +277,6 @@ pub struct PreviewFrame {
     pub state: Option<String>,
 }
 
-/// The server's view of one server-rendered card, projected onto the Mac's snapshot
-/// so its tile carries the same value, freshness and error copy a built-in does.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ServerCardState {
-    pub card_id: String,
-    pub provider: app_core::ProviderState,
-    pub hero: Option<String>,
-    pub errors: Vec<app_core::CardError>,
-}
-
-/// Deliberately partial. `AdminSnapshot` injects `last_ota_error` and
-/// `observed_age_seconds` into `device` after serialization, so parsing the whole
-/// `AppSnapshot` back would couple this app to a shape only the server writes.
-/// These four collections are all a server-rendered tile needs.
-#[derive(Deserialize)]
-pub(crate) struct ServerDeviceStatus {
-    snapshot: Option<ServerRuntimeSnapshot>,
-}
-
-#[derive(Deserialize)]
-struct ServerRuntimeSnapshot {
-    config: ServerSnapshotConfig,
-    providers: Vec<app_core::ProviderSnapshot>,
-    card_data: Vec<app_core::CardDataSnapshot>,
-    card_errors: Vec<app_core::CardError>,
-}
-
-#[derive(Deserialize)]
-struct ServerSnapshotConfig {
-    cards: Vec<CardSettings>,
-}
-
-fn project_server_card_state(status: &ServerDeviceStatus) -> Vec<ServerCardState> {
-    let Some(snapshot) = status.snapshot.as_ref() else {
-        return Vec::new();
-    };
-    snapshot
-        .config
-        .cards
-        .iter()
-        .filter(|card| {
-            matches!(
-                card,
-                CardSettings::Plugin { .. } | CardSettings::Picture { .. }
-            )
-        })
-        .map(|card| {
-            let card_id = card.id();
-            ServerCardState {
-                card_id: card_id.to_owned(),
-                provider: snapshot
-                    .providers
-                    .iter()
-                    .find(|provider| provider.widget_id == card_id)
-                    .map_or(app_core::ProviderState::Idle, |provider| {
-                        provider.state.clone()
-                    }),
-                // The summary the manifest declares arrives as `hero`; a non-text
-                // value is not a headline, so it is not shown as one.
-                hero: snapshot
-                    .card_data
-                    .iter()
-                    .find(|data| data.card_id == card_id)
-                    .and_then(|data| data.fields.iter().find(|field| field.key == "hero"))
-                    .and_then(|field| match &field.value {
-                        CardFieldValue::Text { value } => Some(value.clone()),
-                        CardFieldValue::Integer { .. } | CardFieldValue::Boolean { .. } => None,
-                    }),
-                errors: snapshot
-                    .card_errors
-                    .iter()
-                    .filter(|error| error.card_id == card_id)
-                    .cloned()
-                    .collect(),
-            }
-        })
-        .collect()
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "category", rename_all = "kebab-case")]
 pub enum IpcError {
@@ -507,9 +317,6 @@ pub enum IpcError {
     Device {
         message: String,
     },
-    Provider {
-        message: String,
-    },
     Autostart {
         message: String,
     },
@@ -540,7 +347,6 @@ impl std::fmt::Display for IpcError {
             | Self::IncompatibleServer { message }
             | Self::NotFound { message }
             | Self::Device { message }
-            | Self::Provider { message }
             | Self::Autostart { message }
             | Self::Window { message }
             | Self::Internal { message }
@@ -563,7 +369,6 @@ impl IpcError {
             Self::IncompatibleServer { .. } => "incompatible-server",
             Self::NotFound { .. } => "not-found",
             Self::Device { .. } => "device",
-            Self::Provider { .. } => "provider",
             Self::Autostart { .. } => "autostart",
             Self::Window { .. } => "window",
             Self::Internal { .. } => "internal",
@@ -582,7 +387,6 @@ impl IpcError {
             | Self::IncompatibleServer { message }
             | Self::NotFound { message }
             | Self::Device { message }
-            | Self::Provider { message }
             | Self::Autostart { message }
             | Self::Window { message }
             | Self::Internal { message }
@@ -961,11 +765,9 @@ fn save_destination(
 ///
 /// `resolveDeviceTier` in `useAppState.ts` is its TypeScript twin and must keep
 /// answering the same way. Everything that depends on ownership -- where a save
-/// goes, whether a preview asks the server, and whether the snapshot projector
-/// overlays the server's plugin card state -- reads this one answer, because two
-/// resolutions disagreeing is exactly the defect the projector had: the ordinary
-/// networked case (cable out, so `device.tier` is `None`) routed saves to the
-/// server while the projector treated the display as possibly local.
+/// goes and whether the networked config projection applies -- reads this one
+/// answer. Two resolutions disagreeing once let an unplugged network-owned display
+/// route saves to the server while the projection treated it as possibly local.
 pub(crate) fn resolved_device_tier(
     tier: Option<app_core::DeviceTier>,
     settings: &NetworkSettings,
@@ -1002,18 +804,6 @@ pub fn control_pomodoro(
 }
 
 #[tauri::command]
-pub fn refresh_provider(
-    state: State<'_, DesktopState>,
-    target: WidgetTarget,
-) -> Result<(), IpcError> {
-    validate_target(&target.widget_id, MAX_WIDGET_ID_LEN, "widget ID")?;
-    state
-        .runtime
-        .refresh_provider(target.widget_id)
-        .map_err(IpcError::from)
-}
-
-#[tauri::command]
 pub fn get_autostart_status(
     app: AppHandle,
     state: State<'_, DesktopState>,
@@ -1042,11 +832,8 @@ pub fn set_autostart_enabled(
 /// so the settings UI can badge it, without the renderer itself lying about what it
 /// drew.
 ///
-/// Plugin and picture cards are the two kinds this simulator cannot draw: neither has
-/// a `DisplayTemplate`. One comes from a manifest-compiled scene and the other from
-/// a pushed frame; the server rasterizes both. Those previews are fetched rather than
-/// rendered, which is why this command is `async` -- the fetch runs on a blocking worker,
-/// never on the thread that would otherwise stall the settings window for the agent's timeout.
+/// Picture cards have no `DisplayTemplate`: their frame is pushed by the external
+/// producer and is not reconstructed by this simulator.
 #[tauri::command]
 pub async fn render_card_preview(
     state: State<'_, DesktopState>,
@@ -1063,19 +850,8 @@ pub async fn render_card_preview(
             message: format!("no card with id {card_id:?}"),
         })?;
 
-    let server_rendered_state = match card {
-        CardSettings::Clock { .. } | CardSettings::Pomodoro { .. } => None,
-        CardSettings::Plugin { .. } => Some(PLUGIN_RENDERS_ON_THE_SERVER),
-        CardSettings::Picture { .. } => Some(PICTURE_RENDERS_ON_THE_SERVER),
-    };
-    if let Some(local_state) = server_rendered_state {
-        let context = ServerQueryContext::from_desktop(&state);
-        let tier = snapshot.device.tier;
-        let requested = card_id.clone();
-        return on_server_worker(move || {
-            server_card_preview(&context, tier, &requested, local_state)
-        })
-        .await;
+    if matches!(card, CardSettings::Picture { .. }) {
+        return Ok(unrendered_server_frame(PICTURE_PREVIEW_IS_PUSH_ONLY));
     }
 
     let template = preview_template_for(card, &card_id)?;
@@ -1141,13 +917,12 @@ fn preview_orientation(configured: DisplayOrientation) -> lvgl_sim::SimOrientati
 /// rest of the app accepts; there is no "unknown template" branch to fall back from.
 /// Resolves the preview simulator's `SimTemplate` for one card, or a typed refusal.
 ///
-/// A plugin or picture card has no `DisplayTemplate`: it renders on the server,
-/// not from any of the six built-in templates this preview simulator knows how to
-/// draw. `render_card_preview` sends both kinds to `server_card_preview` before
-/// reaching here, so this arm is a GUARD, not a path
+/// A picture card has no `DisplayTemplate`: it is a pushed frame, not one of the
+/// six built-in templates this preview simulator knows how to draw.
+/// `render_card_preview` handles it before reaching here, so this arm is a GUARD
 /// -- kept, and typed, so a future caller that forgets that routing is refused
 /// visibly (mirroring `runtime.rs`'s `SceneRefused` handling for the same absence)
-/// instead of silently drawing a plugin card as some unrelated built-in face.
+/// instead of silently drawing a picture card as some unrelated built-in face.
 fn preview_template_for(
     card: &CardSettings,
     card_id: &str,
@@ -1185,52 +960,14 @@ fn sim_field(field: &CardField) -> lvgl_sim::SimField {
     }
 }
 
-/// Chosen from the tier the Mac already knows, before any socket is opened: in
-/// local tier there is no server to render on and this app has no plugin host.
-pub(crate) const PLUGIN_RENDERS_ON_THE_SERVER: &str = "Plugin cards render on the server";
-
-/// The picture-specific local-tier sentence. Reusing the plugin sentence would make
-/// the stage call this card something it is not.
-pub(crate) const PICTURE_RENDERS_ON_THE_SERVER: &str = "Picture cards render on the server";
-
-/// Chosen only after a networked-tier request came back 404.
-///
-/// Four different things answer 404 on this route -- a server built before it
-/// exists, an unknown device, an unknown card, and a card that is not a plugin
-/// card -- and the status code carries nothing that tells them apart. So the
-/// sentence states what was observed and asserts no cause. It said "Plugin
-/// previews need a newer server" until the whole-branch review, which was a
-/// guess three quarters of the time.
-pub(crate) const SERVER_PREVIEW_UNAVAILABLE: &str = "The server has no preview for this card";
+pub(crate) const PICTURE_PREVIEW_IS_PUSH_ONLY: &str =
+    "Picture cards show the last frame pushed by their source";
 
 fn unrendered_server_frame(state: &str) -> PreviewFrame {
     PreviewFrame {
         png_base64: None,
         sample: false,
         state: Some(state.to_owned()),
-    }
-}
-
-/// Section 4.2 promises `png_base64` exactly when the state is `fresh` or `stale`
-/// and `message` exactly when it is `error` or `waiting`. This keys off the frame
-/// rather than the word, so a server that breaks that invariant still produces a
-/// stage that is either an image or a sentence, never a blank black rectangle.
-fn server_preview_frame(response: app_core::admin::CardPreviewResponse) -> PreviewFrame {
-    match response.png_base64 {
-        Some(png_base64) => PreviewFrame {
-            png_base64: Some(png_base64),
-            sample: false,
-            state: None,
-        },
-        None => PreviewFrame {
-            png_base64: None,
-            sample: false,
-            state: Some(
-                response
-                    .message
-                    .unwrap_or_else(|| "The server sent no preview for this card".to_owned()),
-            ),
-        },
     }
 }
 
@@ -1281,8 +1018,8 @@ pub(crate) fn set_autostart(
         return Err(error);
     }
 
-    // This preference has no layout or provider effect, so update it without replacing
-    // live pomodoro/provider state.
+    // This preference has no layout effect, so update it without replacing live
+    // pomodoro state.
     state
         .runtime
         .set_autostart_preference(enabled)
@@ -1671,17 +1408,16 @@ impl From<RuntimeError> for IpcError {
                     message: error.to_string(),
                 }
             }
-            RuntimeError::UnknownWidget { .. }
-            | RuntimeError::UnknownScreen { .. }
-            | RuntimeError::UnknownCard { .. }
-            | RuntimeError::NotAPluginCard { .. } => Self::NotFound {
-                message: error.to_string(),
-            },
+            RuntimeError::UnknownWidget { .. } | RuntimeError::UnknownScreen { .. } => {
+                Self::NotFound {
+                    message: error.to_string(),
+                }
+            }
             RuntimeError::DeviceDisconnected => Self::Device {
                 message: "device is disconnected".into(),
             },
             RuntimeError::Device { message } => Self::Device { message },
-            RuntimeError::Provider { message } => Self::Provider { message },
+            RuntimeError::ImageSource { message } => Self::RuntimeUnavailable { message },
         }
     }
 }
@@ -1734,10 +1470,10 @@ pub(crate) mod tests {
         CURRENT_SCHEMA_VERSION, CardAlert, CardDataSnapshot, CardError, CardErrorKind, CardField,
         CardFieldValue, CardSettings, CarouselAdvance, ConnectionState, DeviceCapability,
         DeviceCounters, DeviceSnapshot, DisplayOrientation, DisplayTemplate, IconGlyphMapping,
-        PersistenceState, Playlist, PlaylistEntry, PomodoroSnapshot, PomodoroState,
-        ProviderSnapshot, ProviderState, RefreshPolicy, RuntimeDiagnostics, RuntimeError,
-        RuntimeState, SAVED_SETTINGS_VALIDATION_FAILURE_MESSAGE, StoreWarning, UpdateChannel,
-        UpdateCheckPolicy, UpdaterSettings, ValidationCode, WidgetTapAction,
+        PersistenceState, Playlist, PlaylistEntry, PomodoroSnapshot, PomodoroState, RefreshPolicy,
+        RuntimeDiagnostics, RuntimeError, RuntimeState, SAVED_SETTINGS_VALIDATION_FAILURE_MESSAGE,
+        StoreWarning, UpdateChannel, UpdateCheckPolicy, UpdaterSettings, ValidationCode,
+        WidgetTapAction,
     };
     use serde::Serialize;
 
@@ -1847,15 +1583,15 @@ pub(crate) mod tests {
     /// face at random.
     #[test]
     fn preview_template_for_a_server_rendered_card_is_a_typed_unsupported_refusal() {
-        let card = CardSettings::Plugin {
-            id: "aqi".into(),
-            title: "Air quality".into(),
-            plugin_id: "aqi".into(),
+        let card = CardSettings::Picture {
+            id: "picture".into(),
+            title: "Picture".into(),
+            source_id: "source".into(),
             tap_action: WidgetTapAction::None,
-            refresh: RefreshPolicy::Interval { minutes: 15 },
+            refresh: RefreshPolicy::Manual,
             alert: CardAlert::None,
         };
-        let error = preview_template_for(&card, "aqi").unwrap_err();
+        let error = preview_template_for(&card, "picture").unwrap_err();
         assert!(
             matches!(error, IpcError::Unsupported { ref message } if message.contains("server-rendered")),
             "expected IpcError::Unsupported naming the server-rendered card, got {error:?}"
@@ -2104,10 +1840,10 @@ pub(crate) mod tests {
             IpcError::NotFound { .. }
         ));
         assert!(matches!(
-            IpcError::from(RuntimeError::Provider {
+            IpcError::from(RuntimeError::ImageSource {
                 message: "offline".into()
             }),
-            IpcError::Provider { .. }
+            IpcError::RuntimeUnavailable { .. }
         ));
         assert!(matches!(
             IpcError::from(RuntimeError::DeviceDisconnected),
@@ -2675,7 +2411,6 @@ pub(crate) mod tests {
         device_capabilities: Vec<DeviceCapability>,
         runtime_states: Vec<RuntimeState>,
         connection_states: Vec<ConnectionState>,
-        provider_states: Vec<ProviderState>,
         pomodoro_states: Vec<PomodoroState>,
         card_data: Vec<CardDataSnapshot>,
         persistence_states: Vec<PersistenceState>,
@@ -2685,8 +2420,6 @@ pub(crate) mod tests {
         draft_validation: DraftValidation,
         config_apply_result: ConfigApplyResult,
         autostart_status: AutostartStatus,
-        plugin_catalog: app_core::admin::PluginCatalog,
-        server_card_state: Vec<ServerCardState>,
         preview_frame: PreviewFrame,
     }
 
@@ -2694,7 +2427,6 @@ pub(crate) mod tests {
         match card {
             CardSettings::Clock { .. } => "clock",
             CardSettings::Pomodoro { .. } => "pomodoro",
-            CardSettings::Plugin { .. } => "plugin",
             CardSettings::Picture { .. } => "picture",
         }
     }
@@ -2727,14 +2459,6 @@ pub(crate) mod tests {
                     hold: AlertHold::UntilDismissed,
                 },
             },
-            CardSettings::Plugin {
-                id: "air-quality".into(),
-                title: "Office air".into(),
-                plugin_id: "com.example.air-quality".into(),
-                tap_action: WidgetTapAction::None,
-                refresh: RefreshPolicy::Interval { minutes: 15 },
-                alert: CardAlert::None,
-            },
             CardSettings::Picture {
                 id: "limits-picture".into(),
                 title: "Limits".into(),
@@ -2755,7 +2479,7 @@ pub(crate) mod tests {
                 dwell_seconds: Some(20),
             },
             PlaylistEntry {
-                card_id: "air-quality".into(),
+                card_id: "limits-picture".into(),
                 dwell_seconds: None,
             },
         ];
@@ -2794,7 +2518,7 @@ pub(crate) mod tests {
             updater: UpdaterSettings::default(),
         };
         let card_data = vec![CardDataSnapshot {
-            card_id: "air-quality".into(),
+            card_id: "limits-picture".into(),
             fields: vec![
                 CardField {
                     key: "summary".into(),
@@ -2851,14 +2575,6 @@ pub(crate) mod tests {
                         detected_event_gaps: 13,
                     },
                 },
-                providers: vec![ProviderSnapshot {
-                    widget_id: "air-quality".into(),
-                    state: ProviderState::Stale {
-                        message: "offline".into(),
-                    },
-                    last_success_unix_ms: Some(1_786_000_000_000),
-                    age_seconds: Some(120),
-                }],
                 pomodoros: vec![PomodoroSnapshot {
                     widget_id: "pomodoro".into(),
                     state: PomodoroState::Running,
@@ -2868,7 +2584,7 @@ pub(crate) mod tests {
                 card_data: card_data.clone(),
                 card_errors: vec![CardError {
                     kind: CardErrorKind::DataRefused,
-                    card_id: "air-quality".into(),
+                    card_id: "limits-picture".into(),
                     message:
                         "the display refused this card's data (InvalidPayload): invalid push data"
                             .into(),
@@ -2880,9 +2596,6 @@ pub(crate) mod tests {
                 diagnostics: RuntimeDiagnostics {
                     commands_processed: 1,
                     command_queue_full: 2,
-                    provider_jobs_started: 3,
-                    provider_queue_full: 4,
-                    provider_results_discarded: 5,
                     subscriber_snapshots_overwritten: 6,
                     interrupt_dismissals_ignored: 7,
                 },
@@ -2901,17 +2614,6 @@ pub(crate) mod tests {
             ConnectionState::Connecting,
             ConnectionState::Online,
             ConnectionState::Standalone,
-        ];
-        let provider_states = vec![
-            ProviderState::Idle,
-            ProviderState::Refreshing,
-            ProviderState::Fresh,
-            ProviderState::Stale {
-                message: "stale".into(),
-            },
-            ProviderState::Error {
-                message: "error".into(),
-            },
         ];
         let pomodoro_states = vec![
             PomodoroState::Idle,
@@ -2979,9 +2681,6 @@ pub(crate) mod tests {
             },
             IpcError::Device {
                 message: "device".into(),
-            },
-            IpcError::Provider {
-                message: "provider".into(),
             },
             IpcError::Autostart {
                 message: "autostart".into(),
@@ -3067,7 +2766,6 @@ pub(crate) mod tests {
             device_capabilities: DeviceCapability::from_bits(DeviceCapability::known_bits()),
             runtime_states,
             connection_states,
-            provider_states,
             pomodoro_states,
             card_data,
             persistence_states,
@@ -3091,39 +2789,6 @@ pub(crate) mod tests {
                 enabled: true,
                 preference_enabled: false,
             },
-            plugin_catalog: app_core::admin::PluginCatalog {
-                plugins: vec![app_core::admin::PluginCatalogEntry {
-                    id: "aqi".into(),
-                    name: "aqi".into(),
-                    version: "1.0.0".into(),
-                    node_count: 4,
-                    assets: vec![app_core::admin::PluginCatalogAsset {
-                        file: "icons.ttf".into(),
-                        kind: "icon-font".into(),
-                        byte_length: 40_960,
-                        digest: "0f1e2d3c".into(),
-                    }],
-                    display_name: Some("Air quality".into()),
-                    description: Some("EPA index for a location".into()),
-                    manifest_version: 2,
-                    template: app_core::admin::PluginTemplateKind::DisplayList,
-                    refresh_minutes: 15,
-                }],
-                load_failures: vec![app_core::admin::PluginLoadFailure {
-                    id: "broken".into(),
-                    error: "unknown key \"summry\"".into(),
-                }],
-            },
-            server_card_state: vec![ServerCardState {
-                card_id: "air-quality".into(),
-                provider: ProviderState::Fresh,
-                hero: Some("42".into()),
-                errors: vec![CardError {
-                    kind: CardErrorKind::SceneRefused,
-                    card_id: "air-quality".into(),
-                    message: "no snapshot cached yet".into(),
-                }],
-            }],
             preview_frame: PreviewFrame {
                 png_base64: Some("iVBORw0KGgo=".into()),
                 sample: true,
@@ -3139,199 +2804,19 @@ pub(crate) mod tests {
             .iter()
             .map(contract_card_kind)
             .collect::<Vec<_>>();
-        assert_eq!(kinds, ["clock", "pomodoro", "plugin", "picture"]);
+        assert_eq!(kinds, ["clock", "pomodoro", "picture"]);
     }
 
     #[test]
-    fn every_server_preview_outcome_maps_to_one_stage_state() {
-        use app_core::admin::{CardPreviewResponse, CardPreviewState};
-
-        let rendered = server_preview_frame(CardPreviewResponse {
-            png_base64: Some("iVBORw0KGgo=".into()),
-            state: CardPreviewState::Stale,
-            message: None,
-            refreshed_at_unix_ms: Some(1_787_000_000_000),
-        });
+    fn a_picture_preview_explains_that_the_source_owns_the_frame() {
         assert_eq!(
-            rendered,
-            PreviewFrame {
-                png_base64: Some("iVBORw0KGgo=".into()),
-                sample: false,
-                state: None,
-            }
-        );
-
-        // `sample` means "a real frame rendered, from an empty field set" -- it is
-        // what puts the "No data yet" badge on a drawn image. A waiting plugin card
-        // has no frame at all, so it is NOT sample: it prints the state sentence.
-        let waiting = server_preview_frame(CardPreviewResponse {
-            png_base64: None,
-            state: CardPreviewState::Waiting,
-            message: Some("Waiting for the first refresh".into()),
-            refreshed_at_unix_ms: None,
-        });
-        assert_eq!(
-            waiting,
+            unrendered_server_frame(PICTURE_PREVIEW_IS_PUSH_ONLY),
             PreviewFrame {
                 png_base64: None,
                 sample: false,
-                state: Some("Waiting for the first refresh".into()),
+                state: Some("Picture cards show the last frame pushed by their source".into()),
             }
         );
-
-        let failed = server_preview_frame(CardPreviewResponse {
-            png_base64: None,
-            state: CardPreviewState::Error,
-            message: Some("Plugin \"x\" is not loaded on the server".into()),
-            refreshed_at_unix_ms: None,
-        });
-        assert_eq!(
-            failed,
-            PreviewFrame {
-                png_base64: None,
-                sample: false,
-                state: Some("Plugin \"x\" is not loaded on the server".into()),
-            }
-        );
-
-        // A server that says nothing still says something on the stage.
-        let mute = server_preview_frame(CardPreviewResponse {
-            png_base64: None,
-            state: CardPreviewState::Error,
-            message: None,
-            refreshed_at_unix_ms: None,
-        });
-        assert!(matches!(mute.state, Some(message) if !message.is_empty()));
-    }
-
-    #[test]
-    fn a_plugin_card_the_mac_cannot_render_says_where_it_renders() {
-        assert_eq!(
-            unrendered_server_frame(PLUGIN_RENDERS_ON_THE_SERVER),
-            PreviewFrame {
-                png_base64: None,
-                sample: false,
-                state: Some("Plugin cards render on the server".into()),
-            }
-        );
-        assert_eq!(
-            unrendered_server_frame(SERVER_PREVIEW_UNAVAILABLE).state,
-            Some("The server has no preview for this card".into())
-        );
-    }
-
-    #[test]
-    fn a_picture_card_the_mac_cannot_render_says_where_it_renders_without_calling_it_a_plugin() {
-        assert_eq!(
-            unrendered_server_frame(PICTURE_RENDERS_ON_THE_SERVER),
-            PreviewFrame {
-                png_base64: None,
-                sample: false,
-                state: Some("Picture cards render on the server".into()),
-            }
-        );
-        assert!(!PICTURE_RENDERS_ON_THE_SERVER.contains("Plugin"));
-    }
-
-    #[test]
-    fn server_card_state_covers_plugin_and_picture_cards_and_reads_the_hero_field() {
-        let body = serde_json::json!({
-            "device_id": "desk-1",
-            "connected": true,
-            "last_seen_unix_ms": 1_787_000_000_000_u64,
-            "config": { "origin": "current", "using_fallback": false, "fallback_reason": null },
-            "snapshot": {
-                "config": {
-                    "cards": [
-                        { "kind": "clock", "id": "clock", "title": "Desk",
-                          "show_seconds": true, "template": { "kind": "digital-clock" },
-                          "tap_action": { "kind": "none" },
-                          "refresh": { "kind": "device-local" }, "alert": { "kind": "none" } },
-                        { "kind": "plugin", "id": "air", "title": "", "plugin_id": "aqi",
-                          "tap_action": { "kind": "none" },
-                          "refresh": { "kind": "interval", "minutes": 15 },
-                          "alert": { "kind": "none" } },
-                        { "kind": "plugin", "id": "news", "title": "", "plugin_id": "agenda",
-                          "tap_action": { "kind": "none" },
-                          "refresh": { "kind": "interval", "minutes": 30 },
-                          "alert": { "kind": "none" } },
-                        { "kind": "picture", "id": "limits", "title": "Usage",
-                          "source_id": "limits-source", "tap_action": { "kind": "none" },
-                          "refresh": { "kind": "manual" },
-                          "alert": { "kind": "none" } }
-                    ]
-                },
-                "device": { "observed_age_seconds": 4, "last_ota_error": null },
-                "providers": [
-                    { "widget_id": "air", "state": { "kind": "fresh" },
-                      "last_success_unix_ms": 1_787_000_000_000_i64, "age_seconds": 30 },
-                    { "widget_id": "clock", "state": { "kind": "idle" },
-                      "last_success_unix_ms": null, "age_seconds": null },
-                    { "widget_id": "limits", "state": { "kind": "stale", "message": "late" },
-                      "last_success_unix_ms": 1_787_000_000_000_i64, "age_seconds": 1800 }
-                ],
-                "card_data": [
-                    { "card_id": "air", "fields": [
-                        { "key": "title", "value": { "kind": "text", "value": "Air quality" } },
-                        { "key": "hero", "value": { "kind": "text", "value": "42" } } ] },
-                    { "card_id": "clock", "fields": [] }
-                ],
-                "card_errors": [
-                    { "kind": "scene-refused", "card_id": "news",
-                      "message": "no snapshot cached yet" },
-                    { "kind": "scene-refused", "card_id": "limits",
-                      "message": "waiting for the first picture" },
-                    { "kind": "data-refused", "card_id": "clock", "message": "ignored" }
-                ]
-            }
-        });
-
-        let states = project_server_card_state(&serde_json::from_value(body).unwrap());
-
-        assert_eq!(
-            states,
-            vec![
-                ServerCardState {
-                    card_id: "air".into(),
-                    provider: ProviderState::Fresh,
-                    hero: Some("42".into()),
-                    errors: Vec::new(),
-                },
-                // No provider entry yet is Idle, not an invented staleness.
-                ServerCardState {
-                    card_id: "news".into(),
-                    provider: ProviderState::Idle,
-                    hero: None,
-                    errors: vec![CardError {
-                        kind: CardErrorKind::SceneRefused,
-                        card_id: "news".into(),
-                        message: "no snapshot cached yet".into(),
-                    }],
-                },
-                ServerCardState {
-                    card_id: "limits".into(),
-                    provider: ProviderState::Stale {
-                        message: "late".into(),
-                    },
-                    hero: None,
-                    errors: vec![CardError {
-                        kind: CardErrorKind::SceneRefused,
-                        card_id: "limits".into(),
-                        message: "waiting for the first picture".into(),
-                    }],
-                },
-            ]
-        );
-    }
-
-    #[test]
-    fn a_device_with_no_runtime_projects_no_server_card_state() {
-        let body = serde_json::json!({
-            "device_id": "desk-1", "connected": false, "last_seen_unix_ms": null,
-            "config": { "origin": "defaults", "using_fallback": false, "fallback_reason": null },
-            "snapshot": null
-        });
-        assert!(project_server_card_state(&serde_json::from_value(body).unwrap()).is_empty());
     }
 
     /// Builds a `ServerQueryContext` pointed at a loopback listener with a stored
@@ -3387,38 +2872,6 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn the_catalog_command_reads_the_shared_admin_dto() {
-        let (context, listener, directory) =
-            server_query_fixture("catalog", app_core::DeviceTier::Networked);
-        let server = answer_once(
-            listener,
-            "200 OK",
-            r#"{"plugins":[{"id":"aqi","name":"aqi","version":"1.0.0","node_count":4,
-                "assets":[{"file":"icons.ttf","kind":"icon-font","byte_length":12,"digest":"ab"}],
-                "display_name":"Air quality","description":"EPA index for a location",
-                "manifest_version":2,"template":"display-list","refresh_minutes":15}],
-              "load_failures":[{"id":"broken","error":"unknown key"}]}"#,
-        );
-
-        let catalog = fetch_server_plugins(&context).unwrap();
-
-        let request = server.join().unwrap();
-        assert!(request.starts_with("GET /v1/plugins "));
-        assert_eq!(catalog.plugins.len(), 1);
-        assert_eq!(
-            catalog.plugins[0].display_name.as_deref(),
-            Some("Air quality")
-        );
-        assert_eq!(catalog.plugins[0].refresh_minutes, 15);
-        assert_eq!(
-            catalog.plugins[0].template,
-            app_core::admin::PluginTemplateKind::DisplayList
-        );
-        assert_eq!(catalog.load_failures[0].id, "broken");
-        fs::remove_dir_all(directory).unwrap();
-    }
-
-    #[test]
     fn minting_a_picture_source_posts_its_name_and_returns_one_time_access() {
         let (context, listener, directory) =
             server_query_fixture("mint-picture-source", app_core::DeviceTier::Networked);
@@ -3444,160 +2897,6 @@ pub(crate) mod tests {
                 .push_url
                 .ends_with(&format!("/v1/images/{}", minted.token))
         );
-        fs::remove_dir_all(directory).unwrap();
-    }
-
-    #[test]
-    fn the_card_state_command_asks_for_this_device_and_keeps_server_rendered_cards() {
-        let (context, listener, directory) =
-            server_query_fixture("card-state", app_core::DeviceTier::Networked);
-        let server = answer_once(
-            listener,
-            "200 OK",
-            r#"{"device_id":"desk-1","connected":true,"last_seen_unix_ms":1,
-                "config":{"origin":"current","using_fallback":false,"fallback_reason":null},
-                "snapshot":{"config":{"cards":[
-                    {"kind":"plugin","id":"air","title":"","plugin_id":"aqi",
-                     "tap_action":{"kind":"none"},"refresh":{"kind":"interval","minutes":15},
-                     "alert":{"kind":"none"}},
-                    {"kind":"picture","id":"limits","title":"Usage","source_id":"source",
-                     "tap_action":{"kind":"none"},"refresh":{"kind":"manual"},
-                     "alert":{"kind":"none"}}]},
-                  "providers":[{"widget_id":"air","state":{"kind":"fresh"},
-                    "last_success_unix_ms":null,"age_seconds":null},
-                    {"widget_id":"limits","state":{"kind":"idle"},
-                    "last_success_unix_ms":null,"age_seconds":null}],
-                  "card_data":[{"card_id":"air","fields":[
-                    {"key":"hero","value":{"kind":"text","value":"42"}}]}],
-                  "card_errors":[]}}"#,
-        );
-
-        let states = fetch_server_card_state(&context).unwrap();
-
-        let request = server.join().unwrap();
-        assert!(request.starts_with("GET /v1/devices/desk-1 "));
-        assert_eq!(states.len(), 2);
-        assert_eq!(states[0].hero.as_deref(), Some("42"));
-        assert_eq!(states[1].card_id, "limits");
-        fs::remove_dir_all(directory).unwrap();
-    }
-
-    /// The device-status body embeds the device's whole `AppConfig`, which is
-    /// itself legal up to `MAX_CONFIG_FILE_BYTES`. Reading it under the 64 KiB
-    /// error-body bound made a near-maximal config a permanent "oversized
-    /// response" -- a poll that could never succeed, reported as the same notice a
-    /// dead server gets. The filler here is ordinary config the Mac's partial DTO
-    /// ignores, sized past that old bound.
-    #[test]
-    fn a_device_status_body_larger_than_a_maximal_config_is_still_read() {
-        let (context, listener, directory) =
-            server_query_fixture("card-state-large", app_core::DeviceTier::Networked);
-        let playlists = (0..800)
-            .map(|index| {
-                format!(
-                    r#"{{"id":"loop-{index}","name":"Loop {index}","advance":{{"kind":"timed","default_dwell_seconds":20}},"entries":[]}}"#
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(",");
-        let body = format!(
-            r#"{{"device_id":"desk-1","connected":true,"last_seen_unix_ms":1,
-                "config":{{"origin":"current","using_fallback":false,"fallback_reason":null}},
-                "snapshot":{{"config":{{"playlists":[{playlists}],"cards":[
-                    {{"kind":"plugin","id":"air","title":"","plugin_id":"aqi",
-                     "tap_action":{{"kind":"none"}},"refresh":{{"kind":"interval","minutes":15}},
-                     "alert":{{"kind":"none"}}}}]}},
-                  "providers":[],"card_data":[],"card_errors":[]}}}}"#
-        );
-        assert!(
-            body.len() > MAX_SERVER_ERROR_BYTES,
-            "the filler must exceed the error-body bound to prove anything"
-        );
-        assert!(body.len() < MAX_SERVER_DEVICE_STATUS_BYTES);
-        let server = answer_once(listener, "200 OK", body);
-
-        let states = fetch_server_card_state(&context).unwrap();
-
-        server.join().unwrap();
-        assert_eq!(states.len(), 1);
-        assert_eq!(states[0].card_id, "air");
-        fs::remove_dir_all(directory).unwrap();
-    }
-
-    #[test]
-    fn a_plugin_preview_asks_the_card_route_and_returns_its_frame() {
-        let (context, listener, directory) =
-            server_query_fixture("preview-ok", app_core::DeviceTier::Networked);
-        let server = answer_once(
-            listener,
-            "200 OK",
-            r#"{"png_base64":"iVBORw0KGgo=","state":"fresh","message":null,
-                "refreshed_at_unix_ms":1787000000000}"#,
-        );
-
-        let frame = server_card_preview(
-            &context,
-            Some(app_core::DeviceTier::Networked),
-            "air",
-            PLUGIN_RENDERS_ON_THE_SERVER,
-        )
-        .unwrap();
-
-        let request = server.join().unwrap();
-        assert!(request.starts_with("GET /v1/devices/desk-1/cards/air/preview "));
-        assert_eq!(frame.png_base64.as_deref(), Some("iVBORw0KGgo="));
-        assert_eq!(frame.state, None);
-        assert!(!frame.sample);
-        fs::remove_dir_all(directory).unwrap();
-    }
-
-    /// Spec section 10: the Mac's GETs are additive, so a server that has never
-    /// heard of this route 404s. That degrades to a printed sentence rather than a
-    /// fault, and it is not the local-tier sentence, which is chosen before any
-    /// request is made.
-    ///
-    /// An unknown device, an unknown card and a built-in card also 404, and the
-    /// status code cannot tell any of the four apart -- so the sentence claims only
-    /// that no preview came back. An earlier version said "Plugin previews need a
-    /// newer server", which asserted a cause this code cannot know.
-    #[test]
-    fn a_preview_the_server_does_not_return_degrades_instead_of_erroring() {
-        let (context, listener, directory) =
-            server_query_fixture("preview-404", app_core::DeviceTier::Networked);
-        let server = answer_once(listener, "404 Not Found", "");
-
-        let frame = server_card_preview(
-            &context,
-            Some(app_core::DeviceTier::Networked),
-            "air",
-            PLUGIN_RENDERS_ON_THE_SERVER,
-        )
-        .unwrap();
-
-        server.join().unwrap();
-        assert_eq!(frame.state.as_deref(), Some(SERVER_PREVIEW_UNAVAILABLE));
-        assert_eq!(frame.png_base64, None);
-        fs::remove_dir_all(directory).unwrap();
-    }
-
-    /// Local tier has no server to render on and the Mac has no plugin host, so it
-    /// says so from the tier alone rather than opening a socket at all.
-    #[test]
-    fn a_local_tier_plugin_preview_never_reaches_the_network() {
-        let (context, listener, directory) =
-            server_query_fixture("preview-local", app_core::DeviceTier::Local);
-
-        let frame = server_card_preview(
-            &context,
-            Some(app_core::DeviceTier::Local),
-            "air",
-            PLUGIN_RENDERS_ON_THE_SERVER,
-        )
-        .unwrap();
-
-        assert_eq!(frame.state.as_deref(), Some(PLUGIN_RENDERS_ON_THE_SERVER));
-        assert_eq!(frame.png_base64, None);
-        drop(listener);
         fs::remove_dir_all(directory).unwrap();
     }
 

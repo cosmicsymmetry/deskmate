@@ -10,14 +10,12 @@ import {
   loopSeconds,
   setPlaylistAdvance,
 } from "../lib/configDraft";
-import type { AppConfig, PluginCatalog, ValidationIssue } from "../lib/types";
+import type { AppConfig, ValidationIssue } from "../lib/types";
 import { FieldIssues } from "./FieldIssues";
 
 interface LoopRingProps {
   config: AppConfig;
   issues: ValidationIssue[];
-  /** The server's plugin registry, so a plugin arc is named the same here as elsewhere. */
-  catalog: PluginCatalog | null;
   selectedCardId: string | null;
   onSelect: (cardId: string) => void;
   onChange: (config: AppConfig) => void;
@@ -69,7 +67,6 @@ function compactDuration(totalSeconds: number): string {
 export function LoopRing({
   config,
   issues,
-  catalog,
   selectedCardId,
   onSelect,
   onChange,
@@ -79,7 +76,7 @@ export function LoopRing({
     (candidate) => candidate.id === config.active_playlist_id,
   );
   const isTimed = playlist?.advance.kind === "timed";
-  const segments = useMemo(() => loopSegments(config, catalog), [config, catalog]);
+  const segments = useMemo(() => loopSegments(config), [config]);
   const total = playlist ? loopSeconds(config, playlist.id) : null;
   const [isPlaying, setIsPlaying] = useState(false);
   const [reducedMotion, setReducedMotion] = useState(false);

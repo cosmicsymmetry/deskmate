@@ -11,25 +11,20 @@ pub mod secure_file;
 pub mod state;
 pub mod store;
 
-pub use admin::{
-    AdminConfigErrorBody, CardPreviewResponse, CardPreviewState, PluginCatalog, PluginCatalogAsset,
-    PluginCatalogEntry, PluginTemplateKind,
-};
+pub use admin::AdminConfigErrorBody;
 pub use asset_sync::DesiredAsset;
 pub use commands::{PomodoroAction, RuntimeError};
 pub use config::{
     AlertHold, AppConfig, AppPreferences, AssetKind, AssetSettings, AssetSource,
     CURRENT_SCHEMA_VERSION, CardAlert, CardSettings, CarouselAdvance, CompiledAppConfig,
     ConfigValidationError, DisplayOrientation, DisplayTemplate, IconGlyphMapping,
-    MAX_ALERT_HOLD_SECONDS, MAX_ASSET_BYTES, MAX_ASSET_SOURCE_LEN, MAX_ASSETS,
+    MAX_ACTION_URL_LEN, MAX_ALERT_HOLD_SECONDS, MAX_ASSET_BYTES, MAX_ASSET_SOURCE_LEN, MAX_ASSETS,
     MAX_CARD_REFRESH_MINUTES, MAX_CONFIG_CARDS, MAX_DWELL_SECONDS, MAX_HOST_ACTION_TARGET_LEN,
     MAX_ICON_GLYPH_NAME_LEN, MAX_ICON_GLYPHS, MAX_PLAYLIST_ENTRIES, MAX_PLAYLIST_NAME_LEN,
-    MAX_PLAYLISTS, MAX_PLUGIN_ID_LEN, MAX_PROVIDER_REDIRECTS, MAX_PROVIDER_RESPONSE_BYTES,
-    MAX_PROVIDER_URL_LEN, MAX_TIMEZONE_LEN, MAX_TOTAL_ASSET_BYTES, MAX_WIDGET_ID_LEN,
+    MAX_PLAYLISTS, MAX_TIMEZONE_LEN, MAX_TOTAL_ASSET_BYTES, MAX_WIDGET_ID_LEN,
     MAX_WIDGET_TITLE_LEN, MIN_ALERT_HOLD_SECONDS, MIN_CARD_REFRESH_MINUTES, MIN_DWELL_SECONDS,
-    PROVIDER_REQUEST_TIMEOUT_SECONDS, Playlist, PlaylistEntry, RefreshPolicy, UpdateChannel,
-    UpdateCheckPolicy, UpdaterSettings, ValidationCode, ValidationIssue, WidgetTapAction,
-    utc_offset_minutes,
+    Playlist, PlaylistEntry, RefreshPolicy, UpdateChannel, UpdateCheckPolicy, UpdaterSettings,
+    ValidationCode, ValidationIssue, WidgetTapAction, utc_offset_minutes,
 };
 pub use network_settings::{
     MAX_NETWORK_SETTINGS_FILE_BYTES, NETWORK_SETTINGS_FORMAT_VERSION, NetworkSettings,
@@ -41,15 +36,11 @@ pub use protocol::{
     NetworkConfig, Tier as ProvisioningTier,
 };
 pub use render_negotiation::{
-    BindingClass, BindingRequirements, DeviceRenderProfile, NativeSource, RenderDecision,
-    RenderRequirements, RequirementsError, SceneNodeKind, analyze_raster_only, analyze_scene,
-    classify_binding, negotiate,
+    DeviceRenderProfile, RenderRequirements, SceneNodeKind, analyze_scene, validate_native_scene,
 };
 pub use runtime::{
-    CardPreview, DeviceConnection, ImageSourceFrame, PREVIEW_SCENE_REVISION, PluginHost,
-    ProviderRefreshRequest, ProviderRefreshResult, ProviderRefresher, ProviderRequest, RasterFrame,
-    RasterRequest, RuntimeDevice, RuntimeHandle, RuntimeOptions, RuntimeSubscription,
-    SceneCandidate, SerialRuntimeDevice, SystemProviderRefresher,
+    DeviceConnection, ImageSourceFrame, ImageSourceHost, RuntimeDevice, RuntimeHandle,
+    RuntimeOptions, RuntimeSubscription, SerialRuntimeDevice,
 };
 pub use scene_build::{
     AnalogClockCard, BakedFontMetrics, BigNumberCard, ClockCard, IconBadgeCard, NumericAdvances,
@@ -61,8 +52,8 @@ pub use scene_build::{
 pub use state::{
     AppSnapshot, CardDataSnapshot, CardError, CardErrorKind, CardField, CardFieldValue,
     ConnectionState, DeviceCapability, DeviceCounters, DeviceOtaState, DeviceSnapshot, DeviceTier,
-    DeviceWifiState, PersistenceState, PomodoroSnapshot, PomodoroState, ProviderSnapshot,
-    ProviderState, RuntimeDiagnostics, RuntimeState,
+    DeviceWifiState, PersistenceState, PomodoroSnapshot, PomodoroState, RuntimeDiagnostics,
+    RuntimeState,
 };
 pub use store::{
     ConfigOrigin, ConfigStore, LoadOutcome, MAX_CONFIG_FILE_BYTES,

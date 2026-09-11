@@ -69,15 +69,6 @@ export type CardSettings =
       alert: CardAlert;
     }
   | {
-      kind: "plugin";
-      id: string;
-      title: string;
-      plugin_id: string;
-      tap_action: WidgetTapAction;
-      refresh: RefreshPolicy;
-      alert: CardAlert;
-    }
-  | {
       kind: "picture";
       id: string;
       title: string;
@@ -88,7 +79,7 @@ export type CardSettings =
     };
 
 export type CardKind = CardSettings["kind"];
-export type AddableCardKind = Exclude<CardKind, "plugin" | "picture">;
+export type AddableCardKind = Exclude<CardKind, "picture">;
 
 export interface ImageSource {
   id: string;
@@ -159,7 +150,6 @@ export interface AppSnapshot {
   has_saved_config: boolean;
   runtime: RuntimeState;
   device: DeviceSnapshot;
-  providers: ProviderSnapshot[];
   pomodoros: PomodoroSnapshot[];
   card_data: CardDataSnapshot[];
   card_errors: CardError[];
@@ -264,20 +254,6 @@ export interface DeviceCounters {
   detected_event_gaps: number;
 }
 
-export interface ProviderSnapshot {
-  widget_id: string;
-  state: ProviderState;
-  last_success_unix_ms: number | null;
-  age_seconds: number | null;
-}
-
-export type ProviderState =
-  | { kind: "idle" }
-  | { kind: "refreshing" }
-  | { kind: "fresh" }
-  | { kind: "stale"; message: string }
-  | { kind: "error"; message: string };
-
 export interface PomodoroSnapshot {
   widget_id: string;
   state: PomodoroState;
@@ -302,46 +278,6 @@ export interface CardDataSnapshot {
   fields: CardField[];
 }
 
-export type PluginTemplateKind = "display-list" | "svg";
-
-export interface PluginCatalogAsset {
-  file: string;
-  kind: string;
-  byte_length: number;
-  digest: string;
-}
-
-export interface PluginCatalogEntry {
-  id: string;
-  name: string;
-  version: string;
-  node_count: number;
-  assets: PluginCatalogAsset[];
-  display_name: string | null;
-  description: string | null;
-  manifest_version: number;
-  template: PluginTemplateKind;
-  refresh_minutes: number;
-}
-
-export interface PluginLoadFailure {
-  id: string;
-  error: string;
-}
-
-export interface PluginCatalog {
-  plugins: PluginCatalogEntry[];
-  load_failures: PluginLoadFailure[];
-}
-
-/** The server's own view of one plugin or picture card, projected onto this window's snapshot. */
-export interface ServerCardState {
-  card_id: string;
-  provider: ProviderState;
-  hero: string | null;
-  errors: CardError[];
-}
-
 export type PersistenceState =
   | { kind: "clean" }
   | { kind: "saving" }
@@ -351,9 +287,6 @@ export type PersistenceState =
 export interface RuntimeDiagnostics {
   commands_processed: number;
   command_queue_full: number;
-  provider_jobs_started: number;
-  provider_queue_full: number;
-  provider_results_discarded: number;
   subscriber_snapshots_overwritten: number;
   interrupt_dismissals_ignored: number;
 }
@@ -387,9 +320,8 @@ export interface AutostartStatus {
 
 /**
  * `png_base64` is null exactly when the renderer produced no pixels; `state` then
- * carries the word for why ("Waiting for the first refresh", "Plugin cards render on
- * the server", the server's own error). Built-in cards keep `png_base64` set and
- * `state` null, so nothing about them changes.
+ * carries the word for why. Built-in cards keep `png_base64` set and `state`
+ * null; a picture explains that its source owns the pushed frame.
  */
 export interface PreviewFrame {
   png_base64: string | null;
@@ -412,7 +344,6 @@ export type IpcError =
   | MessageError<"incompatible-server">
   | MessageError<"not-found">
   | MessageError<"device">
-  | MessageError<"provider">
   | MessageError<"autostart">
   | MessageError<"window">
   | MessageError<"internal">
@@ -440,7 +371,6 @@ export interface IpcContractFixtures {
   device_capabilities: DeviceCapability[];
   runtime_states: RuntimeState[];
   connection_states: ConnectionState[];
-  provider_states: ProviderState[];
   pomodoro_states: PomodoroState[];
   card_data: CardDataSnapshot[];
   persistence_states: PersistenceState[];
@@ -450,7 +380,5 @@ export interface IpcContractFixtures {
   draft_validation: DraftValidation;
   config_apply_result: ConfigApplyResult;
   autostart_status: AutostartStatus;
-  plugin_catalog: PluginCatalog;
-  server_card_state: ServerCardState[];
   preview_frame: PreviewFrame;
 }

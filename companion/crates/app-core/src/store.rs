@@ -129,6 +129,7 @@ pub enum ConfigOrigin {
     MigratedV5,
     MigratedV6,
     MigratedV7,
+    MigratedV8,
     LastGood,
 }
 
@@ -513,7 +514,7 @@ enum LegacyInterruptPolicy {
 }
 
 /// Mirrors the v2 `WidgetSettings` shape exactly (six kinds, each carrying
-/// `size`, its provider fields, `template`, `tap_action`, `refresh`, and
+/// `size`, its source fields, `template`, `tap_action`, `refresh`, and
 /// `interrupt_policy`). `size` and `interrupt_policy` are legacy-only
 /// concepts and are parsed here only to be dropped/translated on migration.
 #[allow(dead_code)]
@@ -891,7 +892,12 @@ fn drop_retired_cards_from_json(text: &str) -> Result<AppConfig, StoreError> {
             let retired = card
                 .get("kind")
                 .and_then(serde_json::Value::as_str)
-                .is_some_and(|kind| matches!(kind, "calendar" | "weather" | "json-feed" | "rss"));
+                .is_some_and(|kind| {
+                    matches!(
+                        kind,
+                        "calendar" | "weather" | "json-feed" | "rss" | "plugin"
+                    )
+                });
             if retired && let Some(id) = card.get("id").and_then(serde_json::Value::as_str) {
                 retired_ids.insert(id.to_owned());
             }
@@ -936,7 +942,7 @@ fn decode_config(bytes: &[u8]) -> Result<(AppConfig, ConfigOrigin), StoreError> 
     let header: VersionHeader = parse_json(text)?;
     let (config, origin) = match header.schema_version {
         CURRENT_SCHEMA_VERSION => (parse_json(text)?, ConfigOrigin::Current),
-        version @ (4..=7) => {
+        version @ (4..=8) => {
             // v4's asset variants (`icon { width, height }`, `font { pixel_size,
             // glyph_ranges }`) encoded the pre-tiny_ttf design where glyphs were
             // baked at a fixed size. `config.rs`'s compile step has always
@@ -948,8 +954,8 @@ fn decode_config(bytes: &[u8]) -> Result<(AppConfig, ConfigOrigin), StoreError> 
             // nothing that shape lacks. v4 therefore migrates directly to the
             // current schema in one step, not chained through v5. v5 likewise differs
             // only by adding the plugin card kind, and v6->v7 adds `image_sources`,
-            // which `#[serde(default)]` supplies for older documents. v8 is the first
-            // subtractive bump: remove retired card objects and their playlist
+            // which `#[serde(default)]` supplies for older documents. v8 and v9 are
+            // subtractive bumps: remove retired card objects and their playlist
             // references while the JSON still has enough information to recognize
             // them, then deserialize the surviving current shape strictly.
             let legacy = drop_retired_cards_from_json(text)?;
@@ -958,6 +964,7 @@ fn decode_config(bytes: &[u8]) -> Result<(AppConfig, ConfigOrigin), StoreError> 
                 5 => ConfigOrigin::MigratedV5,
                 6 => ConfigOrigin::MigratedV6,
                 7 => ConfigOrigin::MigratedV7,
+                8 => ConfigOrigin::MigratedV8,
                 _ => unreachable!(),
             };
             (

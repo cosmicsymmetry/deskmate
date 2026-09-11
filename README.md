@@ -9,20 +9,19 @@ and the repository’s durable implementation contract is [CLAUDE.md](CLAUDE.md)
 The live milestone status is in the
 [roadmap](docs/superpowers/plans/2026-08-03-deskmate-roadmap.md). V1 is closed pending
 declaration/tag authorization; V2’s network-owned device path is implemented, with two
-observations still owed. Scene-native rendering, declarative plugins, and the server-side
-`resvg` fallback are delivered in software. The remaining work and hardware gates live
-in these active plans:
+observations still owed. Scene-native rendering is delivered in software. Manifest-based
+plugins and the server-side SVG raster fallback have been retired; server-side cards are
+now pictures pushed by external producers. The remaining work and hardware gates live in
+these active plans:
 
 - [V2 networked device](docs/superpowers/plans/2026-08-18-deskmate-v2-networked-device.md)
-- [Plugin manifest, including the remaining asset-GC observation](docs/superpowers/plans/2026-08-28-deskmate-plugin-manifest.md)
-- [Rasterization fallback](docs/superpowers/plans/2026-08-29-deskmate-rasterization.md)
-- [Stage 5 plugin-upload risk review](docs/superpowers/plans/2026-09-01-deskmate-plugin-upload-risk-review.md)
+- [Picture cards](docs/superpowers/plans/2026-09-10-deskmate-picture-cards.md)
 
 The current application config is frozen at
-[schema v6](docs/config/v6.md), while the additive wire contract remains
-[protocol v1](docs/protocol/v1.md). The device renders host-built scenes; curated
-plugins and rasterization run server-side. Hardware observations and unresolved board
-gates are recorded in [board notes](docs/hardware/board-notes.md).
+[schema v9](docs/config/v9.md), while the additive wire contract remains
+[protocol v1](docs/protocol/v1.md). Clock and pomodoro render as host-built scenes;
+picture frames use durable device assets. Hardware observations and unresolved board gates
+are recorded in [board notes](docs/hardware/board-notes.md).
 
 ## Companion app
 

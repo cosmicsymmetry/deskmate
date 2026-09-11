@@ -20,9 +20,8 @@ pub mod cases;
 /// See its module doc for why the vendored TTF is patched before being subset.
 pub mod assets;
 
-/// Task 8: rendering a declarative scene through the firmware's own decoder
-/// and `ui/scene_view.c` interpreter, the device-side half of the plugin
-/// display list. See its module doc for why it goes through the wire format
+/// Rendering a declarative scene through the firmware's own decoder and
+/// `ui/scene_view.c` interpreter. See its module doc for why it goes through the wire format
 /// rather than filling a `scene_t` over FFI.
 pub mod scene;
 

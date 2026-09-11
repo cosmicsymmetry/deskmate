@@ -2441,7 +2441,9 @@ No firmware change means this is short. Record the observed result in
 **Deliberately not run:** any new `framebuffer_diff` rows. A picture card's face is a
 full-canvas `SceneImage`, and `scene-image` has been in the on-target matrix at both
 orientations since stage 3b Task 8. New rows would be near-duplicate coverage and would
-disturb a hardware-pinned number for nothing. **The 96/10/86 split stays as recorded.**
+disturb a hardware-pinned number for nothing. **The 96/10/86 split remains the
+2026-09-06 observation; after manifest removal the next-run software prediction is
+78/8/70.**
 
 Do not turn this into a long battery of retries. If an observation fails, record what was
 seen and stop.

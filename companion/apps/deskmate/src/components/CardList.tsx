@@ -22,49 +22,25 @@ import {
   loopEntries,
   MAX_CARDS,
   moveEntry,
-  pluginCardFlag,
   removeEntry,
 } from "../lib/configDraft";
 import { placeAddMenu } from "../lib/menuPlacement";
-import { providerTrouble } from "../lib/providers";
 import {
   type AddableCardKind,
   type AppConfig,
-  type CardDataSnapshot,
   type CardSettings,
   type DeviceTier,
   MAX_PLAYLIST_ENTRIES,
-  type PluginCatalog,
   type PomodoroSnapshot,
-  type ProviderSnapshot,
-  type ServerCardState,
   type ValidationIssue,
 } from "../lib/types";
 import { FieldIssues } from "./FieldIssues";
 import { Icon } from "./Icon";
 
-/** One row in the menu's server group, built by `App` from the plugin catalog. */
-export interface PluginKindOption {
-  id: string;
-  version: string;
-  /** The manifest's `display_name`, or null when it declared none. */
-  displayName: string | null;
-  /** The manifest's `description`, or null when it declared none. */
-  description: string | null;
-  onAdd: () => void;
-}
-
 interface CardListProps {
   config: AppConfig;
   issues: ValidationIssue[];
-  cardData: CardDataSnapshot[];
   pomodoros: PomodoroSnapshot[];
-  providers: ProviderSnapshot[];
-  pluginKinds: PluginKindOption[];
-  /** The server's registry, or null in local tier and before the first read. */
-  catalog: PluginCatalog | null;
-  /** The server's own rows for this device's plugin cards. Empty in local tier. */
-  serverCardState: ServerCardState[];
   ownershipTier: DeviceTier | null;
   selectedCardId: string | null;
   onSelect: (cardId: string) => void;
@@ -79,22 +55,12 @@ const addableKinds: { kind: AddableCardKind; description: string }[] = [
   { kind: "pomodoro", description: "Focus timer" },
 ];
 
-function fieldText(data: CardDataSnapshot | undefined, key: string): string | null {
-  const field = data?.fields.find((candidate) => candidate.key === key);
-  if (!field) {
-    return null;
-  }
-  return field.value.kind === "text" ? field.value.value : String(field.value.value);
-}
-
 /** The live fact that makes a tile a complication rather than a list row. */
 function tileValue(
   card: CardSettings,
-  data: CardDataSnapshot | undefined,
   pomodoro: PomodoroSnapshot | undefined,
   now: Date,
   timezone: string,
-  pluginHero: string | null,
 ): string {
   switch (card.kind) {
     case "clock":
@@ -111,30 +77,21 @@ function tileValue(
       const seconds = pomodoro?.remaining_seconds ?? card.duration_seconds;
       return `${Math.floor(seconds / 60)}:${String(Math.floor(seconds % 60)).padStart(2, "0")}`;
     }
-    case "plugin":
-      // The server's evaluated `summary`, or an em dash before its first fetch.
-      // A tile owns one fact; it does not narrate.
-      return pluginHero ?? "—";
     case "picture":
       return "PNG";
   }
 }
 
 /** Every control that acts on one card names template and typed title together. */
-function controlLabel(card: CardSettings, catalog: PluginCatalog | null): string {
+function controlLabel(card: CardSettings): string {
   const title = cardTitle(card);
-  return title ? `${cardLabel(card, catalog)} — ${title}` : cardLabel(card, catalog);
+  return title ? `${cardLabel(card)} — ${title}` : cardLabel(card);
 }
 
 export function CardList({
   config,
   issues,
-  cardData,
   pomodoros,
-  providers,
-  pluginKinds,
-  catalog,
-  serverCardState,
   ownershipTier,
   selectedCardId,
   onSelect,
@@ -292,12 +249,6 @@ export function CardList({
     closeMenu(false);
   };
 
-  const choosePlugin = (plugin: PluginKindOption) => {
-    pendingNewCardIdsRef.current = new Set(config.cards.map((card) => card.id));
-    plugin.onAdd();
-    closeMenu(false);
-  };
-
   const choosePicture = () => {
     pendingNewCardIdsRef.current = new Set(config.cards.map((card) => card.id));
     onAddPicture();
@@ -317,7 +268,7 @@ export function CardList({
     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
       event.preventDefault();
       const direction = event.key === "ArrowDown" ? 1 : -1;
-      const count = addableKinds.length + 1 + pluginKinds.length;
+      const count = addableKinds.length + 1;
       menuItemRefs.current[(index + direction + count) % count]?.focus();
       return;
     }
@@ -385,16 +336,10 @@ export function CardList({
         : [];
     const tileIssues = [...cardIssues, ...entryIssues];
     const hasAlert = card.alert.kind !== "none";
-    const data = cardData.find((candidate) => candidate.card_id === card.id);
     const pomodoro = pomodoros.find((candidate) => candidate.widget_id === card.id);
-    const stale =
-      providerTrouble(providers.find((candidate) => candidate.widget_id === card.id)) !== null;
     const index = inLoop ? (entryIndex ?? -1) : -1;
-    const label = controlLabel(card, catalog);
-    // The server's row for this card, when it has one, and the word that explains a
-    // bare plugin id when the catalog or the tier cannot resolve it.
-    const serverState = serverCardState.find((row) => row.card_id === card.id) ?? null;
-    const pluginFlag = pluginCardFlag(card, catalog, ownershipTier);
+    const label = controlLabel(card);
+    const pictureFlag = card.kind === "picture" && ownershipTier === "local" ? "needs the server" : null;
     return (
       <li
         key={inLoop ? `loop:${entryIndex}:${card.id}` : `outside:${card.id}`}
@@ -423,23 +368,15 @@ export function CardList({
           onClick={() => onSelect(card.id)}
           onKeyDown={inLoop ? (event) => onTileKeyDown(event, card.id) : undefined}
         >
-          <span className="tile-label">{cardLabel(card, catalog)}</span>
+          <span className="tile-label">{cardLabel(card)}</span>
           <strong className="card-tile__value numeral">
-            {tileValue(
-              card,
-              data,
-              pomodoro,
-              now,
-              config.preferences.timezone,
-              serverState?.hero ?? null,
-            )}
+            {tileValue(card, pomodoro, now, config.preferences.timezone)}
           </strong>
           {cardTitle(card) && <span className="card-tile__name">{cardTitle(card)}</span>}
         </button>
         <span className="card-tile__flags">
           {!inLoop && <span className="flag">not in loop</span>}
-          {pluginFlag && <span className="flag">{pluginFlag}</span>}
-          {stale && <span className="flag flag--stale">stale</span>}
+          {pictureFlag && <span className="flag">{pictureFlag}</span>}
           {hasAlert && <span className="flag flag--alert">alerts</span>}
           {!inLoop && (
             <button
@@ -585,7 +522,7 @@ export function CardList({
             </span>
             <span>
               <strong>Add a card</strong>
-              <small>Built in, picture, or plugin</small>
+              <small>Built in or picture</small>
             </span>
           </button>
           {capacityDescription && (
@@ -648,35 +585,6 @@ export function CardList({
                   </span>
                 </button>
               </fieldset>
-              {pluginKinds.length > 0 && (
-                <fieldset className="menu__group">
-                  <legend className="tile-label menu__label">Plugins on the server</legend>
-                  {pluginKinds.map((plugin, pluginIndex) => {
-                    const index = addableKinds.length + 1 + pluginIndex;
-                    const choose = () => choosePlugin(plugin);
-                    return (
-                      <button
-                        ref={(element) => {
-                          if (element) {
-                            menuItemRefs.current[index] = element;
-                          }
-                        }}
-                        type="button"
-                        className="menu__item"
-                        role="menuitem"
-                        key={plugin.id}
-                        onClick={choose}
-                        onKeyDown={(event) => onMenuKeyDown(event, index, choose)}
-                      >
-                        <span>
-                          <strong>{plugin.displayName ?? plugin.id}</strong>
-                          <small>{plugin.description ?? `Plugin · ${plugin.version}`}</small>
-                        </span>
-                      </button>
-                    );
-                  })}
-                </fieldset>
-              )}
             </div>
           )}
         </li>

@@ -4,7 +4,7 @@ import type { IpcContractFixtures } from "./types";
 export const ipcContractFixtures = {
   "snapshot": {
     "config": {
-      "schema_version": 8,
+      "schema_version": 9,
       "preferences": {
         "timezone": "Asia/Tbilisi",
         "autostart": true,
@@ -52,22 +52,6 @@ export const ipcContractFixtures = {
           }
         },
         {
-          "kind": "plugin",
-          "id": "air-quality",
-          "title": "Office air",
-          "plugin_id": "com.example.air-quality",
-          "tap_action": {
-            "kind": "none"
-          },
-          "refresh": {
-            "kind": "interval",
-            "minutes": 15
-          },
-          "alert": {
-            "kind": "none"
-          }
-        },
-        {
           "kind": "picture",
           "id": "limits-picture",
           "title": "Limits",
@@ -108,7 +92,7 @@ export const ipcContractFixtures = {
               "dwell_seconds": 20
             },
             {
-              "card_id": "air-quality",
+              "card_id": "limits-picture",
               "dwell_seconds": null
             }
           ]
@@ -176,17 +160,6 @@ export const ipcContractFixtures = {
         "detected_event_gaps": 13
       }
     },
-    "providers": [
-      {
-        "widget_id": "air-quality",
-        "state": {
-          "kind": "stale",
-          "message": "offline"
-        },
-        "last_success_unix_ms": 1786000000000,
-        "age_seconds": 120
-      }
-    ],
     "pomodoros": [
       {
         "widget_id": "pomodoro",
@@ -197,7 +170,7 @@ export const ipcContractFixtures = {
     ],
     "card_data": [
       {
-        "card_id": "air-quality",
+        "card_id": "limits-picture",
         "fields": [
           {
             "key": "summary",
@@ -219,7 +192,7 @@ export const ipcContractFixtures = {
     "card_errors": [
       {
         "kind": "data-refused",
-        "card_id": "air-quality",
+        "card_id": "limits-picture",
         "message": "the display refused this card's data (InvalidPayload): invalid push data"
       }
     ],
@@ -237,9 +210,6 @@ export const ipcContractFixtures = {
     "diagnostics": {
       "commands_processed": 1,
       "command_queue_full": 2,
-      "provider_jobs_started": 3,
-      "provider_queue_full": 4,
-      "provider_results_discarded": 5,
       "subscriber_snapshots_overwritten": 6,
       "interrupt_dismissals_ignored": 7
     },
@@ -247,7 +217,7 @@ export const ipcContractFixtures = {
   },
   "configs": [
     {
-      "schema_version": 8,
+      "schema_version": 9,
       "preferences": {
         "timezone": "Asia/Tbilisi",
         "autostart": true,
@@ -295,22 +265,6 @@ export const ipcContractFixtures = {
           }
         },
         {
-          "kind": "plugin",
-          "id": "air-quality",
-          "title": "Office air",
-          "plugin_id": "com.example.air-quality",
-          "tap_action": {
-            "kind": "none"
-          },
-          "refresh": {
-            "kind": "interval",
-            "minutes": 15
-          },
-          "alert": {
-            "kind": "none"
-          }
-        },
-        {
           "kind": "picture",
           "id": "limits-picture",
           "title": "Limits",
@@ -351,7 +305,7 @@ export const ipcContractFixtures = {
               "dwell_seconds": 20
             },
             {
-              "card_id": "air-quality",
+              "card_id": "limits-picture",
               "dwell_seconds": null
             }
           ]
@@ -418,22 +372,6 @@ export const ipcContractFixtures = {
       }
     },
     {
-      "kind": "plugin",
-      "id": "air-quality",
-      "title": "Office air",
-      "plugin_id": "com.example.air-quality",
-      "tap_action": {
-        "kind": "none"
-      },
-      "refresh": {
-        "kind": "interval",
-        "minutes": 15
-      },
-      "alert": {
-        "kind": "none"
-      }
-    },
-    {
       "kind": "picture",
       "id": "limits-picture",
       "title": "Limits",
@@ -467,7 +405,7 @@ export const ipcContractFixtures = {
           "dwell_seconds": 20
         },
         {
-          "card_id": "air-quality",
+          "card_id": "limits-picture",
           "dwell_seconds": null
         }
       ]
@@ -496,7 +434,7 @@ export const ipcContractFixtures = {
       "dwell_seconds": 20
     },
     {
-      "card_id": "air-quality",
+      "card_id": "limits-picture",
       "dwell_seconds": null
     }
   ],
@@ -663,25 +601,6 @@ export const ipcContractFixtures = {
       "kind": "standalone"
     }
   ],
-  "provider_states": [
-    {
-      "kind": "idle"
-    },
-    {
-      "kind": "refreshing"
-    },
-    {
-      "kind": "fresh"
-    },
-    {
-      "kind": "stale",
-      "message": "stale"
-    },
-    {
-      "kind": "error",
-      "message": "error"
-    }
-  ],
   "pomodoro_states": [
     "idle",
     "running",
@@ -690,7 +609,7 @@ export const ipcContractFixtures = {
   ],
   "card_data": [
     {
-      "card_id": "air-quality",
+      "card_id": "limits-picture",
       "fields": [
         {
           "key": "summary",
@@ -798,10 +717,6 @@ export const ipcContractFixtures = {
       "message": "device"
     },
     {
-      "category": "provider",
-      "message": "provider"
-    },
-    {
       "category": "autostart",
       "message": "autostart"
     },
@@ -842,51 +757,6 @@ export const ipcContractFixtures = {
     "enabled": true,
     "preference_enabled": false
   },
-  "plugin_catalog": {
-    "plugins": [
-      {
-        "id": "aqi",
-        "name": "aqi",
-        "version": "1.0.0",
-        "node_count": 4,
-        "assets": [
-          {
-            "file": "icons.ttf",
-            "kind": "icon-font",
-            "byte_length": 40960,
-            "digest": "0f1e2d3c"
-          }
-        ],
-        "display_name": "Air quality",
-        "description": "EPA index for a location",
-        "manifest_version": 2,
-        "template": "display-list",
-        "refresh_minutes": 15
-      }
-    ],
-    "load_failures": [
-      {
-        "id": "broken",
-        "error": "unknown key \"summry\""
-      }
-    ]
-  },
-  "server_card_state": [
-    {
-      "card_id": "air-quality",
-      "provider": {
-        "kind": "fresh"
-      },
-      "hero": "42",
-      "errors": [
-        {
-          "kind": "scene-refused",
-          "card_id": "air-quality",
-          "message": "no snapshot cached yet"
-        }
-      ]
-    }
-  ],
   "preview_frame": {
     "png_base64": "iVBORw0KGgo=",
     "sample": true,

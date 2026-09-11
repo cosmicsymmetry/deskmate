@@ -11,7 +11,7 @@ struct TestServer {
     base_url: String,
 }
 
-/// Copies the loopback HTTP harness used by `tests/card_preview.rs`.
+/// A loopback HTTP harness for producer and admin image routes.
 async fn spawn() -> TestServer {
     let state = ServerState::in_memory();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")

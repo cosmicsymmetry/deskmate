@@ -325,7 +325,7 @@ fn v3_all_alert_only_migrates_to_valid_config() {
 }
 
 #[test]
-fn v4_config_migrates_to_v8_with_surviving_cards_unchanged() {
+fn v4_config_migrates_to_v9_with_surviving_cards_unchanged() {
     // config.rs's compile step has always rejected a non-empty `assets` array, so no
     // saved v4 config has ever contained one: migration to the current schema is a
     // version bump with no data transformation (v4 -> v7 directly, not chained
@@ -351,7 +351,7 @@ fn v4_config_migrates_to_v8_with_surviving_cards_unchanged() {
 }
 
 #[test]
-fn v5_config_migrates_to_v8_dropping_retired_cards() {
+fn v5_config_migrates_to_v9_dropping_retired_cards() {
     let directory = test_directory("v5-migration");
     let path = directory.path().join("config.json");
     let store = ConfigStore::new(&path);
@@ -378,7 +378,7 @@ fn v5_config_migrates_to_v8_dropping_retired_cards() {
 }
 
 #[test]
-fn a_v6_document_migrates_to_v8_with_no_image_sources_and_loses_nothing() {
+fn a_v6_document_migrates_to_v9_with_no_image_sources_and_loses_nothing() {
     // A real v6 document: no `image_sources` key at all. It must parse, not fail.
     let v6 = serde_json::json!({
         "schema_version": 6,
@@ -414,7 +414,7 @@ fn a_v6_document_migrates_to_v8_with_no_image_sources_and_loses_nothing() {
 
     assert_eq!(loaded.origin(), ConfigOrigin::MigratedV6);
     assert_eq!(config.schema_version, app_core::CURRENT_SCHEMA_VERSION);
-    assert_eq!(config.schema_version, 8);
+    assert_eq!(config.schema_version, 9);
     assert!(config.image_sources.is_empty(), "v6 knew no sources");
     // Lossless: everything else survived untouched.
     assert_eq!(config.cards.len(), 1);
@@ -423,7 +423,7 @@ fn a_v6_document_migrates_to_v8_with_no_image_sources_and_loses_nothing() {
 }
 
 #[test]
-fn v7_document_migrates_to_v8_dropping_retired_cards_and_entries() {
+fn v7_document_migrates_to_v9_dropping_retired_cards_and_entries() {
     let directory = test_directory("v7-migration");
     let path = directory.path().join("config.json");
     let store = ConfigStore::new(&path);
@@ -451,6 +451,57 @@ fn v7_document_migrates_to_v8_dropping_retired_cards_and_entries() {
         ["clock", "pomodoro"]
     );
     config.validate().unwrap();
+}
+
+#[test]
+fn v8_document_migrates_to_v9_dropping_plugin_cards_and_entries() {
+    let directory = test_directory("v8-migration");
+    let path = directory.path().join("config.json");
+    let store = ConfigStore::new(&path);
+    fs::write(&path, include_bytes!("fixtures/plugin-card.json")).unwrap();
+
+    let outcome = store.load();
+    assert_eq!(outcome.origin(), ConfigOrigin::MigratedV8);
+    assert!(outcome.recovery().is_none());
+    let config = outcome.config();
+    assert_eq!(config.schema_version, CURRENT_SCHEMA_VERSION);
+    assert_eq!(
+        config
+            .cards
+            .iter()
+            .map(CardSettings::id)
+            .collect::<Vec<_>>(),
+        ["clock"]
+    );
+    assert_eq!(
+        config.playlists[0]
+            .entries
+            .iter()
+            .map(|entry| entry.card_id.as_str())
+            .collect::<Vec<_>>(),
+        ["clock"]
+    );
+    config.validate().unwrap();
+}
+
+#[test]
+fn v8_roundtrip_fixture_preserves_every_surviving_card() {
+    let directory = test_directory("v8-roundtrip");
+    let path = directory.path().join("config.json");
+    let store = ConfigStore::new(&path);
+    fs::write(&path, include_bytes!("fixtures/v8-roundtrip.json")).unwrap();
+
+    let outcome = store.load();
+    assert_eq!(outcome.origin(), ConfigOrigin::MigratedV8);
+    assert_eq!(
+        outcome
+            .config()
+            .cards
+            .iter()
+            .map(CardSettings::id)
+            .collect::<Vec<_>>(),
+        ["clock", "pomodoro"]
+    );
 }
 
 #[test]
@@ -489,8 +540,8 @@ fn an_all_retired_v7_document_gets_the_default_clock_and_loses_empty_inactive_pl
 }
 
 #[test]
-fn v0_v1_v2_migrate_directly_to_v8() {
-    let directory = test_directory("legacy-direct-to-v8");
+fn v0_v1_v2_migrate_directly_to_v9() {
+    let directory = test_directory("legacy-direct-to-v9");
     let path = directory.path().join("config.json");
     let store = ConfigStore::new(&path);
 
@@ -685,7 +736,7 @@ fn migrated_v2_documents_always_satisfy_the_rotation_rule() {
 }
 
 #[test]
-fn future_v9_is_a_recoverable_error_preserving_bytes() {
+fn future_v10_is_a_recoverable_error_preserving_bytes() {
     let directory = test_directory("future-version");
     let path = directory.path().join("config.json");
     let store = ConfigStore::new(&path);
@@ -694,12 +745,8 @@ fn future_v9_is_a_recoverable_error_preserving_bytes() {
     last_good.preferences.autostart = true;
     store.save(&last_good).unwrap();
 
-    let future = include_str!("fixtures/future-v7.json").replacen(
-        "\"schema_version\": 8",
-        "\"schema_version\": 9",
-        1,
-    );
-    fs::write(&path, &future).unwrap();
+    let future = include_str!("fixtures/future-v7.json");
+    fs::write(&path, future).unwrap();
 
     let outcome = store.load();
     assert_eq!(outcome.origin(), ConfigOrigin::LastGood);
@@ -707,8 +754,8 @@ fn future_v9_is_a_recoverable_error_preserving_bytes() {
     assert!(matches!(
         outcome.recovery(),
         Some(StoreError::UnsupportedVersion {
-            found: 9,
-            supported: 8
+            found: 10,
+            supported: 9
         })
     ));
     // The unreadable source bytes are never rewritten.

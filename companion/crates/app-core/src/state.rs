@@ -7,7 +7,6 @@ pub struct AppSnapshot {
     pub config: AppConfig,
     pub runtime: RuntimeState,
     pub device: DeviceSnapshot,
-    pub providers: Vec<ProviderSnapshot>,
     pub pomodoros: Vec<PomodoroSnapshot>,
     pub card_data: Vec<CardDataSnapshot>,
     /// Cards whose last data push was refused, or whose complete scene could not be
@@ -41,9 +40,6 @@ pub enum CardErrorKind {
 pub struct RuntimeDiagnostics {
     pub commands_processed: u64,
     pub command_queue_full: u64,
-    pub provider_jobs_started: u64,
-    pub provider_queue_full: u64,
-    pub provider_results_discarded: u64,
     pub subscriber_snapshots_overwritten: u64,
     /// `InterruptDismissed` events the host received but could not apply,
     /// because the arbiter no longer tracks the token they carry (or they
@@ -355,24 +351,6 @@ pub struct DeviceCounters {
     pub ui_queue_high_water: u32,
     pub host_dropped_events: u64,
     pub detected_event_gaps: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProviderSnapshot {
-    pub widget_id: String,
-    pub state: ProviderState,
-    pub last_success_unix_ms: Option<i64>,
-    pub age_seconds: Option<u64>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "kebab-case")]
-pub enum ProviderState {
-    Idle,
-    Refreshing,
-    Fresh,
-    Stale { message: String },
-    Error { message: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -30,7 +30,7 @@ bool sim_render(int template_kind,
  * Task 8 (stage 2a): scene rendering.
  * ------------------------------------------------------------------ */
 
-/* One `field.<name>` binding's current value, as a provider would have
+/* One `field.<name>` binding's current value, as an upstream source would have
  * reported it. Looked up by name, exactly as the device's
  * scene_field_fn does. */
 typedef struct {

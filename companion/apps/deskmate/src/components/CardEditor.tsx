@@ -7,22 +7,17 @@ import {
   setEntryDwell,
   tapActionDescription,
 } from "../lib/configDraft";
-import { providerTrouble } from "../lib/providers";
 import type {
   AlertHold,
   AppConfig,
   CardAlert,
   CardError,
   CardSettings,
-  DeviceTier,
   MintedImageSource,
-  PluginCatalog,
   PomodoroSnapshot,
-  ProviderSnapshot,
   ValidationIssue,
 } from "../lib/types";
 import { FieldIssues } from "./FieldIssues";
-import { Icon } from "./Icon";
 
 interface CardEditorProps {
   card: CardSettings | null;
@@ -38,21 +33,13 @@ interface CardEditorProps {
   /// A typed device refusal for this card's last data or scene update.
   cardError: CardError | null;
   pomodoro: PomodoroSnapshot | null;
-  /// The feed behind this card, when it has one. Only ever rendered when it is in
-  /// trouble — see `providerTrouble`.
-  provider: ProviderSnapshot | null;
-  /// The server's plugin registry, or null in local tier and before the first read.
-  catalog: PluginCatalog | null;
-  ownershipTier: DeviceTier | null;
   timerBusy: boolean;
-  providerRefreshing: boolean;
   /** Present only for the picture card whose source was minted this session. */
   pictureAccess?: MintedImageSource | null;
   onChange: (card: CardSettings) => void;
   onConfigChange: (config: AppConfig) => void;
   onRemove: () => void;
   onTimerAction: (action: "start" | "pause" | "reset") => void;
-  onRefreshProvider: () => void;
 }
 
 function HoldSelector({
@@ -111,17 +98,12 @@ export function CardEditor({
   entryIssues,
   cardError,
   pomodoro,
-  provider,
-  catalog,
-  ownershipTier,
   timerBusy,
-  providerRefreshing,
   pictureAccess = null,
   onChange,
   onConfigChange,
   onRemove,
   onTimerAction,
-  onRefreshProvider,
 }: CardEditorProps) {
   if (!card) {
     return (
@@ -140,28 +122,13 @@ export function CardEditor({
   }
 
   const fieldIssues = (field: string) => issuesForField(issues, field);
-  const trouble = providerTrouble(provider);
-  const catalogEntry =
-    card.kind === "plugin"
-      ? (catalog?.plugins.find((entry) => entry.id === card.plugin_id) ?? null)
-      : null;
-  // What the identity statement says when there is no catalog to check against.
-  // It states only what the tier makes true, never whether the plugin is installed.
-  const catalogUnavailableReason =
-    ownershipTier === "local"
-      ? "Needs the server to render"
-      : "The plugin list comes from the server";
-  // The server owns plugin and picture updates, so the Mac has nothing to refresh.
-  // The reason rides the same sentence as the trouble, because a disabled control
-  // with no stated reason is worse than no control.
-  const refreshesOnServer = card.kind === "plugin" || card.kind === "picture";
   const setAlert = (alert: CardAlert) => onChange({ ...card, alert });
   const playlist = activePlaylist(config);
   const entryIndex = playlist?.entries.findIndex((entry) => entry.card_id === card.id) ?? -1;
   const entry = entryIndex >= 0 ? playlist?.entries[entryIndex] : undefined;
   const isTimed = playlist?.advance.kind === "timed";
   const title = cardTitle(card);
-  const controlName = title ? `${cardLabel(card, catalog)} — ${title}` : cardLabel(card, catalog);
+  const controlName = title ? `${cardLabel(card)} — ${title}` : cardLabel(card);
   const dwellIssues = entryIssues.filter((issue) => issue.path.endsWith(".dwell_seconds"));
   const showDwell =
     entry !== undefined && (isTimed || entry.dwell_seconds !== null || dwellIssues.length > 0);
@@ -170,7 +137,7 @@ export function CardEditor({
     <section className="panel" aria-labelledby="editor-heading">
       <div className="panel-heading">
         <div className="editor-title">
-          <h2 id="editor-heading">{cardLabel(card, catalog)}</h2>
+          <h2 id="editor-heading">{cardLabel(card)}</h2>
           {cardTitle(card) && <span className="editor-title__kind">{cardTitle(card)}</span>}
         </div>
         <button className="text-button text-button--danger" type="button" onClick={onRemove}>
@@ -188,26 +155,6 @@ export function CardEditor({
             </strong>{" "}
             {cardError.message} Adjust the card and save to try again.
           </span>
-        </p>
-      )}
-
-      {/* The recovery half of the removed data-sources panel, moved to where it is
-          actionable: beside the card whose data went bad, not in a list of every
-          feed in the app that was healthy anyway. */}
-      {trouble && (
-        <p className="data-note" role="status">
-          <span>
-            {refreshesOnServer ? `${trouble} This card refreshes on the server.` : trouble}
-          </span>
-          <button
-            className="text-button"
-            type="button"
-            disabled={providerRefreshing || refreshesOnServer}
-            onClick={onRefreshProvider}
-          >
-            <Icon name="refresh" />
-            {providerRefreshing ? "Refreshing…" : "Refresh"}
-          </button>
         </p>
       )}
 
@@ -313,31 +260,6 @@ export function CardEditor({
           </>
         )}
 
-        {card.kind === "plugin" && (
-          <div className="field">
-            <span>Plugin</span>
-            {/* The plugin id is the card's identity, fixed when the card is added.
-                Rendering identity as a control implied that changing it was a safe
-                edit, even though it silently turned the card into a different thing. */}
-            <strong>
-              {catalogEntry
-                ? `${catalogEntry.display_name ?? catalogEntry.id} · ${catalogEntry.version}`
-                : card.plugin_id}
-            </strong>
-            {/* The machine id stays visible in the small line. Without a catalog it
-                is the only identity we know, and the reason says only why we could
-                not verify it rather than claiming the plugin is missing. */}
-            <small>
-              {catalog === null
-                ? `${card.plugin_id} · ${catalogUnavailableReason}`
-                : catalogEntry
-                  ? card.plugin_id
-                  : `${card.plugin_id} · Not installed on the server`}
-            </small>
-            <FieldIssues issues={fieldIssues("plugin_id")} />
-          </div>
-        )}
-
         {card.kind === "picture" && (
           <>
             <label className="field">
@@ -381,37 +303,6 @@ export function CardEditor({
               </div>
             )}
           </>
-        )}
-
-        {card.kind === "plugin" && (
-          <label className="field">
-            <span>Refresh every</span>
-            <select
-              className="numeral"
-              value={card.refresh.kind === "interval" ? card.refresh.minutes : 15}
-              onChange={(event) =>
-                onChange({
-                  ...card,
-                  refresh: { kind: "interval", minutes: numberValue(event.currentTarget.value) },
-                })
-              }
-            >
-              {card.refresh.kind === "interval" &&
-                ![5, 15, 30, 60].includes(card.refresh.minutes) && (
-                  <option value={card.refresh.minutes}>{card.refresh.minutes} minutes</option>
-                )}
-              <option value="5">5 minutes</option>
-              <option value="15">15 minutes</option>
-              <option value="30">30 minutes</option>
-              <option value="60">1 hour</option>
-            </select>
-            {catalogEntry && (
-              <small>
-                {`The server fetches this plugin every ${catalogEntry.refresh_minutes} minutes.`}
-              </small>
-            )}
-            <FieldIssues issues={fieldIssues("refresh")} />
-          </label>
         )}
 
         {card.kind === "pomodoro" && (

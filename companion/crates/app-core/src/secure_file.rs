@@ -123,7 +123,7 @@ pub fn write_and_replace(target: &Path, bytes: &[u8]) -> Result<(), FileIoError>
 /// at mode 0600.
 ///
 /// A canonical RGB565 frame is 329,740 bytes and its reader checks that length
-/// exactly (`server::rasterizer::frame_png`). Writing one through the text path
+/// exactly (`server::image_ingest`). Writing one through the text path
 /// above yields 329,741 bytes on disk, which reads back as a corrupt frame
 /// rather than as an error, so binary payloads must not use it.
 pub fn write_and_replace_binary(target: &Path, bytes: &[u8]) -> Result<(), FileIoError> {

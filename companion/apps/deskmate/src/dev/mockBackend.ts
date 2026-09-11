@@ -21,14 +21,7 @@ import type {
 } from "../lib/types";
 import { mockCardData, mockConfig, mockNetworkSettings, mockSnapshot } from "./fixture";
 import { renderMockFrame } from "./mockPreview";
-import { mockPictureCardState, mockPictureConfig, mockPictureProviders } from "./pictureFixture";
-import {
-  MOCK_PLUGIN_CATALOG,
-  mockPluginCardData,
-  mockPluginCardState,
-  mockPluginConfig,
-  mockPluginProviders,
-} from "./pluginFixture";
+import { mockPictureConfig } from "./pictureFixture";
 
 export const SCENARIOS = [
   "default",
@@ -40,8 +33,6 @@ export const SCENARIOS = [
   "firstrun",
   "empty",
   "carderror",
-  "plugin",
-  "plugin-local",
   "picture",
 ] as const;
 export type Scenario = (typeof SCENARIOS)[number];
@@ -109,7 +100,6 @@ function applyScenario() {
       };
       snapshot = mockSnapshot(config);
       snapshot.has_saved_config = false;
-      snapshot.providers = [];
       snapshot.pomodoros = [];
       snapshot.card_data = [];
       break;
@@ -120,7 +110,6 @@ function applyScenario() {
         playlists: [{ id: "day", name: "Workday", advance: { kind: "manual" }, entries: [] }],
       };
       snapshot = mockSnapshot(config);
-      snapshot.providers = [];
       snapshot.pomodoros = [];
       snapshot.card_data = [];
       break;
@@ -133,24 +122,9 @@ function applyScenario() {
         },
       ];
       break;
-    case "plugin":
-    case "plugin-local":
-      config = mockPluginConfig();
-      snapshot = mockSnapshot(config);
-      snapshot.providers = mockPluginProviders();
-      snapshot.card_data = mockPluginCardData();
-      snapshot.pomodoros = [];
-      if (scenario === "plugin-local") {
-        // No server, so no catalog and no rendering: `pluginCardFlag` prints the
-        // word and the stage says where these cards are drawn.
-        snapshot.device.tier = "local";
-        network = { server_url: "", device_id: "", tier: "local" };
-      }
-      break;
     case "picture":
       config = mockPictureConfig();
       snapshot = mockSnapshot(config);
-      snapshot.providers = mockPictureProviders();
       snapshot.card_data = [];
       snapshot.pomodoros = [];
       break;
@@ -188,7 +162,6 @@ function validate(draft: AppConfig): DraftValidation {
         }
         break;
       case "clock":
-      case "plugin":
         break;
       case "picture":
         if (!draft.image_sources.some((source) => source.id === card.source_id)) {
@@ -256,17 +229,6 @@ function requireArgs(args: Record<string, unknown> | undefined): Record<string, 
 const delay = <T>(value: T, ms = 90): Promise<T> =>
   new Promise((resolve) => window.setTimeout(() => resolve(value), ms));
 
-/** The `hero` field the mock projection published for one card, if any. */
-function heroFor(cardId: string): string | null {
-  const field = snapshot.card_data
-    .find((candidate) => candidate.card_id === cardId)
-    ?.fields.find((candidate) => candidate.key === "hero");
-  if (!field) {
-    return null;
-  }
-  return field.value.kind === "text" ? field.value.value : String(field.value.value);
-}
-
 export async function mockInvoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   switch (command) {
     case "get_app_snapshot":
@@ -275,25 +237,15 @@ export async function mockInvoke<T>(command: string, args?: Record<string, unkno
       return delay(network) as Promise<T>;
     case "get_autostart_status":
       return delay(autostart) as Promise<T>;
-    case "get_server_plugins":
-      if (typeof args?.sourceName === "string") {
-        const sourceNumber = config.image_sources.length + 1;
-        const token = `dev-picture-token-${sourceNumber}`;
-        return delay({
-          source_id: `picture-source-${sourceNumber}`,
-          token,
-          push_url: `${network.server_url.replace(/\/$/, "")}/v1/images/${token}`,
-        }) as Promise<T>;
-      }
-      return delay(MOCK_PLUGIN_CATALOG) as Promise<T>;
-    case "get_server_card_state":
-      return delay(
-        scenario === "plugin"
-          ? mockPluginCardState()
-          : scenario === "picture"
-            ? mockPictureCardState()
-            : [],
-      ) as Promise<T>;
+    case "mint_image_source": {
+      const sourceNumber = config.image_sources.length + 1;
+      const token = `dev-picture-token-${sourceNumber}`;
+      return delay({
+        source_id: `picture-source-${sourceNumber}`,
+        token,
+        push_url: `${network.server_url.replace(/\/$/, "")}/v1/images/${token}`,
+      }) as Promise<T>;
+    }
     case "set_autostart_enabled": {
       autostart = { enabled: Boolean(args?.enabled), preference_enabled: Boolean(args?.enabled) };
       return delay(autostart) as Promise<T>;
@@ -334,47 +286,10 @@ export async function mockInvoke<T>(command: string, args?: Record<string, unkno
       publish();
       return delay(undefined as T);
     }
-    case "refresh_provider": {
-      const id = (requireArgs(args).target as { widget_id: string }).widget_id;
-      const provider = snapshot.providers.find((candidate) => candidate.widget_id === id);
-      if (provider) {
-        provider.state = { kind: "refreshing" };
-        publish();
-        window.setTimeout(() => {
-          provider.state = { kind: "fresh" };
-          provider.age_seconds = 0;
-          publish();
-        }, 900);
-      }
-      return delay(undefined as T);
-    }
     case "render_card_preview": {
       const cardId = args?.cardId as string;
       const card = config.cards.find((candidate) => candidate.id === cardId);
       if (!card) throw { category: "not-found", message: "No such card." };
-      if (card.kind === "plugin") {
-        if (scenario === "plugin-local") {
-          return {
-            png_base64: null,
-            sample: false,
-            state: "Plugin cards render on the server",
-          } as T;
-        }
-        if (!MOCK_PLUGIN_CATALOG.plugins.some((plugin) => plugin.id === card.plugin_id)) {
-          return {
-            png_base64: null,
-            sample: false,
-            state: `Plugin “${card.plugin_id}” is not loaded on the server`,
-          } as T;
-        }
-        if (heroFor(cardId) === null) {
-          return {
-            png_base64: null,
-            sample: false,
-            state: "Waiting for the first refresh",
-          } as T;
-        }
-      }
       if (card.kind === "picture" && snapshot.device.tier === "local") {
         return {
           png_base64: null,
@@ -386,7 +301,6 @@ export async function mockInvoke<T>(command: string, args?: Record<string, unkno
       return {
         png_base64: renderMockFrame(
           card,
-          snapshot.card_data.find((candidate) => candidate.card_id === cardId),
           config.preferences.timezone,
           timer?.remaining_seconds ?? null,
         ),

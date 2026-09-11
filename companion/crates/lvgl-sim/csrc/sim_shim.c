@@ -377,7 +377,7 @@ typedef struct {
 
 /* scene_binding.h's scene_field_fn. Returning NULL for an unknown name is
  * not an error: scene_binding_evaluate() renders the "--" placeholder for
- * it, which is exactly what the device does for a provider that has not
+ * it, which is exactly what the device does for a source that has not
  * reported yet, and a golden that pins that state is worth having. */
 static const char *sim_scene_field_lookup(void *ctx, const char *name)
 {

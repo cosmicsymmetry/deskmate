@@ -476,16 +476,6 @@ export const ipcContractFixtures = {
     },
     {
       "kind": "progress-ring"
-    },
-    {
-      "kind": "row-list"
-    },
-    {
-      "kind": "big-number-label"
-    },
-    {
-      "kind": "icon-badge-text",
-      "icon_asset_id": "weather-icons"
     }
   ],
   "tap_actions": [

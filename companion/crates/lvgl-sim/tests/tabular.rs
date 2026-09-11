@@ -22,10 +22,11 @@
 // Only the two pinned instants are used here; the case table itself belongs
 // to `golden.rs`. `cases` now lives in `lvgl-sim`'s `src/` (Task 10) so both
 // this test and `framebuffer_diff.rs` (a different crate) can reach it.
-use lvgl_sim::{
-    LOGICAL_WIDTH, RenderRequest, SimField, SimFieldValue, SimOrientation, SimTemplate, Simulator,
-    cases,
+use app_core::{
+    AppConfig, CardAlert, CardSettings, DisplayTemplate, RefreshPolicy, WidgetTapAction,
 };
+use lvgl_sim::scene::SceneRenderRequest;
+use lvgl_sim::{LOGICAL_WIDTH, SimOrientation, Simulator, cases};
 
 /// Rows covering the hero time label and nothing else: the face has no title
 /// chip above it and the module row starts at y = 176 (see `digital_clock.c`,
@@ -43,21 +44,27 @@ const ALL_DIGIT_INSTANTS: [i64; 5] = [
     1_755_087_600,
 ];
 
-fn request(now_unix_seconds: i64) -> RenderRequest {
-    RenderRequest {
-        template: SimTemplate::DigitalClock,
-        fields: vec![
-            SimField {
-                name: "title".to_string(),
-                value: SimFieldValue::Text("Desk".to_string()),
-            },
-            SimField {
-                name: "show_seconds".to_string(),
-                value: SimFieldValue::Boolean(false),
-            },
-        ],
+/// A digital clock with seconds hidden, so the hero label is exactly `HH:MM`.
+fn request(now_unix_seconds: i64) -> SceneRenderRequest {
+    let config = AppConfig {
+        cards: vec![CardSettings::Clock {
+            id: "clock".into(),
+            title: "Desk".into(),
+            show_seconds: false,
+            template: DisplayTemplate::DigitalClock,
+            tap_action: WidgetTapAction::None,
+            refresh: RefreshPolicy::DeviceLocal,
+            alert: CardAlert::None,
+        }],
+        ..AppConfig::default()
+    };
+    SceneRenderRequest {
+        scene: app_core::preview_card_scene(&config, "clock", &[]).expect("a clock scene"),
+        assets: Vec::new(),
         utc_offset_minutes: 0,
         now_unix_seconds,
+        timer: None,
+        fields: Vec::new(),
         orientation: SimOrientation::Landscape,
     }
 }
@@ -92,8 +99,14 @@ fn ink_runs(pixels: &[u16]) -> Vec<(usize, usize)> {
 fn hero_time_label_is_tabular() {
     let mut sim = Simulator::new().expect("simulator");
 
-    let runs_1135 = ink_runs(&sim.render(&request(cases::TABULAR_1135)).expect("11:35"));
-    let runs_0000 = ink_runs(&sim.render(&request(cases::TABULAR_0000)).expect("00:00"));
+    let runs_1135 = ink_runs(
+        &sim.render_scene(&request(cases::TABULAR_1135))
+            .expect("11:35"),
+    );
+    let runs_0000 = ink_runs(
+        &sim.render_scene(&request(cases::TABULAR_0000))
+            .expect("00:00"),
+    );
     assert_eq!(runs_1135.len(), 5, "11:35 did not render five glyphs");
     assert_eq!(runs_0000.len(), 5, "00:00 did not render five glyphs");
     assert_eq!(
@@ -106,7 +119,10 @@ fn hero_time_label_is_tabular() {
     let spans: Vec<(usize, usize)> = ALL_DIGIT_INSTANTS
         .iter()
         .map(|instant| {
-            let runs = ink_runs(&sim.render(&request(*instant)).expect("all-digit instant"));
+            let runs = ink_runs(
+                &sim.render_scene(&request(*instant))
+                    .expect("all-digit instant"),
+            );
             (runs[0].0, runs[runs.len() - 1].1)
         })
         .collect();

@@ -267,19 +267,12 @@ fn card_settings_rejects_an_unknown_field_nested_inside_refresh() {
 
 #[test]
 fn display_template_rejects_unknown_fields_on_every_unit_variant() {
-    // `DisplayTemplate` is internally tagged. A prior version of this test only probed
-    // `icon-badge-text` (a struct variant), which happened to reject unknown fields even
-    // under the plain `#[serde(deny_unknown_fields)]` derive and gave false confidence:
-    // the unit variants (DigitalClock, AnalogClock, ProgressRing, RowList,
-    // BigNumberLabel) slipped unknown fields through entirely under that derive. Probe
-    // every unit variant explicitly, plus the struct variant, plus valid round-trips.
-    for kind in [
-        "digital-clock",
-        "analog-clock",
-        "progress-ring",
-        "row-list",
-        "big-number-label",
-    ] {
+    // `DisplayTemplate` is internally tagged, and a plain `#[serde(deny_unknown_fields)]`
+    // derive is a no-op on such an enum's unit variants -- they slipped unknown fields
+    // through entirely. Probe every variant explicitly, plus valid round-trips.
+    // (The struct variant this test also used to probe, `icon-badge-text`, was retired
+    // with the three orphan templates on 2026-09-11.)
+    for kind in ["digital-clock", "analog-clock", "progress-ring"] {
         let with_bogus = format!(r#"{{"kind":"{kind}","bogus":1}}"#);
         assert!(
             serde_json::from_str::<DisplayTemplate>(&with_bogus).is_err(),
@@ -291,23 +284,6 @@ fn display_template_rejects_unknown_fields_on_every_unit_variant() {
             "unit variant {kind:?} must still deserialize without extra fields"
         );
     }
-
-    assert!(
-        serde_json::from_str::<DisplayTemplate>(
-            r#"{"kind":"icon-badge-text","icon_asset_id":"icons","bogus":1}"#
-        )
-        .is_err()
-    );
-    let valid_struct = serde_json::from_str::<DisplayTemplate>(
-        r#"{"kind":"icon-badge-text","icon_asset_id":"icons"}"#,
-    )
-    .unwrap();
-    assert_eq!(
-        valid_struct,
-        DisplayTemplate::IconBadgeText {
-            icon_asset_id: Some("icons".into())
-        }
-    );
 }
 
 #[test]
@@ -673,26 +649,35 @@ fn compilation_lowers_cards_to_the_frozen_wire_shape() {
 #[test]
 fn compositions_the_card_cannot_populate_are_rejected() {
     let rejected = [
-        // Clock sends no `value`: big-number-label would show "--" forever.
+        // A clock sends no timer, so a progress ring would show an empty arc
+        // and a "Pomodoro" label forever.
         CardSettings::Clock {
             id: "clock".into(),
             title: "Desk".into(),
             show_seconds: true,
-            template: DisplayTemplate::BigNumberLabel,
+            template: DisplayTemplate::ProgressRing,
             tap_action: WidgetTapAction::None,
             refresh: RefreshPolicy::DeviceLocal,
             alert: CardAlert::None,
         },
-        // Pomodoro sends label/duration_seconds/remaining_seconds/running, of which
-        // big-number-label declares only `label`: `value` stays "--" forever and the
-        // other three count as unknown on every tick, not merely on every refresh.
-        // `tap_action` is None here so the failure can only be the template — the
-        // timer-action rule is pinned separately below.
+        // A pomodoro on a clock face would draw the time and never its timer.
+        // `tap_action` is None here so the failure can only be the template --
+        // the timer-action rule is pinned separately below.
         CardSettings::Pomodoro {
             id: "focus".into(),
             label: "Focus".into(),
             duration_seconds: 1_500,
-            template: DisplayTemplate::BigNumberLabel,
+            template: DisplayTemplate::DigitalClock,
+            tap_action: WidgetTapAction::None,
+            refresh: RefreshPolicy::DeviceLocal,
+            alert: CardAlert::None,
+        },
+        // And the analog face is the same mistake with the other clock template.
+        CardSettings::Pomodoro {
+            id: "focus-analog".into(),
+            label: "Focus".into(),
+            duration_seconds: 1_500,
+            template: DisplayTemplate::AnalogClock,
             tap_action: WidgetTapAction::None,
             refresh: RefreshPolicy::DeviceLocal,
             alert: CardAlert::None,
@@ -733,7 +718,7 @@ fn timer_tap_actions_require_the_progress_ring_template() {
             id: "focus".into(),
             label: "Focus".into(),
             duration_seconds: 1_500,
-            template: DisplayTemplate::BigNumberLabel,
+            template: DisplayTemplate::DigitalClock,
             tap_action: tap_action.clone(),
             refresh: RefreshPolicy::DeviceLocal,
             alert: CardAlert::None,

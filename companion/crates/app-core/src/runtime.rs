@@ -21,13 +21,11 @@ use crate::commands::{CommandReply, PomodoroAction, RuntimeCommand, RuntimeError
 use crate::render_negotiation;
 use crate::scheduler::Scheduler;
 use crate::{
-    AlertHold, AnalogClockCard, AppConfig, AppSnapshot, BakedFontMetrics, BigNumberCard, CardAlert,
+    AlertHold, AnalogClockCard, AppConfig, AppSnapshot, BakedFontMetrics, CardAlert,
     CardDataSnapshot, CardError, CardErrorKind, CardSettings, ClockCard, ConnectionState,
-    DesiredAsset, DeviceCounters, DeviceSnapshot, DeviceTier, DisplayTemplate, IconBadgeCard,
-    PersistenceState, PomodoroSnapshot, PomodoroState, ProgressRingCard, RowListCard,
-    RuntimeDiagnostics, RuntimeState, SHIPPED_SCENE_SURFACE_COLOR, SceneDataState,
-    build_analog_clock_scene, build_big_number_label_scene, build_digital_clock_scene,
-    build_icon_badge_text_scene, build_progress_ring_scene, build_row_list_scene,
+    DesiredAsset, DeviceCounters, DeviceSnapshot, DeviceTier, DisplayTemplate, PersistenceState,
+    PomodoroSnapshot, PomodoroState, ProgressRingCard, RuntimeDiagnostics, RuntimeState,
+    SceneDataState, build_analog_clock_scene, build_digital_clock_scene, build_progress_ring_scene,
     with_scene_data_state,
 };
 
@@ -2050,44 +2048,6 @@ fn build_template_card_scene(
                 label: field_text(fields, "label"),
                 duration_seconds: field_integer(fields, "duration_seconds"),
             },
-            metrics,
-        ),
-        Some(DisplayTemplate::RowList) => build_row_list_scene(
-            &RowListCard {
-                revision,
-                title: field_text(fields, "title"),
-                row0_title: field_text(fields, "row0_title"),
-                row0_time: field_text(fields, "row0_time"),
-                row1_title: field_text(fields, "row1_title"),
-                row1_time: field_text(fields, "row1_time"),
-                row2_title: field_text(fields, "row2_title"),
-                row2_time: field_text(fields, "row2_time"),
-                row3_title: field_text(fields, "row3_title"),
-                row3_time: field_text(fields, "row3_time"),
-                row4_title: field_text(fields, "row4_title"),
-                row4_time: field_text(fields, "row4_time"),
-            },
-            metrics,
-        ),
-        Some(DisplayTemplate::BigNumberLabel) => build_big_number_label_scene(
-            &BigNumberCard {
-                revision,
-                title: field_text(fields, "title"),
-                value: field_text(fields, "value"),
-                label: field_text(fields, "label"),
-            },
-            metrics,
-        ),
-        Some(DisplayTemplate::IconBadgeText { .. }) => build_icon_badge_text_scene(
-            &IconBadgeCard {
-                revision,
-                title: field_text(fields, "title"),
-                icon: field_text(fields, "icon"),
-                badge: field_text(fields, "badge"),
-                value: field_text(fields, "value"),
-                label: field_text(fields, "label"),
-            },
-            SHIPPED_SCENE_SURFACE_COLOR,
             metrics,
         ),
         None => {

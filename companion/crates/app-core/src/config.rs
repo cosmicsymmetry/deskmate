@@ -37,7 +37,7 @@ mod strict_tagged_enum {
 
     /// Serde's `deny_unknown_fields` no-op on internally tagged enums affects unit
     /// variants just as much as struct variants (`DigitalClock`, not just
-    /// `IconBadgeText`), so `DisplayTemplate` needs the same treatment as the
+    /// `AnalogClock`), so `DisplayTemplate` needs the same treatment as the
     /// card-behaviour types above.
     #[derive(Debug, Serialize, Deserialize)]
     #[serde(tag = "kind", rename_all = "kebab-case")]
@@ -45,9 +45,6 @@ mod strict_tagged_enum {
         DigitalClock,
         AnalogClock,
         ProgressRing,
-        RowList,
-        BigNumberLabel,
-        IconBadgeText { icon_asset_id: Option<String> },
     }
 
     #[derive(Debug, Serialize, Deserialize)]
@@ -159,9 +156,7 @@ mod strict_tagged_enum {
     impl ValidatingDeserialize for DisplayTemplateInner {
         fn allowed_fields(kind: &str) -> Option<&'static [&'static str]> {
             match kind {
-                "digital-clock" | "analog-clock" | "progress-ring" | "row-list"
-                | "big-number-label" => Some(&["kind"]),
-                "icon-badge-text" => Some(&["kind", "icon_asset_id"]),
+                "digital-clock" | "analog-clock" | "progress-ring" => Some(&["kind"]),
                 _ => None,
             }
         }
@@ -701,29 +696,6 @@ impl AppConfig {
                 format!("asset budget must not exceed {MAX_TOTAL_ASSET_BYTES} bytes"),
             ));
         }
-        for (index, card) in self.cards.iter().enumerate() {
-            if let Some(DisplayTemplate::IconBadgeText {
-                icon_asset_id: Some(asset_id),
-            }) = card.template()
-            {
-                match assets_by_id.get(asset_id.as_str()) {
-                    None => issues.push(ValidationIssue::new(
-                        format!("cards[{index}].template.icon_asset_id"),
-                        ValidationCode::MissingReference,
-                        format!("asset {asset_id:?} does not exist"),
-                    )),
-                    Some(kind) if !matches!(kind, AssetKind::IconFont { .. }) => {
-                        issues.push(ValidationIssue::new(
-                            format!("cards[{index}].template.icon_asset_id"),
-                            ValidationCode::InvalidComposition,
-                            "icon template must reference an icon-font asset",
-                        ));
-                    }
-                    Some(_) => {}
-                }
-            }
-        }
-
         if issues.is_empty() {
             Ok(())
         } else {
@@ -855,9 +827,7 @@ impl AppConfig {
                 card.template(),
                 Some(t) if !matches!(
                     t,
-                    DisplayTemplate::DigitalClock
-                        | DisplayTemplate::ProgressRing
-                        | DisplayTemplate::RowList
+                    DisplayTemplate::DigitalClock | DisplayTemplate::ProgressRing
                 )
             )
         }) {
@@ -945,9 +915,6 @@ pub enum DisplayTemplate {
     DigitalClock,
     AnalogClock,
     ProgressRing,
-    RowList,
-    BigNumberLabel,
-    IconBadgeText { icon_asset_id: Option<String> },
 }
 
 impl<'de> Deserialize<'de> for DisplayTemplate {
@@ -963,11 +930,6 @@ impl<'de> Deserialize<'de> for DisplayTemplate {
             strict_tagged_enum::DisplayTemplateInner::DigitalClock => Self::DigitalClock,
             strict_tagged_enum::DisplayTemplateInner::AnalogClock => Self::AnalogClock,
             strict_tagged_enum::DisplayTemplateInner::ProgressRing => Self::ProgressRing,
-            strict_tagged_enum::DisplayTemplateInner::RowList => Self::RowList,
-            strict_tagged_enum::DisplayTemplateInner::BigNumberLabel => Self::BigNumberLabel,
-            strict_tagged_enum::DisplayTemplateInner::IconBadgeText { icon_asset_id } => {
-                Self::IconBadgeText { icon_asset_id }
-            }
         })
     }
 }
@@ -1375,17 +1337,6 @@ impl CardSettings {
         }
         self.tap_action()
             .validate(&format!("{path}.tap_action"), issues);
-        if let Some(DisplayTemplate::IconBadgeText {
-            icon_asset_id: Some(asset_id),
-        }) = self.template()
-        {
-            validate_identifier(
-                &format!("{path}.template.icon_asset_id"),
-                asset_id,
-                MAX_WIDGET_ID_LEN,
-                issues,
-            );
-        }
     }
 
     fn wire_config(&self) -> Option<WidgetConfig> {
@@ -1401,10 +1352,7 @@ impl CardSettings {
             // real digital-clock arm below as anything but that shared byte value.
             Some(DisplayTemplate::DigitalClock) | None => TemplateKind::DigitalClock,
             Some(DisplayTemplate::ProgressRing) => TemplateKind::ProgressRing,
-            Some(DisplayTemplate::RowList) => TemplateKind::RowList,
             Some(DisplayTemplate::AnalogClock) => TemplateKind::AnalogClock,
-            Some(DisplayTemplate::BigNumberLabel) => TemplateKind::BigNumberLabel,
-            Some(DisplayTemplate::IconBadgeText { .. }) => TemplateKind::IconBadgeText,
         };
         let tap_action = match self.tap_action() {
             WidgetTapAction::None => TapAction::None,

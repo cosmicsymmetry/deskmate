@@ -2651,11 +2651,6 @@ pub(crate) mod tests {
                 DisplayTemplate::DigitalClock,
                 DisplayTemplate::AnalogClock,
                 DisplayTemplate::ProgressRing,
-                DisplayTemplate::RowList,
-                DisplayTemplate::BigNumberLabel,
-                DisplayTemplate::IconBadgeText {
-                    icon_asset_id: Some("weather-icons".into()),
-                },
             ],
             tap_actions: vec![
                 WidgetTapAction::None,

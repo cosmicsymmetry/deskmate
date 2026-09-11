@@ -16,37 +16,8 @@
 
 use std::sync::{Arc, LazyLock};
 
-use crate::{RenderRequest, SimField, SimFieldValue, SimOrientation, SimTemplate};
+use crate::SimOrientation;
 use protocol::AssetKind;
-
-/// The wire's absolute per-field text ceiling
-/// (`PROTOCOL_MAX_FIELD_TEXT_LENGTH` in
-/// `firmware/main/core/protocol_message.h`). Used for the row-list
-/// truncation-boundary case; note this exceeds `row0_title`'s own registry
-/// maximum of 96, so this case exercises LVGL's ellipsis truncation at the
-/// wire ceiling rather than the field's schema-declared maximum.
-const PROTOCOL_MAX_FIELD_TEXT_LENGTH: usize = 128;
-
-fn text(name: &str, value: &str) -> SimField {
-    SimField {
-        name: name.to_string(),
-        value: SimFieldValue::Text(value.to_string()),
-    }
-}
-
-fn boolean(name: &str, value: bool) -> SimField {
-    SimField {
-        name: name.to_string(),
-        value: SimFieldValue::Boolean(value),
-    }
-}
-
-fn integer(name: &str, value: i64) -> SimField {
-    SimField {
-        name: name.to_string(),
-        value: SimFieldValue::Integer(value),
-    }
-}
 
 /// One host-owned data state used by the scene/C-template parity gate.
 ///
@@ -61,16 +32,6 @@ pub struct StateFooterFixture {
     pub slug: &'static str,
     pub stale: bool,
     pub error: Option<&'static str>,
-}
-
-impl StateFooterFixture {
-    /// The real template fields that make `template_view.c` apply this state.
-    pub fn fields(self) -> Vec<SimField> {
-        vec![
-            boolean("stale", self.stale),
-            text("error", self.error.unwrap_or("")),
-        ]
-    }
 }
 
 /// The two non-OK shared-footer states, in the parity table's stable order.
@@ -97,694 +58,198 @@ fn orientations() -> [(&'static str, SimOrientation); 2] {
     ]
 }
 
-/// Appends one case at both orientations. Name format:
-/// `{template_slug}--{case_slug}--{orientation_slug}`.
-fn case(
-    cases: &mut Vec<(String, RenderRequest)>,
-    template_slug: &str,
-    case_slug: &str,
-    template: SimTemplate,
-    fields: &[SimField],
-    now_unix_seconds: i64,
-    utc_offset_minutes: i16,
-) {
-    for (orientation_slug, orientation) in orientations() {
-        cases.push((
-            format!("{template_slug}--{case_slug}--{orientation_slug}"),
-            RenderRequest {
-                template,
-                fields: fields.to_vec(),
-                utc_offset_minutes,
-                now_unix_seconds,
-                orientation,
-            },
-        ));
-    }
-}
-
-// Fields: title, show_seconds, stale, error
-// (firmware/main/core/template_fields.c: s_digital_clock_fields)
-fn digital_clock_cases(cases: &mut Vec<(String, RenderRequest)>) {
-    const NOW: i64 = 1_755_000_000; // 2025-08-12 12:00:00 UTC
-    const OFFSET: i16 = 240; // -> 16:00 local
-
-    case(
-        cases,
-        "digital-clock",
-        "typical",
-        SimTemplate::DigitalClock,
-        &[text("title", "Desk"), boolean("show_seconds", true)],
-        NOW,
-        OFFSET,
-    );
-    case(
-        cases,
-        "digital-clock",
-        "no-seconds",
-        SimTemplate::DigitalClock,
-        &[text("title", "Desk"), boolean("show_seconds", false)],
-        NOW,
-        OFFSET,
-    );
-    // Tabular-figure pair (Task 9). Both instants render an HH:MM with no
-    // repeated digit shape in common, at the same font and the same box, so
-    // the two goldens' lit column span must be identical — proportional
-    // figures would shift the second frame. `tests/tabular.rs` asserts that
-    // equality in pixels; the goldens pin the frames it asserts over.
-    case(
-        cases,
-        "digital-clock",
-        "tabular-1135",
-        SimTemplate::DigitalClock,
-        &[text("title", "Desk"), boolean("show_seconds", false)],
-        TABULAR_1135,
-        0,
-    );
-    case(
-        cases,
-        "digital-clock",
-        "tabular-0000",
-        SimTemplate::DigitalClock,
-        &[text("title", "Desk"), boolean("show_seconds", false)],
-        TABULAR_0000,
-        0,
-    );
-}
-
 /// 2025-08-13 11:35:00 UTC — the "widest-looking" of the tabular pair.
 pub const TABULAR_1135: i64 = 1_755_084_900;
 /// 2025-08-13 00:00:00 UTC — the "narrowest-looking" of the tabular pair.
 pub const TABULAR_0000: i64 = 1_755_043_200;
 
-// Fields: title, show_seconds, stale, error
-// (firmware/main/core/template_fields.c: s_analog_clock_fields)
-fn analog_clock_cases(cases: &mut Vec<(String, RenderRequest)>) {
-    // Pinned instant from the task-5 brief verbatim. Both `typical` and
-    // `no-seconds` use this SAME instant on purpose: together the two
-    // goldens pin that the hour/minute hands do not depend on
-    // `show_seconds` (the open 2026-08-11 no-seconds defect's deterministic
-    // form) — only the second hand's visibility should differ between them.
-    const PINNED_INSTANT: i64 = 1_755_081_480;
-    const MIDNIGHT_INSTANT: i64 = 1_755_043_200; // 2025-08-13 00:00:00 UTC
-
-    case(
-        cases,
-        "analog-clock",
-        "typical",
-        SimTemplate::AnalogClock,
-        &[text("title", "Desk"), boolean("show_seconds", true)],
-        PINNED_INSTANT,
-        0,
-    );
-    case(
-        cases,
-        "analog-clock",
-        "no-seconds",
-        SimTemplate::AnalogClock,
-        &[text("title", "Desk"), boolean("show_seconds", false)],
-        PINNED_INSTANT,
-        0,
-    );
-    case(
-        cases,
-        "analog-clock",
-        "midnight",
-        SimTemplate::AnalogClock,
-        &[text("title", "Desk"), boolean("show_seconds", true)],
-        MIDNIGHT_INSTANT,
-        0,
-    );
-}
-
-// Fields: label, duration_seconds (required), remaining_seconds (required),
-// running (required), stale, error
-// (firmware/main/core/template_fields.c: s_progress_ring_fields)
-fn progress_ring_cases(cases: &mut Vec<(String, RenderRequest)>) {
-    const NOW: i64 = 1_755_000_000;
-    const DURATION_SECONDS: i64 = 1500;
-
-    // A running ring mid-countdown is the ONLY pixel coverage of the running
-    // arc-indicator hue: `running` drives the arc indicator and status text
-    // colours (`progress_ring.c`, `palette.hue` vs
-    // `DESKMATE_COLOR_TERTIARY`/`_PRIMARY`), and at a zero-length arc the
-    // indicator is not drawn at all. So this case has to stay -- but it can
-    // only be compared against a deterministic renderer.
-    //
-    // `current_remaining_ms` returns the pinned `remaining_ms` verbatim when the
-    // ring is stopped and derives it from `lv_tick_get()` when running. The
-    // simulator's fake tick is fixed (an 840ms anchor offset, see
-    // `csrc/sim_shim.c`), so this golden is stable; real hardware's
-    // push-to-capture latency is not, and the label's `(remaining_ms + 999) /
-    // 1000` ceiling flips a whole second the moment that latency crosses 1000ms.
-    // No running value avoids that: the label flips every second by
-    // construction, whatever the duration.
-    //
-    // It is therefore golden-only, and `framebuffer_diff.rs` excludes it from
-    // the physical comparison by name. See `exclusion_reason` there.
-    case(
-        cases,
-        "progress-ring",
-        "running-mid-countdown",
-        SimTemplate::ProgressRing,
-        &[
-            text("label", "Pomodoro"),
-            integer("duration_seconds", DURATION_SECONDS),
-            integer("remaining_seconds", 900),
-            boolean("running", true),
-        ],
-        NOW,
-        0,
-    );
-    // The hardware-comparable half of the case above: identical geometry at a
-    // partial arc (900/1500), which no other progress-ring case covers, with the
-    // ring stopped so both sides render the pinned value and the frame is stable.
-    case(
-        cases,
-        "progress-ring",
-        "paused-mid-countdown",
-        SimTemplate::ProgressRing,
-        &[
-            text("label", "Pomodoro"),
-            integer("duration_seconds", DURATION_SECONDS),
-            integer("remaining_seconds", 900),
-            boolean("running", false),
-        ],
-        NOW,
-        0,
-    );
-    // The only running ring that hardware can be compared on, and so the only
-    // on-device coverage of the running palette -- here the status text ("Done"
-    // in `palette.hue`), since a zero-length arc draws no indicator.
-    //
-    // It is deterministic because `current_remaining_ms` clamps to 0 as soon as
-    // `elapsed >= remaining_ms`, and with `remaining_ms` of 0 that holds for any
-    // elapsed at all. No other running value has that property.
-    case(
-        cases,
-        "progress-ring",
-        "running-at-zero",
-        SimTemplate::ProgressRing,
-        &[
-            text("label", "Pomodoro"),
-            integer("duration_seconds", DURATION_SECONDS),
-            integer("remaining_seconds", 0),
-            boolean("running", true),
-        ],
-        NOW,
-        0,
-    );
-    case(
-        cases,
-        "progress-ring",
-        "finished",
-        SimTemplate::ProgressRing,
-        &[
-            text("label", "Pomodoro"),
-            integer("duration_seconds", DURATION_SECONDS),
-            integer("remaining_seconds", 0),
-            boolean("running", false),
-        ],
-        NOW,
-        0,
-    );
-    case(
-        cases,
-        "progress-ring",
-        "never-started",
-        SimTemplate::ProgressRing,
-        &[
-            text("label", "Pomodoro"),
-            integer("duration_seconds", DURATION_SECONDS),
-            integer("remaining_seconds", DURATION_SECONDS),
-            boolean("running", false),
-        ],
-        NOW,
-        0,
-    );
-}
-
-// Fields: title, row0_title/row0_time .. row4_title/row4_time, stale, error
-// (firmware/main/core/template_fields.c: s_row_list_fields)
-fn row_list_cases(cases: &mut Vec<(String, RenderRequest)>) {
-    const NOW: i64 = 1_755_000_000;
-    let truncation_boundary_title: String = "Boundary-"
-        .chars()
-        .cycle()
-        .take(PROTOCOL_MAX_FIELD_TEXT_LENGTH)
-        .collect();
-
-    case(
-        cases,
-        "row-list",
-        "five-full-rows",
-        SimTemplate::RowList,
-        &[
-            text("title", "Calendar"),
-            text("row0_title", "Standup"),
-            text("row0_time", "09:00"),
-            text("row1_title", "Design Review"),
-            text("row1_time", "10:30"),
-            text("row2_title", "Lunch with Sam"),
-            text("row2_time", "12:00"),
-            text("row3_title", "1:1 with Manager"),
-            text("row3_time", "14:00"),
-            text("row4_title", "Sprint Planning"),
-            text("row4_time", "16:00"),
-        ],
-        NOW,
-        0,
-    );
-    case(
-        cases,
-        "row-list",
-        "one-row",
-        SimTemplate::RowList,
-        &[
-            text("title", "Calendar"),
-            text("row0_title", "Standup"),
-            text("row0_time", "09:00"),
-        ],
-        NOW,
-        0,
-    );
-    case(
-        cases,
-        "row-list",
-        "zero-rows",
-        SimTemplate::RowList,
-        &[text("title", "Calendar")],
-        NOW,
-        0,
-    );
-    case(
-        cases,
-        "row-list",
-        "truncation-boundary",
-        SimTemplate::RowList,
-        &[
-            text("title", "Calendar"),
-            text("row0_title", &truncation_boundary_title),
-            text("row0_time", "09:00"),
-        ],
-        NOW,
-        0,
-    );
-    case(
-        cases,
-        "row-list",
-        "unicode-row",
-        SimTemplate::RowList,
-        &[
-            text("title", "Calendar"),
-            text("row0_title", "Café — Zürich ☂"),
-            text("row0_time", "09:00"),
-        ],
-        NOW,
-        0,
-    );
-    case(
-        cases,
-        "row-list",
-        "stale",
-        SimTemplate::RowList,
-        &[text("title", "Calendar"), boolean("stale", true)],
-        NOW,
-        0,
-    );
-    case(
-        cases,
-        "row-list",
-        "error",
-        SimTemplate::RowList,
-        &[text("title", "Calendar"), text("error", "Sync failed")],
-        NOW,
-        0,
-    );
-}
-
-// Fields: title, value, label, stale, error
-// (firmware/main/core/template_fields.c: s_big_number_label_fields)
-fn big_number_label_cases(cases: &mut Vec<(String, RenderRequest)>) {
-    const NOW: i64 = 1_755_000_000;
-    // `value`'s registry maximum is 16 chars.
-    let maximal_value = "9".repeat(16);
-
-    case(
-        cases,
-        "big-number-label",
-        "typical",
-        SimTemplate::BigNumberLabel,
-        &[
-            text("title", "Steps"),
-            text("value", "8123"),
-            text("label", "today"),
-        ],
-        NOW,
-        0,
-    );
-    case(
-        cases,
-        "big-number-label",
-        "empty-value",
-        SimTemplate::BigNumberLabel,
-        &[
-            text("title", "Steps"),
-            text("value", ""),
-            text("label", "today"),
-        ],
-        NOW,
-        0,
-    );
-    case(
-        cases,
-        "big-number-label",
-        "maximal-length-value",
-        SimTemplate::BigNumberLabel,
-        &[
-            text("title", "Distance"),
-            text("value", &maximal_value),
-            text("label", "km run"),
-        ],
-        NOW,
-        0,
-    );
-    // A json-feed boolean lands in `value` as free-form text. The HERO and
-    // DISPLAY tiers are digits-only subsets, so this case pins the step down
-    // to BODY; `typical` above pins the numeric case staying at HERO.
-    case(
-        cases,
-        "big-number-label",
-        "alphabetic-value",
-        SimTemplate::BigNumberLabel,
-        &[
-            text("title", "Deploy gate"),
-            text("value", "yes"),
-            text("label", "main branch"),
-        ],
-        NOW,
-        0,
-    );
-    case(
-        cases,
-        "big-number-label",
-        "empty-label",
-        SimTemplate::BigNumberLabel,
-        &[
-            text("title", "Steps"),
-            text("value", "8123"),
-            text("label", ""),
-        ],
-        NOW,
-        0,
-    );
-}
-
-// Fields: title, icon, badge, value, label, unit, temperature_tenths,
-// apparent_temperature_tenths, stale, error
-// (firmware/main/core/template_fields.c: s_icon_badge_text_fields).
-// `icon_badge_text_patch` (firmware/main/ui/templates/icon_badge_text.c)
-// only reads title/badge/value/label/icon; unit and the temperature fields
-// are declared so `unknown_field_count` stays zero on a weather push, but
-// are not drawn, so they are omitted here.
-//
-// Icon names come from `weather_icon_from_name`
-// (firmware/main/ui/templates/weather_icon.c): sun, moon, cloud, cloud-sun,
-// cloud-moon, rain, drizzle, snow, storm, fog, unknown (11 total). Any
-// unrecognized name, including "volcano", falls back to the hollow-ring
-// unknown icon.
-fn icon_badge_text_cases(cases: &mut Vec<(String, RenderRequest)>) {
-    const NOW: i64 = 1_755_000_000;
-
-    case(
-        cases,
-        "icon-badge-text",
-        "icon-sun",
-        SimTemplate::IconBadgeText,
-        &[
-            text("title", "Weather"),
-            text("icon", "sun"),
-            text("badge", "Now"),
-            text("value", "72"),
-            text("label", "Feels 74"),
-        ],
-        NOW,
-        0,
-    );
-    case(
-        cases,
-        "icon-badge-text",
-        "icon-storm",
-        SimTemplate::IconBadgeText,
-        &[
-            text("title", "Weather"),
-            text("icon", "storm"),
-            text("badge", "Alert"),
-            text("value", "61"),
-            text("label", "Feels 59"),
-        ],
-        NOW,
-        0,
-    );
-    case(
-        cases,
-        "icon-badge-text",
-        "icon-unknown",
-        SimTemplate::IconBadgeText,
-        &[
-            text("title", "Weather"),
-            text("icon", "volcano"),
-            text("badge", "Unknown"),
-            text("value", "--"),
-            text("label", "No data"),
-        ],
-        NOW,
-        0,
-    );
-    case(
-        cases,
-        "icon-badge-text",
-        "empty-badge",
-        SimTemplate::IconBadgeText,
-        &[
-            text("title", "Weather"),
-            text("icon", "cloud"),
-            text("badge", ""),
-            text("value", "65"),
-            text("label", "Partly cloudy"),
-        ],
-        NOW,
-        0,
-    );
-    case(
-        cases,
-        "icon-badge-text",
-        "empty-value",
-        SimTemplate::IconBadgeText,
-        &[
-            text("title", "Weather"),
-            text("icon", "rain"),
-            text("badge", "Now"),
-            text("value", ""),
-            text("label", "Heavy"),
-        ],
-        NOW,
-        0,
-    );
-}
-
-/// The full render case matrix: every template x both orientations x
-/// the field rows from the task-5 brief's case table (spec §3.2.1). Every
-/// case pins `now_unix_seconds`/`utc_offset_minutes` explicitly; none reads
-/// real time.
-pub fn golden_cases() -> Vec<(String, RenderRequest)> {
-    let mut cases = Vec::new();
-    digital_clock_cases(&mut cases);
-    analog_clock_cases(&mut cases);
-    progress_ring_cases(&mut cases);
-    row_list_cases(&mut cases);
-    big_number_label_cases(&mut cases);
-    icon_badge_text_cases(&mut cases);
-    cases
-}
-
-fn field_text<'a>(request: &'a RenderRequest, name: &str, default: &'a str) -> &'a str {
-    request
-        .fields
-        .iter()
-        .find_map(|field| {
-            (field.name == name)
-                .then_some(&field.value)
-                .and_then(|value| {
-                    if let SimFieldValue::Text(value) = value {
-                        Some(value.as_str())
-                    } else {
-                        None
-                    }
-                })
-        })
-        .unwrap_or(default)
-}
-
-fn field_integer(request: &RenderRequest, name: &str, default: i64) -> i64 {
-    request
-        .fields
-        .iter()
-        .find_map(|field| {
-            (field.name == name)
-                .then_some(&field.value)
-                .and_then(|value| {
-                    if let SimFieldValue::Integer(value) = value {
-                        Some(*value)
-                    } else {
-                        None
-                    }
-                })
-        })
-        .unwrap_or(default)
-}
-
-fn field_boolean(request: &RenderRequest, name: &str, default: bool) -> bool {
-    request
-        .fields
-        .iter()
-        .find_map(|field| {
-            (field.name == name)
-                .then_some(&field.value)
-                .and_then(|value| {
-                    if let SimFieldValue::Boolean(value) = value {
-                        Some(*value)
-                    } else {
-                        None
-                    }
-                })
-        })
-        .unwrap_or(default)
-}
-
-/// The six shipping-face rows as device-pushable scenes.
+/// The shipping-face rows as device-pushable scenes.
 ///
-/// This is the hardware-facing half of the scene parity matrix, promoted next
-/// to [`scene_cases`] so examples do not depend on an integration test's
-/// private `cases()`. The row names deliberately remain identical to
-/// [`golden_cases`]: `framebuffer_diff`'s two historical exclusions are keyed
-/// by those names, and changing the prefix would silently make both branches
-/// unreachable again.
-#[allow(clippy::too_many_lines)] // one explicit adapter arm per retired face
+/// This is both the golden table (`tests/golden.rs` pins the landscape rows
+/// under `tests/golden/`) and the hardware-facing half of the framebuffer
+/// matrix that `framebuffer_diff` drives.
+///
+/// It used to be an adapter over a second table of C-template requests, which
+/// the retired reference oracle rendered so a parity gate could compare the
+/// two. There is one renderer now, so the field matrix is expressed directly
+/// as scene-builder inputs. The row NAMES are unchanged on purpose:
+/// `framebuffer_diff`'s exclusions are keyed by them, and renaming a row would
+/// silently make an exclusion branch unreachable.
+#[allow(clippy::too_many_lines)] // one explicit row per shipped face case
 pub fn face_scene_cases() -> Vec<(String, SceneRenderRequest)> {
     use app_core::scene_build::{
-        AnalogClockCard, BakedFontMetrics, BigNumberCard, ClockCard, IconBadgeCard,
-        ProgressRingCard, RowListCard, SceneDataState, build_analog_clock_scene,
-        build_big_number_label_scene, build_digital_clock_scene, build_icon_badge_text_scene,
-        build_progress_ring_scene, build_row_list_scene, with_scene_data_state,
+        AnalogClockCard, BakedFontMetrics, ClockCard, ProgressRingCard, SceneDataState,
+        build_analog_clock_scene, build_digital_clock_scene, build_progress_ring_scene,
+        with_scene_data_state,
     };
 
-    golden_cases()
-        .into_iter()
-        .map(|(name, request)| {
-            let metrics = &BakedFontMetrics::SHIPPED;
-            let scene = match request.template {
-                SimTemplate::DigitalClock => {
-                    let local_seconds =
-                        request.now_unix_seconds + i64::from(request.utc_offset_minutes) * 60;
-                    let local_now = chrono::DateTime::from_timestamp(local_seconds, 0)
-                        .expect("golden clock instant is representable")
-                        .naive_utc();
-                    build_digital_clock_scene(
-                        &ClockCard {
-                            revision: 1,
-                            show_seconds: field_boolean(&request, "show_seconds", true),
-                            local_now,
-                        },
-                        metrics,
-                    )
-                }
-                SimTemplate::AnalogClock => build_analog_clock_scene(&AnalogClockCard {
-                    revision: 1,
-                    show_seconds: field_boolean(&request, "show_seconds", true),
-                }),
-                SimTemplate::ProgressRing => build_progress_ring_scene(
-                    &ProgressRingCard {
-                        revision: 1,
-                        label: field_text(&request, "label", "Pomodoro"),
-                        duration_seconds: field_integer(&request, "duration_seconds", 0),
-                    },
-                    metrics,
-                ),
-                SimTemplate::RowList => build_row_list_scene(
-                    &RowListCard {
-                        revision: 1,
-                        title: field_text(&request, "title", "Calendar"),
-                        row0_title: field_text(&request, "row0_title", ""),
-                        row0_time: field_text(&request, "row0_time", ""),
-                        row1_title: field_text(&request, "row1_title", ""),
-                        row1_time: field_text(&request, "row1_time", ""),
-                        row2_title: field_text(&request, "row2_title", ""),
-                        row2_time: field_text(&request, "row2_time", ""),
-                        row3_title: field_text(&request, "row3_title", ""),
-                        row3_time: field_text(&request, "row3_time", ""),
-                        row4_title: field_text(&request, "row4_title", ""),
-                        row4_time: field_text(&request, "row4_time", ""),
-                    },
-                    metrics,
-                ),
-                SimTemplate::BigNumberLabel => build_big_number_label_scene(
-                    &BigNumberCard {
-                        revision: 1,
-                        title: field_text(&request, "title", ""),
-                        value: field_text(&request, "value", "--"),
-                        label: field_text(&request, "label", ""),
-                    },
-                    metrics,
-                ),
-                SimTemplate::IconBadgeText => build_icon_badge_text_scene(
-                    &IconBadgeCard {
-                        revision: 1,
-                        title: field_text(&request, "title", ""),
-                        icon: field_text(&request, "icon", "unknown"),
-                        badge: field_text(&request, "badge", ""),
-                        value: field_text(&request, "value", "--"),
-                        label: field_text(&request, "label", ""),
-                    },
-                    app_core::scene_build::SHIPPED_SCENE_SURFACE_COLOR,
-                    metrics,
-                ),
-            };
-            let scene = with_scene_data_state(
-                scene,
-                SceneDataState {
-                    stale: field_boolean(&request, "stale", false),
-                    error: match field_text(&request, "error", "") {
-                        "" => None,
-                        error => Some(error),
-                    },
-                },
-                metrics,
-            );
-            let timer = (request.template == SimTemplate::ProgressRing).then(|| {
-                let to_milliseconds = |seconds: i64| {
-                    u32::try_from(seconds * 1_000)
-                        .expect("golden progress-ring fixture is inside u32")
-                };
-                SceneTimer {
-                    total_ms: to_milliseconds(field_integer(&request, "duration_seconds", 0)),
-                    remaining_ms: to_milliseconds(field_integer(&request, "remaining_seconds", 0)),
-                    running: field_boolean(&request, "running", false),
-                }
-            });
-            (
-                name,
+    /// 2025-08-12 12:00:00 UTC.
+    const NOW: i64 = 1_755_000_000;
+    /// -> 16:00 local.
+    const OFFSET: i16 = 240;
+    /// The analog brief's pinned instant. `typical` and `no-seconds` share it
+    /// on purpose: together they pin that the hour and minute hands do not
+    /// depend on `show_seconds`, which is the deterministic form of the
+    /// 2026-08-11 no-seconds defect.
+    const ANALOG_INSTANT: i64 = 1_755_081_480;
+    /// 2025-08-13 00:00:00 UTC.
+    const MIDNIGHT_INSTANT: i64 = 1_755_043_200;
+    const DURATION_SECONDS: i64 = 1500;
+
+    let metrics = &BakedFontMetrics::SHIPPED;
+
+    let clock = |show_seconds: bool, now_unix_seconds: i64, utc_offset_minutes: i16| {
+        let local_seconds = now_unix_seconds + i64::from(utc_offset_minutes) * 60;
+        let local_now = chrono::DateTime::from_timestamp(local_seconds, 0)
+            .expect("golden clock instant is representable")
+            .naive_utc();
+        build_digital_clock_scene(
+            &ClockCard {
+                revision: 1,
+                show_seconds,
+                local_now,
+            },
+            metrics,
+        )
+    };
+    let analog = |show_seconds: bool| {
+        build_analog_clock_scene(&AnalogClockCard {
+            revision: 1,
+            show_seconds,
+        })
+    };
+    let ring = |remaining_seconds: i64, running: bool| {
+        let scene = build_progress_ring_scene(
+            &ProgressRingCard {
+                revision: 1,
+                label: "Pomodoro",
+                duration_seconds: DURATION_SECONDS,
+            },
+            metrics,
+        );
+        let to_milliseconds = |seconds: i64| {
+            u32::try_from(seconds * 1_000).expect("progress-ring fixture is inside u32")
+        };
+        (
+            scene,
+            Some(SceneTimer {
+                total_ms: to_milliseconds(DURATION_SECONDS),
+                remaining_ms: to_milliseconds(remaining_seconds),
+                running,
+            }),
+        )
+    };
+
+    let rows: Vec<(&'static str, Scene, Option<SceneTimer>, i64, i16)> = vec![
+        (
+            "digital-clock--typical",
+            clock(true, NOW, OFFSET),
+            None,
+            NOW,
+            OFFSET,
+        ),
+        (
+            "digital-clock--no-seconds",
+            clock(false, NOW, OFFSET),
+            None,
+            NOW,
+            OFFSET,
+        ),
+        // Tabular-figure pair. Both instants render an HH:MM with no repeated
+        // digit shape in common, at the same font and the same box, so their
+        // lit column spans must be identical -- proportional figures would
+        // shift the second frame. `tests/tabular.rs` asserts that equality in
+        // pixels; these goldens pin the frames it asserts over.
+        (
+            "digital-clock--tabular-1135",
+            clock(false, TABULAR_1135, 0),
+            None,
+            TABULAR_1135,
+            0,
+        ),
+        (
+            "digital-clock--tabular-0000",
+            clock(false, TABULAR_0000, 0),
+            None,
+            TABULAR_0000,
+            0,
+        ),
+        (
+            "analog-clock--typical",
+            analog(true),
+            None,
+            ANALOG_INSTANT,
+            0,
+        ),
+        (
+            "analog-clock--no-seconds",
+            analog(false),
+            None,
+            ANALOG_INSTANT,
+            0,
+        ),
+        (
+            "analog-clock--midnight",
+            analog(true),
+            None,
+            MIDNIGHT_INSTANT,
+            0,
+        ),
+    ];
+
+    // A running ring mid-countdown is the only pixel coverage of the running
+    // arc-indicator hue: `running` drives the indicator and status-text
+    // colours, and at a zero-length arc the indicator is not drawn at all. It
+    // is golden-only -- `framebuffer_diff` excludes it by name, because the
+    // device keeps ticking a running timer through `scene_view_tick_bindings`
+    // while this simulator's fake tick is fixed.
+    let ring_rows: Vec<(&'static str, (Scene, Option<SceneTimer>))> = vec![
+        ("progress-ring--running-mid-countdown", ring(900, true)),
+        // The hardware-comparable half of the row above: the same partial arc
+        // with the ring stopped, so both sides render the pinned value.
+        ("progress-ring--paused-mid-countdown", ring(900, false)),
+        // The only running ring hardware can be compared on, and so the only
+        // on-device coverage of the running palette -- here the status text,
+        // since a zero-length arc draws no indicator.
+        ("progress-ring--running-at-zero", ring(0, true)),
+        ("progress-ring--finished", ring(0, false)),
+        (
+            "progress-ring--never-started",
+            ring(DURATION_SECONDS, false),
+        ),
+    ];
+
+    let mut cases = Vec::new();
+    let all = rows.into_iter().chain(
+        ring_rows
+            .into_iter()
+            .map(|(name, (scene, timer))| (name, scene, timer, NOW, 0)),
+    );
+    for (name, scene, timer, now_unix_seconds, utc_offset_minutes) in all {
+        let scene = with_scene_data_state(
+            scene,
+            SceneDataState {
+                stale: false,
+                error: None,
+            },
+            metrics,
+        );
+        for (orientation_slug, orientation) in orientations() {
+            cases.push((
+                format!("{name}--{orientation_slug}"),
                 SceneRenderRequest {
-                    scene,
+                    scene: scene.clone(),
                     assets: Vec::new(),
-                    utc_offset_minutes: request.utc_offset_minutes,
-                    now_unix_seconds: request.now_unix_seconds,
+                    utc_offset_minutes,
+                    now_unix_seconds,
                     timer,
                     fields: Vec::new(),
-                    orientation: request.orientation,
+                    orientation,
                 },
-            )
-        })
-        .collect()
+            ));
+        }
+    }
+    cases
 }
 
 // ---------------------------------------------------------------------------

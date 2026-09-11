@@ -2,7 +2,7 @@ use protocol::{
     Deframer, FrameError, MAX_PAYLOAD_SIZE, MessageError, decode_message, decode_wire_frame,
 };
 
-const ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../../protocol/fixtures/v1");
+const ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../../protocol/fixtures/v2");
 
 fn fixture(name: &str) -> Vec<u8> {
     std::fs::read(format!("{ROOT}/{name}")).unwrap()
@@ -15,7 +15,7 @@ fn valid_golden_frames_decode() {
         "status_response.bin",
         "time_sync.bin",
         "ack_time.bin",
-        "push_data.bin",
+        "push_timer.bin",
         "ack_push.bin",
         "heartbeat.bin",
         "heartbeat_ack.bin",
@@ -36,7 +36,7 @@ fn valid_golden_frames_decode() {
         "error_unsupported_template.bin",
         "error_unsupported_size.bin",
         "error_config_too_large.bin",
-        "push_unknown_field.bin",
+        "push_timer_paused.bin",
         "network_config.bin",
         "factory_reset.bin",
         "status_response_networked.bin",
@@ -99,7 +99,7 @@ fn invalid_golden_inputs_have_stable_classes() {
         decode_message(&duplicate),
         Err(MessageError::DuplicateOrUnsortedKey)
     );
-    for name in ["duplicate_widget_ids.bin", "duplicate_screen_ids.bin"] {
+    for name in ["duplicate_card_ids.bin"] {
         let frame = decode_wire_frame(&fixture(name)).unwrap();
         assert_eq!(
             decode_message(&frame),
@@ -107,22 +107,15 @@ fn invalid_golden_inputs_have_stable_classes() {
             "{name}"
         );
     }
-    let missing = decode_wire_frame(&fixture("missing_widget_reference.bin")).unwrap();
+    // A card's tap action is the only enumerated value left on the wire, so it
+    // is the only one that can be unsupported. Templates and size classes went
+    // with protocol v2.
+    let action = decode_wire_frame(&fixture("unsupported_tap_action_config.bin")).unwrap();
     assert_eq!(
-        decode_message(&missing),
-        Err(MessageError::UnknownWidgetReference)
+        decode_message(&action),
+        Err(MessageError::InvalidValue("tap action"))
     );
-    let template = decode_wire_frame(&fixture("unsupported_template_config.bin")).unwrap();
-    assert_eq!(
-        decode_message(&template),
-        Err(MessageError::UnsupportedTemplate(99))
-    );
-    let size = decode_wire_frame(&fixture("unsupported_size_config.bin")).unwrap();
-    assert_eq!(
-        decode_message(&size),
-        Err(MessageError::UnsupportedSizeClass(3))
-    );
-    for name in ["config_too_many_widgets.bin", "config_too_many_screens.bin"] {
+    for name in ["config_too_many_cards.bin"] {
         let excessive = decode_wire_frame(&fixture(name)).unwrap();
         assert_eq!(
             decode_message(&excessive),
@@ -132,11 +125,6 @@ fn invalid_golden_inputs_have_stable_classes() {
     }
     let utf8 = decode_wire_frame(&fixture("invalid_config_utf8.bin")).unwrap();
     assert!(matches!(decode_message(&utf8), Err(MessageError::Cbor(_))));
-    let fields = decode_wire_frame(&fixture("duplicate_field_names.bin")).unwrap();
-    assert_eq!(
-        decode_message(&fields),
-        Err(MessageError::DuplicateOrUnsortedKey)
-    );
     for name in ["zero_request_config.bin", "nonzero_request_event.bin"] {
         let frame = decode_wire_frame(&fixture(name)).unwrap();
         assert_eq!(
@@ -153,25 +141,9 @@ fn invalid_golden_inputs_have_stable_classes() {
 #[test]
 fn maximum_config_fixture_stays_inside_one_frame() {
     let frame = decode_wire_frame(&fixture("apply_config_max.bin")).unwrap();
-    assert_eq!(frame.payload.len(), 935);
+    assert_eq!(frame.payload.len(), 317);
     assert!(frame.payload.len() <= MAX_PAYLOAD_SIZE);
     decode_message(&frame).unwrap();
-}
-
-#[test]
-fn extended_template_kinds_round_trip() {
-    for (value, kind) in [
-        (4u8, protocol::TemplateKind::AnalogClock),
-        (5u8, protocol::TemplateKind::BigNumberLabel),
-        (6u8, protocol::TemplateKind::IconBadgeText),
-    ] {
-        assert_eq!(
-            protocol::template_kind_from_wire(value).expect("kind decodes"),
-            kind,
-            "wire value {value} must decode to {kind:?}"
-        );
-        assert_eq!(kind as u8, value, "{kind:?} must encode as {value}");
-    }
 }
 
 #[test]
@@ -181,10 +153,7 @@ fn current_capabilities_advertise_implemented_features() {
     assert_eq!(protocol::CAPABILITY_DURABLE_ASSET_ENCODING, 1024);
     assert_eq!(
         protocol::CURRENT_CAPABILITIES,
-        protocol::CAPABILITY_CORE_WIDGETS
-            | protocol::CAPABILITY_CONFIG_ROTATION
-            | protocol::CAPABILITY_EXTENDED_TEMPLATES
-            | protocol::CAPABILITY_ASSET_TRANSFER
+        protocol::CAPABILITY_ASSET_TRANSFER
             | protocol::CAPABILITY_FIRMWARE_UPDATE
             | protocol::CAPABILITY_NETWORKING
             | protocol::CAPABILITY_SCENE_RENDER
@@ -193,7 +162,9 @@ fn current_capabilities_advertise_implemented_features() {
         "implemented asset transfer, firmware update, networking, scene \
          rendering, volatile-asset, and durable-asset encoding features must be advertised"
     );
-    assert_eq!(protocol::CURRENT_CAPABILITIES, 2027);
+    // Protocol v2 re-based the word: bits 0-4 described a device that rendered
+    // templates itself and are retired, never re-issued.
+    assert_eq!(protocol::CURRENT_CAPABILITIES, 2016);
 }
 
 fn assert_rot_rect_clip_is_pinned(nodes: &[protocol::SceneNode]) {

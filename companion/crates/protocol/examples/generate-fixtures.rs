@@ -3,15 +3,14 @@ use std::fs;
 use std::path::PathBuf;
 
 use protocol::{
-    Ack, ActivateScreen, ApplyConfig, AssetBegin, AssetChunk, AssetCommit, AssetKind, AssetRelease,
-    CURRENT_CAPABILITIES, DeviceEvent, ErrorCode, ErrorResponse, EventAction, EventKind, Field,
-    FieldValue, Frame, HeartbeatAck, InterruptPolicy, MAX_CONFIG_SCREENS, MAX_CONFIG_WIDGETS,
-    MAX_DEVICE_TOKEN_LEN, MAX_PAYLOAD_SIZE, MAX_PROTOCOL_VERSION, MAX_WIRE_FRAME, Message,
-    NetworkConfig, OtaState, PushData, PushScene, Scene, SceneAlign, SceneArc, SceneClipRect,
-    SceneFont, SceneFontTier, SceneGlyph, SceneImage, SceneLabel, SceneLabelAnchor, SceneLine,
-    SceneNode, SceneRect, SceneRotRect, SceneScale, SceneText, SceneValue, ScreenConfig, SizeClass,
-    StatusResponse, TYPE_ASSET_BEGIN, TYPE_PUSH_SCENE, TapAction, TemplateKind, Tier, TimeSync,
-    TriggerInterrupt, VOLATILE_IMAGE_DECODED_LENGTH, WidgetConfig, WifiState, encode_message,
+    Ack, ActivateCard, ApplyConfig, AssetBegin, AssetChunk, AssetCommit, AssetKind, AssetRelease,
+    CURRENT_CAPABILITIES, CardConfig, DeviceEvent, ErrorCode, ErrorResponse, EventAction,
+    EventKind, Frame, HeartbeatAck, MAX_CONFIG_WIDGETS, MAX_DEVICE_TOKEN_LEN, MAX_PAYLOAD_SIZE,
+    MAX_PROTOCOL_VERSION, MAX_WIRE_FRAME, Message, NetworkConfig, OtaState, PushScene, PushTimer,
+    Scene, SceneAlign, SceneArc, SceneClipRect, SceneFont, SceneFontTier, SceneGlyph, SceneImage,
+    SceneLabel, SceneLabelAnchor, SceneLine, SceneNode, SceneRect, SceneRotRect, SceneScale,
+    SceneText, SceneValue, StatusResponse, TYPE_ASSET_BEGIN, TYPE_PUSH_SCENE, TapAction, Tier,
+    TimeSync, TriggerInterrupt, VOLATILE_IMAGE_DECODED_LENGTH, WifiState, encode_message,
 };
 
 /// A 32-byte digest with distinct, non-zero, ascending bytes starting at
@@ -209,16 +208,9 @@ fn minimum_config() -> ApplyConfig {
     ApplyConfig {
         revision: 1,
         rotation: 90,
-        widgets: vec![WidgetConfig {
-            widget_id: "clock".into(),
-            template: TemplateKind::DigitalClock,
-            size_class: SizeClass::Full,
+        cards: vec![CardConfig {
+            card_id: "clock".into(),
             tap_action: TapAction::None,
-            interrupt_policy: InterruptPolicy::Disabled,
-        }],
-        screens: vec![ScreenConfig {
-            screen_id: "home".into(),
-            widget_id: "clock".into(),
         }],
     }
 }
@@ -229,41 +221,20 @@ fn bounded_id(prefix: &str, index: usize) -> String {
 }
 
 fn maximum_config() -> ApplyConfig {
-    let widgets = (0..MAX_CONFIG_WIDGETS)
-        .map(|index| {
-            let template = match index % 3 {
-                0 => TemplateKind::DigitalClock,
-                1 => TemplateKind::ProgressRing,
-                _ => TemplateKind::RowList,
-            };
-            WidgetConfig {
-                widget_id: bounded_id("widget", index),
-                template,
-                size_class: if index % 2 == 0 {
-                    SizeClass::Full
-                } else {
-                    SizeClass::Standard
-                },
-                tap_action: if template == TemplateKind::ProgressRing {
-                    TapAction::StartPause
-                } else {
-                    TapAction::None
-                },
-                interrupt_policy: InterruptPolicy::Enabled,
-            }
+    let cards = (0..MAX_CONFIG_WIDGETS)
+        .map(|index| CardConfig {
+            card_id: bounded_id("card", index),
+            tap_action: if index % 3 == 1 {
+                TapAction::StartPause
+            } else {
+                TapAction::None
+            },
         })
         .collect::<Vec<_>>();
-    let screens = (0..MAX_CONFIG_SCREENS)
-        .map(|index| ScreenConfig {
-            screen_id: bounded_id("screen", index),
-            widget_id: widgets[index].widget_id.clone(),
-        })
-        .collect();
     ApplyConfig {
         revision: u32::MAX,
         rotation: 270,
-        widgets,
-        screens,
+        cards,
     }
 }
 
@@ -295,34 +266,19 @@ fn cbor_text(bytes: &mut Vec<u8>, value: &str) {
     bytes.extend_from_slice(value.as_bytes());
 }
 
-fn raw_config_payload(widgets: &[(&str, u8, u8, u8, u8)], screens: &[(&str, &str)]) -> Vec<u8> {
+fn raw_config_payload(cards: &[(&str, u8)]) -> Vec<u8> {
     let mut bytes = Vec::new();
-    cbor_argument(&mut bytes, 5, 3);
+    cbor_argument(&mut bytes, 5, 2);
     cbor_unsigned(&mut bytes, 0);
     cbor_unsigned(&mut bytes, 1);
     cbor_unsigned(&mut bytes, 1);
-    cbor_argument(&mut bytes, 4, u64::try_from(widgets.len()).unwrap());
-    for &(widget_id, template, size, action, policy) in widgets {
-        cbor_argument(&mut bytes, 5, 5);
-        cbor_unsigned(&mut bytes, 0);
-        cbor_text(&mut bytes, widget_id);
-        cbor_unsigned(&mut bytes, 1);
-        cbor_unsigned(&mut bytes, u64::from(template));
-        cbor_unsigned(&mut bytes, 2);
-        cbor_unsigned(&mut bytes, u64::from(size));
-        cbor_unsigned(&mut bytes, 3);
-        cbor_unsigned(&mut bytes, u64::from(action));
-        cbor_unsigned(&mut bytes, 4);
-        cbor_unsigned(&mut bytes, u64::from(policy));
-    }
-    cbor_unsigned(&mut bytes, 2);
-    cbor_argument(&mut bytes, 4, u64::try_from(screens.len()).unwrap());
-    for &(screen_id, widget_id) in screens {
+    cbor_argument(&mut bytes, 4, u64::try_from(cards.len()).unwrap());
+    for &(card_id, action) in cards {
         cbor_argument(&mut bytes, 5, 2);
         cbor_unsigned(&mut bytes, 0);
-        cbor_text(&mut bytes, screen_id);
+        cbor_text(&mut bytes, card_id);
         cbor_unsigned(&mut bytes, 1);
-        cbor_text(&mut bytes, widget_id);
+        cbor_unsigned(&mut bytes, u64::from(action));
     }
     bytes
 }
@@ -505,25 +461,14 @@ fn fixture_messages() -> Vec<(&'static str, u32, Message)> {
             }),
         ),
         (
-            "push_data.bin",
+            "push_timer.bin",
             3,
-            Message::PushData(PushData {
-                widget_id: "weather".into(),
+            Message::PushTimer(PushTimer {
+                card_id: "focus".into(),
                 revision: 7,
-                fields: vec![
-                    Field {
-                        key: "ok".into(),
-                        value: FieldValue::Boolean(true),
-                    },
-                    Field {
-                        key: "temp".into(),
-                        value: FieldValue::Integer(23),
-                    },
-                    Field {
-                        key: "summary".into(),
-                        value: FieldValue::Text("Clear".into()),
-                    },
-                ],
+                total_ms: 1_500_000,
+                remaining_ms: 900_000,
+                running: true,
             }),
         ),
         (
@@ -571,8 +516,8 @@ fn fixture_messages() -> Vec<(&'static str, u32, Message)> {
         (
             "activate_screen.bin",
             12,
-            Message::ActivateScreen(ActivateScreen {
-                screen_id: "home".into(),
+            Message::ActivateCard(ActivateCard {
+                card_id: "home".into(),
             }),
         ),
         (
@@ -691,15 +636,14 @@ fn fixture_messages() -> Vec<(&'static str, u32, Message)> {
             }),
         ),
         (
-            "push_unknown_field.bin",
+            "push_timer_paused.bin",
             19,
-            Message::PushData(PushData {
-                widget_id: "clock".into(),
+            Message::PushTimer(PushTimer {
+                card_id: "focus".into(),
                 revision: 8,
-                fields: vec![Field {
-                    key: "future_field".into(),
-                    value: FieldValue::Boolean(true),
-                }],
+                total_ms: 1_500_000,
+                remaining_ms: 1_500_000,
+                running: false,
             }),
         ),
         (
@@ -816,7 +760,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let messages = fixture_messages();
     let mut manifest =
-        String::from("Deskmate protocol v1 deterministic fixtures\n\nValid frames:\n");
+        String::from("Deskmate protocol v2 deterministic fixtures\n\nValid frames:\n");
     let mut maximum_config_payload = None;
     for (name, request_id, message) in &messages {
         let wire = encode_message(*request_id, message)?;
@@ -861,62 +805,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     fs::write(output.join("duplicate_keys.bin"), &duplicate_keys)?;
     write_raw_frame(
         &output,
-        "duplicate_widget_ids.bin",
+        "duplicate_card_ids.bin",
         9,
         20,
-        raw_config_payload(
-            &[("dup", 1, 1, 0, 0), ("dup", 2, 2, 1, 1)],
-            &[("home", "dup")],
-        ),
+        raw_config_payload(&[("dup", 0), ("dup", 1)]),
     )?;
     write_raw_frame(
         &output,
-        "duplicate_screen_ids.bin",
-        9,
-        21,
-        raw_config_payload(
-            &[("clock", 1, 1, 0, 0)],
-            &[("home", "clock"), ("home", "clock")],
-        ),
-    )?;
-    write_raw_frame(
-        &output,
-        "missing_widget_reference.bin",
-        9,
-        22,
-        raw_config_payload(&[("clock", 1, 1, 0, 0)], &[("home", "ghost")]),
-    )?;
-    write_raw_frame(
-        &output,
-        "unsupported_template_config.bin",
+        "unsupported_tap_action_config.bin",
         9,
         23,
-        raw_config_payload(&[("clock", 99, 1, 0, 0)], &[("home", "clock")]),
+        raw_config_payload(&[("clock", 99)]),
     )?;
+    let excessive_cards = vec![("clock", 0u8); MAX_CONFIG_WIDGETS + 1];
     write_raw_frame(
         &output,
-        "unsupported_size_config.bin",
-        9,
-        24,
-        raw_config_payload(&[("clock", 1, 3, 0, 0)], &[("home", "clock")]),
-    )?;
-    let excessive_widgets = vec![("clock", 1, 1, 0, 0); MAX_CONFIG_WIDGETS + 1];
-    write_raw_frame(
-        &output,
-        "config_too_many_widgets.bin",
+        "config_too_many_cards.bin",
         9,
         25,
-        raw_config_payload(&excessive_widgets, &[("home", "clock")]),
+        raw_config_payload(&excessive_cards),
     )?;
-    let excessive_screens = vec![("home", "clock"); MAX_CONFIG_SCREENS + 1];
-    write_raw_frame(
-        &output,
-        "config_too_many_screens.bin",
-        9,
-        26,
-        raw_config_payload(&[("clock", 1, 1, 0, 0)], &excessive_screens),
-    )?;
-    let mut invalid_utf8 = raw_config_payload(&[("clock", 1, 1, 0, 0)], &[("home", "clock")]);
+    let mut invalid_utf8 = raw_config_payload(&[("clock", 0)]);
     let clock_position = invalid_utf8
         .windows(5)
         .position(|window| window == b"clock")
@@ -935,7 +844,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "zero_request_config.bin",
         9,
         0,
-        raw_config_payload(&[("clock", 1, 1, 0, 0)], &[("home", "clock")]),
+        raw_config_payload(&[("clock", 0)]),
     )?;
     let event = encode_message(
         0,

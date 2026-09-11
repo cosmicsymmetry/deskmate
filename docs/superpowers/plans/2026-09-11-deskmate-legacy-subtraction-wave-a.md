@@ -1,5 +1,40 @@
 # Legacy Subtraction — Wave A Implementation Plan
 
+> **STATUS: DELIVERED 2026-09-11**, in seven commits on
+> `refactor/wave-a-legacy-subtraction`. The boxes below are NOT back-filled --
+> ticking 69 of them from memory is the thing this repo's own rule warns against --
+> so read this header, not the checkboxes, for what happened.
+>
+> **Delivered as planned:** Task 1 (pre-v4 migration chain, store.rs 1,224 -> 449),
+> Task 2 (preview on the scene path), Task 3 (oracle, parity gate and the three orphan
+> templates), Task 4 (`runtime/` split), Task 5 (`commands/` split), Task 6 (M2 tooling),
+> Task 7 (CLAUDE.md 113 KB -> 16 KB).
+>
+> **Deviations, each with its reason:**
+>
+> - **Task 2 Step 10** (look at it in the dev harness) was replaced by
+>   `crates/lvgl-sim/tests/preview_path.rs`. The harness MOCKS `render_card_preview`,
+>   so it would have rendered perfectly against a broken Rust path. The plan step was
+>   wrong.
+> - **Task 3 grew.** `face_scene_cases()` turned out to be an ADAPTER over
+>   `golden_cases()`, not an independent table, so retiring the oracle required
+>   rewriting it as a direct table. The three orphan templates' 17 goldens went with
+>   them and the hardware matrix moved 78/8/70 -> 44/6/38.
+> - **Task 4 Step 8** (tests travel per-module) was not done. `runtime.rs`'s test block
+>   drives the worker loop end to end rather than any one concern, and `pub(super)`
+>   reaches the parent's test module, so they still compile where they are.
+> - **Task 5's shape differs.** There is no separate `ipc.rs`: the DTOs and validators
+>   stayed in `commands/mod.rs` beside the four commands that belong to no group, and
+>   the config module is `commands/config.rs`.
+> - **Task 7 Step 4 was already done** by the 2026-09-09 session -- every delivered plan
+>   with a large open-box count already carried a status note, including
+>   `m4-v1-completion`, which uses a different heading form than the plan's grep.
+> - **One frozen-contract text correction** the plan said it would not make:
+>   `docs/config/v9.md` said templates kept their v8 shape, which stopped being true
+>   when the three orphans went. Corrected in place and dated. No valid v9 document
+>   changes meaning, so the schema version did not move.
+
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Remove three concepts the product no longer has — pre-v4 config

@@ -3,28 +3,8 @@
 #include <stdint.h>
 #include <stddef.h>
 
-typedef struct {
-    const char *name;
-    int type; /* 0 text, 1 integer, 2 boolean — mirrors PROTOCOL_FIELD_* */
-    const char *text;
-    int64_t integer;
-    bool boolean;
-} sim_field_t;
-
 /* One-time process init: lv_init + headless display. Returns false on failure. */
 bool sim_init(void);
-
-/* Renders one template with the given fields at a pinned instant.
- * orientation_flipped selects the 270° (180°-flipped landscape) mounting.
- * Writes 448*368 RGB565 pixels (logical landscape) into out_pixels.
- * Returns false on unknown template or field resolution failure. */
-bool sim_render(int template_kind,
-                const sim_field_t *fields,
-                size_t field_count,
-                int16_t utc_offset_minutes,
-                int64_t now_unix_seconds,
-                bool orientation_flipped,
-                uint16_t *out_pixels);
 
 /* ---------------------------------------------------------------------
  * Task 8 (stage 2a): scene rendering.
@@ -100,9 +80,8 @@ typedef enum {
  *
  * The binding context is assembled from the remaining arguments;
  * `fields` resolves `field.<name>` bindings and may be NULL when
- * `field_count` is 0. `orientation_flipped` selects the 270° mount, as in
- * sim_render. Writes 448*368 RGB565 pixels (logical landscape) into
- * out_pixels.
+ * `field_count` is 0. `orientation_flipped` selects the 270° mount.
+ * Writes 448*368 RGB565 pixels (logical landscape) into out_pixels.
  *
  * Returns SIM_SCENE_OK, or the reason it failed -- see sim_scene_result_t
  * above. out_pixels is left untouched on every failure. Any asset a node
@@ -119,21 +98,3 @@ sim_scene_result_t sim_render_scene(const uint8_t *payload,
                                     size_t field_count,
                                     bool orientation_flipped,
                                     uint16_t *out_pixels);
-
-/* Temporal parity harness: builds the C template and scene at one instant,
- * advances both by elapsed_ms, and captures their final frames. The scene is
- * refreshed in place; its payload is decoded and shown exactly once. When
- * toggle_running is true, both sides apply one start/pause transition at the
- * end of the interval. When authoritative_reconcile is also true, both sides
- * then apply the original host snapshot again. */
-sim_scene_result_t sim_render_scene_temporal_pair(
-    const uint8_t *payload, size_t payload_length,
-    int template_kind, const sim_field_t *template_fields,
-    size_t template_field_count, int16_t utc_offset_minutes,
-    int64_t now_unix_seconds, bool timer_active, uint32_t timer_total_ms,
-    uint32_t timer_remaining_ms, bool timer_running, uint32_t elapsed_ms,
-    bool toggle_running, bool authoritative_reconcile,
-    const sim_scene_field_t *scene_fields,
-    size_t scene_field_count, bool orientation_flipped,
-    uint16_t *out_template_pixels, uint16_t *out_initial_scene_pixels,
-    uint16_t *out_scene_pixels);

@@ -9,8 +9,8 @@ fn golden_frames_match() {
         std::env::var("BLESS").is_ok(),
         Some("golden mismatches"),
         "orphan golden with no matching case (run with BLESS=1 to delete)",
-        cases::golden_cases(),
+        cases::face_scene_cases(),
         |_, _| {},
-        lvgl_sim::Simulator::render_png,
+        lvgl_sim::Simulator::render_scene_png,
     );
 }

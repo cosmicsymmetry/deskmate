@@ -10,8 +10,6 @@ use protocol::{
     NetworkConfig, OtaState, PushData, StatusResponse, Tier, TimeSync, WifiState,
 };
 
-mod m2;
-
 const USAGE: &str = "\
 Usage:
   deskmate-cli status [--port PATH] [--json]
@@ -31,7 +29,6 @@ not live.";
 #[derive(Debug)]
 pub(crate) enum AppError {
     Usage(String),
-    Config(String),
     Device(DeviceError),
     Host(String),
 }
@@ -39,7 +36,7 @@ pub(crate) enum AppError {
 impl fmt::Display for AppError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Usage(error) | Self::Config(error) | Self::Host(error) => f.write_str(error),
+            Self::Usage(error) | Self::Host(error) => f.write_str(error),
             Self::Device(error) => error.fmt(f),
         }
     }
@@ -523,9 +520,6 @@ fn print_status(status: &StatusResponse, port_name: &str, json: bool) {
 }
 
 fn run() -> Result<(), AppError> {
-    if m2::run_if_requested()? {
-        return Ok(());
-    }
     let options = parse_options()?;
     let port = options.port.as_deref();
     let json = options.json;
@@ -641,7 +635,6 @@ fn ota_state_name(state: OtaState) -> &'static str {
 fn exit_code(error: &AppError) -> i32 {
     match error {
         AppError::Usage(_) => 2,
-        AppError::Config(_) => 3,
         AppError::Device(DeviceError::NoDevice) => 10,
         AppError::Device(DeviceError::Timeout) => 11,
         AppError::Device(DeviceError::VersionMismatch(_)) => 12,
@@ -656,7 +649,7 @@ fn main() {
         env::args().nth(1).as_deref(),
         Some("help" | "--help" | "-h")
     ) {
-        println!("{USAGE}\n\n{}", m2::M2_USAGE);
+        println!("{USAGE}");
         return;
     }
     let json = env::args().any(|argument| argument == "--json");
@@ -667,7 +660,7 @@ fn main() {
             if !error.to_string().is_empty() {
                 eprintln!("error: {error}\n");
             }
-            eprintln!("{USAGE}\n\n{}", m2::M2_USAGE);
+            eprintln!("{USAGE}");
         } else {
             eprintln!("error: {error}");
         }

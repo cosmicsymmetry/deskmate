@@ -2,22 +2,33 @@
 
 Spec: `docs/superpowers/specs/2026-08-03-deskmate-design.md`
 
-**Current:** V1 and V2 are EXITED and TAGGED (`v1`, `v2`) by explicit owner direction
-on 2026-09-06. V1's `v1` tag is at `7abd496` (all V1-exit items closed); V2's `v2` tag is
-at `fdf85ba` (the verified networked-device state, which excludes the later `feat/one-loop`
-merge). Owner declared V2 exited with three hardware observations deferred, not observed,
-and not treated as exit blockers: Task 9 tap latency, the BUSY/OTA-owner refusal, and the
-§6 96 px glyph-cache timing (each needs the board with a person present or a firmware
-test-hook; see board-notes). Next milestone is V3 (server host). Scene
-stages 2a and 2b are delivered. Stages 3a, 3b, and 4 are delivered and, as of the
-2026-09-06 hardware session (board-notes, "Stage 4 Task 7"), confirmed on the board:
-3a's Gate B is closed, stage 4's Task 7 session and on-target framebuffer check
-(historical 96/10/86, 0 differing; current unobserved inventory predicts 78/8/70) both
-PASSED, and 3b's asset-GC teardown is partially observed —
-only its BUSY/OTA-owner variant, which needs a pending OTA in flight, remains owed.
-Stage 5 remains a risk review only; implementation awaits review completion and explicit
-owner approval. M0/M1 are tagged `m0`/`m1`; later milestones remain untagged without
-that authorization.
+**Current:** V1 and V2 are EXITED and TAGGED (`v1` at `7abd496`, `v2` at `fdf85ba`) by
+explicit owner direction on 2026-09-06. **V3 (server host)** is in progress on
+`feat/v3-server-host`.
+
+Running alongside V3 is the **legacy subtraction** (spec
+`docs/superpowers/specs/2026-09-11-deskmate-legacy-subtraction-design.md`), which removes
+the shapes seven schema versions and four rendering approaches left behind:
+
+- Schema **v8** retired the device-rendered data cards and **v9** the manifest-based
+  plugins, together about 36,500 lines.
+- **Wave A** (plan `2026-09-11-deskmate-legacy-subtraction-wave-a.md`) is complete: the
+  pre-v4 migration chain, the retired-template oracle and its parity gate, the M2 demo
+  tooling, and the module boundaries inside `runtime.rs` and `commands.rs`.
+- **Wave B** (schema v10, removing playlists) and **Wave C** (protocol v2, removing the
+  pre-scene wire) remain. Wave C is the only one that spends a hardware session.
+
+Scene stages 2a, 2b, 3a, 3b and 4 are delivered and confirmed on the board as of the
+2026-09-06 session (board-notes, "Stage 4 Task 7"). Stage 5 remains a risk review only;
+implementation awaits review completion and explicit owner approval.
+
+Hardware still owed: V2 Task 9's tap latency, the BUSY/OTA-owner refusal variant, stage
+3b's asset-GC teardown, and a framebuffer-matrix run — the last observed result is
+96/10/86 on 2026-09-06, which predates both v9 and Wave A; the current unobserved
+inventory is 44/6/38.
+
+M0/M1 are tagged `m0`/`m1`; later milestones remain untagged without that
+authorization.
 
 One plan per milestone; each milestone ends with working, demonstrable
 software. Ordering rationale: retire hardware risk first (from-scratch

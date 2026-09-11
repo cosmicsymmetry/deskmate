@@ -3,10 +3,9 @@
 //! `tests/golden/scene/`.
 //!
 //! A separate test and golden subdirectory from `tests/golden.rs`, for the same
-//! reason `tests/asset_font.rs` is: these cases are `SceneRenderRequest`s
-//! rendered through `Simulator::render_scene_png` — the firmware's scene
-//! decoder and `ui/scene_view.c` interpreter — not `RenderRequest`s through
-//! `template_view_show`. Keeping the PNGs in a subdirectory means
+//! reason `tests/asset_font.rs` is: these cases exercise one scene node kind
+//! each, rather than a shipped card face, so they are pinned apart from the
+//! face goldens `tests/golden.rs` owns. Keeping the PNGs in a subdirectory means
 //! `tests/golden.rs`'s orphan check, which lists only `tests/golden/*.png`
 //! non-recursively, never sees them.
 

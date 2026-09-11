@@ -93,22 +93,17 @@ fn parse_port() -> Result<Option<String>, String> {
 /// historical face-row exclusions are reachable through `face_scene_cases()`;
 /// keep them explicit so their known flakes cannot silently return.
 fn exclusion_reason(name: &str, request: &SceneRenderRequest) -> Option<&'static str> {
-    if name.starts_with("row-list--truncation-boundary--") {
+    if name.starts_with("progress-ring--running-mid-countdown--") {
         Some(
-            "row0_title is 128 chars (the wire's generic field ceiling), \
-             exceeding row-list's own registry maximum of 96 for that \
-             field -- the device rejects this push",
-        )
-    } else if name.starts_with("progress-ring--running-mid-countdown--") {
-        Some(
-            "a running ring keeps counting down from lv_tick_get() after its \
-             fields are pushed, so the device frame moves while the simulator's \
-             fixed fake tick freezes it -- the MM:SS label flips a second as \
-             soon as push-to-capture latency crosses 1000ms, making the \
-             comparison a race rather than a check. No running value avoids \
-             this. The case is kept for the deterministic simulator goldens, \
-             which do cover the running arc hue; paused-mid-countdown covers \
-             the same geometry here, and running-at-zero the running palette",
+            "the device keeps ticking a running timer through \
+             scene_view_tick_bindings after the scene is pushed, so its frame \
+             moves while the simulator's fixed fake tick freezes it -- the \
+             MM:SS label flips a second as soon as push-to-capture latency \
+             crosses 1000ms, making the comparison a race rather than a check. \
+             No running value avoids this. The case is kept for the \
+             deterministic simulator goldens, which do cover the running arc \
+             hue; paused-mid-countdown covers the same geometry here, and \
+             running-at-zero the running palette",
         )
     } else if request.fields.iter().any(|(field_name, _)| {
         !matches!(
@@ -634,10 +629,6 @@ mod tests {
             .chain(cases::date_truncation_scene_cases())
             .collect();
 
-        let truncation_boundary = requests
-            .iter()
-            .filter(|(name, _)| name.starts_with("row-list--truncation-boundary--"))
-            .count();
         let running_mid_countdown = requests
             .iter()
             .filter(|(name, _)| name.starts_with("progress-ring--running-mid-countdown--"))
@@ -645,8 +636,7 @@ mod tests {
         let field_registry_mismatch = requests
             .iter()
             .filter(|(name, request)| {
-                !name.starts_with("row-list--truncation-boundary--")
-                    && !name.starts_with("progress-ring--running-mid-countdown--")
+                !name.starts_with("progress-ring--running-mid-countdown--")
                     && exclusion_reason(name, request).is_some()
             })
             .count();
@@ -656,24 +646,26 @@ mod tests {
             .count();
 
         // The counted-not-assumed numbers this task's report must state.
+        // The counted-not-assumed numbers the next hardware session must state.
+        // The three orphan faces (row-list, big-number-label, icon-badge-text)
+        // were retired on 2026-09-11 with the template oracle that was their
+        // only remaining consumer, taking 34 rows -- and with them the
+        // row-list--truncation-boundary exclusion, which had no case left to
+        // exclude.
         assert_eq!(
             requests.len(),
-            78,
-            "76 non-manifest rows + 2 date-overflow rows"
+            44,
+            "42 non-manifest rows + 2 date-overflow rows"
         );
-        assert_eq!(truncation_boundary, 2);
         assert_eq!(running_mid_countdown, 2);
         assert_eq!(
             field_registry_mismatch, 4,
             "scene-text and scene-label, both orientations -- field.status, which no \
              built-in registry accepts"
         );
-        assert_eq!(
-            excluded,
-            truncation_boundary + running_mid_countdown + field_registry_mismatch
-        );
-        assert_eq!(excluded, 8);
-        assert_eq!(requests.len() - excluded, 70);
+        assert_eq!(excluded, running_mid_countdown + field_registry_mismatch);
+        assert_eq!(excluded, 6);
+        assert_eq!(requests.len() - excluded, 38);
 
         // The RGB565-image and runtime-font-asset rows (scene-image,
         // scene-glyph, both orientations = 4 rows) are no longer excluded.
@@ -694,14 +686,10 @@ mod tests {
             );
         }
 
-        for prefix in [
-            "digital-clock--",
-            "analog-clock--",
-            "progress-ring--",
-            "row-list--",
-            "big-number-label--",
-            "icon-badge-text--",
-        ] {
+        // Every face a card can still name. The other three retired with the
+        // template oracle on 2026-09-11; no card had been able to name them
+        // since schema v8.
+        for prefix in ["digital-clock--", "analog-clock--", "progress-ring--"] {
             assert!(
                 requests.iter().any(|(name, _)| name.starts_with(prefix)),
                 "missing real-face coverage for {prefix}"

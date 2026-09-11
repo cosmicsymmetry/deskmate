@@ -59,14 +59,16 @@ idf.py -C firmware build
 idf.py -C firmware -p /dev/cu.usbmodem* flash monitor
 ```
 
-## Legacy CLI inspection
+## CLI inspection
 
-`deskmate-cli` retains the M1 `status`, `time-sync`, and `push-data` commands and the M2
-config/demo commands as a manual inspection path. The M2 commands are legacy tooling for
-template-era firmware: scene-native firmware cannot draw a card from them. See the
+`deskmate-cli` is a manual inspection path over the cable: `status`, `time-sync`,
+`push-data`, `provision` and `factory-reset`. See the
 [M1 protocol/CLI plan](docs/superpowers/plans/2026-08-04-deskmate-m1-protocol-link-cli.md)
-and [M2 walkthrough](docs/superpowers/plans/2026-08-04-deskmate-m2-template-first-widgets.md)
-for the commands and their historical acceptance flow.
+for what each one sends.
+
+The M2 config/demo commands were removed on 2026-09-11. They pushed `ApplyConfig`
+and `PushData` with templates, and since stage 3a the device draws only host-pushed
+scenes, so none of them could put a face on the panel.
 
 ## Verification
 

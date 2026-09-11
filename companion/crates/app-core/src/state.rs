@@ -388,6 +388,21 @@ pub struct CardField {
     pub value: CardFieldValue,
 }
 
+impl CardField {
+    /// The wire form of this field. The snapshot carries the app-facing DTO, but
+    /// a scene is built from `protocol::Field`, so the preview path converts back.
+    pub fn to_protocol(&self) -> protocol::Field {
+        protocol::Field {
+            key: self.key.clone(),
+            value: match &self.value {
+                CardFieldValue::Text { value } => protocol::FieldValue::Text(value.clone()),
+                CardFieldValue::Integer { value } => protocol::FieldValue::Integer(*value),
+                CardFieldValue::Boolean { value } => protocol::FieldValue::Boolean(*value),
+            },
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CardDataSnapshot {
     pub card_id: String,

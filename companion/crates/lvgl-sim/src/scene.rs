@@ -37,10 +37,7 @@ use std::sync::Arc;
 
 use protocol::{AssetKind, Scene, encode_scene_payload};
 
-use crate::{
-    LOGICAL_HEIGHT, LOGICAL_WIDTH, RenderRequest, SimError, SimFieldValue, SimOrientation,
-    Simulator, pixels_to_png,
-};
+use crate::{LOGICAL_HEIGHT, LOGICAL_WIDTH, SimError, SimOrientation, Simulator, pixels_to_png};
 
 /// Why `firmware/main/core/scene_decode.c`'s `scene_decode()` refused a
 /// payload — one variant per `scene_model_result_t` error code
@@ -154,7 +151,7 @@ pub struct SceneAsset {
     pub bytes: Arc<[u8]>,
 }
 
-/// One scene render. Mirrors [`crate::RenderRequest`]'s shape: everything the
+/// One scene render: everything the
 /// frame depends on, pinned, so the render is a pure function of the request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SceneRenderRequest {
@@ -170,29 +167,6 @@ pub struct SceneRenderRequest {
     /// renders the device's `--` placeholder rather than failing.
     pub fields: Vec<(String, String)>,
     pub orientation: SimOrientation,
-}
-
-/// One temporal parity run. Both sides are built at the initial instant and
-/// advance their wall clock and optional timer through the same interval.
-/// `toggle_running` applies one local start/pause transition at the end. When
-/// `authoritative_reconcile` is also set, the original host snapshot is then
-/// applied again. The scene is refreshed in place and is never decoded or
-/// pushed a second time.
-pub struct SceneTemporalPairRequest<'a> {
-    pub template: &'a RenderRequest,
-    pub scene: &'a SceneRenderRequest,
-    /// Advances the wall clock on both sides; a running timer also consumes
-    /// the same milliseconds.
-    pub elapsed_ms: u32,
-    pub toggle_running: bool,
-    pub authoritative_reconcile: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SceneTemporalPair {
-    pub template: Vec<u16>,
-    pub initial_scene: Vec<u16>,
-    pub scene: Vec<u16>,
 }
 
 /// A `field.<name>` binding's value across the FFI boundary. Kept alive only
@@ -226,48 +200,6 @@ fn prepare_scene_fields(
     (names, values, raw)
 }
 
-pub(crate) fn prepare_template_fields(
-    request: &RenderRequest,
-) -> (Vec<CString>, Vec<CString>, Vec<crate::RawField>) {
-    let names: Vec<CString> = request
-        .fields
-        .iter()
-        .map(|field| crate::truncated_cstring(&field.name))
-        .collect();
-    let texts: Vec<CString> = request
-        .fields
-        .iter()
-        .map(|field| match &field.value {
-            SimFieldValue::Text(value) => crate::truncated_cstring(value),
-            SimFieldValue::Integer(_) | SimFieldValue::Boolean(_) => CString::default(),
-        })
-        .collect();
-    let raw = request
-        .fields
-        .iter()
-        .zip(&names)
-        .zip(&texts)
-        .map(|((field, name), value)| {
-            let (kind, integer, boolean) = match field.value {
-                SimFieldValue::Text(_) => (0, 0, false),
-                SimFieldValue::Integer(value) => (1, value, false),
-                SimFieldValue::Boolean(value) => (2, 0, value),
-            };
-            crate::RawField {
-                name: name.as_ptr(),
-                kind,
-                text: value.as_ptr(),
-                integer,
-                boolean,
-            }
-        })
-        .collect();
-    (names, texts, raw)
-}
-
-// SAFETY: this block declares csrc/sim_shim.c's Task 8 additions exactly as
-// defined in csrc/sim_shim.h, compiled and linked in by build.rs alongside the
-// rest of the shim's extern "C" surface (see lib.rs's own such block).
 unsafe extern "C" {
     fn sim_asset_register(digest: *const u8, bytes: *const u8, len: u32, kind: u8) -> bool;
 
@@ -285,30 +217,6 @@ unsafe extern "C" {
         field_count: usize,
         orientation_flipped: bool,
         out_pixels: *mut u16,
-    ) -> i32;
-
-    #[allow(clippy::too_many_arguments)]
-    fn sim_render_scene_temporal_pair(
-        payload: *const u8,
-        payload_length: usize,
-        template_kind: i32,
-        template_fields: *const crate::RawField,
-        template_field_count: usize,
-        utc_offset_minutes: i16,
-        now_unix_seconds: i64,
-        timer_active: bool,
-        timer_total_ms: u32,
-        timer_remaining_ms: u32,
-        timer_running: bool,
-        elapsed_ms: u32,
-        toggle_running: bool,
-        authoritative_reconcile: bool,
-        scene_fields: *const RawSceneField,
-        scene_field_count: usize,
-        orientation_flipped: bool,
-        out_template_pixels: *mut u16,
-        out_initial_scene_pixels: *mut u16,
-        out_scene_pixels: *mut u16,
     ) -> i32;
 }
 
@@ -386,68 +294,6 @@ impl Simulator {
     pub fn render_scene_png(&mut self, request: &SceneRenderRequest) -> Result<Vec<u8>, SimError> {
         let pixels = self.render_scene(request)?;
         pixels_to_png(&pixels)
-    }
-
-    /// Renders a C template and its scene at one instant, advances both, and
-    /// returns their final frames. The C shim decodes and shows the scene once,
-    /// then drives the real scene tick/local-action/reconciliation entry point.
-    ///
-    /// # Errors
-    ///
-    /// The same setup, validation, decode, asset, and render errors as
-    /// [`Simulator::render_scene`].
-    pub fn render_scene_temporal_pair(
-        &mut self,
-        request: &SceneTemporalPairRequest<'_>,
-    ) -> Result<SceneTemporalPair, SimError> {
-        let payload = encode_scene_payload(&request.scene.scene).map_err(SimError::SceneInvalid)?;
-        for asset in &request.scene.assets {
-            register_asset(asset)?;
-        }
-
-        let (_template_names, _template_texts, template_fields) =
-            prepare_template_fields(request.template);
-        let (_scene_names, _scene_values, scene_fields) =
-            prepare_scene_fields(&request.scene.fields);
-
-        let timer = request.scene.timer.unwrap_or(SceneTimer {
-            total_ms: 0,
-            remaining_ms: 0,
-            running: false,
-        });
-        let mut template = vec![0_u16; (LOGICAL_WIDTH * LOGICAL_HEIGHT) as usize];
-        let mut initial_scene = vec![0_u16; (LOGICAL_WIDTH * LOGICAL_HEIGHT) as usize];
-        let mut scene = vec![0_u16; (LOGICAL_WIDTH * LOGICAL_HEIGHT) as usize];
-        let status = unsafe {
-            sim_render_scene_temporal_pair(
-                payload.as_ptr(),
-                payload.len(),
-                request.template.template.wire_kind(),
-                template_fields.as_ptr(),
-                template_fields.len(),
-                request.scene.utc_offset_minutes,
-                request.scene.now_unix_seconds,
-                request.scene.timer.is_some(),
-                timer.total_ms,
-                timer.remaining_ms,
-                timer.running,
-                request.elapsed_ms,
-                request.toggle_running,
-                request.authoritative_reconcile,
-                scene_fields.as_ptr(),
-                scene_fields.len(),
-                matches!(request.scene.orientation, SimOrientation::LandscapeFlipped),
-                template.as_mut_ptr(),
-                initial_scene.as_mut_ptr(),
-                scene.as_mut_ptr(),
-            )
-        };
-        map_sim_scene_result(status)?;
-        Ok(SceneTemporalPair {
-            template,
-            initial_scene,
-            scene,
-        })
     }
 }
 

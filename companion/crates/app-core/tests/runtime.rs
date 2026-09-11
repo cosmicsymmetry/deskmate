@@ -21,6 +21,81 @@ use protocol::{
 
 const FULL_JSON: &str = include_str!("fixtures/full.json");
 
+#[test]
+fn card_field_round_trips_every_value_kind_back_to_the_wire() {
+    // The snapshot DTO is what the window holds; a scene is built from
+    // protocol::Field. The preview path converts back, so every value kind must
+    // survive the return trip.
+    let cases = [
+        (
+            CardField {
+                key: "title".into(),
+                value: CardFieldValue::Text {
+                    value: "Desk".into(),
+                },
+            },
+            protocol::FieldValue::Text("Desk".into()),
+        ),
+        (
+            CardField {
+                key: "duration_seconds".into(),
+                value: CardFieldValue::Integer { value: 1_500 },
+            },
+            protocol::FieldValue::Integer(1_500),
+        ),
+        (
+            CardField {
+                key: "running".into(),
+                value: CardFieldValue::Boolean { value: true },
+            },
+            protocol::FieldValue::Boolean(true),
+        ),
+    ];
+
+    for (card_field, expected) in cases {
+        let wire = card_field.to_protocol();
+        assert_eq!(wire.key, card_field.key);
+        assert_eq!(wire.value, expected);
+    }
+}
+
+#[test]
+fn preview_card_scene_builds_the_same_face_the_device_would_receive() {
+    // The preview must not be a second renderer: it builds the scene the device
+    // would be pushed. A picture card is refused rather than drawn blank,
+    // because its frames live on the server and this process has no
+    // ImageSourceHost.
+    let mut config = AppConfig::default();
+    let clock_id = config.cards[0].id().to_owned();
+
+    let scene = app_core::preview_card_scene(&config, &clock_id, &[])
+        .expect("a clock card previews locally");
+    assert!(
+        !scene.nodes.is_empty(),
+        "a clock preview must draw something"
+    );
+
+    let missing = app_core::preview_card_scene(&config, "no-such-card", &[]);
+    assert!(
+        missing.is_err(),
+        "an unknown card id must be a typed refusal, not an empty frame"
+    );
+
+    config.cards.push(CardSettings::Picture {
+        id: "picture".into(),
+        title: "Usage".into(),
+        source_id: "usage".into(),
+        tap_action: WidgetTapAction::None,
+        refresh: RefreshPolicy::DeviceLocal,
+        alert: CardAlert::None,
+    });
+    let picture = app_core::preview_card_scene(&config, "picture", &[]);
+    assert!(
+        picture.is_err(),
+        "a picture card has no locally renderable face and must be refused"
+    );
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Operation {
     Connect,

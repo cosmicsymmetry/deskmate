@@ -97,10 +97,10 @@ export const ipcContractFixtures = {
       },
       "port_name": "/dev/cu.usbmodem1",
       "firmware_version": "1.0.0",
-      "protocol_version": 1,
-      "max_protocol_version": 1,
+      "protocol_version": 2,
+      "max_protocol_version": 2,
       "capabilities": [
-        "core-widgets"
+        "scene-render"
       ],
       "unknown_capability_bits": "0x0000000000000000",
       "uptime_ms": 42,
@@ -112,7 +112,7 @@ export const ipcContractFixtures = {
       "ip": null,
       "last_network_error": null,
       "ota_state": null,
-      "active_screen_id": "clock",
+      "active_card_id": "clock",
       "counters": {
         "host_reconnects": 1,
         "valid_frames": 2,
@@ -131,7 +131,7 @@ export const ipcContractFixtures = {
     },
     "pomodoros": [
       {
-        "widget_id": "pomodoro",
+        "card_id": "pomodoro",
         "state": "running",
         "duration_seconds": 1500,
         "remaining_seconds": 900
@@ -439,11 +439,6 @@ export const ipcContractFixtures = {
     "landscape-flipped"
   ],
   "device_capabilities": [
-    "core-widgets",
-    "config-rotation",
-    "dashboard-layouts",
-    "extended-templates",
-    "host-tap-actions",
     "asset-transfer",
     "firmware-update",
     "networking",

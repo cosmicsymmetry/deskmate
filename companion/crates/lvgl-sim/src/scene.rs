@@ -30,9 +30,7 @@
 //! the whole scene; the shim makes it unconditionally rather than only when a
 //! scene happens to contain one.
 
-use std::ffi::CString;
 use std::fmt;
-use std::os::raw::c_char;
 use std::sync::Arc;
 
 use protocol::{AssetKind, Scene, encode_scene_payload};
@@ -163,41 +161,7 @@ pub struct SceneRenderRequest {
     pub utc_offset_minutes: i16,
     pub now_unix_seconds: i64,
     pub timer: Option<SceneTimer>,
-    /// `field.<name>` bindings resolve against these. A name that is absent
-    /// renders the device's `--` placeholder rather than failing.
-    pub fields: Vec<(String, String)>,
     pub orientation: SimOrientation,
-}
-
-/// A `field.<name>` binding's value across the FFI boundary. Kept alive only
-/// for the duration of one `sim_render_scene` call; both pointers point into
-/// `CString`s held by [`Simulator::render_scene`].
-#[repr(C)]
-struct RawSceneField {
-    name: *const c_char,
-    value: *const c_char,
-}
-
-fn prepare_scene_fields(
-    fields: &[(String, String)],
-) -> (Vec<CString>, Vec<CString>, Vec<RawSceneField>) {
-    let names: Vec<CString> = fields
-        .iter()
-        .map(|(name, _)| crate::truncated_cstring(name))
-        .collect();
-    let values: Vec<CString> = fields
-        .iter()
-        .map(|(_, value)| crate::truncated_cstring(value))
-        .collect();
-    let raw = names
-        .iter()
-        .zip(&values)
-        .map(|(name, value)| RawSceneField {
-            name: name.as_ptr(),
-            value: value.as_ptr(),
-        })
-        .collect();
-    (names, values, raw)
 }
 
 unsafe extern "C" {
@@ -213,8 +177,6 @@ unsafe extern "C" {
         timer_total_ms: u32,
         timer_remaining_ms: u32,
         timer_running: bool,
-        fields: *const RawSceneField,
-        field_count: usize,
         orientation_flipped: bool,
         out_pixels: *mut u16,
     ) -> i32;
@@ -251,18 +213,14 @@ impl Simulator {
             register_asset(asset)?;
         }
 
-        // Keep the CStrings alive across the call: RawSceneField only holds
-        // pointers into them.
-        let (_names, _values, raw) = prepare_scene_fields(&request.fields);
-
         let timer = request.timer.unwrap_or(SceneTimer {
             total_ms: 0,
             remaining_ms: 0,
             running: false,
         });
         let mut pixels = vec![0_u16; (LOGICAL_WIDTH * LOGICAL_HEIGHT) as usize];
-        // SAFETY: `payload`, `raw` and the CStrings backing its pointers are
-        // alive for the duration of this call; `pixels` has exactly
+        // SAFETY: `payload` is alive for the duration of this call;
+        // `pixels` has exactly
         // LOGICAL_WIDTH * LOGICAL_HEIGHT elements, matching what
         // sim_render_scene writes (SIM_WIDTH * SIM_HEIGHT in the shim).
         let status = unsafe {
@@ -275,8 +233,6 @@ impl Simulator {
                 timer.total_ms,
                 timer.remaining_ms,
                 timer.running,
-                raw.as_ptr(),
-                raw.len(),
                 matches!(request.orientation, SimOrientation::LandscapeFlipped),
                 pixels.as_mut_ptr(),
             )
@@ -330,7 +286,6 @@ mod tests {
             utc_offset_minutes: 0,
             now_unix_seconds: 1_755_000_000,
             timer: None,
-            fields: Vec::new(),
             orientation: SimOrientation::Landscape,
         }
     }

@@ -18,7 +18,6 @@ fn render(scene: protocol::Scene, timer: Option<SceneTimer>) -> Vec<u16> {
             utc_offset_minutes: 0,
             now_unix_seconds: 1_767_225_600,
             timer,
-            fields: Vec::new(),
             orientation: SimOrientation::Landscape,
         })
         .expect("render the preview scene")

@@ -10,7 +10,6 @@
 //! gate. That went on 2026-09-11 along with the second renderer it existed to
 //! check.
 
-use std::ffi::CString;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -109,29 +108,6 @@ impl std::error::Error for SimError {}
 unsafe extern "C" {
     fn sim_init() -> bool;
 
-}
-
-/// Builds a `CString` from `s`, truncating at the first interior NUL byte
-/// instead of failing the whole string. `CString::new` rejects any interior
-/// NUL, and the call sites used to fall back to `.unwrap_or_default()` on
-/// that error — silently rendering an *empty* field for a string that has a
-/// NUL anywhere in it. On device, the field text lands in a fixed C buffer
-/// via `strncpy` (see `sim_shim.c`'s `build_fields`), which just stops
-/// copying at the NUL and renders everything before it; truncating here
-/// instead of blanking matches that behavior so the preview shows the same
-/// prefix the firmware would.
-pub(crate) fn truncated_cstring(s: &str) -> CString {
-    match CString::new(s) {
-        Ok(cstring) => cstring,
-        Err(err) => {
-            let nul_position = err.nul_position();
-            // The bytes up to `nul_position` are exactly the prefix before
-            // the first NUL that made `CString::new` fail, so they contain
-            // no NUL themselves and this cannot fail.
-            CString::new(&s.as_bytes()[..nul_position])
-                .expect("prefix before first NUL cannot itself contain a NUL")
-        }
-    }
 }
 
 static SIMULATOR_CLAIMED: AtomicBool = AtomicBool::new(false);
@@ -278,27 +254,5 @@ mod tests {
             .expect("render flipped");
         let reversed: Vec<u16> = plain.iter().rev().copied().collect();
         assert_eq!(flipped, reversed);
-    }
-
-    #[test]
-    fn truncated_cstring_truncates_at_first_interior_nul() {
-        let with_interior_nul = "Café\0Zürich";
-        let result = truncated_cstring(with_interior_nul);
-        assert_eq!(result.to_str().expect("valid utf-8"), "Café");
-
-        // A string with no interior NUL is passed through unchanged.
-        let clean = "Zürich";
-        assert_eq!(
-            truncated_cstring(clean).to_str().expect("valid utf-8"),
-            clean
-        );
-
-        // A NUL as the very first byte truncates to empty, not a panic.
-        assert_eq!(
-            truncated_cstring("\0trailing")
-                .to_str()
-                .expect("valid utf-8"),
-            ""
-        );
     }
 }

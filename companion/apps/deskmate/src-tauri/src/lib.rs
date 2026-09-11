@@ -269,7 +269,7 @@ fn report_exit_metrics(snapshot: &AppSnapshot) {
         connection_log_label(&snapshot.device.connection),
         snapshot.device.uptime_ms,
         snapshot.device.free_heap,
-        snapshot.device.active_screen_id.is_some(),
+        snapshot.device.active_card_id.is_some(),
         snapshot.device.counters,
         snapshot.diagnostics,
     );
@@ -299,8 +299,7 @@ const fn runtime_error_log_label(error: &app_core::RuntimeError) -> &'static str
         app_core::RuntimeError::QueueFull => "queue-full",
         app_core::RuntimeError::WorkerStopped => "worker-stopped",
         app_core::RuntimeError::ResponseTimeout => "response-timeout",
-        app_core::RuntimeError::UnknownWidget { .. } => "unknown-widget",
-        app_core::RuntimeError::UnknownScreen { .. } => "unknown-screen",
+        app_core::RuntimeError::UnknownCard { .. } => "unknown-card",
         app_core::RuntimeError::DeviceDisconnected | app_core::RuntimeError::Device { .. } => {
             "device"
         }
@@ -776,7 +775,7 @@ mod tests {
                 ip: None,
                 last_network_error: None,
                 ota_state: None,
-                active_screen_id: None,
+                active_card_id: None,
                 counters: DeviceCounters::default(),
             },
             pomodoros: Vec::new(),

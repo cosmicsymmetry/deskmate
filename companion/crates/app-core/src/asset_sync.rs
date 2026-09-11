@@ -357,8 +357,8 @@ mod tests {
     use crate::{DeviceConnection, RuntimeDevice};
     use device::{ReceivedEvent, SessionDiagnostics};
     use protocol::{
-        Ack, Field, NetworkConfig, PushScene, ScreenConfig, StatusResponse, TYPE_ASSET_BEGIN,
-        TimeSync, TriggerInterrupt, WidgetConfig,
+        Ack, CardConfig, NetworkConfig, PushScene, StatusResponse, TYPE_ASSET_BEGIN, TimeSync,
+        TriggerInterrupt,
     };
 
     use super::*;
@@ -486,19 +486,20 @@ mod tests {
         fn apply_layout(
             &mut self,
             _rotation: u16,
-            _widgets: Vec<WidgetConfig>,
-            _screens: Vec<ScreenConfig>,
+            _cards: Vec<CardConfig>,
         ) -> Result<(), DeviceError> {
             unreachable!("FakeDevice only exercises asset transfer in these tests")
         }
-        fn push_fields(
+        fn push_timer(
             &mut self,
-            _widget_id: String,
-            _fields: Vec<Field>,
+            _card_id: String,
+            _total_ms: u32,
+            _remaining_ms: u32,
+            _running: bool,
         ) -> Result<(), DeviceError> {
             unreachable!("FakeDevice only exercises asset transfer in these tests")
         }
-        fn activate_screen(&mut self, _screen_id: String) -> Result<(), DeviceError> {
+        fn activate_card(&mut self, _card_id: String) -> Result<(), DeviceError> {
             unreachable!("FakeDevice only exercises asset transfer in these tests")
         }
         fn push_scene(&mut self, _push: PushScene) -> Result<(), DeviceError> {

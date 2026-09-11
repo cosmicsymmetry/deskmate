@@ -394,9 +394,10 @@ pub fn binding_is_valid(text: &str) -> bool {
     if let Some(argument) = text.strip_prefix("time:") {
         return time_format_is_valid(argument);
     }
-    if let Some(argument) = text.strip_prefix("field.") {
-        return !argument.is_empty() && argument.len() <= MAX_SCENE_BINDING_LEN;
-    }
+    // `field.` is deliberately absent. Protocol v1 let a scene name a value out
+    // of the device's per-card field bag; v2's device has no field bag and
+    // `core/scene_binding.c` no longer parses the prefix, so accepting one here
+    // would mint a scene the device refuses.
     false
 }
 
@@ -1545,17 +1546,13 @@ mod tests {
         assert!(!binding_is_valid("timer.remaining:hh:mm:ss"));
         assert!(!binding_is_valid("timer.elapsed:HH:mm:ss"));
         assert!(!binding_is_valid("timer.total:hh:mm:ss"));
-        assert!(binding_is_valid("field.temp"));
         assert!(!binding_is_valid("time:"));
         assert!(!binding_is_valid("time:%s"));
-        assert!(!binding_is_valid("field."));
         assert!(!binding_is_valid("whatever"));
-        assert!(!binding_is_valid(
-            &"field."
-                .chars()
-                .chain("x".repeat(64).chars())
-                .collect::<String>()
-        ));
+        // Protocol v1's per-card field bag is gone from the device, so the
+        // whole `field.` namespace must now be refused rather than minted.
+        assert!(!binding_is_valid("field.temp"));
+        assert!(!binding_is_valid("field."));
     }
 
     /// The standalone payload is the same map `PushScene` nests under its key

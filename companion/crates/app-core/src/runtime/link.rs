@@ -32,15 +32,18 @@ pub trait RuntimeDevice: Send + 'static {
     fn provision(&mut self, config: &NetworkConfig) -> Result<(), DeviceError>;
     fn factory_reset(&mut self) -> Result<(), DeviceError>;
     fn time_sync(&mut self, sync: TimeSync) -> Result<(), DeviceError>;
-    fn apply_layout(
+    fn apply_layout(&mut self, rotation: u16, cards: Vec<CardConfig>) -> Result<(), DeviceError>;
+    /// The timer a card's `timer.*` scene bindings resolve against. Protocol
+    /// v2 replaced the generic field push with this.
+    fn push_timer(
         &mut self,
-        rotation: u16,
-        widgets: Vec<WidgetConfig>,
-        screens: Vec<ScreenConfig>,
+        card_id: String,
+        total_ms: u32,
+        remaining_ms: u32,
+        running: bool,
     ) -> Result<(), DeviceError>;
-    fn push_fields(&mut self, widget_id: String, fields: Vec<Field>) -> Result<(), DeviceError>;
     fn push_scene(&mut self, push: PushScene) -> Result<(), DeviceError>;
-    fn activate_screen(&mut self, screen_id: String) -> Result<(), DeviceError>;
+    fn activate_card(&mut self, card_id: String) -> Result<(), DeviceError>;
     fn trigger_interrupt(&mut self, interrupt: TriggerInterrupt) -> Result<(), DeviceError>;
     /// Reserve (or re-attach to) storage for one asset. Unlike `provision`/
     /// `factory_reset`, this must work on every transport: the server owning
@@ -152,22 +155,23 @@ impl RuntimeDevice for SerialRuntimeDevice {
         self.connected()?.session.time_sync(sync).map(|_| ())
     }
 
-    fn apply_layout(
-        &mut self,
-        rotation: u16,
-        widgets: Vec<WidgetConfig>,
-        screens: Vec<ScreenConfig>,
-    ) -> Result<(), DeviceError> {
+    fn apply_layout(&mut self, rotation: u16, cards: Vec<CardConfig>) -> Result<(), DeviceError> {
         self.connected()?
             .session
-            .apply_next_config(rotation, widgets, screens)
+            .apply_next_config(rotation, cards)
             .map(|_| ())
     }
 
-    fn push_fields(&mut self, widget_id: String, fields: Vec<Field>) -> Result<(), DeviceError> {
+    fn push_timer(
+        &mut self,
+        card_id: String,
+        total_ms: u32,
+        remaining_ms: u32,
+        running: bool,
+    ) -> Result<(), DeviceError> {
         self.connected()?
             .session
-            .push_fields(widget_id, fields)
+            .push_next_timer(card_id, total_ms, remaining_ms, running)
             .map(|_| ())
     }
 
@@ -175,10 +179,10 @@ impl RuntimeDevice for SerialRuntimeDevice {
         self.connected()?.session.push_scene(push).map(|_| ())
     }
 
-    fn activate_screen(&mut self, screen_id: String) -> Result<(), DeviceError> {
+    fn activate_card(&mut self, card_id: String) -> Result<(), DeviceError> {
         self.connected()?
             .session
-            .activate_screen(ActivateScreen { screen_id })
+            .activate_card(ActivateCard { card_id })
             .map(|_| ())
     }
 
@@ -283,7 +287,7 @@ pub(super) fn mark_disconnected(
     // Capabilities belong to the new attachment, not the retained runtime. A
     // reconnect may follow an OTA in either direction, so force one render-policy
     // decision from the fresh StatusResponse even when all data is otherwise clean.
-    state.active_scene_dirty = state.active_screen.is_some();
+    state.active_scene_dirty = state.active_card.is_some();
     state.next_connect = now + reconnect_interval;
     state.device.connection = if state.ever_connected {
         ConnectionState::Standalone

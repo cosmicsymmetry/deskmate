@@ -179,7 +179,7 @@ export interface DeviceSnapshot {
   ip: string | null;
   last_network_error: string | null;
   ota_state: DeviceOtaState | null;
-  active_screen_id: string | null;
+  active_card_id: string | null;
   counters: DeviceCounters;
 }
 
@@ -209,12 +209,12 @@ export interface ProvisionDeviceInput {
   tier: DeviceTier;
 }
 
+/**
+ * Protocol v2 re-based these. The bits that described rendering a template --
+ * core widgets, config rotation, dashboard layouts, extended templates, host
+ * tap actions -- say nothing about a device that only draws scenes.
+ */
 export type DeviceCapability =
-  | "core-widgets"
-  | "config-rotation"
-  | "dashboard-layouts"
-  | "extended-templates"
-  | "host-tap-actions"
   | "asset-transfer"
   | "firmware-update"
   | "networking"
@@ -239,7 +239,7 @@ export interface DeviceCounters {
 }
 
 export interface PomodoroSnapshot {
-  widget_id: string;
+  card_id: string;
   state: PomodoroState;
   duration_seconds: number;
   remaining_seconds: number;

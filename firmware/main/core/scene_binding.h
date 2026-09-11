@@ -10,7 +10,6 @@ typedef enum {
     SCENE_BINDING_TIME = 1,
     SCENE_BINDING_TIMER_REMAINING = 2,
     SCENE_BINDING_TIMER_PCT = 3,
-    SCENE_BINDING_FIELD = 4,
     SCENE_BINDING_TIMER_ELAPSED = 5,
     SCENE_BINDING_TIMER_TOTAL = 6,
     SCENE_BINDING_TIMER_STATUS = 7,
@@ -25,11 +24,6 @@ typedef enum {
     SCENE_BINDING_ERR_FORMAT,
     SCENE_BINDING_ERR_CAPACITY,
 } scene_binding_result_t;
-
-/* Returns the field's current text, or NULL when the provider has not
- * reported one yet. Injected rather than called directly so this module
- * stays pure and host-testable. */
-typedef const char *(*scene_field_fn)(void *ctx, const char *name);
 
 typedef struct {
     scene_binding_kind_t kind;
@@ -59,8 +53,6 @@ typedef struct {
     uint32_t timer_remaining_ms;
     uint8_t timer_remaining_pct;
     uint16_t timer_remaining_permille;
-    scene_field_fn field;
-    void *field_ctx;
 } scene_binding_context_t;
 
 typedef int32_t (*scene_trigo_fn)(int32_t degrees);

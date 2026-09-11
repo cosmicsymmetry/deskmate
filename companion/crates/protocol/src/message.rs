@@ -3,16 +3,22 @@
 use core::fmt;
 
 use crate::PROTOCOL_VERSION;
-use crate::cbor::{CborError, Decoder, Encoder, deterministic_key_before};
+use crate::cbor::{CborError, Decoder, Encoder};
 use crate::frame::{Frame, FrameError, MAX_PAYLOAD_SIZE, encode_frame};
 use crate::scene::{Scene, decode_scene, encode_scene, validate_scene};
 
-pub const MAX_PROTOCOL_VERSION: u8 = 1;
-pub const CAPABILITY_CORE_WIDGETS: u64 = 1 << 0;
-pub const CAPABILITY_CONFIG_ROTATION: u64 = 1 << 1;
-pub const CAPABILITY_DASHBOARD_LAYOUTS: u64 = 1 << 2;
-pub const CAPABILITY_EXTENDED_TEMPLATES: u64 = 1 << 3;
-pub const CAPABILITY_HOST_TAP_ACTIONS: u64 = 1 << 4;
+pub const MAX_PROTOCOL_VERSION: u8 = 2;
+
+/// Protocol v1's bits 0-4 described a device that rendered templates itself:
+/// core widgets, config rotation, dashboard layouts, extended templates, host
+/// tap actions. v2 has no templates, so none of them said anything a host could
+/// act on, and they are retired rather than re-used. **Bit numbers are not
+/// compacted.** A bit's meaning is its identity; reusing a retired number would
+/// make a v1 capability word decode as a plausible v2 one instead of an
+/// obviously wrong one.
+/// Kept as documentation of which numbers must never be re-issued.
+#[allow(dead_code)]
+pub const RETIRED_V1_CAPABILITY_BITS: u64 = 0b1_1111;
 pub const CAPABILITY_ASSET_TRANSFER: u64 = 1 << 5;
 pub const CAPABILITY_FIRMWARE_UPDATE: u64 = 1 << 6;
 pub const CAPABILITY_NETWORKING: u64 = 1 << 7;
@@ -40,24 +46,20 @@ pub const CAPABILITY_VOLATILE_ASSETS: u64 = 1 << 9;
 /// is 172 sequential chunk round trips at `MAX_ASSET_CHUNK_BYTES`, and the
 /// tunnel does not survive that. The same frame RLE565-encoded is a handful.
 pub const CAPABILITY_DURABLE_ASSET_ENCODING: u64 = 1 << 10;
-pub const LEGACY_CAPABILITIES: u64 = CAPABILITY_CORE_WIDGETS;
-pub const CURRENT_CAPABILITIES: u64 = CAPABILITY_CORE_WIDGETS
-    | CAPABILITY_CONFIG_ROTATION
-    | CAPABILITY_EXTENDED_TEMPLATES
-    | CAPABILITY_ASSET_TRANSFER
+pub const CURRENT_CAPABILITIES: u64 = CAPABILITY_ASSET_TRANSFER
     | CAPABILITY_FIRMWARE_UPDATE
     | CAPABILITY_NETWORKING
     | CAPABILITY_SCENE_RENDER
     | CAPABILITY_VOLATILE_ASSETS
     | CAPABILITY_DURABLE_ASSET_ENCODING;
 pub const LINK_TIMEOUT_MS: u64 = 10_000;
-pub const MAX_WIDGET_ID_LEN: usize = 32;
-pub const MAX_SCREEN_ID_LEN: usize = 32;
-pub const MAX_CONFIG_WIDGETS: usize = 8;
-pub const MAX_CONFIG_SCREENS: usize = 8;
-pub const MAX_FIELD_COUNT: usize = 16;
-pub const MAX_FIELD_KEY_LEN: usize = 32;
-pub const MAX_FIELD_TEXT_LEN: usize = 128;
+/// A card id is an identifier the host chose, not free text.
+///
+/// Protocol v1 had three of these -- one for a widget id, one for a screen id
+/// and one for a card id -- all 32, because a widget, a screen and a card were
+/// three names for the thing config schema v10 settled as one card.
+pub const MAX_CARD_ID_LEN: usize = 32;
+pub const MAX_CONFIG_CARDS: usize = 8;
 pub const MAX_DIAGNOSTIC_LEN: usize = 96;
 pub const MAX_INTERRUPT_REASON_LEN: usize = 96;
 pub const MAX_FIRMWARE_VERSION_LEN: usize = 32;
@@ -87,12 +89,12 @@ pub const TYPE_STATUS_REQUEST: u8 = 1;
 pub const TYPE_STATUS_RESPONSE: u8 = 2;
 pub const TYPE_TIME_SYNC: u8 = 3;
 pub const TYPE_ACK: u8 = 4;
-pub const TYPE_PUSH_DATA: u8 = 5;
+pub const TYPE_PUSH_TIMER: u8 = 5;
 pub const TYPE_HEARTBEAT: u8 = 6;
 pub const TYPE_HEARTBEAT_ACK: u8 = 7;
 pub const TYPE_ERROR: u8 = 8;
 pub const TYPE_APPLY_CONFIG: u8 = 9;
-pub const TYPE_ACTIVATE_SCREEN: u8 = 10;
+pub const TYPE_ACTIVATE_CARD: u8 = 10;
 pub const TYPE_TRIGGER_INTERRUPT: u8 = 11;
 pub const TYPE_DEVICE_EVENT: u8 = 12;
 pub const TYPE_NETWORK_CONFIG: u8 = 13;
@@ -103,42 +105,12 @@ pub const TYPE_ASSET_COMMIT: u8 = 17;
 pub const TYPE_ASSET_RELEASE: u8 = 18;
 pub const TYPE_PUSH_SCENE: u8 = 19;
 
-/// Same 32 bytes as a widget id, and for the same reason: a card id is an
-/// identifier the host chose, not free text.
-pub const MAX_CARD_ID_LEN: usize = 32;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
-pub enum TemplateKind {
-    DigitalClock = 1,
-    ProgressRing = 2,
-    RowList = 3,
-    AnalogClock = 4,
-    BigNumberLabel = 5,
-    IconBadgeText = 6,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
-pub enum SizeClass {
-    Full = 1,
-    Standard = 2,
-    Tile = 3,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum TapAction {
     None = 0,
     StartPause = 1,
     Reset = 2,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
-pub enum InterruptPolicy {
-    Disabled = 0,
-    Enabled = 1,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -235,7 +207,7 @@ pub struct AssetRelease {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PushScene {
     pub card_id: String,
-    /// Required and nonzero, like `PushData`'s and `ApplyConfig`'s: a scene
+    /// Required and nonzero, like `PushTimer`'s and `ApplyConfig`'s: a scene
     /// the host cannot pin a revision to is one it cannot tell apart from the
     /// scene already on the panel.
     pub revision: u32,
@@ -243,68 +215,66 @@ pub struct PushScene {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WidgetConfig {
-    pub widget_id: String,
-    pub template: TemplateKind,
-    pub size_class: SizeClass,
+/// One card in the loop. Protocol v2 carries only what the device still decides
+/// for itself: which card this is, and what a tap on it does. The template, the
+/// size class and the interrupt policy all described a device that rendered the
+/// face, and it has not since stage 3a.
+pub struct CardConfig {
+    pub card_id: String,
     pub tap_action: TapAction,
-    pub interrupt_policy: InterruptPolicy,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ScreenConfig {
-    pub screen_id: String,
-    pub widget_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApplyConfig {
     pub revision: u32,
     pub rotation: u16,
-    pub widgets: Vec<WidgetConfig>,
-    pub screens: Vec<ScreenConfig>,
+    /// The loop, in order. Protocol v2 dropped the parallel `screens` array:
+    /// since config schema v10 a screen id is always the card id, so it
+    /// restated this list.
+    pub cards: Vec<CardConfig>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ActivateScreen {
-    pub screen_id: String,
+pub struct ActivateCard {
+    pub card_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TriggerInterrupt {
-    pub widget_id: String,
+    pub card_id: String,
     pub token: u32,
     pub reason: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Something the person at the panel did, reported upward.
+///
+/// Protocol v1 carried two identifiers here, `card_id` and `card_id`, and
+/// every producer and consumer set them to the same card. v2 states the one
+/// card id (key 2); key 3 is retired rather than reused.
 pub struct DeviceEvent {
     pub sequence: u64,
     pub kind: EventKind,
-    pub widget_id: String,
-    pub screen_id: String,
+    pub card_id: String,
     pub action: EventAction,
     pub interrupt_token: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum FieldValue {
-    Text(String),
-    Integer(i64),
-    Boolean(bool),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Field {
-    pub key: String,
-    pub value: FieldValue,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PushData {
-    pub widget_id: String,
+/// The timer a card's `timer.*` scene bindings resolve against.
+///
+/// Replaces protocol v1's `PushData`, which carried an arbitrary field bag the
+/// device validated against a per-template registry. Its only surviving consumer
+/// read three keys out of it by name -- `duration_seconds`, `remaining_seconds`
+/// and `running` -- so v2 states them. Nothing has emitted a `field.*` binding
+/// since config schema v9 removed manifest plugins, so the rest of the bag had
+/// no reader at all.
+pub struct PushTimer {
+    pub card_id: String,
     pub revision: u32,
-    pub fields: Vec<Field>,
+    pub total_ms: u32,
+    pub remaining_ms: u32,
+    pub running: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -374,10 +344,7 @@ pub enum ErrorCode {
     StaleRevision = 7,
     Busy = 8,
     Internal = 9,
-    UnknownWidget = 10,
-    UnknownScreen = 11,
-    UnsupportedTemplate = 12,
-    UnsupportedSizeClass = 13,
+    UnknownCard = 10,
     ConfigTooLarge = 14,
     WrongTier = 15,
 }
@@ -396,10 +363,7 @@ impl TryFrom<u16> for ErrorCode {
             7 => Ok(Self::StaleRevision),
             8 => Ok(Self::Busy),
             9 => Ok(Self::Internal),
-            10 => Ok(Self::UnknownWidget),
-            11 => Ok(Self::UnknownScreen),
-            12 => Ok(Self::UnsupportedTemplate),
-            13 => Ok(Self::UnsupportedSizeClass),
+            10 => Ok(Self::UnknownCard),
             14 => Ok(Self::ConfigTooLarge),
             15 => Ok(Self::WrongTier),
             _ => Err(MessageError::InvalidValue("error code")),
@@ -419,12 +383,12 @@ pub enum Message {
     StatusResponse(StatusResponse),
     TimeSync(TimeSync),
     Ack(Ack),
-    PushData(PushData),
+    PushTimer(PushTimer),
     Heartbeat,
     HeartbeatAck(HeartbeatAck),
     Error(ErrorResponse),
     ApplyConfig(ApplyConfig),
-    ActivateScreen(ActivateScreen),
+    ActivateCard(ActivateCard),
     TriggerInterrupt(TriggerInterrupt),
     DeviceEvent(DeviceEvent),
     NetworkConfig(NetworkConfig),
@@ -444,12 +408,12 @@ impl Message {
             Self::StatusResponse(_) => TYPE_STATUS_RESPONSE,
             Self::TimeSync(_) => TYPE_TIME_SYNC,
             Self::Ack(_) => TYPE_ACK,
-            Self::PushData(_) => TYPE_PUSH_DATA,
+            Self::PushTimer(_) => TYPE_PUSH_TIMER,
             Self::Heartbeat => TYPE_HEARTBEAT,
             Self::HeartbeatAck(_) => TYPE_HEARTBEAT_ACK,
             Self::Error(_) => TYPE_ERROR,
             Self::ApplyConfig(_) => TYPE_APPLY_CONFIG,
-            Self::ActivateScreen(_) => TYPE_ACTIVATE_SCREEN,
+            Self::ActivateCard(_) => TYPE_ACTIVATE_CARD,
             Self::TriggerInterrupt(_) => TYPE_TRIGGER_INTERRUPT,
             Self::DeviceEvent(_) => TYPE_DEVICE_EVENT,
             Self::NetworkConfig(_) => TYPE_NETWORK_CONFIG,
@@ -496,8 +460,6 @@ pub enum MessageError {
     DuplicateOrUnsortedKey,
     PayloadTooLarge,
     InvalidRequestId,
-    UnsupportedTemplate(u8),
-    UnsupportedSizeClass(u8),
     ConfigTooLarge,
     UnknownWidgetReference,
 }
@@ -535,47 +497,12 @@ fn checked_text(
     }
 }
 
-/// Decodes a wire-format template kind byte into a [`TemplateKind`].
-///
-/// # Errors
-///
-/// Returns [`MessageError::UnsupportedTemplate`] for any value outside the
-/// known template range; unknown kinds are rejected, never clamped.
-pub fn template_kind_from_wire(value: u8) -> Result<TemplateKind, MessageError> {
-    match value {
-        1 => Ok(TemplateKind::DigitalClock),
-        2 => Ok(TemplateKind::ProgressRing),
-        3 => Ok(TemplateKind::RowList),
-        4 => Ok(TemplateKind::AnalogClock),
-        5 => Ok(TemplateKind::BigNumberLabel),
-        6 => Ok(TemplateKind::IconBadgeText),
-        other => Err(MessageError::UnsupportedTemplate(other)),
-    }
-}
-
-fn size_class(value: u8) -> Result<SizeClass, MessageError> {
-    match value {
-        1 => Ok(SizeClass::Full),
-        2 => Ok(SizeClass::Standard),
-        3 => Ok(SizeClass::Tile),
-        other => Err(MessageError::UnsupportedSizeClass(other)),
-    }
-}
-
 fn tap_action(value: u8) -> Result<TapAction, MessageError> {
     match value {
         0 => Ok(TapAction::None),
         1 => Ok(TapAction::StartPause),
         2 => Ok(TapAction::Reset),
         _ => Err(MessageError::InvalidValue("tap action")),
-    }
-}
-
-fn interrupt_policy(value: u8) -> Result<InterruptPolicy, MessageError> {
-    match value {
-        0 => Ok(InterruptPolicy::Disabled),
-        1 => Ok(InterruptPolicy::Enabled),
-        _ => Err(MessageError::InvalidValue("interrupt policy")),
     }
 }
 
@@ -644,9 +571,9 @@ pub const fn expected_response_type(request_type: u8) -> Option<u8> {
     match request_type {
         TYPE_STATUS_REQUEST => Some(TYPE_STATUS_RESPONSE),
         TYPE_TIME_SYNC
-        | TYPE_PUSH_DATA
+        | TYPE_PUSH_TIMER
         | TYPE_APPLY_CONFIG
-        | TYPE_ACTIVATE_SCREEN
+        | TYPE_ACTIVATE_CARD
         | TYPE_TRIGGER_INTERRUPT
         | TYPE_NETWORK_CONFIG
         | TYPE_FACTORY_RESET
@@ -730,45 +657,22 @@ fn validate_apply_config(config: &ApplyConfig) -> Result<(), MessageError> {
     if config.revision == 0 {
         return Err(MessageError::InvalidValue("config revision"));
     }
-    if config.widgets.is_empty() || config.screens.is_empty() {
+    if config.cards.is_empty() {
         return Err(MessageError::InvalidValue("config count"));
     }
-    if config.widgets.len() > MAX_CONFIG_WIDGETS || config.screens.len() > MAX_CONFIG_SCREENS {
+    if config.cards.len() > MAX_CONFIG_CARDS {
         return Err(MessageError::ConfigTooLarge);
     }
     if !matches!(config.rotation, 90 | 270) {
         return Err(MessageError::InvalidValue("config rotation"));
     }
-    for (index, widget) in config.widgets.iter().enumerate() {
-        checked_text(&widget.widget_id, 1, MAX_WIDGET_ID_LEN, "widget_id")?;
-        if config.widgets[..index]
+    for (index, card) in config.cards.iter().enumerate() {
+        checked_text(&card.card_id, 1, MAX_CARD_ID_LEN, "card_id")?;
+        if config.cards[..index]
             .iter()
-            .any(|other| other.widget_id == widget.widget_id)
+            .any(|other| other.card_id == card.card_id)
         {
             return Err(MessageError::DuplicateOrUnsortedKey);
-        }
-        if widget.size_class == SizeClass::Tile {
-            return Err(MessageError::UnsupportedSizeClass(SizeClass::Tile as u8));
-        }
-        if widget.template != TemplateKind::ProgressRing && widget.tap_action != TapAction::None {
-            return Err(MessageError::InvalidValue("template tap action"));
-        }
-    }
-    for (index, screen) in config.screens.iter().enumerate() {
-        checked_text(&screen.screen_id, 1, MAX_SCREEN_ID_LEN, "screen_id")?;
-        checked_text(&screen.widget_id, 1, MAX_WIDGET_ID_LEN, "widget_id")?;
-        if config.screens[..index]
-            .iter()
-            .any(|other| other.screen_id == screen.screen_id)
-        {
-            return Err(MessageError::DuplicateOrUnsortedKey);
-        }
-        if !config
-            .widgets
-            .iter()
-            .any(|widget| widget.widget_id == screen.widget_id)
-        {
-            return Err(MessageError::UnknownWidgetReference);
         }
     }
     Ok(())
@@ -778,8 +682,7 @@ fn validate_device_event(event: &DeviceEvent) -> Result<(), MessageError> {
     if event.sequence == 0 {
         return Err(MessageError::InvalidValue("event sequence"));
     }
-    checked_text(&event.widget_id, 1, MAX_WIDGET_ID_LEN, "widget_id")?;
-    checked_text(&event.screen_id, 1, MAX_SCREEN_ID_LEN, "screen_id")?;
+    checked_text(&event.card_id, 1, MAX_CARD_ID_LEN, "card_id")?;
     let valid = match event.kind {
         EventKind::Tap => {
             matches!(event.action, EventAction::StartPause | EventAction::Reset)
@@ -803,24 +706,15 @@ fn validate_device_event(event: &DeviceEvent) -> Result<(), MessageError> {
     }
 }
 
-fn validate_push(push: &PushData) -> Result<(), MessageError> {
-    checked_text(&push.widget_id, 1, MAX_WIDGET_ID_LEN, "widget_id")?;
+fn validate_push(push: &PushTimer) -> Result<(), MessageError> {
+    checked_text(&push.card_id, 1, MAX_CARD_ID_LEN, "card_id")?;
     if push.revision == 0 {
         return Err(MessageError::InvalidValue("revision"));
     }
-    if push.fields.len() > MAX_FIELD_COUNT {
-        return Err(MessageError::InvalidValue("field count"));
-    }
-    let mut keys: Vec<&str> = push.fields.iter().map(|field| field.key.as_str()).collect();
-    for field in &push.fields {
-        checked_text(&field.key, 1, MAX_FIELD_KEY_LEN, "field key")?;
-        if let FieldValue::Text(text) = &field.value {
-            checked_text(text, 0, MAX_FIELD_TEXT_LEN, "field text")?;
-        }
-    }
-    keys.sort_unstable();
-    if keys.windows(2).any(|pair| pair[0] == pair[1]) {
-        return Err(MessageError::DuplicateOrUnsortedKey);
+    // A timer that has run past its own total is not a state the host can mean,
+    // and on the device it would drive a `timer.permille` binding out of range.
+    if push.remaining_ms > push.total_ms {
+        return Err(MessageError::InvalidValue("remaining_ms"));
     }
     Ok(())
 }
@@ -875,7 +769,7 @@ pub fn validate_message(message: &Message) -> Result<(), MessageError> {
         Message::Ack(ack) => {
             let revision_required = matches!(
                 ack.acknowledged_type,
-                TYPE_PUSH_DATA | TYPE_APPLY_CONFIG | TYPE_PUSH_SCENE
+                TYPE_PUSH_TIMER | TYPE_APPLY_CONFIG | TYPE_PUSH_SCENE
             );
             let already_present_required = ack.acknowledged_type == TYPE_ASSET_BEGIN;
             if expected_response_type(ack.acknowledged_type) != Some(TYPE_ACK) {
@@ -892,16 +786,16 @@ pub fn validate_message(message: &Message) -> Result<(), MessageError> {
             }
             Ok(())
         }
-        Message::PushData(push) => validate_push(push),
+        Message::PushTimer(push) => validate_push(push),
         Message::Error(error) => {
             checked_text(&error.diagnostic, 0, MAX_DIAGNOSTIC_LEN, "diagnostic")
         }
         Message::ApplyConfig(config) => validate_apply_config(config),
-        Message::ActivateScreen(activate) => {
-            checked_text(&activate.screen_id, 1, MAX_SCREEN_ID_LEN, "screen_id")
+        Message::ActivateCard(activate) => {
+            checked_text(&activate.card_id, 1, MAX_CARD_ID_LEN, "card_id")
         }
         Message::TriggerInterrupt(interrupt) => {
-            checked_text(&interrupt.widget_id, 1, MAX_WIDGET_ID_LEN, "widget_id")?;
+            checked_text(&interrupt.card_id, 1, MAX_CARD_ID_LEN, "card_id")?;
             checked_text(
                 &interrupt.reason,
                 0,
@@ -930,47 +824,18 @@ pub fn validate_message(message: &Message) -> Result<(), MessageError> {
     }
 }
 
-fn encode_field_value(encoder: &mut Encoder, value: &FieldValue) {
-    match value {
-        FieldValue::Text(text) => encoder.text(text),
-        FieldValue::Integer(integer) => encoder.signed(*integer),
-        FieldValue::Boolean(boolean) => encoder.boolean(*boolean),
-    }
-}
-
-fn encoded_text_key(key: &str) -> Vec<u8> {
-    let mut encoder = Encoder::new();
-    encoder.text(key);
-    encoder.into_bytes()
-}
-
 fn encode_config_payload(encoder: &mut Encoder, config: &ApplyConfig) {
-    encoder.map(4);
+    encoder.map(3);
     encoder.unsigned(0);
     encoder.unsigned(u64::from(config.revision));
     encoder.unsigned(1);
-    encoder.array(config.widgets.len());
-    for widget in &config.widgets {
-        encoder.map(5);
-        encoder.unsigned(0);
-        encoder.text(&widget.widget_id);
-        encoder.unsigned(1);
-        encoder.unsigned(u64::from(widget.template as u8));
-        encoder.unsigned(2);
-        encoder.unsigned(u64::from(widget.size_class as u8));
-        encoder.unsigned(3);
-        encoder.unsigned(u64::from(widget.tap_action as u8));
-        encoder.unsigned(4);
-        encoder.unsigned(u64::from(widget.interrupt_policy as u8));
-    }
-    encoder.unsigned(2);
-    encoder.array(config.screens.len());
-    for screen in &config.screens {
+    encoder.array(config.cards.len());
+    for card in &config.cards {
         encoder.map(2);
         encoder.unsigned(0);
-        encoder.text(&screen.screen_id);
+        encoder.text(&card.card_id);
         encoder.unsigned(1);
-        encoder.text(&screen.widget_id);
+        encoder.unsigned(u64::from(card.tap_action as u8));
     }
     encoder.unsigned(3);
     encoder.unsigned(u64::from(config.rotation));
@@ -978,18 +843,16 @@ fn encode_config_payload(encoder: &mut Encoder, config: &ApplyConfig) {
 
 fn encode_device_event_payload(encoder: &mut Encoder, event: &DeviceEvent) {
     encoder.map(if event.interrupt_token.is_some() {
-        6
-    } else {
         5
+    } else {
+        4
     });
     encoder.unsigned(0);
     encoder.unsigned(event.sequence);
     encoder.unsigned(1);
     encoder.unsigned(u64::from(event.kind as u8));
     encoder.unsigned(2);
-    encoder.text(&event.widget_id);
-    encoder.unsigned(3);
-    encoder.text(&event.screen_id);
+    encoder.text(&event.card_id);
     encoder.unsigned(4);
     encoder.unsigned(u64::from(event.action as u8));
     if let Some(token) = event.interrupt_token {
@@ -1087,35 +950,29 @@ fn encode_payload(message: &Message) -> Result<Vec<u8>, MessageError> {
             encoder.unsigned(1);
             encoder.signed(i64::from(sync.utc_offset_minutes));
         }
-        Message::PushData(push) => {
-            encoder.map(3);
+        Message::PushTimer(push) => {
+            encoder.map(5);
             encoder.unsigned(0);
-            encoder.text(&push.widget_id);
+            encoder.text(&push.card_id);
             encoder.unsigned(1);
             encoder.unsigned(u64::from(push.revision));
             encoder.unsigned(2);
-            encoder.map(push.fields.len());
-            let mut fields: Vec<(&Field, Vec<u8>)> = push
-                .fields
-                .iter()
-                .map(|field| (field, encoded_text_key(&field.key)))
-                .collect();
-            fields.sort_by(|a, b| a.1.len().cmp(&b.1.len()).then_with(|| a.1.cmp(&b.1)));
-            for (field, _) in fields {
-                encoder.text(&field.key);
-                encode_field_value(&mut encoder, &field.value);
-            }
+            encoder.unsigned(u64::from(push.total_ms));
+            encoder.unsigned(3);
+            encoder.unsigned(u64::from(push.remaining_ms));
+            encoder.unsigned(4);
+            encoder.boolean(push.running);
         }
         Message::ApplyConfig(config) => encode_config_payload(&mut encoder, config),
-        Message::ActivateScreen(activate) => {
+        Message::ActivateCard(activate) => {
             encoder.map(1);
             encoder.unsigned(0);
-            encoder.text(&activate.screen_id);
+            encoder.text(&activate.card_id);
         }
         Message::TriggerInterrupt(interrupt) => {
             encoder.map(3);
             encoder.unsigned(0);
-            encoder.text(&interrupt.widget_id);
+            encoder.text(&interrupt.card_id);
             encoder.unsigned(1);
             encoder.unsigned(u64::from(interrupt.token));
             encoder.unsigned(2);
@@ -1289,127 +1146,61 @@ fn decode_time_sync(payload: &[u8]) -> Result<TimeSync, MessageError> {
     Ok(value)
 }
 
-fn decode_fields(decoder: &mut Decoder<'_>) -> Result<Vec<Field>, MessageError> {
-    let count = decoder.map_len()?;
-    if count > MAX_FIELD_COUNT {
-        return Err(MessageError::InvalidValue("field count"));
-    }
-    let mut fields = Vec::with_capacity(count);
-    let mut previous_raw: Option<Vec<u8>> = None;
-    for _ in 0..count {
-        let start = decoder.position();
-        let key = decoder.text()?.to_owned();
-        let end = decoder.position();
-        let raw = decoder.slice(start, end).to_vec();
-        if previous_raw
-            .as_ref()
-            .is_some_and(|previous| !deterministic_key_before(previous, &raw))
-        {
-            return Err(MessageError::DuplicateOrUnsortedKey);
-        }
-        previous_raw = Some(raw);
-        checked_text(&key, 1, MAX_FIELD_KEY_LEN, "field key")?;
-        let value = match decoder.peek_major()? {
-            0 | 1 => FieldValue::Integer(decoder.signed()?),
-            3 => {
-                let text = decoder.text()?.to_owned();
-                checked_text(&text, 0, MAX_FIELD_TEXT_LEN, "field text")?;
-                FieldValue::Text(text)
-            }
-            7 => FieldValue::Boolean(decoder.boolean()?),
-            _ => return Err(MessageError::InvalidValue("field value")),
-        };
-        fields.push(Field { key, value });
-    }
-    Ok(fields)
-}
-
-fn decode_push(payload: &[u8]) -> Result<PushData, MessageError> {
+fn decode_push(payload: &[u8]) -> Result<PushTimer, MessageError> {
     let mut decoder = Decoder::new(payload);
     let len = decoder.map_len()?;
     let mut previous = None;
-    let mut widget_id = None;
+    let mut card_id = None;
     let mut revision = None;
-    let mut fields = None;
+    let mut total_ms = None;
+    let mut remaining_ms = None;
+    let mut running = None;
     for _ in 0..len {
         match next_numeric_key(&mut decoder, &mut previous)? {
-            0 => widget_id = Some(decoder.text()?.to_owned()),
+            0 => card_id = Some(decoder.text()?.to_owned()),
             1 => revision = Some(read_u32(&mut decoder, "revision")?),
-            2 => fields = Some(decode_fields(&mut decoder)?),
+            2 => total_ms = Some(read_u32(&mut decoder, "total_ms")?),
+            3 => remaining_ms = Some(read_u32(&mut decoder, "remaining_ms")?),
+            4 => running = Some(decoder.boolean()?),
             _ => decoder.skip()?,
         }
     }
     decoder.finish()?;
-    let value = PushData {
-        widget_id: widget_id.ok_or(MessageError::MissingField(0))?,
+    let value = PushTimer {
+        card_id: card_id.ok_or(MessageError::MissingField(0))?,
         revision: revision.ok_or(MessageError::MissingField(1))?,
-        fields: fields.ok_or(MessageError::MissingField(2))?,
+        total_ms: total_ms.ok_or(MessageError::MissingField(2))?,
+        remaining_ms: remaining_ms.ok_or(MessageError::MissingField(3))?,
+        running: running.ok_or(MessageError::MissingField(4))?,
     };
     validate_push(&value)?;
     Ok(value)
 }
 
-fn decode_widgets(decoder: &mut Decoder<'_>) -> Result<Vec<WidgetConfig>, MessageError> {
+fn decode_cards(decoder: &mut Decoder<'_>) -> Result<Vec<CardConfig>, MessageError> {
     let count = decoder.array_len()?;
-    if count > MAX_CONFIG_WIDGETS {
+    if count > MAX_CONFIG_CARDS {
         return Err(MessageError::ConfigTooLarge);
     }
-    let mut widgets = Vec::with_capacity(count);
+    let mut cards = Vec::with_capacity(count);
     for _ in 0..count {
         let len = decoder.map_len()?;
         let mut previous = None;
-        let mut widget_id = None;
-        let mut template = None;
-        let mut size = None;
+        let mut card_id = None;
         let mut action = None;
-        let mut policy = None;
         for _ in 0..len {
             match next_numeric_key(decoder, &mut previous)? {
-                0 => widget_id = Some(decoder.text()?.to_owned()),
-                1 => template = Some(template_kind_from_wire(read_u8(decoder, "template")?)?),
-                2 => size = Some(size_class(read_u8(decoder, "size class")?)?),
-                3 => action = Some(tap_action(read_u8(decoder, "tap action")?)?),
-                4 => {
-                    policy = Some(interrupt_policy(read_u8(decoder, "interrupt policy")?)?);
-                }
+                0 => card_id = Some(decoder.text()?.to_owned()),
+                1 => action = Some(tap_action(read_u8(decoder, "tap action")?)?),
                 _ => decoder.skip()?,
             }
         }
-        widgets.push(WidgetConfig {
-            widget_id: widget_id.ok_or(MessageError::MissingField(0))?,
-            template: template.ok_or(MessageError::MissingField(1))?,
-            size_class: size.ok_or(MessageError::MissingField(2))?,
-            tap_action: action.ok_or(MessageError::MissingField(3))?,
-            interrupt_policy: policy.ok_or(MessageError::MissingField(4))?,
+        cards.push(CardConfig {
+            card_id: card_id.ok_or(MessageError::MissingField(0))?,
+            tap_action: action.ok_or(MessageError::MissingField(1))?,
         });
     }
-    Ok(widgets)
-}
-
-fn decode_screens(decoder: &mut Decoder<'_>) -> Result<Vec<ScreenConfig>, MessageError> {
-    let count = decoder.array_len()?;
-    if count > MAX_CONFIG_SCREENS {
-        return Err(MessageError::ConfigTooLarge);
-    }
-    let mut screens = Vec::with_capacity(count);
-    for _ in 0..count {
-        let len = decoder.map_len()?;
-        let mut previous = None;
-        let mut screen_id = None;
-        let mut widget_id = None;
-        for _ in 0..len {
-            match next_numeric_key(decoder, &mut previous)? {
-                0 => screen_id = Some(decoder.text()?.to_owned()),
-                1 => widget_id = Some(decoder.text()?.to_owned()),
-                _ => decoder.skip()?,
-            }
-        }
-        screens.push(ScreenConfig {
-            screen_id: screen_id.ok_or(MessageError::MissingField(0))?,
-            widget_id: widget_id.ok_or(MessageError::MissingField(1))?,
-        });
-    }
-    Ok(screens)
+    Ok(cards)
 }
 
 fn decode_apply_config(payload: &[u8]) -> Result<ApplyConfig, MessageError> {
@@ -1417,14 +1208,12 @@ fn decode_apply_config(payload: &[u8]) -> Result<ApplyConfig, MessageError> {
     let len = decoder.map_len()?;
     let mut previous = None;
     let mut revision = None;
-    let mut widgets = None;
-    let mut screens = None;
+    let mut cards = None;
     let mut rotation = None;
     for _ in 0..len {
         match next_numeric_key(&mut decoder, &mut previous)? {
             0 => revision = Some(read_u32(&mut decoder, "config revision")?),
-            1 => widgets = Some(decode_widgets(&mut decoder)?),
-            2 => screens = Some(decode_screens(&mut decoder)?),
+            1 => cards = Some(decode_cards(&mut decoder)?),
             3 => rotation = Some(read_u16(&mut decoder, "config rotation")?),
             _ => decoder.skip()?,
         }
@@ -1433,8 +1222,7 @@ fn decode_apply_config(payload: &[u8]) -> Result<ApplyConfig, MessageError> {
     let config = ApplyConfig {
         revision: revision.ok_or(MessageError::MissingField(0))?,
         rotation: rotation.unwrap_or(90),
-        widgets: widgets.ok_or(MessageError::MissingField(1))?,
-        screens: screens.ok_or(MessageError::MissingField(2))?,
+        cards: cards.ok_or(MessageError::MissingField(1))?,
     };
     validate_apply_config(&config)?;
     Ok(config)
@@ -1485,22 +1273,22 @@ fn decode_network_config(payload: &[u8]) -> Result<NetworkConfig, MessageError> 
     Ok(config)
 }
 
-fn decode_activate_screen(payload: &[u8]) -> Result<ActivateScreen, MessageError> {
+fn decode_activate_card(payload: &[u8]) -> Result<ActivateCard, MessageError> {
     let mut decoder = Decoder::new(payload);
     let len = decoder.map_len()?;
     let mut previous = None;
-    let mut screen_id = None;
+    let mut card_id = None;
     for _ in 0..len {
         match next_numeric_key(&mut decoder, &mut previous)? {
-            0 => screen_id = Some(decoder.text()?.to_owned()),
+            0 => card_id = Some(decoder.text()?.to_owned()),
             _ => decoder.skip()?,
         }
     }
     decoder.finish()?;
-    let activate = ActivateScreen {
-        screen_id: screen_id.ok_or(MessageError::MissingField(0))?,
+    let activate = ActivateCard {
+        card_id: card_id.ok_or(MessageError::MissingField(0))?,
     };
-    validate_message(&Message::ActivateScreen(activate.clone()))?;
+    validate_message(&Message::ActivateCard(activate.clone()))?;
     Ok(activate)
 }
 
@@ -1508,12 +1296,12 @@ fn decode_trigger_interrupt(payload: &[u8]) -> Result<TriggerInterrupt, MessageE
     let mut decoder = Decoder::new(payload);
     let len = decoder.map_len()?;
     let mut previous = None;
-    let mut widget_id = None;
+    let mut card_id = None;
     let mut token = None;
     let mut reason = None;
     for _ in 0..len {
         match next_numeric_key(&mut decoder, &mut previous)? {
-            0 => widget_id = Some(decoder.text()?.to_owned()),
+            0 => card_id = Some(decoder.text()?.to_owned()),
             1 => token = Some(read_u32(&mut decoder, "interrupt token")?),
             2 => reason = Some(decoder.text()?.to_owned()),
             _ => decoder.skip()?,
@@ -1521,7 +1309,7 @@ fn decode_trigger_interrupt(payload: &[u8]) -> Result<TriggerInterrupt, MessageE
     }
     decoder.finish()?;
     let interrupt = TriggerInterrupt {
-        widget_id: widget_id.ok_or(MessageError::MissingField(0))?,
+        card_id: card_id.ok_or(MessageError::MissingField(0))?,
         token: token.ok_or(MessageError::MissingField(1))?,
         reason: reason.ok_or(MessageError::MissingField(2))?,
     };
@@ -1535,16 +1323,14 @@ fn decode_device_event(payload: &[u8]) -> Result<DeviceEvent, MessageError> {
     let mut previous = None;
     let mut sequence = None;
     let mut kind = None;
-    let mut widget_id = None;
-    let mut screen_id = None;
+    let mut card_id = None;
     let mut action = None;
     let mut interrupt_token = None;
     for _ in 0..len {
         match next_numeric_key(&mut decoder, &mut previous)? {
             0 => sequence = Some(decoder.unsigned()?),
             1 => kind = Some(event_kind(read_u8(&mut decoder, "event kind")?)?),
-            2 => widget_id = Some(decoder.text()?.to_owned()),
-            3 => screen_id = Some(decoder.text()?.to_owned()),
+            2 => card_id = Some(decoder.text()?.to_owned()),
             4 => action = Some(event_action(read_u8(&mut decoder, "event action")?)?),
             5 => interrupt_token = Some(read_u32(&mut decoder, "interrupt token")?),
             _ => decoder.skip()?,
@@ -1554,8 +1340,7 @@ fn decode_device_event(payload: &[u8]) -> Result<DeviceEvent, MessageError> {
     let event = DeviceEvent {
         sequence: sequence.ok_or(MessageError::MissingField(0))?,
         kind: kind.ok_or(MessageError::MissingField(1))?,
-        widget_id: widget_id.ok_or(MessageError::MissingField(2))?,
-        screen_id: screen_id.ok_or(MessageError::MissingField(3))?,
+        card_id: card_id.ok_or(MessageError::MissingField(2))?,
         action: action.ok_or(MessageError::MissingField(4))?,
         interrupt_token,
     };
@@ -1866,7 +1651,9 @@ fn decode_status(payload: &[u8]) -> Result<StatusResponse, MessageError> {
     let value = StatusResponse {
         protocol_version: protocol_version.ok_or(MessageError::MissingField(0))?,
         max_protocol_version: max_protocol_version.unwrap_or(PROTOCOL_VERSION),
-        capabilities: capabilities.unwrap_or(LEGACY_CAPABILITIES),
+        // A v2 device always states its capabilities. An absent word used to
+        // mean "the oldest v1 build", and no such build speaks v2.
+        capabilities: capabilities.unwrap_or(0),
         firmware_version: firmware_version.ok_or(MessageError::MissingField(1))?,
         uptime_ms: uptime_ms.ok_or(MessageError::MissingField(2))?,
         free_heap: free_heap.ok_or(MessageError::MissingField(3))?,
@@ -1918,7 +1705,7 @@ pub fn decode_message(frame: &Frame) -> Result<Message, MessageError> {
         TYPE_STATUS_RESPONSE => Message::StatusResponse(decode_status(&frame.payload)?),
         TYPE_TIME_SYNC => Message::TimeSync(decode_time_sync(&frame.payload)?),
         TYPE_ACK => Message::Ack(decode_ack(&frame.payload)?),
-        TYPE_PUSH_DATA => Message::PushData(decode_push(&frame.payload)?),
+        TYPE_PUSH_TIMER => Message::PushTimer(decode_push(&frame.payload)?),
         TYPE_HEARTBEAT => {
             require_empty_map(&frame.payload)?;
             Message::Heartbeat
@@ -1926,7 +1713,7 @@ pub fn decode_message(frame: &Frame) -> Result<Message, MessageError> {
         TYPE_HEARTBEAT_ACK => Message::HeartbeatAck(decode_heartbeat_ack(&frame.payload)?),
         TYPE_ERROR => Message::Error(decode_error(&frame.payload)?),
         TYPE_APPLY_CONFIG => Message::ApplyConfig(decode_apply_config(&frame.payload)?),
-        TYPE_ACTIVATE_SCREEN => Message::ActivateScreen(decode_activate_screen(&frame.payload)?),
+        TYPE_ACTIVATE_CARD => Message::ActivateCard(decode_activate_card(&frame.payload)?),
         TYPE_TRIGGER_INTERRUPT => {
             Message::TriggerInterrupt(decode_trigger_interrupt(&frame.payload)?)
         }
@@ -1957,7 +1744,7 @@ mod tests {
 
     fn status() -> StatusResponse {
         StatusResponse {
-            protocol_version: 1,
+            protocol_version: PROTOCOL_VERSION,
             max_protocol_version: MAX_PROTOCOL_VERSION,
             capabilities: CURRENT_CAPABILITIES,
             firmware_version: "m1-test".into(),
@@ -2015,23 +1802,12 @@ mod tests {
             revision: None,
             already_present: None,
         }));
-        round_trip(&Message::PushData(PushData {
-            widget_id: "weather".into(),
+        round_trip(&Message::PushTimer(PushTimer {
+            card_id: "focus".into(),
             revision: 7,
-            fields: vec![
-                Field {
-                    key: "ok".into(),
-                    value: FieldValue::Boolean(true),
-                },
-                Field {
-                    key: "temp".into(),
-                    value: FieldValue::Integer(23),
-                },
-                Field {
-                    key: "summary".into(),
-                    value: FieldValue::Text("Clear".into()),
-                },
-            ],
+            total_ms: 1_500_000,
+            remaining_ms: 900_000,
+            running: true,
         }));
         round_trip(&Message::Heartbeat);
         round_trip(&Message::HeartbeatAck(HeartbeatAck { uptime_ms: 99 }));
@@ -2042,31 +1818,23 @@ mod tests {
         round_trip(&Message::ApplyConfig(ApplyConfig {
             revision: 3,
             rotation: 270,
-            widgets: vec![WidgetConfig {
-                widget_id: "timer".into(),
-                template: TemplateKind::ProgressRing,
-                size_class: SizeClass::Standard,
+            cards: vec![CardConfig {
+                card_id: "timer".into(),
                 tap_action: TapAction::StartPause,
-                interrupt_policy: InterruptPolicy::Enabled,
-            }],
-            screens: vec![ScreenConfig {
-                screen_id: "focus".into(),
-                widget_id: "timer".into(),
             }],
         }));
-        round_trip(&Message::ActivateScreen(ActivateScreen {
-            screen_id: "focus".into(),
+        round_trip(&Message::ActivateCard(ActivateCard {
+            card_id: "focus".into(),
         }));
         round_trip(&Message::TriggerInterrupt(TriggerInterrupt {
-            widget_id: "timer".into(),
+            card_id: "timer".into(),
             token: 4,
             reason: "done".into(),
         }));
         round_trip(&Message::DeviceEvent(DeviceEvent {
             sequence: 5,
             kind: EventKind::InterruptDismissed,
-            widget_id: "timer".into(),
-            screen_id: "focus".into(),
+            card_id: "timer".into(),
             action: EventAction::DismissInterrupt,
             interrupt_token: Some(4),
         }));
@@ -2106,9 +1874,9 @@ mod tests {
         );
         for request_type in [
             TYPE_TIME_SYNC,
-            TYPE_PUSH_DATA,
+            TYPE_PUSH_TIMER,
             TYPE_APPLY_CONFIG,
-            TYPE_ACTIVATE_SCREEN,
+            TYPE_ACTIVATE_CARD,
             TYPE_TRIGGER_INTERRUPT,
             TYPE_NETWORK_CONFIG,
             TYPE_FACTORY_RESET,
@@ -2238,10 +2006,10 @@ mod tests {
         // (capabilities) are still encoded contiguously and in this order
         // because keys are canonical; locate and drop them regardless of
         // what now follows them on the wire. The tail is
-        // CURRENT_CAPABILITIES; bit 8 took it from 235 to 491, bit 9 took it
-        // to 1003, and bit 10 now takes it to 2027 (0x07eb). It moves whenever
-        // a capability bit is added to the constant.
-        let pattern = [0x15, 0x09, 0x16, 0x01, 0x17, 0x19, 0x07, 0xeb];
+        // CURRENT_CAPABILITIES, which protocol v2 re-based: bits 0-4 described
+        // a device that rendered templates and are retired, leaving
+        // 2016 (0x07e0). It moves whenever a capability bit changes.
+        let pattern = [0x15, 0x09, 0x16, 0x02, 0x17, 0x19, 0x07, 0xe0];
         let offset = payload
             .windows(pattern.len())
             .position(|window| window == pattern)
@@ -2256,7 +2024,8 @@ mod tests {
         };
         assert_eq!(decoded.latest_interrupt_token, 0);
         assert_eq!(decoded.max_protocol_version, PROTOCOL_VERSION);
-        assert_eq!(decoded.capabilities, LEGACY_CAPABILITIES);
+        // A v2 device always states its capabilities; an absent word is zero.
+        assert_eq!(decoded.capabilities, 0);
     }
 
     #[test]
@@ -2294,25 +2063,18 @@ mod tests {
         let config = ApplyConfig {
             revision: 1,
             rotation: 270,
-            widgets: vec![WidgetConfig {
-                widget_id: "clock".into(),
-                template: TemplateKind::DigitalClock,
-                size_class: SizeClass::Full,
+            cards: vec![CardConfig {
+                card_id: "clock".into(),
                 tap_action: TapAction::None,
-                interrupt_policy: InterruptPolicy::Disabled,
-            }],
-            screens: vec![ScreenConfig {
-                screen_id: "home".into(),
-                widget_id: "clock".into(),
             }],
         };
         let mut payload = encode_payload(&Message::ApplyConfig(config.clone())).unwrap();
-        assert_eq!(payload[0], 0xa4, "config should be a four-entry CBOR map");
+        assert_eq!(payload[0], 0xa3, "config should be a three-entry CBOR map");
         assert_eq!(
             payload.split_off(payload.len() - 4),
             [0x03, 0x19, 0x01, 0x0e]
         );
-        payload[0] = 0xa3;
+        payload[0] = 0xa2;
         let decoded = decode_message(&Frame::new(TYPE_APPLY_CONFIG, 1, payload)).unwrap();
         let Message::ApplyConfig(decoded) = decoded else {
             panic!("decoded message should remain an apply-config request");
@@ -2339,10 +2101,12 @@ mod tests {
         assert!(
             encode_message(
                 1,
-                &Message::PushData(PushData {
-                    widget_id: "x".repeat(MAX_WIDGET_ID_LEN + 1),
+                &Message::PushTimer(PushTimer {
+                    card_id: "x".repeat(MAX_CARD_ID_LEN + 1),
                     revision: 1,
-                    fields: vec![]
+                    total_ms: 0,
+                    remaining_ms: 0,
+                    running: false,
                 })
             )
             .is_err()
@@ -2365,9 +2129,11 @@ mod tests {
     #[test]
     fn version_and_unknown_type_are_explicit() {
         let mut frame = Frame::new(TYPE_STATUS_REQUEST, 1, vec![0xa0]);
-        frame.version = 2;
-        assert_eq!(decode_message(&frame), Err(MessageError::Version(2)));
+        // A version this build does not speak -- v1 is exactly that now, and a
+        // v1 device is what the fleet runs until the rollout session.
         frame.version = 1;
+        assert_eq!(decode_message(&frame), Err(MessageError::Version(1)));
+        frame.version = PROTOCOL_VERSION;
         frame.message_type = 99;
         assert_eq!(
             decode_message(&frame),

@@ -7,14 +7,14 @@
 static device_event_queue_t s_queue;
 static protocol_device_event_t s_event;
 
-static protocol_device_event_t navigation_event(const char *screen_id)
+static protocol_device_event_t navigation_event(const char *card_id)
 {
     protocol_device_event_t event = {
         .kind = PROTOCOL_EVENT_NAVIGATION,
         .action = PROTOCOL_EVENT_ACTION_NAVIGATE_NEXT,
     };
-    strcpy(event.widget_id, "clock");
-    strcpy(event.screen_id, screen_id);
+    strcpy(event.card_id, "clock");
+    strcpy(event.card_id, card_id);
     return event;
 }
 

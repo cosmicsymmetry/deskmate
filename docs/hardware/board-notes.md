@@ -4842,3 +4842,79 @@ times; it is still not a law, and the check stays.
 `+1024`). Bit 9 could not carry the promise: a deployed bit-9 build writes durable
 wire bytes to flash verbatim, so compressing without a new bit would have stored
 compressed bytes as pixels on every device in the fleet.
+
+## Protocol v2 — OWED, not yet observed (branch `refactor/wave-c-protocol-v2`)
+
+**Nothing in this section has been run on hardware.** It is the stub the Wave C plan asks
+for: what a session must observe before protocol v2 is trusted, written down while the
+reasons are fresh.
+
+`refactor/wave-c-protocol-v2` was **merged to `main` on 2026-09-12** by owner direction,
+ahead of this session. **It is not deployed, and the server must not be redeployed until
+the board is flashed** -- the live binary must keep running its pre-v2 build until then,
+because a v2 server cannot talk to the v1 firmware on `dev-0005` at all.
+
+### Why an on-board check is mandatory here
+
+Firmware statics moved. Measured before and after on the same tree:
+
+| | Before (2026-09-05 cleanup) | After protocol v2 | Delta |
+|---|---:|---:|---:|
+| `.bss` | 87,104 | 87,000 | **−104** |
+| `.data` | 23,128 | 23,128 | 0 |
+| DIRAM total | 203,891 | 203,763 | −128 |
+| IRAM | 16,384 / 16,384, 0 remaining | 16,384 / 16,384, 0 remaining | 0 |
+
+**−104 bytes of `.bss` is within one byte of the ~105 bytes that broke OTA downloads in
+`3f2aa03` with every test green.** That failure was a memory-layout shift, not a capacity
+problem, and a shrink moves layout exactly as a growth does. Treat this as the same class
+of hazard, and do not read "it got smaller" as reassurance.
+
+Where the 104 bytes went: `protocol_device_event_t` lost its second 33-byte id array and
+`carousel_binding_t` lost three of its six, so `device_event_queue_t` fell from 616 to 552
+bytes (the host test prints the figure) and `protocol_task`'s binding shrank with it. The
+per-template field registry (`core/template_fields.c`) and `widget_model`'s field state
+went entirely.
+
+### The rollout order is NOT the usual one, and getting it wrong bricks the link
+
+Protocol v2 is **not additive**. A v2 server and a v1 device do not half-work: the frame
+envelope's version byte makes every frame `VersionMismatch` in both directions. So the
+device must be flashed **first**, over the cable, and the server redeployed second.
+Between the two the device is unreachable from the live server — that window is expected,
+not a fault.
+
+1. `idf.py -C firmware flash` the v2 image over USB. Move
+   `DESKMATE_FIRMWARE_VERSION`/`firmware/version.txt` to match, or the catalog reverts the
+   board within a minute (a downgrade path exists by design).
+2. Merge and redeploy the server. A server built before this change speaks v1 and cannot
+   talk to the flashed device at all.
+3. Verify the link comes back, then run the checks below.
+
+### What the session must observe
+
+- [ ] **The OTA download.** The check this whole section exists for. Publish a second v2
+      image and watch it download, install and survive the rollback window.
+- [ ] **Capabilities read 2016**, by name, with no unknown bits. Bits 0-4 are retired;
+      a device still advertising them is running pre-v2 firmware.
+- [ ] **A card face draws** at 270° and 90° — the scene path is unchanged, so this is a
+      regression check, not new coverage.
+- [ ] **A pomodoro counts down between pushes.** `PushTimer` replaced the field bag; the
+      `timer.*` bindings must still tick locally with no host traffic.
+- [ ] **A tap reports one card id.** `DeviceEvent` lost its second identifier; confirm a
+      tap and a swipe both reach the host and act on the right card.
+- [ ] **`framebuffer_diff` on target.** The last observed split was `96 total / 10
+      excluded / 86 identical` (2026-09-06). That matrix is gone: Wave A retired the three
+      orphan faces with the template oracle (−34 rows) and schema v9 removed the curated
+      plugins (−18). The software inventory is now **44 rows**, pinned by
+      `gate_b_inventory_is_the_real_counted_split_not_an_assumed_one`. Protocol v2 then
+      closed the four `field.*` exclusions — there is no field namespace to fall outside
+      of — leaving **one** exclusion, the `progress-ring--running-mid-countdown` pair,
+      which is a push-to-capture timing race no wire change can fix. So the expected split
+      is **`44 total / 2 excluded / 42 identical / 0 differing`**. That is a software
+      prediction; run it fresh rather than trusting it.
+
+Software gates that are green on this branch, and what they do not cover: the full
+companion workspace set, `make -C firmware/host_tests clean test` and `sanitize`, and
+`idf.py -C firmware build`. None of them can see an OTA layout failure. That is the whole
+lesson of `3f2aa03`.

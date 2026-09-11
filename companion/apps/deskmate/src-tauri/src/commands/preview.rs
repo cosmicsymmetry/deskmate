@@ -29,7 +29,7 @@ pub async fn render_card_preview(
     state: State<'_, DesktopState>,
     card_id: String,
 ) -> Result<PreviewFrame, IpcError> {
-    validate_target(&card_id, MAX_WIDGET_ID_LEN, "card ID")?;
+    validate_target(&card_id, MAX_CARD_ID_LEN, "card ID")?;
     let snapshot = state.runtime.snapshot().map_err(IpcError::from)?;
     let card = snapshot
         .config
@@ -67,7 +67,6 @@ pub async fn render_card_preview(
         utc_offset_minutes,
         now_unix_seconds: now.timestamp(),
         timer: preview_timer(&fields),
-        fields: Vec::new(),
         orientation: preview_orientation(snapshot.config.preferences.orientation),
     };
     let png = state

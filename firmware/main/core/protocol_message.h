@@ -9,13 +9,11 @@
 #include "protocol_frame.h"
 
 #define PROTOCOL_LINK_TIMEOUT_MS 10000U
-#define PROTOCOL_MAX_WIDGET_ID_LENGTH 32U
-#define PROTOCOL_MAX_SCREEN_ID_LENGTH 32U
-#define PROTOCOL_MAX_CONFIG_WIDGETS 8U
-#define PROTOCOL_MAX_CONFIG_SCREENS 8U
-#define PROTOCOL_MAX_FIELD_COUNT 16U
-#define PROTOCOL_MAX_FIELD_KEY_LENGTH 32U
-#define PROTOCOL_MAX_FIELD_TEXT_LENGTH 128U
+/* A card id is an identifier the host chose, not free text. Protocol v1 had
+ * one of these per name for the same thing -- a widget, a screen and a card --
+ * all 32; config schema v10 settled them as one card. */
+#define PROTOCOL_MAX_CARD_ID_LENGTH 32U
+#define PROTOCOL_MAX_CONFIG_CARDS 8U
 #define PROTOCOL_MAX_DIAGNOSTIC_LENGTH 96U
 #define PROTOCOL_MAX_INTERRUPT_REASON_LENGTH 96U
 #define PROTOCOL_MAX_FIRMWARE_VERSION_LENGTH 32U
@@ -23,7 +21,7 @@
 #define PROTOCOL_MAX_UNIX_SECONDS INT64_C(4102444800)
 #define PROTOCOL_MIN_UTC_OFFSET_MINUTES (-840)
 #define PROTOCOL_MAX_UTC_OFFSET_MINUTES 840
-#define PROTOCOL_MAX_VERSION 1U
+#define PROTOCOL_MAX_VERSION 2U
 #define PROTOCOL_CAPABILITY_CORE_WIDGETS (UINT64_C(1) << 0)
 #define PROTOCOL_CAPABILITY_CONFIG_ROTATION (UINT64_C(1) << 1)
 #define PROTOCOL_CAPABILITY_DASHBOARD_LAYOUTS (UINT64_C(1) << 2)
@@ -49,12 +47,11 @@
  * bytes to flash verbatim, so an RLE565 durable asset would be stored as if the
  * compressed bytes were pixels. */
 #define PROTOCOL_CAPABILITY_DURABLE_ASSET_ENCODING (UINT64_C(1) << 10)
-#define PROTOCOL_LEGACY_CAPABILITIES PROTOCOL_CAPABILITY_CORE_WIDGETS
+/* Protocol v2 retired bits 0-4: they described a device that rendered
+ * templates itself, which this one has not since stage 3a. The numbers are NOT
+ * re-used -- a bit's meaning is its identity. */
 #define PROTOCOL_CURRENT_CAPABILITIES                            \
-    (PROTOCOL_CAPABILITY_CORE_WIDGETS |                          \
-     PROTOCOL_CAPABILITY_CONFIG_ROTATION |                       \
-     PROTOCOL_CAPABILITY_EXTENDED_TEMPLATES |                    \
-     PROTOCOL_CAPABILITY_ASSET_TRANSFER |                        \
+    (PROTOCOL_CAPABILITY_ASSET_TRANSFER |                        \
      PROTOCOL_CAPABILITY_FIRMWARE_UPDATE |                       \
      PROTOCOL_CAPABILITY_NETWORKING |                            \
      PROTOCOL_CAPABILITY_SCENE_RENDER |                          \
@@ -74,21 +71,17 @@
 #define PROTOCOL_ASSET_ENCODING_RAW 0U
 #define PROTOCOL_ASSET_ENCODING_RLE565 1U
 #define PROTOCOL_VOLATILE_IMAGE_DECODED_LENGTH 329740U
-/* Same 32 bytes as a widget id, and for the same reason: a card id is an
- * identifier the host chose, not free text. */
-#define PROTOCOL_MAX_CARD_ID_LENGTH 32U
-
 typedef enum {
     PROTOCOL_TYPE_STATUS_REQUEST = 1,
     PROTOCOL_TYPE_STATUS_RESPONSE = 2,
     PROTOCOL_TYPE_TIME_SYNC = 3,
     PROTOCOL_TYPE_ACK = 4,
-    PROTOCOL_TYPE_PUSH_DATA = 5,
+    PROTOCOL_TYPE_PUSH_TIMER = 5,
     PROTOCOL_TYPE_HEARTBEAT = 6,
     PROTOCOL_TYPE_HEARTBEAT_ACK = 7,
     PROTOCOL_TYPE_ERROR = 8,
     PROTOCOL_TYPE_APPLY_CONFIG = 9,
-    PROTOCOL_TYPE_ACTIVATE_SCREEN = 10,
+    PROTOCOL_TYPE_ACTIVATE_CARD = 10,
     PROTOCOL_TYPE_TRIGGER_INTERRUPT = 11,
     PROTOCOL_TYPE_DEVICE_EVENT = 12,
     PROTOCOL_TYPE_NETWORK_CONFIG = 13,
@@ -111,29 +104,11 @@ typedef enum {
     PROTOCOL_ERROR_BUSY = 8,
     PROTOCOL_ERROR_INTERNAL = 9,
     PROTOCOL_ERROR_UNKNOWN_WIDGET = 10,
-    PROTOCOL_ERROR_UNKNOWN_SCREEN = 11,
-    PROTOCOL_ERROR_UNSUPPORTED_TEMPLATE = 12,
-    PROTOCOL_ERROR_UNSUPPORTED_SIZE_CLASS = 13,
     PROTOCOL_ERROR_CONFIG_TOO_LARGE = 14,
     /* Returned when a message is valid but not permitted on this transport
      * in the device's current tier. */
     PROTOCOL_ERROR_WRONG_TIER = 15,
 } protocol_error_code_t;
-
-typedef enum {
-    PROTOCOL_TEMPLATE_DIGITAL_CLOCK = 1,
-    PROTOCOL_TEMPLATE_PROGRESS_RING = 2,
-    PROTOCOL_TEMPLATE_ROW_LIST = 3,
-    PROTOCOL_TEMPLATE_ANALOG_CLOCK = 4,
-    PROTOCOL_TEMPLATE_BIG_NUMBER_LABEL = 5,
-    PROTOCOL_TEMPLATE_ICON_BADGE_TEXT = 6,
-} protocol_template_kind_t;
-
-typedef enum {
-    PROTOCOL_SIZE_FULL = 1,
-    PROTOCOL_SIZE_STANDARD = 2,
-    PROTOCOL_SIZE_TILE = 3,
-} protocol_size_class_t;
 
 typedef enum {
     PROTOCOL_TAP_NONE = 0,
@@ -217,70 +192,54 @@ typedef struct {
     size_t digest_count;
 } protocol_asset_release_t;
 
+/* One card in the loop. Protocol v2 carries only what the device decides for
+ * itself: which card this is, and what a tap does. */
 typedef struct {
-    char widget_id[PROTOCOL_MAX_WIDGET_ID_LENGTH + 1U];
-    protocol_template_kind_t template_kind;
-    protocol_size_class_t size_class;
+    char card_id[PROTOCOL_MAX_CARD_ID_LENGTH + 1U];
     protocol_tap_action_t tap_action;
-    protocol_interrupt_policy_t interrupt_policy;
-} protocol_widget_config_t;
-
-typedef struct {
-    char screen_id[PROTOCOL_MAX_SCREEN_ID_LENGTH + 1U];
-    char widget_id[PROTOCOL_MAX_WIDGET_ID_LENGTH + 1U];
-} protocol_screen_config_t;
+} protocol_card_config_t;
 
 typedef struct {
     uint32_t revision;
     uint16_t rotation;
-    size_t widget_count;
-    protocol_widget_config_t widgets[PROTOCOL_MAX_CONFIG_WIDGETS];
-    size_t screen_count;
-    protocol_screen_config_t screens[PROTOCOL_MAX_CONFIG_SCREENS];
+    size_t card_count;
+    protocol_card_config_t cards[PROTOCOL_MAX_CONFIG_CARDS];
 } protocol_apply_config_t;
 
 typedef struct {
-    char screen_id[PROTOCOL_MAX_SCREEN_ID_LENGTH + 1U];
-} protocol_activate_screen_t;
+    char card_id[PROTOCOL_MAX_CARD_ID_LENGTH + 1U];
+} protocol_activate_card_t;
 
 typedef struct {
-    char widget_id[PROTOCOL_MAX_WIDGET_ID_LENGTH + 1U];
+    char card_id[PROTOCOL_MAX_CARD_ID_LENGTH + 1U];
     uint32_t token;
     char reason[PROTOCOL_MAX_INTERRUPT_REASON_LENGTH + 1U];
 } protocol_trigger_interrupt_t;
 
+/* Something the person at the panel did, reported upward. Protocol v1 carried
+ * two identifiers, widget_id (key 2) and screen_id (key 3), and every producer
+ * set them to the same card. v2 states the one card id in key 2; key 3 is
+ * retired rather than reused. */
 typedef struct {
     uint64_t sequence;
     protocol_event_kind_t kind;
-    char widget_id[PROTOCOL_MAX_WIDGET_ID_LENGTH + 1U];
-    char screen_id[PROTOCOL_MAX_SCREEN_ID_LENGTH + 1U];
+    char card_id[PROTOCOL_MAX_CARD_ID_LENGTH + 1U];
     protocol_event_action_t action;
     bool has_interrupt_token;
     uint32_t interrupt_token;
 } protocol_device_event_t;
 
-typedef enum {
-    PROTOCOL_FIELD_TEXT = 0,
-    PROTOCOL_FIELD_INTEGER,
-    PROTOCOL_FIELD_BOOLEAN,
-} protocol_field_type_t;
-
+/* The timer a card's `timer.*` scene bindings resolve against. Protocol v2
+ * replaced PushData's arbitrary field bag with this: its only consumer read
+ * three keys out of that bag by name, and nothing has bound `field.*` since
+ * config schema v9. */
 typedef struct {
-    char key[PROTOCOL_MAX_FIELD_KEY_LENGTH + 1U];
-    protocol_field_type_t type;
-    union {
-        char text[PROTOCOL_MAX_FIELD_TEXT_LENGTH + 1U];
-        int64_t integer;
-        bool boolean;
-    } value;
-} protocol_field_t;
-
-typedef struct {
-    char widget_id[PROTOCOL_MAX_WIDGET_ID_LENGTH + 1U];
+    char card_id[PROTOCOL_MAX_CARD_ID_LENGTH + 1U];
     uint32_t revision;
-    size_t field_count;
-    protocol_field_t fields[PROTOCOL_MAX_FIELD_COUNT];
-} protocol_push_data_t;
+    uint32_t total_ms;
+    uint32_t remaining_ms;
+    bool running;
+} protocol_push_timer_t;
 
 /* PushScene: one card's whole display list, replacing whatever that card
  * drew before. `scene` is embedded by value rather than pointed at because
@@ -364,11 +323,11 @@ typedef struct {
         protocol_status_response_t status;
         protocol_time_sync_t time_sync;
         protocol_ack_t ack;
-        protocol_push_data_t push_data;
+        protocol_push_timer_t push_timer;
         protocol_heartbeat_ack_t heartbeat_ack;
         protocol_error_response_t error;
         protocol_apply_config_t apply_config;
-        protocol_activate_screen_t activate_screen;
+        protocol_activate_card_t activate_card;
         protocol_trigger_interrupt_t trigger_interrupt;
         protocol_device_event_t device_event;
         protocol_network_config_t network_config;
@@ -393,17 +352,9 @@ typedef enum {
     PROTOCOL_MESSAGE_ERR_TOO_LARGE,
     PROTOCOL_MESSAGE_ERR_FRAME,
     PROTOCOL_MESSAGE_ERR_INVALID_REQUEST_ID,
-    PROTOCOL_MESSAGE_ERR_UNSUPPORTED_TEMPLATE,
-    PROTOCOL_MESSAGE_ERR_UNSUPPORTED_SIZE_CLASS,
     PROTOCOL_MESSAGE_ERR_CONFIG_TOO_LARGE,
     PROTOCOL_MESSAGE_ERR_UNKNOWN_WIDGET,
 } protocol_message_result_t;
-
-static inline bool protocol_template_kind_valid(protocol_template_kind_t kind)
-{
-    return kind >= PROTOCOL_TEMPLATE_DIGITAL_CLOCK &&
-           kind <= PROTOCOL_TEMPLATE_ICON_BADGE_TEXT;
-}
 
 typedef enum {
     PROTOCOL_REQUEST_DISPATCHABLE = 0,

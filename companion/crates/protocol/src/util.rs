@@ -55,7 +55,7 @@ pub fn digest_hex(digest: &[u8; ASSET_DIGEST_LEN]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::MAX_FIELD_TEXT_LEN;
+    const MAX_FIELD_TEXT_LEN: usize = 128;
 
     #[test]
     fn request_ids_are_nonzero_and_wrap_to_one() {

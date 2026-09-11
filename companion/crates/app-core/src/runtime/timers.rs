@@ -12,20 +12,19 @@ use super::*;
 
 pub(super) fn update_pomodoros(state: &mut WorkerState, now: Instant) {
     let ids: Vec<String> = state.pomodoros.keys().cloned().collect();
-    for widget_id in ids {
-        let Some(timer) = state.pomodoros.get_mut(&widget_id) else {
+    for card_id in ids {
+        let Some(timer) = state.pomodoros.get_mut(&card_id) else {
             continue;
         };
         let update = timer.update(now);
-        let changed = state.latest_fields.get(&widget_id) != Some(&update.fields);
-        let completion_interrupt = record_pomodoro_update(state, &widget_id, update);
+        let fields = pomodoro_fields(timer.label(), &update);
+        let changed = state.latest_fields.get(&card_id) != Some(&fields);
+        let completion_interrupt = record_pomodoro_update(state, &card_id, &update, fields);
         if changed {
-            state.dirty_widgets.insert(widget_id.clone());
+            state.dirty_cards.insert(card_id.clone());
         }
         if completion_interrupt {
-            let _ = state
-                .interrupts
-                .schedule(widget_id.clone(), "Timer finished");
+            let _ = state.interrupts.schedule(card_id.clone(), "Timer finished");
         }
     }
 }
@@ -34,13 +33,13 @@ pub(super) fn control_pomodoro(
     state: &mut WorkerState,
     scheduler: &mut Scheduler,
     device: &mut dyn RuntimeDevice,
-    widget_id: &str,
+    card_id: &str,
     action: PomodoroAction,
     now: Instant,
 ) -> Result<(), RuntimeError> {
-    let Some(timer) = state.pomodoros.get_mut(widget_id) else {
-        return Err(RuntimeError::UnknownWidget {
-            widget_id: widget_id.into(),
+    let Some(timer) = state.pomodoros.get_mut(card_id) else {
+        return Err(RuntimeError::UnknownCard {
+            card_id: card_id.into(),
         });
     };
     let update = match action {
@@ -49,12 +48,13 @@ pub(super) fn control_pomodoro(
         PomodoroAction::Toggle => timer.toggle(now),
         PomodoroAction::Reset => timer.reset(now),
     };
-    let completion_interrupt = record_pomodoro_update(state, widget_id, update);
-    state.dirty_widgets.insert(widget_id.into());
+    let fields = pomodoro_fields(timer.label(), &update);
+    let completion_interrupt = record_pomodoro_update(state, card_id, &update, fields);
+    state.dirty_cards.insert(card_id.into());
     if completion_interrupt {
         state
             .interrupts
-            .schedule(widget_id, "Timer finished")
+            .schedule(card_id, "Timer finished")
             .map_err(|error| RuntimeError::Device {
                 message: error.to_string(),
             })?;
@@ -66,18 +66,68 @@ pub(super) fn control_pomodoro(
     Ok(())
 }
 
+/// The host-side face data for one tick of a timer.
+///
+/// Protocol v1 had the engine build this bag as wire `Field`s, which both
+/// seeded host state and went to the device as `PushData`. Protocol v2's
+/// device receives `PushTimer` instead and models nothing else, so the bag is
+/// host-only and is assembled here, where the host's own `CardField` type
+/// lives, rather than in `engine`.
+pub(super) fn pomodoro_fields(
+    label: &str,
+    update: &engine::pomodoro::PomodoroUpdate,
+) -> Vec<CardField> {
+    vec![
+        CardField {
+            key: "label".into(),
+            value: CardFieldValue::Text {
+                value: label.to_owned(),
+            },
+        },
+        CardField {
+            key: "duration_seconds".into(),
+            value: CardFieldValue::Integer {
+                value: i64::from(update.duration_seconds),
+            },
+        },
+        CardField {
+            key: "remaining_seconds".into(),
+            value: CardFieldValue::Integer {
+                value: i64::from(update.remaining_seconds),
+            },
+        },
+        CardField {
+            key: "running".into(),
+            value: CardFieldValue::Boolean {
+                value: update.state == EnginePomodoroState::Running,
+            },
+        },
+        CardField {
+            key: "stale".into(),
+            value: CardFieldValue::Boolean { value: false },
+        },
+        CardField {
+            key: "error".into(),
+            value: CardFieldValue::Text {
+                value: String::new(),
+            },
+        },
+    ]
+}
+
 pub(super) fn record_pomodoro_update(
     state: &mut WorkerState,
-    widget_id: &str,
-    update: engine::pomodoro::PomodoroUpdate,
+    card_id: &str,
+    update: &engine::pomodoro::PomodoroUpdate,
+    fields: Vec<CardField>,
 ) -> bool {
     let completion_interrupt =
-        update.completion_interrupt && card_wants_completion_interrupt(&state.config, widget_id);
-    state.latest_fields.insert(widget_id.into(), update.fields);
+        update.completion_interrupt && card_wants_completion_interrupt(&state.config, card_id);
+    state.latest_fields.insert(card_id.into(), fields);
     state.pomodoro_snapshots.insert(
-        widget_id.into(),
+        card_id.into(),
         PomodoroSnapshot {
-            widget_id: widget_id.into(),
+            card_id: card_id.into(),
             state: pomodoro_state(update.state),
             duration_seconds: update.duration_seconds,
             remaining_seconds: update.remaining_seconds,
@@ -88,21 +138,18 @@ pub(super) fn record_pomodoro_update(
 
 /// The configured alert for a card, or `CardAlert::None` if the card is
 /// unknown (e.g. it was removed from config between scheduling and firing).
-pub(super) fn card_alert(config: &AppConfig, widget_id: &str) -> CardAlert {
+pub(super) fn card_alert(config: &AppConfig, card_id: &str) -> CardAlert {
     config
         .cards
         .iter()
-        .find(|card| card.id() == widget_id)
+        .find(|card| card.id() == card_id)
         .map_or(CardAlert::None, CardSettings::alert)
 }
 
 /// A pomodoro's completion only becomes a host-triggered interrupt when its
 /// card is configured to alert specifically on timer finish.
-pub(super) fn card_wants_completion_interrupt(config: &AppConfig, widget_id: &str) -> bool {
-    matches!(
-        card_alert(config, widget_id),
-        CardAlert::OnTimerFinish { .. }
-    )
+pub(super) fn card_wants_completion_interrupt(config: &AppConfig, card_id: &str) -> bool {
+    matches!(card_alert(config, card_id), CardAlert::OnTimerFinish { .. })
 }
 
 /// Arms the scheduler's bounded alert-hold deadline for `token`, but only if
@@ -124,7 +171,7 @@ pub(super) fn card_wants_completion_interrupt(config: &AppConfig, widget_id: &st
 /// only frees the host's arbiter slot for the next alert and re-syncs the
 /// saved carousel screen id host-side (see the `alert_hold_due` handling in
 /// `run_scheduled_work`). It does not clear the panel. Per
-/// `docs/protocol/v1.md`'s `ActivateScreen` section and firmware's
+/// `docs/protocol/v1.md`'s `ActivateCard` section and firmware's
 /// `protocol_task.c` (`show_carousel_screen` is skipped whenever an interrupt
 /// is active), the device yields the overlay on tap alone. Confirmed on
 /// hardware — see `docs/hardware/board-notes.md`, card-model §6.
@@ -183,7 +230,7 @@ pub(super) fn sync_alert_hold_to_active_interrupt(
 ) {
     match state.interrupts.active() {
         Some(active) if active.acknowledged => {
-            let hold = card_alert(&state.config, &active.message.widget_id).hold();
+            let hold = card_alert(&state.config, &active.message.card_id).hold();
             arm_alert_hold(scheduler, active.message.token, hold, now);
         }
         Some(_) | None => scheduler.set_alert_hold(None),
@@ -226,7 +273,7 @@ pub(super) fn flush_interrupts(
                     &state.interrupts,
                     scheduler,
                     interrupt.token,
-                    card_alert(&state.config, &interrupt.widget_id).hold(),
+                    card_alert(&state.config, &interrupt.card_id).hold(),
                     now,
                 );
             }

@@ -13,32 +13,33 @@
 // diff nobody can read against the original.
 #[allow(clippy::wildcard_imports)]
 use super::*;
+use crate::state::{CardField, CardFieldValue};
 
-pub(super) fn field_text<'a>(fields: &'a [Field], key: &str) -> &'a str {
+pub(super) fn field_text<'a>(fields: &'a [CardField], key: &str) -> &'a str {
     fields
         .iter()
         .find_map(|field| match (&*field.key, &field.value) {
-            (candidate, FieldValue::Text(value)) if candidate == key => Some(value.as_str()),
+            (candidate, CardFieldValue::Text { value }) if candidate == key => Some(value.as_str()),
             _ => None,
         })
         .unwrap_or("")
 }
 
-pub(super) fn field_integer(fields: &[Field], key: &str) -> i64 {
+pub(super) fn field_integer(fields: &[CardField], key: &str) -> i64 {
     fields
         .iter()
         .find_map(|field| match (&*field.key, &field.value) {
-            (candidate, FieldValue::Integer(value)) if candidate == key => Some(*value),
+            (candidate, CardFieldValue::Integer { value }) if candidate == key => Some(*value),
             _ => None,
         })
         .unwrap_or(0)
 }
 
-pub(super) fn field_boolean(fields: &[Field], key: &str) -> bool {
+pub(super) fn field_boolean(fields: &[CardField], key: &str) -> bool {
     fields
         .iter()
         .find_map(|field| match (&*field.key, &field.value) {
-            (candidate, FieldValue::Boolean(value)) if candidate == key => Some(*value),
+            (candidate, CardFieldValue::Boolean { value }) if candidate == key => Some(*value),
             _ => None,
         })
         .unwrap_or(false)
@@ -47,7 +48,7 @@ pub(super) fn field_boolean(fields: &[Field], key: &str) -> bool {
 pub(super) fn build_card_scene(
     config: &AppConfig,
     card_id: &str,
-    fields: &[Field],
+    fields: &[CardField],
     image_source_host: Option<&mut dyn ImageSourceHost>,
     revision: u32,
 ) -> Result<PushScene, String> {
@@ -122,8 +123,7 @@ pub fn preview_card_scene(
             "card {card_id:?} is a picture card; its frame lives on the server"
         ));
     }
-    let fields: Vec<Field> = fields.iter().map(crate::CardField::to_protocol).collect();
-    build_card_scene(config, card_id, &fields, None, 1).map(|push| push.scene)
+    build_card_scene(config, card_id, fields, None, 1).map(|push| push.scene)
 }
 
 pub(super) fn waiting_for_first_picture_scene(
@@ -154,7 +154,7 @@ pub(super) fn build_template_card_scene(
     config: &AppConfig,
     card: &CardSettings,
     card_id: &str,
-    fields: &[Field],
+    fields: &[CardField],
     revision: u32,
     metrics: &BakedFontMetrics,
 ) -> Result<protocol::Scene, String> {
@@ -306,7 +306,7 @@ pub(super) fn push_active_scene(
     if ownership_was_refused(state) || state.needs_full_sync || !state.active_scene_dirty {
         return;
     }
-    let Some(card_id) = state.active_screen.clone() else {
+    let Some(card_id) = state.active_card.clone() else {
         state.active_scene_dirty = false;
         return;
     };

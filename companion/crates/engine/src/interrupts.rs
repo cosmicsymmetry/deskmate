@@ -55,11 +55,11 @@ impl InterruptArbiter {
 
     pub fn schedule(
         &mut self,
-        widget_id: impl Into<String>,
+        card_id: impl Into<String>,
         reason: impl Into<String>,
     ) -> Result<TriggerInterrupt, InterruptError> {
-        let widget_id = widget_id.into();
-        if widget_id.is_empty() || widget_id.len() > protocol::MAX_WIDGET_ID_LEN {
+        let card_id = card_id.into();
+        if card_id.is_empty() || card_id.len() > protocol::MAX_CARD_ID_LEN {
             return Err(InterruptError::InvalidWidgetId);
         }
         if self.active.is_some() && self.pending.is_some() {
@@ -71,7 +71,7 @@ impl InterruptArbiter {
             .ok_or(InterruptError::TokenExhausted)?;
         let reason = reason.into();
         let message = TriggerInterrupt {
-            widget_id,
+            card_id,
             token,
             reason: truncate_utf8_to_bytes(&reason, protocol::MAX_INTERRUPT_REASON_LEN).to_owned(),
         };
@@ -124,14 +124,14 @@ impl InterruptArbiter {
         if self
             .active
             .as_ref()
-            .is_some_and(|active| !retain(&active.message.widget_id))
+            .is_some_and(|active| !retain(&active.message.card_id))
         {
             self.active = None;
         }
         if self
             .pending
             .as_ref()
-            .is_some_and(|pending| !retain(&pending.message.widget_id))
+            .is_some_and(|pending| !retain(&pending.message.card_id))
         {
             self.pending = None;
         }
@@ -230,13 +230,13 @@ mod tests {
         arbiter.schedule("removed", "first").unwrap();
         let retained = arbiter.schedule("timer", "second").unwrap();
 
-        arbiter.retain_widgets(|widget_id| widget_id == "timer");
+        arbiter.retain_widgets(|card_id| card_id == "timer");
 
         assert_eq!(arbiter.active().unwrap().message, retained);
         assert!(arbiter.pending().is_none());
 
         arbiter.schedule("removed", "third").unwrap();
-        arbiter.retain_widgets(|widget_id| widget_id == "timer");
+        arbiter.retain_widgets(|card_id| card_id == "timer");
         assert_eq!(arbiter.active().unwrap().message, retained);
         assert!(arbiter.pending().is_none());
     }

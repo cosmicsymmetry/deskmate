@@ -2,107 +2,29 @@
 
 #include <string.h>
 
-#include "core/apply_config_validation.h"
-
-_Static_assert(sizeof(widget_model_t) <= 48U * 1024U,
-               "fixed widget model exceeded its M2 RAM budget");
-
-static widget_model_config_result_t config_validation_result(
-    apply_config_validation_result_t result)
+static const protocol_apply_config_t *live_config(const widget_model_t *model)
 {
-    switch (result) {
-    case APPLY_CONFIG_VALID:
-        return WIDGET_MODEL_CONFIG_APPLIED;
-    case APPLY_CONFIG_TOO_LARGE:
-        return WIDGET_MODEL_CONFIG_TOO_LARGE;
-    case APPLY_CONFIG_DUPLICATE_ID:
-        return WIDGET_MODEL_CONFIG_DUPLICATE_ID;
-    case APPLY_CONFIG_UNKNOWN_WIDGET:
-        return WIDGET_MODEL_CONFIG_UNKNOWN_WIDGET;
-    case APPLY_CONFIG_UNSUPPORTED_TEMPLATE:
-        return WIDGET_MODEL_CONFIG_UNSUPPORTED_TEMPLATE;
-    case APPLY_CONFIG_UNSUPPORTED_SIZE_CLASS:
-        return WIDGET_MODEL_CONFIG_UNSUPPORTED_SIZE_CLASS;
-    case APPLY_CONFIG_INVALID_ARGUMENT:
-        return WIDGET_MODEL_CONFIG_INVALID_ARGUMENT;
-    case APPLY_CONFIG_INVALID_VALUE:
-    default:
-        return WIDGET_MODEL_CONFIG_INVALID_VALUE;
-    }
+    return model->configured ? &model->configs[model->live_config_index] : NULL;
 }
 
-static bool configs_equal(const protocol_apply_config_t *left,
-                          const protocol_apply_config_t *right)
+static bool duplicate_card_ids(const protocol_apply_config_t *config)
 {
-    if (left->revision != right->revision ||
-        left->rotation != right->rotation ||
-        left->widget_count != right->widget_count ||
-        left->screen_count != right->screen_count) {
-        return false;
-    }
-    for (size_t i = 0U; i < left->widget_count; ++i) {
-        const protocol_widget_config_t *a = &left->widgets[i];
-        const protocol_widget_config_t *b = &right->widgets[i];
-        if (strcmp(a->widget_id, b->widget_id) != 0 ||
-            a->template_kind != b->template_kind ||
-            a->size_class != b->size_class ||
-            a->tap_action != b->tap_action ||
-            a->interrupt_policy != b->interrupt_policy) {
-            return false;
+    for (size_t i = 0U; i < config->card_count; ++i) {
+        for (size_t j = i + 1U; j < config->card_count; ++j) {
+            if (strcmp(config->cards[i].card_id, config->cards[j].card_id) == 0) {
+                return true;
+            }
         }
     }
-    for (size_t i = 0U; i < left->screen_count; ++i) {
-        const protocol_screen_config_t *a = &left->screens[i];
-        const protocol_screen_config_t *b = &right->screens[i];
-        if (strcmp(a->screen_id, b->screen_id) != 0 ||
-            strcmp(a->widget_id, b->widget_id) != 0) {
-            return false;
-        }
-    }
-    return true;
-}
-
-static size_t screen_index(const protocol_apply_config_t *config,
-                           const char *screen_id)
-{
-    for (size_t i = 0U; i < config->screen_count; ++i) {
-        if (strcmp(config->screens[i].screen_id, screen_id) == 0) {
-            return i;
-        }
-    }
-    return config->screen_count;
-}
-
-static size_t widget_index(const protocol_apply_config_t *config,
-                           const char *widget_id)
-{
-    for (size_t i = 0U; i < config->widget_count; ++i) {
-        if (strcmp(config->widgets[i].widget_id, widget_id) == 0) {
-            return i;
-        }
-    }
-    return config->widget_count;
+    return false;
 }
 
 void widget_model_init(widget_model_t *model)
 {
-    if (model != NULL) {
-        memset(model, 0, sizeof(*model));
+    if (model == NULL) {
+        return;
     }
-}
-
-const protocol_apply_config_t *widget_model_config(
-    const widget_model_t *model)
-{
-    return model != NULL && model->configured
-               ? &model->configs[model->live_config_index]
-               : NULL;
-}
-
-uint32_t widget_model_config_revision(const widget_model_t *model)
-{
-    const protocol_apply_config_t *config = widget_model_config(model);
-    return config != NULL ? config->revision : 0U;
+    memset(model, 0, sizeof(*model));
 }
 
 widget_model_config_result_t widget_model_check_config(
@@ -112,19 +34,29 @@ widget_model_config_result_t widget_model_check_config(
     if (model == NULL || config == NULL) {
         return WIDGET_MODEL_CONFIG_INVALID_ARGUMENT;
     }
-    widget_model_config_result_t validation = config_validation_result(
-        apply_config_validate(config));
-    if (validation != WIDGET_MODEL_CONFIG_APPLIED) {
-        return validation;
+    if (config->revision == 0U) {
+        return WIDGET_MODEL_CONFIG_INVALID_VALUE;
     }
-
-    const protocol_apply_config_t *live = widget_model_config(model);
-    if (live != NULL && config->revision <= live->revision) {
-        if (config->revision == live->revision &&
-            configs_equal(live, config)) {
+    const protocol_apply_config_t *current = live_config(model);
+    if (current != NULL) {
+        if (config->revision < current->revision) {
+            return WIDGET_MODEL_CONFIG_STALE_REVISION;
+        }
+        if (config->revision == current->revision) {
             return WIDGET_MODEL_CONFIG_REPLAYED;
         }
-        return WIDGET_MODEL_CONFIG_STALE_REVISION;
+    }
+    if (config->card_count == 0U ||
+        config->card_count > PROTOCOL_MAX_CONFIG_CARDS) {
+        return WIDGET_MODEL_CONFIG_TOO_LARGE;
+    }
+    for (size_t i = 0U; i < config->card_count; ++i) {
+        if (config->cards[i].card_id[0] == '\0') {
+            return WIDGET_MODEL_CONFIG_INVALID_VALUE;
+        }
+    }
+    if (duplicate_card_ids(config)) {
+        return WIDGET_MODEL_CONFIG_DUPLICATE_ID;
     }
     return WIDGET_MODEL_CONFIG_APPLIED;
 }
@@ -133,143 +65,139 @@ widget_model_config_result_t widget_model_apply_config(
     widget_model_t *model,
     const protocol_apply_config_t *config)
 {
-    widget_model_config_result_t result = widget_model_check_config(model,
-                                                                     config);
+    widget_model_config_result_t result = widget_model_check_config(model, config);
     if (result != WIDGET_MODEL_CONFIG_APPLIED) {
         return result;
     }
 
-    uint8_t staging_index = model->configured
-                                ? (uint8_t)(model->live_config_index ^ 1U)
-                                : 1U;
+    /* Stage into the buffer that is not live, then publish with an index swap,
+     * so a reader never observes a half-written config. */
+    uint8_t staging_index = model->configured ? (uint8_t)(1U - model->live_config_index) : 0U;
     protocol_apply_config_t *staging = &model->configs[staging_index];
-    *staging = *config;
+    memcpy(staging, config, sizeof(*staging));
 
-    const protocol_apply_config_t *live = widget_model_config(model);
-    char active_screen_id[PROTOCOL_MAX_SCREEN_ID_LENGTH + 1U] = {0};
-    if (live != NULL && model->active_screen_index < live->screen_count) {
-        strcpy(active_screen_id,
-               live->screens[model->active_screen_index].screen_id);
-    }
-    size_t next_active = active_screen_id[0] == '\0'
-                             ? staging->screen_count
-                             : screen_index(staging, active_screen_id);
-    if (next_active == staging->screen_count) {
-        next_active = 0U;
-    }
-
-    for (size_t i = 0U; i < staging->widget_count; ++i) {
-        bool initialized = template_fields_init(
-            staging->widgets[i].template_kind,
-            &model->widget_fields[staging_index][i]);
-        if (!initialized) {
-            return WIDGET_MODEL_CONFIG_INVALID_VALUE;
+    /* Keep showing the same card across a config replace when it survives,
+     * so an unrelated edit does not jump the loop. */
+    size_t next_active = 0U;
+    const protocol_card_config_t *active = widget_model_active_card(model);
+    if (active != NULL) {
+        for (size_t i = 0U; i < staging->card_count; ++i) {
+            if (strcmp(staging->cards[i].card_id, active->card_id) == 0) {
+                next_active = i;
+                break;
+            }
         }
     }
-    for (size_t i = staging->widget_count;
-         i < PROTOCOL_MAX_CONFIG_WIDGETS; ++i) {
-        memset(&model->widget_fields[staging_index][i], 0,
-               sizeof(model->widget_fields[staging_index][i]));
-    }
+
     model->live_config_index = staging_index;
     model->configured = true;
-    model->active_screen_index = next_active;
+    model->active_card_index = next_active;
+
+    /* A timer whose card left the configuration has nothing to resolve for. */
+    if (model->timer.present) {
+        bool still_present = false;
+        for (size_t i = 0U; i < staging->card_count; ++i) {
+            if (strcmp(staging->cards[i].card_id, model->timer.card_id) == 0) {
+                still_present = true;
+                break;
+            }
+        }
+        if (!still_present) {
+            memset(&model->timer, 0, sizeof(model->timer));
+        }
+    }
     return WIDGET_MODEL_CONFIG_APPLIED;
 }
 
-const protocol_screen_config_t *widget_model_active_screen(
-    const widget_model_t *model)
+const protocol_apply_config_t *widget_model_config(const widget_model_t *model)
+{
+    return model == NULL ? NULL : live_config(model);
+}
+
+uint32_t widget_model_config_revision(const widget_model_t *model)
 {
     const protocol_apply_config_t *config = widget_model_config(model);
-    if (config == NULL || model->active_screen_index >= config->screen_count) {
+    return config == NULL ? 0U : config->revision;
+}
+
+const protocol_card_config_t *widget_model_active_card(const widget_model_t *model)
+{
+    const protocol_apply_config_t *config = widget_model_config(model);
+    if (config == NULL || model->active_card_index >= config->card_count) {
         return NULL;
     }
-    return &config->screens[model->active_screen_index];
+    return &config->cards[model->active_card_index];
 }
 
-bool widget_model_activate_screen(widget_model_t *model,
-                                  const char *screen_id)
+bool widget_model_activate_card(widget_model_t *model, const char *card_id)
 {
     const protocol_apply_config_t *config = widget_model_config(model);
-    if (config == NULL || screen_id == NULL) {
+    if (config == NULL || card_id == NULL) {
         return false;
     }
-    size_t index = screen_index(config, screen_id);
-    if (index == config->screen_count) {
-        return false;
+    for (size_t i = 0U; i < config->card_count; ++i) {
+        if (strcmp(config->cards[i].card_id, card_id) == 0) {
+            model->active_card_index = i;
+            return true;
+        }
     }
-    model->active_screen_index = index;
-    return true;
+    return false;
 }
 
-widget_model_push_result_t widget_model_apply_push(
+widget_model_push_result_t widget_model_apply_timer(
     widget_model_t *model,
-    const protocol_push_data_t *push)
+    const protocol_push_timer_t *push)
 {
-    if (model == NULL || push == NULL || push->revision == 0U) {
+    if (model == NULL || push == NULL) {
         return WIDGET_MODEL_PUSH_INVALID_ARGUMENT;
-    }
-    if (push->revision <= model->latest_data_revision) {
-        return WIDGET_MODEL_PUSH_STALE_REVISION;
     }
     const protocol_apply_config_t *config = widget_model_config(model);
     if (config == NULL) {
         return WIDGET_MODEL_PUSH_UNKNOWN_WIDGET;
     }
-    size_t index = widget_index(config, push->widget_id);
-    if (index == config->widget_count) {
+    if (push->revision == 0U) {
+        return WIDGET_MODEL_PUSH_INVALID_ARGUMENT;
+    }
+    if (push->revision < model->latest_data_revision) {
+        return WIDGET_MODEL_PUSH_STALE_REVISION;
+    }
+    bool known = false;
+    for (size_t i = 0U; i < config->card_count; ++i) {
+        if (strcmp(config->cards[i].card_id, push->card_id) == 0) {
+            known = true;
+            break;
+        }
+    }
+    if (!known) {
         return WIDGET_MODEL_PUSH_UNKNOWN_WIDGET;
     }
-    template_fields_result_t result = template_fields_resolve(
-        &model->widget_fields[model->live_config_index][index],
-        &model->field_staging, push);
-    if (result != TEMPLATE_FIELDS_OK) {
-        return result == TEMPLATE_FIELDS_INVALID_ARGUMENT
-                   ? WIDGET_MODEL_PUSH_INVALID_ARGUMENT
-                   : WIDGET_MODEL_PUSH_INVALID_FIELDS;
-    }
+
+    memset(&model->timer, 0, sizeof(model->timer));
+    memcpy(model->timer.card_id, push->card_id, sizeof(model->timer.card_id));
+    model->timer.card_id[sizeof(model->timer.card_id) - 1U] = '\0';
+    model->timer.present = true;
+    model->timer.total_ms = push->total_ms;
+    model->timer.remaining_ms = push->remaining_ms;
+    model->timer.running = push->running;
     model->latest_data_revision = push->revision;
     return WIDGET_MODEL_PUSH_ACCEPTED;
 }
 
 uint32_t widget_model_latest_data_revision(const widget_model_t *model)
 {
-    return model != NULL ? model->latest_data_revision : 0U;
-}
-
-const template_field_state_t *widget_model_widget_fields(
-    const widget_model_t *model,
-    const char *widget_id)
-{
-    const protocol_apply_config_t *config = widget_model_config(model);
-    if (config == NULL || widget_id == NULL) {
-        return NULL;
-    }
-    size_t index = widget_index(config, widget_id);
-    return index < config->widget_count
-               ? &model->widget_fields[model->live_config_index][index]
-               : NULL;
+    return model == NULL ? 0U : model->latest_data_revision;
 }
 
 bool widget_model_has_running_progress(const widget_model_t *model)
 {
-    const protocol_apply_config_t *config = widget_model_config(model);
-    if (config == NULL) {
-        return false;
+    return model != NULL && model->timer.present && model->timer.running;
+}
+
+const widget_model_timer_t *widget_model_timer(const widget_model_t *model,
+                                               const char *card_id)
+{
+    if (model == NULL || card_id == NULL || !model->timer.present) {
+        return NULL;
     }
-    for (size_t index = 0U; index < config->widget_count; ++index) {
-        if (config->widgets[index].template_kind !=
-            PROTOCOL_TEMPLATE_PROGRESS_RING) {
-            continue;
-        }
-        const template_field_state_t *fields =
-            &model->widget_fields[model->live_config_index][index];
-        const template_field_value_t *running = template_fields_get(
-            fields, "running");
-        if (running != NULL && running->type == PROTOCOL_FIELD_BOOLEAN &&
-            running->value.boolean) {
-            return true;
-        }
-    }
-    return false;
+    return strcmp(model->timer.card_id, card_id) == 0 ? &model->timer : NULL;
 }

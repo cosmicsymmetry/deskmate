@@ -14,50 +14,12 @@ use app_core::{
 };
 use device::{DeviceError, ReceivedEvent, SessionDiagnostics, TransportError};
 use protocol::{
-    Ack, AssetBegin, AssetChunk, AssetCommit, AssetRelease, DeviceEvent, ErrorCode, ErrorResponse,
-    EventAction, EventKind, Field, PROTOCOL_VERSION, PushScene, Scene, SceneNode, SceneValue,
-    ScreenConfig, StatusResponse, TimeSync, TriggerInterrupt, WidgetConfig,
+    Ack, AssetBegin, AssetChunk, AssetCommit, AssetRelease, CardConfig, DeviceEvent, ErrorCode,
+    ErrorResponse, EventAction, EventKind, PROTOCOL_VERSION, PushScene, PushTimer, Scene,
+    SceneNode, SceneValue, StatusResponse, TimeSync, TriggerInterrupt,
 };
 
 const FULL_JSON: &str = include_str!("fixtures/full.json");
-
-#[test]
-fn card_field_round_trips_every_value_kind_back_to_the_wire() {
-    // The snapshot DTO is what the window holds; a scene is built from
-    // protocol::Field. The preview path converts back, so every value kind must
-    // survive the return trip.
-    let cases = [
-        (
-            CardField {
-                key: "title".into(),
-                value: CardFieldValue::Text {
-                    value: "Desk".into(),
-                },
-            },
-            protocol::FieldValue::Text("Desk".into()),
-        ),
-        (
-            CardField {
-                key: "duration_seconds".into(),
-                value: CardFieldValue::Integer { value: 1_500 },
-            },
-            protocol::FieldValue::Integer(1_500),
-        ),
-        (
-            CardField {
-                key: "running".into(),
-                value: CardFieldValue::Boolean { value: true },
-            },
-            protocol::FieldValue::Boolean(true),
-        ),
-    ];
-
-    for (card_field, expected) in cases {
-        let wire = card_field.to_protocol();
-        assert_eq!(wire.key, card_field.key);
-        assert_eq!(wire.value, expected);
-    }
-}
 
 #[test]
 fn preview_card_scene_builds_the_same_face_the_device_would_receive() {
@@ -124,8 +86,8 @@ enum Operation {
 struct ReplayCache {
     time: bool,
     layout: bool,
-    pushes: BTreeMap<String, Vec<Field>>,
-    active_screen: Option<String>,
+    pushes: BTreeMap<String, PushTimer>,
+    active_card: Option<String>,
     interrupts: BTreeMap<u32, TriggerInterrupt>,
 }
 
@@ -288,12 +250,12 @@ impl MockDeviceControl {
         self.state.lock().unwrap().status_override = Some(status);
     }
 
-    fn refuse_pushes_for(&self, widget_id: &str) {
+    fn refuse_pushes_for(&self, card_id: &str) {
         self.state
             .lock()
             .unwrap()
             .refused_pushes
-            .insert(widget_id.to_owned());
+            .insert(card_id.to_owned());
     }
 
     fn refuse_scenes_for(&self, card_id: &str) {
@@ -370,13 +332,13 @@ impl RuntimeDevice for MockDevice {
             }
             if reset && state.replay.layout {
                 state.operations.push(Operation::ReplayLayout);
-                let widget_ids: Vec<String> = state.replay.pushes.keys().cloned().collect();
-                for widget_id in widget_ids {
-                    state.operations.push(Operation::ReplayPush(widget_id));
+                let card_ids: Vec<String> = state.replay.pushes.keys().cloned().collect();
+                for card_id in card_ids {
+                    state.operations.push(Operation::ReplayPush(card_id));
                 }
             }
-            if let Some(screen_id) = state.replay.active_screen.clone() {
-                state.operations.push(Operation::ReplayActivate(screen_id));
+            if let Some(card_id) = state.replay.active_card.clone() {
+                state.operations.push(Operation::ReplayActivate(card_id));
             }
             let tokens: Vec<u32> = state.replay.interrupts.keys().copied().collect();
             for token in tokens {
@@ -460,12 +422,7 @@ impl RuntimeDevice for MockDevice {
         })?
     }
 
-    fn apply_layout(
-        &mut self,
-        rotation: u16,
-        _widgets: Vec<WidgetConfig>,
-        _screens: Vec<ScreenConfig>,
-    ) -> Result<(), DeviceError> {
+    fn apply_layout(&mut self, rotation: u16, _cards: Vec<CardConfig>) -> Result<(), DeviceError> {
         // Simulates a real synchronize's cost: an asset reconcile can take
         // far longer than a bare message exchange.
         std::thread::sleep(self.control.state.lock().unwrap().call_delay);
@@ -480,28 +437,43 @@ impl RuntimeDevice for MockDevice {
         })
     }
 
-    fn push_fields(&mut self, widget_id: String, fields: Vec<Field>) -> Result<(), DeviceError> {
+    fn push_timer(
+        &mut self,
+        card_id: String,
+        total_ms: u32,
+        remaining_ms: u32,
+        running: bool,
+    ) -> Result<(), DeviceError> {
         let gate = self.with_connected(|state| state.next_push_gate.take())?;
         if let Some(gate) = gate {
             gate.enter_and_wait();
         }
         self.with_connected(|state| {
-            state.operations.push(Operation::Push(widget_id.clone()));
-            if state.refused_pushes.contains(&widget_id) {
+            state.operations.push(Operation::Push(card_id.clone()));
+            if state.refused_pushes.contains(&card_id) {
                 return Err(DeviceError::Rejected(ErrorResponse {
                     code: ErrorCode::InvalidPayload,
-                    diagnostic: "invalid push data".into(),
+                    diagnostic: "invalid timer".into(),
                 }));
             }
-            state.replay.pushes.insert(widget_id, fields);
+            state.replay.pushes.insert(
+                card_id.clone(),
+                PushTimer {
+                    card_id,
+                    revision: 0,
+                    total_ms,
+                    remaining_ms,
+                    running,
+                },
+            );
             Ok(())
         })?
     }
 
-    fn activate_screen(&mut self, screen_id: String) -> Result<(), DeviceError> {
+    fn activate_card(&mut self, card_id: String) -> Result<(), DeviceError> {
         self.with_connected(|state| {
-            state.replay.active_screen = Some(screen_id.clone());
-            state.operations.push(Operation::Activate(screen_id));
+            state.replay.active_card = Some(card_id.clone());
+            state.operations.push(Operation::Activate(card_id));
         })
     }
 
@@ -585,7 +557,7 @@ impl RuntimeDevice for MockDevice {
                 EventAction::NavigatePrevious | EventAction::NavigateNext
             )
         {
-            state.replay.active_screen = Some(event.event.screen_id.clone());
+            state.replay.active_card = Some(event.event.card_id.clone());
         }
         if event.event.kind == EventKind::InterruptDismissed
             && let Some(token) = event.event.interrupt_token
@@ -1196,8 +1168,15 @@ fn failed_full_sync_never_pushes_a_scene_before_activation_succeeds() {
     runtime.shutdown().unwrap();
 }
 
+/// A device that does not advertise scene rendering still receives the card
+/// model -- config and activation -- because that is what tells it which card
+/// is live and what a tap on it means. What it does not receive is a face.
+///
+/// Protocol v1 called this the "legacy widget path": the device drew a C
+/// template from the pushed field bag instead. There is no such path in v2,
+/// so the card says so as a typed refusal rather than going quietly blank.
 #[test]
-fn legacy_device_receives_widget_config_and_never_receives_a_scene() {
+fn a_device_without_scene_rendering_gets_the_card_model_but_no_face() {
     let control = MockDeviceControl::default();
     let mut legacy = status(42);
     legacy.capabilities &= !protocol::CAPABILITY_SCENE_RENDER;
@@ -1207,7 +1186,6 @@ fn legacy_device_receives_widget_config_and_never_receives_a_scene() {
     wait_for(Duration::from_secs(1), || {
         let operations = control.operations();
         operations.contains(&Operation::ApplyLayout(270))
-            && operations.contains(&Operation::Push("clock".into()))
             && operations.contains(&Operation::Activate("clock".into()))
     });
     // Soft negative over ten complete 10 ms runtime intervals: unlike the
@@ -1218,8 +1196,14 @@ fn legacy_device_receives_widget_config_and_never_receives_a_scene() {
             .operations()
             .iter()
             .all(|operation| !matches!(operation, Operation::PushScene(_))),
-        "firmware without bit 8 must stay on the legacy widget path"
+        "firmware without bit 8 must not be sent a scene"
     );
+
+    let snapshot = wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
+        !snapshot.card_errors.is_empty()
+    });
+    assert_eq!(snapshot.card_errors[0].kind, CardErrorKind::SceneRefused);
+    assert_eq!(snapshot.card_errors[0].card_id, "clock");
     runtime.shutdown().unwrap();
 }
 
@@ -1478,7 +1462,7 @@ fn scenes_push_on_config_and_navigation_events_but_not_clock_or_pomodoro_ticks()
     wait_for(Duration::from_secs(1), || scene_count() > initial);
     let after_config = scene_count();
 
-    runtime.activate_screen("pomodoro").unwrap();
+    runtime.activate_card("pomodoro").unwrap();
     wait_for(Duration::from_secs(1), || {
         control.operations().iter().rev().any(
             |operation| matches!(operation, Operation::PushScene(push) if push.card_id == "pomodoro"),
@@ -1493,14 +1477,14 @@ fn scenes_push_on_config_and_navigation_events_but_not_clock_or_pomodoro_ticks()
         snapshot
             .pomodoros
             .iter()
-            .any(|timer| timer.widget_id == "pomodoro" && timer.state == PomodoroState::Running)
+            .any(|timer| timer.card_id == "pomodoro" && timer.state == PomodoroState::Running)
     });
     let after_timer_start = scene_count();
     thread::sleep(Duration::from_millis(100));
     assert_eq!(
         scene_count(),
         after_timer_start,
-        "pomodoro scheduler ticks update bindings through PushData, not scene rebuilds"
+        "pomodoro scheduler ticks update bindings through PushTimer, not scene rebuilds"
     );
 
     runtime.shutdown().unwrap();
@@ -1666,13 +1650,12 @@ fn local_navigation_becomes_the_authoritative_screen_for_reset_replay() {
     control.push_event(DeviceEvent {
         sequence: 1,
         kind: EventKind::Navigation,
-        widget_id: "pomodoro".into(),
-        screen_id: "pomodoro".into(),
+        card_id: "pomodoro".into(),
         action: EventAction::NavigateNext,
         interrupt_token: None,
     });
     wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
-        snapshot.device.active_screen_id.as_deref() == Some("pomodoro")
+        snapshot.device.active_card_id.as_deref() == Some("pomodoro")
     });
 
     control.force_disconnect(true);
@@ -1716,8 +1699,7 @@ fn pomodoro_events_complete_once_and_dismissed_interrupts_do_not_replay() {
     control.push_event(DeviceEvent {
         sequence: 1,
         kind: EventKind::Tap,
-        widget_id: "pomodoro".into(),
-        screen_id: "pomodoro".into(),
+        card_id: "pomodoro".into(),
         action: EventAction::StartPause,
         interrupt_token: None,
     });
@@ -1739,8 +1721,7 @@ fn pomodoro_events_complete_once_and_dismissed_interrupts_do_not_replay() {
     control.push_event(DeviceEvent {
         sequence: 2,
         kind: EventKind::InterruptDismissed,
-        widget_id: "pomodoro".into(),
-        screen_id: "pomodoro".into(),
+        card_id: "pomodoro".into(),
         action: EventAction::DismissInterrupt,
         interrupt_token: Some(1),
     });
@@ -1771,20 +1752,20 @@ fn pomodoro_events_complete_once_and_dismissed_interrupts_do_not_replay() {
 // `AlertHold::Seconds` deadline actually reaches a real device through the
 // full `run_runtime` loop: the interrupt fires once, then — with no touch
 // dismissal from the device — the hold expires on its own, the host dismisses
-// it from its own arbiter, and re-sends `ActivateScreen` for the saved
+// it from its own arbiter, and re-sends `ActivateCard` for the saved
 // carousel screen. `full_config`'s carousel is `Manual`, so the only source
 // of a *second* activation here is the hold expiring, not rotation.
 //
 // This test is named for exactly that and no more: it does **not** prove the
 // physical panel actually leaves the interrupt overlay. Per
-// `docs/protocol/v1.md`'s `ActivateScreen` section and firmware's
+// `docs/protocol/v1.md`'s `ActivateCard` section and firmware's
 // `protocol_task.c` (`show_carousel_screen` is skipped whenever
 // `interrupt_state_active` is non-null), the real device keeps showing the
-// interrupt until a tap dismisses it — `ActivateScreen` only changes which
+// interrupt until a tap dismisses it — `ActivateCard` only changes which
 // screen is *saved* to restore to afterward. `MockDevice` in this file has no
-// interrupt-takeover model at all: it just records that `ActivateScreen` was
+// interrupt-takeover model at all: it just records that `ActivateCard` was
 // called. So this test is wiring-only — it exercises the scheduler's
-// `alert_hold_due` → `InterruptArbiter::dismiss` → `active_screen_dirty` →
+// `alert_hold_due` → `InterruptArbiter::dismiss` → `active_card_dirty` →
 // `send_screen` path through a real threaded runtime loop — not a claim about
 // on-device visual behavior. See `arm_alert_hold`'s doc comment in
 // `runtime.rs` for the full protocol-v1 limitation this bounded hold lives
@@ -1810,12 +1791,11 @@ fn a_bounded_alert_hold_re_sends_the_saved_carousel_screen_activation() {
     wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
         snapshot.device.connection == ConnectionState::Online
     });
-    let activations_before_completion = activated_screen_ids(&control).len();
+    let activations_before_completion = activated_card_ids(&control).len();
     control.push_event(DeviceEvent {
         sequence: 1,
         kind: EventKind::Tap,
-        widget_id: "pomodoro".into(),
-        screen_id: "pomodoro".into(),
+        card_id: "pomodoro".into(),
         action: EventAction::StartPause,
         interrupt_token: None,
     });
@@ -1837,15 +1817,15 @@ fn a_bounded_alert_hold_re_sends_the_saved_carousel_screen_activation() {
     // No spontaneous activations from the manual-advance carousel between
     // completion and the interrupt firing.
     assert_eq!(
-        activated_screen_ids(&control).len(),
+        activated_card_ids(&control).len(),
         activations_before_completion
     );
 
     // No dismissal event from the device: the 5s hold must expire on its own
-    // and re-send `ActivateScreen`, which is the only other source of a new
+    // and re-send `ActivateCard`, which is the only other source of a new
     // activation under `CarouselAdvance::Manual`.
     wait_for(Duration::from_secs(7), || {
-        activated_screen_ids(&control).len() > activations_before_completion
+        activated_card_ids(&control).len() > activations_before_completion
     });
     runtime.shutdown().unwrap();
 }
@@ -1909,9 +1889,9 @@ fn bounded_hold_alert_completing_while_disconnected_survives_to_reconnect() {
         "the interrupt raised while unpowered must be delivered on reconnect"
     );
 
-    let activations_after_delivery = activated_screen_ids(&control).len();
+    let activations_after_delivery = activated_card_ids(&control).len();
     wait_for(Duration::from_secs(7), || {
-        activated_screen_ids(&control).len() > activations_after_delivery
+        activated_card_ids(&control).len() > activations_after_delivery
     });
     runtime.shutdown().unwrap();
 }
@@ -1995,8 +1975,7 @@ fn pomodoro_completion_without_an_alert_does_not_schedule_an_interrupt() {
     control.push_event(DeviceEvent {
         sequence: 1,
         kind: EventKind::Tap,
-        widget_id: "pomodoro".into(),
-        screen_id: "pomodoro".into(),
+        card_id: "pomodoro".into(),
         action: EventAction::StartPause,
         interrupt_token: None,
     });
@@ -2045,8 +2024,7 @@ fn app_restart_seeds_interrupt_tokens_from_the_still_powered_device() {
     control.push_event(DeviceEvent {
         sequence: 1,
         kind: EventKind::Tap,
-        widget_id: "pomodoro".into(),
-        screen_id: "pomodoro".into(),
+        card_id: "pomodoro".into(),
         action: EventAction::StartPause,
         interrupt_token: None,
     });
@@ -2072,16 +2050,16 @@ fn subscribers_are_bounded_and_coalesce_pressure_to_the_latest_snapshot() {
     assert!(matches!(runtime.subscribe(), Err(RuntimeError::QueueFull)));
     runtime.set_paused(true).unwrap();
     runtime.set_paused(false).unwrap();
-    runtime.activate_screen("clock").unwrap();
+    runtime.activate_card("clock").unwrap();
     wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
-        snapshot.device.active_screen_id.as_deref() == Some("clock")
+        snapshot.device.active_card_id.as_deref() == Some("clock")
             && snapshot.runtime == RuntimeState::Running
     });
     let latest = subscription
         .recv_timeout(Duration::from_secs(1))
         .unwrap()
         .unwrap();
-    assert_eq!(latest.device.active_screen_id.as_deref(), Some("clock"));
+    assert_eq!(latest.device.active_card_id.as_deref(), Some("clock"));
     assert_eq!(latest.runtime, RuntimeState::Running);
     runtime.shutdown().unwrap();
 }
@@ -2168,25 +2146,54 @@ fn pause_defers_timer_pushes_until_resume() {
     runtime.shutdown().unwrap();
 }
 
-/// Final-review finding: a push the device refused aborted `push_dirty_widgets`
-/// WITHOUT clearing the widget from `dirty_widgets`, so the runtime re-attempted the
+/// Final-review finding: a push the device refused aborted the dirty-card pass
+/// WITHOUT clearing the card from `dirty_cards`, so the runtime re-attempted the
 /// identical payload every cycle, sat in `RuntimeState::Error` with raw protocol text
-/// forever, and starved every widget queued behind it in the same cycle. A refusal is
+/// forever, and starved every card queued behind it in the same cycle. A refusal is
 /// terminal for that payload: drop it, record it against its card, keep going.
+///
+/// Both cards here are pomodoros because protocol v2 pushes one thing per card
+/// -- the timer its `timer.*` bindings resolve against -- and only a pomodoro
+/// has one. A clock card reaches the device as a scene and nothing else, so it
+/// has no push to refuse.
 #[test]
 fn a_refused_push_is_not_retried_and_does_not_starve_other_cards() {
     let control = MockDeviceControl::default();
-    // `dirty_widgets` is ordered, so "clock" is attempted before "pomodoro": the
-    // pomodoro pushes below prove the cycle continued past the refusal.
-    control.refuse_pushes_for("clock");
-    let runtime = start_runtime(full_config(), &control, Duration::from_millis(5));
+    let mut config = full_config();
+    config.cards = vec![
+        CardSettings::Pomodoro {
+            id: "first".into(),
+            label: "First".into(),
+            duration_seconds: 1_500,
+            template: DisplayTemplate::ProgressRing,
+            tap_action: WidgetTapAction::StartPause,
+            refresh: RefreshPolicy::DeviceLocal,
+            alert: CardAlert::None,
+            dwell_seconds: None,
+        },
+        CardSettings::Pomodoro {
+            id: "second".into(),
+            label: "Second".into(),
+            duration_seconds: 1_500,
+            template: DisplayTemplate::ProgressRing,
+            tap_action: WidgetTapAction::StartPause,
+            refresh: RefreshPolicy::DeviceLocal,
+            alert: CardAlert::None,
+            dwell_seconds: None,
+        },
+    ];
+    config.image_sources = Vec::new();
+    // `dirty_cards` is ordered, so "first" is attempted before "second": the
+    // pushes below prove the cycle continued past the refusal.
+    control.refuse_pushes_for("first");
+    let runtime = start_runtime(config, &control, Duration::from_millis(5));
 
     let snapshot = wait_for_snapshot(&runtime, Duration::from_secs(2), |snapshot| {
         !snapshot.card_errors.is_empty()
     });
     assert_eq!(snapshot.card_errors.len(), 1);
     assert_eq!(snapshot.card_errors[0].kind, CardErrorKind::DataRefused);
-    assert_eq!(snapshot.card_errors[0].card_id, "clock");
+    assert_eq!(snapshot.card_errors[0].card_id, "first");
     assert!(
         snapshot.card_errors[0].message.contains("refused"),
         "message must be actionable, got {:?}",
@@ -2197,31 +2204,31 @@ fn a_refused_push_is_not_retried_and_does_not_starve_other_cards() {
         "a card-scoped refusal must not park the whole runtime in Error"
     );
 
-    // The widget ordered behind the refused one in the SAME cycle still reached the
+    // The card ordered behind the refused one in the SAME cycle still reached the
     // device, and later cycles still push it.
-    let pomodoro_pushes = |control: &MockDeviceControl| {
+    let second_pushes = |control: &MockDeviceControl| {
         control
             .operations()
             .iter()
-            .filter(|operation| matches!(operation, Operation::Push(id) if id == "pomodoro"))
+            .filter(|operation| matches!(operation, Operation::Push(id) if id == "second"))
             .count()
     };
     assert!(
-        pomodoro_pushes(&control) >= 1,
-        "a refusal must not skip the widgets queued behind it"
+        second_pushes(&control) >= 1,
+        "a refusal must not skip the cards queued behind it"
     );
     runtime
-        .control_pomodoro("pomodoro", PomodoroAction::Start)
+        .control_pomodoro("second", PomodoroAction::Start)
         .unwrap();
-    wait_for(Duration::from_secs(2), || pomodoro_pushes(&control) >= 2);
+    wait_for(Duration::from_secs(2), || second_pushes(&control) >= 2);
 
-    let clock_pushes = control
+    let first_pushes = control
         .operations()
         .iter()
-        .filter(|operation| matches!(operation, Operation::Push(id) if id == "clock"))
+        .filter(|operation| matches!(operation, Operation::Push(id) if id == "first"))
         .count();
     assert_eq!(
-        clock_pushes, 1,
+        first_pushes, 1,
         "the refused payload must be attempted once, not re-queued every cycle"
     );
     runtime.shutdown().unwrap();
@@ -2251,10 +2258,7 @@ fn command_queue_rejects_pressure_without_growing() {
     let second_runtime = Arc::clone(&runtime);
     let second = thread::spawn(move || second_runtime.set_paused(true));
     thread::sleep(Duration::from_millis(20));
-    assert_eq!(
-        runtime.activate_screen("clock"),
-        Err(RuntimeError::QueueFull)
-    );
+    assert_eq!(runtime.activate_card("clock"), Err(RuntimeError::QueueFull));
     gate.open();
     first.join().unwrap().unwrap();
     second.join().unwrap().unwrap();
@@ -2278,12 +2282,12 @@ fn invalid_commands_do_not_mutate_runtime_state() {
         .filter(|operation| matches!(operation, Operation::ApplyLayout(_)))
         .count();
     assert!(matches!(
-        runtime.activate_screen("missing"),
-        Err(RuntimeError::UnknownScreen { .. })
+        runtime.activate_card("missing"),
+        Err(RuntimeError::UnknownCard { .. })
     ));
     assert!(matches!(
         runtime.control_pomodoro("missing", PomodoroAction::Reset),
-        Err(RuntimeError::UnknownWidget { .. })
+        Err(RuntimeError::UnknownCard { .. })
     ));
     let mut invalid = AppConfig::default();
     invalid.cards.push(invalid.cards[0].clone());
@@ -2314,14 +2318,14 @@ fn unrelated_config_and_preference_edits_preserve_live_timer_and_screen() {
     runtime
         .control_pomodoro("pomodoro", PomodoroAction::Start)
         .unwrap();
-    runtime.activate_screen("pomodoro").unwrap();
+    runtime.activate_card("pomodoro").unwrap();
     runtime.set_autostart_preference(false).unwrap();
     let before = wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
         snapshot
             .pomodoros
             .first()
             .is_some_and(|timer| timer.state == PomodoroState::Running)
-            && snapshot.device.active_screen_id.as_deref() == Some("pomodoro")
+            && snapshot.device.active_card_id.as_deref() == Some("pomodoro")
     });
 
     let mut edited = before.config;
@@ -2348,7 +2352,7 @@ fn unrelated_config_and_preference_edits_preserve_live_timer_and_screen() {
             .first()
             .is_some_and(|timer| timer.state == PomodoroState::Running)
     );
-    assert_eq!(after.device.active_screen_id.as_deref(), Some("pomodoro"));
+    assert_eq!(after.device.active_card_id.as_deref(), Some("pomodoro"));
     assert!(control.operations().contains(&Operation::ApplyLayout(90)));
     runtime.shutdown().unwrap();
 }
@@ -2460,16 +2464,16 @@ fn pomodoro_card(id: &str, alert: CardAlert) -> CardSettings {
     }
 }
 
-/// The screen IDs sent to the device via `ActivateScreen`, in the order they
+/// The screen IDs sent to the device via `ActivateCard`, in the order they
 /// were sent. The very first entry is always the initial full-sync
 /// activation of the boot-time active screen, issued on connect regardless of
 /// carousel mode; rotation-triggered activations (if any) follow it.
-fn activated_screen_ids(control: &MockDeviceControl) -> Vec<String> {
+fn activated_card_ids(control: &MockDeviceControl) -> Vec<String> {
     control
         .operations()
         .into_iter()
         .filter_map(|operation| match operation {
-            Operation::Activate(screen_id) => Some(screen_id),
+            Operation::Activate(card_id) => Some(card_id),
             _ => None,
         })
         .collect()
@@ -2490,16 +2494,16 @@ fn rotation_follows_card_order_and_each_cards_own_dwell() {
     let runtime = start_runtime(config, &control, Duration::ZERO);
 
     wait_for(Duration::from_secs(1), || {
-        activated_screen_ids(&control).first().map(String::as_str) == Some("b")
+        activated_card_ids(&control).first().map(String::as_str) == Some("b")
     });
     wait_for(Duration::from_secs(7), || {
-        activated_screen_ids(&control).get(1).map(String::as_str) == Some("a")
+        activated_card_ids(&control).get(1).map(String::as_str) == Some("a")
     });
     wait_for(Duration::from_secs(12), || {
-        activated_screen_ids(&control).get(2).map(String::as_str) == Some("b")
+        activated_card_ids(&control).get(2).map(String::as_str) == Some("b")
     });
 
-    assert_eq!(&activated_screen_ids(&control)[..3], ["b", "a", "b"]);
+    assert_eq!(&activated_card_ids(&control)[..3], ["b", "a", "b"]);
     runtime.shutdown().unwrap();
 }
 
@@ -2517,7 +2521,7 @@ fn reordering_the_loop_replays_and_keeps_the_card_on_the_panel() {
     };
     let runtime = start_runtime(config.clone(), &control, Duration::ZERO);
     wait_for(Duration::from_secs(1), || {
-        activated_screen_ids(&control) == ["shared"]
+        activated_card_ids(&control) == ["shared"]
     });
     let apply_count_before = control
         .operations()
@@ -2536,7 +2540,7 @@ fn reordering_the_loop_replays_and_keeps_the_card_on_the_panel() {
             == apply_count_before + 1
     });
     wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
-        snapshot.device.active_screen_id.as_deref() == Some("shared")
+        snapshot.device.active_card_id.as_deref() == Some("shared")
     });
 
     // But a card that leaves the loop cannot stay on the panel: the first card
@@ -2544,7 +2548,7 @@ fn reordering_the_loop_replays_and_keeps_the_card_on_the_panel() {
     config.cards.retain(|card| card.id() != "shared");
     runtime.apply_config(config).unwrap();
     wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
-        snapshot.device.active_screen_id.as_deref() == Some("new-first")
+        snapshot.device.active_card_id.as_deref() == Some("new-first")
     });
     runtime.shutdown().unwrap();
 }
@@ -2574,7 +2578,7 @@ fn alert_outside_active_playlist_still_fires() {
     let runtime = start_runtime(config, &control, Duration::ZERO);
     wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
         snapshot.device.connection == ConnectionState::Online
-            && snapshot.device.active_screen_id.as_deref() == Some("visible")
+            && snapshot.device.active_card_id.as_deref() == Some("visible")
     });
 
     runtime
@@ -2586,17 +2590,16 @@ fn alert_outside_active_playlist_still_fires() {
     control.push_event(DeviceEvent {
         sequence: 1,
         kind: EventKind::InterruptDismissed,
-        widget_id: "alert-only".into(),
-        screen_id: "alert-only".into(),
+        card_id: "alert-only".into(),
         action: EventAction::DismissInterrupt,
         interrupt_token: Some(1),
     });
 
     let after_dismissal = wait_for_snapshot(&runtime, Duration::from_secs(1), |snapshot| {
-        snapshot.device.active_screen_id.as_deref() == Some("visible")
+        snapshot.device.active_card_id.as_deref() == Some("visible")
     });
     assert_eq!(
-        after_dismissal.device.active_screen_id.as_deref(),
+        after_dismissal.device.active_card_id.as_deref(),
         Some("visible")
     );
     runtime.shutdown().unwrap();
@@ -2612,11 +2615,11 @@ fn manual_advance_playlist_has_no_rotation_deadline() {
     };
     let runtime = start_runtime(config, &control, Duration::ZERO);
     wait_for(Duration::from_secs(1), || {
-        activated_screen_ids(&control) == ["first"]
+        activated_card_ids(&control) == ["first"]
     });
 
     thread::sleep(Duration::from_secs(6));
-    assert_eq!(activated_screen_ids(&control), ["first"]);
+    assert_eq!(activated_card_ids(&control), ["first"]);
     runtime.shutdown().unwrap();
 }
 
@@ -2627,8 +2630,8 @@ fn manual_advance_playlist_has_no_rotation_deadline() {
 // `drain_device_events`, and `process_command` directly with synthetic `Instant`s — no
 // sleeping required. This file keeps exactly one real-time rotation test: an end-to-end
 // wiring proof that `scheduler.rotation_due` firing inside the real `run_runtime` loop
-// actually reaches the mock device via `ActivateScreen`, through
-// `advance_rotation` -> `active_screen_dirty` -> `send_screen`. One dwell period (the
+// actually reaches the mock device via `ActivateCard`, through
+// `advance_rotation` -> `active_card_dirty` -> `send_screen`. One dwell period (the
 // validated minimum, 5s) is enough to prove the wiring; it does not re-prove ordering or
 // skipping, which the unit tests already pin.
 #[test]
@@ -2658,14 +2661,14 @@ fn timed_advance_wiring_reaches_the_device_after_one_dwell() {
     // The initial full sync activates the first in-rotation card ("first"),
     // independent of rotation.
     wait_for(Duration::from_secs(1), || {
-        activated_screen_ids(&control) == ["first"]
+        activated_card_ids(&control) == ["first"]
     });
 
     // One dwell later, rotation has walked to the next card in the loop and the
     // activation reached the mock device. Since schema v10 that is simply the
     // next card -- there are no cards for the loop to skip any more.
     wait_for(Duration::from_secs(8), || {
-        activated_screen_ids(&control) == ["first", "alerting"]
+        activated_card_ids(&control) == ["first", "alerting"]
     });
     runtime.shutdown().unwrap();
 }
@@ -2764,8 +2767,7 @@ fn interrupt_tokens_do_not_follow_the_unrelated_revision_counters() {
     control.push_event(DeviceEvent {
         sequence: 1,
         kind: EventKind::Tap,
-        widget_id: "pomodoro".into(),
-        screen_id: "pomodoro".into(),
+        card_id: "pomodoro".into(),
         action: EventAction::StartPause,
         interrupt_token: None,
     });
@@ -2822,8 +2824,7 @@ fn an_absent_interrupt_counter_still_takes_the_revision_floor() {
     control.push_event(DeviceEvent {
         sequence: 1,
         kind: EventKind::Tap,
-        widget_id: "pomodoro".into(),
-        screen_id: "pomodoro".into(),
+        card_id: "pomodoro".into(),
         action: EventAction::StartPause,
         interrupt_token: None,
     });
@@ -2866,8 +2867,7 @@ fn a_dismissal_for_an_untracked_token_is_counted_rather_than_silently_dropped() 
     control.push_event(DeviceEvent {
         sequence: 1,
         kind: EventKind::InterruptDismissed,
-        widget_id: "pomodoro".into(),
-        screen_id: "pomodoro".into(),
+        card_id: "pomodoro".into(),
         action: EventAction::DismissInterrupt,
         interrupt_token: Some(4242),
     });
@@ -2918,8 +2918,7 @@ fn a_tap_on_a_completed_pomodoro_still_pushes_authoritative_state() {
     control.push_event(DeviceEvent {
         sequence: 1,
         kind: EventKind::Tap,
-        widget_id: "pomodoro".into(),
-        screen_id: "pomodoro".into(),
+        card_id: "pomodoro".into(),
         action: EventAction::StartPause,
         interrupt_token: None,
     });
@@ -2940,8 +2939,7 @@ fn a_tap_on_a_completed_pomodoro_still_pushes_authoritative_state() {
     control.push_event(DeviceEvent {
         sequence: 2,
         kind: EventKind::Tap,
-        widget_id: "pomodoro".into(),
-        screen_id: "pomodoro".into(),
+        card_id: "pomodoro".into(),
         action: EventAction::StartPause,
         interrupt_token: None,
     });

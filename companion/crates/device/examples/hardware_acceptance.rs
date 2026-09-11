@@ -5,9 +5,9 @@ use std::time::{Duration, Instant};
 
 use device::{DeviceClient, DeviceError, Transport, connect};
 use protocol::{
-    ApplyConfig, Deframer, ErrorCode, Frame, InterruptPolicy, Message, PushData, ScreenConfig,
-    SizeClass, StatusResponse, TYPE_APPLY_CONFIG, TYPE_PUSH_DATA, TYPE_TIME_SYNC, TapAction,
-    TemplateKind, WidgetConfig, decode_message, encode_frame, encode_message,
+    ApplyConfig, CardConfig, Deframer, ErrorCode, Frame, Message, PushTimer, StatusResponse,
+    TYPE_APPLY_CONFIG, TYPE_PUSH_TIMER, TYPE_TIME_SYNC, TapAction, decode_message, encode_frame,
+    encode_message,
 };
 
 const BAD_CRC: &[u8] = include_bytes!("../../../../protocol/fixtures/v1/bad_crc.bin");
@@ -129,16 +129,9 @@ fn apply_acceptance_config(
     let config = ApplyConfig {
         revision: config_revision,
         rotation: 90,
-        widgets: vec![WidgetConfig {
-            widget_id: "acceptance".into(),
-            template: TemplateKind::DigitalClock,
-            size_class: SizeClass::Full,
+        cards: vec![CardConfig {
+            card_id: "acceptance".into(),
             tap_action: TapAction::None,
-            interrupt_policy: InterruptPolicy::Disabled,
-        }],
-        screens: vec![ScreenConfig {
-            screen_id: "acceptance-screen".into(),
-            widget_id: "acceptance".into(),
         }],
     };
     match client
@@ -204,13 +197,14 @@ fn run() -> Result<(), String> {
     write_all(&mut transport, GARBAGE)?;
     write_all(&mut transport, OVERLONG)?;
 
-    // Canonical {0: "test", 1: 0, 2: {}}: structurally valid CBOR with an
-    // invalid zero PushData revision.
+    // Canonical {0: "test", 1: 0, 2: 0, 3: 0, 4: false}: structurally valid
+    // CBOR with an invalid zero PushTimer revision.
     let invalid_push = encode_frame(&Frame::new(
-        TYPE_PUSH_DATA,
+        TYPE_PUSH_TIMER,
         103,
         vec![
-            0xa3, 0x00, 0x64, b't', b'e', b's', b't', 0x01, 0x00, 0x02, 0xa0,
+            0xa5, 0x00, 0x64, b't', b'e', b's', b't', 0x01, 0x00, 0x02, 0x00, 0x03, 0x00, 0x04,
+            0xf4,
         ],
     ))
     .map_err(|error| error.to_string())?;
@@ -234,13 +228,15 @@ fn run() -> Result<(), String> {
         .latest_revision
         .checked_add(1)
         .ok_or_else(|| "cannot run push check at maximum retained revision".to_owned())?;
-    let push = PushData {
-        widget_id: "acceptance".into(),
+    let push = PushTimer {
+        card_id: "acceptance".into(),
         revision,
-        fields: Vec::new(),
+        total_ms: 60_000,
+        remaining_ms: 60_000,
+        running: false,
     };
     let ack = client
-        .push_data(push.clone())
+        .push_timer(push.clone())
         .map_err(|error| error.to_string())?;
     if ack.revision != Some(revision) {
         return Err(format!(
@@ -248,7 +244,7 @@ fn run() -> Result<(), String> {
             ack.revision
         ));
     }
-    match client.push_data(push) {
+    match client.push_timer(push) {
         Err(DeviceError::Rejected(error)) if error.code == ErrorCode::StaleRevision => {}
         Err(error) => return Err(format!("unexpected stale-push result: {error}")),
         Ok(_) => return Err("device accepted a stale push revision".into()),

@@ -20,28 +20,12 @@
 //! `push_case_assets` provisions every asset a case's scene names, over the
 //! real `AssetBegin`/`AssetChunk`/`AssetCommit` wire path -- the first time
 //! this harness (or any test in this repo) exercises the device's
-//! asset-transfer path rather than excluding any case that needed one. See
-//! `exclusion_reason`'s doc for exactly which of the three historical
-//! exclusion reasons this closes, and which one it does not.
-//!
-//! ## The row-list truncation-boundary exclusion
-//!
-//! `row-list--truncation-boundary--*` pins `row0_title` at the wire's
-//! generic per-field ceiling (`PROTOCOL_MAX_FIELD_TEXT_LENGTH` = 128,
-//! `firmware/main/core/protocol_message.h`), which exceeds that specific
-//! field's own registry maximum of 96
-//! (`s_row_list_fields` in `firmware/main/core/template_fields.c`). A push
-//! that violates a field's registry maximum is rejected by the device, so
-//! this case cannot be exercised against real hardware as written — see the
-//! Task 5 ledger note carried into the Task 10 brief. It is excluded here
-//! (not clamped): clamping would silently change what the case name means,
-//! and the golden PNG suite already pins the 128-char behavior against the
-//! host renderer, which has no such wire ceiling to violate.
+//! asset-transfer path rather than excluding any case that needed one.
 //!
 //! ## Sequencing and settle time
 //!
-//! Each case applies a single-card config, activates its one screen, pushes
-//! any timer snapshot, pushes the scene, and *finally* time-syncs the device
+//! Each case applies a single-card config, activates that card, pushes any
+//! timer, pushes the scene, and *finally* time-syncs the device
 //! to the case's pinned instant. Time-sync updates the clock context read by
 //! the 250 ms scene-binding tick; [`SETTLE`] gives that tick time to repaint
 //! while staying comfortably under the one full second that would roll the
@@ -57,10 +41,10 @@ use device::{DeviceClient, Transport, connect};
 use lvgl_sim::scene::{SceneRenderRequest, SceneTimer};
 use lvgl_sim::{SimOrientation, Simulator, cases};
 use protocol::{
-    ActivateScreen, ApplyConfig, AssetBegin, AssetChunk, AssetCommit, Field, FieldValue,
-    InterruptPolicy, MAX_ASSET_CHUNK_BYTES, Message, PushData, PushScene, ScreenConfig, SizeClass,
-    TYPE_ACTIVATE_SCREEN, TYPE_APPLY_CONFIG, TYPE_ASSET_BEGIN, TYPE_ASSET_CHUNK, TYPE_ASSET_COMMIT,
-    TYPE_PUSH_SCENE, TapAction, TemplateKind, TimeSync, WidgetConfig,
+    ActivateCard, ApplyConfig, AssetBegin, AssetChunk, AssetCommit, CardConfig,
+    MAX_ASSET_CHUNK_BYTES, Message, PushScene, PushTimer, TYPE_ACTIVATE_CARD, TYPE_APPLY_CONFIG,
+    TYPE_ASSET_BEGIN, TYPE_ASSET_CHUNK, TYPE_ASSET_COMMIT, TYPE_PUSH_SCENE, TYPE_PUSH_TIMER,
+    TapAction, TimeSync,
 };
 /// Gives the 250 ms scene-binding tick margin to redraw before capture while
 /// staying clear of the 1 s mark that rolls a just-synced second over.
@@ -89,10 +73,12 @@ fn parse_port() -> Result<Option<String>, String> {
     Ok(port)
 }
 
-/// Returns the reason a scene case cannot be pushed by this harness. The two
-/// historical face-row exclusions are reachable through `face_scene_cases()`;
-/// keep them explicit so their known flakes cannot silently return.
-fn exclusion_reason(name: &str, request: &SceneRenderRequest) -> Option<&'static str> {
+/// Returns the reason a scene case cannot be pushed by this harness.
+///
+/// Protocol v2 closed the `field.*` exclusions this function used to carry:
+/// there is no field namespace and therefore no registry to fall outside of.
+/// What is left is the one timing race below, which no wire change can fix.
+fn exclusion_reason(name: &str, _request: &SceneRenderRequest) -> Option<&'static str> {
     if name.starts_with("progress-ring--running-mid-countdown--") {
         Some(
             "the device keeps ticking a running timer through \
@@ -104,30 +90,6 @@ fn exclusion_reason(name: &str, request: &SceneRenderRequest) -> Option<&'static
              deterministic simulator goldens, which do cover the running arc \
              hue; paused-mid-countdown covers the same geometry here, and \
              running-at-zero the running palette",
-        )
-    } else if request.fields.iter().any(|(field_name, _)| {
-        !matches!(
-            field_name.as_str(),
-            "title" | "show_seconds" | "stale" | "error"
-        )
-    }) {
-        // `push_case_assets` below provisions real RGB565 image and runtime font
-        // assets, and
-        // `push_case_fields` now pushes `request.fields` as PushData too --
-        // so the two asset-shaped exclusions this function used to name are
-        // gone. What is left is genuinely un-closable without a firmware
-        // change: `apply_case_config` always selects `TemplateKind::DigitalClock`
-        // for a no-timer case (this crate's own choice, unrelated to Task 8),
-        // whose PushData registry (`s_digital_clock_fields` in
-        // `firmware/main/core/template_fields.c`) is exactly
-        // `title`/`show_seconds`/`stale`/`error`. The two scene-node synthetic
-        // cases below (`scene-text`/`scene-label`) bind `field.status`, a name
-        // no registry accepts.
-        Some(
-            "the scene binds a field.* name outside DigitalClock's PushData registry \
-             (title/show_seconds/stale/error) -- apply_case_config always selects \
-             DigitalClock's template for a no-timer case, so any other field name \
-             is rejected by the device",
         )
     } else {
         None
@@ -196,17 +158,6 @@ fn diff_pixels(expected: &[u16], actual: &[u16]) -> (usize, u32) {
     (differing, max_delta)
 }
 
-/// Selects the device field registry for a scene request. This does not pick
-/// a renderer anymore, but it remains load-bearing for `PushData` validation:
-/// timer producer rows must use `ProgressRing`'s duration/remaining/running registry.
-fn case_template(request: &SceneRenderRequest) -> TemplateKind {
-    if request.timer.is_some() {
-        TemplateKind::ProgressRing
-    } else {
-        TemplateKind::DigitalClock
-    }
-}
-
 fn apply_case_config(
     client: &mut DeviceClient<impl Transport>,
     revision: u32,
@@ -215,19 +166,9 @@ fn apply_case_config(
     let config = ApplyConfig {
         revision,
         rotation: rotation_degrees(request.orientation),
-        widgets: vec![WidgetConfig {
-            widget_id: "diff".into(),
-            /* ApplyConfig still registers the bounded PushData field schema;
-             * it no longer selects a C renderer. Timer scene cases need the
-             * ProgressRing registry, while asset-free geometry needs no data. */
-            template: case_template(request),
-            size_class: SizeClass::Full,
+        cards: vec![CardConfig {
+            card_id: "diff".into(),
             tap_action: TapAction::None,
-            interrupt_policy: InterruptPolicy::Disabled,
-        }],
-        screens: vec![ScreenConfig {
-            screen_id: "diff-screen".into(),
-            widget_id: "diff".into(),
         }],
     };
     match client
@@ -243,67 +184,44 @@ fn apply_case_config(
     }
 }
 
-fn activate_case_screen(client: &mut DeviceClient<impl Transport>) -> Result<(), String> {
+fn activate_case_card(client: &mut DeviceClient<impl Transport>) -> Result<(), String> {
     match client
-        .request(&Message::ActivateScreen(ActivateScreen {
-            screen_id: "diff-screen".into(),
+        .request(&Message::ActivateCard(ActivateCard {
+            card_id: "diff".into(),
         }))
-        .map_err(|error| format!("activate screen: {error}"))?
+        .map_err(|error| format!("activate card: {error}"))?
     {
-        Message::Ack(ack) if ack.acknowledged_type == TYPE_ACTIVATE_SCREEN => Ok(()),
-        message => Err(format!("unexpected activate-screen response: {message:?}")),
+        Message::Ack(ack) if ack.acknowledged_type == TYPE_ACTIVATE_CARD => Ok(()),
+        message => Err(format!("unexpected activate-card response: {message:?}")),
     }
 }
 
-/// Pushes both of the two things a case's `PushData` can carry: a
-/// `ProgressRing` timer snapshot (`request.timer`), and `request.fields` -- the
-/// `field.*` binding values used by synthetic scene cases. A case with
-/// neither pushes nothing at all, exactly as before Task 8.
-fn push_case_fields(
+/// Pushes the timer a case's `timer.*` bindings resolve against, if it has
+/// one. A case with no timer pushes nothing: protocol v2's device models
+/// nothing else per card.
+fn push_case_timer(
     client: &mut DeviceClient<impl Transport>,
     revision: u32,
     request: &SceneRenderRequest,
 ) -> Result<(), String> {
-    let mut fields = Vec::new();
-    if let Some(SceneTimer {
+    let Some(SceneTimer {
         total_ms,
         remaining_ms,
         running,
     }) = request.timer
-    {
-        fields.push(Field {
-            key: "duration_seconds".into(),
-            value: FieldValue::Integer(i64::from(total_ms / 1_000)),
-        });
-        fields.push(Field {
-            key: "remaining_seconds".into(),
-            value: FieldValue::Integer(i64::from(remaining_ms / 1_000)),
-        });
-        fields.push(Field {
-            key: "running".into(),
-            value: FieldValue::Boolean(running),
-        });
-    }
-    // `exclusion_reason` already refused any case whose field name is not
-    // one of DigitalClock's registered fields, so every name reaching here
-    // is one `apply_case_config`'s always-DigitalClock template accepts.
-    for (name, value) in &request.fields {
-        fields.push(Field {
-            key: name.clone(),
-            value: FieldValue::Text(value.clone()),
-        });
-    }
-    if fields.is_empty() {
+    else {
         return Ok(());
-    }
+    };
     let ack = client
-        .push_data(PushData {
-            widget_id: "diff".into(),
+        .push_timer(PushTimer {
+            card_id: "diff".into(),
             revision,
-            fields,
+            total_ms,
+            remaining_ms,
+            running,
         })
-        .map_err(|error| format!("push data: {error}"))?;
-    if ack.revision != Some(revision) {
+        .map_err(|error| format!("push timer: {error}"))?;
+    if ack.acknowledged_type != TYPE_PUSH_TIMER || ack.revision != Some(revision) {
         return Err(format!(
             "push acknowledgement revision mismatch: expected {revision}, received {:?}",
             ack.revision
@@ -451,8 +369,8 @@ fn run_case<T: Transport>(
         if !request.assets.is_empty() {
             thread::sleep(CONFIG_SETTLE);
         }
-        activate_case_screen(&mut client)?;
-        push_case_fields(&mut client, data_revision, request)?;
+        activate_case_card(&mut client)?;
+        push_case_timer(&mut client, data_revision, request)?;
         // Before the scene that names these assets by digest, so the device
         // never has to resolve a digest it has not been given bytes for yet.
         push_case_assets(&mut client, request)?;
@@ -617,10 +535,13 @@ fn main() {
 mod tests {
     use super::*;
 
-    /// The manifest removal subtracts its sixteen curated-plugin rows and the two
-    /// manifest-backed timer-producer rows. This pins the new software inventory
-    /// separately from the last 96/10/86 hardware observation; the next board
-    /// session must measure it afresh.
+    /// Pins the software inventory separately from the last 96/10/86 hardware
+    /// observation; the next board session must measure it afresh.
+    ///
+    /// Protocol v2 closed the four `field.*` exclusions: there is no field
+    /// namespace, so `scene-text` and `scene-label` bind `date` and
+    /// `timer.status` instead and run on hardware like every other row. One
+    /// exclusion is left, and it is a timing race no wire change can fix.
     #[test]
     fn gate_b_inventory_is_the_real_counted_split_not_an_assumed_one() {
         let requests: Vec<_> = cases::scene_cases()
@@ -633,7 +554,7 @@ mod tests {
             .iter()
             .filter(|(name, _)| name.starts_with("progress-ring--running-mid-countdown--"))
             .count();
-        let field_registry_mismatch = requests
+        let other_exclusions = requests
             .iter()
             .filter(|(name, request)| {
                 !name.starts_with("progress-ring--running-mid-countdown--")
@@ -659,13 +580,12 @@ mod tests {
         );
         assert_eq!(running_mid_countdown, 2);
         assert_eq!(
-            field_registry_mismatch, 4,
-            "scene-text and scene-label, both orientations -- field.status, which no \
-             built-in registry accepts"
+            other_exclusions, 0,
+            "the running-timer race is the only reason a row cannot be pushed to \
+             hardware; protocol v2 removed the field namespace the other four named"
         );
-        assert_eq!(excluded, running_mid_countdown + field_registry_mismatch);
-        assert_eq!(excluded, 6);
-        assert_eq!(requests.len() - excluded, 38);
+        assert_eq!(excluded, 2);
+        assert_eq!(requests.len() - excluded, 42);
 
         // The RGB565-image and runtime-font-asset rows (scene-image,
         // scene-glyph, both orientations = 4 rows) are no longer excluded.
@@ -695,18 +615,19 @@ mod tests {
                 "missing real-face coverage for {prefix}"
             );
         }
-        for (prefix, expected_template) in
-            [("digital-clock--date-overflow--", TemplateKind::DigitalClock)]
-        {
-            let matching = requests
-                .iter()
-                .filter(|(name, _)| name.starts_with(prefix))
-                .collect::<Vec<_>>();
-            assert_eq!(matching.len(), 2, "{prefix} must cover both orientations");
-            assert!(matching.iter().all(|(name, request)| {
-                exclusion_reason(name, request).is_none()
-                    && case_template(request) == expected_template
-            }));
-        }
+        // The produced date that overflows its 176 px box, at both mountings.
+        // It binds `date` and carries no timer, so nothing excludes it.
+        let overflow = requests
+            .iter()
+            .filter(|(name, _)| name.starts_with("digital-clock--date-overflow--"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            overflow.len(),
+            2,
+            "date overflow must cover both orientations"
+        );
+        assert!(overflow.iter().all(|(name, request)| {
+            exclusion_reason(name, request).is_none() && request.timer.is_none()
+        }));
     }
 }

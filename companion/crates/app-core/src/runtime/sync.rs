@@ -67,24 +67,20 @@ pub(super) fn synchronize_full(
     }
     if !sync_device_result(
         state,
-        device.apply_layout(
-            compiled.layout.rotation,
-            compiled.layout.widgets,
-            compiled.layout.screens,
-        ),
+        device.apply_layout(compiled.layout.rotation, compiled.layout.cards),
     )? {
         return Ok(());
     }
-    state.dirty_widgets = state.latest_fields.keys().cloned().collect();
+    state.dirty_cards = state.latest_fields.keys().cloned().collect();
     push_dirty_widgets(state, device)?;
-    state.active_screen_dirty = state.active_screen.is_some();
+    state.active_card_dirty = state.active_card.is_some();
     send_screen(state, device)?;
     // `RuntimeCommand::ApplyConfig` waits for this full ownership/model sync
     // before replying. Leave the scene dirty for the worker's separate render
     // phase: activation is the device-model transaction boundary, while drawing
     // the new face is the event-driven consequence of that completed apply.
     flush_interrupts(state, scheduler, device, now)?;
-    state.active_scene_dirty = state.active_screen.is_some();
+    state.active_scene_dirty = state.active_card.is_some();
     state.needs_full_sync = false;
     Ok(())
 }
@@ -134,14 +130,19 @@ pub(super) fn synchronize_pending(
     flush_interrupts(state, scheduler, device, now)
 }
 
-/// Pushes every dirty widget, then leaves the dirty set holding only what still
-/// needs sending.
+/// Pushes the device-side timer of every dirty card, then leaves the dirty set
+/// holding only what still needs sending.
+///
+/// Protocol v1 pushed a bag of rendered field strings here and the device
+/// redrew a C template from it. Protocol v2's device models one thing per card
+/// — the timer its `timer.*` scene bindings resolve against — so this sends
+/// `PushTimer` and a card without a timer simply leaves the dirty set. Its
+/// face is a host-built scene and travels through the render phase instead.
 ///
 /// A push the device *refuses* is not a transport failure and must not be retried:
-/// the frame arrived, the device parsed it, and it rejected the contents (an
-/// undeclared field type, an over-long text value, a value outside the template's
-/// declared range). The identical payload can only be refused again, so retrying it
-/// pins the runtime in `RuntimeState::Error` forever and starves every widget queued
+/// the frame arrived, the device parsed it, and it rejected the contents. The
+/// identical payload can only be refused again, so retrying it
+/// pins the runtime in `RuntimeState::Error` forever and starves every card queued
 /// behind it in the same cycle. Such a push is dropped from the dirty set and
 /// recorded as a card-scoped `CardError` the settings UI can show against the card
 /// that caused it. `Busy` is the one refusal that *is* transient (the device asked
@@ -154,21 +155,26 @@ pub(super) fn push_dirty_widgets(
     if ownership_was_refused(state) {
         return Ok(());
     }
-    let dirty: Vec<String> = state.dirty_widgets.iter().cloned().collect();
-    for widget_id in dirty {
-        let Some(fields) = state.latest_fields.get(&widget_id).cloned() else {
-            state.dirty_widgets.remove(&widget_id);
+    let dirty: Vec<String> = state.dirty_cards.iter().cloned().collect();
+    for card_id in dirty {
+        let Some(timer) = state.pomodoro_snapshots.get(&card_id) else {
+            // Nothing about this card is device-side state. Its face is a
+            // scene the render phase owns.
+            state.dirty_cards.remove(&card_id);
             continue;
         };
-        match device.push_fields(widget_id.clone(), fields) {
+        let total_ms = timer.duration_seconds.saturating_mul(1_000);
+        let remaining_ms = timer.remaining_seconds.saturating_mul(1_000);
+        let running = timer.state == PomodoroState::Running;
+        match device.push_timer(card_id.clone(), total_ms, remaining_ms, running) {
             Ok(()) => {
-                state.dirty_widgets.remove(&widget_id);
+                state.dirty_cards.remove(&card_id);
                 if state
                     .push_rejections
-                    .get(&widget_id)
+                    .get(&card_id)
                     .is_some_and(|error| error.kind == CardErrorKind::DataRefused)
                 {
-                    state.push_rejections.remove(&widget_id);
+                    state.push_rejections.remove(&card_id);
                 }
             }
             Err(error) if is_wrong_tier(&error) => {
@@ -177,14 +183,14 @@ pub(super) fn push_dirty_widgets(
             }
             Err(DeviceError::Rejected(error)) if error.code == protocol::ErrorCode::Busy => {}
             Err(DeviceError::Rejected(error)) => {
-                state.dirty_widgets.remove(&widget_id);
+                state.dirty_cards.remove(&card_id);
                 state.push_rejections.insert(
-                    widget_id.clone(),
+                    card_id.clone(),
                     CardError {
                         kind: CardErrorKind::DataRefused,
-                        card_id: widget_id,
+                        card_id,
                         message: format!(
-                            "the display refused this card's data ({:?}): {}",
+                            "the display refused this card's timer ({:?}): {}",
                             error.code, error.diagnostic
                         ),
                     },
@@ -203,15 +209,15 @@ pub(super) fn send_screen(
     if ownership_was_refused(state) {
         return Ok(());
     }
-    if !state.active_screen_dirty {
+    if !state.active_card_dirty {
         return Ok(());
     }
-    if let Some(screen_id) = state.active_screen.clone()
-        && !sync_device_result(state, device.activate_screen(screen_id))?
+    if let Some(card_id) = state.active_card.clone()
+        && !sync_device_result(state, device.activate_card(card_id))?
     {
         return Ok(());
     }
-    state.active_screen_dirty = false;
+    state.active_card_dirty = false;
     Ok(())
 }
 

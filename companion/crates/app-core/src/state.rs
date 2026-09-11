@@ -101,7 +101,7 @@ pub struct DeviceSnapshot {
     pub last_network_error: Option<String>,
     #[serde(default)]
     pub ota_state: Option<DeviceOtaState>,
-    pub active_screen_id: Option<String>,
+    pub active_card_id: Option<String>,
     pub counters: DeviceCounters,
 }
 
@@ -141,11 +141,6 @@ impl DeviceSnapshot {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum DeviceCapability {
-    CoreWidgets,
-    ConfigRotation,
-    DashboardLayouts,
-    ExtendedTemplates,
-    HostTapActions,
     AssetTransfer,
     FirmwareUpdate,
     Networking,
@@ -155,12 +150,7 @@ pub enum DeviceCapability {
 }
 
 impl DeviceCapability {
-    const ALL: [Self; 11] = [
-        Self::CoreWidgets,
-        Self::ConfigRotation,
-        Self::DashboardLayouts,
-        Self::ExtendedTemplates,
-        Self::HostTapActions,
+    const ALL: [Self; 6] = [
         Self::AssetTransfer,
         Self::FirmwareUpdate,
         Self::Networking,
@@ -171,11 +161,6 @@ impl DeviceCapability {
 
     pub const fn bit(self) -> u64 {
         match self {
-            Self::CoreWidgets => protocol::CAPABILITY_CORE_WIDGETS,
-            Self::ConfigRotation => protocol::CAPABILITY_CONFIG_ROTATION,
-            Self::DashboardLayouts => protocol::CAPABILITY_DASHBOARD_LAYOUTS,
-            Self::ExtendedTemplates => protocol::CAPABILITY_EXTENDED_TEMPLATES,
-            Self::HostTapActions => protocol::CAPABILITY_HOST_TAP_ACTIONS,
             Self::AssetTransfer => protocol::CAPABILITY_ASSET_TRANSFER,
             Self::FirmwareUpdate => protocol::CAPABILITY_FIRMWARE_UPDATE,
             Self::Networking => protocol::CAPABILITY_NETWORKING,
@@ -190,11 +175,6 @@ impl DeviceCapability {
     /// user nothing about what to change or which firmware to install.
     pub const fn label(self) -> &'static str {
         match self {
-            Self::CoreWidgets => "core widgets",
-            Self::ConfigRotation => "display rotation",
-            Self::DashboardLayouts => "dashboard layouts",
-            Self::ExtendedTemplates => "extended display templates",
-            Self::HostTapActions => "host tap actions",
             Self::AssetTransfer => "icon and font asset transfer",
             Self::FirmwareUpdate => "firmware update",
             Self::Networking => "networking",
@@ -355,7 +335,7 @@ pub struct DeviceCounters {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PomodoroSnapshot {
-    pub widget_id: String,
+    pub card_id: String,
     pub state: PomodoroState,
     pub duration_seconds: u32,
     pub remaining_seconds: u32,
@@ -370,7 +350,10 @@ pub enum PomodoroState {
     Completed,
 }
 
-/// Mirrors `protocol::FieldValue` for the settings webview. The wire type
+/// One live value a card's scene builder reads. Protocol v2 removed the wire's
+/// generic field bag, so this is now purely a HOST-side type: it is what the
+/// runtime keeps per card, what the settings webview renders, and what
+/// `build_card_scene` reads. The wire
 /// deliberately does not derive `Serialize` (it must stay free of
 /// presentation concerns), so this DTO carries the same last-good values
 /// across the IPC boundary instead.
@@ -388,21 +371,6 @@ pub struct CardField {
     pub value: CardFieldValue,
 }
 
-impl CardField {
-    /// The wire form of this field. The snapshot carries the app-facing DTO, but
-    /// a scene is built from `protocol::Field`, so the preview path converts back.
-    pub fn to_protocol(&self) -> protocol::Field {
-        protocol::Field {
-            key: self.key.clone(),
-            value: match &self.value {
-                CardFieldValue::Text { value } => protocol::FieldValue::Text(value.clone()),
-                CardFieldValue::Integer { value } => protocol::FieldValue::Integer(*value),
-                CardFieldValue::Boolean { value } => protocol::FieldValue::Boolean(*value),
-            },
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CardDataSnapshot {
     pub card_id: String,
@@ -410,26 +378,10 @@ pub struct CardDataSnapshot {
 }
 
 impl CardDataSnapshot {
-    pub(crate) fn from_protocol(card_id: &str, fields: &[protocol::Field]) -> Self {
+    pub(crate) fn new(card_id: &str, fields: &[CardField]) -> Self {
         Self {
             card_id: card_id.to_owned(),
-            fields: fields
-                .iter()
-                .map(|field| CardField {
-                    key: field.key.clone(),
-                    value: match &field.value {
-                        protocol::FieldValue::Text(value) => CardFieldValue::Text {
-                            value: value.clone(),
-                        },
-                        protocol::FieldValue::Integer(value) => {
-                            CardFieldValue::Integer { value: *value }
-                        }
-                        protocol::FieldValue::Boolean(value) => {
-                            CardFieldValue::Boolean { value: *value }
-                        }
-                    },
-                })
-                .collect(),
+            fields: fields.to_vec(),
         }
     }
 }

@@ -17,7 +17,7 @@ static bool same_trigger(const interrupt_slot_t *slot,
                          const protocol_trigger_interrupt_t *trigger)
 {
     return slot->occupied && slot->token == trigger->token &&
-           strcmp(slot->widget_id, trigger->widget_id) == 0 &&
+           strcmp(slot->card_id, trigger->card_id) == 0 &&
            strcmp(slot->reason, trigger->reason) == 0;
 }
 
@@ -26,7 +26,7 @@ static void fill_slot(interrupt_slot_t *slot,
 {
     memset(slot, 0, sizeof(*slot));
     slot->occupied = true;
-    strcpy(slot->widget_id, trigger->widget_id);
+    strcpy(slot->card_id, trigger->card_id);
     slot->token = trigger->token;
     strcpy(slot->reason, trigger->reason);
 }
@@ -45,7 +45,7 @@ void interrupt_state_clear(interrupt_state_t *state)
     }
     memset(&state->active, 0, sizeof(state->active));
     memset(&state->pending, 0, sizeof(state->pending));
-    memset(state->saved_screen_id, 0, sizeof(state->saved_screen_id));
+    memset(state->saved_card_id, 0, sizeof(state->saved_card_id));
 }
 
 uint32_t interrupt_state_latest_token(const interrupt_state_t *state)
@@ -53,25 +53,25 @@ uint32_t interrupt_state_latest_token(const interrupt_state_t *state)
     return state == NULL ? 0U : state->latest_token;
 }
 
-bool interrupt_state_set_saved_screen(interrupt_state_t *state,
-                                      const char *screen_id)
+bool interrupt_state_set_saved_card(interrupt_state_t *state,
+                                      const char *card_id)
 {
-    if (state == NULL || !state->active.occupied || screen_id == NULL ||
-        !bounded_nonempty(screen_id,
-                          PROTOCOL_MAX_SCREEN_ID_LENGTH + 1U)) {
+    if (state == NULL || !state->active.occupied || card_id == NULL ||
+        !bounded_nonempty(card_id,
+                          PROTOCOL_MAX_CARD_ID_LENGTH + 1U)) {
         return false;
     }
-    strcpy(state->saved_screen_id, screen_id);
+    strcpy(state->saved_card_id, card_id);
     return true;
 }
 
 interrupt_trigger_result_t interrupt_state_trigger(
     interrupt_state_t *state,
     const protocol_trigger_interrupt_t *trigger,
-    const char *active_carousel_screen_id)
+    const char *active_carousel_card_id)
 {
     if (state == NULL || trigger == NULL ||
-        !bounded_nonempty(trigger->widget_id, sizeof(trigger->widget_id)) ||
+        !bounded_nonempty(trigger->card_id, sizeof(trigger->card_id)) ||
         trigger->token == 0U ||
         !bounded_text(trigger->reason, sizeof(trigger->reason))) {
         return INTERRUPT_TRIGGER_INVALID_ARGUMENT;
@@ -92,13 +92,13 @@ interrupt_trigger_result_t interrupt_state_trigger(
         return INTERRUPT_TRIGGER_BUSY;
     }
     if (!state->active.occupied) {
-        if (active_carousel_screen_id == NULL ||
-            !bounded_nonempty(active_carousel_screen_id,
-                              PROTOCOL_MAX_SCREEN_ID_LENGTH + 1U)) {
+        if (active_carousel_card_id == NULL ||
+            !bounded_nonempty(active_carousel_card_id,
+                              PROTOCOL_MAX_CARD_ID_LENGTH + 1U)) {
             return INTERRUPT_TRIGGER_INVALID_ARGUMENT;
         }
         fill_slot(&state->active, trigger);
-        strcpy(state->saved_screen_id, active_carousel_screen_id);
+        strcpy(state->saved_card_id, active_carousel_card_id);
         state->latest_token = trigger->token;
         return INTERRUPT_TRIGGER_ACTIVATED;
     }
@@ -114,17 +114,17 @@ bool interrupt_state_dismiss(interrupt_state_t *state,
         return false;
     }
     memset(dismissal, 0, sizeof(*dismissal));
-    strcpy(dismissal->widget_id, state->active.widget_id);
+    strcpy(dismissal->card_id, state->active.card_id);
     dismissal->token = state->active.token;
-    strcpy(dismissal->saved_screen_id, state->saved_screen_id);
+    strcpy(dismissal->saved_card_id, state->saved_card_id);
     if (state->pending.occupied) {
         state->active = state->pending;
         memset(&state->pending, 0, sizeof(state->pending));
         dismissal->promoted_pending = true;
     } else {
         memset(&state->active, 0, sizeof(state->active));
-        memset(state->saved_screen_id, 0, sizeof(state->saved_screen_id));
-        dismissal->restore_saved_screen = true;
+        memset(state->saved_card_id, 0, sizeof(state->saved_card_id));
+        dismissal->restore_saved_card = true;
     }
     return true;
 }

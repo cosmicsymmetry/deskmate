@@ -1,18 +1,16 @@
-//! The render case table: every firmware template x both mount orientations x
-//! a field matrix chosen to exercise each template's visually distinct
-//! states. `tests/golden.rs` pins the landscape outputs under `tests/golden/`;
-//! flipped rows remain available to the physical harness. These rows now drive
-//! the reference-only C oracle; the physical framebuffer diff drives both
-//! [`scene_cases`] and [`face_scene_cases`] because shipping firmware no
-//! longer has a template renderer. This lives under `src/` rather than
-//! `tests/` so integration tests and hardware examples can reach it as
+//! The render case table: every card face x both mount orientations x the
+//! data states chosen to exercise each face's visually distinct appearances.
+//! `tests/golden.rs` pins the landscape outputs under `tests/golden/`; flipped
+//! rows remain available to the physical harness. The physical framebuffer
+//! diff drives both [`scene_cases`] and [`face_scene_cases`], because a scene
+//! is the only thing shipping firmware draws. This lives under `src/` rather
+//! than `tests/` so integration tests and hardware examples can reach it as
 //! `lvgl_sim::cases`.
 //!
-//! Field names below are pulled from the firmware's own registry,
-//! `firmware/main/core/template_fields.c` (`template_fields_registry`) — do
-//! not rename a field here without checking that file first, since a wrong
-//! name silently falls back to the field's default and produces a
-//! meaningless golden.
+//! Every value a node binds comes from the closed vocabulary in
+//! `firmware/main/core/scene_binding.h` — `time:`, `date` and the `timer.*`
+//! family, and nothing else. Protocol v2 retired the `field.` namespace along
+//! with the device's per-card field bag.
 
 use std::sync::{Arc, LazyLock};
 
@@ -21,12 +19,9 @@ use protocol::AssetKind;
 
 /// One host-owned data state used by the scene/C-template parity gate.
 ///
-/// These fixtures live beside the simulator's other template field fixtures
-/// because their C half must be expressed as real `stale`/`error` fields and
-/// rendered through `template_view_show()`. They are intentionally not added
-/// to [`golden_cases`]: the byte-exact scene parity gate owns this 24-row
-/// matrix, while the existing row-list goldens already pin the C footer's
-/// standalone appearance.
+/// They are intentionally not added to [`golden_cases`]: the 24-row state
+/// matrix is owned by the face-scene rows, while the existing row-list
+/// goldens already pin the footer's standalone appearance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StateFooterFixture {
     pub slug: &'static str,
@@ -243,7 +238,6 @@ pub fn face_scene_cases() -> Vec<(String, SceneRenderRequest)> {
                     utc_offset_minutes,
                     now_unix_seconds,
                     timer,
-                    fields: Vec::new(),
                     orientation,
                 },
             ));
@@ -399,7 +393,6 @@ pub fn asset_font_scene_cases() -> Vec<(String, SceneRenderRequest)> {
             utc_offset_minutes: 0,
             now_unix_seconds: SCENE_NOW,
             timer: None,
-            fields: Vec::new(),
             orientation: SimOrientation::Landscape,
         },
     )]
@@ -436,7 +429,6 @@ fn scene_case(
     nodes: &[SceneNode],
     assets: &[SceneAsset],
     timer: Option<SceneTimer>,
-    fields: &[(String, String)],
 ) {
     for (orientation_slug, orientation) in orientations() {
         cases.push((
@@ -451,7 +443,6 @@ fn scene_case(
                 utc_offset_minutes: SCENE_OFFSET,
                 now_unix_seconds: SCENE_NOW,
                 timer,
-                fields: fields.to_vec(),
                 orientation,
             },
         ));
@@ -634,8 +625,8 @@ fn scene_line_nodes() -> Vec<SceneNode> {
 }
 
 /// `text`: every tier the node can name, every alignment, both long modes,
-/// a `time:` binding, a `field.` binding that resolves and one that does not
-/// — each on a drawn baseline rule.
+/// a `time:` binding, a `date` binding that resolves and a `timer.status` one
+/// that cannot (this case supplies no timer) — each on a drawn baseline rule.
 ///
 /// The `HERO`/`DISPLAY` faces are digits-only subsets (spec §5.2), so the
 /// only string set in one here is a clock reading.
@@ -712,11 +703,12 @@ fn scene_text_nodes() -> Vec<SceneNode> {
             font: SceneFont::Baked(SceneFontTier::Caption),
             color: GREEN,
             running_color: None,
-            value: binding("field.status"),
+            value: binding("date"),
             ellipsize: false,
         }),
-        // No upstream source has reported `absent`, so this renders the device's
-        // "--" placeholder rather than nothing and rather than failing.
+        // This case pushes no timer, so the binding has nothing to resolve
+        // against and renders the device's "--" placeholder rather than
+        // nothing and rather than failing.
         SceneNode::Text(SceneText {
             x: 288,
             baseline_y: 314,
@@ -725,7 +717,7 @@ fn scene_text_nodes() -> Vec<SceneNode> {
             font: SceneFont::Baked(SceneFontTier::Caption),
             color: PINK,
             running_color: None,
-            value: binding("field.absent"),
+            value: binding("timer.status"),
             ellipsize: false,
         }),
     ]
@@ -976,7 +968,7 @@ fn scene_label_nodes() -> Vec<SceneNode> {
             y: 216,
             horizontal_anchor: SceneLabelAnchor::Left,
             font: SceneFont::Baked(SceneFontTier::Body),
-            value: binding("field.status"),
+            value: binding("date"),
             ink: 0x000f_0726,
             fill: 0x008b_6cff,
             fill_opacity: u8::MAX,
@@ -1101,7 +1093,7 @@ fn scene_rot_rect_nodes() -> Vec<SceneNode> {
 /// `PushScene`, the same message shipping firmware renders.
 pub fn scene_cases() -> Vec<(String, SceneRenderRequest)> {
     let mut cases = Vec::new();
-    scene_case(&mut cases, "rect", &scene_rect_nodes(), &[], None, &[]);
+    scene_case(&mut cases, "rect", &scene_rect_nodes(), &[], None);
     scene_case(
         &mut cases,
         "arc",
@@ -1112,24 +1104,15 @@ pub fn scene_cases() -> Vec<(String, SceneRenderRequest)> {
             remaining_ms: 35_000,
             running: false,
         }),
-        &[],
     );
-    scene_case(&mut cases, "line", &scene_line_nodes(), &[], None, &[]);
-    scene_case(
-        &mut cases,
-        "text",
-        &scene_text_nodes(),
-        &[],
-        None,
-        &[("status".to_string(), "SYNCED".to_string())],
-    );
+    scene_case(&mut cases, "line", &scene_line_nodes(), &[], None);
+    scene_case(&mut cases, "text", &scene_text_nodes(), &[], None);
     scene_case(
         &mut cases,
         "image",
         &scene_image_nodes(),
         &[image_asset()],
         None,
-        &[],
     );
     scene_case(
         &mut cases,
@@ -1137,25 +1120,10 @@ pub fn scene_cases() -> Vec<(String, SceneRenderRequest)> {
         &scene_glyph_nodes(),
         &[font_asset()],
         None,
-        &[],
     );
-    scene_case(&mut cases, "scale", &scene_scale_nodes(), &[], None, &[]);
-    scene_case(
-        &mut cases,
-        "label",
-        &scene_label_nodes(),
-        &[],
-        None,
-        &[("status".to_string(), "READY".to_string())],
-    );
-    scene_case(
-        &mut cases,
-        "rot-rect",
-        &scene_rot_rect_nodes(),
-        &[],
-        None,
-        &[],
-    );
+    scene_case(&mut cases, "scale", &scene_scale_nodes(), &[], None);
+    scene_case(&mut cases, "label", &scene_label_nodes(), &[], None);
+    scene_case(&mut cases, "rot-rect", &scene_rot_rect_nodes(), &[], None);
     cases
 }
 
@@ -1221,7 +1189,6 @@ pub fn date_truncation_scene_cases() -> Vec<(String, SceneRenderRequest)> {
                     utc_offset_minutes: DATE_OVERFLOW_UTC_OFFSET_MINUTES,
                     now_unix_seconds: DATE_OVERFLOW_NOW_UNIX_SECONDS,
                     timer: None,
-                    fields: Vec::new(),
                     orientation,
                 },
             )

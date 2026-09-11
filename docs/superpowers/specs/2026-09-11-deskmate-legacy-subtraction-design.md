@@ -119,22 +119,38 @@ Repointed, not removed: `tests/golden.rs` renders the 32 face PNGs from
 (no title chip; tabular digit advance) and move to the scene path intact.
 
 **The repin is its own proof.** Parity holds today at zero differing pixels with
-no tolerance, so regenerating the goldens from the scene path must reproduce all
-32 PNGs byte-identically. A single changed pixel means the parity gate was
-lying, and the deletion stops until that is understood.
+no tolerance, so regenerating the goldens from the scene path must reproduce
+them byte-identically apart from cases the parity gate already excludes. Any
+other changed pixel means the gate was lying, and the deletion stops until that
+is understood. See "Proven, not predicted" below for the measured result.
 
 Coverage is unchanged: the goldens still pin every pixel of every face. What is
 lost is the assertion "this matches code we deleted". The hardware matrix is
 unaffected — `framebuffer_diff` already drives `SceneRenderRequest` only.
 
-**Two things get better as a side effect**, and neither is the goal:
+**One thing gets better as a side effect**, and it is not the goal: the preview
+shows what the panel shows *by construction* rather than by a gate.
 
-1. The preview shows what the panel shows *by construction* rather than by a
-   gate.
-2. Picture cards get a preview. Today `commands.rs:854` returns
-   `PICTURE_PREVIEW_IS_PUSH_ONLY` and draws nothing; `build_card_scene` already
-   renders a picture card's face from its stored frame, and
-   `waiting_for_first_picture_scene` already handles the empty case.
+**Picture cards are NOT part of that**, and an earlier draft of this spec was
+wrong to claim they were. `build_card_scene` can draw a picture face, but only
+from an `ImageSourceHost`, and the Mac app has none — `lib.rs:445` starts the
+runtime as `start_serial(config, None)`, and the only implementation is
+`ServerImageSourceHost`. Frames live on the server because that is where
+producers push them. So a picture card's preview stays
+`PICTURE_PREVIEW_IS_PUSH_ONLY` and draws nothing. Rendering one means fetching
+the frame from the server in networked tier, which is a feature, not a
+side effect, and is out of scope here.
+
+**Proven, not predicted.** Repointing `tests/golden.rs` at `face_scene_cases()`
+with `render_scene_png` was run before this spec was finalised: 28 of the 29
+landscape goldens regenerate byte-identically, and the single mismatch is
+`progress-ring--running-mid-countdown--landscape`, whose divergence
+`face_scene_cases.rs:27-31` already documents — the oracle advances from LVGL's
+fake-tick anchor while a scene consumes the supplied snapshot. That golden is
+re-blessed with the reason recorded; the scene value is the more deterministic
+of the two. Its hardware exclusion is unaffected: the device still ticks a
+running timer through `scene_view_tick_bindings`, so the race the exclusion
+names is still real.
 
 Non-goal: changing what the preview *decides*. `preview_orientation` stays —
 the preview renders upright at both mountings, on the owner's explicit

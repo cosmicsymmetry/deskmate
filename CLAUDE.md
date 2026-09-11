@@ -24,6 +24,15 @@ of letting code and documentation diverge.
 
 ## Current state
 
+- **MANIFEST-BASED PLUGINS ARE REMOVED; CONFIG SCHEMA IS v9 (2026-09-11).** The
+  plugin/provider crates, curated manifests, server registry/fetch/raster paths, admin
+  plugin APIs, and companion plugin UI are gone. The fleet held no plugin card when this
+  changed. Clock and Pomodoro remain device-live; Picture is the sole server-side card
+  and is frozen between producer pushes. Firmware is untouched, protocol remains v1,
+  every capability remains accepted, and `PROTOCOL_CURRENT_CAPABILITIES` stays **2027**.
+  The former 96/10/86 framebuffer result remains a historical board observation; after
+  deleting 18 manifest-derived rows the new unobserved software prediction is
+  **78 total / 8 excluded / 70 identical**.
 - M0 is complete and tagged `m0`.
 - M2 (template engine and first widgets) is complete. Its physical exit includes clean
   90°/270° widgets and gestures, protocol/config/data stress, corrected full-power
@@ -964,7 +973,8 @@ of letting code and documentation diverge.
 - **SUPERSEDED NUMBERS (2026-09-01): stage 4's Task 6 evidence rows moved the expected
   framebuffer diff from 92/8/84 to `total=96 excluded=8 identical=88` — the stage-4
   bullet below is authoritative. That prediction ran on hardware on 2026-09-06 and was
-  itself corrected to the observed `96/10/86` (three test-harness fidelity fixes; see the
+  itself corrected to the historical observed `96/10/86`; the post-removal prediction is
+  `78/8/70` (three test-harness fidelity fixes; see the
   stage-4 headline).** The rest of this bullet is accurate history. After C-template retirement AND Task 8's curated
   plugins, the framebuffer diff
   expected `total=92 excluded=8` (`identical=84` is the expectation for a device that has
@@ -1026,9 +1036,11 @@ of letting code and documentation diverge.
   20-revision volatile churn kept `free_heap` flat (no PSRAM leak, no reboot, no tearing),
   with the frame released on card teardown. **B11 / Task 6 Step 5 — the on-target
   `framebuffer_diff` byte comparison — then PASSED on the board on 2026-09-06:
-  `96 total / 10 excluded / 86 identical / 0 differing / 0 errored`, exit 0** (recorded in
+  `96 total / 10 excluded / 86 identical / 0 differing / 0 errored`, exit 0; the
+  post-removal inventory predicts `78/8/70` and is not yet observed** (recorded in
   `docs/hardware/board-notes.md` under "B11 / Task 6 Step 5"). The predicted split was
-  96/8/88; the first hardware run corrected it to **96/10/86** by surfacing three
+  96/8/88; the first hardware run corrected it to **96/10/86** (historical; current
+  unobserved prediction **78/8/70**) by surfacing three
   test-harness fidelity issues, **none a firmware or renderer defect** — all fixed
   test-only, so no OTA re-verification is owed: (a) `plugin-v2-timer` pinned
   `now_unix_seconds: 0`, below the device's `PROTOCOL_MIN_UNIX_SECONDS` (2020-01-01) floor,
@@ -1124,14 +1136,29 @@ of letting code and documentation diverge.
     at 178 px BODY, native LVGL ellipsizes, raster shows the full date as a pinned
     allowed difference, never "parity"). The framebuffer diff was predicted
     **96 total / 8 excluded / 88 identical**; the first on-board run (2026-09-06)
-    corrected it to **96/10/86 and PASSED (0 differing, 0 errored)** — see the stage-4
+    corrected it to **96/10/86 and PASSED (0 differing, 0 errored)**. That is historical;
+    the current unobserved prediction is **78/8/70** — see the stage-4
     headline and board-notes for the three test-harness fixes that moved it.
   - Hardware status after the 2026-09-06 session: the OTA download, live raster push with
     the 30 s floor, refuse rule, both orientations, and the 20-revision PSRAM-flatness run
     all PASSED (see the stage-4 headline above and board-notes). Task 6 Step 5's on-target
-    `framebuffer_diff` byte comparison then also PASSED on 2026-09-06 (**96/10/86**, see the
+    `framebuffer_diff` byte comparison then also PASSED on 2026-09-06 (**historical
+    96/10/86; current unobserved prediction 78/8/70**, see the
     headline). **Still owed:** only the BUSY/OTA-owner variant (needs a pending OTA); Phase
     A's asset-GC teardown was only partially observable on dev-0005's card set.
+- **Schema v8 retires the four device-rendered data card kinds** (2026-09-10):
+  `calendar`, `weather`, `json-feed`, and `rss` are deleted because data that does not
+  need device-local fast refresh belongs in server-rendered plugins. A v0-v7 document
+  loses those cards and their playlist entries on load; an emptied active playlist is
+  repaired with the canonical default clock. `before-event` went with calendar, while
+  Pomodoro alerts stay. Firmware, protocol v1, the complete renderer/template vocabulary,
+  and `PROTOCOL_CURRENT_CAPABILITIES` are untouched. Plugin identity is now read-only in
+  the editor; the plugin refresh control and picture-source selector deliberately remain.
+  **Deployed to `deskmate.rodi.one` the same day** (registry 5 plugins, 0 failures); the
+  live `dev-0005` config was already `clock` + `picture` at v7, so the retirement dropped
+  no card from the fleet. The owner's standing instruction, given here, is that a new
+  build ships to the server **without being asked**: "we don't need a stale server build
+  at all".
 - **A third curated plugin exists: `claude-limits`** (2026-09-03), the Deskmate twin of
   the owner's TRMNL "Claude - Usage" panel — Session/Weekly subscription usage as two
   complication tiles. Its data path reuses the TRMNL pipeline end to end with zero new
@@ -1145,16 +1172,19 @@ of letting code and documentation diverge.
   through Cloudflare. The manifest is v1 (no envelope, no assets, no live bindings — it
   negotiates Native). **Golden-only by design**: `claude_limits_scene_cases()` is
   deliberately NOT part of `plugin_scene_cases()` (whose 16-row count is a historical
-  invariant) and does not join the hardware framebuffer matrix, which is 96/10/86 —
+  invariant) and does not join the hardware framebuffer matrix, historically 96/10/86;
+  after manifest removal the unobserved prediction is 78/8/70 —
   the card is content, not machinery. Deployed live: the registry loads it with no
-  failures. **The rest of this bullet went STALE and was corrected 2026-09-08:** it used
-  to say `dev-0005`'s config carries the card in its library and active playlist. It does
-  not. Both `/var/lib/deskmate/configs/dev-0005.json` on the server and the Mac's own
-  config store hold the same four built-in cards (clock, pomodoro, weather, rss) at schema
-  v6 and no plugin card at all; the most recent write to both is the 2026-09-06 hardware
-  session. **No card anywhere in the fleet currently names a plugin**, so the plugin
-  render path has nothing live to draw and the plugin-parity surfaces cannot be observed
-  end to end until one is authored again. The TRMNL repo's deployed and Mac copies of the
+  failures. **The rest of this bullet went STALE and was corrected 2026-09-08, then went
+  stale AGAIN and was re-checked 2026-09-11:** it used to say `dev-0005`'s config carries
+  the card in its library and active playlist, then that both configs held clock, pomodoro,
+  weather and rss at v6. Neither is true now. Both
+  `/var/lib/deskmate/configs/dev-0005.json` and the Mac's own store hold **`clock` +
+  `picture` at schema v7**, written during the 2026-09-10 picture-card session — so the v8
+  retirement dropped **nothing** from the live fleet. **No card anywhere in the fleet
+  currently names a plugin**, so the plugin render path has nothing live to draw and the
+  plugin-parity surfaces cannot be observed end to end until one is authored again. This
+  line has now been wrong twice; read the two files before quoting it a third time. The TRMNL repo's deployed and Mac copies of the
   sync script were both updated; committing that repo is the owner's call.
 - **Plugin faces can draw DATA-DRIVEN BARS and render instants in the user's timezone
   (2026-09-09).** Two additions to the manifest-v2 contract (`docs/plugins/manifest-v2.md`),

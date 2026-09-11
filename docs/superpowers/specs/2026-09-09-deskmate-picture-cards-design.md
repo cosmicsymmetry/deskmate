@@ -342,7 +342,8 @@ the decoded blob.
 `SceneImage`, and `scene-image` is already in the on-target matrix at both orientations
 since stage 3b Task 8. New rows would be near-duplicate coverage and would disturb a
 hardware-pinned number for nothing. Host tests assert instead that the scene built is the
-expected single-node scene. **The 96/10/86 framebuffer split stays as recorded.**
+expected single-node scene. **The 96/10/86 split remains the 2026-09-06 observation;
+after manifest removal the next-run software prediction is 78/8/70.**
 
 **Workspace gates** per `CLAUDE.md`: `cargo fmt --all --check`, `cargo clippy --workspace
 --all-targets -- -D warnings`, `cargo test --workspace --all-targets`, `cargo test

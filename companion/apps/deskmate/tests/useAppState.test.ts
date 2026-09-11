@@ -1,10 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import type { AppSnapshot, IpcError, ServerCardState } from "../src/lib/types";
+import type { AppSnapshot } from "../src/lib/types";
 import { ipcContractFixtures } from "../src/lib/types.contract";
 import {
   type AppStateSubscriptionOptions,
   startAppStateSubscription,
-  startServerCardStatePoll,
 } from "../src/lib/useAppState";
 
 class FakeEventTarget {
@@ -40,8 +39,8 @@ async function flushPromises() {
 }
 
 describe("startAppStateSubscription", () => {
-  test("the subscription fixture carries schema-v7 playlists", () => {
-    expect(snapshot.config.schema_version).toBe(7);
+  test("the subscription fixture carries schema-v9 playlists", () => {
+    expect(snapshot.config.schema_version).toBe(9);
     expect(snapshot.config.playlists.map((playlist) => playlist.id)).toEqual(["workday", "manual"]);
     expect(snapshot.config.active_playlist_id).toBe("workday");
   });
@@ -126,101 +125,5 @@ describe("startAppStateSubscription", () => {
     expect(fetchCalls).toBe(2);
     expect(unlistenCalls).toBe(1);
     expect(errors).toEqual([]);
-  });
-});
-
-describe("startServerCardStatePoll", () => {
-  /** A scheduler whose `clear` really stops the handler, so "after stop" means it. */
-  function fakeScheduler() {
-    const handlers = new Map<number, () => void>();
-    let nextHandle = 0;
-    let cleared = 0;
-    return {
-      scheduler: {
-        set: (handler: () => void) => {
-          nextHandle += 1;
-          handlers.set(nextHandle, handler);
-          return nextHandle;
-        },
-        clear: (handle: number) => {
-          cleared += 1;
-          handlers.delete(handle);
-        },
-      },
-      tick: () => {
-        for (const handler of [...handlers.values()]) {
-          handler();
-        }
-      },
-      cleared: () => cleared,
-    };
-  }
-
-  test("polls on start, on focus and on each tick, but never while hidden", async () => {
-    const focusTarget = new FakeEventTarget();
-    const visibilityTarget = new FakeEventTarget();
-    const { scheduler, tick, cleared } = fakeScheduler();
-    const accepted: ServerCardState[][] = [];
-    let fetches = 0;
-
-    const stop = startServerCardStatePoll({
-      fetchCardState: async () => {
-        fetches += 1;
-        return [];
-      },
-      onCardState: (state) => accepted.push(state),
-      onError: () => {},
-      focusTarget,
-      visibilityTarget,
-      scheduler,
-    });
-    await flushPromises();
-    expect(fetches).toBe(1);
-    expect(accepted).toHaveLength(1);
-
-    focusTarget.dispatch("focus");
-    tick();
-    await flushPromises();
-    expect(fetches).toBe(3);
-
-    visibilityTarget.visibilityState = "hidden";
-    tick();
-    focusTarget.dispatch("focus");
-    await flushPromises();
-    expect(fetches).toBe(3);
-
-    visibilityTarget.visibilityState = "visible";
-    visibilityTarget.dispatch("visibilitychange");
-    await flushPromises();
-    expect(fetches).toBe(4);
-
-    stop();
-    tick();
-    focusTarget.dispatch("focus");
-    await flushPromises();
-    expect(fetches).toBe(4);
-    expect(cleared()).toBe(1);
-    expect(focusTarget.count("focus")).toBe(0);
-    expect(visibilityTarget.count("visibilitychange")).toBe(0);
-  });
-
-  test("a failed poll is reported as a typed error and never as a card state", async () => {
-    const { scheduler } = fakeScheduler();
-    const errors: IpcError[] = [];
-    const stop = startServerCardStatePoll({
-      fetchCardState: async () => {
-        throw { category: "runtime-unavailable", message: "no runtime for this device" };
-      },
-      onCardState: () => {
-        throw new Error("a failed poll must not publish a card state");
-      },
-      onError: (error) => errors.push(error),
-      scheduler,
-    });
-    await flushPromises();
-    expect(errors).toEqual([
-      { category: "runtime-unavailable", message: "no runtime for this device" },
-    ]);
-    stop();
   });
 });

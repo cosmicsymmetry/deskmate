@@ -2,7 +2,7 @@
 
 /* The closed weather icon vocabulary. The host may send any string; anything
  * outside this set renders WEATHER_ICON_UNKNOWN. Keep this list in sync with
- * the weather provider in companion/crates/providers/src/weather.rs. */
+ * the retired weather card's former host data path. */
 typedef enum {
     WEATHER_ICON_UNKNOWN = 0,
     WEATHER_ICON_SUN,

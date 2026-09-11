@@ -4,10 +4,8 @@ import {
   activePlaylist,
   addCard,
   addEntry,
-  cardKindName,
   cardLabel,
   cardMoveFromKey,
-  cardName,
   cardsContainerIssues,
   cardsOutsideLoop,
   cardTitle,
@@ -28,7 +26,6 @@ import {
   moveEntry,
   nextLoopCardId,
   numberValue,
-  pluginCardFlag,
   removeCard,
   removeEntry,
   setEntryDwell,
@@ -37,11 +34,8 @@ import {
   unclaimedIssues,
 } from "../src/lib/configDraft";
 import type {
-  AddableCardKind,
   AppConfig,
   CardSettings,
-  DeviceTier,
-  PluginCatalog,
   ValidationIssue,
 } from "../src/lib/types";
 import { ipcContractFixtures } from "../src/lib/types.contract";
@@ -90,52 +84,6 @@ function cardsConfig(ids: string[]): AppConfig {
   };
 }
 
-function pluginCard(): CardSettings {
-  return {
-    kind: "plugin",
-    id: "plugin-card",
-    title: "Office air",
-    plugin_id: "com.example.air-quality",
-    tap_action: { kind: "none" },
-    refresh: { kind: "interval", minutes: 15 },
-    alert: { kind: "none" },
-  };
-}
-
-function pluginCatalog(displayName: string | null = "Air quality"): PluginCatalog {
-  return {
-    plugins: [
-      {
-        id: "com.example.air-quality",
-        name: "aqi",
-        version: "1.0.0",
-        node_count: 7,
-        assets: [],
-        display_name: displayName,
-        description: "EPA index for a location",
-        manifest_version: 2,
-        template: "display-list",
-        refresh_minutes: 15,
-      },
-    ],
-    load_failures: [],
-  };
-}
-
-test("a plugin card is named by its display name, and falls back to its id twice over", () => {
-  const card = pluginCard();
-  expect(cardLabel(card, pluginCatalog())).toBe("Air quality");
-  // Fallback one: the catalog knows the plugin but the manifest declared no name.
-  expect(cardLabel(card, pluginCatalog(null))).toBe("com.example.air-quality");
-  // Fallback two: no catalog at all (local tier, or the server was unreachable).
-  expect(cardLabel(card, null)).toBe("com.example.air-quality");
-  expect(cardLabel(card)).toBe("com.example.air-quality");
-  // A catalog that does not carry this id cannot rename it either.
-  expect(cardLabel({ ...card, plugin_id: "com.example.gone" }, pluginCatalog())).toBe(
-    "com.example.gone",
-  );
-});
-
 test("a picture card is called Picture, with the owner's words beside it", () => {
   const card: CardSettings = {
     kind: "picture",
@@ -146,51 +94,8 @@ test("a picture card is called Picture, with the owner's words beside it", () =>
     refresh: { kind: "manual" },
     alert: { kind: "none" },
   };
-  expect(cardLabel(card, null)).toBe("Picture");
+  expect(cardLabel(card)).toBe("Picture");
   expect(cardTitle(card)).toBe("Limits");
-});
-
-test("no card kind is called “Plugin” on any surface", () => {
-  const kinds: AddableCardKind[] = ["clock", "pomodoro", "calendar", "weather", "json-feed", "rss"];
-  expect(kinds.map(cardKindName)).not.toContain("Plugin");
-  expect(cardName(pluginCard())).toBe("Office air");
-  expect(cardName({ ...pluginCard(), title: "" })).toBe("com.example.air-quality");
-});
-
-test("a bare plugin id always carries the word that explains it", () => {
-  const card = pluginCard();
-  const missing = { ...card, plugin_id: "com.example.gone" };
-  const networked: DeviceTier = "networked";
-  const local: DeviceTier = "local";
-
-  // Networked, catalog loaded, plugin present: the name is the whole story.
-  expect(pluginCardFlag(card, pluginCatalog(), networked)).toBeNull();
-  // Networked, catalog loaded, plugin absent: the server does not have it.
-  expect(pluginCardFlag(missing, pluginCatalog(), networked)).toBe("not on the server");
-  // Local tier: there is no server to render it, whatever a stale catalog says.
-  expect(pluginCardFlag(card, pluginCatalog(), local)).toBe("needs the server");
-  expect(pluginCardFlag(missing, null, local)).toBe("needs the server");
-  // Networked with no catalog yet: unknown is not the same as absent, so no word.
-  expect(pluginCardFlag(missing, null, networked)).toBeNull();
-  // Ownership not yet resolved: also unknown, also silent.
-  expect(pluginCardFlag(missing, null, null)).toBeNull();
-  // Built-in cards never carry it.
-  expect(pluginCardFlag(initialConfig().cards[0], null, local)).toBeNull();
-});
-
-test("a picture card says when it needs the server", () => {
-  const card: CardSettings = {
-    kind: "picture",
-    id: "shot",
-    title: "Limits",
-    source_id: "limits",
-    tap_action: { kind: "none" },
-    refresh: { kind: "manual" },
-    alert: { kind: "none" },
-  };
-
-  expect(pluginCardFlag(card, null, "local")).toBe("needs the server");
-  expect(pluginCardFlag(card, null, "networked")).toBeNull();
 });
 
 describe("configuration draft helpers", () => {
@@ -199,24 +104,15 @@ describe("configuration draft helpers", () => {
     expect(withSecondClock.cardId).toBe("clock-2");
 
     const withPomodoro = addCard(withSecondClock.config, "pomodoro");
-    const complete = addCard(withPomodoro.config, "calendar");
+    const complete = addCard(withPomodoro.config, "clock");
+    expect(complete.cardId).toBe("clock-3");
     expect(complete.config.cards.map((card) => card.kind)).toEqual([
       "clock",
       "clock",
       "pomodoro",
-      "calendar",
+      "clock",
     ]);
     expect(new Set(complete.config.cards.map((card) => card.id)).size).toBe(4);
-  });
-
-  test("copies plugin cards without inventing a built-in template", () => {
-    const plugin = pluginCard();
-    const copied = copyConfig({ ...initialConfig(), cards: [plugin] });
-
-    expect(copied.cards[0]).toEqual(plugin);
-    expect(copied.cards[0]).not.toBe(plugin);
-    expect(copied.cards[0]).not.toHaveProperty("template");
-    expect(cardLabel(copied.cards[0])).toBe("com.example.air-quality");
   });
 
   test("first-run guidance follows add a card, then save without demanding a card kind", () => {
@@ -227,17 +123,17 @@ describe("configuration draft helpers", () => {
     };
     expect(firstRunSteps(empty, false).map((step) => step.done)).toEqual([false, false]);
 
-    const withWeather = addCard(empty, "weather").config;
-    expect(firstRunSteps(withWeather, false).map((step) => step.done)).toEqual([true, false]);
-    expect(firstRunSteps(withWeather, true).every((step) => step.done)).toBe(true);
+    const withPomodoro = addCard(empty, "pomodoro").config;
+    expect(firstRunSteps(withPomodoro, false).map((step) => step.done)).toEqual([true, false]);
+    expect(firstRunSteps(withPomodoro, true).every((step) => step.done)).toBe(true);
   });
 
   test("adding a card appends it to the library and enrols it at the end of the active loop", () => {
-    const { config, cardId } = addCard(initialConfig(), "weather");
-    expect(config.cards.map((card) => card.kind)).toContain("weather");
-    expect(cardId).toBe("weather");
+    const { config, cardId } = addCard(initialConfig(), "pomodoro");
+    expect(config.cards.map((card) => card.kind)).toContain("pomodoro");
+    expect(cardId).toBe("pomodoro");
     expect(config.playlists[0].entries.at(-1)).toEqual({
-      card_id: "weather",
+      card_id: "pomodoro",
       dwell_seconds: null,
     });
     expect("screens" in config).toBe(false);
@@ -245,7 +141,7 @@ describe("configuration draft helpers", () => {
 
   test("adding a card is gated by both the card and active-loop entry limits", () => {
     const cardFull = cardsConfig(["a", "b", "c", "d", "e", "f", "g", "h"]);
-    expect(addCard(cardFull, "weather")).toEqual({ config: cardFull, cardId: null });
+    expect(addCard(cardFull, "clock")).toEqual({ config: cardFull, cardId: null });
 
     const entryFullBase = cardsConfig(["a", "b", "c", "d", "e", "f", "g"]);
     const entryFull: AppConfig = {
@@ -260,69 +156,7 @@ describe("configuration draft helpers", () => {
         },
       ],
     };
-    expect(addCard(entryFull, "weather")).toEqual({ config: entryFull, cardId: null });
-  });
-
-  test("a plugin card is added by the same call, with the same two caps, as any other", () => {
-    const { config, cardId } = addCard(initialConfig(), {
-      kind: "plugin",
-      pluginId: "com.example.air-quality",
-      refreshMinutes: 15,
-    });
-    expect(cardId).toBe("plugin");
-    const added = config.cards.at(-1);
-    if (added?.kind !== "plugin") {
-      throw new Error("addCard did not append the plugin card");
-    }
-    expect(added).toEqual({
-      kind: "plugin",
-      id: "plugin",
-      title: "",
-      plugin_id: "com.example.air-quality",
-      tap_action: { kind: "none" },
-      refresh: { kind: "interval", minutes: 15 },
-      alert: { kind: "none" },
-    });
-    // Enrolled in the loop by the same code path as a built-in add.
-    expect(config.playlists[0].entries.at(-1)?.card_id).toBe("plugin");
-
-    // The card id is minted, never derived: a 64-byte plugin id cannot fit the
-    // 32-byte card-id bound, and a second card of the same plugin must not collide.
-    const second = addCard(config, {
-      kind: "plugin",
-      pluginId: "com.example.air-quality",
-      refreshMinutes: 15,
-    });
-    expect(second.cardId).toBe("plugin-2");
-
-    const cardFull: AppConfig = {
-      ...initialConfig(),
-      cards: Array.from({ length: 8 }, (_, index) => ({
-        ...initialConfig().cards[0],
-        id: `c${index}`,
-      })),
-    };
-    expect(addCard(cardFull, { kind: "plugin", pluginId: "aqi", refreshMinutes: 15 })).toEqual({
-      config: cardFull,
-      cardId: null,
-    });
-
-    const entryFull: AppConfig = {
-      ...initialConfig(),
-      playlists: [
-        {
-          ...initialConfig().playlists[0],
-          entries: Array.from({ length: 8 }, (_, index) => ({
-            card_id: `c${index}`,
-            dwell_seconds: null,
-          })),
-        },
-      ],
-    };
-    expect(addCard(entryFull, { kind: "plugin", pluginId: "aqi", refreshMinutes: 15 })).toEqual({
-      config: entryFull,
-      cardId: null,
-    });
+    expect(addCard(entryFull, "clock")).toEqual({ config: entryFull, cardId: null });
   });
 
   test("adding a picture card enrols it in the loop", () => {
@@ -366,7 +200,7 @@ describe("configuration draft helpers", () => {
   });
 
   test("adding every kind produces a reachable, addable card", () => {
-    const kinds = ["clock", "pomodoro", "calendar", "weather", "json-feed", "rss"] as const;
+    const kinds = ["clock", "pomodoro"] as const;
     let config: AppConfig = { ...initialConfig(), cards: [] };
     for (const kind of kinds) {
       config = addCard(config, kind).config;
@@ -374,35 +208,17 @@ describe("configuration draft helpers", () => {
     expect(config.cards.map((card) => card.kind)).toEqual([...kinds]);
   });
 
-  // Regression test for the final-review finding: `addCard` defaulted weather and
-  // json-feed to `big-number-label`, a template `validate()` accepted but
-  // `wire_config()` (in `config.rs`) could not yet lower, so a freshly-added card of
-  // either kind validated cleanly yet always failed to save. `wire_config()` now lowers
-  // all six templates (see `companion/crates/app-core/src/config.rs`), so weather and
-  // json-feed default to the templates their field composition was actually designed
-  // for — `icon-badge-text` and `big-number-label` — instead of the `row-list`
-  // placeholder that rendered a title over empty rows. See
-  // `companion/crates/app-core/tests/config.rs`'s
-  // `every_freshly_added_card_kind_validates_and_compiles` for the Rust-side proof that
-  // every one of these defaults both validates AND compiles.
   test("every freshly-added card kind defaults to a template the wire actually implements", () => {
     const compilableTemplates = new Set([
       "digital-clock",
       "analog-clock",
       "progress-ring",
-      "row-list",
-      "big-number-label",
-      "icon-badge-text",
     ]);
     const expectedTemplateKind: Record<string, string> = {
       clock: "digital-clock",
       pomodoro: "progress-ring",
-      calendar: "row-list",
-      weather: "icon-badge-text",
-      "json-feed": "big-number-label",
-      rss: "row-list",
     };
-    const kinds = ["clock", "pomodoro", "calendar", "weather", "json-feed", "rss"] as const;
+    const kinds = ["clock", "pomodoro"] as const;
     let config: AppConfig = { ...initialConfig(), cards: [] };
     for (const kind of kinds) {
       const { config: next, cardId } = addCard(config, kind);
@@ -435,21 +251,21 @@ describe("configuration draft helpers", () => {
   });
 
   test("resolves active-loop entries without dropping missing references, then finds active-loop outsiders", () => {
-    const withCards = addCard(addCard(initialConfig(), "pomodoro").config, "weather").config;
+    const withCards = addCard(addCard(initialConfig(), "pomodoro").config, "clock").config;
     const config = {
       ...withCards,
       playlists: [
         {
           ...withCards.playlists[0],
           entries: [
-            { card_id: "weather", dwell_seconds: 15 },
+            { card_id: "clock-2", dwell_seconds: 15 },
             { card_id: "missing-card", dwell_seconds: null },
             { card_id: "clock", dwell_seconds: null },
           ],
         },
       ],
     };
-    expect(libraryCards(config).map((card) => card.id)).toEqual(["clock", "pomodoro", "weather"]);
+    expect(libraryCards(config).map((card) => card.id)).toEqual(["clock", "pomodoro", "clock-2"]);
     expect(loopEntries(config)).toEqual([
       { index: 0, entry: config.playlists[0].entries[0], card: config.cards[2] },
       { index: 1, entry: config.playlists[0].entries[1], card: null },
@@ -488,20 +304,20 @@ describe("configuration draft helpers", () => {
 
   test("moves playlist entries with clamped targets and index-safe source boundaries", () => {
     let config = addCard(initialConfig(), "pomodoro").config;
-    config = addCard(config, "weather").config;
-    config = addEntry(addEntry(config, "workday", "pomodoro"), "workday", "weather");
+    config = addCard(config, "clock").config;
+    config = addEntry(addEntry(config, "workday", "pomodoro"), "workday", "clock-2");
 
     const toEnd = moveEntry(config, "workday", 0, 99);
     expect(toEnd.playlists[0].entries.map((entry) => entry.card_id)).toEqual([
       "pomodoro",
-      "weather",
+      "clock-2",
       "clock",
     ]);
     const toStart = moveEntry(toEnd, "workday", 2, -99);
     expect(toStart.playlists[0].entries.map((entry) => entry.card_id)).toEqual([
       "clock",
       "pomodoro",
-      "weather",
+      "clock-2",
     ]);
     expect(moveEntry(config, "workday", -1, 1)).toBe(config);
     expect(moveEntry(config, "workday", 3, 1)).toBe(config);
@@ -589,13 +405,13 @@ describe("configuration draft helpers", () => {
 
   test("loopSegments proportions active-playlist entries by resolved dwell and excludes library-only cards", () => {
     let config = addCard(initialConfig(), "pomodoro").config;
-    config = addCard(config, "weather").config;
+    config = addCard(config, "clock").config;
     config = {
       ...config,
       playlists: [
         {
           ...config.playlists[0],
-          entries: config.playlists[0].entries.filter((entry) => entry.card_id !== "weather"),
+          entries: config.playlists[0].entries.filter((entry) => entry.card_id !== "clock-2"),
         },
       ],
     };
@@ -623,22 +439,6 @@ describe("configuration draft helpers", () => {
     expect(segments.map((segment) => segment.dwellSeconds)).toEqual([0, 0]);
     expect(segments[0].widthPercent).toBe(50);
     expect(segments[1].widthPercent).toBe(50);
-  });
-
-  test("loopSegments names a plugin segment from the catalog it is given", () => {
-    const config: AppConfig = {
-      ...initialConfig(),
-      cards: [pluginCard()],
-      playlists: [
-        {
-          ...initialConfig().playlists[0],
-          advance: { kind: "timed", default_dwell_seconds: 20 },
-          entries: [{ card_id: "plugin-card", dwell_seconds: 30 }],
-        },
-      ],
-    };
-    expect(loopSegments(config, pluginCatalog())[0].name).toBe("Air quality");
-    expect(loopSegments(config)[0].name).toBe("com.example.air-quality");
   });
 
   test("nextLoopCardId wraps past the last segment", () => {
@@ -698,10 +498,10 @@ describe("configuration draft helpers", () => {
 
   test("loopAdvance wraps past the last segment and resolves against whatever segments it is given, so a mid-play reorder is honoured on the next check", () => {
     let config = addCard(initialConfig(), "pomodoro").config;
-    config = addCard(config, "weather").config;
-    config = addEntry(addEntry(config, "workday", "pomodoro"), "workday", "weather");
+    config = addCard(config, "clock").config;
+    config = addEntry(addEntry(config, "workday", "pomodoro"), "workday", "clock-2");
     const segments = loopSegments(config);
-    // pomodoro and weather swapped, leaving clock (the active/current card) exactly where
+    // pomodoro and the second clock swapped, leaving clock (the active/current card) exactly where
     // it was — isolating the reorder's effect to "what comes after a".
     const reordered = loopSegments(moveEntry(config, "workday", 1, 2));
 
@@ -712,10 +512,10 @@ describe("configuration draft helpers", () => {
     // NEW order instead of a stale one — because the caller passes the
     // latest segments in on every check rather than one captured once at
     // play-start.
-    expect(loopAdvance(reordered, "clock", 1_000, 1_000)?.cardId).toBe("weather");
+    expect(loopAdvance(reordered, "clock", 1_000, 1_000)?.cardId).toBe("clock-2");
 
     // Wrapping past the last segment still returns to the first.
-    expect(loopAdvance(segments, "weather", 1_000, 1_000)?.cardId).toBe("clock");
+    expect(loopAdvance(segments, "clock-2", 1_000, 1_000)?.cardId).toBe("clock");
   });
 
   test("loopAdvance returns null with no segments or nothing to advance to", () => {
@@ -744,11 +544,11 @@ describe("configuration draft helpers", () => {
       ...base,
       cards: [
         { ...addCard(base, "clock").config.cards[0], id: "a" },
-        { ...addCard(base, "calendar").config.cards[0], id: "b" },
+        { ...addCard(base, "clock").config.cards[0], id: "b" },
       ],
     };
     const issues: ValidationIssue[] = [
-      { path: "cards[1].source", code: "out-of-range", message: "calendar source is required" },
+      { path: "cards[1].title", code: "out-of-range", message: "card title is required" },
     ];
 
     expect(issuesForCard(issues, config, "b")).toHaveLength(1);
@@ -757,7 +557,7 @@ describe("configuration draft helpers", () => {
     // After dragging "b" to the front, the SAME issue list must still attach to "b".
     const reordered = moveCard(config, "b", 0);
     const rebased: ValidationIssue[] = [
-      { path: "cards[0].source", code: "out-of-range", message: "calendar source is required" },
+      { path: "cards[0].title", code: "out-of-range", message: "card title is required" },
     ];
     expect(issuesForCard(rebased, reordered, "b")).toHaveLength(1);
     expect(issuesForCard(rebased, reordered, "a")).toHaveLength(0);
@@ -828,7 +628,7 @@ describe("configuration draft helpers", () => {
 
   test("contract fixtures expose cards, not widgets or screens", () => {
     const config = ipcContractFixtures.snapshot.config;
-    expect(config.schema_version).toBe(7);
+    expect(config.schema_version).toBe(9);
     expect(Array.isArray(config.cards)).toBe(true);
     expect(Array.isArray(config.playlists)).toBe(true);
     expect("widgets" in config).toBe(false);
@@ -841,16 +641,18 @@ describe("configuration draft helpers", () => {
 
   test("every alert and playlist advance variant is represented in the contract", () => {
     const alertKinds = ipcContractFixtures.card_alerts.map((a) => a.kind).sort();
-    expect(alertKinds).toEqual(["before-event", "none", "on-timer-finish"]);
+    expect(alertKinds).toEqual(["none", "on-timer-finish"]);
 
     const advanceKinds = ipcContractFixtures.carousel_advances.map((a) => a.kind).sort();
     expect(advanceKinds).toEqual(["manual", "timed"]);
   });
 
-  test("the contract represents plugin cards and every known device capability", () => {
-    const plugin = ipcContractFixtures.card_settings.find((card) => card.kind === "plugin");
-    expect(plugin).toEqual({ ...pluginCard(), id: "air-quality" });
-    expect(plugin).not.toHaveProperty("template");
+  test("the contract represents every supported card and known device capability", () => {
+    expect(ipcContractFixtures.card_settings.map((card) => card.kind).sort()).toEqual([
+      "clock",
+      "picture",
+      "pomodoro",
+    ]);
     expect(ipcContractFixtures.device_capabilities).toContain("volatile-assets");
   });
 });

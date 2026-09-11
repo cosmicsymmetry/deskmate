@@ -154,12 +154,8 @@ last-good data. `AnalogClock` needs no additional binding for the same reason.
 - The flipped simulator framebuffer is an exact reversal of the landscape framebuffer, and
   the device's pre-flush 0x7E capture carries the same reversal. **Neither can prove
   physical 270° panel geometry** — that is only ever a panel observation.
-- `field.*` and `timer.pct` are wire surface no builder emits. A binding no builder emits
-  is surface the byte-exact gate reports green on forever; both are retained deliberately
-  (`field.*` for plugin-authored scenes in stage 3b) rather than by omission.
-  **Superseded in part at stage 3b's exit** — `field.title` now has both an author and a
-  producer, `timer.pct` has neither but does have synthetic coverage. See "Stage 3b exit"
-  below for what changed and the distinction between coverage and use.
+- `field.*` and `timer.pct` are protocol-v1 surface no current card builder emits.
+  Synthetic scene rows retain renderer coverage, but coverage is not production use.
 - The asset-GC teardown/rebuild sequence still has **no automated end-to-end test**.
   Stage 3b's runtime assets must exercise teardown, font-registry reset, compaction,
   retained scene rebuild, and the `BUSY`/OTA-owner paths before anything relies on it.
@@ -167,136 +163,12 @@ last-good data. `AnalogClock` needs no additional binding for the same reason.
   rows deliberately straddling the HERO and DISPLAY step-down boundaries.
   `IconBadgeText` proves selected examples, not an independent boundary matrix.
 
-## Stage 3b entry decision
+## Post-manifest status
 
-The vocabulary is now a **ratchet**: every binding here is a permanent firmware-side
-surface a future device must keep evaluating, and the whole set is nine tokens plus one
-style selector. Stage 3b authors plugins against that set. If a curated plugin wants a
-tenth, the answer is a host-side rebuild-and-push, not a new token — "anything computed
-happens on the server" is §2's rule, and the pressure to add just one more is exactly how
-a closed set becomes an expression language.
+Manifest-authored scenes and their raster fallback were removed with config schema v9.
+The firmware and protocol remain unchanged, so the full binding and scene-node vocabulary
+stays available to the device even though the host no longer authors those paths.
 
-Two things stage 3b inherits and must not lose:
-
-1. **`field.*` is the plugin data path.** It is the one binding designed for values a
-   plugin supplies, and it is the only member of the vocabulary with no builder and
-   therefore no pixel coverage. A plugin that binds it is exercising an untested arm.
-2. **A gate that supplies a binding's input proves how a value is drawn, never what it
-   means.** Stage 3a's three defects lived in exactly that hole for a whole stage. Any
-   plugin-facing test that pins its own inputs inherits the same blindness.
-
-## Stage 3b exit: how those two inheritances actually held up
-
-Written at stage 3b's exit (2026-08-29). **Both entries above were about the same
-weakness — surface with no producer — and stage 3b resolved them asymmetrically: one
-closed, one only half-closed.**
-
-### Task 6 pre-change evidence inventory (2026-09-01)
-
-This is the row-by-row inventory before Task 6 adds evidence. Counts below are render
-rows, so a landscape/flipped pair counts as two; the flipped row is not independent
-geometry evidence.
-
-- **`timer.remaining:mm:ss`: emitted, with producer-shaped inputs.**
-  `companion/crates/lvgl-sim/src/cases.rs::face_scene_cases()` calls
-  `build_progress_ring_scene()` for `progress-ring--running-mid-countdown`,
-  `--paused-mid-countdown`, `--running-at-zero`, `--finished`, and
-  `--never-started`, at both orientations: **10 rows** emit the binding and pass
-  `SceneTimer { total_ms, remaining_ms, running }`, from which C derives display text
-  and ratios. In the larger C-oracle matrix,
-  `companion/crates/app-core/tests/scene_parity.rs::add_progress_ring_cases()` has four
-  active-duration variants at both orientations: **8 rows** emit the binding; its two
-  `zero-duration` rows deliberately emit the literal `00:00`. The five temporal tests
-  using `assert_progress_ring_temporal_parity()` reuse the same producer-shaped input.
-  These overlapping rows prove the shipped ProgressRing builder, not a manifest-v2
-  authoring path.
-- **`timer.pct`: drawn synthetically, never authored by a production builder.**
-  `companion/crates/lvgl-sim/src/cases.rs::scene_arc_nodes()` supplies the binding and
-  `scene_cases()` supplies `SceneTimer { total_ms: 100_000, remaining_ms: 35_000,
-  running: false }`: exactly **2 golden rows**, `scene-arc--landscape` and
-  `scene-arc--flipped`. The same rows are offered to `framebuffer_diff` and the older
-  `scene_panel_check` hardware harnesses. They prove that a supplied remaining 35%
-  value is drawn; they do not give `timer.pct` a manifest author or prove producer
-  meaning.
-- **BigNumber HERO/DISPLAY/BODY boundaries: already present in the C-oracle matrix.**
-  `scene_parity.rs::add_big_number_cases()` derives its strings from
-  `BakedFontMetrics::SHIPPED`. `hero-just-fits` / `hero-just-misses` and
-  `display-just-fits` / `display-just-misses`, each at both orientations, are exactly
-  **8 boundary rows**: HERO->DISPLAY and DISPLAY->BODY. `lowest-tier-long` and
-  `non-numeric`, also at both orientations, add **4 BODY rows** but are not adjacent
-  boundary pairs. The promoted 10-row BigNumber face matrix has selected HERO/BODY
-  examples, not this metrics-derived boundary matrix.
-- **Localized date overflow: zero rows.** `scene_parity.rs` has **28 base DigitalClock
-  rows** (7 local instants x seconds shown/hidden x 2 orientations) and four state-footer
-  rows that duplicate the first instant. They evaluate **7 unique produced date
-  strings**. The widest is `Wed, Aug 12` at **174 BODY-font pixels**, so **0 produced
-  strings exceed** the 176-pixel date content box. The node's `ellipsize: true` flag was
-  therefore structural coverage only, not an exercised truncation.
-
-This resolves the disagreement: CLAUDE.md's older blanket claim of no timer pixel or
-tier-step-down coverage is stale, while the later ledger was right that `timer.pct` had
-synthetic coverage. The narrower missing evidence is a real manifest-v2 timer authoring
-row, plus a produced date that actually exceeds its box.
-
-**`field.*` now has a producer, and it took two separate things to get one.** Authoring a
-binding was not enough. `plugins/aqi/manifest.toml` bound `field.title` in Task 8, which
-bought pixel coverage in the simulator and in `framebuffer_diff` — but on a real device
-the binding still resolved to the `--` placeholder, because *nothing pushed a `title`
-field for a plugin card*; the manifest's own comment says so. The producer arrived only
-with the server wiring (Task 8b, `800c192`), where `ServerProviderRefresher` emits the
-card's `title` as a `Field`. **The lesson generalises: a binding needs an author AND a
-producer, and this ledger's "no builder" phrasing only ever counted the author.** A
-binding can have full pixel coverage and still be dead end to end.
-
-Two limits on that claim, both permanent and worth not relearning:
-
-- **The reach is narrower than "a plugin's own fields".** A plugin card's
-  `WidgetConfig.template` is always `TemplateKind::DigitalClock` on the wire
-  (`app-core/src/config.rs`'s `wire_config`, a decision predating this stage), so the
-  only names `field.*` can EVER resolve for any plugin card are DigitalClock's four
-  registered fields — `title`, `show_seconds`, `stale`, `error`. A plugin does not get a
-  registry of its own. This is why `scene-text`/`scene-label` stay excluded from
-  `framebuffer_diff`: they bind a synthetic `field.status` that no registry accepts.
-- **`plugin-aqi--empty` is now excluded too (2026-09-06, the first on-board
-  `framebuffer_diff`).** Its empty state pushes no `title`, and the device drew **nothing**
-  there while the simulator drew `--`. `scene_binding.c` writes the `--` placeholder only
-  when the field lookup returns NULL; on the device `title` is a *registered* field of the
-  card's template, so an unpushed `title` resolves to `""` (renders nothing), never NULL.
-  The simulator's field array is empty, so its lookup returns NULL → `--`. A device cannot
-  reproduce the `--` placeholder for a name its registry knows; the case stays golden-only.
-  (Distinct from the pre-Task-8b production note above, which described a plugin card whose
-  field was not registered at all.)
-- **`field.title` HAS now been hardware-observed** — the non-empty `plugin-aqi` rows push
-  `title` and drew it byte-identically on the board on 2026-09-06 (and stage 3b Task 9 saw
-  `field.title` render "Headlines" from a server value on 2026-08-30). The empty-state
-  `--` placeholder for a registered field is the one thing the device provably does *not*
-  produce.
-
-**`timer.pct` is unchanged, and its position is subtler than "uncovered".** It has
-synthetic pixel coverage — `lvgl-sim/src/cases.rs`'s scene-arc case binds it, and
-`scene_panel_check.rs` exercises it — so a renderer defect would be caught. What it still
-lacks is a **production builder**: stage 3a moved the real arc to `timer.permille`
-(at r=195 one percent is 12.25 px, so percent quantisation is visibly insufficient), and
-nothing in stage 3b gave `timer.pct` an emitter. So it is wire surface kept alive by a
-test alone. That is the distinction the entry above was reaching for and did not have
-words for: **coverage and use are different questions**, and `timer.pct` has the first
-without the second, where `field.title` before Task 8b had neither.
-
-**The asset path: exercised in software, unexercised on hardware, and it hid a
-destructive bug.** Task 8's `push_case_assets` drove `AssetBegin`/`AssetChunk`/
-`AssetCommit` for the first time, and Task 8b put durable reconciliation on a production
-path. That wiring immediately surfaced something no golden or parity row could have:
-**`AssetRelease.digests` is a keep-set, not a delete-list** — `asset_store.c`'s
-compaction marks every committed record absent from it DEAD — so a server with an empty
-plugin registry was instructing the device to wipe every asset it held, on every full
-synchronize. It was caught by `server/tests/hostile_device.rs`, which asserts the
-**exact** request sequence a device sees. **A pixel gate cannot see a wire defect at
-all**; only a sequence assertion could, and only because it was strict rather than
-permissive.
-
-**The asset-GC teardown entry above is NOT discharged.** Teardown, font-registry reset,
-compaction, retained-scene rebuild and the `BUSY`/OTA-owner paths remain without an
-automated end-to-end test and without a simulator seam, and stage 3b's Task 9 — the first
-occasion any of it would run for real — is deferred. Stage 4 makes this materially more
-urgent rather than less: rasterization turns **volatile** assets into the common case,
-and the durable/volatile flag on `AssetBegin` has never once been set to volatile.
+Picture frames keep the durable asset pipeline live. Its release operation remains a
+keep-set: omitting a digest deletes it, and an empty desired set is therefore never sent
+as a harmless no-op. The runtime derives that set from image-source frames alone.

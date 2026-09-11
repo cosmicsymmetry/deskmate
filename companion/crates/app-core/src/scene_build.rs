@@ -540,15 +540,15 @@ pub struct RowListCard<'a> {
 
 /// The host-owned data state shared by all six scene builders.
 ///
-/// This deliberately is not a scene binding. The host learns that provider
-/// state changed, rebuilds the scene, and pushes it just as it does for a new
-/// provider result. A non-empty error wins over stale exactly as it does in
+/// This deliberately is not a scene binding. The host learns that upstream data
+/// state changed, rebuilds the scene, and pushes it with the new facts. A non-empty
+/// error wins over stale exactly as it does in
 /// `template_view.c::update_data_state()`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SceneDataState<'a> {
-    /// Whether the last-good provider value has aged past its freshness bound.
+    /// Whether the last-good value has aged past its freshness bound.
     pub stale: bool,
-    /// The host-visible provider/configuration error, when one exists.
+    /// The host-visible data/configuration error, when one exists.
     pub error: Option<&'a str>,
 }
 

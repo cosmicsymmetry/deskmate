@@ -65,53 +65,16 @@ export function mockConfig(): AppConfig {
         alert: { kind: "on-timer-finish", hold: { kind: "until-dismissed" } },
       },
       {
-        kind: "weather",
-        id: "weather",
-        title: "Outside",
-        location: "Tbilisi",
-        units: "metric",
-        template: { kind: "icon-badge-text", icon_asset_id: null },
+        kind: "picture",
+        id: "picture",
+        title: "Studio",
+        source_id: "studio",
         tap_action: { kind: "none" },
-        refresh: { kind: "interval", minutes: 30 },
-        alert: { kind: "none" },
-      },
-      {
-        kind: "calendar",
-        id: "calendar",
-        title: "Today",
-        source: { kind: "url", value: "https://calendar.example/rodion.ics" },
-        template: { kind: "row-list" },
-        tap_action: { kind: "none" },
-        refresh: { kind: "interval", minutes: 15 },
-        alert: { kind: "before-event", lead_minutes: 10, hold: { kind: "seconds", value: 120 } },
-      },
-      {
-        kind: "rss",
-        id: "rss",
-        title: "Headlines",
-        url: "https://news.ycombinator.com/rss",
-        max_items: 3,
-        template: { kind: "row-list" },
-        tap_action: { kind: "none" },
-        refresh: { kind: "interval", minutes: 30 },
-        alert: { kind: "none" },
-      },
-      {
-        kind: "json-feed",
-        id: "json-feed",
-        title: "Build status",
-        url: "https://ci.example/status.json",
-        mappings: [
-          { field: "hero", path: "pipeline.state" },
-          { field: "caption", path: "pipeline.branch" },
-        ],
-        template: { kind: "big-number-label" },
-        tap_action: { kind: "none" },
-        refresh: { kind: "interval", minutes: 5 },
+        refresh: { kind: "manual" },
         alert: { kind: "none" },
       },
     ],
-    image_sources: [],
+    image_sources: [{ id: "studio", name: "Studio" }],
     assets: [],
     playlists: [
       {
@@ -121,18 +84,14 @@ export function mockConfig(): AppConfig {
         entries: [
           { card_id: "clock", dwell_seconds: 45 },
           { card_id: "pomodoro", dwell_seconds: null },
-          { card_id: "weather", dwell_seconds: 15 },
-          { card_id: "calendar", dwell_seconds: 30 },
+          { card_id: "picture", dwell_seconds: 30 },
         ],
       },
       {
         id: "evening",
         name: "Evening",
         advance: { kind: "manual" },
-        entries: [
-          { card_id: "clock", dwell_seconds: null },
-          { card_id: "rss", dwell_seconds: null },
-        ],
+        entries: [{ card_id: "clock", dwell_seconds: null }],
       },
     ],
     active_playlist_id: "day",
@@ -141,53 +100,7 @@ export function mockConfig(): AppConfig {
 }
 
 export function mockCardData(): CardDataSnapshot[] {
-  return [
-    {
-      card_id: "weather",
-      fields: [
-        { key: "hero", value: { kind: "text", value: "18°" } },
-        { key: "caption", value: { kind: "text", value: "Clear · feels 17°" } },
-        { key: "icon", value: { kind: "text", value: "clear-day" } },
-      ],
-    },
-    {
-      card_id: "calendar",
-      fields: [
-        { key: "row0_title", value: { kind: "text", value: "Standup" } },
-        { key: "row0_time", value: { kind: "text", value: "09:30" } },
-        { key: "row1_title", value: { kind: "text", value: "Design review" } },
-        { key: "row1_time", value: { kind: "text", value: "13:00" } },
-        { key: "row2_title", value: { kind: "text", value: "1:1 with Ana" } },
-        { key: "row2_time", value: { kind: "text", value: "16:30" } },
-        { key: "row3_title", value: { kind: "text", value: "" } },
-        { key: "row3_time", value: { kind: "text", value: "" } },
-        { key: "row4_title", value: { kind: "text", value: "" } },
-        { key: "row4_time", value: { kind: "text", value: "" } },
-      ],
-    },
-    {
-      card_id: "rss",
-      fields: [
-        { key: "row0_title", value: { kind: "text", value: "Show HN: A tiny desk display" } },
-        { key: "row0_time", value: { kind: "text", value: "8 min ago" } },
-        { key: "row1_title", value: { kind: "text", value: "The case for boring software" } },
-        { key: "row1_time", value: { kind: "text", value: "24 min ago" } },
-        { key: "row2_title", value: { kind: "text", value: "" } },
-        { key: "row2_time", value: { kind: "text", value: "" } },
-        { key: "row3_title", value: { kind: "text", value: "" } },
-        { key: "row3_time", value: { kind: "text", value: "" } },
-        { key: "row4_title", value: { kind: "text", value: "" } },
-        { key: "row4_time", value: { kind: "text", value: "" } },
-      ],
-    },
-    {
-      card_id: "json-feed",
-      fields: [
-        { key: "hero", value: { kind: "text", value: "PASS" } },
-        { key: "caption", value: { kind: "text", value: "main" } },
-      ],
-    },
-  ];
+  return [];
 }
 
 export function mockNetworkSettings(): NetworkSettings {
@@ -225,27 +138,6 @@ export function mockSnapshot(config: AppConfig): AppSnapshot {
       active_screen_id: "clock",
       counters: MOCK_COUNTERS,
     },
-    providers: [
-      { widget_id: "weather", state: { kind: "fresh" }, last_success_unix_ms: 1, age_seconds: 240 },
-      {
-        widget_id: "calendar",
-        state: { kind: "fresh" },
-        last_success_unix_ms: 1,
-        age_seconds: 40,
-      },
-      {
-        widget_id: "rss",
-        state: { kind: "stale", message: "Feed timed out after 10s" },
-        last_success_unix_ms: 1,
-        age_seconds: 5400,
-      },
-      {
-        widget_id: "json-feed",
-        state: { kind: "fresh" },
-        last_success_unix_ms: 1,
-        age_seconds: 120,
-      },
-    ],
     pomodoros: [
       {
         widget_id: "pomodoro",
@@ -260,9 +152,6 @@ export function mockSnapshot(config: AppConfig): AppSnapshot {
     diagnostics: {
       commands_processed: 1284,
       command_queue_full: 0,
-      provider_jobs_started: 96,
-      provider_queue_full: 0,
-      provider_results_discarded: 0,
       subscriber_snapshots_overwritten: 2,
       interrupt_dismissals_ignored: 0,
     },

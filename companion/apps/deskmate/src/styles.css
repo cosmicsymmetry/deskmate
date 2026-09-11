@@ -745,7 +745,7 @@ h3 {
 }
 
 /* The template names the row; the owner's words follow it in the same line, quiet,
-   which is what tells one "ICS calendar" from another. */
+   which is what tells two cards of the same kind apart. */
 .loop__entry-text {
   display: flex;
   align-items: baseline;

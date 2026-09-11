@@ -32,7 +32,6 @@ not live.";
 pub(crate) enum AppError {
     Usage(String),
     Config(String),
-    Provider(String),
     Device(DeviceError),
     Host(String),
 }
@@ -40,10 +39,7 @@ pub(crate) enum AppError {
 impl fmt::Display for AppError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Usage(error)
-            | Self::Config(error)
-            | Self::Provider(error)
-            | Self::Host(error) => f.write_str(error),
+            Self::Usage(error) | Self::Config(error) | Self::Host(error) => f.write_str(error),
             Self::Device(error) => error.fmt(f),
         }
     }
@@ -646,7 +642,6 @@ fn exit_code(error: &AppError) -> i32 {
     match error {
         AppError::Usage(_) => 2,
         AppError::Config(_) => 3,
-        AppError::Provider(_) => 4,
         AppError::Device(DeviceError::NoDevice) => 10,
         AppError::Device(DeviceError::Timeout) => 11,
         AppError::Device(DeviceError::VersionMismatch(_)) => 12,

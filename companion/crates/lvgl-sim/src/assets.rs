@@ -12,8 +12,8 @@
 //!
 //! ## Why the vendored TTF is patched, not raw
 //!
-//! [`INTER_SUBSET_TTF`] is not a plain subset of
-//! `tools/fonts/Inter-Regular.ttf`. `lv_tiny_ttf` (the runtime rasterizer
+//! [`INTER_SUBSET_TTF`] is not a plain subset of Inter Regular. `lv_tiny_ttf`
+//! (the runtime rasterizer
 //! `font_registry_acquire` calls into, `firmware/main/ui/font_registry.c`)
 //! wraps `stb_truetype`, which resolves glyphs by a raw `cmap` lookup and
 //! never applies OpenType GSUB features. Inter's digits are *proportional*
@@ -24,19 +24,19 @@
 //! document and fix for the four baked `deskmate_font_*` faces
 //! (`lv_font_conv` has the identical raw-cmap limitation). This golden
 //! renders `12:34`, where digit advance width and colon alignment are
-//! precisely what would regress if that patch were skipped.
+//! precisely what would regress if that patch were skipped. The original source
+//! and patch helper were removed with the server rasterizer; this derived test
+//! asset remains independently licensed and content-addressed.
 //!
-//! [`INTER_SUBSET_TTF`] was produced by, in order:
+//! [`INTER_SUBSET_TTF`] was produced by first repointing digit codepoints
+//! U+0030-U+0039 at Inter's tabular glyph outlines, then running:
 //!
-//! 1. `python3 tools/fonts/patch_tabular_figures.py tools/fonts/Inter-Regular.ttf out.ttf`
-//!    — repoints the digit codepoints (U+0030-U+0039) at Inter's tabular
-//!    glyph outlines, the same transform `tools/genfonts.sh` runs before
-//!    baking `deskmate_font_28`/`_56`/`_96`.
-//! 2. `pyftsubset out.ttf --output-file=Inter-subset.ttf
+//! `pyftsubset out.ttf --output-file=Inter-subset.ttf
 //!    --unicodes="U+0020,U+0030-0039,U+003A,U+0041-005A" --layout-features=''
 //!    --no-hinting --desubroutinize --drop-tables+=GSUB,GPOS,GDEF,DSIG
 //!    --name-IDs='' --glyph-names`
-//!    — down to exactly the glyphs this golden needs (digits, colon, A-Z,
+//!
+//! This reduces it to exactly the glyphs this golden needs (digits, colon, A-Z,
 //!    space); `stb_truetype` never reads GSUB/GPOS/GDEF, so dropping them
 //!    (step 1's cmap rewrite already did the substitution work they would
 //!    have driven) is safe. The result is ~4 KiB, comfortably under the
@@ -44,7 +44,7 @@
 //!    Inter's `.tf` (tabular) glyphs, confirmed by inspection after
 //!    subsetting.
 //!
-//! Licence: `assets/OFL.txt`, copied verbatim from `tools/fonts/OFL.txt`
+//! Licence: `assets/OFL.txt`
 //! (Inter is SIL Open Font License 1.1; a patched/subsetted derivative
 //! remains covered by the same licence, which is why the licence file is
 //! committed alongside the derived TTF rather than only alongside the

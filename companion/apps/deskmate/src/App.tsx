@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import { CardEditor } from "./components/CardEditor";
-import { CardList, type PluginKindOption } from "./components/CardList";
+import { CardList } from "./components/CardList";
 import { DevicePreview } from "./components/DevicePreview";
 import { Icon } from "./components/Icon";
 import { LoopRing } from "./components/LoopRing";
@@ -24,11 +24,9 @@ import {
   updateWidget,
 } from "./lib/configDraft";
 import {
-  chooseIcsFile,
   controlPomodoro,
   getAutostartStatus,
   mintImageSource,
-  refreshProvider,
   resumePushing,
   setAutostartEnabled,
   toIpcError,
@@ -75,10 +73,6 @@ export function App() {
     dataGeneration,
     networkSettings,
     ownershipTier,
-    pluginCatalog,
-    catalogError,
-    refreshCatalog,
-    serverCardState,
     saveConfig,
     saveServerAccess,
     pairDevice,
@@ -98,7 +92,6 @@ export function App() {
   const [saveState, setSaveState] = useState<SaveState>({ kind: "idle" });
   const [commandError, setCommandError] = useState<IpcError | null>(null);
   const [busyAction, setBusyAction] = useState<string | null>(null);
-  const [refreshingProviderId, setRefreshingProviderId] = useState<string | null>(null);
   const [autostartEnabled, setAutostartValue] = useState(false);
   const [autostartMismatch, setAutostartMismatch] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -238,8 +231,6 @@ export function App() {
   const leftoverIssues = unclaimedIssues(issues, draft);
   const networkedTier = ownershipTier === "networked";
   const localTier = ownershipTier === "local";
-  const selectedProvider =
-    snapshot.providers.find((candidate) => candidate.widget_id === selectedCardId) ?? null;
   const protocolMismatch =
     snapshot.device.protocol_version !== null && snapshot.device.protocol_version !== 1;
   const paused = snapshot.config.preferences.paused || snapshot.runtime.kind === "paused";
@@ -296,17 +287,6 @@ export function App() {
       .finally(() => setBusyAction(null));
   };
 
-  // The add menu's server group, built from the catalog and nothing else. It is
-  // empty in local tier and before the first read, which is why the group only
-  // renders when it has rows.
-  const pluginKinds: PluginKindOption[] = (pluginCatalog?.plugins ?? []).map((entry) => ({
-    id: entry.id,
-    version: entry.version,
-    displayName: entry.display_name,
-    description: entry.description,
-    onAdd: () =>
-      handleAdd({ kind: "plugin", pluginId: entry.id, refreshMinutes: entry.refresh_minutes }),
-  }));
   const handleWidgetChange = (widget: CardSettings) => {
     if (!selectedCardId) {
       return;
@@ -331,24 +311,6 @@ export function App() {
       return;
     }
     handleRemoveCard(selectedCardId);
-  };
-  const handleChooseCalendarFile = () => {
-    if (selectedWidget?.kind !== "calendar") {
-      return;
-    }
-    setBusyAction("calendar-file");
-    setCommandError(null);
-    void chooseIcsFile()
-      .then((path) => {
-        if (path) {
-          handleWidgetChange({
-            ...selectedWidget,
-            source: { kind: "file", value: path },
-          });
-        }
-      })
-      .catch((nextError) => setCommandError(toIpcError(nextError)))
-      .finally(() => setBusyAction(null));
   };
   const runAction = async (name: string, operation: () => Promise<void>) => {
     setBusyAction(name);
@@ -402,14 +364,6 @@ export function App() {
     }
     void runAction("timer", () => controlPomodoro(selectedCardId, action satisfies PomodoroAction));
   };
-  const handleProviderRefresh = (widgetId: string) => {
-    setRefreshingProviderId(widgetId);
-    setCommandError(null);
-    void refreshProvider(widgetId)
-      .then(() => refresh())
-      .catch((nextError) => setCommandError(toIpcError(nextError)))
-      .finally(() => setRefreshingProviderId(null));
-  };
   const handleAutostart = (enabled: boolean) => {
     setBusyAction("autostart");
     setCommandError(null);
@@ -446,7 +400,6 @@ export function App() {
           <LoopRing
             config={draft}
             issues={issues}
-            catalog={pluginCatalog}
             selectedCardId={selectedCardId}
             onSelect={handleSelectCard}
             onChange={replaceDraft}
@@ -522,21 +475,6 @@ export function App() {
             </aside>
           )}
 
-          {/* One notice for either server read failing. The last projection and the
-              last catalog are kept — a plugin card keeps its name and its value
-              rather than blanking because a poll missed. */}
-          {catalogError && (
-            <aside className="notice notice--warn" role="status">
-              <div>
-                <strong>{catalogError}</strong>
-                <p>Plugin names and previews are the last ones this window received.</p>
-                <button className="button button--quiet" type="button" onClick={refreshCatalog}>
-                  Try again
-                </button>
-              </div>
-            </aside>
-          )}
-
           {/* Card-scoped failures stay actionable without inventing a cause: data
               refusals name the display, while scene failures remain neutral because
               scene construction can fail before the display sees anything. */}
@@ -548,7 +486,7 @@ export function App() {
                   const card = draft.cards.find((candidate) => candidate.id === cardError.card_id);
                   return (
                     <p key={cardError.card_id}>
-                      <strong>{card ? cardLabel(card, pluginCatalog) : cardError.card_id}</strong> —{" "}
+                      <strong>{card ? cardLabel(card) : cardError.card_id}</strong> —{" "}
                       {cardError.message}
                     </p>
                   );
@@ -614,12 +552,7 @@ export function App() {
           <CardList
             config={draft}
             issues={issues}
-            cardData={snapshot.card_data}
             pomodoros={snapshot.pomodoros}
-            providers={snapshot.providers}
-            pluginKinds={pluginKinds}
-            catalog={pluginCatalog}
-            serverCardState={serverCardState}
             ownershipTier={ownershipTier}
             selectedCardId={selectedCardId}
             onSelect={handleSelectCard}
@@ -636,19 +569,12 @@ export function App() {
             entryIssues={selectedEntryIssues}
             cardError={selectedCardError}
             pomodoro={pomodoro}
-            provider={selectedProvider}
             timerBusy={busyAction === "timer"}
-            filePickerBusy={busyAction === "calendar-file"}
-            providerRefreshing={refreshingProviderId === selectedCardId}
             pictureAccess={mintedPicture?.cardId === selectedCardId ? mintedPicture.access : null}
-            catalog={pluginCatalog}
-            ownershipTier={ownershipTier}
             onChange={handleWidgetChange}
             onConfigChange={replaceDraft}
             onRemove={handleRemove}
             onTimerAction={handleTimerAction}
-            onChooseCalendarFile={handleChooseCalendarFile}
-            onRefreshProvider={() => selectedCardId && handleProviderRefresh(selectedCardId)}
           />
         </main>
       </div>

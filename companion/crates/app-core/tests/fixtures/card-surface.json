@@ -1,5 +1,5 @@
 {
-  "schema_version": 7,
+  "schema_version": 9,
   "preferences": {
     "timezone": "Asia/Tbilisi",
     "autostart": true,
@@ -28,52 +28,16 @@
       "alert": { "kind": "on-timer-finish", "hold": { "kind": "until-dismissed" } }
     },
     {
-      "kind": "calendar",
-      "id": "agenda",
-      "title": "Up next",
-      "source": { "kind": "url", "value": "https://example.test/calendar.ics" },
-      "template": { "kind": "row-list" },
+      "kind": "picture",
+      "id": "picture",
+      "title": "Studio",
+      "source_id": "studio",
       "tap_action": { "kind": "none" },
-      "refresh": { "kind": "interval", "minutes": 15 },
-      "alert": { "kind": "before-event", "lead_minutes": 5, "hold": { "kind": "seconds", "value": 60 } }
-    },
-    {
-      "kind": "weather",
-      "id": "weather",
-      "title": "Weather",
-      "location": "Tbilisi",
-      "units": "metric",
-      "template": { "kind": "icon-badge-text", "icon_asset_id": "icons" },
-      "tap_action": { "kind": "open-url", "url": "https://example.test/weather" },
-      "refresh": { "kind": "interval", "minutes": 30 },
-      "alert": { "kind": "none" }
-    },
-    {
-      "kind": "json-feed",
-      "id": "metric",
-      "title": "Metric",
-      "url": "https://example.test/metric.json",
-      "mappings": [
-        { "field": "value", "path": "$.current.value" },
-        { "field": "label", "path": "$.current.label" }
-      ],
-      "template": { "kind": "big-number-label" },
-      "tap_action": { "kind": "open-application", "application_id": "com.example.metrics" },
       "refresh": { "kind": "manual" },
-      "alert": { "kind": "none" }
-    },
-    {
-      "kind": "rss",
-      "id": "news",
-      "title": "News",
-      "url": "https://example.test/feed.xml",
-      "max_items": 5,
-      "template": { "kind": "row-list" },
-      "tap_action": { "kind": "dismiss" },
-      "refresh": { "kind": "interval", "minutes": 60 },
       "alert": { "kind": "none" }
     }
   ],
+  "image_sources": [{ "id": "studio", "name": "Studio" }],
   "assets": [
     {
       "id": "icons",
@@ -102,10 +66,7 @@
       "entries": [
         { "card_id": "analog", "dwell_seconds": null },
         { "card_id": "focus", "dwell_seconds": null },
-        { "card_id": "agenda", "dwell_seconds": null },
-        { "card_id": "weather", "dwell_seconds": null },
-        { "card_id": "metric", "dwell_seconds": null },
-        { "card_id": "news", "dwell_seconds": null }
+        { "card_id": "picture", "dwell_seconds": null }
       ]
     }
   ],

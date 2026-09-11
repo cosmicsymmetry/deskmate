@@ -1,5 +1,5 @@
 {
-  "schema_version": 7,
+  "schema_version": 9,
   "preferences": {
     "timezone": "Not/A_Timezone",
     "autostart": false,
@@ -38,23 +38,6 @@
       "alert": { "kind": "none" }
     },
     {
-      "kind": "calendar",
-      "id": "calendar-a",
-      "title": "Calendar",
-      "source": {
-        "kind": "url",
-        "value": "calendar.example/feed"
-      },
-      "template": { "kind": "row-list" },
-      "tap_action": { "kind": "none" },
-      "refresh": { "kind": "interval", "minutes": 15 },
-      "alert": {
-        "kind": "before-event",
-        "lead_minutes": 61,
-        "hold": { "kind": "seconds", "value": 60 }
-      }
-    },
-    {
       "kind": "pomodoro",
       "id": "pomodoro-b",
       "label": "Focus",
@@ -68,14 +51,12 @@
       }
     },
     {
-      "kind": "weather",
+      "kind": "picture",
       "id": "orphan",
       "title": "Orphan",
-      "location": "Nowhere",
-      "units": "metric",
-      "template": { "kind": "icon-badge-text", "icon_asset_id": "missing-icon" },
+      "source_id": "missing-source",
       "tap_action": { "kind": "none" },
-      "refresh": { "kind": "interval", "minutes": 30 },
+      "refresh": { "kind": "manual" },
       "alert": { "kind": "none" }
     }
   ],
@@ -88,7 +69,6 @@
       "entries": [
         { "card_id": "on-timer-mismatch", "dwell_seconds": null },
         { "card_id": "duplicate", "dwell_seconds": 4 },
-        { "card_id": "calendar-a", "dwell_seconds": null },
         { "card_id": "pomodoro-b", "dwell_seconds": null },
         { "card_id": "ghost", "dwell_seconds": null },
         { "card_id": "on-timer-mismatch", "dwell_seconds": null }

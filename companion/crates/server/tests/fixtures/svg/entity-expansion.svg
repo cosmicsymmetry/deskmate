@@ -1,8 +1,0 @@
-<?xml version="1.0"?>
-<!DOCTYPE svg [
-  <!ENTITY a "xxxxxxxxxx">
-  <!ENTITY b "&a;&a;&a;&a;&a;&a;&a;&a;&a;&a;">
-]>
-<svg xmlns="http://www.w3.org/2000/svg" width="448" height="368">
-  <text>&b;</text>
-</svg>

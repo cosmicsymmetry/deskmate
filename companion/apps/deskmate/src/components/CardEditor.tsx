@@ -7,27 +7,17 @@ import {
   setEntryDwell,
   tapActionDescription,
 } from "../lib/configDraft";
-import { providerTrouble } from "../lib/providers";
 import type {
   AlertHold,
   AppConfig,
   CardAlert,
   CardError,
   CardSettings,
-  DeviceTier,
-  JsonFieldMapping,
   MintedImageSource,
-  PluginCatalog,
   PomodoroSnapshot,
-  ProviderSnapshot,
   ValidationIssue,
-  WeatherUnits,
 } from "../lib/types";
 import { FieldIssues } from "./FieldIssues";
-import { Icon } from "./Icon";
-
-const MAX_JSON_MAPPINGS = 16;
-const MAX_RSS_ITEMS = 5;
 
 interface CardEditorProps {
   card: CardSettings | null;
@@ -43,24 +33,13 @@ interface CardEditorProps {
   /// A typed device refusal for this card's last data or scene update.
   cardError: CardError | null;
   pomodoro: PomodoroSnapshot | null;
-  /// The feed behind this card, when it has one. Only ever rendered when it is in
-  /// trouble — see `providerTrouble`.
-  provider: ProviderSnapshot | null;
-  /// The server's plugin registry, or null in local tier and before the first read.
-  /// The Plugin field is read-only without it, because there is nothing to choose from.
-  catalog: PluginCatalog | null;
-  ownershipTier: DeviceTier | null;
   timerBusy: boolean;
-  filePickerBusy: boolean;
-  providerRefreshing: boolean;
   /** Present only for the picture card whose source was minted this session. */
   pictureAccess?: MintedImageSource | null;
   onChange: (card: CardSettings) => void;
   onConfigChange: (config: AppConfig) => void;
   onRemove: () => void;
   onTimerAction: (action: "start" | "pause" | "reset") => void;
-  onChooseCalendarFile: () => void;
-  onRefreshProvider: () => void;
 }
 
 function HoldSelector({
@@ -119,19 +98,12 @@ export function CardEditor({
   entryIssues,
   cardError,
   pomodoro,
-  provider,
-  catalog,
-  ownershipTier,
   timerBusy,
-  filePickerBusy,
-  providerRefreshing,
   pictureAccess = null,
   onChange,
   onConfigChange,
   onRemove,
   onTimerAction,
-  onChooseCalendarFile,
-  onRefreshProvider,
 }: CardEditorProps) {
   if (!card) {
     return (
@@ -150,29 +122,13 @@ export function CardEditor({
   }
 
   const fieldIssues = (field: string) => issuesForField(issues, field);
-  const trouble = providerTrouble(provider);
-  const catalogEntry =
-    card.kind === "plugin"
-      ? (catalog?.plugins.find((entry) => entry.id === card.plugin_id) ?? null)
-      : null;
-  // What the small line already says when there is no catalog to check against —
-  // shared with the Plugin select's fallback option so the two can never disagree.
-  // It states only what the tier makes true, never whether the plugin is installed.
-  const catalogUnavailableReason =
-    ownershipTier === "local"
-      ? "Needs the server to render"
-      : "The plugin list comes from the server";
-  // The server owns plugin and picture updates, so the Mac has nothing to refresh.
-  // The reason rides the same sentence as the trouble, because a disabled control
-  // with no stated reason is worse than no control.
-  const refreshesOnServer = card.kind === "plugin" || card.kind === "picture";
   const setAlert = (alert: CardAlert) => onChange({ ...card, alert });
   const playlist = activePlaylist(config);
   const entryIndex = playlist?.entries.findIndex((entry) => entry.card_id === card.id) ?? -1;
   const entry = entryIndex >= 0 ? playlist?.entries[entryIndex] : undefined;
   const isTimed = playlist?.advance.kind === "timed";
   const title = cardTitle(card);
-  const controlName = title ? `${cardLabel(card, catalog)} — ${title}` : cardLabel(card, catalog);
+  const controlName = title ? `${cardLabel(card)} — ${title}` : cardLabel(card);
   const dwellIssues = entryIssues.filter((issue) => issue.path.endsWith(".dwell_seconds"));
   const showDwell =
     entry !== undefined && (isTimed || entry.dwell_seconds !== null || dwellIssues.length > 0);
@@ -181,7 +137,7 @@ export function CardEditor({
     <section className="panel" aria-labelledby="editor-heading">
       <div className="panel-heading">
         <div className="editor-title">
-          <h2 id="editor-heading">{cardLabel(card, catalog)}</h2>
+          <h2 id="editor-heading">{cardLabel(card)}</h2>
           {cardTitle(card) && <span className="editor-title__kind">{cardTitle(card)}</span>}
         </div>
         <button className="text-button text-button--danger" type="button" onClick={onRemove}>
@@ -202,34 +158,10 @@ export function CardEditor({
         </p>
       )}
 
-      {/* The recovery half of the removed data-sources panel, moved to where it is
-          actionable: beside the card whose data went bad, not in a list of every
-          feed in the app that was healthy anyway. */}
-      {trouble && (
-        <p className="data-note" role="status">
-          <span>
-            {refreshesOnServer ? `${trouble} This card refreshes on the server.` : trouble}
-          </span>
-          <button
-            className="text-button"
-            type="button"
-            disabled={providerRefreshing || refreshesOnServer}
-            onClick={onRefreshProvider}
-          >
-            <Icon name="refresh" />
-            {providerRefreshing ? "Refreshing…" : "Refresh"}
-          </button>
-        </p>
-      )}
-
       <div className="form-grid">
         {card.kind !== "pomodoro" && (
           <label className="field">
-            <span>
-              {card.kind === "clock" || card.kind === "plugin" || card.kind === "picture"
-                ? "Name"
-                : "Heading"}
-            </span>
+            <span>Name</span>
             <input
               value={card.title}
               maxLength={64}
@@ -237,21 +169,6 @@ export function CardEditor({
               aria-invalid={fieldIssues("title").length > 0}
             />
             <FieldIssues issues={fieldIssues("title")} />
-          </label>
-        )}
-
-        {(card.kind === "json-feed" || card.kind === "rss") && (
-          <label className="field">
-            <span>Feed address</span>
-            <input
-              type="url"
-              value={card.url}
-              maxLength={2048}
-              placeholder={`https://example.com/${card.kind === "json-feed" ? "data.json" : "feed.xml"}`}
-              onChange={(event) => onChange({ ...card, url: event.currentTarget.value })}
-              aria-invalid={fieldIssues("url").length > 0}
-            />
-            <FieldIssues issues={fieldIssues("url")} />
           </label>
         )}
 
@@ -343,227 +260,6 @@ export function CardEditor({
           </>
         )}
 
-        {card.kind === "calendar" && (
-          <>
-            <fieldset className="source-picker">
-              <legend>Calendar source</legend>
-              <label>
-                <input
-                  type="radio"
-                  name="source"
-                  value="url"
-                  checked={card.source.kind === "url"}
-                  onChange={() => onChange({ ...card, source: { kind: "url", value: "" } })}
-                />
-                Web address
-              </label>
-              <label>
-                <input
-                  type="radio"
-                  name="source"
-                  value="file"
-                  checked={card.source.kind === "file"}
-                  onChange={() => onChange({ ...card, source: { kind: "file", value: "" } })}
-                />
-                File on this computer
-              </label>
-            </fieldset>
-            <div className="field">
-              <label htmlFor="calendar-source">
-                {card.source.kind === "url" ? "ICS web address" : "ICS file"}
-              </label>
-              <div className={card.source.kind === "file" ? "file-picker-row" : undefined}>
-                <input
-                  id="calendar-source"
-                  type={card.source.kind === "url" ? "url" : "text"}
-                  value={card.source.value}
-                  maxLength={2048}
-                  placeholder={
-                    card.source.kind === "url"
-                      ? "https://calendar.example/my-calendar.ics"
-                      : "Choose an iCalendar file"
-                  }
-                  onChange={(event) =>
-                    onChange({
-                      ...card,
-                      source: { ...card.source, value: event.currentTarget.value },
-                    })
-                  }
-                  aria-invalid={fieldIssues("source").length > 0}
-                />
-                {card.source.kind === "file" && (
-                  <button
-                    className="button button--quiet"
-                    type="button"
-                    disabled={filePickerBusy}
-                    onClick={onChooseCalendarFile}
-                  >
-                    {filePickerBusy ? "Choosing…" : "Choose file…"}
-                  </button>
-                )}
-              </div>
-              <small>
-                {card.source.kind === "file"
-                  ? "Choose a local .ics or .ical file up to 1 MB."
-                  : "Only this address is saved; downloaded events remain temporary."}
-              </small>
-              <FieldIssues issues={fieldIssues("source")} />
-            </div>
-          </>
-        )}
-
-        {card.kind === "weather" && (
-          <>
-            <label className="field">
-              <span>Location</span>
-              <input
-                value={card.location}
-                maxLength={128}
-                placeholder="City, region, or postal code"
-                onChange={(event) => onChange({ ...card, location: event.currentTarget.value })}
-                aria-invalid={fieldIssues("location").length > 0}
-              />
-              <FieldIssues issues={fieldIssues("location")} />
-            </label>
-            <label className="field">
-              <span>Units</span>
-              <select
-                value={card.units}
-                onChange={(event) =>
-                  onChange({ ...card, units: event.currentTarget.value as WeatherUnits })
-                }
-              >
-                <option value="metric">Metric · °C</option>
-                <option value="imperial">Imperial · °F</option>
-              </select>
-            </label>
-          </>
-        )}
-
-        {card.kind === "json-feed" && (
-          <fieldset className="mapping-list">
-            <legend>Field mappings</legend>
-            {card.mappings.length === 0 && (
-              <p className="behaviour-hint">
-                No fields mapped yet. Add one to pull a value out of the feed.
-              </p>
-            )}
-            {card.mappings.map((mapping, index) => {
-              const updateMapping = (patch: Partial<JsonFieldMapping>) =>
-                onChange({
-                  ...card,
-                  mappings: card.mappings.map((entry, entryIndex) =>
-                    entryIndex === index ? { ...entry, ...patch } : entry,
-                  ),
-                });
-              return (
-                // biome-ignore lint/suspicious/noArrayIndexKey: mappings have no id field; rows are addressed by position.
-                <div className="mapping-row" key={index}>
-                  <input
-                    aria-label="Field name"
-                    value={mapping.field}
-                    maxLength={32}
-                    placeholder="field name"
-                    onChange={(event) => updateMapping({ field: event.currentTarget.value })}
-                    aria-invalid={fieldIssues(`mappings[${index}].field`).length > 0}
-                  />
-                  <input
-                    aria-label="JSON path"
-                    value={mapping.path}
-                    maxLength={256}
-                    placeholder="json.path.to.value"
-                    onChange={(event) => updateMapping({ path: event.currentTarget.value })}
-                    aria-invalid={fieldIssues(`mappings[${index}].path`).length > 0}
-                  />
-                  <button
-                    type="button"
-                    className="text-button text-button--danger"
-                    onClick={() =>
-                      onChange({
-                        ...card,
-                        mappings: card.mappings.filter((_, entryIndex) => entryIndex !== index),
-                      })
-                    }
-                  >
-                    Remove
-                  </button>
-                  <FieldIssues issues={fieldIssues(`mappings[${index}].field`)} />
-                  <FieldIssues issues={fieldIssues(`mappings[${index}].path`)} />
-                </div>
-              );
-            })}
-            <button
-              type="button"
-              className="button button--quiet"
-              disabled={card.mappings.length >= MAX_JSON_MAPPINGS}
-              onClick={() =>
-                onChange({ ...card, mappings: [...card.mappings, { field: "", path: "" }] })
-              }
-            >
-              Add field mapping
-            </button>
-            <FieldIssues issues={fieldIssues("mappings")} />
-          </fieldset>
-        )}
-
-        {card.kind === "rss" && (
-          <label className="field">
-            <span>Headlines shown</span>
-            <input
-              type="number"
-              className="numeral"
-              min={1}
-              max={MAX_RSS_ITEMS}
-              step={1}
-              value={card.max_items}
-              onChange={(event) =>
-                onChange({ ...card, max_items: numberValue(event.currentTarget.value) })
-              }
-              aria-invalid={fieldIssues("max_items").length > 0}
-            />
-            <FieldIssues issues={fieldIssues("max_items")} />
-          </label>
-        )}
-
-        {card.kind === "plugin" && (
-          <label className="field">
-            <span>Plugin</span>
-            <select
-              value={card.plugin_id}
-              disabled={catalog === null}
-              onChange={(event) => onChange({ ...card, plugin_id: event.currentTarget.value })}
-              aria-invalid={fieldIssues("plugin_id").length > 0}
-            >
-              {/* A saved id the registry no longer carries stays selected and says
-                  why. Dropping it would silently rewrite the document on first
-                  render, which is a data loss nobody asked for. When there is no
-                  catalog at all, "not installed" would be a claim the app cannot
-                  back up — it knows only that it cannot check, so it says that
-                  instead, in the same words as the small line below. */}
-              {!catalogEntry && (
-                <option value={card.plugin_id}>
-                  {catalog === null
-                    ? `${card.plugin_id} · ${catalogUnavailableReason}`
-                    : `${card.plugin_id} · Not installed on the server`}
-                </option>
-              )}
-              {catalog?.plugins.map((entry) => (
-                <option key={entry.id} value={entry.id}>
-                  {`${entry.display_name ?? entry.id} · ${entry.version}`}
-                </option>
-              ))}
-            </select>
-            {/* The machine id, quietly — it is the only identity a card has when the
-                catalog is unreachable, so it is never the thing that disappears. */}
-            <small>
-              {catalog === null
-                ? `${card.plugin_id} · ${catalogUnavailableReason}`
-                : card.plugin_id}
-            </small>
-            <FieldIssues issues={fieldIssues("plugin_id")} />
-          </label>
-        )}
-
         {card.kind === "picture" && (
           <>
             <label className="field">
@@ -609,46 +305,6 @@ export function CardEditor({
           </>
         )}
 
-        {/* Shared across every kind whose refresh policy is an interval — calendar,
-            weather, json-feed, and rss. Clock and pomodoro are device-local and never
-            reach here. This used to live only inside the calendar block, so weather/
-            json-feed/rss cards kept whatever `addCard` chose forever with no way to
-            change it. */}
-        {(card.kind === "calendar" ||
-          card.kind === "weather" ||
-          card.kind === "json-feed" ||
-          card.kind === "rss" ||
-          card.kind === "plugin") && (
-          <label className="field">
-            <span>Refresh every</span>
-            <select
-              className="numeral"
-              value={card.refresh.kind === "interval" ? card.refresh.minutes : 15}
-              onChange={(event) =>
-                onChange({
-                  ...card,
-                  refresh: { kind: "interval", minutes: numberValue(event.currentTarget.value) },
-                })
-              }
-            >
-              {card.refresh.kind === "interval" &&
-                ![5, 15, 30, 60].includes(card.refresh.minutes) && (
-                  <option value={card.refresh.minutes}>{card.refresh.minutes} minutes</option>
-                )}
-              <option value="5">5 minutes</option>
-              <option value="15">15 minutes</option>
-              <option value="30">30 minutes</option>
-              <option value="60">1 hour</option>
-            </select>
-            {catalogEntry && (
-              <small>
-                {`The server fetches this plugin every ${catalogEntry.refresh_minutes} minutes.`}
-              </small>
-            )}
-            <FieldIssues issues={fieldIssues("refresh")} />
-          </label>
-        )}
-
         {card.kind === "pomodoro" && (
           <fieldset className="alert-fieldset">
             <legend>Alert</legend>
@@ -684,77 +340,6 @@ export function CardEditor({
                 onChange={(hold) => setAlert({ kind: "on-timer-finish", hold })}
                 issues={fieldIssues("alert.hold.value")}
               />
-            )}
-            <FieldIssues issues={fieldIssues("alert")} />
-          </fieldset>
-        )}
-
-        {card.kind === "calendar" && (
-          <fieldset className="alert-fieldset">
-            <legend>Alert</legend>
-            <label className="check-field">
-              <input
-                type="checkbox"
-                checked={card.alert.kind === "before-event"}
-                onChange={(event) =>
-                  setAlert(
-                    event.currentTarget.checked
-                      ? {
-                          kind: "before-event",
-                          lead_minutes:
-                            card.alert.kind === "before-event" ? card.alert.lead_minutes : 10,
-                          hold:
-                            card.alert.kind === "before-event"
-                              ? card.alert.hold
-                              : { kind: "until-dismissed" },
-                        }
-                      : { kind: "none" },
-                  )
-                }
-              />
-              <span>
-                <strong>Take over the screen before an event</strong>
-                <small>Shows full-screen ahead of the next calendar item.</small>
-              </span>
-            </label>
-            {card.alert.kind === "before-event" && (
-              <>
-                <label className="field">
-                  <span>Lead time in minutes</span>
-                  <input
-                    type="number"
-                    className="numeral"
-                    min={1}
-                    max={60}
-                    step={1}
-                    value={card.alert.lead_minutes}
-                    onChange={(event) =>
-                      setAlert({
-                        kind: "before-event",
-                        lead_minutes: numberValue(event.currentTarget.value),
-                        hold:
-                          card.alert.kind === "before-event"
-                            ? card.alert.hold
-                            : { kind: "until-dismissed" },
-                      })
-                    }
-                    aria-invalid={fieldIssues("alert.lead_minutes").length > 0}
-                  />
-                  <FieldIssues issues={fieldIssues("alert.lead_minutes")} />
-                </label>
-                <HoldSelector
-                  hold={card.alert.hold}
-                  onChange={(hold) =>
-                    setAlert({
-                      kind: "before-event",
-                      lead_minutes:
-                        card.alert.kind === "before-event" ? card.alert.lead_minutes : 10,
-                      hold,
-                    })
-                  }
-                  issues={fieldIssues("alert.hold.value")}
-                />
-              </>
             )}
             <FieldIssues issues={fieldIssues("alert")} />
           </fieldset>

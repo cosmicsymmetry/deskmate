@@ -1,5 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 368" width="448" height="368">
-  <rect width="448" height="368" fill="#000000"/>
-  <text x="224" y="200" fill="#f5f5f7" font-size="96" text-anchor="middle">{{ time:HH:mm }}</text>
-  <text x="224" y="260" fill="#5c5c66" font-size="22" text-anchor="middle">A CLOCK NO RASTER MAY FREEZE</text>
-</svg>

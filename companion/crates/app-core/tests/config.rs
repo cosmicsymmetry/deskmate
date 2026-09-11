@@ -1,18 +1,16 @@
 use app_core::config::ImageSource;
 use app_core::{
     AlertHold, AppConfig, AppSnapshot, AssetKind, AssetSettings, AssetSource,
-    CURRENT_SCHEMA_VERSION, CalendarSource, CardAlert, CardDataSnapshot, CardError, CardErrorKind,
-    CardField, CardFieldValue, CardSettings, CarouselAdvance, ConnectionState, DeviceCounters,
-    DeviceSnapshot, DisplayTemplate, JsonFieldMapping, MAX_ASSET_BYTES, MAX_PLAYLIST_ENTRIES,
-    MAX_PLAYLIST_NAME_LEN, MAX_PLAYLISTS, MAX_PLUGIN_ID_LEN, MAX_PROVIDER_URL_LEN,
-    PersistenceState, Playlist, PlaylistEntry, PomodoroSnapshot, PomodoroState, ProviderSnapshot,
-    ProviderState, RefreshPolicy, RuntimeDiagnostics, RuntimeState, ValidationCode, WeatherUnits,
-    WidgetTapAction,
+    CURRENT_SCHEMA_VERSION, CardAlert, CardDataSnapshot, CardError, CardErrorKind, CardField,
+    CardFieldValue, CardSettings, CarouselAdvance, ConnectionState, DeviceCounters, DeviceSnapshot,
+    DisplayTemplate, MAX_ASSET_BYTES, MAX_PLAYLIST_ENTRIES, MAX_PLAYLIST_NAME_LEN, MAX_PLAYLISTS,
+    PersistenceState, Playlist, PlaylistEntry, PomodoroSnapshot, PomodoroState, RefreshPolicy,
+    RuntimeDiagnostics, RuntimeState, ValidationCode, WidgetTapAction,
 };
 use protocol::{
     CAPABILITY_ASSET_TRANSFER, CAPABILITY_CONFIG_ROTATION, CAPABILITY_CORE_WIDGETS,
-    CAPABILITY_EXTENDED_TEMPLATES, CAPABILITY_HOST_TAP_ACTIONS, Field, FieldValue, InterruptPolicy,
-    Message, SizeClass, TapAction, TemplateKind, encode_message,
+    CAPABILITY_EXTENDED_TEMPLATES, InterruptPolicy, Message, SizeClass, TapAction, TemplateKind,
+    encode_message,
 };
 
 const DEFAULT_JSON: &str = include_str!("fixtures/default.json");
@@ -21,7 +19,6 @@ const INVALID_JSON: &str = include_str!("fixtures/invalid.json");
 const FUTURE_JSON: &str = include_str!("fixtures/future-v7.json");
 const MALFORMED_JSON: &str = include_str!("fixtures/malformed.json");
 const CARD_SURFACE_JSON: &str = include_str!("fixtures/card-surface.json");
-const PLUGIN_CARD_JSON: &str = include_str!("fixtures/plugin-card.json");
 
 // These frozen pre-v7 fixtures intentionally have no `image_sources` key. Parse
 // them through the new default, then move only the version to the contract under
@@ -55,7 +52,7 @@ fn full_fixture_compiles_deterministically_to_m2_contract() {
     assert_eq!(first.layout.widgets.len(), 3);
     assert_eq!(first.layout.screens[0].screen_id, "clock");
     assert_eq!(first.layout.screens[1].screen_id, "pomodoro");
-    assert_eq!(first.layout.screens[2].screen_id, "calendar");
+    assert_eq!(first.layout.screens[2].screen_id, "picture");
 
     let clock = &first.layout.widgets[0];
     assert_eq!(clock.template, TemplateKind::DigitalClock);
@@ -69,15 +66,15 @@ fn full_fixture_compiles_deterministically_to_m2_contract() {
     assert_eq!(pomodoro.tap_action, TapAction::StartPause);
     assert_eq!(pomodoro.interrupt_policy, InterruptPolicy::Enabled);
 
-    let calendar = &first.layout.widgets[2];
-    assert_eq!(calendar.template, TemplateKind::RowList);
-    assert_eq!(calendar.size_class, SizeClass::Full);
-    assert_eq!(calendar.interrupt_policy, InterruptPolicy::Disabled);
+    let picture = &first.layout.widgets[2];
+    assert_eq!(picture.template, TemplateKind::DigitalClock);
+    assert_eq!(picture.size_class, SizeClass::Full);
+    assert_eq!(picture.interrupt_policy, InterruptPolicy::Disabled);
 
     assert_eq!(first.initial_pushes.len(), 3);
     assert_eq!(first.initial_pushes[0].fields.len(), 4);
     assert_eq!(first.initial_pushes[1].fields.len(), 6);
-    assert_eq!(first.initial_pushes[2].fields.len(), 13);
+    assert_eq!(first.initial_pushes[2].fields.len(), 3);
 
     encode_message(1, &Message::ApplyConfig(first.layout)).unwrap();
     for (request_id, push) in first.initial_pushes.into_iter().enumerate() {
@@ -87,28 +84,6 @@ fn full_fixture_compiles_deterministically_to_m2_contract() {
         )
         .unwrap();
     }
-}
-
-#[test]
-fn v4_playlist_compiles_byte_identically_to_the_v3_full_fixture() {
-    // `full.json` is the schema-v4 form of the frozen schema-v3 full fixture:
-    // the active playlist contains its three former InRotation cards in the
-    // same order, and the pomodoro alert keeps the same interrupt policy.
-    let config = current_config(FULL_JSON);
-    let compiled = config.compile(42).unwrap();
-
-    let actual = encode_message(1, &Message::ApplyConfig(compiled.layout)).unwrap();
-    let v3_apply_config_wire = [
-        3, 1, 9, 1, 2, 1, 1, 1, 2, 123, 2, 164, 6, 24, 42, 1, 131, 165, 12, 101, 99, 108, 111, 99,
-        107, 1, 1, 2, 1, 3, 2, 4, 2, 165, 19, 104, 112, 111, 109, 111, 100, 111, 114, 111, 1, 2, 2,
-        1, 3, 1, 4, 1, 165, 15, 104, 99, 97, 108, 101, 110, 100, 97, 114, 1, 3, 2, 1, 3, 2, 4, 4,
-        2, 131, 162, 15, 101, 99, 108, 111, 99, 107, 1, 101, 99, 108, 111, 99, 107, 162, 21, 104,
-        112, 111, 109, 111, 100, 111, 114, 111, 1, 104, 112, 111, 109, 111, 100, 111, 114, 111,
-        162, 28, 104, 99, 97, 108, 101, 110, 100, 97, 114, 1, 104, 99, 97, 108, 101, 110, 100, 97,
-        114, 3, 25, 1, 14, 200, 59, 108, 173, 0,
-    ];
-
-    assert_eq!(actual, v3_apply_config_wire);
 }
 
 #[test]
@@ -129,29 +104,23 @@ fn invalid_fixture_reports_all_domain_boundaries_before_compile() {
             "playlists[0].entries[1].dwell_seconds",
             ValidationCode::OutOfRange,
         ),
-        // before-event lead_minutes: 61 is above MAX_ALERT_LEAD_MINUTES (60).
-        ("cards[3].alert.lead_minutes", ValidationCode::OutOfRange),
         // on-timer-finish hold.value: 4 is below MIN_ALERT_HOLD_SECONDS (5).
-        ("cards[4].alert.hold.value", ValidationCode::OutOfRange),
+        ("cards[3].alert.hold.value", ValidationCode::OutOfRange),
         // on-timer-finish alerts are only valid on pomodoro cards; cards[0] is clock.
         ("cards[0].alert", ValidationCode::OutOfRange),
         // a playlist entry referencing a card id that does not exist.
         (
-            "playlists[0].entries[4].card_id",
+            "playlists[0].entries[3].card_id",
             ValidationCode::MissingReference,
         ),
         // "on-timer-mismatch" appears twice in playlist "p1"'s entries.
         (
-            "playlists[0].entries[5].card_id",
+            "playlists[0].entries[4].card_id",
             ValidationCode::DuplicateId,
         ),
         // Playlists "p1" and "p2" share the name "Main".
         ("playlists[1].name", ValidationCode::DuplicateId),
-        ("cards[3].source", ValidationCode::InvalidSource),
-        (
-            "cards[5].template.icon_asset_id",
-            ValidationCode::MissingReference,
-        ),
+        ("cards[4].source_id", ValidationCode::MissingReference),
     ] {
         assert!(
             error
@@ -165,8 +134,7 @@ fn invalid_fixture_reports_all_domain_boundaries_before_compile() {
 
 #[test]
 fn future_schema_establishes_a_clean_migration_boundary() {
-    let future = FUTURE_JSON.replacen("\"schema_version\": 7", "\"schema_version\": 8", 1);
-    let config: AppConfig = serde_json::from_str(&future).unwrap();
+    let config: AppConfig = serde_json::from_str(FUTURE_JSON).unwrap();
     let error = config.validate().unwrap_err();
     assert!(error.issues.iter().any(|issue| {
         issue.path == "schema_version" && issue.code == ValidationCode::UnsupportedVersion
@@ -185,52 +153,13 @@ fn card_surface_is_closed_bounded_and_capability_gated() {
     let expected_capabilities = CAPABILITY_CORE_WIDGETS
         | CAPABILITY_CONFIG_ROTATION
         | CAPABILITY_EXTENDED_TEMPLATES
-        | CAPABILITY_HOST_TAP_ACTIONS
         | CAPABILITY_ASSET_TRANSFER;
     assert_eq!(config.required_device_capabilities(), expected_capabilities);
 
-    // `HostTapActions` (open-url/open-application/dismiss) is still reserved and
-    // unimplemented on the wire (docs/protocol/v1.md), so the weather/json-feed/rss
-    // cards here still fail to compile with RequiresCapability. Schema v5 opens the
-    // seam specifically for *assets*: this fixture's two assets no longer
-    // contribute an issue, which is what distinguishes this from the pre-v5
-    // behavior where every issue here could equally have been the asset rejection.
-    let first = config.compile(9).unwrap_err();
-    let second = config.compile(9).unwrap_err();
+    let first = config.compile(9).unwrap();
+    let second = config.compile(9).unwrap();
     assert_eq!(first, second);
-    assert_eq!(first.issues.len(), 3);
-    for issue in &first.issues {
-        assert_eq!(issue.code, ValidationCode::RequiresCapability);
-        assert!(!issue.path.starts_with("assets"));
-    }
-}
-
-#[test]
-fn card_surface_rejects_oversized_sources_and_asset_budgets() {
-    let mut config = current_config(CARD_SURFACE_JSON);
-    if let CardSettings::JsonFeed { url, .. } = &mut config.cards[4] {
-        *url = format!("https://example.test/{}", "x".repeat(MAX_PROVIDER_URL_LEN));
-    }
-    let asset = config.assets[0].clone();
-    config.assets = (0..5)
-        .map(|index| AssetSettings {
-            id: format!("asset-{index}"),
-            maximum_bytes: MAX_ASSET_BYTES,
-            ..asset.clone()
-        })
-        .collect();
-
-    let error = config.validate().unwrap_err();
-    for expected in [
-        ValidationCode::TooLong,
-        ValidationCode::TooLarge,
-        ValidationCode::MissingReference,
-    ] {
-        assert!(
-            error.issues.iter().any(|issue| issue.code == expected),
-            "missing {expected:?}: {error:?}"
-        );
-    }
+    assert_eq!(first.layout.widgets.len(), 3);
 }
 
 #[test]
@@ -289,52 +218,12 @@ fn a_font_asset_compiles_and_requires_the_asset_transfer_capability() {
 }
 
 #[test]
-fn network_provider_urls_cannot_embed_credentials_and_weather_has_a_refresh_floor() {
-    let mut config = current_config(CARD_SURFACE_JSON);
-    for card in &mut config.cards {
-        match card {
-            CardSettings::Calendar { source, .. } => {
-                *source = app_core::CalendarSource::Url(
-                    "https://user:calendar-secret@example.test/feed.ics".into(),
-                );
-            }
-            CardSettings::Weather { refresh, .. } => {
-                *refresh = app_core::RefreshPolicy::Interval { minutes: 9 };
-            }
-            CardSettings::JsonFeed { url, mappings, .. } => {
-                *url = "https://user:secret@example.test/feed.json".into();
-                mappings[0].field = "title".into();
-            }
-            _ => {}
-        }
-    }
-    let error = config.validate().unwrap_err();
-    assert_eq!(
-        error
-            .issues
-            .iter()
-            .filter(|issue| issue.code == ValidationCode::InvalidSource)
-            .count(),
-        2
-    );
-    assert!(error.issues.iter().any(|issue| {
-        issue.path.ends_with(".mappings[0].field")
-            && issue.code == ValidationCode::InvalidComposition
-    }));
-    assert!(error.issues.iter().any(|issue| {
-        issue.path.ends_with(".refresh.minutes") && issue.code == ValidationCode::OutOfRange
-    }));
-    assert!(!format!("{error:?}").contains("secret"));
-    assert!(!format!("{error:?}").contains("calendar-secret"));
-}
-
-#[test]
 fn malformed_and_unknown_json_are_rejected_by_serde() {
     assert!(serde_json::from_str::<AppConfig>(MALFORMED_JSON).is_err());
 
     let with_unknown = DEFAULT_JSON.replace(
-        "\"schema_version\": 7,",
-        "\"schema_version\": 7, \"unexpected\": true,",
+        "\"schema_version\": 9,",
+        "\"schema_version\": 9, \"unexpected\": true,",
     );
     // A schema bump moves this anchor, and a `replace` that matches nothing
     // returns the input unchanged -- which would leave the assertion below
@@ -347,8 +236,8 @@ fn malformed_and_unknown_json_are_rejected_by_serde() {
     assert!(serde_json::from_str::<AppConfig>(&with_unknown).is_err());
 
     let nested_unknown = CARD_SURFACE_JSON.replacen(
-        r#""template": { "kind": "icon-badge-text", "icon_asset_id": "icons" }"#,
-        r#""template": { "kind": "icon-badge-text", "icon_asset_id": "icons", "unexpected": true }"#,
+        r#""template": { "kind": "analog-clock" }"#,
+        r#""template": { "kind": "analog-clock", "unexpected": true }"#,
         1,
     );
     assert!(serde_json::from_str::<AppConfig>(&nested_unknown).is_err());
@@ -519,14 +408,6 @@ fn runtime_snapshot_uses_tagged_states_for_frontend_contract() {
             active_screen_id: Some("clock".into()),
             counters: DeviceCounters::default(),
         },
-        providers: vec![ProviderSnapshot {
-            widget_id: "calendar".into(),
-            state: ProviderState::Stale {
-                message: "offline".into(),
-            },
-            last_success_unix_ms: Some(1_787_000_000_000),
-            age_seconds: Some(60),
-        }],
         pomodoros: vec![PomodoroSnapshot {
             widget_id: "pomodoro".into(),
             state: PomodoroState::Paused,
@@ -534,7 +415,7 @@ fn runtime_snapshot_uses_tagged_states_for_frontend_contract() {
             remaining_seconds: 900,
         }],
         card_data: vec![CardDataSnapshot {
-            card_id: "calendar".into(),
+            card_id: "air-quality".into(),
             fields: vec![CardField {
                 key: "row0_title".into(),
                 value: CardFieldValue::Text {
@@ -544,7 +425,7 @@ fn runtime_snapshot_uses_tagged_states_for_frontend_contract() {
         }],
         card_errors: vec![CardError {
             kind: CardErrorKind::DataRefused,
-            card_id: "json-feed".into(),
+            card_id: "air-quality".into(),
             message: "the display refused this card's data".into(),
         }],
         persistence: PersistenceState::Clean,
@@ -558,10 +439,9 @@ fn runtime_snapshot_uses_tagged_states_for_frontend_contract() {
         json["device"]["unknown_capability_bits"],
         "0x8000000000000000"
     );
-    assert_eq!(json["providers"][0]["state"]["kind"], "stale");
     assert_eq!(json["pomodoros"][0]["state"], "paused");
     assert_eq!(json["card_data"][0]["fields"][0]["value"]["kind"], "text");
-    assert_eq!(json["card_errors"][0]["card_id"], "json-feed");
+    assert_eq!(json["card_errors"][0]["card_id"], "air-quality");
     assert_eq!(json["card_errors"][0]["kind"], "data-refused");
     assert_eq!(json["persistence"]["kind"], "clean");
     assert_eq!(
@@ -572,12 +452,11 @@ fn runtime_snapshot_uses_tagged_states_for_frontend_contract() {
 
 #[test]
 fn card_behaviour_types_round_trip_as_closed_tagged_json() {
-    let alert = CardAlert::BeforeEvent {
-        lead_minutes: 5,
+    let alert = CardAlert::OnTimerFinish {
         hold: AlertHold::Seconds { value: 60 },
     };
     let json = serde_json::to_value(alert).unwrap();
-    assert_eq!(json["kind"], "before-event");
+    assert_eq!(json["kind"], "on-timer-finish");
     assert_eq!(json["hold"]["kind"], "seconds");
     assert_eq!(serde_json::from_value::<CardAlert>(json).unwrap(), alert);
 
@@ -602,15 +481,6 @@ fn card_alert_rejects_unknown_nested_fields_in_hold() {
         "should reject unknown field in nested hold for OnTimerFinish"
     );
 
-    // Unknown field nested in hold for BeforeEvent
-    assert!(
-        serde_json::from_str::<CardAlert>(
-            r#"{"kind":"before-event","lead_minutes":5,"hold":{"kind":"seconds","value":60,"extra":1}}"#
-        )
-        .is_err(),
-        "should reject unknown field in nested hold for BeforeEvent"
-    );
-
     // Valid nested hold still works for OnTimerFinish
     let valid_timer = serde_json::from_str::<CardAlert>(
         r#"{"kind":"on-timer-finish","hold":{"kind":"until-dismissed"}}"#,
@@ -620,19 +490,6 @@ fn card_alert_rejects_unknown_nested_fields_in_hold() {
         valid_timer,
         CardAlert::OnTimerFinish {
             hold: AlertHold::UntilDismissed
-        }
-    ));
-
-    // Valid nested hold still works for BeforeEvent
-    let valid_before = serde_json::from_str::<CardAlert>(
-        r#"{"kind":"before-event","lead_minutes":10,"hold":{"kind":"seconds","value":30}}"#,
-    )
-    .expect("valid BeforeEvent should deserialize");
-    assert!(matches!(
-        valid_before,
-        CardAlert::BeforeEvent {
-            lead_minutes: 10,
-            ..
         }
     ));
 }
@@ -694,13 +551,6 @@ fn card_alert_hold_method_extracts_hold() {
     }
     .hold();
     assert_eq!(timer_hold, Some(AlertHold::UntilDismissed));
-
-    let before_hold = CardAlert::BeforeEvent {
-        lead_minutes: 5,
-        hold: AlertHold::Seconds { value: 60 },
-    }
-    .hold();
-    assert_eq!(before_hold, Some(AlertHold::Seconds { value: 60 }));
 }
 
 fn clock_card(id: &str) -> CardSettings {
@@ -816,12 +666,12 @@ fn compilation_lowers_cards_to_the_frozen_wire_shape() {
 
 /// Final-review finding: `wire_config()` lowering every template removed the only
 /// backstop that had been keeping host-valid-but-device-invalid compositions from
-/// being saved. A card kind may use a template only when the provider populates the
+/// being saved. A card kind may use a template only when it populates the
 /// fields that template declares — otherwise the card renders its placeholders
 /// forever and every field it does send inflates the device's `unknown_field_count`
 /// on every refresh, degrading the drift diagnostic Task 2 deliberately preserved.
 #[test]
-fn compositions_the_provider_cannot_populate_are_rejected() {
+fn compositions_the_card_cannot_populate_are_rejected() {
     let rejected = [
         // Clock sends no `value`: big-number-label would show "--" forever.
         CardSettings::Clock {
@@ -831,30 +681,6 @@ fn compositions_the_provider_cannot_populate_are_rejected() {
             template: DisplayTemplate::BigNumberLabel,
             tap_action: WidgetTapAction::None,
             refresh: RefreshPolicy::DeviceLocal,
-            alert: CardAlert::None,
-        },
-        // Calendar sends `title` plus ten `rowN_*` fields icon-badge-text declares none of.
-        CardSettings::Calendar {
-            id: "agenda".into(),
-            title: "Up next".into(),
-            source: CalendarSource::Url("https://example.test/calendar.ics".into()),
-            template: DisplayTemplate::IconBadgeText {
-                icon_asset_id: None,
-            },
-            tap_action: WidgetTapAction::None,
-            refresh: RefreshPolicy::Interval { minutes: 15 },
-            alert: CardAlert::None,
-        },
-        CardSettings::Rss {
-            id: "news".into(),
-            title: "Headlines".into(),
-            url: "https://example.test/feed.xml".into(),
-            max_items: 3,
-            template: DisplayTemplate::IconBadgeText {
-                icon_asset_id: None,
-            },
-            tap_action: WidgetTapAction::None,
-            refresh: RefreshPolicy::Interval { minutes: 30 },
             alert: CardAlert::None,
         },
         // Pomodoro sends label/duration_seconds/remaining_seconds/running, of which
@@ -888,26 +714,6 @@ fn compositions_the_provider_cannot_populate_are_rejected() {
             error.issues
         );
     }
-}
-
-/// `validate()` runs on config LOAD and nothing migrates a saved card to a new
-/// template, so every weather card saved before the extended templates shipped is
-/// still on `row-list`. Narrowing weather's allowed set would make those saved
-/// configurations fail to load, stranding the user's whole configuration.
-#[test]
-fn already_saved_weather_cards_on_row_list_still_load() {
-    let config = single_card_config(CardSettings::Weather {
-        id: "weather".into(),
-        title: "Weather".into(),
-        location: "Tbilisi".into(),
-        units: WeatherUnits::Metric,
-        template: DisplayTemplate::RowList,
-        tap_action: WidgetTapAction::None,
-        refresh: RefreshPolicy::Interval { minutes: 30 },
-        alert: CardAlert::None,
-    });
-    config.validate().expect("saved weather cards must load");
-    config.compile(1).expect("and must still compile");
 }
 
 /// Final-review finding: `widget_model.c` refuses any widget whose template is not
@@ -1006,7 +812,7 @@ fn a_picture_card_naming_an_unknown_source_is_a_typed_missing_reference() {
 
 #[test]
 fn a_picture_card_compiles_to_the_digital_clock_wire_template() {
-    // The device learns nothing new: same byte every plugin card sends.
+    // The device learns nothing new: picture content arrives through the durable asset path.
     let mut config = AppConfig {
         image_sources: vec![ImageSource {
             id: "limits".into(),
@@ -1070,195 +876,6 @@ fn two_image_sources_may_not_share_an_id() {
     );
 }
 
-// -- Task 6: the plugin card kind -------------------------------------------------
-
-fn plugin_card(tap_action: WidgetTapAction, refresh: RefreshPolicy) -> CardSettings {
-    CardSettings::Plugin {
-        id: "aqi".into(),
-        title: "Air quality".into(),
-        plugin_id: "aqi".into(),
-        tap_action,
-        refresh,
-        alert: CardAlert::None,
-    }
-}
-
-#[test]
-fn plugin_card_fixture_deserializes_validates_and_round_trips() {
-    let config = current_config(PLUGIN_CARD_JSON);
-    config.validate().unwrap();
-    assert_eq!(
-        config.cards[0],
-        CardSettings::Plugin {
-            id: "aqi".into(),
-            title: "Air quality".into(),
-            plugin_id: "aqi".into(),
-            tap_action: WidgetTapAction::None,
-            refresh: RefreshPolicy::Interval { minutes: 15 },
-            alert: CardAlert::None,
-        }
-    );
-
-    let round_trip = serde_json::to_string(&config).unwrap();
-    let decoded: AppConfig = serde_json::from_str(&round_trip).unwrap();
-    assert_eq!(decoded, config);
-}
-
-#[test]
-fn plugin_card_rejects_a_template_field_as_unknown() {
-    // A plugin card deliberately carries no `template`: it renders from its
-    // manifest-compiled scene, not one of the six built-in `DisplayTemplate`s.
-    // `CardSettingsInner`'s `plugin` arm does not list `template` among its allowed
-    // fields, so supplying one must be an unknown-field rejection like any other name
-    // that arm does not list — not silently ignored.
-    let json = r#"{
-        "kind": "plugin",
-        "id": "aqi",
-        "title": "Air quality",
-        "plugin_id": "aqi",
-        "template": { "kind": "digital-clock" },
-        "tap_action": { "kind": "none" },
-        "refresh": { "kind": "interval", "minutes": 15 },
-        "alert": { "kind": "none" }
-    }"#;
-    let error = serde_json::from_str::<CardSettings>(json).unwrap_err();
-    assert!(
-        error.to_string().contains("unknown field: template"),
-        "expected an unknown-field rejection naming `template`, got {error}"
-    );
-}
-
-#[test]
-fn plugin_card_refuses_device_local_refresh_and_pomodoro_only_tap_actions() {
-    // `device-local` is clock/pomodoro's refresh policy; a plugin card is neither
-    // provider, so it is refused the same way calendar/weather/json-feed/rss already
-    // are (`validate_composition`'s `refresh_supported` match).
-    let config = single_card_config(plugin_card(
-        WidgetTapAction::None,
-        RefreshPolicy::DeviceLocal,
-    ));
-    let error = config
-        .validate()
-        .expect_err("device-local refresh must not validate on a plugin card");
-    assert!(
-        error.issues.iter().any(|issue| {
-            issue.path == "cards[0].refresh" && issue.code == ValidationCode::InvalidComposition
-        }),
-        "expected cards[0].refresh InvalidComposition: {:?}",
-        error.issues
-    );
-
-    // `start-pause`/`reset` require a pomodoro provider; a plugin card is never one.
-    // This is the provider-gated tap-action check, which still runs for `Plugin` even
-    // though the template-gated one above it in `validate_composition` is skipped
-    // entirely (a plugin card passes `template: None`).
-    for tap_action in [WidgetTapAction::StartPause, WidgetTapAction::Reset] {
-        let config = single_card_config(plugin_card(
-            tap_action.clone(),
-            RefreshPolicy::Interval { minutes: 15 },
-        ));
-        let error = config.validate().expect_err(&format!(
-            "{tap_action:?} must not validate on a plugin card"
-        ));
-        assert!(
-            error.issues.iter().any(|issue| {
-                issue.path == "cards[0].tap_action"
-                    && issue.code == ValidationCode::InvalidComposition
-            }),
-            "{tap_action:?} must report cards[0].tap_action InvalidComposition: {:?}",
-            error.issues
-        );
-    }
-
-    // The plugin-legal combination validates cleanly.
-    let config = single_card_config(plugin_card(
-        WidgetTapAction::None,
-        RefreshPolicy::Interval { minutes: 15 },
-    ));
-    config
-        .validate()
-        .expect("a plugin card with interval refresh and no tap action must validate");
-}
-
-#[test]
-fn plugin_id_bounds_enforced() {
-    let mut empty = single_card_config(plugin_card(
-        WidgetTapAction::None,
-        RefreshPolicy::Interval { minutes: 15 },
-    ));
-    if let CardSettings::Plugin { plugin_id, .. } = &mut empty.cards[0] {
-        *plugin_id = String::new();
-    }
-    let error = empty
-        .validate()
-        .expect_err("empty plugin_id must not validate");
-    assert!(error.issues.iter().any(|issue| {
-        issue.path == "cards[0].plugin_id" && issue.code == ValidationCode::Empty
-    }));
-
-    let mut at_bound = single_card_config(plugin_card(
-        WidgetTapAction::None,
-        RefreshPolicy::Interval { minutes: 15 },
-    ));
-    if let CardSettings::Plugin { plugin_id, .. } = &mut at_bound.cards[0] {
-        *plugin_id = "x".repeat(MAX_PLUGIN_ID_LEN);
-    }
-    at_bound
-        .validate()
-        .expect("plugin_id at exactly MAX_PLUGIN_ID_LEN must validate");
-
-    let mut one_past = single_card_config(plugin_card(
-        WidgetTapAction::None,
-        RefreshPolicy::Interval { minutes: 15 },
-    ));
-    if let CardSettings::Plugin { plugin_id, .. } = &mut one_past.cards[0] {
-        *plugin_id = "x".repeat(MAX_PLUGIN_ID_LEN + 1);
-    }
-    let error = one_past
-        .validate()
-        .expect_err("plugin_id one byte past MAX_PLUGIN_ID_LEN must not validate");
-    assert!(error.issues.iter().any(|issue| {
-        issue.path == "cards[0].plugin_id" && issue.code == ValidationCode::TooLong
-    }));
-}
-
-#[test]
-fn plugin_card_lowers_to_the_wire_and_pushes_the_three_field_shape() {
-    let config = single_card_config(plugin_card(
-        WidgetTapAction::None,
-        RefreshPolicy::Interval { minutes: 15 },
-    ));
-    let compiled = config.compile(1).unwrap();
-
-    let widget = &compiled.layout.widgets[0];
-    // `TemplateKind::DigitalClock` is the documented inert placeholder
-    // (`wire_config`'s comment): firmware no longer switches on this field for any
-    // card since stage 3a, so it carries no rendering meaning for a plugin card.
-    assert_eq!(widget.template, TemplateKind::DigitalClock);
-    assert_eq!(widget.size_class, SizeClass::Full);
-    assert_eq!(widget.tap_action, TapAction::None);
-    assert_eq!(widget.interrupt_policy, InterruptPolicy::Disabled);
-    assert_eq!(compiled.layout.screens[0].widget_id, "aqi");
-
-    assert_eq!(
-        compiled.initial_pushes[0].fields,
-        vec![
-            Field {
-                key: "title".into(),
-                value: FieldValue::Text("Air quality".into()),
-            },
-            Field {
-                key: "stale".into(),
-                value: FieldValue::Boolean(true),
-            },
-            Field {
-                key: "error".into(),
-                value: FieldValue::Text("Waiting for provider refresh".into()),
-            },
-        ]
-    );
-}
-
 #[test]
 fn compilation_is_deterministic_for_identical_input() {
     let config = AppConfig::default();
@@ -1274,22 +891,6 @@ fn timed_advance_no_longer_requires_an_unimplemented_capability() {
     assert!(config.compile(1).is_ok());
 }
 
-/// Regression test for the final-review finding that a freshly-added weather or
-/// json-feed card could be added, edited, and still fail to save: `configDraft.ts`'s
-/// `addCard` defaulted both to `DisplayTemplate::BigNumberLabel`, which `validate()`
-/// accepts but `wire_config()` cannot lower (`RequiresCapability`), and the IPC
-/// `validate_config_draft` command ran only `validate()`, never `compile()` — so the
-/// settings UI reported the draft valid right up until Save rejected it with an error
-/// attached to no field. `wire_config()` now lowers every `DisplayTemplate` (this is
-/// the M4 task-3/8 fix), so `addCard` defaults weather and json-feed to the templates
-/// their field composition was designed for — `icon-badge-text` and
-/// `big-number-label` — instead of the `row-list` placeholder this test used to pin.
-/// Each of these six cards mirrors exactly what `addCard` produces for that kind today
-/// (see `configDraft.ts`), with the field(s) addCard deliberately leaves empty
-/// (calendar source / weather location / json-feed url and its empty `mappings` list /
-/// rss url) filled in — this test is about whether the REST of a freshly-added card's
-/// defaults are wire-compilable, not about the separate, already-correctly-surfaced
-/// "required field left empty" validation error.
 #[test]
 fn every_freshly_added_card_kind_validates_and_compiles() {
     let cards = [
@@ -1300,68 +901,25 @@ fn every_freshly_added_card_kind_validates_and_compiles() {
                 hold: AlertHold::UntilDismissed,
             },
         ),
-        CardSettings::Calendar {
-            id: "calendar".into(),
-            title: "Up next".into(),
-            source: CalendarSource::Url("https://example.test/calendar.ics".into()),
-            template: DisplayTemplate::RowList,
+        CardSettings::Picture {
+            id: "picture".into(),
+            title: "Studio".into(),
+            source_id: "studio".into(),
             tap_action: WidgetTapAction::None,
-            refresh: RefreshPolicy::Interval { minutes: 15 },
-            alert: CardAlert::None,
-        },
-        CardSettings::Weather {
-            id: "weather".into(),
-            title: "Weather".into(),
-            location: "Tbilisi".into(),
-            units: WeatherUnits::Metric,
-            template: DisplayTemplate::IconBadgeText {
-                icon_asset_id: None,
-            },
-            tap_action: WidgetTapAction::None,
-            refresh: RefreshPolicy::Interval { minutes: 30 },
-            alert: CardAlert::None,
-        },
-        CardSettings::JsonFeed {
-            id: "json-feed".into(),
-            title: "Feed".into(),
-            url: "https://example.test/feed.json".into(),
-            // `addCard` itself defaults `mappings` to empty (the user adds one via
-            // "Add field mapping"), and `mappings` requires at least one entry, the
-            // same "field left empty" shape as calendar source / weather location /
-            // rss url. One mapping here represents the user having done their part.
-            mappings: vec![JsonFieldMapping {
-                field: "value".into(),
-                path: "$.value".into(),
-            }],
-            template: DisplayTemplate::BigNumberLabel,
-            tap_action: WidgetTapAction::None,
-            refresh: RefreshPolicy::Interval { minutes: 15 },
-            alert: CardAlert::None,
-        },
-        CardSettings::Rss {
-            id: "rss".into(),
-            title: "Headlines".into(),
-            url: "https://example.test/feed.xml".into(),
-            max_items: 3,
-            template: DisplayTemplate::RowList,
-            tap_action: WidgetTapAction::None,
-            refresh: RefreshPolicy::Interval { minutes: 30 },
-            alert: CardAlert::None,
-        },
-        // Task 6: the plugin card kind, added after this test was written for the six
-        // built-in provider/template pairings. It carries no `template` at all.
-        CardSettings::Plugin {
-            id: "aqi".into(),
-            title: "Air quality".into(),
-            plugin_id: "aqi".into(),
-            tap_action: WidgetTapAction::None,
-            refresh: RefreshPolicy::Interval { minutes: 15 },
+            refresh: RefreshPolicy::Manual,
             alert: CardAlert::None,
         },
     ];
 
     for card in cards {
-        let config = single_card_config(card);
+        let is_picture = matches!(card, CardSettings::Picture { .. });
+        let mut config = single_card_config(card);
+        if is_picture {
+            config.image_sources.push(ImageSource {
+                id: "studio".into(),
+                name: "Studio".into(),
+            });
+        }
         config.validate().unwrap_or_else(|error| {
             panic!("{} card failed validate(): {error:?}", config.cards[0].id())
         });
@@ -1369,102 +927,6 @@ fn every_freshly_added_card_kind_validates_and_compiles() {
             panic!("{} card failed compile(): {error:?}", config.cards[0].id())
         });
     }
-}
-
-/// Task 8: `wire_config()` used to return `None` for `AnalogClock`, `BigNumberLabel`,
-/// and `IconBadgeText`, so any card configured with one of them validated cleanly but
-/// could never compile (`RequiresCapability`). Exercises all six `DisplayTemplate`
-/// variants, each on a card kind `validate_composition` actually allows it on, and
-/// asserts `compile()` now succeeds for every one.
-#[test]
-fn every_display_template_lowers_to_the_wire() {
-    let cards = [
-        clock_card("digital-clock"),
-        CardSettings::Clock {
-            id: "analog-clock".into(),
-            title: "Desk".into(),
-            show_seconds: true,
-            template: DisplayTemplate::AnalogClock,
-            tap_action: WidgetTapAction::None,
-            refresh: RefreshPolicy::DeviceLocal,
-            alert: CardAlert::None,
-        },
-        pomodoro_card(
-            "progress-ring",
-            CardAlert::OnTimerFinish {
-                hold: AlertHold::UntilDismissed,
-            },
-        ),
-        CardSettings::Calendar {
-            id: "row-list".into(),
-            title: "Up next".into(),
-            source: CalendarSource::Url("https://example.test/calendar.ics".into()),
-            template: DisplayTemplate::RowList,
-            tap_action: WidgetTapAction::None,
-            refresh: RefreshPolicy::Interval { minutes: 15 },
-            alert: CardAlert::None,
-        },
-        CardSettings::Weather {
-            id: "big-number-label".into(),
-            title: "Weather".into(),
-            location: "Tbilisi".into(),
-            units: WeatherUnits::Metric,
-            template: DisplayTemplate::BigNumberLabel,
-            tap_action: WidgetTapAction::None,
-            refresh: RefreshPolicy::Interval { minutes: 30 },
-            alert: CardAlert::None,
-        },
-        CardSettings::Weather {
-            id: "icon-badge-text".into(),
-            title: "Weather".into(),
-            location: "Tbilisi".into(),
-            units: WeatherUnits::Metric,
-            template: DisplayTemplate::IconBadgeText {
-                icon_asset_id: None,
-            },
-            tap_action: WidgetTapAction::None,
-            refresh: RefreshPolicy::Interval { minutes: 30 },
-            alert: CardAlert::None,
-        },
-    ];
-
-    for card in cards {
-        let template = card.template().cloned();
-        let config = single_card_config(card);
-        config.compile(1).unwrap_or_else(|error| {
-            panic!("{template:?} must lower to the wire, but compile() failed: {error:?}")
-        });
-    }
-}
-
-/// Task 8: `required_device_capabilities()` already flags `CAPABILITY_EXTENDED_TEMPLATES`
-/// for the three extended templates and only those (see `config.rs`); this pins that
-/// contract from the outside so a future change to the template set can't silently
-/// widen or narrow which templates demand the capability.
-#[test]
-fn extended_templates_require_the_extended_capability() {
-    let extended = single_card_config(CardSettings::Weather {
-        id: "big-number-label".into(),
-        title: "Weather".into(),
-        location: "Tbilisi".into(),
-        units: WeatherUnits::Metric,
-        template: DisplayTemplate::BigNumberLabel,
-        tap_action: WidgetTapAction::None,
-        refresh: RefreshPolicy::Interval { minutes: 30 },
-        alert: CardAlert::None,
-    });
-    assert_eq!(
-        extended.required_device_capabilities() & CAPABILITY_EXTENDED_TEMPLATES,
-        CAPABILITY_EXTENDED_TEMPLATES,
-        "big-number-label must require the extended-templates capability"
-    );
-
-    let core = single_card_config(clock_card("digital-clock"));
-    assert_eq!(
-        core.required_device_capabilities() & CAPABILITY_EXTENDED_TEMPLATES,
-        0,
-        "core templates must not demand the extended-templates capability"
-    );
 }
 
 #[test]
@@ -1533,13 +995,13 @@ fn entry(card_id: &str) -> PlaylistEntry {
 }
 
 #[test]
-fn default_config_is_v7_with_one_playlist() {
+fn default_config_is_v9_with_one_playlist() {
     let config = AppConfig::default();
     // A literal, not `CURRENT_SCHEMA_VERSION`: this test exists to catch a bump that
     // forgot to update `AppConfig::default()`, and comparing the constant to itself
-    // could never fail that way. The boundary tests in `tests/store.rs` (`found: 8,
-    // supported: 7`) keep the same literal discipline for the same reason.
-    assert_eq!(config.schema_version, 7);
+    // could never fail that way. The boundary tests in `tests/store.rs` keep the
+    // same literal discipline for the same reason.
+    assert_eq!(config.schema_version, 9);
     assert_eq!(config.playlists.len(), 1);
     assert_eq!(config.active_playlist_id, config.playlists[0].id);
     assert_eq!(config.playlists[0].entries.len(), 1);

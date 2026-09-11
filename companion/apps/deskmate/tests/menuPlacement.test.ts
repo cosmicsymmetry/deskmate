@@ -11,7 +11,7 @@ const lowTrigger = { top: 241, bottom: 348, left: 880, right: 1028 };
 /** The companion window's content area, which is shorter than it looks. */
 const appWindow = { width: 1096, height: 700 };
 
-/** Six built-in kinds plus the five plugins the live server offers. */
+/** A deliberately tall menu, independent of whichever card kinds are available. */
 const fullMenu = 479;
 
 describe("add-card menu placement", () => {
@@ -30,8 +30,8 @@ describe("add-card menu placement", () => {
   });
 
   /**
-   * The regression. Every plugin entry used to sit below a flat 300px cap, under
-   * a heading that stayed visible, so choosing a plugin did nothing. The window
+   * The regression. Entries used to sit below a flat 300px cap, under a heading
+   * that stayed visible, so choosing a card did nothing. The window
    * has room for the whole menu — it just has no room for it *beneath the
    * button* — so the menu must be shown whole rather than anchored and clipped.
    */

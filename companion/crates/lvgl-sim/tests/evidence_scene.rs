@@ -1,5 +1,4 @@
-//! Stage 4 Task 6 evidence rows. These are neither additions to the retired
-//! C-template parity headline nor aliases for the curated-v1 plugin matrix.
+//! Native date-overflow evidence rows.
 
 use std::collections::HashMap;
 
@@ -9,55 +8,8 @@ use lvgl_sim::{LOGICAL_WIDTH, Simulator, cases};
 use protocol::{SceneNode, SceneValue};
 
 fn evidence_cases() -> Vec<(String, lvgl_sim::scene::SceneRenderRequest)> {
-    cases::timer_producer_scene_cases()
-        .into_iter()
-        .chain(cases::date_truncation_scene_cases())
-        .collect()
+    cases::date_truncation_scene_cases()
 }
-
-fn assert_timer_producer_meaning(request: &lvgl_sim::scene::SceneRenderRequest) {
-    let timer = request.timer.expect("the v2 timer row has a snapshot");
-    let remaining_pct = u64::from(timer.remaining_ms) * 100 / u64::from(timer.total_ms);
-    let elapsed_pct = 100 - remaining_pct;
-    assert_eq!(remaining_pct, 35, "the producer fact is remaining percent");
-    assert_eq!(elapsed_pct, 65, "the inverse must be visibly distinct");
-    assert_ne!(remaining_pct, elapsed_pct);
-}
-
-#[test]
-fn committed_v2_manifest_emits_timer_bindings_from_a_producer_shaped_snapshot() {
-    let cases = cases::timer_producer_scene_cases();
-    assert_eq!(cases.len(), 2, "one row at both orientations");
-    for (name, request) in cases {
-        assert_timer_producer_meaning(&request);
-        let arc_bindings = request
-            .scene
-            .nodes
-            .iter()
-            .filter_map(|node| match node {
-                SceneNode::Arc(arc) if !arc.end_binding.is_empty() => {
-                    Some(arc.end_binding.as_str())
-                }
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        let text_bindings = request
-            .scene
-            .nodes
-            .iter()
-            .filter_map(|node| match node {
-                SceneNode::Text(text) => match &text.value {
-                    SceneValue::Binding(binding) => Some(binding.as_str()),
-                    SceneValue::Literal(_) => None,
-                },
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(arc_bindings, ["timer.permille"], "{name}");
-        assert_eq!(text_bindings, ["timer.remaining:mm:ss"], "{name}");
-    }
-}
-
 fn generated_array<'a>(source: &'a str, declaration: &str) -> &'a str {
     let after = source
         .split_once(declaration)
@@ -178,20 +130,14 @@ fn native_date_binding_ellipsizes_the_produced_overflow() {
 }
 
 #[test]
-fn producer_and_date_scene_goldens_match() {
+fn date_scene_goldens_match() {
     common::assert_goldens(
         "evidence-scene",
         std::env::var_os("BLESS").is_some(),
         Some("evidence scene golden mismatches"),
         "orphan golden (run with BLESS=1 to delete)",
         evidence_cases(),
-        |_, request| {
-            // This semantic assertion deliberately precedes rendering: an
-            // inverted producer must fail before pixels can pass it.
-            if request.timer.is_some() {
-                assert_timer_producer_meaning(request);
-            }
-        },
+        |_, _| {},
         lvgl_sim::Simulator::render_scene_png,
     );
 }

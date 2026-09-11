@@ -1,5 +1,5 @@
 {
-  "schema_version": 9,
+  "schema_version": 8,
   "preferences": {
     "timezone": "Asia/Tbilisi",
     "autostart": true,
@@ -28,17 +28,14 @@
       "alert": { "kind": "on-timer-finish", "hold": { "kind": "until-dismissed" } }
     },
     {
-      "kind": "picture",
-      "id": "picture",
-      "title": "Status picture",
-      "source_id": "status",
+      "kind": "plugin",
+      "id": "plugin",
+      "title": "Status",
+      "plugin_id": "com.example.status",
       "tap_action": { "kind": "none" },
-      "refresh": { "kind": "manual" },
+      "refresh": { "kind": "interval", "minutes": 15 },
       "alert": { "kind": "none" }
     }
-  ],
-  "image_sources": [
-    { "id": "status", "name": "Status" }
   ],
   "assets": [],
   "playlists": [
@@ -49,7 +46,7 @@
       "entries": [
         { "card_id": "clock", "dwell_seconds": null },
         { "card_id": "pomodoro", "dwell_seconds": null },
-        { "card_id": "picture", "dwell_seconds": null }
+        { "card_id": "plugin", "dwell_seconds": null }
       ]
     }
   ],

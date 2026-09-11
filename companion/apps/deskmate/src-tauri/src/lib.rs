@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use app_core::{
     AppConfig, AppSnapshot, ConfigOrigin, ConfigStore, ConnectionState, DeviceTier, LoadOutcome,
-    NetworkSettingsStore, PersistenceState, ProviderState, RuntimeHandle, RuntimeState,
+    NetworkSettingsStore, PersistenceState, RuntimeHandle, RuntimeState,
     SAVED_SETTINGS_VALIDATION_FAILURE_MESSAGE,
 };
 use serde::Serialize;
@@ -130,65 +130,9 @@ impl NetworkedConfigProjection {
     }
 }
 
-/// The last successful `get_server_card_state` poll. In networked tier the server
-/// owns every plugin card's data, so its answer replaces whatever the local
-/// hostless runtime holds for those ids -- and only those ids. A failed poll keeps
-/// the previous projection rather than blanking a tile that was correct a moment
-/// ago; the frontend surfaces the failure as one notice.
-///
-/// The provider entry is rebuilt with no timestamps because `ServerCardState`
-/// deliberately carries none: a tile reads the state word, and a fetch time
-/// measured on the server is not a fact about this Mac's clock.
-#[derive(Default)]
-struct ServerStateProjection(Mutex<Vec<commands::ServerCardState>>);
-
-impl ServerStateProjection {
-    fn replace(&self, states: Vec<commands::ServerCardState>) -> Result<(), commands::IpcError> {
-        *self.0.lock().map_err(|_| commands::IpcError::Internal {
-            message: "server plugin state is unavailable".into(),
-        })? = states;
-        Ok(())
-    }
-
-    fn project(&self, tier: DeviceTier, app: &mut AppSnapshot) {
-        if tier != DeviceTier::Networked {
-            return;
-        }
-        let Ok(states) = self.0.lock() else {
-            return;
-        };
-        for state in states.iter() {
-            let card_id = state.card_id.as_str();
-            app.providers
-                .retain(|provider| provider.widget_id != card_id);
-            app.providers.push(app_core::ProviderSnapshot {
-                widget_id: state.card_id.clone(),
-                state: state.provider.clone(),
-                last_success_unix_ms: None,
-                age_seconds: None,
-            });
-            app.card_data.retain(|data| data.card_id != card_id);
-            if let Some(hero) = state.hero.as_ref() {
-                app.card_data.push(app_core::CardDataSnapshot {
-                    card_id: state.card_id.clone(),
-                    fields: vec![app_core::CardField {
-                        key: "hero".into(),
-                        value: app_core::CardFieldValue::Text {
-                            value: hero.clone(),
-                        },
-                    }],
-                });
-            }
-            app.card_errors.retain(|error| error.card_id != card_id);
-            app.card_errors.extend(state.errors.iter().cloned());
-        }
-    }
-}
-
 struct DesktopSnapshotProjector {
     network_store: Arc<NetworkSettingsStore>,
     networked_config: Arc<NetworkedConfigProjection>,
-    server_card_state: Arc<ServerStateProjection>,
     last_known_tier: Mutex<Option<DeviceTier>>,
     has_saved_config: Arc<AtomicBool>,
 }
@@ -200,7 +144,6 @@ impl DesktopSnapshotProjector {
         }
         let tier = self.resolve_tier(app.device.tier);
         self.networked_config.project(tier, &mut app.config);
-        self.server_card_state.project(tier, &mut app);
         DesktopSnapshot {
             app,
             has_saved_config: self.has_saved_config.load(Ordering::Acquire),
@@ -213,13 +156,9 @@ impl DesktopSnapshotProjector {
     ///
     /// Gating on the live `device.tier` alone was a real defect: in the ordinary
     /// networked case -- no cable, cold app start -- it is `None`, so neither
-    /// projection ran. The tile still showed the server's hero, because the
-    /// frontend resolves ownership its own way, but nothing else the server knows
-    /// reached the window: no provider entry, so no `stale` flag and no trouble
-    /// line in the editor, and no `card_errors`, so no notice in the work column.
+    /// config projection ran.
     ///
-    /// The safety intent is unchanged. A resolution of `Local` paints nothing,
-    /// so server state can still never land on a display this Mac owns itself.
+    /// The safety intent is unchanged. A resolution of `Local` paints nothing.
     /// The settings file is read only when there is no live tier, so a connected
     /// cable costs no read per snapshot.
     fn resolve_tier(&self, live: Option<DeviceTier>) -> DeviceTier {
@@ -260,7 +199,6 @@ struct DesktopState {
     store: Arc<ConfigStore>,
     network_store: Arc<NetworkSettingsStore>,
     networked_config: Arc<NetworkedConfigProjection>,
-    server_card_state: Arc<ServerStateProjection>,
     snapshot_projector: DesktopSnapshotProjector,
     server_client: ureq::Agent,
     has_saved_config: Arc<AtomicBool>,
@@ -325,19 +263,8 @@ impl DesktopState {
 }
 
 fn report_exit_metrics(snapshot: &AppSnapshot) {
-    let mut provider_fresh = 0usize;
-    let mut provider_stale = 0usize;
-    let mut provider_error = 0usize;
-    for provider in &snapshot.providers {
-        match provider.state {
-            ProviderState::Fresh => provider_fresh += 1,
-            ProviderState::Stale { .. } => provider_stale += 1,
-            ProviderState::Error { .. } => provider_error += 1,
-            ProviderState::Idle | ProviderState::Refreshing => {}
-        }
-    }
     eprintln!(
-        "Deskmate exit metrics: runtime={} connection={} uptime_ms={:?} free_heap={:?} active_screen_present={} providers=fresh:{provider_fresh},stale:{provider_stale},error:{provider_error} counters={:?} runtime_diagnostics={:?}",
+        "Deskmate exit metrics: runtime={} connection={} uptime_ms={:?} free_heap={:?} active_screen_present={} counters={:?} runtime_diagnostics={:?}",
         runtime_log_label(&snapshot.runtime),
         connection_log_label(&snapshot.device.connection),
         snapshot.device.uptime_ms,
@@ -374,12 +301,10 @@ const fn runtime_error_log_label(error: &app_core::RuntimeError) -> &'static str
         app_core::RuntimeError::ResponseTimeout => "response-timeout",
         app_core::RuntimeError::UnknownWidget { .. } => "unknown-widget",
         app_core::RuntimeError::UnknownScreen { .. } => "unknown-screen",
-        app_core::RuntimeError::UnknownCard { .. } => "unknown-card",
-        app_core::RuntimeError::NotAPluginCard { .. } => "not-a-plugin-card",
         app_core::RuntimeError::DeviceDisconnected | app_core::RuntimeError::Device { .. } => {
             "device"
         }
-        app_core::RuntimeError::Provider { .. } => "provider",
+        app_core::RuntimeError::ImageSource { .. } => "image-source",
     }
 }
 
@@ -528,12 +453,10 @@ fn setup_app(app: &mut App) -> Result<(), Box<dyn Error>> {
     let initial_snapshot = runtime.snapshot()?;
     let tray = create_tray(app, &initial_snapshot, autostart_enabled)?;
     let networked_config = Arc::new(NetworkedConfigProjection::default());
-    let server_card_state = Arc::new(ServerStateProjection::default());
     let has_saved_config = Arc::new(AtomicBool::new(has_saved_config));
     let snapshot_projector = DesktopSnapshotProjector {
         network_store: Arc::clone(&network_store),
         networked_config: Arc::clone(&networked_config),
-        server_card_state: Arc::clone(&server_card_state),
         last_known_tier: Mutex::new(last_known_tier),
         has_saved_config: Arc::clone(&has_saved_config),
     };
@@ -543,7 +466,6 @@ fn setup_app(app: &mut App) -> Result<(), Box<dyn Error>> {
         store,
         network_store,
         networked_config,
-        server_card_state,
         snapshot_projector,
         server_client: server_http_agent(),
         has_saved_config,
@@ -659,7 +581,6 @@ pub fn run() {
             MacosLauncher::LaunchAgent,
             None,
         ))
-        .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             commands::get_app_snapshot,
             commands::validate_config_draft,
@@ -672,13 +593,10 @@ pub fn run() {
             commands::use_local_ownership,
             commands::resume_pushing,
             commands::control_pomodoro,
-            commands::refresh_provider,
-            commands::choose_ics_file,
+            commands::mint_image_source,
             commands::get_autostart_status,
             commands::set_autostart_enabled,
             commands::render_card_preview,
-            commands::get_server_plugins,
-            commands::get_server_card_state,
         ])
         .setup(setup_app)
         .build(tauri::generate_context!())
@@ -835,7 +753,6 @@ mod tests {
         let projector = DesktopSnapshotProjector {
             network_store: Arc::clone(&network_store),
             networked_config: Arc::new(NetworkedConfigProjection::default()),
-            server_card_state: Arc::new(ServerStateProjection::default()),
             last_known_tier: Mutex::new(Some(DeviceTier::Local)),
             has_saved_config: Arc::new(AtomicBool::new(false)),
         };
@@ -862,7 +779,6 @@ mod tests {
                 active_screen_id: None,
                 counters: DeviceCounters::default(),
             },
-            providers: Vec::new(),
             pomodoros: Vec::new(),
             card_data: Vec::new(),
             card_errors: Vec::new(),
@@ -1011,178 +927,5 @@ mod tests {
 
         assert!(!unavailable_directory.exists());
         std::fs::remove_file(blocking_file).unwrap();
-    }
-
-    /// One plugin card as a hostless Mac runtime reports it: an idle provider entry
-    /// that will never refresh, an empty field set, and no error. The overlay has to
-    /// replace all three, not append beside them.
-    fn plugin_card_snapshot() -> AppSnapshot {
-        use app_core::{
-            CardDataSnapshot, DeviceCounters, DeviceSnapshot, ProviderSnapshot, RuntimeDiagnostics,
-        };
-
-        AppSnapshot {
-            config: AppConfig::default(),
-            runtime: RuntimeState::Running,
-            device: DeviceSnapshot {
-                connection: ConnectionState::Online,
-                port_name: None,
-                firmware_version: Some("2.0.0".into()),
-                protocol_version: Some(1),
-                max_protocol_version: Some(1),
-                capabilities: Vec::new(),
-                unknown_capability_bits: 0,
-                uptime_ms: None,
-                free_heap: None,
-                rotation: None,
-                tier: Some(DeviceTier::Networked),
-                wifi_state: None,
-                wifi_rssi: None,
-                ip: None,
-                last_network_error: None,
-                ota_state: None,
-                active_screen_id: None,
-                counters: DeviceCounters::default(),
-            },
-            providers: vec![ProviderSnapshot {
-                widget_id: "air".into(),
-                state: ProviderState::Idle,
-                last_success_unix_ms: None,
-                age_seconds: None,
-            }],
-            pomodoros: Vec::new(),
-            card_data: vec![CardDataSnapshot {
-                card_id: "air".into(),
-                fields: Vec::new(),
-            }],
-            card_errors: Vec::new(),
-            persistence: PersistenceState::Clean,
-            diagnostics: RuntimeDiagnostics::default(),
-        }
-    }
-
-    fn server_state_projection() -> ServerStateProjection {
-        use app_core::CardErrorKind;
-
-        let projection = ServerStateProjection::default();
-        projection
-            .replace(vec![commands::ServerCardState {
-                card_id: "air".into(),
-                provider: ProviderState::Fresh,
-                hero: Some("42".into()),
-                errors: vec![app_core::CardError {
-                    kind: CardErrorKind::SceneRefused,
-                    card_id: "air".into(),
-                    message: "no snapshot cached yet".into(),
-                }],
-            }])
-            .unwrap();
-        projection
-    }
-
-    #[test]
-    fn server_card_state_overlays_only_in_networked_tier() {
-        use app_core::CardFieldValue;
-
-        let projection = server_state_projection();
-
-        // Local ownership must never be painted over with server state: this Mac
-        // genuinely owns that display, and the server's answer is about another one.
-        let mut local = plugin_card_snapshot();
-        projection.project(DeviceTier::Local, &mut local);
-        assert_eq!(local.providers.len(), 1);
-        assert_eq!(local.providers[0].state, ProviderState::Idle);
-        assert!(local.card_data[0].fields.is_empty());
-        assert!(local.card_errors.is_empty());
-
-        let mut app = plugin_card_snapshot();
-        projection.project(DeviceTier::Networked, &mut app);
-        assert_eq!(app.providers.len(), 1, "the stale entry was appended to");
-        assert_eq!(app.providers[0].widget_id, "air");
-        assert_eq!(app.providers[0].state, ProviderState::Fresh);
-        assert_eq!(app.card_data.len(), 1);
-        assert_eq!(app.card_data[0].fields.len(), 1);
-        assert_eq!(app.card_data[0].fields[0].key, "hero");
-        assert_eq!(
-            app.card_data[0].fields[0].value,
-            CardFieldValue::Text { value: "42".into() }
-        );
-        assert_eq!(app.card_errors.len(), 1);
-        assert_eq!(app.card_errors[0].card_id, "air");
-    }
-
-    fn temp_network_store(label: &str) -> (Arc<NetworkSettingsStore>, std::path::PathBuf) {
-        use std::time::{SystemTime, UNIX_EPOCH};
-
-        let serial = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let directory =
-            std::env::temp_dir().join(format!("deskmate-{label}-{}-{serial}", std::process::id()));
-        std::fs::create_dir(&directory).unwrap();
-        let store = Arc::new(NetworkSettingsStore::new(
-            directory.join("network-settings.json"),
-        ));
-        (store, directory)
-    }
-
-    fn projector_over(store: &Arc<NetworkSettingsStore>) -> DesktopSnapshotProjector {
-        DesktopSnapshotProjector {
-            network_store: Arc::clone(store),
-            networked_config: Arc::new(NetworkedConfigProjection::default()),
-            server_card_state: Arc::new(server_state_projection()),
-            last_known_tier: Mutex::new(None),
-            has_saved_config: Arc::new(AtomicBool::new(false)),
-        }
-    }
-
-    /// The ordinary networked case: no cable, a cold start, so `device.tier` is
-    /// `None` and the persisted settings are the only ownership fact there is.
-    /// The overlay has to run here -- this is the mode the server-rendered card
-    /// exists for -- because a tile's `stale` flag, the editor's trouble line and
-    /// the work column's card errors all read the snapshot the projector emits,
-    /// while the tile's hero reads the frontend's own resolution. Two resolutions
-    /// meant a tile that showed a value and never showed it going stale.
-    #[test]
-    fn a_cable_out_networked_mac_still_gets_the_server_overlay() {
-        use app_core::NetworkSettingsUpdate;
-
-        let (store, directory) = temp_network_store("tier-resolution-networked");
-        store
-            .save(NetworkSettingsUpdate::new(
-                "https://desk.example",
-                "desk-1",
-                Some(DeviceTier::Networked),
-                None,
-            ))
-            .unwrap();
-        let projector = projector_over(&store);
-        let mut snapshot = plugin_card_snapshot();
-        snapshot.device.tier = None;
-
-        let projected = projector.project_snapshot(snapshot);
-
-        assert_eq!(projected.app.providers[0].state, ProviderState::Fresh);
-        assert_eq!(projected.app.card_data[0].fields.len(), 1);
-        assert_eq!(projected.app.card_errors.len(), 1);
-        std::fs::remove_dir_all(directory).unwrap();
-    }
-
-    /// The same unresolved live tier with no server identity stored resolves to
-    /// local, and a local display is never painted with another device's state.
-    #[test]
-    fn a_cable_out_mac_with_no_server_identity_keeps_its_local_state() {
-        let (store, directory) = temp_network_store("tier-resolution-local");
-        let projector = projector_over(&store);
-        let mut snapshot = plugin_card_snapshot();
-        snapshot.device.tier = None;
-
-        let projected = projector.project_snapshot(snapshot);
-
-        assert_eq!(projected.app.providers[0].state, ProviderState::Idle);
-        assert!(projected.app.card_data[0].fields.is_empty());
-        assert!(projected.app.card_errors.is_empty());
-        std::fs::remove_dir_all(directory).unwrap();
     }
 }

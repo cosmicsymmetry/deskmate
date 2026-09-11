@@ -39,6 +39,48 @@ pub struct ImageSourceStore {
     state: Mutex<ImageSourceState>,
 }
 
+/// Supplies the runtime with the complete durable picture keep-set and the
+/// current frame for one configured source. The store's `Arc` bytes are passed
+/// through unchanged, preserving the digest provenance established at ingest.
+pub(crate) struct ServerImageSourceHost {
+    store: Arc<ImageSourceStore>,
+}
+
+impl ServerImageSourceHost {
+    pub(crate) fn new(store: Arc<ImageSourceStore>) -> Self {
+        Self { store }
+    }
+}
+
+impl app_core::ImageSourceHost for ServerImageSourceHost {
+    fn desired_assets(&mut self) -> Vec<app_core::DesiredAsset> {
+        let mut desired = Vec::new();
+        for (_, frame) in self.store.all_frames(Utc::now()) {
+            if desired
+                .iter()
+                .any(|asset: &app_core::DesiredAsset| asset.digest == frame.digest)
+            {
+                continue;
+            }
+            desired.push(app_core::DesiredAsset {
+                digest: frame.digest,
+                kind: protocol::AssetKind::Image,
+                bytes: frame.bytes,
+            });
+        }
+        desired
+    }
+
+    fn image_source_frame(&mut self, source_id: &str) -> Option<app_core::ImageSourceFrame> {
+        let frame = self.store.frame(source_id, Utc::now())?;
+        Some(app_core::ImageSourceFrame {
+            digest: frame.digest,
+            bytes: frame.bytes,
+            stale: frame.stale,
+        })
+    }
+}
+
 #[derive(Clone)]
 struct ImageSourceState {
     sources: Vec<SourceRecord>,
@@ -130,11 +172,9 @@ impl ImageSourceStore {
     /// Mints a source id and a random 32-byte bearer token. The token's digest
     /// is committed before the one plaintext copy is returned.
     ///
-    /// `durable_digests_available` is how many of the device's durable asset
-    /// slots are not already spoken for by the plugin registry. Two ceilings
-    /// therefore apply: this store's own `MAX_IMAGE_SOURCES`, and the device's
-    /// shared digest budget, which plugins and picture frames draw from
-    /// together. Checking the second one HERE is deliberate -- the wire's copy
+    /// `durable_digests_available` is the device's durable asset ceiling. Two
+    /// ceilings therefore apply: this store's own `MAX_IMAGE_SOURCES`, and the
+    /// wire's digest budget. Checking the second one HERE is deliberate -- the wire's copy
     /// of the rule lives in `compose_asset_keep_set` and refuses an
     /// over-ceiling set by name, but that fires during a device sync, long
     /// after the person who minted one source too many has walked away. This is
@@ -684,10 +724,8 @@ mod tests {
 
     #[test]
     fn minting_past_the_devices_shared_digest_budget_is_refused_by_name() {
-        // Plugin assets and picture frames draw from ONE device-wide digest
-        // budget, and the registry's share is already spent. This ceiling is
-        // separate from `MAX_IMAGE_SOURCES` and is the one a loaded plugin
-        // registry can move, so it gets its own error rather than being folded
+        // Picture frames draw from the device-wide digest budget. This ceiling is
+        // separate from `MAX_IMAGE_SOURCES`, so it gets its own error rather than being folded
         // into `Capacity` -- a person told "capacity reached" after minting two
         // of eight sources would reasonably think the store was broken.
         let temp = tempfile::tempdir().expect("temp dir");

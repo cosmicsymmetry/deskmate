@@ -121,11 +121,10 @@ async fn mint_source(
         status: rejection.status(),
         message: rejection.body_text(),
     })?;
-    // Plugin assets and picture frames draw from one device-wide digest budget,
-    // and the registry's share is already committed, so what is left is what a
-    // new source may claim.
-    let available = crate::plugin_registry::MAX_DURABLE_REGISTRY_ASSETS
-        .saturating_sub(state.plugins().all_assets().len());
+    // Every source reserves one place in the device-wide durable keep-set.
+    // The store's smaller source ceiling remains the ordinary limiting factor,
+    // but passing the wire ceiling keeps the two independent bounds explicit.
+    let available = protocol::MAX_ASSET_DIGESTS;
     let minted =
         tokio::task::spawn_blocking(move || state.image_sources().mint(&request.name, available))
             .await

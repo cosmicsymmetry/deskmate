@@ -1,8 +1,8 @@
 //! Dev-only physical framebuffer diff (V1 reset design spec §3.2.2/§3.2.3,
 //! Task 10). Pushes every device-representable case in the synthetic
 //! `lvgl_sim::cases::scene_cases()`, six-face `lvgl_sim::cases::face_scene_cases()`,
-//! and (Task 8, plugin-manifest stage) `lvgl_sim::cases::plugin_scene_cases()`
-//! matrices to a physically connected device running a `DESKMATE_DEV_DIAG=1`
+//! and produced-date overflow matrices to a physically connected device running a
+//! `DESKMATE_DEV_DIAG=1`
 //! build, requests a 0x7E framebuffer capture, and byte-compares the
 //! reassembled pixels against `Simulator::render_scene` for the identical
 //! case. This only runs against real hardware: 0x7E/0x7F are dev-build-only
@@ -15,7 +15,7 @@
 //! like any other unsupported byte the untrusted-input rules require it to
 //! tolerate).
 //!
-//! ## Real asset provisioning (Task 8, plugin-manifest stage)
+//! ## Real asset provisioning
 //!
 //! `push_case_assets` provisions every asset a case's scene names, over the
 //! real `AssetBegin`/`AssetChunk`/`AssetCommit` wire path -- the first time
@@ -110,33 +110,14 @@ fn exclusion_reason(name: &str, request: &SceneRenderRequest) -> Option<&'static
              which do cover the running arc hue; paused-mid-countdown covers \
              the same geometry here, and running-at-zero the running palette",
         )
-    } else if name.starts_with("plugin-aqi--empty--") {
-        // `aqi`'s empty state pushes no `title` field, and its scene binds
-        // `{{ field.title }}`. On the device a configured card ALWAYS
-        // registers its template's fields (this harness's DigitalClock
-        // registers `title`), so `field.title` resolves to the registered
-        // field's empty value ("") and renders nothing. In the simulator the
-        // field is entirely absent from the pushed array, so
-        // `scene_binding.c` returns NULL and writes its placeholder ("--").
-        // Same C, different field input: the device cannot produce the "--"
-        // placeholder for a name its registry knows, so it cannot match this
-        // golden. Kept in the golden suite (its deliberate placeholder
-        // coverage), excluded from hardware -- the same shape as the
-        // field.status rows below. Found on the board 2026-09-06 (Task 6
-        // Step 5): the device drew nothing, the simulator drew "--".
-        Some(
-            "the empty state binds field.title with no title pushed; the device \
-             registers the card's template fields so field.title is \"\" (renders \
-             nothing), never the NULL that yields the simulator's \"--\" placeholder",
-        )
     } else if request.fields.iter().any(|(field_name, _)| {
         !matches!(
             field_name.as_str(),
             "title" | "show_seconds" | "stale" | "error"
         )
     }) {
-        // Task 8 (plugin-manifest stage): `push_case_assets` below now
-        // provisions real RGB565 image and runtime font assets, and
+        // `push_case_assets` below provisions real RGB565 image and runtime font
+        // assets, and
         // `push_case_fields` now pushes `request.fields` as PushData too --
         // so the two asset-shaped exclusions this function used to name are
         // gone. What is left is genuinely un-closable without a firmware
@@ -144,15 +125,9 @@ fn exclusion_reason(name: &str, request: &SceneRenderRequest) -> Option<&'static
         // for a no-timer case (this crate's own choice, unrelated to Task 8),
         // whose PushData registry (`s_digital_clock_fields` in
         // `firmware/main/core/template_fields.c`) is exactly
-        // `title`/`show_seconds`/`stale`/`error`. A schema-v6 plugin card's
-        // `WidgetConfig.template` is *also* always `DigitalClock` on the wire
-        // (`app-core/src/config.rs`'s `wire_config`, an established, deliberate
-        // decision this task did not make and does not reopen) -- so a plugin
-        // does not get a registry of its own to "bring" either. The two
-        // scene-node synthetic cases below (`scene-text`/`scene-label`) bind
-        // `field.status`, a name no registry accepts; the curated `aqi`
-        // plugin instead binds `field.title`, which this registry does
-        // accept, and that is what gives `field.*` its hardware coverage.
+        // `title`/`show_seconds`/`stale`/`error`. The two scene-node synthetic
+        // cases below (`scene-text`/`scene-label`) bind `field.status`, a name
+        // no registry accepts.
         Some(
             "the scene binds a field.* name outside DigitalClock's PushData registry \
              (title/show_seconds/stale/error) -- apply_case_config always selects \
@@ -228,8 +203,7 @@ fn diff_pixels(expected: &[u16], actual: &[u16]) -> (usize, u32) {
 
 /// Selects the device field registry for a scene request. This does not pick
 /// a renderer anymore, but it remains load-bearing for `PushData` validation:
-/// timer producer rows must use `ProgressRing`'s duration/remaining/running
-/// registry, never the plugin card's `DigitalClock`-shaped four-field registry.
+/// timer producer rows must use `ProgressRing`'s duration/remaining/running registry.
 fn case_template(request: &SceneRenderRequest) -> TemplateKind {
     if request.timer.is_some() {
         TemplateKind::ProgressRing
@@ -287,9 +261,8 @@ fn activate_case_screen(client: &mut DeviceClient<impl Transport>) -> Result<(),
 }
 
 /// Pushes both of the two things a case's `PushData` can carry: a
-/// `ProgressRing` timer snapshot (`request.timer`), and (Task 8,
-/// plugin-manifest stage) `request.fields` -- the `field.*` binding values a
-/// plugin's scene resolves against, e.g. `aqi`'s `field.title`. A case with
+/// `ProgressRing` timer snapshot (`request.timer`), and `request.fields` -- the
+/// `field.*` binding values used by synthetic scene cases. A case with
 /// neither pushes nothing at all, exactly as before Task 8.
 fn push_case_fields(
     client: &mut DeviceClient<impl Transport>,
@@ -345,12 +318,10 @@ fn push_case_fields(
 }
 
 /// Provisions every asset `request.scene` names, over the real
-/// `AssetBegin`/`AssetChunk`/`AssetCommit` wire path -- Task 8
-/// (plugin-manifest stage)'s first exercise of the device's asset-transfer
-/// path in this harness. `AssetBegin`'s `already_present` lets a case skip
+/// `AssetBegin`/`AssetChunk`/`AssetCommit` wire path. `AssetBegin`'s
+/// `already_present` lets a case skip
 /// chunking an asset a previous case already committed under the same
-/// digest, which is common here: the two glyph-bearing `aqi` states below
-/// each name the same `icons.ttf` digest.
+/// digest, which is common across asset-bearing case variants.
 fn push_case_assets(
     client: &mut DeviceClient<impl Transport>,
     request: &SceneRenderRequest,
@@ -577,8 +548,6 @@ fn run() -> Result<(), String> {
     for (name, request) in cases::scene_cases()
         .into_iter()
         .chain(cases::face_scene_cases())
-        .chain(cases::plugin_scene_cases())
-        .chain(cases::timer_producer_scene_cases())
         .chain(cases::date_truncation_scene_cases())
     {
         if let Some(reason) = exclusion_reason(&name, &request) {
@@ -653,34 +622,15 @@ fn main() {
 mod tests {
     use super::*;
 
-    /// Task 8 (plugin-manifest stage) added `plugin_scene_cases()` (16 rows:
-    /// two curated plugins x four data states x two orientations) and, in
-    /// the same change, `push_case_assets`/`push_case_fields` closed two of
-    /// `exclusion_reason`'s three pre-Task-8 reasons -- the RGB565-image and
-    /// runtime-font-asset ones -- by actually provisioning them, rather than
-    /// refusing every case that needed one. The third reason (a `field.*`
-    /// name no `TemplateKind::DigitalClock` PushData push can carry) is
-    /// NOT closed: see `exclusion_reason`'s own doc for why a plugin does
-    /// not get a registry of its own to "bring" on the wire. This test
-    /// pins the real, counted-not-assumed per-reason split rather than a
-    /// single total, the way the stage's own 58/54/4 invariant should have
-    /// been pinned before it went stale and misled a whole stage. Task 6 adds
-    /// four included rows to the prior 92/8/84 inventory: two v2 timer
-    /// producer rows and two native produced-date overflow rows.
-    ///
-    /// The first on-board run of this gate (2026-09-06, Task 6 Step 5) then
-    /// corrected the split to 96/10/86: the two `plugin-aqi--empty` rows moved
-    /// to excluded, because a device registers a configured card's template
-    /// fields and so cannot reproduce the simulator's `field.title` "--"
-    /// placeholder (see `exclusion_reason`). The two v2 timer rows stayed
-    /// included only after fixing their wire-invalid `now_unix_seconds: 0`.
+    /// The manifest removal subtracts its sixteen curated-plugin rows and the two
+    /// manifest-backed timer-producer rows. This pins the new software inventory
+    /// separately from the last 96/10/86 hardware observation; the next board
+    /// session must measure it afresh.
     #[test]
     fn gate_b_inventory_is_the_real_counted_split_not_an_assumed_one() {
         let requests: Vec<_> = cases::scene_cases()
             .into_iter()
             .chain(cases::face_scene_cases())
-            .chain(cases::plugin_scene_cases())
-            .chain(cases::timer_producer_scene_cases())
             .chain(cases::date_truncation_scene_cases())
             .collect();
 
@@ -692,16 +642,11 @@ mod tests {
             .iter()
             .filter(|(name, _)| name.starts_with("progress-ring--running-mid-countdown--"))
             .count();
-        let field_placeholder_unreachable = requests
-            .iter()
-            .filter(|(name, _)| name.starts_with("plugin-aqi--empty--"))
-            .count();
         let field_registry_mismatch = requests
             .iter()
             .filter(|(name, request)| {
                 !name.starts_with("row-list--truncation-boundary--")
                     && !name.starts_with("progress-ring--running-mid-countdown--")
-                    && !name.starts_with("plugin-aqi--empty--")
                     && exclusion_reason(name, request).is_some()
             })
             .count();
@@ -713,31 +658,22 @@ mod tests {
         // The counted-not-assumed numbers this task's report must state.
         assert_eq!(
             requests.len(),
-            96,
-            "92 pre-Task-6 rows + 2 v2 timer rows + 2 date-overflow rows"
+            78,
+            "76 non-manifest rows + 2 date-overflow rows"
         );
         assert_eq!(truncation_boundary, 2);
         assert_eq!(running_mid_countdown, 2);
         assert_eq!(
             field_registry_mismatch, 4,
             "scene-text and scene-label, both orientations -- field.status, which no \
-             registry (built-in or plugin-forced-to-DigitalClock) accepts"
-        );
-        assert_eq!(
-            field_placeholder_unreachable, 2,
-            "plugin-aqi--empty, both orientations -- field.title's \"--\" placeholder \
-             is unreachable on a device that registers the card's template fields \
-             (found on the board 2026-09-06, Task 6 Step 5)"
+             built-in registry accepts"
         );
         assert_eq!(
             excluded,
-            truncation_boundary
-                + running_mid_countdown
-                + field_registry_mismatch
-                + field_placeholder_unreachable
+            truncation_boundary + running_mid_countdown + field_registry_mismatch
         );
-        assert_eq!(excluded, 10);
-        assert_eq!(requests.len() - excluded, 86);
+        assert_eq!(excluded, 8);
+        assert_eq!(requests.len() - excluded, 70);
 
         // The RGB565-image and runtime-font-asset rows (scene-image,
         // scene-glyph, both orientations = 4 rows) are no longer excluded.
@@ -771,41 +707,9 @@ mod tests {
                 "missing real-face coverage for {prefix}"
             );
         }
-        for prefix in ["plugin-aqi--", "plugin-agenda--"] {
-            assert_eq!(
-                requests
-                    .iter()
-                    .filter(|(name, _)| name.starts_with(prefix))
-                    .count(),
-                8,
-                "missing curated-plugin coverage for {prefix}"
-            );
-        }
-        // `plugin-agenda` binds no `field.*`, so all eight rows are includable.
-        assert!(
-            requests
-                .iter()
-                .filter(|(name, _)| name.starts_with("plugin-agenda--"))
-                .all(|(name, request)| exclusion_reason(name, request).is_none()),
-            "every plugin-agenda-- row must be includable, not excluded"
-        );
-        // `plugin-aqi`'s six non-empty rows are includable; its two empty rows
-        // are excluded (field.title's "--" placeholder is unreachable on the
-        // device -- see `exclusion_reason`).
-        assert_eq!(
-            requests
-                .iter()
-                .filter(|(name, request)| name.starts_with("plugin-aqi--")
-                    && exclusion_reason(name, request).is_none())
-                .count(),
-            6,
-            "plugin-aqi's six non-empty rows must be includable"
-        );
-
-        for (prefix, expected_template) in [
-            ("plugin-v2-timer--", TemplateKind::ProgressRing),
-            ("digital-clock--date-overflow--", TemplateKind::DigitalClock),
-        ] {
+        for (prefix, expected_template) in
+            [("digital-clock--date-overflow--", TemplateKind::DigitalClock)]
+        {
             let matching = requests
                 .iter()
                 .filter(|(name, _)| name.starts_with(prefix))
